@@ -15,7 +15,7 @@ use std::sync::{Arc, Mutex};
 
 /// Wraps an open SQLite session connection for the headless agent path.
 ///
-/// Previously this reopened the database on *every* `append_message` /
+/// Previously this reopened the database on *every* `append_chat_message` /
 /// `record_usage` / `end` call. It now holds one [`SessionDb`] (and thus one
 /// `Connection`) behind a `Mutex` — `SessionDb` wraps a rusqlite `Connection`
 /// which is `Send` but not `Sync`, so the lock makes the sink shareable via
@@ -54,7 +54,7 @@ impl SessionWriter {
             return;
         };
         if let Err(e) = db.append_chat_message(conv_id, message, seq) {
-            self.note_failure("append_message", &e);
+            self.note_failure("append_chat_message", &e);
         }
     }
 
@@ -114,39 +114,6 @@ impl SessionWriter {
 impl SessionSink for SessionWriter {
     fn conv_id(&self) -> Option<i64> {
         SessionWriter::conv_id(self)
-    }
-
-    fn append_message(
-        &self,
-        role: &str,
-        content: &str,
-        tool_name: Option<&str>,
-        tool_call_id: Option<&str>,
-        tool_calls: Option<&str>,
-        images: Option<&str>,
-        is_error: bool,
-        seq: i64,
-    ) {
-        let Some(conv_id) = self.conv_id else {
-            return;
-        };
-        let guard = self.db.lock().unwrap_or_else(|error| error.into_inner());
-        let Some(db) = guard.as_ref() else {
-            return;
-        };
-        if let Err(error) = db.append_message(
-            conv_id,
-            role,
-            content,
-            tool_name,
-            tool_call_id,
-            tool_calls,
-            images,
-            is_error,
-            seq,
-        ) {
-            self.note_failure("append_message", &error);
-        }
     }
 
     fn append_chat_message(&self, message: &ChatMessage, seq: i64) {

@@ -42,18 +42,7 @@ fn delegated_agents_honor_an_explicit_session_sink() {
         fn conv_id(&self) -> Option<i64> {
             Some(42)
         }
-        fn append_message(
-            &self,
-            _: &str,
-            _: &str,
-            _: Option<&str>,
-            _: Option<&str>,
-            _: Option<&str>,
-            _: Option<&str>,
-            _: bool,
-            _: i64,
-        ) {
-        }
+        fn append_chat_message(&self, _message: &crate::llm::ChatMessage, _seq: i64) {}
         fn record_usage(
             &self,
             _: &str,

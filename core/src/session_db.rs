@@ -1038,68 +1038,6 @@ impl SessionDb {
         Ok(allocated_seq)
     }
 
-    /// Append a message to a conversation.
-    ///
-    /// This normalized-column adapter remains for compatibility. Runtime
-    /// persistence should use [`Self::append_chat_message`] so no message
-    /// fields are discarded.
-    #[allow(clippy::too_many_arguments)]
-    pub fn append_message(
-        &self,
-        conversation_id: i64,
-        role: &str,
-        content: &str,
-        tool_name: Option<&str>,
-        tool_call_id: Option<&str>,
-        tool_calls: Option<&str>,
-        images: Option<&str>,
-        is_error: bool,
-        seq: i64,
-    ) -> rusqlite::Result<i64> {
-        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
-        let db_seq: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(seq), 0) FROM messages WHERE conversation_id = ?1",
-            params![conversation_id],
-            |row| row.get(0),
-        )?;
-        let allocated_seq = seq.max(db_seq.saturating_add(1));
-        let chat_role = match role {
-            "assistant" => ChatRole::Assistant,
-            "tool" => ChatRole::Tool,
-            "system" => ChatRole::System,
-            _ => ChatRole::User,
-        };
-        let parsed_tool_calls: Result<Option<Vec<crate::tools::ToolCall>>, _> =
-            tool_calls.map(serde_json::from_str).transpose();
-        let parsed_images: Result<Option<Vec<crate::llm::ImageData>>, _> =
-            images.map(serde_json::from_str).transpose();
-        let payload_json = match (parsed_tool_calls, parsed_images) {
-            (Ok(tool_calls), Ok(images)) => {
-                let mut message = ChatMessage::new(chat_role, content);
-                message.name = tool_name.map(str::to_owned);
-                message.tool_call_id = tool_call_id.map(str::to_owned);
-                message.tool_calls = tool_calls.unwrap_or_default();
-                message.images = images.unwrap_or_default();
-                message.is_error = is_error;
-                serialize_message(&message).ok()
-            }
-            _ => None,
-        };
-        let row = MessageRow {
-            role,
-            content,
-            tool_name,
-            tool_call_id,
-            tool_calls,
-            images,
-            is_error,
-            payload_json: payload_json.as_deref(),
-        };
-        Self::insert_message_row(&tx, conversation_id, &row, allocated_seq, &now_iso())?;
-        tx.commit()?;
-        Ok(allocated_seq)
-    }
-
     /// Append every new message and usage record from a completed turn in a
     /// single transaction — one commit (one WAL sync) instead of one per row,
     /// and the whole turn is atomic: a mid-loop failure rolls everything back,

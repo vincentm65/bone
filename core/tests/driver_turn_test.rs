@@ -1036,28 +1036,8 @@ impl SessionSink for RecordingUsageSink {
         Some(42)
     }
 
-    fn append_message(
-        &self,
-        role: &str,
-        content: &str,
-        tool_name: Option<&str>,
-        tool_call_id: Option<&str>,
-        _tool_calls: Option<&str>,
-        _images: Option<&str>,
-        is_error: bool,
-        seq: i64,
-    ) {
-        let role = match role {
-            "assistant" => ChatRole::Assistant,
-            "tool" => ChatRole::Tool,
-            "system" => ChatRole::System,
-            _ => ChatRole::User,
-        };
-        let mut message = ChatMessage::new(role, content);
-        message.name = tool_name.map(str::to_owned);
-        message.tool_call_id = tool_call_id.map(str::to_owned);
-        message.is_error = is_error;
-        self.messages.lock().unwrap().push((seq, message));
+    fn append_chat_message(&self, message: &ChatMessage, seq: i64) {
+        self.messages.lock().unwrap().push((seq, message.clone()));
     }
 
     fn record_usage(

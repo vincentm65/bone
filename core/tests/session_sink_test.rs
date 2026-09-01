@@ -45,21 +45,16 @@ impl SessionSink for RecordingSink {
         self.conv
     }
 
-    fn append_message(
-        &self,
-        role: &str,
-        content: &str,
-        _tool_name: Option<&str>,
-        _tool_call_id: Option<&str>,
-        _tool_calls: Option<&str>,
-        _images: Option<&str>,
-        is_error: bool,
-        _seq: i64,
-    ) {
+    fn append_chat_message(&self, message: &ChatMessage, _seq: i64) {
         self.messages
             .lock()
             .unwrap()
-            .push(format!("{}: {} (error: {})", role, content, is_error));
+            .push(format!(
+                "{}: {} (error: {})",
+                message.role.as_str(),
+                message.content,
+                message.is_error
+            ));
     }
 
     fn record_usage(

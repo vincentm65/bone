@@ -314,28 +314,16 @@ impl RuntimeSession {
         let mut message = ChatMessage::new(chat_role, content);
         message.name = tool_name.map(str::to_owned);
         message.tool_call_id = call_id.map(str::to_owned);
-        let tool_calls = tool_calls_json.map(serde_json::from_str).transpose();
-        let images = images_json.map(serde_json::from_str).transpose();
-        let persisted = match (tool_calls, images) {
-            (Ok(tool_calls), Ok(images)) => {
-                message.tool_calls = tool_calls.unwrap_or_default();
-                message.images = images.unwrap_or_default();
-                db.append_chat_message(conv_id, &message, requested_seq)
-            }
-            // Retain the legacy raw projection if a caller supplies malformed
-            // JSON instead of silently changing its history/FTS representation.
-            _ => db.append_message(
-                conv_id,
-                role,
-                content,
-                tool_name,
-                call_id,
-                tool_calls_json,
-                images_json,
-                false,
-                requested_seq,
-            ),
-        };
+        // Callers serialize their own in-process structures, so a JSON parse
+        // failure here means the field was malformed; drop it and persist the
+        // rest of the message rather than aborting the write.
+        if let Ok(tool_calls) = tool_calls_json.map(serde_json::from_str).transpose() {
+            message.tool_calls = tool_calls.unwrap_or_default();
+        }
+        if let Ok(images) = images_json.map(serde_json::from_str).transpose() {
+            message.images = images.unwrap_or_default();
+        }
+        let persisted = db.append_chat_message(conv_id, &message, requested_seq);
         if let Ok(allocated_seq) = persisted {
             self.session_seq = allocated_seq;
         }

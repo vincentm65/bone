@@ -2,6 +2,8 @@ use super::{
     SCHEMA_VERSION, SessionDb, StartupDbOperation, db_path_with_legacy,
     migrate_legacy_db_if_needed, retry_startup_sqlite_with_deadline,
 };
+use crate::llm::{ChatMessage, ChatRole, ImageData};
+use crate::tools::{ToolCall, ToolResult};
 use crate::util::{civil_from_days, utc_from_unix_secs as iso_from_unix_secs};
 use rusqlite::Connection;
 use std::path::PathBuf;
@@ -184,7 +186,7 @@ fn v8_migration_adds_context_checkpoints_without_touching_messages() {
     let db = SessionDb { conn };
     db.setup_schema().unwrap();
     let conv = db.create_conversation("openai", "gpt-4").unwrap();
-    db.append_message(conv, "user", "preserved", None, None, None, None, false, 1)
+    db.append_chat_message(conv, &ChatMessage::new(ChatRole::User, "preserved"), 1)
         .unwrap();
     db.conn
         .execute("DROP TABLE conversation_context_checkpoints", [])
@@ -262,10 +264,14 @@ fn max_message_seq_tracks_highest_seq() {
     // No messages yet → 0.
     assert_eq!(db.max_message_seq(conv).unwrap(), 0);
 
-    db.append_message(conv, "user", "hi", None, None, None, None, false, 1)
+    db.append_chat_message(conv, &ChatMessage::new(ChatRole::User, "hi"), 1)
         .unwrap();
-    db.append_message(conv, "assistant", "hello", None, None, None, None, false, 2)
-        .unwrap();
+    db.append_chat_message(
+        conv,
+        &ChatMessage::new(ChatRole::Assistant, "hello"),
+        2,
+    )
+    .unwrap();
     assert_eq!(db.max_message_seq(conv).unwrap(), 2);
 
     // A different conversation is unaffected.
@@ -274,19 +280,18 @@ fn max_message_seq_tracks_highest_seq() {
 }
 
 #[test]
-fn append_message_repairs_stale_or_duplicate_sequence_hints() {
+fn append_chat_message_repairs_stale_or_duplicate_sequence_hints() {
     let conn = Connection::open_in_memory().unwrap();
     let db = SessionDb { conn };
     db.setup_schema().unwrap();
     let conv = db.create_conversation("openai", "gpt-4").unwrap();
 
     assert_eq!(
-        db.append_message(conv, "user", "one", None, None, None, None, false, 1)
-            .unwrap(),
+        db.append_chat_message(conv, &ChatMessage::new(ChatRole::User, "one"), 1).unwrap(),
         1
     );
     assert_eq!(
-        db.append_message(conv, "assistant", "two", None, None, None, None, false, 1)
+        db.append_chat_message(conv, &ChatMessage::new(ChatRole::Assistant, "two"), 1)
             .unwrap(),
         2
     );
@@ -528,18 +533,8 @@ fn context_checkpoint_survives_reload_without_rewriting_full_history() {
     ];
     db.append_turn_with_checkpoint(conv, 2, &[answer], &[], Some(&compacted))
         .unwrap();
-    db.append_message(
-        conv,
-        "user",
-        "after restart",
-        None,
-        None,
-        None,
-        None,
-        false,
-        4,
-    )
-    .unwrap();
+    db.append_chat_message(conv, &ChatMessage::new(ChatRole::User, "after restart"), 4)
+        .unwrap();
 
     let full = db.load_messages(conv).unwrap();
     assert_eq!(full.len(), 4);
@@ -557,9 +552,8 @@ fn checkpoint_rejected_at_save_when_newer_messages_exist() {
     let db = SessionDb { conn };
     db.setup_schema().unwrap();
     let conv = db.create_conversation("openai", "gpt-4").unwrap();
-    db.append_message(conv, "user", "one", None, None, None, None, false, 1)
-        .unwrap();
-    db.append_message(conv, "user", "concurrent", None, None, None, None, false, 2)
+    db.append_chat_message(conv, &ChatMessage::new(ChatRole::User, "one"), 1).unwrap();
+    db.append_chat_message(conv, &ChatMessage::new(ChatRole::User, "concurrent"), 2)
         .unwrap();
 
     let stale = vec![crate::llm::ChatMessage::new(
@@ -578,7 +572,7 @@ fn malformed_latest_checkpoint_falls_back_to_an_older_revision() {
     let db = SessionDb { conn };
     db.setup_schema().unwrap();
     let conv = db.create_conversation("openai", "gpt-4").unwrap();
-    db.append_message(conv, "user", "original", None, None, None, None, false, 1)
+    db.append_chat_message(conv, &ChatMessage::new(ChatRole::User, "original"), 1)
         .unwrap();
     let valid = vec![crate::llm::ChatMessage::new(
         crate::llm::ChatRole::User,
@@ -616,29 +610,22 @@ fn all_checkpoints_malformed_falls_back_to_raw_messages() {
     let db = SessionDb { conn };
     db.setup_schema().unwrap();
     let conv = db.create_conversation("openai", "gpt-4").unwrap();
-    db.append_message(conv, "user", "first", None, None, None, None, false, 1)
-        .unwrap();
-    db.append_message(
+    db.append_chat_message(conv, &ChatMessage::new(ChatRole::User, "first"), 1).unwrap();
+    db.append_chat_message(
         conv,
-        "assistant",
-        "second",
-        None,
-        None,
-        None,
-        None,
-        false,
+        &ChatMessage::new(ChatRole::Assistant, "second"),
         2,
     )
     .unwrap();
-    db.append_message(
+    db.append_chat_message(
         conv,
-        "tool",
-        "error result",
-        Some("shell"),
-        Some("c1"),
-        None,
-        None,
-        true,
+        &ChatMessage::tool(ToolResult {
+            call_id: "c1".into(),
+            name: "shell".into(),
+            content: "error result".into(),
+            is_error: true,
+            ..Default::default()
+        }),
         3,
     )
     .unwrap();
@@ -736,15 +723,10 @@ fn tool_calls_roundtrip() {
     let conv = db.create_conversation("openai", "gpt-4").unwrap();
 
     let tc_json = r#"[{"id":"call_1","name":"shell","arguments":"{\"command\":\"ls\",\"env\":[],\"timeout_ms\":120000}"}]"#;
-    db.append_message(
+    let tool_calls: Vec<ToolCall> = serde_json::from_str(tc_json).unwrap();
+    db.append_chat_message(
         conv,
-        "assistant",
-        "Let me check.",
-        None,
-        None,
-        Some(tc_json),
-        None,
-        false,
+        &ChatMessage::assistant_with_tools("Let me check.", tool_calls),
         1,
     )
     .unwrap();
@@ -756,7 +738,7 @@ fn tool_calls_roundtrip() {
     assert_eq!(msg.tool_calls, Some(tc_json.to_string()));
 }
 
-/// Image attachments round-trip through append_message and list_messages.
+/// Image attachments round-trip through append_chat_message and list_messages.
 #[test]
 fn images_roundtrip() {
     let conn = Connection::open_in_memory().unwrap();
@@ -765,25 +747,16 @@ fn images_roundtrip() {
     let conv = db.create_conversation("openai", "gpt-4").unwrap();
 
     let img_json = r#"[{"media_type":"image/png","data":"aGVsbG8="}]"#;
-    db.append_message(
-        conv,
-        "user",
-        "look",
-        None,
-        None,
-        None,
-        Some(img_json),
-        false,
-        1,
-    )
-    .unwrap();
+    let images: Vec<ImageData> = serde_json::from_str(img_json).unwrap();
+    db.append_chat_message(conv, &ChatMessage::user_with_images("look", images), 1)
+        .unwrap();
 
     let msgs = db.list_messages(conv, 100).unwrap();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].images, Some(img_json.to_string()));
 }
 
-/// The tool-result error flag round-trips through append_message/list_messages.
+/// The tool-result error flag round-trips through append_chat_message/list_messages.
 #[test]
 fn is_error_roundtrip() {
     let conn = Connection::open_in_memory().unwrap();
@@ -791,27 +764,20 @@ fn is_error_roundtrip() {
     db.setup_schema().unwrap();
     let conv = db.create_conversation("openai", "gpt-4").unwrap();
 
-    db.append_message(
+    db.append_chat_message(
         conv,
-        "tool",
-        "boom",
-        Some("shell"),
-        Some("c1"),
-        None,
-        None,
-        true,
+        &ChatMessage::tool(ToolResult::error("c1", "shell", "boom")),
         1,
     )
     .unwrap();
-    db.append_message(
+    db.append_chat_message(
         conv,
-        "tool",
-        "ok",
-        Some("shell"),
-        Some("c2"),
-        None,
-        None,
-        false,
+        &ChatMessage::tool(ToolResult {
+            call_id: "c2".into(),
+            name: "shell".into(),
+            content: "ok".into(),
+            ..Default::default()
+        }),
         2,
     )
     .unwrap();
@@ -954,8 +920,7 @@ fn opening_cleanup_prunes_only_ended_fully_empty_conversations() {
         )
         .unwrap();
     let kept = db.create_conversation("local", "local").unwrap();
-    db.append_message(kept, "user", "keep", None, None, None, None, false, 1)
-        .unwrap();
+    db.append_chat_message(kept, &ChatMessage::new(ChatRole::User, "keep"), 1).unwrap();
     db.conn
         .execute(
             "UPDATE conversations SET ended_at = '2026-01-01T00:00:00Z' WHERE id = ?1",
@@ -986,8 +951,7 @@ fn ending_conversation_with_a_message_preserves_it() {
     db.setup_schema().unwrap();
 
     let id = db.create_conversation("local", "local").unwrap();
-    db.append_message(id, "user", "keep", None, None, None, None, false, 1)
-        .unwrap();
+    db.append_chat_message(id, &ChatMessage::new(ChatRole::User, "keep"), 1).unwrap();
     db.end_conversation(id).unwrap();
 
     assert_eq!(db.latest_conversation().unwrap(), Some((id, true)));
@@ -1007,8 +971,7 @@ fn latest_conversation_reports_id_and_emptiness() {
 
     // A conversation with a message resumes as non-empty.
     let c1 = db.create_conversation("local", "local").unwrap();
-    db.append_message(c1, "user", "hi", None, None, None, None, false, 1)
-        .unwrap();
+    db.append_chat_message(c1, &ChatMessage::new(ChatRole::User, "hi"), 1).unwrap();
     assert_eq!(db.latest_conversation().unwrap(), Some((c1, true)));
 
     // A newer, message-less conversation is reported as empty (recyclable).

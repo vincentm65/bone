@@ -1,7 +1,7 @@
 //! Session persistence sink — injectable seam for conversation/usage recording.
 //!
 //! `SessionSink` is the object-safe trait for the four operations the agent
-//! loop performs (`conv_id`, `append_message`, `record_usage`, `end`).
+//! loop performs (`conv_id`, `append_chat_message`, `record_usage`, `end`).
 //! `AgentRequest` accepts `Option<Arc<dyn SessionSink>>`: when present it is
 //! used verbatim. Without one, top-level headless runs construct a real
 //! [`SessionWriter`]; delegated agents use either [`UsageOnlySessionSink`]
@@ -29,44 +29,11 @@ pub trait SessionSink: Send + Sync {
     /// Database conversation id, if a session is open.
     fn conv_id(&self) -> Option<i64>;
 
-    /// Append a normalized message to the session transcript.
+    /// Append one complete model-facing message to the session transcript.
     ///
-    /// Retained as the stable implementation surface for third-party sinks.
-    #[allow(clippy::too_many_arguments)]
-    fn append_message(
-        &self,
-        role: &str,
-        content: &str,
-        tool_name: Option<&str>,
-        tool_call_id: Option<&str>,
-        tool_calls: Option<&str>,
-        images: Option<&str>,
-        is_error: bool,
-        seq: i64,
-    );
-
-    /// Append one complete model-facing message.
-    ///
-    /// Built-in durable sinks override this losslessly. Existing external
-    /// implementations keep compiling and receive the normalized projection.
-    fn append_chat_message(&self, message: &ChatMessage, seq: i64) {
-        let tool_calls = (!message.tool_calls.is_empty())
-            .then(|| serde_json::to_string(&message.tool_calls).ok())
-            .flatten();
-        let images = (!message.images.is_empty())
-            .then(|| serde_json::to_string(&message.images).ok())
-            .flatten();
-        self.append_message(
-            message.role.as_str(),
-            &message.content,
-            message.name.as_deref(),
-            message.tool_call_id.as_deref(),
-            tool_calls.as_deref(),
-            images.as_deref(),
-            message.is_error,
-            seq,
-        );
-    }
+    /// Built-in durable sinks persist it losslessly (normalized columns plus
+    /// the full payload); no message fields are projected away.
+    fn append_chat_message(&self, message: &ChatMessage, seq: i64);
 
     /// Record token usage for a provider/model turn.
     #[allow(clippy::too_many_arguments)]
@@ -107,18 +74,7 @@ impl SessionSink for NullSessionSink {
         None
     }
 
-    fn append_message(
-        &self,
-        _role: &str,
-        _content: &str,
-        _tool_name: Option<&str>,
-        _tool_call_id: Option<&str>,
-        _tool_calls: Option<&str>,
-        _images: Option<&str>,
-        _is_error: bool,
-        _seq: i64,
-    ) {
-    }
+    fn append_chat_message(&self, _message: &ChatMessage, _seq: i64) {}
 
     fn record_usage(
         &self,
@@ -142,7 +98,7 @@ impl SessionSink for NullSessionSink {
 /// history with internal prompts). They still burn tokens, and those tokens
 /// should appear in `/stats`. This sink is the bridge: `record_usage` writes
 /// `usage_events` rows under the parent's `conversation_id`, while
-/// `append_message` / `end` stay no-ops.
+/// `append_chat_message` / `end` stay no-ops.
 pub struct UsageOnlySessionSink {
     db: Mutex<Option<SessionDb>>,
     conv_id: i64,
@@ -196,17 +152,7 @@ impl SessionSink for UsageOnlySessionSink {
         Some(self.conv_id)
     }
 
-    fn append_message(
-        &self,
-        _role: &str,
-        _content: &str,
-        _tool_name: Option<&str>,
-        _tool_call_id: Option<&str>,
-        _tool_calls: Option<&str>,
-        _images: Option<&str>,
-        _is_error: bool,
-        _seq: i64,
-    ) {
+    fn append_chat_message(&self, _message: &ChatMessage, _seq: i64) {
         // Nested agents must not write transcript rows into the parent chat.
     }
 
