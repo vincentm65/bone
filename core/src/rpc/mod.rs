@@ -1016,44 +1016,38 @@ fn bounded_jobs_snapshot(
     mut jobs: Vec<bone_protocol::JobSnapshot>,
     max_bytes: usize,
 ) -> RuntimeEvent {
-    loop {
-        let event = RuntimeEvent::JobsSnapshot { version, jobs };
-        let encoded_len = serde_json::to_vec(&event)
-            .expect("job snapshots are serializable")
-            .len();
-        if encoded_len <= max_bytes {
-            return event;
-        }
-        let RuntimeEvent::JobsSnapshot {
-            jobs: remaining_jobs,
-            ..
-        } = event
-        else {
-            unreachable!()
-        };
-        jobs = remaining_jobs;
+    let encoded_len = |jobs: &Vec<bone_protocol::JobSnapshot>| {
+        serde_json::to_vec(&RuntimeEvent::JobsSnapshot {
+            version,
+            jobs: jobs.clone(),
+        })
+        .expect("job snapshots are serializable")
+        .len()
+    };
+    let mut total = encoded_len(&jobs);
 
-        let excess = encoded_len - max_bytes;
-        let mut removed_bytes = 0;
-        while removed_bytes < excess {
-            let Some((index, _)) = jobs
-                .iter()
-                .enumerate()
-                .filter(|(_, job)| !job.events.is_empty())
-                .max_by_key(|(_, job)| job.events.len())
-            else {
-                break;
-            };
-            let removed = jobs[index].events.remove(0);
-            removed_bytes += serde_json::to_vec(&removed)
+    for job in &mut jobs {
+        let mut remove_count = 0;
+        while total > max_bytes && remove_count < job.events.len() {
+            let event_len = serde_json::to_vec(&job.events[remove_count])
                 .expect("job events are serializable")
-                .len()
-                + 1;
+                .len();
+            let comma_len = usize::from(job.events.len() - remove_count > 1);
+            total = total.saturating_sub(event_len + comma_len);
+            remove_count += 1;
         }
-        if removed_bytes == 0 && jobs.pop().is_none() {
-            return RuntimeEvent::JobsSnapshot { version, jobs };
+        job.events.drain(..remove_count);
+        if total <= max_bytes {
+            break;
         }
     }
+
+    while total > max_bytes && !jobs.is_empty() {
+        jobs.pop();
+        total = encoded_len(&jobs);
+    }
+
+    RuntimeEvent::JobsSnapshot { version, jobs }
 }
 
 struct BlockingCtxSetup {
