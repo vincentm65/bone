@@ -265,7 +265,9 @@ impl AppCtxState {
         config_store: crate::config::store::ConfigStore,
         config_schema: bone_protocol::ConfigSchema,
     ) -> Self {
-        let est = estimate_prompt_tokens(tools, system_prompt_override.as_deref());
+        let defs = tools.definitions();
+        let schema_chars = serde_json::to_string(&defs).unwrap_or_default().len();
+        let sys_chars = system_prompt_override.as_deref().unwrap_or_default().len();
         Self {
             session_id,
             background_scope: session_id,
@@ -275,7 +277,20 @@ impl AppCtxState {
             system_prompt_override,
             approval_mode: *approval_mode,
             tool_handler: Box::new(tools.clone()),
-            usage: build_usage_context(stats, &est, by_provider),
+            usage: UsageContext {
+                request_count: stats.request_count,
+                sent: stats.sent,
+                received: stats.received,
+                cached: stats.cached,
+                cost: stats.cost,
+                context_length: stats.context_length,
+                tool_count: defs.len() as u64,
+                tool_schema_chars: schema_chars as u64,
+                tool_schema_tokens: crate::agent::estimate_tokens(schema_chars) as u64,
+                system_prompt_chars: sys_chars as u64,
+                system_prompt_tokens: crate::agent::estimate_tokens(sys_chars) as u64,
+                by_provider,
+            },
             conversation_history: history,
             config_store,
             config_schema,
@@ -1576,7 +1591,7 @@ pub(crate) fn build_conversation_table(lua: &Lua, cfg: &CtxConfig) -> Result<Tab
             let messages = super::types::parse_messages_table(&messages);
             let history = crate::chat::build_chat_history(&messages, &context_system_prompt);
             let prompt_chars = crate::agent::estimate_context_chars(&history, tool_defs_json_chars);
-            Ok((prompt_chars as f64 / crate::llm::token_tracker::CHARS_PER_TOKEN).ceil() as u64)
+            Ok(crate::agent::estimate_tokens(prompt_chars) as u64)
         })?;
         conversation_table.set("context_tokens", context_tokens_fn)?;
     }
@@ -3355,38 +3370,6 @@ async fn await_cancelled(flag: &Option<std::sync::Arc<std::sync::atomic::AtomicB
     }
 }
 
-/// Token-usage figures derived from the current tool schema and system prompt.
-/// Shared by every site that fills a `UsageContext`.
-pub(crate) struct PromptTokenEstimate {
-    pub tool_count: u64,
-    pub schema_chars: u64,
-    pub schema_tokens: u64,
-    pub sys_chars: u64,
-    pub sys_tokens: u64,
-}
-
-/// Estimate token counts for the serialized tool schema and active system prompt.
-pub(crate) fn estimate_prompt_tokens(
-    tools: &crate::tools::registry::ToolHandler,
-    system_prompt_override: Option<&str>,
-) -> PromptTokenEstimate {
-    let defs = tools.definitions();
-    let schema_chars = serde_json::to_string(&defs).unwrap_or_default().len() as u64;
-    let sys_chars = system_prompt_override.unwrap_or_default().len() as u64;
-    PromptTokenEstimate {
-        tool_count: defs.len() as u64,
-        schema_chars,
-        schema_tokens: estimate_tokens(schema_chars),
-        sys_chars,
-        sys_tokens: estimate_tokens(sys_chars),
-    }
-}
-
-/// Char-count → token-count using the shared `CHARS_PER_TOKEN` heuristic.
-fn estimate_tokens(chars: u64) -> u64 {
-    (chars as f64 / crate::llm::token_tracker::CHARS_PER_TOKEN).ceil() as u64
-}
-
 /// Per-provider usage breakdown for the current conversation, mapped into the
 /// Lua-facing `UsageProviderContext`. Empty when there is no session DB,
 /// conversation, or the query fails.
@@ -3408,29 +3391,6 @@ pub fn usage_by_provider_context(
             request_count: p.request_count.max(0) as u64,
         })
         .collect()
-}
-
-/// Assemble a `UsageContext` from cumulative token stats, the prompt estimate,
-/// and the per-provider breakdown.
-pub(crate) fn build_usage_context(
-    stats: &crate::llm::TokenStats,
-    est: &PromptTokenEstimate,
-    by_provider: Vec<UsageProviderContext>,
-) -> UsageContext {
-    UsageContext {
-        request_count: stats.request_count,
-        sent: stats.sent,
-        received: stats.received,
-        cached: stats.cached,
-        cost: stats.cost,
-        context_length: stats.context_length,
-        tool_count: est.tool_count,
-        tool_schema_chars: est.schema_chars,
-        tool_schema_tokens: est.schema_tokens,
-        system_prompt_chars: est.sys_chars,
-        system_prompt_tokens: est.sys_tokens,
-        by_provider,
-    }
 }
 
 /// Build the `CtxConfig` passed to the `before_turn` hook before each provider

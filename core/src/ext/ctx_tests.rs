@@ -633,7 +633,7 @@ fn app_ctx_state_usage_measures_active_system_prompt() {
     assert_eq!(state.usage.system_prompt_chars, prompt.len() as u64);
     assert_eq!(
         state.usage.system_prompt_tokens,
-        estimate_tokens(prompt.len() as u64)
+        crate::agent::estimate_tokens(prompt.len()) as u64
     );
 }
 
