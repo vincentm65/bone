@@ -215,7 +215,7 @@ fn canonical_config_pages_and_mutations_use_the_daemon_store() {
         &["shell".into(), "worker".into()],
         &["config".into(), "history".into()],
     ));
-    let config = build_config_table(&lua, &cfg).unwrap();
+    let config = build_canonical_config_table(&lua, &cfg).unwrap();
 
     let get_pages: mlua::Function = config.get("get_pages").unwrap();
     let pages: serde_json::Value = lua
@@ -292,7 +292,7 @@ fn config_get_uses_canonical_store_instead_of_filesystem() {
     let mut cfg = CtxConfig::new("/tmp".into(), new_shared_state());
     cfg.config_schema = Some(store.schema_for(&[], &[]));
     cfg.config_store = Some(store);
-    let config = build_config_table(&lua, &cfg).unwrap();
+    let config = build_canonical_config_table(&lua, &cfg).unwrap();
     let get: mlua::Function = config.get("get").unwrap();
 
     assert_eq!(get.call::<String>(("general", "approval")).unwrap(), "safe");
@@ -318,7 +318,7 @@ fn config_get_table_exposes_canonical_enablement() {
     let mut cfg = CtxConfig::new("/tmp".into(), new_shared_state());
     cfg.config_schema = Some(schema);
     cfg.config_store = Some(store);
-    let config = build_config_table(&lua, &cfg).unwrap();
+    let config = build_canonical_config_table(&lua, &cfg).unwrap();
     let get_table: mlua::Function = config.get("get_table").unwrap();
 
     let commands: mlua::Table = get_table.call("commands").unwrap();

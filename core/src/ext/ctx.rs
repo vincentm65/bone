@@ -440,7 +440,7 @@ pub fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error
     add_agent_table(lua, &ctx, cfg)?;
 
     // ctx.config — access to persisted configuration.
-    ctx.set("config", build_config_table(lua, cfg)?)?;
+    ctx.set("config", build_canonical_config_table(lua, cfg)?)?;
 
     // ctx.db.query — read-only raw SQL against the session db.
     ctx.set("db", build_db_table(lua)?)?;
@@ -2253,12 +2253,6 @@ fn build_canonical_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlu
     )?;
 
     Ok(table)
-}
-
-/// Build the `ctx.config` table: read-only access to persisted YAML config plus
-/// the read/write helpers backing the customize UI (pages, provider entries).
-fn build_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
-    build_canonical_config_table(lua, cfg)
 }
 
 /// Maximum nesting depth for subagent calls. Sub-agents cannot spawn
