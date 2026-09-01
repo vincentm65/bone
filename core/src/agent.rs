@@ -25,10 +25,10 @@ use std::sync::{Arc, Mutex};
 /// while a write is in flight cannot wedge the sink — once `panic = "abort"`
 /// is removed a poisoned lock is otherwise a real failure mode.
 ///
-/// Public so the TUI can hand the runtime `Driver` a sink for its active
-/// conversation. The TUI itself does not use this — it owns its own held
-/// `SessionDb` directly.
-pub struct SessionWriter {
+/// Crate-internal: only headless `run_agent` builds one (via
+/// `open_headless_session`). Frontends receive sinks as `Arc<dyn SessionSink>`
+/// and never name this type.
+pub(crate) struct SessionWriter {
     /// Lazily opened connection. `None` only when the DB failed to open at
     /// construction (then `conv_id` is also `None` and every method no-ops).
     db: Mutex<Option<SessionDb>>,
