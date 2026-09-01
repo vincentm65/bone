@@ -295,13 +295,13 @@ fn append_chat_message_repairs_stale_or_duplicate_sequence_hints() {
             .unwrap(),
         2
     );
-    let seqs: Vec<i64> = db
-        .list_messages(conv, 10)
+    let contents: Vec<_> = db
+        .load_messages(conv)
         .unwrap()
         .into_iter()
-        .map(|m| m.seq)
+        .map(|m| m.content)
         .collect();
-    assert_eq!(seqs, vec![1, 2]);
+    assert_eq!(contents, vec!["one", "two"]);
 }
 
 #[test]
@@ -316,7 +316,7 @@ fn append_turn_persists_system_messages() {
     )];
 
     assert_eq!(db.append_turn_with_checkpoint(conv, 0, &messages, &[], None).unwrap(), 1);
-    let stored = db.list_messages(conv, 10).unwrap();
+    let stored = db.load_messages(conv).unwrap();
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].role, "system");
     assert_eq!(stored[0].content, "durable context");
@@ -373,7 +373,7 @@ fn complete_message_roundtrip_preserves_codex_provider_order() {
     ];
 
     db.append_chat_message(conv, &message, 1).unwrap();
-    let history = db.list_messages(conv, 10).unwrap();
+    let history = db.load_messages(conv).unwrap();
     assert_eq!(history[0].role, "assistant");
     assert_eq!(history[0].content, "text between calls");
     assert!(history[0].tool_calls.as_deref().unwrap().contains("call-a"));
@@ -510,7 +510,6 @@ fn runtime_load_is_not_truncated_at_history_query_limit() {
         .collect();
     db.append_turn_with_checkpoint(conv, 0, &messages, &[], None).unwrap();
 
-    assert_eq!(db.list_messages(conv, 2000).unwrap().len(), 1000);
     assert_eq!(db.load_messages(conv).unwrap().len(), 1001);
 }
 
@@ -714,7 +713,7 @@ fn current_era_date_formats_as_valid_iso_date() {
     assert_eq!(civil_from_days(20_610), (2026, 6, 6));
 }
 
-/// Assistant message with tool_calls JSON is returned by list_messages.
+/// Assistant message with tool_calls JSON is returned by load_messages.
 #[test]
 fn tool_calls_roundtrip() {
     let conn = Connection::open_in_memory().unwrap();
@@ -731,14 +730,14 @@ fn tool_calls_roundtrip() {
     )
     .unwrap();
 
-    let msgs = db.list_messages(conv, 100).unwrap();
+    let msgs = db.load_messages(conv).unwrap();
     assert_eq!(msgs.len(), 1);
     let msg = &msgs[0];
     assert_eq!(msg.content, "Let me check.");
     assert_eq!(msg.tool_calls, Some(tc_json.to_string()));
 }
 
-/// Image attachments round-trip through append_chat_message and list_messages.
+/// Image attachments round-trip through append_chat_message and load_messages.
 #[test]
 fn images_roundtrip() {
     let conn = Connection::open_in_memory().unwrap();
@@ -751,12 +750,12 @@ fn images_roundtrip() {
     db.append_chat_message(conv, &ChatMessage::user_with_images("look", images), 1)
         .unwrap();
 
-    let msgs = db.list_messages(conv, 100).unwrap();
+    let msgs = db.load_messages(conv).unwrap();
     assert_eq!(msgs.len(), 1);
     assert_eq!(msgs[0].images, Some(img_json.to_string()));
 }
 
-/// The tool-result error flag round-trips through append_chat_message/list_messages.
+/// The tool-result error flag round-trips through append_chat_message/load_messages.
 #[test]
 fn is_error_roundtrip() {
     let conn = Connection::open_in_memory().unwrap();
@@ -782,7 +781,7 @@ fn is_error_roundtrip() {
     )
     .unwrap();
 
-    let msgs = db.list_messages(conv, 100).unwrap();
+    let msgs = db.load_messages(conv).unwrap();
     assert_eq!(msgs.len(), 2);
     assert!(
         msgs[0].is_error,

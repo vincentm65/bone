@@ -89,20 +89,9 @@ fn migrate_legacy_db_if_needed(
     Ok(())
 }
 
-/// Summary of a conversation for listing.
-#[derive(Clone, Debug)]
-pub(crate) struct ConversationSummary {
-    pub id: i64,
-    pub provider: String,
-    pub model: String,
-    pub started_at: String,
-    pub ended_at: Option<String>,
-}
-
 /// A stored message for retrieval.
 #[derive(Clone, Debug)]
 pub(crate) struct StoredMessage {
-    pub seq: i64,
     pub role: String,
     pub content: String,
     pub tool_name: Option<String>,
@@ -1595,38 +1584,6 @@ impl SessionDb {
         rows.collect()
     }
 
-    /// List recent conversations, most recent first.
-    pub(crate) fn list_conversations(
-        &self,
-        limit: usize,
-    ) -> rusqlite::Result<Vec<ConversationSummary>> {
-        let limit = limit.clamp(1, 100);
-        let mut stmt = self.conn.prepare(
-            "SELECT id, provider, model, started_at, ended_at \
-             FROM conversations ORDER BY id DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(params![limit as i64], |row| {
-            Ok(ConversationSummary {
-                id: row.get(0)?,
-                provider: row.get(1)?,
-                model: row.get(2)?,
-                started_at: row.get(3)?,
-                ended_at: row.get(4)?,
-            })
-        })?;
-        rows.collect()
-    }
-
-    /// List messages for a conversation, ordered by seq ascending.
-    pub(crate) fn list_messages(
-        &self,
-        conversation_id: i64,
-        limit: usize,
-    ) -> rusqlite::Result<Vec<StoredMessage>> {
-        let limit = limit.clamp(1, 1000);
-        self.query_messages(conversation_id, Some(limit))
-    }
-
     /// Load a complete durable transcript. Runtime replay must not silently
     /// truncate long conversations at the public history-query limit.
     pub(crate) fn load_messages(
@@ -1676,7 +1633,6 @@ impl SessionDb {
     /// Map a rusqlite message projection into a [`StoredMessage`].
     fn stored_message_from_row(row: &rusqlite::Row) -> rusqlite::Result<StoredMessage> {
         Ok(StoredMessage {
-            seq: row.get(0)?,
             role: row.get(1)?,
             content: row.get(2)?,
             tool_name: row.get(3)?,

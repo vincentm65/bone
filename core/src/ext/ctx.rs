@@ -439,9 +439,6 @@ pub fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error
     // ctx.config — access to persisted configuration.
     ctx.set("config", build_config_table(lua, cfg)?)?;
 
-    // ctx.session — read-only access to session/conversation history.
-    ctx.set("session", build_session_table(lua, cfg)?)?;
-
     // ctx.db.query — read-only raw SQL against the session db.
     ctx.set("db", build_db_table(lua)?)?;
 
@@ -1849,108 +1846,6 @@ fn build_tools_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     Ok(tools_table)
 }
 
-/// Build the `ctx.session` table: `current()` plus `list()`/`messages()` which
-/// read directly from the session db. (Overlaps `ctx.conversation` on
-/// `current`; see the API-shape note in the review.)
-fn build_session_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
-    let session_table = lua.create_table()?;
-
-    // ctx.session.current() → table or nil
-    let session_current_fn =
-        build_current_fn(lua, cfg.session_id, cfg.provider.clone(), cfg.model.clone())?;
-    session_table.set("current", session_current_fn)?;
-
-    // ctx.session.list(opts?) → array of conversation summaries
-    let session_list_fn = lua.create_function(move |lua, opts: Option<mlua::Table>| {
-        let limit = opt_usize(&opts, "limit").unwrap_or(20).clamp(1, 100);
-        let db = open_session_db()?;
-        let conversations = db
-            .list_conversations(limit)
-            .map_err(|e| mlua::Error::external(format!("failed to list conversations: {e}")))?;
-        let result = lua.create_table()?;
-        for conv in conversations {
-            let t = lua.create_table()?;
-            t.set("id", conv.id)?;
-            t.set("provider", conv.provider)?;
-            t.set("model", conv.model)?;
-            t.set("started_at", conv.started_at)?;
-            if let Some(ended) = conv.ended_at {
-                t.set("ended_at", ended)?;
-            }
-            result.push(t)?;
-        }
-        Ok(Value::Table(result))
-    })?;
-    session_table.set("list", session_list_fn)?;
-
-    // ctx.session.messages(conversation_id, opts?) → array of messages
-    let session_messages_fn = lua.create_function(
-        move |lua, (conversation_id, opts): (i64, Option<mlua::Table>)| {
-            let limit = opt_usize(&opts, "limit").unwrap_or(200).clamp(1, 1000);
-            let db = open_session_db()?;
-            let messages = db
-                .list_messages(conversation_id, limit)
-                .map_err(|e| mlua::Error::external(format!("failed to list messages: {e}")))?;
-            let result = lua.create_table()?;
-            for msg in messages {
-                let t = lua.create_table()?;
-                t.set("seq", msg.seq)?;
-                t.set("role", msg.role)?;
-                t.set("content", msg.content)?;
-                if let Some(tn) = msg.tool_name {
-                    t.set("tool_name", tn)?;
-                }
-                if let Some(tci) = msg.tool_call_id {
-                    t.set("tool_call_id", tci)?;
-                }
-                if msg.is_error {
-                    t.set("is_error", true)?;
-                }
-                if let Some(ref tc_json) = msg.tool_calls
-                    && let Ok(tc_vec) = serde_json::from_str::<Vec<serde_json::Value>>(tc_json)
-                {
-                    let tc_table = lua.create_table()?;
-                    for tc_val in tc_vec {
-                        let tc = lua.create_table()?;
-                        if let Some(id) = tc_val.get("id") {
-                            tc.set("id", lua.to_value(id)?)?;
-                        }
-                        if let Some(name) = tc_val.get("name") {
-                            tc.set("name", lua.to_value(name)?)?;
-                        }
-                        if let Some(args) = tc_val.get("arguments") {
-                            tc.set("arguments", lua.to_value(args)?)?;
-                        }
-                        tc_table.push(tc)?;
-                    }
-                    t.set("tool_calls", tc_table)?;
-                }
-                if let Some(ref img_json) = msg.images
-                    && let Ok(img_vec) = serde_json::from_str::<Vec<serde_json::Value>>(img_json)
-                {
-                    let img_table = lua.create_table()?;
-                    for img_val in img_vec {
-                        let img = lua.create_table()?;
-                        if let Some(mt) = img_val.get("media_type") {
-                            img.set("media_type", lua.to_value(mt)?)?;
-                        }
-                        if let Some(data) = img_val.get("data") {
-                            img.set("data", lua.to_value(data)?)?;
-                        }
-                        img_table.push(img)?;
-                    }
-                    t.set("images", img_table)?;
-                }
-                result.push(t)?;
-            }
-            Ok(Value::Table(result))
-        },
-    )?;
-    session_table.set("messages", session_messages_fn)?;
-
-    Ok(session_table)
-}
-
 /// Cheap prefix check for `ctx.db.query`. Accepts `SELECT` and CTE form
 /// `WITH ... SELECT`. Actual write protection is enforced after prepare via
 /// `Statement::readonly()` — `WITH` can also introduce mutating statements.
@@ -3247,12 +3142,6 @@ fn opt_str(opts: &Option<Table>, key: &str) -> Option<String> {
 fn opt_u64(opts: &Option<Table>, key: &str) -> Option<u64> {
     opts.as_ref()
         .and_then(|t| t.get::<Option<u64>>(key).ok().flatten())
-}
-
-/// Read an optional `usize` field from an opts table (missing/wrong-type → None).
-fn opt_usize(opts: &Option<Table>, key: &str) -> Option<usize> {
-    opts.as_ref()
-        .and_then(|t| t.get::<Option<usize>>(key).ok().flatten())
 }
 
 /// Read the per-agent tool allowlist (`opts.tools`) for `ctx.agent.run`,
