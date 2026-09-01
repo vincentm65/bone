@@ -65,7 +65,14 @@ impl ToolExecutionContext {
 #[async_trait]
 pub trait Tool: Send + Sync {
     fn definition(&self) -> ToolDefinition;
-    async fn execute(&self, arguments: Value) -> Result<String, String>;
+
+    /// Context-less execution. Tools that need a [`ToolExecutionContext`]
+    /// (cancellation, working directory, process scope) override
+    /// [`execute_output_live`](Self::execute_output_live) instead and rely on
+    /// this error for the context-less path.
+    async fn execute(&self, _arguments: Value) -> Result<String, String> {
+        Err("tool requires the live execution path".into())
+    }
 
     async fn execute_output(&self, arguments: Value) -> Result<ToolOutput, String> {
         self.execute(arguments).await.map(ToolOutput::text)

@@ -782,30 +782,6 @@ impl Tool for ShellTool {
         }
     }
 
-    async fn execute(&self, arguments: Value) -> Result<String, String> {
-        // Context-less fallback (trait default path / tests). No cancel token
-        // is available here, so the wall-clock timeout is the only backstop;
-        // the live path below wires in cancellation.
-        let args = parse_shell_args(arguments)?;
-        if args.action != "run" {
-            return crate::processes::execute_action(&args.action, args.id.as_deref(), None);
-        }
-        let (command, timeout_ms, background) = parse_run_args(args)?;
-        if background {
-            let id = crate::processes::registry().spawn(command, "shell".into(), timeout_ms, None);
-            return Ok(format!("background process started: {id}"));
-        }
-        let output = run_script(ScriptRequest {
-            command,
-            env: Vec::new(),
-            timeout_ms,
-            working_dir: None,
-            cancel: None,
-        })
-        .await?;
-        Ok(format_output(&output))
-    }
-
     async fn execute_output_live(
         &self,
         arguments: Value,

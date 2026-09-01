@@ -80,10 +80,14 @@ async fn timeout_returns_partial_stdout() {
     let tool = ShellTool;
 
     let result = tool
-        .execute(json!({
-            "command": PARTIAL_THEN_SLEEP,
-            "timeout_ms": 1000
-        }))
+        .execute_output_live(
+            json!({
+                "command": PARTIAL_THEN_SLEEP,
+                "timeout_ms": 1000
+            }),
+            None,
+            ToolExecutionContext::default(),
+        )
         .await;
 
     assert!(result.is_err(), "expected timeout error, got: {result:?}");
@@ -97,9 +101,14 @@ async fn successful_command_returns_exit_code_and_stdout() {
     let tool = ShellTool;
 
     let result = tool
-        .execute(json!({ "command": "echo hello" }))
+        .execute_output_live(
+            json!({ "command": "echo hello" }),
+            None,
+            ToolExecutionContext::default(),
+        )
         .await
-        .expect("command should succeed");
+        .expect("command should succeed")
+        .content;
 
     assert!(result.contains("exit code: 0"));
     assert!(result.contains("hello"));
@@ -155,29 +164,49 @@ async fn live_background_uses_context_working_directory() {
 #[tokio::test]
 async fn shell_manages_its_background_processes() {
     let started = ShellTool
-        .execute(json!({ "action": "run", "command": LONG_SLEEP, "background": true }))
+        .execute_output_live(
+            json!({ "action": "run", "command": LONG_SLEEP, "background": true }),
+            None,
+            ToolExecutionContext::default(),
+        )
         .await
-        .expect("background command should start");
+        .expect("background command should start")
+        .content;
     let id = started
         .strip_prefix("background process started: ")
         .expect("result should contain a process id");
 
     let listed = ShellTool
-        .execute(json!({ "action": "list" }))
+        .execute_output_live(
+            json!({ "action": "list" }),
+            None,
+            ToolExecutionContext::default(),
+        )
         .await
-        .expect("list should succeed");
+        .expect("list should succeed")
+        .content;
     assert!(listed.contains(id));
 
     let status = ShellTool
-        .execute(json!({ "action": "status", "id": id }))
+        .execute_output_live(
+            json!({ "action": "status", "id": id }),
+            None,
+            ToolExecutionContext::default(),
+        )
         .await
-        .expect("status should succeed");
+        .expect("status should succeed")
+        .content;
     assert!(status.contains("running: true"));
 
     let killed = ShellTool
-        .execute(json!({ "action": "kill", "id": id }))
+        .execute_output_live(
+            json!({ "action": "kill", "id": id }),
+            None,
+            ToolExecutionContext::default(),
+        )
         .await
-        .expect("kill should succeed");
+        .expect("kill should succeed")
+        .content;
     assert_eq!(killed, format!("stop requested for {id}"));
 
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
@@ -192,9 +221,14 @@ async fn shell_manages_its_background_processes() {
 #[tokio::test]
 async fn background_output_is_visible_before_completion() {
     let started = ShellTool
-        .execute(json!({ "command": LIVE_BACKGROUND_OUTPUT, "background": true }))
+        .execute_output_live(
+            json!({ "command": LIVE_BACKGROUND_OUTPUT, "background": true }),
+            None,
+            ToolExecutionContext::default(),
+        )
         .await
-        .expect("background command should start");
+        .expect("background command should start")
+        .content;
     let id = started
         .strip_prefix("background process started: ")
         .expect("result should contain a process id");
@@ -218,9 +252,14 @@ async fn background_output_is_visible_before_completion() {
 #[tokio::test]
 async fn finished_background_status_reports_exit_code() {
     let started = ShellTool
-        .execute(json!({ "command": "exit 7", "background": true }))
+        .execute_output_live(
+            json!({ "command": "exit 7", "background": true }),
+            None,
+            ToolExecutionContext::default(),
+        )
         .await
-        .expect("background command should start");
+        .expect("background command should start")
+        .content;
     let id = started
         .strip_prefix("background process started: ")
         .expect("result should contain a process id");
@@ -233,9 +272,14 @@ async fn finished_background_status_reports_exit_code() {
     .expect("background command should finish");
 
     let status = ShellTool
-        .execute(json!({ "action": "status", "id": id }))
+        .execute_output_live(
+            json!({ "action": "status", "id": id }),
+            None,
+            ToolExecutionContext::default(),
+        )
         .await
-        .expect("status should succeed");
+        .expect("status should succeed")
+        .content;
 
     assert!(status.contains("exit code: 7"), "{status}");
     assert!(status.contains("signal: none"), "{status}");
@@ -245,9 +289,14 @@ async fn finished_background_status_reports_exit_code() {
 #[tokio::test]
 async fn signalled_background_status_reports_signal() {
     let started = ShellTool
-        .execute(json!({ "command": "kill -TERM $$", "background": true }))
+        .execute_output_live(
+            json!({ "command": "kill -TERM $$", "background": true }),
+            None,
+            ToolExecutionContext::default(),
+        )
         .await
-        .expect("background command should start");
+        .expect("background command should start")
+        .content;
     let id = started
         .strip_prefix("background process started: ")
         .expect("result should contain a process id");
@@ -260,9 +309,14 @@ async fn signalled_background_status_reports_signal() {
     .expect("background command should finish");
 
     let status = ShellTool
-        .execute(json!({ "action": "status", "id": id }))
+        .execute_output_live(
+            json!({ "action": "status", "id": id }),
+            None,
+            ToolExecutionContext::default(),
+        )
         .await
-        .expect("status should succeed");
+        .expect("status should succeed")
+        .content;
 
     assert!(status.contains("exit code: none"), "{status}");
     assert!(status.contains("signal: 15"), "{status}");
@@ -353,12 +407,17 @@ async fn classification_is_accepted_but_ignored() {
     let tool = ShellTool;
 
     let result = tool
-        .execute(json!({
-            "command": "echo ok",
-            "classification": "read_only"
-        }))
+        .execute_output_live(
+            json!({
+                "command": "echo ok",
+                "classification": "read_only"
+            }),
+            None,
+            ToolExecutionContext::default(),
+        )
         .await
-        .expect("command should succeed");
+        .expect("command should succeed")
+        .content;
 
     assert!(result.contains("exit code: 0"));
 }
@@ -376,7 +435,11 @@ async fn obvious_shell_file_writes_redirect_to_dedicated_tools() {
         "cat source.txt > copy.txt",
     ] {
         let error = tool
-            .execute(json!({ "command": command }))
+            .execute_output_live(
+                json!({ "command": command }),
+                None,
+                ToolExecutionContext::default(),
+            )
             .await
             .expect_err(command);
         assert!(
@@ -390,7 +453,13 @@ async fn obvious_shell_file_writes_redirect_to_dedicated_tools() {
 async fn shell_keeps_read_fallbacks_and_normal_commands_available() {
     let tool = ShellTool;
     for command in ["cat /dev/null", "head -1 /dev/null", "printf hello"] {
-        let result = tool.execute(json!({ "command": command })).await;
+        let result = tool
+            .execute_output_live(
+                json!({ "command": command }),
+                None,
+                ToolExecutionContext::default(),
+            )
+            .await;
         assert!(result.is_ok(), "{command}: {result:?}");
     }
 }

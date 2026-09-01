@@ -1616,11 +1616,16 @@ impl App {
 
     async fn run_inline_command(&mut self, cmd: &str, term: &mut BoneTerminal) -> io::Result<()> {
         let result = ShellTool
-            .execute(serde_json::json!({
-                "command": cmd,
-                "timeout_ms": 60_000,
-            }))
+            .execute_output_live(
+                serde_json::json!({
+                    "command": cmd,
+                    "timeout_ms": 60_000,
+                }),
+                None,
+                crate::tools::types::ToolExecutionContext::default(),
+            )
             .await
+            .map(|output| output.content)
             .unwrap_or_else(|e| format!("[error: {e}]"));
 
         let is_error = result.contains("exit code: 1") || result.contains("timed out");
