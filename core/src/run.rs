@@ -198,13 +198,12 @@ async fn expand_lua_command(
             .map(|command| command.name.clone())
             .collect::<Vec<_>>();
         let config_schema = config.schema_for(&tool_names, &command_names);
-        let mut ctx_cfg = crate::ext::ctx::CtxConfig::new(config_dir_str, shared_state);
+        let mut ctx_cfg =
+            crate::ext::ctx::CtxConfig::new(config_dir_str, shared_state, config, config_schema);
         ctx_cfg.tool_handler = Some(booted.tools);
         ctx_cfg.approval_mode = approval_mode;
         ctx_cfg.provider = provider;
         ctx_cfg.model = model;
-        ctx_cfg.config_store = Some(config);
-        ctx_cfg.config_schema = Some(config_schema);
         let ctx_table = crate::ext::ctx::create_ctx_table(&lua, &ctx_cfg).ok()?;
 
         // Release the project Lua mutex before calling into Lua: a nested

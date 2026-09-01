@@ -320,7 +320,7 @@ local function render_list_text(tasks)
 end
 
 bone.on("before_turn", function(_event, ctx)
-    if ctx.runtime.info().execution.depth ~= 0 then return end
+    if ctx.runtime.info().agent_depth ~= 0 then return end
 
     local raw = ctx.state.get("task_list")
     local state

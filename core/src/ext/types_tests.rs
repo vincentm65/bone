@@ -31,13 +31,13 @@ fn managed_hook_manager(script: &str) -> ExtensionManager {
 
 fn managed_hook_ctx() -> crate::ext::ctx::CtxConfig {
     let store = crate::config::store::ConfigStore::for_test();
-    let mut cfg = crate::ext::ctx::CtxConfig::new(
+    let schema = store.schema();
+    crate::ext::ctx::CtxConfig::new(
         std::env::temp_dir().to_string_lossy().to_string(),
         Arc::new(Mutex::new(Default::default())),
-    );
-    cfg.config_schema = Some(store.schema());
-    cfg.config_store = Some(store);
-    cfg
+        store,
+        schema,
+    )
 }
 
 #[test]

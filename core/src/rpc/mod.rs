@@ -1100,6 +1100,8 @@ impl BlockingCtxSetup {
         let mut config = crate::ext::ctx::CtxConfig::new(
             crate::config::bone_dir().to_string_lossy().to_string(),
             self.app_state.tool_handler.shared_state.clone(),
+            self.app_state.config_store.clone(),
+            self.app_state.config_schema.clone(),
         );
         self.app_state.apply_to(&mut config);
         config.key_sender = self.key_tx.take();

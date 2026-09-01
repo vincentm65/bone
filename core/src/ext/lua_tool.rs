@@ -202,7 +202,21 @@ impl LuaTool {
             .as_ref()
             .map(|h| h.shared_state.clone())
             .unwrap_or(shared_state);
-        let mut ctx_cfg = CtxConfig::new(config_dir, session_state);
+        let (config_store, config_schema) = if let Some(state) = &context.app_state {
+            (state.config_store.clone(), state.config_schema.clone())
+        } else if let Some(store) = context
+            .tool_handler
+            .as_ref()
+            .and_then(|handler| handler.config_store.clone())
+        {
+            let schema = store.schema();
+            (store, schema)
+        } else {
+            return Err(format!(
+                "lua tool '{name}': daemon configuration store is unavailable"
+            ));
+        };
+        let mut ctx_cfg = CtxConfig::new(config_dir, session_state, config_store, config_schema);
         if let Some(working_dir) = &context.working_dir {
             ctx_cfg.cwd = working_dir.to_string_lossy().into_owned();
         }
@@ -212,15 +226,6 @@ impl LuaTool {
         // re-points `shared_state` at the session map.
         if let Some(state) = &context.app_state {
             state.apply_to(&mut ctx_cfg);
-        }
-        if ctx_cfg.config_store.is_none()
-            && let Some(store) = context
-                .tool_handler
-                .as_ref()
-                .and_then(|handler| handler.config_store.clone())
-        {
-            ctx_cfg.config_schema = Some(store.schema());
-            ctx_cfg.config_store = Some(store);
         }
         ctx_cfg.key_sender = events;
         ctx_cfg.ui = Some(ui.clone());

@@ -96,7 +96,7 @@ pub fn new_shared_state() -> SharedState {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
-pub use bone_protocol::UsageProviderContext;
+use bone_protocol::UsageProviderContext;
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct UsageContext {
     pub request_count: u64,
@@ -173,8 +173,8 @@ pub struct CtxConfig {
     pub(crate) private_llm: Option<PrivateLlmContext>,
     pub conversation_history: Option<Vec<crate::llm::ChatMessage>>,
     /// Canonical daemon configuration available to interactive Lua commands.
-    pub config_store: Option<crate::config::store::ConfigStore>,
-    pub config_schema: Option<bone_protocol::ConfigSchema>,
+    pub config_store: crate::config::store::ConfigStore,
+    pub config_schema: bone_protocol::ConfigSchema,
     /// Sink for daemon-owned conversation mutations requested by Lua.
     pub conversation_operations: Option<std::sync::mpsc::Sender<ConversationOperation>>,
     /// Sender for the frontend-facing `RuntimeEvent` stream. When set, hooks
@@ -186,8 +186,13 @@ pub struct CtxConfig {
 
 impl CtxConfig {
     /// Create a CtxConfig with default/inert values for all fields except
-    /// `config_dir` and `shared_state`.
-    pub fn new(config_dir: String, shared_state: SharedState) -> Self {
+    /// the shared state and required canonical configuration.
+    pub fn new(
+        config_dir: String,
+        shared_state: SharedState,
+        config_store: crate::config::store::ConfigStore,
+        config_schema: bone_protocol::ConfigSchema,
+    ) -> Self {
         Self {
             config_dir,
             cwd: std::env::current_dir()
@@ -214,8 +219,8 @@ impl CtxConfig {
             usage: None,
             private_llm: None,
             conversation_history: None,
-            config_store: None,
-            config_schema: None,
+            config_store,
+            config_schema,
             conversation_operations: None,
             runtime_status: None,
         }
@@ -313,8 +318,8 @@ impl AppCtxState {
         cfg.shared_state = self.tool_handler.shared_state.clone();
         cfg.usage = Some(self.usage.clone());
         cfg.conversation_history = Some(self.conversation_history.clone());
-        cfg.config_store = Some(self.config_store.clone());
-        cfg.config_schema = Some(self.config_schema.clone());
+        cfg.config_store = self.config_store.clone();
+        cfg.config_schema = self.config_schema.clone();
     }
 }
 
@@ -378,9 +383,6 @@ pub(crate) fn lua_log(config_dir: &str, level: &str, msg: &str) {
 
 /// Create the `ctx` table for a single tool invocation.
 pub fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
-    cfg.config_store
-        .as_ref()
-        .ok_or_else(|| mlua::Error::external("daemon configuration store is unavailable"))?;
     let ctx = lua.create_table()?;
 
     ctx.set("config_dir", cfg.config_dir.as_str())?;
@@ -1295,10 +1297,6 @@ fn build_runtime_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error>
         info.set("model", model.as_deref())?;
         info.set("agent_depth", agent_depth)?;
         info.set("approval_mode", approval_mode)?;
-        let execution = lua.create_table()?;
-        execution.set("kind", "agent")?;
-        execution.set("depth", agent_depth)?;
-        info.set("execution", execution)?;
         Ok(info)
     })?;
     runtime_table.set("info", info_fn)?;
@@ -1998,16 +1996,8 @@ fn append_config_pages(
 fn build_canonical_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
     let table = lua.create_table()?;
     table.set("dir", cfg.config_dir.as_str())?;
-    let store = cfg
-        .config_store
-        .as_ref()
-        .expect("canonical config table requires a store")
-        .clone();
-    let schema = Arc::new(
-        cfg.config_schema
-            .clone()
-            .expect("canonical config table requires a schema"),
-    );
+    let store = cfg.config_store.clone();
+    let schema = Arc::new(cfg.config_schema.clone());
 
     let get_store = store.clone();
     let get_schema = Arc::clone(&schema);
@@ -2307,10 +2297,7 @@ async fn acquire_provider_slot(
 /// Create the `ctx.agent` table with `run` and `run_stream` functions.
 fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::Error> {
     let agent_table = lua.create_table()?;
-    let store = cfg
-        .config_store
-        .clone()
-        .ok_or_else(|| mlua::Error::external("daemon configuration store is unavailable"))?;
+    let store = cfg.config_store.clone();
 
     // Captures shared by all three dispatch closures. Built once and cloned
     // per closure (each needs its own 'static copy).
@@ -3341,7 +3328,6 @@ async fn await_cancelled(flag: &Option<std::sync::Arc<std::sync::atomic::AtomicB
 /// Per-provider usage breakdown for the current conversation, mapped into the
 /// Lua-facing `UsageProviderContext`. Empty when there is no session DB,
 /// conversation, or the query fails.
-#[cfg_attr(not(feature = "tui"), allow(dead_code))]
 pub fn usage_by_provider_context(
     db: Option<&crate::session_db::SessionDb>,
     session_id: Option<i64>,
@@ -3369,6 +3355,8 @@ pub(crate) fn build_before_turn_config(state: &AppCtxState) -> CtxConfig {
     let mut cfg = CtxConfig::new(
         crate::config::bone_dir().to_string_lossy().to_string(),
         state.tool_handler.shared_state.clone(),
+        state.config_store.clone(),
+        state.config_schema.clone(),
     );
     state.apply_to(&mut cfg);
     cfg
@@ -3381,7 +3369,6 @@ fn tostring_lua_value(v: &Value) -> String {
         Value::Number(n) => n.to_string(),
         Value::String(s) => s.to_str().ok().map(|b| b.to_string()).unwrap_or_default(),
         Value::Boolean(b) => b.to_string(),
-        Value::Nil => "null".to_string(),
         _ => "<unsupported>".to_string(),
     }
 }

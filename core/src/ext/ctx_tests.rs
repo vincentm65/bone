@@ -1,14 +1,11 @@
 use super::*;
 
-/// Create a CtxConfig with a minimal test ConfigStore and schema so that
-/// `create_ctx_table` does not reject the config as missing its daemon store.
+/// Create a CtxConfig with a minimal test ConfigStore and schema.
 fn test_ctx_config() -> CtxConfig {
     let shared = new_shared_state();
     let store = crate::config::store::ConfigStore::for_test();
-    let mut cfg = CtxConfig::new("/tmp".to_string(), shared);
-    cfg.config_schema = Some(store.schema());
-    cfg.config_store = Some(store);
-    cfg
+    let schema = store.schema();
+    CtxConfig::new("/tmp".to_string(), shared, store, schema)
 }
 
 #[test]
@@ -206,15 +203,16 @@ fn canonical_config_pages_and_mutations_use_the_daemon_store() {
     let store =
         crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
     let lua = Lua::new();
-    let mut cfg = CtxConfig::new(
-        temp.path().to_string_lossy().into_owned(),
-        new_shared_state(),
-    );
-    cfg.config_store = Some(store.clone());
-    cfg.config_schema = Some(store.schema_for(
+    let schema = store.schema_for(
         &["shell".into(), "worker".into()],
         &["config".into(), "history".into()],
-    ));
+    );
+    let cfg = CtxConfig::new(
+        temp.path().to_string_lossy().into_owned(),
+        new_shared_state(),
+        store.clone(),
+        schema,
+    );
     let config = build_canonical_config_table(&lua, &cfg).unwrap();
 
     let get_pages: mlua::Function = config.get("get_pages").unwrap();
@@ -289,9 +287,8 @@ fn canonical_config_pages_and_mutations_use_the_daemon_store() {
 fn config_get_uses_canonical_store_instead_of_filesystem() {
     let lua = Lua::new();
     let store = crate::config::store::ConfigStore::for_test();
-    let mut cfg = CtxConfig::new("/tmp".into(), new_shared_state());
-    cfg.config_schema = Some(store.schema_for(&[], &[]));
-    cfg.config_store = Some(store);
+    let schema = store.schema_for(&[], &[]);
+    let cfg = CtxConfig::new("/tmp".into(), new_shared_state(), store, schema);
     let config = build_canonical_config_table(&lua, &cfg).unwrap();
     let get: mlua::Function = config.get("get").unwrap();
 
@@ -315,9 +312,7 @@ fn config_get_table_exposes_canonical_enablement() {
         .unwrap();
     let revision = store.snapshot().revision;
     store.set_enabled("tools", "cron", false, revision).unwrap();
-    let mut cfg = CtxConfig::new("/tmp".into(), new_shared_state());
-    cfg.config_schema = Some(schema);
-    cfg.config_store = Some(store);
+    let cfg = CtxConfig::new("/tmp".into(), new_shared_state(), store, schema);
     let config = build_canonical_config_table(&lua, &cfg).unwrap();
     let get_table: mlua::Function = config.get("get_table").unwrap();
 
@@ -620,7 +615,12 @@ fn sample_app_state(system_prompt_override: Option<String>) -> AppCtxState {
 
 fn cfg_from(state: &AppCtxState) -> CtxConfig {
     let shared: SharedState = Arc::new(Mutex::new(HashMap::new()));
-    let mut cfg = CtxConfig::new("/tmp".to_string(), shared);
+    let mut cfg = CtxConfig::new(
+        "/tmp".to_string(),
+        shared,
+        state.config_store.clone(),
+        state.config_schema.clone(),
+    );
     state.apply_to(&mut cfg);
     cfg
 }
@@ -1414,7 +1414,7 @@ async fn ctx_exec_redacted_approval_does_not_expose_arguments() {
 }
 
 #[test]
-fn runtime_info_exposes_read_only_execution_metadata() {
+fn runtime_info_exposes_read_only_metadata() {
     let mut cfg = test_ctx_config();
     cfg.session_id = Some(42);
     cfg.provider = Some("openrouter".into());
@@ -1433,8 +1433,7 @@ fn runtime_info_exposes_read_only_execution_metadata() {
     assert_eq!(info["model"], "test-model");
     assert_eq!(info["agent_depth"], 2);
     assert_eq!(info["approval_mode"], "danger");
-    assert_eq!(info["execution"]["kind"], "agent");
-    assert_eq!(info["execution"]["depth"], 2);
+    assert!(info.get("execution").is_none());
 }
 
 #[test]
