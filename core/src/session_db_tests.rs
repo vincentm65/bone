@@ -310,7 +310,7 @@ fn append_turn_persists_system_messages() {
         "durable context",
     )];
 
-    assert_eq!(db.append_turn(conv, 0, &messages, &[]).unwrap(), 1);
+    assert_eq!(db.append_turn_with_checkpoint(conv, 0, &messages, &[], None).unwrap(), 1);
     let stored = db.list_messages(conv, 10).unwrap();
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].role, "system");
@@ -503,7 +503,7 @@ fn runtime_load_is_not_truncated_at_history_query_limit() {
     let messages: Vec<_> = (0..1001)
         .map(|i| crate::llm::ChatMessage::new(crate::llm::ChatRole::User, format!("message {i}")))
         .collect();
-    db.append_turn(conv, 0, &messages, &[]).unwrap();
+    db.append_turn_with_checkpoint(conv, 0, &messages, &[], None).unwrap();
 
     assert_eq!(db.list_messages(conv, 2000).unwrap().len(), 1000);
     assert_eq!(db.load_messages(conv).unwrap().len(), 1001);
@@ -519,7 +519,7 @@ fn context_checkpoint_survives_reload_without_rewriting_full_history() {
         crate::llm::ChatMessage::new(crate::llm::ChatRole::User, "old question"),
         crate::llm::ChatMessage::new(crate::llm::ChatRole::Assistant, "old answer"),
     ];
-    db.append_turn(conv, 0, &original, &[]).unwrap();
+    db.append_turn_with_checkpoint(conv, 0, &original, &[], None).unwrap();
 
     let answer = crate::llm::ChatMessage::new(crate::llm::ChatRole::Assistant, "new answer");
     let compacted = vec![

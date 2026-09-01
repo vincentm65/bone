@@ -1111,20 +1111,9 @@ impl SessionDb {
     /// Append every new message and usage record from a completed turn in a
     /// single transaction — one commit (one WAL sync) instead of one per row,
     /// and the whole turn is atomic: a mid-loop failure rolls everything back,
-    /// so the DB can never hold a partial turn. `seq` is advanced per written
-    /// message and returned.
-    pub fn append_turn(
-        &self,
-        conversation_id: i64,
-        seq: i64,
-        messages: &[ChatMessage],
-        usage: &[UsageRecord],
-    ) -> rusqlite::Result<i64> {
-        self.append_turn_with_checkpoint(conversation_id, seq, messages, usage, None)
-    }
-
-    /// Append a turn and, when supplied, atomically persist the resulting
-    /// model-facing context checkpoint at the turn's final sequence.
+    /// so the DB can never hold a partial turn. When supplied, the resulting
+    /// model-facing context checkpoint is persisted atomically at the turn's
+    /// final sequence. `seq` is advanced per written message and returned.
     pub(crate) fn append_turn_with_checkpoint(
         &self,
         conversation_id: i64,
