@@ -439,9 +439,6 @@ pub fn create_ctx_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error
     // ctx.agent.run(prompt, opts?) → { ok, content, error }
     add_agent_table(lua, &ctx, cfg)?;
 
-    // ctx.settings.get("namespace.key") — read-only resolved extension settings.
-    ctx.set("settings", build_settings_table(lua)?)?;
-
     // ctx.config — access to persisted configuration.
     ctx.set("config", build_config_table(lua, cfg)?)?;
 
@@ -1924,19 +1921,6 @@ fn build_db_table(lua: &Lua) -> Result<Table, mlua::Error> {
     let db_table = lua.create_table()?;
     db_table.set("query", db_query_fn)?;
     Ok(db_table)
-}
-
-/// Build the read-only `ctx.settings` extension-settings API.
-fn build_settings_table(lua: &Lua) -> Result<Table, mlua::Error> {
-    let table = lua.create_table()?;
-    let get = lua.create_function(|lua, path: String| {
-        let bone: Table = lua.globals().get("bone")?;
-        let settings: Table = bone.get("settings")?;
-        let get: mlua::Function = settings.get("_get_extension")?;
-        get.call::<Value>(path)
-    })?;
-    table.set("get", get)?;
-    Ok(table)
 }
 
 fn find_config_field<'a>(

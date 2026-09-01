@@ -427,7 +427,10 @@ fn extension_settings_define_resolve_and_validate() {
               options = { "fast", "safe" } },
           },
         })
-        assert(bone.settings._get_extension("example.enabled") == true)
+        assert(bone.settings._get_extension == nil)
+        local ok, err = pcall(bone.settings.get, "extensions.example.enabled")
+        assert(not ok)
+        assert(tostring(err):find("use ctx.config.get", 1, true))
         assert(bone.settings._set_extension == nil)
         assert(not pcall(bone.settings.register, {
           namespace = "example", title = "Duplicate",
