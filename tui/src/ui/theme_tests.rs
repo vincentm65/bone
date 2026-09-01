@@ -145,7 +145,10 @@ fn syntax_highlight_rebuilds_code_theme() {
 
     // apply_snapshot also rebuilds.
     let snap = crate::config::settings::ThemeSettings {
-        syntax_string: Some("#ff00ff".to_string()),
+        syntax: crate::config::settings::ThemeSyntaxSettings {
+            string: Some("#ff00ff".to_string()),
+            ..Default::default()
+        },
         ..Default::default()
     };
     theme.apply_snapshot(&snap);
@@ -289,7 +292,10 @@ fn runtime_syntax_changes_rebuild_once_and_unrelated_changes_do_not() {
     assert_eq!(theme.code_rebuilds(), after_set);
 
     let reloaded = crate::config::settings::ThemeSettings {
-        syntax_comment: Some("#010203".into()),
+        syntax: crate::config::settings::ThemeSyntaxSettings {
+            comment: Some("#010203".into()),
+            ..Default::default()
+        },
         ..Default::default()
     };
     theme.apply_snapshot(&reloaded);
@@ -306,7 +312,10 @@ fn runtime_syntax_changes_rebuild_once_and_unrelated_changes_do_not() {
 fn full_snapshot_and_equivalent_incremental_updates_have_equal_layers() {
     let configured = crate::config::settings::ThemeSettings {
         input_border: Some("#112233".into()),
-        syntax_comment: Some("#223344".into()),
+        syntax: crate::config::settings::ThemeSyntaxSettings {
+            comment: Some("#223344".into()),
+            ..Default::default()
+        },
         ..Default::default()
     };
     let overrides = std::collections::HashMap::from([
@@ -341,7 +350,10 @@ fn full_snapshot_and_equivalent_incremental_updates_have_equal_layers() {
 
     let reloaded = crate::config::settings::ThemeSettings {
         input_border: Some("#334455".into()),
-        syntax_comment: Some("#445566".into()),
+        syntax: crate::config::settings::ThemeSyntaxSettings {
+            comment: Some("#445566".into()),
+            ..Default::default()
+        },
         ..Default::default()
     };
     snapshot.apply_resolved_snapshot(&reloaded, &overrides);

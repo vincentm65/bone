@@ -577,14 +577,6 @@ impl Theme {
         apply_ref!(approval_danger, snap.approval_danger);
         apply_ref!(tool_call, snap.tool_call);
         apply_ref!(tool_error, snap.tool_error);
-        apply_ref!(shell_program, snap.shell_program);
-        apply_ref!(shell_separator, snap.shell_separator);
-        apply_ref!(shell_redirect, snap.shell_redirect);
-        apply_ref!(shell_flag, snap.shell_flag);
-        apply_ref!(shell_string, snap.shell_string);
-        apply_ref!(shell_variable, snap.shell_variable);
-        apply_ref!(shell_comment, snap.shell_comment);
-        apply_ref!(shell_path, snap.shell_path);
         apply_ref!(diff_removed, snap.diff_removed);
         apply_ref!(diff_added, snap.diff_added);
         apply_ref!(thinking, snap.thinking);
@@ -599,24 +591,6 @@ impl Theme {
         apply_ref!(chart_empty, snap.chart_empty);
         apply_ref!(heat_low, snap.heat_low);
         apply_ref!(heat_high, snap.heat_high);
-        apply_ref!(syntax_text, snap.syntax_text);
-        apply_ref!(syntax_comment, snap.syntax_comment);
-        apply_ref!(syntax_string, snap.syntax_string);
-        apply_ref!(syntax_number, snap.syntax_number);
-        apply_ref!(syntax_constant, snap.syntax_constant);
-        apply_ref!(syntax_escape, snap.syntax_escape);
-        apply_ref!(syntax_regex, snap.syntax_regex);
-        apply_ref!(syntax_keyword, snap.syntax_keyword);
-        apply_ref!(syntax_keyword_control, snap.syntax_keyword_control);
-        apply_ref!(syntax_type, snap.syntax_type);
-        apply_ref!(syntax_function, snap.syntax_function);
-        apply_ref!(syntax_variable, snap.syntax_variable);
-        apply_ref!(syntax_tag, snap.syntax_tag);
-        apply_ref!(syntax_attribute, snap.syntax_attribute);
-        apply_ref!(syntax_punctuation, snap.syntax_punctuation);
-        apply_ref!(syntax_subtle, snap.syntax_subtle);
-        apply_ref!(syntax_markup, snap.syntax_markup);
-        apply_ref!(syntax_invalid, snap.syntax_invalid);
 
         for (name, spec) in &snap.highlights {
             theme.apply_highlight_spec(name, spec);

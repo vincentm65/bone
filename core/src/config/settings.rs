@@ -392,20 +392,14 @@ pub enum ThemeStyleSpec {
     },
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct ThemeSettings {
     /// Selected `lua/themes/<name>.lua` theme. The resolved fields below are
     /// persisted alongside it so frontends never need filesystem or Lua access.
-    #[serde(default)]
     pub name: Option<String>,
-    #[serde(default)]
     pub palette: ThemePaletteSettings,
-    #[serde(default)]
     pub shell: ThemeShellSettings,
-    #[serde(default)]
     pub syntax: ThemeSyntaxSettings,
-    #[serde(default)]
     pub highlights: std::collections::BTreeMap<String, ThemeStyleSpec>,
     pub user_msg: Option<String>,
     pub user_msg_bg: Option<String>,
@@ -416,14 +410,6 @@ pub struct ThemeSettings {
     pub approval_danger: Option<String>,
     pub tool_call: Option<String>,
     pub tool_error: Option<String>,
-    pub shell_program: Option<String>,
-    pub shell_separator: Option<String>,
-    pub shell_redirect: Option<String>,
-    pub shell_flag: Option<String>,
-    pub shell_string: Option<String>,
-    pub shell_variable: Option<String>,
-    pub shell_comment: Option<String>,
-    pub shell_path: Option<String>,
     pub diff_removed: Option<String>,
     pub diff_added: Option<String>,
     pub thinking: Option<String>,
@@ -438,24 +424,141 @@ pub struct ThemeSettings {
     pub chart_empty: Option<String>,
     pub heat_low: Option<String>,
     pub heat_high: Option<String>,
-    pub syntax_text: Option<String>,
-    pub syntax_comment: Option<String>,
-    pub syntax_string: Option<String>,
-    pub syntax_number: Option<String>,
-    pub syntax_constant: Option<String>,
-    pub syntax_escape: Option<String>,
-    pub syntax_regex: Option<String>,
-    pub syntax_keyword: Option<String>,
-    pub syntax_keyword_control: Option<String>,
-    pub syntax_type: Option<String>,
-    pub syntax_function: Option<String>,
-    pub syntax_variable: Option<String>,
-    pub syntax_tag: Option<String>,
-    pub syntax_attribute: Option<String>,
-    pub syntax_punctuation: Option<String>,
-    pub syntax_subtle: Option<String>,
-    pub syntax_markup: Option<String>,
-    pub syntax_invalid: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ThemeSettingsInput {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    palette: ThemePaletteSettings,
+    #[serde(default)]
+    shell: ThemeShellSettings,
+    #[serde(default)]
+    syntax: ThemeSyntaxSettings,
+    #[serde(default)]
+    highlights: std::collections::BTreeMap<String, ThemeStyleSpec>,
+    user_msg: Option<String>,
+    user_msg_bg: Option<String>,
+    status_text: Option<String>,
+    input_border: Option<String>,
+    system_msg: Option<String>,
+    approval_safe: Option<String>,
+    approval_danger: Option<String>,
+    tool_call: Option<String>,
+    tool_error: Option<String>,
+    shell_program: Option<String>,
+    shell_separator: Option<String>,
+    shell_redirect: Option<String>,
+    shell_flag: Option<String>,
+    shell_string: Option<String>,
+    shell_variable: Option<String>,
+    shell_comment: Option<String>,
+    shell_path: Option<String>,
+    diff_removed: Option<String>,
+    diff_added: Option<String>,
+    thinking: Option<String>,
+    markdown_marker: Option<String>,
+    markdown_heading: Option<String>,
+    markdown_link: Option<String>,
+    markdown_inline_code: Option<String>,
+    markdown_rule: Option<String>,
+    markdown_table_border: Option<String>,
+    markdown_table_header: Option<String>,
+    chart: Option<String>,
+    chart_empty: Option<String>,
+    heat_low: Option<String>,
+    heat_high: Option<String>,
+    syntax_text: Option<String>,
+    syntax_comment: Option<String>,
+    syntax_string: Option<String>,
+    syntax_number: Option<String>,
+    syntax_constant: Option<String>,
+    syntax_escape: Option<String>,
+    syntax_regex: Option<String>,
+    syntax_keyword: Option<String>,
+    syntax_keyword_control: Option<String>,
+    syntax_type: Option<String>,
+    syntax_function: Option<String>,
+    syntax_variable: Option<String>,
+    syntax_tag: Option<String>,
+    syntax_attribute: Option<String>,
+    syntax_punctuation: Option<String>,
+    syntax_subtle: Option<String>,
+    syntax_markup: Option<String>,
+    syntax_invalid: Option<String>,
+}
+
+impl<'de> Deserialize<'de> for ThemeSettings {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let mut input = ThemeSettingsInput::deserialize(deserializer)?;
+
+        // Legacy flat values historically applied after structured values, so
+        // they continue to win when both spellings are present.
+        input.shell.program = input.shell_program.or(input.shell.program);
+        input.shell.separator = input.shell_separator.or(input.shell.separator);
+        input.shell.redirect = input.shell_redirect.or(input.shell.redirect);
+        input.shell.flag = input.shell_flag.or(input.shell.flag);
+        input.shell.string = input.shell_string.or(input.shell.string);
+        input.shell.variable = input.shell_variable.or(input.shell.variable);
+        input.shell.comment = input.shell_comment.or(input.shell.comment);
+        input.shell.path = input.shell_path.or(input.shell.path);
+        input.syntax.text = input.syntax_text.or(input.syntax.text);
+        input.syntax.comment = input.syntax_comment.or(input.syntax.comment);
+        input.syntax.string = input.syntax_string.or(input.syntax.string);
+        input.syntax.number = input.syntax_number.or(input.syntax.number);
+        input.syntax.constant = input.syntax_constant.or(input.syntax.constant);
+        input.syntax.escape = input.syntax_escape.or(input.syntax.escape);
+        input.syntax.regex = input.syntax_regex.or(input.syntax.regex);
+        input.syntax.keyword = input.syntax_keyword.or(input.syntax.keyword);
+        input.syntax.keyword_control = input
+            .syntax_keyword_control
+            .or(input.syntax.keyword_control);
+        input.syntax.r#type = input.syntax_type.or(input.syntax.r#type);
+        input.syntax.function_name = input.syntax_function.or(input.syntax.function_name);
+        input.syntax.variable = input.syntax_variable.or(input.syntax.variable);
+        input.syntax.tag = input.syntax_tag.or(input.syntax.tag);
+        input.syntax.attribute = input.syntax_attribute.or(input.syntax.attribute);
+        input.syntax.punctuation = input.syntax_punctuation.or(input.syntax.punctuation);
+        input.syntax.subtle = input.syntax_subtle.or(input.syntax.subtle);
+        input.syntax.markup = input.syntax_markup.or(input.syntax.markup);
+        input.syntax.invalid = input.syntax_invalid.or(input.syntax.invalid);
+
+        Ok(Self {
+            name: input.name,
+            palette: input.palette,
+            shell: input.shell,
+            syntax: input.syntax,
+            highlights: input.highlights,
+            user_msg: input.user_msg,
+            user_msg_bg: input.user_msg_bg,
+            status_text: input.status_text,
+            input_border: input.input_border,
+            system_msg: input.system_msg,
+            approval_safe: input.approval_safe,
+            approval_danger: input.approval_danger,
+            tool_call: input.tool_call,
+            tool_error: input.tool_error,
+            diff_removed: input.diff_removed,
+            diff_added: input.diff_added,
+            thinking: input.thinking,
+            markdown_marker: input.markdown_marker,
+            markdown_heading: input.markdown_heading,
+            markdown_link: input.markdown_link,
+            markdown_inline_code: input.markdown_inline_code,
+            markdown_rule: input.markdown_rule,
+            markdown_table_border: input.markdown_table_border,
+            markdown_table_header: input.markdown_table_header,
+            chart: input.chart,
+            chart_empty: input.chart_empty,
+            heat_low: input.heat_low,
+            heat_high: input.heat_high,
+        })
+    }
 }
 
 // ── Keymaps ──────────────────────────────────────────────────────────────────

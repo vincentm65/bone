@@ -46,6 +46,42 @@ fn validates_version_unknown_keys_and_values() {
 }
 
 #[test]
+fn legacy_flat_theme_colors_deserialize_into_canonical_fields() {
+    let theme: ThemeSettings = serde_yaml::from_str(
+        "shell_program: '#112233'\nsyntax_function: '#445566'\nsyntax_type: '#778899'\n",
+    )
+    .unwrap();
+
+    assert_eq!(theme.shell.program.as_deref(), Some("#112233"));
+    assert_eq!(theme.syntax.function_name.as_deref(), Some("#445566"));
+    assert_eq!(theme.syntax.r#type.as_deref(), Some("#778899"));
+
+    let serialized = serde_yaml::to_string(&theme).unwrap();
+    assert!(serialized.contains("shell:\n  program: '#112233'"));
+    assert!(serialized.contains("function_name: '#445566'"));
+    assert!(!serialized.contains("shell_program:"));
+    assert!(!serialized.contains("syntax_function:"));
+    assert!(!serialized.contains("syntax_type:"));
+}
+
+#[test]
+fn legacy_flat_theme_colors_override_nested_values() {
+    let theme: ThemeSettings = serde_yaml::from_str(
+        "shell:\n  program: nested\nsyntax:\n  comment: nested\nshell_program: legacy\nsyntax_comment: legacy\n",
+    )
+    .unwrap();
+
+    assert_eq!(theme.shell.program.as_deref(), Some("legacy"));
+    assert_eq!(theme.syntax.comment.as_deref(), Some("legacy"));
+}
+
+#[test]
+fn theme_compatibility_deserializer_still_rejects_unknown_fields() {
+    assert!(serde_yaml::from_str::<ThemeSettings>("shell_program_typo: red\n").is_err());
+    assert!(serde_yaml::from_str::<ThemeSettings>("shell:\n  program_typo: red\n").is_err());
+}
+
+#[test]
 fn atomically_persists_and_loads_values_only_yaml() {
     let path = temp_path("roundtrip");
     let mut settings = Settings::defaults();

@@ -101,11 +101,18 @@ theme:
 ```
 
 Colors may be `#RRGGBB` (with or without `#`) or a supported named color.
-Resolution precedence is native defaults → palette → derived roles → structured
-shell/syntax values → legacy flat fields → `highlights`. Palette names may be
-referenced by role values. `input_bg`, `input_prefix`, and `input_cursor` are
-configured only under `theme.highlights`; palette roles belong under
-`theme.palette`.
+`theme.shell.*` and `theme.syntax.*` are the canonical persisted keys. Legacy
+flat `theme.shell_*` and `theme.syntax_*` keys remain accepted when loading an
+existing file; when both forms set the same value, the legacy flat key wins to
+preserve previous behavior. Saving the configuration normalizes those values to
+the nested canonical keys.
+
+Resolution precedence is native defaults → palette → derived roles → canonical
+shell/syntax values → `highlights`. Palette names may be referenced by role
+values. `input_bg`, `input_prefix`, and `input_cursor` are configured only under
+`theme.highlights`; palette roles belong under `theme.palette`. The flat names in
+the role table below are runtime highlight identifiers, not canonical persisted
+shell or syntax keys.
 
 <!-- BEGIN GENERATED THEME ROLES -->
 | Role | Channel | Runtime |
