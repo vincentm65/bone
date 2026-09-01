@@ -2278,7 +2278,11 @@ async fn reload_settings_reports_config_yaml_and_fresh_snapshot() {
     let before_revision = config.snapshot().revision;
     let mut persisted = crate::config::settings::Settings::load().unwrap().unwrap();
     persisted
-        .set_value("general", "show_thinking", "true".into())
+        .set_path_at(
+            "general.show_reasoning",
+            serde_json::json!(true),
+            &crate::config::settings::settings_path(),
+        )
         .unwrap();
     let (hub, mut commands) = Hub::new();
     let mut events = hub.subscribe();

@@ -401,7 +401,11 @@ fn reload_settings_adopts_config_yaml_and_advances_revision() {
     let before = store.snapshot();
     let mut persisted = Settings::load().unwrap().unwrap();
     persisted
-        .set_value("general", "show_thinking", "true".into())
+        .set_path_at(
+            "general.show_reasoning",
+            serde_json::json!(true),
+            &super::super::settings::settings_path(),
+        )
         .unwrap();
 
     store.reload_settings().unwrap();

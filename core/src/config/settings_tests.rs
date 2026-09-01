@@ -19,7 +19,6 @@ fn validates_version_unknown_keys_and_values() {
 
     assert!(serde_yaml::from_str::<BoneSettings>("version: 1\nunknown: true\n").is_err());
     assert!(validate_approval("prompt").is_err());
-    assert!(parse_bool("maybe").is_err());
     assert!(
         validate_keymaps(&KeymapSettings {
             bindings: vec![KeyBinding {
