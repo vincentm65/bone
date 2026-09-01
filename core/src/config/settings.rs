@@ -587,10 +587,6 @@ impl Settings {
         self.revision
     }
 
-    pub fn into_resolved(self) -> BoneSettings {
-        self.inner
-    }
-
     pub(crate) fn replace_domains(
         &mut self,
         subagents: BTreeMap<String, SubagentSettings>,
