@@ -7,7 +7,6 @@ use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::config::ProviderEntry;
 use crate::llm::provider::{
@@ -529,135 +528,6 @@ fn codex_session_id(conversation_id: i64) -> String {
     format!("00000000-0000-4000-8000-{id:012x}")
 }
 
-/// Diagnostic gate: when `BONE_CODEX_DEBUG` is set (and not empty/`0`), each
-/// Codex request body is dumped to its own file and its reported cache stats are
-/// logged, so prefix-cache divergence can be located by diffing two consecutive
-/// request JSONs. Zero-cost (a single env read) when unset.
-fn codex_debug_enabled() -> bool {
-    std::env::var("BONE_CODEX_DEBUG")
-        .map(|v| !v.is_empty() && v != "0")
-        .unwrap_or(false)
-}
-
-/// Emit bounded diagnostics for exactly the image data URLs about to be serialized.
-fn debug_request_images(input: &[CodexInputItem]) {
-    if std::env::var("BONE_IMAGE_DEBUG").as_deref() != Ok("1") {
-        return;
-    }
-
-    use base64::Engine;
-    use sha2::{Digest, Sha256};
-
-    let images: Vec<&str> = input
-        .iter()
-        .filter_map(|item| match item {
-            CodexInputItem::Message { content, .. } => Some(content),
-            _ => None,
-        })
-        .flatten()
-        .filter_map(|content| match content {
-            CodexContent::InputImage { image_url } => Some(image_url.as_str()),
-            _ => None,
-        })
-        .collect();
-
-    crate::ext::ctx::runtime_warn(format!(
-        "codex request images: image_count={}",
-        images.len()
-    ));
-    for (index, image_url) in images.into_iter().enumerate() {
-        let Some((media_type, data)) = image_url
-            .strip_prefix("data:")
-            .and_then(|value| value.split_once(";base64,"))
-        else {
-            crate::ext::ctx::runtime_warn(format!(
-                "codex request images[{index}]: media_type=unknown base64_bytes=0 decode_ok=false"
-            ));
-            continue;
-        };
-
-        match base64::engine::general_purpose::STANDARD.decode(data) {
-            Ok(bytes) => {
-                let png = bytes.starts_with(b"\x89PNG\r\n\x1a\n");
-                let dimensions = if png && bytes.len() >= 24 {
-                    Some((
-                        u32::from_be_bytes(bytes[16..20].try_into().unwrap()),
-                        u32::from_be_bytes(bytes[20..24].try_into().unwrap()),
-                    ))
-                } else {
-                    None
-                };
-                let dimensions = dimensions
-                    .map(|(width, height)| format!("{width}x{height}"))
-                    .unwrap_or_else(|| "unknown".to_string());
-                crate::ext::ctx::runtime_warn(format!(
-                    "codex request images[{index}]: media_type={media_type} base64_bytes={} decode_ok=true decoded_bytes={} png={png} dimensions={dimensions} sha256={:x}",
-                    data.len(),
-                    bytes.len(),
-                    Sha256::digest(&bytes),
-                ));
-            }
-            Err(_) => crate::ext::ctx::runtime_warn(format!(
-                "codex request images[{index}]: media_type={media_type} base64_bytes={} decode_ok=false",
-                data.len(),
-            )),
-        }
-    }
-}
-
-/// Monotonic request counter so a request dump and its later usage line share a
-/// stable `#N` and consecutive requests are diffable in order.
-static CODEX_DEBUG_SEQ: AtomicU64 = AtomicU64::new(0);
-
-/// Append one line to `bone.log` (same file the Lua `ctx.log` helpers use).
-fn codex_debug_log_line(line: &str) {
-    let path = crate::config::bone_dir().join("bone.log");
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-    {
-        use std::io::Write;
-        let _ = writeln!(f, "{line}");
-    }
-}
-
-/// Write the pretty-printed request body to `codex-debug-NNNN.json` and log a
-/// one-line summary to `bone.log`. Returns the request's sequence number so the
-/// matching usage line can reference it. Pretty-printed (one input item per
-/// block) so a plain `diff` of two dumps points straight at the first item where
-/// the cached prefix breaks.
-fn codex_debug_dump_request(request: &CodexRequest) -> u64 {
-    let seq = CODEX_DEBUG_SEQ.fetch_add(1, Ordering::Relaxed);
-    let dir = crate::config::bone_dir();
-    let file = dir.join(format!("codex-debug-{seq:04}.json"));
-    let body = serde_json::to_string_pretty(request).unwrap_or_default();
-    let _ = std::fs::write(&file, &body);
-    codex_debug_log_line(&format!(
-        "[codex-debug] req #{seq} model={} input_items={} cache_key={} -> {}",
-        request.model,
-        request.input.len(),
-        request.prompt_cache_key.as_deref().unwrap_or("(none)"),
-        file.display(),
-    ));
-    seq
-}
-
-/// Log the provider-reported usage for request `#seq`, including the cache-hit
-/// rate (cached as a fraction of input), so the per-request hit rate can be
-/// read straight from `bone.log` without aggregation.
-fn codex_debug_log_usage(seq: u64, prompt: u32, completion: u32, cached: Option<u32>) {
-    let cached = cached.unwrap_or(0);
-    let pct = if prompt > 0 {
-        (cached as f64 / prompt as f64) * 100.0
-    } else {
-        0.0
-    };
-    codex_debug_log_line(&format!(
-        "[codex-debug] req #{seq} usage: input={prompt} cached={cached} ({pct:.1}%) output={completion}"
-    ));
-}
-
 #[async_trait]
 impl LlmProvider for CodexProvider {
     fn id(&self) -> &str {
@@ -732,12 +602,6 @@ impl LlmProvider for CodexProvider {
             prompt_cache_key: request_identity.clone(),
             include: Some(vec!["reasoning.encrypted_content"]),
         };
-
-        debug_request_images(&request.input);
-
-        // Diagnostic: dump the request body (gated by BONE_CODEX_DEBUG) so the
-        // matching usage line can correlate by sequence number.
-        let debug_seq = codex_debug_enabled().then(|| codex_debug_dump_request(&request));
 
         let mut req = self.client.post(self.chat_url()).json(&request);
 
@@ -1009,9 +873,6 @@ impl LlmProvider for CodexProvider {
             }
 
             if let Some((prompt, completion, cached)) = last_usage {
-                if let Some(seq) = debug_seq {
-                    codex_debug_log_usage(seq, prompt, completion, cached);
-                }
                 yield ChatEvent::TokenUsage {
                     prompt_tokens: prompt,
                     completion_tokens: completion,
