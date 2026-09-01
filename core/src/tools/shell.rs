@@ -43,27 +43,6 @@ async fn kill_process_tree(pid: u32) {
         .await;
 }
 
-pub struct DirectExecRequest {
-    pub program: String,
-    pub args: Vec<String>,
-    pub env: Vec<(String, String)>,
-    pub stdin: Option<Vec<u8>>,
-    pub working_dir: Option<PathBuf>,
-    pub timeout_ms: u64,
-    pub cancel: Option<Arc<AtomicBool>>,
-    pub max_output_bytes: usize,
-}
-
-pub struct DirectExecOutput {
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
-    pub exit_code: Option<i32>,
-    pub signal: Option<i32>,
-    pub timed_out: bool,
-    pub cancelled: bool,
-    pub output_limit_exceeded: bool,
-}
-
 pub struct DirectExecError {
     pub spawned: bool,
     pub message: String,
@@ -89,25 +68,25 @@ pub struct ScriptOutput {
     pub cancelled: bool,
 }
 
-struct ProcessRequest {
-    program: String,
-    args: Vec<String>,
-    env: Vec<(String, String)>,
-    stdin: Option<Vec<u8>>,
-    working_dir: Option<PathBuf>,
-    timeout_ms: u64,
-    cancel: Option<Arc<AtomicBool>>,
+pub(crate) struct ProcessRequest {
+    pub(crate) program: String,
+    pub(crate) args: Vec<String>,
+    pub(crate) env: Vec<(String, String)>,
+    pub(crate) stdin: Option<Vec<u8>>,
+    pub(crate) working_dir: Option<PathBuf>,
+    pub(crate) timeout_ms: u64,
+    pub(crate) cancel: Option<Arc<AtomicBool>>,
 }
 
-struct ProcessOutput {
-    exit_code: Option<i32>,
-    signal: Option<i32>,
-    timed_out: bool,
-    cancelled: bool,
-    output_limit_exceeded: bool,
+pub(crate) struct ProcessOutput {
+    pub(crate) exit_code: Option<i32>,
+    pub(crate) signal: Option<i32>,
+    pub(crate) timed_out: bool,
+    pub(crate) cancelled: bool,
+    pub(crate) output_limit_exceeded: bool,
 }
 
-enum StreamError {
+pub(crate) enum StreamError {
     OutputLimit,
     Other(String),
 }
@@ -194,7 +173,7 @@ pub async fn run_script(request: ScriptRequest) -> Result<ScriptOutput, String> 
     run_script_stream(request, |_, _| Ok(())).await
 }
 
-async fn run_process_stream<F>(
+pub(crate) async fn run_process_stream<F>(
     request: ProcessRequest,
     mut emit: F,
 ) -> Result<ProcessOutput, DirectExecError>
@@ -353,48 +332,6 @@ where
         timed_out,
         cancelled,
         output_limit_exceeded,
-    })
-}
-
-pub async fn run_direct_exec(
-    request: DirectExecRequest,
-) -> Result<DirectExecOutput, DirectExecError> {
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
-    let mut total = 0usize;
-    let max_output_bytes = request.max_output_bytes;
-    let output = run_process_stream(
-        ProcessRequest {
-            program: request.program,
-            args: request.args,
-            env: request.env,
-            stdin: request.stdin,
-            working_dir: request.working_dir,
-            timeout_ms: request.timeout_ms,
-            cancel: request.cancel,
-        },
-        |is_stderr, bytes| {
-            total = total.saturating_add(bytes.len());
-            if total > max_output_bytes {
-                return Err(StreamError::OutputLimit);
-            }
-            if is_stderr {
-                stderr.extend_from_slice(bytes);
-            } else {
-                stdout.extend_from_slice(bytes);
-            }
-            Ok(())
-        },
-    )
-    .await?;
-    Ok(DirectExecOutput {
-        stdout,
-        stderr,
-        exit_code: output.exit_code,
-        signal: output.signal,
-        timed_out: output.timed_out,
-        cancelled: output.cancelled,
-        output_limit_exceeded: output.output_limit_exceeded,
     })
 }
 

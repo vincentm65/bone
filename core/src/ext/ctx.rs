@@ -16,7 +16,7 @@ use mlua::{FromLua, IntoLua, Lua, LuaSerdeExt, Table, Value};
 use crate::config::store::ConfigStore;
 use crate::llm::provider::{LlmProvider, ProviderRequestContext};
 use crate::tools::shell::{
-    DirectExecRequest, ScriptRequest, run_direct_exec, run_script, run_script_lines,
+    ProcessRequest, ScriptRequest, StreamError, run_process_stream, run_script, run_script_lines,
 };
 use crate::tools::types::ToolCall;
 use crate::tools::write_atomic::write_atomic;
@@ -923,24 +923,40 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
                     }
                 }
             }
-            let result = match block_on(run_direct_exec(DirectExecRequest {
-                program,
-                args: argv,
-                env,
-                stdin,
-                working_dir: Some(exec_cwd.clone().into()),
-                timeout_ms,
-                cancel: exec_cancel.clone(),
-                max_output_bytes: max_output,
-            })) {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let mut total = 0usize;
+            let result = match block_on(run_process_stream(
+                ProcessRequest {
+                    program,
+                    args: argv,
+                    env,
+                    stdin,
+                    working_dir: Some(exec_cwd.clone().into()),
+                    timeout_ms,
+                    cancel: exec_cancel.clone(),
+                },
+                |is_stderr, bytes| {
+                    total = total.saturating_add(bytes.len());
+                    if total > max_output {
+                        return Err(StreamError::OutputLimit);
+                    }
+                    if is_stderr {
+                        stderr.extend_from_slice(bytes);
+                    } else {
+                        stdout.extend_from_slice(bytes);
+                    }
+                    Ok(())
+                },
+            )) {
                 Ok(out) => {
                     let result = lua.create_table()?;
                     result.set("spawned", true)?;
                     result.set("timed_out", out.timed_out)?;
                     result.set("cancelled", out.cancelled)?;
                     result.set("output_limit_exceeded", out.output_limit_exceeded)?;
-                    result.set("stdout", lua.create_string(&out.stdout)?)?;
-                    result.set("stderr", lua.create_string(&out.stderr)?)?;
+                    result.set("stdout", lua.create_string(&stdout)?)?;
+                    result.set("stderr", lua.create_string(&stderr)?)?;
                     result.set("exit_code", out.exit_code)?;
                     result.set("signal", out.signal)?;
                     result
