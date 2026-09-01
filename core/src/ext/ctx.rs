@@ -1419,17 +1419,6 @@ fn private_llm_completion_to_lua(
     Ok(Value::Table(result))
 }
 
-async fn wait_for_llm_cancel(cancelled: Option<Arc<AtomicBool>>) {
-    match cancelled {
-        Some(flag) => {
-            while !flag.load(Ordering::Relaxed) {
-                tokio::time::sleep(Duration::from_millis(25)).await;
-            }
-        }
-        None => std::future::pending::<()>().await,
-    }
-}
-
 async fn run_private_completion(
     provider: Arc<dyn LlmProvider>,
     request_context: ProviderRequestContext,
@@ -1447,7 +1436,7 @@ async fn run_private_completion(
     let request = provider.chat_stream_with_context(messages, tools, request_context);
     let mut stream = match tokio::select! {
         biased;
-        _ = wait_for_llm_cancel(cancelled.clone()) => {
+        _ = await_cancelled(&cancelled) => {
             return PrivateLlmCompletion {
                 content: String::new(),
                 tool_calls: Vec::new(),
@@ -1477,7 +1466,7 @@ async fn run_private_completion(
     loop {
         let event = tokio::select! {
             biased;
-            _ = wait_for_llm_cancel(cancelled.clone()) => {
+            _ = await_cancelled(&cancelled) => {
                 return PrivateLlmCompletion {
                     content,
                     tool_calls,
@@ -3341,7 +3330,7 @@ fn agent_result_to_lua(
 async fn await_cancelled(flag: &Option<std::sync::Arc<std::sync::atomic::AtomicBool>>) {
     if let Some(f) = flag {
         while !f.load(std::sync::atomic::Ordering::Relaxed) {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
     } else {
         std::future::pending::<()>().await;
