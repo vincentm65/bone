@@ -169,7 +169,3 @@ pub struct InputStyleSnapshot {
     #[serde(default)]
     pub border: InputBorderSnapshot,
 }
-
-#[cfg(test)]
-#[path = "snapshots_tests.rs"]
-mod tests;

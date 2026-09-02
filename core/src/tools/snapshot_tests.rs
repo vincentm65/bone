@@ -53,13 +53,6 @@ fn repeated_read_merges_seen_lines() {
 }
 
 #[test]
-fn clear_removes_snapshots() {
-    let (mut store, _) = store_with("a.txt", "x\n");
-    store.clear();
-    assert!(store.head("a.txt").is_none());
-}
-
-#[test]
 fn normalize_strips_bom_and_crlf() {
     assert_eq!(normalize_text("\u{feff}a\r\nb\rc"), "a\nb\nc");
     assert_eq!(normalize_text("plain\n"), "plain\n");

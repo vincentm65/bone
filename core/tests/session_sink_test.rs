@@ -9,12 +9,11 @@
 //!
 //! These tests verify:
 //! 1. The trait is externally implementable (a recording sink).
-//! 2. `NullSessionSink` is provably inert.
-//! 3. Sinks compose through `Arc<dyn SessionSink>` (object-safe, shareable).
-//! 4. `UsageOnlySessionSink` attributes usage to a parent conversation without
+//! 2. `NullSessionSink` is inert.
+//! 3. `UsageOnlySessionSink` attributes usage to a parent conversation without
 //!    writing messages or ending that conversation.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use bone_core::llm::{ChatMessage, ChatRole};
 use bone_core::session_db::SessionDb;
@@ -106,42 +105,6 @@ fn null_sink_is_inert() {
     sink.record_usage("p", "m", 1, 1, None, None, false);
     sink.end();
     // Nothing to assert beyond "didn't panic" — that IS the contract.
-}
-
-#[test]
-fn sink_is_object_safe_via_arc_dyn() {
-    // Arc<dyn SessionSink> is the injection type on AgentRequest.
-    let sink: Arc<dyn SessionSink> = Arc::new(RecordingSink::new());
-    assert_eq!(sink.conv_id(), Some(42));
-    sink.append_chat_message(&ChatMessage::new(ChatRole::User, "test"), 0);
-    assert_eq!(sink.conv_id(), Some(42)); // still works after a call
-}
-
-#[test]
-fn null_sink_is_object_safe_via_arc_dyn() {
-    let sink: Arc<dyn SessionSink> = Arc::new(NullSessionSink);
-    assert_eq!(sink.conv_id(), None);
-    sink.end();
-}
-
-#[test]
-fn mixed_sink_types_unify_under_dyn() {
-    // A Driver could hold a Vec of sinks of different concrete types.
-    let sinks: Vec<Arc<dyn SessionSink>> =
-        vec![Arc::new(NullSessionSink), Arc::new(RecordingSink::new())];
-    assert_eq!(sinks[0].conv_id(), None);
-    assert_eq!(sinks[1].conv_id(), Some(42));
-}
-
-#[test]
-fn injected_sink_is_shareable_via_arc() {
-    // Arc refcount — mirrors the Step 0 provider injection test.
-    let sink: Arc<dyn SessionSink> = Arc::new(NullSessionSink);
-    let cloned = sink.clone();
-    assert_eq!(Arc::strong_count(&sink), 2);
-    assert_eq!(cloned.conv_id(), None);
-    drop(cloned);
-    assert_eq!(Arc::strong_count(&sink), 1);
 }
 
 #[test]

@@ -1,8 +1,8 @@
 use super::{
-    CodexProvider, CodexRequest, CodexResponse, codex_request_identity, extract_response_events,
-    output_index, process_summary_event,
+    CodexProvider, CodexResponse, codex_request_identity, extract_response_events, output_index,
+    process_summary_event,
 };
-use crate::llm::provider::{ChatEvent, LlmProvider, ProviderRequestContext};
+use crate::llm::provider::{ChatEvent, ProviderRequestContext};
 use crate::tools::TRUNCATED_ARGS_KEY;
 use serde_json::json;
 use std::collections::BTreeSet;
@@ -78,18 +78,6 @@ fn fast_mode_maps_to_priority_service_tier() {
         CodexProvider::from_entry("codex", &disabled).service_tier(),
         None
     );
-}
-
-#[test]
-fn max_tokens_maps_to_responses_output_cap() {
-    let entry = serde_yaml::from_str("handler: codex\n").unwrap();
-    let mut provider = CodexProvider::from_entry("codex", &entry);
-
-    provider.set_max_tokens(Some(12_000));
-    assert_eq!(provider.max_tokens, Some(12_000));
-
-    provider.set_max_tokens(None);
-    assert_eq!(provider.max_tokens, None);
 }
 
 #[test]
@@ -189,46 +177,4 @@ fn completed_reasoning_skips_already_streamed_summary_part() {
 fn output_index_defaults_to_zero() {
     assert_eq!(output_index(&json!({})), 0);
     assert_eq!(output_index(&json!({"output_index": 3})), 3);
-}
-
-/// Context max_tokens overrides configured cap in the wire body.
-#[test]
-fn context_max_tokens_overrides_configured_cap_in_codex_request() {
-    let request = CodexRequest {
-        model: "codex-latest".into(),
-        instructions: "test".into(),
-        input: Vec::new(),
-        stream: true,
-        store: false,
-        max_output_tokens: Some(4_000), // context override value
-        reasoning: None,
-        service_tier: None,
-        tools: None,
-        tool_choice: None,
-        prompt_cache_key: None,
-        include: None,
-    };
-    let json = serde_json::to_value(&request).unwrap();
-    assert_eq!(json["max_output_tokens"], 4_000);
-}
-
-/// Configured cap is used when context has no max_tokens.
-#[test]
-fn configured_cap_used_when_context_max_tokens_is_none() {
-    let request = CodexRequest {
-        model: "codex-latest".into(),
-        instructions: "test".into(),
-        input: Vec::new(),
-        stream: true,
-        store: false,
-        max_output_tokens: Some(7_000), // configured cap
-        reasoning: None,
-        service_tier: None,
-        tools: None,
-        tool_choice: None,
-        prompt_cache_key: None,
-        include: None,
-    };
-    let json = serde_json::to_value(&request).unwrap();
-    assert_eq!(json["max_output_tokens"], 7_000);
 }

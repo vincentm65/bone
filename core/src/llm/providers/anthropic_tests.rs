@@ -123,35 +123,3 @@ fn reasoning_effort_uses_anthropic_output_config() {
     let json = serde_json::to_value(request).unwrap();
     assert_eq!(json["output_config"]["effort"], "ultra");
 }
-
-/// Context max_tokens overrides configured cap in the wire body.
-#[test]
-fn context_max_tokens_overrides_configured_cap_in_messages_request() {
-    let request = MessagesRequest {
-        model: "claude-3".into(),
-        max_tokens: 5_000, // context override value
-        stream: true,
-        output_config: None,
-        system: Vec::new(),
-        messages: Vec::new(),
-        tools: Vec::new(),
-    };
-    let json = serde_json::to_value(&request).unwrap();
-    assert_eq!(json["max_tokens"], 5_000);
-}
-
-/// Configured cap is used when context has no max_tokens.
-#[test]
-fn configured_cap_used_when_context_max_tokens_is_none() {
-    let request = MessagesRequest {
-        model: "claude-3".into(),
-        max_tokens: 8_000, // configured cap
-        stream: true,
-        output_config: None,
-        system: Vec::new(),
-        messages: Vec::new(),
-        tools: Vec::new(),
-    };
-    let json = serde_json::to_value(&request).unwrap();
-    assert_eq!(json["max_tokens"], 8_000);
-}

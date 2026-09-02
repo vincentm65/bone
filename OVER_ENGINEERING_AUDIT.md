@@ -274,6 +274,33 @@ IDs are stable so the verification pass can reference them. Each finding lists: 
 
 Recommended process: one commit per finding, each independently revertable; `cargo build` + `cargo test` per commit.
 
+## Progress (cleanup execution)
+
+Started 2026-09-01; the recommended process (one commit per finding, build + test per commit) is being followed.
+
+**Done — 16 findings:**
+
+| Finding | Commit | Order step |
+|---|---|---|
+| CTX-1 (PNG codec) | `31c5b33` | 1 |
+| CFG-1 (legacy canonical keys) | `0df8411` | 2 |
+| RPC-1 (`SetSetting`) | `92f8a1d` | 3 |
+| DB-1 (`messages_fts`) | `da63bd5` | 3 |
+| DB-2 (`append_turn`) | `a78c274` | 3 |
+| DB-3 (`is_transient_contention`) | `2e28f51` | 3 |
+| SINK-1/DB-4 (9-arg `append_message`) | `0b37c86` | 3 |
+| SINK-2 (`with_db`) | `ef8b445` | 3 |
+| CDX-1 (codex debug) | `5d895a0` | 3 |
+| CDX-2 (no-op `validate`) | `c1aff47` | 3 |
+| SHELL-1 (`ShellTool::execute`) | `ec2264a` | 3 |
+| MISC-2 (`SessionWriter` visibility) | `1ab4c10` | 3 |
+| MISC-3 (`JobRegistry` Default) | `83b7f7b` | 3 |
+| CFG-3 (`into_resolved`) | `c0f8966` | 3 |
+| CTX-2 (`ctx.session` table) | `b54b048` | (not in order; executed) |
+| CTX-3 (`turn_nudge` ctx plumbing) | `46289f7` | 3 |
+
+Step 3 (small dead-code sweep) is 13/19 done. **Next:** CTX-4, CTX-5, CTX-6, CTX-7, CTX-8, then step 4 consolidations (RPC-2, RPC-4, DRV-1/DRV-2, SHELL-2, JBS-1, CTX-9 last item Option→required), and CFG-2 last (step 5).
+
 ---
 
 ## Verification

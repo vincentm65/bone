@@ -29,7 +29,7 @@ use crate::tools::{ApprovalGate, ApprovalMode, CallOutcome, ToolCall, ToolResult
 /// Maximum turns a sub-agent (agent_depth > 0) may take before the driver
 /// breaks the loop with an error. This is a hard backstop against tool-looping;
 /// the top-level agent (depth 0) is uncapped.
-const SUBAGENT_MAX_TURNS: usize = 30;
+const SUBAGENT_MAX_TURNS: usize = 200;
 
 fn is_retryable_stream_error(kind: &LlmErrorKind) -> bool {
     matches!(

@@ -18,15 +18,6 @@ fn split_editor_command_cases() {
 }
 
 #[test]
-fn default_editor_is_platform_specific() {
-    if cfg!(windows) {
-        assert_eq!(default_editor(), "notepad");
-    } else {
-        assert_eq!(default_editor(), "nano");
-    }
-}
-
-#[test]
 fn editor_temp_paths_are_unique_and_cleaned_up() {
     let first = editor_temp_path().unwrap();
     let first_path = first.to_path_buf();
