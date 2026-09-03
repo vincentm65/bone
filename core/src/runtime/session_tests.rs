@@ -53,6 +53,7 @@ fn apply_outcome_persists_explicit_turn_messages_after_transcript_replacement() 
         transcript: vec![ChatMessage::new(ChatRole::User, "summary"), current.clone()],
         token_stats: Default::default(),
         persist_messages: vec![current],
+        checkpointed_messages: 0,
         transcript_replaced: true,
         usage: Vec::new(),
     };
@@ -91,6 +92,7 @@ fn apply_outcome_surfaces_persistence_failure_after_adopting_state() {
         transcript: vec![current.clone()],
         token_stats: Default::default(),
         persist_messages: vec![current],
+        checkpointed_messages: 0,
         transcript_replaced: false,
         usage: Vec::new(),
     };
@@ -142,6 +144,7 @@ fn incognito_on_detaches_persistence_and_off_persists_whole_transcript() {
         ],
         token_stats: Default::default(),
         persist_messages: vec![current],
+        checkpointed_messages: 0,
         transcript_replaced: false,
         usage: Vec::new(),
     };
@@ -366,6 +369,15 @@ fn transcript_replacement_persists_compacted_view_without_losing_history() {
     let sequence = db
         .append_turn_with_checkpoint(conversation, 0, &prior, &[], None)
         .unwrap();
+    let checkpointed = ChatMessage::new(ChatRole::Assistant, "checkpointed tool request");
+    db.append_turn_with_checkpoint(
+        conversation,
+        sequence,
+        std::slice::from_ref(&checkpointed),
+        &[],
+        None,
+    )
+    .unwrap();
 
     let mut session = RuntimeSession::new(ToolHandler::new(builtin_tools()));
     session.session_db = Some(db);
@@ -376,6 +388,7 @@ fn transcript_replacement_persists_compacted_view_without_losing_history() {
     let current = ChatMessage::new(ChatRole::Assistant, "current answer");
     let compacted = vec![
         ChatMessage::new(ChatRole::User, "compacted summary of prior turns"),
+        checkpointed,
         current.clone(),
     ];
     let (result, persistence_error) = session.apply_outcome(DriverOutcome {
@@ -387,6 +400,7 @@ fn transcript_replacement_persists_compacted_view_without_losing_history() {
         transcript: compacted,
         token_stats: Default::default(),
         persist_messages: vec![current],
+        checkpointed_messages: 1,
         transcript_replaced: true,
         usage: Vec::new(),
     });
@@ -397,7 +411,11 @@ fn transcript_replacement_persists_compacted_view_without_losing_history() {
     let effective = db.load_effective_transcript(conversation).unwrap();
     assert_eq!(
         contents(&session.transcript),
-        ["compacted summary of prior turns", "current answer"]
+        [
+            "compacted summary of prior turns",
+            "checkpointed tool request",
+            "current answer"
+        ]
     );
     assert_eq!(contents(&effective), contents(&session.transcript));
     assert_eq!(
@@ -408,6 +426,7 @@ fn transcript_replacement_persists_compacted_view_without_losing_history() {
             "follow-up",
             "second answer",
             "final question",
+            "checkpointed tool request",
             "current answer",
         ]
     );
@@ -423,6 +442,6 @@ fn transcript_replacement_persists_compacted_view_without_losing_history() {
     assert_eq!(checkpoint_count, 1);
     assert_eq!(
         db.load_messages(conversation).unwrap().len(),
-        prior.len() + 1
+        prior.len() + 2
     );
 }

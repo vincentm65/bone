@@ -444,6 +444,7 @@ impl RuntimeSession {
             transcript,
             token_stats,
             persist_messages,
+            checkpointed_messages,
             transcript_replaced,
             usage,
         } = outcome;
@@ -454,6 +455,14 @@ impl RuntimeSession {
         // re-adopt both so a future isolation change can't drift.
         self.tools.state_map = tools.state_map;
         self.tools.shared_state = tools.shared_state;
+
+        // Mid-turn checkpoints use a separate connection and allocate their own
+        // DB sequences. Advance this actor's hint by the rows it successfully
+        // wrote; append_turn still compares it with the live DB maximum, so a
+        // concurrent writer cannot make a stale context checkpoint authoritative.
+        self.session_seq = self
+            .session_seq
+            .saturating_add(i64::try_from(checkpointed_messages).unwrap_or(i64::MAX));
 
         // Persist the turn's new messages + usage in one atomic transaction (a
         // single WAL sync) instead of one commit per row.

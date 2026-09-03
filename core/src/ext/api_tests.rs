@@ -427,10 +427,10 @@ fn extension_settings_define_resolve_and_validate() {
               options = { "fast", "safe" } },
           },
         })
-        assert(bone.settings._get_extension == nil)
+        assert(bone.settings._get_extension("example.enabled") == true)
         local ok, err = pcall(bone.settings.get, "extensions.example.enabled")
         assert(not ok)
-        assert(tostring(err):find("use ctx.config.get", 1, true))
+        assert(tostring(err):find("use ctx.settings.get", 1, true))
         assert(bone.settings._set_extension == nil)
         assert(not pcall(bone.settings.register, {
           namespace = "example", title = "Duplicate",
@@ -440,6 +440,19 @@ fn extension_settings_define_resolve_and_validate() {
     )
     .exec()
     .unwrap();
+
+    let store = crate::config::store::ConfigStore::for_test();
+    let cfg = crate::ext::ctx::CtxConfig::new(
+        "/tmp".into(),
+        crate::ext::ctx::new_shared_state(),
+        store.clone(),
+        store.schema(),
+    );
+    let ctx = crate::ext::ctx::create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+    lua.load(r#"assert(ctx.settings.get("example.enabled") == true)"#)
+        .exec()
+        .unwrap();
 
     let pages = registry.read().unwrap().pages();
     assert_eq!(pages.len(), 1);

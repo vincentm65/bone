@@ -107,6 +107,22 @@ fn record_hook_usage(
     }
 }
 
+/// Durably commit every completed message accumulated since the previous tool
+/// boundary. On failure the batch stays in `persist_messages` so the normal
+/// end-of-turn transaction can retry it.
+fn checkpoint_tool_boundary(
+    session: &dyn SessionSink,
+    persist_messages: &mut Vec<ChatMessage>,
+) -> usize {
+    if !persist_messages.is_empty() && session.checkpoint_messages(persist_messages) {
+        let persisted = persist_messages.len();
+        persist_messages.clear();
+        persisted
+    } else {
+        0
+    }
+}
+
 fn apply_hook_operations(
     operations: Vec<crate::ext::ctx::ConversationOperation>,
     transcript: &mut Vec<ChatMessage>,
@@ -437,7 +453,7 @@ pub struct Driver {
     pub token_stats: TokenStats,
     pub system_prompt_override: Option<String>,
     /// Stable conversation id for this turn, independent of the session sink.
-    /// Frontends that persist out-of-band run with a [`NullSessionSink`] (whose
+    /// Incognito and test frontends may use a [`NullSessionSink`] (whose
     /// `conv_id` is `None`), so the id is threaded in directly — it drives the
     /// provider cache key (`prompt_cache_key`) and the `ctx` conversation id.
     pub conversation_id: Option<i64>,
@@ -462,14 +478,18 @@ pub struct DriverOutcome {
     /// Kept separately because a model-facing transcript replacement can shorten
     /// or reshape `transcript`, making a pre-turn transcript index invalid.
     pub persist_messages: Vec<ChatMessage>,
+    /// Number of this turn's messages already committed at tool boundaries.
+    /// RuntimeSession advances its sequence hint by this count before the final
+    /// transaction, preserving stale-checkpoint protection without duplicating
+    /// those rows.
+    pub checkpointed_messages: usize,
     /// True when `conversation.replace` changed the model-facing transcript and
     /// the resulting view needs a durable checkpoint.
     pub transcript_replaced: bool,
     /// Per-request usage captured during the turn. The Driver also reports these
-    /// to its `session` sink, but a frontend that runs with a `NullSessionSink`
-    /// (the TUI persists with its own continuous `session_seq`) reads them from
-    /// here to write usage events itself. Empty for headless runs that discard
-    /// the outcome.
+    /// to its `session` sink, while the interactive daemon's checkpoint sink
+    /// leaves usage for RuntimeSession's final transaction. Empty for headless
+    /// runs that discard the outcome.
     pub usage: Vec<UsageRecord>,
 }
 
@@ -548,6 +568,7 @@ impl Driver {
                     transcript,
                     token_stats,
                     persist_messages: Vec::new(),
+                    checkpointed_messages: 0,
                     transcript_replaced: false,
                     usage: Vec::new(),
                 }
@@ -631,6 +652,7 @@ impl Driver {
         let mut session_seq = 0i64;
         let mut usage_records: Vec<UsageRecord> = Vec::new();
         let mut persist_messages: Vec<ChatMessage> = Vec::new();
+        let mut checkpointed_messages = 0usize;
         let mut transcript_replaced = false;
         // Shared provider routing/cache state for normal requests and private
         // completions made by any lifecycle hook in this turn.
@@ -751,6 +773,7 @@ impl Driver {
                 transcript,
                 token_stats,
                 persist_messages,
+                checkpointed_messages,
                 transcript_replaced,
                 usage: usage_records,
             };
@@ -782,6 +805,7 @@ impl Driver {
                 transcript,
                 token_stats,
                 persist_messages,
+                checkpointed_messages,
                 transcript_replaced,
                 usage: usage_records,
             };
@@ -817,6 +841,7 @@ impl Driver {
                 transcript,
                 token_stats,
                 persist_messages,
+                checkpointed_messages,
                 transcript_replaced,
                 usage: usage_records,
             };
@@ -1314,6 +1339,10 @@ impl Driver {
             request_history.push(provider_assistant);
             transcript.push(assistant.clone());
             persist_messages.push(assistant);
+            // A tool may run for a long time. Make its completed request and
+            // every earlier message recoverable before execution starts.
+            checkpointed_messages +=
+                checkpoint_tool_boundary(session.as_ref(), &mut persist_messages);
 
             // Execute tool calls.
             for call in &tool_calls {
@@ -1487,6 +1516,10 @@ impl Driver {
                         persist_messages.push(relay);
                     }
                 }
+                // Checkpoint after each completed tool result. Parallel tool
+                // batches still get one small transaction per completed item.
+                checkpointed_messages +=
+                    checkpoint_tool_boundary(session.as_ref(), &mut persist_messages);
             }
 
             // Runaway brake. Build a signature from this round's *failing*
@@ -1608,6 +1641,7 @@ impl Driver {
             transcript,
             token_stats,
             persist_messages,
+            checkpointed_messages,
             transcript_replaced,
             usage: usage_records,
         }

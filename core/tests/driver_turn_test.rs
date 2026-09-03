@@ -96,6 +96,41 @@ impl LlmProvider for MockProvider {
     }
 }
 
+#[derive(Default)]
+struct RecordingCheckpointSink {
+    checkpoints: Mutex<Vec<Vec<ChatRole>>>,
+}
+
+impl SessionSink for RecordingCheckpointSink {
+    fn conv_id(&self) -> Option<i64> {
+        Some(1)
+    }
+
+    fn append_chat_message(&self, _message: &ChatMessage, _seq: i64) {}
+
+    fn record_usage(
+        &self,
+        _provider: &str,
+        _model: &str,
+        _prompt_tokens: u32,
+        _completion_tokens: u32,
+        _cached_tokens: Option<u32>,
+        _cost: Option<f64>,
+        _is_estimated: bool,
+    ) {
+    }
+
+    fn checkpoint_messages(&self, messages: &[ChatMessage]) -> bool {
+        self.checkpoints
+            .lock()
+            .unwrap()
+            .push(messages.iter().map(|message| message.role).collect());
+        true
+    }
+
+    fn end(&self) {}
+}
+
 fn driver_with(script: Vec<ChatEvent>, mode: ApprovalMode) -> (Driver, &'static str) {
     driver_with_gate(script, mode, Arc::new(AutoApprovalGate))
 }
@@ -536,6 +571,39 @@ async fn driver_executes_tool_call_then_finishes() {
             .iter()
             .any(|e| matches!(e, AgentRunEvent::ToolResult { name, .. } if name == "read_file")),
         "must emit a ToolResult event for read_file, got {events:?}"
+    );
+}
+
+#[tokio::test]
+async fn driver_checkpoints_before_and_after_each_tool() {
+    let (mut driver, prompt) = driver_with(
+        vec![ChatEvent::ToolCall(ToolCall {
+            id: "call_checkpoint".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({ "path": "/nonexistent/bone-checkpoint-test" }),
+        })],
+        ApprovalMode::Safe,
+    );
+    let sink = Arc::new(RecordingCheckpointSink::default());
+    driver.session = sink.clone();
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    outcome.result.expect("driver run with checkpointed tool");
+
+    assert_eq!(
+        *sink.checkpoints.lock().unwrap(),
+        vec![vec![ChatRole::Assistant], vec![ChatRole::Tool]],
+        "persist the tool request before execution and its result immediately after"
+    );
+    assert_eq!(outcome.checkpointed_messages, 2);
+    assert_eq!(
+        outcome
+            .persist_messages
+            .iter()
+            .map(|message| message.role)
+            .collect::<Vec<_>>(),
+        vec![ChatRole::Assistant],
+        "only the final response remains for the turn-end transaction"
     );
 }
 

@@ -48,6 +48,14 @@ pub trait SessionSink: Send + Sync {
         is_estimated: bool,
     );
 
+    /// Persist completed messages at a recoverable mid-turn boundary.
+    ///
+    /// Returns `true` only when every supplied message is durable. The default
+    /// keeps the messages in the turn outcome for its normal end-of-turn commit.
+    fn checkpoint_messages(&self, _messages: &[ChatMessage]) -> bool {
+        false
+    }
+
     /// Mark the current conversation as ended.
     fn end(&self);
 
@@ -59,6 +67,88 @@ pub trait SessionSink: Send + Sync {
     /// [`NullSessionSink`]) return `0`.
     fn persist_failures(&self) -> u64 {
         0
+    }
+}
+
+/// Mid-turn checkpoint sink for interactive conversations.
+///
+/// The daemon already persists the user prompt before starting a turn and owns
+/// the final atomic message/usage commit. This sink only writes completed
+/// assistant/tool messages at tool boundaries so a process crash cannot discard
+/// all completed work from a long-running turn.
+pub(crate) struct ToolCheckpointSessionSink {
+    db: Mutex<Option<SessionDb>>,
+    conv_id: i64,
+    failures: AtomicU64,
+}
+
+impl ToolCheckpointSessionSink {
+    pub(crate) fn open_for(conversation_id: i64) -> Self {
+        let db = match SessionDb::open(&db_path()) {
+            Ok(db) => Some(db),
+            Err(error) => {
+                crate::ext::ctx::runtime_warn(format!(
+                    "bone: warning: session db open failed (tool checkpoint sink): {error}"
+                ));
+                None
+            }
+        };
+        Self {
+            db: Mutex::new(db),
+            conv_id: conversation_id,
+            failures: AtomicU64::new(0),
+        }
+    }
+}
+
+impl SessionSink for ToolCheckpointSessionSink {
+    fn conv_id(&self) -> Option<i64> {
+        Some(self.conv_id)
+    }
+
+    fn append_chat_message(&self, _message: &ChatMessage, _seq: i64) {
+        // The Driver checkpoints the pending batch explicitly at tool boundaries.
+    }
+
+    fn record_usage(
+        &self,
+        _provider: &str,
+        _model: &str,
+        _prompt_tokens: u32,
+        _completion_tokens: u32,
+        _cached_tokens: Option<u32>,
+        _cost: Option<f64>,
+        _is_estimated: bool,
+    ) {
+        // RuntimeSession commits usage with the rest of the turn outcome.
+    }
+
+    fn checkpoint_messages(&self, messages: &[ChatMessage]) -> bool {
+        if messages.is_empty() {
+            return true;
+        }
+        let guard = self.db.lock().unwrap_or_else(|error| error.into_inner());
+        let Some(db) = guard.as_ref() else {
+            return false;
+        };
+        match db.append_turn_with_checkpoint(self.conv_id, 0, messages, &[], None) {
+            Ok(_) => true,
+            Err(error) => {
+                self.failures.fetch_add(1, Ordering::Relaxed);
+                crate::ext::ctx::runtime_warn(format!(
+                    "bone: warning: session db tool checkpoint failed: {error}"
+                ));
+                false
+            }
+        }
+    }
+
+    fn end(&self) {
+        // The authoritative RuntimeSession owns conversation lifecycle.
+    }
+
+    fn persist_failures(&self) -> u64 {
+        self.failures.load(Ordering::Relaxed)
     }
 }
 

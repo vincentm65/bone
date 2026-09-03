@@ -39,6 +39,19 @@ The global metadata includes `bone.version`, `bone.cwd`, `bone.config_dir`,
 `bone.agent_depth`, `bone.headless`, `bone.model`, and `bone.provider`. Logging
 is available through `bone.log.info`, `bone.log.warn`, and `bone.log.error`.
 
+## Submitting turns
+
+`bone.submit(text, options)` and `ctx.conversation.submit(text, options)` queue a
+prompt for the owning conversation's next idle turn. By default the frontend
+shows the submitted text as an automated user row. Set `display` to a string to
+show a shorter label, or to `false` to suppress that live row:
+
+```lua
+bone.submit("Continue internal work.", { display = false })
+```
+
+Presentation does not change the model-facing or persisted prompt text.
+
 ## Context
 
 Tool `execute(params, ctx)` and command `handler(args, ctx)` receive a context

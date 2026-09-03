@@ -422,7 +422,12 @@ function dispatchEvent(ev) {
       state.sawStarted = true;
       // A turn we didn't submit ourselves is a daemon-injected one — typically
       // background sub-agent results being handed to the model.
-      if (!state.sending) resolveBackgroundAgents();
+      if (!state.sending) {
+        resolveBackgroundAgents();
+        // Mirror the TUI display semantics: None -> show the raw task,
+        // Some("") -> suppress the user row, Some(label) -> show the label.
+        if (ev.display !== "") userMessage(ev.display ?? ev.task);
+      }
       markRunning(state.conversationId, true); setRunning(true); showThinking(); return;
     case "status": return onStatus(ev.message);
     case "notice": return systemLine(ev.message);

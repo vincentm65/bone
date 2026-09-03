@@ -426,9 +426,11 @@ impl App {
         display: Option<String>,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        self.messages
-            .push(Message::user(display.as_deref().unwrap_or(&task)));
-        self.flush_new_messages_to_scrollback(term)?;
+        if display.as_deref() != Some("") {
+            self.messages
+                .push(Message::user(display.as_deref().unwrap_or(&task)));
+            self.flush_new_messages_to_scrollback(term)?;
+        }
         self.begin_streaming();
         self.run_event_pump(request_id, term).await
     }

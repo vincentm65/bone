@@ -94,12 +94,14 @@ pub fn setup_api(
         .map_err(crate::util::errstr)?;
     api.set("emit", emit).map_err(crate::util::errstr)?;
 
-    // bone.submit(text) — queue a prompt for the frontend to submit, like
-    // typed input. Drained between turns (or queued behind the active turn).
+    // bone.submit(text, options?) — queue a prompt for the frontend to submit,
+    // like typed input. `display = false` hides the automated user row; a
+    // string replaces it. Drained between turns (or queued behind the active turn).
     let submit = lua
-        .create_function(|lua, text: String| {
+        .create_function(|lua, (text, options): (String, Option<Table>)| {
+            let display = crate::ext::inbox::parse_display(options)?;
             if !text.trim().is_empty() {
-                crate::ext::inbox::for_lua(lua).push(text);
+                crate::ext::inbox::for_lua(lua).push_with_display(text, display);
             }
             Ok(())
         })
@@ -209,6 +211,27 @@ pub fn setup_api(
         .set("_rollback_owner", rollback)
         .map_err(crate::util::errstr)?;
 
+    let extension_get_store = Arc::clone(&settings);
+    let extension_get_registry = Arc::clone(&registry);
+    let extension_get = lua
+        .create_function(move |lua, path: String| {
+            let store = extension_get_store
+                .lock()
+                .map_err(|e| mlua::Error::external(format!("settings lock poisoned: {e}")))?;
+            let value = extension_get_registry
+                .read()
+                .map_err(|e| {
+                    mlua::Error::external(format!("settings registry lock poisoned: {e}"))
+                })?
+                .resolve(&store, &path)
+                .map_err(mlua::Error::external)?;
+            lua.to_value(&value)
+        })
+        .map_err(crate::util::errstr)?;
+    settings_api
+        .set("_get_extension", extension_get)
+        .map_err(crate::util::errstr)?;
+
     let pages_registry = Arc::clone(&registry);
     let pages_store = Arc::clone(&settings);
     let pages = lua
@@ -260,7 +283,7 @@ pub fn setup_api(
         .create_function(move |lua, path: String| {
             if path == "extensions" || path.starts_with("extensions.") {
                 return Err(mlua::Error::external(
-                    "extension settings are request-scoped; use ctx.config.get",
+                    "extension settings are request-scoped; use ctx.settings.get",
                 ));
             }
             let value = get_store

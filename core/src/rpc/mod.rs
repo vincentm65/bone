@@ -1711,8 +1711,8 @@ impl DaemonCtx {
     fn next_background_prompt(&self) -> Option<(String, Option<String>)> {
         // `bone.submit` prompts first — steering should win over passively
         // arriving job results.
-        if let Some(text) = self.submit_inbox.pop() {
-            return Some((text, None));
+        if let Some(prompt) = self.submit_inbox.pop() {
+            return Some((prompt.text, prompt.display));
         }
         let scope = self.session.lock().unwrap().background_scope();
         let registry = crate::ext::jobs::registry();
@@ -2835,6 +2835,12 @@ impl DaemonCtx {
         ));
         let driver = {
             let s = self.session.lock().unwrap();
+            let session_sink: Arc<dyn crate::session_sink::SessionSink> = match s.conversation_id {
+                Some(conversation_id) => Arc::new(
+                    crate::session_sink::ToolCheckpointSessionSink::open_for(conversation_id),
+                ),
+                None => Arc::new(crate::session_sink::NullSessionSink),
+            };
             s.build_driver(
                 self.llm.clone(),
                 self.extensions.clone(),
@@ -2844,7 +2850,7 @@ impl DaemonCtx {
                 bg_tx,
                 self.key_registry.clone(),
                 cancel.clone(),
-                Arc::new(crate::session_sink::NullSessionSink),
+                session_sink,
             )
         };
         let mut conn = LocalConn::new(

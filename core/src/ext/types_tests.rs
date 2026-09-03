@@ -72,8 +72,8 @@ fn rebinding_runtime_inbox_preserves_queued_prompts() {
     let lua = reloaded.lua_handle();
     super::super::inbox::for_lua(&lua.lock().unwrap()).push("after reload".into());
     assert_eq!(
-        reloaded.submit_inbox().pop().as_deref(),
-        Some("after reload")
+        reloaded.submit_inbox().pop().map(|prompt| prompt.text),
+        Some("after reload".to_owned())
     );
 }
 
