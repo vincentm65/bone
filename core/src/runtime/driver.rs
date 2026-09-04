@@ -1593,10 +1593,21 @@ impl Driver {
             });
         }
         let hook_mode = approval_mode.get();
+        // A user cancel exits the turn loop as `Ok("")` (the partial turn is
+        // discarded), so without this check the turn_end hook cannot tell a
+        // cancel apart from a normal empty completion — autonomous loops
+        // (task_loop, goal) would keep re-submitting after Esc.
+        let turn_cancelled = is_cancelled();
         let _ = hook_runtime
             .run(DriverHookState {
                 name: "turn_end",
                 payload: match &result {
+                    Ok(content) if turn_cancelled => serde_json::json!({
+                        "ok": false,
+                        "cancelled": true,
+                        "error": "turn cancelled",
+                        "content": content,
+                    }),
                     Ok(content) => serde_json::json!({ "ok": true, "content": content }),
                     Err(message) => serde_json::json!({ "ok": false, "error": message }),
                 },

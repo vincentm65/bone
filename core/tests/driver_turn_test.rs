@@ -2789,6 +2789,117 @@ async fn driver_cancelled_before_turn_returns_empty() {
     );
 }
 
+/// A cancelled turn exits as `Ok("")`, so the turn_end hook must be told the
+/// difference — otherwise autonomous loops (task_loop, goal) keep re-submitting
+/// after Esc.
+#[tokio::test]
+async fn driver_cancelled_turn_reports_cancelled_to_turn_end_hook() {
+    let (config_dir, extensions) = private_completion_extensions(
+        "driver-turn-end-cancel",
+        r#"
+bone.on("turn_end", function(event, _ctx)
+    _G.turn_end = {
+        ok = event.ok,
+        cancelled = event.cancelled,
+        error = event.error,
+    }
+end)
+"#,
+    );
+    let lua = extensions.lua_handle();
+    let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let llm = Arc::new(StreamHoldingProvider);
+    // Esc mid-stream: the stream is open and the turn is in flight.
+    let cancel_later = Arc::clone(&cancel);
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancel_later.store(true, std::sync::atomic::Ordering::Relaxed);
+    });
+
+    let prompt = "hi";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let driver = Driver {
+        llm,
+        extensions,
+        tools: ToolHandler::new(builtin_tools()),
+        session: Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Safe),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: Some(Arc::clone(&cancel)),
+        history: build_chat_history(&transcript, "test system prompt"),
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        conversation_id: None,
+        background_scope: None,
+        config_store: common::config_store(),
+        turn_nudge: Arc::new(Mutex::new(None)),
+    };
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        driver.run_to_outcome(prompt),
+    )
+    .await
+    .expect("mid-stream cancel must end the turn promptly");
+    assert_eq!(outcome.result.unwrap().content, "");
+
+    let (ok, cancelled, error) = {
+        let lua = lua.lock().unwrap();
+        let captured: mlua::Table = lua
+            .globals()
+            .get::<Option<mlua::Table>>("turn_end")
+            .unwrap()
+            .expect("turn_end hook must run for a cancelled turn");
+        let ok: bool = captured.get("ok").unwrap();
+        let cancelled: Option<bool> = captured.get("cancelled").unwrap();
+        let error: Option<String> = captured.get("error").unwrap();
+        (ok, cancelled, error)
+    };
+    assert!(!ok, "cancelled turn must not report ok to turn_end");
+    assert_eq!(cancelled, Some(true), "cancelled flag must be set");
+    assert_eq!(error.as_deref(), Some("turn cancelled"));
+
+    std::fs::remove_dir_all(config_dir).ok();
+}
+
+/// A provider that emits one delta, then holds the stream open forever — the
+/// shape of a model still streaming when the user hits Esc. The stream never
+/// completes on its own; the driver's cancel check ends the turn and drops it.
+struct StreamHoldingProvider;
+
+#[async_trait]
+impl LlmProvider for StreamHoldingProvider {
+    fn id(&self) -> &str {
+        "stream-holding"
+    }
+    fn name(&self) -> &str {
+        "Stream Holding"
+    }
+    fn model(&self) -> &str {
+        "mock-stream"
+    }
+    fn set_model(&mut self, _model: String) {}
+    async fn chat_stream(
+        &self,
+        _messages: Vec<ChatMessage>,
+        _tools: Vec<ToolDefinition>,
+    ) -> Result<ResponseStream, LlmError> {
+        let stream = futures_util::stream::once(async {
+            Ok::<_, LlmError>(ChatEvent::TextDelta("partial".into()))
+        })
+        .chain(futures_util::stream::pending());
+        Ok(stream.boxed())
+    }
+}
+
 /// A provider that emits the *same* failing tool call on every request, with
 /// no `finish_reason`/usage — the exact shape of a local model stuck spewing a
 /// broken edit as fast as it can generate. Used to prove the runaway brake
