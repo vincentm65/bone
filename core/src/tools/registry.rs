@@ -112,10 +112,16 @@ impl ToolRegistry {
     }
 }
 
-/// The tool's declared required fields, in schema order (empty if none).
+/// The fields an argument object must supply to satisfy the tool's schema.
+///
+/// A non-empty top-level `required` is returned as-is. Otherwise, for a
+/// top-level `anyOf`/`oneOf`, the union of each variant's `required` (a valid
+/// object satisfies exactly one variant); this is empty when any variant itself
+/// declares no required fields, since an empty object can then be valid.
+/// Schemas with neither return empty.
 fn required_fields(tool: &dyn Tool) -> Vec<String> {
-    tool.definition()
-        .input_schema
+    let schema = tool.definition().input_schema;
+    let top: Vec<String> = schema
         .get("required")
         .and_then(|r| r.as_array())
         .map(|a| {
@@ -123,11 +129,45 @@ fn required_fields(tool: &dyn Tool) -> Vec<String> {
                 .filter_map(|v| v.as_str().map(String::from))
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if !top.is_empty() {
+        return top;
+    }
+    for combinator in ["anyOf", "oneOf"] {
+        let Some(variants) = schema.get(combinator).and_then(|v| v.as_array()) else {
+            continue;
+        };
+        let mut union: Vec<String> = Vec::new();
+        let mut all_variants_require_fields = !variants.is_empty();
+        for variant in variants {
+            let names: Vec<String> = variant
+                .get("required")
+                .and_then(|r| r.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            if names.is_empty() {
+                all_variants_require_fields = false;
+            } else {
+                union.extend(names);
+            }
+        }
+        if all_variants_require_fields {
+            let mut seen = HashSet::new();
+            union.retain(|name| seen.insert(name.clone()));
+            return union;
+        }
+        return Vec::new();
+    }
+    Vec::new()
 }
 
 /// Reject calls whose arguments cannot possibly satisfy the tool's schema:
-/// null, a non-object, or an empty object when required fields are declared.
+/// null, a non-object, or an empty object when required fields are declared
+/// (top-level, or in every `anyOf`/`oneOf` variant).
 /// Models in a degenerate loop emit these; a uniform, actionable error beats
 /// serde's deserialization message. Tools without required fields still accept
 /// empty/absent arguments.
