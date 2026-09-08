@@ -2481,10 +2481,12 @@ impl App {
     }
 
     /// Submit queued turns without overwriting text typed while a turn runs.
-    /// Draining pauses as soon as the input contains a draft; the idle inbox
-    /// tick resumes it after that draft is submitted or cleared.
+    /// Draining pauses as soon as the input contains a draft (or a queue item
+    /// is being edited) and resumes from the key handler once that draft is
+    /// submitted or cleared, or the edit finishes.
     async fn drain_queue_when_input_empty(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         while !self.queue.is_empty()
+            && self.queue_editing.is_none()
             && self.input.buffer.is_empty()
             && !self.input.has_pastes()
             && !self.input.has_images()
@@ -3099,10 +3101,12 @@ impl App {
             match code {
                 KeyCode::Enter => {
                     self.finish_queue_edit(true);
+                    self.drain_queue_when_input_empty(term).await?;
                     return self.redraw(term);
                 }
                 KeyCode::Esc => {
                     self.finish_queue_edit(false);
+                    self.drain_queue_when_input_empty(term).await?;
                     return self.redraw(term);
                 }
                 _ => {}
@@ -3306,6 +3310,10 @@ impl App {
                     return Ok(());
                 }
                 self.update_autocomplete();
+                // A key that empties the buffer (Esc, Ctrl+U, delete-to-empty)
+                // ends the draft that paused the queue, so resume draining.
+                // No-op when the queue is empty or input still has content.
+                self.drain_queue_when_input_empty(term).await?;
                 self.redraw(term)
             }
             InputAction::OpenEditor => self.open_editor(term).await,

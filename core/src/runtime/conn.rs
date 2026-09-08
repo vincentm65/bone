@@ -26,12 +26,13 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::AsyncRead;
 use tokio::sync::mpsc;
 
-use crate::rpc::codec;
 use crate::runtime::driver::{Driver, DriverOutcome};
 use crate::runtime::{ApprovalReplyRegistry, KeyReplyRegistry, RuntimeCommand, RuntimeEvent};
+
+pub use bone_client::SocketConn;
 
 /// Pumps the turn protocol at a transport edge: push commands, pull events.
 /// The same trait backs the runtime-side [`LocalConn`] (which drives the
@@ -208,76 +209,15 @@ impl RuntimeConn for LocalConn {
     }
 }
 
-/// Remote runtime connection: the same protocol over a socket to `bone serve`.
-///
-/// A background task owns the write half and drains `send`-queued commands, so
-/// `send` stays non-blocking and sync (matching [`LocalConn`]); `next_event`
-/// decodes the event stream off the read half. Unlike `LocalConn`, `None` from
-/// `next_event` means the *connection closed* (not turn-idle): a remote frontend
-/// detects turn end from a `Finished`/`Failed` event and keeps the connection
-/// open across turns, since the runtime lives in the daemon.
-pub struct SocketConn<R> {
-    reader: codec::MessageReader<R>,
-    cmd_tx: mpsc::UnboundedSender<RuntimeCommand>,
-    writer: tokio::task::JoinHandle<()>,
-}
-
-impl<R> SocketConn<R>
-where
-    R: AsyncRead + Unpin,
-{
-    /// Build a connection from the split halves of a duplex stream. The write
-    /// half is moved into a writer task; commands queued via `send` are framed
-    /// and flushed to it in order.
-    pub fn new<W>(read_half: R, write_half: W) -> Self
-    where
-        W: AsyncWrite + Unpin + Send + 'static,
-    {
-        let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<RuntimeCommand>();
-        let writer = tokio::spawn(async move {
-            let mut w = write_half;
-            while let Some(cmd) = cmd_rx.recv().await {
-                if codec::write_message(&mut w, &cmd).await.is_err() {
-                    break;
-                }
-            }
-        });
-        Self {
-            reader: codec::MessageReader::new(read_half),
-            cmd_tx,
-            writer,
-        }
-    }
-
-    /// A cloneable handle for queuing commands without borrowing the connection
-    /// — lets a client push prompts/replies from a `select!` arm while another
-    /// arm holds `&mut self` in [`next_event`](RuntimeConn::next_event).
-    pub fn command_sender(&self) -> mpsc::UnboundedSender<RuntimeCommand> {
-        self.cmd_tx.clone()
-    }
-}
-
-impl<R> Drop for SocketConn<R> {
-    fn drop(&mut self) {
-        self.writer.abort();
-    }
-}
-
 impl<R> RuntimeConn for SocketConn<R>
 where
     R: AsyncRead + Unpin,
 {
-    fn send(&mut self, cmd: RuntimeCommand) {
-        let _ = self.cmd_tx.send(cmd);
+    fn send(&mut self, command: RuntimeCommand) {
+        SocketConn::send(self, command);
     }
 
     async fn next_event(&mut self) -> Option<RuntimeEvent> {
-        loop {
-            match self.reader.read::<RuntimeEvent>().await {
-                Some(Ok(ev)) => return Some(ev),
-                Some(Err(err)) if err.is_recoverable() => continue,
-                Some(Err(_)) | None => return None,
-            }
-        }
+        SocketConn::next_event(self).await
     }
 }

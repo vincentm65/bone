@@ -23,6 +23,9 @@ TUI / headless runner / web bridge / remote client
 - `protocol` owns the serializable commands, events, configuration snapshots,
   session snapshots, tool types, and view types that cross a frontend boundary.
 - `tui` owns the native terminal client and its rendering/input code.
+- `client` owns the shared lightweight JSONL/socket transport used by thin remote
+  frontends; it does not contain daemon/session logic.
+- `native` owns the `bone-desktop` eframe UI and local event reduction.
 - `webui` is a Node/browser client and bridge for `bone serve`; it is not another
   runtime or core conversation-persistence layer. Its bridge may maintain durable
   web-only metadata, such as conversation titles and archived status.

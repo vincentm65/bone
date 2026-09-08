@@ -11,7 +11,10 @@ From the repository root:
 ```sh
 cargo fmt --all -- --check
 cargo test --workspace
-cargo build --release
+cargo build --release                    # default protocol/core/TUI members
+cargo build --release -p bone-desktop     # native app
+cargo test -p bone-client
+cargo build --release --workspace        # all Rust workspace packages
 ```
 
 Use focused checks while iterating, for example:

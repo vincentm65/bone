@@ -2884,7 +2884,7 @@ async fn managed_load_failure_is_correlated() {
 
 #[tokio::test]
 async fn socket_conn_skips_decode_errors_then_reads_next_event() {
-    use crate::runtime::{RuntimeConn, SocketConn};
+    use crate::runtime::SocketConn;
 
     let (read_side, mut peer) = tokio::io::duplex(4096);
     let mut conn = SocketConn::new(read_side, tokio::io::sink());
@@ -2906,7 +2906,7 @@ async fn socket_conn_skips_decode_errors_then_reads_next_event() {
 
 #[tokio::test]
 async fn socket_conn_terminates_on_oversized_frame() {
-    use crate::runtime::{RuntimeConn, SocketConn};
+    use crate::runtime::SocketConn;
 
     let input = std::io::Cursor::new(vec![b'x'; codec::MAX_LINE_BYTES + 1]);
     let mut conn = SocketConn::new(input, tokio::io::sink());
@@ -2919,7 +2919,7 @@ async fn socket_conn_terminates_on_oversized_frame() {
 
 #[tokio::test]
 async fn socket_conn_terminates_on_io_error() {
-    use crate::runtime::{RuntimeConn, SocketConn};
+    use crate::runtime::SocketConn;
     use std::pin::Pin;
     use std::task::{Context, Poll};
     use tokio::io::ReadBuf;

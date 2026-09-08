@@ -477,7 +477,7 @@ async fn run_web(_args: &[String]) -> std::io::Result<()> {
 /// approval mode already allows, otherwise deny). Drives the runtime purely
 /// through [`SocketConn`] — the same transport a remote TUI would use.
 async fn run_connect(args: &[String]) -> std::io::Result<()> {
-    use bone::runtime::{RuntimeCommand, RuntimeConn, RuntimeEvent, SocketConn};
+    use bone::runtime::{RuntimeCommand, RuntimeEvent, SocketConn};
     use bone::tools::CallOutcome;
     use tokio::io::AsyncBufReadExt;
 

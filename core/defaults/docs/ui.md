@@ -20,6 +20,15 @@ share its actor and event stream; different conversations can run concurrently.
 Loading a conversation changes only the requesting client. Approvals and
 cancellation are scoped to the attached conversation.
 
+- The first native desktop client is `bone-desktop` in `native/`. It is a thin
+  eframe/wgpu client of an already running loopback daemon; it does not autostart
+  or own daemon state. Its background Tokio transport reduces typed events into
+  a local transcript and never retries a prompt after uncertain delivery.
+- Native Stage 1 supports one attached conversation, streamed text, multiline
+  prompts, cancellation, and basic approve/deny controls. Tabs, settings,
+  attachments, mobile behavior, and richer Markdown/canvas rendering are later
+  stages.
+
 ## Command and event boundary
 
 `protocol` is the single source of truth for types crossing the boundary:
