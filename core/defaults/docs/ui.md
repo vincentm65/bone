@@ -21,13 +21,19 @@ Loading a conversation changes only the requesting client. Approvals and
 cancellation are scoped to the attached conversation.
 
 - The first native desktop client is `bone-desktop` in `native/`. It is a thin
-  eframe/wgpu client of an already running loopback daemon; it does not autostart
-  or own daemon state. Its background Tokio transport reduces typed events into
-  a local transcript and never retries a prompt after uncertain delivery.
-- Native Stage 1 supports one attached conversation, streamed text, multiline
-  prompts, cancellation, and basic approve/deny controls. Tabs, settings,
-  attachments, mobile behavior, and richer Markdown/canvas rendering are later
-  stages.
+  eframe/wgpu client of a loopback daemon; for a standard loopback address with
+  nothing listening it can autostart its own daemon, but custom ports and remote
+  addresses never do. Connections are restricted to loopback because the daemon
+  protocol has no encryption or authentication; remote use requires an SSH
+  tunnel to a forwarded `127.0.0.1` port. Its background Tokio transport reduces
+  typed events into a local transcript and never retries a prompt after
+  uncertain delivery.
+- Native supports multiple conversation tabs (new/close/select, split view),
+  streamed Markdown text with images, multiline prompts, cancellation,
+  approve/deny controls, provider setup and settings dialogs, a searchable
+  conversation sidebar, zoom, and keyboard shortcuts. Client-only display
+  preferences (zoom, pane widths, split) persist in the desktop state file,
+  not daemon configuration.
 
 ## Command and event boundary
 

@@ -1,5 +1,5 @@
 use super::{
-    SCHEMA_VERSION, SessionDb, StartupDbOperation, db_path_with_legacy,
+    FULL_SCHEMA, SCHEMA_VERSION, SessionDb, StartupDbOperation, db_path_with_legacy,
     migrate_legacy_db_if_needed, retry_startup_sqlite_with_deadline,
 };
 use crate::llm::{ChatMessage, ChatRole, ImageData};
@@ -266,12 +266,8 @@ fn max_message_seq_tracks_highest_seq() {
 
     db.append_chat_message(conv, &ChatMessage::new(ChatRole::User, "hi"), 1)
         .unwrap();
-    db.append_chat_message(
-        conv,
-        &ChatMessage::new(ChatRole::Assistant, "hello"),
-        2,
-    )
-    .unwrap();
+    db.append_chat_message(conv, &ChatMessage::new(ChatRole::Assistant, "hello"), 2)
+        .unwrap();
     assert_eq!(db.max_message_seq(conv).unwrap(), 2);
 
     // A different conversation is unaffected.
@@ -287,7 +283,8 @@ fn append_chat_message_repairs_stale_or_duplicate_sequence_hints() {
     let conv = db.create_conversation("openai", "gpt-4").unwrap();
 
     assert_eq!(
-        db.append_chat_message(conv, &ChatMessage::new(ChatRole::User, "one"), 1).unwrap(),
+        db.append_chat_message(conv, &ChatMessage::new(ChatRole::User, "one"), 1)
+            .unwrap(),
         1
     );
     assert_eq!(
@@ -315,7 +312,11 @@ fn append_turn_persists_system_messages() {
         "durable context",
     )];
 
-    assert_eq!(db.append_turn_with_checkpoint(conv, 0, &messages, &[], None).unwrap(), 1);
+    assert_eq!(
+        db.append_turn_with_checkpoint(conv, 0, &messages, &[], None)
+            .unwrap(),
+        1
+    );
     let stored = db.load_messages(conv).unwrap();
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].role, "system");
@@ -508,7 +509,8 @@ fn runtime_load_is_not_truncated_at_history_query_limit() {
     let messages: Vec<_> = (0..1001)
         .map(|i| crate::llm::ChatMessage::new(crate::llm::ChatRole::User, format!("message {i}")))
         .collect();
-    db.append_turn_with_checkpoint(conv, 0, &messages, &[], None).unwrap();
+    db.append_turn_with_checkpoint(conv, 0, &messages, &[], None)
+        .unwrap();
 
     assert_eq!(db.load_messages(conv).unwrap().len(), 1001);
 }
@@ -523,7 +525,8 @@ fn context_checkpoint_survives_reload_without_rewriting_full_history() {
         crate::llm::ChatMessage::new(crate::llm::ChatRole::User, "old question"),
         crate::llm::ChatMessage::new(crate::llm::ChatRole::Assistant, "old answer"),
     ];
-    db.append_turn_with_checkpoint(conv, 0, &original, &[], None).unwrap();
+    db.append_turn_with_checkpoint(conv, 0, &original, &[], None)
+        .unwrap();
 
     let answer = crate::llm::ChatMessage::new(crate::llm::ChatRole::Assistant, "new answer");
     let compacted = vec![
@@ -551,7 +554,8 @@ fn checkpoint_rejected_at_save_when_newer_messages_exist() {
     let db = SessionDb { conn };
     db.setup_schema().unwrap();
     let conv = db.create_conversation("openai", "gpt-4").unwrap();
-    db.append_chat_message(conv, &ChatMessage::new(ChatRole::User, "one"), 1).unwrap();
+    db.append_chat_message(conv, &ChatMessage::new(ChatRole::User, "one"), 1)
+        .unwrap();
     db.append_chat_message(conv, &ChatMessage::new(ChatRole::User, "concurrent"), 2)
         .unwrap();
 
@@ -609,13 +613,10 @@ fn all_checkpoints_malformed_falls_back_to_raw_messages() {
     let db = SessionDb { conn };
     db.setup_schema().unwrap();
     let conv = db.create_conversation("openai", "gpt-4").unwrap();
-    db.append_chat_message(conv, &ChatMessage::new(ChatRole::User, "first"), 1).unwrap();
-    db.append_chat_message(
-        conv,
-        &ChatMessage::new(ChatRole::Assistant, "second"),
-        2,
-    )
-    .unwrap();
+    db.append_chat_message(conv, &ChatMessage::new(ChatRole::User, "first"), 1)
+        .unwrap();
+    db.append_chat_message(conv, &ChatMessage::new(ChatRole::Assistant, "second"), 2)
+        .unwrap();
     db.append_chat_message(
         conv,
         &ChatMessage::tool(ToolResult {
@@ -919,7 +920,8 @@ fn opening_cleanup_prunes_only_ended_fully_empty_conversations() {
         )
         .unwrap();
     let kept = db.create_conversation("local", "local").unwrap();
-    db.append_chat_message(kept, &ChatMessage::new(ChatRole::User, "keep"), 1).unwrap();
+    db.append_chat_message(kept, &ChatMessage::new(ChatRole::User, "keep"), 1)
+        .unwrap();
     db.conn
         .execute(
             "UPDATE conversations SET ended_at = '2026-01-01T00:00:00Z' WHERE id = ?1",
@@ -950,7 +952,8 @@ fn ending_conversation_with_a_message_preserves_it() {
     db.setup_schema().unwrap();
 
     let id = db.create_conversation("local", "local").unwrap();
-    db.append_chat_message(id, &ChatMessage::new(ChatRole::User, "keep"), 1).unwrap();
+    db.append_chat_message(id, &ChatMessage::new(ChatRole::User, "keep"), 1)
+        .unwrap();
     db.end_conversation(id).unwrap();
 
     assert_eq!(db.latest_conversation().unwrap(), Some((id, true)));
@@ -970,13 +973,227 @@ fn latest_conversation_reports_id_and_emptiness() {
 
     // A conversation with a message resumes as non-empty.
     let c1 = db.create_conversation("local", "local").unwrap();
-    db.append_chat_message(c1, &ChatMessage::new(ChatRole::User, "hi"), 1).unwrap();
+    db.append_chat_message(c1, &ChatMessage::new(ChatRole::User, "hi"), 1)
+        .unwrap();
     assert_eq!(db.latest_conversation().unwrap(), Some((c1, true)));
 
     // A newer, message-less conversation is reported as empty (recyclable).
     let c2 = db.create_conversation("local", "local").unwrap();
     assert_eq!(db.latest_conversation().unwrap(), Some((c2, false)));
     assert!(c2 > c1, "latest is the highest id");
+}
+
+/// `recent_conversations` feeds the daemon's conversation picker: newest
+/// last-activity first, titles derived from the first user message, and a
+/// `"(new)"` fallback for conversations without one.
+#[test]
+fn recent_conversations_orders_by_last_activity_and_derives_titles() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+
+    // `first` has the lowest id but a later last message than `second`, so
+    // last-activity ordering (not id ordering) must win.
+    let first = db.create_conversation("openai", "gpt").unwrap();
+    let mut message = ChatMessage::new(ChatRole::User, "fix the flaky test\non main");
+    message.created_at = Some("2026-07-01T10:00:00Z".into());
+    db.append_chat_message(first, &message, 1).unwrap();
+    let mut message = ChatMessage::new(ChatRole::User, "and this is the later question");
+    message.created_at = Some("2026-07-03T08:00:00Z".into());
+    db.append_chat_message(first, &message, 2).unwrap();
+
+    let second = db.create_conversation("anthropic", "claude").unwrap();
+    let long = "please explain why the connection pool keeps exhausting itself under load";
+    let mut message = ChatMessage::new(ChatRole::User, long);
+    message.created_at = Some("2026-07-02T09:30:00Z".into());
+    db.append_chat_message(second, &message, 1).unwrap();
+
+    // Assistant-only: no user message to title it from.
+    let assistant_only = db.create_conversation("openai", "gpt").unwrap();
+    let mut message = ChatMessage::new(ChatRole::Assistant, "just an answer");
+    message.created_at = Some("2026-07-04T00:00:00Z".into());
+    db.append_chat_message(assistant_only, &message, 1).unwrap();
+
+    // Message-less: falls back to `started_at` for recency.
+    let empty = db.create_conversation("openai", "gpt").unwrap();
+    db.conn
+        .execute(
+            "UPDATE conversations SET started_at = '2026-07-05T00:00:00Z' WHERE id = ?1",
+            [empty],
+        )
+        .unwrap();
+
+    let all = db.recent_conversations(100).unwrap();
+    let ids: Vec<i64> = all.iter().map(|c| c.id).collect();
+    assert_eq!(ids, vec![empty, assistant_only, first, second]);
+
+    // A smaller limit keeps only the most recent rows.
+    let limited = db.recent_conversations(2).unwrap();
+    assert_eq!(
+        limited.iter().map(|c| c.id).collect::<Vec<_>>(),
+        vec![empty, assistant_only]
+    );
+
+    let by_id = |id: i64| all.iter().find(|c| c.id == id).unwrap();
+    let first = by_id(first);
+    assert_eq!(first.title, "fix the flaky test on main");
+    assert_eq!(first.updated_at, "2026-07-03T08:00:00Z");
+    assert_eq!(first.message_count, 2);
+    assert_eq!(
+        (first.provider.as_str(), first.model.as_str()),
+        ("openai", "gpt")
+    );
+
+    let second = by_id(second);
+    assert_eq!(
+        second.title,
+        format!("{}…", long.chars().take(60).collect::<String>()),
+        "long titles are cut to one line with an ellipsis"
+    );
+    assert_eq!(second.updated_at, "2026-07-02T09:30:00Z");
+    assert_eq!(
+        (second.provider.as_str(), second.model.as_str()),
+        ("anthropic", "claude")
+    );
+
+    let assistant_only = by_id(assistant_only);
+    assert_eq!(assistant_only.title, "(new)");
+    assert_eq!(assistant_only.message_count, 1);
+
+    let empty = by_id(empty);
+    assert_eq!(empty.title, "(new)");
+    assert_eq!(empty.message_count, 0);
+    assert_eq!(empty.updated_at, "2026-07-05T00:00:00Z");
+}
+
+#[test]
+fn recent_conversations_on_an_empty_database_returns_nothing() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    assert!(db.recent_conversations(10).unwrap().is_empty());
+}
+
+/// A user-supplied title overrides the derived one, a blank rename clears the
+/// override, and renaming an unknown id is an error.
+#[test]
+fn rename_conversation_sets_clears_and_rejects_unknown_ids() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+
+    let chat = db.create_conversation("openai", "gpt").unwrap();
+    let mut message = ChatMessage::new(ChatRole::User, "fix the flaky test");
+    message.created_at = Some("2026-07-01T10:00:00Z".into());
+    db.append_chat_message(chat, &message, 1).unwrap();
+    assert_eq!(
+        db.recent_conversations(10).unwrap()[0].title,
+        "fix the flaky test"
+    );
+
+    db.rename_conversation(chat, "  debugging notes  ").unwrap();
+    assert_eq!(
+        db.recent_conversations(10).unwrap()[0].title,
+        "debugging notes"
+    );
+    assert_eq!(
+        db.recent_conversations(10).unwrap()[0].full_title,
+        "debugging notes"
+    );
+
+    // A long stored title is truncated for display but `full_title` keeps the
+    // verbatim text so a rename can be re-seeded without losing characters.
+    let long_title = "please explain why the connection pool keeps exhausting itself under load";
+    db.rename_conversation(chat, long_title).unwrap();
+    let meta = db.recent_conversations(10).unwrap().remove(0);
+    assert!(meta.title.ends_with('…'));
+    assert_eq!(meta.full_title, long_title);
+
+    // A blank title clears the override and falls back to the derivation.
+    db.rename_conversation(chat, "   ").unwrap();
+    assert_eq!(
+        db.recent_conversations(10).unwrap()[0].title,
+        "fix the flaky test"
+    );
+
+    assert_eq!(
+        db.rename_conversation(999, "ghost").unwrap_err(),
+        rusqlite::Error::QueryReturnedNoRows
+    );
+}
+
+/// Deleting a conversation removes every row that references it and reports
+/// whether a conversation row was actually removed.
+#[test]
+fn delete_conversation_removes_every_referencing_row() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+
+    let chat = db.create_conversation("openai", "gpt").unwrap();
+    let mut message = ChatMessage::new(ChatRole::User, "hello world");
+    message.created_at = Some("2026-07-01T10:00:00Z".into());
+    db.append_chat_message(chat, &message, 1).unwrap();
+    db.record_usage(chat, "openai", "gpt", 10, 5, None, Some(0.1), false)
+        .unwrap();
+    db.save_context_checkpoint(chat, 1, &[message]).unwrap();
+    let keeper = db.create_conversation("anthropic", "claude").unwrap();
+
+    assert!(db.delete_conversation(chat).unwrap());
+    assert!(!db.conversation_exists(chat).unwrap());
+    assert!(db.conversation_exists(keeper).unwrap());
+    for sql in [
+        "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1",
+        "SELECT COUNT(*) FROM usage_events WHERE conversation_id = ?1",
+        "SELECT COUNT(*) FROM conversation_context_checkpoints WHERE conversation_id = ?1",
+    ] {
+        let count: i64 = db.conn.query_row(sql, [chat], |row| row.get(0)).unwrap();
+        assert_eq!(count, 0, "expected no leftover rows for {sql}");
+    }
+
+    assert!(!db.delete_conversation(chat).unwrap());
+}
+
+/// A v10 database (conversations without a title column) gains the column via
+/// the guarded ALTER when `setup_schema` runs.
+#[test]
+fn schema_migration_from_v10_adds_the_title_column() {
+    let conn = Connection::open_in_memory().unwrap();
+    let v10_schema = FULL_SCHEMA.replace(
+        "model      TEXT NOT NULL,\n        title      TEXT",
+        "model      TEXT NOT NULL",
+    );
+    conn.execute_batch(&v10_schema).unwrap();
+    let has_title: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'title'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        has_title, 0,
+        "fixture must model a v10 database without the column"
+    );
+    conn.pragma_update(None, "user_version", 10u32).unwrap();
+
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+
+    let version: u32 = db
+        .conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, SCHEMA_VERSION);
+    let has_title: i64 = db
+        .conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('conversations') WHERE name = 'title'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(has_title, 1);
 }
 
 /// `db_path` must track `bone_dir()` (XDG/`HOME`), not a hard-coded home path.

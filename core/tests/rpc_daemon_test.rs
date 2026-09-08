@@ -1201,11 +1201,19 @@ bone.command.register("ping", {
         settings,
         commands,
         tool_defs,
+        cwd,
         ..
     } = ev
     else {
         panic!("expected FrontendState");
     };
+    // The daemon's working directory (its runtime/extension workspace) must
+    // cross the wire so a VM-less frontend can show where the agent operates.
+    assert_eq!(
+        cwd.as_deref(),
+        Some(config_dir.to_string_lossy().as_ref()),
+        "frontend_state.cwd must be the daemon's boot workspace"
+    );
     // Builtin tools (e.g. read_file) must reach a VM-less frontend for context
     // estimation + tool-row rendering.
     assert!(

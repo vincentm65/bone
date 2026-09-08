@@ -8,9 +8,7 @@
 //! horizontal rules. Links are rendered and opened only when their URL is
 //! considered safe (see [`is_safe_url`]).
 
-use eframe::egui::{
-    self, Align, AsIdSalt, Color32, FontSelection, RichText, Stroke, Style, Ui, text::LayoutJob,
-};
+use eframe::egui::{self, Align, AsIdSalt, FontSelection, RichText, Style, Ui, text::LayoutJob};
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 /// One contiguous run of text sharing the same inline styling.
@@ -300,7 +298,7 @@ pub fn render_blocks(ui: &mut Ui, salt: impl AsIdSalt + Copy, blocks: &[Block]) 
                 ui.add_space(6.0);
                 let size = heading_pixel_size(*level);
                 let job = build_job(runs, &ui.style(), Some(size));
-                ui.add(egui::Label::new(job));
+                ui.add(egui::Label::new(job).selectable(true));
                 ui.add_space(2.0);
             }
             Block::Paragraph {
@@ -394,6 +392,11 @@ fn render_inline(ui: &mut Ui, runs: &[Run], marker: Option<&str>) {
     });
 }
 
+/// Cap on the code lines laid out per block. A single unbounded label for a
+/// huge block would make the row (and the frame) unbounded; the Copy button
+/// always copies the full text, so nothing is lost.
+const MAX_CODE_LINES: usize = 200;
+
 fn render_code_block(ui: &mut Ui, language: Option<&str>, text: &str) {
     ui.add_space(4.0);
     ui.horizontal(|ui| {
@@ -406,21 +409,56 @@ fn render_code_block(ui: &mut Ui, language: Option<&str>, text: &str) {
             }
         });
     });
-    let frame = egui::Frame::default()
-        .fill(Color32::from_gray(24))
-        .stroke(Stroke::new(1.0, Color32::from_gray(60)))
-        .inner_margin(8.0)
-        .corner_radius(4.0);
-    frame.show(ui, |ui| {
-        egui::ScrollArea::horizontal().show(ui, |ui| {
-            ui.add(
-                egui::Label::new(RichText::new(text.to_string()).monospace())
-                    .selectable(true)
-                    .wrap_mode(egui::TextWrapMode::Extend),
-            );
+    let (shown, remaining) = preformatted_prefix(text, MAX_CODE_LINES);
+    if !shown.is_empty() {
+        let visuals = ui.visuals();
+        let frame = egui::Frame::default()
+            .fill(visuals.code_bg_color)
+            .stroke(visuals.widgets.noninteractive.bg_stroke)
+            .inner_margin(8.0)
+            .corner_radius(4.0);
+        frame.show(ui, |ui| {
+            egui::ScrollArea::horizontal().show(ui, |ui| {
+                ui.add(
+                    egui::Label::new(RichText::new(shown).monospace())
+                        .selectable(true)
+                        .wrap_mode(egui::TextWrapMode::Extend),
+                );
+            });
         });
-    });
+    }
+    if remaining > 0 {
+        ui.label(
+            RichText::new(format!(
+                "… {remaining} more lines — Copy for the full block"
+            ))
+            .small()
+            .weak(),
+        );
+    }
     ui.add_space(4.0);
+}
+
+/// Split `text` into the first `max_lines` lines — newlines preserved exactly,
+/// no truncation within a line — plus the number of lines beyond the bound.
+/// Pure, so the bounded rendering can be tested without a UI.
+pub fn preformatted_prefix(text: &str, max_lines: usize) -> (String, usize) {
+    let mut shown = String::new();
+    let mut count = 0;
+    for line in text.split_inclusive('\n') {
+        if count >= max_lines {
+            break;
+        }
+        shown.push_str(line);
+        count += 1;
+    }
+    let total = text.lines().count();
+    // Drop the newline of a truncated last line so the label does not gain a
+    // phantom empty line; when the whole text fits, it stays byte-for-byte.
+    if count < total && shown.ends_with('\n') {
+        shown.pop();
+    }
+    (shown, total.saturating_sub(count))
 }
 
 #[cfg(test)]
@@ -519,5 +557,44 @@ mod tests {
             Block::Paragraph { depth, .. } => assert_eq!(*depth, 1),
             other => panic!("expected paragraph, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn preformatted_prefix_preserves_newlines_and_bounds() {
+        // Under the bound: the whole text survives byte-for-byte.
+        let text = "line one\n  line two\nline\tthree";
+        let (shown, remaining) = preformatted_prefix(text, 10);
+        assert_eq!(shown, text);
+        assert_eq!(remaining, 0);
+
+        // At the bound: exactly `max_lines` whole lines, newlines intact,
+        // and the remainder counted in full lines (no partial line shown).
+        let text = (0..50)
+            .map(|i| format!("log {i:02}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (shown, remaining) = preformatted_prefix(&text, 7);
+        assert_eq!(
+            shown,
+            (0..7)
+                .map(|i| format!("log {i:02}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert_eq!(remaining, 43);
+        assert_eq!(shown.lines().count(), 7);
+
+        // A trailing line without a final newline still counts as one line.
+        let (shown, remaining) = preformatted_prefix("a\nb", 2);
+        assert_eq!(shown, "a\nb");
+        assert_eq!(remaining, 0);
+        let (shown, remaining) = preformatted_prefix("a\nb", 1);
+        // The truncated last line keeps no trailing newline (no phantom row).
+        assert_eq!(shown, "a");
+        assert_eq!(remaining, 1);
+
+        // Zero bound and empty input stay well defined.
+        assert_eq!(preformatted_prefix("a\nb", 0), (String::new(), 2));
+        assert_eq!(preformatted_prefix("", 3), (String::new(), 0));
     }
 }

@@ -265,11 +265,13 @@ impl ProviderEntry {
         match self.stream_usage.as_str() {
             "true" => true,
             "false" => false,
-            _ => self.base_url.contains("api.openai.com")
-                || self.base_url.contains("api.deepseek.com")
-                || self.base_url.contains("cli-chat-proxy.grok.com")
-                || self.base_url.contains("127.0.0.1")
-                || self.base_url.contains("localhost"),
+            _ => {
+                self.base_url.contains("api.openai.com")
+                    || self.base_url.contains("api.deepseek.com")
+                    || self.base_url.contains("cli-chat-proxy.grok.com")
+                    || self.base_url.contains("127.0.0.1")
+                    || self.base_url.contains("localhost")
+            }
         }
     }
 

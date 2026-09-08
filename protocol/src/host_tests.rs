@@ -108,6 +108,18 @@ fn setup() -> SetupSnapshot {
     }
 }
 
+fn conversation() -> ConversationMeta {
+    ConversationMeta {
+        id: 7,
+        title: "fix the flaky test".into(),
+        full_title: "fix the flaky test".into(),
+        updated_at: "2026-08-10T14:01:00Z".into(),
+        message_count: 12,
+        provider: "openai".into(),
+        model: "gpt".into(),
+    }
+}
+
 fn roundtrip<T>(value: &T) -> T
 where
     T: Serialize + for<'de> Deserialize<'de>,
@@ -125,6 +137,20 @@ fn every_host_request_variant_round_trips() {
                 end: "2026-08-10".into(),
             }),
         },
+        HostRequest::Conversations { limit: 0 },
+        HostRequest::Conversations { limit: 50 },
+        HostRequest::ConversationRename {
+            id: 7,
+            title: "fix the flaky test".into(),
+            limit: 0,
+        },
+        HostRequest::ConversationRename {
+            id: 8,
+            title: "another title".into(),
+            limit: 25,
+        },
+        HostRequest::ConversationDelete { id: 7, limit: 0 },
+        HostRequest::ConversationDelete { id: 9, limit: 25 },
         HostRequest::Catalog { refresh: true },
         HostRequest::CatalogApply {
             expected_revision: "sha256:index".into(),
@@ -149,6 +175,8 @@ fn every_host_request_variant_round_trips() {
 fn every_host_response_variant_round_trips() {
     let variants = vec![
         HostResponse::Stats(Box::new(stats())),
+        HostResponse::Conversations(vec![conversation()]),
+        HostResponse::Conversations(Vec::new()),
         HostResponse::Catalog(catalog()),
         HostResponse::CatalogApplied(applied()),
         HostResponse::Setup(setup()),
@@ -175,6 +203,26 @@ fn request_defaults_preserve_snapshot_only_and_cached_catalog_behavior() {
 
     let catalog: HostRequest = serde_json::from_str(r#"{"catalog":{}}"#).unwrap();
     assert_eq!(catalog, HostRequest::Catalog { refresh: false });
+
+    let conversations: HostRequest = serde_json::from_str(r#"{"conversations":{}}"#).unwrap();
+    assert_eq!(conversations, HostRequest::Conversations { limit: 0 });
+
+    let rename: HostRequest =
+        serde_json::from_str(r#"{"conversation_rename":{"id":1,"title":"t"}}"#).unwrap();
+    assert_eq!(
+        rename,
+        HostRequest::ConversationRename {
+            id: 1,
+            title: "t".into(),
+            limit: 0,
+        }
+    );
+
+    let delete: HostRequest = serde_json::from_str(r#"{"conversation_delete":{"id":2}}"#).unwrap();
+    assert_eq!(
+        delete,
+        HostRequest::ConversationDelete { id: 2, limit: 0 }
+    );
 
     let item: CatalogItem =
         serde_json::from_str(r#"{"name":"weather.lua","kind":"tool"}"#).unwrap();

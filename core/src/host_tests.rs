@@ -1,4 +1,5 @@
 use super::*;
+use crate::llm::{ChatMessage, ChatRole};
 use std::fs;
 use std::path::Path;
 
@@ -75,6 +76,254 @@ fn stats_queries_the_service_database() {
         assert_eq!(snapshot.total.completion_tokens, 25);
         assert_eq!(snapshot.total.cached_tokens, 10);
         assert_eq!(snapshot.total.request_count, 1);
+    });
+}
+
+#[test]
+fn conversations_lists_recent_metadata_through_the_service() {
+    with_host_env(|bone, _, config| {
+        let path = bone.join("conversations.db");
+        let db = SessionDb::open(&path).unwrap();
+        let chat = db.create_conversation("openai", "gpt").unwrap();
+        let mut message = ChatMessage::new(ChatRole::User, "hello world");
+        message.created_at = Some("2026-07-03T08:00:00Z".into());
+        db.append_chat_message(chat, &message, 1).unwrap();
+        let empty = db.create_conversation("anthropic", "claude").unwrap();
+        db.conn_ref()
+            .execute(
+                "UPDATE conversations SET started_at = '2026-07-01T00:00:00Z' WHERE id = ?1",
+                [empty],
+            )
+            .unwrap();
+        drop(db);
+
+        let service = HostService::with_db_path(config, path);
+
+        // A zero limit selects the daemon default and returns both rows.
+        let HostResponse::Conversations(conversations) =
+            service.execute(HostRequest::Conversations { limit: 0 })
+        else {
+            panic!("expected conversations response");
+        };
+        assert_eq!(conversations.len(), 2);
+        assert_eq!(conversations[0].id, chat);
+        assert_eq!(conversations[0].title, "hello world");
+        assert_eq!(conversations[1].id, empty);
+        assert_eq!(conversations[1].title, "(new)");
+
+        // An explicit limit keeps only the most recent conversation.
+        let HostResponse::Conversations(limited) =
+            service.execute(HostRequest::Conversations { limit: 1 })
+        else {
+            panic!("expected conversations response");
+        };
+        assert_eq!(limited.iter().map(|c| c.id).collect::<Vec<_>>(), vec![chat]);
+    });
+}
+
+#[test]
+fn conversation_mutation_responses_honor_the_requested_limit() {
+    with_host_env(|bone, _, config| {
+        let path = bone.join("conversations.db");
+        let db = SessionDb::open(&path).unwrap();
+        let first = db.create_conversation("openai", "gpt").unwrap();
+        let mut message = ChatMessage::new(ChatRole::User, "first chat");
+        message.created_at = Some("2026-07-03T08:00:00Z".into());
+        db.append_chat_message(first, &message, 1).unwrap();
+        let second = db.create_conversation("anthropic", "claude").unwrap();
+        db.conn_ref()
+            .execute(
+                "UPDATE conversations SET started_at = '2026-07-01T00:00:00Z' WHERE id = ?1",
+                [second],
+            )
+            .unwrap();
+        drop(db);
+        let service = HostService::with_db_path(config, path);
+
+        // A rename refresh is capped to the requested limit.
+        let HostResponse::Conversations(renamed) =
+            service.execute(HostRequest::ConversationRename {
+                id: first,
+                title: "renamed".into(),
+                limit: 1,
+            })
+        else {
+            panic!("expected conversations response");
+        };
+        assert_eq!(renamed.iter().map(|c| c.id).collect::<Vec<_>>(), vec![first]);
+
+        // A delete refresh threads the same limit through the resolver.
+        let HostResponse::Conversations(deleted) =
+            service.execute(HostRequest::ConversationDelete {
+                id: second,
+                limit: 1,
+            })
+        else {
+            panic!("expected conversations response");
+        };
+        assert_eq!(deleted.iter().map(|c| c.id).collect::<Vec<_>>(), vec![first]);
+
+        // An oversized limit is capped rather than rejected.
+        let HostResponse::Conversations(capped) =
+            service.execute(HostRequest::Conversations { limit: u32::MAX })
+        else {
+            panic!("expected conversations response");
+        };
+        assert_eq!(capped.iter().map(|c| c.id).collect::<Vec<_>>(), vec![first]);
+    });
+}
+
+#[test]
+fn conversations_reports_unavailable_when_the_database_cannot_be_opened() {
+    with_host_env(|bone, _, config| {
+        let blocker = bone.join("blocker");
+        fs::write(&blocker, b"a file where the database directory would go").unwrap();
+        let service = HostService::with_db_path(config, blocker.join("conversations.db"));
+        let response = service.execute(HostRequest::Conversations { limit: 10 });
+        assert!(
+            matches!(
+                response,
+                HostResponse::Error {
+                    code: HostErrorCode::Unavailable,
+                    ..
+                }
+            ),
+            "expected unavailable error, got {response:?}"
+        );
+    });
+}
+
+#[test]
+fn conversation_rename_persists_the_title_and_refreshes_the_list() {
+    with_host_env(|bone, _, config| {
+        let path = bone.join("conversations.db");
+        let db = SessionDb::open(&path).unwrap();
+        let chat = db.create_conversation("openai", "gpt").unwrap();
+        let mut message = ChatMessage::new(ChatRole::User, "hello world");
+        message.created_at = Some("2026-07-03T08:00:00Z".into());
+        db.append_chat_message(chat, &message, 1).unwrap();
+        drop(db);
+        let service = HostService::with_db_path(config, path);
+
+        let HostResponse::Conversations(conversations) =
+            service.execute(HostRequest::ConversationRename {
+                id: chat,
+                title: "  debugging notes  ".into(),
+                limit: 0,
+            })
+        else {
+            panic!("expected conversations response");
+        };
+        assert_eq!(conversations.len(), 1);
+        assert_eq!(conversations[0].id, chat);
+        assert_eq!(conversations[0].title, "debugging notes");
+
+        // A blank rename is rejected: the desktop refuses empty titles
+        // client-side and the host backstops the same rule.
+        let blank = service.execute(HostRequest::ConversationRename {
+            id: chat,
+            title: "   ".into(),
+            limit: 0,
+        });
+        assert!(
+            matches!(
+                blank,
+                HostResponse::Error {
+                    code: HostErrorCode::Invalid,
+                    ..
+                }
+            ),
+            "expected invalid error for a blank rename, got {blank:?}"
+        );
+    });
+}
+
+#[test]
+fn conversation_rename_rejects_empty_titles_and_unknown_ids() {
+    with_host_env(|bone, _, config| {
+        let path = bone.join("conversations.db");
+        let db = SessionDb::open(&path).unwrap();
+        db.create_conversation("openai", "gpt").unwrap();
+        drop(db);
+        let service = HostService::with_db_path(config, path);
+
+        let empty = service.execute(HostRequest::ConversationRename {
+            id: 1,
+            title: "   ".into(),
+            limit: 0,
+        });
+        assert!(
+            matches!(
+                empty,
+                HostResponse::Error {
+                    code: HostErrorCode::Invalid,
+                    ..
+                }
+            ),
+            "expected invalid error, got {empty:?}"
+        );
+
+        let unknown = service.execute(HostRequest::ConversationRename {
+            id: 999,
+            title: "no such chat".into(),
+            limit: 0,
+        });
+        assert!(
+            matches!(
+                unknown,
+                HostResponse::Error {
+                    code: HostErrorCode::Invalid,
+                    ..
+                }
+            ),
+            "expected invalid error, got {unknown:?}"
+        );
+    });
+}
+
+#[test]
+fn conversation_delete_removes_the_row_and_refreshes_the_list() {
+    with_host_env(|bone, _, config| {
+        let path = bone.join("conversations.db");
+        let db = SessionDb::open(&path).unwrap();
+        let chat = db.create_conversation("openai", "gpt").unwrap();
+        let mut message = ChatMessage::new(ChatRole::User, "hello world");
+        message.created_at = Some("2026-07-03T08:00:00Z".into());
+        db.append_chat_message(chat, &message, 1).unwrap();
+        db.record_usage(chat, "openai", "gpt", 10, 5, None, Some(0.1), false)
+            .unwrap();
+        let other = db.create_conversation("anthropic", "claude").unwrap();
+        drop(db);
+        let service = HostService::with_db_path(config, path);
+
+        let HostResponse::Conversations(conversations) =
+            service.execute(HostRequest::ConversationDelete {
+                id: chat,
+                limit: 0,
+            })
+        else {
+            panic!("expected conversations response");
+        };
+        assert_eq!(
+            conversations.iter().map(|c| c.id).collect::<Vec<_>>(),
+            vec![other]
+        );
+
+        // Deleting the same id again is an invalid request.
+        let again = service.execute(HostRequest::ConversationDelete {
+            id: chat,
+            limit: 0,
+        });
+        assert!(
+            matches!(
+                again,
+                HostResponse::Error {
+                    code: HostErrorCode::Invalid,
+                    ..
+                }
+            ),
+            "expected invalid error, got {again:?}"
+        );
     });
 }
 

@@ -23,9 +23,9 @@ pub use event::{
 };
 pub use host::{
     CatalogAction, CatalogActionKind, CatalogApplyResult, CatalogItem, CatalogItemOutcome,
-    CatalogItemResult, CatalogSnapshot, DateRange, HOST_API_VERSION, HostErrorCode, HostRequest,
-    HostResponse, HourUsage, InitChoice, ProviderChoice, ProviderUsage, SetupApplyResult,
-    SetupSnapshot, UsageBucket, UsageStatsSnapshot, UsageSummary,
+    CatalogItemResult, CatalogSnapshot, ConversationMeta, DateRange, HOST_API_VERSION,
+    HostErrorCode, HostRequest, HostResponse, HourUsage, InitChoice, ProviderChoice, ProviderUsage,
+    SetupApplyResult, SetupSnapshot, UsageBucket, UsageStatsSnapshot, UsageSummary,
 };
 pub use input::KeyEvent;
 pub use message::{

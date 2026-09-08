@@ -646,3 +646,575 @@ Not verified in this slice (kept explicit):
 3. Accept proposed performance budgets as trial gates, subject to measurements.
 4. Arrange macOS/Windows test machines and an iPhone for the early mobile spike.
 5. Review Stage 2 text/performance results before committing to full parity.
+
+## Desktop UX Layer 1 — auto daemon lifecycle + auto-connect (2026-09-08)
+
+Out-of-band UX slice, requested ahead of the remaining Stage-5 work: the desktop
+app should need no address typing or Connect click for the local case.
+
+### Change summary (native/ only)
+- New `native/src/daemon.rs`: `DEFAULT_ADDRESS=127.0.0.1:7878`, retry budget
+  (`MAX_DAEMON_RETRIES=10`, 600 ms), address normalization (`ensure_port`), and
+  `spawn_daemon` (`serve --listen <addr>`, appended log, detached process group,
+  stdin nulled). Pure helpers are unit-tested.
+- `native/src/main.rs`: every tab starts `auto`; `begin()` connects all tabs on
+  open. On a refused loopback connect the coordinator spawns the sibling
+  `bone` binary (or `$BONE_DESKTOP_DAEMON`), shows an amber "… Starting daemon"
+  pill, retries, then flips to green "● Local daemon" once a tab connects.
+  Failures land in a red "Daemon offline" pill plus a `Daemon:` notice. The
+  address TextEdit + Connect/Disconnect moved out of the toolbar into a
+  "Server…" dialog. Restart layout restore is unchanged and still debounce-saved.
+- Lifecycle decision (guardrail "one authoritative daemon"): the app is a client,
+  not a supervisor — a spawned daemon deliberately **outlives** the app and
+  shares the app environment (BONE_DIR inherited), so it serves the same
+  conversations after the frontend closes. Daemon log:
+  `<state-dir>/logs/daemon.log` (state dir = parent of the layout file).
+
+### Status
+- Unit tests: `cargo test -p bone-desktop` = 39 passed, 0 failed, 1 ignored
+  (re-run on a clean tree 2026-09-08).
+- Release binaries rebuilt 2026-09-08 (now including the Layer-2 core/protocol)
+  for the consolidated smoke.
+- `cargo fmt -p bone-desktop` clean.
+- **Window smoke: NOT yet run by automation** — the display GPU (GPU1) has no
+  spare VRAM while the local llama-server holds ~20.6 GB, so a new wgpu device
+  fails with `Wgpu … Device(OutOfMemory)` (no lavapipe/Xvfb fallback installed).
+  Handed to the user to run later (runbook below).
+
+### Window smoke runbook (user-run; ~3 minutes)
+1. Ensure VRAM: display GPU needs headroom for one wgpu device (llama-server's
+   context currently blocks it). No other GPU window may be starting.
+2. State is pre-staged at `target/l1-smoke/` (survives until deleted):
+   - `layout.txt` — header v1, `address 15 127.0.0.1:17900`, `selected 0`,
+     `tab new` (fresh tab; free port, no daemon on it).
+   - `bone-home/providers.yaml` — `active: desktop-fixture` → mock provider
+     `http://127.0.0.1:17879` (mock_provider.py still running).
+   - `ocr.py snapshot <tag>` → grim DP-4 + negate + tesseract into
+     `target/l1-smoke/evidence/`.
+3. Launch from the repo root in a Wayland session:
+   ```
+   env BONE_DIR=$PWD/target/l1-smoke/bone-home \
+       BONE_DESKTOP_STATE=$PWD/target/l1-smoke/layout.txt \
+       ./target/release/bone-desktop
+   ```
+4. Expect (no typing, no Connect click):
+   - Pill goes red/amber briefly, then **green "● Local daemon"**.
+   - A sibling daemon appears: `ss -ltn | grep 17900` →
+     `bone serve --listen 127.0.0.1:17900` (spawned from `target/release/bone`).
+   - `target/l1-smoke/logs/daemon.log` exists (state-dir logs).
+   - After ~1 s the fresh tab auto-connects and pins a conversation; `layout.txt`
+     now says `tab load 1` (debounce-saved; wait ~1 s before quitting).
+   - OCR snapshot for evidence (pill text, tab header).
+  4b. Picker (Layer 2, consolidated into this run):
+     - While the pill is still starting, the sidebar's **Recent** section shows
+       "Waiting for the daemon…".
+     - Once the tab connects it shows "No conversations yet." (the staged
+       BONE_DIR is empty — the 2026-09-07 wipe removed the old fixture
+       conversations).
+     - Type a short message in the composer and send it (Ctrl+Enter). The mock
+       provider at 127.0.0.1:17879 must still be running for a reply.
+     - Click the **↻** button next to "Recent": the new conversation now appears,
+       titled with your prompt, with a weak "N messages · <timestamp>" hint.
+     - Click the entry: the current tab (holding that conversation) is selected —
+       no new tab is created, and the entry gains a "✓".
+     - Click "+ New conversation" (a second, empty tab opens), then **↻** again:
+       the list keeps the first entry most-recent-first; the empty tab's
+       conversation shows as "(new)" once it has an id.
+     - OCR snapshot for evidence (Recent list, titles, hints).
+5. Quit the app (close window or SIGTERM). Verify the spawned daemon **keeps
+   listening** on 17900 (outlives the app by design).
+6. Kill that daemon, relaunch the app with the same env — the layout now restores
+   `tab load 1` at `127.0.0.1:17900`, the refused connect re-spawns the daemon,
+   and the pill goes green again (restart-restore + spawn-on-refused with the
+   real binary).
+7. Cleanup: quit the app, kill the spawned 17900 daemon. Optionally
+   `rm -rf target/l1-smoke`. Rebuild state dirs are disposable.
+
+Note: the previous fixture store under `target/desktop-validation` (providers
+copy, conversations incl. conv 7, scratch OCR tooling, evidence) was removed by
+an intentional `git clean`-style wipe on 2026-09-07 ~21:37 while the fixture
+daemons were running; only tracked source + `.bone-rust` survive. Recreate a
+BONE_DIR from `.bone-rust/providers.yaml` (redacting keys) when fixture
+conversations are needed again.
+
+## Desktop UX Layer 2 — recent-conversation picker (2026-09-08)
+
+Goal: kill the numeric "Load <id>" field in the desktop app. Users pick a recent
+conversation from a sidebar by title; the numeric id stays internal (layout
+`tab load <id>` is unchanged).
+
+### Design decision: host-scoped request, NOT a per-conversation command
+`ListConversations` was planned as a `RuntimeCommand` in `protocol/event.rs`. On
+grounding in the code, the cleaner home is the **host control plane**:
+- The `HostRequest`/`HostResponse` pair is already the correlated, daemon-global
+  request/response channel, and its documented authority is "its usage database"
+  — the *same* `conversations.db` we list. `HostRequest::Stats` already opens it.
+- The daemon loop already routes `HostRequest` → `HostService::execute` →
+  publishes `RuntimeEvent::HostResponse { request_id, response }` (rpc/mod.rs
+  ~2067/2101). So a host request needs **no** serve-path, daemon-loop, codec, or
+  tui changes.
+- The native connection layer is generic (`Command::Send(RuntimeCommand)` /
+  `Event::Runtime(RuntimeEvent)`), so sending a host request and receiving the
+  response needs no connection-layer change.
+
+Net: this touches only `protocol/` (signed off) + `core/src/host.rs` +
+`core/src/session_db.rs` (signed off for Layer 2) + `native/src/main.rs`.
+
+### Wire shape (protocol/src/host.rs)
+- `ConversationMeta { id: i64, title: String, updated_at: String,
+  message_count: i64, provider: String, model: String }`.
+- `HostRequest::Conversations { limit: u32 }` — `limit=0` selects the daemon
+  default.
+- `HostResponse::Conversations(Vec<ConversationMeta>)`.
+
+### Metadata source (core/src/session_db.rs)
+The `conversations` table has only `id, started_at, ended_at, provider, model`
+(no title, no updated_at). To avoid a schema migration:
+- `title` = first non-empty `role='user'` message `content` (ordered by `seq`),
+  truncated/one-lined in Rust; fall back to "(new)" when a conversation has no
+  user text.
+- `updated_at` = `MAX(messages.created_at)` for the conversation, else its
+  `started_at` (both are `utc_now()` ISO strings, so they string-sort).
+- `message_count` = `COUNT(messages)`.
+- Ordering: most-recent-first (`updated_at DESC, id DESC`), `LIMIT ?`.
+New method `SessionDb::recent_conversations(limit) -> rusqlite::Result<Vec<ConversationMeta>>`;
+the query lives here (protocol stays free of core types, mirroring how
+`stats()` re-exports protocol types).
+
+### Native picker (native/src/main.rs)
+- The app owns one in-flight request: `conversations_request: Option<(tab_id,
+  request_id)>`, `conversations: Vec<ConversationMeta>`, `conversations_loaded`.
+- `poll_conversations()` runs at the end of every `drain_all`: once any non-demo
+  tab is connected it sends
+  `RuntimeCommand::HostRequest { request_id, request: HostRequest::Conversations { limit: 0 } }`
+  through that tab (request id from the tab's `state.next_id()`). No busy loop:
+  the connect event's repaint re-runs the poll. If the sending tab loses its
+  socket before the response, the request is abandoned and re-issued on the next
+  connected tab. Demo mode never issues the request.
+- `Tab::handle_event` captures each `RuntimeEvent::HostResponse` in
+  `tab.host_response` (the tab reducer ignores it via its catch-all);
+  `drain_all` then applies the response only when (tab id, request id) matches
+  the pending one: `Conversations(vec)` fills the list, `Error` sets a sidebar
+  notice, other host responses are dropped.
+- Sidebar: the numeric "Load <id>" field is gone. Under "Recent" (with a "↻"
+  refresh button) the app shows "Waiting for the daemon…", "Loading…", "No
+  conversations yet.", or the recent-first list — title (with a "✓" when a tab
+  already holds it) plus a weak `message_count · updated_at` hint. Clicking an
+  entry calls `open_conversation(id)`: selects the existing attached tab if
+  there is one, else opens a fresh `Intent::Load(id)` tab and connects it. The
+  numeric id stays internal (layout `tab load <id>` is unchanged).
+
+### Status
+- **Implemented** (2026-09-08). Host dispatch, wire shape, metadata query, and
+  native picker as described above.
+- Tests (re-run on this tree 2026-09-08):
+  - `protocol/src/host_tests.rs` — `Conversations` request/response round-trips,
+    `{"conversations":{}}` → limit 0 default.
+  - `core/src/session_db_tests.rs` — `recent_conversations_orders_by_last_activity_and_derives_titles`
+    (updated_at ordering beats id order, first-user titles, 60-char ellipsis,
+    "(new)" fallback, message counts, provider/model, limit) + empty-DB case.
+  - `core/src/host_tests.rs` — service-level list (default + limit) and
+    `HostResponse::Error { code: Unavailable }` when the DB cannot open.
+  - `native` — 4 new tests: request issued once on the first connected tab,
+    correlated response populates the list and `open_conversation` reuses tabs,
+    request abandoned when the sending tab disconnects, no-op in demo mode.
+  - Totals: `cargo test -p bone-protocol -p bone-core -p bone-desktop` all green;
+    `cargo test -p bone-desktop` = 43 passed, 0 failed, 1 ignored.
+- `cargo fmt` clean for every touched file (the five pre-existing fmt drifts in
+  `core/src/config/*`, `core/src/runtime/driver.rs`, `core/tests/session_sink_test.rs`,
+  `protocol/src/config.rs` were left untouched on purpose).
+- Release binaries rebuilt with the new core/protocol
+  (`cargo build --release -p bone-desktop -p bone`) for the consolidated smoke.
+- **Consolidated window smoke: run by the user (2026-09-08) — passed.** The
+  Layer-1 + Layer-2 runbook completed on a display machine, including the
+  picker verification step (4b).
+
+## Stage 5, slice 1 — model/provider selection (2026-09-08)
+
+First Stage-5 vertical: let the desktop pick the daemon's active provider and
+edit the active provider's model. No protocol or core changes — the existing
+runtime surface is sufficient (`GetConfig` → broadcast `ConfigSnapshot`;
+`SetActiveProvider` / `UpsertProvider` with revision checks → broadcast
+`ConfigChanged` / `ConfigMutationRejected`), so this slice is `native/` only.
+
+### Data flow (native/src/main.rs)
+- `Tab` buffers daemon config traffic the same way it buffers host responses:
+  `config_snapshots: Vec<(ConfigSnapshot, bool /*restart_required*/)>` and
+  `config_rejections: Vec<String>`, filled in `handle_event` before the
+  (ignoring) reducer, drained app-level in `drain_all`.
+- `DesktopApp` holds `config: Option<ConfigSnapshot>` (latest authoritative
+  snapshot — any connected tab can refresh it, since `GetConfig` responses are
+  broadcast, not request-correlated) and `config_request: Option<tab_id>` for
+  the in-flight fetch. `poll_config()` (run from `drain_all`, no timers)
+  issues `GetConfig` once any tab is connected and abandons the pending fetch
+  if its tab loses the socket.
+- A `ConfigMutationRejected` clears `config` (forcing a refetch of the real
+  revision) and shows the daemon's error in the dialog.
+
+### UI
+- Toolbar pill `⚙ {provider label} · {model}` (green) after the Server…
+  button; amber `Model …` while no snapshot has arrived, red
+  `⚙ No active provider` when the snapshot has no matching active provider.
+  Clicking opens the "Model / Provider" dialog (same anchor/style as Server…).
+- Dialog: one row per provider (`●` active / `○` others, hover shows whether
+  the API key is configured). Clicking an inactive row sends
+  `SetActiveProvider { id, expected_revision: snapshot.revision }` — the
+  daemon-wide persistent switch, TUI `/provider` equivalent. Below, an
+  editable Model field for the active provider (resynced when the active
+  provider changes) with a "Save model" button that sends `UpsertProvider`
+  (all other `ProviderConfig` fields copied through; omitted `ProviderUpdate`
+  options preserve their values). Footer shows the config revision and a "↻"
+  refetch. Demo mode hides the pill and the dialog.
+- The connection worker already repaints on every event, so snapshots/rejections
+  update the pill on arrival with no extra wakeups.
+
+### Status
+- **Implemented** (2026-09-08), code + tests.
+- Tests: 6 new in `native/src/main.rs` — fetch issued once on the first
+  connected tab (no double-send), broadcast snapshot populates the picker and
+  resolves the fetch, rejection clears the snapshot + shows the notice + the
+  drain's poll refetches, fetch abandoned when the sending tab disconnects,
+  switch/save refuse without a snapshot or a connected tab (unchanged model is
+  a no-op), no-op in demo mode.
+- Validation (2026-09-08): `cargo test -p bone-desktop` = 51 passed, 0 failed,
+  1 ignored; `cargo fmt -p bone-desktop` clean; release
+  `bone-desktop` + `bone` rebuilt (`cargo build --release`).
+- **Window smoke: pending** (user-owned, display machine). Suggested check:
+  toolbar shows `⚙ …` after connect; open the pill → providers list; click
+  another provider → row flips to `●`, pill updates; edit the model + Save
+  model → "Saving model…" clears once the new snapshot lands; kill another
+  client's config edit race → rejection message + refetch.
+
+## Stage 5, slice 2 — attachments (images)
+
+Composer accepts image attachments, sent with the prompt as `SubmitPrompt`
+`images: Vec<ImageData>`.
+
+- **Data flow:** 📎 picker or drag-drop → `Attachment { name, media_type,
+  data_b64, byte_size }` → on send, `to_image_data()` maps each attachment to
+  `bone_protocol::ImageData { name, media_type, data_b64, width: None,
+  height: None, sha256: None }` → cleared with the composer on successful
+  send. `Attachment::from_file` rejects non-image extensions and files over
+  15 MB (`MAX_ATTACHMENT_BYTES`), surfacing the reason in `state.last_error`.
+- **Supported extensions:** png, jpeg/jpg, webp, gif (case-insensitive).
+- **UI:** chips row above the editor — one `🖼 name (KB)` chip per attachment
+  with a removable `✕`; the send-enable rule is now *connected && ready &&
+  !busy && (non-empty text OR non-empty attachments)*, so an image with empty
+  composer text is sendable. Editor hint updated to
+  `Message (Ctrl+Enter to send) · 📎 or drop an image`. Drag-drop is handled
+  once in `ui` via `ui.ctx().input(|i| i.raw.dropped_files.clone())` routed to
+  the selected tab's `apply_drops` (per handle: `path()`/`bytes()` →
+  `from_file`; failures recorded per file, valid files still attach).
+- **Demo mode:** 📎 hidden and drops ignored.
+- **New deps:** `base64 = "0.22"` (native only); `rfd` (slice 1) covers the
+  file picker via `add_filter("Images", …)`.
+
+### Status
+- **Implemented** (2026-09-08), code + tests.
+- Tests: 4 new in `native/src/main.rs` — base64 encode + extension→media_type
+  mapping (round-trip decode), unknown extension / oversize rejection
+  (exactly-at-cap accepted), `can_send` with attachments and empty text,
+  `send_prompt` clears composer **and** attachments and sets busy.
+- Validation (2026-09-08): `cargo test -p bone-desktop` = 55 passed, 0 failed,
+  1 ignored; `cargo fmt -p bone-desktop` clean.
+- **Window smoke: pending** (user-owned, display machine). Suggested checks:
+  attach via 📎 picker → chip appears, send enabled with empty text; drag an
+  image in from the file manager → chip appears; drop a non-image (e.g.
+  `.txt`) → error notice, no chip; send an image to the daemon → composer and
+  chip clear, busy indicator engages; oversize (>15 MB) image rejected with
+  the cap message.
+
+## Stage 5, slices 3–5 — conversation rename/delete, shortcuts, split view
+
+The remaining three desktop-workflow slices of the current session, in order:
+rename/delete of durable conversations from the sidebar, a Ctrl-shortcut set
+for tab/split navigation, and a resizable split view showing a second
+conversation beside the selected one.
+
+### Slice 3 — conversation rename and delete
+
+Protocol (protocol/src/host.rs, host control plane — no serve-path changes):
+- `HostRequest::ConversationRename { id: i64, title: String }` and
+  `HostRequest::ConversationDelete { id: i64 }`. Both respond with the
+  refreshed `HostResponse::Conversations` list, so the sidebar re-renders from
+  the daemon's authoritative data after any mutation.
+
+Core (session_db.rs + host.rs):
+- `SCHEMA_VERSION` 10 → 11: `conversations` gains a nullable `title` override
+  column. `SessionDb::rename_conversation(id, title)` stores it; a blank title
+  clears the override (DB level). `SessionDb::delete_conversation(id)` removes
+  the conversation and all of its rows. `recent_conversations` now uses
+  `COALESCE(conversations.title, <derived first-user title>)` so a stored
+  override wins over the derived title.
+- Host service: a blank/whitespace `ConversationRename` title is refused with
+  `HostErrorCode::Invalid` ("title must not be empty"); unknown ids are
+  `Invalid`. The daemon is the authority; the native client also refuses blank
+  titles locally to keep the field open for editing.
+
+Native (main.rs):
+- State: `rename_target: Option<i64>`, `rename_field: String`,
+  `delete_target: Option<(i64, String)>`, and `mutation_target: Option<i64>`
+  (which conversation id the in-flight host request mutates, for error context).
+- `request_conversation_mutation(request)`: sends through the first connected
+  non-demo tab (`state.next_id()`), reusing the existing `conversations_request`
+  correlation; refuses when disconnected or another request is in flight.
+- `start_rename` seeds the field from the list and cancels any armed delete;
+  `commit_rename` trims — blank → local notice "A conversation title cannot be
+  blank." (field stays open); a refused send keeps the field open with "Cannot
+  rename right now: no daemon connection or a conversation update is already in
+  flight.". `start_delete` is refused while any non-demo tab has
+  `conversation_id == Some(id)` → "Close the tab for that conversation before
+  deleting it."; `commit_delete` takes the target first, then sends (refused
+  send → notice).
+- `apply_host_response`: a `Conversations` response clears `mutation_target`; an
+  `Error` says "Conversation update failed: {message}" when `mutation_target`
+  was set, else the existing "Conversation list unavailable: {message}".
+  `poll_conversations` abandonment also clears `mutation_target`.
+- Sidebar UI: each row is three-way. Renaming: inline `TextEdit` (seeded) +
+  ✓/✕ buttons, with Enter/Escape firing on the frame the field loses focus
+  (`lost_focus() && key_pressed`). Delete-arming: inline red
+  `Delete "…"? Yes / No`. Otherwise: the usual selectable row plus ✎ (rename)
+  and 🗑 (delete) buttons. Row actions are collected into locals during the
+  loop and applied after it.
+
+### Slice 4 — keyboard shortcuts
+
+- `apply_shortcut(key, ctx) -> bool` handles one key; `handle_shortcuts(ui)`
+  runs at the top of `ui()` (right after `pump_daemon`, before panels) so it
+  fires even while a widget has focus. It is gated on the Ctrl modifier and
+  walks `const KEYS: [egui::Key; 14]`, returning after the first handled key.
+- Shortcuts: Ctrl+T (new tab + connect), Ctrl+W (close selected tab),
+  Ctrl+PageUp / Ctrl+PageDown (previous/next tab with wrap), Ctrl+1…Ctrl+9
+  (select tab when in range), Ctrl+\\ (toggle split).
+- egui 0.36.1 note: the digit variants of `egui::Key` are `Num1`…`Num9`
+  (there is no `Digit*` in 0.36), and panels are the unified `egui::Panel`
+  (`.top()/.left()/.right()/.bottom()`), not the old `SidePanel`/`TopBottomPanel`
+  types.
+
+### Slice 5 — split view
+
+- State: `split: bool`, `split_tab: usize`. Not persisted to the layout file
+  (a split layout is a per-session view, like the Stage-3 omissions).
+- Toolbar: a `⧉ Split` selectable button (`egui::Button::selectable`), enabled
+  only with ≥2 tabs, hover "Show a second conversation beside this one
+  (Ctrl+\\)"; toggling re-runs `reconcile_split()`.
+- `reconcile_split()`: forces `split = false` below two tabs; clamps
+  `selected` and `split_tab`; shifts `split_tab` off `selected` so one
+  transcript cache never renders in two panes at once.
+- `split_header(ui)`: a selectable strip of tabs for the right pane, skipping
+  the left-selected tab.
+- Render: while split, a right `egui::Panel::right("split-pane")` (resizable,
+  default 380 px, min 220 px) is reserved and rendered first — so the left
+  transcript measures its area against the remaining central space — showing
+  `split_header` + `tabs[split_tab].body`; then the left pane renders
+  `tabs[selected].body`. Either pane changing triggers `note_layout_change`.
+
+### Status
+
+- **Implemented** (2026-09-08), code + tests.
+- Tests: 8 new in `native/src/main.rs` — rename commit sends and the response
+  updates the list, blank title refused locally, rename/delete refused without
+  a connection, rename error response reports the update failure, delete
+  refused while a tab has the conversation open, delete commit updates the
+  list, shortcuts (select tabs / new / close / split toggle), and
+  `reconcile_split` staying valid across selection changes and tab closes.
+  Protocol/core additions are covered by the existing
+  `host_tests.rs`/`session_db_tests.rs` suites.
+- Validation (2026-09-08): `cargo test -p bone-protocol -p bone-core` all
+  green (core lib 460 passed / 0 failed); `cargo test -p bone-desktop` =
+  63 passed, 0 failed, 1 ignored; `cargo fmt -p bone-desktop -p bone-core
+  -p bone-protocol` clean (the five pre-existing drift files untouched);
+  clippy shows no warnings in the new code (all reported lints pre-date this
+  session).
+- **Window smoke: pending** (user-owned, display machine). Suggested checks:
+  hover a sidebar row → ✎ opens the inline field (Enter commits, Escape
+  cancels; blank is refused with the field still open); 🗑 on a closed
+  conversation → inline confirm deletes it; 🗑 on an open conversation →
+  refusal notice; Ctrl+T / Ctrl+W / Ctrl+1–9 / Ctrl+PageUp / Ctrl+PageDown
+  navigate tabs; with two tabs, ⧉ Split or Ctrl+\\ shows a second pane with
+  its own tab strip (closing the second tab drops the split).
+
+## Stage 6, slices A–B — desktop hardening and release
+
+The final stage, scoped to what this host can actually build and test:
+hardening the local-daemon connection (bounded auto-reconnect on
+mid-session drops, a daemon version-mismatch notice, and detection and
+respawn when the app-spawned daemon dies) plus unit tests for the
+failure and recovery paths. Anything that needs another OS, packaging,
+or a clean machine is documented below as blocked rather than
+implemented.
+
+### Slice A — reconnect and daemon hardening
+
+Daemon (daemon.rs):
+- `MAX_RECONNECT_ROUNDS: u32 = 5` and `RECONNECT_RETRY_DELAY_MS: u64 =
+  2000`: the auto-reconnect budget and the initial delay before the
+  first reconnect attempt.
+- `is_mid_session_drop(reason)`: classifies a disconnect reason —
+  anything other than `Connect failed*`, `Disconnected`, and
+  `Connection cancelled` is a mid-session drop (a previously connected
+  socket was lost) and is worth an automatic retry.
+- `spawn_daemon` now returns `std::io::Result<std::process::Child>`
+  instead of a bare pid, so the parent can `try_wait` on its daemon.
+
+Native (main.rs):
+- `Tab` gains `mid_drop: bool` (this tab lost a connection it already
+  had) and `host_api_version: u16` (the version the daemon reported).
+  In `handle_event`, the `Disconnected` arm sets `mid_drop` gated on
+  prior connectivity — an initial connect failure is never treated as a
+  drop — and the `Connected` arm resets both; the `FrontendState`
+  runtime event records the daemon's version.
+- `DesktopApp` gains `reconnect_budget: u32`,
+  `daemon_child: Option<std::process::Child>` (set on a successful
+  `start_local_daemon`), and `version_notice: String`.
+- `poll_daemon_child(ctx)` runs before each pump: it `try_wait`s the
+  spawned child. On exit it clears the child, resets the budget, marks
+  every tab disconnected, then either respawns — phase Ready, so it
+  calls `start_local_daemon` again (success notice: "The local daemon
+  (pid {pid}) exited ({status}); a new one is starting.") — or settles
+  to `Stopped` ("The local daemon (pid {pid}) exited before accepting
+  connections ({status}). Use Server… to start it.") with a notice.
+- Bounded reconnect semantics: a mid-session drop (or a refused/other
+  failure while Ready) arms the retry when none is pending; the first
+  drop allocates `MAX_RECONNECT_ROUNDS`, and each tick after the
+  initial 2 s delay spends one and reconnects the affected tabs. The
+  6th consecutive failure exhausts the budget → `Stopped` with "Lost
+  the daemon connection and could not restore it after 5 attempts.
+  Reconnect manually in the Server dialog." and a notice. A successful
+  connection resets the budget and the drop flags.
+- `check_host_api_versions()` runs at the tail of `drain_all`: it
+  observes the first non-demo tab with a recorded version and, if it
+  differs from `bone_protocol::HOST_API_VERSION`, sets an
+  informational notice "Daemon host API version {v} does not match
+  this client ({}); some features may not work.", rendered as an amber
+  toolbar label below the red daemon notice.
+
+### Slice B — failure/recovery tests
+
+- 8 new tests (1 in `native/src/daemon.rs`, 7 in `native/src/main.rs`),
+  plus a `spawn_dead_process` helper (a `sh -c "exit 0"` /
+  `cmd /c exit 0` child that exits immediately).
+- `mid_session_drop_classification`: drop-reason classification —
+  mid-session reasons retry, connect-failure reasons do not.
+- `mid_session_drop_drives_bounded_reconnect_rounds`: a mid-session
+  drop arms the bounded retry and, with no recovery, exhausts the
+  budget into `Stopped`.
+- `mid_session_reconnect_restores_tabs_and_clears_budget`: a successful
+  reconnect reattaches the tabs and zeroes the budget.
+- `idle_ready_app_never_schedules_retries`: a Ready app with no drop
+  never schedules a retry.
+- `tab_mid_drop_only_when_connected_socket_is_lost`: `mid_drop` is set
+  only for a tab that had a connection before the drop.
+- `spawned_daemon_death_after_ready_triggers_respawn`: an app-spawned
+  daemon that dies while Ready is respawned and the notice is shown.
+- `spawned_daemon_death_before_ready_is_stopped`: a daemon that dies
+  before accepting connections settles to `Stopped` with the "exited
+  before accepting connections" message.
+- `host_api_version_mismatch_surfaces_notice_and_match_clears`: a
+  mismatched version surfaces the toolbar notice; a matching one
+  clears it.
+
+### Status
+
+- **Implemented** (2026-09-08), code + tests. Changes confined to
+  `native/src/daemon.rs` and `native/src/main.rs`.
+- Validation (2026-09-08): `cargo test -p bone-desktop` = 71 passed,
+  0 failed, 1 ignored (baseline 63; +8 new); `cargo fmt -p bone-desktop
+  -p bone-core -p bone-protocol` clean (the five pre-existing drift
+  files untouched). No protocol/core code changed this stage, so the
+  Stage 5 numbers there stand.
+- **Window smoke: pending** (user-owned, display machine). Suggested
+  checks: kill the app-spawned daemon → "…a new one is starting."
+  notice and the tabs reconnect; point `BONE_DESKTOP_DAEMON` at a
+  broken binary → "Could not start the local daemon" / "exited before
+  accepting connections" paths. Budget exhaustion and the version
+  label are covered by the unit tests above.
+
+### Blocked / out of scope for this host
+
+- macOS/Windows runtime validation — this host is Linux-only; note the
+  unix-only `process_group(0)` (the Windows branch uses
+  `CREATE_NEW_PROCESS_GROUP`), and no non-Linux binary has been run
+  here.
+- Installers/signing/notarization — the release artifact is the plain
+  release binary pair (`bone-desktop` + `bone`); no packaging, signing,
+  or notarization is done or possible on this host.
+- Clean-machine install — the "Could not find the `bone` daemon binary
+  (set BONE_DESKTOP_DAEMON or install bone)." path is unit-tested only;
+  a real first run on a fresh machine cannot be exercised here.
+- Credential storage / secure transport — N/A by design: local daemon
+  traffic is plaintext loopback TCP; connecting to a remote host is an
+  explicit user action, and TLS/tokens are daemon-side concerns.
+
+## Desktop UX milestone — transcript, navigation, setup, images, preferences (2026-09-08)
+
+Consolidated UX slice completing the remaining in-scope native work: workspace
+identity, safe remote-connection safeguards, transcript quality, sidebar
+navigation, provider setup, image display, and client-only preferences.
+
+### What changed
+
+- **Workspace identity and safe controls:** the toolbar surfaces the workspace
+  root; the Server dialog is the only connection surface, with disconnect/
+  reconnect and explicit failure notices.
+- **Secure remote-access policy:** `native/src/daemon.rs::local_endpoint`
+  accepts only loopback socket targets; any non-loopback address (hostname or
+  LAN IP) is rejected with "Direct remote connections are disabled: … Use an
+  SSH tunnel and connect to 127.0.0.1:<forwarded-port>." No TLS/auth was
+  invented — remote use is an SSH tunnel to a forwarded loopback port. No
+  custom ports or remote addresses ever autostart a daemon. Covered by
+  `ux_tests::remote_connections_require_a_loopback_tunnel_endpoint` and
+  `daemon::tests::loopback_detection`.
+- **Transcript and navigation:** rendered Markdown with images
+  (`native/src/images.rs`), jump-to-latest pill while scrolled up, sidebar
+  "Open conversations" above the searchable "Recent" history list
+  (title filter), and split-view panes with per-pane tab headers.
+- **Provider setup:** new `native/src/setup.rs` `SetupUi` renders the daemon's
+  `HostRequest::Setup` snapshot as a form; Save submits the `SetupApply`
+  plan through the existing correlated host API (no credentials touch the
+  frontend beyond what the protocol already carries). The dialog auto-opens
+  once when the daemon reports onboarding is needed and is reachable from
+  "View & settings → Provider setup…". Applied results invalidate the cached
+  config so the next poll refetches the revisioned snapshot.
+- **Preferences:** zoom (0.75–2.0, mirrored to the state file), pane widths,
+  and split state persist in the desktop layout file; keyboard shortcuts
+  (Cmd+T/W, Cmd+1–9, PageUp/Down, Cmd+\) are gated while dialogs are open.
+- **Protocol/core additions:** setup snapshot/action types and the correlated
+  host setup API in `bone-protocol`/`bone-core` (see the Stage 5 entries);
+  the native client consumes them without owning setup state.
+
+### Validation
+
+- `cargo test -p bone-desktop`: **106 passed, 0 failed, 1 ignored** (release
+  ignored perf test included). `cargo test -p bone-protocol`: 22 passed.
+  Workspace (core/TUI) suites green.
+- `cargo build -p bone-desktop --release`: clean, zero warnings.
+  `cargo clippy -p bone-desktop --tests`: only pre-existing warnings remain.
+  `cargo fmt -p bone-desktop -- --check`: clean.
+- Performance (release, headless, `native/src/perf_tests.rs`): long-history
+  8 MiB warm p95 0.09 ms, 20 MiB stress 0.06 ms, 100k-line tool output 1.30 ms,
+  200×2000 tool outputs 0.05 ms — all under the 16.7 ms P95 budget. The
+  sampling window skips the first three frames: frame 2 in a headless run
+  absorbs a one-time font-atlas rebuild (~24 ms) that a running app never
+  repeats, so measuring it would misrepresent steady-state cost.
+
+### Visual verification
+
+- Live window smoke **not run this pass (blocked, user-approved skip)**: the
+  display GPU (GPU1) had ~0.6 GiB free because `llama-server` held ~20.6 GiB,
+  so a new wgpu device failed `RequestDeviceError(Device(OutOfMemory))`
+  regardless of `WGPU_ADAPTER`/`WGPU_MSAA_SAMPLES` selection. The pre-existing
+  old-build window was left untouched per the user. Verified instead by the
+  106 unit/integration tests (setup, sidebar, split, reconnect, remote
+  policy), the headless release perf test, and the Stage 2/3/Layer smoke
+  evidence recorded above. The Layer-1/2/Layer-A/B window runbooks remain the
+  user-run path when VRAM is available.
+
+### Remaining gaps (explicit)
+
+- End-to-end tool/approval demo in the window (mock provider is text-only).
+- macOS/Windows runtime validation; installers/signing; clean-machine first
+  run (Linux-only host).
+- Syntax highlighting, variable-height virtualization, and bounded parse-cache
+  eviction remain deferred; measured warm frames currently sit well under
+  budget, so none blocks this milestone.

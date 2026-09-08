@@ -81,7 +81,10 @@ pub struct ProviderConfig {
     #[serde(default, skip_serializing_if = "is_false")]
     pub supports_prompt_cache_key: bool,
     /// `auto` / `true` / `false`; `auto` keeps the built-in host list.
-    #[serde(default = "default_stream_usage", skip_serializing_if = "is_auto_stream_usage")]
+    #[serde(
+        default = "default_stream_usage",
+        skip_serializing_if = "is_auto_stream_usage"
+    )]
     pub stream_usage: String,
     pub api_key_configured: bool,
 }

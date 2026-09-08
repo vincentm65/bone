@@ -937,6 +937,7 @@ impl App {
                 subagents: _,
                 host_api_version,
                 catalog_updates,
+                cwd: _,
             } => {
                 self.apply_frontend_state(
                     banner,
@@ -2549,8 +2550,7 @@ impl App {
         let processes_changed = self.processes_version != self.processes_seen_version;
         let background_tick_due = self.jobs_last_refresh.elapsed()
             >= std::time::Duration::from_secs(1)
-            && (!self.jobs.is_empty()
-                || self.processes.iter().any(|p| p.running));
+            && (!self.jobs.is_empty() || self.processes.iter().any(|p| p.running));
         let refresh =
             jobs_changed || background_pane_needs_refresh(processes_changed, background_tick_due);
         if !refresh {

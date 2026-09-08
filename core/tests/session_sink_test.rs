@@ -44,15 +44,12 @@ impl SessionSink for RecordingSink {
     }
 
     fn append_chat_message(&self, message: &ChatMessage, _seq: i64) {
-        self.messages
-            .lock()
-            .unwrap()
-            .push(format!(
-                "{}: {} (error: {})",
-                message.role.as_str(),
-                message.content,
-                message.is_error
-            ));
+        self.messages.lock().unwrap().push(format!(
+            "{}: {} (error: {})",
+            message.role.as_str(),
+            message.content,
+            message.is_error
+        ));
     }
 
     fn record_usage(

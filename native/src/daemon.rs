@@ -20,6 +20,13 @@ pub const MAX_DAEMON_RETRIES: u32 = 10;
 /// Delay between automatic reconnect rounds while the daemon boots.
 pub const DAEMON_RETRY_DELAY_MS: u64 = 600;
 
+/// Maximum automatic reconnect rounds after a mid-session drop before the
+/// coordinator gives up and defers to the Server dialog.
+pub const MAX_RECONNECT_ROUNDS: u32 = 5;
+
+/// Delay between automatic reconnect rounds after a mid-session drop.
+pub const RECONNECT_RETRY_DELAY_MS: u64 = 2000;
+
 /// Split `host:port` for a connect/spawn address. Accepts IPv4, bracketed
 /// IPv6, and hostnames. Returns `None` when the address carries no port.
 pub fn split_host_port(address: &str) -> Option<(String, u16)> {
@@ -66,6 +73,41 @@ pub fn ensure_port(address: &str) -> String {
     }
 }
 
+/// Native remote access must use a secure tunnel terminating on loopback.
+/// Resolve `localhost` ourselves: never trust DNS to enforce this boundary.
+///
+/// Returns every loopback candidate for `address` in preference order. A
+/// `localhost` host expands to both IPv4 and IPv6 loopback so a daemon bound to
+/// either family is reachable; an explicit IP yields a single candidate.
+pub fn local_endpoints(address: &str) -> Result<Vec<std::net::SocketAddr>, String> {
+    let candidates = split_host_port(address).map(|(host, port)| {
+        if host.eq_ignore_ascii_case("localhost") {
+            vec![
+                std::net::SocketAddr::new(IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), port),
+                std::net::SocketAddr::new(IpAddr::V6(std::net::Ipv6Addr::LOCALHOST), port),
+            ]
+        } else {
+            host.parse::<IpAddr>()
+                .ok()
+                .filter(|ip| ip.is_loopback())
+                .map(|ip| vec![std::net::SocketAddr::new(ip, port)])
+                .unwrap_or_default()
+        }
+    });
+    match candidates {
+        Some(endpoints) if !endpoints.is_empty() => Ok(endpoints),
+        _ => Err(REMOTE_DISABLED.into()),
+    }
+}
+
+/// The preferred loopback endpoint for `address`. See [`local_endpoints`] for
+/// the full candidate list (a `localhost` host may have more than one).
+pub fn local_endpoint(address: &str) -> Result<std::net::SocketAddr, String> {
+    local_endpoints(address).map(|mut endpoints| endpoints.remove(0))
+}
+
+const REMOTE_DISABLED: &str = "Direct remote connections are disabled: Bone TCP has no encryption or authentication. Use an SSH tunnel and connect to 127.0.0.1:<forwarded-port>.";
+
 /// Classify a connect-failure reason string produced by the socket worker.
 /// `true` when the peer actively refused the connection (port closed) — the
 /// only case where auto-starting a local daemon makes sense.
@@ -73,12 +115,18 @@ pub fn is_refused(reason: &str) -> bool {
     reason.contains("refused")
 }
 
+/// Classify a `Disconnected` reason: `true` when an already-established session
+/// was dropped mid-way (socket loss, writer close, runtime failure) rather than
+/// never connected in the first place. Drives the bounded mid-session
+/// auto-reconnect; plain "Disconnected"/cancelled/init-failure reasons do not.
+pub fn is_mid_session_drop(reason: &str) -> bool {
+    !reason.starts_with("Connect failed")
+        && reason != "Disconnected"
+        && reason != "Connection cancelled"
+}
+
 fn executable_name() -> &'static str {
-    if cfg!(windows) {
-        "bone.exe"
-    } else {
-        "bone"
-    }
+    if cfg!(windows) { "bone.exe" } else { "bone" }
 }
 
 /// Locate the `bone` daemon binary: an explicit `BONE_DESKTOP_DAEMON` override,
@@ -120,8 +168,13 @@ pub fn daemon_log_path(state_dir: Option<&Path>) -> PathBuf {
 /// Launch `bin serve --listen <address>` detached from the app. The daemon
 /// deliberately outlives the app (the frontend is a client, not a supervisor),
 /// so a shared daemon can keep serving the TUI/web clients. Logs append to
-/// `log_path`. Returns the spawned pid on success.
-pub fn spawn_daemon(bin: &Path, address: &str, log_path: &Path) -> std::io::Result<u32> {
+/// `log_path`. Returns the spawned `Child` on success; the caller keeps it so
+/// the app can detect the death of a daemon it started itself (`try_wait`).
+pub fn spawn_daemon(
+    bin: &Path,
+    address: &str,
+    log_path: &Path,
+) -> std::io::Result<std::process::Child> {
     if let Some(parent) = log_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -144,7 +197,7 @@ pub fn spawn_daemon(bin: &Path, address: &str, log_path: &Path) -> std::io::Resu
         // New process group so a parent/terminal exit does not take it down.
         command.process_group(0);
     }
-    Ok(command.spawn()?.id())
+    command.spawn()
 }
 
 /// Lifecycle of the daemon target the app is talking to.
@@ -171,11 +224,11 @@ mod tests {
             split_host_port("127.0.0.1:17878"),
             Some(("127.0.0.1".into(), 17878))
         );
-        assert_eq!(split_host_port("localhost:80"), Some(("localhost".into(), 80)));
         assert_eq!(
-            split_host_port("[::1]:9000"),
-            Some(("::1".into(), 9000))
+            split_host_port("localhost:80"),
+            Some(("localhost".into(), 80))
         );
+        assert_eq!(split_host_port("[::1]:9000"), Some(("::1".into(), 9000)));
         assert_eq!(split_host_port("127.0.0.1"), None);
         assert_eq!(split_host_port(""), None);
     }
@@ -191,6 +244,22 @@ mod tests {
     }
 
     #[test]
+    fn local_endpoints_expand_localhost_to_both_families() {
+        let endpoints = local_endpoints("localhost:7878").unwrap();
+        assert_eq!(endpoints.len(), 2);
+        assert_eq!(endpoints[0], "127.0.0.1:7878".parse().unwrap());
+        assert_eq!(endpoints[1], "[::1]:7878".parse().unwrap());
+        // An explicit loopback IP yields exactly one candidate.
+        assert_eq!(
+            local_endpoints("[::1]:9000").unwrap(),
+            vec!["[::1]:9000".parse().unwrap()]
+        );
+        // Non-loopback and malformed targets are still rejected.
+        assert!(local_endpoints("10.0.0.5:7878").is_err());
+        assert!(local_endpoints("127.0.0.1").is_err());
+    }
+
+    #[test]
     fn ensure_port_appends_default_when_missing() {
         assert_eq!(ensure_port("localhost"), "localhost:7878");
         assert_eq!(ensure_port(" 127.0.0.1 "), "127.0.0.1:7878");
@@ -200,9 +269,32 @@ mod tests {
 
     #[test]
     fn refused_classification() {
-        assert!(is_refused("Connect failed: Connection refused (os error 111)"));
+        assert!(is_refused(
+            "Connect failed: Connection refused (os error 111)"
+        ));
         assert!(is_refused("Connect failed: Connection refused"));
-        assert!(!is_refused("Connect failed: connection timed out after 10 seconds"));
+        assert!(!is_refused(
+            "Connect failed: connection timed out after 10 seconds"
+        ));
         assert!(!is_refused("Disconnected"));
+    }
+
+    #[test]
+    fn mid_session_drop_classification() {
+        // Established sockets lost mid-way: reconnect is warranted.
+        assert!(is_mid_session_drop(
+            "Connection lost. Delivery may be uncertain; reconnect manually. Prompts are never resent automatically."
+        ));
+        assert!(is_mid_session_drop(
+            "Connection writer closed; delivery may be uncertain."
+        ));
+        assert!(is_mid_session_drop("Runtime initialization failed: boom"));
+        // Never-connected / deliberate reasons: no auto-reconnect.
+        assert!(!is_mid_session_drop(
+            "Connect failed: Connection refused (os error 111)"
+        ));
+        assert!(!is_mid_session_drop("Connect failed: connection timed out"));
+        assert!(!is_mid_session_drop("Disconnected"));
+        assert!(!is_mid_session_drop("Connection cancelled"));
     }
 }

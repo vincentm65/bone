@@ -901,7 +901,6 @@ impl Settings {
         self.set_path_at(path, default.clone(), file)?;
         Ok(default)
     }
-
 }
 
 // ── Validation ───────────────────────────────────────────────────────────────

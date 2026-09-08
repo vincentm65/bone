@@ -629,6 +629,10 @@ pub fn frontend_state(
         subagents: extensions.subagents(),
         host_api_version: bone_protocol::HOST_API_VERSION,
         catalog_updates: crate::ext::catalog::updates_available(),
+        cwd: tools
+            .working_dir
+            .as_ref()
+            .map(|dir| dir.to_string_lossy().into_owned()),
     }
 }
 

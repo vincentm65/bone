@@ -53,25 +53,13 @@ async fn worker(
         let Command::Connect(address) = command else {
             continue;
         };
-        let result = tokio::select! {
-            result = tokio::time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(&address)) => result,
-            command = commands.recv() => {
-                if command.is_none() { return; }
-                if !emit(&events, &ctx, Event::Disconnected("Connection cancelled".into())).await { return; }
-                continue;
-            }
-        };
-        let stream = match result {
-            Ok(Ok(stream)) => stream,
-            error => {
-                let message = match error {
-                    Ok(Err(e)) => e.to_string(),
-                    _ => "connection timed out after 10 seconds".into(),
-                };
+        let endpoints = match crate::daemon::local_endpoints(&address) {
+            Ok(endpoints) => endpoints,
+            Err(reason) => {
                 if !emit(
                     &events,
                     &ctx,
-                    Event::Disconnected(format!("Connect failed: {message}")),
+                    Event::Disconnected(format!("Connect failed: {reason}")),
                 )
                 .await
                 {
@@ -79,6 +67,48 @@ async fn worker(
                 }
                 continue;
             }
+        };
+        // Try every loopback candidate (a `localhost` host may be IPv4 or IPv6)
+        // until one connects; a refusal on one family must not hide a daemon on
+        // the other.
+        let mut stream = None;
+        let mut last_error = String::new();
+        let mut cancelled = false;
+        for endpoint in endpoints {
+            let result = tokio::select! {
+                result = tokio::time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(endpoint)) => result,
+                command = commands.recv() => {
+                    if command.is_none() { return; }
+                    cancelled = true;
+                    break;
+                }
+            };
+            match result {
+                Ok(Ok(connected)) => {
+                    stream = Some(connected);
+                    break;
+                }
+                Ok(Err(error)) => last_error = error.to_string(),
+                Err(_) => last_error = "connection timed out after 10 seconds".into(),
+            }
+        }
+        if cancelled {
+            if !emit(&events, &ctx, Event::Disconnected("Connection cancelled".into())).await {
+                return;
+            }
+            continue;
+        }
+        let Some(stream) = stream else {
+            if !emit(
+                &events,
+                &ctx,
+                Event::Disconnected(format!("Connect failed: {last_error}")),
+            )
+            .await
+            {
+                return;
+            }
+            continue;
         };
         let (read, write) = stream.into_split();
         let mut conn = SocketConn::new(read, write);

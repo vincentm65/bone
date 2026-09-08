@@ -238,34 +238,29 @@ impl DriverHookRuntime<'_> {
         state: DriverHookState<'_>,
         mode: DriverHookMode<'_>,
     ) -> (crate::ext::types::ManagedHookResult, bool) {
-        let (
-            system_prompt,
-            per_record_usage,
-            set_handler_cancel,
-            forward_keys,
-            before_extras,
-        ) = match mode {
-            DriverHookMode::Generic => (
-                context_system_prompt(state.history, self.system_prompt_override),
-                None,
-                true,
-                true,
-                None,
-            ),
-            // before_turn historically receives the raw override, even when the
-            // current history already has a system message. Its tool handler also
-            // intentionally does not receive the generic run cancel token.
-            DriverHookMode::BeforeTurn {
-                report_usage,
-                extras,
-            } => (
-                self.system_prompt_override.clone(),
-                Some(report_usage),
-                false,
-                false,
-                Some(extras),
-            ),
-        };
+        let (system_prompt, per_record_usage, set_handler_cancel, forward_keys, before_extras) =
+            match mode {
+                DriverHookMode::Generic => (
+                    context_system_prompt(state.history, self.system_prompt_override),
+                    None,
+                    true,
+                    true,
+                    None,
+                ),
+                // before_turn historically receives the raw override, even when the
+                // current history already has a system message. Its tool handler also
+                // intentionally does not receive the generic run cancel token.
+                DriverHookMode::BeforeTurn {
+                    report_usage,
+                    extras,
+                } => (
+                    self.system_prompt_override.clone(),
+                    Some(report_usage),
+                    false,
+                    false,
+                    Some(extras),
+                ),
+            };
         let mut app_state = crate::ext::ctx::AppCtxState::new(
             state.tools,
             state.token_stats,
@@ -385,9 +380,9 @@ impl DriverHookRuntime<'_> {
             for operation in std::mem::take(&mut result.operations) {
                 match operation {
                     crate::ext::ctx::ConversationOperation::Append(messages) => {
-                        extras.deferred_operations.push(
-                            crate::ext::ctx::ConversationOperation::Append(messages),
-                        );
+                        extras
+                            .deferred_operations
+                            .push(crate::ext::ctx::ConversationOperation::Append(messages));
                     }
                     crate::ext::ctx::ConversationOperation::Load(_) => {
                         crate::ext::ctx::runtime_warn(
@@ -660,8 +655,7 @@ impl Driver {
         // Durable conversations keep a deterministic cross-turn scope; incognito
         // runs pin to the stable per-actor fallback so the provider sees the
         // same cache/routing identity on every turn instead of a fresh one.
-        let cache_scope =
-            crate::llm::provider::new_cache_scope(conversation_id, background_scope);
+        let cache_scope = crate::llm::provider::new_cache_scope(conversation_id, background_scope);
         let hook_runtime = DriverHookRuntime {
             extensions: &extensions,
             gate: &gate,

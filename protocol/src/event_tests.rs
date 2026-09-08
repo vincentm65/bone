@@ -160,6 +160,7 @@ fn every_runtime_event_variant_round_trips() {
             subagents: vec![],
             host_api_version: crate::HOST_API_VERSION,
             catalog_updates: 2,
+            cwd: Some("/srv/bone".into()),
         },
         RuntimeEvent::HostResponse {
             request_id: 18,
@@ -394,6 +395,58 @@ fn synchronize_defaults_to_snapshot_only() {
             messages: None,
             ..
         }
+    ));
+}
+
+#[test]
+fn frontend_state_cwd_is_optional_and_legacy_messages_default_none() {
+    // A daemon that predates the additive `cwd` field omits it entirely; a
+    // frontend must still accept that wire message and see `cwd: None`.
+    let ev: RuntimeEvent = serde_json::from_value(json!({
+        "frontend_state": {
+            "banner": "bone",
+            "settings": {},
+            "commands": [],
+            "tool_defs": [],
+            "tool_display": {},
+            "subagents": [],
+            "host_api_version": 1,
+            "catalog_updates": 0
+        }
+    }))
+    .expect("legacy frontend_state must deserialize");
+    assert!(matches!(ev, RuntimeEvent::FrontendState { cwd: None, .. }));
+
+    // A daemon that knows its workspace round-trips the value and emits the key.
+    let with_cwd = RuntimeEvent::FrontendState {
+        banner: String::new(),
+        settings: json!({}),
+        commands: vec![],
+        tool_defs: vec![],
+        tool_display: json!({}),
+        subagents: vec![],
+        host_api_version: 1,
+        catalog_updates: 0,
+        cwd: Some("/srv/bone".into()),
+    };
+    let value = serde_json::to_value(&with_cwd).expect("serialize");
+    assert_eq!(value["frontend_state"]["cwd"], json!("/srv/bone"));
+    let back: RuntimeEvent = serde_json::from_value(value).expect("deserialize");
+    assert!(matches!(
+        back,
+        RuntimeEvent::FrontendState {
+            cwd: Some(ref cwd),
+            ..
+        } if cwd == "/srv/bone"
+    ));
+
+    // An explicit `null` (daemon booted without a resolvable working dir) stays None.
+    let mut null_cwd = serde_json::to_value(&with_cwd).expect("serialize");
+    null_cwd["frontend_state"]["cwd"] = json!(null);
+    let nulled: RuntimeEvent = serde_json::from_value(null_cwd).expect("deserialize");
+    assert!(matches!(
+        nulled,
+        RuntimeEvent::FrontendState { cwd: None, .. }
     ));
 }
 

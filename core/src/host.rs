@@ -49,6 +49,11 @@ impl HostService {
     pub fn execute(&self, request: HostRequest) -> HostResponse {
         match request {
             HostRequest::Stats { range } => self.stats(range),
+            HostRequest::Conversations { limit } => self.conversations(limit),
+            HostRequest::ConversationRename { id, title, limit } => {
+                self.conversation_rename(id, title, limit)
+            }
+            HostRequest::ConversationDelete { id, limit } => self.conversation_delete(id, limit),
             HostRequest::Catalog { refresh } => self.catalog(refresh),
             HostRequest::CatalogApply {
                 expected_revision,
@@ -80,6 +85,61 @@ impl HostService {
         });
         match result {
             Ok(snapshot) => HostResponse::Stats(Box::new(snapshot)),
+            Err(error) => host_error(HostErrorCode::Unavailable, error),
+        }
+    }
+
+    /// Resolve a client-supplied conversation-list limit: `0` selects the
+    /// daemon default, and the result is capped to bound response size.
+    fn resolve_conversation_limit(limit: u32) -> i64 {
+        const DEFAULT_LIMIT: u32 = 100;
+        const MAX_LIMIT: u32 = 100;
+        let limit = if limit == 0 { DEFAULT_LIMIT } else { limit };
+        limit.min(MAX_LIMIT) as i64
+    }
+
+    /// List recent durable conversations (most-recent-first) with display-safe
+    /// metadata. `limit == 0` selects a sane default so a caller can ask for
+    /// "some recents" without tuning a number.
+    fn conversations(&self, limit: u32) -> HostResponse {
+        let limit = Self::resolve_conversation_limit(limit);
+        let result =
+            SessionDb::open(&self.db_path).and_then(|db| db.recent_conversations(limit));
+        match result {
+            Ok(conversations) => HostResponse::Conversations(conversations),
+            Err(error) => host_error(HostErrorCode::Unavailable, error),
+        }
+    }
+
+    /// Rename a durable conversation and respond with the refreshed
+    /// conversation list.
+    fn conversation_rename(&self, id: i64, title: String, limit: u32) -> HostResponse {
+        let title = title.trim();
+        if title.is_empty() {
+            return host_error(HostErrorCode::Invalid, "title must not be empty");
+        }
+        let result =
+            SessionDb::open(&self.db_path).and_then(|db| db.rename_conversation(id, title));
+        match result {
+            Ok(()) => self.conversations(limit),
+            Err(rusqlite::Error::QueryReturnedNoRows) => host_error(
+                HostErrorCode::Invalid,
+                format!("conversation not found: {id}"),
+            ),
+            Err(error) => host_error(HostErrorCode::Unavailable, error),
+        }
+    }
+
+    /// Delete a durable conversation (and its messages, usage, and checkpoints)
+    /// and respond with the refreshed conversation list.
+    fn conversation_delete(&self, id: i64, limit: u32) -> HostResponse {
+        let result = SessionDb::open(&self.db_path).and_then(|db| db.delete_conversation(id));
+        match result {
+            Ok(true) => self.conversations(limit),
+            Ok(false) => host_error(
+                HostErrorCode::Invalid,
+                format!("conversation not found: {id}"),
+            ),
             Err(error) => host_error(HostErrorCode::Unavailable, error),
         }
     }

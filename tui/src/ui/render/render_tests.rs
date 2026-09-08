@@ -216,7 +216,10 @@ fn muted_markdown_colors_plain_text_and_preserves_emphasis() {
         .expect("emphasis span rendered");
     assert_eq!(italic_span.style.fg, Some(theme.palette.muted));
     assert!(
-        italic_span.style.add_modifier.contains(ratatui::style::Modifier::ITALIC),
+        italic_span
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::ITALIC),
         "emphasis span should be italic"
     );
 }
@@ -247,7 +250,10 @@ fn system_message_renders_as_muted_markdown() {
         .expect("recap span rendered");
     assert_eq!(recap_span.style.fg, Some(theme.palette.muted));
     assert!(
-        recap_span.style.add_modifier.contains(ratatui::style::Modifier::ITALIC),
+        recap_span
+            .style
+            .add_modifier
+            .contains(ratatui::style::Modifier::ITALIC),
         "system message emphasis should render italic"
     );
 }

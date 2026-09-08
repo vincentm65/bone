@@ -196,6 +196,27 @@ pub struct CatalogApplyResult {
     pub extensions_reloaded: bool,
 }
 
+/// Display-safe metadata for one durable conversation, listed most-recent-first.
+///
+/// `title` is a human label derived from the conversation's first user message
+/// (never the transcript); `updated_at` is the ISO timestamp of its latest
+/// activity. The numeric `id` is the durable row key a frontend loads.
+///
+/// `full_title` carries the conversation's stored title verbatim (empty when
+/// none was set), so a rename can be seeded with the untruncated text even when
+/// `title` is display-shortened. It defaults to empty for older daemons.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConversationMeta {
+    pub id: i64,
+    pub title: String,
+    #[serde(default)]
+    pub full_title: String,
+    pub updated_at: String,
+    pub message_count: i64,
+    pub provider: String,
+    pub model: String,
+}
+
 /// Minimal provider data needed by onboarding; credentials remain redacted.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderChoice {
@@ -242,6 +263,32 @@ pub enum HostRequest {
         #[serde(default)]
         range: Option<DateRange>,
     },
+    /// List recent durable conversations (most-recent-first) with display-safe
+    /// metadata for a frontend conversation picker. `limit == 0` selects the
+    /// daemon default.
+    Conversations {
+        #[serde(default)]
+        limit: u32,
+    },
+    /// Rename a durable conversation to a user-supplied title. Both mutation
+    /// requests respond with the refreshed `HostResponse::Conversations` list.
+    ConversationRename {
+        id: i64,
+        title: String,
+        /// Limit for the refreshed conversation list in the response;
+        /// `limit == 0` selects the daemon default.
+        #[serde(default)]
+        limit: u32,
+    },
+    /// Delete a durable conversation and all of its rows. Responds with the
+    /// refreshed `HostResponse::Conversations` list.
+    ConversationDelete {
+        id: i64,
+        /// Limit for the refreshed conversation list in the response;
+        /// `limit == 0` selects the daemon default.
+        #[serde(default)]
+        limit: u32,
+    },
     Catalog {
         #[serde(default)]
         refresh: bool,
@@ -277,6 +324,7 @@ pub enum HostErrorCode {
 #[serde(rename_all = "snake_case")]
 pub enum HostResponse {
     Stats(Box<UsageStatsSnapshot>),
+    Conversations(Vec<ConversationMeta>),
     Catalog(CatalogSnapshot),
     CatalogApplied(CatalogApplyResult),
     Setup(SetupSnapshot),

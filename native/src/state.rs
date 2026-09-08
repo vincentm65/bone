@@ -1,11 +1,19 @@
 //! Small, renderer-independent projection of the authoritative daemon stream.
 use std::collections::{HashMap, HashSet};
 
-use bone_protocol::{ChatMessage, ChatRole, RuntimeCommand, RuntimeEvent, SessionSnapshot};
+use bone_protocol::{
+    ChatMessage, ChatRole, ImageData, RuntimeCommand, RuntimeEvent, SessionSnapshot,
+};
 
 #[derive(Default)]
 pub struct State {
     pub rows: Vec<(String, String)>,
+    /// Authoritative image attachments from the current transcript. Renderers
+    /// must use these payloads rather than fetching by filename or path.
+    pub images: Vec<ImageData>,
+    /// Stable image-cache keys parallel to `images`, hashed once when the
+    /// transcript is rebuilt so per-frame rendering never re-hashes payloads.
+    pub image_keys: Vec<String>,
     /// Parallel to `rows`: tool-card overlay state for tool rows (`None` for
     /// ordinary text rows). Every row append goes through [`Self::push_row`]
     /// so the two vectors stay index-aligned.
@@ -140,6 +148,8 @@ impl State {
 
     fn replace(&mut self, messages: Vec<ChatMessage>) {
         self.rows.clear();
+        self.images.clear();
+        self.image_keys.clear();
         self.toolcards.clear();
         self.assistant = None;
         self.reasoning = None;
@@ -165,13 +175,16 @@ impl State {
                 });
             }
             if !message.images.is_empty() {
-                self.push_row(
-                    "attachments",
-                    format!(
-                        "{} image(s); image display is not implemented yet",
-                        message.images.len()
-                    ),
-                );
+                for image in &message.images {
+                    let name = format!("Image {}", self.images.len() + 1);
+                    self.image_keys.push(crate::images::cache_key(
+                        &name,
+                        &image.media_type,
+                        &image.data,
+                    ));
+                    self.images.push(image.clone());
+                }
+                self.push_row("attachments", format!("{} image(s)", message.images.len()));
             }
         }
     }
@@ -649,6 +662,36 @@ mod tests {
         s.reset(Some(9));
         assert!(s.changed_rows.is_empty());
         assert!(s.rows.is_empty());
+    }
+
+    #[test]
+    fn history_reconstructs_authoritative_images_and_replaces_them() {
+        let mut state = State::default();
+        let image = ImageData {
+            media_type: "image/png".into(),
+            data: "aGVsbG8=".into(),
+            width: Some(1),
+            height: Some(1),
+            sha256: None,
+        };
+        state.reduce(RuntimeEvent::ConversationLoaded {
+            messages: vec![ChatMessage::user_with_images(
+                "with image",
+                vec![image.clone()],
+            )],
+            snapshot: SessionSnapshot::default(),
+            busy: false,
+        });
+        assert_eq!(state.images, vec![image]);
+        assert_eq!(state.rows.last().unwrap().1, "1 image(s)");
+        state.reduce(RuntimeEvent::StateSynchronized {
+            request_id: state.sync_id.unwrap(),
+            busy: false,
+            snapshot: SessionSnapshot::default(),
+            view: None,
+            messages: Some(vec![ChatMessage::new(ChatRole::User, "without image")]),
+        });
+        assert!(state.images.is_empty());
     }
 
     #[test]

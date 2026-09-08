@@ -234,7 +234,8 @@ pub(crate) fn stored_to_chat_message(msg: StoredMessage) -> crate::llm::ChatMess
 }
 
 pub use bone_protocol::{
-    DateRange, HourUsage, ProviderUsage, UsageBucket, UsageStatsSnapshot, UsageSummary,
+    ConversationMeta, DateRange, HourUsage, ProviderUsage, UsageBucket, UsageStatsSnapshot,
+    UsageSummary,
 };
 
 /// Time range selector shared between session_db and stats UI.
@@ -306,7 +307,8 @@ const FULL_SCHEMA: &str = "
         started_at TEXT NOT NULL,
         ended_at   TEXT,
         provider   TEXT NOT NULL,
-        model      TEXT NOT NULL
+        model      TEXT NOT NULL,
+        title      TEXT
     );
 
     CREATE TABLE IF NOT EXISTS messages (
@@ -413,7 +415,7 @@ const BUCKET_PROJECTION: &str = "COALESCE(usage.prompt,0), COALESCE(usage.comple
 
 /// Latest conversations.db schema version. Bumped when `setup_schema` gains a
 /// new migration step; tests assert against this instead of a bare literal.
-pub(crate) const SCHEMA_VERSION: u32 = 10;
+pub(crate) const SCHEMA_VERSION: u32 = 11;
 
 const STARTUP_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 const STARTUP_RETRY_DEADLINE: Duration = Duration::from_secs(3);
@@ -500,7 +502,6 @@ impl StartupDbError {
             StartupDbErrorSource::Io(_) => None,
         }
     }
-
 }
 
 impl std::fmt::Display for StartupDbError {
@@ -817,6 +818,16 @@ impl SessionDb {
             version = 10;
         }
 
+        if version == 10 {
+            // Keep the derived first-user-message title while allowing a
+            // user override. Existing rows stay NULL and keep using the
+            // derived projection.
+            if !column_exists(&tx, "conversations", "title")? {
+                tx.execute_batch("ALTER TABLE conversations ADD COLUMN title TEXT;")?;
+            }
+            version = 11;
+        }
+
         if version != current_version {
             tx.pragma_update(None, "user_version", version)?;
         }
@@ -863,6 +874,73 @@ impl SessionDb {
             .optional()
     }
 
+    /// Recent durable conversations with display-safe metadata, newest first.
+    ///
+    /// No schema change: both projections come from the existing tables.
+    /// `updated_at` is the latest message timestamp (ISO-UTC, string-sortable),
+    /// falling back to the conversation's start; `title` is a one-line
+    /// derivation of the first non-empty user message, or `"(new)"` when the
+    /// conversation holds no user message yet.
+    pub fn recent_conversations(&self, limit: i64) -> rusqlite::Result<Vec<ConversationMeta>> {
+        let mut stmt = self.conn.prepare(
+            "WITH meta AS (
+                 SELECT c.id, c.provider, c.model, c.title,
+                        COALESCE((
+                             SELECT MAX(m.created_at)
+                             FROM messages m
+                             WHERE m.conversation_id = c.id
+                         ), c.started_at) AS updated_at,
+                        (
+                             SELECT COUNT(*)
+                             FROM messages m
+                             WHERE m.conversation_id = c.id
+                         ) AS message_count
+                 FROM conversations c
+             ), first_user AS (
+                 SELECT conversation_id AS id, content AS title,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY conversation_id
+                            ORDER BY seq ASC, id ASC
+                        ) AS rn
+                 FROM messages
+                 WHERE role = 'user' AND TRIM(content) <> ''
+             )
+             SELECT meta.id, meta.provider, meta.model, meta.updated_at,
+                    meta.message_count,
+                    COALESCE(
+                        NULLIF(TRIM(COALESCE(meta.title, '')), ''),
+                        (
+                            SELECT title FROM first_user
+                            WHERE first_user.id = meta.id AND first_user.rn = 1
+                            LIMIT 1
+                        ),
+                        ''
+                    ) AS title,
+                    COALESCE(meta.title, '') AS stored_title
+             FROM meta
+             ORDER BY meta.updated_at DESC, meta.id DESC
+             LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![limit.max(1)], |row| {
+            let raw_title: String = row.get(5)?;
+            let title = conversation_title(&raw_title);
+            Ok(ConversationMeta {
+                id: row.get(0)?,
+                title: if title.is_empty() {
+                    "(new)".to_string()
+                } else {
+                    title
+                },
+                full_title: row.get(6)?,
+                updated_at: row.get(3)?,
+                message_count: row.get(4)?,
+                provider: row.get(1)?,
+                model: row.get(2)?,
+            })
+        })?;
+        rows.collect()
+    }
+
     /// Point a conversation's stored provider/model at the currently active
     /// provider. Called when switching provider so the sidebar and reopen path
     /// reflect the provider a chat is actually using, not the boot default it
@@ -878,6 +956,48 @@ impl SessionDb {
             params![id, provider, model],
         )?;
         Ok(())
+    }
+
+    /// Set a user-supplied conversation title. A blank title clears the
+    /// override so the derived title (first user message) shows again. Returns
+    /// `QueryReturnedNoRows` when the conversation id does not exist.
+    pub fn rename_conversation(&self, id: i64, title: &str) -> rusqlite::Result<()> {
+        let trimmed = title.trim();
+        let new_title = if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed)
+        };
+        let updated = self.conn.execute(
+            "UPDATE conversations SET title = ?2 WHERE id = ?1",
+            params![id, new_title],
+        )?;
+        if updated == 0 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
+    /// Delete a conversation and every row that references it (messages,
+    /// usage events, context checkpoints) in one transaction. Returns whether
+    /// a conversation row was actually removed.
+    pub fn delete_conversation(&self, id: i64) -> rusqlite::Result<bool> {
+        let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        tx.execute(
+            "DELETE FROM conversation_context_checkpoints WHERE conversation_id = ?1",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM usage_events WHERE conversation_id = ?1",
+            params![id],
+        )?;
+        tx.execute(
+            "DELETE FROM messages WHERE conversation_id = ?1",
+            params![id],
+        )?;
+        let removed = tx.execute("DELETE FROM conversations WHERE id = ?1", params![id])?;
+        tx.commit()?;
+        Ok(removed > 0)
     }
 
     /// Create a new conversation and return its id.
@@ -1685,6 +1805,22 @@ impl SessionDb {
 
 fn now_iso() -> String {
     crate::util::utc_now()
+}
+
+/// Collapse stored message text into a one-line display title: whitespace
+/// (including newlines) is normalized to single spaces and long text is cut at
+/// 60 characters with an ellipsis. Returns an empty string for empty input.
+fn conversation_title(content: &str) -> String {
+    let one_line = content.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.is_empty() {
+        return String::new();
+    }
+    let mut chars = one_line.chars();
+    let mut title: String = chars.by_ref().take(60).collect();
+    if chars.next().is_some() {
+        title.push('…');
+    }
+    title
 }
 
 #[cfg(test)]

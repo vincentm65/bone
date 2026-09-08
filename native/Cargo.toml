@@ -8,10 +8,13 @@ name = "bone-desktop"
 path = "src/main.rs"
 
 [dependencies]
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
 bone-client = { path = "../client" }
 bone-protocol = { path = "../protocol" }
 eframe = { version = "0.36.1", default-features = true, features = ["wgpu"] }
 pulldown-cmark = "0.13"
+rfd = "0.15"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros", "time"] }
 
 [dev-dependencies]

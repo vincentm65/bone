@@ -6,7 +6,7 @@
 //! must stay well under the 16.7 ms (60 fps) frame budget; frame 0 is the cold
 //! full-measure pass and is reported separately.
 use crate::state::{ToolCard, ToolState};
-use crate::transcript::Cache;
+use crate::transcript::{CHUNK_LINES, Cache};
 use eframe::egui;
 use std::time::Instant;
 
@@ -48,20 +48,41 @@ fn renderer_baseline() {
             true, // hard budget: warm p95 must stay under 16.7 ms
         ),
         (
-            // A single enormous code row is a measurement-correctness case, not
-            // a band case: it spans the whole transcript, so every frame still
-            // builds it. Kept for the tall-row regression value.
+            // A single enormous tool output is a boundedness case: the row
+            // lays out only the first chunk (CHUNK_LINES lines), so the row
+            // height — and every frame — stays bounded no matter the size.
             "tool-100000-lines".into(),
-            vec![(
-                "tool: shell".into(),
-                format!("```text\n{}```", "tool output line\n".repeat(100_000)),
-            )],
+            vec![("tool: shell".into(), "tool output line\n".repeat(100_000))],
             vec![Some(ToolCard {
                 name: "shell".into(),
                 state: ToolState::Done,
                 args: None,
             })],
             false,
+        ),
+        (
+            // Many large tool outputs: warm frames build only the band and each
+            // built row is chunk-bounded, so this must meet the 16.7 ms budget.
+            "tool-outputs-200x2000".into(),
+            (0..200)
+                .map(|i| {
+                    let log = (0..2000)
+                        .map(|j| format!("line {i:03}-{j:04}"))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    (format!("tool: shell{i}"), log)
+                })
+                .collect(),
+            (0..200)
+                .map(|_| {
+                    Some(ToolCard {
+                        name: "shell".into(),
+                        state: ToolState::Done,
+                        args: None,
+                    })
+                })
+                .collect(),
+            true, // hard budget: warm p95 must stay under 16.7 ms
         ),
     ];
 
@@ -85,13 +106,18 @@ fn renderer_baseline() {
             if frame == 0 {
                 println!("{name}: cold_ms={elapsed_ms:.2}");
             }
-            if frame >= 2 {
+            if frame >= 3 {
+                // Frames 0 and 1 are the cold full-measure and first-warm passes.
+                // Frame 2 is skipped too: headless frames rebuild the font atlas,
+                // and that one rebuild invalidates the text-layout cache, so frame
+                // 2 pays a re-layout that a real app never repeats (its atlas is
+                // built once at startup). Steady-state warm frames start at 3.
                 samples.push(elapsed_ms);
             }
         }
         samples.sort_by(f64::total_cmp);
-        let p50 = samples[5];
-        let p95 = samples[9];
+        let p50 = samples[4];
+        let p95 = samples[8];
         println!(
             "{name}: bytes={bytes} warm_p50_ms={p50:.2} warm_p95_ms={p95:.2} last_built={}",
             cache.last_built
@@ -101,6 +127,18 @@ fn renderer_baseline() {
                 p95 < 16.7,
                 "{name}: warm p95 {p95:.2} ms exceeded the 16.7 ms frame budget"
             );
+        }
+        // Tool rows are chunk-bounded: a row whose output exceeds one chunk
+        // may never lay out more than its shown chunks (1 by default), so its
+        // measured height stays far below an unbounded single-label render.
+        for (i, (role, text)) in rows.iter().enumerate() {
+            if role.starts_with("tool:") && text.lines().count() > CHUNK_LINES {
+                assert!(
+                    cache.heights[i] < CHUNK_LINES as f32 * 40.0 + 500.0,
+                    "{name}: tool row {i} measured {}px; expected one bounded chunk",
+                    cache.heights[i]
+                );
+            }
         }
         // A resize invalidates every cached height: the reflow frame must
         // rebuild all rows (band-only rendering then resumes at the new width).

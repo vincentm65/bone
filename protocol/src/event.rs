@@ -166,6 +166,13 @@ pub enum RuntimeEvent {
         /// Daemon-host catalog updates available from its cached index.
         #[serde(default)]
         catalog_updates: usize,
+        /// The daemon's working directory (its runtime/extension workspace) used
+        /// to resolve relative tool paths, so a frontend can show where the agent
+        /// is operating. `None` when the daemon could not determine it (e.g. a
+        /// test/unloaded runtime) or when talking to a daemon that predates this
+        /// field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
     },
     /// Daemon-owned schema and redacted resolved configuration.
     ConfigSnapshot {

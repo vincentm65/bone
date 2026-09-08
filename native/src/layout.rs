@@ -14,6 +14,42 @@ use std::path::{Path, PathBuf};
 pub const FORMAT_HEADER: &[u8] = b"bone-desktop-layout v1\n";
 const STATE_FILE_NAME: &str = "layout.txt";
 
+/// Valid ranges for persisted display values; out-of-range values found in a
+/// saved file are clamped on load.
+pub const ZOOM_MIN: u16 = 75;
+pub const ZOOM_MAX: u16 = 200;
+pub const SIDEBAR_WIDTH_MIN: u16 = 150;
+pub const SIDEBAR_WIDTH_MAX: u16 = 500;
+pub const SPLIT_WIDTH_MIN: u16 = 220;
+pub const SPLIT_WIDTH_MAX: u16 = 1200;
+
+/// Persisted display settings: zoom level, split view, and pane widths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Preferences {
+    /// Document zoom as a percentage (75..=200 after clamping).
+    pub zoom_percent: u16,
+    /// Whether the active tab is split into two panes.
+    pub split: bool,
+    /// Index of the tab shown in the split pane (0 when split is off).
+    pub split_tab: usize,
+    /// Left sidebar width in pixels (150..=500 after clamping).
+    pub sidebar_width: u16,
+    /// Split-pane width in pixels (220..=1200 after clamping).
+    pub split_width: u16,
+}
+
+impl Default for Preferences {
+    fn default() -> Self {
+        Self {
+            zoom_percent: 100,
+            split: false,
+            split_tab: 0,
+            sidebar_width: 230,
+            split_width: 380,
+        }
+    }
+}
+
 /// One open tab's durable frontend state.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TabState {
@@ -33,6 +69,8 @@ pub struct Layout {
     pub selected: usize,
     /// Open tabs in order.
     pub tabs: Vec<TabState>,
+    /// Persisted display settings.
+    pub preferences: Preferences,
 }
 
 /// Default on-disk location: `BONE_DESKTOP_STATE` when set, otherwise
@@ -68,6 +106,18 @@ fn encode(layout: &Layout) -> String {
         }
         push_field(&mut out, b"draft", tab.draft.as_bytes());
     }
+    let prefs = &layout.preferences;
+    out.push_str("display ");
+    out.push_str(&prefs.zoom_percent.to_string());
+    out.push(' ');
+    out.push_str(if prefs.split { "1" } else { "0" });
+    out.push(' ');
+    out.push_str(&prefs.split_tab.to_string());
+    out.push(' ');
+    out.push_str(&prefs.sidebar_width.to_string());
+    out.push(' ');
+    out.push_str(&prefs.split_width.to_string());
+    out.push('\n');
     out
 }
 
@@ -161,6 +211,12 @@ impl<'a> Cursor<'a> {
     }
 }
 
+/// Clamp an arbitrary parsed number into a valid `u16` range (negative or
+/// oversized values snap to the nearest bound).
+fn clamp_u16(value: i128, min: u16, max: u16) -> u16 {
+    value.clamp(min as i128, max as i128) as u16
+}
+
 fn decode(input: &[u8]) -> Result<Layout, FormatError> {
     let mut cursor = Cursor {
         bytes: input,
@@ -217,6 +273,37 @@ fn decode(input: &[u8]) -> Result<Layout, FormatError> {
                 layout.tabs[index].draft =
                     String::from_utf8(payload).map_err(|_| FormatError::Utf8)?;
             }
+            b"display" => {
+                cursor.byte(b' ')?;
+                let zoom_percent = clamp_u16(cursor.number()?, ZOOM_MIN, ZOOM_MAX);
+                cursor.byte(b' ')?;
+                let split = match cursor.number()? {
+                    0 => false,
+                    1 => true,
+                    _ => return Err(FormatError::Number),
+                };
+                cursor.byte(b' ')?;
+                let split_tab = cursor.number()?;
+                let split_tab = usize::try_from(if split_tab < 0 {
+                    0
+                } else {
+                    split_tab.min(usize::MAX as i128)
+                })
+                .map_err(|_| FormatError::Number)?;
+                cursor.byte(b' ')?;
+                let sidebar_width =
+                    clamp_u16(cursor.number()?, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
+                cursor.byte(b' ')?;
+                let split_width = clamp_u16(cursor.number()?, SPLIT_WIDTH_MIN, SPLIT_WIDTH_MAX);
+                cursor.newline()?;
+                layout.preferences = Preferences {
+                    zoom_percent,
+                    split,
+                    split_tab,
+                    sidebar_width,
+                    split_width,
+                };
+            }
             _ => return Err(FormatError::Unexpected("unknown record")),
         }
     }
@@ -270,6 +357,13 @@ mod tests {
                     draft: String::new(),
                 },
             ],
+            preferences: Preferences {
+                zoom_percent: 150,
+                split: true,
+                split_tab: 1,
+                sidebar_width: 300,
+                split_width: 900,
+            },
         }
     }
 
@@ -325,5 +419,97 @@ mod tests {
         std::fs::write(&path, b"bone-desktop-layout v1\nselected not-a-number\n").unwrap();
         assert!(load(&path).unwrap_err().contains("invalid layout"));
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn legacy_file_without_display_record_keeps_address_and_drafts_with_default_prefs() {
+        let bytes =
+            b"bone-desktop-layout v1\naddress 11 127.0.0.1:1\nselected 0\ntab load 5\ndraft 2 hi\n";
+        let layout = decode(bytes).unwrap();
+        assert_eq!(layout.address, "127.0.0.1:1");
+        assert_eq!(layout.selected, 0);
+        assert_eq!(layout.tabs.len(), 1);
+        assert_eq!(layout.tabs[0].conversation_id, Some(5));
+        assert_eq!(layout.tabs[0].draft, "hi");
+        assert_eq!(layout.preferences, Preferences::default());
+        assert_eq!(Preferences::default().zoom_percent, 100);
+        assert!(!Preferences::default().split);
+        assert_eq!(Preferences::default().split_tab, 0);
+        assert_eq!(Preferences::default().sidebar_width, 230);
+        assert_eq!(Preferences::default().split_width, 380);
+    }
+
+    #[test]
+    fn display_preferences_round_trip_current_values() {
+        let mut layout = Layout::default();
+        layout.preferences = Preferences {
+            zoom_percent: 75,
+            split: true,
+            split_tab: 3,
+            sidebar_width: 500,
+            split_width: 1200,
+        };
+        let decoded = decode(encode(&layout).as_bytes()).unwrap();
+        assert_eq!(decoded.preferences, layout.preferences);
+        assert_eq!(decoded, layout);
+    }
+
+    #[test]
+    fn out_of_range_display_values_are_clamped_on_load() {
+        let bytes = b"bone-desktop-layout v1\ndisplay -10 1 -3 5 99999\n";
+        let layout = decode(bytes).unwrap();
+        assert_eq!(
+            layout.preferences,
+            Preferences {
+                zoom_percent: ZOOM_MIN,
+                split: true,
+                split_tab: 0,
+                sidebar_width: SIDEBAR_WIDTH_MIN,
+                split_width: SPLIT_WIDTH_MAX,
+            }
+        );
+        // Upper zoom bound clamps to ZOOM_MAX, and split 0 stays false.
+        let bytes = b"bone-desktop-layout v1\ndisplay 9999 0 0 99999 200\n";
+        let layout = decode(bytes).unwrap();
+        assert_eq!(layout.preferences.zoom_percent, ZOOM_MAX);
+        assert!(!layout.preferences.split);
+        assert_eq!(layout.preferences.sidebar_width, SIDEBAR_WIDTH_MAX);
+        assert_eq!(layout.preferences.split_width, SPLIT_WIDTH_MIN);
+    }
+
+    #[test]
+    fn malformed_display_record_is_an_error() {
+        // split flag must be 0 or 1.
+        assert!(matches!(
+            decode(b"bone-desktop-layout v1\ndisplay 100 2 0 230 380\n"),
+            Err(FormatError::Number)
+        ));
+        // Non-numeric value.
+        assert!(matches!(
+            decode(b"bone-desktop-layout v1\ndisplay 100 0 0 230 wide\n"),
+            Err(FormatError::Number)
+        ));
+        // Missing fields.
+        assert!(decode(b"bone-desktop-layout v1\ndisplay 100 0\n").is_err());
+    }
+
+    #[test]
+    fn unicode_drafts_survive_with_display_record() {
+        let mut layout = Layout::default();
+        layout.tabs.push(TabState {
+            conversation_id: Some(1),
+            draft: "héllo ✓\n第二行 🚀\ttabbed\n".into(),
+        });
+        layout.preferences = Preferences {
+            zoom_percent: 125,
+            split: false,
+            split_tab: 0,
+            sidebar_width: 250,
+            split_width: 400,
+        };
+        let encoded = encode(&layout);
+        let decoded = decode(encoded.as_bytes()).unwrap();
+        assert_eq!(decoded.tabs[0].draft, layout.tabs[0].draft);
+        assert_eq!(decoded, layout);
     }
 }
