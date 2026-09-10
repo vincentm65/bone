@@ -3,50 +3,108 @@
 //! composer draft. Conversation content itself stays daemon-owned; this file is
 //! purely a client preference (see NATIVE_APP_PLAN.md).
 //!
-//! The file uses a small hand-rolled, length-prefixed text format so the
-//! desktop crate needs no serde dependency. String payloads are byte-length
-//! prefixed, so drafts may contain any bytes including newlines.
+//! Length-prefixed UTF-8 records keep multiline drafts intact. The workspace
+//! record is a JSON split tree of windows, panes and tab groups; layout files
+//! written before it (v1–v3) carried a single split-view flag that is migrated
+//! into the tree once on restore.
 
 use std::fmt;
 use std::io;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
-pub const FORMAT_HEADER: &[u8] = b"bone-desktop-layout v1\n";
+pub const FORMAT_HEADER: &[u8] = b"bone-desktop-layout v5\n";
+const V4_FORMAT_HEADER: &[u8] = b"bone-desktop-layout v4\n";
+const V3_FORMAT_HEADER: &[u8] = b"bone-desktop-layout v3\n";
+const V2_FORMAT_HEADER: &[u8] = b"bone-desktop-layout v2\n";
+const V1_FORMAT_HEADER: &[u8] = b"bone-desktop-layout v1\n";
 const STATE_FILE_NAME: &str = "layout.txt";
 
 /// Valid ranges for persisted display values; out-of-range values found in a
 /// saved file are clamped on load.
 pub const ZOOM_MIN: u16 = 75;
 pub const ZOOM_MAX: u16 = 200;
-pub const SIDEBAR_WIDTH_MIN: u16 = 150;
+pub const SIDEBAR_WIDTH_MIN: u16 = 220;
 pub const SIDEBAR_WIDTH_MAX: u16 = 500;
-pub const SPLIT_WIDTH_MIN: u16 = 220;
-pub const SPLIT_WIDTH_MAX: u16 = 1200;
+/// Fresh layouts use this fraction of the available window width. A manually
+/// resized sidebar is stored as an absolute width instead.
+pub const SIDEBAR_DEFAULT_FRACTION: f32 = 0.20;
+pub const CENTRAL_WIDTH_MIN: u16 = 320;
 
-/// Persisted display settings: zoom level, split view, and pane widths.
+/// How much tool detail the desktop shows without opening an individual call.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ToolVerbosity {
+    #[default]
+    Concise,
+    Verbose,
+}
+
+/// Persisted display settings: zoom level and sidebar width.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Preferences {
     /// Document zoom as a percentage (75..=200 after clamping).
     pub zoom_percent: u16,
-    /// Whether the active tab is split into two panes.
-    pub split: bool,
-    /// Index of the tab shown in the split pane (0 when split is off).
-    pub split_tab: usize,
-    /// Left sidebar width in pixels (150..=500 after clamping).
+    pub tool_verbosity: ToolVerbosity,
+    /// Left sidebar width in pixels (220..=500 after clamping).
     pub sidebar_width: u16,
-    /// Split-pane width in pixels (220..=1200 after clamping).
-    pub split_width: u16,
+    /// Whether `sidebar_width` is a user override. Fresh layouts use the
+    /// responsive 20% default and do not let an old absolute width win.
+    pub sidebar_width_manual: bool,
 }
 
 impl Default for Preferences {
     fn default() -> Self {
         Self {
             zoom_percent: 100,
-            split: false,
-            split_tab: 0,
+            tool_verbosity: ToolVerbosity::Concise,
             sidebar_width: 230,
-            split_width: 380,
+            sidebar_width_manual: false,
         }
+    }
+}
+
+/// Responsive default width for a sidebar that has not been manually resized.
+pub fn default_sidebar_width(window_width: f32) -> f32 {
+    (window_width * SIDEBAR_DEFAULT_FRACTION)
+        .clamp(SIDEBAR_WIDTH_MIN as f32, SIDEBAR_WIDTH_MAX as f32)
+}
+
+/// Per-frame responsive decision for the horizontal panes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResponsivePlan {
+    /// Whether the left sidebar renders at all this frame.
+    pub show_sidebar: bool,
+    /// Maximum sidebar width this frame (`>= SIDEBAR_WIDTH_MIN` when shown).
+    pub sidebar_cap: f32,
+}
+
+/// Decide whether the sidebar renders and how wide it may be for a window of
+/// `window_width`. The conversation area is guaranteed at least
+/// `CENTRAL_WIDTH_MIN` pixels:
+///
+/// - The sidebar hides when the window cannot host it at its minimum width
+///   alongside the guaranteed conversation area.
+/// - The sidebar is capped so `window_width - sidebar_cap` always leaves room
+///   for the conversation area.
+pub fn responsive_plan(window_width: f32) -> ResponsivePlan {
+    if !window_width.is_finite() || window_width <= 0.0 {
+        return ResponsivePlan {
+            show_sidebar: false,
+            sidebar_cap: 0.0,
+        };
+    }
+    let sidebar_min = SIDEBAR_WIDTH_MIN as f32;
+    let central_min = CENTRAL_WIDTH_MIN as f32;
+    let show_sidebar = window_width >= sidebar_min + central_min;
+    let sidebar_cap = if show_sidebar {
+        (window_width - central_min).max(sidebar_min)
+    } else {
+        0.0
+    };
+    ResponsivePlan {
+        show_sidebar,
+        sidebar_cap,
     }
 }
 
@@ -60,8 +118,21 @@ pub struct TabState {
     pub draft: String,
 }
 
+/// The single split-view flag carried by pre-workspace (v1–v3) layout files.
+///
+/// `tab` is a one-based index into `tabs` (0 when the flag names no tab), the
+/// same convention `Workspace` uses. Read from a saved file only; migration
+/// input for [`crate::workspace::Workspace::from_legacy`], never re-encoded.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LegacySplit {
+    /// Whether the old file requested two panes.
+    pub active: bool,
+    /// The tab shown in the second pane.
+    pub tab: usize,
+}
+
 /// Snapshot of the whole open-tab layout.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Layout {
     /// Daemon address shown in the toolbar.
     pub address: String,
@@ -71,6 +142,24 @@ pub struct Layout {
     pub tabs: Vec<TabState>,
     /// Persisted display settings.
     pub preferences: Preferences,
+    /// Tab references are one-based indices into `tabs`, not runtime IDs.
+    pub workspace: Option<crate::workspace::Workspace>,
+    /// Split flag from a pre-workspace file; migration input only. Never
+    /// written back, so it is excluded from equality (see `PartialEq`).
+    pub legacy_split: LegacySplit,
+}
+
+impl PartialEq for Layout {
+    /// Compares the fields `encode` writes. `legacy_split` is a one-way
+    /// migration input, so two layouts with the same durable state compare
+    /// equal even when one was decoded from an old file.
+    fn eq(&self, other: &Self) -> bool {
+        self.address == other.address
+            && self.selected == other.selected
+            && self.tabs == other.tabs
+            && self.preferences == other.preferences
+            && self.workspace == other.workspace
+    }
 }
 
 /// Default on-disk location: `BONE_DESKTOP_STATE` when set, otherwise
@@ -110,14 +199,19 @@ fn encode(layout: &Layout) -> String {
     out.push_str("display ");
     out.push_str(&prefs.zoom_percent.to_string());
     out.push(' ');
-    out.push_str(if prefs.split { "1" } else { "0" });
-    out.push(' ');
-    out.push_str(&prefs.split_tab.to_string());
-    out.push(' ');
     out.push_str(&prefs.sidebar_width.to_string());
     out.push(' ');
-    out.push_str(&prefs.split_width.to_string());
+    out.push_str(if prefs.sidebar_width_manual { "1" } else { "0" });
+    out.push_str(if prefs.tool_verbosity == ToolVerbosity::Verbose {
+        " 1"
+    } else {
+        " 0"
+    });
     out.push('\n');
+    if let Some(workspace) = &layout.workspace {
+        let json = serde_json::to_string(workspace).expect("workspace is serializable");
+        push_field(&mut out, b"workspace", json.as_bytes());
+    }
     out
 }
 
@@ -129,6 +223,21 @@ fn push_field(out: &mut String, keyword: &[u8], bytes: &[u8]) {
     out.push(' ');
     out.push_str(std::str::from_utf8(bytes).expect("payload must be utf-8"));
     out.push('\n');
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Format {
+    /// Oldest format: `display` carries the split flag but no manual-sidebar
+    /// marker, so its sidebar width always migrates to the responsive default.
+    V1,
+    /// Like v1 but with a manual-sidebar marker.
+    V2,
+    /// Like v2 (current file is v4; v3 only differs by header).
+    V3,
+    /// Current format: `display` is just zoom, sidebar width and manual flag.
+    V4,
+    /// Adds the tool verbosity preference to the display record.
+    V5,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -222,10 +331,23 @@ fn decode(input: &[u8]) -> Result<Layout, FormatError> {
         bytes: input,
         pos: 0,
     };
-    if !input.starts_with(FORMAT_HEADER) {
+    // The workspace tree (v4) supersedes the single split flag carried by
+    // v1–v3 files; those are decoded into `legacy_split` for a one-time
+    // migration on restore.
+    let (format, header_len) = if input.starts_with(FORMAT_HEADER) {
+        (Format::V5, FORMAT_HEADER.len())
+    } else if input.starts_with(V4_FORMAT_HEADER) {
+        (Format::V4, V4_FORMAT_HEADER.len())
+    } else if input.starts_with(V3_FORMAT_HEADER) {
+        (Format::V3, V3_FORMAT_HEADER.len())
+    } else if input.starts_with(V2_FORMAT_HEADER) {
+        (Format::V2, V2_FORMAT_HEADER.len())
+    } else if input.starts_with(V1_FORMAT_HEADER) {
+        (Format::V1, V1_FORMAT_HEADER.len())
+    } else {
         return Err(FormatError::Header);
-    }
-    cursor.pos = FORMAT_HEADER.len();
+    };
+    cursor.pos = header_len;
     let mut layout = Layout::default();
     let mut current_tab = None;
     loop {
@@ -273,36 +395,95 @@ fn decode(input: &[u8]) -> Result<Layout, FormatError> {
                 layout.tabs[index].draft =
                     String::from_utf8(payload).map_err(|_| FormatError::Utf8)?;
             }
+            b"workspace" => {
+                let payload = cursor.payload()?;
+                if layout.workspace.is_some() {
+                    return Err(FormatError::Unexpected("duplicate workspace"));
+                }
+                layout.workspace = Some(
+                    serde_json::from_slice(&payload)
+                        .map_err(|_| FormatError::Unexpected("invalid workspace tree"))?,
+                );
+            }
             b"display" => {
                 cursor.byte(b' ')?;
                 let zoom_percent = clamp_u16(cursor.number()?, ZOOM_MIN, ZOOM_MAX);
                 cursor.byte(b' ')?;
-                let split = match cursor.number()? {
-                    0 => false,
-                    1 => true,
-                    _ => return Err(FormatError::Number),
-                };
-                cursor.byte(b' ')?;
-                let split_tab = cursor.number()?;
-                let split_tab = usize::try_from(if split_tab < 0 {
-                    0
+                if matches!(format, Format::V4 | Format::V5) {
+                    let sidebar_width =
+                        clamp_u16(cursor.number()?, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
+                    cursor.byte(b' ')?;
+                    let sidebar_width_manual = match cursor.number()? {
+                        0 => false,
+                        1 => true,
+                        _ => return Err(FormatError::Number),
+                    };
+                    let tool_verbosity = if format == Format::V5 {
+                        cursor.byte(b' ')?;
+                        match cursor.number()? {
+                            0 => ToolVerbosity::Concise,
+                            1 => ToolVerbosity::Verbose,
+                            _ => return Err(FormatError::Number),
+                        }
+                    } else {
+                        ToolVerbosity::Concise
+                    };
+                    cursor.newline()?;
+                    layout.preferences = Preferences {
+                        tool_verbosity,
+                        zoom_percent,
+                        sidebar_width,
+                        sidebar_width_manual,
+                    };
                 } else {
-                    split_tab.min(usize::MAX as i128)
-                })
-                .map_err(|_| FormatError::Number)?;
-                cursor.byte(b' ')?;
-                let sidebar_width =
-                    clamp_u16(cursor.number()?, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
-                cursor.byte(b' ')?;
-                let split_width = clamp_u16(cursor.number()?, SPLIT_WIDTH_MIN, SPLIT_WIDTH_MAX);
-                cursor.newline()?;
-                layout.preferences = Preferences {
-                    zoom_percent,
-                    split,
-                    split_tab,
-                    sidebar_width,
-                    split_width,
-                };
+                    let split = match cursor.number()? {
+                        0 => false,
+                        1 => true,
+                        _ => return Err(FormatError::Number),
+                    };
+                    cursor.byte(b' ')?;
+                    let split_tab = cursor.number()?;
+                    let split_tab = usize::try_from(if split_tab < 0 {
+                        0
+                    } else {
+                        split_tab.min(usize::MAX as i128)
+                    })
+                    .map_err(|_| FormatError::Number)?;
+                    cursor.byte(b' ')?;
+                    let sidebar_width =
+                        clamp_u16(cursor.number()?, SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
+                    cursor.byte(b' ')?;
+                    let first = cursor.number()?;
+                    let sidebar_width_manual = if cursor.bytes.get(cursor.pos) == Some(&b'\n') {
+                        // Five-field record: `first` is the old split width.
+                        false
+                    } else {
+                        // The manual marker only exists from v2 onward; v1 files
+                        // (and some written by the buggy egui restore path)
+                        // always migrate back to the responsive default.
+                        let manual = match first {
+                            0 => false,
+                            1 => format != Format::V1,
+                            _ => return Err(FormatError::Number),
+                        };
+                        cursor.byte(b' ')?;
+                        // The trailing split width is discarded; the workspace
+                        // tree supersedes it.
+                        cursor.number()?;
+                        manual
+                    };
+                    cursor.newline()?;
+                    layout.preferences = Preferences {
+                        tool_verbosity: ToolVerbosity::Concise,
+                        zoom_percent,
+                        sidebar_width,
+                        sidebar_width_manual,
+                    };
+                    layout.legacy_split = LegacySplit {
+                        active: split,
+                        tab: split_tab,
+                    };
+                }
             }
             _ => return Err(FormatError::Unexpected("unknown record")),
         }
@@ -312,12 +493,87 @@ fn decode(input: &[u8]) -> Result<Layout, FormatError> {
 
 /// Write `layout` atomically (temp file + rename) under `path`.
 pub fn save(path: &Path, layout: &Layout) -> io::Result<()> {
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, encode(layout))?;
-    std::fs::rename(&tmp, path)
+    // Include both the process id and a monotonic suffix so concurrent saves
+    // from one process cannot overwrite each other's temporary file. The
+    // destination replacement is the commit point for each writer.
+    let tmp = path.with_extension(format!(
+        "tmp-{}-{}",
+        std::process::id(),
+        TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)?;
+        file.write_all(encode(layout).as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        replace_file(&tmp, path)?;
+        sync_parent(path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(not(windows))]
+fn replace_file(tmp: &Path, path: &Path) -> io::Result<()> {
+    std::fs::rename(tmp, path)
+}
+
+#[cfg(windows)]
+fn replace_file(tmp: &Path, path: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+
+    // `std::fs::rename` does not replace an existing destination on Windows.
+    // MoveFileEx does, while keeping the replacement a single filesystem
+    // operation and requesting write-through durability.
+    const MOVEFILE_REPLACE_EXISTING: u32 = 0x0000_0001;
+    const MOVEFILE_WRITE_THROUGH: u32 = 0x0000_0008;
+    unsafe extern "system" {
+        fn MoveFileExW(from: *const u16, to: *const u16, flags: u32) -> i32;
+    }
+    let from: Vec<u16> = tmp.as_os_str().encode_wide().chain(Some(0)).collect();
+    let to: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let replaced = unsafe {
+        MoveFileExW(
+            from.as_ptr(),
+            to.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if replaced == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        // `Path::parent` returns an empty path for a relative filename. There
+        // is no directory handle to sync in that case; the file itself was
+        // already flushed before the rename.
+        if !parent.as_os_str().is_empty() {
+            std::fs::File::open(parent)?.sync_all()?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 /// Read a layout file. `Ok(None)` when the file does not exist; `Ok(Some(_))`
@@ -358,13 +614,33 @@ mod tests {
                 },
             ],
             preferences: Preferences {
+                tool_verbosity: ToolVerbosity::Concise,
                 zoom_percent: 150,
-                split: true,
-                split_tab: 1,
                 sidebar_width: 300,
-                split_width: 900,
+                sidebar_width_manual: true,
             },
+            workspace: None,
+            legacy_split: LegacySplit::default(),
         }
+    }
+
+    #[test]
+    fn tool_verbosity_round_trips_and_older_layouts_default_to_concise() {
+        let mut layout = Layout::default();
+        layout.preferences.tool_verbosity = ToolVerbosity::Verbose;
+        layout.tabs.push(TabState {
+            conversation_id: Some(42),
+            draft: "keep my draft".into(),
+        });
+        let restored = decode(encode(&layout).as_bytes()).unwrap();
+        assert_eq!(restored.preferences.tool_verbosity, ToolVerbosity::Verbose);
+        assert_eq!(restored.tabs[0].draft, "keep my draft");
+        let old = b"bone-desktop-layout v4\naddress 0 \nselected 0\ndisplay 125 300 1\n";
+        let restored = decode(old).unwrap();
+        assert_eq!(restored.preferences.tool_verbosity, ToolVerbosity::Concise);
+        assert_eq!(restored.preferences.zoom_percent, 125);
+        assert_eq!(restored.preferences.sidebar_width, 300);
+        assert!(restored.preferences.sidebar_width_manual);
     }
 
     #[test]
@@ -381,8 +657,9 @@ mod tests {
 
     #[test]
     fn rejects_wrong_header_and_garbage() {
+        // v4 is current; a future version is (correctly) rejected.
         assert!(matches!(
-            decode(b"bone-desktop-layout v2\n"),
+            decode(b"bone-desktop-layout v99\n"),
             Err(FormatError::Header)
         ));
         assert!(matches!(decode(b"not a layout"), Err(FormatError::Header)));
@@ -433,21 +710,75 @@ mod tests {
         assert_eq!(layout.tabs[0].draft, "hi");
         assert_eq!(layout.preferences, Preferences::default());
         assert_eq!(Preferences::default().zoom_percent, 100);
-        assert!(!Preferences::default().split);
-        assert_eq!(Preferences::default().split_tab, 0);
         assert_eq!(Preferences::default().sidebar_width, 230);
-        assert_eq!(Preferences::default().split_width, 380);
+        assert!(!Preferences::default().sidebar_width_manual);
+        assert_eq!(layout.legacy_split, LegacySplit::default());
+    }
+
+    #[test]
+    fn legacy_manual_sidebar_marker_is_migrated_to_responsive_default() {
+        let bytes = b"bone-desktop-layout v1\ndisplay 100 0 0 480 1 380\n";
+        let layout = decode(bytes).unwrap();
+        assert_eq!(layout.preferences.sidebar_width, 480);
+        assert!(!layout.preferences.sidebar_width_manual);
+        assert_eq!(default_sidebar_width(840.0), SIDEBAR_WIDTH_MIN as f32);
+
+        let current = b"bone-desktop-layout v2\ndisplay 100 0 0 480 1 380\n";
+        assert!(decode(current).unwrap().preferences.sidebar_width_manual);
+    }
+
+    #[test]
+    fn legacy_split_record_feeds_legacy_split_for_migration() {
+        // Mirrors the real on-disk v2 file: 6-field display with split on and
+        // tab index 7 in the right pane, sidebar dragged to 349.
+        let bytes = b"bone-desktop-layout v2\ndisplay 100 1 7 349 1 676\n";
+        let layout = decode(bytes).unwrap();
+        assert_eq!(
+            layout.preferences,
+            Preferences {
+                tool_verbosity: ToolVerbosity::Concise,
+                zoom_percent: 100,
+                sidebar_width: 349,
+                sidebar_width_manual: true,
+            }
+        );
+        assert_eq!(
+            layout.legacy_split,
+            LegacySplit {
+                active: true,
+                tab: 7,
+            }
+        );
+    }
+
+    #[test]
+    fn current_file_never_records_a_legacy_split() {
+        // v4 is encode's only output, so a round-tripped layout re-decodes with
+        // no migration input.
+        let layout = Layout {
+            legacy_split: LegacySplit {
+                active: true,
+                tab: 3,
+            },
+            ..Default::default()
+        };
+        let decoded = decode(encode(&layout).as_bytes()).unwrap();
+        assert_eq!(decoded.legacy_split, LegacySplit::default());
+        // `legacy_split` is excluded from equality, so the durable state still
+        // compares equal.
+        assert_eq!(decoded, layout);
     }
 
     #[test]
     fn display_preferences_round_trip_current_values() {
-        let mut layout = Layout::default();
-        layout.preferences = Preferences {
-            zoom_percent: 75,
-            split: true,
-            split_tab: 3,
-            sidebar_width: 500,
-            split_width: 1200,
+        let layout = Layout {
+            preferences: Preferences {
+                tool_verbosity: ToolVerbosity::Concise,
+                zoom_percent: 75,
+                sidebar_width: 500,
+                sidebar_width_manual: true,
+            },
+            ..Default::default()
         };
         let decoded = decode(encode(&layout).as_bytes()).unwrap();
         assert_eq!(decoded.preferences, layout.preferences);
@@ -456,30 +787,43 @@ mod tests {
 
     #[test]
     fn out_of_range_display_values_are_clamped_on_load() {
-        let bytes = b"bone-desktop-layout v1\ndisplay -10 1 -3 5 99999\n";
+        // Current (v4) record: zoom and sidebar width clamp, flag preserved.
+        let bytes = b"bone-desktop-layout v4\ndisplay -10 5 0\n";
         let layout = decode(bytes).unwrap();
         assert_eq!(
             layout.preferences,
             Preferences {
+                tool_verbosity: ToolVerbosity::Concise,
                 zoom_percent: ZOOM_MIN,
-                split: true,
-                split_tab: 0,
                 sidebar_width: SIDEBAR_WIDTH_MIN,
-                split_width: SPLIT_WIDTH_MAX,
+                sidebar_width_manual: false,
             }
         );
-        // Upper zoom bound clamps to ZOOM_MAX, and split 0 stays false.
-        let bytes = b"bone-desktop-layout v1\ndisplay 9999 0 0 99999 200\n";
+        let bytes = b"bone-desktop-layout v4\ndisplay 9999 99999 1\n";
         let layout = decode(bytes).unwrap();
         assert_eq!(layout.preferences.zoom_percent, ZOOM_MAX);
-        assert!(!layout.preferences.split);
         assert_eq!(layout.preferences.sidebar_width, SIDEBAR_WIDTH_MAX);
-        assert_eq!(layout.preferences.split_width, SPLIT_WIDTH_MIN);
+        assert!(layout.preferences.sidebar_width_manual);
+
+        // Legacy (v1–v3) record: same clamping, and the split flag feeds
+        // `legacy_split` for migration.
+        let bytes = b"bone-desktop-layout v1\ndisplay -10 1 -3 5 99999\n";
+        let layout = decode(bytes).unwrap();
+        assert_eq!(layout.preferences.zoom_percent, ZOOM_MIN);
+        assert_eq!(layout.preferences.sidebar_width, SIDEBAR_WIDTH_MIN);
+        assert!(!layout.preferences.sidebar_width_manual);
+        assert_eq!(
+            layout.legacy_split,
+            LegacySplit {
+                active: true,
+                tab: 0,
+            }
+        );
     }
 
     #[test]
     fn malformed_display_record_is_an_error() {
-        // split flag must be 0 or 1.
+        // Legacy split flag must be 0 or 1.
         assert!(matches!(
             decode(b"bone-desktop-layout v1\ndisplay 100 2 0 230 380\n"),
             Err(FormatError::Number)
@@ -491,6 +835,12 @@ mod tests {
         ));
         // Missing fields.
         assert!(decode(b"bone-desktop-layout v1\ndisplay 100 0\n").is_err());
+        // Current flag must be 0 or 1.
+        assert!(matches!(
+            decode(b"bone-desktop-layout v4\ndisplay 100 230 2\n"),
+            Err(FormatError::Number)
+        ));
+        assert!(decode(b"bone-desktop-layout v4\ndisplay 100 230\n").is_err());
     }
 
     #[test]
@@ -501,15 +851,77 @@ mod tests {
             draft: "héllo ✓\n第二行 🚀\ttabbed\n".into(),
         });
         layout.preferences = Preferences {
+            tool_verbosity: ToolVerbosity::Concise,
             zoom_percent: 125,
-            split: false,
-            split_tab: 0,
             sidebar_width: 250,
-            split_width: 400,
+            sidebar_width_manual: true,
         };
         let encoded = encode(&layout);
         let decoded = decode(encoded.as_bytes()).unwrap();
         assert_eq!(decoded.tabs[0].draft, layout.tabs[0].draft);
         assert_eq!(decoded, layout);
+    }
+
+    #[test]
+    fn proportional_sidebar_default_is_bounded_and_legacy_width_is_not_manual() {
+        assert_eq!(default_sidebar_width(840.0), SIDEBAR_WIDTH_MIN as f32);
+        assert_eq!(default_sidebar_width(400.0), SIDEBAR_WIDTH_MIN as f32);
+        assert_eq!(default_sidebar_width(4000.0), SIDEBAR_WIDTH_MAX as f32);
+        let legacy = decode(b"bone-desktop-layout v1\ndisplay 100 0 0 500 380\n").unwrap();
+        assert_eq!(legacy.preferences.sidebar_width, 500);
+        assert!(!legacy.preferences.sidebar_width_manual);
+    }
+
+    #[test]
+    fn manual_sidebar_width_round_trips_without_clobbering_other_preferences() {
+        let mut layout = Layout::default();
+        layout.preferences.sidebar_width = 410;
+        layout.preferences.sidebar_width_manual = true;
+        let restored = decode(encode(&layout).as_bytes()).unwrap();
+        assert_eq!(restored.preferences, layout.preferences);
+    }
+    #[test]
+    fn responsive_plan_caps_sidebar_but_keeps_central_minimum() {
+        // Wide window: the sidebar shows and is capped so the conversation area
+        // always keeps its minimum.
+        let plan = responsive_plan(1200.0);
+        assert!(plan.show_sidebar);
+        assert_eq!(plan.sidebar_cap, 1200.0 - 320.0); // 880
+        assert!(1200.0 - plan.sidebar_cap >= 320.0);
+    }
+
+    #[test]
+    fn responsive_plan_hides_sidebar_when_window_is_narrow() {
+        // The sidebar hides below the sidebar+central minimum (220+320=540).
+        assert!(responsive_plan(540.0).show_sidebar);
+        assert!(!responsive_plan(539.0).show_sidebar);
+        assert_eq!(responsive_plan(539.0).sidebar_cap, 0.0);
+        assert!(!responsive_plan(520.0).show_sidebar);
+    }
+
+    #[test]
+    fn responsive_plan_sweep_keeps_central_minimum_at_every_width() {
+        let central_min = CENTRAL_WIDTH_MIN as f32;
+        for width in (400..=2400).map(|w| w as f32) {
+            let plan = responsive_plan(width);
+            if plan.show_sidebar {
+                assert!(plan.sidebar_cap >= SIDEBAR_WIDTH_MIN as f32);
+                assert!(
+                    width - plan.sidebar_cap >= central_min - f32::EPSILON,
+                    "central area squeezed by the sidebar cap at width {width}: {plan:?}"
+                );
+            } else {
+                assert_eq!(plan.sidebar_cap, 0.0);
+            }
+        }
+    }
+
+    #[test]
+    fn responsive_plan_rejects_invalid_widths() {
+        for width in [0.0, -100.0, f32::NAN, f32::INFINITY] {
+            let plan = responsive_plan(width);
+            assert!(!plan.show_sidebar, "width {width}: {plan:?}");
+            assert_eq!(plan.sidebar_cap, 0.0);
+        }
     }
 }

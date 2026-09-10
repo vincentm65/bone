@@ -639,9 +639,12 @@ dependencies = [
  "bone-protocol",
  "eframe",
  "image",
+ "libc",
  "pulldown-cmark",
  "rfd",
+ "serde",
  "serde_json",
+ "syntect",
  "tokio",
 ]
 

@@ -67,11 +67,6 @@ impl ImageCache {
         self.preview = None;
     }
 
-    /// Alias useful when the parent replaces a conversation/tab.
-    pub fn reset(&mut self) {
-        self.clear();
-    }
-
     /// Render a thumbnail. Clicking it opens a larger, still locally decoded
     /// preview window. Invalid or oversized payloads are reported inline.
     ///
@@ -146,15 +141,12 @@ impl ImageCache {
         let max_height = (screen.y * 0.8).clamp(240.0, 900.0);
         let mut preview_id = std::collections::hash_map::DefaultHasher::new();
         id.hash(&mut preview_id);
-        egui::Window::new("Image preview")
+        crate::surface::Surface::new("Image preview", "")
             .id(egui::Id::new(("bone-image-preview", preview_id.finish())))
-            .open(&mut open)
-            .resizable(true)
-            .max_width(max_width)
-            .max_height(max_height)
-            .show(ctx, |ui| {
-                let scale = (max_width / image.width as f32)
-                    .min(max_height / image.height as f32)
+            .size(max_width, max_height)
+            .show(ctx, &mut open, |ui| {
+                let scale = (ui.available_width() / image.width as f32)
+                    .min((max_height - 100.0).max(1.0) / image.height as f32)
                     .min(1.0);
                 ui.add(egui::Image::new(egui::load::SizedTexture::new(
                     image.texture.id(),

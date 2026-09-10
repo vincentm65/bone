@@ -1218,3 +1218,89 @@ navigation, provider setup, image display, and client-only preferences.
 - Syntax highlighting, variable-height virtualization, and bounded parse-cache
   eviction remain deferred; measured warm frames currently sit well under
   budget, so none blocks this milestone.
+
+---
+
+## Desktop workspace and window model (2026-09-10)
+
+The desktop milestone above still described a single boolean split
+(`split: bool` / `split_tab` / a `⧉ Split` toggle / `reconcile_split()`). That
+model is gone. `bone-desktop` now owns a small frontend-only ownership tree
+(`native/src/workspace.rs`) that drives real multi-window, tabbed, splittable
+chat windows.
+
+### Ownership tree
+
+- **`Workspace { windows: Vec<Window>, active_window: Id, next_id: Id }`** — the
+  whole layout. IDs are frontend-local (`pub type Id = u64`); they never refer
+  to daemon/session internals, so every layout operation rewrites stable
+  references and never touches a connection.
+- **`Window { id, root: Node, focused_pane, size, position }`** — one native OS
+  window with its own split tree and geometry.
+- **`Node::{Pane, Split}`** — the recursive layout. `Pane { id, tabs, active }`
+  holds a tab group (tab ids are **one-based runtime tab ids**, matching the
+  per-tab `Tab::id`); `Split { id, axis, ratio, first, second }` divides a rect
+  along `Axis::{Horizontal, Vertical}` with an `f32` ratio.
+- **Conversation tabs stay in `DesktopApp::tabs`.** The workspace references
+  them by id only; it does not own conversations, so reconnecting / reloading a
+  conversation never disturbs the layout.
+- Helper accessors: `active_tab(window)`, `focus_tab(tab)`, `focus_pane(pane)`,
+  `move_tab(tab, target, index)`, `focused_pane(window)`, `pane_window`,
+  `panes()`. `active_tab` takes a **window id**; `Layout::selected` remains an
+  **index** into `tabs`.
+
+### Presentation (`native/src/workspace_ui.rs`)
+
+- **Per-window egui viewports.** `viewport(id)` maps window `0` to
+  `egui::ViewportId::ROOT` and any other window to
+  `ViewportId::from_hash_of(("bone-window", id))`; each non-root window is drawn
+  with `show_viewport_immediate`, and focus/close commands are sent to the
+  right viewport (`ViewportCommand::Focus`, `close_requested`).
+- **Tab drag between panes.** `DragTab(Id)` carries a dragged tab across panes;
+  dropping calls `workspace.move_tab`, focusing the target group and syncing the
+  selection. Tab strips, group focus, and per-group tab selection all route
+  through the workspace so exactly one pane per window is focused.
+- **Window/tab context menus.** New window, new tab, split (right / down), close
+  tab, close window — all dispatched as `DesktopApp` actions.
+- **Shortcuts** (also listed by `/help`): `Ctrl+T` new conversation, `Ctrl+W`
+  close conversation, `Ctrl+PageUp`/`Ctrl+PageDown` previous/next conversation,
+  `Ctrl+1…9` select conversation, `Ctrl+\` split right,
+  `Ctrl+Shift+\` split down, `Ctrl+Shift+N` new window,
+  `Ctrl+K` command palette, `Ctrl+P` switch task.
+- **Geometry persistence.** Per-window `size`/`position` and pane `ratio`s are
+  written back into the workspace record.
+
+### Layout persistence (`native/src/layout.rs`)
+
+- Format is now **v4** (`FORMAT_HEADER = b"bone-desktop-layout v4\n"`). The
+  display record no longer carries split fields:
+  `display <zoom_percent> <sidebar_width> <manual 0|1>`.
+- `Preferences { zoom_percent, sidebar_width, sidebar_width_manual }`; the
+  workspace tree is serialized in its own JSON record.
+- **One-time migration.** `decode` still reads v1–v3 headers (old display record
+  `display <zoom> <split 0|1> <split_tab> <sidebar_width> <first> [<split_width>]`).
+  A legacy `split`/`split_tab` is surfaced as `Layout::legacy_split` (a
+  `LegacySplit { active, tab }`), which `open()` hands to
+  `workspace::from_legacy(tabs, selected, split, split_tab)` to rebuild a
+  two-pane workspace the first time. v4 never writes `legacy_split`, so the
+  migration happens exactly once and old files load losslessly.
+- `Layout` keeps a hand-written `PartialEq` that ignores `legacy_split` (the
+  workspace tree holds `f32` ratios and is not `Eq`).
+
+### Status
+
+- `cargo check -p bone-desktop --all-targets`: clean, **zero warnings**.
+- `cargo test -p bone-desktop`: **347 passed, 0 failed, 1 ignored** (release
+  ignored perf test). Covering layout v4 round-trip, v1–v3 migration incl. the
+  legacy split → two-pane path, `responsive_plan` sidebar caps, `/help` window
+  block, and the split/pane tests.
+- Superseded carve-outs removed: `layout::split_cap`,
+  `ResponsivePlan::show_split`, the always-false `split` arg of
+  `responsive_plan`, and the always-`None` `split_width` arg of `sync_display`.
+
+### Remaining gaps (explicit)
+
+- Live multi-window smoke not re-run this pass; verified by unit/integration
+  tests and the headless render tests. Run the window runbooks when GPU VRAM is
+  free.
+- macOS/Windows runtime validation still pending (Linux-only host).

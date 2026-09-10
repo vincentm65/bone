@@ -14,10 +14,14 @@ const W: f32 = 1264.0;
 const H: f32 = 1412.0;
 const TAB_ID: u64 = 1;
 
+/// One renderer scenario: name, transcript rows, tool cards, and whether the
+/// warm budget is enforced (true) or only reported (false).
+type Case = (String, Vec<(String, String)>, Vec<Option<ToolCard>>, bool);
+
 #[test]
 #[ignore = "manual release performance measurement"]
 fn renderer_baseline() {
-    let cases: Vec<(String, Vec<(String, String)>, Vec<Option<ToolCard>>, bool)> = vec![
+    let cases: Vec<Case> = vec![
         (
             "long-history-8MiB".into(),
             (0..10_000)
@@ -57,6 +61,9 @@ fn renderer_baseline() {
                 name: "shell".into(),
                 state: ToolState::Done,
                 args: None,
+                label: None,
+                show_result: None,
+                eager: None,
             })],
             false,
         ),
@@ -79,6 +86,9 @@ fn renderer_baseline() {
                         name: "shell".into(),
                         state: ToolState::Done,
                         args: None,
+                        label: None,
+                        show_result: None,
+                        eager: None,
                     })
                 })
                 .collect(),
@@ -97,7 +107,14 @@ fn renderer_baseline() {
         for frame in 0..12 {
             let start = Instant::now();
             let mut out = ctx.run_ui(input(frame, W), |ui| {
-                cache.show(ui, TAB_ID, true, rows, toolcards);
+                cache.show(
+                    ui,
+                    TAB_ID,
+                    true,
+                    rows,
+                    toolcards,
+                    &crate::theme::ThemeColors::default(),
+                );
             });
             // Headless frames always produce font-atlas deltas; clearing keeps
             // debug builds from panicking in `TexturesDelta::drop`.
@@ -144,7 +161,14 @@ fn renderer_baseline() {
         // rebuild all rows (band-only rendering then resumes at the new width).
         let start = Instant::now();
         let mut out = ctx.run_ui(input(12, 1000.0), |ui| {
-            cache.show(ui, TAB_ID, true, rows, toolcards);
+            cache.show(
+                ui,
+                TAB_ID,
+                true,
+                rows,
+                toolcards,
+                &crate::theme::ThemeColors::default(),
+            );
         });
         out.textures_delta.clear();
         let reflow_ms = start.elapsed().as_secs_f64() * 1000.0;

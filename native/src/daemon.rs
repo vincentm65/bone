@@ -138,12 +138,12 @@ pub fn resolve_binary() -> Option<PathBuf> {
             return Some(path);
         }
     }
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            let candidate = dir.join(executable_name());
-            if candidate.is_file() {
-                return Some(candidate);
-            }
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        let candidate = dir.join(executable_name());
+        if candidate.is_file() {
+            return Some(candidate);
         }
     }
     let path = std::env::var_os("PATH")?;

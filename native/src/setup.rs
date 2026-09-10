@@ -49,11 +49,88 @@
 //!    machine so the next `poll()` re-requests `HostRequest::Setup`, and the
 //!    fresh snapshot rebases the plan (the key must be re-entered).
 
+use std::collections::HashMap;
+
 use bone_protocol::{
-    HostErrorCode, HostRequest, HostResponse, InitChoice, ProviderChoice, SetupApplyResult,
-    SetupSnapshot,
+    CatalogAction, CatalogActionKind, CatalogItem, HostErrorCode, HostRequest, HostResponse,
+    InitChoice, ProviderChoice, SetupApplyResult, SetupSnapshot,
 };
 use eframe::egui;
+
+/// The wizard pages, mirroring the TUI's five-step onboarding flow.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Step {
+    Welcome,
+    Provider,
+    Catalog,
+    Init,
+    Confirm,
+}
+
+impl Step {
+    fn number(self) -> usize {
+        match self {
+            Step::Welcome => 1,
+            Step::Provider => 2,
+            Step::Catalog => 3,
+            Step::Init => 4,
+            Step::Confirm => 5,
+        }
+    }
+
+    fn next(self) -> Step {
+        match self {
+            Step::Welcome => Step::Provider,
+            Step::Provider => Step::Catalog,
+            Step::Catalog => Step::Init,
+            Step::Init => Step::Confirm,
+            Step::Confirm => Step::Confirm,
+        }
+    }
+
+    fn prev(self) -> Step {
+        match self {
+            Step::Welcome => Step::Welcome,
+            Step::Provider => Step::Welcome,
+            Step::Catalog => Step::Provider,
+            Step::Init => Step::Catalog,
+            Step::Confirm => Step::Init,
+        }
+    }
+}
+
+/// One `init.lua` choice offered on the Init step.
+#[derive(Clone, Copy)]
+struct InitOption {
+    choice: InitChoice,
+    label: &'static str,
+    detail: &'static str,
+}
+
+/// The init options the wizard offers: always Populated/Blank, plus Keep when the
+/// daemon reports an existing `init.lua` (mirrors the TUI's option list).
+fn init_options(init_exists: bool) -> Vec<InitOption> {
+    let mut options = vec![
+        InitOption {
+            choice: InitChoice::Populated,
+            label: "Auto-populated",
+            detail: "Banner wiring plus a researcher in subagents.yaml, ready to dispatch.",
+        },
+        InitOption {
+            choice: InitChoice::Blank,
+            label: "Blank",
+            detail: "A minimal placeholder you fill in yourself.",
+        },
+    ];
+    if init_exists {
+        options.push(InitOption {
+            choice: InitChoice::Keep,
+            label: "Keep current",
+            detail: "Leave my existing init.lua untouched.",
+        });
+    }
+    options
+}
 
 /// Result of feeding one correlated response into [`SetupUi::handle_response`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -114,6 +191,17 @@ pub struct SetupUi {
     applied: Option<SetupApplyResult>,
     /// Latest host error, shown in the error panel.
     error: Option<(HostErrorCode, String)>,
+    /// Current wizard page.
+    step: Step,
+    /// Catalog entries from the snapshot; checked/touched state lives in the
+    /// maps below so the entries stay immutable.
+    catalog: Vec<CatalogItem>,
+    /// Checked state per catalog item name (seeded from installed/update).
+    cat_checked: HashMap<String, bool>,
+    /// `init.lua` choices offered (Populated/Blank, plus Keep when applicable).
+    init_options: Vec<InitOption>,
+    /// Selected `init.lua` option.
+    init_cursor: usize,
 }
 
 impl Default for SetupUi {
@@ -139,6 +227,11 @@ impl SetupUi {
             stale: false,
             applied: None,
             error: None,
+            step: Step::Welcome,
+            catalog: Vec::new(),
+            cat_checked: HashMap::new(),
+            init_options: init_options(false),
+            init_cursor: 0,
         }
     }
 
@@ -189,6 +282,16 @@ impl SetupUi {
         self.error = None;
         self.stale = false;
         self.pending = false;
+        // (Re)seed the wizard from the fresh snapshot.
+        self.step = Step::Welcome;
+        self.catalog = snapshot.catalog.items.clone();
+        self.cat_checked.clear();
+        for item in &self.catalog {
+            self.cat_checked
+                .insert(item.name.clone(), item.installed || item.update_available);
+        }
+        self.init_options = init_options(snapshot.init_exists);
+        self.init_cursor = 0;
         self.snapshot = Some(snapshot);
     }
 
@@ -243,13 +346,108 @@ impl SetupUi {
         self.selected().is_some_and(|p| !p.api_key_configured)
     }
 
-    /// True while a snapshot is stored and something is actionable: the
-    /// selected provider has no key, or first-launch onboarding is pending.
-    /// The parent uses this to decide whether to auto-open the dialog.
+    /// Client-side credential sanity check for the typed key.
+    ///
+    /// The host protocol has no provider "test" call and this crate never links
+    /// `bone-core`, so a typed key cannot be authenticated here — the daemon
+    /// persists it as-is. We do reject obvious paste errors (embedded
+    /// whitespace or control characters) before sending. An empty field means
+    /// "skip / keep the existing key" and is always allowed.
+    pub fn key_error(&self) -> Option<&'static str> {
+        let key = self.api_key.trim();
+        if key.is_empty() {
+            return None;
+        }
+        if key.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Some(
+                "The API key contains spaces or control characters — check for a bad paste.",
+            );
+        }
+        None
+    }
+
+    /// True when the plan can be applied: a provider is selected and the typed
+    /// key (if any) passes the client-side sanity check.
+    pub fn can_apply(&self) -> bool {
+        self.selected().is_some() && self.key_error().is_none()
+    }
+
+    /// True when the selected provider has no configured key and none was typed,
+    /// so applying would leave it unusable (mirrors the TUI's no-key warning).
+    pub fn missing_key_warning(&self) -> bool {
+        self.selected().is_some_and(|p| !p.api_key_configured) && self.api_key.trim().is_empty()
+    }
+
+    /// Auto-offer setup only when the daemon reports first-launch onboarding.
+    /// An unconfigured selection is still editable through explicit setup, but
+    /// must not interrupt users who already have another working provider.
     pub fn actionable(&self) -> bool {
-        self.snapshot
-            .as_ref()
-            .is_some_and(|s| s.needs_onboarding || self.needs_key())
+        self.snapshot.as_ref().is_some_and(|s| s.needs_onboarding)
+    }
+
+    /// True once a `SetupApply` has been accepted by the daemon (terminal
+    /// success state; the parent can show a "done" notice on close).
+    pub fn completed(&self) -> bool {
+        self.applied.is_some()
+    }
+
+    /// The catalog entries offered on the Catalog step.
+    pub fn catalog(&self) -> &[CatalogItem] {
+        &self.catalog
+    }
+
+    /// The checked state for one catalog item (seeded installed/update-checked).
+    fn cat_checked(&self, item: &CatalogItem) -> bool {
+        *self
+            .cat_checked
+            .get(&item.name)
+            .unwrap_or(&(item.installed || item.update_available))
+    }
+
+    /// Toggle one catalog item's checked state.
+    fn toggle_catalog(&mut self, name: &str) {
+        let current = self.cat_checked.get(name).copied().unwrap_or(false);
+        self.cat_checked.insert(name.to_owned(), !current);
+    }
+
+    /// The catalog actions the plan will send: only items whose checked state
+    /// differs from the snapshot, plus any pending update. Mirrors the TUI's
+    /// `catalog::actions(..., touched_only = false)`.
+    fn catalog_actions(&self) -> Vec<CatalogAction> {
+        self.catalog
+            .iter()
+            .filter_map(|item| {
+                let checked = self.cat_checked(item);
+                if checked != item.installed || (checked && item.update_available) {
+                    Some(CatalogAction {
+                        name: item.name.clone(),
+                        action: if checked {
+                            CatalogActionKind::Install
+                        } else {
+                            CatalogActionKind::Remove
+                        },
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    /// The currently selected `init.lua` choice.
+    fn init_choice(&self) -> InitChoice {
+        self.init_options
+            .get(self.init_cursor)
+            .map(|o| o.choice)
+            .unwrap_or(InitChoice::Keep)
+    }
+
+    /// The label of the selected `init.lua` choice (for the confirm summary).
+    fn init_label(&self) -> &'static str {
+        self.init_options
+            .get(self.init_cursor)
+            .map(|o| o.label)
+            .unwrap_or("Keep current")
     }
 
     // ---- plan and lifecycle ------------------------------------------------
@@ -258,24 +456,29 @@ impl SetupUi {
     /// key copy (the wire request is the only copy that remains), and mark
     /// the request in flight.
     ///
-    /// The plan always uses the snapshot's config and catalog revisions,
-    /// `InitChoice::Keep`, and empty catalog actions: onboarding never
-    /// touches `init.lua` or the catalog. Returns `None` — with no side
-    /// effects — when no provider is selectable.
+    /// The plan uses the snapshot's config and catalog revisions, the selected
+    /// `init.lua` choice, and the catalog actions collected on the Catalog
+    /// step. Returns `None` — with no side effects — when no provider is
+    /// selectable.
     pub fn submit(&mut self) -> Option<HostRequest> {
-        let snapshot = self.snapshot.as_ref()?;
+        let (config_revision, catalog_revision) = {
+            let snapshot = self.snapshot.as_ref()?;
+            (snapshot.config_revision, snapshot.catalog.revision.clone())
+        };
         let provider_id = self.provider.clone()?;
         let api_key = (!self.api_key.trim().is_empty()).then(|| self.api_key.trim().to_string());
+        let catalog = self.catalog_actions();
+        let init = self.init_choice();
         self.api_key.clear();
         self.error = None;
         self.pending = true;
         Some(HostRequest::SetupApply {
-            expected_config_revision: snapshot.config_revision,
-            expected_catalog_revision: snapshot.catalog.revision.clone(),
+            expected_config_revision: config_revision,
+            expected_catalog_revision: catalog_revision,
             provider_id: Some(provider_id),
             api_key,
-            catalog: Vec::new(),
-            init: InitChoice::Keep,
+            catalog,
+            init,
         })
     }
 
@@ -408,31 +611,12 @@ impl SetupUi {
             }
             return RenderOutcome::default();
         }
-        // Clone the small snapshot so the dialog can mutate `self` (select,
-        // key field, buttons) while still reading the list — same pattern as
-        // the provider dialog in `main.rs`.
-        let (providers, active, needs_onboarding) = match &self.snapshot {
-            Some(snapshot) => (
-                snapshot.providers.clone(),
-                snapshot.active_provider.clone(),
-                snapshot.needs_onboarding,
-            ),
-            None => {
-                ui.weak(if self.pending {
-                    "Loading daemon setup state…"
-                } else {
-                    "Waiting for a daemon connection…"
-                });
-                ui.add_space(4.0);
-                if ui.button("Close").clicked() {
-                    return RenderOutcome::close();
-                }
-                return RenderOutcome::default();
-            }
-        };
-        if providers.is_empty() {
-            ui.label("No providers are configured on this daemon.");
-            ui.weak("Add one on the daemon (e.g. its providers config) and reopen setup.");
+        if self.snapshot.is_none() {
+            ui.weak(if self.pending {
+                "Loading daemon setup state…"
+            } else {
+                "Waiting for a daemon connection…"
+            });
             ui.add_space(4.0);
             if ui.button("Close").clicked() {
                 return RenderOutcome::close();
@@ -440,81 +624,227 @@ impl SetupUi {
             return RenderOutcome::default();
         }
 
-        ui.label(egui::RichText::new("Provider").strong());
-        if needs_onboarding {
-            ui.weak("First launch: pick a provider and add its API key to get started.");
-        }
-        for provider in &providers {
-            let is_active = provider.id == active;
-            let marker = if is_active { "●" } else { "○" };
-            let label = if provider.label.is_empty() {
-                provider.id.clone()
-            } else {
-                provider.label.clone()
-            };
-            let suffix = if provider.api_key_configured {
-                String::new()
-            } else {
-                " (no API key)".to_string()
-            };
-            let selected = self.provider.as_deref() == Some(provider.id.as_str());
-            if ui
-                .selectable_label(
-                    selected,
-                    egui::RichText::new(format!("{marker} {label}{suffix}")),
-                )
-                .on_hover_text(if is_active {
-                    "Active provider"
-                } else {
-                    "Select to activate on save"
-                })
-                .clicked()
-            {
-                self.select_provider(&provider.id);
-            }
-        }
-
-        if self.needs_key() || !self.api_key.is_empty() {
-            ui.separator();
-            let hint = if self.needs_key() {
-                "type the provider's API key"
-            } else {
-                "leave blank to keep the current key"
-            };
-            ui.horizontal(|ui| {
-                ui.label("API key");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.api_key)
-                        .password(true)
-                        .desired_width(220.0)
-                        .hint_text(hint),
-                );
+        // Header: title + step counter.
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new("bone setup").strong());
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.weak(format!(
+                    "step {} of {}",
+                    self.step.number(),
+                    Step::Confirm.number()
+                ));
             });
-            ui.weak(
-                "Sent to the daemon on Save. The app never logs it and \
-                 forgets it as soon as the dialog closes.",
-            );
+        });
+        ui.separator();
+        match self.step {
+            Step::Welcome => self.render_welcome(ui),
+            Step::Provider => self.render_provider(ui),
+            Step::Catalog => self.render_catalog(ui),
+            Step::Init => self.render_init(ui),
+            Step::Confirm => self.render_confirm(ui),
         }
 
         ui.add_space(4.0);
-        // A provider that has no key on the daemon cannot be saved with a blank
-        // field: the daemon would skip the upsert and still report success.
-        let can_save = !(self.needs_key() && self.api_key.trim().is_empty());
+        ui.separator();
         let mut outcome = RenderOutcome::default();
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(can_save, egui::Button::new("Save"))
-                .clicked()
-            {
-                outcome.request = self.submit();
-            } else if ui.button("Cancel").clicked() {
-                outcome.close = true;
+            if self.step != Step::Welcome && ui.button("← Back").clicked() {
+                self.step = self.step.prev();
             }
+            let forward = match self.step {
+                Step::Welcome => "Start",
+                Step::Confirm => "Apply",
+                _ => "Next →",
+            };
+            let ready = self.step != Step::Confirm || self.can_apply();
+            if ui.add_enabled(ready, egui::Button::new(forward)).clicked() {
+                if self.step == Step::Confirm {
+                    outcome.request = self.submit();
+                } else {
+                    self.step = self.step.next();
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.button("Cancel").clicked() {
+                    outcome.close = true;
+                }
+            });
         });
-        if !can_save {
-            ui.weak("Enter this provider's API key to save.");
-        }
         outcome
+    }
+
+    // ---- wizard pages -------------------------------------------------------
+
+    fn render_welcome(&self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Welcome to Bone").strong());
+        ui.add_space(4.0);
+        ui.label("This quick setup configures the daemon host. You'll set:");
+        ui.add_space(2.0);
+        ui.label("• Provider — pick one and drop in an API key (optional).");
+        ui.label("• Catalog — optional tools & commands, downloaded on demand.");
+        ui.label("• init.lua — startup script, banner, and advanced hooks.");
+        ui.add_space(4.0);
+        ui.weak(
+            "Everything is editable later — just ask bone, or run /setup again. \
+             Nothing is written locally; the daemon persists the plan on Apply.",
+        );
+    }
+
+    fn render_provider(&mut self, ui: &mut egui::Ui) {
+        // Clone so the loop can mutate `self` while reading the list.
+        let providers = self.providers().to_vec();
+        ui.label(egui::RichText::new("Pick a provider and add a key").strong());
+        if self.snapshot.as_ref().is_some_and(|s| s.needs_onboarding) {
+            ui.weak("First launch: pick a provider and add its API key to get started.");
+        }
+        ui.add_space(4.0);
+        if providers.is_empty() {
+            ui.label("No providers are configured on this daemon.");
+            ui.weak("Add one on the daemon (e.g. its providers config) and reopen setup.");
+        } else {
+            let active = self
+                .snapshot
+                .as_ref()
+                .map(|s| s.active_provider.clone())
+                .unwrap_or_default();
+            for provider in &providers {
+                let is_active = provider.id == active;
+                let marker = if is_active { "●" } else { "○" };
+                let label = if provider.label.is_empty() {
+                    provider.id.clone()
+                } else {
+                    provider.label.clone()
+                };
+                let suffix = if provider.api_key_configured {
+                    String::new()
+                } else {
+                    " (no API key)".to_string()
+                };
+                let selected = self.provider.as_deref() == Some(provider.id.as_str());
+                if ui
+                    .selectable_label(
+                        selected,
+                        egui::RichText::new(format!("{marker} {label}{suffix}")),
+                    )
+                    .on_hover_text(if is_active {
+                        "Active provider"
+                    } else {
+                        "Select to activate on apply"
+                    })
+                    .clicked()
+                {
+                    self.select_provider(&provider.id);
+                }
+            }
+        }
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label("API key");
+            ui.add(
+                egui::TextEdit::singleline(&mut self.api_key)
+                    .password(true)
+                    .desired_width(220.0)
+                    .hint_text("leave blank to skip"),
+            );
+        });
+        ui.weak(
+            "Sent to the daemon on Apply. The app never logs it and forgets it \
+             as soon as the dialog closes.",
+        );
+        if let Some(error) = self.key_error() {
+            ui.colored_label(egui::Color32::from_rgb(235, 90, 90), error);
+        }
+    }
+
+    fn render_catalog(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Pick optional tools & commands").strong());
+        if self.catalog.is_empty() {
+            ui.add_space(4.0);
+            ui.weak(
+                "bone couldn't reach the catalog (you may be offline). Skip for \
+                 now and add tools later with /catalog.",
+            );
+            return;
+        }
+        ui.weak("They download once selected. Uncheck to remove an installed item.");
+        ui.add_space(4.0);
+        let items = self.catalog.clone();
+        egui::ScrollArea::vertical()
+            .id_salt("setup_catalog")
+            .max_height(220.0)
+            .show(ui, |ui| {
+                for item in &items {
+                    let mut checked = self.cat_checked(item);
+                    let mut label = item.name.clone();
+                    if item.update_available {
+                        label.push_str("  (update available)");
+                    } else if item.installed {
+                        label.push_str("  (installed)");
+                    }
+                    if ui.checkbox(&mut checked, label).changed() {
+                        self.toggle_catalog(&item.name);
+                    }
+                }
+            });
+    }
+
+    fn render_init(&mut self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("How should your init.lua start?").strong());
+        ui.weak("init.lua runs once at launch.");
+        ui.add_space(4.0);
+        let options = self.init_options.clone();
+        for (i, option) in options.iter().enumerate() {
+            let selected = i == self.init_cursor;
+            if ui.selectable_label(selected, option.label).clicked() {
+                self.init_cursor = i;
+            }
+        }
+        if let Some(option) = options.get(self.init_cursor) {
+            ui.add_space(4.0);
+            ui.weak(option.detail);
+        }
+    }
+
+    fn render_confirm(&self, ui: &mut egui::Ui) {
+        ui.label(egui::RichText::new("Ready to set up bone.").strong());
+        ui.add_space(4.0);
+        let provider = self
+            .selected()
+            .map(|p| {
+                if p.label.is_empty() {
+                    p.id.clone()
+                } else {
+                    p.label.clone()
+                }
+            })
+            .unwrap_or_else(|| "skipped".to_string());
+        let key = if self.api_key.trim().is_empty() {
+            if self.selected().is_some_and(|p| p.api_key_configured) {
+                "keep current".to_string()
+            } else {
+                "skipped".to_string()
+            }
+        } else {
+            format!("{} characters", self.key_len())
+        };
+        ui.label(format!("Provider:   {provider}"));
+        ui.label(format!("API key:    {key}"));
+        ui.label(format!(
+            "Catalog:    {} change(s)",
+            self.catalog_actions().len()
+        ));
+        ui.label(format!("init.lua:   {}", self.init_label()));
+        ui.add_space(4.0);
+        if let Some(error) = self.key_error() {
+            ui.colored_label(egui::Color32::from_rgb(235, 90, 90), error);
+        } else if self.missing_key_warning() {
+            ui.colored_label(
+                egui::Color32::from_rgb(235, 190, 80),
+                "No API key for this provider yet — it will stay unusable until you \
+                 add one (via /config or /setup).",
+            );
+        }
+        ui.weak("Apply sends this plan to the daemon host; Cancel leaves config unchanged.");
     }
 }
 
@@ -567,6 +897,33 @@ mod tests {
         }
     }
 
+    fn cat_item(name: &str, installed: bool, update: bool) -> CatalogItem {
+        CatalogItem {
+            name: name.to_string(),
+            installed,
+            update_available: update,
+            ..CatalogItem::default()
+        }
+    }
+
+    fn snapshot_with_catalog(
+        revision: u64,
+        items: Vec<CatalogItem>,
+        init_exists: bool,
+    ) -> SetupSnapshot {
+        SetupSnapshot {
+            config_revision: revision,
+            providers: vec![provider("local", true)],
+            active_provider: "local".to_string(),
+            init_exists,
+            needs_onboarding: false,
+            catalog: CatalogSnapshot {
+                revision: "cat-1".to_string(),
+                items,
+            },
+        }
+    }
+
     /// Drive one headless egui frame over `render` (no window, no input).
     fn render_once(state: &mut SetupUi) -> RenderOutcome {
         let ctx = egui::Context::default();
@@ -599,7 +956,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_uses_snapshot_revisions_keep_init_and_no_catalog_actions() {
+    fn plan_uses_snapshot_revisions_and_defaults() {
         let mut ui = SetupUi::new();
         ui.show(snapshot(
             7,
@@ -624,8 +981,96 @@ mod tests {
         assert_eq!(expected_catalog_revision, "cat-1");
         assert_eq!(provider_id.as_deref(), Some("local"));
         assert_eq!(api_key.as_deref(), Some("sk-test-123"));
-        assert!(catalog.is_empty(), "onboarding never mutates the catalog");
-        assert_eq!(init, InitChoice::Keep, "onboarding never touches init.lua");
+        assert!(catalog.is_empty(), "no catalog items: no actions");
+        assert_eq!(
+            init,
+            InitChoice::Populated,
+            "default init choice is auto-populated"
+        );
+    }
+
+    #[test]
+    fn catalog_is_seeded_and_actions_reflect_checked_state() {
+        let mut ui = SetupUi::new();
+        ui.show(snapshot_with_catalog(
+            1,
+            vec![
+                cat_item("alpha", true, false), // installed -> checked
+                cat_item("beta", false, false), // not installed -> unchecked
+                cat_item("gamma", true, true),  // installed + update -> checked
+            ],
+            false,
+        ));
+        assert_eq!(ui.catalog().len(), 3);
+        assert!(ui.cat_checked(&ui.catalog()[0]));
+        assert!(!ui.cat_checked(&ui.catalog()[1]));
+        assert!(ui.cat_checked(&ui.catalog()[2]));
+        // No user changes: only the pending update is actionable.
+        let actions = ui.catalog_actions();
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].name, "gamma");
+        assert_eq!(actions[0].action, CatalogActionKind::Install);
+
+        // Toggle beta on (install) and alpha off (remove).
+        ui.toggle_catalog("beta");
+        ui.toggle_catalog("alpha");
+        let actions = ui.catalog_actions();
+        assert_eq!(actions.len(), 3);
+        assert_eq!(actions[0].name, "alpha");
+        assert_eq!(actions[0].action, CatalogActionKind::Remove);
+        assert_eq!(actions[1].name, "beta");
+        assert_eq!(actions[1].action, CatalogActionKind::Install);
+        assert_eq!(actions[2].name, "gamma");
+        assert_eq!(actions[2].action, CatalogActionKind::Install);
+    }
+
+    #[test]
+    fn init_options_depend_on_existing_init_lua() {
+        let mut ui = SetupUi::new();
+        ui.show(snapshot_with_catalog(1, Vec::new(), false));
+        assert_eq!(ui.init_choice(), InitChoice::Populated);
+        assert_eq!(ui.init_label(), "Auto-populated");
+        assert!(!ui.init_options.iter().any(|o| o.choice == InitChoice::Keep));
+
+        let mut ui = SetupUi::new();
+        ui.show(snapshot_with_catalog(1, Vec::new(), true));
+        assert!(ui.init_options.iter().any(|o| o.choice == InitChoice::Keep));
+        // Select Keep (last option) and confirm it flows into the plan.
+        ui.init_cursor = ui.init_options.len() - 1;
+        assert_eq!(ui.init_choice(), InitChoice::Keep);
+        let HostRequest::SetupApply { init, .. } = ui.submit().expect("plan") else {
+            panic!("expected SetupApply");
+        };
+        assert_eq!(init, InitChoice::Keep);
+    }
+
+    #[test]
+    fn submit_includes_catalog_and_selected_init_choice() {
+        let mut ui = SetupUi::new();
+        ui.show(snapshot_with_catalog(
+            3,
+            vec![cat_item("alpha", false, false)],
+            true,
+        ));
+        ui.toggle_catalog("alpha"); // install alpha
+        ui.init_cursor = 0; // Auto-populated
+        let HostRequest::SetupApply { catalog, init, .. } = ui.submit().expect("plan") else {
+            panic!("expected SetupApply");
+        };
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].name, "alpha");
+        assert_eq!(catalog[0].action, CatalogActionKind::Install);
+        assert_eq!(init, InitChoice::Populated);
+    }
+
+    #[test]
+    fn step_navigation_wraps_at_the_ends() {
+        assert_eq!(Step::Welcome.number(), 1);
+        assert_eq!(Step::Confirm.number(), 5);
+        assert_eq!(Step::Welcome.prev(), Step::Welcome);
+        assert_eq!(Step::Confirm.next(), Step::Confirm);
+        assert_eq!(Step::Welcome.next(), Step::Provider);
+        assert_eq!(Step::Confirm.prev(), Step::Init);
     }
 
     #[test]
@@ -751,6 +1196,48 @@ mod tests {
     }
 
     #[test]
+    fn key_error_flags_bad_pastes_but_allows_blank_and_clean_keys() {
+        let mut ui = SetupUi::new();
+        ui.show(snapshot(1, "c", vec![provider("local", false)], "local"));
+        assert_eq!(ui.key_error(), None, "blank key is a valid skip");
+        ui.set_api_key("sk-abc 123");
+        assert!(ui.key_error().is_some(), "embedded space is a paste error");
+        ui.set_api_key("sk-abc\n123");
+        assert!(
+            ui.key_error().is_some(),
+            "embedded newline is a paste error"
+        );
+        ui.set_api_key("  sk-abc-123  ");
+        assert_eq!(ui.key_error(), None, "surrounding whitespace is trimmed");
+    }
+
+    #[test]
+    fn can_apply_requires_a_provider_and_a_sane_key() {
+        let mut ui = SetupUi::new();
+        ui.show(snapshot(1, "c", vec![provider("local", false)], "local"));
+        assert!(ui.can_apply(), "blank key with a provider is applicable");
+        ui.set_api_key("sk a");
+        assert!(!ui.can_apply(), "malformed key blocks apply");
+        // No providers: nothing to apply.
+        let mut ui = SetupUi::new();
+        ui.show(snapshot(1, "c", Vec::new(), ""));
+        assert!(!ui.can_apply(), "no provider selected");
+    }
+
+    #[test]
+    fn missing_key_warning_tracks_provider_and_field() {
+        let mut ui = SetupUi::new();
+        ui.show(snapshot(1, "c", vec![provider("local", false)], "local"));
+        assert!(ui.missing_key_warning());
+        ui.set_api_key("sk-123");
+        assert!(!ui.missing_key_warning());
+        // Provider already has a key: no warning even with an empty field.
+        let mut ui = SetupUi::new();
+        ui.show(snapshot(1, "c", vec![provider("local", true)], "local"));
+        assert!(!ui.missing_key_warning());
+    }
+
+    #[test]
     fn non_setup_responses_are_ignored() {
         let mut ui = SetupUi::new();
         ui.show(snapshot(1, "c", vec![provider("local", false)], "local"));
@@ -788,6 +1275,22 @@ mod tests {
         ui.show(s);
         assert!(!ui.actionable());
         assert!(!ui.needs_key());
+    }
+
+    #[test]
+    fn configured_daemon_does_not_offer_setup_for_an_unconfigured_selection() {
+        let mut ui = SetupUi::new();
+        let mut s = snapshot(
+            1,
+            "c",
+            vec![provider("local", false), provider("working", true)],
+            "local",
+        );
+        s.needs_onboarding = false;
+        ui.show(s);
+        assert!(ui.needs_key());
+        assert!(!ui.actionable());
+        assert!(ui.can_apply(), "explicit setup remains usable");
     }
 
     #[test]
