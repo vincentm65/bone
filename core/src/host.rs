@@ -48,6 +48,10 @@ impl HostService {
     /// Execute one typed request synchronously on the daemon host.
     pub fn execute(&self, request: HostRequest) -> HostResponse {
         match request {
+            HostRequest::WorkspaceReview => match std::env::current_dir() {
+                Ok(root) => crate::workspace_review::review(&root),
+                Err(error) => host_error(HostErrorCode::Unavailable, error),
+            },
             HostRequest::Stats { range } => self.stats(range),
             HostRequest::Conversations { limit } => self.conversations(limit),
             HostRequest::ConversationRename { id, title, limit } => {
@@ -103,8 +107,7 @@ impl HostService {
     /// "some recents" without tuning a number.
     fn conversations(&self, limit: u32) -> HostResponse {
         let limit = Self::resolve_conversation_limit(limit);
-        let result =
-            SessionDb::open(&self.db_path).and_then(|db| db.recent_conversations(limit));
+        let result = SessionDb::open(&self.db_path).and_then(|db| db.recent_conversations(limit));
         match result {
             Ok(conversations) => HostResponse::Conversations(conversations),
             Err(error) => host_error(HostErrorCode::Unavailable, error),

@@ -299,11 +299,7 @@ impl RuntimeProjection {
             },
             // Always send this, including for an empty new conversation, so
             // switching actors clears stale frontend scrollback.
-            RuntimeEvent::ConversationLoaded {
-                messages: session.display_transcript(),
-                snapshot,
-                busy,
-            },
+            bounded_conversation_loaded(session.display_transcript(), snapshot, busy),
             // Apply the full view after ConversationLoaded resets transient
             // client state; otherwise the reset can immediately discard panes
             // from this authoritative projection.
@@ -960,6 +956,62 @@ fn bounded_jobs_snapshot(
     RuntimeEvent::JobsSnapshot { version, jobs }
 }
 
+/// Trim `messages` to the newest suffix whose serialized event fits `max_bytes`.
+///
+/// A long conversation's durable history can exceed [`MAX_LINE_BYTES`] once
+/// JSON-encoded, so the daemon would fail to write the frame and drop the
+/// connection mid-replay. Dropping the oldest messages first keeps the newest
+/// context visible while holding the frame within the transport cap, mirroring
+/// [`bounded_jobs_snapshot`].
+///
+/// [`MAX_LINE_BYTES`]: crate::rpc::codec::MAX_LINE_BYTES
+fn bound_transcript(
+    messages: Vec<ChatMessage>,
+    max_bytes: usize,
+    encode: impl Fn(&[ChatMessage]) -> usize,
+) -> Vec<ChatMessage> {
+    let total = encode(&messages);
+    if total <= max_bytes {
+        return messages;
+    }
+    // Remove oldest messages until at least `excess` bytes are gone. Each
+    // message's own encoded length underestimates what removal frees (it omits
+    // the array comma), so stopping guarantees the remainder fits.
+    let mut excess = total - max_bytes;
+    let mut start = 0;
+    while start < messages.len() && excess > 0 {
+        let removed = serde_json::to_vec(&messages[start])
+            .expect("chat messages are serializable")
+            .len();
+        excess = excess.saturating_sub(removed);
+        start += 1;
+    }
+    messages[start..].to_vec()
+}
+
+/// Build a `ConversationLoaded` event bounded to the transport cap, keeping the
+/// newest messages when the full transcript would not fit one frame.
+fn bounded_conversation_loaded(
+    messages: Vec<ChatMessage>,
+    snapshot: crate::runtime::SessionSnapshot,
+    busy: bool,
+) -> RuntimeEvent {
+    let messages = bound_transcript(messages, crate::rpc::codec::MAX_LINE_BYTES, |msgs| {
+        serde_json::to_vec(&RuntimeEvent::ConversationLoaded {
+            messages: msgs.to_vec(),
+            snapshot: snapshot.clone(),
+            busy,
+        })
+        .expect("conversation loaded is serializable")
+        .len()
+    });
+    RuntimeEvent::ConversationLoaded {
+        messages,
+        snapshot,
+        busy,
+    }
+}
+
 struct BlockingCtxSetup {
     app_state: crate::ext::ctx::AppCtxState,
     cancel: Arc<std::sync::atomic::AtomicBool>,
@@ -1032,6 +1084,9 @@ impl BlockingCtxSetup {
                 )),
                 turn_state: Some(Arc::new(std::sync::OnceLock::new())),
                 max_tokens: None,
+                // Top-level daemon hook completions; delegated agents build their
+                // own driver (with its own depth) rather than routing here.
+                agent_depth: 0,
             },
             usage_records: Arc::clone(&self.usage_records),
         });
@@ -1201,17 +1256,34 @@ impl DaemonCtx {
     }
 
     fn publish_synchronized_state(&self, request_id: u64, include_messages: bool, busy: bool) {
-        let (snapshot, messages) = {
+        let (snapshot, view, messages) = {
             let session = self.session.lock().unwrap();
             let snapshot = session.snapshot(self.llm.id(), self.llm.model());
+            let view: Option<bone_protocol::ViewModel> =
+                Some(crate::ext::api_ui::snapshot(&self.extensions.ui_handle()).into());
             let messages = include_messages.then(|| session.display_transcript());
-            (snapshot, messages)
+            (snapshot, view, messages)
         };
+        // Bound the repair transcript too: the same cap applies whether the
+        // full history arrives via attach or a post-lag resync.
+        let messages = messages.map(|messages| {
+            bound_transcript(messages, crate::rpc::codec::MAX_LINE_BYTES, |msgs| {
+                serde_json::to_vec(&RuntimeEvent::StateSynchronized {
+                    request_id,
+                    busy,
+                    snapshot: snapshot.clone(),
+                    view: view.clone(),
+                    messages: Some(msgs.to_vec()),
+                })
+                .expect("state synchronized is serializable")
+                .len()
+            })
+        });
         self.hub.publish(RuntimeEvent::StateSynchronized {
             request_id,
             busy,
             snapshot,
-            view: Some(crate::ext::api_ui::snapshot(&self.extensions.ui_handle()).into()),
+            view,
             messages,
         });
         // The correlated completion atomically replaces stale session + view
@@ -1759,67 +1831,77 @@ impl DaemonCtx {
         }
         let loaded = {
             let s = self.session.lock().unwrap();
-            s.session_db.as_ref().and_then(|db| {
-                let full = db.load_messages(id).ok()?;
-                let effective = db.load_effective_transcript(id).ok()?;
-                let provider_model = db.conversation_provider_model(id).ok().flatten();
-                Some((full, effective, provider_model))
-            })
+            match s.session_db.as_ref() {
+                None => Err(format!(
+                    "failed to load conversation {id}: session database unavailable"
+                )),
+                Some(db) => match db.conversation_exists(id) {
+                    Ok(false) => Err(format!("conversation {id} not found")),
+                    Ok(true) => (|| {
+                        let rows = db.load_messages(id)?;
+                        let effective = db.load_effective_transcript(id)?;
+                        let provider_model = db.conversation_provider_model(id)?;
+                        Ok((rows, effective, provider_model))
+                    })()
+                    .map_err(|error: rusqlite::Error| {
+                        format!("failed to load conversation {id}: {error}")
+                    }),
+                    Err(error) => Err(format!("failed to load conversation {id}: {error}")),
+                },
+            }
         };
-        if let Some((rows, effective, provider_model)) = loaded {
-            let changing_conversation = self.session.lock().unwrap().conversation_id != Some(id);
-            if changing_conversation {
-                self.cancel_background_work();
-            }
-            if let Some((provider_id, model)) = provider_model {
-                self.restore_provider(&provider_id, &model);
-            }
-            let messages = rows
-                .into_iter()
-                .map(crate::session_db::stored_to_chat_message)
-                .collect::<Vec<_>>();
-            let system_prompt = crate::llm::prompts::system_prompt(
-                self.config
-                    .runtime_settings_snapshot()
-                    .resolved()
-                    .general
-                    .system_prompt(),
-            );
-            let snapshot = {
-                let mut s = self.session.lock().unwrap();
-                if let Some(db) = s.session_db.as_ref() {
-                    if let Some(old) = s.conversation_id
-                        && old != id
-                    {
-                        let _ = db.end_conversation(old);
-                    }
-                    let _ = db.reopen_conversation(id);
+        match loaded {
+            Ok((rows, effective, provider_model)) => {
+                let changing_conversation =
+                    self.session.lock().unwrap().conversation_id != Some(id);
+                if changing_conversation {
+                    self.cancel_background_work();
                 }
-                s.conversation_id = Some(id);
-                s.session_seq = s
-                    .session_db
-                    .as_ref()
-                    .and_then(|db| db.max_message_seq(id).ok())
-                    .unwrap_or(0);
-                s.transcript = effective;
-                s.restore_usage_and_context(&system_prompt);
-                s.snapshot(self.llm.id(), self.llm.model())
-            };
-            self.reset_host_tool_state();
-            self.hub.publish(RuntimeEvent::ConversationLoaded {
-                messages,
-                snapshot,
-                busy: false,
-            });
-            // ConversationLoaded resets client-owned transient UI state. Reapply
-            // the canonical extension view afterwards so surviving status lines,
-            // highlights, and non-conversation panes remain visible.
-            self.hub.publish(view_snapshot(&self.extensions));
-        } else {
-            self.hub.publish(RuntimeEvent::ConversationLoadFailed {
-                id,
-                message: format!("failed to load conversation {id}"),
-            });
+                if let Some((provider_id, model)) = provider_model {
+                    self.restore_provider(&provider_id, &model);
+                }
+                let messages = rows
+                    .into_iter()
+                    .map(crate::session_db::stored_to_chat_message)
+                    .collect::<Vec<_>>();
+                let system_prompt = crate::llm::prompts::system_prompt(
+                    self.config
+                        .runtime_settings_snapshot()
+                        .resolved()
+                        .general
+                        .system_prompt(),
+                );
+                let snapshot = {
+                    let mut s = self.session.lock().unwrap();
+                    if let Some(db) = s.session_db.as_ref() {
+                        if let Some(old) = s.conversation_id
+                            && old != id
+                        {
+                            let _ = db.end_conversation(old);
+                        }
+                        let _ = db.reopen_conversation(id);
+                    }
+                    s.conversation_id = Some(id);
+                    s.session_seq = s
+                        .session_db
+                        .as_ref()
+                        .and_then(|db| db.max_message_seq(id).ok())
+                        .unwrap_or(0);
+                    s.transcript = effective;
+                    s.restore_usage_and_context(&system_prompt);
+                    s.snapshot(self.llm.id(), self.llm.model())
+                };
+                self.reset_host_tool_state();
+                self.hub
+                    .publish(bounded_conversation_loaded(messages, snapshot, false));
+                // ConversationLoaded resets client-owned transient UI state. Reapply
+                // the canonical extension view afterwards so surviving status lines,
+                // highlights, and non-conversation panes remain visible.
+                self.hub.publish(view_snapshot(&self.extensions));
+            }
+            Err(message) => self
+                .hub
+                .publish(RuntimeEvent::ConversationLoadFailed { id, message }),
         }
     }
 
@@ -2297,6 +2379,42 @@ impl DaemonCtx {
                 // Always snapshot, even on failure (keeping the old provider), so
                 // the frontend's `await_state_snapshot` unblocks instead of
                 // hanging forever waiting on a snapshot that never comes.
+                self.publish_snapshot();
+                Flow::Continue
+            }
+            RuntimeCommand::SetConversationModel { provider_id, model } => {
+                let model = model.trim();
+                let result = if model.is_empty() {
+                    Err("Model ID cannot be empty".to_string())
+                } else {
+                    crate::llm::providers::build_provider(
+                        &provider_id,
+                        model,
+                        &self.config.providers_config(),
+                    )
+                    .map_err(|error| error.to_string())
+                };
+                match result {
+                    Ok(provider) => {
+                        self.llm = Arc::from(provider);
+                        let session = self.session.lock().unwrap();
+                        if !session.incognito
+                            && let (Some(db), Some(id)) =
+                                (session.session_db.as_ref(), session.conversation_id)
+                            && let Err(error) =
+                                db.set_conversation_provider(id, self.llm.id(), self.llm.model())
+                        {
+                            self.hub.publish(RuntimeEvent::Status {
+                                message: format!(
+                                    "Model selected, but could not save the task's model: {error}"
+                                ),
+                            });
+                        }
+                    }
+                    Err(error) => self.hub.publish(RuntimeEvent::Status {
+                        message: format!("Could not select model: {error}"),
+                    }),
+                }
                 self.publish_snapshot();
                 Flow::Continue
             }

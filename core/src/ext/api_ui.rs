@@ -140,6 +140,7 @@ pub fn setup_api_ui(lua: &Lua, bone: &Table, shared_ui: SharedUi) -> Result<(), 
             let id = o.id.clone();
             let component = Component::Float {
                 id: o.id,
+                presentation: bone_protocol::PanePresentation::Overlay,
                 title: o.title,
                 lines: o.lines,
                 rect: FloatRect {
@@ -169,6 +170,7 @@ pub fn setup_api_ui(lua: &Lua, bone: &Table, shared_ui: SharedUi) -> Result<(), 
             // Re-upsert the existing float with new lines, preserving placement.
             let updated = if let Some(Component::Float {
                 title,
+                presentation,
                 rect,
                 z,
                 border,
@@ -178,6 +180,7 @@ pub fn setup_api_ui(lua: &Lua, bone: &Table, shared_ui: SharedUi) -> Result<(), 
             {
                 let component = Component::Float {
                     id: id.clone(),
+                    presentation: *presentation,
                     title: title.clone(),
                     lines,
                     rect: *rect,

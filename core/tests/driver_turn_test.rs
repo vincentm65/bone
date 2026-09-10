@@ -322,6 +322,7 @@ fn driver_with_gate(
         system_prompt_override: None,
         conversation_id: None,
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -355,6 +356,7 @@ fn driver_with_raw(attempts: Vec<MockAttempt>, mode: ApprovalMode) -> (Driver, &
         system_prompt_override: None,
         conversation_id: None,
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -502,6 +504,7 @@ async fn driver_usage_only_sink_persists_to_parent_conversation() {
         system_prompt_override: None,
         conversation_id: Some(parent_id),
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -802,6 +805,7 @@ async fn driver_key_reply_completes_turn() {
         system_prompt_override: None,
         conversation_id: None,
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -958,6 +962,7 @@ end)
         system_prompt_override: None,
         conversation_id: None,
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -1010,6 +1015,49 @@ impl LlmProvider for CapturingProvider {
         self.captured.lock().unwrap().push(messages);
         let events = self.script.lock().unwrap().pop().unwrap_or_default();
         Ok(futures_util::stream::iter(events.into_iter().map(Ok)).boxed())
+    }
+}
+
+/// Records the `ProviderRequestContext` of every `chat_stream_with_context`
+/// call while replaying a fixed text stream. The driver always calls
+/// `chat_stream_with_context`, so this observes the exact routing context the
+/// agent loop hands to a real provider — the wire between the driver's
+/// delegation state and the provider's cache/routing identity.
+struct ContextRecordingProvider {
+    model: String,
+    contexts: Mutex<Vec<ProviderRequestContext>>,
+}
+
+#[async_trait]
+impl LlmProvider for ContextRecordingProvider {
+    fn id(&self) -> &str {
+        "context-mock"
+    }
+    fn name(&self) -> &str {
+        "Context Recording Provider"
+    }
+    fn model(&self) -> &str {
+        &self.model
+    }
+    fn set_model(&mut self, model: String) {
+        self.model = model;
+    }
+    async fn chat_stream(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<ResponseStream, LlmError> {
+        self.chat_stream_with_context(messages, tools, ProviderRequestContext::default())
+            .await
+    }
+    async fn chat_stream_with_context(
+        &self,
+        _messages: Vec<ChatMessage>,
+        _tools: Vec<ToolDefinition>,
+        context: ProviderRequestContext,
+    ) -> Result<ResponseStream, LlmError> {
+        self.contexts.lock().unwrap().push(context);
+        Ok(futures_util::stream::iter([Ok(ChatEvent::TextDelta("done".into()))]).boxed())
     }
 }
 
@@ -1207,6 +1255,7 @@ record("session_end", true)
         system_prompt_override: None,
         conversation_id: Some(42),
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
     };
@@ -1294,6 +1343,7 @@ end)
         system_prompt_override: None,
         conversation_id: None,
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
     };
@@ -1394,6 +1444,7 @@ end)
         system_prompt_override: None,
         conversation_id: None,
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
     };
@@ -1458,6 +1509,7 @@ end)
         system_prompt_override: None,
         conversation_id: None,
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
     };
@@ -1529,6 +1581,7 @@ end)
         system_prompt_override: Some(base_system_prompt.into()),
         conversation_id: Some(42),
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
     };
@@ -1636,6 +1689,7 @@ end)
         system_prompt_override: None,
         conversation_id: Some(42),
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
     };
@@ -1782,6 +1836,7 @@ end)
         system_prompt_override: None,
         conversation_id: Some(42),
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
     };
@@ -1858,6 +1913,7 @@ end)
         system_prompt_override: Some(base.clone()),
         conversation_id: None,
         background_scope: None,
+        agent_cache_scope: None,
         config_store: config,
         turn_nudge: Arc::new(Mutex::new(None)),
     };
@@ -1954,6 +2010,7 @@ async fn driver_preserves_ephemeral_images_in_request_history() {
         system_prompt_override: None,
         conversation_id: None,
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
     };
@@ -2077,6 +2134,7 @@ bone.tool.register({
         system_prompt_override: None,
         conversation_id: Some(77),
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -2172,6 +2230,7 @@ bone.tool.register({
         system_prompt_override: None,
         conversation_id: None,
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -2239,6 +2298,7 @@ async fn driver_keeps_tool_preamble_as_assistant_content() {
         system_prompt_override: None,
         conversation_id: None,
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -2349,6 +2409,7 @@ end)
         system_prompt_override: None,
         conversation_id: None,
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -2455,6 +2516,7 @@ end)
         system_prompt_override: None,
         conversation_id: None,
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
     };
@@ -2556,6 +2618,7 @@ end)
         system_prompt_override: None,
         conversation_id: None,
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -2755,6 +2818,7 @@ end, { timeout_ms = 60000 })
         system_prompt_override: None,
         conversation_id: None,
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
     };
@@ -2839,6 +2903,7 @@ end)
         system_prompt_override: None,
         conversation_id: None,
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
     };
@@ -2974,6 +3039,7 @@ async fn repeated_identical_failing_tool_call_aborts() {
         system_prompt_override: None,
         conversation_id: None,
         background_scope: None,
+        agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
@@ -2995,4 +3061,357 @@ async fn repeated_identical_failing_tool_call_aborts() {
         err.contains("in a row"),
         "abort reason should name the repeated-failure loop, got: {err}"
     );
+}
+
+/// End-to-end wiring proof for the Codex delegated-agent identity fix: the
+/// driver must hand the provider a routing context carrying the delegation
+/// depth and a distinct per-agent cache scope. `codex_routing_identity` (unit
+/// tested separately) turns `agent_depth > 0` + a distinct scope into a forked
+/// `thread-id` sharing the parent `session-id`, so this closes the loop from
+/// the driver's delegation state to the on-the-wire routing identity.
+#[tokio::test]
+async fn driver_passes_delegation_depth_and_agent_scope_to_provider() {
+    let prompt = "hi";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let build = |llm: Arc<ContextRecordingProvider>,
+                 agent_depth: usize,
+                 agent_cache_scope: Option<String>| Driver {
+        llm,
+        extensions: ExtensionManager::unloaded(),
+        tools: ToolHandler::new(builtin_tools()),
+        session: Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Safe),
+        agent_depth,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: None,
+        history: build_chat_history(&transcript, "test system prompt"),
+        transcript: transcript.clone(),
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        // The parent conversation id is threaded through to a delegated run too,
+        // so its `session-id` stays the parent's (fork semantics).
+        conversation_id: Some(7),
+        background_scope: None,
+        agent_cache_scope,
+        config_store: common::config_store(),
+        turn_nudge: Arc::new(Mutex::new(None)),
+    };
+
+    // Top level: depth 0 and no agent scope -> the conversation-derived scope.
+    let top_llm = Arc::new(ContextRecordingProvider {
+        model: "context-mock".into(),
+        contexts: Mutex::new(Vec::new()),
+    });
+    build(top_llm.clone(), 0, None).run_to_outcome(prompt).await;
+    {
+        let top = top_llm.contexts.lock().unwrap();
+        assert_eq!(top.len(), 1, "one provider call, no tool rounds");
+        assert_eq!(top[0].agent_depth, 0);
+        assert_eq!(
+            top[0].cache_scope.as_deref(),
+            Some("conversation-7"),
+            "top level keeps the deterministic per-conversation scope"
+        );
+        assert_eq!(top[0].conversation_id, Some(7));
+    }
+
+    // Delegated: depth 1 with an opaque per-agent scope -> both forwarded
+    // unchanged so the provider forks a distinct thread off the parent session.
+    let agent_scope = "run-4242-1";
+    let agent_llm = Arc::new(ContextRecordingProvider {
+        model: "context-mock".into(),
+        contexts: Mutex::new(Vec::new()),
+    });
+    let outcome = build(agent_llm.clone(), 1, Some(agent_scope.into()))
+        .run_to_outcome(prompt)
+        .await;
+    assert!(outcome.result.is_ok(), "delegated run completes");
+    let agent = agent_llm.contexts.lock().unwrap();
+    assert_eq!(agent.len(), 1);
+    assert_eq!(
+        agent[0].agent_depth, 1,
+        "driver forwards the delegated agent depth"
+    );
+    assert_eq!(
+        agent[0].cache_scope.as_deref(),
+        Some(agent_scope),
+        "driver forwards the per-agent scope (not the parent's conversation scope)"
+    );
+    assert_eq!(
+        agent[0].conversation_id,
+        Some(7),
+        "delegated session-id stays pinned to the parent conversation"
+    );
+}
+
+/// Returns a durable (persisted) image, like `read_file` does for a PNG.
+struct DurableImageTool;
+
+#[async_trait]
+impl Tool for DurableImageTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "durable_image".into(),
+            description: "returns a persisted image".into(),
+            input_schema: serde_json::json!({ "type": "object" }),
+        }
+    }
+
+    async fn execute(&self, _arguments: serde_json::Value) -> Result<String, String> {
+        unreachable!("execute_output is used")
+    }
+
+    async fn execute_output(&self, arguments: serde_json::Value) -> Result<ToolOutput, String> {
+        let label = arguments
+            .get("label")
+            .and_then(|value| value.as_str())
+            .unwrap_or("shot");
+        Ok(ToolOutput::with_images(
+            format!("read {label}"),
+            vec![bone_core::llm::ImageData {
+                media_type: "image/png".into(),
+                data: format!("durable-base64-{label}"),
+                width: Some(10),
+                height: Some(20),
+                sha256: None,
+            }],
+        ))
+    }
+}
+
+/// A batch of two image-returning calls must keep both tool replies adjacent to
+/// the assistant `tool_calls` message; the image relays follow the batch. Strict
+/// providers (DeepSeek: "insufficient tool messages following tool_calls")
+/// reject a batch whose replies are interleaved with a user message.
+#[tokio::test]
+async fn driver_emits_image_relays_after_the_whole_tool_batch() {
+    let prompt = "read both shots";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let history = build_chat_history(&transcript, "test system prompt");
+    let llm = Arc::new(CapturingProvider {
+        model: "mock-vision".into(),
+        script: Mutex::new(vec![
+            vec![ChatEvent::TextDelta("done".into())],
+            vec![
+                ChatEvent::ToolCall(ToolCall {
+                    id: "call-a".into(),
+                    name: "durable_image".into(),
+                    arguments: serde_json::json!({ "label": "a" }),
+                }),
+                ChatEvent::ToolCall(ToolCall {
+                    id: "call-b".into(),
+                    name: "durable_image".into(),
+                    arguments: serde_json::json!({ "label": "b" }),
+                }),
+            ],
+        ]),
+        captured: Mutex::new(Vec::new()),
+    });
+    let driver = Driver {
+        llm: llm.clone(),
+        extensions: ExtensionManager::unloaded(),
+        tools: ToolHandler::new(builtin_tools().register(DurableImageTool)),
+        session: Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Danger),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: None,
+        history,
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        conversation_id: None,
+        background_scope: None,
+        agent_cache_scope: None,
+        config_store: common::config_store(),
+        turn_nudge: Arc::new(Mutex::new(None)),
+    };
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert!(outcome.result.is_ok(), "turn failed");
+
+    let captured = llm.captured.lock().unwrap();
+    assert_eq!(captured.len(), 2);
+    let roles: Vec<ChatRole> = captured[1].iter().map(|message| message.role).collect();
+    assert_eq!(
+        roles,
+        vec![
+            ChatRole::System,
+            ChatRole::User,
+            ChatRole::Assistant,
+            ChatRole::Tool,
+            ChatRole::Tool,
+            ChatRole::User,
+            ChatRole::User,
+        ],
+        "both tool replies stay adjacent, relays come last"
+    );
+
+    let tool_ids: Vec<Option<&str>> = captured[1]
+        .iter()
+        .filter(|message| message.role == ChatRole::Tool)
+        .map(|message| message.tool_call_id.as_deref())
+        .collect();
+    assert_eq!(tool_ids, vec![Some("call-a"), Some("call-b")]);
+
+    let relay_data: Vec<String> = captured[1]
+        .iter()
+        .filter(|message| message.role == ChatRole::User)
+        .flat_map(|message| message.images.iter().map(|image| image.data.clone()))
+        .collect();
+    assert_eq!(
+        relay_data,
+        vec![
+            "durable-base64-a".to_string(),
+            "durable-base64-b".to_string()
+        ],
+        "each relay carries its own image"
+    );
+
+    // Durable relays are part of the saved conversation, so reopening the chat
+    // still shows the image the tool returned.
+    let durable_relays = |messages: &[ChatMessage]| {
+        messages
+            .iter()
+            .filter(|message| message.content.starts_with("Image output from"))
+            .count()
+    };
+    assert_eq!(
+        durable_relays(&outcome.transcript),
+        2,
+        "both relays join the transcript"
+    );
+    assert_eq!(
+        durable_relays(&outcome.persist_messages),
+        2,
+        "both relays are queued for the session DB"
+    );
+}
+
+/// Mixed batch: an ephemeral screenshot tool and a durable image tool called in
+/// the same round. Contiguity holds, and the ephemeral relay stays out of the
+/// durable transcript while still reaching the provider.
+#[tokio::test]
+async fn driver_keeps_mixed_image_batch_adjacent_and_ephemeral_out_of_transcript() {
+    let prompt = "look and read";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let history = build_chat_history(&transcript, "test system prompt");
+    let llm = Arc::new(CapturingProvider {
+        model: "mock-vision".into(),
+        script: Mutex::new(vec![
+            vec![ChatEvent::TextDelta("done".into())],
+            vec![
+                ChatEvent::ToolCall(ToolCall {
+                    id: "call-shot".into(),
+                    name: "ephemeral_image".into(),
+                    arguments: serde_json::json!({}),
+                }),
+                ChatEvent::ToolCall(ToolCall {
+                    id: "call-read".into(),
+                    name: "durable_image".into(),
+                    arguments: serde_json::json!({ "label": "read" }),
+                }),
+            ],
+        ]),
+        captured: Mutex::new(Vec::new()),
+    });
+    let driver = Driver {
+        llm: llm.clone(),
+        extensions: ExtensionManager::unloaded(),
+        tools: ToolHandler::new(builtin_tools().register(DurableImageTool).register(
+            EphemeralImageTool {
+                calls: std::sync::atomic::AtomicUsize::new(0),
+            },
+        )),
+        session: Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Danger),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: None,
+        history,
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        conversation_id: None,
+        background_scope: None,
+        agent_cache_scope: None,
+        config_store: common::config_store(),
+        turn_nudge: Arc::new(Mutex::new(None)),
+    };
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert!(outcome.result.is_ok(), "turn failed");
+
+    let captured = llm.captured.lock().unwrap();
+    assert_eq!(captured.len(), 2);
+    let roles: Vec<ChatRole> = captured[1].iter().map(|message| message.role).collect();
+    assert_eq!(
+        roles,
+        vec![
+            ChatRole::System,
+            ChatRole::User,
+            ChatRole::Assistant,
+            ChatRole::Tool,
+            ChatRole::Tool,
+            ChatRole::User,
+            ChatRole::User,
+        ],
+        "tool replies stay adjacent with a mixed batch"
+    );
+
+    // Both relays reach the provider, request-history order follows call order.
+    let relay_data: Vec<String> = captured[1]
+        .iter()
+        .filter(|message| message.role == ChatRole::User)
+        .flat_map(|message| message.images.iter().map(|image| image.data.clone()))
+        .collect();
+    assert_eq!(
+        relay_data,
+        vec![
+            "ephemeral-base64-1".to_string(),
+            "durable-base64-read".to_string()
+        ]
+    );
+
+    // Only the durable image survives into the saved conversation: its relay is
+    // persisted, and no ephemeral image data leaks into transcript or DB queue.
+    let relays = |messages: &[ChatMessage]| {
+        messages
+            .iter()
+            .filter(|message| message.content == "Image output from durable_image:")
+            .count()
+    };
+    assert_eq!(relays(&outcome.transcript), 1, "durable relay is saved");
+    assert_eq!(relays(&outcome.persist_messages), 1);
+    for message in outcome
+        .transcript
+        .iter()
+        .chain(outcome.persist_messages.iter())
+    {
+        assert!(!message.content.contains("ephemeral-base64"));
+        assert!(
+            message
+                .images
+                .iter()
+                .all(|image| !image.data.contains("ephemeral"))
+        );
+    }
 }

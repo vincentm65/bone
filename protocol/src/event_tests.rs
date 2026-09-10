@@ -291,6 +291,10 @@ fn every_runtime_command_variant_round_trips() {
         RuntimeCommand::SwitchProvider {
             provider_id: "anthropic".into(),
         },
+        RuntimeCommand::SetConversationModel {
+            provider_id: "anthropic".into(),
+            model: "custom-model".into(),
+        },
         RuntimeCommand::ReloadExtensions,
         RuntimeCommand::ReloadSettings,
         RuntimeCommand::UpsertSubagent {

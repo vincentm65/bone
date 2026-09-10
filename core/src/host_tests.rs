@@ -150,7 +150,10 @@ fn conversation_mutation_responses_honor_the_requested_limit() {
         else {
             panic!("expected conversations response");
         };
-        assert_eq!(renamed.iter().map(|c| c.id).collect::<Vec<_>>(), vec![first]);
+        assert_eq!(
+            renamed.iter().map(|c| c.id).collect::<Vec<_>>(),
+            vec![first]
+        );
 
         // A delete refresh threads the same limit through the resolver.
         let HostResponse::Conversations(deleted) =
@@ -161,7 +164,10 @@ fn conversation_mutation_responses_honor_the_requested_limit() {
         else {
             panic!("expected conversations response");
         };
-        assert_eq!(deleted.iter().map(|c| c.id).collect::<Vec<_>>(), vec![first]);
+        assert_eq!(
+            deleted.iter().map(|c| c.id).collect::<Vec<_>>(),
+            vec![first]
+        );
 
         // An oversized limit is capped rather than rejected.
         let HostResponse::Conversations(capped) =
@@ -297,10 +303,7 @@ fn conversation_delete_removes_the_row_and_refreshes_the_list() {
         let service = HostService::with_db_path(config, path);
 
         let HostResponse::Conversations(conversations) =
-            service.execute(HostRequest::ConversationDelete {
-                id: chat,
-                limit: 0,
-            })
+            service.execute(HostRequest::ConversationDelete { id: chat, limit: 0 })
         else {
             panic!("expected conversations response");
         };
@@ -310,10 +313,7 @@ fn conversation_delete_removes_the_row_and_refreshes_the_list() {
         );
 
         // Deleting the same id again is an invalid request.
-        let again = service.execute(HostRequest::ConversationDelete {
-            id: chat,
-            limit: 0,
-        });
+        let again = service.execute(HostRequest::ConversationDelete { id: chat, limit: 0 });
         assert!(
             matches!(
                 again,

@@ -114,6 +114,7 @@ fn conversation() -> ConversationMeta {
         title: "fix the flaky test".into(),
         full_title: "fix the flaky test".into(),
         updated_at: "2026-08-10T14:01:00Z".into(),
+        updated_at_local: "2026-08-10T10:01:00".into(),
         message_count: 12,
         provider: "openai".into(),
         model: "gpt".into(),
@@ -219,10 +220,7 @@ fn request_defaults_preserve_snapshot_only_and_cached_catalog_behavior() {
     );
 
     let delete: HostRequest = serde_json::from_str(r#"{"conversation_delete":{"id":2}}"#).unwrap();
-    assert_eq!(
-        delete,
-        HostRequest::ConversationDelete { id: 2, limit: 0 }
-    );
+    assert_eq!(delete, HostRequest::ConversationDelete { id: 2, limit: 0 });
 
     let item: CatalogItem =
         serde_json::from_str(r#"{"name":"weather.lua","kind":"tool"}"#).unwrap();

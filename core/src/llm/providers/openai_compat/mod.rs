@@ -226,7 +226,11 @@ pub(crate) fn openai_messages(messages: Vec<ChatMessage>) -> Vec<OpenAiMessage> 
                 ChatRole::Tool => "tool",
             }
             .to_string(),
-            content: if !message.images.is_empty() {
+            // Tool replies are always plain text on the wire: providers
+            // accept content parts (`image_url`) only on user messages, and a
+            // tool's images are relayed by the driver in a follow-up user
+            // message after the tool batch.
+            content: if message.role != ChatRole::Tool && !message.images.is_empty() {
                 // Multimodal: a leading text part (when present) followed by one
                 // image_url part per attachment, as a base64 data URL.
                 let mut parts = Vec::new();

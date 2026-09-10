@@ -59,6 +59,148 @@ fn grouped_hubs_do_not_retain_dropped_actor_channels() {
 
 struct ConfigTestProvider;
 
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn task_model_choice_is_isolated_persisted_and_keeps_shared_defaults() {
+    let _lock = crate::util::test_env_lock();
+    struct RestoreEnv(Option<std::ffi::OsString>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.0 {
+                    Some(value) => std::env::set_var("BONE_DIR", value),
+                    None => std::env::remove_var("BONE_DIR"),
+                }
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let _restore = RestoreEnv(std::env::var_os("BONE_DIR"));
+    unsafe {
+        std::env::set_var("BONE_DIR", dir.path());
+    }
+    let mut providers = crate::config::ProvidersConfig {
+        last_provider: "mock".into(),
+        ..Default::default()
+    };
+    providers.providers.insert(
+        "mock".into(),
+        crate::config::ProviderEntry {
+            label: "Mock".into(),
+            base_url: "http://localhost".into(),
+            model: "mock-1".into(),
+            api_key: Default::default(),
+            endpoint: "/chat/completions".into(),
+            handler: "openai".into(),
+            context_window_tokens: None,
+            max_concurrency: None,
+            reasoning_effort: String::new(),
+            fast_mode: false,
+            supports_prompt_cache_key: false,
+            stream_usage: "auto".into(),
+        },
+    );
+    crate::config::domains::persist_providers(&providers).unwrap();
+    let config =
+        crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
+    let before = config.snapshot();
+    let provider_file = std::fs::read(crate::config::providers_path()).unwrap();
+    let db = crate::session_db::SessionDb::open(&dir.path().join("tasks.db")).unwrap();
+    let id = db.create_conversation("mock", "mock-1").unwrap();
+    let mut session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    session.session_db = Some(db);
+    session.conversation_id = Some(id);
+    let (mut task, hub, mut commands) = test_daemon_ctx(
+        Arc::new(ConfigTestProvider),
+        crate::ext::ExtensionManager::unloaded(),
+        session,
+    );
+    task.config = config.clone();
+    let other_session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    let (mut other_task, _other_hub, _other_commands) = test_daemon_ctx(
+        Arc::new(ConfigTestProvider),
+        crate::ext::ExtensionManager::unloaded(),
+        other_session,
+    );
+    other_task.config = config.clone();
+    let mut events = hub.subscribe();
+    task.handle_idle_command(
+        RuntimeCommand::SetConversationModel {
+            provider_id: "mock".into(),
+            model: "task-model".into(),
+        },
+        &mut commands,
+    )
+    .await;
+    assert_eq!(task.llm.model(), "task-model");
+    assert_eq!(other_task.llm.model(), "mock-1");
+    assert_eq!(config.snapshot(), before);
+    assert_eq!(
+        std::fs::read(crate::config::providers_path()).unwrap(),
+        provider_file
+    );
+    assert!(
+        matches!(events.try_recv(), Ok(RuntimeEvent::StateSnapshot { snapshot }) if snapshot.provider_model == "task-model")
+    );
+    assert_eq!(
+        task.session
+            .lock()
+            .unwrap()
+            .session_db
+            .as_ref()
+            .unwrap()
+            .conversation_provider_model(id)
+            .unwrap(),
+        Some(("mock".into(), "task-model".into()))
+    );
+    task.llm = Arc::new(ConfigTestProvider);
+    task.load_conversation(id);
+    assert_eq!(
+        task.llm.model(),
+        "task-model",
+        "reopening restores the task's selection"
+    );
+    task.handle_idle_command(
+        RuntimeCommand::SetConversationModel {
+            provider_id: "missing".into(),
+            model: "invalid".into(),
+        },
+        &mut commands,
+    )
+    .await;
+    assert_eq!(
+        task.llm.model(),
+        "task-model",
+        "unknown providers must preserve the previous selection"
+    );
+    task.session.lock().unwrap().incognito = true;
+    task.handle_idle_command(
+        RuntimeCommand::SetConversationModel {
+            provider_id: "mock".into(),
+            model: "private-model".into(),
+        },
+        &mut commands,
+    )
+    .await;
+    assert_eq!(task.llm.model(), "private-model");
+    assert_eq!(
+        task.session
+            .lock()
+            .unwrap()
+            .session_db
+            .as_ref()
+            .unwrap()
+            .conversation_provider_model(id)
+            .unwrap(),
+        Some(("mock".into(), "task-model".into())),
+        "incognito must not write model metadata"
+    );
+}
+
 #[async_trait::async_trait]
 impl crate::llm::provider::LlmProvider for ConfigTestProvider {
     fn id(&self) -> &str {
@@ -822,6 +964,7 @@ fn grouped_automatic_reload_claims_once_and_commits_before_broadcast() {
     }
 }
 
+#[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "current_thread")]
 async fn host_reload_waits_for_turn_end_and_preserves_conversation_state() {
     let _guard = crate::util::test_env_lock();
@@ -3736,4 +3879,166 @@ fn oversized_jobs_snapshot_drops_oldest_events_to_fit() {
         jobs[0].events.as_slice(),
         [bone_protocol::JobEventSnapshot::TextDelta { text }] if text.starts_with("new:")
     ));
+}
+
+#[test]
+fn initial_attach_bounds_oversized_conversation_loaded_frame() {
+    let mut session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    for index in 0..170 {
+        session.transcript.push(ChatMessage::new(
+            crate::llm::ChatRole::User,
+            format!("message-{index}:{}", "x".repeat(100_000)),
+        ));
+    }
+    let projection = RuntimeProjection::new(
+        Arc::new(Mutex::new(session)),
+        Arc::new(ConfigTestProvider),
+        crate::ext::ExtensionManager::unloaded(),
+    );
+
+    let loaded = projection
+        .initial_events(false)
+        .into_iter()
+        .find_map(|event| match event {
+            RuntimeEvent::ConversationLoaded {
+                messages,
+                snapshot,
+                busy,
+            } => Some(RuntimeEvent::ConversationLoaded {
+                messages,
+                snapshot,
+                busy,
+            }),
+            _ => None,
+        })
+        .expect("attach replay omitted ConversationLoaded");
+    let encoded = serde_json::to_vec(&loaded).unwrap();
+    assert!(encoded.len() <= crate::rpc::codec::MAX_LINE_BYTES);
+    let RuntimeEvent::ConversationLoaded { messages, .. } = loaded else {
+        unreachable!()
+    };
+    assert!(messages.len() < 170);
+    assert!(messages.last().unwrap().content.starts_with("message-169:"));
+}
+
+#[test]
+fn conversation_load_reports_missing_id_without_mutating_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = crate::session_db::SessionDb::open(&temp.path().join("sessions.db")).unwrap();
+    let existing_id = db.create_conversation("mock", "mock-1").unwrap();
+    let mut session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    session.session_db = Some(db);
+    session.conversation_id = Some(existing_id);
+    let (mut ctx, hub, _commands) = test_daemon_ctx(
+        Arc::new(ConfigTestProvider),
+        crate::ext::ExtensionManager::unloaded(),
+        session,
+    );
+    let mut events = hub.subscribe();
+
+    ctx.load_conversation(existing_id + 1);
+
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        RuntimeEvent::ConversationLoadFailed { id, message }
+            if id == existing_id + 1
+                && message == format!("conversation {} not found", existing_id + 1)
+    ));
+    assert_eq!(
+        ctx.session.lock().unwrap().conversation_id,
+        Some(existing_id)
+    );
+}
+
+#[test]
+fn conversation_load_reports_sqlite_failure_details() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sessions.db");
+    let db = crate::session_db::SessionDb::open(&path).unwrap();
+    let id = db.create_conversation("mock", "mock-1").unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch("ALTER TABLE messages RENAME TO messages_broken;")
+        .unwrap();
+    drop(connection);
+
+    let mut session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    session.session_db = Some(db);
+    session.conversation_id = Some(id);
+    let (mut ctx, hub, _commands) = test_daemon_ctx(
+        Arc::new(ConfigTestProvider),
+        crate::ext::ExtensionManager::unloaded(),
+        session,
+    );
+    let mut events = hub.subscribe();
+
+    ctx.load_conversation(id);
+
+    assert!(matches!(
+        events.try_recv().unwrap(),
+        RuntimeEvent::ConversationLoadFailed { id: failed_id, message }
+            if failed_id == id
+                && message.starts_with(&format!("failed to load conversation {id}:"))
+                && message.contains("no such table")
+    ));
+    assert_eq!(ctx.session.lock().unwrap().conversation_id, Some(id));
+}
+
+#[test]
+fn oversized_conversation_load_drops_oldest_messages_to_fit() {
+    let snapshot = crate::runtime::SessionSnapshot::default();
+    let messages: Vec<ChatMessage> = (0..20)
+        .map(|i| {
+            ChatMessage::new(
+                crate::llm::ChatRole::User,
+                format!("msg-{i}:{}", "x".repeat(200)),
+            )
+        })
+        .collect();
+    let encode = |msgs: &[ChatMessage]| {
+        serde_json::to_vec(&RuntimeEvent::ConversationLoaded {
+            messages: msgs.to_vec(),
+            snapshot: snapshot.clone(),
+            busy: false,
+        })
+        .unwrap()
+        .len()
+    };
+    // Budget exactly fits the event once the first five messages are gone.
+    let max_bytes = encode(&messages[5..]);
+
+    let bounded = super::bound_transcript(messages.clone(), max_bytes, encode);
+
+    assert!(
+        bounded.len() < messages.len(),
+        "oldest messages should be trimmed"
+    );
+    assert!(encode(&bounded) <= max_bytes, "bounded transcript must fit");
+    // Newest context is preserved; the oldest messages are the ones dropped.
+    assert_eq!(bounded.last().unwrap(), messages.last().unwrap());
+    assert_ne!(bounded.first().unwrap(), messages.first().unwrap());
+}
+
+#[test]
+fn bounded_conversation_loaded_preserves_snapshot_and_busy() {
+    let snapshot = crate::runtime::SessionSnapshot::default();
+    let messages = vec![ChatMessage::new(crate::llm::ChatRole::User, "hi")];
+    let event = super::bounded_conversation_loaded(messages.clone(), snapshot.clone(), true);
+    let RuntimeEvent::ConversationLoaded {
+        messages: got,
+        snapshot: got_snapshot,
+        busy,
+    } = event
+    else {
+        panic!("expected ConversationLoaded");
+    };
+    assert_eq!(got, messages);
+    assert_eq!(got_snapshot, snapshot);
+    assert!(busy);
 }

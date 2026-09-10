@@ -189,12 +189,35 @@ fn transcript_of_respects_scope() {
         crate::llm::ChatRole::Assistant,
         "done",
     )];
-    reg.complete_with_tokens(&id, Ok("done".into()), 0, 0, Some(transcript.clone()));
+    reg.complete_with_tokens(&id, Ok("done".into()), 0, 0, Some(transcript.clone()), None);
 
     let saved = reg.transcript_of(&id, Some(1)).expect("matching scope");
     assert_eq!(saved.len(), 1);
     assert_eq!(saved[0].content, "done");
     assert!(reg.transcript_of(&id, Some(2)).is_none());
+}
+
+#[test]
+fn cache_scope_of_saves_identity_and_respects_scope() {
+    let reg = fresh_registry();
+    let id = reg.create(NewJob {
+        scope: Some(1),
+        ..new_job("researcher", "conv-1 work")
+    });
+    // No identity recorded until the run finishes with one.
+    assert!(reg.cache_scope_of(&id, Some(1)).is_none());
+    reg.complete_with_tokens(&id, Ok("done".into()), 0, 0, None, Some("run-1-7".into()));
+
+    assert_eq!(
+        reg.cache_scope_of(&id, Some(1)).as_deref(),
+        Some("run-1-7"),
+        "a followup reuses the finished run's provider cache identity"
+    );
+    assert!(
+        reg.cache_scope_of(&id, Some(2)).is_none(),
+        "a foreign scope cannot read another owner's cache identity"
+    );
+    assert!(reg.cache_scope_of("unknown", Some(1)).is_none());
 }
 
 #[test]

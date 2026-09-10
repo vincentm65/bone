@@ -222,6 +222,34 @@ fn serializes_text_only_as_plain_string() {
     assert_eq!(json["content"], "hello");
 }
 
+/// A tool reply stays a plain string even when the tool returned an image:
+/// providers accept `image_url` content parts on user messages only, and a
+/// strict one rejects a tool message carrying them. The driver relays tool
+/// images in a follow-up user message instead.
+#[test]
+fn serializes_tool_message_with_images_as_plain_string() {
+    let tool = ChatMessage::tool(crate::llm::provider::ToolResult {
+        call_id: "call-a".into(),
+        name: "read_file".into(),
+        content: "read 1 image".into(),
+        images: vec![ImageData {
+            media_type: "image/png".to_string(),
+            data: "abc".to_string(),
+            width: Some(1),
+            height: Some(1),
+            sha256: Some("ignored-metadata".into()),
+        }],
+        is_error: false,
+        ..Default::default()
+    });
+    let messages = openai_messages(vec![tool]);
+    let json = serde_json::to_value(&messages[0]).unwrap();
+
+    assert_eq!(json["role"], "tool");
+    assert_eq!(json["content"], "read 1 image");
+    assert_eq!(json["tool_call_id"], "call-a");
+}
+
 #[test]
 fn serializes_tools_with_required_function_envelope() {
     let tools = openai_tools(vec![crate::tools::ToolDefinition {

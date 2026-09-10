@@ -122,6 +122,7 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
         llm: None,
         session_sink: None,
         background_scope: None,
+        cache_scope: None,
         tool_allowlist: None,
         max_tokens: None,
         approval_gate: None,

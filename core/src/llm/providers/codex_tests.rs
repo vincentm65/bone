@@ -1,6 +1,6 @@
 use super::{
-    CodexProvider, CodexResponse, codex_request_identity, extract_response_events, output_index,
-    process_summary_event,
+    CodexProvider, CodexResponse, codex_routing_identity, codex_scope_id, codex_session_id,
+    extract_response_events, output_index, process_summary_event,
 };
 use crate::llm::provider::{ChatEvent, ProviderRequestContext};
 use crate::tools::TRUNCATED_ARGS_KEY;
@@ -8,31 +8,36 @@ use serde_json::json;
 use std::collections::BTreeSet;
 
 #[test]
-fn conversation_identity_takes_precedence_over_cache_scope() {
+fn top_level_conversation_collapses_thread_onto_session() {
     let context = ProviderRequestContext {
         conversation_id: Some(42),
         cache_scope: Some("run-ignored".into()),
+        agent_depth: 0,
         ..Default::default()
     };
 
-    assert_eq!(
-        codex_request_identity(&context).as_deref(),
-        Some("00000000-0000-4000-8000-00000000002a")
-    );
+    let routing = codex_routing_identity(&context).expect("top-level identity");
+    assert_eq!(routing.session, codex_session_id(42));
+    // A top-level turn keeps all four routing fields on one stable id, so the
+    // thread id must equal (not merely mirror) the session id.
+    assert_eq!(routing.thread, routing.session);
+    assert_eq!(routing.session, "00000000-0000-4000-8000-00000000002a");
 }
 
 #[test]
-fn cache_scope_identity_is_stable_and_uuid_shaped() {
+fn top_level_cache_scope_identity_is_stable_and_uuid_shaped() {
     let context = ProviderRequestContext {
         cache_scope: Some("delegated-run".into()),
+        agent_depth: 0,
         ..Default::default()
     };
-    let identity = codex_request_identity(&context).unwrap();
+    let routing = codex_routing_identity(&context).expect("scope identity");
 
-    assert_eq!(identity, codex_request_identity(&context).unwrap());
-    assert_eq!(identity.len(), 36);
+    assert_eq!(routing.thread, routing.session);
+    assert_eq!(routing.session.len(), 36);
     assert_eq!(
-        identity
+        routing
+            .session
             .char_indices()
             .filter_map(|(index, ch)| (ch == '-').then_some(index))
             .collect::<Vec<_>>(),
@@ -41,27 +46,77 @@ fn cache_scope_identity_is_stable_and_uuid_shaped() {
 }
 
 #[test]
-fn different_cache_scopes_have_different_identities() {
-    let first = ProviderRequestContext {
+fn delegated_agent_keeps_parent_session_but_gets_distinct_thread() {
+    let context = ProviderRequestContext {
+        conversation_id: Some(42),
         cache_scope: Some("run-1".into()),
-        ..Default::default()
-    };
-    let second = ProviderRequestContext {
-        cache_scope: Some("run-2".into()),
+        agent_depth: 1,
         ..Default::default()
     };
 
-    assert_ne!(
-        codex_request_identity(&first),
-        codex_request_identity(&second)
+    let routing = codex_routing_identity(&context).expect("delegated identity");
+    // Fork semantics: shared parent session, per-agent thread.
+    assert_eq!(routing.session, codex_session_id(42));
+    assert_eq!(routing.thread, codex_scope_id("run-1"));
+    assert_ne!(routing.thread, routing.session);
+}
+
+#[test]
+fn sibling_delegated_agents_have_distinct_threads() {
+    let sibling = |scope: &str| ProviderRequestContext {
+        conversation_id: Some(42),
+        cache_scope: Some(scope.into()),
+        agent_depth: 1,
+        ..Default::default()
+    };
+
+    let first = codex_routing_identity(&sibling("run-1")).unwrap();
+    let second = codex_routing_identity(&sibling("run-2")).unwrap();
+
+    assert_eq!(first.session, second.session);
+    assert_ne!(first.thread, second.thread);
+}
+
+#[test]
+fn delegated_thread_is_deterministic_per_scope() {
+    let context = ProviderRequestContext {
+        conversation_id: Some(42),
+        cache_scope: Some("run-1".into()),
+        agent_depth: 1,
+        ..Default::default()
+    };
+
+    assert_eq!(
+        codex_routing_identity(&context).unwrap().thread,
+        codex_routing_identity(&context).unwrap().thread
     );
 }
 
 #[test]
+fn delegated_agent_without_conversation_collapses_onto_scope() {
+    let context = ProviderRequestContext {
+        cache_scope: Some("run-1".into()),
+        agent_depth: 1,
+        ..Default::default()
+    };
+
+    // No parent conversation to fork from: session and thread coincide on the
+    // scope-derived id so the request still carries a routing identity.
+    let routing = codex_routing_identity(&context).expect("scope-only delegated identity");
+    assert_eq!(routing.session, codex_scope_id("run-1"));
+    assert_eq!(routing.thread, routing.session);
+}
+
+#[test]
 fn missing_conversation_and_scope_has_no_identity() {
-    assert_eq!(
-        codex_request_identity(&ProviderRequestContext::default()),
-        None
+    assert!(codex_routing_identity(&ProviderRequestContext::default()).is_none());
+    // Delegation depth alone carries no identity.
+    assert!(
+        codex_routing_identity(&ProviderRequestContext {
+            agent_depth: 1,
+            ..Default::default()
+        })
+        .is_none()
     );
 }
 

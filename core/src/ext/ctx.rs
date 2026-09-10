@@ -2550,6 +2550,11 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             else {
                 return agent_err(lua, "job not found or has no saved transcript");
             };
+            // Reuse the prior run's provider cache identity so a followup stays
+            // on the same Codex routing shard instead of contending with the
+            // parent conversation's cache.
+            let prior_cache_scope =
+                crate::ext::jobs::registry().cache_scope_of(&prior_id, followup_scope);
             let agent_name: String = opt_str(&opts, "agent").unwrap_or_default();
             let title: String = opt_str(&opts, "title").unwrap_or_default();
             let handle = tokio::runtime::Handle::try_current().map_err(|e| {
@@ -2574,6 +2579,11 @@ fn add_agent_table(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua::
             // opt: followup already carries the previous run's history, so a
             // separately supplied `context` is deliberately ignored here.
             built.request.transcript = Some(transcript);
+            // A followup is the same logical agent continuing, so keep the
+            // prior run's cache identity when it saved one.
+            if let Some(scope) = prior_cache_scope {
+                built.request.cache_scope = Some(scope);
+            }
             let id = launch_background_job(
                 handle,
                 built,
@@ -2742,6 +2752,7 @@ fn launch_background_job(
         tr_cb.store(received, Ordering::Relaxed);
         crate::ext::jobs::registry().update_tokens(&token_job_id, sent, received);
     }));
+    let job_cache_scope = built.request.cache_scope.clone();
     let BuiltAgent {
         request,
         provider,
@@ -2767,6 +2778,7 @@ fn launch_background_job(
                     Err(error),
                     0,
                     0,
+                    None,
                     None,
                 );
                 return;
@@ -2831,6 +2843,7 @@ fn launch_background_job(
             token_sent.load(Ordering::Relaxed),
             token_received.load(Ordering::Relaxed),
             transcript,
+            job_cache_scope,
         );
     });
     id
@@ -2923,6 +2936,10 @@ fn build_agent_request(
         // has no conversation (headless without a session) → NullSessionSink.
         session_sink: crate::session_sink::UsageOnlySessionSink::for_parent(inherited.session_id),
         background_scope: inherited.background_scope,
+        // Each delegated logical agent gets its own opaque cache scope so
+        // sibling subagents don't share (and contend on) one Codex routing/cache
+        // identity. `followup` overwrites this with the prior run's saved scope.
+        cache_scope: Some(crate::llm::provider::new_cache_scope(None, None)),
         tool_allowlist,
         max_tokens,
         approval_gate,

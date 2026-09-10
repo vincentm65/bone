@@ -71,6 +71,11 @@ pub struct Job {
     /// `ctx.agent.followup` can resume this agent with its context intact.
     #[serde(skip)]
     pub transcript: Option<Vec<crate::llm::ChatMessage>>,
+    /// Provider cache identity used by the job's delegated run, kept so a
+    /// `ctx.agent.followup` can resume under the same Codex routing/cache
+    /// identity instead of contending with the parent conversation's.
+    #[serde(skip)]
+    pub cache_scope: Option<String>,
     /// Runtime background scope the job belongs to. Durable conversations use
     /// their database id; incognito sessions use an actor-unique identity.
     /// `None` is reserved for standalone callers that have no runtime owner.
@@ -129,6 +134,12 @@ pub struct WaitOutcome {
     pub timed_out: bool,
 }
 
+impl Default for JobRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl JobRegistry {
     pub fn new() -> Self {
         Self {
@@ -181,6 +192,7 @@ impl JobRegistry {
             trace: Vec::new(),
             events: Vec::new(),
             transcript: None,
+            cache_scope: None,
             scope,
             cancel_flag,
         });
@@ -293,9 +305,20 @@ impl JobRegistry {
         job.transcript.clone()
     }
 
+    /// The provider cache identity used by a finished job, so a followup can
+    /// resume under the same Codex routing/cache identity. `None` when the job
+    /// is unknown, out of scope, or predates identity tracking.
+    pub fn cache_scope_of(&self, id: &str, scope: Option<i64>) -> Option<String> {
+        let jobs = self.lock_jobs();
+        let job = jobs
+            .iter()
+            .find(|j| j.id == id && scope_matches(j.scope, scope))?;
+        job.cache_scope.clone()
+    }
+
     /// Mark a job as finished (Ok or Error).
     pub fn complete(&self, id: &str, result: Result<String, String>) {
-        self.complete_with_tokens(id, result, 0, 0, None);
+        self.complete_with_tokens(id, result, 0, 0, None, None);
     }
 
     /// Update token counts for a running job.
@@ -312,7 +335,9 @@ impl JobRegistry {
     }
 
     /// Update token counts from shared atomics when a job completes.
-    /// `transcript`, when `Some`, is retained for `ctx.agent.followup`.
+    /// `transcript`, when `Some`, is retained for `ctx.agent.followup`;
+    /// `cache_scope` is retained so that followup reuses the run's provider
+    /// cache identity.
     pub fn complete_with_tokens(
         &self,
         id: &str,
@@ -320,6 +345,7 @@ impl JobRegistry {
         token_sent: u64,
         token_received: u64,
         transcript: Option<Vec<crate::llm::ChatMessage>>,
+        cache_scope: Option<String>,
     ) {
         let now = current_unix_seconds();
         let status = if result.is_ok() {
@@ -340,6 +366,7 @@ impl JobRegistry {
             token_sent,
             token_received,
             transcript,
+            cache_scope,
         );
         self.completed.notify_all();
         drop(jobs);
@@ -555,6 +582,7 @@ fn finish_job(
     token_sent: u64,
     token_received: u64,
     transcript: Option<Vec<crate::llm::ChatMessage>>,
+    cache_scope: Option<String>,
 ) {
     if let Some(job) = jobs.iter_mut().find(|j| j.id == id) {
         job.status = status;
@@ -565,6 +593,7 @@ fn finish_job(
         job.token_received = token_received;
         job.activity = None;
         job.transcript = transcript;
+        job.cache_scope = cache_scope;
     }
 }
 

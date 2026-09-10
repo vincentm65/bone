@@ -276,11 +276,21 @@ pub fn save_setup_selection(selection: &SetupSelection) -> std::io::Result<()> {
     fs::write(path, json)
 }
 
-/// True only for a genuinely fresh install: no `init.lua` and no setup marker.
-/// Existing users upgrading (who already have an `init.lua`) are never forced
-/// through the wizard.
+/// True only for a genuinely fresh install: no `init.lua`, no setup marker,
+/// and no configured provider credential. A provider configured by an earlier
+/// install is already usable even if the optional onboarding files are absent;
+/// reopening the wizard on every client restart would be destructive noise.
 pub fn needs_onboarding() -> bool {
-    !bone_dir().join("init.lua").exists() && !setup_selection_path().exists()
+    if bone_dir().join("init.lua").exists() || setup_selection_path().exists() {
+        return false;
+    }
+    let Ok(Some(providers)) = domains::load_providers() else {
+        return true;
+    };
+    !providers
+        .providers
+        .values()
+        .any(|entry| !entry.api_key.is_empty())
 }
 
 /// Seed the always-safe, selection-independent config (command policy, AGENTS,

@@ -180,6 +180,12 @@ pub struct AgentRequest {
     /// independently of `session_sink`, because incognito actors have an
     /// isolated background scope but no durable conversation id.
     pub background_scope: Option<i64>,
+    /// Opaque per-logical-agent cache identity for this delegated run. When set,
+    /// the driver uses it as the provider cache scope instead of deriving one
+    /// from the parent conversation, so sibling subagents no longer share (and
+    /// contend on) one Codex cache/routing identity. `None` for top-level runs,
+    /// which keep the stable per-conversation identity.
+    pub cache_scope: Option<String>,
     /// Optional tool allowlist. When set, the agent only sees tools whose
     /// names appear in this list. When `None` (the default), all tools are
     /// available.
@@ -562,6 +568,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
         background_scope: request
             .background_scope
             .or_else(|| session_report.conv_id()),
+        agent_cache_scope: request.cache_scope,
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
     };
 

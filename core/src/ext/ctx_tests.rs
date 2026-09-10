@@ -1268,7 +1268,7 @@ fn wait_for_lua_global(lua: &Lua, global: &str, timeout_ms: u64) -> bool {
     let deadline = Instant::now() + Duration::from_millis(timeout_ms);
     loop {
         let value: bool = lua
-            .load(&format!("return {global} == true"))
+            .load(format!("return {global} == true"))
             .eval()
             .unwrap_or(false);
         if value {
@@ -1638,6 +1638,7 @@ fn private_llm_test_config(
             cache_scope: Some("conversation-42".into()),
             turn_state: Some(Arc::clone(&turn_state)),
             max_tokens: None,
+            agent_depth: 0,
         },
         usage_records: Arc::clone(&usage_records),
     });

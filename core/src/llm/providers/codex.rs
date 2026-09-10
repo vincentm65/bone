@@ -481,11 +481,44 @@ fn resolve_event_type<'a>(raw: &'a Value, sse_event: &'a str) -> &'a str {
     sse_event
 }
 
-fn codex_request_identity(context: &ProviderRequestContext) -> Option<String> {
-    context
-        .conversation_id
-        .map(codex_session_id)
-        .or_else(|| context.cache_scope.as_deref().map(codex_scope_id))
+/// The Codex CLI routing identity for one request: the root `session-id` plus
+/// the per-logical-agent `thread-id` (also used for `x-client-request-id` and
+/// `prompt_cache_key`).
+pub(super) struct CodexRoutingIdentity {
+    pub(super) session: String,
+    pub(super) thread: String,
+}
+
+/// Resolve the Codex CLI routing identity for one request.
+///
+/// A top-level turn (`agent_depth == 0`) collapses all four routing fields onto
+/// one stable per-conversation id, matching the Codex CLI, which derives
+/// `session-id`, `thread-id`, `x-client-request-id`, and `prompt_cache_key`
+/// from the conversation id.
+///
+/// A delegated agent (`agent_depth > 0`) instead mirrors an upstream *forked*
+/// thread: it keeps the root conversation's `session-id` but gets a distinct
+/// per-agent `thread-id` / `x-client-request-id` / `prompt_cache_key` derived
+/// from the agent's opaque cache scope. That stops a subagent's divergent
+/// transcript from contending with the parent conversation's cache shard, while
+/// the shared `session-id` keeps the whole tree on one routing session.
+pub(super) fn codex_routing_identity(
+    context: &ProviderRequestContext,
+) -> Option<CodexRoutingIdentity> {
+    let conversation = context.conversation_id.map(codex_session_id);
+    let scope = context.cache_scope.as_deref().map(codex_scope_id);
+    if context.agent_depth == 0 {
+        let session = conversation.or(scope)?;
+        return Some(CodexRoutingIdentity {
+            thread: session.clone(),
+            session,
+        });
+    }
+    let thread = scope.or_else(|| conversation.clone())?;
+    Some(CodexRoutingIdentity {
+        session: conversation.unwrap_or_else(|| thread.clone()),
+        thread,
+    })
 }
 
 /// Deterministically map an opaque provider cache scope to the UUID shape the
@@ -571,7 +604,7 @@ impl LlmProvider for CodexProvider {
     ) -> Result<ResponseStream, LlmError> {
         let instructions = build_instructions(&messages);
         let input_items = build_codex_messages(messages);
-        let request_identity = codex_request_identity(&context);
+        let routing = codex_routing_identity(&context);
         let codex_tools = codex_tools(tools);
         let tools = if codex_tools.is_empty() {
             None
@@ -595,7 +628,7 @@ impl LlmProvider for CodexProvider {
             service_tier: self.service_tier(),
             tools,
             tool_choice,
-            prompt_cache_key: request_identity.clone(),
+            prompt_cache_key: routing.as_ref().map(|routing| routing.thread.clone()),
             include: Some(vec!["reasoning.encrypted_content"]),
         };
 
@@ -613,11 +646,11 @@ impl LlmProvider for CodexProvider {
         // so the growing conversation prefix gets re-billed at the fresh-input
         // rate on most turns (the oscillating per-turn cache miss we measured).
         req = req.header("originator", "codex_cli_rs");
-        if let Some(session_id) = request_identity {
+        if let Some(routing) = &routing {
             req = req
-                .header("session-id", &session_id)
-                .header("thread-id", &session_id)
-                .header("x-client-request-id", &session_id);
+                .header("session-id", &routing.session)
+                .header("thread-id", &routing.thread)
+                .header("x-client-request-id", &routing.thread);
         }
         if let Some(turn_state) = context.turn_state.as_ref().and_then(|state| state.get()) {
             req = req.header("x-codex-turn-state", turn_state);

@@ -3,6 +3,7 @@ use serde_json::json;
 
 fn float(id: &str, lines: Vec<PaneLineSpec>) -> Component {
     Component::Float {
+        presentation: bone_protocol::PanePresentation::Overlay,
         id: id.into(),
         title: "t".into(),
         lines,
@@ -144,6 +145,7 @@ fn float_component_parses_from_lua_style_json() {
 #[test]
 fn float_scroll_round_trips_into_pane_content() {
     let comp = Component::Float {
+        presentation: bone_protocol::PanePresentation::Overlay,
         id: "scroller".into(),
         title: "t".into(),
         lines: vec![PaneLineSpec::Plain("x".into())],

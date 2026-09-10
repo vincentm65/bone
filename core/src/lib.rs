@@ -19,3 +19,4 @@ pub mod shell_split;
 pub mod tools;
 pub mod update_check;
 pub mod util;
+mod workspace_review;

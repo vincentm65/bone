@@ -40,6 +40,11 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// Prefix of the runtime's synthetic relay of a tool's returned images. Tools
+/// cannot return images inside a tool-role message on the OpenAI wire, so the
+/// driver relays them in a follow-up user message carrying this prefix.
+pub const IMAGE_RELAY_PREFIX: &str = "Image output from ";
+
 /// A tool call produced by the model or replayed in a message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -142,6 +147,12 @@ pub struct ChatMessage {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_error: bool,
+    /// True for messages synthesized by the runtime rather than typed by the
+    /// user (e.g. the relay that carries a tool's returned images, which cannot
+    /// ride in a tool-role message). Frontends render these as ambient notes
+    /// instead of prompt bubbles after a history reload.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub synthetic: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<Reasoning>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -163,6 +174,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             is_error: false,
+            synthetic: false,
             reasoning: None,
             reasoning_items: Vec::new(),
             created_at: None,
@@ -193,11 +205,22 @@ impl ChatMessage {
             tool_call_id: Some(result.call_id),
             name: Some(result.name),
             is_error: result.is_error,
+            synthetic: false,
             reasoning: None,
             reasoning_items: Vec::new(),
             created_at: None,
             output_sequence: Vec::new(),
         }
+    }
+
+    /// True when this is a runtime-synthesized relay of a tool's returned
+    /// images rather than input the user typed. Rows written since the
+    /// `synthetic` flag was added carry it; older rows are recognized by the
+    /// relay prefix so reloading a pre-existing conversation still avoids a
+    /// bogus prompt bubble.
+    pub fn is_synthetic_relay(&self) -> bool {
+        self.synthetic
+            || (self.role == ChatRole::User && self.content.starts_with(IMAGE_RELAY_PREFIX))
     }
 }
 

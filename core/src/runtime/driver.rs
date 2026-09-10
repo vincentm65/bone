@@ -295,6 +295,7 @@ impl DriverHookRuntime<'_> {
                 cache_scope: Some(self.cache_scope.to_string()),
                 turn_state: Some(Arc::clone(self.turn_state)),
                 max_tokens: None,
+                agent_depth: self.agent_depth,
             },
             usage_records: Arc::clone(&private_usage),
         });
@@ -455,6 +456,11 @@ pub struct Driver {
     /// Owner for jobs and managed processes. Unlike `conversation_id`, this is
     /// still present for an incognito actor.
     pub background_scope: Option<i64>,
+    /// Opaque per-logical-agent provider cache identity for a delegated run.
+    /// When `Some`, it replaces the conversation-derived cache scope so sibling
+    /// subagents get distinct Codex routing/cache identities. `None` for
+    /// top-level turns, which keep the stable per-conversation scope.
+    pub agent_cache_scope: Option<String>,
     /// Shared steer nudge. `LocalConn::send(Steer)` sets it; the driver
     /// loop checks and consumes it at the top of each iteration.
     pub turn_nudge: Arc<Mutex<Option<String>>>,
@@ -594,6 +600,7 @@ impl Driver {
             system_prompt_override,
             conversation_id,
             background_scope,
+            agent_cache_scope,
             turn_nudge,
         } = self;
         let tool_names = tools
@@ -652,10 +659,13 @@ impl Driver {
         // Shared provider routing/cache state for normal requests and private
         // completions made by any lifecycle hook in this turn.
         let turn_state = Arc::new(OnceLock::new());
-        // Durable conversations keep a deterministic cross-turn scope; incognito
-        // runs pin to the stable per-actor fallback so the provider sees the
-        // same cache/routing identity on every turn instead of a fresh one.
-        let cache_scope = crate::llm::provider::new_cache_scope(conversation_id, background_scope);
+        // Delegated agents carry their own opaque scope so sibling subagents get
+        // distinct Codex routing/cache identities instead of contending on the
+        // parent conversation's. Top-level turns (and incognito actors) keep the
+        // deterministic per-conversation / per-actor scope.
+        let cache_scope = agent_cache_scope.unwrap_or_else(|| {
+            crate::llm::provider::new_cache_scope(conversation_id, background_scope)
+        });
         let hook_runtime = DriverHookRuntime {
             extensions: &extensions,
             gate: &gate,
@@ -1029,6 +1039,7 @@ impl Driver {
                         cache_scope: Some(cache_scope.clone()),
                         turn_state: Some(Arc::clone(&turn_state)),
                         max_tokens: None,
+                        agent_depth,
                     },
                 );
                 let result = tokio::select! {
@@ -1464,6 +1475,14 @@ impl Driver {
                 }
             }
 
+            // Tool-returned images cannot ride in a tool-role message on the
+            // OpenAI wire, so they are relayed as follow-up user messages.
+            // A tool reply must stay adjacent to the assistant message that
+            // requested it: strict providers (DeepSeek, OpenAI) reject a batch
+            // whose replies are interleaved with any other message, so the
+            // relays are collected here and appended after the whole batch.
+            let mut image_relays: Vec<(ChatMessage, bool)> = Vec::new();
+
             for result in &results {
                 // Live frontends receive this from ToolHandler as each call
                 // completes. Keep the legacy/headless event sinks populated
@@ -1488,33 +1507,41 @@ impl Driver {
                 transcript.push(message.clone());
                 persist_messages.push(message);
 
-                // The OpenAI wire format cannot carry images in a tool-role
-                // message, so relay tool-returned images to vision-capable
-                // models as a follow-up user message. Ephemeral relays live only
-                // in request history, and each new one replaces the previous
-                // screenshot from this assistant turn.
+                // Deferred until the batch finishes (see `image_relays` above).
                 if !result.images.is_empty() {
-                    let note = format!("Image output from {}:", result.name);
+                    let note = format!("{}{}:", crate::llm::IMAGE_RELAY_PREFIX, result.name);
                     let mut relay = ChatMessage::user_with_images(note, result.images.clone());
                     relay.created_at = Some(crate::util::utc_now());
-                    let provider_relay = model_facing_message(&relay, None);
-                    if result.ephemeral_images {
-                        request_history.push(provider_relay.clone());
-                        ephemeral_image_relays.push(provider_relay);
-                    } else {
-                        session_seq += 1;
-                        session.append_chat_message(&relay, session_seq);
-                        history.push(provider_relay.clone());
-                        request_history.push(provider_relay);
-                        transcript.push(relay.clone());
-                        persist_messages.push(relay);
-                    }
+                    // The relay is runtime-generated, not user input; mark it so
+                    // a reload renders it as an ambient note, not a prompt bubble.
+                    relay.synthetic = true;
+                    image_relays.push((relay, result.ephemeral_images));
                 }
                 // Checkpoint after each completed tool result. Parallel tool
                 // batches still get one small transaction per completed item.
                 checkpointed_messages +=
                     checkpoint_tool_boundary(session.as_ref(), &mut persist_messages);
             }
+
+            // Append the batch's image relays after every tool reply. Ephemeral
+            // relays (screenshots) live only in provider request history; durable
+            // ones join the transcript and the session DB with the tool result.
+            for (relay, ephemeral) in image_relays {
+                let provider_relay = model_facing_message(&relay, None);
+                if ephemeral {
+                    request_history.push(provider_relay.clone());
+                    ephemeral_image_relays.push(provider_relay);
+                } else {
+                    session_seq += 1;
+                    session.append_chat_message(&relay, session_seq);
+                    history.push(provider_relay.clone());
+                    request_history.push(provider_relay);
+                    transcript.push(relay.clone());
+                    persist_messages.push(relay);
+                }
+            }
+            checkpointed_messages +=
+                checkpoint_tool_boundary(session.as_ref(), &mut persist_messages);
 
             // Runaway brake. Build a signature from this round's *failing*
             // calls, keyed on tool name + error text: a bad edit produces a

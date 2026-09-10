@@ -381,7 +381,14 @@ fn complete_message_roundtrip_preserves_codex_provider_order() {
     assert!(!history[0].is_error);
 
     let loaded = db.load_effective_transcript(conv).unwrap();
-    assert_eq!(loaded, vec![message]);
+    // The stored assistant tool calls have no recorded replies, so load-time
+    // repair appends one deterministic placeholder per call (interrupted turn).
+    assert_eq!(loaded.len(), 3);
+    assert_eq!(loaded[0], message);
+    assert_eq!(loaded[1].role, ChatRole::Tool);
+    assert_eq!(loaded[1].tool_call_id.as_deref(), Some("call-a"));
+    assert!(loaded[1].is_error);
+    assert_eq!(loaded[2].tool_call_id.as_deref(), Some("call-b"));
 
     let provider_items = serde_json::to_value(build_codex_messages(loaded)).unwrap();
     let provider_items = provider_items.as_array().unwrap();
@@ -401,7 +408,9 @@ fn complete_message_roundtrip_preserves_codex_provider_order() {
             "function_call",
             "assistant",
             "reasoning",
-            "function_call"
+            "function_call",
+            "function_call_output",
+            "function_call_output"
         ]
     );
     assert_eq!(
@@ -435,18 +444,70 @@ fn legacy_row_fallback_keeps_normalized_history_and_provider_order() {
         .unwrap();
 
     let loaded = db.load_effective_transcript(conv).unwrap();
-    assert_eq!(loaded.len(), 1);
+    // The dangling legacy call gains a deterministic placeholder reply on load.
+    assert_eq!(loaded.len(), 2);
     assert_eq!(loaded[0].content, "legacy text");
     assert_eq!(loaded[0].tool_calls[0].id, "legacy-call");
     assert!(loaded[0].reasoning.is_none());
     assert!(loaded[0].reasoning_items.is_empty());
     assert!(loaded[0].output_sequence.is_empty());
+    assert_eq!(loaded[1].role, ChatRole::Tool);
+    assert_eq!(loaded[1].tool_call_id.as_deref(), Some("legacy-call"));
+    assert!(loaded[1].is_error);
 
     let provider_items = serde_json::to_value(build_codex_messages(loaded)).unwrap();
     let provider_items = provider_items.as_array().unwrap();
     assert_eq!(provider_items[0]["role"], "assistant");
     assert_eq!(provider_items[1]["type"], "function_call");
     assert_eq!(provider_items[1]["call_id"], "legacy-call");
+}
+
+#[test]
+fn load_effective_transcript_reorders_interleaved_image_relays() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db
+        .create_conversation("deepseek", "deepseek-v4-flash")
+        .unwrap();
+
+    let mut assistant = ChatMessage::new(ChatRole::Assistant, "");
+    assistant.tool_calls = vec![
+        ToolCall {
+            id: "call-a".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({}),
+        },
+        ToolCall {
+            id: "call-b".into(),
+            name: "read_file".into(),
+            arguments: serde_json::json!({}),
+        },
+    ];
+    let mut reply_a = ChatMessage::new(ChatRole::Tool, "a");
+    reply_a.tool_call_id = Some("call-a".into());
+    reply_a.name = Some("read_file".into());
+    let mut reply_b = ChatMessage::new(ChatRole::Tool, "b");
+    reply_b.tool_call_id = Some("call-b".into());
+    reply_b.name = Some("read_file".into());
+    let relay = ChatMessage::new(ChatRole::User, "Image output from read_file:");
+
+    // Legacy on-disk order: each relay immediately follows its own tool reply.
+    for (seq, message) in [&assistant, &reply_a, &relay, &reply_b, &relay]
+        .into_iter()
+        .enumerate()
+    {
+        db.append_chat_message(conv, message, seq as i64 + 1)
+            .unwrap();
+    }
+
+    let loaded = db.load_effective_transcript(conv).unwrap();
+    let shape: Vec<_> = loaded
+        .iter()
+        .map(|m| m.tool_call_id.as_deref().unwrap_or(m.role.as_str()))
+        .collect();
+
+    assert_eq!(shape, ["assistant", "call-a", "call-b", "user", "user"]);
 }
 
 #[test]

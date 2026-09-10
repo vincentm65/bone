@@ -109,12 +109,12 @@ fn run_loop(
         }
         match event::read()? {
             Event::Key(key) if key.kind == KeyEventKind::Press => match key.code {
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if process.running {
-                        let _ = command_tx.send(bone_protocol::RuntimeCommand::CancelProcess {
-                            id: process.id.clone(),
-                        });
-                    }
+                KeyCode::Char('c')
+                    if key.modifiers.contains(KeyModifiers::CONTROL) && process.running =>
+                {
+                    let _ = command_tx.send(bone_protocol::RuntimeCommand::CancelProcess {
+                        id: process.id.clone(),
+                    });
                 }
                 KeyCode::Char('q') | KeyCode::Esc => break,
                 KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => break,

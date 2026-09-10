@@ -226,6 +226,7 @@ pub(crate) fn stored_to_chat_message(msg: StoredMessage) -> crate::llm::ChatMess
         tool_call_id: msg.tool_call_id,
         name: msg.tool_name,
         is_error: msg.is_error,
+        synthetic: false,
         reasoning: None,
         reasoning_items: Vec::new(),
         created_at: Some(msg.created_at),
@@ -916,7 +917,9 @@ impl SessionDb {
                         ),
                         ''
                     ) AS title,
-                    COALESCE(meta.title, '') AS stored_title
+                    COALESCE(meta.title, '') AS stored_title,
+                    strftime('%Y-%m-%dT%H:%M:%S', meta.updated_at, 'localtime')
+                        AS updated_at_local
              FROM meta
              ORDER BY meta.updated_at DESC, meta.id DESC
              LIMIT ?1",
@@ -933,6 +936,7 @@ impl SessionDb {
                 },
                 full_title: row.get(6)?,
                 updated_at: row.get(3)?,
+                updated_at_local: row.get(7)?,
                 message_count: row.get(4)?,
                 provider: row.get(1)?,
                 model: row.get(2)?,
@@ -1743,11 +1747,17 @@ impl SessionDb {
             };
             let mut tail = self.query_messages_after(conversation_id, through_seq)?;
             transcript.extend(tail.drain(..).map(stored_to_chat_message));
+            crate::chat::repair_tool_call_sequences(&mut transcript);
             return Ok(transcript);
         }
 
-        self.load_messages(conversation_id)
-            .map(|rows| rows.into_iter().map(stored_to_chat_message).collect())
+        let mut transcript: Vec<ChatMessage> = self
+            .load_messages(conversation_id)?
+            .into_iter()
+            .map(stored_to_chat_message)
+            .collect();
+        crate::chat::repair_tool_call_sequences(&mut transcript);
+        Ok(transcript)
     }
 
     /// Map a rusqlite message projection into a [`StoredMessage`].

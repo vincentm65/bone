@@ -124,6 +124,9 @@ pub struct StatusSegment {
 pub enum Component {
     Float {
         id: String,
+        /// Pane envelopes participate in the chat layout; explicit floats overlay it.
+        #[serde(default)]
+        presentation: PanePresentation,
         #[serde(default)]
         title: String,
         #[serde(default)]
@@ -153,6 +156,7 @@ impl Component {
     pub fn float_from_pane_content(pc: &PaneContent) -> Component {
         Component::Float {
             id: pc.source.clone(),
+            presentation: PanePresentation::Live,
             title: pc.title.clone(),
             lines: pc.lines.clone(),
             rect: FloatRect {
@@ -187,6 +191,14 @@ impl Component {
             Component::StatusLine { .. } => None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PanePresentation {
+    #[default]
+    Overlay,
+    Live,
 }
 
 /// Complete daemon-owned UI projection used to initialize or repair a client.
@@ -231,5 +243,41 @@ pub fn view_diff_from_pane_content(pc: PaneContent) -> ViewDiff {
         ViewDiff::Upsert {
             component: Component::float_from_pane_content(&pc),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_pane_presentation_survives_serialization_and_legacy_floats_default_to_overlay() {
+        let pane = PaneContent {
+            source: "task_list".into(),
+            title: "Tasks".into(),
+            lines: vec![PaneLineSpec::Plain("Review changes".into())],
+            visible_rows: 8,
+            scroll: 2,
+        };
+        let component = Component::float_from_pane_content(&pane);
+        let mut json = serde_json::to_value(&component).unwrap();
+        let restored: Component = serde_json::from_value(json.clone()).unwrap();
+        assert!(matches!(
+            restored,
+            Component::Float {
+                presentation: PanePresentation::Live,
+                ..
+            }
+        ));
+        assert_eq!(restored.as_pane_content().unwrap().scroll, 2);
+        json.as_object_mut().unwrap().remove("presentation");
+        let legacy: Component = serde_json::from_value(json).unwrap();
+        assert!(matches!(
+            legacy,
+            Component::Float {
+                presentation: PanePresentation::Overlay,
+                ..
+            }
+        ));
     }
 }

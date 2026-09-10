@@ -31,7 +31,8 @@ pub(crate) fn parse_tool_arguments(raw: &str) -> serde_json::Value {
 
 // Re-export wire-format types from protocol.
 pub use bone_protocol::{
-    ChatMessage, ChatRole, ImageData, OutputItem, Reasoning, ReasoningItem, ToolCall, ToolResult,
+    ChatMessage, ChatRole, IMAGE_RELAY_PREFIX, ImageData, OutputItem, Reasoning, ReasoningItem,
+    ToolCall, ToolResult,
 };
 
 /// A boxed async stream of provider events from an LLM provider.
@@ -188,6 +189,11 @@ pub struct ProviderRequestContext {
     /// Optional request-local output cap. This overrides the provider's
     /// configured default without mutating the shared provider instance.
     pub max_tokens: Option<u32>,
+    /// Delegation depth of the agent issuing the request: `0` for a top-level
+    /// turn, `> 0` for a delegated sub-agent. Codex uses it to decide whether to
+    /// collapse the routing identity onto the conversation id (top level) or
+    /// fork a per-agent thread off the shared `session-id` (delegated).
+    pub agent_depth: usize,
 }
 
 #[async_trait]

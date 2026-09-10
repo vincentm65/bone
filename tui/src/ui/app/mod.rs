@@ -1802,10 +1802,18 @@ impl App {
         let mut rows = Vec::new();
         for msg in transcript {
             match msg.role {
-                ChatRole::User => rows.push(Message::user_with_images(
-                    msg.content.clone(),
-                    msg.images.len(),
-                )),
+                ChatRole::User => {
+                    if msg.is_synthetic_relay() {
+                        // A runtime relay of tool-returned images: the user did
+                        // not type it, so show it as ambient text, not a prompt.
+                        rows.push(Message::system(msg.content.clone()));
+                    } else {
+                        rows.push(Message::user_with_images(
+                            msg.content.clone(),
+                            msg.images.len(),
+                        ));
+                    }
+                }
                 ChatRole::Assistant => {
                     if let Some(message) = assistant_display_message(&msg.content) {
                         rows.push(message);

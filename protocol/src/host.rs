@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Current daemon-host request/response contract advertised in `FrontendState`.
-pub const HOST_API_VERSION: u16 = 1;
+pub const HOST_API_VERSION: u16 = 3;
 
 /// A custom `[start, end]` date range (inclusive, `YYYY-MM-DD`, daemon-local
 /// time).
@@ -205,6 +205,10 @@ pub struct CatalogApplyResult {
 /// `full_title` carries the conversation's stored title verbatim (empty when
 /// none was set), so a rename can be seeded with the untruncated text even when
 /// `title` is display-shortened. It defaults to empty for older daemons.
+///
+/// `updated_at_local` is the same instant as `updated_at` converted to the
+/// daemon's local time (`YYYY-MM-DDTHH:MM:SS`, no zone), for display. It is
+/// empty from older daemons, which must fall back to `updated_at`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationMeta {
     pub id: i64,
@@ -212,6 +216,8 @@ pub struct ConversationMeta {
     #[serde(default)]
     pub full_title: String,
     pub updated_at: String,
+    #[serde(default)]
+    pub updated_at_local: String,
     pub message_count: i64,
     pub provider: String,
     pub model: String,
@@ -297,6 +303,8 @@ pub enum HostRequest {
         expected_revision: String,
         actions: Vec<CatalogAction>,
     },
+    /// Read-only Git status and staged/unstaged diffs from the daemon workspace.
+    WorkspaceReview,
     Setup,
     SetupApply {
         expected_config_revision: u64,
@@ -323,6 +331,13 @@ pub enum HostErrorCode {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HostResponse {
+    WorkspaceReview {
+        workspace: String,
+        status: String,
+        staged: String,
+        unstaged: String,
+        truncated: bool,
+    },
     Stats(Box<UsageStatsSnapshot>),
     Conversations(Vec<ConversationMeta>),
     Catalog(CatalogSnapshot),

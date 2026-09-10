@@ -1,8 +1,89 @@
 //! Conversation model: on-disk message representation and provider chat-history assembly.
 
+use crate::llm::provider::ToolResult;
 use crate::llm::{ChatMessage, ChatRole};
 
 // ── History ─────────────────────────────────────────────────────────────────
+
+/// Deterministic answer for a tool call whose result was never recorded (an
+/// aborted, crashed, or interrupted turn).
+const INTERRUPTED_TOOL_RESULT: &str = "Tool call was interrupted; no result was recorded.";
+
+/// Repair malformed stored tool-call sequences so a wedged conversation becomes
+/// sendable again. Two independent fixes run in a single pass:
+///
+/// * Image relays interleaved inside a tool batch are moved after the batch.
+///   Strict providers require every `tool_call_id` to be answered immediately
+///   by its tool message, so `assistant(tool_calls=[a,b]) → tool a → relay →
+///   tool b → relay` is rejected; it is rewritten to `… → tool a → tool b →
+///   relay a → relay b` without inventing or dropping data.
+/// * A tool call whose reply is missing gains a deterministic error placeholder,
+///   in call order, so an interrupted turn no longer dangles.
+///
+/// Idempotent: an already-valid sequence is returned unchanged, and running the
+/// pass twice produces the same result.
+pub fn repair_tool_call_sequences(messages: &mut Vec<ChatMessage>) {
+    if !messages
+        .iter()
+        .any(|m| m.role == ChatRole::Assistant && !m.tool_calls.is_empty())
+    {
+        return;
+    }
+
+    let mut out: Vec<ChatMessage> = Vec::with_capacity(messages.len());
+    let mut index = 0;
+    while index < messages.len() {
+        let message = messages[index].clone();
+        if message.role != ChatRole::Assistant || message.tool_calls.is_empty() {
+            out.push(message);
+            index += 1;
+            continue;
+        }
+
+        // Consume the batch's replies and any relays interleaved among them.
+        // A reply must belong to this assistant; relays carry no call id.
+        let expected = message.tool_calls.clone();
+        let mut replies: std::collections::HashMap<String, ChatMessage> =
+            std::collections::HashMap::new();
+        let mut relays: Vec<ChatMessage> = Vec::new();
+        let mut scan = index + 1;
+        while scan < messages.len() {
+            let candidate = &messages[scan];
+            if candidate.role == ChatRole::Tool
+                && let Some(id) = candidate.tool_call_id.as_deref()
+                && expected.iter().any(|call| call.id == id)
+            {
+                if replies.contains_key(id) {
+                    break;
+                }
+                replies.insert(id.to_string(), candidate.clone());
+                scan += 1;
+                continue;
+            }
+            if candidate.is_synthetic_relay() {
+                relays.push(candidate.clone());
+                scan += 1;
+                continue;
+            }
+            break;
+        }
+
+        out.push(message);
+        for call in expected {
+            match replies.remove(&call.id) {
+                Some(reply) => out.push(reply),
+                None => out.push(ChatMessage::tool(ToolResult::error(
+                    call.id.clone(),
+                    call.name.clone(),
+                    INTERRUPTED_TOOL_RESULT,
+                ))),
+            }
+        }
+        out.extend(relays);
+        index = scan;
+    }
+    *messages = out;
+}
 
 /// Build provider history without truncating conversation or tool chains.
 pub fn build_chat_history(messages: &[ChatMessage], system_prompt: &str) -> Vec<ChatMessage> {

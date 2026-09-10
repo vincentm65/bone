@@ -251,6 +251,7 @@ fn view_snapshot_replaces_only_daemon_owned_components_and_highlights() {
                     }],
                 },
                 bone_protocol::Component::Float {
+                    presentation: bone_protocol::PanePresentation::Overlay,
                     id: "stale-pane".into(),
                     title: "Stale".into(),
                     lines: vec![bone_protocol::PaneLineSpec::Plain("old pane".into())],
@@ -279,6 +280,7 @@ fn view_snapshot_replaces_only_daemon_owned_components_and_highlights() {
     app.apply_idle_event(crate::runtime::RuntimeEvent::ViewSnapshot {
         view: bone_protocol::ViewModel {
             components: vec![bone_protocol::Component::Float {
+                presentation: bone_protocol::PanePresentation::Overlay,
                 id: "shared-shape".into(),
                 title: "Replacement".into(),
                 lines: vec![bone_protocol::PaneLineSpec::Plain("new pane".into())],

@@ -423,6 +423,7 @@ impl RuntimeSession {
             system_prompt_override: Some(system_prompt),
             conversation_id: self.conversation_id,
             background_scope: Some(self.background_scope()),
+            agent_cache_scope: None,
             turn_nudge: self.turn_nudge.clone(),
         }
     }

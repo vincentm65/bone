@@ -504,6 +504,12 @@ pub enum RuntimeCommand {
     SwitchProvider {
         provider_id: String,
     },
+    /// Select a provider and model for this conversation without changing shared defaults.
+    /// Available when FrontendState advertises host API 3 or newer.
+    SetConversationModel {
+        provider_id: String,
+        model: String,
+    },
     ReloadExtensions,
     /// Reload only canonical `config.yaml`, preserving extension/tool runtime
     /// state, then broadcast a fresh full frontend settings snapshot.

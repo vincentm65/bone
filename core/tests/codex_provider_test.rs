@@ -255,3 +255,171 @@ fn test_codex_request_omits_optional_fields_when_unset() {
     assert!(!obj.contains_key("top_p"));
     assert_eq!(json["store"], false);
 }
+
+/// Parse the header block (up to and including the blank line) of a raw HTTP
+/// request into a lower-cased name -> value map.
+fn parse_headers(header_block: &str) -> std::collections::HashMap<String, String> {
+    header_block
+        .lines()
+        .skip(1) // request line
+        .filter_map(|line| line.split_once(':'))
+        .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_string()))
+        .collect()
+}
+
+/// Accept one connection, read the full request (headers + Content-Length body),
+/// then reply with a minimal well-formed SSE stream so the provider's
+/// `chat_stream_with_context` resolves. Returns `(header block, body)`.
+async fn capture_one_request(listener: &tokio::net::TcpListener) -> (String, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let (mut stream, _) = listener.accept().await.unwrap();
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let header_end = loop {
+        let n = stream.read(&mut chunk).await.unwrap();
+        assert!(n > 0, "client closed before sending headers");
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos + 4;
+        }
+    };
+    let header_block = String::from_utf8_lossy(&buf[..header_end]).to_string();
+    let content_length: usize = header_block
+        .lines()
+        .find_map(|line| {
+            let (k, v) = line.split_once(':')?;
+            k.eq_ignore_ascii_case("content-length")
+                .then(|| v.trim().parse().ok())?
+        })
+        .unwrap_or(0);
+    while buf.len() < header_end + content_length {
+        let n = stream.read(&mut chunk).await.unwrap();
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    let body_end = header_end + content_length;
+    let body = String::from_utf8_lossy(&buf[header_end..body_end]).to_string();
+
+    let sse = "data: [DONE]\n\n";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{}",
+        sse.len(),
+        sse
+    );
+    stream.write_all(response.as_bytes()).await.unwrap();
+    stream.flush().await.unwrap();
+    (header_block, body)
+}
+
+/// Send one Codex request through a live provider against a capturing server and
+/// return the parsed request headers plus the JSON body, so a test can inspect
+/// exactly what the provider puts on the wire.
+async fn send_codex_request(
+    provider: &bone_core::llm::providers::codex::CodexProvider,
+    listener: &tokio::net::TcpListener,
+    context: bone_core::llm::provider::ProviderRequestContext,
+) -> (std::collections::HashMap<String, String>, serde_json::Value) {
+    use bone_core::llm::provider::LlmProvider;
+
+    let messages = vec![ChatMessage::new(ChatRole::User, "hello")];
+    let capture = capture_one_request(listener);
+    let call = provider.chat_stream_with_context(messages, vec![], context);
+    let (_stream, (headers, body)) = tokio::join!(call, capture);
+    (
+        parse_headers(&headers),
+        serde_json::from_str(&body).unwrap(),
+    )
+}
+
+/// Wire-level proof of the delegated-agent identity fix: a delegated request
+/// must carry a distinct `thread-id` / `x-client-request-id` / `prompt_cache_key`
+/// while keeping the parent conversation's `session-id`, so the Codex proxy
+/// routes the subagent to a forked cache thread that shares the session. A
+/// top-level request keeps all three collapsed onto the conversation id.
+#[tokio::test]
+async fn codex_delegated_request_forks_thread_but_keeps_session_id() {
+    use bone_core::config::ProviderEntry;
+    use bone_core::llm::provider::ProviderRequestContext;
+    use bone_core::llm::providers::codex::CodexProvider;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let entry: ProviderEntry = serde_json::from_value(serde_json::json!({
+        "base_url": format!("http://{addr}"),
+        "model": "gpt-6-astra",
+        "endpoint": "/responses",
+        "handler": "codex",
+    }))
+    .unwrap();
+    let provider = CodexProvider::from_entry("codex-test", &entry);
+
+    // 42 as the fixed v4-shaped session id the provider derives from the
+    // conversation id: `00000000-0000-4000-8000-{id:012x}`.
+    let session_id = "00000000-0000-4000-8000-00000000002a";
+
+    // Top level: depth 0, no agent scope -> all three collapse onto session id.
+    let (top_headers, top_body) = send_codex_request(
+        &provider,
+        &listener,
+        ProviderRequestContext {
+            conversation_id: Some(42),
+            agent_depth: 0,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(top_headers["session-id"], session_id);
+    assert_eq!(top_headers["thread-id"], session_id);
+    assert_eq!(top_headers["x-client-request-id"], session_id);
+    assert_eq!(top_body["prompt_cache_key"], session_id);
+
+    // Delegated: depth 1 with a distinct per-agent scope -> forked thread.
+    let (a_headers, a_body) = send_codex_request(
+        &provider,
+        &listener,
+        ProviderRequestContext {
+            conversation_id: Some(42),
+            cache_scope: Some("scope-a".into()),
+            agent_depth: 1,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(
+        a_headers["session-id"], session_id,
+        "delegated agent keeps the parent session-id"
+    );
+    assert_ne!(
+        a_headers["thread-id"], session_id,
+        "delegated agent gets a forked thread-id"
+    );
+    assert_eq!(
+        a_headers["thread-id"], a_headers["x-client-request-id"],
+        "thread-id and x-client-request-id share the forked thread"
+    );
+    assert_eq!(
+        a_body["prompt_cache_key"], a_headers["thread-id"],
+        "prompt_cache_key matches the forked thread-id"
+    );
+
+    // Sibling agent: a different scope -> a different thread, same session.
+    let (b_headers, _b_body) = send_codex_request(
+        &provider,
+        &listener,
+        ProviderRequestContext {
+            conversation_id: Some(42),
+            cache_scope: Some("scope-b".into()),
+            agent_depth: 1,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert_eq!(b_headers["session-id"], session_id);
+    assert_ne!(
+        b_headers["thread-id"], a_headers["thread-id"],
+        "sibling agents must not share a cache thread"
+    );
+}
