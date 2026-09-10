@@ -6598,7 +6598,15 @@ fn main() -> eframe::Result {
             eprintln!("Run `bone {name}` for the daemon-side operation.");
             std::process::exit(2);
         }
-        cli::Command::Gui => {}
+        cli::Command::Gui => {
+            // Compiling the bundled syntect grammars takes long enough to stall
+            // a frame, so warm them off the UI thread before the first code
+            // block appears.
+            std::thread::Builder::new()
+                .name("markdown-prewarm".to_string())
+                .spawn(markdown::prewarm_code_highlighting)
+                .ok();
+        }
     }
     eframe::run_native(
         "Bone Desktop",

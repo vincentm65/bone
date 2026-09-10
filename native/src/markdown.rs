@@ -14,7 +14,8 @@ use eframe::egui::{
     text::LayoutJob,
 };
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use std::sync::LazyLock;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 use syntect::easy::HighlightLines;
 use syntect::highlighting::{Color as SyColor, FontStyle, ThemeSet};
 use syntect::parsing::SyntaxSet;
@@ -28,6 +29,45 @@ static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_
 /// building a per-theme syntect theme each frame would re-parse scope
 /// selectors, so a static set is preferred.
 static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
+
+/// Load the syntax and theme sets ahead of the first code block.
+///
+/// Building them compiles ~100 bundled grammars' regexes, which takes long
+/// enough to stall a frame. Warming them on a background thread at startup
+/// keeps the first fenced block smooth.
+pub fn prewarm_code_highlighting() {
+    LazyLock::force(&SYNTAX_SET);
+    LazyLock::force(&THEME_SET);
+}
+
+/// Memoized highlighted code jobs. A transcript re-renders its visible rows
+/// every frame, and highlighting is by far the costliest part of a code block,
+/// so the finished [`LayoutJob`] is kept. Dropped wholesale when it fills:
+/// only the blocks near the viewport are worth keeping.
+static CODE_JOB_CACHE: LazyLock<Mutex<HashMap<CodeJobKey, LayoutJob>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Entry cap for [`CODE_JOB_CACHE`] (each entry is at most [`MAX_CODE_LINES`]
+/// styled lines).
+const CODE_JOB_CACHE_ENTRIES: usize = 32;
+
+/// Everything [`code_layout_job`] reads besides the block's position on screen
+/// (the job wraps with `TextWrapMode::Extend`, so it is width-independent).
+#[derive(PartialEq, Eq, Hash)]
+struct CodeJobKey {
+    language: Option<String>,
+    text: String,
+    dark: bool,
+    font: String,
+}
+
+#[cfg(test)]
+fn code_job_cache_len() -> usize {
+    CODE_JOB_CACHE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .len()
+}
 
 /// One contiguous run of text sharing the same inline styling.
 #[derive(Debug, Clone, Default)]
@@ -809,10 +849,47 @@ fn render_code_block(ui: &mut Ui, language: Option<&str>, text: &str, colors: &T
     ui.add_space(6.0);
 }
 
+/// Memoized highlighted monospace [`LayoutJob`] for a fenced code block.
+///
+/// The result depends only on the block text, its language, the theme and the
+/// resolved monospace font, so the cache stays correct across zoom/style and
+/// light/dark changes.
+fn code_layout_job(ui: &Ui, language: Option<&str>, text: &str, colors: &ThemeColors) -> LayoutJob {
+    let font_id = TextStyle::Monospace.resolve(ui.style().as_ref());
+    let key = CodeJobKey {
+        language: language.map(str::to_string),
+        text: text.to_string(),
+        dark: colors.syntax_dark,
+        font: format!("{font_id:?}"),
+    };
+    {
+        let cache = CODE_JOB_CACHE
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if let Some(job) = cache.get(&key) {
+            return job.clone();
+        }
+    }
+    let job = highlight_code_job(language, text, colors, &font_id);
+    let mut cache = CODE_JOB_CACHE
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    if cache.len() >= CODE_JOB_CACHE_ENTRIES {
+        cache.clear();
+    }
+    cache.insert(key, job.clone());
+    job
+}
+
 /// Build a syntect-highlighted monospace [`LayoutJob`] for a fenced code block.
 /// Each line is highlighted with its `\n` so line-scoped scopes close, then the
 /// terminator is re-emitted as an unstyled break.
-fn code_layout_job(ui: &Ui, language: Option<&str>, text: &str, colors: &ThemeColors) -> LayoutJob {
+fn highlight_code_job(
+    language: Option<&str>,
+    text: &str,
+    colors: &ThemeColors,
+    font_id: &egui::FontId,
+) -> LayoutJob {
     let syntax = language
         .and_then(|lang| {
             SYNTAX_SET
@@ -821,7 +898,6 @@ fn code_layout_job(ui: &Ui, language: Option<&str>, text: &str, colors: &ThemeCo
         })
         .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
     let theme = code_theme(colors);
-    let font_id = TextStyle::Monospace.resolve(ui.style().as_ref());
     let default_fg = theme
         .settings
         .foreground
@@ -1263,6 +1339,60 @@ mod tests {
                     distinct.len() >= 2,
                     "expected multiple token colors, got {distinct:?}"
                 );
+            },
+        );
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn code_layout_job_memoizes_and_matches_direct_highlight() {
+        let ctx = egui::Context::default();
+        let colors = ThemeColors::default();
+        let text = "fn main() {\n    println!(\"hi\");\n}\n";
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let font_id = TextStyle::Monospace.resolve(ui.style().as_ref());
+                let direct = highlight_code_job(Some("rust"), text, &colors, &font_id);
+                let first = code_layout_job(ui, Some("rust"), text, &colors);
+                let second = code_layout_job(ui, Some("rust"), text, &colors);
+                assert_eq!(
+                    first, direct,
+                    "memoized job should equal direct highlighting"
+                );
+                assert_eq!(second, first, "repeat calls should return the memoized job");
+            },
+        );
+        out.textures_delta.clear();
+    }
+
+    #[test]
+    fn code_layout_job_cache_stays_bounded() {
+        let ctx = egui::Context::default();
+        let colors = ThemeColors::default();
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                for i in 0..(CODE_JOB_CACHE_ENTRIES + 8) {
+                    let text = format!("let x{i} = {i};\n");
+                    let _ = code_layout_job(ui, Some("rust"), &text, &colors);
+                    assert!(
+                        code_job_cache_len() <= CODE_JOB_CACHE_ENTRIES,
+                        "cache grew past its cap after {i} distinct blocks"
+                    );
+                }
             },
         );
         out.textures_delta.clear();
