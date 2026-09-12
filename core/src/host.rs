@@ -149,7 +149,10 @@ impl HostService {
 
     fn catalog(&self, refresh: bool) -> HostResponse {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        HostResponse::Catalog(catalog_snapshot(load_catalog(&mut state, refresh)))
+        HostResponse::Catalog(catalog_snapshot(
+            load_catalog(&mut state, refresh),
+            &self.config.disabled_plugins(),
+        ))
     }
 
     fn catalog_apply(
@@ -159,14 +162,14 @@ impl HostService {
     ) -> HostResponse {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let entries = load_catalog(&mut state, false);
-        let current = catalog_revision(entries);
+        let current = catalog_revision(entries, &self.config.disabled_plugins());
         if current != expected_revision {
             return host_error(
                 HostErrorCode::Stale,
                 format!("catalog changed; expected {expected_revision}, current {current}"),
             );
         }
-        HostResponse::CatalogApplied(apply_catalog(entries, &actions))
+        HostResponse::CatalogApplied(apply_catalog(entries, &actions, &self.config))
     }
 
     fn setup(&self) -> HostResponse {
@@ -187,7 +190,10 @@ impl HostService {
             active_provider: config.active_provider,
             init_exists: config::bone_dir().join("init.lua").exists(),
             needs_onboarding: config::needs_onboarding(),
-            catalog: catalog_snapshot(load_catalog(&mut state, false)),
+            catalog: catalog_snapshot(
+                load_catalog(&mut state, false),
+                &self.config.disabled_plugins(),
+            ),
         })
     }
 
@@ -203,7 +209,7 @@ impl HostService {
     ) -> HostResponse {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         let entries = load_catalog(&mut state, false);
-        let current_catalog = catalog_revision(entries);
+        let current_catalog = catalog_revision(entries, &self.config.disabled_plugins());
         if current_catalog != expected_catalog_revision {
             return host_error(
                 HostErrorCode::Stale,
@@ -287,7 +293,7 @@ impl HostService {
             return host_error(HostErrorCode::Internal, error);
         }
 
-        let catalog = apply_catalog(entries, &actions);
+        let catalog = apply_catalog(entries, &actions, &self.config);
         let failures = catalog
             .results
             .iter()
@@ -313,21 +319,28 @@ fn load_catalog(state: &mut HostState, refresh: bool) -> &[CatalogEntry] {
     state.catalog.as_deref().unwrap_or_default()
 }
 
-fn catalog_revision(entries: &[CatalogEntry]) -> String {
+fn catalog_revision(entries: &[CatalogEntry], disabled_plugins: &[String]) -> String {
     let mut digest = Sha256::new();
     digest.update(serde_json::to_vec(entries).unwrap_or_default());
     for entry in entries {
         digest.update([
             u8::from(catalog::is_installed(entry)),
             u8::from(catalog::needs_update(entry)),
+            u8::from(plugin_enabled(entry, disabled_plugins)),
         ]);
     }
     format!("{:x}", digest.finalize())
 }
 
-fn catalog_snapshot(entries: &[CatalogEntry]) -> CatalogSnapshot {
+/// Whether an entry is currently active. Non-plugin items have no package-level
+/// enable state and are always active; a plugin is active unless disabled.
+fn plugin_enabled(entry: &CatalogEntry, disabled_plugins: &[String]) -> bool {
+    entry.kind != "plugin" || !disabled_plugins.iter().any(|name| name == &entry.name)
+}
+
+fn catalog_snapshot(entries: &[CatalogEntry], disabled_plugins: &[String]) -> CatalogSnapshot {
     CatalogSnapshot {
-        revision: catalog_revision(entries),
+        revision: catalog_revision(entries, disabled_plugins),
         items: entries
             .iter()
             .map(|entry| CatalogItem {
@@ -345,6 +358,7 @@ fn catalog_snapshot(entries: &[CatalogEntry]) -> CatalogSnapshot {
                 long_description: entry.long_description.clone(),
                 installed: catalog::is_installed(entry),
                 update_available: catalog::is_installed(entry) && catalog::needs_update(entry),
+                enabled: plugin_enabled(entry, disabled_plugins),
             })
             .collect(),
     }
@@ -354,11 +368,16 @@ fn find_catalog_entry<'a>(entries: &'a [CatalogEntry], name: &str) -> Option<&'a
     let requested = name.strip_suffix(".lua").unwrap_or(name);
     entries
         .iter()
-        .find(|entry| entry.name.strip_suffix(".lua") == Some(requested))
+        .find(|entry| entry.name == requested || entry.name.strip_suffix(".lua") == Some(requested))
 }
 
-fn apply_catalog(entries: &[CatalogEntry], actions: &[CatalogAction]) -> CatalogApplyResult {
+fn apply_catalog(
+    entries: &[CatalogEntry],
+    actions: &[CatalogAction],
+    config: &ConfigStore,
+) -> CatalogApplyResult {
     let mut changed = false;
+    let disabled = config.disabled_plugins();
     let results = actions
         .iter()
         .map(|action| {
@@ -366,11 +385,14 @@ fn apply_catalog(entries: &[CatalogEntry], actions: &[CatalogAction]) -> Catalog
                 None => CatalogItemOutcome::Failed {
                     message: format!("catalog item not found: {}", action.name),
                 },
-                Some(entry) => apply_catalog_entry(entry, action.action),
+                Some(entry) => apply_catalog_entry(entry, action.action, &disabled, config),
             };
             changed |= matches!(
                 outcome,
-                CatalogItemOutcome::Installed | CatalogItemOutcome::Removed
+                CatalogItemOutcome::Installed
+                    | CatalogItemOutcome::Removed
+                    | CatalogItemOutcome::Enabled
+                    | CatalogItemOutcome::Disabled
             );
             CatalogItemResult {
                 name: action.name.clone(),
@@ -379,14 +401,20 @@ fn apply_catalog(entries: &[CatalogEntry], actions: &[CatalogAction]) -> Catalog
         })
         .collect::<Vec<_>>();
     CatalogApplyResult {
-        snapshot: catalog_snapshot(entries),
+        snapshot: catalog_snapshot(entries, &config.disabled_plugins()),
         results,
         changed,
         extensions_reloaded: false,
     }
 }
 
-fn apply_catalog_entry(entry: &CatalogEntry, action: CatalogActionKind) -> CatalogItemOutcome {
+fn apply_catalog_entry(
+    entry: &CatalogEntry,
+    action: CatalogActionKind,
+    disabled: &[String],
+    config: &ConfigStore,
+) -> CatalogItemOutcome {
+    let is_disabled = disabled.iter().any(|name| name == &entry.name);
     let result = match action {
         CatalogActionKind::Install
             if catalog::is_installed(entry) && !catalog::needs_update(entry) =>
@@ -400,6 +428,28 @@ fn apply_catalog_entry(entry: &CatalogEntry, action: CatalogActionKind) -> Catal
             return CatalogItemOutcome::Unchanged;
         }
         CatalogActionKind::Remove => catalog::remove(entry).map(|()| CatalogItemOutcome::Removed),
+        CatalogActionKind::Enable | CatalogActionKind::Disable => {
+            if entry.kind != "plugin" {
+                return CatalogItemOutcome::Failed {
+                    message: format!("{} is not a plugin", entry.name),
+                };
+            }
+            let enable = matches!(action, CatalogActionKind::Enable);
+            if enable != is_disabled {
+                return CatalogItemOutcome::Unchanged;
+            }
+            let revision = config.snapshot().revision;
+            return match config.set_enabled("plugins", &entry.name, enable, revision) {
+                Ok(()) => {
+                    if enable {
+                        CatalogItemOutcome::Enabled
+                    } else {
+                        CatalogItemOutcome::Disabled
+                    }
+                }
+                Err((_, message)) => CatalogItemOutcome::Failed { message },
+            };
+        }
     };
     result.unwrap_or_else(|message| CatalogItemOutcome::Failed { message })
 }

@@ -206,6 +206,7 @@ fn canonical_config_pages_and_mutations_use_the_daemon_store() {
     let schema = store.schema_for(
         &["shell".into(), "worker".into()],
         &["config".into(), "history".into()],
+        &["demo".into()],
     );
     let cfg = CtxConfig::new(
         temp.path().to_string_lossy().into_owned(),
@@ -225,14 +226,23 @@ fn canonical_config_pages_and_mutations_use_the_daemon_store() {
         .iter()
         .filter_map(|page| page["namespace"].as_str())
         .collect::<Vec<_>>();
-    assert_eq!(
-        namespaces,
-        ["general", "providers", "tools", "commands", "status"]
-    );
-    assert_eq!(pages[2]["fields"].as_array().unwrap().len(), 2);
-    assert_eq!(pages[3]["fields"].as_array().unwrap().len(), 1);
-    assert_eq!(pages[3]["fields"][0]["key"], "history");
-    assert_eq!(pages[4]["fields"].as_array().unwrap().len(), 15);
+    assert_eq!(namespaces, ["general", "providers", "plugins", "status"]);
+    // The unified "plugins" page merges standalone tools, standalone commands,
+    // and plugin packages, name-sorted (with a kind tiebreak) and carrying a
+    // `kind` badge plus a kind-qualified key that avoids name collisions.
+    let plugin_fields = pages[2]["fields"].as_array().unwrap();
+    assert_eq!(plugin_fields.len(), 4);
+    assert_eq!(plugin_fields[0]["key"], "plugin:demo");
+    assert_eq!(plugin_fields[0]["kind"], "plugin");
+    assert_eq!(plugin_fields[0]["path"], "plugins.demo");
+    assert_eq!(plugin_fields[1]["key"], "command:history");
+    assert_eq!(plugin_fields[1]["kind"], "command");
+    assert_eq!(plugin_fields[1]["path"], "commands.history");
+    assert_eq!(plugin_fields[2]["key"], "tool:shell");
+    assert_eq!(plugin_fields[2]["kind"], "tool");
+    assert_eq!(plugin_fields[2]["path"], "tools.shell");
+    assert_eq!(plugin_fields[3]["key"], "tool:worker");
+    assert_eq!(pages[3]["fields"].as_array().unwrap().len(), 15);
 
     let set_value: mlua::Function = config.get("set_value").unwrap();
     assert!(
@@ -241,8 +251,18 @@ fn canonical_config_pages_and_mutations_use_the_daemon_store() {
             .unwrap()
     );
     assert_eq!(store.snapshot().values["general"]["show_reasoning"], true);
-    assert!(set_value.call::<bool>(("tools", "shell", false)).unwrap());
+    assert!(
+        set_value
+            .call::<bool>(("plugins", "tool:shell", false))
+            .unwrap()
+    );
     assert_eq!(store.snapshot().disabled_tools, ["shell"]);
+    assert!(
+        set_value
+            .call::<bool>(("plugins", "plugin:demo", false))
+            .unwrap()
+    );
+    assert_eq!(store.snapshot().disabled_plugins, ["demo"]);
     assert!(
         set_value
             .call::<bool>(("status", "spinner_speed", 125_i64))
@@ -287,7 +307,7 @@ fn canonical_config_pages_and_mutations_use_the_daemon_store() {
 fn config_get_uses_canonical_store_instead_of_filesystem() {
     let lua = Lua::new();
     let store = crate::config::store::ConfigStore::for_test();
-    let schema = store.schema_for(&[], &[]);
+    let schema = store.schema_for(&[], &[], &[]);
     let cfg = CtxConfig::new("/tmp".into(), new_shared_state(), store, schema);
     let config = build_canonical_config_table(&lua, &cfg).unwrap();
     let get: mlua::Function = config.get("get").unwrap();
@@ -305,7 +325,7 @@ fn config_get_table_exposes_canonical_enablement() {
     let lua = Lua::new();
     let store =
         crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
-    let schema = store.schema_for(&["cron".into()], &["compact".into()]);
+    let schema = store.schema_for(&["cron".into()], &["compact".into()], &[]);
     let revision = store.snapshot().revision;
     store
         .set_enabled("commands", "compact", false, revision)
@@ -596,7 +616,7 @@ fn sample_app_state(system_prompt_override: Option<String>) -> AppCtxState {
         crate::llm::ChatMessage::new(crate::llm::ChatRole::Assistant, "hi there"),
     ];
     let config_store = crate::config::store::ConfigStore::for_test();
-    let config_schema = config_store.schema_for(&[], &[]);
+    let config_schema = config_store.schema_for(&[], &[], &[]);
     AppCtxState::new(
         &tools,
         &stats,

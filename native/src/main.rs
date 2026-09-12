@@ -27,6 +27,7 @@ mod palette;
 mod panes;
 #[cfg(test)]
 mod perf_tests;
+mod plugins;
 mod review;
 mod setup;
 mod state;
@@ -209,6 +210,7 @@ fn one_line(text: &str) -> String {
 enum UiRequest {
     OpenStats,
     OpenJob(String),
+    OpenProcess(String),
     OpenSetup,
     OpenConfig,
     OpenCatalog,
@@ -218,6 +220,41 @@ enum UiRequest {
     SaveModel(String),
     OpenProvider,
     SwitchProvider(String),
+    /// Persist a provider's shared `reasoning_effort` default. The provider id
+    /// is explicit so the chooser targets the provider it displayed.
+    SetReasoningEffort {
+        provider_id: String,
+        effort: String,
+    },
+}
+
+/// Everything the composer's model pill and its anchored chooser popup need to
+/// render. Computed at the app level (which owns the config and the conversation
+/// list) and handed to the tab each frame; the tab draws the popup and routes
+/// the user's choices back through [`UiRequest`].
+struct ModelSelector {
+    /// Compact pill text, e.g. `Model: qwen3`.
+    label: String,
+    /// Full `provider · model` text used for hover and the popup header.
+    detail: String,
+    color: egui::Color32,
+    /// `(provider id, label, is-current)` for the provider section.
+    providers: Vec<(String, String, bool)>,
+    /// Known model ids for the current provider (configured, saved, and seen).
+    models: Vec<String>,
+    /// The provider's saved default model, so it can be marked in the list.
+    saved_model: String,
+    /// Model the task's snapshot currently reports.
+    active_model: String,
+    /// Provider the task's snapshot currently reports.
+    active_provider: String,
+    /// The provider's saved `reasoning_effort` (`""` means the default).
+    reasoning: String,
+    /// Whether choosing a model/provider is currently allowed (connected, ready,
+    /// idle).
+    can_choose: bool,
+    /// Latest provider status line, so the popup can show save/switch feedback.
+    notice: String,
 }
 
 /// A large pasted blob held out of the visible composer. `token` is the short
@@ -618,18 +655,6 @@ impl Tab {
                         .push_row("system", "Not connected to the daemon.");
                 }
             }
-            "tools" => {
-                self.clear_input();
-                let input = if arg.trim() == "reload" {
-                    "tools reload"
-                } else {
-                    "tools"
-                };
-                if !self.run_command("config", input) {
-                    self.state
-                        .push_row("system", "Not connected to the daemon.");
-                }
-            }
             "config" => {
                 self.clear_input();
                 if arg.trim().is_empty() {
@@ -940,13 +965,20 @@ impl Tab {
             }
             self.state.busy = true;
             self.state.status = "Working…".into();
-        } else if !output.is_empty() {
-            let role = if display_role.as_deref() == Some("assistant") {
-                "assistant"
-            } else {
-                "system"
-            };
-            self.state.push_row(role, output);
+        } else {
+            // No turn started: a cancelled interactive menu, a config reply, or an
+            // empty result. The `KeyRequest` that opened a menu set `busy` and the
+            // waiting status, and this is the only "command over" signal, so settle
+            // the composer rather than leaving it stuck busy/"Cancelling…".
+            if !output.is_empty() {
+                let role = if display_role.as_deref() == Some("assistant") {
+                    "assistant"
+                } else {
+                    "system"
+                };
+                self.state.push_row(role, output);
+            }
+            self.state.finish_command();
         }
     }
 
@@ -1603,8 +1635,10 @@ struct DesktopApp {
     stats_picker: Option<(String, String)>,
     /// Inline status/error line under the stats dialog.
     stats_notice: String,
-    /// Catalog browser open flag (Phase 6).
-    show_catalog: bool,
+    /// Plugins surface open flag. One screen browses, installs, updates, and
+    /// removes every catalog item, and toggles the plugins the daemon can
+    /// enable/disable.
+    show_plugins: bool,
     /// Latest daemon catalog snapshot.
     catalog: Option<CatalogSnapshot>,
     /// (tab id, request id) of the in-flight `Catalog`/`CatalogApply` request;
@@ -1621,9 +1655,12 @@ struct DesktopApp {
     /// A `/catalog install|remove` waiting for the first snapshot so it can be
     /// applied against a known revision: `(requesting tab, action)`.
     pending_catalog_action: Option<(u64, CatalogAction)>,
-    /// Persistent multi-select state for the catalog browser (checked rows,
-    /// touched set, per-item apply outcomes, result-phase banner).
-    catalog_view: catalog::CatalogView,
+    /// Persistent state for the Plugins surface (search/filter, selection,
+    /// per-item apply outcomes, result-phase banner).
+    plugins_view: plugins::PluginsView,
+    /// Plugin install/update actions awaiting explicit user consent (A4). Bone
+    /// Lua is not sandboxed, so installing a plugin is never silent.
+    plugin_consent: Option<Vec<CatalogAction>>,
     /// Provider/model dialog open flag.
     show_provider: bool,
     /// Stable id of the tab that opened the provider/model chooser. Commands
@@ -1758,14 +1795,15 @@ impl DesktopApp {
             stats_refreshed: None,
             stats_picker: None,
             stats_notice: String::new(),
-            show_catalog: false,
+            show_plugins: false,
             catalog: None,
             catalog_request: None,
             catalog_request_at: None,
             catalog_retry_at: None,
             catalog_notice: String::new(),
             pending_catalog_action: None,
-            catalog_view: catalog::CatalogView::default(),
+            plugins_view: plugins::PluginsView::default(),
+            plugin_consent: None,
             show_provider: false,
             provider_origin_tab: None,
             show_setup: false,
@@ -1989,7 +2027,7 @@ impl DesktopApp {
         }
         tab.state.push_row(
             "assistant",
-            "File changes stay visible. Expand a call for details, or choose More → Tool calls → Verbose.",
+            "File changes stay visible. Expand a call for details, or choose Tools → Verbose.",
         );
         tab.state
             .view
@@ -2307,10 +2345,20 @@ impl DesktopApp {
             .and_then(|value| value.as_str())
             == Some("danger");
         self.config_schema = Some(schema);
+        let was_saving = self.config_notice.starts_with("Saving")
+            || self.config_notice.starts_with("Resetting")
+            || self.config_notice.starts_with("Enabling")
+            || self.config_notice.starts_with("Disabling")
+            || self.config_notice.starts_with("Approval mode:");
         self.config = Some(snapshot);
         // A fresh authoritative snapshot resolves any in-flight fetch and
         // clears transient "switching…" notices; a restart-required flag wins.
         self.config_request = None;
+        self.config_notice = if was_saving && !restart_required {
+            "Saved".into()
+        } else {
+            String::new()
+        };
         self.provider_notice = if restart_required {
             "Applied. The daemon flagged this change as restart-required.".into()
         } else {
@@ -2347,7 +2395,7 @@ impl DesktopApp {
         self.cli_provider = cli.provider;
         self.cli_model = cli.model;
         self.show_setup |= cli.open_setup;
-        self.show_catalog |= cli.open_catalog;
+        self.show_plugins |= cli.open_plugins;
         self.show_stats |= cli.open_stats;
     }
 
@@ -2415,7 +2463,7 @@ impl DesktopApp {
         {
             let _ = self.refresh_stats();
         }
-        if self.show_catalog
+        if self.show_plugins
             && self.catalog.is_none()
             && self.catalog_retry_at.is_none_or(|at| Instant::now() >= at)
         {
@@ -2557,6 +2605,58 @@ impl DesktopApp {
         sent
     }
 
+    /// Persist a provider's shared `reasoning_effort` default (the TUI's
+    /// reasoning chooser), preserving the configured model and every other
+    /// field. `effort` empty means the provider default.
+    fn save_reasoning_for_provider(
+        &mut self,
+        origin: Option<u64>,
+        provider_id: &str,
+        effort: &str,
+    ) -> bool {
+        let Some(config) = self.config.as_ref().cloned() else {
+            return false;
+        };
+        let Some(index) = self.provider_target_index(origin) else {
+            return false;
+        };
+        let Some(provider) = config
+            .providers
+            .iter()
+            .find(|p| p.id == provider_id)
+            .cloned()
+        else {
+            return false;
+        };
+        if provider.reasoning_effort == effort {
+            return false;
+        }
+        let update = ProviderUpdate {
+            id: provider.id,
+            label: provider.label,
+            base_url: provider.base_url,
+            model: provider.model,
+            endpoint: provider.endpoint,
+            handler: provider.handler,
+            context_window_tokens: provider.context_window_tokens,
+            max_concurrency: provider.max_concurrency,
+            reasoning_effort: effort.to_string(),
+            fast_mode: None,
+            supports_prompt_cache_key: None,
+            stream_usage: None,
+            api_key: None,
+        };
+        let sent = self.tabs[index].command(RuntimeCommand::UpsertProvider {
+            provider: update,
+            expected_revision: config.revision,
+            request_id: None,
+        });
+        if sent {
+            self.provider_notice = format!("Saving reasoning effort for {provider_id}…");
+        }
+        sent
+    }
+
     /// Persist one config value against the latest snapshot revision (TUI
     /// `/config set`). Returns whether the command was queued.
     fn set_config_value(&mut self, path: &str, value: serde_json::Value) -> bool {
@@ -2619,6 +2719,13 @@ impl DesktopApp {
         };
         let command = if namespace == "tools" {
             RuntimeCommand::SetToolEnabled {
+                name: name.to_owned(),
+                enabled,
+                expected_revision: revision,
+                request_id: None,
+            }
+        } else if namespace == "plugins" {
+            RuntimeCommand::SetPluginEnabled {
                 name: name.to_owned(),
                 enabled,
                 expected_revision: revision,
@@ -2798,6 +2905,9 @@ impl DesktopApp {
     }
 
     fn request_review(&mut self) {
+        if let Some(tab) = self.tabs.get(self.selected) {
+            self.review.set_workspace(&tab.workspace);
+        }
         if self.review.pending.is_some() {
             return;
         }
@@ -2886,6 +2996,95 @@ impl DesktopApp {
         sent
     }
 
+    /// Route catalog actions through the plugin consent gate (A4). Installing or
+    /// updating a Lua plugin requires explicit consent; every other action is
+    /// applied immediately.
+    fn request_catalog_actions(&mut self, actions: Vec<CatalogAction>) {
+        if actions.is_empty() {
+            return;
+        }
+        let mut immediate = Vec::new();
+        let mut consent = Vec::new();
+        for action in actions {
+            if self.is_plugin_install(&action) {
+                consent.push(action);
+            } else {
+                immediate.push(action);
+            }
+        }
+        if !immediate.is_empty() {
+            self.apply_catalog_actions(immediate);
+        }
+        if !consent.is_empty() {
+            self.plugin_consent = Some(consent);
+        }
+    }
+
+    /// Whether `action` installs or updates a plugin (rather than a tool,
+    /// command, theme, or a non-install action).
+    fn is_plugin_install(&self, action: &CatalogAction) -> bool {
+        matches!(action.action, CatalogActionKind::Install)
+            && self.catalog.as_ref().is_some_and(|catalog| {
+                catalog
+                    .items
+                    .iter()
+                    .any(|item| item.name == action.name && item.kind == "plugin")
+            })
+    }
+
+    /// Explicit consent gate for installing or updating a plugin (A4). Bone Lua
+    /// is not sandboxed, so this is a consent step, not a sandbox; declining
+    /// leaves the plugin tree unchanged.
+    fn plugin_consent_dialog(&mut self, ctx: &egui::Context) {
+        let Some(actions) = self.plugin_consent.clone() else {
+            return;
+        };
+        let updating = actions.iter().all(|action| {
+            self.catalog.as_ref().is_some_and(|catalog| {
+                catalog
+                    .items
+                    .iter()
+                    .any(|item| item.name == action.name && item.update_available)
+            })
+        });
+        let noun = if actions.len() == 1 {
+            "plugin"
+        } else {
+            "plugins"
+        };
+        let verb = if updating { "Update" } else { "Install" };
+        let mut confirm = false;
+        let mut cancel = false;
+        crate::surface::modal(ctx, egui::Id::new("plugin-consent")).show(ctx, |ui| {
+            ui.heading(format!("{verb} {noun}?"));
+            ui.add_space(4.0);
+            for action in &actions {
+                ui.label(format!("• {}", action.name));
+            }
+            ui.add_space(6.0);
+            ui.label(
+                "Bone Lua plugins are not sandboxed: a plugin runs with the same \
+                 authority as your own init.lua, including filesystem and shell \
+                 access through registered tools. Only install plugins you trust.",
+            );
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Cancel").clicked() {
+                    cancel = true;
+                }
+                if crate::surface::primary(ui, verb).clicked() {
+                    confirm = true;
+                }
+            });
+        });
+        if confirm {
+            self.plugin_consent = None;
+            self.apply_catalog_actions(actions);
+        } else if cancel {
+            self.plugin_consent = None;
+        }
+    }
+
     /// Apply a correlated `Stats` response to the stats dashboard state.
     fn apply_stats_response(&mut self, response: HostResponse) {
         match response {
@@ -2924,7 +3123,7 @@ impl DesktopApp {
             }
             HostResponse::CatalogApplied(result) => {
                 self.catalog_notice = catalog::applied_summary(&result);
-                self.catalog_view.apply_result(&result);
+                self.plugins_view.apply_result(&result);
                 self.catalog = Some(result.snapshot);
             }
             HostResponse::Error { message, .. } => {
@@ -2952,6 +3151,13 @@ impl DesktopApp {
                     self.job_view = Some(activity::JobViewer::new(tab_id, id));
                 }
             }
+            UiRequest::OpenProcess(id) => {
+                if self.tabs.iter().any(|tab| {
+                    tab.id == tab_id && tab.state.processes.iter().any(|process| process.id == id)
+                }) {
+                    self.process_view = Some(activity::ProcessViewer::new(tab_id, id));
+                }
+            }
             UiRequest::OpenStats => {
                 self.show_stats = true;
                 if self.stats.is_none() {
@@ -2968,7 +3174,7 @@ impl DesktopApp {
                 self.show_setup = true;
             }
             UiRequest::OpenCatalog => {
-                self.show_catalog = true;
+                self.show_plugins = true;
                 if self.catalog.is_none() {
                     self.request_catalog(false);
                 }
@@ -2983,6 +3189,13 @@ impl DesktopApp {
                 self.show_provider = true;
             }
             UiRequest::SwitchProvider(id) => self.apply_provider_command(tab_id, &id),
+            UiRequest::SetReasoningEffort {
+                provider_id,
+                effort,
+            } => {
+                self.provider_origin_tab = Some(tab_id);
+                self.save_reasoning_for_provider(Some(tab_id), &provider_id, &effort);
+            }
         }
     }
 
@@ -3098,13 +3311,12 @@ impl DesktopApp {
         }
     }
 
-    /// Latest theme payload from the selected tab (falling back to any tab that
-    /// has received one), as broadcast by `ViewDiff::SetTheme`.
+    /// Latest theme payload from the selected tab, as broadcast by
+    /// `ViewDiff::SetTheme` or included in the daemon's resolved frontend state.
     fn theme_value(&self) -> Option<&serde_json::Value> {
         self.tabs
             .get(self.selected)
             .and_then(|tab| tab.state.theme.as_ref())
-            .or_else(|| self.tabs.iter().find_map(|tab| tab.state.theme.as_ref()))
     }
 
     /// Resolved palette of the currently applied daemon theme, used to color
@@ -3131,15 +3343,29 @@ impl DesktopApp {
     /// style when the payload changes, so this is cheap on the common frame.
     fn apply_theme(&mut self, ctx: &egui::Context) {
         let Some(value) = self.theme_value().cloned() else {
+            // A reconnect or tab switch can leave the selected tab without a
+            // payload briefly. Do not keep displaying another tab's theme.
+            if self.applied_theme.take().is_some() {
+                ctx.set_style_of(ctx.theme(), theme::ThemeSettings::default().style());
+                ctx.request_repaint();
+            }
             return;
         };
         if self.applied_theme.as_ref() == Some(&value) {
             return;
         }
-        if let Ok(settings) = serde_json::from_value::<theme::ThemeSettings>(value.clone()) {
-            ctx.set_style_of(ctx.theme(), settings.style());
-        }
+        let Ok(settings) = serde_json::from_value::<theme::ThemeSettings>(value.clone()) else {
+            // Ignore malformed daemon payloads without disturbing the last
+            // successfully applied theme.
+            return;
+        };
+        ctx.set_style_of(ctx.theme(), settings.style());
         self.applied_theme = Some(value);
+        // egui snapshots the root `Ui`'s style when a pass begins, so a style set
+        // mid-pass is only painted on the *next* pass. Request one so a theme the
+        // daemon pushed while the app was otherwise idle is drawn immediately
+        // instead of waiting for unrelated input or a timer.
+        ctx.request_repaint();
     }
 
     /// Refresh the configurable keymap from the daemon's resolved frontend
@@ -3968,7 +4194,6 @@ impl DesktopApp {
             || self.command_input.is_some()
             || self.rename_target.is_some()
             || self.delete_target.is_some()
-            || self.review.open
             || self.show_provider
             || self.show_setup
             || self.show_server
@@ -3978,7 +4203,8 @@ impl DesktopApp {
             || self.process_view.is_some()
             || self.job_view.is_some()
             || self.show_stats
-            || self.show_catalog
+            || self.show_plugins
+            || self.plugin_consent.is_some()
     }
 
     /// Spawn `bone serve` bound to the effective address, if possible. On
@@ -4242,6 +4468,67 @@ impl DesktopApp {
             format!("{label} · {model}"),
             egui::Color32::from_rgb(110, 200, 120),
         )
+    }
+
+    /// Gather the pill's text/color plus the provider, model, and reasoning
+    /// choices for the composer's anchored chooser popup. Mirrors the model set
+    /// the full "Choose model" dialog offers (configured default, saved models
+    /// from the conversation list, and models observed on other tabs).
+    fn model_selector_data(&self, index: usize) -> ModelSelector {
+        let (label, detail, color) = self.model_pill(index);
+        let snapshot = self.tabs.get(index).map(|tab| &tab.state.snapshot);
+        let active_provider = snapshot.map(|s| s.provider_id.clone()).unwrap_or_default();
+        let active_model = snapshot
+            .map(|s| s.provider_model.clone())
+            .unwrap_or_default();
+        let can_choose = self
+            .tabs
+            .get(index)
+            .is_some_and(|tab| tab.connected && tab.state.ready && !tab.state.busy);
+        let mut providers = Vec::new();
+        let mut saved_model = String::new();
+        let mut reasoning = String::new();
+        let mut models = Vec::new();
+        if let Some(config) = self.config.as_ref() {
+            providers = config
+                .providers
+                .iter()
+                .map(|p| (p.id.clone(), p.label.clone(), p.id == active_provider))
+                .collect();
+            if let Some(saved) = config.providers.iter().find(|p| p.id == active_provider) {
+                saved_model = saved.model.clone();
+                reasoning = saved.reasoning_effort.clone();
+            }
+            let mut set = std::collections::BTreeSet::new();
+            if !saved_model.is_empty() {
+                set.insert(saved_model.clone());
+            }
+            for meta in &self.conversations {
+                if meta.provider == active_provider && !meta.model.is_empty() {
+                    set.insert(meta.model.clone());
+                }
+            }
+            for tab in &self.tabs {
+                let snapshot = &tab.state.snapshot;
+                if snapshot.provider_id == active_provider && !snapshot.provider_model.is_empty() {
+                    set.insert(snapshot.provider_model.clone());
+                }
+            }
+            models = set.into_iter().collect();
+        }
+        ModelSelector {
+            label,
+            detail,
+            color,
+            providers,
+            models,
+            saved_model,
+            active_model,
+            active_provider,
+            reasoning,
+            can_choose,
+            notice: self.provider_notice.clone(),
+        }
     }
 
     /// Toolbar pill describing the daemon target.
@@ -4604,7 +4891,7 @@ impl DesktopApp {
                 self.tabs[index].apply_drops(&dropped);
             }
         }
-        let model_selector = (!self.demo).then(|| self.model_pill(index));
+        let model_selector = (!self.demo).then(|| self.model_selector_data(index));
         let danger = self.approval_mode() == "danger";
         let approval_keyboard_enabled = !blocked
             && ui.is_enabled()
@@ -4675,35 +4962,74 @@ impl DesktopApp {
                     data.insert_temp(id, !hidden);
                 });
             }
-            let (pill, color) = self.daemon_pill();
-            let (dot, response) =
-                ui.allocate_exact_size(egui::vec2(12.0, 20.0), egui::Sense::hover());
-            ui.painter().circle_filled(dot.center(), 3.0, color);
-            response.on_hover_text(&pill);
-            if !self.demo && !matches!(self.daemon_phase, daemon::Phase::Ready) {
-                ui.label(egui::RichText::new(pill).small());
-            }
             // A text-only menu bar in the spirit of File/Edit/View: the labels
-            // carry no button chrome and drop their menus on click. The active
-            // conversation's title stays in the tab strip below, not up here.
+            // carry no button chrome and drop their menus on click. Keep the
+            // controls grouped from the app shell, through workspace/task work,
+            // to server state and policy. The active conversation's title stays
+            // in the tab strip below, not up here.
             egui::MenuBar::new().ui(ui, |ui| {
-                ui.menu_button("Layout", |ui| self.window_menu(ui))
+                // App shell: window, pane, and display controls.
+                ui.menu_button("View", |ui| self.window_menu(ui))
                     .response
-                    .on_hover_text("Windows and split layout");
-                if !self.demo {
-                    self.permissions_menu(ui);
-                }
+                    .on_hover_text("Windows, split layout, and view settings");
+                ui.separator();
+
+                // Workspace: move between tasks, then review this workspace.
+                ui.menu_button("Task", |ui| self.task_menu(ui))
+                    .response
+                    .on_hover_text("Switch tasks, and this task's activity and usage");
+                let review_label = self
+                    .tabs
+                    .get(self.selected)
+                    .and_then(|tab| self.review.file_count(&tab.workspace))
+                    .map_or_else(
+                        || "Changes".to_owned(),
+                        |count| format!("Changes ({count})"),
+                    );
                 if ui
-                    .button("Changes")
+                    .button(review_label)
                     .on_hover_text("Review changed files in this workspace")
                     .clicked()
                 {
-                    self.review.open = true;
-                    self.request_review();
+                    self.review.open =
+                        !self.review.open || self.review.window != self.window_ui.rendering;
+                    self.review.window = self.window_ui.rendering;
+                    if self.review.open {
+                        self.request_review();
+                    }
                 }
-                ui.menu_button("More", |ui| self.toolbar_menu(ui))
+                ui.separator();
+
+                // Tool settings share one menu, while its sections make their
+                // different scopes explicit: display locally, permissions on the
+                // server.
+                ui.menu_button("Tools", |ui| self.tools_menu(ui))
                     .response
-                    .on_hover_text("View & settings");
+                    .on_hover_text("Tool-call display and execution permissions");
+                ui.separator();
+
+                // Server scope: the status indicator sits beside connection and
+                // provider controls.
+                let (pill, color) = self.daemon_pill();
+                let (dot, response) =
+                    ui.allocate_exact_size(egui::vec2(12.0, 20.0), egui::Sense::hover());
+                ui.painter().circle_filled(dot.center(), 3.0, color);
+                response.on_hover_text(&pill);
+                if !self.demo && !matches!(self.daemon_phase, daemon::Phase::Ready) {
+                    ui.label(egui::RichText::new(pill).small());
+                }
+                if !self.demo {
+                    ui.menu_button("Server", |ui| self.server_menu(ui))
+                        .response
+                        .on_hover_text("Daemon connection and provider setup");
+                }
+                ui.separator();
+
+                // Help is intentionally last: it explains the controls rather
+                // than changing workspace state.
+                ui.menu_button("Help", |ui| self.help_menu(ui))
+                    .response
+                    .on_hover_text("Keyboard shortcuts");
             });
         });
         if let Some(tab) = self.tabs.get(self.selected) {
@@ -4768,17 +5094,23 @@ impl DesktopApp {
         }
     }
 
-    /// Secondary toolbar actions and view settings, collapsed into one menu so
-    /// the top bar stays a compact single row.
-    fn toolbar_menu(&mut self, ui: &mut egui::Ui) {
+    /// The `Tools` menu keeps tool-call display and execution settings together;
+    /// the section headings explain their different owners and scopes.
+    fn tools_menu(&mut self, ui: &mut egui::Ui) {
+        ui.set_max_width((ui.ctx().content_rect().width() - 32.0).clamp(220.0, 420.0));
+        self.tool_display_section(ui);
+        if !self.demo {
+            ui.separator();
+            self.tool_permissions_section(ui);
+        }
+    }
+
+    /// The `Task` menu: cross-task navigation plus this task's session and usage
+    /// surfaces (previously crammed into the `More` menu).
+    fn task_menu(&mut self, ui: &mut egui::Ui) {
         if ui.button("Switch task…  Ctrl/Cmd+P").clicked() {
             self.palette
                 .open(false, self.tabs.get(self.selected).map_or(0, |t| t.id));
-            ui.close();
-        }
-        if ui.button("Workspace changes…").clicked() {
-            self.review.open = true;
-            self.request_review();
             ui.close();
         }
         if ui.button("Commands…  Ctrl/Cmd+K").clicked() {
@@ -4786,153 +5118,123 @@ impl DesktopApp {
                 .open(true, self.tabs.get(self.selected).map_or(0, |t| t.id));
             ui.close();
         }
-        ui.separator();
-        if self.has_connected_tab() {
-            let incognito = self
-                .tabs
-                .get(self.selected)
-                .is_some_and(|tab| tab.state.snapshot.incognito);
-            if ui
-                .add_enabled(
-                    self.tabs
-                        .get(self.selected)
-                        .is_some_and(|tab| tab.connected && !tab.demo),
-                    egui::Button::selectable(incognito, "Incognito for this task"),
-                )
-                .on_hover_text(
-                    "Session-scoped: while on, nothing is written to the conversation database",
-                )
-                .clicked()
-            {
-                self.set_incognito(!incognito);
-                ui.close();
-            }
-            let (process_count, job_count) = self
-                .tabs
-                .get(self.selected)
-                .map(|tab| (tab.state.processes.len(), tab.state.jobs.len()))
-                .unwrap_or((0, 0));
-            let active = process_count + job_count;
-            let label = if active > 0 {
-                format!("Activity ({active})")
-            } else {
-                "Activity".to_string()
-            };
-            if ui
-                .add_enabled(true, egui::Button::selectable(self.show_activity, label))
-                .on_hover_text("Background processes and jobs")
-                .clicked()
-            {
-                self.show_activity = !self.show_activity;
-                if self.show_activity {
-                    self.activity_tab = self
-                        .tabs
-                        .get(self.selected)
-                        .filter(|tab| tab.connected && !tab.demo)
-                        .map(|tab| tab.id)
-                        .or_else(|| {
-                            self.tabs
-                                .iter()
-                                .find(|tab| tab.connected && !tab.demo)
-                                .map(|tab| tab.id)
-                        });
-                    self.refresh_activity();
-                } else {
-                    self.activity_tab = None;
-                }
-                ui.close();
-            }
-            if ui
-                .add_enabled(true, egui::Button::selectable(self.show_stats, "Usage"))
-                .on_hover_text("Token usage statistics")
-                .clicked()
-            {
-                self.show_stats = !self.show_stats;
-                if self.show_stats && self.stats.is_none() {
-                    self.refresh_stats();
-                }
-                ui.close();
-            }
-            let updates = self.catalog_updates();
-            let catalog_label = if updates > 0 {
-                format!("Catalog ({updates})")
-            } else {
-                "Catalog".to_string()
-            };
-            if ui
-                .add_enabled(
-                    true,
-                    egui::Button::selectable(self.show_catalog, catalog_label),
-                )
-                .on_hover_text("Browse and install extensions")
-                .clicked()
-            {
-                self.show_catalog = !self.show_catalog;
-                if self.show_catalog {
-                    self.request_catalog(true);
-                }
-                ui.close();
-            }
+        if !self.has_connected_tab() {
+            return;
         }
         ui.separator();
-        if !self.demo && ui.button("Server & connection…").clicked() {
+        let incognito = self
+            .tabs
+            .get(self.selected)
+            .is_some_and(|tab| tab.state.snapshot.incognito);
+        if ui
+            .add_enabled(
+                self.tabs
+                    .get(self.selected)
+                    .is_some_and(|tab| tab.connected && !tab.demo),
+                egui::Button::selectable(incognito, "Incognito for this task"),
+            )
+            .on_hover_text(
+                "Session-scoped: while on, nothing is written to the conversation database",
+            )
+            .clicked()
+        {
+            self.set_incognito(!incognito);
+            ui.close();
+        }
+        let (process_count, job_count) = self
+            .tabs
+            .get(self.selected)
+            .map(|tab| (tab.state.processes.len(), tab.state.jobs.len()))
+            .unwrap_or((0, 0));
+        let active = process_count + job_count;
+        let label = if active > 0 {
+            format!("Activity ({active})")
+        } else {
+            "Activity".to_string()
+        };
+        if ui
+            .add_enabled(true, egui::Button::selectable(self.show_activity, label))
+            .on_hover_text("Background processes and jobs")
+            .clicked()
+        {
+            self.show_activity = !self.show_activity;
+            if self.show_activity {
+                self.activity_tab = self
+                    .tabs
+                    .get(self.selected)
+                    .filter(|tab| tab.connected && !tab.demo)
+                    .map(|tab| tab.id)
+                    .or_else(|| {
+                        self.tabs
+                            .iter()
+                            .find(|tab| tab.connected && !tab.demo)
+                            .map(|tab| tab.id)
+                    });
+                self.refresh_activity();
+            } else {
+                self.activity_tab = None;
+            }
+            ui.close();
+        }
+        if ui
+            .add_enabled(true, egui::Button::selectable(self.show_stats, "Usage"))
+            .on_hover_text("Token usage statistics")
+            .clicked()
+        {
+            self.show_stats = !self.show_stats;
+            if self.show_stats && self.stats.is_none() {
+                self.refresh_stats();
+            }
+            ui.close();
+        }
+        let updates = self.catalog_updates();
+        let plugins_label = if updates > 0 {
+            format!("Plugins ({updates})")
+        } else {
+            "Plugins".to_string()
+        };
+        if ui
+            .add_enabled(
+                true,
+                egui::Button::selectable(self.show_plugins, plugins_label),
+            )
+            .on_hover_text("Browse, install, and manage plugins")
+            .clicked()
+        {
+            self.show_plugins = !self.show_plugins;
+            if self.show_plugins {
+                self.request_catalog(true);
+            }
+            ui.close();
+        }
+    }
+
+    /// The `Server` menu: daemon connection, provider setup, and live connection
+    /// status. Only shown outside demo mode.
+    fn server_menu(&mut self, ui: &mut egui::Ui) {
+        if ui.button("Server & connection…").clicked() {
             self.show_server = true;
             ui.close();
         }
-        if !self.demo && ui.button("Provider setup…").clicked() {
+        if ui.button("Provider setup…").clicked() {
             self.show_setup = true;
             ui.close();
         }
-        ui.menu_button("Tool calls", |ui| {
-            let before = self.display.tool_verbosity;
-            ui.selectable_value(
-                &mut self.display.tool_verbosity,
-                layout::ToolVerbosity::Concise,
-                "Concise",
-            )
-            .on_hover_text(
-                "Compact summaries with filenames and commands; edit diffs stay visible",
-            );
-            ui.selectable_value(
-                &mut self.display.tool_verbosity,
-                layout::ToolVerbosity::Verbose,
-                "Verbose",
-            )
-            .on_hover_text("Expand tool arguments and output; edit diffs stay visible");
-            if before != self.display.tool_verbosity {
-                self.note_layout_change(ui.ctx());
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label("Zoom");
-            let zoom = ui.ctx().zoom_factor();
-            let mut next = zoom;
-            if ui.button("−").clicked() {
-                next = (zoom - 0.1).max(0.75);
-            }
-            if ui
-                .button(format!("{:.0}%", zoom * 100.0))
-                .on_hover_text("Reset zoom")
-                .clicked()
-            {
-                next = 1.0;
-            }
-            if ui.button("+").clicked() {
-                next = (zoom + 0.1).min(2.0);
-            }
-            if (next - zoom).abs() > f32::EPSILON {
-                ui.ctx().set_zoom_factor(next);
-            }
-        });
-        ui.separator();
         if let Some(tab) = self.tabs.get(self.selected) {
+            ui.separator();
             ui.label(format!("Socket: {}", tab.connection_status));
             ui.label(format!("Turn: {}", tab.state.status));
             ui.label(format!("Host API: {}", tab.host_api_version));
         }
+    }
+
+    /// The `Help` menu: a keyboard shortcut reference.
+    fn help_menu(&mut self, ui: &mut egui::Ui) {
         ui.weak("Ctrl/Cmd+T: new · W: close focused pane");
         ui.weak("Ctrl/Cmd+PageUp/PageDown: switch conversation");
         ui.weak("Ctrl/Cmd+P: switch task · K: command picker");
+        ui.weak("Ctrl/Cmd+Shift+N: new window");
+        ui.weak("Ctrl/Cmd+\\: split right · Shift+\\: split down");
     }
 
     /// Advanced connection dialog: address editing, daemon status, and manual
@@ -5235,10 +5537,10 @@ impl DesktopApp {
 
     fn open_utility(&mut self, destination: &str) {
         self.show_config = destination == "Settings";
-        self.show_catalog = destination == "Catalog";
+        self.show_plugins = destination == "Plugins";
         self.show_stats = destination == "Usage";
         self.stats_picker = None;
-        if self.show_catalog && self.catalog.is_none() {
+        if self.show_plugins && self.catalog.is_none() {
             self.request_catalog(true);
         }
         if self.show_stats && self.stats.is_none() {
@@ -5402,22 +5704,23 @@ impl DesktopApp {
         }
     }
 
-    /// Extension catalog browser (Phase 6). Renders the most recent
-    /// `CatalogSnapshot` and sends install/remove `CatalogApply` requests.
-    fn catalog_dialog(&mut self, ctx: &egui::Context) {
-        if self.demo || !self.show_catalog {
+    /// Plugins surface. Renders the most recent `CatalogSnapshot` through the
+    /// unified plugins renderer and sends install/update/remove/enable/disable
+    /// `CatalogApply` requests.
+    fn plugins_dialog(&mut self, ctx: &egui::Context) {
+        if self.demo || !self.show_plugins {
             return;
         }
         let palette = self.palette();
-        let mut open = self.show_catalog;
+        let mut open = self.show_plugins;
         let mut destination = None;
         let mut actions = Vec::new();
         let mut refresh = false;
-        crate::surface::Surface::new("Catalog", "Find and manage extensions for Bone.")
-            .size(1040.0, 700.0)
+        crate::surface::Surface::new("Plugins", "Find, install, and manage plugins for Bone.")
+            .size(960.0, 640.0)
             .body_scroll(false)
             .show(ctx, &mut open, |ui| {
-                destination = surface::navigation(ui, "Catalog", |ui| {
+                destination = surface::navigation(ui, "Plugins", |ui| {
                     refresh = ui
                         .add_enabled(self.catalog_request.is_none(), egui::Button::new("Refresh"))
                         .clicked();
@@ -5429,7 +5732,7 @@ impl DesktopApp {
                     Some(snapshot) => {
                         actions = ui
                             .add_enabled_ui(self.catalog_request.is_none(), |ui| {
-                                catalog::render(ui, snapshot, &mut self.catalog_view, &palette)
+                                plugins::render(ui, snapshot, &mut self.plugins_view, &palette)
                             })
                             .inner;
                     }
@@ -5437,12 +5740,12 @@ impl DesktopApp {
                         // A notice (timeout/error) already explains the empty
                         // state; only show the loading hint while it is pending.
                         if self.catalog_notice.is_empty() {
-                            ui.weak("Loading catalog…");
+                            ui.weak("Loading plugins…");
                         }
                     }
                 }
             });
-        self.show_catalog = open;
+        self.show_plugins = open;
         if let Some(destination) = destination {
             self.open_utility(destination);
         }
@@ -5454,24 +5757,7 @@ impl DesktopApp {
             self.request_catalog(true);
         }
         if !actions.is_empty() {
-            let mut mapped = Vec::new();
-            for action in actions {
-                match action {
-                    catalog::CatalogUiAction::Apply(changes) => {
-                        for (name, install) in changes {
-                            mapped.push(CatalogAction {
-                                name,
-                                action: if install {
-                                    CatalogActionKind::Install
-                                } else {
-                                    CatalogActionKind::Remove
-                                },
-                            });
-                        }
-                    }
-                }
-            }
-            self.apply_catalog_actions(mapped);
+            self.request_catalog_actions(actions);
         }
     }
 
@@ -5487,7 +5773,7 @@ impl DesktopApp {
         let mut action: Option<config_view::ConfigUiAction> = None;
         let mut refetch = false;
         crate::surface::Surface::new("Settings", "Customize how Bone looks and works.")
-            .size(980.0, 680.0)
+            .size(900.0, 620.0)
             .body_scroll(false)
             .show(ctx, &mut open, |ui| {
                 destination = surface::navigation(ui, "Settings", |_| {});
@@ -5573,11 +5859,26 @@ impl DesktopApp {
         let view = &self.tabs[index].state.view;
         let palette = self.palette();
         let screen = ctx.content_rect();
-        crate::surface::modal(ctx, egui::Id::new("key-capture")).show(ctx, |ui| {
+        let cap = (screen.height() - 64.0).max(1.0);
+        // Only the test hook below reads this response; in normal builds the
+        // modal is fire-and-forget, so keep the binding underscore-prefixed.
+        let _response = crate::surface::modal(ctx, egui::Id::new("key-capture")).show(ctx, |ui| {
             ui.set_width((screen.width() - 64.0).clamp(1.0, 720.0));
+            // The view arrives from the daemon one frame after the key request,
+            // so the modal opens on a small placeholder. Reserve the measured
+            // content height now: otherwise the auto-sized modal area latches
+            // onto the placeholder height and the ScrollArea below stays clipped
+            // to it forever (see `Self::key_capture_content_height`).
+            let desired = Self::key_capture_content_height(ui, view);
+            if desired > 0.0 {
+                // Pixel-snapping the centred modal can shave a fraction of a point
+                // off the reserved height, which alone is enough to re-clip the last
+                // row; add a small gutter so the measured content always fits.
+                ui.set_min_height((desired + 2.0).min(cap));
+            }
             egui::ScrollArea::vertical()
                 .id_salt(("key-capture-panes", self.tabs[index].id))
-                .max_height((screen.height() - 64.0).max(1.0))
+                .max_height(cap)
                 .show(ui, |ui| {
                     let mut has_content = false;
                     for component in &view.components {
@@ -5612,6 +5913,13 @@ impl DesktopApp {
                     }
                 });
         });
+        #[cfg(test)]
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new("last-key-capture-rect"),
+                _response.response.rect,
+            )
+        });
 
         if let Some((key, modifiers)) = captured {
             let event = keys::key_event(key, modifiers);
@@ -5621,6 +5929,48 @@ impl DesktopApp {
                     Some("Could not send the key reply; the connection is closed.".into());
             }
         }
+    }
+
+    /// Height the key-capture modal must reserve so every float pane it renders
+    /// is visible in one paint. `egui::Modal` sizes its area to the measured
+    /// content and the `ScrollArea` below derives its height from that area, so
+    /// without a content-derived floor the area settles on the one-frame
+    /// placeholder size and the panes stay clipped. Overestimating only adds
+    /// trailing whitespace; underestimating re-clips.
+    fn key_capture_content_height(ui: &egui::Ui, view: &bone_protocol::ViewModel) -> f32 {
+        let spacing = ui.spacing().item_spacing.y;
+        // The ScrollArea reserves its scrollbar from the available width; wrap
+        // to the reduced width so the estimate errs high rather than low.
+        let scroll = ui.spacing().scroll;
+        let width =
+            (ui.available_width() - scroll.bar_width - 2.0 * scroll.bar_inner_margin).max(1.0);
+        let mut height = 0.0;
+        let mut first = true;
+        for component in &view.components {
+            let bone_protocol::Component::Float {
+                title,
+                lines,
+                scroll,
+                ..
+            } = component
+            else {
+                continue;
+            };
+            if lines.is_empty() {
+                continue;
+            }
+            if !first {
+                // The separator drawn between floats.
+                height += spacing + 6.0;
+            }
+            first = false;
+            if !title.is_empty() {
+                height += ui.text_style_height(&egui::TextStyle::Heading) + spacing;
+            }
+            let start = (*scroll).min(lines.len());
+            height += panes::measure_lines(ui, &lines[start..], width);
+        }
+        height
     }
 
     /// Provider onboarding dialog: renders the `SetupUi` form and sends the
@@ -5671,15 +6021,18 @@ impl DesktopApp {
 
 impl Tab {
     /// Intercept autocomplete navigation before the multiline editor sees the
-    /// keys, so Enter accepts a suggestion instead of inserting a newline.
-    fn handle_autocomplete_keys(&mut self, ui: &mut egui::Ui) {
+    /// keys. Tab accepts the highlighted suggestion; Enter accepts it and runs
+    /// it immediately (mirroring the TUI), so selecting a command cannot get
+    /// stuck re-accepting itself. Returns true when the caller should submit the
+    /// composer this frame.
+    fn handle_autocomplete_keys(&mut self, ui: &mut egui::Ui) -> bool {
         let has_matches = self
             .autocomplete
             .as_ref()
             .map(|ac| !ac.matches.is_empty())
             .unwrap_or(false);
         if !has_matches {
-            return;
+            return false;
         }
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) {
             if let Some(ac) = self.autocomplete.as_mut() {
@@ -5689,11 +6042,19 @@ impl Tab {
             if let Some(ac) = self.autocomplete.as_mut() {
                 ac.up();
             }
-        } else if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab))
-            || ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
-        {
+        } else if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)) {
             self.accept_autocomplete();
+        } else if ui.input(|i| {
+            i.events.iter().any(|event| {
+                matches!(event,
+            egui::Event::Key { key: egui::Key::Enter, pressed: true, modifiers, .. }
+            if *modifiers == egui::Modifiers::NONE)
+            })
+        }) && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+        {
+            return self.accept_autocomplete();
         }
+        false
     }
 
     /// Keep the approval nav state pinned to the first pending approval. When
@@ -5799,10 +6160,109 @@ impl Tab {
         }
     }
 
+    /// The chooser popup anchored above the composer's model chip: pick the
+    /// provider, a model for the current provider, or the shared reasoning
+    /// effort, plus a link to the full "Choose model" dialog. Choices are queued
+    /// as [`UiRequest`]s because the app (not the tab) owns the config and the
+    /// conversation list the choices are validated against.
+    fn model_chooser_popup(&mut self, response: &egui::Response, selector: &ModelSelector) {
+        egui::Popup::from_toggle_button_response(response)
+            // `TOP_START` anchors the popup's bottom-left to the chip's
+            // top-left, i.e. it opens above the chip like the TUI `/provider`.
+            .align(egui::RectAlign::TOP_START)
+            .gap(6.0)
+            .width(320.0)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show(|ui| {
+                ui.set_min_width(300.0);
+                ui.strong("Model for this task");
+                ui.label(format!(
+                    "Current: {} · {}",
+                    selector.active_model, selector.active_provider
+                ));
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Provider").small().weak());
+                for (id, label, current) in &selector.providers {
+                    let text = if *current {
+                        format!("{label} ✓")
+                    } else {
+                        label.clone()
+                    };
+                    if ui.selectable_label(*current, text).clicked() && !*current {
+                        self.request_ui(UiRequest::SwitchProvider(id.clone()));
+                    }
+                }
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Model").small().weak());
+                if selector.models.is_empty() {
+                    ui.weak("No known models for this provider.");
+                }
+                egui::ScrollArea::vertical()
+                    .id_salt("model-chooser-models")
+                    .max_height(180.0)
+                    .show(ui, |ui| {
+                        for model in &selector.models {
+                            let active = *model == selector.active_model;
+                            let label = if *model == selector.saved_model {
+                                format!("{model} · default")
+                            } else {
+                                model.clone()
+                            };
+                            if ui
+                                .add_enabled(
+                                    selector.can_choose,
+                                    egui::Button::selectable(active, label),
+                                )
+                                .clicked()
+                            {
+                                self.request_ui(UiRequest::SaveModel(model.clone()));
+                            }
+                        }
+                    });
+                ui.add_space(4.0);
+                ui.label(egui::RichText::new("Reasoning effort").small().weak());
+                ui.horizontal_wrapped(|ui| {
+                    for (value, label) in [
+                        ("", "default"),
+                        ("low", "low"),
+                        ("medium", "medium"),
+                        ("high", "high"),
+                        ("xhigh", "xhigh"),
+                    ] {
+                        let selected = selector.reasoning == value;
+                        if ui
+                            .add_enabled(
+                                selector.can_choose,
+                                egui::Button::selectable(selected, label),
+                            )
+                            .clicked()
+                            && !selected
+                        {
+                            self.request_ui(UiRequest::SetReasoningEffort {
+                                provider_id: selector.active_provider.clone(),
+                                effort: value.to_string(),
+                            });
+                        }
+                    }
+                });
+                ui.add_space(4.0);
+                if !selector.notice.is_empty() {
+                    ui.label(&selector.notice);
+                }
+                if ui
+                    .button("More model options…")
+                    .on_hover_text("Open the full model dialog")
+                    .clicked()
+                {
+                    self.request_ui(UiRequest::OpenProvider);
+                }
+            });
+    }
+
     fn composer_panel(
         &mut self,
         ui: &mut egui::Ui,
-        model_selector: Option<(String, String, egui::Color32)>,
+        model_selector: Option<ModelSelector>,
         _danger: bool,
         approval_keyboard_enabled: bool,
     ) -> bool {
@@ -6030,9 +6490,10 @@ impl Tab {
         }
         let editor_focused = ui.memory(|memory| memory.has_focus(editor_id));
         self.refresh_autocomplete();
-        if editor_focused {
-            self.handle_autocomplete_keys(ui);
-        }
+        // Enter on a highlighted command accepts it and runs it immediately;
+        // Tab only accepts it. The submit must happen after the composer text is
+        // set, so stash the request and fold it into the send path below.
+        let autocomplete_submit = editor_focused && self.handle_autocomplete_keys(ui);
         // Collapse large pastes into a placeholder token, mirroring the TUI.
         // The event is removed so the TextEdit below does not also insert the
         // whole blob. Only when focused, so we never swallow another widget's
@@ -6116,10 +6577,10 @@ impl Tab {
                                     .desired_width(f32::INFINITY)
                                     .desired_rows(2)
                                     .frame(egui::Frame::NONE)
-                                    // Enter is an action, not a newline: the
-                                    // return-key handler below sends, steers,
-                                    // or queues instead of inserting a `\n`.
-                                    .return_key(None)
+                                    .return_key(egui::KeyboardShortcut::new(
+                                        egui::Modifiers::SHIFT,
+                                        egui::Key::Enter,
+                                    ))
                                     .hint_text("Ask anything, or / for commands"),
                             )
                         } else {
@@ -6131,7 +6592,10 @@ impl Tab {
                                         .desired_width(ui.available_width())
                                         .desired_rows(2)
                                         .frame(egui::Frame::NONE)
-                                        .return_key(None)
+                                        .return_key(egui::KeyboardShortcut::new(
+                                            egui::Modifiers::SHIFT,
+                                            egui::Key::Enter,
+                                        ))
                                         .hint_text("Ask anything, or / for commands"),
                                 )
                             })
@@ -6148,11 +6612,10 @@ impl Tab {
         if self.autocomplete_popup(ui, &editor) {
             changed = true;
         }
-        // Return-key actions. The composer's TextEdit has no return key, so
-        // these events are still available to consume here:
+        // Shift+Enter is handled by TextEdit, preserving caret, selection and undo.
+        // The remaining return-key actions are:
         //   Enter       — send; queue while a turn is running
         //   Ctrl+Enter  — steer the running turn (send when idle)
-        //   Shift+Enter — queue for after the running turn (send when idle)
         // Consume the most specific modifiers first: `consume_key` ignores extra
         // Shift/Alt, so a Shift+Enter event also matches the plain-Enter pattern.
         let editor_focused = editor.has_focus();
@@ -6160,10 +6623,16 @@ impl Tab {
             && (ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter))
                 // Alt+Enter mirrors the TUI's terminal fallback for Ctrl+Enter.
                 || ui.input_mut(|i| i.consume_key(egui::Modifiers::ALT, egui::Key::Enter)));
-        let queue_shortcut = editor_focused
-            && ui.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::Enter));
-        let send_shortcut = editor_focused
+        let plain_enter = editor_focused
+            && ui.input(|i| {
+                i.events.iter().any(|event| {
+                    matches!(event,
+                egui::Event::Key { key: egui::Key::Enter, pressed: true, modifiers, .. }
+                if *modifiers == egui::Modifiers::NONE)
+                })
+            })
             && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+        let send_shortcut = autocomplete_submit || plain_enter;
         // Ctrl/Cmd+D clears the queue, mirroring the TUI's ClearQueue action.
         // Gated on an empty composer so it never shadows text editing.
         if editor.has_focus()
@@ -6181,26 +6650,26 @@ impl Tab {
         }
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().interact_size.y = 28.0;
-            ui.spacing_mut().button_padding = egui::vec2(8.0, 4.0);
+            ui.spacing_mut().interact_size.y = theme::CONTROL_HEIGHT;
+            ui.spacing_mut().button_padding = egui::vec2(10.0, 7.0);
             if self.state.snapshot.incognito {
                 ui.label(egui::RichText::new("Incognito").small())
                     .on_hover_text("This task is not being saved to conversation history");
             }
-            if let Some((model_label, model_detail, model_color)) = model_selector
-                && ui
-                    .add(
-                        egui::Button::new(
-                            egui::RichText::new(model_label.trim_start_matches("Model: "))
-                                .small()
-                                .color(model_color),
-                        )
-                        .frame(false),
-                    )
-                    .on_hover_text(format!("Choose provider and model: {model_detail}"))
-                    .clicked()
-            {
-                self.request_ui(UiRequest::OpenProvider);
+            if let Some(selector) = model_selector {
+                // A framed, tinted chip (not a bare label) so it reads as a
+                // clickable control. Clicking toggles the chooser popup below.
+                let button = egui::Button::new(
+                    egui::RichText::new(selector.label.trim_start_matches("Model: ")).small(),
+                )
+                .corner_radius(theme::CONTROL_RADIUS)
+                .fill(ui.visuals().widgets.inactive.weak_bg_fill)
+                .stroke(egui::Stroke::new(1.0, selector.color.gamma_multiply(0.45)));
+                let response = ui.add(button).on_hover_text(format!(
+                    "Click to choose provider, model & reasoning: {}",
+                    selector.detail
+                ));
+                self.model_chooser_popup(&response, &selector);
             }
             // Image attach button, next to the model name. Mirrors the
             // `paste_image` keybinding and drag-and-drop paths.
@@ -6215,24 +6684,24 @@ impl Tab {
                 self.attach_image_dialog();
                 changed = true;
             }
-            let actions_width = if self.state.busy { 192.0 } else { 60.0 };
+            let actions_width = if self.state.busy { 252.0 } else { 68.0 };
             ui.add_space((ui.available_size_before_wrap().x - actions_width).max(0.0));
             let primary = |ui: &egui::Ui, label: &str| {
                 egui::Button::new(egui::RichText::new(label).color(ui.visuals().panel_fill))
                     .fill(ui.visuals().text_color())
                     .stroke(egui::Stroke::NONE)
-                    .corner_radius(4.0)
-                    .min_size(egui::vec2(60.0, 28.0))
+                    .corner_radius(theme::CONTROL_RADIUS)
+                    .min_size(egui::vec2(68.0, theme::CONTROL_HEIGHT))
             };
             if self.state.busy {
                 if ui
                     .add_enabled(
                         self.can_steer(),
-                        egui::Button::new("Steer")
+                        egui::Button::new("Send now")
                             .frame(false)
-                            .min_size(egui::vec2(56.0, 28.0)),
+                            .min_size(egui::vec2(84.0, theme::CONTROL_HEIGHT)),
                     )
-                    .on_hover_text("Inject this text into the running turn (Ctrl+Enter)")
+                    .on_hover_text("Send this message into the running turn (Ctrl/Cmd+Enter)")
                     .clicked()
                     || steer_shortcut
                 {
@@ -6242,13 +6711,12 @@ impl Tab {
                 if ui
                     .add_enabled(
                         self.can_queue(),
-                        egui::Button::new("Queue")
+                        egui::Button::new("Queue next")
                             .frame(false)
-                            .min_size(egui::vec2(60.0, 28.0)),
+                            .min_size(egui::vec2(84.0, theme::CONTROL_HEIGHT)),
                     )
-                    .on_hover_text("Send this prompt when the current turn finishes (Shift+Enter)")
+                    .on_hover_text("Send this message when the current turn finishes (Enter)")
                     .clicked()
-                    || queue_shortcut
                     || send_shortcut
                 {
                     self.enqueue_composer();
@@ -6258,7 +6726,6 @@ impl Tab {
                 .add_enabled(self.can_send(), primary(ui, "Send"))
                 .clicked()
                 || send_shortcut
-                || queue_shortcut
                 || steer_shortcut
             {
                 self.submit_composer();
@@ -6273,7 +6740,7 @@ impl Tab {
                     .clicked()
             {
                 self.command(RuntimeCommand::Cancel);
-                self.state.status = "Cancelling…".into();
+                self.state.status = state::CANCEL_STATUS.into();
             }
         });
         changed
@@ -6306,20 +6773,29 @@ impl Tab {
         ui: &mut egui::Ui,
         colors: &theme::ThemeColors,
         pane_palette: Option<&theme::Palette>,
-        model_selector: Option<(String, String, egui::Color32)>,
+        model_selector: Option<ModelSelector>,
         danger: bool,
         approval_keyboard_enabled: bool,
     ) -> bool {
         // Reserve the composer area before laying out history so long
         // transcripts cannot push it out of the window. The id is per-tab so
         // the split view never registers two bottom panels under one id.
-        let live_height = ui.available_height() / 3.0;
+        // Keep the activity surface compact by default; explicit inspection uses
+        // the bounded live-output pane.
+        let available_height = ui.available_height();
+        // Keep the default activity surface to a compact status strip.
+        let max_live_height = (available_height * 0.65).max(96.0);
+        let live_height = 48.0_f32.min(max_live_height);
         self.live_pane
             .sync(&live_pane::page_ids(&self.state.view, &self.state.jobs));
         let composer_id = egui::Id::new(("composer", self.id));
         Self::fit_bottom_panel(ui.ctx(), composer_id, ui.available_rect_before_wrap());
-        let composer_changed = egui::Panel::bottom(composer_id)
+        let mut composer_changed = egui::Panel::bottom(composer_id)
             .frame(egui::Frame::NONE.fill(ui.visuals().panel_fill))
+            // The panel's default edge separator would draw a line between the
+            // transcript and the composer; the composer has its own framed input
+            // box, so drop the stray line.
+            .show_separator_line(false)
             .show(ui, |ui| {
                 let column_width = ui.available_width().min(theme::CHAT_WIDTH);
                 let inset =
@@ -6335,21 +6811,30 @@ impl Tab {
                             );
                             if self.state.pending_key.is_none()
                                 && let Some(palette) = pane_palette
-                                && let Some(id) = self.live_pane.render(
+                                && let Some(action) = self.live_pane.render_with_bounds(
                                     ui,
                                     &self.state.view,
                                     &self.state.jobs,
+                                    &self.state.processes,
                                     palette,
                                     live_height,
+                                    max_live_height,
                                 )
                             {
-                                self.pending_ui.push(UiRequest::OpenJob(id));
+                                match action {
+                                    live_pane::LiveAction::OpenJob(id) => {
+                                        self.pending_ui.push(UiRequest::OpenJob(id));
+                                    }
+                                    live_pane::LiveAction::OpenProcess(id) => {
+                                        self.pending_ui.push(UiRequest::OpenProcess(id));
+                                    }
+                                }
                             }
                             let changed = egui::Frame::default()
                                 .fill(ui.visuals().faint_bg_color)
                                 .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-                                .corner_radius(6.0)
-                                .inner_margin(egui::Margin::symmetric(12, 8))
+                                .corner_radius(theme::SURFACE_RADIUS)
+                                .inner_margin(egui::Margin::symmetric(16, 12))
                                 .show(ui, |ui| {
                                     ui.spacing_mut().item_spacing.x = 8.0;
                                     self.composer_panel(
@@ -6450,8 +6935,25 @@ impl Tab {
         if self.state.ready && self.state.rows.is_empty() {
             ui.add_space(24.0);
             ui.vertical_centered(|ui| {
-                ui.heading("Ready for a new task");
-                ui.weak("Describe what you want to do below.");
+                ui.heading("What would you like to work on?");
+                if !self.workspace.is_empty() {
+                    let project = std::path::Path::new(&self.workspace)
+                        .file_name().and_then(|name| name.to_str()).unwrap_or(&self.workspace);
+                    ui.label(egui::RichText::new(project).strong()).on_hover_text(&self.workspace);
+                }
+                ui.weak("Describe a task, or choose a starting point.");
+                ui.add_space(12.0);
+                for (label, prompt) in [
+                    ("Explore this project", "Explain how this project is organized and where its main entry points are."),
+                    ("Review recent changes", "Review the changes in this workspace and point out potential bugs or missing tests."),
+                    ("Find an improvement", "Inspect this project and suggest one useful, focused improvement."),
+                ] {
+                    if ui.add_enabled(self.composer.trim().is_empty(), egui::Button::new(label)).clicked() {
+                        self.composer = prompt.into();
+                        ui.memory_mut(|memory| memory.request_focus(egui::Id::new((self.id, "composer-editor"))));
+                        composer_changed = true;
+                    }
+                }
             });
         }
         // Rows and tool cards are only borrowed while this call lays out the
@@ -6461,12 +6963,14 @@ impl Tab {
         self.transcript.set_status(
             (self.state.busy && !self.state.status.is_empty()).then(|| self.state.status.clone()),
         );
-        let response = self.transcript.show(
+        let response = self.transcript.show_with(
             ui,
             self.id,
             self.stick_to_bottom,
             &self.state.rows,
             &self.state.toolcards,
+            &self.state.thinking,
+            self.state.live_reasoning.as_deref(),
             colors,
         );
         // Keep following the bottom until the user scrolls away from it.
@@ -7319,6 +7823,7 @@ mod tests {
             active_provider: active.into(),
             disabled_tools: vec![],
             disabled_commands: vec![],
+            disabled_plugins: vec![],
         }
     }
 
@@ -7338,6 +7843,7 @@ mod tests {
                     integer: None,
                     min: None,
                     max: None,
+                    kind: None,
                     reload_behavior: "none".into(),
                 }],
                 pages: vec![],
@@ -7396,13 +7902,13 @@ mod tests {
         app.apply_cli(cli::Cli {
             address: Some("127.0.0.1:9001".into()),
             open_setup: true,
-            open_catalog: true,
+            open_plugins: true,
             open_stats: true,
             ..Default::default()
         });
         assert_eq!(app.address, "127.0.0.1:9001");
         assert!(app.show_setup);
-        assert!(app.show_catalog);
+        assert!(app.show_plugins);
         assert!(app.show_stats);
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -7630,6 +8136,27 @@ mod tests {
             }
             _ => panic!("expected SetCommandEnabled"),
         }
+
+        app.apply_config_ui_action(config_view::ConfigUiAction::SetEnabled {
+            namespace: "plugins".into(),
+            name: "sample".into(),
+            enabled: false,
+        });
+        match rx.try_recv().expect("plugin toggle sent") {
+            Command::Send(RuntimeCommand::SetPluginEnabled {
+                name,
+                enabled,
+                expected_revision,
+                request_id,
+            }) => {
+                assert_eq!(name, "sample");
+                assert!(!enabled);
+                assert_eq!(expected_revision, 9);
+                assert!(request_id.is_none());
+            }
+            _ => panic!("expected SetPluginEnabled"),
+        }
+        assert!(app.config_notice.contains("Disabling sample"));
 
         // A disconnected app queues nothing and explains why.
         app.tabs[0].connected = false;
@@ -8065,12 +8592,12 @@ mod tests {
         assert_eq!(tab.queue[0], "queued");
         assert!(tab.composer.is_empty());
 
-        // Busy + Shift+Enter also queues.
+        // Busy + Shift+Enter inserts a newline without sending.
         tab.composer = "shifted".into();
         press(tab, egui::Modifiers::SHIFT);
         assert!(rx.try_recv().is_err());
-        assert_eq!(tab.queue.len(), 2);
-        assert_eq!(tab.queue[1], "shifted");
+        assert_eq!(tab.queue.len(), 1);
+        assert_eq!(tab.composer, "shift\ned");
 
         // Busy + Ctrl+Enter steers the running turn.
         tab.composer = "steer me".into();
@@ -8080,7 +8607,7 @@ mod tests {
             Ok(Command::Send(RuntimeCommand::Steer { ref text })) if text == "steer me"
         ));
         assert!(tab.composer.is_empty());
-        assert_eq!(tab.queue.len(), 2, "steer must not enqueue");
+        assert_eq!(tab.queue.len(), 1, "steer must not enqueue");
 
         // Idle + Ctrl+Enter falls back to sending.
         tab.state.busy = false;
@@ -8093,19 +8620,71 @@ mod tests {
         assert!(tab.composer.is_empty());
         assert_eq!(
             tab.queue.len(),
-            2,
+            1,
             "an idle send leaves the queue untouched"
         );
 
-        // Idle + Shift+Enter falls back to sending.
+        // Shift+Enter inserts a newline in both idle and busy states.
         tab.state.busy = false;
         tab.composer = "send via shift".into();
         press(tab, egui::Modifiers::SHIFT);
-        assert!(matches!(
-            rx.try_recv(),
-            Ok(Command::Send(RuntimeCommand::SubmitPrompt { ref text, .. })) if text == "send via shift"
-        ));
-        assert!(tab.composer.is_empty());
+        assert!(rx.try_recv().is_err());
+        assert!(tab.composer.contains('\n'));
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn composer_enter_on_autocomplete_accepts_and_runs_command() {
+        let ctx = egui::Context::default();
+        let (mut app, dir) = fresh_app(&ctx, "composer-autocomplete-enter");
+        let tab = &mut app.tabs[0];
+        tab.connected = true;
+        tab.state.ready = true;
+        let editor_id = egui::Id::new((tab.id, "composer-editor"));
+        let press = |tab: &mut Tab, key: egui::Key| {
+            ctx.memory_mut(|memory| memory.request_focus(editor_id));
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900.0, 500.0),
+                )),
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: egui::Modifiers::NONE,
+                }],
+                ..Default::default()
+            };
+            ctx.run_ui(input, |ui| {
+                tab.composer_panel(ui, None, false, true);
+            })
+            .textures_delta
+            .clear();
+        };
+
+        // Tab fills the composer with the highlighted command but does not run it.
+        let before = tab.state.rows.len();
+        tab.composer = "/he".into();
+        press(tab, egui::Key::Tab);
+        assert_eq!(tab.composer, "/help", "Tab accepts the suggestion");
+        assert!(tab.autocomplete.is_none(), "accepting dismisses the popup");
+        assert_eq!(tab.state.rows.len(), before, "Tab must not run the command");
+
+        // Enter accepts and runs the command immediately. Regression: it used to
+        // re-accept the same suggestion forever without ever sending.
+        tab.composer = "/help".into();
+        press(tab, egui::Key::Enter);
+        assert!(
+            tab.composer.is_empty(),
+            "Enter runs the accepted command instead of re-accepting it"
+        );
+        assert!(tab.autocomplete.is_none());
+        let (role, text) = tab.state.rows.last().expect("a help row was pushed");
+        assert_eq!(role, "system");
+        assert!(text.contains("Commands"), "help output rendered: {text}");
 
         std::fs::remove_dir_all(&dir).unwrap();
     }
@@ -8313,6 +8892,106 @@ mod tests {
             _ => panic!("expected KeyReply"),
         }
         assert!(app.tabs[0].state.pending_key.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn key_capture_modal_grows_to_fit_delivered_panes() {
+        use bone_protocol::{Component, FloatRect, PaneLineSpec, PaneSpanSpec, ViewModel};
+        let ctx = egui::Context::default();
+        let (mut app, dir) = fresh_app(&ctx, "keycapture-size");
+        app.tabs[0].connected = true;
+        app.tabs[0].state.ready = true;
+        app.tabs[0].state.pending_key = Some(3);
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 700.0));
+        let run = |app: &mut DesktopApp| {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    ..Default::default()
+                },
+                |ui| app.key_capture_dialog(ui.ctx()),
+            )
+        };
+        let rect = || {
+            ctx.data(|data| {
+                data.get_temp::<egui::Rect>(egui::Id::new("last-key-capture-rect"))
+                    .expect("modal rect recorded")
+            })
+        };
+        // The real menu sends styled (`Spans`) rows, which render through
+        // `ui.horizontal_wrapped` and therefore reserve `interact_size.y` each;
+        // a `Plain` row would only take its text height and hide the bug.
+        let theme_row = |i: usize| PaneLineSpec::Spans {
+            spans: vec![PaneSpanSpec {
+                text: format!("theme-{i}"),
+                fg: Some("white".into()),
+                modifiers: vec![],
+            }],
+            bg: None,
+        };
+        // Frame 1: the daemon's view has not arrived yet, so only the placeholder
+        // renders and the auto-sized modal area latches onto that small height.
+        let placeholder = {
+            let mut output = run(&mut app);
+            output.textures_delta.clear();
+            rect().height()
+        };
+        // The 13-line menu view now arrives.
+        app.tabs[0].state.view = ViewModel {
+            components: vec![Component::Float {
+                presentation: bone_protocol::PanePresentation::Overlay,
+                id: "menu".into(),
+                title: "Menu".into(),
+                lines: (0..13usize).map(theme_row).collect(),
+                rect: FloatRect {
+                    anchor: Default::default(),
+                    width: 0,
+                    height: 0,
+                    col: 0,
+                    row: 0,
+                },
+                z: 0,
+                border: false,
+                scroll: 0,
+            }],
+            highlights: Default::default(),
+        };
+        let mut output = None;
+        let mut grown = placeholder;
+        for _ in 0..3 {
+            let mut out = run(&mut app);
+            out.textures_delta.clear();
+            output = Some(out);
+            grown = rect().height();
+        }
+        let output = output.unwrap();
+        assert!(
+            placeholder < 200.0,
+            "placeholder modal stays small: {placeholder}"
+        );
+        assert!(
+            grown > placeholder + 100.0,
+            "modal must grow to fit the delivered panes: placeholder {placeholder}, grown {grown}"
+        );
+        assert!(
+            grown <= screen.height() - 64.0 + 1.0,
+            "modal stays within the screen cap: {grown}"
+        );
+        // Every row must be actually visible inside its clip rect, not merely laid
+        // out while scrolled out of view.
+        let row_visible = |label: &str| {
+            output.shapes.iter().any(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.text() == label => clipped
+                    .clip_rect
+                    .contains_rect(text.galley.rect.translate(text.pos.to_vec2())),
+                _ => false,
+            })
+        };
+        for i in 0..13 {
+            let label = format!("theme-{i}");
+            assert!(row_visible(&label), "line {label} is visibly rendered");
+        }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -8832,6 +9511,66 @@ mod tests {
     }
 
     #[test]
+    fn plugin_install_waits_for_consent() {
+        let ctx = egui::Context::default();
+        let (mut app, dir) = fresh_app(&ctx, "pluginconsent");
+        app.tabs[0].connected = true;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.tabs[0].commands = tx;
+        app.catalog = Some(CatalogSnapshot {
+            revision: "rev-1".into(),
+            items: vec![
+                bone_protocol::CatalogItem {
+                    name: "demo-plugin".into(),
+                    kind: "plugin".into(),
+                    installed: false,
+                    ..bone_protocol::CatalogItem::default()
+                },
+                bone_protocol::CatalogItem {
+                    name: "demo-tool".into(),
+                    kind: "tool".into(),
+                    installed: false,
+                    ..bone_protocol::CatalogItem::default()
+                },
+            ],
+        });
+
+        app.request_catalog_actions(vec![
+            CatalogAction {
+                name: "demo-plugin".into(),
+                action: CatalogActionKind::Install,
+            },
+            CatalogAction {
+                name: "demo-tool".into(),
+                action: CatalogActionKind::Install,
+            },
+        ]);
+
+        // The tool install dispatches immediately; the plugin waits for consent.
+        match rx.try_recv().expect("tool install sent") {
+            Command::Send(RuntimeCommand::HostRequest { request, .. }) => match request {
+                HostRequest::CatalogApply { actions, .. } => {
+                    assert_eq!(actions.len(), 1);
+                    assert_eq!(actions[0].name, "demo-tool");
+                }
+                _ => panic!("expected HostRequest::CatalogApply"),
+            },
+            _ => panic!("expected HostRequest"),
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "plugin install must not be sent yet"
+        );
+        assert_eq!(
+            app.plugin_consent
+                .as_ref()
+                .map(|actions| actions.iter().map(|a| a.name.clone()).collect::<Vec<_>>()),
+            Some(vec!["demo-plugin".to_string()])
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn apply_stats_response_stores_snapshot_and_error() {
         let ctx = egui::Context::default();
         let (mut app, dir) = fresh_app(&ctx, "statsresp");
@@ -8991,24 +9730,24 @@ mod tests {
     }
 
     #[test]
-    fn stats_and_catalog_dialogs_render_headless() {
+    fn stats_and_plugins_dialogs_render_headless() {
         let ctx = egui::Context::default();
         let (mut app, dir) = fresh_app(&ctx, "phase6render");
         app.tabs[0].connected = true;
         app.show_stats = true;
         app.stats = Some(sample_stats());
-        app.show_catalog = true;
+        app.show_plugins = true;
         app.catalog = Some(sample_catalog("r1"));
 
         ctx.run_ui(egui::RawInput::default(), |ui| {
             app.stats_dialog(ui.ctx());
-            app.catalog_dialog(ui.ctx());
+            app.plugins_dialog(ui.ctx());
         })
         .textures_delta
         .clear();
 
         assert!(app.show_stats);
-        assert!(app.show_catalog);
+        assert!(app.show_plugins);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -9065,6 +9804,52 @@ mod tests {
         app.applied_theme = None;
         app.apply_theme(&ctx);
         assert!(app.applied_theme.is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn selected_tab_theme_does_not_fall_back_to_another_tab() {
+        let ctx = egui::Context::default();
+        let (mut app, dir) = fresh_app(&ctx, "cfgtheme-tabs");
+        let tab_zero_theme = serde_json::json!({
+            "name": "first",
+            "palette": { "bg": "#101014", "fg": "#e0e0e0", "accent": "#4f9cf9" }
+        });
+        let tab_one_theme = serde_json::json!({
+            "name": "second",
+            "palette": { "bg": "#202024", "fg": "#f0f0f0", "accent": "#ff79c6" }
+        });
+
+        // The first tab's theme applies while it is selected.
+        app.tabs[0].state.theme = Some(tab_zero_theme.clone());
+        app.apply_theme(&ctx);
+        assert_eq!(app.applied_theme, Some(tab_zero_theme));
+        assert_eq!(
+            ctx.style_of(ctx.theme()).visuals.panel_fill,
+            egui::Color32::from_rgb(0x10, 0x10, 0x14)
+        );
+
+        // Adding a tab selects it, and its theme must replace the first tab's.
+        app.add_tab(Intent::New, &ctx);
+        app.tabs[1].state.theme = Some(tab_one_theme.clone());
+        app.apply_theme(&ctx);
+        assert_eq!(app.selected, 1);
+        assert_eq!(app.applied_theme, Some(tab_one_theme));
+        assert_eq!(
+            ctx.style_of(ctx.theme()).visuals.panel_fill,
+            egui::Color32::from_rgb(0x20, 0x20, 0x24)
+        );
+
+        // Clearing the selected tab must restore the native baseline rather than
+        // borrowing the stale theme from tab zero.
+        app.tabs[1].state.theme = None;
+        app.apply_theme(&ctx);
+        assert!(app.applied_theme.is_none());
+        assert_eq!(
+            ctx.style_of(ctx.theme()).visuals.panel_fill,
+            theme::ThemeSettings::default().style().visuals.panel_fill
+        );
+
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -9146,6 +9931,67 @@ mod tests {
         );
         std::fs::remove_dir_all(&dir).unwrap();
     }
+
+    #[test]
+    fn reasoning_effort_save_refuses_without_connection_and_preserves_model() {
+        let ctx = egui::Context::default();
+        let (mut app, dir) = fresh_app(&ctx, "cfgreason");
+        // No snapshot: nothing can be sent.
+        assert!(!app.save_reasoning_for_provider(None, "local", "high"));
+        app.config = Some(sample_config(7, "local", &[("local", "qwen3")]));
+        // Snapshot but no connected tab: still refused.
+        assert!(!app.save_reasoning_for_provider(None, "local", "high"));
+        app.tabs[0].connected = true;
+        app.tabs[0].state.snapshot.provider_id = "local".into();
+        app.tabs[0].state.snapshot.provider_model = "qwen3".into();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.tabs[0].commands = tx;
+        // The sample provider already defaults to "medium": a no-op sends nothing.
+        assert!(!app.save_reasoning_for_provider(None, "local", "medium"));
+        assert!(rx.try_recv().is_err(), "unchanged effort sends nothing");
+        // A changed effort goes out, keeping the configured model intact.
+        assert!(app.save_reasoning_for_provider(None, "local", "high"));
+        match rx.try_recv() {
+            Ok(Command::Send(RuntimeCommand::UpsertProvider { provider, .. })) => {
+                assert_eq!(provider.id, "local");
+                assert_eq!(provider.reasoning_effort, "high");
+                assert_eq!(provider.model, "qwen3");
+            }
+            _ => panic!("expected UpsertProvider"),
+        }
+        assert!(app.provider_notice.contains("Saving reasoning effort"));
+        // An unknown provider id is refused.
+        assert!(!app.save_reasoning_for_provider(None, "missing", "high"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn apply_ui_request_set_reasoning_effort_saves_for_origin_tab() {
+        let ctx = egui::Context::default();
+        let (mut app, dir) = fresh_app(&ctx, "uireason");
+        let id = app.tabs[0].id;
+        app.config = Some(sample_config(9, "local", &[("local", "qwen3")]));
+        app.tabs[0].connected = true;
+        app.tabs[0].state.snapshot.provider_id = "local".into();
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        app.tabs[0].commands = tx;
+        app.apply_ui_request(
+            id,
+            UiRequest::SetReasoningEffort {
+                provider_id: "local".into(),
+                effort: "high".into(),
+            },
+        );
+        assert_eq!(app.provider_origin_tab, Some(id));
+        match rx.try_recv() {
+            Ok(Command::Send(RuntimeCommand::UpsertProvider { provider, .. })) => {
+                assert_eq!(provider.reasoning_effort, "high");
+            }
+            _ => panic!("expected UpsertProvider"),
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
     #[test]
     fn config_poll_is_a_noop_in_demo_mode() {
         let ctx = egui::Context::default();
@@ -9511,7 +10357,7 @@ mod tests {
         app.apply_ui_request(id, UiRequest::OpenConfig);
         assert!(app.show_config);
         app.apply_ui_request(id, UiRequest::OpenCatalog);
-        assert!(app.show_catalog);
+        assert!(app.show_plugins);
         app.apply_ui_request(id, UiRequest::OpenProvider);
         assert!(app.show_provider);
         std::fs::remove_dir_all(&dir).unwrap();
@@ -9929,6 +10775,53 @@ mod tests {
             tab.state.rows.last().unwrap(),
             &("user".to_string(), "/do the thing".to_string())
         );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn apply_command_complete_empty_cancel_clears_busy() {
+        let ctx = egui::Context::default();
+        let (mut app, dir) = fresh_app(&ctx, "cmdcancel");
+        let tab = &mut app.tabs[0];
+        tab.connected = true;
+        tab.state.ready = true;
+        let (tx, _rx) = mpsc::unbounded_channel();
+        tab.commands = tx;
+        assert!(tab.run_command("themes", ""));
+        let pending = tab.pending_command.expect("pending id");
+        // Opening the interactive menu set the tab busy while it waited for a key.
+        tab.state.pending_key = Some(7);
+        tab.state.busy = true;
+        tab.state.status = state::KEY_WAIT_STATUS.into();
+        // Cancelling the menu (Esc) returns an empty result with submit=false.
+        tab.handle_event(Event::Runtime(RuntimeEvent::CommandComplete {
+            request_id: Some(pending),
+            output: String::new(),
+            submit: false,
+            display_role: None,
+            action: None,
+        }));
+        assert!(tab.pending_command.is_none());
+        assert!(!tab.state.busy, "an empty cancel must end the busy state");
+        assert_eq!(tab.state.status, "Ready");
+        assert!(tab.state.pending_key.is_none());
+        assert!(tab.state.rows.is_empty(), "an empty result renders no row");
+
+        // Stop clicked while the menu waited, then the command settles: the
+        // lingering "Cancelling…" status must clear too.
+        assert!(tab.run_command("themes", ""));
+        let pending = tab.pending_command.expect("pending id");
+        tab.state.busy = true;
+        tab.state.status = state::CANCEL_STATUS.into();
+        tab.handle_event(Event::Runtime(RuntimeEvent::CommandComplete {
+            request_id: Some(pending),
+            output: String::new(),
+            submit: false,
+            display_role: None,
+            action: None,
+        }));
+        assert!(!tab.state.busy);
+        assert_eq!(tab.state.status, "Ready");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
@@ -10960,11 +11853,19 @@ mod tests {
                                 ui,
                                 &colors,
                                 None,
-                                Some((
-                                    "Model: Example model".into(),
-                                    "Example".into(),
-                                    colors.tool_call,
-                                )),
+                                Some(ModelSelector {
+                                    label: "Model: Example model".into(),
+                                    detail: "Example".into(),
+                                    color: colors.tool_call,
+                                    providers: Vec::new(),
+                                    models: Vec::new(),
+                                    saved_model: String::new(),
+                                    active_model: "Example model".into(),
+                                    active_provider: "example".into(),
+                                    reasoning: String::new(),
+                                    can_choose: false,
+                                    notice: String::new(),
+                                }),
                                 false,
                                 true,
                             );
@@ -10980,7 +11881,8 @@ mod tests {
                         .iter()
                         .find_map(|shape| match &shape.shape {
                             egui::Shape::Rect(rect)
-                                if rect.corner_radius == egui::CornerRadius::same(6) =>
+                                if rect.corner_radius
+                                    == egui::CornerRadius::same(theme::SURFACE_RADIUS) =>
                             {
                                 assert_eq!(rect.stroke.width, 1.0);
                                 Some(rect.rect)
@@ -11005,8 +11907,8 @@ mod tests {
                         .collect();
                     assert_eq!(texts.contains(&"Send"), !busy);
                     assert_eq!(texts.contains(&"Stop"), busy);
-                    assert_eq!(texts.contains(&"Steer"), busy);
-                    assert_eq!(texts.contains(&"Queue"), busy);
+                    assert_eq!(texts.contains(&"Send now"), busy);
+                    assert_eq!(texts.contains(&"Queue next"), busy);
                     let panel =
                         egui::PanelState::load(&ctx, egui::Id::new(("composer", tab.id))).unwrap();
                     assert_eq!(panel.outer_rect.right(), width);
@@ -11127,10 +12029,10 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// The header is a text-only menu bar: it names the menus and no longer
-    /// shows the active conversation's title or its workspace folder.
+    /// The header is a text-only menu bar. Its labels follow the shell →
+    /// workspace → server → help hierarchy and do not duplicate task identity.
     #[test]
-    fn header_is_a_menu_bar_without_task_title_or_workspace() {
+    fn header_groups_controls_by_scope_without_task_title_or_workspace() {
         fn screen() -> egui::RawInput {
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -11150,6 +12052,18 @@ mod tests {
                 })
                 .collect()
         }
+        fn text_x(output: &egui::FullOutput, label: &str) -> f32 {
+            output
+                .shapes
+                .iter()
+                .find_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Text(text) if text.galley.text() == label => {
+                        Some(text.pos.x)
+                    }
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("missing {label}"))
+        }
 
         let ctx = egui::Context::default();
         let (mut app, dir) = fresh_app(&ctx, "header-menu-bar");
@@ -11157,17 +12071,29 @@ mod tests {
         app.tabs[0].workspace = "/home/user/project".into();
         app.tabs[0].saved_title = Some((7, "Refactor the parser".into()));
         let mut header = Vec::new();
+        let mut output = None;
         for _ in 0..3 {
             let mut out = ctx.run_ui(screen(), |ui| {
                 egui::Panel::top("toolbar").show(ui, |ui| app.toolbar(ui));
             });
             out.textures_delta.clear();
             header = texts(&out);
+            output = Some(out);
         }
-        for menu in ["Layout", "Tools: ask", "Changes", "More"] {
+        let output = output.as_ref().unwrap();
+        for menu in ["View", "Task", "Changes", "Tools", "Server", "Help"] {
             assert!(
                 header.iter().any(|t| t == menu),
                 "menu bar shows `{menu}`: {header:?}"
+            );
+        }
+        let ordered = ["View", "Task", "Changes", "Tools", "Server", "Help"];
+        for pair in ordered.windows(2) {
+            assert!(
+                text_x(output, pair[0]) < text_x(output, pair[1]),
+                "header order is wrong for {} and {}: {header:?}",
+                pair[0],
+                pair[1]
             );
         }
         assert!(
@@ -11258,23 +12184,23 @@ mod tests {
             "menus start closed before any click: {closed:?}"
         );
 
-        // `Layout` drops the window/split menu.
-        let layout = label_center(&settled, "Layout").expect("Layout label is visible");
-        click(&mut app, layout);
+        // `View` drops the window/split menu.
+        let view = label_center(&settled, "View").expect("View label is visible");
+        click(&mut app, view);
         let mut open = Vec::new();
         for _ in 0..3 {
-            open = texts(&render(&mut app, vec![egui::Event::PointerMoved(layout)]));
+            open = texts(&render(&mut app, vec![egui::Event::PointerMoved(view)]));
             if open.iter().any(|t| t.contains("New window")) {
                 break;
             }
         }
         assert!(
             open.iter().any(|t| t.contains("New window")),
-            "clicking Layout opens its menu: {open:?}"
+            "clicking View opens its menu: {open:?}"
         );
 
-        // `Tools` drops the shared tool-permission menu.
-        let tools = label_center(&settled, "Tools: ask").expect("Tools label is visible");
+        // `Tools` groups display detail with shared tool permissions.
+        let tools = label_center(&settled, "Tools").expect("Tools label is visible");
         click(&mut app, tools);
         let mut open = Vec::new();
         for _ in 0..3 {
@@ -11284,8 +12210,16 @@ mod tests {
             }
         }
         assert!(
+            open.iter().any(|t| t.contains("Tool-call display")),
+            "Tools menu shows tool-call display settings: {open:?}"
+        );
+        assert!(
             open.iter().any(|t| t.contains("Tool permissions")),
-            "clicking Tools opens its menu: {open:?}"
+            "Tools menu shows tool permissions: {open:?}"
+        );
+        assert!(
+            open.iter().any(|t| t == "Concise") && open.iter().any(|t| t == "Verbose"),
+            "Tools menu shows display detail choices: {open:?}"
         );
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -11724,6 +12658,60 @@ mod tests {
         }));
         assert_eq!(app.tabs[0].workspace, "/workspace/project");
         assert_eq!(app.tabs[0].host_api_version, 7);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn apply_theme_requests_a_repaint_on_change() {
+        let ctx = egui::Context::default();
+        let (mut app, dir) = fresh_app(&ctx, "theme-repaint");
+
+        // Drive one egui pass the way eframe does: egui creates the root `Ui`
+        // (snapshotting the active style) before calling into the app, so
+        // `apply_theme`'s mid-pass `set_style_of` is only painted on the *next*
+        // pass. The frame's repaint delay tells us whether that pass is coming.
+        let run = |ctx: &egui::Context, app: &mut DesktopApp| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1200.0, 800.0),
+                )),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(input, |ui| app.apply_theme(ui.ctx()));
+            output.textures_delta.clear();
+            output
+                .viewport_output
+                .get(&egui::ViewportId::ROOT)
+                .map(|viewport| viewport.repaint_delay)
+        };
+
+        app.tabs[0].state.theme = Some(serde_json::json!({
+            "name": "a",
+            "palette": { "bg": "#101014", "fg": "#e0e0e0" }
+        }));
+        // egui only reports `Duration::MAX` after a couple of warm-up passes.
+        let _ = run(&ctx, &mut app);
+        let _ = run(&ctx, &mut app);
+        // Control: an idle pass with an unchanged theme must sleep, otherwise the
+        // assertion below could pass for reasons unrelated to theming.
+        assert_eq!(
+            run(&ctx, &mut app),
+            Some(std::time::Duration::MAX),
+            "an unchanged theme must not schedule a repaint"
+        );
+
+        // The daemon pushes a new theme while the app is otherwise idle (no
+        // further input), so `apply_theme` itself has to schedule the repaint.
+        app.tabs[0].state.theme = Some(serde_json::json!({
+            "name": "b",
+            "palette": { "bg": "#ff0000", "fg": "#000000" }
+        }));
+        let delay = run(&ctx, &mut app);
+        assert!(
+            delay.is_some_and(|delay| delay < std::time::Duration::MAX),
+            "applying a new theme must request a repaint or the colors never appear (delay: {delay:?})"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }

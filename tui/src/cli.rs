@@ -52,7 +52,6 @@ pub fn usage() -> String {
        bone run [--provider <id>] [--model <name>] ...
        bone serve [--listen <addr>]   # multi-client daemon (default 127.0.0.1:7878)
        bone connect [--listen <addr>] # line-oriented RPC client
-       bone web                       # web UI bridge (http://localhost:4577)
        bone setup | catalog | update | install | stats-popup"
         .to_string()
 }

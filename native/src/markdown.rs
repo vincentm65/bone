@@ -69,6 +69,29 @@ fn code_job_cache_len() -> usize {
         .len()
 }
 
+/// A color selected by an ANSI SGR sequence embedded in a run's text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AnsiColor {
+    /// One of the 16 basic colors (`30-37`, `90-97`), shared with the TUI palette.
+    Named(u8),
+    /// An xterm-256 palette index (`38;5;n`).
+    Indexed(u8),
+    /// A 24-bit truecolor value (`38;2;r;g;b`).
+    Rgb(u8, u8, u8),
+}
+
+/// The subset of SGR attributes the transcript renderer honors. Command output
+/// (e.g. `/usage`) ships terminal colors; decoding them keeps the intended
+/// hierarchy instead of leaking raw escape bytes into the transcript.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct AnsiStyle {
+    pub fg: Option<AnsiColor>,
+    pub bold: bool,
+    pub dim: bool,
+    pub italic: bool,
+    pub underline: bool,
+}
+
 /// One contiguous run of text sharing the same inline styling.
 #[derive(Debug, Clone, Default)]
 pub struct Run {
@@ -79,6 +102,8 @@ pub struct Run {
     pub code: bool,
     /// Safe browser URL or a parsed local file reference.
     pub url: Option<String>,
+    /// Styling decoded from ANSI SGR sequences in the source text.
+    pub ansi: AnsiStyle,
 }
 
 /// A single rendered transcript block.
@@ -146,6 +171,7 @@ fn push_run(
         && last.strike == strike
         && last.code == code
         && last.url == url
+        && last.ansi == AnsiStyle::default()
     {
         last.text.push_str(text);
         return;
@@ -157,7 +183,253 @@ fn push_run(
         strike,
         code,
         url,
+        ansi: AnsiStyle::default(),
     });
+}
+
+/// The 16 ANSI colors, matching `tui/src/ui/color.rs::color_to_rgb` so the
+/// desktop transcript and the terminal agree on the basic palette.
+const NAMED_ANSI_RGB: [(u8, u8, u8); 16] = [
+    (0x00, 0x00, 0x00), // Black
+    (0xCD, 0x31, 0x31), // Red
+    (0x0D, 0xBC, 0x79), // Green
+    (0xE5, 0xE5, 0x10), // Yellow
+    (0x24, 0x72, 0xC8), // Blue
+    (0xBC, 0x3F, 0xBC), // Magenta
+    (0x11, 0xA8, 0xCD), // Cyan
+    (0xC0, 0xC0, 0xC0), // Gray
+    (0x80, 0x80, 0x80), // DarkGray
+    (0xF1, 0x4C, 0x4C), // LightRed
+    (0x23, 0xD1, 0x8B), // LightGreen
+    (0xF5, 0xF5, 0x43), // LightYellow
+    (0x3B, 0x8E, 0xEA), // LightBlue
+    (0xD6, 0x70, 0xD6), // LightMagenta
+    (0x29, 0xB8, 0xDB), // LightCyan
+    (0xFF, 0xFF, 0xFF), // White
+];
+
+/// Map an [`AnsiColor`] to an RGB triple.
+fn ansi_rgb(color: AnsiColor) -> (u8, u8, u8) {
+    match color {
+        AnsiColor::Named(index) => NAMED_ANSI_RGB[(index as usize).min(15)],
+        AnsiColor::Rgb(r, g, b) => (r, g, b),
+        AnsiColor::Indexed(index) => xterm_256_rgb(index),
+    }
+}
+
+/// xterm-256 palette entry to RGB: indices 16..=231 form a 6×6×6 color cube and
+/// 232..=255 a gray ramp; the first 16 fall back to the basic palette.
+fn xterm_256_rgb(index: u8) -> (u8, u8, u8) {
+    match index {
+        0..=15 => NAMED_ANSI_RGB[index as usize],
+        16..=231 => {
+            let n = index - 16;
+            const STEPS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+            (
+                STEPS[(n / 36) as usize],
+                STEPS[((n % 36) / 6) as usize],
+                STEPS[(n % 6) as usize],
+            )
+        }
+        _ => {
+            let level = 8 + (index - 232) * 10;
+            (level, level, level)
+        }
+    }
+}
+
+/// Whether two runs differ only in their text, so an adjacent pair can merge.
+fn same_run_style(a: &Run, b: &Run) -> bool {
+    a.bold == b.bold
+        && a.italic == b.italic
+        && a.strike == b.strike
+        && a.code == b.code
+        && a.url == b.url
+        && a.ansi == b.ansi
+}
+
+/// Append `run`, merging its text into the previous run when identical in style.
+fn push_merge(runs: &mut Vec<Run>, run: Run) {
+    if run.text.is_empty() {
+        return;
+    }
+    if let Some(last) = runs.last_mut()
+        && same_run_style(last, &run)
+    {
+        last.text.push_str(&run.text);
+        return;
+    }
+    runs.push(run);
+}
+
+/// Strip ANSI escape sequences from every block's inline text and record the
+/// styling they implied in [`Run::ansi`]. Code blocks keep their literal payload
+/// (they render preformatted and a copy must be byte-for-byte). Parse-time
+/// soft/hard breaks never contain escapes, so only the text runs change.
+fn apply_ansi(blocks: &mut [Block]) {
+    for block in blocks {
+        match block {
+            Block::Heading { runs, .. } | Block::Paragraph { runs, .. } => ansi_runs(runs),
+            Block::Table { headers, rows, .. } => {
+                for cell in headers.iter_mut() {
+                    ansi_runs(cell);
+                }
+                for row in rows.iter_mut() {
+                    for cell in row.iter_mut() {
+                        ansi_runs(cell);
+                    }
+                }
+            }
+            Block::Code { .. } | Block::Rule => {}
+        }
+    }
+}
+
+/// Rewrite one block's runs so escape sequences are removed and their SGR
+/// attributes applied. State carries across runs (a color opened before a soft
+/// break keeps coloring the following run) and resets at each block boundary.
+fn ansi_runs(runs: &mut Vec<Run>) {
+    let mut state = AnsiStyle::default();
+    let mut out: Vec<Run> = Vec::with_capacity(runs.len());
+    for run in runs.drain(..) {
+        let mut segment = String::new();
+        let mut chars = run.text.chars().peekable();
+        while let Some(ch) = chars.next() {
+            if ch == '\x1b' {
+                flush_segment(&mut out, &run, &segment, state);
+                segment.clear();
+                if let Some(params) = consume_escape(&mut chars) {
+                    apply_sgr(&mut state, &params);
+                }
+            } else if ch.is_control() && ch != '\n' && ch != '\t' {
+                // Drop stray control bytes (CR, BEL, ...) that would render as
+                // replacement boxes; newlines and tabs are meaningful.
+            } else {
+                segment.push(ch);
+            }
+        }
+        flush_segment(&mut out, &run, &segment, state);
+    }
+    *runs = out;
+}
+
+/// Push a decoded text segment, inheriting the source run's other attributes.
+fn flush_segment(out: &mut Vec<Run>, run: &Run, text: &str, ansi: AnsiStyle) {
+    push_merge(
+        out,
+        Run {
+            text: text.to_string(),
+            bold: run.bold,
+            italic: run.italic,
+            strike: run.strike,
+            code: run.code,
+            url: run.url.clone(),
+            ansi,
+        },
+    );
+}
+
+/// Consume an escape sequence whose introducer (`ESC`) was already read.
+/// CSI sequences return their parameter bytes (only `m`, SGR, carries styling);
+/// OSC and other sequences are dropped, returning `None`.
+fn consume_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Option<String> {
+    match chars.peek().copied() {
+        Some('[') => {
+            chars.next();
+            let mut params = String::new();
+            for ch in chars.by_ref() {
+                if ('\u{40}'..='\u{7e}').contains(&ch) {
+                    return (ch == 'm').then_some(params);
+                }
+                params.push(ch);
+            }
+            None
+        }
+        Some(']') => {
+            // OSC: consume up to BEL or the ST terminator (ESC \).
+            chars.next();
+            let mut prev = '\0';
+            for ch in chars.by_ref() {
+                if ch == '\x07' || (prev == '\x1b' && ch == '\\') {
+                    break;
+                }
+                prev = ch;
+            }
+            None
+        }
+        Some(_) => {
+            // Two-byte escape (e.g. `ESC ( B`): drop the introducer and one byte.
+            chars.next();
+            None
+        }
+        None => None,
+    }
+}
+
+/// Apply the SGR parameter bytes of a CSI `m` sequence to the running style.
+/// Unknown or unsupported codes (including all background colors) are ignored.
+fn apply_sgr(state: &mut AnsiStyle, params: &str) {
+    let codes: Vec<u32> = params
+        .split([';', ':'])
+        .map(|part| {
+            let part = part.trim();
+            if part.is_empty() {
+                0
+            } else {
+                part.parse().unwrap_or(0)
+            }
+        })
+        .collect();
+    let mut i = 0;
+    while i < codes.len() {
+        match codes[i] {
+            0 => *state = AnsiStyle::default(),
+            1 => state.bold = true,
+            2 => state.dim = true,
+            3 => state.italic = true,
+            4 => state.underline = true,
+            22 => {
+                state.bold = false;
+                state.dim = false;
+            }
+            23 => state.italic = false,
+            24 => state.underline = false,
+            30..=37 => state.fg = Some(AnsiColor::Named((codes[i] - 30) as u8)),
+            39 => state.fg = None,
+            90..=97 => state.fg = Some(AnsiColor::Named((codes[i] - 90 + 8) as u8)),
+            38 => {
+                if let Some((color, consumed)) = parse_extended_color(&codes[i + 1..]) {
+                    state.fg = Some(color);
+                    i += consumed;
+                }
+            }
+            48 => {
+                // Background color: consume its parameters, then discard.
+                if let Some((_, consumed)) = parse_extended_color(&codes[i + 1..]) {
+                    i += consumed;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+}
+
+/// Parse the tail of an extended color (`5;n` or `2;r;g;b`). Returns the decoded
+/// color and how many parameter codes it consumed.
+fn parse_extended_color(codes: &[u32]) -> Option<(AnsiColor, usize)> {
+    match codes.first()? {
+        5 => Some((AnsiColor::Indexed(*codes.get(1)? as u8), 2)),
+        2 => Some((
+            AnsiColor::Rgb(
+                *codes.get(1)? as u8,
+                *codes.get(2)? as u8,
+                *codes.get(3)? as u8,
+            ),
+            4,
+        )),
+        _ => None,
+    }
 }
 
 /// Parse a Markdown string into renderable blocks. Pure and allocation-only.
@@ -353,9 +625,13 @@ pub fn parse_markdown(text: &str) -> Vec<Block> {
                 push_run(&mut runs, &c, false, false, false, true, reference);
             }
             Event::SoftBreak if code.is_none() => {
+                // Preserve the source newline rather than collapsing to a space.
+                // Pasted logs and command output (e.g. `/usage`) rely on hard
+                // line structure; folding it into one paragraph is unreadable.
+                // Mirrors `tui/src/ui/render/markdown.rs`.
                 push_run(
                     &mut runs,
-                    " ",
+                    "\n",
                     bold > 0,
                     italic > 0,
                     strike > 0,
@@ -404,6 +680,8 @@ pub fn parse_markdown(text: &str) -> Vec<Block> {
         });
     }
 
+    apply_ansi(&mut blocks);
+
     blocks
 }
 
@@ -446,33 +724,9 @@ fn build_job(
     let mut job = LayoutJob::default();
     let code_bg = style.visuals.faint_bg_color;
     for run in runs {
-        let mut rich = RichText::new(run.text.clone());
+        let mut rich = run_rich(run, style, base, strong, colors);
         if let Some(size) = size {
             rich = rich.size(size);
-        }
-        if strong || run.bold {
-            rich = rich
-                .strong()
-                .family(egui::TextStyle::Heading.resolve(style).family);
-        }
-        if run.italic {
-            rich = rich.italics();
-        }
-        if run.strike {
-            rich = rich.strikethrough();
-        }
-        if run.code {
-            rich = rich.monospace();
-        }
-        let color = if run.code {
-            Some(colors.markdown_inline_code)
-        } else if run.url.is_some() {
-            Some(colors.markdown_link)
-        } else {
-            base
-        };
-        if let Some(color) = color {
-            rich = rich.color(color);
         }
         let start = job.sections.len();
         rich.append_to(&mut job, style, FontSelection::Default, Align::TOP);
@@ -486,6 +740,54 @@ fn build_job(
         }
     }
     job
+}
+
+/// Apply a run's inline styling — Markdown emphasis plus any decoded ANSI SGR
+/// attributes — to a [`RichText`]. `base` is the fallback text color (headings,
+/// table headers); `None` keeps egui's default. `strong` forces bold for
+/// headings and table headers. Color precedence: inline code, then link, then an
+/// explicit ANSI foreground, then the dim/weak tone, then `base`.
+fn run_rich(
+    run: &Run,
+    style: &Style,
+    base: Option<egui::Color32>,
+    strong: bool,
+    colors: &ThemeColors,
+) -> RichText {
+    let mut rich = RichText::new(run.text.clone());
+    if strong || run.bold || run.ansi.bold {
+        rich = rich
+            .strong()
+            .family(egui::TextStyle::Heading.resolve(style).family);
+    }
+    if run.italic || run.ansi.italic {
+        rich = rich.italics();
+    }
+    if run.strike {
+        rich = rich.strikethrough();
+    }
+    if run.ansi.underline {
+        rich = rich.underline();
+    }
+    if run.code {
+        rich = rich.monospace();
+    }
+    let color = if run.code {
+        Some(colors.markdown_inline_code)
+    } else if run.url.is_some() {
+        Some(colors.markdown_link)
+    } else if let Some(fg) = run.ansi.fg {
+        let (r, g, b) = ansi_rgb(fg);
+        Some(egui::Color32::from_rgb(r, g, b))
+    } else if run.ansi.dim {
+        Some(style.visuals.weak_text_color())
+    } else {
+        base
+    };
+    if let Some(color) = color {
+        rich = rich.color(color);
+    }
+    rich
 }
 
 /// Intrinsic width for a short, ordinary prompt. Measure text only (never render
@@ -720,21 +1022,7 @@ fn render_inline(ui: &mut Ui, runs: &[Run], marker: Option<&str>, colors: &Theme
             gap.append_to(&mut job, style, FontSelection::Default, Align::TOP);
         }
         for run in runs {
-            let mut rich = RichText::new(run.text.clone());
-            if run.bold {
-                rich = rich
-                    .strong()
-                    .family(egui::TextStyle::Heading.resolve(style).family);
-            }
-            if run.italic {
-                rich = rich.italics();
-            }
-            if run.strike {
-                rich = rich.strikethrough();
-            }
-            if run.code {
-                rich = rich.monospace().color(colors.markdown_inline_code);
-            }
+            let rich = run_rich(run, style, None, false, colors);
             let start = job.sections.len();
             rich.append_to(&mut job, style, FontSelection::Default, Align::TOP);
             for section in &mut job.sections[start..] {
@@ -1417,6 +1705,7 @@ mod tests {
                 strike: false,
                 code: false,
                 url: None,
+                ansi: AnsiStyle::default(),
             },
             Run {
                 text: "x = 1".into(),
@@ -1425,6 +1714,7 @@ mod tests {
                 strike: false,
                 code: true,
                 url: None,
+                ansi: AnsiStyle::default(),
             },
             Run {
                 text: " world".into(),
@@ -1433,6 +1723,7 @@ mod tests {
                 strike: false,
                 code: false,
                 url: None,
+                ansi: AnsiStyle::default(),
             },
         ];
 
@@ -1546,5 +1837,152 @@ mod tests {
         // Nothing outruns the level-1 size, and deeper levels step down.
         assert!(heading_pixel_size(4) < heading_pixel_size(3));
         assert!(heading_pixel_size(6) <= heading_pixel_size(4));
+    }
+
+    #[test]
+    fn soft_breaks_preserve_source_newlines() {
+        let blocks = parse_markdown("first\nsecond");
+        match &blocks[0] {
+            Block::Paragraph { runs, .. } => {
+                let text: String = runs.iter().map(|r| r.text.as_str()).collect();
+                assert_eq!(text, "first\nsecond", "a soft break must stay a newline");
+            }
+            other => panic!("expected paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sgr_sequences_strip_and_style() {
+        let blocks = parse_markdown("\x1b[36mhello\x1b[0m world");
+        let runs = match &blocks[0] {
+            Block::Paragraph { runs, .. } => runs,
+            other => panic!("expected paragraph, got {other:?}"),
+        };
+        assert_eq!(runs.len(), 2, "runs: {runs:?}");
+        assert_eq!(runs[0].text, "hello");
+        assert_eq!(runs[0].ansi.fg, Some(AnsiColor::Named(6)));
+        assert_eq!(runs[1].text, " world");
+        assert_eq!(runs[1].ansi, AnsiStyle::default());
+        assert!(
+            runs.iter().all(|r| !r.text.contains('\x1b')),
+            "escape bytes must not survive into the text"
+        );
+    }
+
+    #[test]
+    fn ansi_state_carries_across_runs_in_a_block() {
+        // The color opens in a run that markdown splits off (the bold span
+        // prevents merging), so only carried state can reach "bold".
+        let blocks = parse_markdown("\x1b[36m**bold**\x1b[0m rest");
+        let runs = match &blocks[0] {
+            Block::Paragraph { runs, .. } => runs,
+            other => panic!("expected paragraph, got {other:?}"),
+        };
+        assert_eq!(runs.len(), 2, "runs: {runs:?}");
+        assert_eq!(runs[0].text, "bold");
+        assert!(runs[0].bold);
+        assert_eq!(runs[0].ansi.fg, Some(AnsiColor::Named(6)));
+        assert_eq!(runs[1].text, " rest");
+        assert_eq!(runs[1].ansi, AnsiStyle::default());
+    }
+
+    #[test]
+    fn non_sgr_escapes_are_dropped() {
+        // A CSI erase (`ESC[2K`) and an OSC title (`ESC]0;t BEL`) carry no
+        // styling but must still be removed from the visible text.
+        let blocks = parse_markdown("a\x1b[2Kb\x1b]0;title\x07c");
+        match &blocks[0] {
+            Block::Paragraph { runs, .. } => {
+                let text: String = runs.iter().map(|r| r.text.as_str()).collect();
+                assert_eq!(text, "abc");
+            }
+            other => panic!("expected paragraph, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sgr_codes_update_style_fields() {
+        let mut style = AnsiStyle::default();
+        apply_sgr(&mut style, "1;36");
+        assert!(style.bold);
+        assert_eq!(style.fg, Some(AnsiColor::Named(6)));
+        apply_sgr(&mut style, "22;39");
+        assert!(!style.bold);
+        assert_eq!(style.fg, None);
+        apply_sgr(&mut style, "38;5;208");
+        assert_eq!(style.fg, Some(AnsiColor::Indexed(208)));
+        apply_sgr(&mut style, "38;2;10;20;30");
+        assert_eq!(style.fg, Some(AnsiColor::Rgb(10, 20, 30)));
+        // A background color is ignored, but its parameters are still consumed.
+        apply_sgr(&mut style, "48;2;1;2;3");
+        assert_eq!(style.fg, Some(AnsiColor::Rgb(10, 20, 30)));
+        apply_sgr(&mut style, "2;4");
+        assert!(style.dim && style.underline);
+        apply_sgr(&mut style, "0");
+        assert_eq!(style, AnsiStyle::default());
+    }
+
+    #[test]
+    fn ansi_palette_matches_expected_rgb() {
+        // The 16 basic colors come from the shared TUI palette.
+        assert_eq!(ansi_rgb(AnsiColor::Named(6)), (0x11, 0xA8, 0xCD));
+        assert_eq!(ansi_rgb(AnsiColor::Named(8)), (0x80, 0x80, 0x80));
+        assert_eq!(ansi_rgb(AnsiColor::Rgb(1, 2, 3)), (1, 2, 3));
+        // 196 sits at the corner of the 6×6×6 cube: pure red.
+        assert_eq!(ansi_rgb(AnsiColor::Indexed(196)), (255, 0, 0));
+        // 232 is the first step of the gray ramp.
+        assert_eq!(ansi_rgb(AnsiColor::Indexed(232)), (8, 8, 8));
+    }
+
+    #[test]
+    fn usage_output_renders_multiline_without_escapes() {
+        // The `/usage` command emits one ANSI-colored line per fact; the desktop
+        // transcript must show them as separate lines with the escapes decoded.
+        let display = "\x1b[36mConversation usage\x1b[0m\n\
+             \x1b[2m────────────────────────────────────────────────\x1b[0m\n\
+             \x1b[2mRequests:     \x1b[0m\x1b[37m12\x1b[0m\n\
+             \x1b[2mTokens:       \x1b[0m\x1b[37m34,567 total\x1b[0m";
+        let blocks = parse_markdown(display);
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| render_blocks(ui, "usage", &blocks, &ThemeColors::default()),
+        );
+        fn galleys(shape: &egui::epaint::Shape, out: &mut Vec<std::sync::Arc<egui::Galley>>) {
+            match shape {
+                egui::epaint::Shape::Text(t) => out.push(t.galley.clone()),
+                egui::epaint::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        galleys(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &out.shapes {
+            galleys(&clipped.shape, &mut found);
+        }
+        out.textures_delta.clear();
+        let body = found
+            .iter()
+            .find(|g| g.job.text.contains("Conversation usage"))
+            .expect("usage galley");
+        assert!(
+            !body.job.text.contains('\x1b'),
+            "escape bytes leaked into the rendered text"
+        );
+        // Four source lines, no wrapping at this width → four visual rows.
+        assert!(
+            body.rows.len() >= 4,
+            "expected multi-line output, got {} row(s)",
+            body.rows.len()
+        );
     }
 }

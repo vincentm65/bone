@@ -319,14 +319,26 @@ impl DesktopApp {
         }
     }
 
+    /// The `View` menu: window and pane layout, zoom, and window close/quit.
+    /// Reordering, moving, and merging tabs/panes moved to drag and drop, so only
+    /// actions drag cannot express stay here.
     pub(crate) fn window_menu(&mut self, ui: &mut egui::Ui) {
         if ui.button("New window  Ctrl+Shift+N").clicked() {
             self.new_native_window(ui.ctx());
             ui.close();
         }
         if let Some(tab) = self.tabs.get(self.selected).map(|tab| tab.id) {
+            let ctx = ui.ctx().clone();
             ui.separator();
-            self.tab_context_menu(tab, ui);
+            for (label, axis) in [
+                ("Split right", Axis::Horizontal),
+                ("Split down", Axis::Vertical),
+            ] {
+                if ui.button(label).clicked() {
+                    self.split_conversation(tab, axis, &ctx);
+                    ui.close();
+                }
+            }
         }
         ui.separator();
         let windows: Vec<_> = self
@@ -346,6 +358,28 @@ impl DesktopApp {
                 }
             }
         });
+        ui.horizontal(|ui| {
+            ui.label("Zoom");
+            let zoom = ui.ctx().zoom_factor();
+            let mut next = zoom;
+            if ui.button("−").clicked() {
+                next = (zoom - 0.1).max(0.75);
+            }
+            if ui
+                .button(format!("{:.0}%", zoom * 100.0))
+                .on_hover_text("Reset zoom")
+                .clicked()
+            {
+                next = 1.0;
+            }
+            if ui.button("+").clicked() {
+                next = (zoom + 0.1).min(2.0);
+            }
+            if (next - zoom).abs() > f32::EPSILON {
+                ui.ctx().set_zoom_factor(next);
+            }
+        });
+        ui.separator();
         if ui
             .button(if self.window_ui.rendering == 0 {
                 "Quit Bone Desktop…"
@@ -356,6 +390,29 @@ impl DesktopApp {
         {
             self.window_ui.close_window = Some(self.window_ui.rendering);
             ui.close();
+        }
+    }
+
+    /// Tool-call display settings live in the client and apply to every
+    /// conversation in this desktop instance.
+    pub(crate) fn tool_display_section(&mut self, ui: &mut egui::Ui) {
+        ui.strong("Tool-call display");
+        ui.weak("How much argument and output detail appears in the transcript");
+        let before = self.display.tool_verbosity;
+        ui.selectable_value(
+            &mut self.display.tool_verbosity,
+            layout::ToolVerbosity::Concise,
+            "Concise",
+        )
+        .on_hover_text("Compact summaries with filenames and commands; edit diffs stay visible");
+        ui.selectable_value(
+            &mut self.display.tool_verbosity,
+            layout::ToolVerbosity::Verbose,
+            "Verbose",
+        )
+        .on_hover_text("Expand tool arguments and output; edit diffs stay visible");
+        if before != self.display.tool_verbosity {
+            self.note_layout_change(ui.ctx());
         }
     }
 
@@ -444,6 +501,57 @@ impl DesktopApp {
             ui.disable();
         }
         egui::Panel::top(egui::Id::new(("toolbar", window))).show(ui, |ui| self.toolbar(ui));
+        if self.review.open && self.review.window == window {
+            if let Some(workspace) = self
+                .tabs
+                .get(self.selected)
+                .map(|tab| tab.workspace.clone())
+                && self.review.set_workspace(&workspace)
+            {
+                self.request_review();
+            }
+            let connected = self
+                .review
+                .pending
+                .is_none_or(|(id, _, _)| self.tabs.iter().any(|tab| tab.id == id && tab.connected));
+            self.review.check_pending(connected);
+            if self.review.pending.is_some() {
+                ctx.request_repaint_after(std::time::Duration::from_secs(1));
+            }
+            let colors = self.theme_colors();
+            let available = ui.available_width();
+            let panel = if available >= 700.0 {
+                let id = egui::Id::new(("changes-right", window));
+                Self::cap_panel_width(&ctx, id, available - 320.0);
+                egui::Panel::right(id)
+                    .default_size(420.0)
+                    .min_size(280.0)
+                    .max_size(available - 320.0)
+            } else {
+                egui::Panel::bottom(egui::Id::new(("changes-bottom", window)))
+                    .default_size(ui.available_height() * 0.45)
+                    .min_size(160.0)
+                    .max_size((ui.available_height() * 0.55).max(160.0))
+            };
+            let refresh = panel
+                .resizable(true)
+                .frame(
+                    egui::Frame::new()
+                        .fill(ui.visuals().window_fill)
+                        .inner_margin(12),
+                )
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt(("changes-body", window))
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| self.review.show(ui, &colors))
+                        .inner
+                })
+                .inner;
+            if refresh {
+                self.request_review();
+            }
+        }
         let plan = layout::responsive_plan(ui.available_width());
         let hidden = ctx.data(|data| {
             data.get_temp::<bool>(egui::Id::new(("sidebar-hidden", window)))
@@ -458,6 +566,11 @@ impl DesktopApp {
                 Self::set_panel_width(&ctx, id, default_width);
             }
             let response = egui::Panel::left(id)
+                .frame(
+                    egui::Frame::new()
+                        .fill(ui.visuals().window_fill)
+                        .inner_margin(12),
+                )
                 .resizable(true)
                 .default_size(if self.display.sidebar_width_manual {
                     self.display.sidebar_width as f32
@@ -874,17 +987,6 @@ impl DesktopApp {
             self.command_dialog(ctx);
             self.task_dialogs(ctx);
             file_refs::dialog(ctx);
-            let connected = self
-                .review
-                .pending
-                .is_none_or(|(id, _, _)| self.tabs.iter().any(|tab| tab.id == id && tab.connected));
-            self.review.check_pending(connected);
-            if self.review.pending.is_some() {
-                ctx.request_repaint_after(std::time::Duration::from_secs(1));
-            }
-            if self.review.show(ctx, &self.theme_colors()) {
-                self.request_review();
-            }
             self.server_dialog(ctx);
             self.provider_dialog(ctx);
             self.config_dialog(ctx);
@@ -893,7 +995,8 @@ impl DesktopApp {
             self.process_view_dialog(ctx);
             self.job_view_dialog(ctx);
             self.stats_dialog(ctx);
-            self.catalog_dialog(ctx);
+            self.plugins_dialog(ctx);
+            self.plugin_consent_dialog(ctx);
         }
         if self
             .close_target
@@ -1167,6 +1270,61 @@ mod tests {
         for _ in 0..3 {
             frame(app, ctx, vec![]).drop_without_applying_deltas();
         }
+    }
+
+    /// Regression: `shared_dialog_open` decides whether `render_window_dialogs`
+    /// runs at all, so a utility flag missing from it silently hides its
+    /// surface — and switching to it closes the surface that was open. The
+    /// Plugins flag was omitted, so Task → Plugins rendered nothing.
+    #[test]
+    fn plugins_surface_opens_through_the_window_dialog_pass() {
+        let ctx = egui::Context::default();
+        let dir = std::env::temp_dir().join("bone-desktop-workspace-plugins");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut app = DesktopApp::open(ctx.clone(), false, Some(dir.join("layout.txt")));
+        app.tabs[0].connected = true;
+        app.catalog = Some(bone_protocol::CatalogSnapshot {
+            revision: "r1".into(),
+            items: vec![bone_protocol::CatalogItem {
+                name: "alpha-plugin".into(),
+                kind: "plugin".into(),
+                description: "Alpha plugin".into(),
+                installed: true,
+                enabled: true,
+                ..bone_protocol::CatalogItem::default()
+            }],
+        });
+
+        assert!(!app.shared_dialog_open(), "nothing is open at first");
+
+        // Task → Plugins (open_utility) sets only this flag.
+        app.open_utility("Plugins");
+        assert!(app.show_plugins);
+
+        // Utility surfaces settle their modal over a few frames, matching the
+        // other surface tests.
+        let mut output = None;
+        for _ in 0..4 {
+            let mut frame_output = frame(&mut app, &ctx, vec![]);
+            frame_output.textures_delta.clear();
+            output = Some(frame_output);
+        }
+        let output = output.unwrap();
+        assert!(
+            app.show_plugins,
+            "the opening frames must not dismiss the Plugins surface"
+        );
+        assert!(
+            app.shared_dialog_open(),
+            "render_window_dialogs is skipped unless shared_dialog_open sees Plugins"
+        );
+        let has_heading = output
+            .shapes
+            .iter()
+            .any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == "Plugins"));
+        assert!(has_heading, "the Plugins surface must be rendered");
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     fn pointer(pos: egui::Pos2, pressed: bool) -> Vec<egui::Event> {

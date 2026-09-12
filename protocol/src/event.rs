@@ -109,6 +109,10 @@ pub enum RuntimeEvent {
         /// Complete display transcript, included only when explicitly requested.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         messages: Option<Vec<ChatMessage>>,
+        /// Active daemon-resolved theme, including transient previews. Older
+        /// daemons omit this field; clients retain their existing baseline then.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        theme: Option<serde_json::Value>,
     },
     /// The socket bridge dropped broadcast events because the client lagged.
     ///
@@ -555,6 +559,16 @@ pub enum RuntimeCommand {
         request_id: Option<String>,
     },
     SetCommandEnabled {
+        name: String,
+        enabled: bool,
+        expected_revision: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
+    },
+    /// Enable or disable one installed Lua plugin package. Capabilities the
+    /// plugin registered inherit its state; toggling re-runs the Lua runtime so
+    /// a disabled plugin's entry point no longer installs its capabilities.
+    SetPluginEnabled {
         name: String,
         enabled: bool,
         expected_revision: u64,

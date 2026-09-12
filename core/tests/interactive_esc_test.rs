@@ -228,8 +228,7 @@ bone.command.register("picker", {
         .collect::<Vec<_>>();
     assert!(namespaces.contains(&"general"));
     assert!(namespaces.contains(&"providers"));
-    assert!(namespaces.contains(&"tools"));
-    assert!(namespaces.contains(&"commands"));
+    assert!(namespaces.contains(&"plugins"));
     assert!(namespaces.contains(&"status"));
     assert_eq!(snapshot.values["general"]["show_reasoning"], false);
 

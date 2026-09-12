@@ -178,6 +178,7 @@ impl RuntimeConn for LocalConn {
             | RuntimeCommand::SetActiveProvider { .. }
             | RuntimeCommand::SetToolEnabled { .. }
             | RuntimeCommand::SetCommandEnabled { .. }
+            | RuntimeCommand::SetPluginEnabled { .. }
             | RuntimeCommand::UpsertSubagent { .. }
             | RuntimeCommand::DeleteSubagent { .. }
             | RuntimeCommand::SetSubagentEnabled { .. }

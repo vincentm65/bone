@@ -21,6 +21,8 @@ struct Snapshot {
 #[derive(Default)]
 pub struct Review {
     pub open: bool,
+    pub window: crate::workspace::Id,
+    workspace: String,
     pub pending: Option<(u64, u64, Instant)>,
     pub notice: String,
     snapshot: Option<Snapshot>,
@@ -69,98 +71,128 @@ impl Review {
         }
     }
 
-    pub fn show(&mut self, ctx: &egui::Context, colors: &crate::theme::ThemeColors) -> bool {
-        if !self.open {
+    pub fn set_workspace(&mut self, workspace: &str) -> bool {
+        if self.workspace == workspace {
             return false;
         }
-        let mut open = true;
+        self.workspace = workspace.to_owned();
+        self.snapshot = None;
+        self.pending = None;
+        self.notice.clear();
+        self.selected.clear();
+        true
+    }
+
+    pub fn file_count(&self, workspace: &str) -> Option<usize> {
+        self.snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.workspace == workspace)
+            .map(|snapshot| snapshot.files.len())
+    }
+
+    /// A docked inspector; it never takes keyboard ownership from the conversation.
+    pub fn show(&mut self, ui: &mut egui::Ui, colors: &crate::theme::ThemeColors) -> bool {
         let mut refresh = false;
-        crate::surface::Surface::new(
-            "Workspace changes",
-            "Review files changed across this workspace.",
-        )
-        .size(1040.0, 700.0)
-        .body_scroll(true)
-        .show(ctx, &mut open, |ui| {
-            ui.horizontal_wrapped(|ui| {
-                refresh = ui
-                    .add_enabled(self.pending.is_none(), egui::Button::new("Refresh"))
-                    .clicked();
-                if self.pending.is_some() {
-                    ui.spinner();
+        ui.horizontal(|ui| {
+            ui.strong("Workspace changes");
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if crate::icons::button(ui, crate::icons::Icon::Close, "Close changes").clicked() {
+                    self.open = false;
                 }
-                ui.weak("Entire workspace · read-only");
+                refresh = ui
+                    .add_enabled(
+                        self.pending.is_none(),
+                        egui::Button::new("Refresh").frame(false),
+                    )
+                    .clicked();
             });
-            if !self.notice.is_empty() {
-                ui.colored_label(ui.visuals().warn_fg_color, &self.notice);
-            }
-            let Some(snapshot) = &self.snapshot else {
-                ui.label(if self.pending.is_some() {
-                    "Loading changed files…"
+        });
+        ui.label(egui::RichText::new("Entire workspace").small().weak())
+            .on_hover_text("Includes changes from every task and manual edits in this workspace.");
+        if !self.notice.is_empty() {
+            ui.colored_label(ui.visuals().warn_fg_color, &self.notice);
+        }
+        let Some(snapshot) = &self.snapshot else {
+            crate::surface::empty(
+                ui,
+                if self.pending.is_some() {
+                    "Loading changes…"
                 } else {
-                    "Refresh to load changed files."
-                });
-                return;
-            };
-            ui.add(egui::Label::new(&snapshot.workspace).truncate())
-                .on_hover_text(&snapshot.workspace);
-            ui.weak("Includes changes from other tasks and manual edits.");
-            if self.pending.is_some() || !self.notice.is_empty() {
-                ui.weak("Showing the previous snapshot");
-            }
-            if snapshot.truncated {
-                ui.colored_label(
-                    ui.visuals().warn_fg_color,
-                    "Large output was truncated; some files or changes may be incomplete.",
-                );
-            }
-            if snapshot.files.is_empty() {
-                ui.label(if snapshot.truncated {
-                    "No files in the received portion of this snapshot."
+                    "No snapshot yet"
+                },
+                "Changes appear here when the workspace is refreshed.",
+            );
+            return refresh;
+        };
+        ui.add(
+            egui::Label::new(egui::RichText::new(&snapshot.workspace).small().weak()).truncate(),
+        )
+        .on_hover_text(&snapshot.workspace);
+        if self.pending.is_some() || !self.notice.is_empty() {
+            ui.weak("Showing the previous snapshot");
+        }
+        if snapshot.truncated {
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                "Large output was truncated; some changes may be incomplete.",
+            );
+        }
+        ui.separator();
+        if snapshot.files.is_empty() {
+            crate::surface::empty(
+                ui,
+                if snapshot.truncated {
+                    "No files in this partial snapshot"
                 } else {
                     "Working tree clean"
-                });
-                return;
-            }
-            // Reserve room for the title, scope/truncation notice and diff
-            // controls even when the file list is stacked above the diff.
-            let height = (ctx.content_rect().height() - 290.0).clamp(100.0, 480.0);
-            if ui.available_width() >= 640.0 {
-                ui.horizontal_top(|ui| {
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(240.0, height),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| {
-                            render_files(ui, &snapshot.files, &mut self.selected, height);
-                        },
-                    );
-                    ui.separator();
-                    ui.vertical(|ui| {
-                        ui.set_width(ui.available_width());
-                        render_diff(
+                },
+                "Refresh after making changes to inspect them here.",
+            );
+            return refresh;
+        }
+        let height = ui.available_height();
+        if ui.available_width() >= 760.0 {
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(220.0, height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(220.0);
+                        render_files(
                             ui,
                             &snapshot.files,
-                            &self.selected,
-                            &mut self.staged,
-                            height,
-                            colors,
+                            &mut self.selected,
+                            (height - 30.0).max(32.0),
                         );
-                    });
-                });
-            } else {
-                render_files(ui, &snapshot.files, &mut self.selected, 140.0);
-                ui.separator();
-                render_diff(
-                    ui,
-                    &snapshot.files,
-                    &self.selected,
-                    &mut self.staged,
-                    (height - 160.0).max(100.0),
-                    colors,
+                    },
                 );
-            }
-        });
-        self.open = open;
+                crate::surface::divider(ui, height);
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width());
+                    render_diff(
+                        ui,
+                        &snapshot.files,
+                        &self.selected,
+                        &mut self.staged,
+                        (height - 130.0).max(32.0),
+                        colors,
+                    );
+                });
+            });
+        } else {
+            let list_height = (height * 0.25).clamp(36.0, 140.0);
+            render_files(ui, &snapshot.files, &mut self.selected, list_height);
+            ui.separator();
+            let diff_height = (ui.available_height() - 130.0).max(32.0);
+            render_diff(
+                ui,
+                &snapshot.files,
+                &self.selected,
+                &mut self.staged,
+                diff_height,
+                colors,
+            );
+        }
         refresh
     }
 }

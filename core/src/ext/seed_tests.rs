@@ -217,6 +217,16 @@ fn bundled_ui_seeds_refresh_pre_feature_copies() {
     );
     std::fs::write(&config, "-- canonical-config-v7\n").unwrap();
     assert!(!should_refresh_seeded_lua(&config, "config.lua").unwrap());
+    // v8 is now a legacy seed too: the pristine digest (see
+    // CANONICAL_CONFIG_V8_SHA256) refreshes, but any edited v8 the user has
+    // changed — even one keeping the marker — is preserved.
+    std::fs::write(&config, "-- canonical-config-v8\n").unwrap();
+    assert!(!should_refresh_seeded_lua(&config, "config.lua").unwrap());
+    std::fs::write(&config, "-- canonical-config-v8\n-- user customization\n").unwrap();
+    assert!(
+        !should_refresh_seeded_lua(&config, "config.lua").unwrap(),
+        "edited v8 config must be preserved"
+    );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -371,6 +381,113 @@ fn unreadable_seed_target_is_preserved() {
 
     seed_default_lua(&dir, &[("locked.lua", "replacement")], None, true);
     assert!(target.is_dir(), "force replaced a directory with a file");
-
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── Plugin package loading (Model A) ────────────────────────────────────────
+
+/// Build a Lua VM with a `bone` global exposing `bone.tool.register`, matching
+/// what `ops_tools::setup_register_tool` installs at boot.
+fn plugin_test_lua() -> mlua::Lua {
+    let lua = mlua::Lua::new();
+    let bone = lua.create_table().unwrap();
+    super::ops_tools::setup_register_tool(&lua, &bone).unwrap();
+    lua.globals().set("bone", bone).unwrap();
+    lua
+}
+
+/// The `plugin` field stamped on each `bone._tools` entry (or `None`).
+fn registered_tool_plugins(lua: &mlua::Lua) -> Vec<Option<String>> {
+    let bone: mlua::Table = lua.globals().get("bone").unwrap();
+    let tools: mlua::Table = bone.get("_tools").unwrap();
+    tools
+        .sequence_values::<mlua::Table>()
+        .map(|entry| entry.unwrap().get::<Option<String>>("plugin").unwrap())
+        .collect()
+}
+
+const ALPHA_TOOL_LUA: &str = r#"bone.tool.register({ name = "alpha_tool", description = "d", parameters = {}, execute = function() return "ok" end })"#;
+
+#[test]
+fn plugin_entry_points_load_and_stamp_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugins = dir.path().join("plugins");
+    std::fs::create_dir_all(plugins.join("alpha")).unwrap();
+    std::fs::write(plugins.join("alpha/init.lua"), ALPHA_TOOL_LUA).unwrap();
+
+    let lua = plugin_test_lua();
+    run_lua_plugin_files(&lua, &plugins, None).unwrap();
+
+    assert_eq!(
+        registered_tool_plugins(&lua),
+        vec![Some("alpha".to_string())]
+    );
+}
+
+#[test]
+fn disabled_plugins_are_skipped() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugins = dir.path().join("plugins");
+    std::fs::create_dir_all(plugins.join("alpha")).unwrap();
+    std::fs::write(plugins.join("alpha/init.lua"), ALPHA_TOOL_LUA).unwrap();
+
+    let lua = plugin_test_lua();
+    let disabled: std::collections::HashSet<String> = ["alpha".to_string()].into_iter().collect();
+    run_lua_plugin_files(&lua, &plugins, Some(&disabled)).unwrap();
+
+    assert!(registered_tool_plugins(&lua).is_empty());
+}
+
+#[test]
+fn plugin_dir_without_init_lua_is_inert() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugins = dir.path().join("plugins");
+    std::fs::create_dir_all(plugins.join("empty")).unwrap();
+    std::fs::write(plugins.join("empty/readme.md"), "no init here").unwrap();
+
+    let lua = plugin_test_lua();
+    run_lua_plugin_files(&lua, &plugins, None).unwrap();
+    assert!(registered_tool_plugins(&lua).is_empty());
+}
+
+#[test]
+fn missing_plugins_dir_is_not_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let lua = plugin_test_lua();
+    run_lua_plugin_files(&lua, &dir.path().join("nope"), None).unwrap();
+    assert!(registered_tool_plugins(&lua).is_empty());
+}
+
+#[test]
+fn plugin_errors_are_attributed_to_the_plugin() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugins = dir.path().join("plugins");
+    std::fs::create_dir_all(plugins.join("broken")).unwrap();
+    std::fs::write(plugins.join("broken/init.lua"), "this is not valid lua (").unwrap();
+
+    let lua = plugin_test_lua();
+    let error = run_lua_plugin_files(&lua, &plugins, None).unwrap_err();
+    assert!(
+        error.contains("plugin 'broken'"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn plugin_owner_global_is_reset_after_load() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugins = dir.path().join("plugins");
+    std::fs::create_dir_all(plugins.join("alpha")).unwrap();
+    std::fs::write(plugins.join("alpha/init.lua"), ALPHA_TOOL_LUA).unwrap();
+
+    let lua = plugin_test_lua();
+    run_lua_plugin_files(&lua, &plugins, None).unwrap();
+
+    let bone: mlua::Table = lua.globals().get("bone").unwrap();
+    assert!(
+        bone.get::<Option<String>>("_plugin_owner")
+            .unwrap()
+            .is_none(),
+        "_plugin_owner leaked past plugin execution"
+    );
 }

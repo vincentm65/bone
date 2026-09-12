@@ -411,6 +411,7 @@ async fn synchronize_is_correlated_when_idle_and_during_a_turn() {
                 snapshot,
                 view,
                 messages,
+                theme: _,
             } = events.recv().await.unwrap()
             {
                 break (request_id, busy, snapshot, view, messages);
@@ -695,21 +696,11 @@ fn incognito_actor_applies_unskipped_host_reload() {
 }
 
 #[test]
-fn explicit_tools_reload_skips_automatic_source_check() {
-    assert!(!checks_extension_sources(&RuntimeCommand::RunCommand {
-        request_id: None,
-        name: "config".into(),
-        input: " tools   reload ".into(),
-    }));
+fn commands_and_prompts_check_extension_sources() {
     assert!(checks_extension_sources(&RuntimeCommand::RunCommand {
         request_id: None,
         name: "config".into(),
-        input: "tools".into(),
-    }));
-    assert!(checks_extension_sources(&RuntimeCommand::RunCommand {
-        request_id: None,
-        name: "other".into(),
-        input: "tools reload".into(),
+        input: String::new(),
     }));
     assert!(checks_extension_sources(&RuntimeCommand::SubmitPrompt {
         request_id: None,
@@ -1123,14 +1114,17 @@ fn interactive_test_extensions() -> crate::ext::ExtensionManager {
             crate::ext::ops_commands::RegisteredLuaCommand {
                 name: "wait_for_key".into(),
                 description: String::new(),
+                plugin: None,
             },
             crate::ext::ops_commands::RegisteredLuaCommand {
                 name: "wait_for_approval".into(),
                 description: String::new(),
+                plugin: None,
             },
             crate::ext::ops_commands::RegisteredLuaCommand {
                 name: "submit_output".into(),
                 description: String::new(),
+                plugin: None,
             },
         ],
         Arc::new(Mutex::new(crate::config::settings::Settings::defaults())),
@@ -1290,6 +1284,7 @@ fn private_command_extensions() -> crate::ext::ExtensionManager {
         vec![crate::ext::ops_commands::RegisteredLuaCommand {
             name: "private_replace".into(),
             description: String::new(),
+            plugin: None,
         }],
         Arc::new(Mutex::new(crate::config::settings::Settings::defaults())),
         Arc::new(std::sync::RwLock::new(Default::default())),

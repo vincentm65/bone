@@ -30,6 +30,10 @@ use crate::runtime::view::{Anchor, Component, FloatRect, StatusSegment, ViewDiff
 #[derive(Default)]
 pub struct UiState {
     pub view: ViewModel,
+    /// The most recently applied daemon theme, including transient previews.
+    /// Unlike the view model, theme state is intentionally retained separately
+    /// because `SetTheme` is renderer state and is not part of the view snapshot.
+    pub active_theme: Option<serde_json::Value>,
     /// Diffs accumulated since the last [`drain_diffs`](UiState::drain_diffs).
     pub diffs: Vec<ViewDiff>,
     /// Current terminal width in columns, published by the renderer each frame
@@ -43,6 +47,9 @@ impl UiState {
     pub fn apply(&mut self, diff: ViewDiff) -> bool {
         if !self.view.apply(&diff) {
             return false;
+        }
+        if let ViewDiff::SetTheme { theme } = &diff {
+            self.active_theme = Some(theme.clone());
         }
         self.diffs.push(diff);
         true
@@ -265,6 +272,12 @@ pub fn drain_diffs(ui: &SharedUi) -> Vec<ViewDiff> {
 /// diffs). Locks the `UiState` mutex only — never the Lua VM.
 pub fn snapshot(ui: &SharedUi) -> ViewModel {
     lock(ui).view.clone()
+}
+
+/// Snapshot the current active daemon theme from a standalone [`SharedUi`]
+/// handle. Locks the `UiState` mutex only — never the Lua VM.
+pub fn active_theme_snapshot(ui: &SharedUi) -> Option<serde_json::Value> {
+    lock(ui).active_theme.clone()
 }
 
 #[cfg(test)]

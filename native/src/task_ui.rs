@@ -128,12 +128,11 @@ pub fn command_label(name: &str) -> String {
     match name {
         "config" => "Settings".into(),
         "stats" => "Usage statistics".into(),
-        "catalog" => "Extensions".into(),
+        "catalog" => "Plugins".into(),
         "setup" => "Provider setup".into(),
         "provider" | "model" => "Choose model for this task".into(),
         "edit" | "e" => "Edit draft in larger editor".into(),
         "clear" | "new" => "New task".into(),
-        "tools" => "Tool settings".into(),
         "help" => "Command and shortcut reference".into(),
         "incognito" => "Toggle incognito for this task".into(),
         _ => format!("/{name}…"),
@@ -154,6 +153,14 @@ fn recent_title(meta: &ConversationMeta) -> String {
         }
     } else {
         meta.full_title.clone()
+    }
+}
+
+fn recent_group(meta: &ConversationMeta) -> &'static str {
+    match relative_date(&meta.updated_at, &meta.updated_at_local).as_str() {
+        "yesterday" => "Yesterday",
+        value if value == "today" || value.ends_with("am") || value.ends_with("pm") => "Today",
+        _ => "Earlier",
     }
 }
 
@@ -245,25 +252,22 @@ impl Tab {
 }
 
 impl DesktopApp {
-    pub(super) fn permissions_menu(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn tool_permissions_section(&mut self, ui: &mut egui::Ui) {
         let auto = self.approval_mode() == "danger";
-        ui.menu_button(if auto { "Tools: auto" } else { "Tools: ask" }, |ui| {
-            ui.set_max_width((ui.ctx().content_rect().width() - 32.0).clamp(180.0, 360.0));
-            ui.strong("Tool permissions");
-            ui.weak("Applies to all tasks");
-            ui.add_enabled_ui(self.has_connected_tab(), |ui| {
-                if ui
-                    .selectable_label(!auto, "Ask before running tools")
-                    .clicked()
-                {
-                    self.set_approval_mode("safe");
-                    ui.close();
-                }
-                if ui.selectable_label(auto, "Auto-approve tools").clicked() {
-                    self.set_approval_mode("danger");
-                    ui.close();
-                }
-            });
+        ui.strong("Tool permissions");
+        ui.weak("Applies to all tasks on this server");
+        ui.add_enabled_ui(self.has_connected_tab(), |ui| {
+            if ui
+                .selectable_label(!auto, "Ask before running tools")
+                .clicked()
+            {
+                self.set_approval_mode("safe");
+                ui.close();
+            }
+            if ui.selectable_label(auto, "Auto-approve tools").clicked() {
+                self.set_approval_mode("danger");
+                ui.close();
+            }
         });
     }
     pub(super) fn sync_task_titles(&mut self) {
@@ -279,11 +283,11 @@ impl DesktopApp {
     pub(super) fn sidebar_lists(&mut self, ui: &mut egui::Ui) {
         self.sync_task_titles();
         ui.add_space(4.0);
-        ui.label(egui::RichText::new("Open").weak().size(11.0));
+        ui.label(egui::RichText::new("Open").weak().size(12.0));
         self.open_tabs(ui);
         if !self.demo {
             ui.add_space(8.0);
-            ui.label(egui::RichText::new("Recent").weak().size(11.0));
+            ui.label(egui::RichText::new("Recent").weak().size(12.0));
             if self.conversations_request.is_some() {
                 ui.weak("Loading tasks…");
             } else if !self.conversations_loaded {
@@ -308,42 +312,43 @@ impl DesktopApp {
                         "No matching recent tasks."
                     });
                 }
-                for meta in rows {
-                    let title = recent_title(&meta);
-                    let response = task_row(
-                        ui,
-                        RowIndicator::None,
-                        egui::Color32::GRAY,
-                        egui::RichText::new(one_line(&title)),
-                        false,
-                    )
-                    .on_hover_text(&title);
-                    response.context_menu(|ui| {
-                        if ui.button("Rename…").clicked() {
-                            self.start_rename(meta.id);
-                            ui.close();
-                        }
-                        if ui.button("Delete…").clicked() {
-                            self.start_delete(meta.id);
-                            ui.close();
-                        }
-                    });
-                    if response.clicked() {
-                        self.open_conversation(meta.id, &ui.ctx().clone());
+                for group in ["Today", "Yesterday", "Earlier"] {
+                    let grouped: Vec<_> = rows
+                        .iter()
+                        .filter(|meta| recent_group(meta) == group)
+                        .collect();
+                    if grouped.is_empty() {
+                        continue;
                     }
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(format!(
-                                "{} messages · {}",
-                                meta.message_count,
-                                relative_date(&meta.updated_at, &meta.updated_at_local)
-                            ))
-                            .small()
-                            .weak(),
+                    ui.add_space(8.0);
+                    ui.label(egui::RichText::new(group).small().weak());
+                    for meta in grouped {
+                        let title = recent_title(meta);
+                        let response = task_row(
+                            ui,
+                            RowIndicator::None,
+                            egui::Color32::GRAY,
+                            egui::RichText::new(one_line(&title)),
+                            false,
                         )
-                        .truncate(),
-                    )
-                    .on_hover_text(&meta.updated_at);
+                        .on_hover_text(format!(
+                            "{title}\n{} messages · {}",
+                            meta.message_count, meta.updated_at_local
+                        ));
+                        response.context_menu(|ui| {
+                            if ui.button("Rename…").clicked() {
+                                self.start_rename(meta.id);
+                                ui.close();
+                            }
+                            if ui.button("Delete…").clicked() {
+                                self.start_delete(meta.id);
+                                ui.close();
+                            }
+                        });
+                        if response.clicked() {
+                            self.open_conversation(meta.id, &ui.ctx().clone());
+                        }
+                    }
                 }
             }
         }
@@ -378,7 +383,7 @@ impl DesktopApp {
                 ui,
                 indicator,
                 color,
-                egui::RichText::new(format!("{private}{title}").trim()).color(color),
+                egui::RichText::new(format!("{private}{title}").trim()),
                 self.selected == index,
             )
             .on_hover_text(format!("{title}\n{location}\n{status}"));
@@ -606,7 +611,7 @@ impl DesktopApp {
         };
         self.focus_conversation(tab, ctx);
         match name {
-            "config" | "tools" => self.apply_ui_request(tab, UiRequest::OpenConfig),
+            "config" => self.apply_ui_request(tab, UiRequest::OpenConfig),
             "stats" => self.apply_ui_request(tab, UiRequest::OpenStats),
             "setup" => self.apply_ui_request(tab, UiRequest::OpenSetup),
             "catalog" => self.apply_ui_request(tab, UiRequest::OpenCatalog),

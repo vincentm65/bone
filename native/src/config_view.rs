@@ -83,13 +83,21 @@ impl ConfigView {
             .map_or(&[], |snapshot| snapshot.disabled_commands.as_slice())
     }
 
-    /// Whether a tool/command is enabled. Enablement is tracked separately from
-    /// `values` in the snapshot's disabled lists, so `tools.<name>` /
-    /// `commands.<name>` schema fields cannot read it from [`Self::value`].
+    pub fn disabled_plugins(&self) -> &[String] {
+        self.snapshot
+            .as_ref()
+            .map_or(&[], |snapshot| snapshot.disabled_plugins.as_slice())
+    }
+
+    /// Whether a tool/command/plugin is enabled. Enablement is tracked separately
+    /// from `values` in the snapshot's disabled lists, so `tools.<name>` /
+    /// `commands.<name>` / `plugins.<name>` schema fields cannot read it from
+    /// [`Self::value`].
     pub fn is_enabled(&self, namespace: &str, name: &str) -> bool {
         match namespace {
             "tools" => !self.disabled_tools().iter().any(|entry| entry == name),
             "commands" => !self.disabled_commands().iter().any(|entry| entry == name),
+            "plugins" => !self.disabled_plugins().iter().any(|entry| entry == name),
             _ => true,
         }
     }
@@ -215,6 +223,10 @@ fn matches(field: &SettingDefinition, page: &str, query: &str) -> bool {
     })
 }
 
+fn page_field_count(page: &bone_protocol::ConfigPage) -> usize {
+    page.fields.len() + page.pages.iter().map(page_field_count).sum::<usize>()
+}
+
 /// Search spans every category, including extension-defined nested pages.
 pub fn render_pages(
     ui: &mut egui::Ui,
@@ -227,13 +239,15 @@ pub fn render_pages(
         return;
     };
     state.sync(view, edits);
+    ui.spacing_mut().item_spacing = egui::vec2(10.0, 6.0);
+    ui.spacing_mut().interact_size.y = crate::theme::CONTROL_HEIGHT;
     ui.add(
         egui::TextEdit::singleline(&mut state.query)
             .hint_text("Search settings…")
-            .margin(egui::vec2(12.0, 9.0))
+            .margin(egui::vec2(12.0, 7.0))
             .desired_width(f32::INFINITY),
     );
-    ui.add_space(6.0);
+    ui.add_space(2.0);
     if !schema.pages.iter().any(|p| p.namespace == state.selected) {
         state.selected = schema
             .pages
@@ -278,14 +292,20 @@ pub fn render_pages(
                         .id_salt("settings-navigation")
                         .max_height(height)
                         .show(ui, |ui| {
-                            ui.weak("PREFERENCES");
+                            ui.label(egui::RichText::new("PREFERENCES").small().weak());
                             for page in &schema.pages {
+                                let count = page_field_count(page);
+                                let label = if count > 0 {
+                                    format!("{}  {count}", page.title)
+                                } else {
+                                    page.title.clone()
+                                };
                                 if ui
                                     .add_sized(
-                                        [164.0, 36.0],
+                                        [164.0, crate::theme::CONTROL_HEIGHT],
                                         egui::Button::selectable(
                                             query.is_empty() && state.selected == page.namespace,
-                                            &page.title,
+                                            label,
                                         ),
                                     )
                                     .clicked()
@@ -349,16 +369,45 @@ fn render_page(
         .filter(|f| matches(f, &title, query))
         .collect();
     let mut count = fields.len();
+    let has_type = fields.iter().any(|field| field.kind.is_some());
     if !fields.is_empty() {
-        ui.add_space(8.0);
-        ui.label(egui::RichText::new(&title).size(18.0).strong());
-        ui.add_space(6.0);
-        for field in fields {
-            ui.push_id(&field.path, |ui| {
-                render_field(ui, field, view, edits, action);
-            });
-            ui.separator();
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            // The title sits outside the card so the card reads as content, and
+            // uses the app's semibold family to establish a clear type step above
+            // the 15.0 body text.
+            ui.label(
+                egui::RichText::new(&title)
+                    .size(17.0)
+                    .family(egui::FontFamily::Name("semibold".into())),
+            );
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} setting{}",
+                    count,
+                    if count == 1 { "" } else { "s" }
+                ))
+                .small()
+                .weak(),
+            );
+        });
+        ui.add_space(4.0);
+        if has_type {
+            render_type_header(ui);
         }
+        // All of a page's rows share one card, separated by dividers. This keeps
+        // the page a short scannable list instead of a stack of boxes.
+        crate::surface::card(ui).show(ui, |ui| {
+            ui.set_min_width(ui.available_width());
+            for (index, field) in fields.iter().enumerate() {
+                if index > 0 {
+                    ui.separator();
+                }
+                ui.push_id(&field.path, |ui| {
+                    render_field(ui, field, view, edits, action, has_type)
+                });
+            }
+        });
     }
     for child in &page.pages {
         count += render_page(ui, child, view, edits, action, query, &title);
@@ -383,12 +432,16 @@ fn field_hint(field: &SettingDefinition) -> String {
     parts.join(" · ")
 }
 
+/// Width reserved for the trailing reset affordance.
+const RESET_WIDTH: f32 = 34.0;
+
 fn render_field(
     ui: &mut egui::Ui,
     field: &SettingDefinition,
     view: &ConfigView,
     edits: &mut HashMap<String, String>,
     action: &mut Option<ConfigUiAction>,
+    has_type: bool,
 ) {
     let enablement = field
         .path
@@ -399,126 +452,219 @@ fn render_field(
                 .path
                 .strip_prefix("commands.")
                 .map(|n| ("commands", n))
-        });
+        })
+        .or_else(|| field.path.strip_prefix("plugins.").map(|n| ("plugins", n)));
+    // Enablement rows have no value to reset; only offer reset when the current
+    // value actually differs from the schema default.
+    let reset = enablement.is_none() && view.value(field) != field.default;
     let label = |ui: &mut egui::Ui| {
-        ui.label(egui::RichText::new(&field.label).strong())
-            .on_hover_text(&field.path);
+        if has_type {
+            ui.horizontal(|ui| {
+                type_cell(ui, field.kind.as_deref());
+                ui.label(egui::RichText::new(&field.label).strong())
+                    .on_hover_text(&field.path);
+            });
+        } else {
+            ui.label(egui::RichText::new(&field.label).strong())
+                .on_hover_text(&field.path);
+        }
         let hint = field_hint(field);
         if !hint.is_empty() {
-            ui.weak(hint);
+            ui.label(egui::RichText::new(hint).small().weak());
         }
     };
-    let mut control = |ui: &mut egui::Ui| {
-        if let Some((namespace, name)) = enablement {
-            let mut enabled = view.is_enabled(namespace, name);
-            let text = if enabled { "Enabled" } else { "Disabled" };
-            if ui.checkbox(&mut enabled, text).changed() {
-                *action = Some(ConfigUiAction::SetEnabled {
-                    namespace: namespace.into(),
-                    name: name.into(),
-                    enabled,
-                });
-            }
-        } else {
-            match field.value_type.as_str() {
-                "bool" => {
-                    let mut value = view.value(field).as_bool().unwrap_or(false);
-                    let text = if value { "On" } else { "Off" };
-                    if ui.checkbox(&mut value, text).changed() {
-                        *action = Some(ConfigUiAction::Set {
-                            path: field.path.clone(),
-                            value: value.into(),
-                        });
-                    }
-                }
-                "enum" => {
-                    let current = view.render_value(field);
-                    let mut selected = current.clone();
-                    egui::ComboBox::from_id_salt("value")
-                        .width(ui.available_width().min(220.0))
-                        .selected_text(&selected)
-                        .show_ui(ui, |ui| {
-                            for option in &field.options {
-                                ui.selectable_value(&mut selected, option.clone(), option);
-                            }
-                        });
-                    if selected != current {
-                        *action = Some(ConfigUiAction::Set {
-                            path: field.path.clone(),
-                            value: selected.into(),
-                        });
-                    }
-                }
-                _ => {
-                    let current = view.render_value(field);
-                    let buffer = edits
-                        .entry(field.path.clone())
-                        .or_insert_with(|| current.clone());
-                    let changed = *buffer != current;
-                    let parsed = parse_config_value(field, buffer.trim());
-                    ui.horizontal(|ui| {
-                        let response = ui.add(
-                            egui::TextEdit::singleline(buffer)
-                                .margin(egui::vec2(8.0, 7.0))
-                                .desired_width((ui.available_width() - 72.0).max(60.0)),
-                        );
-                        let enter =
-                            response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                        if (ui
-                            .add_enabled(changed && parsed.is_ok(), egui::Button::new("Save"))
-                            .clicked()
-                            || (enter && changed))
-                            && let Ok(value) = parse_config_value(field, buffer.trim())
-                        {
-                            *action = Some(ConfigUiAction::Set {
-                                path: field.path.clone(),
-                                value,
-                            });
-                        }
-                    });
-                    if *buffer != current {
-                        match parse_config_value(field, buffer.trim()) {
-                            Err(error) => {
-                                ui.colored_label(ui.visuals().error_fg_color, error);
-                            }
-                            Ok(_) => {
-                                ui.weak("Unsaved change");
-                            }
-                        }
-                    }
-                }
-            }
-            if view.value(field) != field.default && ui.small_button("Reset to default").clicked() {
-                edits.remove(&field.path);
-                *action = Some(ConfigUiAction::Reset {
-                    path: field.path.clone(),
-                });
-            }
-        }
-    };
-    ui.add_space(6.0);
+    ui.spacing_mut().item_spacing.y = 6.0;
     if ui.available_width() >= 460.0 {
         let width = ui.available_width();
+        // The control column keeps a fixed width across every row so values line
+        // up in one scannable column; reset always reserves its trailing slot,
+        // whether or not a glyph is drawn, so controls stay aligned. Account for
+        // the two horizontal-layout gaps so the row never grows its parent width
+        // on successive egui layout passes.
+        let label_width = width * 0.48;
+        let gaps = ui.spacing().item_spacing.x * 2.0;
+        let control_width = (width - label_width - RESET_WIDTH - gaps).max(60.0);
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(
-                egui::vec2(width * 0.46, 36.0),
+                egui::vec2(label_width, crate::theme::CONTROL_HEIGHT),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
-                    ui.set_width(width * 0.46);
+                    ui.set_width(label_width);
                     label(ui);
                 },
             );
             ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), 36.0),
+                egui::vec2(control_width, crate::theme::CONTROL_HEIGHT),
                 egui::Layout::top_down(egui::Align::Min),
-                &mut control,
+                |ui| {
+                    ui.set_min_width(control_width);
+                    field_control(ui, field, view, enablement, edits, action);
+                },
+            );
+            ui.allocate_ui_with_layout(
+                egui::vec2(RESET_WIDTH, crate::theme::CONTROL_HEIGHT),
+                egui::Layout::right_to_left(egui::Align::Min),
+                |ui| {
+                    if reset {
+                        reset_button(ui, field, edits, action);
+                    }
+                },
             );
         });
     } else {
         label(ui);
-        control(ui);
+        field_control(ui, field, view, enablement, edits, action);
+        if reset {
+            reset_button(ui, field, edits, action);
+        }
     }
-    ui.add_space(6.0);
+}
+
+/// Width reserved for the leading "Type" column on the unified Plugins page.
+const TYPE_WIDTH: f32 = 60.0;
+
+/// Reserve the fixed-width "Type" column slot and, when a type is present,
+/// render it dim and left-aligned. Rows without a type leave the cell blank but
+/// still reserve its width so labels align down the column.
+fn type_cell(ui: &mut egui::Ui, value: Option<&str>) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(TYPE_WIDTH, ui.spacing().interact_size.y),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            ui.set_width(TYPE_WIDTH);
+            if let Some(value) = value {
+                ui.label(egui::RichText::new(value).small().weak());
+            }
+        },
+    );
+}
+
+/// The dim "Type"/"Name" column header shown above the unified Plugins page's
+/// card. The card insets its content by 12px, so the header offsets to match.
+fn render_type_header(ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        ui.add_space(12.0);
+        type_cell(ui, Some("Type"));
+        ui.label(egui::RichText::new("Name").small().weak());
+    });
+}
+
+/// The value editor for one row. Enablement rows toggle a tool/command; other
+/// rows edit by declared type.
+fn field_control(
+    ui: &mut egui::Ui,
+    field: &SettingDefinition,
+    view: &ConfigView,
+    enablement: Option<(&str, &str)>,
+    edits: &mut HashMap<String, String>,
+    action: &mut Option<ConfigUiAction>,
+) {
+    if let Some((namespace, name)) = enablement {
+        let mut enabled = view.is_enabled(namespace, name);
+        let text = if enabled { "Enabled" } else { "Disabled" };
+        if ui.checkbox(&mut enabled, text).changed() {
+            *action = Some(ConfigUiAction::SetEnabled {
+                namespace: namespace.into(),
+                name: name.into(),
+                enabled,
+            });
+        }
+        return;
+    }
+    match field.value_type.as_str() {
+        // A toggle button states the value once (On/Off) and carries the accent
+        // fill when on, instead of a checkbox plus a redundant trailing label.
+        "bool" => {
+            let value = view.value(field).as_bool().unwrap_or(false);
+            let text = if value { "On" } else { "Off" };
+            if ui
+                .add(
+                    egui::Button::selectable(value, text)
+                        .min_size(egui::vec2(88.0, crate::theme::CONTROL_HEIGHT)),
+                )
+                .clicked()
+            {
+                *action = Some(ConfigUiAction::Set {
+                    path: field.path.clone(),
+                    value: (!value).into(),
+                });
+            }
+        }
+        "enum" => {
+            let current = view.render_value(field);
+            let mut selected = current.clone();
+            egui::ComboBox::from_id_salt("value")
+                .width(ui.available_width().min(220.0))
+                .selected_text(&selected)
+                .show_ui(ui, |ui| {
+                    for option in &field.options {
+                        ui.selectable_value(&mut selected, option.clone(), option);
+                    }
+                });
+            if selected != current {
+                *action = Some(ConfigUiAction::Set {
+                    path: field.path.clone(),
+                    value: selected.into(),
+                });
+            }
+        }
+        _ => {
+            let current = view.render_value(field);
+            let buffer = edits
+                .entry(field.path.clone())
+                .or_insert_with(|| current.clone());
+            let changed = *buffer != current;
+            let parsed = parse_config_value(field, buffer.trim());
+            let response = ui.add(
+                egui::TextEdit::singleline(buffer)
+                    .margin(egui::vec2(8.0, 7.0))
+                    .desired_width(f32::INFINITY),
+            );
+            // Text edits commit on Enter or blur; there is no explicit Save step.
+            if response.lost_focus()
+                && changed
+                && let Ok(value) = parsed
+            {
+                *action = Some(ConfigUiAction::Set {
+                    path: field.path.clone(),
+                    value,
+                });
+            }
+            if changed {
+                match parse_config_value(field, buffer.trim()) {
+                    Err(error) => {
+                        ui.colored_label(ui.visuals().error_fg_color, error);
+                    }
+                    Ok(_) => {
+                        ui.weak("Unsaved change");
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Trailing reset affordance: a borderless glyph that returns the setting to its
+/// schema default. Shown only when the current value differs from the default.
+fn reset_button(
+    ui: &mut egui::Ui,
+    field: &SettingDefinition,
+    edits: &mut HashMap<String, String>,
+    action: &mut Option<ConfigUiAction>,
+) {
+    let response = ui
+        .add(
+            egui::Button::new(egui::RichText::new("↺").size(16.0))
+                .frame(false)
+                .min_size(egui::vec2(RESET_WIDTH, crate::theme::CONTROL_HEIGHT)),
+        )
+        .on_hover_text("Reset to default");
+    if response.clicked() {
+        edits.remove(&field.path);
+        *action = Some(ConfigUiAction::Reset {
+            path: field.path.clone(),
+        });
+    }
 }
 
 #[cfg(test)]
@@ -578,6 +724,7 @@ mod tests {
             integer: None,
             min: None,
             max: None,
+            kind: None,
             reload_behavior: String::new(),
         }
     }
@@ -601,6 +748,7 @@ mod tests {
             active_provider: String::new(),
             disabled_tools: vec!["shell".into()],
             disabled_commands: vec!["/model".into()],
+            disabled_plugins: Vec::new(),
         }
     }
 
@@ -631,19 +779,27 @@ mod tests {
 
     #[test]
     fn disabled_lists_come_from_snapshot() {
-        let view = ConfigView::new(None, Some(snapshot(serde_json::json!({}))));
+        let mut snap = snapshot(serde_json::json!({}));
+        snap.disabled_plugins = vec!["sample".into()];
+        let view = ConfigView::new(None, Some(snap));
         assert_eq!(view.disabled_tools(), ["shell".to_string()]);
         assert_eq!(view.disabled_commands(), ["/model".to_string()]);
+        assert_eq!(view.disabled_plugins(), ["sample".to_string()]);
         assert!(ConfigView::default().disabled_tools().is_empty());
+        assert!(ConfigView::default().disabled_plugins().is_empty());
     }
 
     #[test]
     fn is_enabled_reads_disabled_lists() {
-        let view = ConfigView::new(None, Some(snapshot(serde_json::json!({}))));
+        let mut snap = snapshot(serde_json::json!({}));
+        snap.disabled_plugins = vec!["sample".into()];
+        let view = ConfigView::new(None, Some(snap));
         assert!(!view.is_enabled("tools", "shell"));
         assert!(view.is_enabled("tools", "read_file"));
         assert!(!view.is_enabled("commands", "/model"));
         assert!(view.is_enabled("commands", "/help"));
+        assert!(!view.is_enabled("plugins", "sample"));
+        assert!(view.is_enabled("plugins", "other"));
         // Unknown namespace and a missing snapshot default to enabled.
         assert!(view.is_enabled("other", "x"));
         assert!(ConfigView::default().is_enabled("tools", "shell"));

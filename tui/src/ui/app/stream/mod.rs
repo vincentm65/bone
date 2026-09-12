@@ -607,6 +607,7 @@ impl App {
                         snapshot,
                         view,
                         messages,
+                        theme: _,
                     }) if sync_pending == Some(request_id) => {
                         self.apply_synchronized_projection(request_id, snapshot, view);
                         if busy {

@@ -2,7 +2,7 @@
 
 **A terminal coding agent that stays out of your way.**
 
-Bone can inspect a codebase, edit files, run commands, and keep working in the background while you stay in control. The default interface is a fast native TUI, with headless, daemon, and web modes available when you need them.
+Bone can inspect a codebase, edit files, run commands, and keep working in the background while you stay in control. The default interface is a fast native TUI, with headless, daemon, and desktop modes available when you need them.
 
 [![npm](https://img.shields.io/npm/v/bone-agent?label=npm)](https://www.npmjs.com/package/bone-agent)
 [![release](https://github.com/vincentm65/bone/actions/workflows/npm-release.yml/badge.svg)](https://github.com/vincentm65/bone/actions/workflows/npm-release.yml)
@@ -88,18 +88,9 @@ bone serve
 
 # Attach the TUI to a daemon
 bone --connect 127.0.0.1:7878
-
-# Open the web interface
-bone web
 ```
 
 `bone serve` listens on `127.0.0.1:7878` by default. It uses unencrypted, unauthenticated TCP, so do not expose it to an untrusted network.
-
-## Web interface
-
-`bone web` starts the local bridge and opens the browser UI at `http://localhost:4577`. It includes conversation history, provider and model controls, approvals, attachments, usage stats, and a file/diff canvas.
-
-Node.js is required for web mode. See [`webui/README.md`](webui/README.md) for bridge details and environment variables.
 
 ## Configuration
 
@@ -116,9 +107,9 @@ Bone keeps its local state in `~/.bone-rust` by default. Set `BONE_DIR` to use a
 └── data/                   # conversations and runtime state
 ```
 
-Core owns these documents and exposes one revisioned configuration schema and resolved snapshot to every client. Use `/config` or the web settings panel for supported generic mutations; providers use dedicated client actions, while themes and keymaps also have dedicated Lua APIs. Built-in schemas live in Rust; extensions declare schemas with `bone.settings.define(namespace, schema)`, while YAML stores only user-selected values. Provider secrets may be plaintext or exact `${ENV_VAR}` references, which resolve from the environment at runtime.
+Core owns these documents and exposes one revisioned configuration schema and resolved snapshot to every client. Use `/config` for supported generic mutations; providers use dedicated client actions, while themes and keymaps also have dedicated Lua APIs. Built-in schemas live in Rust; extensions declare schemas with `bone.settings.define(namespace, schema)`, while YAML stores only user-selected values. Provider secrets may be plaintext or exact `${ENV_VAR}` references, which resolve from the environment at runtime.
 
-Most changes apply immediately or on the next model turn. Extension settings may request an extension reload. Bone fingerprints `init.lua` and every lowercase `*.lua` file under `lua/`; direct Lua edits reload automatically before the next prompt or slash command. A broken candidate is rejected without replacing the active extensions and is retried only after the Lua sources change again. Use `/tools reload` to force an explicit rescan. `command-policy.yaml` is file-edited, daemon-owned, and always requires a restart. Provider entries support the native Anthropic, Codex, and Grok Build handlers as well as OpenAI-compatible endpoints.
+Most changes apply immediately or on the next model turn. Extension settings may request an extension reload. Bone fingerprints `init.lua` and every lowercase `*.lua` file under `lua/`; direct Lua edits reload automatically before the next prompt or slash command. A broken candidate is rejected without replacing the active extensions and is retried only after the Lua sources change again. Installing through `/catalog` or toggling a row in `/config` forces a reload of the extension sources. `command-policy.yaml` is file-edited, daemon-owned, and always requires a restart. Provider entries support the native Anthropic, Codex, and Grok Build handlers as well as OpenAI-compatible endpoints.
 
 Optional tools and commands can be managed with:
 
@@ -134,13 +125,13 @@ Bone starts in **Safe** mode. Read-only work can proceed automatically, while fi
 
 ## Architecture
 
-The daemon is the source of truth for sessions, tools, approvals, extensions, jobs, and persistence. The terminal and web interfaces are clients of the same runtime protocol.
+The daemon is the source of truth for sessions, tools, approvals, extensions, jobs, and persistence. The terminal and desktop interfaces are clients of the same runtime protocol.
 
 ```text
                     ┌──────────────┐
 TUI ───────────────▶│              │
 Headless runner ───▶│  Bone core   │──▶ model providers
-Web bridge ────────▶│  + runtime   │──▶ tools / Lua / SQLite
+Desktop client ────▶│  + runtime   │──▶ tools / Lua / SQLite
 Remote client ─────▶│              │
                     └──────────────┘
 ```
@@ -150,7 +141,6 @@ The Rust workspace is split into:
 - `core` — agent loop, providers, tools, configuration, Lua, runtime, and persistence
 - `protocol` — frontend/runtime commands and events
 - `tui` — the `bone` binary and terminal client
-- `webui` — zero-dependency Node bridge and browser client
 
 ## Development
 
@@ -185,9 +175,3 @@ cargo run -p bone
 
 Alternatively, copy a completed executable outside Cargo's target directory and
 run the staged copy while continuing development builds.
-
-The web client does not need an npm build step. Run it against a local build with:
-
-```sh
-BONE_BIN=target/debug/bone node webui/bridge.mjs
-```

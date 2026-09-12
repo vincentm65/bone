@@ -67,9 +67,13 @@ pub fn catalog_action_message(
         Some(CatalogItemOutcome::Failed { message }) => {
             format!("Catalog action failed for {name}: {message}")
         }
+        Some(CatalogItemOutcome::Enabled) => format!("Catalog item enabled: {name}"),
+        Some(CatalogItemOutcome::Disabled) => format!("Catalog item disabled: {name}"),
         Some(CatalogItemOutcome::Unchanged) | None => match action {
             CatalogActionKind::Install => format!("Catalog item already installed: {name}"),
             CatalogActionKind::Remove => format!("Catalog item is not installed: {name}"),
+            CatalogActionKind::Enable => format!("Catalog item already enabled: {name}"),
+            CatalogActionKind::Disable => format!("Catalog item already disabled: {name}"),
         },
     }
 }

@@ -779,6 +779,7 @@ fn is_config_command(command: &RuntimeCommand) -> bool {
             | RuntimeCommand::SetActiveProvider { .. }
             | RuntimeCommand::SetToolEnabled { .. }
             | RuntimeCommand::SetCommandEnabled { .. }
+            | RuntimeCommand::SetPluginEnabled { .. }
             | RuntimeCommand::ReloadSettings
             | RuntimeCommand::UpsertSubagent { .. }
             | RuntimeCommand::DeleteSubagent { .. }
@@ -795,15 +796,10 @@ fn starts_turn(command: &RuntimeCommand) -> bool {
 }
 
 fn checks_extension_sources(command: &RuntimeCommand) -> bool {
-    match command {
-        RuntimeCommand::SubmitPrompt { .. } => true,
-        RuntimeCommand::RunCommand { name, input, .. } => {
-            // The config command turns this into ReloadExtensions. Let that
-            // authoritative manual request perform the one reload.
-            name != "config" || !input.split_whitespace().eq(["tools", "reload"])
-        }
-        _ => false,
-    }
+    matches!(
+        command,
+        RuntimeCommand::SubmitPrompt { .. } | RuntimeCommand::RunCommand { .. }
+    )
 }
 
 /// The daemon's shared state, threaded through command handling so each
@@ -1164,22 +1160,27 @@ impl DaemonCtx {
     }
 
     fn config_schema(&self) -> bone_protocol::ConfigSchema {
-        let tools = self
-            .session
-            .lock()
-            .unwrap()
-            .tools
-            .all_definitions()
-            .into_iter()
-            .map(|tool| tool.name)
-            .collect::<Vec<_>>();
-        let commands = self
-            .extensions
-            .commands()
-            .iter()
-            .map(|command| command.name.clone())
-            .collect::<Vec<_>>();
-        self.config.schema_for(&tools, &commands)
+        let (tools, commands) = {
+            let session = self.session.lock().unwrap();
+            let tools = session
+                .tools
+                .all_definitions()
+                .into_iter()
+                .filter(|tool| session.tools.plugin_owner_for(&tool.name).is_none())
+                .map(|tool| tool.name)
+                .collect::<Vec<_>>();
+            let commands = self
+                .extensions
+                .commands()
+                .iter()
+                .filter(|command| command.plugin.is_none())
+                .map(|command| command.name.clone())
+                .collect::<Vec<_>>();
+            (tools, commands)
+        };
+        let plugins =
+            crate::ext::installed_plugin_names(&crate::config::bone_dir().join("lua/plugins"));
+        self.config.schema_for(&tools, &commands, &plugins)
     }
 
     fn config_event(&self) -> RuntimeEvent {
@@ -1256,6 +1257,10 @@ impl DaemonCtx {
     }
 
     fn publish_synchronized_state(&self, request_id: u64, include_messages: bool, busy: bool) {
+        let theme = self
+            .extensions
+            .active_theme()
+            .or_else(|| self.extensions.configured_theme());
         let (snapshot, view, messages) = {
             let session = self.session.lock().unwrap();
             let snapshot = session.snapshot(self.llm.id(), self.llm.model());
@@ -1274,6 +1279,7 @@ impl DaemonCtx {
                     snapshot: snapshot.clone(),
                     view: view.clone(),
                     messages: Some(msgs.to_vec()),
+                    theme: theme.clone(),
                 })
                 .expect("state synchronized is serializable")
                 .len()
@@ -1285,6 +1291,7 @@ impl DaemonCtx {
             snapshot,
             view,
             messages,
+            theme,
         });
         // The correlated completion atomically replaces stale session + view
         // state. Replay live gates afterwards so applying that full view cannot
@@ -2596,6 +2603,42 @@ impl DaemonCtx {
                     false,
                     request_id,
                 );
+                Flow::Continue
+            }
+            RuntimeCommand::SetPluginEnabled {
+                name,
+                enabled,
+                expected_revision,
+                request_id,
+            } => {
+                let result = self
+                    .config
+                    .set_enabled("plugins", &name, enabled, expected_revision);
+                let applied = result.is_ok();
+                self.finish_config_mutation(
+                    vec![format!("plugins.{name}")],
+                    result,
+                    false,
+                    request_id,
+                );
+                // Capabilities inherit their plugin's state by construction: a
+                // disabled plugin's entry point never runs, so re-boot the Lua
+                // runtime to drop (or reinstall) its capabilities. While a turn
+                // is in flight, defer to the idle drain rather than race it.
+                if applied {
+                    let busy = self.hub.busy.load(std::sync::atomic::Ordering::SeqCst);
+                    let reloaded = !busy && self.reload_extensions(true, ReloadReason::Automatic);
+                    if reloaded {
+                        if let Some(group) = &self.hub.group
+                            && let Some(actor_id) = self.actor_id
+                        {
+                            group.request_extension_reload(actor_id, None);
+                        }
+                    } else if busy {
+                        self.pending_commands
+                            .push_back(RuntimeCommand::ReloadExtensions);
+                    }
+                }
                 Flow::Continue
             }
             RuntimeCommand::ReloadSettings => {

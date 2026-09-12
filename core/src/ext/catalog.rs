@@ -91,16 +91,26 @@ where
 
 impl CatalogEntry {
     fn validate(&self) -> Result<(), String> {
-        if !super::is_safe_leaf_name(&self.name) || !self.name.ends_with(".lua") {
+        if !matches!(self.kind.as_str(), "tool" | "command" | "plugin") {
+            return Err(format!("invalid catalog kind '{}'", self.kind));
+        }
+        if self.is_plugin() {
+            // A plugin is a directory `plugins/<name>/` whose entry point is
+            // `init.lua`; the name is the package directory, not a file.
+            if !super::is_safe_leaf_name(&self.name) || self.name.ends_with(".lua") {
+                return Err(format!(
+                    "invalid catalog plugin name '{}': expected a package directory name",
+                    self.name
+                ));
+            }
+        } else if !super::is_safe_leaf_name(&self.name) || !self.name.ends_with(".lua") {
             return Err(format!(
                 "invalid catalog name '{}': expected one .lua file name",
                 self.name
             ));
         }
-        if !matches!(self.kind.as_str(), "tool" | "command") {
-            return Err(format!("invalid catalog kind '{}'", self.kind));
-        }
-        let primary_path = format!("{}/{}", self.dir_segment(), self.name);
+        let primary_path = self.primary_rel();
+        let plugin_prefix = format!("plugins/{}/", self.name);
         let mut paths = std::collections::HashSet::new();
         for file in &self.files {
             let path = Path::new(&file.path);
@@ -113,7 +123,14 @@ impl CatalogEntry {
                 && path
                     .components()
                     .all(|component| matches!(component, std::path::Component::Normal(_)));
-            if !is_safe_relative || file.path == primary_path || !paths.insert(file.path.as_str()) {
+            // A plugin's bundled files must live inside its own package
+            // directory; other kinds may publish files anywhere under `lua/`.
+            let scoped = !self.is_plugin() || file.path.starts_with(&plugin_prefix);
+            if !is_safe_relative
+                || !scoped
+                || file.path == primary_path
+                || !paths.insert(file.path.as_str())
+            {
                 return Err(format!("invalid bundled catalog path '{}'", file.path));
             }
         }
@@ -124,13 +141,44 @@ impl CatalogEntry {
         self.kind == "command"
     }
 
+    fn is_plugin(&self) -> bool {
+        self.kind == "plugin"
+    }
+
     /// Directory segment under `lua/` and the catalog, e.g. `"tools"`.
     fn dir_segment(&self) -> &'static str {
-        if self.is_command() {
-            "commands"
-        } else {
-            "tools"
+        match self.kind.as_str() {
+            "command" => "commands",
+            "plugin" => "plugins",
+            _ => "tools",
         }
+    }
+
+    /// Primary file path relative to both the catalog root and `~/.bone-rust/lua/`.
+    /// Tools/commands are single files (`tools/weather.lua`); a plugin's primary
+    /// file is its package entry point (`plugins/<name>/init.lua`).
+    fn primary_rel(&self) -> String {
+        if self.is_plugin() {
+            format!("plugins/{}/init.lua", self.name)
+        } else {
+            format!("{}/{}", self.dir_segment(), self.name)
+        }
+    }
+
+    /// Absolute path of the item's primary file beneath `~/.bone-rust/lua/`.
+    fn primary_path(&self) -> PathBuf {
+        crate::config::bone_dir()
+            .join("lua")
+            .join(self.primary_rel())
+    }
+
+    /// Absolute path of a plugin's package directory (empty for non-plugins).
+    fn plugin_dir(&self) -> Option<PathBuf> {
+        self.is_plugin().then(|| {
+            crate::config::bone_dir()
+                .join("lua/plugins")
+                .join(&self.name)
+        })
     }
 }
 
@@ -181,12 +229,6 @@ fn fetch_remote(url: &str) -> Option<Vec<u8>> {
 
 fn cache_dir() -> PathBuf {
     crate::config::bone_dir().join("cache/catalog")
-}
-
-fn lua_dir(entry: &CatalogEntry) -> PathBuf {
-    crate::config::bone_dir()
-        .join("lua")
-        .join(entry.dir_segment())
 }
 
 fn parse_index(bytes: &[u8]) -> Option<Vec<CatalogEntry>> {
@@ -245,14 +287,14 @@ fn bundled_path(file: &CatalogFile) -> PathBuf {
 /// True if the item's primary file and all bundled files are present on disk.
 pub fn is_installed(entry: &CatalogEntry) -> bool {
     entry.validate().is_ok()
-        && lua_dir(entry).join(&entry.name).exists()
+        && entry.primary_path().exists()
         && entry.files.iter().all(|file| bundled_path(file).exists())
 }
 
 /// True if any file managed by the item is present on disk.
 pub fn has_installed_files(entry: &CatalogEntry) -> bool {
     entry.validate().is_ok()
-        && (lua_dir(entry).join(&entry.name).exists()
+        && (entry.primary_path().exists()
             || entry.files.iter().any(|file| bundled_path(file).exists()))
 }
 
@@ -271,6 +313,10 @@ pub fn installed_command_names() -> std::collections::HashSet<String> {
 }
 
 fn bundled_sha256(entry: &CatalogEntry) -> Option<String> {
+    // Plugins are never bundled defaults.
+    if entry.is_plugin() {
+        return None;
+    }
     let bundled = if entry.is_command() {
         super::DEFAULT_LUA_COMMANDS
     } else {
@@ -302,14 +348,11 @@ pub fn needs_update(entry: &CatalogEntry) -> bool {
         return false;
     }
     let bundled = bundled_sha256(entry);
-    file_needs_update(
-        &lua_dir(entry).join(&entry.name),
-        &entry.sha256,
-        bundled.as_deref(),
-    ) || entry
-        .files
-        .iter()
-        .any(|file| file_needs_update(&bundled_path(file), &file.sha256, None))
+    file_needs_update(&entry.primary_path(), &entry.sha256, bundled.as_deref())
+        || entry
+            .files
+            .iter()
+            .any(|file| file_needs_update(&bundled_path(file), &file.sha256, None))
 }
 
 /// Number of installed items with a newer version available, read from the
@@ -338,11 +381,11 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// Verifies declared sha256 values before writing anything.
 pub fn install(entry: &CatalogEntry) -> Result<(), String> {
     entry.validate()?;
-    let primary_rel = format!("{}/{}", entry.dir_segment(), entry.name);
+    let primary_rel = entry.primary_rel();
     let mut downloads = Vec::with_capacity(entry.files.len() + 1);
     downloads.push((
         primary_rel.clone(),
-        lua_dir(entry).join(&entry.name),
+        entry.primary_path(),
         entry.sha256.as_str(),
     ));
     downloads.extend(
@@ -381,10 +424,11 @@ pub fn install(entry: &CatalogEntry) -> Result<(), String> {
     Ok(())
 }
 
-/// Remove an installed catalog item and every file bundled with it.
+/// Remove an installed catalog item and every file bundled with it. For a
+/// plugin, the now-empty package directories left behind are pruned.
 pub fn remove(entry: &CatalogEntry) -> Result<(), String> {
     entry.validate()?;
-    let mut paths = vec![lua_dir(entry).join(&entry.name)];
+    let mut paths = vec![entry.primary_path()];
     paths.extend(entry.files.iter().map(bundled_path));
     for path in paths {
         if path.exists() {
@@ -392,7 +436,32 @@ pub fn remove(entry: &CatalogEntry) -> Result<(), String> {
                 .map_err(|e| format!("could not remove {}: {e}", path.display()))?;
         }
     }
+    if let Some(dir) = entry.plugin_dir() {
+        prune_empty_dirs(&dir);
+    }
     Ok(())
+}
+
+/// Remove `root` and any subdirectories that are empty, deepest first. Files
+/// that remain (e.g. user-authored additions) keep their directories in place.
+fn prune_empty_dirs(root: &Path) {
+    let mut stack = vec![root.to_path_buf()];
+    let mut dirs = Vec::new();
+    while let Some(dir) = stack.pop() {
+        dirs.push(dir.clone());
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                }
+            }
+        }
+    }
+    dirs.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
+    for dir in dirs {
+        let _ = std::fs::remove_dir(&dir);
+    }
 }
 
 // ---- background refresh --------------------------------------------------

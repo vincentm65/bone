@@ -4,9 +4,48 @@ use eframe::egui::{self, vec2};
 pub fn frame(ctx: &egui::Context) -> egui::Frame {
     let style = ctx.style_of(ctx.theme());
     egui::Frame::popup(&style)
-        .inner_margin(22)
-        .corner_radius(12)
-        .fill(style.visuals.panel_fill)
+        // Utility screens are information dense. Keep a comfortable outer
+        // gutter, while letting their own toolbars and cards provide the
+        // visual rhythm inside.
+        .inner_margin(18)
+        .corner_radius(crate::theme::SURFACE_RADIUS)
+        .fill(style.visuals.window_fill)
+        // A drop shadow lifts the dialog off the transcript so it reads as a
+        // foreground surface rather than a recolored region of the window.
+        .shadow(egui::Shadow {
+            offset: [0, 12],
+            blur: 32,
+            spread: 0,
+            color: egui::Color32::from_black_alpha(110),
+        })
+}
+
+/// Fill for a grouped content card. Slightly lighter than the dialog surface so
+/// cards read as raised panels sitting on top of the dialog, not recessed wells.
+pub fn card_fill(visuals: &egui::Visuals) -> egui::Color32 {
+    visuals
+        .window_fill
+        .lerp_to_gamma(visuals.text_color(), 0.035)
+}
+
+/// A grouped content card: one raised surface holding a run of related rows.
+/// Rows inside should be separated with `ui.separator()` rather than given a
+/// card each, so a page reads as a short list instead of a stack of boxes.
+pub fn card(ui: &egui::Ui) -> egui::Frame {
+    let visuals = ui.visuals();
+    egui::Frame::new()
+        .fill(card_fill(visuals))
+        .stroke(egui::Stroke::new(
+            1.0,
+            visuals
+                .widgets
+                .noninteractive
+                .bg_stroke
+                .color
+                .gamma_multiply(0.55),
+        ))
+        .corner_radius(egui::CornerRadius::same(crate::theme::CONTROL_RADIUS))
+        .inner_margin(egui::Margin::symmetric(12, 8))
 }
 
 pub fn modal(ctx: &egui::Context, id: egui::Id) -> egui::Modal {
@@ -65,9 +104,9 @@ impl<'a> Surface<'a> {
             if !self.scroll {
                 ui.set_min_height(size.y);
             }
-            ui.spacing_mut().item_spacing = vec2(10.0, 10.0);
-            ui.spacing_mut().button_padding = vec2(12.0, 7.0);
-            ui.spacing_mut().interact_size.y = 34.0;
+            ui.spacing_mut().item_spacing = vec2(8.0, 7.0);
+            ui.spacing_mut().button_padding = vec2(11.0, 6.0);
+            ui.spacing_mut().interact_size.y = crate::theme::CONTROL_HEIGHT;
             ui.horizontal(|ui| {
                 ui.heading(self.title);
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -85,7 +124,7 @@ impl<'a> Surface<'a> {
             // a centered modal move by a pixel as its children are re-laid out.
             ui.set_min_width(size.x + 8.0);
             let height = ui.available_height().max(48.0);
-            if self.scroll || size.y < 500.0 {
+            if self.scroll || size.y < 500.0 || size.x < 600.0 {
                 egui::ScrollArea::vertical()
                     .id_salt("surface-body")
                     .max_height(height)
@@ -142,16 +181,49 @@ pub fn navigation(
     trailing: impl FnOnce(&mut egui::Ui),
 ) -> Option<&'static str> {
     let mut selected = None;
-    ui.horizontal(|ui| {
-        for label in ["Settings", "Catalog", "Usage"] {
-            if ui.selectable_label(label == active, label).clicked() && label != active {
+    let narrow = ui.available_width() < 420.0;
+    let mut trailing = Some(trailing);
+    ui.horizontal_wrapped(|ui| {
+        for label in ["Settings", "Plugins", "Usage"] {
+            if tab(ui, label == active, label).clicked() && label != active {
                 selected = Some(label);
             }
         }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), trailing);
+        if !narrow {
+            ui.with_layout(
+                egui::Layout::right_to_left(egui::Align::Center),
+                trailing.take().unwrap(),
+            );
+        }
     });
-    ui.add_space(4.0);
+    if let Some(trailing) = trailing {
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), trailing);
+    }
+    ui.add_space(8.0);
     selected
+}
+
+/// Navigation uses an underline so it reads differently from an action button.
+pub fn tab(ui: &mut egui::Ui, selected: bool, label: impl Into<String>) -> egui::Response {
+    let color = if selected {
+        ui.visuals().text_color()
+    } else {
+        ui.visuals().weak_text_color()
+    };
+    let response = ui.add(
+        egui::Button::new(egui::RichText::new(label.into()).color(color))
+            .frame(false)
+            .min_size(vec2(0.0, crate::theme::CONTROL_HEIGHT)),
+    );
+    if selected {
+        let rect = response.rect.shrink2(vec2(10.0, 0.0));
+        ui.painter().hline(
+            rect.x_range(),
+            rect.bottom(),
+            egui::Stroke::new(2.0, ui.visuals().hyperlink_color),
+        );
+    }
+    response
 }
 
 pub fn divider(ui: &mut egui::Ui, height: f32) {

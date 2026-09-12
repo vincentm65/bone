@@ -135,7 +135,6 @@ pub(crate) fn create_engine(
     super::ops_tools::setup_register_subagent(&lua, bone, settings.clone())?;
     super::ops_commands::setup_register_command(&lua, bone)?;
     super::ops_events::setup_on(&lua, bone)?;
-    super::ops_plugins::setup_plugin(&lua, bone)?;
     // bone.api.ui.* — the minimal Lua UI API (Phase 4). Additive namespace,
     // backed by a per-VM ViewModel in Lua app-data.
     super::api_ui::setup_api_ui(&lua, bone, shared_ui.clone())?;

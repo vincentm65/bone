@@ -15,7 +15,6 @@ mod loader;
 pub mod lua_tool;
 pub mod ops_commands;
 pub mod ops_events;
-pub mod ops_plugins;
 pub mod ops_tools;
 pub mod provider_slots;
 pub mod settings_registry;
@@ -50,10 +49,17 @@ const CANONICAL_CONFIG_V7_SHA256: [u8; 32] = [
     50, 227, 161, 114, 13, 179, 64, 113, 254, 103, 180,
 ];
 
+// SHA-256 702310129a58832935cc155f2c94f75afcb97125fe05d035d2f7c1e9bba546f9
+const CANONICAL_CONFIG_V8_SHA256: [u8; 32] = [
+    112, 35, 16, 18, 154, 88, 131, 41, 53, 204, 21, 95, 44, 148, 247, 90, 252, 185, 113, 37, 254,
+    5, 208, 53, 210, 247, 193, 233, 187, 165, 70, 249,
+];
+
 fn is_unmodified_canonical_config(existing: &str) -> bool {
     let digest: [u8; 32] = Sha256::digest(existing.as_bytes()).into();
     (existing.contains("canonical-config-v6") && digest == CANONICAL_CONFIG_V6_SHA256)
         || (existing.contains("canonical-config-v7") && digest == CANONICAL_CONFIG_V7_SHA256)
+        || (existing.contains("canonical-config-v8") && digest == CANONICAL_CONFIG_V8_SHA256)
 }
 
 fn is_safe_leaf_name(name: &str) -> bool {
@@ -132,7 +138,7 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> std::io::Result<bool> {
         // special-casing to declared `display.eager` / `display.template`;
         // refresh older seeded copies that predate those fields.
         || (name == "subagent.lua" && !existing.contains("eager"))
-        // Config migrations refresh only exact bundled v6/v7 seeds; preserve
+        // Config migrations refresh only exact bundled v6/v7/v8 seeds; preserve
         // any copy the user has edited, even if it has a known marker.
         || (name == "config.lua" && is_unmodified_canonical_config(&existing)))
 }
@@ -366,6 +372,88 @@ pub fn run_lua_command_files(
     run_lua_files_selected(lua, dir, DEFAULT_LUA_COMMANDS, allow)
 }
 
+/// Execute the `init.lua` entry point of every plugin package under
+/// `plugins_dir` (one directory level, sorted by name).
+///
+/// A plugin is a *package*: `lua/plugins/<name>/init.lua` runs at boot and
+/// registers ordinary capabilities (`bone.tool.register`,
+/// `bone.command.register`, `bone.on`, …). While a plugin's entry point runs,
+/// `bone._plugin_owner` is set to the plugin name so each registration records
+/// which plugin it came from; capabilities therefore inherit their plugin's
+/// enable state.
+///
+/// A directory without `init.lua` is an inert, non-error package. Names in
+/// `disabled` are skipped without being removed from disk; `disabled == None`
+/// runs every installed plugin.
+pub fn run_lua_plugin_files(
+    lua: &mlua::Lua,
+    plugins_dir: &std::path::Path,
+    disabled: Option<&HashSet<String>>,
+) -> Result<(), String> {
+    if !plugins_dir.is_dir() {
+        return Ok(());
+    }
+
+    let mut dirs: Vec<_> = std::fs::read_dir(plugins_dir)
+        .map_err(|e| format!("failed to read {}: {e}", plugins_dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    dirs.sort();
+
+    let mut errors = Vec::new();
+    for dir in dirs {
+        let name = dir
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        if disabled.is_some_and(|disabled| disabled.contains(&name)) {
+            continue;
+        }
+        let init = dir.join("init.lua");
+        if !init.is_file() {
+            continue;
+        }
+        if let Err(e) = exec_lua_file(lua, &init, &name, Some(&name)) {
+            ctx::runtime_warn(format!("bone: warning: plugin '{name}': {e}"));
+            errors.push(format!("plugin '{name}': {e}"));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+/// Names of the installed plugin packages under `plugins_dir` (one directory
+/// level, sorted): each directory that contains an `init.lua`. Directories
+/// without one are inert and omitted. Disabled plugins are still listed so
+/// their enable/disable toggle remains reachable.
+pub fn installed_plugin_names(plugins_dir: &std::path::Path) -> Vec<String> {
+    if !plugins_dir.is_dir() {
+        return Vec::new();
+    }
+    let mut names: Vec<_> = std::fs::read_dir(plugins_dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir() && path.join("init.lua").is_file())
+        .map(|path| {
+            path.file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
+    names.sort();
+    names
+}
+
 fn run_lua_files_selected(
     lua: &mlua::Lua,
     dir: &std::path::Path,
@@ -411,35 +499,9 @@ fn run_lua_files_filtered(
         if !keep(&name) {
             continue;
         }
-        let source = match std::fs::read_to_string(&path) {
-            Ok(source) => source,
-            Err(e) => {
-                let message = format!("failed to read {}: {e}", path.display());
-                ctx::runtime_warn(format!("bone: warning: {message}"));
-                errors.push(message);
-                continue;
-            }
-        };
-        let owner = path.to_string_lossy().to_string();
-        let bone = lua.globals().get::<mlua::Table>("bone").ok();
-        if let Some(bone) = &bone {
-            bone.set("_settings_owner", owner.as_str())
-                .map_err(crate::util::errstr)?;
-        }
-        if let Err(e) = lua.load(&source).set_name(&name).exec() {
-            if let Some(bone) = &bone
-                && let Ok(settings) = bone.get::<mlua::Table>("settings")
-                && let Ok(rollback) = settings.get::<mlua::Function>("_rollback_owner")
-            {
-                let _ = rollback.call::<()>(owner);
-            }
-            let message = format!("error executing {}: {e}", path.display());
+        if let Err(message) = exec_lua_file(lua, &path, &name, None) {
             ctx::runtime_warn(format!("bone: warning: {message}"));
             errors.push(message);
-        }
-        if let Some(bone) = bone {
-            bone.set("_settings_owner", mlua::Value::Nil)
-                .map_err(crate::util::errstr)?;
         }
     }
 
@@ -448,6 +510,49 @@ fn run_lua_files_filtered(
     } else {
         Err(errors.join("; "))
     }
+}
+
+/// Execute a single Lua file `path` (Lua chunk name `name`). While the file
+/// runs, `bone._settings_owner` is set to the file path so settings writes can
+/// be rolled back on error via `bone.settings._rollback_owner`. When
+/// `plugin_owner` is `Some(name)`, `bone._plugin_owner` is additionally set for
+/// the duration so registrations record which plugin they came from. Both
+/// globals are reset afterwards.
+fn exec_lua_file(
+    lua: &mlua::Lua,
+    path: &std::path::Path,
+    name: &str,
+    plugin_owner: Option<&str>,
+) -> Result<(), String> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|e| format!("failed to read {}: {e}", path.display()))?;
+    let owner = path.to_string_lossy().to_string();
+    let bone = lua.globals().get::<mlua::Table>("bone").ok();
+    if let Some(bone) = &bone {
+        bone.set("_settings_owner", owner.as_str())
+            .map_err(crate::util::errstr)?;
+        if let Some(plugin) = plugin_owner {
+            bone.set("_plugin_owner", plugin)
+                .map_err(crate::util::errstr)?;
+        }
+    }
+    let result = lua.load(&source).set_name(name).exec();
+    if result.is_err()
+        && let Some(bone) = &bone
+        && let Ok(settings) = bone.get::<mlua::Table>("settings")
+        && let Ok(rollback) = settings.get::<mlua::Function>("_rollback_owner")
+    {
+        let _ = rollback.call::<()>(owner);
+    }
+    if let Some(bone) = bone {
+        bone.set("_settings_owner", mlua::Value::Nil)
+            .map_err(crate::util::errstr)?;
+        if plugin_owner.is_some() {
+            bone.set("_plugin_owner", mlua::Value::Nil)
+                .map_err(crate::util::errstr)?;
+        }
+    }
+    result.map_err(|e| format!("error executing {}: {e}", path.display()))
 }
 
 #[cfg(test)]

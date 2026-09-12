@@ -17,7 +17,6 @@ fn only_builtin_commands_are_protected() {
         "quit",
         "setup",
         "stats",
-        "tools",
         "update",
     ] {
         assert!(

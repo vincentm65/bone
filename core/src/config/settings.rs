@@ -135,6 +135,11 @@ pub struct BoneSettings {
     pub tools: EnablementSettings,
     #[serde(default)]
     pub commands: EnablementSettings,
+    /// Plugin *packages* under `lua/plugins/<name>/`. Disabling a plugin skips
+    /// its `init.lua`, so the tools/commands/hooks it registers never exist;
+    /// capabilities therefore inherit their plugin's enable state.
+    #[serde(default)]
+    pub plugins: EnablementSettings,
     #[serde(default)]
     pub keymaps: KeymapSettings,
 }
@@ -148,6 +153,7 @@ impl Default for BoneSettings {
             theme: ThemeSettings::default(),
             tools: EnablementSettings::default(),
             commands: EnablementSettings::default(),
+            plugins: EnablementSettings::default(),
             keymaps: KeymapSettings::default(),
         }
     }

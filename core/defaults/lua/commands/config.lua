@@ -1,5 +1,5 @@
 -- /config — interactive settings editor.
--- canonical-config-v8
+-- canonical-config-v9
 --
 -- Renders its own styled bottom pane (full span control) for the tabbed
 -- settings overview, and reuses `ui.menu` only for the isolated sub-prompts
@@ -287,8 +287,9 @@ local function pad(s, width)
    return s
 end
 
--- Spans for a single selectable row. `pad_w` aligns the value column.
-local function row_spans(row, selected, pad_w)
+-- Spans for a single selectable row. `pad_w` aligns the value column and a
+-- truthy `type_w` reserves a fixed-width leading "Type" column.
+local function row_spans(row, selected, pad_w, type_w)
    local fg = selected and COL.text or COL.muted
    local mods = selected and { "bold" } or nil
    -- Accent bar marks the selected row; a blank gutter keeps others aligned.
@@ -297,6 +298,12 @@ local function row_spans(row, selected, pad_w)
    if row.kind == "field" then
       local f = row.field
       local label = f.label or f.key
+      -- The unified Plugins page leads each row with its capability type
+      -- (`tool`, `command`, `plugin`), blank for rows without one. Ordinary
+      -- value pages omit `kind` entirely and render no column.
+      if type_w then
+         sp[#sp + 1] = span(pad(f.kind or "", type_w) .. "  ", COL.dim, mods)
+      end
       sp[#sp + 1] = span(pad(label, pad_w) .. "  ", fg, mods)
       if f.type == "bool" then
          local on = f.value == true or f.value == "true"
@@ -433,11 +440,20 @@ local function run(ctx, start_ns)
 
       if total == 0 then
          lines[#lines + 1] = line_of({ span(
-            "  Nothing to configure here \u{2014} manage via /tools or /commands",
+            "  Nothing to configure here \u{2014} install extensions from /catalog",
             COL.dim, { "italic" }
          ) })
       else
          local pad_w = label_width(rows)
+         -- The unified Plugins page leads each row with a "Type" column sourced
+         -- from the capability kind; other pages leave the column off entirely.
+         local type_w = 0
+         for _, row in ipairs(rows) do
+            if row.kind == "field" and row.field.kind then
+               type_w = math.max(type_w, #row.field.kind)
+            end
+         end
+         if type_w == 0 then type_w = nil end
          if is_providers then
             pad_w = math.max(pad_w, #"Provider")
             lines[#lines + 1] = line_of({
@@ -447,13 +463,20 @@ local function run(ctx, start_ns)
                span(pad("Handler", 10) .. "  ", COL.dim, { "bold" }),
                span("Base URL", COL.dim, { "bold" }),
             })
+         elseif type_w then
+            type_w = math.max(type_w, #"Type")
+            lines[#lines + 1] = line_of({
+               span("   ", COL.dim),
+               span(pad("Type", type_w) .. "  ", COL.dim, { "bold" }),
+               span(pad("Name", pad_w) .. "  ", COL.dim, { "bold" }),
+            })
          end
          if first > 1 then
             lines[#lines + 1] = line_of({ span("  \u{2191} " .. (first - 1) .. " more", COL.dim) })
          end
          for i = first, last do
             local is_sel = i == sel
-            lines[#lines + 1] = line_of(row_spans(rows[i], is_sel, pad_w), is_sel and COL.sel_bg or nil)
+            lines[#lines + 1] = line_of(row_spans(rows[i], is_sel, pad_w, type_w), is_sel and COL.sel_bg or nil)
          end
          if last < total then
             lines[#lines + 1] = line_of({ span("  \u{2193} " .. (total - last) .. " more", COL.dim) })
@@ -506,14 +529,14 @@ local function run(ctx, start_ns)
                   local nv = ctx.config.cycle_field(ns, f.key, f.value)
                   if nv ~= nil and save_value(ctx, ns, f.key, nv) then
                      changed = true
-                     restart_required = restart_required or ns == "tools" or ns == "commands"
+                     restart_required = restart_required or ns == "tools" or ns == "commands" or ns == "plugins"
                   end
                else
                   local v = edit_text(ctx, f.label or f.key, f.value or "")
                   if v ~= nil and f.type == "number" then v = tonumber(v) end
                   if v ~= nil and save_value(ctx, ns, f.key, v) then
                      changed = true
-                     restart_required = restart_required or ns == "tools" or ns == "commands"
+                     restart_required = restart_required or ns == "tools" or ns == "commands" or ns == "plugins"
                   end
                end
             end
@@ -538,9 +561,6 @@ bone.command.register("config", {
    description = "edit configuration",
    handler = function(arg, ctx)
       local words = split_args(arg)
-      if words[1] == "tools" and words[2] == "reload" then
-         return { action = "config.reload_tools", submit = false }
-      end
       return run(ctx, words[1])
    end,
 })

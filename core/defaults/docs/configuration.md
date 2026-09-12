@@ -28,7 +28,7 @@ namespace in `extensions.yaml`.
 
 ## Mutation and restart rules
 
-Prefer `/config`, the web settings client, or the daemon configuration APIs for
+Prefer `/config` or the daemon configuration APIs for
 supported mutations. Typed changes are validated against the current schema
 revision and persist only the affected domain. Depending on the setting, a
 change applies immediately, on the next model turn, or after extensions reload.

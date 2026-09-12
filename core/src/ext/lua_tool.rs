@@ -32,6 +32,9 @@ pub struct LuaTool {
     /// `state` back in before each call. `None` for ordinary stateless tools.
     state_key: Option<String>,
     ui: super::api_ui::SharedUi,
+    /// Name of the plugin package that registered this tool, if any. Enables the
+    /// tool to inherit its plugin's enable state.
+    plugin: Option<String>,
 }
 
 impl LuaTool {
@@ -133,6 +136,10 @@ impl LuaTool {
             .create_registry_value(execute_fn)
             .map_err(|e| format!("tool '{}' failed to store execute fn: {e}", name))?;
 
+        // Owning plugin, stamped by `bone.tool.register` when the tool was
+        // declared inside a plugin's init.lua. `None` for standalone tools.
+        let plugin: Option<String> = entry.get::<Option<String>>("plugin").ok().flatten();
+
         Ok(Self {
             name,
             description,
@@ -145,6 +152,7 @@ impl LuaTool {
             config_dir,
             shared_state,
             ui,
+            plugin,
         })
     }
 
@@ -309,6 +317,10 @@ impl Tool for LuaTool {
             description: self.description.clone(),
             input_schema: self.parameters.clone(),
         }
+    }
+
+    fn plugin_owner(&self) -> Option<&str> {
+        self.plugin.as_deref()
     }
 
     async fn execute(&self, arguments: Value) -> Result<String, String> {

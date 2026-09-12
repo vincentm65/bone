@@ -472,3 +472,353 @@ fn window_manager_tab_status_prioritizes_attention_and_tracks_location() {
     tab.composer = "draft".into();
     assert_eq!(tab.navigation_status().0, "Draft");
 }
+
+/// Regression: clicking the faint `✻` on a past row to expand its reasoning
+/// while the transcript is pinned to the bottom must not move the bottom
+/// "activity" panel (the reported lurch was localized there, not to the
+/// transcript content). The transcript itself *does* reflow on the click, which
+/// this also asserts so the test can't pass vacuously.
+#[test]
+fn expanding_a_past_rows_reasoning_while_pinned_keeps_the_activity_panel_still() {
+    use std::collections::HashMap;
+
+    fn asterisks(out: &egui::FullOutput) -> Vec<egui::Pos2> {
+        let mut groups: HashMap<(i32, i32), Vec<egui::Pos2>> = HashMap::new();
+        for shape in &out.shapes {
+            if let egui::epaint::Shape::LineSegment { points, .. } = &shape.shape {
+                let mid = egui::pos2(
+                    (points[0].x + points[1].x) * 0.5,
+                    (points[0].y + points[1].y) * 0.5,
+                );
+                groups
+                    .entry(((mid.x * 2.0).round() as i32, (mid.y * 2.0).round() as i32))
+                    .or_default()
+                    .push(mid);
+            }
+        }
+        groups
+            .into_values()
+            .filter(|v| v.len() == 3)
+            .map(|v| v[0])
+            .collect()
+    }
+    fn text_pos(out: &egui::FullOutput, needle: &str) -> Option<egui::Pos2> {
+        out.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(t) if t.galley.text().contains(needle) => Some(t.pos),
+            _ => None,
+        })
+    }
+
+    const TARGET: usize = 195;
+
+    let ctx = egui::Context::default();
+    let mut app = DesktopApp::open(ctx.clone(), false, None);
+    let tab_id = app.tabs[0].id;
+    {
+        let tab = &mut app.tabs[0];
+        tab.state.ready = true;
+        tab.state.busy = true;
+        tab.state.status = "working…".into();
+        tab.state.live_reasoning = Some("thinking…".into());
+        tab.state.processes = vec![bone_protocol::ProcessSnapshot {
+            id: "p1".into(),
+            command: "cargo test".into(),
+            owner: "conversation".into(),
+            running: true,
+            state: bone_protocol::ProcessState::Running,
+            started_at: 1_000,
+            finished_at: None,
+            stdout: "running 5 tests".into(),
+            stderr: String::new(),
+            exit_code: None,
+            signal: None,
+            error: None,
+        }];
+        for i in 0..200 {
+            tab.state.push_row(
+                "assistant",
+                format!("filler row {i} with enough words to fill one line"),
+            );
+        }
+        // Every row needs reasoning so the `✻` affordance is painted; the
+        // target row carries a unique marker to detect the expansion.
+        for i in 0..200 {
+            tab.state.thinking[i] = Some(format!("reasoning for row {i}\nsecond line"));
+        }
+        tab.state.thinking[TARGET] = Some("NEEDLE first step\nsecond step\nthird step".into());
+    }
+
+    let anchor_text = format!("filler row {TARGET}");
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0));
+    let composer_id = egui::Id::new(("composer", tab_id));
+    let run = |app: &mut DesktopApp, events: Vec<egui::Event>| {
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            },
+            |ui| app.render_workspace(ui),
+        )
+    };
+
+    // Settle the layout, then capture the panel rect, the target row's text
+    // anchor, and the `✻` affordance nearest that anchor. The first rendered
+    // frame converges the bottom panel from an off-screen startup rect, so the
+    // target row may not be visible until it settles; capture the last frame
+    // that has both the anchor and the panel rect. (Output is dropped before
+    // asserting so a failure cannot trip epaint's unapplied-deltas guard.)
+    let mut panel_before = None;
+    let mut anchor_before = None;
+    let mut target = None;
+    for _ in 0..6 {
+        let out = run(&mut app, vec![]);
+        let pinned = app.tabs[0].stick_to_bottom;
+        let collapsed = text_pos(&out, "NEEDLE").is_none();
+        let anchor = text_pos(&out, &anchor_text);
+        let nearest = anchor.and_then(|a| {
+            asterisks(&out)
+                .into_iter()
+                .min_by(|x, y| (x.y - a.y).abs().total_cmp(&(y.y - a.y).abs()))
+        });
+        let panel = egui::PanelState::load(&ctx, composer_id).map(|s| s.outer_rect);
+        out.drop_without_applying_deltas();
+        assert!(pinned, "the transcript should be pinned to the bottom");
+        assert!(
+            collapsed,
+            "the target row's reasoning should start collapsed"
+        );
+        if let (Some(anchor), Some(panel)) = (anchor, panel) {
+            anchor_before = Some(anchor);
+            panel_before = Some(panel);
+        }
+        if let Some(nearest) = nearest {
+            target = Some(nearest);
+        }
+    }
+
+    let target = target.expect("a `✻` affordance should be painted for the target row");
+    let panel_before = panel_before.expect("the activity panel should persist a rect");
+    let anchor_before = anchor_before.expect("the target row should be visible");
+    assert!(
+        panel_before.max.y <= screen.max.y + 1.0,
+        "the activity panel should have settled on-screen, got {panel_before:?}"
+    );
+
+    // Press and release in a single frame: the exact reported interaction.
+    let moved = egui::Event::PointerMoved(target);
+    let press = egui::Event::PointerButton {
+        pos: target,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let release = egui::Event::PointerButton {
+        pos: target,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+
+    let mut needle_seen = false;
+    let mut anchor_after = None;
+    for frame in 0..6 {
+        let events = if frame == 0 {
+            vec![moved.clone(), press.clone(), release.clone()]
+        } else {
+            Vec::new()
+        };
+        let out = run(&mut app, events);
+        let panel = egui::PanelState::load(&ctx, composer_id).map(|s| s.outer_rect);
+        let pinned = app.tabs[0].stick_to_bottom;
+        let needle = text_pos(&out, "NEEDLE").is_some();
+        let anchor = text_pos(&out, &anchor_text);
+        out.drop_without_applying_deltas();
+        assert_eq!(
+            panel,
+            Some(panel_before),
+            "the activity panel moved on frame {frame} of the expand click"
+        );
+        assert!(pinned, "the transcript should stay pinned across the click");
+        needle_seen |= needle;
+        anchor_after = anchor;
+    }
+
+    assert!(needle_seen, "clicking the `✻` should expand the reasoning");
+    assert_ne!(
+        anchor_after,
+        Some(anchor_before),
+        "expanding a row should reflow the transcript"
+    );
+}
+
+/// Collapsing a past row's reasoning while the transcript is pinned to the
+/// bottom must not jolt the rows below it: the pinned offset has to land on the
+/// new bottom the same frame, so those rows hold their screen position. The bug
+/// painted them one row-height too high for a single frame before snapping back.
+#[test]
+fn collapsing_a_past_rows_reasoning_while_pinned_keeps_the_rows_below_still() {
+    use std::collections::HashMap;
+
+    fn asterisks(out: &egui::FullOutput) -> Vec<egui::Pos2> {
+        let mut groups: HashMap<(i32, i32), Vec<egui::Pos2>> = HashMap::new();
+        for shape in &out.shapes {
+            if let egui::epaint::Shape::LineSegment { points, .. } = &shape.shape {
+                let mid = egui::pos2(
+                    (points[0].x + points[1].x) * 0.5,
+                    (points[0].y + points[1].y) * 0.5,
+                );
+                groups
+                    .entry(((mid.x * 2.0).round() as i32, (mid.y * 2.0).round() as i32))
+                    .or_default()
+                    .push(mid);
+            }
+        }
+        groups
+            .into_values()
+            .filter(|v| v.len() == 3)
+            .map(|v| v[0])
+            .collect()
+    }
+    fn text_pos(out: &egui::FullOutput, needle: &str) -> Option<egui::Pos2> {
+        out.shapes.iter().find_map(|shape| match &shape.shape {
+            egui::epaint::Shape::Text(t) if t.galley.text().contains(needle) => Some(t.pos),
+            _ => None,
+        })
+    }
+
+    const TARGET: usize = 190;
+    let ctx = egui::Context::default();
+    let mut app = DesktopApp::open(ctx.clone(), false, None);
+    {
+        let tab = &mut app.tabs[0];
+        tab.state.ready = true;
+        for i in 0..200 {
+            tab.state.push_row(
+                "assistant",
+                format!("filler row {i} with enough words to fill one line"),
+            );
+        }
+        for i in 0..200 {
+            tab.state.thinking[i] = Some(format!("reasoning for row {i}\nsecond line\nthird line"));
+        }
+    }
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(900.0, 600.0));
+    let run = |app: &mut DesktopApp, events: Vec<egui::Event>| {
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(screen),
+                events,
+                ..Default::default()
+            },
+            |ui| app.render_workspace(ui),
+        )
+    };
+    let below = |out: &egui::FullOutput| -> Vec<(usize, Option<f32>)> {
+        (TARGET + 1..200)
+            .map(|i| (i, text_pos(out, &format!("filler row {i} ")).map(|p| p.y)))
+            .collect()
+    };
+    let anchor =
+        |out: &egui::FullOutput| text_pos(out, &format!("filler row {TARGET} ")).map(|p| p.y);
+    let nearest_asterisk = |out: &egui::FullOutput| -> Option<egui::Pos2> {
+        anchor(out).and_then(|a| {
+            asterisks(out)
+                .into_iter()
+                .min_by(|x, y| (x.y - a).abs().total_cmp(&(y.y - a).abs()))
+        })
+    };
+    let click = |pos: egui::Pos2| {
+        vec![
+            egui::Event::PointerMoved(pos),
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: true,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            },
+        ]
+    };
+
+    // Settle, then record the target row's anchor and the anchors of every row
+    // below it while collapsed. The first rendered frame converges the bottom
+    // panel from an off-screen startup rect, so capture the last settled frame.
+    // (`run` output is dropped before asserting so a failing frame cannot trip
+    // epaint's unapplied-deltas guard.)
+    let mut below_before = None;
+    let mut anchor_before = None;
+    let mut target = None;
+    for _ in 0..8 {
+        let out = run(&mut app, vec![]);
+        let pinned = app.tabs[0].stick_to_bottom;
+        let below_now = below(&out);
+        let anchor_now = anchor(&out);
+        let nearest = nearest_asterisk(&out);
+        out.drop_without_applying_deltas();
+        assert!(pinned, "the transcript should start pinned to the bottom");
+        if below_now.iter().any(|(_, y)| y.is_some()) {
+            below_before = Some(below_now);
+            anchor_before = anchor_now;
+        }
+        if let Some(nearest) = nearest {
+            target = Some(nearest);
+        }
+    }
+    let target = target.expect("a `✻` affordance should be painted for the target row");
+    let below_before = below_before.expect("the rows below the target should be laid out");
+    let anchor_before = anchor_before.expect("the target row should be visible");
+
+    // Expanding pulls the target row's heading up; the rows below must hold still.
+    for f in 0..6 {
+        let out = run(&mut app, if f == 0 { click(target) } else { vec![] });
+        let pinned = app.tabs[0].stick_to_bottom;
+        let below_now = below(&out);
+        out.drop_without_applying_deltas();
+        assert!(pinned, "the transcript should stay pinned while expanding");
+        assert_eq!(
+            below_now, below_before,
+            "expanding must not move the rows below the target (frame {f})"
+        );
+    }
+
+    // Expanding moved the target row's heading, so re-locate its affordance.
+    let target2 = {
+        let out = run(&mut app, vec![]);
+        let nearest = nearest_asterisk(&out);
+        out.drop_without_applying_deltas();
+        nearest
+    };
+    let target2 = target2.expect("a `✻` affordance should remain after expanding");
+
+    // Collapse: on every frame — including the click frame — the rows below the
+    // target must hold their screen position. The bug painted them a row-height
+    // too high for one frame before snapping back.
+    let mut anchor_returned = false;
+    for f in 0..6 {
+        let out = run(&mut app, if f == 0 { click(target2) } else { vec![] });
+        let pinned = app.tabs[0].stick_to_bottom;
+        let below_now = below(&out);
+        let anchor_now = anchor(&out);
+        out.drop_without_applying_deltas();
+        assert!(pinned, "the transcript should stay pinned while collapsing");
+        assert_eq!(
+            below_now, below_before,
+            "collapsing a past row's reasoning jolted the rows below it on frame {f}"
+        );
+        if let Some(now) = anchor_now
+            && (now - anchor_before).abs() < 1.0
+        {
+            anchor_returned = true;
+        }
+    }
+    assert!(
+        anchor_returned,
+        "the target row should settle back to its collapsed position"
+    );
+}

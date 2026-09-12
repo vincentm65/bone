@@ -92,6 +92,63 @@ pub fn render_lines(
     }
 }
 
+/// Estimate the height (in points) that [`render_lines`] will occupy when laid
+/// out at `width`, mirroring its one-row-per-spec structure: `Spans` rows are
+/// measured as a single wrapped run of their concatenated text, which matches
+/// the common single-segment case and errs high for exotic multi-segment rows.
+/// `Spans` rows carry the [`egui::Spacing::interact_size`] floor that
+/// `ui.horizontal_wrapped` reserves; `Plain` rows do not. Returns `0.0` for an
+/// empty slice.
+///
+/// Callers use this to pre-size a host container so an auto-sized container
+/// (e.g. `egui::Modal`'s area, which latches onto the measured content height)
+/// cannot settle on a too-small placeholder height and clip later content.
+pub fn measure_lines(ui: &egui::Ui, lines: &[PaneLineSpec], width: f32) -> f32 {
+    if lines.is_empty() {
+        return 0.0;
+    }
+    let font_id = ui
+        .style()
+        .text_styles
+        .get(&egui::TextStyle::Body)
+        .cloned()
+        .unwrap_or_else(|| egui::FontId::proportional(14.0));
+    let spacing = ui.spacing().item_spacing.y;
+    // `Spans` rows render through `ui.horizontal_wrapped`, which reserves
+    // `interact_size.y` as a floor for the row regardless of its text
+    // (egui: "Assume there will be something interactive on the horizontal
+    // layout"); `Plain` rows are bare labels and take only their text height.
+    // Mirror that floor here or the estimate under-reports every styled row.
+    let wrapped_floor = ui.spacing().interact_size.y;
+    let width = width.max(1.0);
+    let mut height = 0.0;
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            height += spacing;
+        }
+        let text: String = match line {
+            PaneLineSpec::Plain(text) => native_pane_text(text).into_owned(),
+            PaneLineSpec::Spans { spans, .. } => spans
+                .iter()
+                .map(|span| native_pane_text(&span.text).into_owned())
+                .collect(),
+        };
+        let row = if text.is_empty() {
+            // A label with no text still occupies one row.
+            ui.text_style_height(&egui::TextStyle::Body)
+        } else {
+            ui.fonts_mut(|fonts| fonts.layout(text, font_id.clone(), egui::Color32::WHITE, width))
+                .size()
+                .y
+        };
+        height += match line {
+            PaneLineSpec::Spans { .. } => row.max(wrapped_floor),
+            PaneLineSpec::Plain(_) => row,
+        };
+    }
+    height
+}
+
 /// Terminal progress glyphs are absent from the bundled proportional fonts.
 /// Keep their filled-marker meaning without showing a missing-glyph box.
 fn native_pane_text(text: &str) -> std::borrow::Cow<'_, str> {

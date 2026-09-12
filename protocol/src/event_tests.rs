@@ -140,6 +140,7 @@ fn every_runtime_event_variant_round_trips() {
             snapshot: SessionSnapshot::default(),
             view: Some(crate::ViewModel::default()),
             messages: Some(vec![ChatMessage::new(ChatRole::User, "repair")]),
+            theme: Some(json!({ "name": "repair-theme" })),
         },
         RuntimeEvent::StreamLagged { skipped: 23 },
         RuntimeEvent::ViewSnapshot {
@@ -397,6 +398,7 @@ fn synchronize_defaults_to_snapshot_only() {
             busy: false,
             view: None,
             messages: None,
+            theme: None,
             ..
         }
     ));

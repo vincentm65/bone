@@ -606,14 +606,18 @@ impl Driver {
         let tool_names = tools
             .all_definitions()
             .into_iter()
+            .filter(|tool| tools.plugin_owner_for(&tool.name).is_none())
             .map(|tool| tool.name)
             .collect::<Vec<_>>();
         let command_names = extensions
             .commands()
             .iter()
+            .filter(|command| command.plugin.is_none())
             .map(|command| command.name.clone())
             .collect::<Vec<_>>();
-        let config_schema = config_store.schema_for(&tool_names, &command_names);
+        let plugin_names =
+            crate::ext::installed_plugin_names(&crate::config::bone_dir().join("lua/plugins"));
+        let config_schema = config_store.schema_for(&tool_names, &command_names, &plugin_names);
         let is_cancelled = || {
             cancel
                 .as_ref()

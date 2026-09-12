@@ -104,6 +104,7 @@ fn build_item(entry: &CatalogItem, theme: &Theme) -> Item {
     item.category = match entry.kind.as_str() {
         "command" => "command",
         "theme" => "theme",
+        "plugin" => "plugin",
         _ => "tool",
     };
     add_detail(&mut item, "Version", entry.version.as_deref());
@@ -174,6 +175,9 @@ struct State {
     /// Set once the user has applied changes: a one-line banner summarizing what
     /// happened. `Some` switches the screen into its read-only "result" phase.
     result: Option<String>,
+    /// Plugin install/update actions awaiting explicit consent. Bone Lua is not
+    /// sandboxed, so installing a plugin always asks first.
+    pending_consent: Option<Vec<CatalogAction>>,
 }
 
 impl State {
@@ -189,6 +193,7 @@ impl State {
                 message: "Catalog closed.".to_string(),
             },
             result: None,
+            pending_consent: None,
         }
     }
 }
@@ -215,6 +220,21 @@ where
 
     loop {
         match event::read()? {
+            // Consent phase: plugin install/update waits for an explicit yes.
+            Event::Key(key)
+                if key.kind == KeyEventKind::Press && state.pending_consent.is_some() =>
+            {
+                match key.code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        let requested = state.pending_consent.take().unwrap_or_default();
+                        apply_actions(&mut state, theme, &mut apply, requested);
+                    }
+                    KeyCode::Esc | KeyCode::Char('n') | KeyCode::Char('N') => {
+                        state.pending_consent = None;
+                    }
+                    _ => {}
+                }
+            }
             // Result phase: any of esc/enter closes; cursor still moves so the
             // user can scroll the list and read per-item status / errors.
             Event::Key(key) if key.kind == KeyEventKind::Press && state.result.is_some() => {
@@ -233,7 +253,7 @@ where
                 KeyCode::Char('a') => set_all(&mut state, true),
                 KeyCode::Char('n') => set_all(&mut state, false),
                 // Apply, then stay open showing the result until the user closes.
-                KeyCode::Enter => apply_state(&mut state, theme, &mut apply),
+                KeyCode::Enter => request_apply(&mut state, theme, &mut apply),
                 _ => {}
             },
             Event::Resize(_, _) => {}
@@ -265,11 +285,36 @@ fn set_all(state: &mut State, checked: bool) {
     }
 }
 
-fn apply_state<F>(state: &mut State, theme: &Theme, apply: &mut F)
+/// Compute the actions the current selection implies, gate plugin installs
+/// behind a consent prompt, and apply everything else immediately.
+fn request_apply<F>(state: &mut State, theme: &Theme, apply: &mut F)
 where
     F: FnMut(String, Vec<CatalogAction>) -> Result<CatalogApplyResult, String>,
 {
     let requested = actions(&state.entries, &state.items, true);
+    if needs_consent(state, &requested) {
+        state.pending_consent = Some(requested);
+    } else {
+        apply_actions(state, theme, apply, requested);
+    }
+}
+
+/// Whether any requested action installs or updates a plugin (Lua that runs
+/// unsandboxed), which always requires explicit consent.
+fn needs_consent(state: &State, requested: &[CatalogAction]) -> bool {
+    requested.iter().any(|action| {
+        matches!(action.action, CatalogActionKind::Install)
+            && state
+                .entries
+                .iter()
+                .any(|entry| entry.name == action.name && entry.kind == "plugin")
+    })
+}
+
+fn apply_actions<F>(state: &mut State, theme: &Theme, apply: &mut F, requested: Vec<CatalogAction>)
+where
+    F: FnMut(String, Vec<CatalogAction>) -> Result<CatalogApplyResult, String>,
+{
     let applied = match apply(state.revision.clone(), requested) {
         Ok(applied) => applied,
         Err(error) => {
@@ -286,6 +331,8 @@ where
             CatalogItemOutcome::Installed => installed += 1,
             CatalogItemOutcome::Removed => removed += 1,
             CatalogItemOutcome::Failed { .. } => failed += 1,
+            CatalogItemOutcome::Enabled => {}
+            CatalogItemOutcome::Disabled => {}
             CatalogItemOutcome::Unchanged => {}
         }
     }
@@ -353,6 +400,14 @@ fn overlay_results(items: &mut [Item], results: &[CatalogItemResult], theme: &Th
                 item.tag_color = Some(p.error);
                 item.desc = format!("Failed: {message}");
             }
+            CatalogItemOutcome::Enabled => {
+                item.tag = Some("enabled".to_string());
+                item.tag_color = Some(p.good);
+            }
+            CatalogItemOutcome::Disabled => {
+                item.tag = Some("disabled".to_string());
+                item.tag_color = Some(p.muted);
+            }
             CatalogItemOutcome::Unchanged => {}
         }
     }
@@ -384,7 +439,63 @@ fn draw(frame: &mut ratatui::Frame, state: &State, theme: &Theme) {
 
     draw_header(frame, chunks[0], theme);
     draw_body(frame, chunks[1], state, theme);
-    draw_footer(frame, chunks[2], state.result.is_some(), theme);
+    draw_footer(frame, chunks[2], state, theme);
+    if state.pending_consent.is_some() {
+        draw_consent(frame, area, state, theme);
+    }
+}
+
+/// A centred confirmation box shown before installing or updating a plugin.
+fn draw_consent(frame: &mut ratatui::Frame, area: Rect, state: &State, theme: &Theme) {
+    let p = &theme.palette;
+    let names: Vec<String> = state
+        .pending_consent
+        .as_ref()
+        .map(|actions| actions.iter().map(|action| action.name.clone()).collect())
+        .unwrap_or_default();
+    let lines = vec![
+        Line::from(Span::styled(
+            "Install plugin — confirm",
+            Style::default().fg(p.accent).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!("• {}", names.join(", ")),
+            Style::default().fg(p.fg),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Bone Lua plugins are not sandboxed: a plugin runs with the same \
+             authority as your own init.lua. Only install plugins you trust.",
+            Style::default().fg(p.muted),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "[y] install    [n] cancel",
+            Style::default().fg(p.fg).add_modifier(Modifier::BOLD),
+        )),
+    ];
+    let width = area.width.saturating_sub(8).clamp(24, 72);
+    let height = 11u16.min(area.height);
+    let rect = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(ratatui::widgets::Clear, rect);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(p.accent))
+                    .title("Trust"),
+            )
+            .wrap(Wrap { trim: false })
+            .style(Style::default().bg(p.bg.unwrap_or(ratatui::style::Color::Reset))),
+        rect,
+    );
 }
 
 fn draw_header(frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
@@ -398,7 +509,7 @@ fn draw_header(frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
             Span::styled("catalog", Style::default().fg(p.muted)),
         ]),
         Line::from(Span::styled(
-            "Optional tools, commands & themes — download on demand",
+            "Optional tools, commands, plugins & themes — download on demand",
             Style::default().fg(p.subtle),
         )),
     ];
@@ -481,8 +592,10 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, state: &State, theme: &Them
     );
 }
 
-fn draw_footer(frame: &mut ratatui::Frame, area: Rect, applied: bool, theme: &Theme) {
-    let keys: &[(&str, &str)] = if applied {
+fn draw_footer(frame: &mut ratatui::Frame, area: Rect, state: &State, theme: &Theme) {
+    let keys: &[(&str, &str)] = if state.pending_consent.is_some() {
+        &[("y", "install"), ("n", "cancel")]
+    } else if state.result.is_some() {
         &[("↑↓", "move"), ("enter/esc", "close")]
     } else {
         &[

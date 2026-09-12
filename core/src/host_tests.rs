@@ -49,8 +49,8 @@ fn catalog_projection_is_display_safe_and_revisioned() {
             }],
             ..CatalogEntry::default()
         };
-        let first = catalog_snapshot(std::slice::from_ref(&entry));
-        let second = catalog_snapshot(&[entry]);
+        let first = catalog_snapshot(std::slice::from_ref(&entry), &[]);
+        let second = catalog_snapshot(&[entry], &[]);
         assert_eq!(first.revision, second.revision);
         assert_eq!(first.items[0].name, "weather.lua");
         let json = serde_json::to_value(&first.items[0]).unwrap();
@@ -386,6 +386,109 @@ fn catalog_apply_installs_and_removes_with_per_item_results() {
             CatalogItemOutcome::Removed
         ));
         assert!(!bone.join("lua/tools/weather.lua").exists());
+    });
+}
+
+#[test]
+fn catalog_apply_enables_and_disables_plugins_only() {
+    with_host_env(|_, fixture, config| {
+        fs::create_dir_all(fixture.join("plugins/alpha")).unwrap();
+        fs::write(fixture.join("plugins/alpha/init.lua"), b"return {}\n").unwrap();
+        fs::create_dir_all(fixture.join("tools")).unwrap();
+        fs::write(fixture.join("tools/weather.lua"), b"return {}\n").unwrap();
+        fs::write(
+            fixture.join("catalog.json"),
+            serde_json::to_vec(&serde_json::json!([
+                { "name": "alpha", "kind": "plugin", "description": "Alpha plugin" },
+                { "name": "weather.lua", "kind": "tool", "description": "Weather" }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let service = HostService::new(config.clone());
+        let HostResponse::Catalog(snapshot) =
+            service.execute(HostRequest::Catalog { refresh: true })
+        else {
+            panic!("expected catalog response");
+        };
+        let item = |snapshot: &CatalogSnapshot, name: &str| {
+            snapshot
+                .items
+                .iter()
+                .find(|item| item.name == name)
+                .unwrap()
+                .clone()
+        };
+        assert!(item(&snapshot, "alpha").enabled, "plugins start enabled");
+        assert!(
+            item(&snapshot, "weather.lua").enabled,
+            "non-plugins always enabled"
+        );
+
+        let apply = |expected: String, name: &str, action: CatalogActionKind| {
+            let HostResponse::CatalogApplied(result) = service.execute(HostRequest::CatalogApply {
+                expected_revision: expected,
+                actions: vec![CatalogAction {
+                    name: name.into(),
+                    action,
+                }],
+            }) else {
+                panic!("expected catalog apply response");
+            };
+            result
+        };
+
+        let result = apply(
+            snapshot.revision.clone(),
+            "alpha",
+            CatalogActionKind::Disable,
+        );
+        assert!(
+            matches!(result.results[0].outcome, CatalogItemOutcome::Disabled),
+            "got {:?}",
+            result.results[0].outcome
+        );
+        assert!(result.changed);
+        assert_eq!(config.disabled_plugins(), vec!["alpha".to_string()]);
+        assert!(!item(&result.snapshot, "alpha").enabled);
+        assert_ne!(result.snapshot.revision, snapshot.revision);
+
+        // Re-disabling is idempotent and does not change state.
+        let result = apply(
+            result.snapshot.revision.clone(),
+            "alpha",
+            CatalogActionKind::Disable,
+        );
+        assert!(matches!(
+            result.results[0].outcome,
+            CatalogItemOutcome::Unchanged
+        ));
+        assert!(!result.changed);
+
+        let result = apply(
+            result.snapshot.revision.clone(),
+            "alpha",
+            CatalogActionKind::Enable,
+        );
+        assert!(matches!(
+            result.results[0].outcome,
+            CatalogItemOutcome::Enabled
+        ));
+        assert!(config.disabled_plugins().is_empty());
+        assert!(item(&result.snapshot, "alpha").enabled);
+
+        // Non-plugin capabilities have no package-level enable state.
+        let result = apply(
+            result.snapshot.revision.clone(),
+            "weather.lua",
+            CatalogActionKind::Disable,
+        );
+        assert!(matches!(
+            result.results[0].outcome,
+            CatalogItemOutcome::Failed { .. }
+        ));
+        assert!(!result.changed);
     });
 }
 

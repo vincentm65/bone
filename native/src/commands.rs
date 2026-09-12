@@ -27,7 +27,6 @@ pub const BUILTINS: &[(&str, &str)] = &[
     ("quit", "exit bone"),
     ("setup", "re-run the onboarding setup wizard"),
     ("stats", "open full-screen token stats dashboard"),
-    ("tools", "enable or disable tools, /tools reload to rescan"),
     ("update", "check and apply bone updates"),
 ];
 

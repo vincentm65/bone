@@ -66,6 +66,14 @@ impl ToolExecutionContext {
 pub trait Tool: Send + Sync {
     fn definition(&self) -> ToolDefinition;
 
+    /// Name of the plugin package that registered this tool, if any. Tools not
+    /// owned by a plugin (native, built-in, or standalone Lua) return `None`
+    /// and are toggled individually; plugin-owned tools inherit their plugin's
+    /// enable state and are hidden from the per-capability menus.
+    fn plugin_owner(&self) -> Option<&str> {
+        None
+    }
+
     /// Context-less execution. Tools that need a [`ToolExecutionContext`]
     /// (cancellation, working directory, process scope) override
     /// [`execute_output_live`](Self::execute_output_live) instead and rely on

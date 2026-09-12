@@ -139,3 +139,72 @@ fn catalog_operations_reject_malformed_entries() {
     assert!(install(&invalid).is_err());
     assert!(remove(&invalid).is_err());
 }
+
+fn plugin_entry(name: &str) -> CatalogEntry {
+    CatalogEntry {
+        name: name.into(),
+        kind: "plugin".into(),
+        ..CatalogEntry::default()
+    }
+}
+
+#[test]
+fn plugin_entries_validate_and_resolve_package_paths() {
+    let entry = plugin_entry("myplugin");
+    assert!(entry.validate().is_ok());
+    assert!(entry.is_plugin());
+    assert_eq!(entry.dir_segment(), "plugins");
+    assert_eq!(entry.primary_rel(), "plugins/myplugin/init.lua");
+    assert_eq!(
+        entry.plugin_dir(),
+        Some(crate::config::bone_dir().join("lua/plugins/myplugin"))
+    );
+}
+
+#[test]
+fn plugin_bundled_files_must_stay_inside_its_package() {
+    let mut entry = plugin_entry("myplugin");
+    entry.files = vec![CatalogFile {
+        path: "plugins/myplugin/lib/util.lua".into(),
+        sha256: String::new(),
+    }];
+    assert!(entry.validate().is_ok());
+
+    // A file outside the package directory is rejected.
+    entry.files = vec![CatalogFile {
+        path: "plugins/other/init.lua".into(),
+        sha256: String::new(),
+    }];
+    assert!(entry.validate().is_err());
+
+    // A file elsewhere under `lua/` is also rejected for plugins.
+    entry.files = vec![CatalogFile {
+        path: "themes/nord.lua".into(),
+        sha256: String::new(),
+    }];
+    assert!(entry.validate().is_err());
+}
+
+#[test]
+fn plugin_names_reject_lua_suffix_and_unsafe_segments() {
+    for name in ["evil.lua", "../escape", "nested/escape", "", "back\\slash"] {
+        assert!(
+            plugin_entry(name).validate().is_err(),
+            "accepted plugin name {name:?}"
+        );
+    }
+}
+
+#[test]
+fn plugin_entries_survive_index_round_trip() {
+    let json = br#"[
+        { "name": "myplugin", "kind": "plugin", "description": "d",
+          "files": [ { "path": "plugins/myplugin/lib/util.lua", "sha256": "x" } ] },
+        { "name": "other.lua", "kind": "tool" }
+    ]"#;
+    let entries = parse_index(json).expect("valid index");
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0].kind, "plugin");
+    assert_eq!(entries[0].dir_segment(), "plugins");
+    assert_eq!(entries[0].files.len(), 1);
+}

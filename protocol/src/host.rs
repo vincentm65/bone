@@ -149,6 +149,14 @@ pub struct CatalogItem {
     pub long_description: Option<String>,
     pub installed: bool,
     pub update_available: bool,
+    /// Whether an installed plugin package is currently enabled. Always true for
+    /// non-plugin items, which have no package-level enable state.
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// One revisioned catalog projection from the daemon host.
@@ -163,6 +171,8 @@ pub struct CatalogSnapshot {
 pub enum CatalogActionKind {
     Install,
     Remove,
+    Enable,
+    Disable,
 }
 
 /// One user-requested catalog mutation, addressed by stable item name.
@@ -178,6 +188,8 @@ pub enum CatalogItemOutcome {
     Unchanged,
     Installed,
     Removed,
+    Enabled,
+    Disabled,
     Failed { message: String },
 }
 

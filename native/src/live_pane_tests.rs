@@ -115,6 +115,8 @@ fn live_pages_and_agent_clicks_are_independent_between_conversations() {
     let mut app = DesktopApp::open(ctx.clone(), true, None);
     app.add_demo_tab(&ctx);
     app.tabs[0].live_pane.select("task_list".into());
+    app.tabs[0].live_pane.inspecting = true;
+    app.tabs[1].live_pane.inspecting = true;
     let origin = app.tabs[1].id;
     let mut texts = vec![];
     let palette = theme::Palette::default();
@@ -123,14 +125,22 @@ fn live_pages_and_agent_clicks_are_independent_between_conversations() {
             ui.columns(2, |columns| {
                 for (tab, column) in app.tabs.iter_mut().zip(columns) {
                     column.push_id(tab.id, |ui| {
-                        if let Some(id) = tab.live_pane.render(
+                        if let Some(action) = tab.live_pane.render(
                             ui,
                             &tab.state.view,
                             &tab.state.jobs,
+                            &tab.state.processes,
                             &palette,
                             200.0,
                         ) {
-                            tab.pending_ui.push(UiRequest::OpenJob(id));
+                            match action {
+                                live_pane::LiveAction::OpenJob(id) => {
+                                    tab.pending_ui.push(UiRequest::OpenJob(id));
+                                }
+                                live_pane::LiveAction::OpenProcess(id) => {
+                                    tab.pending_ui.push(UiRequest::OpenProcess(id));
+                                }
+                            }
                         }
                     });
                 }
@@ -146,32 +156,9 @@ fn live_pages_and_agent_clicks_are_independent_between_conversations() {
             .iter()
             .any(|(text, _)| text.contains("Build reusable live panes"))
     );
-    let tasks_tab = texts
-        .iter()
-        .rfind(|(text, _)| text == "Tasks (1/3)")
-        .unwrap()
-        .1
-        .center();
-    render(pointer(tasks_tab, true));
-    let texts = render(pointer(tasks_tab, false));
-    assert_eq!(
-        texts
-            .iter()
-            .filter(|(text, _)| text.contains("Build reusable live panes"))
-            .count(),
-        2
-    );
-    let agents_tab = texts
-        .iter()
-        .rfind(|(text, _)| text == "Agents (2)")
-        .unwrap()
-        .1
-        .center();
-    render(pointer(agents_tab, true));
-    let texts = render(pointer(agents_tab, false));
     let agent = texts
         .iter()
-        .find(|(text, _)| text.contains("Researcher · Review tool presentation"))
+        .rfind(|(text, _)| text.contains("Researcher · Review tool presentation"))
         .unwrap()
         .1
         .center();
@@ -193,6 +180,7 @@ fn live_pane_above_composer_does_not_clip_short_agent_lists() {
     let mut app = DesktopApp::open(ctx.clone(), true, None);
     let colors = theme::ThemeColors::default();
     let palette = theme::Palette::default();
+    app.tabs[0].live_pane.select(live_pane::PageId::Agents);
     for height in [360.0, 700.0] {
         for frame in 0..4 {
             let mut raw = input(vec![]);

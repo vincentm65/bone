@@ -885,6 +885,7 @@ impl App {
                 snapshot,
                 view,
                 messages,
+                theme: _,
             } => {
                 if self.apply_synchronized_projection(request_id, snapshot, view)
                     && !busy
@@ -1521,6 +1522,7 @@ impl App {
                     snapshot,
                     view,
                     messages,
+                    theme: _,
                 }) if response_id == request_id => {
                     self.apply_synchronized_projection(response_id, snapshot, view);
                     if busy {
@@ -1710,6 +1712,7 @@ impl App {
                     messages,
                     snapshot,
                     view,
+                    theme: _,
                 }) if recovery_request == Some(request_id) => {
                     self.synchronization_supported = Some(true);
                     self.pending_synchronizations.remove(&request_id);
@@ -3732,20 +3735,6 @@ impl App {
                 .is_some()
         {
             return Ok(());
-        }
-        if has_lua_config && cmd == "tools" {
-            let config_arg = if arg.trim() == "reload" {
-                "tools reload"
-            } else {
-                "tools"
-            };
-            if self
-                .run_remote_command("config", config_arg, term)
-                .await
-                .is_some()
-            {
-                return Ok(());
-            }
         }
         // `/config` is protected from arbitrary Lua overrides, but the bundled
         // Lua command still owns its interactive UI. Keep the native schema

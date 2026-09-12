@@ -1,12 +1,12 @@
 # Extension API
 
 Bone embeds Lua 5.4 for tools, commands, settings, themes, keymaps, event hooks,
-plugins, and UI components. If `init.lua` is absent, the runtime behaves as
+and UI components. If `init.lua` is absent, the runtime behaves as
 before. Errors in startup Lua are warnings; core continues without that wiring.
 
 Use the namespaced APIs below. Keep `init.lua` as wiring and put implementations
-in `lua/tools/`, `lua/commands/`, `lua/themes/`, `lua/lib/`, or
-`lua/plugins/<name>/init.lua` as appropriate.
+in `lua/tools/`, `lua/commands/`, `lua/themes/`, `lua/plugins/<name>/`, or
+`lua/lib/` as appropriate.
 
 ## Reloading
 
@@ -18,10 +18,10 @@ notifies its peers only after accepting the replacement.
 
 Reload builds a fresh Lua VM and tool registry before replacing the active one.
 If startup, tool, or command source fails, Bone keeps the previous VM and does not
-retry that exact fingerprint; save another Lua change to retry. `/tools reload`
-remains the explicit override: it always attempts a reload even when the
-fingerprint is unchanged, while retaining the previous VM if the candidate is
-broken.
+retry that exact fingerprint; save another Lua change to retry. Installing an
+extension through `/catalog` (or toggling one in `/config`) still forces a reload
+even when the fingerprint is unchanged, while retaining the previous VM if the
+candidate is broken.
 
 ## Registration
 
@@ -38,6 +38,32 @@ bone.on("event_name", function(event, ctx) ... end)
 The global metadata includes `bone.version`, `bone.cwd`, `bone.config_dir`,
 `bone.agent_depth`, `bone.headless`, `bone.model`, and `bone.provider`. Logging
 is available through `bone.log.info`, `bone.log.warn`, and `bone.log.error`.
+
+## Plugins
+
+A plugin is an installable package: a directory `lua/plugins/<name>/init.lua`
+(the entry point) that registers capabilities — tools, commands, keymaps,
+themes, settings, hooks — through the same namespaced APIs. Plugins are
+distributed through the catalog as `kind = "plugin"` entries, installed under
+`lua/plugins/<name>/`, and discovered at VM build. No hand-editing of a shared
+`init.lua` is required; the plugin's own `init.lua` runs automatically.
+
+Boot runs plugins after tools and commands, in sorted directory order, each with
+the same `_settings_owner` rollback behavior as other startup Lua: a failing
+plugin is reported and skipped without taking down the runtime. Capabilities
+inherit their plugin's state — disabling a plugin skips its `init.lua`, so none
+of its tools or commands register.
+
+Remove a plugin through the catalog screen (or by deleting its directory). Enable
+or disable it without deleting files through the `plugins.<name>` setting in the
+canonical settings YAML; a disabled plugin stays installed (checksums and updates
+are still tracked) but its `init.lua` is not run, and a reload applies the change.
+
+> **Trust.** Bone Lua is not sandboxed. A plugin runs with the same authority as
+> your own `init.lua`, including filesystem, `ctx.fs`, and shell access through
+> registered tools. Installing or updating a plugin therefore asks for explicit
+> consent, and every file's `sha256` is verified before anything is written. Only
+> install plugins you trust.
 
 ## Submitting turns
 
@@ -209,14 +235,6 @@ bone.api.ui.set_statusline("stats", { { text = "ready", align = "right" } })
 bone.api.ui.set_highlight("input_border", "#e0a050")
 bone.api.ui.close("help")
 ```
-
-## Plugins and loading
-
-Plugins live under `lua/plugins/<name>/init.lua` and must be loaded explicitly
-from `init.lua` with `bone.plugin.load(name)`. The core plugin API also exposes
-list, install, update, and remove operations. A plugin is still subject to the
-same tool, command, settings, filesystem, shell, and approval contracts as any
-other Lua extension.
 
 For debugging, use `bone.log.*`, inspect `ctx.runtime.info()`, enumerate tool
 and subagent definitions, and use the protocol/event stream rather than relying

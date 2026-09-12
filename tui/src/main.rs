@@ -411,66 +411,6 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// `bone web` — launch the web UI bridge and open the browser.
-async fn run_web(_args: &[String]) -> std::io::Result<()> {
-    // Find bridge.mjs: CWD first, then walk up from the binary's directory.
-    let bridge_path = {
-        let cwd = std::env::current_dir()?;
-        if cwd.join("webui/bridge.mjs").exists() {
-            cwd.join("webui/bridge.mjs")
-        } else {
-            let mut dir = std::env::current_exe()
-                .ok()
-                .and_then(|p| p.parent().map(|p| p.to_path_buf()));
-            let mut found = None;
-            for _ in 0..5 {
-                if let Some(ref d) = dir {
-                    if d.join("webui/bridge.mjs").exists() {
-                        found = Some(d.join("webui/bridge.mjs"));
-                        break;
-                    }
-                    dir = d.parent().map(|p| p.to_path_buf());
-                }
-            }
-            found.ok_or_else(|| {
-                std::io::Error::other(
-                    "webui/bridge.mjs not found — place it in ./webui/ or install bone via git/npm",
-                )
-            })?
-        }
-    };
-
-    // Check node is available
-    if std::process::Command::new("node")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_err()
-    {
-        return Err(std::io::Error::other(
-            "node not found — install Node.js to use the web UI",
-        ));
-    }
-
-    let mut command = tokio::process::Command::new("node");
-    command.arg(&bridge_path);
-    if std::env::var_os("BONE_BIN").is_none()
-        && let Ok(exe) = std::env::current_exe()
-    {
-        command.env("BONE_BIN", exe);
-    }
-
-    let mut child = command
-        .stdin(std::process::Stdio::inherit())
-        .stdout(std::process::Stdio::inherit())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()?;
-
-    child.wait().await?;
-    Ok(())
-}
-
 /// `bone connect` — a line-oriented RPC frontend, the reference *remote client*:
 /// each stdin line is a prompt, the daemon's `RuntimeEvent`s are printed, and
 /// tool-approval requests are answered over the wire (auto-approve what the
@@ -662,7 +602,6 @@ async fn main() -> std::io::Result<()> {
             | Some("stats-popup")
             | Some("update")
             | Some("install")
-            | Some("web")
     );
     if interactive && bone::config::needs_onboarding() {
         // Fresh install: seed the always-safe base so the wizard can `require`
@@ -703,11 +642,6 @@ async fn main() -> std::io::Result<()> {
     // Install: symlink bone binary into PATH
     if args.first().map(String::as_str) == Some("install") {
         return do_install();
-    }
-
-    // `bone web` — launch the web UI bridge (http://localhost:4577).
-    if args.first().map(String::as_str) == Some("web") {
-        return run_web(&args[1..]).await;
     }
 
     // Normal TUI mode
@@ -762,7 +696,7 @@ async fn main() -> std::io::Result<()> {
     let provider: std::sync::Arc<dyn LlmProvider> = std::sync::Arc::from(provider);
     // The interactive TUI starts a fresh conversation each launch (clean slate);
     // past chats remain in the DB and are reachable via /history. Only the
-    // multi-chat `bone serve` / web UI resumes the latest conversation on attach.
+    // multi-chat `bone serve` daemon resumes the latest conversation on attach.
     let settings = config.runtime_settings_handle();
     let boot = boot_runtime_host_for(
         provider,

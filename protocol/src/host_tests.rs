@@ -70,6 +70,7 @@ fn catalog() -> CatalogSnapshot {
             long_description: Some("Detailed weather forecasts.".into()),
             installed: true,
             update_available: true,
+            enabled: true,
         }],
     }
 }
@@ -229,6 +230,8 @@ fn request_defaults_preserve_snapshot_only_and_cached_catalog_behavior() {
         CatalogItem {
             name: "weather.lua".into(),
             kind: "tool".into(),
+            // Missing `enabled` defaults to true (non-plugins are always active).
+            enabled: true,
             ..CatalogItem::default()
         }
     );

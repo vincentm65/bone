@@ -24,6 +24,7 @@ fn result_state(banner: &str) -> State {
             message: String::new(),
         },
         result: Some(banner.to_string()),
+        pending_consent: None,
     }
 }
 
@@ -124,6 +125,17 @@ fn theme_item_has_distinct_category() {
     let item = build_item(&entry("theme"), &theme);
 
     assert_eq!(item.category, "theme");
+}
+
+#[test]
+fn plugin_item_has_distinct_category() {
+    let theme = make_theme();
+    let mut entry = entry("plugin");
+    entry.installed = true;
+    let item = build_item(&entry, &theme);
+
+    assert_eq!(item.category, "plugin");
+    assert_eq!(item.tag.as_deref(), Some("installed"));
 }
 
 #[test]
@@ -238,4 +250,66 @@ fn rows_are_grouped_as_updates_installed_and_available() {
     assert!(screen.contains("Updates (1)"), "{screen}");
     assert!(screen.contains("Installed (1)"), "{screen}");
     assert!(screen.contains("Available (1)"), "{screen}");
+}
+
+fn consent_state(kind: &str) -> State {
+    let theme = make_theme();
+    let entry = entry(kind);
+    let mut item = build_item(&entry, &theme);
+    item.checked = true;
+    item.user_touched = true;
+    State {
+        revision: "r1".into(),
+        entries: vec![entry],
+        items: vec![item],
+        cursor: 0,
+        outcome: Outcome {
+            changed: false,
+            message: String::new(),
+        },
+        result: None,
+        pending_consent: None,
+    }
+}
+
+#[test]
+fn plugin_install_requires_explicit_consent() {
+    let theme = make_theme();
+    let mut state = consent_state("plugin");
+    let calls = std::cell::Cell::new(0usize);
+    let mut apply = |_revision: String, _actions: Vec<CatalogAction>| {
+        calls.set(calls.get() + 1);
+        Err::<CatalogApplyResult, String>("must not apply without consent".into())
+    };
+
+    request_apply(&mut state, &theme, &mut apply);
+
+    assert_eq!(calls.get(), 0, "plugin install must wait for consent");
+    assert_eq!(state.pending_consent.as_ref().map(Vec::len), Some(1));
+    assert!(state.result.is_none());
+}
+
+#[test]
+fn tool_install_applies_without_consent() {
+    let theme = make_theme();
+    let mut state = consent_state("tool");
+    let calls = std::cell::Cell::new(0usize);
+    let mut apply = |_revision: String, _actions: Vec<CatalogAction>| {
+        calls.set(calls.get() + 1);
+        Ok::<CatalogApplyResult, String>(CatalogApplyResult {
+            snapshot: CatalogSnapshot {
+                revision: "r2".into(),
+                items: Vec::new(),
+            },
+            results: Vec::new(),
+            changed: false,
+            extensions_reloaded: false,
+        })
+    };
+
+    request_apply(&mut state, &theme, &mut apply);
+
+    assert_eq!(calls.get(), 1, "non-plugin installs apply immediately");
+    assert!(state.pending_consent.is_none());
+    assert!(state.result.is_some());
 }

@@ -356,6 +356,111 @@ fn failed_persistence_keeps_revision_and_typed_state() {
 }
 
 #[test]
+fn schema_for_exposes_plugins_page_and_snapshot_tracks_disabled_plugins() {
+    let _guard = crate::util::test_env_lock();
+    let old_bone = std::env::var_os("BONE_DIR");
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+
+    let store = ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
+    let schema = store.schema_for(&[], &[], &["alpha".into(), "beta".into()]);
+    let page = schema
+        .pages
+        .iter()
+        .find(|page| page.namespace == "plugins")
+        .expect("plugins page");
+    assert_eq!(page.title, "Plugins");
+    assert_eq!(page.fields.len(), 2);
+    let alpha = page
+        .fields
+        .iter()
+        .find(|field| field.path == "plugins.alpha")
+        .expect("plugins.alpha field");
+    assert_eq!(alpha.value_type, "bool");
+    assert_eq!(alpha.default, serde_json::json!(true));
+    assert!(page.fields.iter().any(|field| field.path == "plugins.beta"));
+
+    // The snapshot carries no disabled plugins until one is toggled.
+    assert!(store.snapshot().disabled_plugins.is_empty());
+
+    let revision = store.snapshot().revision;
+    store
+        .set_enabled("plugins", "alpha", false, revision)
+        .unwrap();
+    assert_eq!(store.snapshot().disabled_plugins, vec!["alpha".to_string()]);
+    assert_eq!(store.disabled_plugins(), vec!["alpha".to_string()]);
+
+    let revision = store.snapshot().revision;
+    store
+        .set_enabled("plugins", "alpha", true, revision)
+        .unwrap();
+    assert!(store.snapshot().disabled_plugins.is_empty());
+
+    unsafe {
+        match old_bone {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+}
+
+#[test]
+fn unified_plugins_page_merges_tools_commands_and_plugins() {
+    let _guard = crate::util::test_env_lock();
+    let old_bone = std::env::var_os("BONE_DIR");
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+
+    let store = ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
+    // `config` is a protected built-in command and must be filtered out.
+    let schema = store.schema_for(
+        &["shell".into(), "worker".into()],
+        &["config".into(), "history".into()],
+        &["demo".into()],
+    );
+
+    // The old orthogonal tool/command pages are gone.
+    assert!(!schema.pages.iter().any(|page| page.namespace == "tools"));
+    assert!(!schema.pages.iter().any(|page| page.namespace == "commands"));
+
+    let page = schema
+        .pages
+        .iter()
+        .find(|page| page.namespace == "plugins")
+        .expect("plugins page");
+    assert_eq!(page.title, "Plugins");
+    // One flat list: each row keeps its true enablement path plus a kind badge
+    // and a kind-qualified key that avoids tool/command name collisions.
+    let rows: Vec<_> = page
+        .fields
+        .iter()
+        .map(|field| {
+            (
+                field.kind.as_deref(),
+                field.path.as_str(),
+                field.key.as_str(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            (Some("plugin"), "plugins.demo", "plugin:demo"),
+            (Some("command"), "commands.history", "command:history"),
+            (Some("tool"), "tools.shell", "tool:shell"),
+            (Some("tool"), "tools.worker", "tool:worker"),
+        ]
+    );
+
+    unsafe {
+        match old_bone {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+}
+
+#[test]
 fn clones_share_mutations_and_revision() {
     let _guard = crate::util::test_env_lock();
     let old_bone = std::env::var_os("BONE_DIR");

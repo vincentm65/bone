@@ -33,8 +33,8 @@ pub struct Cli {
     pub model: Option<String>,
     /// Open the provider setup wizard on launch.
     pub open_setup: bool,
-    /// Open the catalog browser on launch.
-    pub open_catalog: bool,
+    /// Open the plugins browser on launch.
+    pub open_plugins: bool,
     /// Open the token-stats dashboard on launch.
     pub open_stats: bool,
     pub command: Command,
@@ -67,7 +67,7 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
             // Dialog-opening subcommands mirror the TUI's `/setup`, `/catalog`
             // and `stats-popup`.
             "setup" => cli.open_setup = true,
-            "catalog" => cli.open_catalog = true,
+            "plugins" | "catalog" => cli.open_plugins = true,
             "stats-popup" => cli.open_stats = true,
             // Daemon-side operations: this binary has no runtime to run them.
             "connect" => cli.command = Command::DaemonSide("connect"),
@@ -104,7 +104,7 @@ pub fn version() -> String {
 pub fn usage() -> String {
     "Usage: bone-desktop [--connect <addr>] [--provider <id>] [--model <name>]
        bone-desktop setup          # open the provider setup wizard
-       bone-desktop catalog        # open the catalog browser
+       bone-desktop plugins        # open the plugins browser
        bone-desktop stats-popup    # open the token-stats dashboard
        bone-desktop connect --listen <addr>   # GUI against a daemon
 
@@ -174,7 +174,9 @@ mod tests {
     #[test]
     fn dialog_subcommands_set_open_flags() {
         assert!(parse(&args(&["setup"])).unwrap().open_setup);
-        assert!(parse(&args(&["catalog"])).unwrap().open_catalog);
+        assert!(parse(&args(&["plugins"])).unwrap().open_plugins);
+        // `catalog` stays accepted as an alias for the old chrome.
+        assert!(parse(&args(&["catalog"])).unwrap().open_plugins);
         assert!(parse(&args(&["stats-popup"])).unwrap().open_stats);
     }
 

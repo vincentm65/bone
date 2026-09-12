@@ -166,6 +166,25 @@ pub fn boot(
         source_errors.push(e);
     }
 
+    // Run installed plugin *packages* (lua/plugins/<name>/init.lua). A plugin
+    // disabled in canonical settings is skipped entirely: its entry point never
+    // runs, so the tools/commands/hooks it registers simply never exist.
+    if !subagent {
+        let disabled: Option<std::collections::HashSet<String>> = {
+            let settings = settings_arc
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let list = settings.resolved().plugins.disabled.clone();
+            (!list.is_empty()).then(|| list.into_iter().collect())
+        };
+        if let Err(e) =
+            super::run_lua_plugin_files(&lua, &config_dir.join("lua/plugins"), disabled.as_ref())
+        {
+            log_boot_warning(config_dir, format_args!("Lua plugins failed: {e}"));
+            source_errors.push(e);
+        }
+    }
+
     // Conversation-scoped ctx.state map: one Arc per boot so concurrent session
     // actors and subagent boots never share checklist / host tool state.
     let shared_state: SharedState = crate::ext::ctx::new_shared_state();
@@ -305,7 +324,13 @@ fn collect_commands(
                 })
                 .unwrap_or_default();
 
-            commands.push(super::ops_commands::RegisteredLuaCommand { name, description });
+            let plugin = entry.get::<Option<String>>("plugin").ok().flatten();
+
+            commands.push(super::ops_commands::RegisteredLuaCommand {
+                name,
+                description,
+                plugin,
+            });
         }
 
         commands

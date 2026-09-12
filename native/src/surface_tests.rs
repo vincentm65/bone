@@ -71,6 +71,7 @@ fn fixture(ctx: &egui::Context) -> DesktopApp {
                     integer: Some(true),
                     min: if kind == "number" { Some(1.0) } else { None },
                     max: if kind == "number" { Some(1000.0) } else { None },
+                    kind: None,
                     reload_behavior: "next_turn".into(),
                 })
                 .collect(),
@@ -162,7 +163,7 @@ fn show_at(
             ui.label("Bone workspace");
             match name {
                 "Settings" => app.config_dialog(ui.ctx()),
-                "Catalog" => app.catalog_dialog(ui.ctx()),
+                "Plugins" => app.plugins_dialog(ui.ctx()),
                 "Usage" => app.stats_dialog(ui.ctx()),
                 _ => unreachable!(),
             }
@@ -195,7 +196,7 @@ fn utility_screens_fit_and_keep_navigation_visible() {
         (390.0, 800.0),
         (520.0, 400.0),
     ] {
-        for name in ["Settings", "Catalog", "Usage"] {
+        for name in ["Settings", "Plugins", "Usage"] {
             let ctx = egui::Context::default();
             let mut app = fixture(&ctx);
             app.open_utility(name);
@@ -213,7 +214,7 @@ fn utility_screens_fit_and_keep_navigation_visible() {
                 screen.contains_rect(surface),
                 "{name} bounds at {width}: {surface:?}"
             );
-            for label in ["Settings", "Catalog", "Usage"] {
+            for label in ["Settings", "Plugins", "Usage"] {
                 let rect = text_rect(&output, label)
                     .unwrap_or_else(|| panic!("missing {label} in {name}"));
                 assert!(
@@ -256,7 +257,66 @@ fn utility_screens_fit_and_keep_navigation_visible() {
 }
 
 #[test]
-fn catalog_layout_stays_still_with_overflowing_content() {
+fn settings_layout_stays_still_with_overflowing_content() {
+    for (width, height) in [
+        (1200.0, 800.0),
+        (1365.0, 767.0),
+        (1001.0, 701.0),
+        (843.0, 701.0),
+        (900.0, 800.0),
+        (720.0, 600.0),
+        (390.0, 800.0),
+        (520.0, 400.0),
+    ] {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let ctx = egui::Context::default();
+            let mut app = fixture(&ctx);
+            let page = &mut app.config_schema.as_mut().unwrap().pages[0];
+            for index in 0..30 {
+                page.fields.push(SettingDefinition {
+                    path: format!("general.extra_{index}"),
+                    key: format!("extra_{index}"),
+                    label: format!("Additional setting {index}"),
+                    value_type: "string".into(),
+                    options: Vec::new(),
+                    default: serde_json::json!("value"),
+                    value: None,
+                    integer: None,
+                    min: None,
+                    max: None,
+                    kind: None,
+                    reload_behavior: String::new(),
+                });
+            }
+            ctx.set_pixels_per_point(scale);
+            app.show_config = true;
+            let mut previous: Option<egui::Rect> = None;
+            for frame in 0..40 {
+                let _output = show_at(&mut app, &ctx, "Settings", width, height, vec![]);
+                let surface = ctx
+                    .data(|data| data.get_temp::<egui::Rect>(egui::Id::new("last-surface-rect")))
+                    .unwrap();
+                if frame >= 20
+                    && let Some(previous_surface) = previous
+                {
+                    let drift = (surface.min.x - previous_surface.min.x)
+                        .abs()
+                        .max((surface.max.x - previous_surface.max.x).abs())
+                        .max((surface.min.y - previous_surface.min.y).abs())
+                        .max((surface.max.y - previous_surface.max.y).abs());
+                    assert!(
+                        drift < 1.0,
+                        "settings jump at {width}×{height}, scale {scale}, frame {frame}: {drift}; {previous_surface:?} -> {surface:?}"
+                    );
+                }
+                previous = Some(surface);
+            }
+        }
+    }
+}
+
+#[test]
+fn plugins_layout_stays_still_with_overflowing_content() {
     for (width, height) in [
         (1200.0, 800.0),
         (1365.0, 767.0),
@@ -279,10 +339,10 @@ fn catalog_layout_stays_still_with_overflowing_content() {
                 catalog.items.push(item);
             }
             ctx.set_pixels_per_point(scale);
-            app.show_catalog = true;
+            app.show_plugins = true;
             let mut previous: Option<egui::Rect> = None;
             for frame in 0..40 {
-                let _output = show_at(&mut app, &ctx, "Catalog", width, height, vec![]);
+                let _output = show_at(&mut app, &ctx, "Plugins", width, height, vec![]);
                 let bounds = ctx
                     .data(|data| data.get_temp::<egui::Rect>(egui::Id::new("last-surface-rect")))
                     .unwrap();
@@ -295,7 +355,7 @@ fn catalog_layout_stays_still_with_overflowing_content() {
                         .max((positions.max.x - previous.max.x).abs());
                     assert!(
                         drift < 1.0,
-                        "catalog jumps at {width}×{height}, scale {scale}, frame {frame}: {drift}"
+                        "plugins jump at {width}×{height}, scale {scale}, frame {frame}: {drift}"
                     );
                 }
                 previous = Some(positions);
@@ -305,22 +365,22 @@ fn catalog_layout_stays_still_with_overflowing_content() {
 }
 
 #[test]
-fn catalog_install_button_sends_only_the_selected_item() {
+fn plugins_install_button_sends_only_the_selected_item() {
     let ctx = egui::Context::default();
     let mut app = fixture(&ctx);
     let (tx, mut rx) = mpsc::unbounded_channel();
     app.tabs[0].commands = tx;
-    app.show_catalog = true;
-    let mut output = show(&mut app, &ctx, "Catalog", 1200.0, vec![]);
+    app.show_plugins = true;
+    let mut output = show(&mut app, &ctx, "Plugins", 1200.0, vec![]);
     for _ in 0..3 {
-        output = show(&mut app, &ctx, "Catalog", 1200.0, vec![]);
+        output = show(&mut app, &ctx, "Plugins", 1200.0, vec![]);
     }
     let pos = text_rect(&output, "Install").unwrap().center();
     for pressed in [true, false] {
         show(
             &mut app,
             &ctx,
-            "Catalog",
+            "Plugins",
             1200.0,
             vec![
                 egui::Event::PointerMoved(pos),
@@ -345,52 +405,6 @@ fn catalog_install_button_sends_only_the_selected_item() {
         }
         _ => panic!("expected a catalog apply request"),
     }
-    assert!(rx.try_recv().is_err());
-}
-
-#[test]
-fn catalog_row_whitespace_opens_details_without_triggering_an_action() {
-    let ctx = egui::Context::default();
-    let mut app = fixture(&ctx);
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    app.tabs[0].commands = tx;
-    app.show_catalog = true;
-    let mut output = show(&mut app, &ctx, "Catalog", 1200.0, vec![]);
-    for _ in 0..3 {
-        output = show(&mut app, &ctx, "Catalog", 1200.0, vec![]);
-    }
-    let title = text_rect(&output, "Browser tools").unwrap();
-    // This is the open area between the title and the action button.
-    let pos = egui::pos2(title.max.x + 180.0, title.center().y);
-    show(
-        &mut app,
-        &ctx,
-        "Catalog",
-        1200.0,
-        vec![
-            egui::Event::PointerMoved(pos),
-            egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed: true,
-                modifiers: egui::Modifiers::NONE,
-            },
-            egui::Event::PointerButton {
-                pos,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: egui::Modifiers::NONE,
-            },
-        ],
-    );
-    output = show(&mut app, &ctx, "Catalog", 1200.0, vec![]);
-    assert!(
-        text_rect(
-            &output,
-            "Inspect pages and interact with websites from your tasks."
-        )
-        .is_some()
-    );
     assert!(rx.try_recv().is_err());
 }
 

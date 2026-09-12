@@ -39,6 +39,7 @@ struct Inner {
     extension_values: BTreeMap<String, BTreeMap<String, ExtensionValue>>,
     disabled_tools: Vec<String>,
     disabled_commands: Vec<String>,
+    disabled_plugins: Vec<String>,
 }
 
 fn merge_provider_update(
@@ -107,6 +108,7 @@ impl ConfigStore {
                 extension_values,
                 disabled_tools,
                 disabled_commands,
+                disabled_plugins: Vec::new(),
             })),
             runtime_settings,
             extension_catalog: Arc::new(RwLock::new(ExtensionCatalogAuthority {
@@ -136,6 +138,7 @@ impl ConfigStore {
         let extension_values = super::domains::load_or_seed_extensions()?.extensions;
         let disabled_tools = core.resolved().tools.disabled.clone();
         let disabled_commands = core.resolved().commands.disabled.clone();
+        let disabled_plugins = core.resolved().plugins.disabled.clone();
         let mut runtime_settings = core.clone();
         runtime_settings.replace_domains(subagents.clone(), extension_values.clone());
         let settings_handle = extensions.settings_handle();
@@ -153,6 +156,7 @@ impl ConfigStore {
                 extension_values,
                 disabled_tools,
                 disabled_commands,
+                disabled_plugins,
             })),
             runtime_settings: settings_handle,
             extension_catalog: Arc::new(RwLock::new(ExtensionCatalogAuthority {
@@ -275,6 +279,7 @@ impl ConfigStore {
         let mut inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         inner.disabled_tools = loaded.resolved().tools.disabled.clone();
         inner.disabled_commands = loaded.resolved().commands.disabled.clone();
+        inner.disabled_plugins = loaded.resolved().plugins.disabled.clone();
         inner.core = loaded;
         inner.revision = inner.revision.saturating_add(1);
         let settings = Self::runtime_settings(&inner);
@@ -303,10 +308,15 @@ impl ConfigStore {
     }
 
     pub fn schema(&self) -> ConfigSchema {
-        self.schema_for(&[], &[])
+        self.schema_for(&[], &[], &[])
     }
 
-    pub fn schema_for(&self, tool_names: &[String], command_names: &[String]) -> ConfigSchema {
+    pub fn schema_for(
+        &self,
+        tool_names: &[String],
+        command_names: &[String],
+        plugin_names: &[String],
+    ) -> ConfigSchema {
         fn field(
             path: &str,
             key: &str,
@@ -326,6 +336,7 @@ impl ConfigStore {
                 integer: None,
                 min: None,
                 max: None,
+                kind: None,
                 reload_behavior: "immediate".into(),
             }
         }
@@ -362,6 +373,7 @@ impl ConfigStore {
                         integer: extension.integer,
                         min: extension.min,
                         max: extension.max,
+                        kind: None,
                         reload_behavior: "immediate".into(),
                     })
                     .collect(),
@@ -371,19 +383,6 @@ impl ConfigStore {
         let mut tool_names = tool_names.to_vec();
         tool_names.sort();
         tool_names.dedup();
-        let tool_fields = tool_names
-            .into_iter()
-            .map(|name| {
-                field(
-                    &format!("tools.{name}"),
-                    &name,
-                    &name,
-                    "bool",
-                    &[],
-                    serde_json::json!(true),
-                )
-            })
-            .collect();
         let mut command_names: Vec<_> = command_names
             .iter()
             .filter(|name| !crate::commands::is_protected_builtin(name))
@@ -391,17 +390,37 @@ impl ConfigStore {
             .collect();
         command_names.sort();
         command_names.dedup();
-        let command_fields = command_names
+        let mut plugin_names: Vec<_> = plugin_names.to_vec();
+        plugin_names.sort();
+        plugin_names.dedup();
+
+        // A single flat "Plugins" page unifies standalone tools, standalone
+        // commands, and plugin packages. Each row keeps its true
+        // `tools./commands./plugins.` path — which drives enablement routing —
+        // while a kind-qualified key keeps a tool and command that share a name
+        // from colliding.
+        let mut entries: Vec<(&'static str, String)> = Vec::new();
+        entries.extend(tool_names.into_iter().map(|name| ("tool", name)));
+        entries.extend(command_names.into_iter().map(|name| ("command", name)));
+        entries.extend(plugin_names.into_iter().map(|name| ("plugin", name)));
+        entries.sort_by(|a, b| {
+            a.1.to_lowercase()
+                .cmp(&b.1.to_lowercase())
+                .then_with(|| a.0.cmp(b.0))
+        });
+        let plugin_fields = entries
             .into_iter()
-            .map(|name| {
-                field(
-                    &format!("commands.{name}"),
-                    &name,
+            .map(|(kind, name)| {
+                let mut def = field(
+                    &format!("{kind}s.{name}"),
+                    &format!("{kind}:{name}"),
                     &name,
                     "bool",
                     &[],
                     serde_json::json!(true),
-                )
+                );
+                def.kind = Some(kind.into());
+                def
             })
             .collect();
         ConfigSchema {
@@ -454,15 +473,9 @@ impl ConfigStore {
                     pages: Vec::new(),
                 },
                 ConfigPage {
-                    namespace: "tools".into(),
-                    title: "Tools".into(),
-                    fields: tool_fields,
-                    pages: Vec::new(),
-                },
-                ConfigPage {
-                    namespace: "commands".into(),
-                    title: "Commands".into(),
-                    fields: command_fields,
+                    namespace: "plugins".into(),
+                    title: "Plugins".into(),
+                    fields: plugin_fields,
                     pages: Vec::new(),
                 },
                 ConfigPage {
@@ -611,6 +624,15 @@ impl ConfigStore {
         }
     }
 
+    /// Names of the plugin packages the user has disabled in canonical settings.
+    pub fn disabled_plugins(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .disabled_plugins
+            .clone()
+    }
+
     pub fn snapshot(&self) -> ConfigSnapshot {
         let inner = self.inner.lock().unwrap_or_else(|error| error.into_inner());
         let mut entries: Vec<_> = inner
@@ -652,6 +674,7 @@ impl ConfigStore {
             active_provider: inner.providers.last_provider.clone(),
             disabled_tools: inner.disabled_tools.clone(),
             disabled_commands: inner.disabled_commands.clone(),
+            disabled_plugins: inner.disabled_plugins.clone(),
         }
     }
 
@@ -821,6 +844,7 @@ impl ConfigStore {
             let mut disabled = match namespace {
                 "tools" => inner.disabled_tools.clone(),
                 "commands" => inner.disabled_commands.clone(),
+                "plugins" => inner.disabled_plugins.clone(),
                 _ => return Err(format!("unknown enablement namespace: {namespace}")),
             };
             disabled.retain(|entry| entry != name);
@@ -834,6 +858,7 @@ impl ConfigStore {
             match namespace {
                 "tools" => candidate.inner.tools.disabled = disabled.clone(),
                 "commands" => candidate.inner.commands.disabled = disabled.clone(),
+                "plugins" => candidate.inner.plugins.disabled = disabled.clone(),
                 _ => unreachable!(),
             }
             candidate.save().map_err(|error| {
@@ -843,6 +868,7 @@ impl ConfigStore {
             match namespace {
                 "tools" => inner.disabled_tools = disabled,
                 "commands" => inner.disabled_commands = disabled,
+                "plugins" => inner.disabled_plugins = disabled,
                 _ => unreachable!(),
             }
             Ok(())

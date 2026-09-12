@@ -47,6 +47,10 @@ pub struct SettingDefinition {
     pub min: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max: Option<f64>,
+    /// Row category for unified enablement lists (`tool`, `command`, `plugin`);
+    /// `None` for ordinary value settings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     pub reload_behavior: String,
 }
 
@@ -60,6 +64,8 @@ pub struct ConfigSnapshot {
     pub disabled_tools: Vec<String>,
     #[serde(default)]
     pub disabled_commands: Vec<String>,
+    #[serde(default)]
+    pub disabled_plugins: Vec<String>,
 }
 
 /// Provider data safe to send to any client. Secrets are represented only by

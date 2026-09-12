@@ -167,7 +167,7 @@ pub fn daemon_log_path(state_dir: Option<&Path>) -> PathBuf {
 
 /// Launch `bin serve --listen <address>` detached from the app. The daemon
 /// deliberately outlives the app (the frontend is a client, not a supervisor),
-/// so a shared daemon can keep serving the TUI/web clients. Logs append to
+/// so a shared daemon can keep serving TUI/desktop clients. Logs append to
 /// `log_path`. Returns the spawned `Child` on success; the caller keeps it so
 /// the app can detect the death of a daemon it started itself (`try_wait`).
 pub fn spawn_daemon(

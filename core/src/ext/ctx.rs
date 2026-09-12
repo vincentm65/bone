@@ -1943,6 +1943,19 @@ fn find_config_field<'a>(
     })
 }
 
+/// Visit every field across the page tree, depth-first.
+fn for_each_config_field<'a>(
+    pages: &'a [bone_protocol::ConfigPage],
+    f: &mut impl FnMut(&'a bone_protocol::SettingDefinition),
+) {
+    for page in pages {
+        for field in &page.fields {
+            f(field);
+        }
+        for_each_config_field(&page.pages, f);
+    }
+}
+
 fn config_field_value(
     snapshot: &bone_protocol::ConfigSnapshot,
     field: &bone_protocol::SettingDefinition,
@@ -1952,6 +1965,9 @@ fn config_field_value(
     }
     if let Some(name) = field.path.strip_prefix("commands.") {
         return serde_json::json!(!snapshot.disabled_commands.iter().any(|item| item == name));
+    }
+    if let Some(name) = field.path.strip_prefix("plugins.") {
+        return serde_json::json!(!snapshot.disabled_plugins.iter().any(|item| item == name));
     }
     field
         .path
@@ -1970,9 +1986,7 @@ fn append_config_pages(
     snapshot: &bone_protocol::ConfigSnapshot,
 ) -> Result<(), mlua::Error> {
     for page in pages {
-        if !page.fields.is_empty()
-            || matches!(page.namespace.as_str(), "providers" | "tools" | "commands")
-        {
+        if !page.fields.is_empty() || matches!(page.namespace.as_str(), "providers" | "plugins") {
             let page_table = lua.create_table()?;
             page_table.set("namespace", page.namespace.as_str())?;
             page_table.set("title", page.title.as_str())?;
@@ -2000,6 +2014,9 @@ fn append_config_pages(
                     field_table.set("max", max)?;
                 }
                 field_table.set("reload_behavior", field.reload_behavior.as_str())?;
+                if let Some(kind) = &field.kind {
+                    field_table.set("kind", kind.as_str())?;
+                }
                 fields.push(field_table)?;
             }
             page_table.set("fields", fields)?;
@@ -2033,20 +2050,34 @@ fn build_canonical_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlu
     table.set(
         "get_table",
         lua.create_function(move |lua, namespace: String| {
-            let Some(page) = table_schema
+            let snapshot = table_store.snapshot();
+            let values = lua.create_table()?;
+            // Built-in enablement rows (tools/commands/plugins) now share the
+            // unified "plugins" page and are keyed by a kind-qualified name; the
+            // enablement namespace is their path prefix. Extension namespaces
+            // still own a page whose fields use bare keys.
+            if matches!(namespace.as_str(), "tools" | "commands" | "plugins") {
+                let prefix = format!("{namespace}.");
+                let mut fields = Vec::new();
+                for_each_config_field(&table_schema.pages, &mut |field| fields.push(field));
+                for field in fields {
+                    if let Some(name) = field.path.strip_prefix(&prefix) {
+                        values.set(name, lua.to_value(&config_field_value(&snapshot, field))?)?;
+                    }
+                }
+                return Ok(Value::Table(values));
+            }
+            if let Some(page) = table_schema
                 .pages
                 .iter()
                 .find(|page| page.namespace == namespace)
-            else {
-                return Ok(Value::Nil);
-            };
-            let snapshot = table_store.snapshot();
-            let values = lua.create_table()?;
-            for field in &page.fields {
-                values.set(
-                    field.key.as_str(),
-                    lua.to_value(&config_field_value(&snapshot, field))?,
-                )?;
+            {
+                for field in &page.fields {
+                    values.set(
+                        field.key.as_str(),
+                        lua.to_value(&config_field_value(&snapshot, field))?,
+                    )?;
+                }
             }
             Ok(Value::Table(values))
         })?,
@@ -2086,6 +2117,11 @@ fn build_canonical_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlu
                         mlua::Error::external(format!("{} expects a boolean", field.path))
                     })?;
                     set_store.set_enabled("commands", name, enabled, revision)
+                } else if let Some(name) = field.path.strip_prefix("plugins.") {
+                    let enabled = value.as_bool().ok_or_else(|| {
+                        mlua::Error::external(format!("{} expects a boolean", field.path))
+                    })?;
+                    set_store.set_enabled("plugins", name, enabled, revision)
                 } else {
                     set_store.set_value(&field.path, value, revision)
                 };

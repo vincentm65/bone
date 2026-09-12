@@ -413,6 +413,19 @@ impl ExtensionManager {
         self.ui.clone()
     }
 
+    /// Snapshot the active daemon theme, including a transient preview.
+    pub fn active_theme(&self) -> Option<serde_json::Value> {
+        super::api_ui::active_theme_snapshot(&self.ui)
+    }
+
+    /// Snapshot the persisted `theme` section without touching the Lua VM.
+    /// Safe to call while an interactive Lua command is blocked on
+    /// `ctx.ui.key()`, e.g. from state synchronization.
+    pub fn configured_theme(&self) -> Option<serde_json::Value> {
+        let settings = self.settings.lock().unwrap_or_else(|e| e.into_inner());
+        serde_json::to_value(&settings.resolved().theme).ok()
+    }
+
     /// Take the pending UI diffs emitted by `bone.api.ui.*`, `ctx.ui.pane`, and
     /// `ctx.ui.pane` since the last drain. A frontend calls this each render
     /// tick and applies the diffs to its own view (the TUI converts `Float`

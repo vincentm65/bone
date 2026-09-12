@@ -4,7 +4,7 @@ Bone has one runtime authority: `core`. Frontends are clients of that runtime,
 not alternate agent implementations.
 
 ```text
-TUI / headless runner / web bridge / remote client
+TUI / desktop client / headless runner / remote client
                          │ commands and events
                          ▼
                  core runtime + Driver
@@ -19,16 +19,14 @@ TUI / headless runner / web bridge / remote client
 ## Workspace boundaries
 
 - `core` owns the agent loop, providers, tools, approvals, configuration, Lua
-  extensions, runtime sessions, jobs, and persistence.
+  extensions (plain files and directory-based plugins under `lua/plugins/<name>/`),
+  runtime sessions, jobs, and persistence.
 - `protocol` owns the serializable commands, events, configuration snapshots,
   session snapshots, tool types, and view types that cross a frontend boundary.
 - `tui` owns the native terminal client and its rendering/input code.
 - `client` owns the shared lightweight JSONL/socket transport used by thin remote
   frontends; it does not contain daemon/session logic.
 - `native` owns the `bone-desktop` eframe UI and local event reduction.
-- `webui` is a Node/browser client and bridge for `bone serve`; it is not another
-  runtime or core conversation-persistence layer. Its bridge may maintain durable
-  web-only metadata, such as conversation titles and archived status.
 
 Keep dependencies flowing toward `core` and `protocol`. Core must not depend on
 terminal rendering details.
@@ -50,7 +48,7 @@ result. Do not reimplement the turn loop in a frontend.
 
 The daemon owns `RuntimeSession` and constructs `Driver`s. This is true both for
 the in-process daemon used with the TUI and for standalone `bone serve`. A TUI
-or web client sends commands and renders events; it does not own authoritative
+or desktop client sends commands and renders events; it does not own authoritative
 transcript, approval, job, or configuration state.
 
 ## Turn execution
@@ -102,9 +100,7 @@ approvals are conversation-scoped.
 ## Durable versus ephemeral state
 
 The core-owned SQLite tables are the durable source for conversations, messages, and
-runtime records. The web bridge may add durable web-only metadata in
-`webui_conversations`; that metadata does not replace or mutate core-owned transcript
-state. The model-facing transcript may be a compacted/effective view; display history
+runtime records. The model-facing transcript may be a compacted/effective view; display history
 remains complete. In-memory driver state, live view components, status text,
 cancellation flags, and pending events are ephemeral and must not be treated as
 persisted configuration.
@@ -120,6 +116,21 @@ keeps an isolated Lua VM. A catalog change reloads every cached actor without
 letting `ConfigStore` retain those VMs. Frontends keep the fullscreen workflow
 and rendering, but never substitute their own database or config directory.
 
+Building an actor's Lua VM is an ordered boot: seed library modules → run
+`init.lua` → seed default tools/commands → run tool files → run command files →
+run enabled plugins (`lua/plugins/*/init.lua`, one level, sorted) → collect the
+registered tools and commands. A plugin is skipped when disabled via the
+canonical `plugins.<name>` setting; disabling never deletes files, and because
+reload rebuilds a fresh VM the change takes effect on the next reload.
+
+Configuration surfaces expose this uniformly: the `ConfigStore` schema emits one
+`plugins` page that flat-lists standalone tools, standalone commands, and plugin
+packages, each row carrying its `kind` in a dedicated **Type** column and its true
+`tools./commands./plugins.`
+enablement path. The old separate `tools` and `commands` pages are gone; a row's
+toggle writes to `tools.disabled`, `commands.disabled`, or `plugins.disabled`
+accordingly.
+
 ## Invariants
 
 - There is one core `Driver` implementation for headless, TUI, and daemon turns.
@@ -132,7 +143,7 @@ and rendering, but never substitute their own database or config directory.
 - Cancellation is cooperative: the driver checks it between stream/tool work and
   tools receive the same cancellation path.
 - Durable core conversation and runtime writes happen in core/session code, not in a
-  frontend renderer. The web bridge may write only its web-only metadata table.
+  frontend renderer. Clients may not write core-owned durable state.
 
 ## Documentation source
 

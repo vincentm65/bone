@@ -9,6 +9,16 @@ use bone_protocol::{
 
 use crate::tool_display::{self, ToolDisplayConfig};
 
+/// Status shown while the daemon waits for a `ctx.ui.key()` reply. Set when the
+/// `KeyRequest` arrives; cleared by [`State::finish_command`] once the command
+/// settles, so a cancelled menu cannot leave the composer stuck busy.
+pub const KEY_WAIT_STATUS: &str = "A tool is waiting for a key press…";
+
+/// Status shown after the composer's Stop button sends `RuntimeCommand::Cancel`.
+/// Cleared by [`State::finish_command`] when the daemon confirms the command is
+/// over, so a cancel of an idle key wait cannot linger.
+pub const CANCEL_STATUS: &str = "Cancelling…";
+
 /// Format a millisecond duration as `m:ss`, mirroring the TUI's turn notice.
 pub fn format_elapsed_ms(ms: u64) -> String {
     let total = ms / 1000;
@@ -116,6 +126,15 @@ pub struct State {
     /// ordinary text rows). Every row append goes through [`Self::push_row`]
     /// so the two vectors stay index-aligned.
     pub toolcards: Vec<Option<ToolCard>>,
+    /// Parallel to `rows`: attached thinking that led to each row (`None` for
+    /// rows with no reasoning). Every row append goes through [`Self::push_row`]
+    /// so `rows`, `toolcards`, and `thinking` stay index-aligned. Reasoning is an
+    /// attachment on the row it produced, never a peer row of its own.
+    pub thinking: Vec<Option<String>>,
+    /// In-progress reasoning for the current segment. Rendered as a single
+    /// transient badge until it settles onto the row the segment produces (see
+    /// [`Self::settle_reasoning`]). `None` once moved or when idle.
+    pub live_reasoning: Option<String>,
     /// Indexes of rows whose content changed since the renderer last synced.
     /// Recorded by every row mutation ([`Self::push_row`], content overwrites,
     /// deltas) and drained by the UI layer once per frame via [`std::mem::take`].
@@ -164,7 +183,6 @@ pub struct State {
     /// (created via `NewConversation`) load next.
     pub ignore_first_load: bool,
     assistant: Option<usize>,
-    reasoning: Option<usize>,
     tools: HashMap<String, usize>,
     answered: HashSet<u64>,
     // Key and approval registries allocate IDs independently, both starting at 0.
@@ -253,12 +271,13 @@ impl State {
         self.images.clear();
         self.image_keys.clear();
         self.toolcards.clear();
+        self.thinking.clear();
+        self.live_reasoning = None;
         self.changed_rows.clear();
         self.approvals.clear();
         self.answered.clear();
         self.answered_keys.clear();
         self.assistant = None;
-        self.reasoning = None;
         self.tools.clear();
         self.token_usage = None;
         self.work_elapsed_ms = None;
@@ -297,6 +316,19 @@ impl State {
         }
     }
 
+    /// Settle a daemon-run command that finished without starting a turn (a
+    /// cancelled interactive menu, a client-local reply, or an empty result).
+    /// The `KeyRequest` that opened the menu set `busy` + the waiting status; a
+    /// `CommandComplete { submit: false }` is the only signal the turn is over
+    /// for this tab, so clear both here or the composer stays stuck busy.
+    pub fn finish_command(&mut self) {
+        self.pending_key = None;
+        self.busy = false;
+        if self.status == KEY_WAIT_STATUS || self.status == CANCEL_STATUS {
+            self.status = "Ready".into();
+        }
+    }
+
     pub fn needs_approval(&self) -> bool {
         !self.approvals.is_empty()
     }
@@ -327,14 +359,39 @@ impl State {
         shortened
     }
 
-    /// Every append to `rows` must go through here so `toolcards` (parallel to
-    /// `rows`) keeps its indexes aligned with `rows`.
+    /// Every append to `rows` must go through here so `toolcards` and `thinking`
+    /// (both parallel to `rows`) keep their indexes aligned with `rows`.
     pub(crate) fn push_row(&mut self, role: impl Into<String>, text: impl Into<String>) -> usize {
         let i = self.rows.len();
         self.rows.push((role.into(), text.into()));
         self.toolcards.push(None);
+        self.thinking.push(None);
         self.changed_rows.push(i);
         i
+    }
+
+    /// Append a settled thought to the row it produced, concatenating when a row
+    /// accumulates reasoning from several segments. Keeps `thinking` the same
+    /// length as `rows` via the `get_mut` guard.
+    fn attach_thinking(&mut self, row: usize, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        if let Some(slot) = self.thinking.get_mut(row) {
+            match slot {
+                Some(existing) => existing.push_str(&text),
+                None => *slot = Some(text),
+            }
+        }
+    }
+
+    /// Move the in-progress `live_reasoning` onto the row its segment produced,
+    /// returning it to `None`. Called when a segment settles onto a new row
+    /// (assistant text, tool call, or finished response).
+    fn settle_reasoning(&mut self, row: usize) {
+        if let Some(live) = self.live_reasoning.take() {
+            self.attach_thinking(row, live);
+        }
     }
 
     /// Custom heading for a tool row from the parsed display map; `None` means
@@ -421,22 +478,20 @@ impl State {
         self.images.clear();
         self.image_keys.clear();
         self.toolcards.clear();
+        self.thinking.clear();
+        self.live_reasoning = None;
         self.assistant = None;
-        self.reasoning = None;
         self.tools.clear();
         for message in messages {
             if message.role == ChatRole::System {
                 continue;
             }
+            // The row this message's reasoning attaches to: its content row, else
+            // its first tool row. `None` when the message produces no row at all.
+            let mut reasoning_target: Option<usize> = None;
             // Computed before `content`/`reasoning` are moved out below.
             let synthetic_relay = message.is_synthetic_relay();
-            if let Some(reasoning) = message.reasoning {
-                // Historical reasoning is only surfaced when configured, matching
-                // the live-stream gate above.
-                if self.show_reasoning {
-                    self.push_row("reasoning", reasoning.text);
-                }
-            }
+            let reasoning = message.reasoning.map(|reasoning| reasoning.text);
             if message.role == ChatRole::Tool {
                 let id = message.tool_call_id.unwrap_or_default();
                 let name = message.name.unwrap_or_else(|| {
@@ -446,7 +501,8 @@ impl State {
                         .map(|card| card.name.clone())
                         .unwrap_or_else(|| "output".into())
                 });
-                self.tool_result(id, name, message.content, message.is_error);
+                reasoning_target =
+                    Some(self.tool_result(id, name, message.content, message.is_error));
             } else if !message.content.is_empty() {
                 // A runtime relay of tool-returned images reads as ambient text
                 // (a system note), not a user prompt, after a history reload.
@@ -455,11 +511,12 @@ impl State {
                 } else {
                     message.role.as_str()
                 };
-                self.push_row(role, message.content);
+                reasoning_target = Some(self.push_row(role, message.content));
             }
             for call in message.tool_calls {
                 let args = (!call.arguments.is_null()).then(|| call.arguments.to_string());
                 let (i, _) = self.tool_row(call.id, call.name.clone());
+                reasoning_target.get_or_insert(i);
                 // Keep arguments separate from output. A following saved or live
                 // result fills this same card and supplies its authoritative state.
                 let label = self.tool_label_for(&call.name, &call.arguments, "", false);
@@ -490,35 +547,51 @@ impl State {
                 }
                 self.push_row("attachments", format!("{} image(s)", message.images.len()));
             }
+            // Reasoning is surfaced only when configured, matching the live gate.
+            // It attaches to the row this message produced; a reasoning-only
+            // message keeps a standalone row (rendered as a collapsed disclosure).
+            if self.show_reasoning
+                && let Some(reasoning) = reasoning
+            {
+                match reasoning_target {
+                    Some(row) => self.attach_thinking(row, reasoning),
+                    None => {
+                        self.push_row("reasoning", reasoning);
+                    }
+                }
+            }
         }
     }
 
     fn delta(&mut self, text: String, reasoning: bool) {
-        if reasoning && !self.show_reasoning {
-            // Live reasoning is suppressed unless `general.show_reasoning` is set,
-            // mirroring the TUI's `show_thinking` gate.
+        if reasoning {
+            if !self.show_reasoning {
+                // Live reasoning is suppressed unless `general.show_reasoning` is
+                // set, mirroring the TUI's `show_thinking` gate.
+                return;
+            }
+            // Accumulate into the transient badge; it settles onto the row the
+            // segment produces. No reasoning rows appear in scrollback.
+            self.live_reasoning
+                .get_or_insert_with(String::new)
+                .push_str(&text);
             return;
         }
-        let existing = if reasoning {
-            self.reasoning
-        } else {
-            self.assistant
-        };
-        let (row, created) = match existing {
+        let (row, created) = match self.assistant {
             Some(row) => (row, false),
             None => {
-                let row = self.push_row(
-                    if reasoning { "reasoning" } else { "assistant" },
-                    String::new(),
-                );
-                if reasoning {
-                    self.reasoning = Some(row);
-                } else {
-                    self.assistant = Some(row);
-                }
+                let row = self.push_row("assistant", String::new());
+                self.assistant = Some(row);
                 (row, true)
             }
         };
+        if created {
+            // The first assistant text of a segment settles any leading thought.
+            self.settle_reasoning(row);
+        }
+        // Append streamed chunks verbatim. Chunk boundaries are not token
+        // boundaries, so inferring separators from character classes would
+        // corrupt words that are split across chunks (e.g. "token" + "ization").
         self.rows[row].1.push_str(&text);
         if !created {
             // push_row already recorded a brand-new row; only appending to an
@@ -542,7 +615,14 @@ impl State {
     }
 
     /// History and live results share card state, labels, arguments, and output.
-    fn tool_result(&mut self, call_id: String, name: String, content: String, is_error: bool) {
+    /// Returns the tool row's index so callers can attach leading reasoning.
+    fn tool_result(
+        &mut self,
+        call_id: String,
+        name: String,
+        content: String,
+        is_error: bool,
+    ) -> usize {
         let (i, created) = self.tool_row(call_id, name.clone());
         let args = self.toolcards[i]
             .as_ref()
@@ -569,6 +649,7 @@ impl State {
             show_result,
             eager,
         });
+        i
     }
 
     /// Apply a daemon view diff to the local projection. Upserts replace a
@@ -595,7 +676,8 @@ impl State {
                     self.view.highlights.remove(&name);
                 }
             },
-            ViewDiff::SetTheme { theme } => self.theme = Some(theme),
+            ViewDiff::SetTheme { theme } if theme.is_object() => self.theme = Some(theme),
+            ViewDiff::SetTheme { .. } => {}
         }
     }
 
@@ -623,6 +705,9 @@ impl State {
                     self.last_error = Some(message.clone());
                     return None;
                 }
+                // FrontendState is the daemon's boot-time display baseline and
+                // arrives before ConversationLoaded on a fresh attachment.
+                RuntimeEvent::FrontendState { .. } => {}
                 _ => return None,
             }
         }
@@ -661,6 +746,7 @@ impl State {
                 snapshot,
                 messages,
                 view,
+                theme,
             } if self.sync_id == Some(request_id) => {
                 self.sync_id = None;
                 self.last_error = None;
@@ -670,6 +756,9 @@ impl State {
                 self.snapshot = snapshot;
                 self.busy = busy;
                 self.repairing = busy;
+                if let Some(theme) = theme.filter(serde_json::Value::is_object) {
+                    self.theme = Some(theme);
+                }
                 self.approvals.clear(); // authoritative replay follows this event
                 if let Some(view) = view {
                     self.view = view;
@@ -687,7 +776,7 @@ impl State {
             } => {
                 self.push_row("user", display.unwrap_or(task));
                 self.assistant = None;
-                self.reasoning = None;
+                self.live_reasoning = None;
                 self.tools.clear();
                 self.busy = true;
                 self.status = format!("Running {model}");
@@ -702,8 +791,11 @@ impl State {
                 ..
             } => {
                 self.assistant = None;
-                self.reasoning = None;
                 let (i, created) = self.tool_row(id, name.clone());
+                if created {
+                    // The tool call settles any reasoning that led to it.
+                    self.settle_reasoning(i);
+                }
                 self.rows[i].1 = summary;
                 if !created {
                     self.changed_rows.push(i);
@@ -735,14 +827,19 @@ impl State {
                 name,
                 content,
                 is_error,
-            } => self.tool_result(call_id, name, content, is_error),
+            } => {
+                self.tool_result(call_id, name, content, is_error);
+            }
             RuntimeEvent::Finished { content } => {
                 // Finished is the final full response, not another delta.
                 if let Some(i) = self.assistant {
                     self.rows[i].1 = content;
                     self.changed_rows.push(i);
                 } else if !content.is_empty() {
-                    self.push_row("assistant", content);
+                    let i = self.push_row("assistant", content);
+                    // A response that only ever arrived as `Finished` still
+                    // settles any reasoning streamed before it.
+                    self.settle_reasoning(i);
                 }
                 self.approvals.clear();
                 self.status = "Finishing…".into();
@@ -793,7 +890,7 @@ impl State {
             RuntimeEvent::KeyRequest { id }
                 if !self.answered_keys.contains(&id) => {
                     self.pending_key = Some(id);
-                    self.status = "A tool is waiting for a key press…".into();
+                    self.status = KEY_WAIT_STATUS.into();
                     self.busy = true;
                 }
             RuntimeEvent::StreamLagged { .. } => {
@@ -850,6 +947,16 @@ impl State {
                     .and_then(serde_json::Value::as_bool)
                     .unwrap_or(false);
                 self.input_style = InputStyle::from_settings(&settings);
+                // ResolvedFrontendSettings flattens BoneSettings, so the
+                // daemon-resolved semantic theme is `settings.theme`. Keep the
+                // prior theme when a legacy or malformed payload omits it.
+                if let Some(theme) = settings
+                    .get("theme")
+                    .filter(|theme| theme.is_object())
+                    .cloned()
+                {
+                    self.theme = Some(theme);
+                }
                 self.frontend = Some(FrontendState {
                     settings,
                     commands,
@@ -879,6 +986,54 @@ mod tests {
         state
     }
 
+    #[test]
+    fn startup_frontend_state_supplies_theme_before_conversation_load() {
+        let mut s = State::default();
+        let theme = json!({
+            "name": "startup",
+            "palette": { "accent": "#112233" }
+        });
+        s.reduce(frontend_event(json!({ "theme": theme.clone() })));
+        assert!(
+            !s.ready,
+            "frontend settings arrive before conversation load"
+        );
+        assert_eq!(s.theme.as_ref(), Some(&theme));
+
+        s.reduce(RuntimeEvent::ConversationLoaded {
+            messages: vec![],
+            snapshot: SessionSnapshot::default(),
+            busy: false,
+        });
+        assert_eq!(s.theme.as_ref(), Some(&theme));
+    }
+
+    #[test]
+    fn missing_or_malformed_frontend_theme_does_not_replace_last_good_theme() {
+        let mut s = loaded();
+        let theme = json!({ "palette": { "accent": "#112233" } });
+        s.theme = Some(theme.clone());
+
+        for settings in [
+            json!({}),
+            json!({ "theme": "not-an-object" }),
+            json!({ "theme": null }),
+        ] {
+            s.reduce(frontend_event(settings));
+            assert_eq!(s.theme.as_ref(), Some(&theme));
+        }
+    }
+
+    #[test]
+    fn reconnect_reset_clears_stale_theme_from_previous_attachment() {
+        let mut s = loaded();
+        s.theme = Some(json!({ "palette": { "accent": "#112233" } }));
+        s.frontend = Some(FrontendState::default());
+        s.reset(Some(42));
+        assert!(!s.ready);
+        assert!(s.theme.is_none());
+        assert!(s.frontend.is_none());
+    }
     #[test]
     fn input_style_defaults_and_parsing() {
         // No `ui.input` → the Lines preset with no prefix.
@@ -960,6 +1115,17 @@ mod tests {
     }
 
     #[test]
+    fn streamed_chunks_concatenate_verbatim() {
+        // Provider chunks are not token-aligned, so a word can be split across
+        // events. Chunks must join exactly, with no inferred separators.
+        let mut s = loaded();
+        for chunk in ["The token", "ization", " process"] {
+            s.reduce(RuntimeEvent::TextDelta { text: chunk.into() });
+        }
+        assert_eq!(s.rows.last().unwrap().1, "The tokenization process");
+    }
+
+    #[test]
     fn clear_conversation_keeps_display_state_and_drops_transcript() {
         let mut s = loaded();
         s.ready = true;
@@ -999,6 +1165,7 @@ mod tests {
             snapshot: SessionSnapshot::default(),
             view: None,
             messages: Some(vec![]),
+            theme: None,
         });
         assert_eq!(s.rows.len(), 1);
         s.reduce(RuntimeEvent::StateSynchronized {
@@ -1007,6 +1174,7 @@ mod tests {
             snapshot: SessionSnapshot::default(),
             view: None,
             messages: Some(vec![]),
+            theme: None,
         });
         assert!(s.rows.is_empty());
     }
@@ -1202,6 +1370,7 @@ mod tests {
             snapshot: SessionSnapshot::default(),
             busy: false,
             view: None,
+            theme: None,
         });
         assert_eq!(
             s.rows, rows,
@@ -1278,18 +1447,30 @@ mod tests {
         assert_eq!(card.args, Some(json!({"command": "sleep 2"}).to_string()));
     }
 
-    fn frontend_state(tool_display: serde_json::Value) -> RuntimeEvent {
+    fn frontend_event(settings: serde_json::Value) -> RuntimeEvent {
         RuntimeEvent::FrontendState {
             banner: String::new(),
-            settings: json!({}),
+            settings,
             commands: vec![],
             tool_defs: vec![],
-            tool_display,
+            tool_display: json!({}),
             subagents: vec![],
             host_api_version: 1,
             catalog_updates: 0,
             cwd: None,
         }
+    }
+
+    fn frontend_state(tool_display: serde_json::Value) -> RuntimeEvent {
+        let mut event = frontend_event(json!({}));
+        if let RuntimeEvent::FrontendState {
+            tool_display: current,
+            ..
+        } = &mut event
+        {
+            *current = tool_display;
+        }
+        event
     }
 
     #[test]
@@ -1374,11 +1555,13 @@ mod tests {
         let mut s = loaded();
 
         // Default (config off): live reasoning is suppressed entirely.
-        let before = s.rows.len();
         s.reduce(RuntimeEvent::ReasoningDelta {
             text: "hidden".into(),
         });
-        assert_eq!(s.rows.len(), before, "live reasoning hidden by default");
+        assert!(
+            s.live_reasoning.is_none(),
+            "live reasoning hidden by default"
+        );
 
         let with_reasoning = ChatMessage {
             reasoning: Some(bone_protocol::Reasoning {
@@ -1394,7 +1577,7 @@ mod tests {
             busy: false,
         });
         assert!(
-            s.rows.iter().all(|row| row.0 != "reasoning"),
+            s.thinking.iter().all(Option::is_none),
             "historical reasoning hidden by default"
         );
 
@@ -1416,19 +1599,30 @@ mod tests {
             snapshot: SessionSnapshot::default(),
             busy: false,
         });
-        assert!(
-            s.rows
-                .iter()
-                .any(|row| row.0 == "reasoning" && row.1 == "old thought")
-        );
+        // Historical reasoning attaches to the row its message produced.
+        let answer = s
+            .rows
+            .iter()
+            .position(|row| row.0 == "assistant" && row.1 == "answer")
+            .expect("assistant row produced by the message");
+        assert_eq!(s.thinking[answer].as_deref(), Some("old thought"));
+
+        // Live reasoning accumulates in the transient badge until the segment
+        // settles it onto the produced row.
         s.reduce(RuntimeEvent::ReasoningDelta {
             text: "live thought".into(),
         });
-        assert!(
-            s.rows
-                .iter()
-                .any(|row| row.0 == "reasoning" && row.1 == "live thought")
-        );
+        assert_eq!(s.live_reasoning.as_deref(), Some("live thought"));
+        s.reduce(RuntimeEvent::TextDelta {
+            text: "reply".into(),
+        });
+        assert!(s.live_reasoning.is_none(), "reasoning settles on the row");
+        let reply = s
+            .rows
+            .iter()
+            .position(|row| row.0 == "assistant" && row.1 == "reply")
+            .expect("streamed assistant row");
+        assert_eq!(s.thinking[reply].as_deref(), Some("live thought"));
     }
 
     #[test]
@@ -1493,6 +1687,7 @@ mod tests {
             snapshot: SessionSnapshot::default(),
             view: None,
             messages: Some(vec![ChatMessage::new(ChatRole::User, "without image")]),
+            theme: None,
         });
         assert!(state.images.is_empty());
     }
@@ -1636,6 +1831,54 @@ mod tests {
             },
         });
         assert_eq!(s.theme, Some(json!({"accent": "blue"})));
+        // A malformed live payload cannot erase the last successfully decoded
+        // theme.
+        s.reduce(RuntimeEvent::ViewDiff {
+            diff: ViewDiff::SetTheme {
+                theme: json!("not-an-object"),
+            },
+        });
+        assert_eq!(s.theme, Some(json!({"accent": "blue"})));
+    }
+
+    #[test]
+    fn synchronized_theme_restores_persisted_theme_and_legacy_payload_retains_it() {
+        let mut s = loaded();
+        let preview = json!({ "name": "ocean-preview" });
+        let persisted = json!({ "name": "configured", "palette": { "accent": "#445566" } });
+        s.reduce(RuntimeEvent::ViewDiff {
+            diff: ViewDiff::SetTheme {
+                theme: preview.clone(),
+            },
+        });
+        assert_eq!(s.theme, Some(preview));
+
+        let RuntimeCommand::Synchronize { request_id, .. } = s.synchronize() else {
+            panic!("expected synchronization request");
+        };
+        s.reduce(RuntimeEvent::StateSynchronized {
+            request_id,
+            busy: false,
+            snapshot: SessionSnapshot::default(),
+            view: None,
+            messages: None,
+            // This is the payload a `preview(nil)` cancellation restores.
+            theme: Some(persisted.clone()),
+        });
+        assert_eq!(s.theme, Some(persisted.clone()));
+
+        let RuntimeCommand::Synchronize { request_id, .. } = s.synchronize() else {
+            panic!("expected second synchronization request");
+        };
+        s.reduce(RuntimeEvent::StateSynchronized {
+            request_id,
+            busy: false,
+            snapshot: SessionSnapshot::default(),
+            view: None,
+            messages: None,
+            theme: None,
+        });
+        assert_eq!(s.theme, Some(persisted));
     }
 
     #[test]

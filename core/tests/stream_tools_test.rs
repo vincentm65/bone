@@ -123,7 +123,7 @@ async fn tool_handler_execute_all_unknown_tool() {
 
     let results = handler.execute_all(calls, 0).await;
     assert!(results[0].is_error);
-    assert_eq!(results[0].content, "Tool disabled in /tools settings");
+    assert_eq!(results[0].content, "Tool disabled in settings");
 }
 
 #[tokio::test]

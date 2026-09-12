@@ -958,6 +958,7 @@ fn config_view() -> ConfigView {
         integer: None,
         min: None,
         max: None,
+        kind: None,
         reload_behavior: "immediate".into(),
     };
     ConfigView {
@@ -976,6 +977,7 @@ fn config_view() -> ConfigView {
             active_provider: String::new(),
             disabled_tools: Vec::new(),
             disabled_commands: Vec::new(),
+            disabled_plugins: Vec::new(),
         }),
     }
 }
@@ -1153,6 +1155,7 @@ fn process_snapshot_cache_and_rejected_config_updates_are_applied() {
         snapshot: app.view.clone(),
         view: None,
         messages: None,
+        theme: None,
     });
     assert_eq!(app.synchronization_supported, Some(true));
 
@@ -1181,6 +1184,7 @@ fn process_snapshot_cache_and_rejected_config_updates_are_applied() {
         snapshot: foreign_snapshot,
         view: None,
         messages: None,
+        theme: None,
     });
     assert_eq!(app.view.provider_id, original_provider);
     assert!(app.pending_synchronizations.contains(&request_id));
@@ -1193,6 +1197,7 @@ fn process_snapshot_cache_and_rejected_config_updates_are_applied() {
         snapshot: requested_snapshot,
         view: None,
         messages: None,
+        theme: None,
     });
     assert_eq!(app.view.provider_id, "synchronized");
     assert!(!app.pending_synchronizations.contains(&request_id));

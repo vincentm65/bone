@@ -55,6 +55,9 @@ pub fn install_fonts(ctx: &egui::Context) {
 /// One shared width for the transcript and composer, including side padding.
 pub const CHAT_WIDTH: f32 = 800.0;
 pub const CHAT_PADDING: i8 = 20;
+pub const CONTROL_HEIGHT: f32 = 34.0;
+pub const CONTROL_RADIUS: u8 = 8;
+pub const SURFACE_RADIUS: u8 = 12;
 
 /// Resolved theme the daemon broadcasts via `ViewDiff::SetTheme` and the
 /// `FrontendState` settings payload.
@@ -211,13 +214,22 @@ impl ThemeSettings {
         visuals.extreme_bg_color = mix(bg, fg, 0.085);
         visuals.code_bg_color = mix(bg, fg, 0.075);
         visuals.override_text_color = Some(fg);
+        visuals.weak_text_color = Some(
+            self.palette
+                .muted
+                .as_deref()
+                .and_then(parse_color)
+                .unwrap_or_else(|| mix(bg, fg, 0.70)),
+        );
+        visuals.window_corner_radius = egui::CornerRadius::same(SURFACE_RADIUS);
+        visuals.menu_corner_radius = egui::CornerRadius::same(CONTROL_RADIUS);
         visuals.hyperlink_color = accent;
         visuals.selection.bg_fill = self
             .palette
             .selection
             .as_deref()
             .and_then(parse_color)
-            .unwrap_or_else(|| mix(bg, accent, 0.45));
+            .unwrap_or_else(|| mix(bg, accent, 0.25));
         visuals.selection.stroke.color = fg;
         visuals.widgets.noninteractive.bg_fill = mix(bg, fg, 0.018);
         visuals.widgets.noninteractive.weak_bg_fill = mix(bg, fg, 0.012);
@@ -238,6 +250,15 @@ impl ThemeSettings {
         visuals.widgets.hovered.bg_fill = hovered;
         visuals.widgets.active.weak_bg_fill = active;
         visuals.widgets.active.bg_fill = active;
+        for widget in [
+            &mut visuals.widgets.noninteractive,
+            &mut visuals.widgets.inactive,
+            &mut visuals.widgets.hovered,
+            &mut visuals.widgets.active,
+            &mut visuals.widgets.open,
+        ] {
+            widget.corner_radius = egui::CornerRadius::same(CONTROL_RADIUS);
+        }
         visuals
     }
 
@@ -250,8 +271,8 @@ impl ThemeSettings {
             ..Default::default()
         };
         style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-        style.spacing.button_padding = egui::vec2(9.0, 5.0);
-        style.spacing.interact_size = egui::vec2(20.0, 20.0);
+        style.spacing.button_padding = egui::vec2(12.0, 7.0);
+        style.spacing.interact_size = egui::vec2(CONTROL_HEIGHT, CONTROL_HEIGHT);
         style.spacing.slider_width = 120.0;
         style
             .text_styles
@@ -523,7 +544,10 @@ mod tests {
             egui::FontFamily::Monospace
         );
         assert_eq!(style.spacing.item_spacing, egui::vec2(8.0, 6.0));
-        assert_eq!(style.spacing.interact_size, egui::vec2(20.0, 20.0));
+        assert_eq!(
+            style.spacing.interact_size,
+            egui::vec2(CONTROL_HEIGHT, CONTROL_HEIGHT)
+        );
         assert_eq!(style.visuals.panel_fill, egui::Color32::from_gray(27));
         assert_eq!(
             style.text_styles[&egui::TextStyle::Heading].family,

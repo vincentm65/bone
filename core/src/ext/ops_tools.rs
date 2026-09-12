@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use mlua::{Lua, LuaSerdeExt, Table};
+use mlua::{Lua, LuaSerdeExt, Table, Value};
 
 use crate::config::settings::{Settings, SubagentSettings};
 
@@ -26,6 +26,13 @@ pub(crate) fn setup_register_tool(lua: &Lua, bone: &Table) -> Result<(), String>
 
             // Store the entry as-is; from_entry validates the rest.
             let tools: Table = lua.globals().get::<Table>("bone")?.get("_tools")?;
+            // If this registration runs inside a plugin's init.lua, stamp the
+            // entry with the owning plugin so the capability inherits the
+            // plugin's enable state.
+            let bone: Table = lua.globals().get::<Table>("bone")?;
+            if let Ok(Value::String(owner)) = bone.get::<Value>("_plugin_owner") {
+                args.set("plugin", owner)?;
+            }
             tools.push(args)?;
             Ok(())
         })

@@ -55,6 +55,15 @@ impl ToolRegistry {
         definitions
     }
 
+    /// Name of the plugin package that owns the tool `name`, if any. Used by the
+    /// config subsystem to hide plugin-owned capabilities from the per-capability
+    /// menus and to resolve which plugin a capability inherits its state from.
+    pub fn plugin_owner(&self, name: &str) -> Option<String> {
+        self.tools
+            .get(name)
+            .and_then(|tool| tool.plugin_owner().map(str::to_string))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute_live(
         &self,
@@ -386,6 +395,12 @@ impl ToolHandler {
         names
     }
 
+    /// Name of the plugin package that owns the tool `name`, if any. See
+    /// [`ToolRegistry::plugin_owner`].
+    pub fn plugin_owner_for(&self, name: &str) -> Option<String> {
+        self.registry.plugin_owner(name)
+    }
+
     /// All registered tool display configs (`name → config`). Lets the daemon
     /// ship them to a VM-less frontend so it can render custom tool rows.
     pub fn display_map(&self) -> &HashMap<String, ToolDisplayConfig> {
@@ -571,7 +586,7 @@ impl ToolHandler {
                 )
                 .await
         } else {
-            ToolResult::error(call.id, call.name, "Tool disabled in /tools settings")
+            ToolResult::error(call.id, call.name, "Tool disabled in settings")
         }
     }
 

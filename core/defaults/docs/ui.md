@@ -1,6 +1,6 @@
 # Frontends and UI
 
-Bone keeps behavior in core and makes the TUI, web UI, and headless clients thin
+Bone keeps behavior in core and makes the TUI, desktop client, and headless clients thin
 frontends. The runtime protocol is authoritative for commands, events,
 configuration, sessions, approvals, and view updates.
 
@@ -10,12 +10,10 @@ configuration, sessions, approvals, and view updates.
   `RuntimeEvent` stream as a remote client.
 - `bone serve` hosts the daemon and accepts newline-JSON runtime connections.
   `bone --connect` attaches the TUI to it.
-- `bone web` starts the local Node bridge. The browser uses HTTP/SSE; the bridge
-  translates requests and event streams to the daemon's runtime protocol.
 - Headless `bone run` uses core directly and may emit machine-readable events;
   it has no interactive approval pane or live terminal view.
 
-A browser tab has its own daemon attachment. Clients viewing one conversation
+Each attached client has its own daemon connection. Clients viewing one conversation
 share its actor and event stream; different conversations can run concurrently.
 Loading a conversation changes only the requesting client. Approvals and
 cancellation are scoped to the attached conversation.
@@ -50,10 +48,10 @@ cancellation are scoped to the attached conversation.
   task title. Deleting an open task explicitly confirms stopping work and
   discarding its draft, closes its connection, then deletes the saved history.
   The desktop toolbar shows connection, task/workspace identity, sidebar and
-  split controls, a Changes action, and a tool-permissions menu explicitly scoped
-  to all tasks and clients on the server. The model selector lives in the compact
+  split controls, a unified Tools menu for local tool-call display and
+  server-scoped tool permissions. The model selector lives in the compact
   growing composer footer. Secondary actions (incognito, activity, stats, catalog,
-  dialogs) sit in one menu, and the layout is
+  extensions, dialogs) sit in one menu, and the layout is
   responsive: the central transcript always keeps a minimum width, so in a
   narrow window the split tree is retained but a single branch is focused and
   the sidebar is hidden (both return when the window widens); an overflowing
@@ -97,7 +95,7 @@ cancellation are scoped to the attached conversation.
   outlines. Small corner radii and tighter padding give chat an editor-like
   density. The flat, subtly outlined composer keeps the model selector secondary to
   Send/Stop, while preserving configured input presets, prefix, and padding.
-  More → Tool calls offers Concise (default) and Verbose modes, remembered
+  Tools → Concise (default) or Verbose controls tool-call detail, remembered
   across restarts and applied to every conversation. Concise mode shows one-line
   labels with file paths or shell commands; raw arguments and shell output stay
   behind the disclosure. Verbose mode expands those details. Successful calls
@@ -117,12 +115,15 @@ cancellation are scoped to the attached conversation.
   These are desktop presentation choices, not changes to tool or approval behavior.
 - A collapsible live pane sits above each conversation's composer. Its pages
   show active Agents and daemon-provided task lists or extension content, with
-  independent selection and scrolling in each conversation. Agent rows reuse the
-  task-row styling and open a live job transcript; cancellation targets the
-  conversation that launched the viewer. Task lists retain daemon-owned styling
-  and remain until removed. Explicit Lua floats retain overlay placement.
-  The pane is bounded to eight rows and one-third of the conversation height;
-  pane visibility and navigation shortcuts apply to live pages and overlays.
+  independent selection, scrolling, and follow state in each conversation. Agent
+  rows reuse the task-row styling, show inline status and elapsed time, and open a
+  live job transcript; cancellation targets the conversation that launched the
+  viewer. Task lists retain daemon-owned styling and remain until removed.
+  The pane defaults to one-third of the conversation height and can be resized
+  within a bounded range; following pages tail new output, while pages read away
+  from the latest output show a new-output/jump-to-latest affordance. Explicit
+  Lua floats retain overlay placement. Pane visibility and navigation shortcuts
+  apply to live pages and overlays.
 - Native interactive key requests display the owning task's daemon-provided
   float pane titles and styled lines inside a bounded, scrollable input modal,
   including when that task is in the background or panes are hidden. Menu
@@ -196,34 +197,18 @@ Approval and key-request IDs are separate namespaces; clients must track answere
 IDs separately so an approval cannot suppress a tool's keyboard input request.
 
 The TUI owns terminal layout, wrapping, cursor/input behavior, and color
-rendering. The web client maps the same semantic events to browser components and
-its document/diff canvas. Neither frontend should duplicate agent-loop,
-approval,
-configuration, session-persistence, or extension behavior.
+rendering. The desktop client maps the same semantic events to its eframe
+components and its document/diff canvas. Neither frontend should duplicate
+agent-loop, approval, configuration, session-persistence, or extension behavior.
 
 Themes are resolved by core and sent as snapshots; clients centralize their
 colors through the configured theme. Preserve per-span styling when wrapping,
 and keep text content independent from terminal/browser decoration.
 
-### Web model-content safety
-
-The web client renders model Markdown through one central renderer for completed
-turns, tool-boundary snapshots, canvas Markdown, command output, and replayed
-history. Raw inline and block HTML is displayed as text rather than interpreted.
-The rendered result is sanitized as hostile input by the pinned browser DOMPurify
-asset before it is inserted into the document.
-
-The sanitizer allows only the elements and attributes emitted by the Markdown
-renderer. Links accept approved HTTP(S), `mailto:`, local-path, and fragment
-destinations; the application owns their new-tab target and
-`rel="noopener noreferrer"` values. Images accept only HTTPS or local-path
-sources and receive application-owned lazy-loading, decoding, and referrer-policy
-attributes.
-
 ## Configuration and session UX
 
 The daemon distributes one revisioned configuration schema and resolved values.
-The TUI and web settings views submit typed mutations and render the returned
+The TUI and desktop settings views submit typed mutations and render the returned
 snapshot. Provider credentials are redacted in frontend snapshots.
 
 Stats, catalog, and setup share the correlated daemon-host API. Local and remote
@@ -232,10 +217,24 @@ downloads, credentials, and setup files remain on the daemon host. Provider
 setup is offered automatically only for a genuinely unconfigured install; a
 restored provider credential suppresses unsolicited startup onboarding.
 
+The desktop Extensions screen lists the catalog's `kind = "plugin"` packages with
+install, update, remove, and enable/disable controls. Enable/disable is
+plugin-level: a disabled plugin stays installed but none of its capabilities
+(tools, commands) register. The TUI reaches the same plugin install/update/remove
+through `/catalog`. The config UI presents a single **Plugins** page that unifies
+standalone tools, standalone commands, and plugin packages in one flat list — each
+row carrying its `tool` / `command` / `plugin` type in a dedicated **Type** column
+(blank for any row without one) — so a plugin, a plain-file
+tool, and a plain-file command are managed the same way. Enabling or disabling any
+row routes to the matching canonical setting (`tools.disabled` / `commands.disabled`
+/ `plugins.disabled`). Installing or updating a plugin asks for explicit consent
+first — Bone Lua is not sandboxed and runs with the user's authority — and declining
+leaves the plugin tree unchanged. Every file's `sha256` is verified before anything
+is written.
+
 The daemon owns core conversation history and active transcript state. A client may
 request list/load/new actions and render the resulting snapshot, but clients must not
-write core-owned conversation or message tables. The web bridge may persist web-only
-metadata, including title and archive state, in `webui_conversations`; it must not
+write core-owned conversation or message tables. Client-only metadata must not
 modify core-owned messages or transcript state. On reconnect, restore the selected
 conversation by id and request authoritative state rather than replaying guessed local
 state.
@@ -245,7 +244,7 @@ state.
 1. Define or update the cross-boundary type in `protocol`.
 2. Implement daemon routing/state changes in `core` and emit the appropriate
    event or snapshot.
-3. Update the TUI and web bridge/client to consume the same contract.
+3. Update the TUI and other clients to consume the same contract.
 4. Add protocol/core tests and exercise the feature through at least one real
    frontend workflow.
 

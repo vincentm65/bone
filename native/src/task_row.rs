@@ -23,10 +23,19 @@ pub(crate) fn task_row(
 ) -> egui::Response {
     let label = text.text().to_owned();
     let (rect, response) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::click());
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 36.0), egui::Sense::click());
     let visuals = ui.style().interact_selectable(&response, selected);
     if selected || response.hovered() {
-        ui.painter().rect_filled(rect, 2.0, visuals.bg_fill);
+        ui.painter()
+            .rect_filled(rect, crate::theme::CONTROL_RADIUS, visuals.bg_fill);
+    }
+    if response.has_focus() {
+        ui.painter().rect_stroke(
+            rect,
+            crate::theme::CONTROL_RADIUS,
+            egui::Stroke::new(1.0, ui.visuals().hyperlink_color),
+            egui::StrokeKind::Inside,
+        );
     }
     ui.scope_builder(
         egui::UiBuilder::new()
@@ -60,7 +69,7 @@ pub(crate) fn task_row(
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), &label)
     });
-    response
+    response.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
 /// Font-independent clock used by queued work in either task surface.

@@ -46,6 +46,9 @@ pub fn find_handler(lua: &Lua, name: &str) -> Option<mlua::Function> {
 pub struct RegisteredLuaCommand {
     pub name: String,
     pub description: String,
+    /// Name of the plugin package that registered this command, if any. Enables
+    /// the capability to inherit its plugin's enable state.
+    pub plugin: Option<String>,
 }
 
 /// Create `bone.command.register` and the `bone._commands` storage array.
@@ -112,6 +115,14 @@ pub(crate) fn setup_register_command(lua: &Lua, bone: &Table) -> Result<(), Stri
                     ));
                     return Ok(());
                 }
+            }
+
+            // If this registration runs inside a plugin's init.lua, stamp the
+            // entry with the owning plugin so the capability inherits the
+            // plugin's enable state.
+            let bone: Table = lua.globals().get::<Table>("bone")?;
+            if let Ok(Value::String(owner)) = bone.get::<Value>("_plugin_owner") {
+                entry.set("plugin", owner)?;
             }
 
             commands.push(entry)?;
