@@ -78,6 +78,99 @@ fn boot_reports_invalid_tool_source() {
 }
 
 #[test]
+fn boot_runs_nested_lua_init() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("lua")).unwrap();
+    std::fs::write(dir.path().join("lua/init.lua"), "nested_init_ran = true").unwrap();
+
+    let result = boot(
+        dir.path(),
+        dir.path(),
+        BootOptions {
+            agent_depth: 1,
+            ..Default::default()
+        },
+        "test-model",
+        "test-provider",
+        Some(Arc::new(Mutex::new(Settings::defaults()))),
+    );
+
+    assert!(result.manager.is_available());
+    assert!(
+        result.source_errors.is_empty(),
+        "unexpected errors: {:?}",
+        result.source_errors
+    );
+    // A nested init satisfies startup, so no blank root init.lua is created.
+    assert!(!dir.path().join("init.lua").exists());
+    let lua = result.manager.lua_arc();
+    let lua = lua.lock().unwrap();
+    assert!(lua.globals().get::<bool>("nested_init_ran").unwrap());
+}
+
+#[test]
+fn boot_ignores_uppercase_lua_tool_files() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("init.lua"), "-- valid").unwrap();
+    std::fs::create_dir_all(dir.path().join("lua/tools")).unwrap();
+    std::fs::write(
+        dir.path().join("lua/tools/Foo.lua"),
+        "this is not valid lua (",
+    )
+    .unwrap();
+
+    let result = boot(
+        dir.path(),
+        dir.path(),
+        BootOptions {
+            agent_depth: 1,
+            ..Default::default()
+        },
+        "test-model",
+        "test-provider",
+        Some(Arc::new(Mutex::new(Settings::defaults()))),
+    );
+
+    assert!(result.manager.is_available());
+    assert!(
+        result
+            .source_errors
+            .iter()
+            .all(|error| !error.contains("Foo.lua")),
+        "uppercase file should not be loaded: {:?}",
+        result.source_errors
+    );
+}
+
+#[test]
+fn boot_exposes_helpers_dir_in_bone_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("init.lua"), "-- valid").unwrap();
+
+    let result = boot(
+        dir.path(),
+        dir.path(),
+        BootOptions {
+            agent_depth: 1,
+            ..Default::default()
+        },
+        "test-model",
+        "test-provider",
+        Some(Arc::new(Mutex::new(Settings::defaults()))),
+    );
+
+    assert!(result.manager.is_available());
+    let lua = result.manager.lua_arc();
+    let lua = lua.lock().unwrap();
+    let bone: mlua::Table = lua.globals().get("bone").unwrap();
+    let helpers_dir: String = bone.get("helpers_dir").unwrap();
+    assert!(
+        std::path::Path::new(&helpers_dir).ends_with("lua/helpers"),
+        "unexpected helpers_dir: {helpers_dir}"
+    );
+}
+
+#[test]
 fn boot_loads_config_subagents_before_lua_with_config_precedence() {
     use crate::config::settings::SubagentSettings;
 

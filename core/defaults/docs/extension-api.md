@@ -1,18 +1,25 @@
 # Extension API
 
 Bone embeds Lua 5.4 for tools, commands, settings, themes, keymaps, event hooks,
-and UI components. If `init.lua` is absent, the runtime behaves as
-before. Errors in startup Lua are warnings; core continues without that wiring.
+and UI components. Startup wiring lives in `init.lua`: Bone reads it from the
+config root and, when present, from `lua/init.lua`, running the root file first.
+If neither exists, the runtime behaves as before and a blank root `init.lua` is
+created. Errors in startup Lua are warnings; core continues without that wiring.
 
 Use the namespaced APIs below. Keep `init.lua` as wiring and put implementations
 in `lua/tools/`, `lua/commands/`, `lua/themes/`, `lua/plugins/<name>/`, or
-`lua/lib/` as appropriate.
+`lua/lib/` as appropriate. `require` resolves only against `lua/lib/` as a module
+root, so `require("ui.menu")` loads `lua/lib/ui/menu.lua`. Native helper binaries
+belong in the never-auto-loaded `lua/helpers/` directory, exposed as
+`bone.helpers_dir`.
 
 ## Reloading
 
-Bone fingerprints `init.lua` plus all lowercase `*.lua` files recursively under
-`lua/`. It checks that fingerprint at interaction boundaries, immediately before
-the next prompt or slash command, rather than polling or watching the filesystem.
+Bone fingerprints the init files plus every lowercase `*.lua` file recursively
+under `lua/`. An uppercase stem such as `Foo.lua` is ignored, matching tool and
+command discovery. It checks that fingerprint at interaction boundaries,
+immediately before the next prompt or slash command, rather than polling or
+watching the filesystem.
 In a multi-conversation daemon, one actor claims the changed fingerprint and
 notifies its peers only after accepting the replacement.
 
@@ -36,8 +43,9 @@ bone.on("event_name", function(event, ctx) ... end)
 ```
 
 The global metadata includes `bone.version`, `bone.cwd`, `bone.config_dir`,
-`bone.agent_depth`, `bone.headless`, `bone.model`, and `bone.provider`. Logging
-is available through `bone.log.info`, `bone.log.warn`, and `bone.log.error`.
+`bone.helpers_dir`, `bone.agent_depth`, `bone.headless`, `bone.model`, and
+`bone.provider`. Logging is available through `bone.log.info`, `bone.log.warn`,
+and `bone.log.error`.
 
 ## Plugins
 

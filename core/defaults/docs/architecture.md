@@ -116,10 +116,11 @@ keeps an isolated Lua VM. A catalog change reloads every cached actor without
 letting `ConfigStore` retain those VMs. Frontends keep the fullscreen workflow
 and rendering, but never substitute their own database or config directory.
 
-Building an actor's Lua VM is an ordered boot: seed library modules → run
-`init.lua` → seed default tools/commands → run tool files → run command files →
-run enabled plugins (`lua/plugins/*/init.lua`, one level, sorted) → collect the
-registered tools and commands. A plugin is skipped when disabled via the
+Building an actor's Lua VM is an ordered boot: seed library modules and the
+`lua/helpers/` directory → run `init.lua` (config root, then `lua/init.lua`) →
+seed default tools/commands → run tool files → run command files → run enabled
+plugins (`lua/plugins/*/init.lua`, one level, sorted) → collect the registered
+tools and commands. A plugin is skipped when disabled via the
 canonical `plugins.<name>` setting; disabling never deletes files, and because
 reload rebuilds a fresh VM the change takes effect on the next reload.
 

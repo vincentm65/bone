@@ -77,9 +77,7 @@ fn walk_lua(
             .map_err(|error| SourceStampError::new(&path, error))?;
         if file_type.is_dir() {
             walk_lua(config_dir, &path, out)?;
-        } else if file_type.is_file()
-            && path.extension().is_some_and(|extension| extension == "lua")
-        {
+        } else if file_type.is_file() && super::is_lowercase_lua_path(&path) {
             let relative = path
                 .strip_prefix(config_dir)
                 .expect("walked path must be below config directory")
@@ -93,9 +91,11 @@ fn walk_lua(
 /// Compute a deterministic SHA-256 fingerprint over the Lua source tree
 /// rooted at `config_dir`.
 ///
-/// - Hashes `config_dir/init.lua` (relative path `"init.lua"`) if it exists.
-/// - Recursively hashes every regular `*.lua` file under
-///   `config_dir/lua`, sorted by relative path.
+/// - Hashes `config_dir/init.lua` (relative path `"init.lua"`) if it exists;
+///   `lua/init.lua` is covered by the `lua/` walk below.
+/// - Recursively hashes every regular lowercase `*.lua` file under
+///   `config_dir/lua`, sorted by relative path. An uppercase stem such as
+///   `Foo.lua` is ignored, matching Lua discovery.
 /// - Each file contributes its relative path and contents to the digest.
 /// - Returns the final hash or an error if a filesystem operation fails.
 pub fn stamp(config_dir: &Path) -> Result<SourceHash, SourceStampError> {

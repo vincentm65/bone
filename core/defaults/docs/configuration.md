@@ -17,7 +17,8 @@ The resolved config directory is provided in the system prompt. Its default is
 | `subagents.yaml` | Named static subagent definitions and prompts |
 | `extensions.yaml` | Namespaced extension values |
 | `command-policy.yaml` | Shell command safety classifications |
-| `init.lua` | Optional runtime wiring; not a competing settings store |
+| `init.lua` | Optional runtime wiring; also read from `lua/init.lua`; not a competing settings store |
+| `lua/helpers/` | Native helper binaries invoked by Lua scripts; never auto-loaded |
 | `AGENTS.md` and `docs/` | Bone-owned bundled reference documents |
 
 Built-in schemas, labels, types, and option lists live in Rust. The shipped
@@ -40,8 +41,9 @@ file-edited and always restart-required. Provider API keys may be plaintext or
 an exact `${ENV_VAR}` reference; only the complete reference form resolves from
 the environment.
 
-`init.lua` is for lightweight startup wiring. Put substantial implementations in
-purpose-specific Lua files and do not define a second settings table there.
+`init.lua` (at the config root or `lua/init.lua`) is for lightweight startup
+wiring. Put substantial implementations in purpose-specific Lua files and do not
+define a second settings table there.
 
 ## Provider prompt cache keys
 

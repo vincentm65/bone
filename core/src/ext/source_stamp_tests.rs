@@ -124,3 +124,17 @@ fn no_init_lua_but_lua_files_still_hashed() {
     let h2 = stamp(dir2.path()).unwrap();
     assert_ne!(h, h2);
 }
+
+#[test]
+fn uppercase_lua_files_are_ignored() {
+    let lower = make_config_dir(&[("init.lua", "root"), ("lua/a.lua", "a")]);
+    let with_upper = make_config_dir(&[
+        ("init.lua", "root"),
+        ("lua/a.lua", "a"),
+        ("lua/Foo.lua", "uppercase stem is not discovered"),
+    ]);
+    assert_eq!(
+        stamp(lower.path()).unwrap(),
+        stamp(with_upper.path()).unwrap()
+    );
+}

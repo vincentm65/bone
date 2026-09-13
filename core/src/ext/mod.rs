@@ -71,6 +71,19 @@ fn is_safe_leaf_name(name: &str) -> bool {
         )
 }
 
+/// Whether a path names a Lua source file that Bone discovers and executes.
+///
+/// Discovery is lowercase-only: an uppercase stem such as `Foo.lua` is
+/// ignored, matching the rule documented in `extension-api.md`.
+pub(crate) fn is_lowercase_lua_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            Path::new(name).extension().is_some_and(|ext| ext == "lua")
+                && name == name.to_lowercase()
+        })
+}
+
 /// Extract a one-line description from bundled default Lua content for the
 /// setup wizard's pickers. Prefers a `description = "..."` field (as used by
 /// `register_tool`/`register_command`), then falls back to the first `--`
@@ -350,6 +363,22 @@ pub fn seed_default_lua_commands(dir: &Path, allow: Option<&HashSet<String>>, fo
     seed_default_lua(dir, DEFAULT_LUA_COMMANDS, allow, force)
 }
 
+/// Ensure the `lua/helpers/` directory exists for user-supplied native helper
+/// binaries.
+///
+/// Bone never discovers or executes files here: helpers are located through
+/// `bone.helpers_dir` and invoked explicitly through approved shell or process
+/// APIs. Their contents are also outside the Lua source fingerprint. The
+/// directory only pins the conventional location so scripts have a stable path.
+pub fn seed_helpers_dir(dir: &Path) {
+    if let Err(e) = std::fs::create_dir_all(dir) {
+        ctx::runtime_warn(format!(
+            "bone: warning: could not create {}: {e}",
+            dir.display()
+        ));
+    }
+}
+
 /// Execute the Lua tool files from `dir`, honoring the onboarding selection.
 /// Bundled default tools the user deselected are skipped; user-authored files
 /// (not among the bundled defaults) always run. `allow == None` runs every
@@ -485,7 +514,7 @@ fn run_lua_files_filtered(
         .map_err(|e| format!("failed to read {}: {e}", dir.display()))?
         .filter_map(|e| e.ok())
         .map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|ext| ext == "lua"))
+        .filter(|p| is_lowercase_lua_path(p))
         .collect();
     entries.sort();
 

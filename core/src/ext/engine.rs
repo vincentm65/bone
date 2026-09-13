@@ -61,6 +61,14 @@ pub(crate) fn create_engine(
     bone.set("config_dir", config_dir.to_string_lossy().to_string())
         .map_err(crate::util::errstr)?;
 
+    // Conventional location for user-supplied native helper binaries, created by
+    // `seed_helpers_dir`. Exposed so scripts locate it without hard-coding paths.
+    bone.set(
+        "helpers_dir",
+        config_dir.join("lua/helpers").to_string_lossy().to_string(),
+    )
+    .map_err(crate::util::errstr)?;
+
     // Boot context: scripts can adapt to nesting depth and headless mode
     // (e.g. the subagent tool refuses to register inside sub-agent VMs).
     bone.set("agent_depth", opts.agent_depth)
@@ -103,8 +111,10 @@ pub(crate) fn create_engine(
         .set("print", print_fn)
         .map_err(crate::util::errstr)?;
 
-    // Set safe package.path entries so users can `require` from their lua dir.
-    let lua_dir = config_dir.join("lua");
+    // Restrict `require` to the `lua/lib` module root so packaged modules
+    // resolve predictably (`require("ui.menu")` → `lua/lib/ui/menu.lua`). The
+    // `lua/` directory itself is not a module search path.
+    let lua_lib_dir = config_dir.join("lua").join("lib");
     let package: Table = globals
         .get("package")
         .map_err(|e| format!("failed to get package table: {e}"))?;
@@ -114,12 +124,9 @@ pub(crate) fn create_engine(
     } else {
         ";"
     };
-    let lua_dir_str = lua_dir.to_string_lossy();
-    let lua_lib_dir = lua_dir.join("lib");
     let lua_lib_dir_str = lua_lib_dir.to_string_lossy();
     let new_path = format!(
-        "{lua_dir_str}/?.lua;{lua_dir_str}/?/init.lua;{lua_lib_dir_str}/?.lua;{lua_lib_dir_str}/?/init.lua{sep}{existing_path}",
-        lua_dir_str = lua_dir_str,
+        "{lua_lib_dir_str}/?.lua;{lua_lib_dir_str}/?/init.lua{sep}{existing_path}",
         lua_lib_dir_str = lua_lib_dir_str,
     );
     package.set("path", new_path).map_err(crate::util::errstr)?;
@@ -152,23 +159,59 @@ pub(crate) fn create_engine(
     Ok(lua)
 }
 
-/// Load and execute `init.lua`. Returns `Ok(true)` if the file existed and
-/// ran without errors. Returns `Ok(false)` if the file is missing.
-/// If `init.lua` does not exist, a blank one is created automatically.
+/// Load and execute the startup `init.lua`. Returns `Ok(true)` if at least one
+/// init file existed and ran without errors, `Ok(false)` if none existed.
+///
+/// Two locations are accepted and run in order, in the same VM:
+/// 1. `config_dir/init.lua` (canonical root)
+/// 2. `config_dir/lua/init.lua` (module-directory form)
+///
+/// When neither exists, a blank root `init.lua` is created automatically so the
+/// user has an obvious place to start wiring. A failing file is rolled back on
+/// its own and reported; errors are aggregated so boot can surface them.
 pub(crate) fn run_init(lua: &Lua, config_dir: &Path) -> Result<bool, String> {
-    let init_path = config_dir.join("init.lua");
-    if !init_path.exists() {
-        let default_init = DEFAULT_INIT_LUA;
-        std::fs::write(&init_path, default_init)
+    let root_init = config_dir.join("init.lua");
+    let nested_init = config_dir.join("lua").join("init.lua");
+
+    let root_exists = root_init.exists();
+    let nested_exists = nested_init.exists();
+
+    if !root_exists && !nested_exists {
+        std::fs::write(&root_init, DEFAULT_INIT_LUA)
             .map_err(|e| format!("failed to create init.lua: {e}"))?;
         return Ok(false);
     }
 
-    let source =
-        std::fs::read_to_string(&init_path).map_err(|e| format!("failed to read init.lua: {e}"))?;
+    let mut ran = false;
+    let mut errors = Vec::new();
+    if root_exists {
+        match exec_init_file(lua, &root_init, config_dir, "init.lua") {
+            Ok(()) => ran = true,
+            Err(e) => errors.push(e),
+        }
+    }
+    if nested_exists {
+        match exec_init_file(lua, &nested_init, config_dir, "lua/init.lua") {
+            Ok(()) => ran = true,
+            Err(e) => errors.push(e),
+        }
+    }
 
-    match lua.load(&source).set_name("init.lua").exec() {
-        Ok(()) => Ok(true),
+    if errors.is_empty() {
+        Ok(ran)
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+/// Read and execute one startup init file, rolling back settings owned by
+/// `"init.lua"` on failure. `name` is both the Lua chunk name and error prefix.
+fn exec_init_file(lua: &Lua, path: &Path, config_dir: &Path, name: &str) -> Result<(), String> {
+    let source =
+        std::fs::read_to_string(path).map_err(|e| format!("failed to read {name}: {e}"))?;
+
+    match lua.load(&source).set_name(name).exec() {
+        Ok(()) => Ok(()),
         Err(e) => {
             if let Ok(bone) = lua.globals().get::<Table>("bone")
                 && let Ok(settings) = bone.get::<Table>("settings")
@@ -176,7 +219,7 @@ pub(crate) fn run_init(lua: &Lua, config_dir: &Path) -> Result<bool, String> {
             {
                 let _ = rollback.call::<()>("init.lua");
             }
-            let message = format!("init.lua error: {e}");
+            let message = format!("{name} error: {e}");
             super::ctx::lua_log(&config_dir.to_string_lossy(), "warn", &message);
             Err(message)
         }

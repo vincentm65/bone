@@ -281,7 +281,10 @@ pub fn save_setup_selection(selection: &SetupSelection) -> std::io::Result<()> {
 /// install is already usable even if the optional onboarding files are absent;
 /// reopening the wizard on every client restart would be destructive noise.
 pub fn needs_onboarding() -> bool {
-    if bone_dir().join("init.lua").exists() || setup_selection_path().exists() {
+    if bone_dir().join("init.lua").exists()
+        || bone_dir().join("lua/init.lua").exists()
+        || setup_selection_path().exists()
+    {
         return false;
     }
     let Ok(Some(providers)) = domains::load_providers() else {
@@ -301,6 +304,7 @@ pub fn seed_base() -> Result<(), String> {
     sync_core_docs();
     migrate_memory_to_catalog(&bone_dir());
     ext::seed_default_lua_libs(&bone_dir().join("lua/lib"), None, false);
+    ext::seed_helpers_dir(&bone_dir().join("lua/helpers"));
     Ok(())
 }
 

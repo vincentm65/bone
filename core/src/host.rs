@@ -188,7 +188,8 @@ impl HostService {
             config_revision: config.revision,
             providers,
             active_provider: config.active_provider,
-            init_exists: config::bone_dir().join("init.lua").exists(),
+            init_exists: config::bone_dir().join("init.lua").exists()
+                || config::bone_dir().join("lua/init.lua").exists(),
             needs_onboarding: config::needs_onboarding(),
             catalog: catalog_snapshot(
                 load_catalog(&mut state, false),

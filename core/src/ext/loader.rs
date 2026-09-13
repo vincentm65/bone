@@ -17,7 +17,7 @@ fn log_boot_warning(config_dir: &Path, message: impl std::fmt::Display) {
 /// Boot the Lua extension system.
 ///
 /// 1. Creates the Lua VM with the `bone` global table.
-/// 2. Executes `~/.bone-rust/init.lua` if it exists.
+/// 2. Executes the startup `init.lua` (config root, then `lua/init.lua`) if present.
 /// 3. Collects any tools registered via `bone.tool.register()`.
 /// 4. Returns a `BootResult` owning the Lua VM and registered tools.
 ///
@@ -114,9 +114,11 @@ pub fn boot(
         }
     }
 
-    // Seed libraries before init.lua so user startup code can `require` them.
+    // Seed libraries before init.lua so user startup code can `require` them,
+    // and create the conventional native-helper directory.
     if !subagent {
         super::seed_default_lua_libs(&config_dir.join("lua/lib"), None, false);
+        super::seed_helpers_dir(&config_dir.join("lua/helpers"));
     }
 
     let mut source_errors = Vec::new();

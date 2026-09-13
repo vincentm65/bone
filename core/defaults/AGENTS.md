@@ -1,4 +1,4 @@
-<!-- bone-agents-reference-version: 4 -->
+<!-- bone-agents-reference-version: 5 -->
 # Bone Core Reference
 
 Bone refreshes this concise index and the focused core documents from the
