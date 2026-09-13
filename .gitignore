@@ -25,3 +25,16 @@ test_edits.txt
 
 # npm generated artifacts
 *.tgz
+
+# Local network/personal-data scratch — never commit
+/AXIS_CAMERA_ACCESS_RECOVERY.md
+/findings.md
+/bone-desktop-daemon.log
+/scan.py
+/onvif_probe.py
+/page_parse.py
+/wugg_enum.py
+/wugg_probe.py
+/wugg_post.py
+/redact_csv.py
+/redact_pdfs.py
