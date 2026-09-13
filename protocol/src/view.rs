@@ -53,6 +53,33 @@ pub enum PaneLineSpec {
     },
 }
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PanelSlot {
+    Left,
+    Right,
+    Bottom,
+    Top,
+    Overlay,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PanelPlacement {
+    pub slot: PanelSlot,
+    #[serde(default)]
+    pub order: i32,
+    #[serde(default)]
+    pub size_hint: Option<u16>,
+    #[serde(default)]
+    pub pinned: bool,
+    #[serde(default = "default_closable")]
+    pub closable: bool,
+}
+
+fn default_closable() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PaneContent {
     pub source: String,
@@ -63,6 +90,13 @@ pub struct PaneContent {
     pub visible_rows: usize,
     #[serde(default)]
     pub scroll: usize,
+    /// Optional semantic placement. Older producers omit this and retain the
+    /// frontend's existing default placement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<PanelPlacement>,
+    /// Extension that owns this panel, used for lifecycle cleanup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 impl PaneContent {
@@ -138,6 +172,12 @@ pub enum Component {
         border: bool,
         #[serde(default)]
         scroll: usize,
+        /// Optional semantic placement for frontend layout managers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placement: Option<PanelPlacement>,
+        /// Extension that owns this component.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        owner: Option<String>,
     },
     StatusLine {
         id: String,
@@ -169,6 +209,8 @@ impl Component {
             z: 0,
             border: false,
             scroll: pc.scroll,
+            placement: pc.placement.clone(),
+            owner: pc.owner.clone(),
         }
     }
 
@@ -180,6 +222,8 @@ impl Component {
                 lines,
                 rect,
                 scroll,
+                placement,
+                owner,
                 ..
             } => Some(PaneContent {
                 source: id.clone(),
@@ -187,6 +231,8 @@ impl Component {
                 lines: lines.clone(),
                 visible_rows: rect.height.max(1) as usize,
                 scroll: *scroll,
+                placement: placement.clone(),
+                owner: owner.clone(),
             }),
             Component::StatusLine { .. } => None,
         }
@@ -225,6 +271,11 @@ pub enum ViewDiff {
     Remove {
         id: String,
     },
+    /// Update a panel's semantic placement without replacing its content.
+    UpdatePlacement {
+        id: String,
+        placement: Option<PanelPlacement>,
+    },
     SetHighlight {
         name: String,
         fg: Option<String>,
@@ -251,6 +302,60 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pane_content_metadata_is_optional_and_round_trips() {
+        let legacy: PaneContent = serde_json::from_value(serde_json::json!({
+            "source": "legacy",
+            "title": "Legacy"
+        }))
+        .unwrap();
+        assert_eq!(legacy.lines.len(), 0);
+        assert_eq!(legacy.visible_rows, 8);
+        assert!(legacy.placement.is_none());
+        assert!(legacy.owner.is_none());
+
+        let placement = PanelPlacement {
+            slot: PanelSlot::Right,
+            order: 2,
+            size_hint: Some(24),
+            pinned: true,
+            closable: false,
+        };
+        let pane = PaneContent {
+            source: "panel".into(),
+            title: "Panel".into(),
+            lines: vec![PaneLineSpec::Plain("content".into())],
+            visible_rows: 4,
+            scroll: 1,
+            placement: Some(placement.clone()),
+            owner: Some("plugin.example".into()),
+        };
+        let restored: PaneContent =
+            serde_json::from_value(serde_json::to_value(&pane).unwrap()).unwrap();
+        assert_eq!(restored.placement, Some(placement));
+        assert_eq!(restored.owner.as_deref(), Some("plugin.example"));
+    }
+
+    #[test]
+    fn placement_diff_round_trips() {
+        let diff = ViewDiff::UpdatePlacement {
+            id: "panel".into(),
+            placement: Some(PanelPlacement {
+                slot: PanelSlot::Overlay,
+                order: 0,
+                size_hint: None,
+                pinned: false,
+                closable: true,
+            }),
+        };
+        let restored: ViewDiff =
+            serde_json::from_value(serde_json::to_value(&diff).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(diff).unwrap(),
+            serde_json::to_value(restored).unwrap()
+        );
+    }
+
+    #[test]
     fn live_pane_presentation_survives_serialization_and_legacy_floats_default_to_overlay() {
         let pane = PaneContent {
             source: "task_list".into(),
@@ -258,6 +363,8 @@ mod tests {
             lines: vec![PaneLineSpec::Plain("Review changes".into())],
             visible_rows: 8,
             scroll: 2,
+            placement: None,
+            owner: None,
         };
         let component = Component::float_from_pane_content(&pane);
         let mut json = serde_json::to_value(&component).unwrap();

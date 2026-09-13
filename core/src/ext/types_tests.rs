@@ -17,6 +17,7 @@ fn managed_hook_manager(script: &str) -> ExtensionManager {
         Arc::clone(&ui),
     )
     .unwrap();
+    super::super::api_ui::setup_api_ui(&lua, &bone, Arc::clone(&ui)).unwrap();
     lua.load(script).exec().unwrap();
     ExtensionManager::from_arc(
         Arc::new(Mutex::new(lua)),
@@ -450,6 +451,29 @@ fn managed_hook_cancellation_interrupts_lua_and_cleans_up_hook() {
             .unwrap(),
         4
     );
+}
+
+#[test]
+fn managed_event_handler_stamps_registered_plugin_owner_on_panels() {
+    let manager = managed_hook_manager(
+        r#"
+        bone._plugin_owner = "example.plugin"
+        bone.on("custom", function()
+            bone.api.ui.open_float({ id = "panel", lines = { "content" } })
+        end)
+        bone._plugin_owner = nil
+        "#,
+    );
+
+    manager.dispatch_managed("custom", serde_json::json!({}), managed_hook_ctx(), false);
+
+    let view = crate::ext::api_ui::snapshot(&manager.ui_handle());
+    match view.get("panel") {
+        Some(crate::runtime::view::Component::Float { owner, .. }) => {
+            assert_eq!(owner.as_deref(), Some("example.plugin"));
+        }
+        _ => panic!("expected plugin-owned panel"),
+    }
 }
 
 #[test]

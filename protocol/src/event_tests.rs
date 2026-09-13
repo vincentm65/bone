@@ -339,6 +339,12 @@ fn every_runtime_command_variant_round_trips() {
             request_id: Some(13),
             action: "toggle_panes".into(),
         },
+        RuntimeCommand::PanelAction {
+            request_id: Some(14),
+            panel_id: "plugin.panel".into(),
+            action: "refresh".into(),
+            payload: json!({ "limit": 10 }),
+        },
     ];
     for cmd in &cmds {
         let s = serde_json::to_string(cmd).expect("serialize");

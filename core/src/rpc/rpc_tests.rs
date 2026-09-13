@@ -331,6 +331,264 @@ fn test_daemon_ctx(
     )
 }
 
+fn managed_hook_ctx() -> crate::ext::ctx::CtxConfig {
+    let store = crate::config::store::ConfigStore::for_test();
+    let schema = store.schema();
+    crate::ext::ctx::CtxConfig::new(
+        std::env::temp_dir().to_string_lossy().to_string(),
+        Arc::new(Mutex::new(Default::default())),
+        store,
+        schema,
+    )
+}
+
+fn panel_action_extensions() -> crate::ext::ExtensionManager {
+    let lua = mlua::Lua::new();
+    let bone = lua.create_table().unwrap();
+    let settings = Arc::new(Mutex::new(crate::config::settings::Settings::defaults()));
+    let registry = Arc::new(std::sync::RwLock::new(Default::default()));
+    let ui = crate::ext::api_ui::new_shared();
+    crate::ext::ops_events::setup_on(&lua, &bone).unwrap();
+    crate::ext::api_ui::setup_api_ui(&lua, &bone, ui.clone()).unwrap();
+    lua.globals().set("bone", bone.clone()).unwrap();
+    crate::ext::api::setup_api(
+        &lua,
+        &bone,
+        settings.clone(),
+        registry.clone(),
+        std::env::temp_dir().join("bone-panel-action-settings.yaml"),
+        ui.clone(),
+    )
+    .unwrap();
+    lua.load(
+        r#"
+        bone.on("panel_action", function(event)
+            _G.panel_id = event.panel_id
+            _G.panel_action = event.action
+            _G.panel_limit = event.payload.limit
+            bone.api.ui.open_float({
+                id = event.panel_id,
+                title = "Panel",
+                lines = { "updated" },
+                placement = { slot = "right", order = 1 },
+            })
+        end)
+        "#,
+    )
+    .exec()
+    .unwrap();
+    crate::ext::ExtensionManager::from_arc(
+        Arc::new(Mutex::new(lua)),
+        true,
+        true,
+        Vec::new(),
+        settings,
+        registry,
+        ui,
+    )
+}
+
+fn agent_panel_extensions() -> crate::ext::ExtensionManager {
+    let lua = mlua::Lua::new();
+    let bone = lua.create_table().unwrap();
+    let settings = Arc::new(Mutex::new(crate::config::settings::Settings::defaults()));
+    let registry = Arc::new(std::sync::RwLock::new(Default::default()));
+    let ui = crate::ext::api_ui::new_shared();
+    crate::ext::ops_events::setup_on(&lua, &bone).unwrap();
+    crate::ext::api_ui::setup_api_ui(&lua, &bone, ui.clone()).unwrap();
+    lua.globals().set("bone", bone.clone()).unwrap();
+    crate::ext::api::setup_api(
+        &lua,
+        &bone,
+        settings.clone(),
+        registry.clone(),
+        std::env::temp_dir().join("bone-agent-panel-settings.yaml"),
+        ui.clone(),
+    )
+    .unwrap();
+    lua.load(
+        r#"
+        local panel_id = "plugin.agent-run"
+        bone.api.ui.open_float({
+            id = panel_id,
+            title = "Agent run",
+            lines = { "starting" },
+            placement = { slot = "right", order = 0, closable = true },
+        })
+        bone.on("panel_action", function(event)
+            if event.panel_id ~= panel_id then return end
+            if event.action == "focus" then
+                bone.api.ui.set_statusline(panel_id .. ".status", {
+                    { text = "focused", align = "right" },
+                })
+            elseif event.action == "expand" then
+                bone.api.ui.set_lines(panel_id, { "expanded", "streaming output" })
+            elseif event.action == "close" then
+                bone.api.ui.close(panel_id)
+            end
+        end)
+        "#,
+    )
+    .exec()
+    .unwrap();
+    crate::ext::ExtensionManager::from_arc(
+        Arc::new(Mutex::new(lua)),
+        true,
+        true,
+        Vec::new(),
+        settings,
+        registry,
+        ui,
+    )
+}
+
+#[test]
+fn agent_panel_fixture_handles_semantic_actions_and_owner_cleanup() {
+    let manager = agent_panel_extensions();
+    let dispatch = |action: &str| {
+        manager.dispatch_managed(
+            "panel_action",
+            serde_json::json!({
+                "panel_id": "plugin.agent-run",
+                "action": action,
+                "payload": {},
+            }),
+            managed_hook_ctx(),
+            false,
+        )
+    };
+
+    let view = crate::ext::api_ui::snapshot(&manager.ui_handle());
+    assert!(view.get("plugin.agent-run").is_some());
+    assert!(matches!(
+        view.get("plugin.agent-run"),
+        Some(crate::runtime::Component::Float { placement: Some(placement), .. })
+            if placement.slot == bone_protocol::PanelSlot::Right
+    ));
+
+    dispatch("focus");
+    assert!(
+        crate::ext::api_ui::snapshot(&manager.ui_handle())
+            .get("plugin.agent-run.status")
+            .is_some()
+    );
+    dispatch("expand");
+    let expanded = crate::ext::api_ui::snapshot(&manager.ui_handle());
+    assert!(matches!(
+        expanded.get("plugin.agent-run"),
+        Some(crate::runtime::Component::Float { lines, .. })
+            if lines.len() == 2
+    ));
+    dispatch("close");
+    assert!(
+        crate::ext::api_ui::snapshot(&manager.ui_handle())
+            .get("plugin.agent-run")
+            .is_none()
+    );
+
+    // Re-open an owned panel and verify reload-style owner cleanup removes it.
+    let lua = manager.lua_handle();
+    lua.lock()
+        .unwrap()
+        .load(
+            r#"
+            bone._plugin_owner = "agent-plugin"
+            bone.api.ui.open_float({ id = "plugin.agent-run", lines = { "again" } })
+            "#,
+        )
+        .exec()
+        .unwrap();
+    assert_eq!(
+        manager.ui_handle().lock().unwrap().owners(),
+        vec!["agent-plugin"]
+    );
+    assert_eq!(
+        manager
+            .ui_handle()
+            .lock()
+            .unwrap()
+            .remove_owner("agent-plugin"),
+        1
+    );
+    assert!(
+        crate::ext::api_ui::snapshot(&manager.ui_handle())
+            .get("plugin.agent-run")
+            .is_none()
+    );
+}
+
+#[test]
+fn panel_action_hook_receives_panel_payload_and_updates_shared_view() {
+    let manager = panel_action_extensions();
+    let result = manager.dispatch_managed(
+        "panel_action",
+        serde_json::json!({
+            "panel_id": "plugin.panel",
+            "action": "refresh",
+            "payload": { "limit": 10 },
+            "request_id": 7,
+        }),
+        managed_hook_ctx(),
+        false,
+    );
+    assert!(result.operations.is_empty());
+    let view = crate::ext::api_ui::snapshot(&manager.ui_handle());
+    let component = view.get("plugin.panel").expect("panel action opened panel");
+    assert!(matches!(
+        component,
+        crate::runtime::Component::Float { placement: Some(placement), .. }
+            if placement.slot == bone_protocol::PanelSlot::Right
+    ));
+    let lua = manager.lua_handle();
+    let lua = lua.lock().unwrap();
+    assert_eq!(
+        lua.globals().get::<String>("panel_id").unwrap(),
+        "plugin.panel"
+    );
+    assert_eq!(
+        lua.globals().get::<String>("panel_action").unwrap(),
+        "refresh"
+    );
+    assert_eq!(lua.globals().get::<i64>("panel_limit").unwrap(), 10);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn panel_action_command_routes_through_daemon_hook() {
+    let session = crate::runtime::RuntimeSession::new(crate::tools::registry::ToolHandler::new(
+        crate::tools::builtin_tools(),
+    ));
+    let (mut ctx, hub, mut commands) = test_daemon_ctx(
+        Arc::new(NamedTestProvider {
+            id: "test",
+            model: "test-model",
+        }),
+        panel_action_extensions(),
+        session,
+    );
+    let mut events = hub.subscribe();
+    let flow = ctx
+        .handle_idle_command(
+            RuntimeCommand::PanelAction {
+                request_id: Some(7),
+                panel_id: "plugin.panel".into(),
+                action: "refresh".into(),
+                payload: serde_json::json!({ "limit": 10 }),
+            },
+            &mut commands,
+        )
+        .await;
+    assert!(matches!(flow, Flow::Continue));
+    let snapshot = loop {
+        match events.recv().await.unwrap() {
+            RuntimeEvent::StateSnapshot { snapshot } => break snapshot,
+            _ => continue,
+        }
+    };
+    assert_eq!(snapshot.transcript_len, 0);
+    let view = crate::ext::api_ui::snapshot(&ctx.extensions.ui_handle());
+    assert!(view.get("plugin.panel").is_some());
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "current_thread")]
 async fn synchronize_is_correlated_when_idle_and_during_a_turn() {

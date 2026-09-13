@@ -1753,6 +1753,7 @@ impl DaemonCtx {
         let (conversation_tx, conversation_rx) = std::sync::mpsc::channel();
         let ctx_cfg = setup.ctx_config(Some(conversation_tx));
         let lua = self.extensions.lua_handle();
+        let command_owner = self.extensions.command_owner(&name);
 
         // The handler call blocks (Lua + nested tool calls), so run it off the
         // async runtime (spawn_blocking — the handler may nest tool calls).
@@ -1768,6 +1769,9 @@ impl DaemonCtx {
                 Ok(t) => t,
                 Err(_) => return Some((None, Vec::new())),
             };
+            if let Ok(bone) = lua_guard.globals().get::<mlua::Table>("bone") {
+                let _ = bone.set("_active_plugin_owner", command_owner.as_deref());
+            }
             // Release the VM lock before calling in: a nested `ctx.tools.call` runs
             // inline on this thread and must re-acquire the (non-reentrant) mutex.
             drop(lua_guard);
@@ -1780,6 +1784,14 @@ impl DaemonCtx {
                     display_role: None,
                 }),
             };
+            if let Ok(bone) = lua
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .globals()
+                .get::<mlua::Table>("bone")
+            {
+                let _ = bone.set("_active_plugin_owner", mlua::Value::Nil);
+            }
             Some((ret, conversation_rx.try_iter().collect()))
         });
         match self.pump_blocking(commands, handle, setup, false).await {
@@ -2105,6 +2117,20 @@ impl DaemonCtx {
                 message: "Lua extension reload failed; previous extensions remain active".into(),
             });
             return false;
+        }
+
+        // Remove transient UI owned by the old extension runtime before swapping
+        // managers. Legacy owner-less components intentionally remain intact.
+        let old_ui = self.extensions.ui_handle();
+        let old_owners = crate::ext::api_ui::lock_shared(&old_ui).owners();
+        {
+            let mut ui = crate::ext::api_ui::lock_shared(&old_ui);
+            for owner in old_owners {
+                ui.remove_owner(&owner);
+            }
+        }
+        for diff in crate::ext::api_ui::drain_diffs(&old_ui) {
+            self.hub.publish(RuntimeEvent::ViewDiff { diff });
         }
 
         booted.manager.use_submit_inbox(self.submit_inbox.clone());
@@ -2813,6 +2839,28 @@ impl DaemonCtx {
                 let kind = self.extensions.dispatch_keymap(&action);
                 self.hub
                     .publish(RuntimeEvent::KeymapDispatched { request_id, kind });
+                Flow::Continue
+            }
+            // Daemon-owned panel interaction. The action is fire-and-forget;
+            // extensions may update shared view state and/or request conversation
+            // operations through the same managed hook context as lifecycle events.
+            RuntimeCommand::PanelAction {
+                request_id,
+                panel_id,
+                action,
+                payload,
+            } => {
+                let hook_payload = serde_json::json!({
+                    "panel_id": panel_id,
+                    "action": action,
+                    "payload": payload,
+                    "request_id": request_id,
+                });
+                let result = self
+                    .run_managed_hook(commands, "panel_action".into(), hook_payload, false)
+                    .await;
+                self.apply_conversation_operations(result.operations);
+                self.publish_snapshot();
                 Flow::Continue
             }
             // Lua hook on the daemon's VM; snapshot acknowledges completion.

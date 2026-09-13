@@ -265,6 +265,8 @@ fn view_snapshot_replaces_only_daemon_owned_components_and_highlights() {
                     z: 0,
                     border: false,
                     scroll: 0,
+                    placement: None,
+                    owner: None,
                 },
             ],
             highlights: std::collections::HashMap::from([("thinking".into(), "#010203".into())]),
@@ -294,6 +296,8 @@ fn view_snapshot_replaces_only_daemon_owned_components_and_highlights() {
                 z: 0,
                 border: false,
                 scroll: 0,
+                placement: None,
+                owner: None,
             }],
             highlights: std::collections::HashMap::from([(
                 "input_border".into(),

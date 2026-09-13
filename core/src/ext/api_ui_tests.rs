@@ -66,6 +66,72 @@ fn set_lines_updates_existing_float() {
 }
 
 #[test]
+fn set_placement_updates_existing_float_and_rejects_missing_or_non_float() {
+    let (lua, ui) = lua_with_api();
+    lua.load(
+        r#"
+            bone.api.ui.open_float({ id = "f", lines = { "a" } })
+            assert(bone.api.ui.set_placement("f", {
+                slot = "right", order = 2, size_hint = 50,
+                pinned = true, closable = false,
+            }))
+            assert(not bone.api.ui.set_placement("missing", nil))
+            bone.api.ui.set_statusline("status", { { text = "status" } })
+            assert(not bone.api.ui.set_placement("status", nil))
+        "#,
+    )
+    .exec()
+    .unwrap();
+
+    let view = snapshot(&ui);
+    let component = view.get("f").unwrap();
+    let placement = match component {
+        Component::Float { placement, .. } => placement.as_ref().unwrap(),
+        _ => panic!("expected float"),
+    };
+    assert_eq!(placement.slot, bone_protocol::PanelSlot::Right);
+    assert_eq!(placement.order, 2);
+    assert_eq!(placement.size_hint, Some(50));
+    assert!(placement.pinned);
+    assert!(!placement.closable);
+    assert!(drain_diffs(&ui).iter().any(|diff| matches!(
+        diff,
+        ViewDiff::UpdatePlacement { id, placement: Some(placement) }
+            if id == "f" && placement.slot == bone_protocol::PanelSlot::Right
+    )));
+}
+
+#[test]
+fn plugin_owned_components_can_be_removed_without_touching_legacy_components() {
+    let (lua, ui) = lua_with_api();
+    lua.load(
+        r#"
+            bone._plugin_owner = "example"
+            bone.api.ui.open_float({ id = "owned", lines = { "owned" } })
+            bone._plugin_owner = nil
+            bone.api.ui.open_float({ id = "legacy", lines = { "legacy" } })
+        "#,
+    )
+    .exec()
+    .unwrap();
+
+    {
+        let guard = ui.lock().unwrap();
+        assert_eq!(guard.owners(), vec!["example"]);
+    }
+    assert_eq!(ui.lock().unwrap().remove_owner("example"), 1);
+    let mut guard = ui.lock().unwrap();
+    assert!(guard.view.get("owned").is_none());
+    assert!(guard.view.get("legacy").is_some());
+    assert!(
+        guard
+            .drain_diffs()
+            .iter()
+            .any(|diff| matches!(diff, ViewDiff::Remove { id } if id == "owned"))
+    );
+}
+
+#[test]
 fn close_removes_and_statusline_and_highlight_apply() {
     let (lua, ui) = lua_with_api();
     lua.load(

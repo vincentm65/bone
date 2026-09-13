@@ -13,10 +13,12 @@
 
 use std::collections::HashMap;
 
+use bone_protocol::view::PanelSlot;
 use bone_protocol::{Align, Anchor, Component, PaneLineSpec, StatusSegment, ViewModel};
 use eframe::egui;
 
 use crate::theme::{self, Palette};
+use crate::workspace::PanelLayout;
 
 /// Approximate point width of one terminal character cell.
 const CHAR_WIDTH: f32 = 7.0;
@@ -226,6 +228,7 @@ pub fn render_floats(
     visible: bool,
     active: Option<&str>,
     scrolls: &HashMap<String, i64>,
+    panel_layout: Option<&PanelLayout>,
 ) {
     if !visible {
         return;
@@ -235,17 +238,24 @@ pub fn render_floats(
     for component in &view.components {
         let Component::Float {
             id,
-            presentation: bone_protocol::PanePresentation::Overlay,
             title,
             lines,
             rect,
             border,
             scroll,
+            placement,
             ..
         } = component
         else {
             continue;
         };
+        let effective_slot = panel_layout
+            .and_then(|layout| layout.entry(id).map(|entry| entry.slot))
+            .or_else(|| placement.as_ref().map(|placement| placement.slot))
+            .unwrap_or(PanelSlot::Overlay);
+        if effective_slot != PanelSlot::Overlay {
+            continue;
+        }
         let pivot = egui_anchor(rect.anchor);
         let anchor_point = pivot.pos_in_rect(&screen);
         let offset = egui::vec2(rect.col as f32 * CHAR_WIDTH, rect.row as f32 * ROW_HEIGHT);
@@ -257,29 +267,47 @@ pub fn render_floats(
         if active == Some(id.as_str()) {
             frame = frame.stroke(egui::Stroke::new(1.0, accent));
         }
-        egui::Area::new(egui::Id::new(("bone-float", &salt, id)))
-            .order(egui::Order::Middle)
-            .fixed_pos(anchor_point + offset)
-            .pivot(pivot)
-            .show(ctx, |ui| {
-                frame.show(ui, |ui| {
-                    if rect.width > 0 {
-                        ui.set_max_width(rect.width as f32 * CHAR_WIDTH);
-                    }
-                    if !title.is_empty() {
-                        ui.strong(title);
-                    }
-                    let client = scrolls.get(id).copied().unwrap_or(0);
-                    let start = ((*scroll as i64 + client).max(0) as usize).min(lines.len());
-                    let mut scroll_area = egui::ScrollArea::vertical();
-                    if rect.height > 0 {
-                        scroll_area = scroll_area.max_height(rect.height as f32 * ROW_HEIGHT);
-                    }
-                    scroll_area.show(ui, |ui| {
-                        render_lines(ui, &lines[start..], &view.highlights, palette);
-                    });
-                });
+        let client = scrolls.get(id).copied().unwrap_or(0);
+        let start = ((*scroll as i64 + client).max(0) as usize).min(lines.len());
+        let render = |ui: &mut egui::Ui| {
+            if rect.width > 0 {
+                ui.set_max_width(rect.width as f32 * CHAR_WIDTH);
+            }
+            if !title.is_empty() {
+                ui.strong(title);
+            }
+            let mut scroll_area = egui::ScrollArea::vertical();
+            if rect.height > 0 {
+                scroll_area = scroll_area.max_height(rect.height as f32 * ROW_HEIGHT);
+            }
+            scroll_area.show(ui, |ui| {
+                render_lines(ui, &lines[start..], &view.highlights, palette);
             });
+        };
+        if placement.is_some() || panel_layout.is_some_and(|layout| layout.entry(id).is_some()) {
+            // Explicit overlay panels are native floating windows: egui supplies
+            // dragging, resizing, focus stacking, and a stable per-panel state.
+            // Legacy floats retain their anchored Area behavior below.
+            egui::Window::new(if title.is_empty() { id } else { title })
+                .id(egui::Id::new(("bone-floating-panel", &salt, id)))
+                .frame(frame)
+                .default_pos(anchor_point + offset)
+                .default_size(egui::vec2(
+                    (rect.width.max(1) as f32) * CHAR_WIDTH,
+                    (rect.height.max(1) as f32) * ROW_HEIGHT,
+                ))
+                .resizable(true)
+                .movable(true)
+                .show(ctx, render);
+        } else {
+            egui::Area::new(egui::Id::new(("bone-float", &salt, id)))
+                .order(egui::Order::Middle)
+                .fixed_pos(anchor_point + offset)
+                .pivot(pivot)
+                .show(ctx, |ui| {
+                    frame.show(ui, render);
+                });
+        }
     }
 }
 
@@ -371,6 +399,8 @@ mod tests {
                     z: 0,
                     border: true,
                     scroll: 1,
+                    placement: None,
+                    owner: None,
                 },
                 Component::StatusLine {
                     id: "status".into(),
@@ -409,7 +439,16 @@ mod tests {
                 &view.highlights,
                 &palette,
             );
-            render_floats(ui.ctx(), 7u64, &view, &palette, true, None, &HashMap::new());
+            render_floats(
+                ui.ctx(),
+                7u64,
+                &view,
+                &palette,
+                true,
+                None,
+                &HashMap::new(),
+                None,
+            );
         })
         .textures_delta
         .clear();

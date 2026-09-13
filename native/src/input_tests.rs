@@ -62,6 +62,8 @@ fn key_input_modal_shows_owning_tasks_options_even_when_panes_are_hidden() {
                 ],
                 visible_rows: 8,
                 scroll: 0,
+                placement: None,
+                owner: None,
             })
         };
         app.tabs[0].state.view.components.push(pane("Wrong task"));

@@ -189,7 +189,7 @@ fn live_pane_above_composer_does_not_clip_short_agent_lists() {
                 egui::vec2(500.0, height),
             ));
             let mut out = ctx.run_ui(raw, |ui| {
-                app.tabs[0].body(ui, &colors, Some(&palette), None, false, true);
+                app.tabs[0].body(ui, &colors, Some(&palette), None, false, true, None);
             });
             out.textures_delta.clear();
             if frame < 3 {

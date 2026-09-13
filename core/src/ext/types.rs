@@ -443,6 +443,13 @@ impl ExtensionManager {
         &self.commands
     }
 
+    pub fn command_owner(&self, name: &str) -> Option<String> {
+        self.commands
+            .iter()
+            .find(|command| command.name == name)
+            .and_then(|command| command.plugin.clone())
+    }
+
     pub fn command_enabled(&self, name: &str) -> bool {
         !self
             .settings
@@ -682,6 +689,7 @@ impl ExtensionManager {
             .flatten()
             .collect::<Vec<_>>();
         let timeouts = options
+            .as_ref()
             .map(|options| {
                 options
                     .sequence_values::<mlua::Table>()
@@ -692,6 +700,18 @@ impl ExtensionManager {
                                 option.get::<Option<u64>>("timeout_ms").ok().flatten()
                             })
                             .unwrap_or(30_000)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let owners = options
+            .map(|options| {
+                options
+                    .sequence_values::<mlua::Table>()
+                    .map(|option| {
+                        option
+                            .ok()
+                            .and_then(|option| option.get::<Option<String>>("owner").ok().flatten())
                     })
                     .collect::<Vec<_>>()
             })
@@ -760,7 +780,20 @@ impl ExtensionManager {
                 );
             }
             let _hook_guard = HookGuard(lua_handle.clone());
+            let owner = owners.get(index).cloned().flatten();
+            {
+                let lua = lua_handle.lock().unwrap_or_else(|error| error.into_inner());
+                if let Ok(bone) = lua.globals().get::<mlua::Table>("bone") {
+                    let _ = bone.set("_active_plugin_owner", owner.as_deref());
+                }
+            }
             let returned = handler.call::<mlua::Value>((event.clone(), ctx.clone()));
+            {
+                let lua = lua_handle.lock().unwrap_or_else(|error| error.into_inner());
+                if let Ok(bone) = lua.globals().get::<mlua::Table>("bone") {
+                    let _ = bone.set("_active_plugin_owner", mlua::Value::Nil);
+                }
+            }
             match returned {
                 Ok(mlua::Value::Table(table)) => {
                     if blockable && table.get::<Option<bool>>("block").ok().flatten() == Some(true)
@@ -1301,6 +1334,11 @@ fn dispatch_event_inner(
         Ok(Some(t)) => t,
         _ => return EventDispatchResult::Continue,
     };
+    let handler_options = bone
+        .get::<Option<mlua::Table>>("_handler_options")
+        .ok()
+        .flatten()
+        .and_then(|all| all.get::<Option<mlua::Table>>(event_name).ok().flatten());
 
     // Build event payload table.
     let event_table = match lua.to_value(&payload) {
@@ -1318,11 +1356,24 @@ fn dispatch_event_inner(
         }
     };
 
-    for handler in event_handlers.sequence_values::<mlua::Function>() {
+    for (handler_index, handler) in event_handlers
+        .sequence_values::<mlua::Function>()
+        .enumerate()
+    {
         let handler = match handler {
             Ok(h) => h,
             Err(_) => continue,
         };
+        let owner = handler_options.as_ref().and_then(|options| {
+            options
+                .get::<Option<mlua::Table>>(handler_index)
+                .ok()
+                .flatten()
+                .and_then(|option| option.get::<Option<String>>("owner").ok().flatten())
+        });
+        if let Ok(bone) = lua.globals().get::<mlua::Table>("bone") {
+            let _ = bone.set("_active_plugin_owner", owner.as_deref());
+        }
 
         match handler.call::<Option<mlua::Table>>((event_table.clone(), ctx_table.clone())) {
             Ok(Some(ret)) if blockable => {
@@ -1332,6 +1383,9 @@ fn dispatch_event_inner(
                         .ok()
                         .flatten()
                         .unwrap_or_else(|| "blocked by Lua event handler".to_string());
+                    if let Ok(bone) = lua.globals().get::<mlua::Table>("bone") {
+                        let _ = bone.set("_active_plugin_owner", mlua::Value::Nil);
+                    }
                     return EventDispatchResult::Blocked { reason };
                 }
             }
@@ -1342,6 +1396,9 @@ fn dispatch_event_inner(
                     "bone-lua warn: event handler error for '{event_name}': {e}"
                 ));
             }
+        }
+        if let Ok(bone) = lua.globals().get::<mlua::Table>("bone") {
+            let _ = bone.set("_active_plugin_owner", mlua::Value::Nil);
         }
     }
 

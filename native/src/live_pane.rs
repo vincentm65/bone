@@ -1,6 +1,7 @@
 //! Conversation-local flat home for native activity and daemon live content.
 use std::collections::HashMap;
 
+use bone_protocol::view::PanelSlot;
 use bone_protocol::{
     Component, JobSnapshot, JobStatus, PanePresentation, ProcessSnapshot, ProcessState, ViewModel,
 };
@@ -10,6 +11,7 @@ use crate::{
     activity, panes,
     task_row::{RowIndicator, task_row},
     theme::Palette,
+    workspace::PanelLayout,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -28,7 +30,16 @@ const MIN_PANE_HEIGHT: f32 = 96.0;
 const COLLAPSED_PANE_HEIGHT: f32 = 48.0;
 const HEADER_HEIGHT: f32 = 30.0;
 
+#[cfg(test)]
 pub(crate) fn page_ids(view: &ViewModel, jobs: &[JobSnapshot]) -> Vec<PageId> {
+    page_ids_with_layout(view, jobs, None)
+}
+
+pub(crate) fn page_ids_with_layout(
+    view: &ViewModel,
+    jobs: &[JobSnapshot],
+    panel_layout: Option<&PanelLayout>,
+) -> Vec<PageId> {
     let mut ids = Vec::new();
     if !jobs.is_empty() {
         ids.push(PageId::Agents);
@@ -41,8 +52,15 @@ pub(crate) fn page_ids(view: &ViewModel, jobs: &[JobSnapshot]) -> Vec<PageId> {
                     id,
                     presentation: PanePresentation::Live,
                     lines,
+                    placement,
                     ..
-                } if !lines.is_empty() => Some(PageId::Extension(id.clone())),
+                } if !lines.is_empty() => {
+                    let slot = panel_layout
+                        .and_then(|layout| layout.entry(id).map(|entry| entry.slot))
+                        .or_else(|| placement.as_ref().map(|placement| placement.slot))
+                        .unwrap_or(PanelSlot::Bottom);
+                    (slot == PanelSlot::Bottom).then(|| PageId::Extension(id.clone()))
+                }
                 _ => None,
             }),
     );
@@ -133,7 +151,9 @@ impl LivePane {
         palette: &Palette,
         max_height: f32,
     ) -> Option<LiveAction> {
-        self.render_with_bounds(ui, view, jobs, processes, palette, max_height, max_height)
+        self.render_with_bounds(
+            ui, view, jobs, processes, palette, max_height, max_height, None,
+        )
     }
 
     pub fn render_with_bounds(
@@ -145,8 +165,9 @@ impl LivePane {
         palette: &Palette,
         default_height: f32,
         max_height: f32,
+        panel_layout: Option<&PanelLayout>,
     ) -> Option<LiveAction> {
-        let ids = page_ids(view, jobs);
+        let ids = page_ids_with_layout(view, jobs, panel_layout);
         self.sync(&ids);
         let running_commands = processes
             .iter()
@@ -485,6 +506,8 @@ pub(crate) mod tests {
             title: "Tasks (1/30)".into(),
             visible_rows: 8,
             scroll: 0,
+            placement: None,
+            owner: None,
             lines: (0..30)
                 .map(|i| {
                     PaneLineSpec::Plain(format!("Task {i}: {}", "Long task label ".repeat(10)))
@@ -525,6 +548,27 @@ pub(crate) mod tests {
         }
         view.components = vec![overlay];
         assert!(page_ids(&view, &jobs).is_empty());
+
+        let mut docked_live = tasks();
+        if let Component::Float { placement, .. } = &mut docked_live {
+            *placement = Some(bone_protocol::PanelPlacement {
+                slot: PanelSlot::Right,
+                order: 0,
+                size_hint: None,
+                pinned: false,
+                closable: true,
+            });
+        }
+        view.components = vec![docked_live];
+        assert!(page_ids(&view, &jobs).is_empty());
+
+        if let Component::Float { placement, .. } = &mut view.components[0] {
+            placement.as_mut().unwrap().slot = PanelSlot::Bottom;
+        }
+        assert_eq!(
+            page_ids(&view, &jobs),
+            vec![PageId::Extension("task_list".into())]
+        );
     }
 
     #[test]

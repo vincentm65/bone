@@ -144,6 +144,8 @@ pub struct Layout {
     pub preferences: Preferences,
     /// Tab references are one-based indices into `tabs`, not runtime IDs.
     pub workspace: Option<crate::workspace::Workspace>,
+    /// Persisted client-local placement, visibility, and ordering of daemon panels.
+    pub panel_layout: crate::workspace::PanelLayout,
     /// Split flag from a pre-workspace file; migration input only. Never
     /// written back, so it is excluded from equality (see `PartialEq`).
     pub legacy_split: LegacySplit,
@@ -159,6 +161,7 @@ impl PartialEq for Layout {
             && self.tabs == other.tabs
             && self.preferences == other.preferences
             && self.workspace == other.workspace
+            && self.panel_layout == other.panel_layout
     }
 }
 
@@ -212,6 +215,8 @@ fn encode(layout: &Layout) -> String {
         let json = serde_json::to_string(workspace).expect("workspace is serializable");
         push_field(&mut out, b"workspace", json.as_bytes());
     }
+    let panels = serde_json::to_string(&layout.panel_layout).expect("panel layout is serializable");
+    push_field(&mut out, b"panels", panels.as_bytes());
     out
 }
 
@@ -350,6 +355,7 @@ fn decode(input: &[u8]) -> Result<Layout, FormatError> {
     cursor.pos = header_len;
     let mut layout = Layout::default();
     let mut current_tab = None;
+    let mut seen_panel_layout = false;
     loop {
         if cursor.pos >= cursor.bytes.len() {
             break;
@@ -404,6 +410,15 @@ fn decode(input: &[u8]) -> Result<Layout, FormatError> {
                     serde_json::from_slice(&payload)
                         .map_err(|_| FormatError::Unexpected("invalid workspace tree"))?,
                 );
+            }
+            b"panels" => {
+                let payload = cursor.payload()?;
+                if seen_panel_layout {
+                    return Err(FormatError::Unexpected("duplicate panel layout"));
+                }
+                seen_panel_layout = true;
+                layout.panel_layout = serde_json::from_slice(&payload)
+                    .map_err(|_| FormatError::Unexpected("invalid panel layout"))?;
             }
             b"display" => {
                 cursor.byte(b' ')?;
@@ -620,6 +635,7 @@ mod tests {
                 sidebar_width_manual: true,
             },
             workspace: None,
+            panel_layout: crate::workspace::PanelLayout::default(),
             legacy_split: LegacySplit::default(),
         }
     }
@@ -653,6 +669,49 @@ mod tests {
     fn round_trips_empty_layout() {
         let layout = Layout::default();
         assert_eq!(decode(encode(&layout).as_bytes()).unwrap(), layout);
+    }
+
+    #[test]
+    fn panel_layout_record_round_trips_nonempty_state() {
+        let mut layout = Layout::default();
+        layout
+            .panel_layout
+            .panels
+            .push(crate::workspace::PanelEntry {
+                id: "activity".into(),
+                slot: bone_protocol::PanelSlot::Right,
+                order: 3,
+                hidden: true,
+                size: Some(280.5),
+            });
+        let restored = decode(encode(&layout).as_bytes()).unwrap();
+        assert_eq!(restored.panel_layout, layout.panel_layout);
+    }
+
+    #[test]
+    fn legacy_layouts_decode_without_panel_record() {
+        let records = [
+            ("v1", "display 100 0 0 230 380\n"),
+            ("v2", "display 100 0 0 230 0 380\n"),
+            ("v3", "display 100 0 0 230 0 380\n"),
+            ("v4", "display 100 230 0\n"),
+        ];
+        for (version, display) in records {
+            let input = format!("bone-desktop-layout {version}\n{display}");
+            let layout = decode(input.as_bytes()).unwrap();
+            assert!(layout.panel_layout.panels.is_empty(), "{version}");
+        }
+    }
+
+    #[test]
+    fn duplicate_panel_layout_records_are_rejected_even_when_empty() {
+        let empty = serde_json::to_string(&crate::workspace::PanelLayout::default()).unwrap();
+        let input = format!("bone-desktop-layout v5\npanels {} {}\n", empty.len(), empty)
+            + &format!("panels {} {}\n", empty.len(), empty);
+        assert!(matches!(
+            decode(input.as_bytes()),
+            Err(FormatError::Unexpected("duplicate panel layout"))
+        ));
     }
 
     #[test]

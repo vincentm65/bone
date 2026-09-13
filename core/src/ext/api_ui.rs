@@ -24,7 +24,9 @@ use mlua::{Lua, LuaSerdeExt, Table, Value};
 use serde::Deserialize;
 
 use crate::pane_content::PaneLineSpec;
-use crate::runtime::view::{Anchor, Component, FloatRect, StatusSegment, ViewDiff, ViewModel};
+use crate::runtime::view::{
+    Anchor, Component, FloatRect, PanelPlacement, StatusSegment, ViewDiff, ViewModel,
+};
 
 /// Shared UI state mutated by the Lua API and read by frontends.
 #[derive(Default)]
@@ -55,6 +57,44 @@ impl UiState {
         true
     }
 
+    /// Remove all components owned by a plugin and emit matching removal diffs.
+    /// Returns the number of removed components. Owner-less legacy components are
+    /// intentionally untouched.
+    pub fn remove_owner(&mut self, owner: &str) -> usize {
+        let ids: Vec<String> = self
+            .view
+            .components
+            .iter()
+            .filter_map(|component| match component {
+                Component::Float {
+                    id,
+                    owner: Some(component_owner),
+                    ..
+                } if component_owner == owner => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        let count = ids.len();
+        for id in ids {
+            self.apply(ViewDiff::Remove { id });
+        }
+        count
+    }
+
+    /// Return the distinct plugin owners currently present in floating components.
+    pub fn owners(&self) -> Vec<String> {
+        let mut owners = std::collections::BTreeSet::new();
+        for component in &self.view.components {
+            if let Component::Float {
+                owner: Some(owner), ..
+            } = component
+            {
+                owners.insert(owner.clone());
+            }
+        }
+        owners.into_iter().collect()
+    }
+
     /// Take and clear the pending diffs (a frontend renders these and acks).
     pub fn drain_diffs(&mut self) -> Vec<ViewDiff> {
         std::mem::take(&mut self.diffs)
@@ -77,6 +117,33 @@ pub fn new_shared() -> SharedUi {
 fn lock(ui: &SharedUi) -> std::sync::MutexGuard<'_, UiState> {
     ui.lock().unwrap_or_else(|e| e.into_inner())
 }
+
+/// Resolve the authoritative owner for a Lua UI operation. Plugin execution
+/// installs `_plugin_owner`; event dispatch temporarily installs
+/// `_active_plugin_owner` while invoking a registered handler. A caller-supplied
+/// owner remains supported for standalone/legacy Lua code, but cannot override
+/// either runtime-owned value.
+pub fn owner_for_lua(lua: &Lua, requested: Option<String>) -> Option<String> {
+    let Some(bone) = lua.globals().get::<Option<Table>>("bone").ok().flatten() else {
+        return requested;
+    };
+    bone.get::<Option<String>>("_active_plugin_owner")
+        .ok()
+        .flatten()
+        .or_else(|| bone.get::<Option<String>>("_plugin_owner").ok().flatten())
+        .or(requested)
+}
+
+/// Stamp a declarative component with the active plugin owner, if any.
+pub fn stamp_owner(lua: &Lua, diff: &mut ViewDiff) {
+    if let ViewDiff::Upsert {
+        component: Component::Float { owner, .. },
+    } = diff
+    {
+        *owner = owner_for_lua(lua, owner.clone());
+    }
+}
+
 /// Lock a standalone `SharedUi` handle (never touches the Lua VM mutex).
 pub fn lock_shared(ui: &SharedUi) -> std::sync::MutexGuard<'_, UiState> {
     lock(ui)
@@ -110,6 +177,10 @@ struct FloatOpts {
     z: i32,
     #[serde(default)]
     border: bool,
+    #[serde(default)]
+    placement: Option<PanelPlacement>,
+    #[serde(default)]
+    owner: Option<String>,
 }
 
 /// Convert a Lua value to a serde type via JSON, which fully supports the
@@ -160,6 +231,8 @@ pub fn setup_api_ui(lua: &Lua, bone: &Table, shared_ui: SharedUi) -> Result<(), 
                 z: o.z,
                 border: o.border,
                 scroll: 0,
+                placement: o.placement,
+                owner: owner_for_lua(lua, o.owner),
             };
             lock(&ui_state).apply(ViewDiff::Upsert { component });
             Ok(id)
@@ -182,6 +255,8 @@ pub fn setup_api_ui(lua: &Lua, bone: &Table, shared_ui: SharedUi) -> Result<(), 
                 z,
                 border,
                 scroll,
+                placement,
+                owner,
                 ..
             }) = guard.view.get(&id)
             {
@@ -194,6 +269,8 @@ pub fn setup_api_ui(lua: &Lua, bone: &Table, shared_ui: SharedUi) -> Result<(), 
                     z: *z,
                     border: *border,
                     scroll: *scroll,
+                    placement: placement.clone(),
+                    owner: owner.clone(),
                 };
                 guard.apply(ViewDiff::Upsert { component });
                 true
@@ -204,6 +281,17 @@ pub fn setup_api_ui(lua: &Lua, bone: &Table, shared_ui: SharedUi) -> Result<(), 
         })
         .map_err(crate::util::errstr)?;
     ui.set("set_lines", set_lines)
+        .map_err(crate::util::errstr)?;
+
+    // set_placement(id, placement|nil) -> bool
+    let ui_state = shared_ui.clone();
+    let set_placement = lua
+        .create_function(move |lua, (id, placement_val): (String, Value)| {
+            let placement: Option<PanelPlacement> = from_lua(lua, placement_val)?;
+            Ok(lock(&ui_state).apply(ViewDiff::UpdatePlacement { id, placement }))
+        })
+        .map_err(crate::util::errstr)?;
+    ui.set("set_placement", set_placement)
         .map_err(crate::util::errstr)?;
 
     // close(id)

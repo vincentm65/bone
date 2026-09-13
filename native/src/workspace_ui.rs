@@ -5,9 +5,42 @@ use std::collections::HashMap;
 use eframe::egui;
 
 use crate::workspace::{Axis, Id, Node, Pane};
-use crate::{DesktopApp, RowIndicator, file_refs, icons, layout};
+use crate::{DesktopApp, RowIndicator, activity, file_refs, icons, layout, panes};
+use bone_protocol::view::PanelSlot;
+use bone_protocol::{Component, PanePresentation};
 
 const TAB_HEIGHT: f32 = 36.0;
+const CONFIG_PANEL_ID: &str = "bone.native.config";
+const CATALOG_PANEL_ID: &str = "bone.native.catalog";
+
+fn process_view_panel_id(viewer: &crate::activity::ProcessViewer) -> String {
+    format!("bone.native.process.{}.{}", viewer.tab_id, viewer.id)
+}
+
+fn job_view_panel_id(viewer: &crate::activity::JobViewer) -> String {
+    format!("bone.native.job.{}.{}", viewer.tab_id, viewer.id)
+}
+
+fn native_panel(id: &str, title: &str) -> Component {
+    Component::Float {
+        id: id.to_owned(),
+        presentation: PanePresentation::Live,
+        title: title.to_owned(),
+        lines: Vec::new(),
+        rect: bone_protocol::FloatRect {
+            anchor: Default::default(),
+            width: 0,
+            height: 1,
+            col: 0,
+            row: 0,
+        },
+        z: 0,
+        border: false,
+        scroll: 0,
+        placement: None,
+        owner: None,
+    }
+}
 
 #[derive(Default)]
 pub(crate) struct WindowUi {
@@ -340,6 +373,26 @@ impl DesktopApp {
                 }
             }
         }
+        let hidden_panels: Vec<_> = self
+            .panel_layout
+            .panels
+            .iter()
+            .filter(|entry| entry.hidden)
+            .map(|entry| (entry.id.clone(), entry.slot))
+            .collect();
+        if !hidden_panels.is_empty() {
+            ui.menu_button("Show hidden panels", |ui| {
+                for (id, slot) in &hidden_panels {
+                    if ui.button(format!("{slot:?} · {id}")).clicked() {
+                        if let Some(entry) = self.panel_layout.entry_mut(id) {
+                            entry.hidden = false;
+                        }
+                        self.note_layout_change(ui.ctx());
+                        ui.close();
+                    }
+                }
+            });
+        }
         ui.separator();
         let windows: Vec<_> = self
             .workspace
@@ -586,6 +639,7 @@ impl DesktopApp {
             (None, false)
         };
         self.render_window_dialogs(window, &ctx);
+        self.render_docked_panels(window, ui);
         if let Some(root) = self
             .workspace
             .window(window)
@@ -608,6 +662,539 @@ impl DesktopApp {
         }
         self.sync_display(&ctx, sidebar_width, resized);
         self.window_close_dialog(window, &ctx);
+    }
+
+    fn render_docked_panels(&mut self, window: Id, ui: &mut egui::Ui) {
+        if let Some(viewer) = &self.process_view {
+            let tracked = self.tabs.iter().any(|tab| {
+                tab.id == viewer.tab_id
+                    && tab
+                        .state
+                        .processes
+                        .iter()
+                        .any(|process| process.id == viewer.id)
+            });
+            if !tracked {
+                self.process_view = None;
+            }
+        }
+        if let Some(viewer) = &self.job_view {
+            let tracked = self.tabs.iter().any(|tab| {
+                tab.id == viewer.tab_id && tab.state.jobs.iter().any(|job| job.id == viewer.id)
+            });
+            if !tracked {
+                self.job_view = None;
+            }
+        }
+        let mut declared: Vec<(String, PanelSlot, i32)> = self
+            .tabs
+            .iter()
+            .flat_map(|tab| {
+                tab.state.view.components.iter().filter_map(|component| {
+                    let Component::Float {
+                        id,
+                        placement,
+                        presentation,
+                        ..
+                    } = component
+                    else {
+                        return None;
+                    };
+                    let default = if *presentation == PanePresentation::Overlay {
+                        PanelSlot::Overlay
+                    } else {
+                        PanelSlot::Bottom
+                    };
+                    Some((
+                        id.clone(),
+                        placement
+                            .as_ref()
+                            .map_or(default, |placement| placement.slot),
+                        placement.as_ref().map_or(0, |placement| placement.order),
+                    ))
+                })
+            })
+            .collect();
+        // These two displays still need native request/host bridges (catalog
+        // trust and config persistence), but their placement is now managed by
+        // the same client-local panel layout as daemon-owned views.
+        if self.show_config {
+            declared.push((CONFIG_PANEL_ID.into(), PanelSlot::Right, 0));
+        }
+        if self.show_plugins {
+            declared.push((CATALOG_PANEL_ID.into(), PanelSlot::Right, 1));
+        }
+        if let Some(viewer) = &self.process_view {
+            declared.push((process_view_panel_id(viewer), PanelSlot::Right, 2));
+        }
+        if let Some(viewer) = &self.job_view {
+            declared.push((job_view_panel_id(viewer), PanelSlot::Right, 3));
+        }
+        self.panel_layout.sync(declared);
+        let Some(tab_id) = self.workspace.active_tab(window) else {
+            return;
+        };
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        let mut components: Vec<Component> = tab
+            .state
+            .view
+            .components
+            .iter()
+            .filter_map(|component| {
+                let Component::Float {
+                    id,
+                    placement,
+                    presentation,
+                    ..
+                } = component
+                else {
+                    return None;
+                };
+                let default = if *presentation == PanePresentation::Overlay {
+                    PanelSlot::Overlay
+                } else {
+                    PanelSlot::Bottom
+                };
+                let slot = self
+                    .panel_layout
+                    .entry(id)
+                    .map(|entry| entry.slot)
+                    .or_else(|| placement.as_ref().map(|placement| placement.slot))
+                    .unwrap_or(default);
+                // Live panes in the bottom slot are rendered by the composer live
+                // strip (`live_pane`), so docking them here too would show the same
+                // content twice and ignore `panes_visible`. Explicitly placed Live
+                // panes in other slots are still docked.
+                if slot == PanelSlot::Overlay
+                    || (*presentation == PanePresentation::Live && slot == PanelSlot::Bottom)
+                {
+                    return None;
+                }
+                Some(component.clone())
+            })
+            .collect();
+        if self.show_config {
+            components.push(native_panel(CONFIG_PANEL_ID, "Settings"));
+        }
+        if self.show_plugins {
+            components.push(native_panel(CATALOG_PANEL_ID, "Plugins"));
+        }
+        if self
+            .process_view
+            .as_ref()
+            .and_then(|viewer| self.workspace.tab_location(viewer.tab_id))
+            .is_some_and(|(origin_window, _)| origin_window == window)
+        {
+            if let Some(viewer) = &self.process_view {
+                let id = process_view_panel_id(viewer);
+                components.push(native_panel(&id, "Process output"));
+            }
+        }
+        if self
+            .job_view
+            .as_ref()
+            .and_then(|viewer| self.workspace.tab_location(viewer.tab_id))
+            .is_some_and(|(origin_window, _)| origin_window == window)
+        {
+            if let Some(viewer) = &self.job_view {
+                let id = job_view_panel_id(viewer);
+                components.push(native_panel(&id, "Job transcript"));
+            }
+        }
+        let palette = self.palette();
+        let highlights = tab.state.view.highlights.clone();
+        for slot in [
+            PanelSlot::Top,
+            PanelSlot::Left,
+            PanelSlot::Right,
+            PanelSlot::Bottom,
+        ] {
+            let ids: Vec<String> = self
+                .panel_layout
+                .panels
+                .iter()
+                .filter(|entry| {
+                    entry.slot == slot
+                        && !entry.hidden
+                        && components
+                            .iter()
+                            .any(|component| component.id() == entry.id)
+                })
+                .map(|entry| entry.id.clone())
+                .collect();
+            if ids.is_empty() {
+                continue;
+            }
+            let panel_id = egui::Id::new(("daemon-panels", window, slot as u8));
+            let selected_id = ui
+                .ctx()
+                .data(|data| data.get_temp::<String>(panel_id))
+                .filter(|id| ids.contains(id))
+                .unwrap_or_else(|| ids[0].clone());
+            let component = components
+                .iter()
+                .find(|component| component.id() == selected_id)
+                .cloned();
+            let title = component
+                .as_ref()
+                .and_then(|component| match component {
+                    Component::Float { title, .. } => Some(title.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "Panel".into());
+            let saved_size = self
+                .panel_layout
+                .entry(&selected_id)
+                .and_then(|entry| entry.size)
+                .filter(|size| size.is_finite() && *size > 0.0);
+            let panel = match slot {
+                PanelSlot::Top => egui::Panel::top(panel_id),
+                PanelSlot::Left => egui::Panel::left(panel_id),
+                PanelSlot::Right => egui::Panel::right(panel_id),
+                PanelSlot::Bottom => egui::Panel::bottom(panel_id),
+                PanelSlot::Overlay => continue,
+            };
+            let panel = panel.resizable(true);
+            let panel = match slot {
+                PanelSlot::Top | PanelSlot::Bottom => {
+                    panel.default_size(saved_size.unwrap_or(220.0))
+                }
+                PanelSlot::Left | PanelSlot::Right => {
+                    panel.default_size(saved_size.unwrap_or(300.0))
+                }
+                PanelSlot::Overlay => continue,
+            };
+            let response = panel.show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong(&title);
+                    if ids.len() > 1 {
+                        for id in &ids {
+                            let label = components
+                                .iter()
+                                .find(|component| component.id() == id)
+                                .and_then(|component| match component {
+                                    Component::Float { title, .. } => Some(title.as_str()),
+                                    _ => None,
+                                })
+                                .unwrap_or(id);
+                            if ui.selectable_label(*id == selected_id, label).clicked() {
+                                ui.ctx().data_mut(|data| {
+                                    data.insert_temp(panel_id, id.clone());
+                                });
+                            }
+                        }
+                    }
+                    if self.panel_layout.entry(&selected_id).is_some() {
+                        if ui.button("↑").on_hover_text("Move panel earlier").clicked() {
+                            self.panel_layout.reorder(&selected_id, -1);
+                            self.note_layout_change(ui.ctx());
+                        }
+                        if ui.button("↓").on_hover_text("Move panel later").clicked() {
+                            self.panel_layout.reorder(&selected_id, 1);
+                            self.note_layout_change(ui.ctx());
+                        }
+                        if ui.button("Hide").clicked() {
+                            if let Some(entry) = self.panel_layout.entry_mut(&selected_id) {
+                                entry.hidden = true;
+                            }
+                            self.note_layout_change(ui.ctx());
+                        }
+                        ui.menu_button("Move", |ui| {
+                            for target in [
+                                PanelSlot::Left,
+                                PanelSlot::Right,
+                                PanelSlot::Bottom,
+                                PanelSlot::Overlay,
+                            ] {
+                                if ui.button(format!("{target:?}")).clicked() {
+                                    self.panel_layout.set_slot(&selected_id, target);
+                                    self.note_layout_change(ui.ctx());
+                                    ui.close();
+                                }
+                            }
+                        });
+                    }
+                    let process_id = self.process_view.as_ref().map(process_view_panel_id);
+                    let job_id = self.job_view.as_ref().map(job_view_panel_id);
+                    if (process_id.as_deref() == Some(selected_id.as_str())
+                        || job_id.as_deref() == Some(selected_id.as_str()))
+                        && ui.button("Close").clicked()
+                    {
+                        if process_id.as_deref() == Some(selected_id.as_str()) {
+                            self.process_view = None;
+                        } else {
+                            self.job_view = None;
+                        }
+                        self.note_layout_change(ui.ctx());
+                    }
+                });
+                ui.separator();
+                if selected_id == CONFIG_PANEL_ID {
+                    self.render_config_panel(ui);
+                } else if selected_id == CATALOG_PANEL_ID {
+                    self.render_plugins_panel(ui);
+                } else if self
+                    .process_view
+                    .as_ref()
+                    .is_some_and(|viewer| process_view_panel_id(viewer) == selected_id)
+                {
+                    self.render_process_panel(ui);
+                } else if self
+                    .job_view
+                    .as_ref()
+                    .is_some_and(|viewer| job_view_panel_id(viewer) == selected_id)
+                {
+                    self.render_job_panel(ui);
+                } else if let Some(Component::Float { lines, .. }) = component {
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        panes::render_lines(ui, &lines, &highlights, &palette)
+                    });
+                }
+            });
+            let size = if matches!(slot, PanelSlot::Top | PanelSlot::Bottom) {
+                response.response.rect.height()
+            } else {
+                response.response.rect.width()
+            };
+            if let Some(entry) = self.panel_layout.entry_mut(&selected_id) {
+                if entry.size != Some(size) && size.is_finite() {
+                    entry.size = Some(size);
+                    self.note_layout_change(ui.ctx());
+                }
+            }
+        }
+        // Native panels do not have daemon float components to hand to the
+        // generic float renderer. Keep their Overlay placement in the same
+        // client-local workspace path by rendering a stable egui window here.
+        if self.show_config
+            && self
+                .panel_layout
+                .entry(CONFIG_PANEL_ID)
+                .is_some_and(|entry| entry.slot == PanelSlot::Overlay && !entry.hidden)
+        {
+            self.render_native_overlay(
+                window,
+                ui.ctx(),
+                CONFIG_PANEL_ID,
+                "Settings",
+                false,
+                |app, ui| {
+                    app.render_config_panel(ui);
+                },
+            );
+        }
+        if self.show_plugins
+            && self
+                .panel_layout
+                .entry(CATALOG_PANEL_ID)
+                .is_some_and(|entry| entry.slot == PanelSlot::Overlay && !entry.hidden)
+        {
+            self.render_native_overlay(
+                window,
+                ui.ctx(),
+                CATALOG_PANEL_ID,
+                "Plugins",
+                false,
+                |app, ui| {
+                    app.render_plugins_panel(ui);
+                },
+            );
+        }
+        if let Some(viewer) = self.process_view.as_ref() {
+            let id = process_view_panel_id(viewer);
+            let visible = self
+                .workspace
+                .tab_location(viewer.tab_id)
+                .is_some_and(|(origin_window, _)| origin_window == window)
+                && self
+                    .panel_layout
+                    .entry(&id)
+                    .is_some_and(|entry| entry.slot == PanelSlot::Overlay && !entry.hidden);
+            if visible {
+                self.render_native_overlay(
+                    window,
+                    ui.ctx(),
+                    &id,
+                    "Process output",
+                    true,
+                    |app, ui| app.render_process_panel(ui),
+                );
+            }
+        }
+        if let Some(viewer) = self.job_view.as_ref() {
+            let id = job_view_panel_id(viewer);
+            let visible = self
+                .workspace
+                .tab_location(viewer.tab_id)
+                .is_some_and(|(origin_window, _)| origin_window == window)
+                && self
+                    .panel_layout
+                    .entry(&id)
+                    .is_some_and(|entry| entry.slot == PanelSlot::Overlay && !entry.hidden);
+            if visible {
+                self.render_native_overlay(
+                    window,
+                    ui.ctx(),
+                    &id,
+                    "Job transcript",
+                    true,
+                    |app, ui| app.render_job_panel(ui),
+                );
+            }
+        }
+    }
+
+    fn render_native_overlay<F>(
+        &mut self,
+        window: Id,
+        ctx: &egui::Context,
+        id: &str,
+        title: &str,
+        closeable: bool,
+        render: F,
+    ) where
+        F: FnOnce(&mut Self, &mut egui::Ui),
+    {
+        let mut close = false;
+        let mut hide = false;
+        let mut move_to = None;
+        egui::Window::new(title)
+            .id(egui::Id::new(("bone-native-overlay", window, id)))
+            .default_size(egui::vec2(420.0, 320.0))
+            .resizable(true)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    if ui.button("Hide").clicked() {
+                        hide = true;
+                    }
+                    ui.menu_button("Move", |ui| {
+                        for target in [PanelSlot::Left, PanelSlot::Right, PanelSlot::Bottom] {
+                            if ui.button(format!("{target:?}")).clicked() {
+                                move_to = Some(target);
+                                ui.close();
+                            }
+                        }
+                    });
+                    if closeable && ui.button("Close").clicked() {
+                        close = true;
+                    }
+                });
+                ui.separator();
+                render(self, ui);
+            });
+        if hide {
+            if let Some(entry) = self.panel_layout.entry_mut(id) {
+                entry.hidden = true;
+            }
+            self.note_layout_change(ctx);
+        }
+        if let Some(slot) = move_to {
+            self.panel_layout.set_slot(id, slot);
+            self.note_layout_change(ctx);
+        }
+        if close {
+            match id {
+                CONFIG_PANEL_ID => self.show_config = false,
+                CATALOG_PANEL_ID => self.show_plugins = false,
+                _ if self
+                    .process_view
+                    .as_ref()
+                    .is_some_and(|viewer| process_view_panel_id(viewer) == id) =>
+                {
+                    self.process_view = None;
+                }
+                _ if self
+                    .job_view
+                    .as_ref()
+                    .is_some_and(|viewer| job_view_panel_id(viewer) == id) =>
+                {
+                    self.job_view = None;
+                }
+                _ => {}
+            }
+            self.note_layout_change(ctx);
+        }
+    }
+
+    fn render_process_panel(&mut self, ui: &mut egui::Ui) {
+        let Some((tab_id, item_id)) = self
+            .process_view
+            .as_ref()
+            .map(|viewer| (viewer.tab_id, viewer.id.clone()))
+        else {
+            return;
+        };
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            self.process_view = None;
+            return;
+        };
+        let Some(process) = self.tabs[index]
+            .state
+            .processes
+            .iter()
+            .find(|process| process.id == item_id)
+            .cloned()
+        else {
+            ui.weak("Process is no longer tracked.");
+            self.process_view = None;
+            return;
+        };
+        let palette = self.palette();
+        let actions = self
+            .process_view
+            .as_mut()
+            .map(|viewer| activity::render_process_viewer(ui, &process, viewer, &palette))
+            .unwrap_or_default();
+        for action in actions {
+            if let activity::ActivityAction::CancelProcess(id) = action {
+                self.tabs[index].command(bone_protocol::RuntimeCommand::CancelProcess { id });
+            }
+        }
+    }
+
+    fn render_job_panel(&mut self, ui: &mut egui::Ui) {
+        let Some((tab_id, item_id)) = self
+            .job_view
+            .as_ref()
+            .map(|viewer| (viewer.tab_id, viewer.id.clone()))
+        else {
+            return;
+        };
+        let Some(index) = self.tabs.iter().position(|tab| tab.id == tab_id) else {
+            self.job_view = None;
+            return;
+        };
+        let Some(job) = self.tabs[index]
+            .state
+            .jobs
+            .iter()
+            .find(|job| job.id == item_id)
+            .cloned()
+        else {
+            ui.weak("Job is no longer tracked.");
+            self.job_view = None;
+            return;
+        };
+        let palette = self.palette();
+        let connected = self.tabs[index].connected;
+        let actions = self
+            .job_view
+            .as_mut()
+            .map(|viewer| {
+                if connected {
+                    activity::render_job_viewer(ui, &job, viewer, &palette)
+                } else {
+                    Vec::new()
+                }
+            })
+            .unwrap_or_default();
+        for action in actions {
+            if let activity::ActivityAction::CancelJob(id) = action {
+                self.tabs[index].command(bone_protocol::RuntimeCommand::CancelJob { id });
+            }
+        }
     }
 
     fn render_node(&mut self, node: &Node, rect: egui::Rect, ui: &mut egui::Ui) {
@@ -989,13 +1576,9 @@ impl DesktopApp {
             file_refs::dialog(ctx);
             self.server_dialog(ctx);
             self.provider_dialog(ctx);
-            self.config_dialog(ctx);
             self.setup_dialog(ctx);
             self.activity_dialog(ctx);
-            self.process_view_dialog(ctx);
-            self.job_view_dialog(ctx);
             self.stats_dialog(ctx);
-            self.plugins_dialog(ctx);
             self.plugin_consent_dialog(ctx);
         }
         if self
@@ -1272,12 +1855,11 @@ mod tests {
         }
     }
 
-    /// Regression: `shared_dialog_open` decides whether `render_window_dialogs`
-    /// runs at all, so a utility flag missing from it silently hides its
-    /// surface — and switching to it closes the surface that was open. The
-    /// Plugins flag was omitted, so Task → Plugins rendered nothing.
+    /// Regression: utility displays must be rendered by the workspace pass rather
+    /// than by the native modal-dialog pass. The Plugins flag still needs to
+    /// produce a stable panel entry and visible content.
     #[test]
-    fn plugins_surface_opens_through_the_window_dialog_pass() {
+    fn plugins_surface_opens_through_the_workspace_panel_pass() {
         let ctx = egui::Context::default();
         let dir = std::env::temp_dir().join("bone-desktop-workspace-plugins");
         let _ = std::fs::remove_dir_all(&dir);
@@ -1316,17 +1898,89 @@ mod tests {
             "the opening frames must not dismiss the Plugins surface"
         );
         assert!(
-            app.shared_dialog_open(),
-            "render_window_dialogs is skipped unless shared_dialog_open sees Plugins"
+            app.panel_layout.entry(CATALOG_PANEL_ID).is_some(),
+            "the Plugins opening must register a workspace panel"
         );
         let has_heading = output
             .shapes
             .iter()
             .any(|s| matches!(&s.shape, egui::Shape::Text(t) if t.galley.text() == "Plugins"));
-        assert!(has_heading, "the Plugins surface must be rendered");
+        assert!(has_heading, "the Plugins panel must be rendered");
+
+        // Settings follows the same path even while its daemon snapshot is
+        // still loading; it must not fall back to a native modal.
+        app.show_config = true;
+        frame(&mut app, &ctx, vec![]).drop_without_applying_deltas();
+        assert!(
+            app.panel_layout.entry(CONFIG_PANEL_ID).is_some(),
+            "the Settings opening must register a workspace panel"
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn detail_viewers_register_as_origin_workspace_panels_and_cleanup() {
+        let ctx = egui::Context::default();
+        let mut app = fixture(&ctx);
+        let origin = app.tabs[0].id;
+        app.tabs[0].connected = true;
+        app.tabs[1].connected = true;
+        app.tabs[0].state.processes = vec![bone_protocol::ProcessSnapshot {
+            id: "same-id".into(),
+            command: "origin command".into(),
+            owner: "conversation".into(),
+            running: true,
+            state: bone_protocol::ProcessState::Running,
+            started_at: 1_000,
+            finished_at: None,
+            stdout: "origin output".into(),
+            stderr: String::new(),
+            exit_code: None,
+            signal: None,
+            error: None,
+        }];
+        app.tabs[1].state.processes = vec![bone_protocol::ProcessSnapshot {
+            id: "same-id".into(),
+            command: "other command".into(),
+            owner: "conversation".into(),
+            running: true,
+            state: bone_protocol::ProcessState::Running,
+            started_at: 1_000,
+            finished_at: None,
+            stdout: "other output".into(),
+            stderr: String::new(),
+            exit_code: None,
+            signal: None,
+            error: None,
+        }];
+        app.process_view = Some(crate::activity::ProcessViewer::new(origin, "same-id"));
+        let panel_id = process_view_panel_id(app.process_view.as_ref().unwrap());
+
+        let mut output = frame(&mut app, &ctx, vec![]);
+        assert!(app.panel_layout.entry(&panel_id).is_some());
+        assert!(output.shapes.iter().any(|shape| matches!(
+            &shape.shape,
+            egui::Shape::Text(text) if text.galley.text().contains("origin output")
+        )));
+        output.textures_delta.clear();
+
+        app.panel_layout
+            .set_slot(&panel_id, bone_protocol::view::PanelSlot::Overlay);
+        let mut output = frame(&mut app, &ctx, vec![]);
+        output.textures_delta.clear();
+        let mut output = frame(&mut app, &ctx, vec![]);
+        assert!(output.shapes.iter().any(|shape| matches!(
+            &shape.shape,
+            egui::Shape::Text(text) if text.galley.text().contains("origin output")
+        )));
+        output.textures_delta.clear();
+
+        app.tabs[0].state.processes.clear();
+        let mut output = frame(&mut app, &ctx, vec![]);
+        output.textures_delta.clear();
+        assert!(app.process_view.is_none());
+        assert!(app.panel_layout.entry(&panel_id).is_none());
+    }
     fn pointer(pos: egui::Pos2, pressed: bool) -> Vec<egui::Event> {
         vec![
             egui::Event::PointerMoved(pos),

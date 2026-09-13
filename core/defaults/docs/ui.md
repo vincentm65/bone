@@ -201,6 +201,34 @@ rendering. The desktop client maps the same semantic events to its eframe
 components and its document/diff canvas. Neither frontend should duplicate
 agent-loop, approval, configuration, session-persistence, or extension behavior.
 
+## Shared plugin panels
+
+Plugin UI is frontend-neutral. Plugins describe panes and floats through the
+shared view protocol; they do not import ratatui, egui, or any other renderer.
+Each panel has a stable component id and may optionally declare semantic
+placement (`left`, `right`, `top`, `bottom`, or `overlay`), ordering, a size
+hint, pinned/closable state, and an owner. Existing Lua plugins that omit
+placement continue to use the legacy frontend defaults.
+
+The native desktop keeps history pinned on the left. Non-overlay plugin panels
+can be arranged as docked panels on the right or in horizontal rows at the top
+or bottom; multiple panels in a dock use tabs. Native users can move, resize,
+hide, reorder, and stack panels, and can turn a docked panel into a floating
+window. Explicit overlay panels are floating, movable, resizable, focus-stackable
+windows; their initial rectangle comes from the protocol, while subsequent
+geometry, visibility, ordering, and layout choices are persisted in the
+native client's local desktop layout. The desktop also provides a command to
+restore hidden panels.
+
+Panel placement is not daemon-wide geometry configuration. It is semantic data
+that any frontend may interpret. The TUI deliberately preserves its existing
+bottom live-pane layout and treats placement-only updates as no-ops, so old
+plugins and their APIs retain their current behavior. Panel actions travel back
+through the additive `RuntimeCommand::PanelAction` command and are delivered to
+the daemon's managed `panel_action` hook; clients do not execute plugin logic
+locally. When a plugin is reloaded or disabled, the daemon removes components it
+owns while preserving owner-less legacy components.
+
 Themes are resolved by core and sent as snapshots; clients centralize their
 colors through the configured theme. Preserve per-span styling when wrapping,
 and keep text content independent from terminal/browser decoration.

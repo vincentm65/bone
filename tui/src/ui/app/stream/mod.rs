@@ -170,7 +170,9 @@ impl PaneOwnership {
             ViewDiff::Remove { id } => {
                 self.sources.remove(id);
             }
-            ViewDiff::SetHighlight { .. } | ViewDiff::SetTheme { .. } => {}
+            ViewDiff::UpdatePlacement { .. }
+            | ViewDiff::SetHighlight { .. }
+            | ViewDiff::SetTheme { .. } => {}
         }
     }
 

@@ -649,6 +649,16 @@ pub enum RuntimeCommand {
         /// The action string looked up from the binding (may be a callback id).
         action: String,
     },
+    /// Dispatch a semantic action from a shared plugin panel to the daemon.
+    /// The panel owner receives the action through the extension event system.
+    PanelAction {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<u64>,
+        panel_id: String,
+        action: String,
+        #[serde(default)]
+        payload: serde_json::Value,
+    },
 }
 
 /// Classified result of a keymap rhs dispatch.

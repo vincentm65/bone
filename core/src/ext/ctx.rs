@@ -466,7 +466,8 @@ fn make_pane_emit_fn(
         let val: serde_json::Value = lua.from_value(mlua::Value::Table(table))?;
         let pane =
             crate::pane_content::PaneContent::from_json(&val).map_err(mlua::Error::external)?;
-        let diff = crate::runtime::view::view_diff_from_pane_content(pane);
+        let mut diff = crate::runtime::view::view_diff_from_pane_content(pane);
+        super::api_ui::stamp_owner(lua, &mut diff);
         super::api_ui::lock_shared(&ui_state).apply(diff);
         Ok(true)
     })
@@ -1270,7 +1271,9 @@ fn build_ui_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
             let json: serde_json::Value = lua.from_value(value)?;
             let diff: LuaViewDiff = serde_json::from_value(json)
                 .map_err(|e| mlua::Error::external(format!("ui diff: {e}")))?;
-            Ok(super::api_ui::lock_shared(&ui_state).apply(diff.into()))
+            let mut diff: crate::runtime::ViewDiff = diff.into();
+            super::api_ui::stamp_owner(lua, &mut diff);
+            Ok(super::api_ui::lock_shared(&ui_state).apply(diff))
         })?;
         ui_table.set("apply", apply_fn)?;
     } else {
@@ -3015,6 +3018,8 @@ const RUN_STREAM_OPT_KEYS: &[&str] = &[
     "max_tokens",
     "on_started",
     "on_status",
+    "on_text_delta",
+    "on_reasoning_delta",
     "on_tool_call",
     "on_tool_result",
     "on_token_usage",
@@ -3229,11 +3234,13 @@ fn build_current_fn(
 }
 
 /// The optional Lua callbacks `ctx.agent.run_stream` forwards events to. Bundled
-/// so the dispatch/drain helpers take one argument instead of seven.
+/// so the dispatch/drain helpers take one argument instead of nine.
 #[derive(Default)]
 struct StreamCallbacks {
     on_started: Option<mlua::Function>,
     on_status: Option<mlua::Function>,
+    on_text_delta: Option<mlua::Function>,
+    on_reasoning_delta: Option<mlua::Function>,
     on_tool_call: Option<mlua::Function>,
     on_tool_result: Option<mlua::Function>,
     on_token_usage: Option<mlua::Function>,
@@ -3247,6 +3254,8 @@ impl StreamCallbacks {
         Self {
             on_started: opts_cb(opts, "on_started"),
             on_status: opts_cb(opts, "on_status"),
+            on_text_delta: opts_cb(opts, "on_text_delta"),
+            on_reasoning_delta: opts_cb(opts, "on_reasoning_delta"),
             on_tool_call: opts_cb(opts, "on_tool_call"),
             on_tool_result: opts_cb(opts, "on_tool_result"),
             on_token_usage: opts_cb(opts, "on_token_usage"),
@@ -3296,6 +3305,16 @@ fn dispatch_event(
                 cb.call::<()>(message.as_str())?;
             }
         }
+        RuntimeEvent::TextDelta { text } => {
+            if let Some(cb) = &cbs.on_text_delta {
+                cb.call::<()>(text.as_str())?;
+            }
+        }
+        RuntimeEvent::ReasoningDelta { text } => {
+            if let Some(cb) = &cbs.on_reasoning_delta {
+                cb.call::<()>(text.as_str())?;
+            }
+        }
         RuntimeEvent::ToolCall { name, summary, .. } => {
             if let Some(cb) = &cbs.on_tool_call {
                 let t = lua.create_table()?;
@@ -3336,9 +3355,7 @@ fn dispatch_event(
                 cb.call::<()>(message.as_str())?;
             }
         }
-        RuntimeEvent::WorkElapsed { .. } => {}
-        RuntimeEvent::TextDelta { .. }
-        | RuntimeEvent::ReasoningDelta { .. }
+        RuntimeEvent::WorkElapsed { .. }
         | RuntimeEvent::KeyRequest { .. }
         | RuntimeEvent::ApprovalRequest { .. }
         | RuntimeEvent::StateSnapshot { .. }

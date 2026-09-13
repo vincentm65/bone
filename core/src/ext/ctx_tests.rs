@@ -1570,6 +1570,64 @@ fn ui_apply_accepts_protocol_view_diffs() {
     ));
 }
 
+#[test]
+fn stream_callbacks_forward_text_and_reasoning_deltas_in_order() {
+    assert!(RUN_STREAM_OPT_KEYS.contains(&"on_text_delta"));
+    assert!(RUN_STREAM_OPT_KEYS.contains(&"on_reasoning_delta"));
+
+    let lua = Lua::new();
+    lua.load(
+        r#"
+        events = {}
+        function record(kind, text)
+            table.insert(events, kind .. ":" .. text)
+        end
+        "#,
+    )
+    .exec()
+    .unwrap();
+    let opts = lua.create_table().unwrap();
+    opts.set(
+        "on_text_delta",
+        lua.load("function(text) record('text', text) end")
+            .eval::<mlua::Function>()
+            .unwrap(),
+    )
+    .unwrap();
+    opts.set(
+        "on_reasoning_delta",
+        lua.load("function(text) record('reasoning', text) end")
+            .eval::<mlua::Function>()
+            .unwrap(),
+    )
+    .unwrap();
+    let callbacks = StreamCallbacks::from_opts(&Some(opts));
+    dispatch_event(
+        &lua,
+        &crate::runtime::RuntimeEvent::ReasoningDelta {
+            text: "checking".into(),
+        },
+        &callbacks,
+    )
+    .unwrap();
+    dispatch_event(
+        &lua,
+        &crate::runtime::RuntimeEvent::TextDelta {
+            text: "answer".into(),
+        },
+        &callbacks,
+    )
+    .unwrap();
+    let events: Vec<String> = lua
+        .load("return events")
+        .eval::<Table>()
+        .unwrap()
+        .sequence_values()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(events, ["reasoning:checking", "text:answer"]);
+}
+
 #[derive(Clone)]
 enum PrivateTestResponse {
     Events(Vec<Result<crate::llm::ChatEvent, crate::llm::LlmError>>),

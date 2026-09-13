@@ -2650,6 +2650,7 @@ impl App {
                 self.active_page = PanePage::remove(&mut self.pages, &id, self.active_page);
                 true
             }
+            ViewDiff::UpdatePlacement { .. } => false,
             ViewDiff::SetHighlight { name, fg } => {
                 if fg.is_some() {
                     self.wire_view_ownership.highlights.insert(name.clone());

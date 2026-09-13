@@ -17,6 +17,8 @@ fn float(id: &str, lines: Vec<PaneLineSpec>) -> Component {
         z: 0,
         border: true,
         scroll: 0,
+        placement: None,
+        owner: None,
     }
 }
 
@@ -124,6 +126,47 @@ fn view_diff_round_trips_serde() {
 }
 
 #[test]
+fn update_placement_changes_only_float_and_rejects_missing_or_non_float() {
+    let mut vm = ViewModel::new();
+    vm.apply(&ViewDiff::Upsert {
+        component: float("panel", vec![PaneLineSpec::Plain("x".into())]),
+    });
+    let placement = PanelPlacement {
+        slot: PanelSlot::Left,
+        order: 1,
+        size_hint: Some(20),
+        pinned: false,
+        closable: true,
+    };
+    assert!(vm.apply(&ViewDiff::UpdatePlacement {
+        id: "panel".into(),
+        placement: Some(placement.clone()),
+    }));
+    assert_eq!(
+        vm.get("panel")
+            .unwrap()
+            .as_pane_content()
+            .unwrap()
+            .placement,
+        Some(placement)
+    );
+    assert!(!vm.apply(&ViewDiff::UpdatePlacement {
+        id: "missing".into(),
+        placement: None,
+    }));
+    vm.apply(&ViewDiff::Upsert {
+        component: Component::StatusLine {
+            id: "status".into(),
+            segments: Vec::new(),
+        },
+    });
+    assert!(!vm.apply(&ViewDiff::UpdatePlacement {
+        id: "status".into(),
+        placement: None,
+    }));
+}
+
+#[test]
 fn float_component_parses_from_lua_style_json() {
     // Shape a Lua `open_float` opts table would serialize to.
     let val = json!({
@@ -159,6 +202,8 @@ fn float_scroll_round_trips_into_pane_content() {
         z: 0,
         border: true,
         scroll: 7,
+        placement: None,
+        owner: None,
     };
     let pc = comp.as_pane_content().unwrap();
     assert_eq!(pc.scroll, 7);

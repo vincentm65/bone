@@ -1,8 +1,107 @@
 //! Frontend-only ownership tree. IDs never refer to daemon/session internals.
+use bone_protocol::view::PanelSlot;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
 pub type Id = u64;
+
+/// Client-local arrangement for daemon-owned panels. Panel ids are opaque daemon
+/// ids; entries that are not present in the current view are discarded on sync.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PanelLayout {
+    #[serde(default)]
+    pub panels: Vec<PanelEntry>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PanelEntry {
+    pub id: String,
+    pub slot: PanelSlot,
+    #[serde(default)]
+    pub order: i32,
+    #[serde(default)]
+    pub hidden: bool,
+    #[serde(default)]
+    pub size: Option<f32>,
+}
+
+impl Default for PanelLayout {
+    fn default() -> Self {
+        Self { panels: Vec::new() }
+    }
+}
+
+impl PanelLayout {
+    /// Reconcile persisted entries with the daemon's current view, preserving
+    /// local ordering/visibility while giving new panels their declared slot.
+    pub fn sync<I>(&mut self, current: I)
+    where
+        I: IntoIterator<Item = (String, PanelSlot, i32)>,
+    {
+        let current: Vec<_> = current.into_iter().collect();
+        self.panels
+            .retain(|entry| current.iter().any(|(id, _, _)| id == &entry.id));
+        for (id, slot, order) in current {
+            if !self.panels.iter().any(|entry| entry.id == id) {
+                self.panels.push(PanelEntry {
+                    id,
+                    slot,
+                    order,
+                    hidden: false,
+                    size: None,
+                });
+            }
+        }
+        self.panels
+            .sort_by_key(|entry| (entry.slot as u8, entry.order));
+    }
+
+    pub fn entry(&self, id: &str) -> Option<&PanelEntry> {
+        self.panels.iter().find(|entry| entry.id == id)
+    }
+
+    pub fn entry_mut(&mut self, id: &str) -> Option<&mut PanelEntry> {
+        self.panels.iter_mut().find(|entry| entry.id == id)
+    }
+
+    pub fn set_slot(&mut self, id: &str, slot: PanelSlot) {
+        if let Some(entry) = self.entry_mut(id) {
+            entry.slot = slot;
+        }
+    }
+
+    pub fn reorder(&mut self, id: &str, direction: i32) {
+        let Some(index) = self.panels.iter().position(|entry| entry.id == id) else {
+            return;
+        };
+        let slot = self.panels[index].slot;
+        let peers: Vec<_> = self
+            .panels
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.slot == slot)
+            .map(|(index, _)| index)
+            .collect();
+        let Some(peer) = peers.iter().position(|peer_index| *peer_index == index) else {
+            return;
+        };
+        let target = if direction < 0 {
+            peer.checked_sub(1)
+        } else {
+            (peer + 1 < peers.len()).then_some(peer + 1)
+        };
+        let Some(target) = target else { return };
+        self.panels.swap(peers[peer], peers[target]);
+        for (order, entry) in self
+            .panels
+            .iter_mut()
+            .filter(|entry| entry.slot == slot)
+            .enumerate()
+        {
+            entry.order = order as i32;
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Axis {
@@ -782,6 +881,84 @@ mod tests {
         assert_eq!(ws.active_tab(0), Some(20));
         assert_eq!(ws.window(0).unwrap().root.panes().len(), 1);
         assert_tabs(&ws, &[10, 20, 30, 40]);
+    }
+
+    #[test]
+    fn panel_layout_sync_preserves_local_state_and_removes_stale_entries() {
+        let mut layout = PanelLayout {
+            panels: vec![
+                PanelEntry {
+                    id: "local".into(),
+                    slot: PanelSlot::Right,
+                    order: 0,
+                    hidden: true,
+                    size: Some(321.0),
+                },
+                PanelEntry {
+                    id: "stale".into(),
+                    slot: PanelSlot::Left,
+                    order: 0,
+                    hidden: true,
+                    size: Some(99.0),
+                },
+            ],
+        };
+        layout.sync([
+            ("local".into(), PanelSlot::Bottom, 7),
+            ("new".into(), PanelSlot::Left, 2),
+        ]);
+        assert_eq!(layout.panels.len(), 2);
+        assert_eq!(layout.entry("local").unwrap().slot, PanelSlot::Right);
+        assert!(layout.entry("local").unwrap().hidden);
+        assert_eq!(layout.entry("local").unwrap().size, Some(321.0));
+        assert_eq!(layout.entry("new").unwrap().slot, PanelSlot::Left);
+        assert!(!layout.entry("new").unwrap().hidden);
+        assert!(layout.entry("stale").is_none());
+    }
+
+    #[test]
+    fn panel_layout_reorder_stays_within_slot_and_round_trips() {
+        let mut layout = PanelLayout {
+            panels: vec![
+                PanelEntry {
+                    id: "a".into(),
+                    slot: PanelSlot::Bottom,
+                    order: 0,
+                    hidden: false,
+                    size: None,
+                },
+                PanelEntry {
+                    id: "b".into(),
+                    slot: PanelSlot::Bottom,
+                    order: 1,
+                    hidden: false,
+                    size: Some(200.0),
+                },
+                PanelEntry {
+                    id: "c".into(),
+                    slot: PanelSlot::Left,
+                    order: 0,
+                    hidden: false,
+                    size: None,
+                },
+            ],
+        };
+        layout.reorder("b", -1);
+        assert_eq!(
+            layout
+                .panels
+                .iter()
+                .filter(|entry| entry.slot == PanelSlot::Bottom)
+                .map(|entry| entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["b", "a"]
+        );
+        assert_eq!(layout.panels[2].id, "c");
+        let encoded = serde_json::to_string(&layout).unwrap();
+        assert_eq!(
+            serde_json::from_str::<PanelLayout>(&encoded).unwrap(),
+            layout
+        );
     }
 
     #[test]

@@ -9,8 +9,8 @@ use std::collections::HashMap;
 
 // Re-export wire-format types from protocol.
 pub use bone_protocol::view::{
-    Align, Anchor, Component, FloatRect, PaneContent, PaneLineSpec, StatusSegment, ViewDiff,
-    view_diff_from_pane_content,
+    Align, Anchor, Component, FloatRect, PaneContent, PaneLineSpec, PanelPlacement, PanelSlot,
+    StatusSegment, ViewDiff, view_diff_from_pane_content,
 };
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -54,6 +54,18 @@ impl ViewModel {
             }
             ViewDiff::Remove { id } => {
                 self.components.retain(|c| c.id() != id);
+            }
+            ViewDiff::UpdatePlacement { id, placement } => {
+                let Some(component) = self.components.iter_mut().find(|c| c.id() == id) else {
+                    return false;
+                };
+                let Component::Float {
+                    placement: current, ..
+                } = component
+                else {
+                    return false;
+                };
+                *current = placement.clone();
             }
             ViewDiff::SetHighlight { name, fg } => match fg {
                 Some(color) => {

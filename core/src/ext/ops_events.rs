@@ -22,6 +22,7 @@ const EVENT_NAMES: &[&str] = &[
     "turn_start",
     "turn_end",
     "token_usage",
+    "panel_action",
 ];
 
 /// Create the `bone.on` function and the `bone._handlers` storage table.
@@ -67,6 +68,9 @@ pub(crate) fn setup_on(lua: &Lua, bone: &Table) -> Result<(), String> {
                 let stored_opts = lua.create_table()?;
                 stored_opts.set("timeout_ms", timeout_ms)?;
                 stored_opts.set("priority", priority)?;
+                if let Ok(Some(owner)) = bone.get::<Option<String>>("_plugin_owner") {
+                    stored_opts.set("owner", owner)?;
+                }
                 match handlers.get::<Option<Table>>(&*event_name)? {
                     Some(event_handlers) => {
                         let options: Table = handler_options.get(&*event_name)?;

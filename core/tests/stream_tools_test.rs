@@ -81,6 +81,8 @@ impl Tool for PaneTool {
             ],
             visible_rows: 4,
             scroll: 0,
+            placement: None,
+            owner: None,
         };
         Ok(ToolOutput {
             content: "pane result".to_string(),

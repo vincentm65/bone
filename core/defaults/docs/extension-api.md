@@ -99,6 +99,16 @@ with the following core groups:
 - daemon-owned settings/configuration access through `ctx.settings.*` and
   `ctx.config.*`.
 
+`ctx.agent.run_stream(prompt, opts)` keeps the blocking run contract while
+forwarding live callbacks. In addition to `on_started`, `on_status`, tool, usage,
+finish, and failure callbacks, `on_text_delta(text)` and
+`on_reasoning_delta(text)` receive each streamed chunk in order. A plugin can
+use these callbacks to replace the lines of a stable shared panel with
+`bone.api.ui.set_lines`; use `bone.on("panel_action", ...)` for semantic
+`focus`, `expand`, or `close` handling. The existing native activity panel
+remains authoritative for `ctx.agent.spawn` jobs; extensions should not create a
+second panel for the same background job.
+
 Lifecycle event handlers receive the same complete bounded context. They run as
 managed daemon work rather than inline in a frontend event loop: handlers execute
 sequentially by descending `priority`, preserving registration order among equal
@@ -229,12 +239,41 @@ same protocol `ViewDiff` whether the update came from Rust or Lua.
 
 ```lua
 bone.api.ui.open_float({ id = "help", title = "Help", lines = { "text" },
-    width = 40, height = 10, anchor = "center" })
+    width = 40, height = 10, anchor = "center",
+    placement = {
+        slot = "right", order = 0, size_hint = 32,
+        pinned = false, closable = true,
+    } })
 bone.api.ui.set_lines("help", { "updated" })
+bone.api.ui.set_placement("help", { slot = "bottom", order = 0 })
 bone.api.ui.set_statusline("stats", { { text = "ready", align = "right" } })
 bone.api.ui.set_highlight("input_border", "#e0a050")
 bone.api.ui.close("help")
 ```
+
+`open_float` accepts the optional semantic `placement` fields `slot`
+(`left`, `right`, `top`, `bottom`, or `overlay`), `order`, `size_hint`,
+`pinned`, and `closable`. `owner` may also be supplied for compatibility, but
+managed plugin code is stamped with its registered plugin owner instead. A
+plugin's declarative `ctx.ui.pane` and `ctx.ui.apply` float updates receive the
+same ownership stamp. Owned panels are removed when that plugin is successfully
+reloaded or disabled; owner-less legacy panels are preserved. `set_placement`
+updates only an existing float and returns `true` on success. Placement is
+semantic protocol data: native clients may dock or float the panel, while exact
+window geometry and layout preferences remain client-local. The TUI continues
+to use its existing pane layout and ignores placement-only updates.
+
+Plugins can receive native or other frontend panel actions through the managed
+`panel_action` hook. The daemon sends a payload of the following shape:
+
+```lua
+bone.on("panel_action", function(event, ctx)
+    -- event.panel_id, event.action, event.payload, event.request_id
+end)
+```
+
+Panel actions are semantic and fire-and-forget; a handler can update shared UI
+or conversation state, but must not assume a frontend-specific drawing API.
 
 For debugging, use `bone.log.*`, inspect `ctx.runtime.info()`, enumerate tool
 and subagent definitions, and use the protocol/event stream rather than relying

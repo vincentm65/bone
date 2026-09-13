@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 
 use bone_protocol::tools::CallOutcome;
 use bone_protocol::{
-    ChatMessage, ChatRole, ImageData, JobSnapshot, ProcessSnapshot, RuntimeCommand, RuntimeEvent,
-    SessionSnapshot, ViewDiff, ViewModel,
+    ChatMessage, ChatRole, Component, ImageData, JobSnapshot, ProcessSnapshot, RuntimeCommand,
+    RuntimeEvent, SessionSnapshot, ViewDiff, ViewModel,
 };
 
 use crate::tool_display::{self, ToolDisplayConfig};
@@ -667,6 +667,14 @@ impl State {
             ViewDiff::Remove { id } => {
                 self.view.components.retain(|c| c.id() != id);
                 self.view.highlights.remove(&id);
+            }
+            ViewDiff::UpdatePlacement { id, placement } => {
+                if let Some(Component::Float {
+                    placement: current, ..
+                }) = self.view.components.iter_mut().find(|c| c.id() == id)
+                {
+                    *current = placement;
+                }
             }
             ViewDiff::SetHighlight { name, fg } => match fg {
                 Some(fg) => {
@@ -1800,6 +1808,8 @@ mod tests {
                     z: 0,
                     border: true,
                     scroll: 0,
+                    placement: None,
+                    owner: None,
                 },
             },
         });

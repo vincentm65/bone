@@ -1520,6 +1520,8 @@ struct DesktopApp {
     /// Workspace owns selection; conversation commands retain stable tab IDs.
     selected: usize,
     workspace: workspace::Workspace,
+    /// Client-local arrangement of daemon-owned panels.
+    panel_layout: workspace::PanelLayout,
     window_ui: workspace_ui::WindowUi,
     sidebar_notice: String,
     history_search: String,
@@ -1745,6 +1747,7 @@ impl DesktopApp {
             tabs: Vec::new(),
             selected: 0,
             workspace: workspace::Workspace::default(),
+            panel_layout: workspace::PanelLayout::default(),
             window_ui: workspace_ui::WindowUi::default(),
             sidebar_notice: String::new(),
             history_search: String::new(),
@@ -1870,8 +1873,10 @@ impl DesktopApp {
                     // Old layouts become one or two independent tab groups.
                     let prefs = layout.preferences;
                     let legacy_split = layout.legacy_split;
+                    let panel_layout = layout.panel_layout;
                     ctx.set_zoom_factor((prefs.zoom_percent as f32 / 100.0).clamp(0.75, 2.0));
                     app.display = prefs;
+                    app.panel_layout = panel_layout;
                     let ids: Vec<_> = app.tabs.iter().map(|tab| tab.id).collect();
                     app.workspace = layout.workspace.unwrap_or_else(|| {
                         workspace::Workspace::from_legacy(
@@ -2038,6 +2043,8 @@ impl DesktopApp {
                     title: "Tasks (1/3)".into(),
                     visible_rows: 8,
                     scroll: 0,
+                    placement: None,
+                    owner: None,
                     lines: vec![
                         bone_protocol::PaneLineSpec::Spans {
                             spans: vec![bone_protocol::PaneSpanSpec {
@@ -3818,6 +3825,7 @@ impl DesktopApp {
                 .collect(),
             preferences: self.display,
             workspace: Some(workspace),
+            panel_layout: self.panel_layout.clone(),
             legacy_split: layout::LegacySplit::default(),
         }
     }
@@ -4023,17 +4031,37 @@ impl DesktopApp {
         self.tabs
             .get(self.selected)
             .map(|tab| {
-                let mut ids = live_pane::page_ids(&tab.state.view, &tab.state.jobs);
-                ids.extend(tab.state.view.components.iter().filter_map(
-                    |component| match component {
+                let mut ids = live_pane::page_ids_with_layout(
+                    &tab.state.view,
+                    &tab.state.jobs,
+                    Some(&self.panel_layout),
+                );
+                ids.extend(tab.state.view.components.iter().filter_map(|component| {
+                    match component {
                         bone_protocol::Component::Float {
                             id,
-                            presentation: bone_protocol::PanePresentation::Overlay,
+                            presentation,
+                            placement,
                             ..
-                        } => Some(live_pane::PageId::Extension(id.clone())),
+                        } if self
+                            .panel_layout
+                            .entry(id)
+                            .map(|entry| entry.slot)
+                            .or_else(|| placement.as_ref().map(|placement| placement.slot))
+                            .unwrap_or(
+                                if *presentation == bone_protocol::PanePresentation::Overlay {
+                                    bone_protocol::view::PanelSlot::Overlay
+                                } else {
+                                    bone_protocol::view::PanelSlot::Bottom
+                                },
+                            )
+                            == bone_protocol::view::PanelSlot::Overlay =>
+                        {
+                            Some(live_pane::PageId::Extension(id.clone()))
+                        }
                         _ => None,
-                    },
-                ));
+                    }
+                }));
                 ids
             })
             .unwrap_or_default()
@@ -4055,7 +4083,13 @@ impl DesktopApp {
             .filter(|(id, _)| *id == tab.id)
             .and_then(|(_, pane)| ids.iter().position(|candidate| candidate == pane));
         let next = ids[current.map_or(0, |index| (index + 1) % ids.len())].clone();
-        if live_pane::page_ids(&tab.state.view, &tab.state.jobs).contains(&next) {
+        if live_pane::page_ids_with_layout(
+            &tab.state.view,
+            &tab.state.jobs,
+            Some(&self.panel_layout),
+        )
+        .contains(&next)
+        {
             tab.live_pane.select(next.clone());
         }
         self.active_pane = Some((tab.id, next));
@@ -4068,7 +4102,13 @@ impl DesktopApp {
         let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
             return;
         };
-        if live_pane::page_ids(&tab.state.view, &tab.state.jobs).contains(&id) {
+        if live_pane::page_ids_with_layout(
+            &tab.state.view,
+            &tab.state.jobs,
+            Some(&self.panel_layout),
+        )
+        .contains(&id)
+        {
             tab.live_pane.select(id);
             tab.live_pane.scroll_by(delta);
         } else if let live_pane::PageId::Extension(id) = id {
@@ -4179,6 +4219,8 @@ impl DesktopApp {
             || self.pending_key_request().is_some()
             || self.close_target.is_some()
             || self.window_ui.closing_window()
+            || (self.show_config && (self.config.is_none() || self.config_schema.is_none()))
+            || (self.show_plugins && self.catalog.is_none())
             || self.tabs.iter().any(|tab| {
                 tab.show_editor
                     && self
@@ -4197,13 +4239,9 @@ impl DesktopApp {
             || self.show_provider
             || self.show_setup
             || self.show_server
-            || self.show_config
             || self.stats_picker.is_some()
             || self.show_activity
-            || self.process_view.is_some()
-            || self.job_view.is_some()
             || self.show_stats
-            || self.show_plugins
             || self.plugin_consent.is_some()
     }
 
@@ -4911,6 +4949,7 @@ impl DesktopApp {
                     model_selector,
                     danger,
                     approval_keyboard_enabled,
+                    Some(&self.panel_layout),
                 );
                 file_refs::set_workspace(ui.ctx(), "");
                 changed
@@ -4949,6 +4988,7 @@ impl DesktopApp {
             self.panes_visible && tab.state.pending_key.is_none(),
             active,
             &pane_offsets,
+            Some(&self.panel_layout),
         );
         changed
     }
@@ -5411,6 +5451,7 @@ impl DesktopApp {
     /// `process_view`). Renders the origin tab's snapshot for the open process
     /// id and sends a cancel command through that same tab. Closes itself once
     /// the process is no longer in the snapshot.
+    #[cfg(test)]
     fn process_view_dialog(&mut self, ctx: &egui::Context) {
         if self.demo || self.process_view.is_none() {
             return;
@@ -5477,6 +5518,7 @@ impl DesktopApp {
     /// Full job-transcript viewer (Phase 5, parity with the TUI's `open_job`).
     /// Reads and acts on the originating conversation, even after tab switches.
     /// Closes when the origin or its job leaves the current snapshot.
+    #[cfg(test)]
     fn job_view_dialog(&mut self, ctx: &egui::Context) {
         if self.job_view.is_none() {
             return;
@@ -5704,48 +5746,40 @@ impl DesktopApp {
         }
     }
 
-    /// Plugins surface. Renders the most recent `CatalogSnapshot` through the
-    /// unified plugins renderer and sends install/update/remove/enable/disable
-    /// `CatalogApply` requests.
-    fn plugins_dialog(&mut self, ctx: &egui::Context) {
+    /// Render the catalog through the shared workspace panel path. Catalog
+    /// requests and consent remain native host operations; only presentation
+    /// placement is shared with daemon-owned panels.
+    pub(crate) fn render_plugins_panel(&mut self, ui: &mut egui::Ui) {
         if self.demo || !self.show_plugins {
             return;
         }
         let palette = self.palette();
-        let mut open = self.show_plugins;
-        let mut destination = None;
         let mut actions = Vec::new();
         let mut refresh = false;
-        crate::surface::Surface::new("Plugins", "Find, install, and manage plugins for Bone.")
-            .size(960.0, 640.0)
-            .body_scroll(false)
-            .show(ctx, &mut open, |ui| {
-                destination = surface::navigation(ui, "Plugins", |ui| {
-                    refresh = ui
-                        .add_enabled(self.catalog_request.is_none(), egui::Button::new("Refresh"))
-                        .clicked();
-                });
-                if !self.catalog_notice.is_empty() {
-                    ui.weak(&self.catalog_notice);
+        let destination = surface::navigation(ui, "Plugins", |ui| {
+            refresh = ui
+                .add_enabled(self.catalog_request.is_none(), egui::Button::new("Refresh"))
+                .clicked();
+        });
+        if !self.catalog_notice.is_empty() {
+            ui.weak(&self.catalog_notice);
+        }
+        match self.catalog.as_ref() {
+            Some(snapshot) => {
+                actions = ui
+                    .add_enabled_ui(self.catalog_request.is_none(), |ui| {
+                        plugins::render(ui, snapshot, &mut self.plugins_view, &palette)
+                    })
+                    .inner;
+            }
+            None => {
+                // A notice (timeout/error) already explains the empty state;
+                // only show the loading hint while it is pending.
+                if self.catalog_notice.is_empty() {
+                    ui.weak("Loading plugins…");
                 }
-                match self.catalog.as_ref() {
-                    Some(snapshot) => {
-                        actions = ui
-                            .add_enabled_ui(self.catalog_request.is_none(), |ui| {
-                                plugins::render(ui, snapshot, &mut self.plugins_view, &palette)
-                            })
-                            .inner;
-                    }
-                    None => {
-                        // A notice (timeout/error) already explains the empty
-                        // state; only show the loading hint while it is pending.
-                        if self.catalog_notice.is_empty() {
-                            ui.weak("Loading plugins…");
-                        }
-                    }
-                }
-            });
-        self.show_plugins = open;
+            }
+        }
         if let Some(destination) = destination {
             self.open_utility(destination);
         }
@@ -5761,41 +5795,34 @@ impl DesktopApp {
         }
     }
 
-    /// Schema-driven configuration dialog: renders the daemon's config pages and
-    /// sends `SetConfigValue`/`ResetConfigValue` for edits (TUI `/config`).
-    fn config_dialog(&mut self, ctx: &egui::Context) {
+    /// Render daemon-backed configuration data in a shared workspace panel.
+    /// Mutations continue to use the native request bridge, preserving the TUI
+    /// Lua command and its config APIs.
+    pub(crate) fn render_config_panel(&mut self, ui: &mut egui::Ui) {
         if self.demo || !self.show_config {
             return;
         }
         let view = config_view::ConfigView::new(self.config_schema.clone(), self.config.clone());
-        let mut open = self.show_config;
-        let mut destination = None;
+        let destination = surface::navigation(ui, "Settings", |_| {});
         let mut action: Option<config_view::ConfigUiAction> = None;
         let mut refetch = false;
-        crate::surface::Surface::new("Settings", "Customize how Bone looks and works.")
-            .size(900.0, 620.0)
-            .body_scroll(false)
-            .show(ctx, &mut open, |ui| {
-                destination = surface::navigation(ui, "Settings", |_| {});
-                if view.schema.is_none() || view.snapshot.is_none() {
-                    ui.weak("Waiting for the daemon…");
-                    if ui.small_button("↻ Refetch").clicked() {
-                        refetch = true;
-                    }
-                    return;
-                }
-                if !self.config_notice.is_empty() {
-                    ui.weak(&self.config_notice);
-                }
-                config_view::render_pages(
-                    ui,
-                    &view,
-                    &mut self.config_edits,
-                    &mut self.config_ui,
-                    &mut action,
-                );
-            });
-        self.show_config = open;
+        if view.schema.is_none() || view.snapshot.is_none() {
+            ui.weak("Waiting for the daemon…");
+            if ui.small_button("↻ Refetch").clicked() {
+                refetch = true;
+            }
+        } else {
+            if !self.config_notice.is_empty() {
+                ui.weak(&self.config_notice);
+            }
+            config_view::render_pages(
+                ui,
+                &view,
+                &mut self.config_edits,
+                &mut self.config_ui,
+                &mut action,
+            );
+        }
         if let Some(destination) = destination {
             self.open_utility(destination);
         }
@@ -5808,6 +5835,32 @@ impl DesktopApp {
         if let Some(action) = action {
             self.apply_config_ui_action(action);
         }
+    }
+
+    #[cfg(test)]
+    fn plugins_dialog(&mut self, ctx: &egui::Context) {
+        if self.demo || !self.show_plugins {
+            return;
+        }
+        let mut open = self.show_plugins;
+        crate::surface::Surface::new("Plugins", "Find, install, and manage plugins for Bone.")
+            .size(960.0, 640.0)
+            .body_scroll(false)
+            .show(ctx, &mut open, |ui| self.render_plugins_panel(ui));
+        self.show_plugins = open;
+    }
+
+    #[cfg(test)]
+    fn config_dialog(&mut self, ctx: &egui::Context) {
+        if self.demo || !self.show_config {
+            return;
+        }
+        let mut open = self.show_config;
+        crate::surface::Surface::new("Settings", "Customize how Bone looks and works.")
+            .size(900.0, 620.0)
+            .body_scroll(false)
+            .show(ctx, &mut open, |ui| self.render_config_panel(ui));
+        self.show_config = open;
     }
 
     fn pending_key_request(&self) -> Option<(usize, u64)> {
@@ -6558,7 +6611,9 @@ impl Tab {
                     .corner_radius(4.0);
             }
             state::InputPreset::Filled => {
-                frame = frame.fill(ui.visuals().extreme_bg_color).corner_radius(4.0);
+                // The composer surface already carries the filled background
+                // (see `body`), so the input draws no second box: one uniform
+                // surface.
             }
         }
         let editor = egui::ScrollArea::vertical()
@@ -6776,6 +6831,7 @@ impl Tab {
         model_selector: Option<ModelSelector>,
         danger: bool,
         approval_keyboard_enabled: bool,
+        panel_layout: Option<&workspace::PanelLayout>,
     ) -> bool {
         // Reserve the composer area before laying out history so long
         // transcripts cannot push it out of the window. The id is per-tab so
@@ -6786,8 +6842,11 @@ impl Tab {
         // Keep the default activity surface to a compact status strip.
         let max_live_height = (available_height * 0.65).max(96.0);
         let live_height = 48.0_f32.min(max_live_height);
-        self.live_pane
-            .sync(&live_pane::page_ids(&self.state.view, &self.state.jobs));
+        self.live_pane.sync(&live_pane::page_ids_with_layout(
+            &self.state.view,
+            &self.state.jobs,
+            panel_layout,
+        ));
         let composer_id = egui::Id::new(("composer", self.id));
         Self::fit_bottom_panel(ui.ctx(), composer_id, ui.available_rect_before_wrap());
         let mut composer_changed = egui::Panel::bottom(composer_id)
@@ -6819,6 +6878,7 @@ impl Tab {
                                     palette,
                                     live_height,
                                     max_live_height,
+                                    panel_layout,
                                 )
                             {
                                 match action {
@@ -6830,8 +6890,15 @@ impl Tab {
                                     }
                                 }
                             }
+                            // The composer is a single surface: the `filled`
+                            // preset tints it instead of nesting a second box,
+                            // so the input never reads as a mismatched grey block.
+                            let composer_fill = match self.state.input_style.preset {
+                                state::InputPreset::Filled => ui.visuals().extreme_bg_color,
+                                _ => ui.visuals().faint_bg_color,
+                            };
                             let changed = egui::Frame::default()
-                                .fill(ui.visuals().faint_bg_color)
+                                .fill(composer_fill)
                                 .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
                                 .corner_radius(theme::SURFACE_RADIUS)
                                 .inner_margin(egui::Margin::symmetric(16, 12))
@@ -7172,6 +7239,7 @@ mod tests {
             ],
             preferences: layout::Preferences::default(),
             workspace: None,
+            panel_layout: workspace::PanelLayout::default(),
             legacy_split: layout::LegacySplit::default(),
         }
     }
@@ -8954,6 +9022,8 @@ mod tests {
                 z: 0,
                 border: false,
                 scroll: 0,
+                placement: None,
+                owner: None,
             }],
             highlights: Default::default(),
         };
@@ -9178,6 +9248,8 @@ mod tests {
             z: 0,
             border: true,
             scroll: 0,
+            placement: None,
+            owner: None,
         };
         app.tabs[0].state.view.components = vec![float("a"), float("b")];
         let tab_id = app.tabs[0].id;
@@ -11520,7 +11592,15 @@ mod tests {
                             ..Default::default()
                         },
                         |ui| {
-                            tab.body(ui, &theme::ThemeColors::default(), None, None, false, true);
+                            tab.body(
+                                ui,
+                                &theme::ThemeColors::default(),
+                                None,
+                                None,
+                                false,
+                                true,
+                                None,
+                            );
                         },
                     );
                     output.textures_delta.clear();
@@ -11626,7 +11706,15 @@ mod tests {
                     ..Default::default()
                 },
                 |ui| {
-                    tab.body(ui, &theme::ThemeColors::default(), None, None, false, true);
+                    tab.body(
+                        ui,
+                        &theme::ThemeColors::default(),
+                        None,
+                        None,
+                        false,
+                        true,
+                        None,
+                    );
                 },
             );
             output.textures_delta.clear();
@@ -11709,7 +11797,15 @@ mod tests {
                         ui.scope_builder(egui::UiBuilder::new().max_rect(pane), |ui| {
                             scroll_id =
                                 ui.make_persistent_id(egui::IdSalt::new(("transcript", tab.id)));
-                            tab.body(ui, &theme::ThemeColors::default(), None, None, false, true);
+                            tab.body(
+                                ui,
+                                &theme::ThemeColors::default(),
+                                None,
+                                None,
+                                false,
+                                true,
+                                None,
+                            );
                         });
                     },
                 );
@@ -11868,6 +11964,7 @@ mod tests {
                                 }),
                                 false,
                                 true,
+                                None,
                             );
                         },
                     );
@@ -11921,6 +12018,87 @@ mod tests {
                 }
                 std::fs::remove_dir_all(dir).unwrap();
             }
+        }
+    }
+
+    /// One uniform composer surface: the `filled` preset must tint the single
+    /// composer surface rather than nesting a second box (the old grey block
+    /// that read as a mismatched inner rectangle under every theme).
+    #[test]
+    fn composer_preset_paints_one_uniform_surface() {
+        const FAINT: egui::Color32 = egui::Color32::from_rgb(8, 8, 8);
+        const EXTREME: egui::Color32 = egui::Color32::from_rgb(20, 20, 20);
+        for (preset, surface_fill) in [
+            (state::InputPreset::Filled, EXTREME),
+            (state::InputPreset::Lines, FAINT),
+            (state::InputPreset::Box, FAINT),
+        ] {
+            let ctx = egui::Context::default();
+            let (mut app, dir) = fresh_app(&ctx, "composer-uniform");
+            // Set the visuals after `open`, which installs its own theme style.
+            ctx.all_styles_mut(|style| {
+                style.visuals.panel_fill = egui::Color32::from_rgb(0, 0, 0);
+                style.visuals.faint_bg_color = FAINT;
+                style.visuals.extreme_bg_color = EXTREME;
+            });
+            let tab = &mut app.tabs[0];
+            tab.state.ready = true;
+            tab.connected = true;
+            tab.composer = "Review the current changes".into();
+            tab.state.input_style.preset = preset;
+            let colors = theme::ThemeColors::default();
+            let mut out = None;
+            for _ in 0..3 {
+                let mut frame_out = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(900.0, 700.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        tab.body(ui, &colors, None, None, false, true, None);
+                    },
+                );
+                frame_out.textures_delta.clear();
+                out = Some(frame_out);
+            }
+            let out = out.unwrap();
+            let rects: Vec<&egui::epaint::RectShape> = out
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::epaint::Shape::Rect(rect) => Some(rect),
+                    _ => None,
+                })
+                .collect();
+            // The composer surface is the widest rounded surface in the body.
+            let surface = rects
+                .iter()
+                .filter(|rect| {
+                    rect.corner_radius == egui::CornerRadius::same(theme::SURFACE_RADIUS)
+                })
+                .max_by(|a, b| a.rect.width().total_cmp(&b.rect.width()))
+                .expect("composer surface");
+            assert_eq!(surface.fill, surface_fill, "{preset:?} surface tint");
+            assert_eq!(surface.stroke.width, 1.0, "{preset:?} surface outline");
+            // No second, opaque fill may sit inside the composer surface: that
+            // is exactly the nested box this change removes.
+            let nested = rects
+                .iter()
+                .filter(|rect| {
+                    rect.rect != surface.rect
+                        && rect.fill != egui::Color32::TRANSPARENT
+                        && rect.rect.width() > surface.rect.width() * 0.5
+                        && surface.rect.contains_rect(rect.rect)
+                })
+                .count();
+            assert_eq!(
+                nested, 0,
+                "composer must be one uniform surface; {preset:?} nested {nested} extra fill(s)"
+            );
+            std::fs::remove_dir_all(dir).unwrap();
         }
     }
 
@@ -11992,7 +12170,7 @@ mod tests {
         let mut out = None;
         for frame in 0..3 {
             let mut frame_out = ctx.run_ui(screen(frame), |ui| {
-                app.tabs[0].body(ui, &colors, None, None, false, true);
+                app.tabs[0].body(ui, &colors, None, None, false, true, None);
             });
             frame_out.textures_delta.clear();
             out = Some(frame_out);

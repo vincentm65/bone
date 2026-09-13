@@ -169,6 +169,7 @@ impl RuntimeConn for LocalConn {
             | RuntimeCommand::DispatchHook { .. }
             | RuntimeCommand::SetTerminalWidth { .. }
             | RuntimeCommand::KeymapDispatch { .. }
+            | RuntimeCommand::PanelAction { .. }
             | RuntimeCommand::ReloadSettings
             | RuntimeCommand::GetConfig
             | RuntimeCommand::SetConfigValue { .. }

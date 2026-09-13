@@ -37,5 +37,5 @@ pub use tokens::{CHARS_PER_TOKEN, TokenStats, format_tokens};
 pub use tools::{CallOutcome, ToolDefinition, ToolOutput};
 pub use view::{
     Align, Anchor, Component, FloatRect, PaneContent, PaneLineSpec, PanePresentation, PaneSpanSpec,
-    StatusSegment, ViewDiff, ViewModel, view_diff_from_pane_content,
+    PanelPlacement, PanelSlot, StatusSegment, ViewDiff, ViewModel, view_diff_from_pane_content,
 };
