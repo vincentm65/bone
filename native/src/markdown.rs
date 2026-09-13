@@ -854,7 +854,7 @@ pub fn render_blocks(
             Block::Heading { level, runs } => {
                 ui.add_space(if index == 0 { 2.0 } else { 12.0 });
                 let size = heading_pixel_size(*level);
-                let job = build_job(
+                let mut job = build_job(
                     runs,
                     ui.style(),
                     Some(size),
@@ -863,6 +863,10 @@ pub fn render_blocks(
                     None,
                     colors,
                 );
+                // Same guard as `render_inline`: a heading with a token longer
+                // than the column must break mid-token, not overrun and drag the
+                // row's content left.
+                job.wrap.break_anywhere = true;
                 ui.add(egui::Label::new(job).selectable(true));
                 ui.add_space(2.0);
             }
@@ -1032,6 +1036,13 @@ fn render_inline(ui: &mut Ui, runs: &[Run], marker: Option<&str>, colors: &Theme
                 }
             }
         }
+        // A long unbreakable token (a dense code path, a `registry::new()…`
+        // chain) would otherwise overrun the wrap width; epaint then emits a
+        // galley whose origin escapes left of the row, and egui folds that
+        // rect into the row's `max_rect`, dragging all later content left.
+        // Breaking mid-token (overflow-wrap: break-word) only changes layout
+        // when no word-boundary candidate exists, so prose wraps as before.
+        job.wrap.break_anywhere = true;
         ui.add(egui::Label::new(job).selectable(true));
         return;
     }
@@ -1049,7 +1060,7 @@ fn render_inline(ui: &mut Ui, runs: &[Run], marker: Option<&str>, colors: &Theme
                 segment.push(runs[i].clone());
                 i += 1;
             }
-            let job = build_job(
+            let mut job = build_job(
                 &segment,
                 ui.style(),
                 None,
@@ -1058,6 +1069,9 @@ fn render_inline(ui: &mut Ui, runs: &[Run], marker: Option<&str>, colors: &Theme
                 Some(PROSE_LINE_HEIGHT),
                 colors,
             );
+            // See the fast path: never let an unbreakable token overrun the
+            // wrap width, or its galley origin escapes left of the row.
+            job.wrap.break_anywhere = true;
             match url {
                 None => {
                     ui.add(egui::Label::new(job));
@@ -1529,6 +1543,41 @@ mod tests {
                     "wide content expanded its container to {width}"
                 );
             }
+        }
+    }
+
+    /// Markdown-layer companion to
+    /// `workspace_ui::tests::long_inline_tokens_do_not_drag_transcript_content_left`:
+    /// a paragraph mixing link-parsing inline code with a long unbreakable
+    /// token must not expand its container. Without `wrap.break_anywhere` the
+    /// token overruns the wrap width and the row's `min_rect` grows past the
+    /// column.
+    #[test]
+    fn narrow_column_keeps_long_inline_code_inside_the_pane() {
+        let text = "Not user-configurable on disk; changing them requires rebuilding Bone.\n\n\
+            1. Lua tools — loaded at startup from the config dir\n\n\
+            Boot path: `core/src/ext/loader.rs` — creates the Lua VM, runs `~/.bone-rust/init.lua`, seeds defaults\n\n\
+            - Registered in `core/src/tools/mod.rs:90` (`builtin_tools()` → `registry::new().register(read_file…).register(create_file…).register(edit_file…).register(shell…))`\n\n\
+            - Registration API: `core/src/ext/api.rs` + `lua_tool.rs` (`bone.tool.register(...)`, `bone.tool.schema(...)`)";
+        let ctx = egui::Context::default();
+        let blocks = parse_markdown(text);
+        for _ in 0..3 {
+            let mut width = 0.0;
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(320.0, 400.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    render_blocks(ui, "narrow", &blocks, &ThemeColors::default());
+                    width = ui.min_rect().width();
+                },
+            );
+            out.textures_delta.clear();
+            assert!(width <= 320.0, "content expanded its container to {width}");
         }
     }
 

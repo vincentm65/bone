@@ -1855,6 +1855,82 @@ mod tests {
         }
     }
 
+    /// Regression for the reported screenshot: one assistant message with inline
+    /// code spanning links (`core/src/ext/loader.rs`, `~/.bone-rust/init.lua`)
+    /// and a long unbreakable token
+    /// (`registry::new().register(read_file…).register(create_file…)…`).
+    ///
+    /// Inline-code spans that parse as file references make `render_inline` take
+    /// its per-link path, so each URL-homogeneous segment is laid out as its own
+    /// widget. When a segment contains a token longer than the wrap width and no
+    /// break candidate exists, epaint overruns the wrap width and emits a galley
+    /// whose origin is *negative* (`galley.rect.min.x < 0`). egui folds that
+    /// widget rect into the row's `max_rect`, which drags every later paragraph
+    /// left — off the left pane edge. That is the bug.
+    ///
+    /// Assert that, at roomy sizes where nothing is legitimately scrolled out
+    /// vertically, no text galley escapes its clip rect horizontally and no
+    /// galley origin is negative.
+    #[test]
+    fn long_inline_tokens_do_not_drag_transcript_content_left() {
+        let text = "\
+## 2. Lua tools — loaded at startup from the config dir\n\n\
+Tools user, task_list, task_loop, web_search, subagent (plus disabled cron, browser) are Lua files:\n\n\
+- Boot path: `core/src/ext/loader.rs` — creates the Lua VM, runs `~/.bone-rust/init.lua`, seeds defaults, then executes every `~/.bone-rust/lua/tools/*.lua`\n\n\
+1. Native Rust tools — compiled into the daemon\n\n\
+- Registered in `core/src/tools/mod.rs:90` (`builtin_tools()` → `registry::new().register(read_file…).register(create_file…).register(edit_file…).register(shell…))`\n\n\
+- Registration API: `core/src/ext/api.rs` + `lua_tool.rs` (`bone.tool.register(...)`, `bone.tool.schema(...)`)\n\n\
+Not user-configurable on disk; changing them requires rebuilding Bone.\n";
+        for (w, h) in [(1280.0, 900.0), (2220.0, 1200.0), (1000.0, 720.0)] {
+            let ctx = egui::Context::default();
+            let mut app = DesktopApp::open(ctx.clone(), false, None);
+            app.tabs[0].connected = true;
+            app.tabs[0].state.ready = true;
+            app.tabs[0].state.rows = vec![("assistant".into(), text.into())];
+            let mut output = None;
+            for _ in 0..4 {
+                let mut out = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(w, h),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| app.render_native_window(0, ui, false),
+                );
+                out.textures_delta.clear();
+                output = Some(out);
+            }
+            let output = output.unwrap();
+            for shape in &output.shapes {
+                let egui::Shape::Text(t) = &shape.shape else {
+                    continue;
+                };
+                let rect = t.galley.rect.translate(t.pos.to_vec2());
+                let label = || t.galley.text().chars().take(60).collect::<String>();
+                assert!(
+                    t.galley.rect.min.x >= -0.5,
+                    "[{w}x{h}] negative galley origin {:?} for {:?}",
+                    t.galley.rect.min.x,
+                    label()
+                );
+                assert!(
+                    rect.min.x >= shape.clip_rect.min.x - 0.5,
+                    "[{w}x{h}] text {:?} escapes left of its clip: rect={rect:?} clip={:?}",
+                    label(),
+                    shape.clip_rect
+                );
+                assert!(
+                    rect.max.x <= shape.clip_rect.max.x + 0.5,
+                    "[{w}x{h}] text {:?} escapes right of its clip: rect={rect:?} clip={:?}",
+                    label(),
+                    shape.clip_rect
+                );
+            }
+        }
+    }
+
     /// Regression: utility displays must be rendered by the workspace pass rather
     /// than by the native modal-dialog pass. The Plugins flag still needs to
     /// produce a stable panel entry and visible content.

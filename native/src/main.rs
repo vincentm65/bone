@@ -5746,6 +5746,17 @@ impl DesktopApp {
         }
     }
 
+    /// Explain why the catalog is still empty. A pending request is a genuine
+    /// load; with no connected conversation the request cannot be sent at all,
+    /// so the panel must say so instead of spinning forever.
+    fn catalog_pending_hint(&self) -> &'static str {
+        if self.catalog_request.is_some() || self.first_connected_tab_index().is_some() {
+            "Loading plugins…"
+        } else {
+            "Waiting for the daemon connection before plugins can load (see Server & connection…)."
+        }
+    }
+
     /// Render the catalog through the shared workspace panel path. Catalog
     /// requests and consent remain native host operations; only presentation
     /// placement is shared with daemon-owned panels.
@@ -5774,9 +5785,9 @@ impl DesktopApp {
             }
             None => {
                 // A notice (timeout/error) already explains the empty state;
-                // only show the loading hint while it is pending.
+                // only show the pending hint while it is empty.
                 if self.catalog_notice.is_empty() {
-                    ui.weak("Loading plugins…");
+                    ui.weak(self.catalog_pending_hint());
                 }
             }
         }
@@ -9423,6 +9434,28 @@ mod tests {
             }
             _ => panic!("expected HostRequest::Catalog"),
         }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn catalog_pending_hint_reports_a_missing_daemon_connection() {
+        let ctx = egui::Context::default();
+        let (mut app, dir) = fresh_app(&ctx, "cataloghint");
+
+        // No connected conversation: the request cannot be sent, so the panel
+        // must not claim it is loading.
+        app.tabs[0].connected = false;
+        assert!(
+            app.catalog_pending_hint().contains("daemon connection"),
+            "an unconnected catalog must explain the wait"
+        );
+
+        // A connected conversation (or an in-flight request) is a real load.
+        app.tabs[0].connected = true;
+        assert_eq!(app.catalog_pending_hint(), "Loading plugins…");
+        app.tabs[0].connected = false;
+        app.catalog_request = Some((app.tabs[0].id, 1));
+        assert_eq!(app.catalog_pending_hint(), "Loading plugins…");
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
