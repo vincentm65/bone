@@ -134,10 +134,13 @@ fn generate_lua_table(
         let name = path
             .strip_prefix(&dir)
             .expect("collected Lua path stays under its source directory")
-            .to_string_lossy();
+            .to_string_lossy()
+            // Bundled names are matched against literal forward-slash paths
+            // (e.g. `ui/menu.lua`) at runtime, so normalize Windows separators.
+            .replace('\\', "/");
         generated.push_str(&format!(
             "    ({name:?}, include_str!({path:?})),\n",
-            name = name.as_ref(),
+            name = name.as_str(),
             path = path.display().to_string(),
         ));
     }

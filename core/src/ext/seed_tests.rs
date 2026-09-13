@@ -232,6 +232,50 @@ fn bundled_ui_seeds_refresh_pre_feature_copies() {
 }
 
 #[test]
+fn bundled_seed_names_use_forward_slashes() {
+    for (name, _) in DEFAULT_LUA_LIBS
+        .iter()
+        .chain(DEFAULT_LUA_TOOLS)
+        .chain(DEFAULT_LUA_COMMANDS)
+    {
+        assert!(
+            !name.contains('\\'),
+            "bundled seed name {name:?} must use `/`, because refresh rules match literal forward-slash paths"
+        );
+    }
+
+    // Regression: the Windows build used to emit `ui\menu.lua`, so the
+    // `name == "ui/menu.lua"` refresh rule below never fired and the seeded
+    // menu drifted forever.
+    let (name, content) = DEFAULT_LUA_LIBS
+        .iter()
+        .find(|(name, _)| *name == "ui/menu.lua")
+        .expect("bundled libs include ui/menu.lua");
+
+    let dir = std::env::temp_dir().join(format!(
+        "bone-seed-name-separator-test-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    let menu = dir.join("ui").join("menu.lua");
+    std::fs::create_dir_all(menu.parent().unwrap()).unwrap();
+
+    // A pristine copy of the current bundled menu is already up to date.
+    std::fs::write(&menu, content).unwrap();
+    assert!(
+        !should_refresh_seeded_lua(&menu, name).unwrap(),
+        "bundled ui/menu.lua should satisfy its own refresh rule"
+    );
+
+    // A pre-pane-migration copy must still be refreshed under that name.
+    std::fs::write(&menu, "-- old menu helper\n").unwrap();
+    assert!(should_refresh_seeded_lua(&menu, name).unwrap());
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn seeds_refresh_pre_namespace_registration_apis() {
     let dir = std::env::temp_dir().join(format!(
         "bone-registration-api-seed-test-{}-{:?}",
