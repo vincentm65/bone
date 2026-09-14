@@ -215,6 +215,53 @@ fn injection_rejects_max_tokens() {
 }
 
 #[test]
+fn estimate_counts_images_only_on_non_tool_messages() {
+    use crate::llm::{ChatRole, ImageData};
+    use crate::llm::token_tracker::{CHARS_PER_TOKEN, ImageTokenProfile, estimate_image_tokens};
+
+    // A 448×448 image under the default (Qwen2-VL) profile = 256 tokens.
+    let image = ImageData {
+        media_type: "image/png".to_string(),
+        data: String::new(),
+        width: Some(448),
+        height: Some(448),
+        ..Default::default()
+    };
+    let img_chars = (estimate_image_tokens(
+        Some((448, 448)),
+        None,
+        &ImageTokenProfile::default(),
+    ) as f64
+        * CHARS_PER_TOKEN)
+        .ceil() as usize;
+    assert_eq!(img_chars, 973); // 256 * 3.8, rounded up
+
+    // A relay (user) message's image IS counted, and adds exactly img_chars.
+    let relay_empty = ChatMessage::user_with_images("Image output from read_file:", vec![]);
+    let relay_with = ChatMessage::user_with_images(
+        "Image output from read_file:",
+        vec![image.clone()],
+    );
+    assert_eq!(
+        super::estimate_context_chars(&[relay_with.clone()], 0)
+            - super::estimate_context_chars(&[relay_empty.clone()], 0),
+        img_chars
+    );
+
+    // A tool message carrying the same durable image is NOT double-counted:
+    // tool-role images ride a relay, so they are excluded here.
+    let mut tool_empty = ChatMessage::new(ChatRole::Tool, "result");
+    tool_empty.tool_call_id = Some("call-1".to_string());
+    tool_empty.name = Some("read_file".to_string());
+    let mut tool_with_image = tool_empty.clone();
+    tool_with_image.images = vec![image.clone()];
+    assert_eq!(
+        super::estimate_context_chars(&[tool_empty.clone()], 0),
+        super::estimate_context_chars(&[tool_with_image.clone()], 0)
+    );
+}
+
+#[test]
 fn headless_prompt_overrides_ignore_the_daemon_main_prompt() {
     with_bone_dir(|_dir| {
         let config = crate::config::store::ConfigStore::for_test();

@@ -176,11 +176,16 @@ impl ReadFileTool {
             ensure_len(bytes.len() as u64, MAX_IMAGE_FILE_BYTES)?;
             let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
             let note = format!("[read image {path} ({media_type}, {} bytes)]", bytes.len());
+            let (width, height) = crate::llm::parse_image_dimensions(&bytes)
+                .map(|(w, h)| (Some(w), Some(h)))
+                .unwrap_or_default();
             return Ok(ToolOutput::with_images(
                 note,
                 vec![ImageData {
                     media_type: media_type.to_string(),
                     data,
+                    width,
+                    height,
                     ..Default::default()
                 }],
             ));

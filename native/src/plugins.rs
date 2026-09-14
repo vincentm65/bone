@@ -29,6 +29,8 @@ pub struct PluginsView {
     query: String,
     filter: Filter,
     selected: Option<String>,
+    /// Open Settings from the selected plugin's management controls.
+    pub open_settings: bool,
     /// Per-plugin outcome from the last apply, keyed by name.
     results: HashMap<String, CatalogItemOutcome>,
     /// One-line banner shown in the read-only result phase.
@@ -258,7 +260,14 @@ pub fn render(
                     .iter()
                     .find(|i| Some(&i.name) == view.selected.as_ref())
                 {
-                    details(ui, item, &mut actions, good, accent);
+                    details(
+                        ui,
+                        item,
+                        &mut actions,
+                        &mut view.open_settings,
+                        good,
+                        accent,
+                    );
                 }
             });
     } else {
@@ -282,52 +291,37 @@ pub fn render(
                         .show(ui, |ui| {
                             for item in &items {
                                 ui.push_id(&item.name, |ui| {
-                                    egui::Frame::new()
+                                    let selected = view.selected.as_deref() == Some(&item.name);
+                                    let frame = egui::Frame::new()
                                         .inner_margin(8)
                                         .corner_radius(7)
-                                        .fill(if view.selected.as_deref() == Some(&item.name) {
-                                            ui.visuals().widgets.inactive.weak_bg_fill
+                                        .fill(if selected {
+                                            ui.visuals().selection.bg_fill
                                         } else {
                                             egui::Color32::TRANSPARENT
+                                        })
+                                        .stroke(if selected {
+                                            egui::Stroke::new(1.0, accent)
+                                        } else {
+                                            egui::Stroke::NONE
                                         })
                                         .show(ui, |ui| {
                                             ui.set_width((list_width - 32.0).max(80.0));
                                             ui.spacing_mut().item_spacing.y = 3.0;
-                                            ui.horizontal(|ui| {
-                                                let width =
-                                                    (ui.available_width() - 220.0).max(60.0);
-                                                let chosen = ui
-                                                    .allocate_ui_with_layout(
-                                                        egui::vec2(width, 30.0),
-                                                        egui::Layout::left_to_right(
-                                                            egui::Align::Center,
-                                                        ),
-                                                        |ui| {
-                                                            ui.set_width(width);
-                                                            ui.add(
-                                                                egui::Button::new(
-                                                                    egui::RichText::new(&item.name)
-                                                                        .strong(),
-                                                                )
-                                                                .frame(false)
-                                                                .truncate(),
-                                                            )
-                                                            .clicked()
-                                                        },
+                                            let title_width = ui.available_width();
+                                            if ui
+                                                .add_sized(
+                                                    [title_width, 30.0],
+                                                    egui::Button::new(
+                                                        egui::RichText::new(&item.name).strong(),
                                                     )
-                                                    .inner;
-                                                if chosen {
-                                                    view.selected = Some(item.name.clone());
-                                                }
-                                                ui.with_layout(
-                                                    egui::Layout::right_to_left(
-                                                        egui::Align::Center,
-                                                    ),
-                                                    |ui| {
-                                                        plugin_actions(ui, item, &mut actions);
-                                                    },
-                                                );
-                                            });
+                                                    .frame(false)
+                                                    .truncate(),
+                                                )
+                                                .clicked()
+                                            {
+                                                view.selected = Some(item.name.clone());
+                                            }
                                             ui.horizontal_wrapped(|ui| {
                                                 if item.installed && item.enabled {
                                                     ui.colored_label(good, "Enabled");
@@ -339,6 +333,9 @@ pub fn render(
                                                 } else if item.installed {
                                                     ui.colored_label(good, "Installed");
                                                 }
+                                            });
+                                            ui.horizontal_wrapped(|ui| {
+                                                plugin_actions(ui, item, &mut actions);
                                             });
                                             let summary = item
                                                 .description
@@ -360,6 +357,18 @@ pub fn render(
                                                 ui.colored_label(error, message);
                                             }
                                         });
+                                    // Keep the whole card selectable without
+                                    // registering a parent widget after its
+                                    // action buttons (which would steal clicks).
+                                    let card_clicked = ui.input(|input| {
+                                        input.pointer.primary_clicked()
+                                            && input.pointer.interact_pos().is_some_and(|pos| {
+                                                frame.response.rect.contains(pos)
+                                            })
+                                    });
+                                    if card_clicked {
+                                        view.selected = Some(item.name.clone());
+                                    }
                                     ui.add_space(2.0);
                                 });
                             }
@@ -384,7 +393,14 @@ pub fn render(
                                     .iter()
                                     .find(|i| Some(&i.name) == view.selected.as_ref())
                                 {
-                                    details(ui, item, &mut actions, good, accent);
+                                    details(
+                                        ui,
+                                        item,
+                                        &mut actions,
+                                        &mut view.open_settings,
+                                        good,
+                                        accent,
+                                    );
                                 }
                             });
                     },
@@ -415,6 +431,7 @@ fn details(
     ui: &mut egui::Ui,
     item: &CatalogItem,
     actions: &mut Vec<CatalogAction>,
+    open_settings: &mut bool,
     good: egui::Color32,
     accent: egui::Color32,
 ) {
@@ -439,6 +456,10 @@ fn details(
     ui.weak("Bone Lua plugins run unsandboxed — only install plugins you trust.");
     ui.horizontal_wrapped(|ui| {
         plugin_actions(ui, item, actions);
+        if item.installed && toggleable(item) && ui.small_button("Configure in Settings…").clicked()
+        {
+            *open_settings = true;
+        }
     });
     if item.installed && item.update_available && ui.small_button("Remove instead").clicked() {
         actions.push(CatalogAction {

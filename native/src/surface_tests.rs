@@ -257,6 +257,46 @@ fn utility_screens_fit_and_keep_navigation_visible() {
 }
 
 #[test]
+fn narrow_navigation_keeps_body_below_the_nav_row() {
+    // Regression: in a narrow Ui the trailing slot must occupy a single
+    // control-height row. A bare `with_layout(right_to_left + Center)` seeds
+    // the child `min_rect` at the vertical centre of the remaining panel, so
+    // the body of the Plugins/Usage side panels was dropped to the middle.
+    for width in [300.0_f32, 390.0] {
+        let ctx = egui::Context::default();
+        let mut body_y = None;
+        let mut nav_y = None;
+        for _ in 0..2 {
+            ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 1000.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    assert!(ui.available_width() < 420.0);
+                    crate::surface::navigation(ui, "Usage", |_| {});
+                    nav_y = Some(ui.cursor().min.y);
+                    let response = ui.label("Body marker");
+                    body_y = Some(response.rect.min.y);
+                },
+            )
+            .textures_delta
+            .clear();
+        }
+        let nav_y = nav_y.unwrap();
+        let body_y = body_y.unwrap();
+        assert!(
+            body_y >= nav_y - 1.0 && body_y < 120.0,
+            "narrow body at y={body_y} (nav bottom {nav_y}, width {width}); \
+             expected it just below the nav row, not at the vertical middle"
+        );
+    }
+}
+
+#[test]
 fn settings_layout_stays_still_with_overflowing_content() {
     for (width, height) in [
         (1200.0, 800.0),

@@ -197,7 +197,16 @@ pub fn navigation(
         }
     });
     if let Some(trailing) = trailing {
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), trailing);
+        // Bound the trailing row to a single control height. A bare
+        // `with_layout` seeds the child's `min_rect` at the vertical centre of
+        // the remaining panel (right_to_left + Align::Center), so advancing the
+        // parent cursor past it would drop all body content to the middle of
+        // the panel — even when the trailing closure renders nothing.
+        ui.allocate_ui_with_layout(
+            vec2(ui.available_width(), crate::theme::CONTROL_HEIGHT),
+            egui::Layout::right_to_left(egui::Align::Center),
+            trailing,
+        );
     }
     ui.add_space(8.0);
     selected

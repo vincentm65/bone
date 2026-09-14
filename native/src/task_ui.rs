@@ -124,21 +124,6 @@ pub struct CommandInput {
     focus: bool,
 }
 
-pub fn command_label(name: &str) -> String {
-    match name {
-        "config" => "Settings".into(),
-        "stats" => "Usage statistics".into(),
-        "catalog" => "Plugins".into(),
-        "setup" => "Provider setup".into(),
-        "provider" | "model" => "Choose model for this task".into(),
-        "edit" | "e" => "Edit draft in larger editor".into(),
-        "clear" | "new" => "New task".into(),
-        "help" => "Command and shortcut reference".into(),
-        "incognito" => "Toggle incognito for this task".into(),
-        _ => format!("/{name}…"),
-    }
-}
-
 fn matches_task(title: &str, detail: &str, query: &str) -> bool {
     let query = query.trim().to_lowercase();
     title.to_lowercase().contains(&query) || detail.to_lowercase().contains(&query)
@@ -154,6 +139,22 @@ fn recent_title(meta: &ConversationMeta) -> String {
     } else {
         meta.full_title.clone()
     }
+}
+
+fn recent_context(meta: &ConversationMeta) -> String {
+    let timestamp = if meta.updated_at_local.trim().is_empty() {
+        &meta.updated_at
+    } else {
+        &meta.updated_at_local
+    };
+    let time = timestamp
+        .split_once('T')
+        .map_or(timestamp.as_str(), |(_, time)| time);
+    [time, meta.provider.as_str(), meta.model.as_str()]
+        .into_iter()
+        .filter(|value| !value.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 fn recent_group(meta: &ConversationMeta) -> &'static str {
@@ -335,6 +336,13 @@ impl DesktopApp {
                             "{title}\n{} messages · {}",
                             meta.message_count, meta.updated_at_local
                         ));
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(recent_context(meta)).small().weak(),
+                            )
+                            .truncate()
+                            .selectable(false),
+                        );
                         response.context_menu(|ui| {
                             if ui.button("Rename…").clicked() {
                                 self.start_rename(meta.id);

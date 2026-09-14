@@ -4,12 +4,15 @@ use crate::chat::build_chat_history;
 use crate::config::store::ConfigStore;
 use crate::llm::{
     ChatMessage, ChatRole, TokenStats, providers::create_provider_with_config,
-    token_tracker::CHARS_PER_TOKEN,
+    token_tracker::{
+        CHARS_PER_TOKEN, ImageTokenProfile, estimate_image_tokens, parse_image_dimensions,
+    },
 };
 use crate::session_db::{SessionDb, db_path};
 use crate::session_sink::SessionSink;
 use crate::tools::ApprovalMode;
 use crate::tools::registry::ToolHandler;
+use base64::Engine as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -599,16 +602,47 @@ fn opt_str_chars(s: Option<&str>) -> usize {
 }
 
 pub fn estimate_context_chars(history: &[ChatMessage], tool_defs_json_chars: usize) -> usize {
+    let image_profile = ImageTokenProfile::default();
     let message_chars: usize = history
         .iter()
         .map(|msg| {
-            msg.content.chars().count()
+            let text = msg.content.chars().count()
                 + msg.reasoning.as_ref().map_or(0, |r| r.text.chars().count())
                 + serde_json::to_string(&msg.tool_calls)
                     .map(|json| json.chars().count())
                     .unwrap_or(0)
                 + opt_str_chars(msg.tool_call_id.as_deref())
-                + opt_str_chars(msg.name.as_deref())
+                + opt_str_chars(msg.name.as_deref());
+            // Count images exactly the way the wire sends them — only on
+            // non-tool messages. Tool results ride a synthetic relay user
+            // message, so counting tool-role images too would double-count a
+            // durable image that also lives on its tool message.
+            let image_chars = if msg.role == ChatRole::Tool {
+                0
+            } else {
+                msg.images
+                    .iter()
+                    .map(|img| {
+                        let known = match (img.width, img.height) {
+                            (Some(w), Some(h)) => Some((w, h)),
+                            _ => None,
+                        };
+                        // Sniff from the payload only when dims aren't recorded;
+                        // decoding is avoided on the common recorded-dims path.
+                        let sniffed = if known.is_some() {
+                            None
+                        } else {
+                            base64::engine::general_purpose::STANDARD
+                                .decode(img.data.as_bytes())
+                                .ok()
+                                .and_then(|bytes| parse_image_dimensions(&bytes))
+                        };
+                        let tokens = estimate_image_tokens(known, sniffed, &image_profile);
+                        (tokens as f64 * CHARS_PER_TOKEN).ceil() as usize
+                    })
+                    .sum()
+            };
+            text + image_chars
         })
         .sum();
     message_chars + tool_defs_json_chars

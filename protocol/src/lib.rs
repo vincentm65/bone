@@ -33,7 +33,10 @@ pub use message::{
     ToolCall, ToolResult,
 };
 pub use session::{SessionSnapshot, SubagentDefinition, UsageProviderContext};
-pub use tokens::{CHARS_PER_TOKEN, TokenStats, format_tokens};
+pub use tokens::{
+    CHARS_PER_TOKEN, ImageTokenProfile, TokenStats, estimate_image_tokens, format_tokens,
+    parse_image_dimensions,
+};
 pub use tools::{CallOutcome, ToolDefinition, ToolOutput};
 pub use view::{
     Align, Anchor, Component, FloatRect, PaneContent, PaneLineSpec, PanePresentation, PaneSpanSpec,

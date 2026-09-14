@@ -4828,7 +4828,10 @@ impl DesktopApp {
                             !matches!(name.as_str(), "e" | "clear" | "provider" | "exit")
                         })
                         .map(|(name, detail)| palette::Entry {
-                            label: task_ui::command_label(&name),
+                            // Mirror the `/help` reference so the list reads
+                            // uniformly: every row is `/name — description`,
+                            // instead of mixing friendly labels with `/name…`.
+                            label: format!("/{name} — {detail}"),
                             detail,
                             action: palette::Action::Command { tab: tab.id, name },
                         }),
@@ -4904,6 +4907,28 @@ impl DesktopApp {
         ui.add_space(2.0);
         task_ui::task_search(ui, &mut self.history_search);
         ui.add_space(4.0);
+        // Pin the workspace links to the sidebar bottom as a self-sizing panel
+        // so the history viewport yields exactly the space they need. Reserving
+        // a fixed height clipped the links: at the minimum sidebar width they
+        // wrap to two rows, and the sidebar is not itself scrollable.
+        if !self.demo {
+            // Id is salted with the hosting ui so multiple windows do not
+            // collide.
+            egui::Panel::bottom(ui.id().with("sidebar-workspace")).show(ui, |ui| {
+                ui.label(egui::RichText::new("Workspace").weak().size(12.0));
+                ui.horizontal_wrapped(|ui| {
+                    if ui.button("Settings").clicked() {
+                        self.open_utility("Settings");
+                    }
+                    if ui.button("Plugins").clicked() {
+                        self.open_utility("Plugins");
+                    }
+                    if ui.button("Usage").clicked() {
+                        self.open_utility("Usage");
+                    }
+                });
+            });
+        }
         egui::ScrollArea::vertical()
             .id_salt("sidebar-scroll")
             .auto_shrink([false, false])
@@ -5790,6 +5815,10 @@ impl DesktopApp {
                     ui.weak(self.catalog_pending_hint());
                 }
             }
+        }
+        if self.plugins_view.open_settings {
+            self.plugins_view.open_settings = false;
+            self.open_utility("Settings");
         }
         if let Some(destination) = destination {
             self.open_utility(destination);

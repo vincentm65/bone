@@ -473,7 +473,12 @@ fn render_field(
             ui.label(egui::RichText::new(hint).small().weak());
         }
     };
-    ui.spacing_mut().item_spacing.y = 6.0;
+    let multiline = field.path == "general.system_prompt";
+    let row_height = if multiline {
+        132.0
+    } else {
+        crate::theme::CONTROL_HEIGHT
+    };
     if ui.available_width() >= 460.0 {
         let width = ui.available_width();
         // The control column keeps a fixed width across every row so values line
@@ -486,7 +491,7 @@ fn render_field(
         let control_width = (width - label_width - RESET_WIDTH - gaps).max(60.0);
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(
-                egui::vec2(label_width, crate::theme::CONTROL_HEIGHT),
+                egui::vec2(label_width, row_height),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     ui.set_width(label_width);
@@ -494,7 +499,7 @@ fn render_field(
                 },
             );
             ui.allocate_ui_with_layout(
-                egui::vec2(control_width, crate::theme::CONTROL_HEIGHT),
+                egui::vec2(control_width, row_height),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     ui.set_min_width(control_width);
@@ -502,7 +507,7 @@ fn render_field(
                 },
             );
             ui.allocate_ui_with_layout(
-                egui::vec2(RESET_WIDTH, crate::theme::CONTROL_HEIGHT),
+                egui::vec2(RESET_WIDTH, row_height),
                 egui::Layout::right_to_left(egui::Align::Min),
                 |ui| {
                     if reset {
@@ -615,11 +620,20 @@ fn field_control(
                 .or_insert_with(|| current.clone());
             let changed = *buffer != current;
             let parsed = parse_config_value(field, buffer.trim());
-            let response = ui.add(
-                egui::TextEdit::singleline(buffer)
-                    .margin(egui::vec2(8.0, 7.0))
-                    .desired_width(f32::INFINITY),
-            );
+            let response = if field.path == "general.system_prompt" {
+                ui.add(
+                    egui::TextEdit::multiline(buffer)
+                        .margin(egui::vec2(8.0, 7.0))
+                        .desired_rows(5)
+                        .desired_width(f32::INFINITY),
+                )
+            } else {
+                ui.add(
+                    egui::TextEdit::singleline(buffer)
+                        .margin(egui::vec2(8.0, 7.0))
+                        .desired_width(f32::INFINITY),
+                )
+            };
             // Text edits commit on Enter or blur; there is no explicit Save step.
             if response.lost_focus()
                 && changed

@@ -861,13 +861,28 @@ impl DesktopApp {
                 PanelSlot::Top | PanelSlot::Bottom => {
                     panel.default_size(saved_size.unwrap_or(220.0))
                 }
-                PanelSlot::Left | PanelSlot::Right => {
-                    panel.default_size(saved_size.unwrap_or(300.0))
+                PanelSlot::Left => panel.default_size(saved_size.unwrap_or(300.0)),
+                PanelSlot::Right => {
+                    let plugin_panel = selected_id == CATALOG_PANEL_ID;
+                    let preferred_min: f32 = if plugin_panel { 360.0 } else { 280.0 };
+                    // Keep the conversation's minimum width available while
+                    // still allowing a useful panel on smaller windows.
+                    let max_size = (ui.available_width() - layout::CENTRAL_WIDTH_MIN as f32)
+                        .clamp(280.0, 560.0);
+                    let min_size = preferred_min.min(max_size);
+                    panel
+                        .default_size(saved_size.unwrap_or(if plugin_panel {
+                            440.0
+                        } else {
+                            300.0
+                        }))
+                        .min_size(min_size)
+                        .max_size(max_size)
                 }
                 PanelSlot::Overlay => continue,
             };
             let response = panel.show(ui, |ui| {
-                ui.horizontal(|ui| {
+                ui.horizontal_wrapped(|ui| {
                     ui.strong(&title);
                     if ids.len() > 1 {
                         for id in &ids {

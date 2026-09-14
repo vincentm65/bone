@@ -4,4 +4,7 @@
 //! helpers remain here.
 
 // Re-export wire-format types from protocol.
-pub use bone_protocol::{CHARS_PER_TOKEN, TokenStats, format_tokens};
+pub use bone_protocol::{
+    CHARS_PER_TOKEN, ImageTokenProfile, TokenStats, estimate_image_tokens, format_tokens,
+    parse_image_dimensions,
+};
