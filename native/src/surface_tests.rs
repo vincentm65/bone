@@ -214,7 +214,16 @@ fn utility_screens_fit_and_keep_navigation_visible() {
                 screen.contains_rect(surface),
                 "{name} bounds at {width}: {surface:?}"
             );
-            for label in ["Settings", "Plugins", "Usage"] {
+            // Usage keeps the shared Settings|Plugins|Usage strip; the docked
+            // Settings and Plugins panels now carry no in-panel tab strip (they
+            // are reached from the sidebar), so only assert each shows its own
+            // title on-screen.
+            let labels: &[&str] = if name == "Usage" {
+                &["Settings", "Plugins", "Usage"]
+            } else {
+                &[name]
+            };
+            for label in labels {
                 let rect = text_rect(&output, label)
                     .unwrap_or_else(|| panic!("missing {label} in {name}"));
                 assert!(

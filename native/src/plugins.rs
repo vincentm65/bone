@@ -20,6 +20,22 @@ use eframe::egui;
 use crate::catalog::{Filter, color, matches_item, result_banner};
 use crate::theme::Palette;
 
+/// Horizontal space reserved at the right edge of a compact plugin row for the
+/// inline action cluster, sized per control. Reserving the cluster's width up
+/// front lets the name column take the remainder instead of overflowing into
+/// it (the cluster is laid out right-to-left, last).
+const CLOSE_ACTION_WIDTH: f32 = 34.0;
+const INSTALL_ACTION_WIDTH: f32 = 86.0;
+const UPDATE_ACTION_WIDTH: f32 = 82.0;
+const TOGGLE_ACTION_WIDTH: f32 = 90.0;
+const CONFIRM_ACTIONS_WIDTH: f32 = 240.0;
+
+/// Bounds for the row's name column. It tracks the width the inline action
+/// cluster leaves, but never collapses below a readable minimum — past that the
+/// cluster moves to its own line beneath the name instead.
+const NAME_MIN_WIDTH: f32 = 56.0;
+const NAME_MAX_WIDTH: f32 = 260.0;
+
 /// Persistent state for the Plugins surface: search/filter, the selected
 /// plugin, and the per-plugin outcome banner from the last apply.
 #[derive(Debug, Default)]
@@ -28,9 +44,14 @@ pub struct PluginsView {
     revision: String,
     query: String,
     filter: Filter,
+    /// Plugin whose row is expanded to show its description and metadata.
     selected: Option<String>,
-    /// Open Settings from the selected plugin's management controls.
+    /// Plugin awaiting an inline Remove confirmation.
+    confirm_remove: Option<String>,
+    /// Open Settings from an expanded plugin's management controls.
     pub open_settings: bool,
+    /// Refresh requested from the toolbar.
+    pub refresh: bool,
     /// Per-plugin outcome from the last apply, keyed by name.
     results: HashMap<String, CatalogItemOutcome>,
     /// One-line banner shown in the read-only result phase.
@@ -49,6 +70,7 @@ impl PluginsView {
     fn reseed(&mut self) {
         self.results.clear();
         self.banner = None;
+        self.confirm_remove = None;
     }
 
     /// Record an apply result: adopt its snapshot, overlay per-plugin outcome
@@ -97,32 +119,104 @@ fn install(name: &str) -> CatalogAction {
     }
 }
 
-/// Install/update/remove plus enable/disable controls for one plugin row.
-/// Enable/disable is only offered for installed plugins (the daemon rejects it
-/// for any other kind). Actions are emitted immediately (no batch phase).
-fn plugin_actions(ui: &mut egui::Ui, item: &CatalogItem, actions: &mut Vec<CatalogAction>) {
-    if let Some((label, action)) = toggle(item) {
-        if crate::surface::primary(ui, label).clicked() {
-            actions.push(CatalogAction {
-                name: item.name.clone(),
-                action,
-            });
-        }
+fn remove(name: &str) -> CatalogAction {
+    CatalogAction {
+        name: name.to_string(),
+        action: CatalogActionKind::Remove,
+    }
+}
+
+/// Inline install/update plus a close (`×`) remove control and enable/disable
+/// controls for one plugin row. Enable/disable is only offered for installed
+/// plugins (the daemon rejects it for any other kind). Install/update emit
+/// immediately; the `×` routes through `confirm_remove` so the row asks before
+/// the destructive action. Rendered in a `right_to_left` layout, so the first
+/// widget added lands at the right edge (the `×` remove control).
+fn row_actions(
+    ui: &mut egui::Ui,
+    item: &CatalogItem,
+    actions: &mut Vec<CatalogAction>,
+    confirm_remove: &mut Option<String>,
+) {
+    if item.installed && ui.button("×").on_hover_text("Remove").clicked() {
+        *confirm_remove = Some(item.name.clone());
     }
     if item.update_available {
         if ui.button("Update").clicked() {
             actions.push(install(&item.name));
         }
-    } else if item.installed {
-        if ui.button("Remove").clicked() {
-            actions.push(CatalogAction {
-                name: item.name.clone(),
-                action: CatalogActionKind::Remove,
-            });
-        }
-    } else if ui.button("Install").clicked() {
+    } else if !item.installed && ui.button("Install").clicked() {
         actions.push(install(&item.name));
     }
+    if let Some((label, action)) = toggle(item)
+        && crate::surface::primary(ui, label).clicked()
+    {
+        actions.push(CatalogAction {
+            name: item.name.clone(),
+            action,
+        });
+    }
+}
+
+/// Width reserved for a row's inline action cluster, mirroring the controls
+/// `row_actions` emits. The name column takes the remaining row width.
+fn actions_reserve(item: &CatalogItem, spacing: f32) -> f32 {
+    let mut width = 0.0;
+    let mut controls = 0;
+    if item.installed {
+        width += CLOSE_ACTION_WIDTH;
+        controls += 1;
+    }
+    if item.update_available {
+        width += UPDATE_ACTION_WIDTH;
+        controls += 1;
+    } else if !item.installed {
+        width += INSTALL_ACTION_WIDTH;
+        controls += 1;
+    }
+    if toggle(item).is_some() {
+        width += TOGGLE_ACTION_WIDTH;
+        controls += 1;
+    }
+    if controls > 1 {
+        width += spacing * (controls - 1) as f32;
+    }
+    width
+}
+
+/// The row's inline action cluster, right-aligned: either the Remove
+/// confirmation controls or the install/update/remove/toggle controls.
+fn row_cluster(
+    ui: &mut egui::Ui,
+    item: &CatalogItem,
+    view: &mut PluginsView,
+    actions: &mut Vec<CatalogAction>,
+    confirming: bool,
+) {
+    if confirming {
+        if ui.button("Remove").clicked() {
+            actions.push(remove(&item.name));
+            view.confirm_remove = None;
+        }
+        if ui.button("Cancel").clicked() {
+            view.confirm_remove = None;
+        }
+        ui.weak("Remove?");
+    } else {
+        row_actions(ui, item, actions, &mut view.confirm_remove);
+    }
+}
+
+/// Section heading above a group of rows, with the group's item count.
+fn section_header(ui: &mut egui::Ui, title: &str, count: usize) {
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.add(egui::Label::new(egui::RichText::new(title).small().strong()).selectable(false));
+        ui.add(
+            egui::Label::new(egui::RichText::new(count.to_string()).small().weak())
+                .selectable(false),
+        );
+    });
 }
 
 /// Render the plugin list and details pane. Returns the actions the user
@@ -140,12 +234,20 @@ pub fn render(
     let accent = color(&palette.accent, ui.visuals().hyperlink_color);
     let good = color(&palette.good, egui::Color32::from_rgb(90, 200, 120));
     let error = ui.visuals().error_fg_color;
-    ui.add(
-        egui::TextEdit::singleline(&mut view.query)
-            .hint_text("Search plugins…")
-            .margin(egui::vec2(12.0, 7.0))
-            .desired_width(f32::INFINITY),
-    );
+    ui.horizontal(|ui| {
+        let refresh_width = 88.0;
+        let search_width =
+            (ui.available_width() - refresh_width - ui.spacing().item_spacing.x).max(96.0);
+        ui.add_sized(
+            egui::vec2(search_width, crate::theme::CONTROL_HEIGHT),
+            egui::TextEdit::singleline(&mut view.query)
+                .hint_text("Search plugins…")
+                .margin(egui::vec2(12.0, 7.0)),
+        );
+        if ui.add(egui::Button::new("Refresh")).clicked() {
+            view.refresh = true;
+        }
+    });
     let plugins: Vec<&CatalogItem> = snapshot.items.iter().collect();
     ui.horizontal_wrapped(|ui| {
         for (filter, title, count) in [
@@ -165,29 +267,6 @@ pub fn render(
             {
                 view.filter = filter;
             }
-        }
-    });
-    let enabled = plugins
-        .iter()
-        .filter(|item| item.installed && item.enabled)
-        .count();
-    let updates = plugins.iter().filter(|item| item.update_available).count();
-    ui.horizontal_wrapped(|ui| {
-        ui.label(
-            egui::RichText::new(format!("{} plugins", plugins.len()))
-                .small()
-                .weak(),
-        );
-        ui.label(
-            egui::RichText::new(format!("{enabled} enabled"))
-                .small()
-                .weak(),
-        );
-        if updates > 0 {
-            ui.colored_label(
-                accent,
-                format!("{updates} update{}", if updates == 1 { "" } else { "s" }),
-            );
         }
     });
     if let Some(banner) = view.banner.clone() {
@@ -215,21 +294,12 @@ pub fn render(
         .filter(|i| matches_item(i, view.filter, &query))
         .copied()
         .collect();
-    let height = (ui.available_height()
-        - if ui.available_width() < 500.0 {
-            92.0
-        } else {
-            62.0
-        })
-    .max(48.0);
-    let wide = ui.available_width() >= 760.0;
-    if wide
-        && !items
-            .iter()
-            .any(|i| Some(&i.name) == view.selected.as_ref())
-    {
-        view.selected = items.first().map(|i| i.name.clone());
-    }
+    let footer_reserve = if ui.available_width() < 460.0 {
+        72.0
+    } else {
+        50.0
+    };
+    let height = (ui.available_height() - footer_reserve).max(48.0);
     ui.separator();
     if items.is_empty() {
         ui.allocate_ui(egui::vec2(ui.available_width(), height), |ui| {
@@ -247,166 +317,46 @@ pub fn render(
                 },
             );
         });
-    } else if !wide && view.selected.is_some() {
+    } else {
+        // Order rows by state: enabled, then installed-but-disabled, then not
+        // installed, each under its own heading. Within a group the catalog
+        // order is preserved.
+        let mut groups: [(&str, Vec<&CatalogItem>); 3] = [
+            ("Installed", Vec::new()),
+            ("Disabled", Vec::new()),
+            ("Not installed", Vec::new()),
+        ];
+        for &item in &items {
+            let index = if !item.installed {
+                2
+            } else if item.enabled {
+                0
+            } else {
+                1
+            };
+            groups[index].1.push(item);
+        }
         egui::ScrollArea::vertical()
-            .id_salt("plugins-details")
+            .id_salt(("plugins-list", view.filter as u8, &query))
+            .scroll_bar_visibility(
+                egui::containers::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+            )
             .max_height(height)
             .auto_shrink([false, false])
             .show(ui, |ui| {
-                if ui.button("Back to plugins").clicked() {
-                    view.selected = None;
-                }
-                if let Some(item) = items
-                    .iter()
-                    .find(|i| Some(&i.name) == view.selected.as_ref())
-                {
-                    details(
-                        ui,
-                        item,
-                        &mut actions,
-                        &mut view.open_settings,
-                        good,
-                        accent,
-                    );
+                for (title, group) in &groups {
+                    if group.is_empty() {
+                        continue;
+                    }
+                    section_header(ui, title, group.len());
+                    for &item in group {
+                        ui.push_id(&item.name, |ui| {
+                            plugin_row(ui, item, view, &mut actions, accent, error);
+                        });
+                        ui.add_space(2.0);
+                    }
                 }
             });
-    } else {
-        ui.horizontal_top(|ui| {
-            let list_width = if wide {
-                ui.available_width() - 300.0
-            } else {
-                ui.available_width()
-            };
-            ui.allocate_ui_with_layout(
-                egui::vec2(list_width, height),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    egui::ScrollArea::vertical()
-                        .id_salt(("plugins-list", view.filter as u8, &query))
-                        .scroll_bar_visibility(
-                            egui::containers::scroll_area::ScrollBarVisibility::AlwaysVisible,
-                        )
-                        .max_height(height)
-                        .auto_shrink([false, false])
-                        .show(ui, |ui| {
-                            for item in &items {
-                                ui.push_id(&item.name, |ui| {
-                                    let selected = view.selected.as_deref() == Some(&item.name);
-                                    let frame = egui::Frame::new()
-                                        .inner_margin(8)
-                                        .corner_radius(7)
-                                        .fill(if selected {
-                                            ui.visuals().selection.bg_fill
-                                        } else {
-                                            egui::Color32::TRANSPARENT
-                                        })
-                                        .stroke(if selected {
-                                            egui::Stroke::new(1.0, accent)
-                                        } else {
-                                            egui::Stroke::NONE
-                                        })
-                                        .show(ui, |ui| {
-                                            ui.set_width((list_width - 32.0).max(80.0));
-                                            ui.spacing_mut().item_spacing.y = 3.0;
-                                            let title_width = ui.available_width();
-                                            if ui
-                                                .add_sized(
-                                                    [title_width, 30.0],
-                                                    egui::Button::new(
-                                                        egui::RichText::new(&item.name).strong(),
-                                                    )
-                                                    .frame(false)
-                                                    .truncate(),
-                                                )
-                                                .clicked()
-                                            {
-                                                view.selected = Some(item.name.clone());
-                                            }
-                                            ui.horizontal_wrapped(|ui| {
-                                                if item.installed && item.enabled {
-                                                    ui.colored_label(good, "Enabled");
-                                                } else if item.installed {
-                                                    ui.weak("Disabled");
-                                                }
-                                                if item.update_available {
-                                                    ui.colored_label(accent, "Update available");
-                                                } else if item.installed {
-                                                    ui.colored_label(good, "Installed");
-                                                }
-                                            });
-                                            ui.horizontal_wrapped(|ui| {
-                                                plugin_actions(ui, item, &mut actions);
-                                            });
-                                            let summary = item
-                                                .description
-                                                .split(['.', '\n'])
-                                                .next()
-                                                .unwrap_or("")
-                                                .trim();
-                                            if !summary.is_empty() {
-                                                ui.add(
-                                                    egui::Label::new(
-                                                        egui::RichText::new(summary).small().weak(),
-                                                    )
-                                                    .truncate(),
-                                                );
-                                            }
-                                            if let Some(CatalogItemOutcome::Failed { message }) =
-                                                view.results.get(&item.name)
-                                            {
-                                                ui.colored_label(error, message);
-                                            }
-                                        });
-                                    // Keep the whole card selectable without
-                                    // registering a parent widget after its
-                                    // action buttons (which would steal clicks).
-                                    let card_clicked = ui.input(|input| {
-                                        input.pointer.primary_clicked()
-                                            && input.pointer.interact_pos().is_some_and(|pos| {
-                                                frame.response.rect.contains(pos)
-                                            })
-                                    });
-                                    if card_clicked {
-                                        view.selected = Some(item.name.clone());
-                                    }
-                                    ui.add_space(2.0);
-                                });
-                            }
-                        });
-                },
-            );
-            if wide {
-                crate::surface::divider(ui, height);
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), height),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        egui::ScrollArea::vertical()
-                            .id_salt("plugins-details")
-                            .scroll_bar_visibility(
-                                egui::containers::scroll_area::ScrollBarVisibility::AlwaysVisible,
-                            )
-                            .max_height(height)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                if let Some(item) = items
-                                    .iter()
-                                    .find(|i| Some(&i.name) == view.selected.as_ref())
-                                {
-                                    details(
-                                        ui,
-                                        item,
-                                        &mut actions,
-                                        &mut view.open_settings,
-                                        good,
-                                        accent,
-                                    );
-                                }
-                            });
-                    },
-                );
-            }
-        });
     }
     ui.separator();
     ui.horizontal_wrapped(|ui| {
@@ -427,68 +377,129 @@ pub fn render(
     actions
 }
 
-fn details(
+/// One compact list row: name (click to expand) and inline actions, with the
+/// expanded detail and any failed outcome rendered below.
+fn plugin_row(
     ui: &mut egui::Ui,
     item: &CatalogItem,
+    view: &mut PluginsView,
     actions: &mut Vec<CatalogAction>,
-    open_settings: &mut bool,
-    good: egui::Color32,
     accent: egui::Color32,
+    error: egui::Color32,
 ) {
-    ui.add_space(4.0);
-    ui.label(egui::RichText::new(&item.name).size(18.0).strong());
-    ui.horizontal_wrapped(|ui| {
-        if let Some(version) = &item.version {
-            ui.weak(format!("v{version}"));
-        }
-        if item.installed && item.enabled {
-            ui.colored_label(good, "Enabled");
-        } else if item.installed {
-            ui.weak("Disabled");
-        }
-        if item.update_available {
-            ui.colored_label(accent, "Update available");
-        } else if item.installed {
-            ui.colored_label(good, "Installed");
-        }
-    });
-    ui.label(&item.description);
-    ui.weak("Bone Lua plugins run unsandboxed — only install plugins you trust.");
-    ui.horizontal_wrapped(|ui| {
-        plugin_actions(ui, item, actions);
-        if item.installed && toggleable(item) && ui.small_button("Configure in Settings…").clicked()
-        {
-            *open_settings = true;
-        }
-    });
-    if item.installed && item.update_available && ui.small_button("Remove instead").clicked() {
-        actions.push(CatalogAction {
-            name: item.name.clone(),
-            action: CatalogActionKind::Remove,
+    let expanded = view.selected.as_deref() == Some(item.name.as_str());
+    let confirming = view.confirm_remove.as_deref() == Some(item.name.as_str());
+    egui::Frame::new()
+        .inner_margin(egui::Margin::symmetric(6, 3))
+        .corner_radius(6)
+        .fill(if expanded {
+            ui.visuals().selection.bg_fill
+        } else {
+            egui::Color32::TRANSPARENT
+        })
+        .stroke(if expanded {
+            egui::Stroke::new(1.0, accent)
+        } else {
+            egui::Stroke::NONE
+        })
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let full = ui.available_width();
+            // The name column takes whatever the inline action cluster leaves.
+            // The cluster is laid out right-to-left after the name, so reserving
+            // its width up front keeps it (including the Remove confirmation
+            // strip) from overflowing the row. When the row is too narrow to
+            // seat both, the cluster drops to its own line beneath the name.
+            let gap = ui.spacing().item_spacing.x;
+            let reserve = if confirming {
+                CONFIRM_ACTIONS_WIDTH
+            } else {
+                actions_reserve(item, gap)
+            };
+            let inline = full - reserve - gap >= NAME_MIN_WIDTH;
+            let name_width = if inline {
+                (full - reserve - gap).clamp(NAME_MIN_WIDTH, NAME_MAX_WIDTH)
+            } else {
+                full
+            };
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(name_width, crate::theme::CONTROL_HEIGHT),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        let response = ui.add(
+                            egui::Label::new(egui::RichText::new(&item.name).strong())
+                                .truncate()
+                                .sense(egui::Sense::click()),
+                        );
+                        if response.clicked() {
+                            view.selected = if expanded {
+                                None
+                            } else {
+                                Some(item.name.clone())
+                            };
+                        }
+                    },
+                );
+                if inline {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        row_cluster(ui, item, view, actions, confirming);
+                    });
+                }
+            });
+            if !inline {
+                ui.horizontal(|ui| {
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        row_cluster(ui, item, view, actions, confirming);
+                    });
+                });
+            }
+            if expanded {
+                ui.add_space(2.0);
+                expanded_details(ui, item, view);
+            }
+            if let Some(CatalogItemOutcome::Failed { message }) = view.results.get(&item.name) {
+                ui.colored_label(error, message);
+            }
         });
+}
+
+/// Expanded detail for one plugin, shown inline beneath its row.
+fn expanded_details(ui: &mut egui::Ui, item: &CatalogItem, view: &mut PluginsView) {
+    if !item.description.is_empty() {
+        ui.label(&item.description);
     }
-    ui.separator();
+    ui.weak("Bone Lua plugins run unsandboxed — only install plugins you trust.");
+    let mut meta = Vec::new();
+    if let Some(version) = item.version.as_deref().filter(|v| !v.is_empty()) {
+        meta.push(format!("v{version}"));
+    }
+    if let Some(author) = item.author.as_deref().filter(|v| !v.is_empty()) {
+        meta.push(format!("by {author}"));
+    }
+    if let Some(updated) = item.updated_at.as_deref().filter(|v| !v.is_empty()) {
+        meta.push(format!("updated {updated}"));
+    }
+    if let Some(requires) = item.min_bone_version.as_deref().filter(|v| !v.is_empty()) {
+        meta.push(format!("requires Bone {requires}"));
+    }
+    if !meta.is_empty() {
+        ui.weak(meta.join(" · "));
+    }
     if let Some(about) = &item.long_description {
         ui.label(about);
     }
-    for (label, value) in [
-        ("Author", &item.author),
-        ("Updated", &item.updated_at),
-        ("Requires Bone", &item.min_bone_version),
-    ] {
-        if let Some(value) = value.as_deref().filter(|v| !v.is_empty()) {
-            ui.weak(format!("{label}: {value}"));
-        }
-    }
     if !item.dependencies.is_empty() {
-        ui.strong("Dependencies");
-        ui.label(item.dependencies.join(", "));
+        ui.weak(format!("Dependencies: {}", item.dependencies.join(", ")));
     }
     if !item.permissions.is_empty() {
-        ui.strong("Permissions");
-        ui.label(item.permissions.join(", "));
+        ui.weak(format!("Permissions: {}", item.permissions.join(", ")));
     }
     ui.horizontal_wrapped(|ui| {
+        if item.installed && toggleable(item) && ui.small_button("Configure in Settings…").clicked()
+        {
+            view.open_settings = true;
+        }
         if let Some(url) = &item.repository {
             ui.hyperlink_to("Repository", url);
         }
@@ -539,7 +550,8 @@ mod tests {
     }
 
     /// The merged surface lists every catalog item, not just `kind == "plugin"`
-    /// packages, so a tool-only snapshot still renders (and selects) its row.
+    /// packages, so a tool-only snapshot still renders its row. Rows start
+    /// collapsed — selection now happens only on an explicit click.
     #[test]
     fn render_lists_non_plugin_items() {
         let ctx = egui::Context::default();
@@ -567,7 +579,134 @@ mod tests {
         )
         .textures_delta
         .clear();
-        assert_eq!(view.selected.as_deref(), Some("some-tool"));
+        assert!(view.selected.is_none());
+    }
+
+    /// Rows are grouped under state headings — enabled, then installed-but-
+    /// disabled, then not installed — each with its own count, and every heading
+    /// precedes its rows.
+    #[test]
+    fn render_groups_items_by_state_under_headings() {
+        let ctx = egui::Context::default();
+        let snapshot = CatalogSnapshot {
+            revision: "r1".into(),
+            items: vec![
+                plugin("enabled-one", true, true),
+                CatalogItem {
+                    name: "not-installed".into(),
+                    kind: "tool".into(),
+                    ..CatalogItem::default()
+                },
+                plugin("disabled-one", true, false),
+            ],
+        };
+        let mut view = PluginsView::default();
+        let mut texts: Vec<String> = Vec::new();
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1200.0, 800.0),
+                    )),
+                    ..egui::RawInput::default()
+                },
+                |ui| {
+                    let _ = render(ui, &snapshot, &mut view, &Palette::default());
+                },
+            );
+            texts = output
+                .shapes
+                .iter()
+                .filter_map(|shape| match &shape.shape {
+                    egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect();
+            output.textures_delta.clear();
+        }
+        for heading in ["Installed", "Disabled", "Not installed"] {
+            assert!(
+                texts.iter().any(|t| t == heading),
+                "missing heading {heading}: {texts:?}"
+            );
+        }
+        let index = |name: &str| texts.iter().position(|t| t == name).unwrap();
+        assert!(index("Installed") < index("enabled-one"));
+        assert!(index("Disabled") < index("disabled-one"));
+        assert!(index("Not installed") < index("not-installed"));
+        assert!(index("enabled-one") < index("disabled-one"));
+        assert!(index("disabled-one") < index("not-installed"));
+    }
+
+    /// On a panel too narrow to seat the name beside the Remove confirmation,
+    /// the controls drop to their own line instead of overlapping the name.
+    #[test]
+    fn confirm_controls_drop_below_name_when_row_is_narrow() {
+        let ctx = egui::Context::default();
+        let snapshot = CatalogSnapshot {
+            revision: "r1".into(),
+            items: vec![plugin("ask_user.lua", true, true)],
+        };
+        let mut view = PluginsView::default();
+        // Seed the view from the snapshot first: `sync` reseeds and clears any
+        // pending confirmation on the frame it adopts a new revision.
+        ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(200.0, 600.0),
+                )),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                let _ = render(ui, &snapshot, &mut view, &Palette::default());
+            },
+        )
+        .textures_delta
+        .clear();
+        view.confirm_remove = Some("ask_user.lua".into());
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(200.0, 600.0),
+                )),
+                ..egui::RawInput::default()
+            },
+            |ui| {
+                let _ = render(ui, &snapshot, &mut view, &Palette::default());
+            },
+        );
+        let texts: Vec<(String, egui::Rect)> = output
+            .shapes
+            .iter()
+            .filter_map(|shape| match &shape.shape {
+                egui::Shape::Text(t) => Some((
+                    t.galley.text().to_owned(),
+                    egui::Rect::from_min_size(t.pos, t.galley.size()),
+                )),
+                _ => None,
+            })
+            .collect();
+        output.textures_delta.clear();
+        let rect = |needle: &str| {
+            texts
+                .iter()
+                .find(|(text, _)| text == needle)
+                .map(|(_, rect)| *rect)
+                .unwrap_or_else(|| panic!("missing {needle}: {:?}", texts.len()))
+        };
+        let name = rect("ask_user.lua");
+        for control in ["Remove", "Cancel", "Remove?"] {
+            let control = rect(control);
+            assert!(
+                name.bottom() <= control.top() || !name.intersects(control),
+                "confirm controls overlap the name on a narrow row: {name:?} vs {control:?}"
+            );
+        }
+        // On this narrow row the controls sit below the name entirely.
+        assert!(rect("Remove").top() >= name.bottom());
     }
 
     /// Enable/disable is only offered for installed plugin packages; the daemon

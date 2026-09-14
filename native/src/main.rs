@@ -5791,12 +5791,6 @@ impl DesktopApp {
         }
         let palette = self.palette();
         let mut actions = Vec::new();
-        let mut refresh = false;
-        let destination = surface::navigation(ui, "Plugins", |ui| {
-            refresh = ui
-                .add_enabled(self.catalog_request.is_none(), egui::Button::new("Refresh"))
-                .clicked();
-        });
         if !self.catalog_notice.is_empty() {
             ui.weak(&self.catalog_notice);
         }
@@ -5820,10 +5814,7 @@ impl DesktopApp {
             self.plugins_view.open_settings = false;
             self.open_utility("Settings");
         }
-        if let Some(destination) = destination {
-            self.open_utility(destination);
-        }
-        if refresh {
+        if std::mem::take(&mut self.plugins_view.refresh) {
             // Drop any stale in-flight slot so the refresh is not a no-op.
             self.catalog_request = None;
             self.catalog_request_at = None;
@@ -5843,7 +5834,6 @@ impl DesktopApp {
             return;
         }
         let view = config_view::ConfigView::new(self.config_schema.clone(), self.config.clone());
-        let destination = surface::navigation(ui, "Settings", |_| {});
         let mut action: Option<config_view::ConfigUiAction> = None;
         let mut refetch = false;
         if view.schema.is_none() || view.snapshot.is_none() {
@@ -5862,9 +5852,6 @@ impl DesktopApp {
                 &mut self.config_ui,
                 &mut action,
             );
-        }
-        if let Some(destination) = destination {
-            self.open_utility(destination);
         }
         if refetch {
             self.config = None;
