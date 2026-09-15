@@ -27,10 +27,34 @@ pub struct EditPreview {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Args {
-    path: String,
+struct EditHunk {
     old_text: String,
     new_text: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Args {
+    path: String,
+    #[serde(default)]
+    old_text: Option<String>,
+    #[serde(default)]
+    new_text: Option<String>,
+    #[serde(default)]
+    edits: Option<Vec<EditHunk>>,
+}
+
+/// One normalized replacement: exact `old` → `new`.
+struct Hunk {
+    old: String,
+    new: String,
+}
+
+/// A hunk matched against the original normalized file text.
+struct MatchedHunk {
+    offset: usize,
+    old: String,
+    new: String,
 }
 
 #[async_trait]
@@ -38,7 +62,7 @@ impl Tool for EditFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "edit_file".to_string(),
-            description: "Preferred tool for modifying existing file contents; use this instead of shell commands such as sed -i, tee, heredocs, scripts, or redirection. Replaces one exact, unique block in an existing UTF-8 file. Read the file first, then pass the same path, copy a unique block of shown text into old_text, and put the desired replacement in new_text. Use an empty new_text to delete. To insert, include a small unchanged surrounding block in both old_text and new_text. Returns a unified diff.".to_string(),
+            description: "Preferred tool for modifying existing file contents; use this instead of shell commands such as sed -i, tee, heredocs, scripts, or redirection. Replaces one exact, unique block in an existing UTF-8 file, or several disjoint blocks in one call via `edits`. Read the file first, then pass the same path, copy unique blocks of shown text into `old_text` (or each `edits` entry's `old_text`), and put the desired replacement in `new_text`. Use an empty new_text to delete. To insert, include a small unchanged surrounding block in both old_text and new_text. Returns a unified diff.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -48,14 +72,33 @@ impl Tool for EditFileTool {
                     },
                     "old_text": {
                         "type": "string",
-                        "description": "Exact unique text copied from read_file output, without line-number prefixes. May be empty only when the file is empty."
+                        "description": "Exact unique text copied from read_file output, without line-number prefixes, for a single replacement. May be empty only when the file is empty. Provide either old_text/new_text or edits, not both."
                     },
                     "new_text": {
                         "type": "string",
-                        "description": "Replacement text. May be empty to delete old_text."
+                        "description": "Replacement text for old_text. May be empty to delete old_text."
+                    },
+                    "edits": {
+                        "type": "array",
+                        "description": "Several disjoint replacements applied in one call. Each hunk is matched against the original file content, not the result of earlier hunks.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "old_text": {
+                                    "type": "string",
+                                    "description": "Exact unique text copied from read_file output, without line-number prefixes. May be empty only when the file is empty."
+                                },
+                                "new_text": {
+                                    "type": "string",
+                                    "description": "Replacement text. May be empty to delete old_text."
+                                }
+                            },
+                            "required": ["old_text", "new_text"],
+                            "additionalProperties": false
+                        }
                     }
                 },
-                "required": ["path", "old_text", "new_text"],
+                "required": ["path"],
                 "additionalProperties": false
             }),
         }
@@ -86,13 +129,11 @@ pub async fn preview_edit_file(
     arguments: Value,
     working_dir: Option<&Path>,
 ) -> Result<EditPreview, String> {
-    let args = parse_args(arguments)?;
-    let resolved = snapshot::resolve_existing_path(&args.path, working_dir).await?;
+    let (path_arg, hunks) = parse_args(arguments)?;
+    let resolved = snapshot::resolve_existing_path(&path_arg, working_dir).await?;
     let path = resolved.to_string_lossy().into_owned();
     let (_, live) = read_live(&resolved).await?;
-    let old_text = snapshot::normalize_text(&args.old_text);
-    let new_text = snapshot::normalize_text(&args.new_text);
-    let edited = replace_unique(&live, &old_text, &new_text, &path)?;
+    let (_, edited) = match_hunks(&live, &hunks, &path)?;
     Ok(EditPreview {
         before_hash: snapshot::compute_tag(&live),
         diff: diff::build_unified_diff("edit_file", &path, &live, &edited),
@@ -104,12 +145,10 @@ async fn run_edit(
     snapshots: Option<&Snapshots>,
     working_dir: Option<&Path>,
 ) -> Result<String, String> {
-    let args = parse_args(arguments)?;
-    let resolved = snapshot::resolve_existing_path(&args.path, working_dir).await?;
+    let (path_arg, hunks) = parse_args(arguments)?;
+    let resolved = snapshot::resolve_existing_path(&path_arg, working_dir).await?;
     let path = resolved.to_string_lossy().into_owned();
     let (live_raw, live) = read_live(&resolved).await?;
-    let old_text = snapshot::normalize_text(&args.old_text);
-    let new_text = snapshot::normalize_text(&args.new_text);
 
     let live_format = snapshot::TextFormat::detect(&live_raw);
     let (base, seen_lines, format) = if let Some(store) = snapshots {
@@ -117,7 +156,9 @@ async fn run_edit(
         let snap = guard
             .head(&path)
             .ok_or_else(|| format!("read `{path}` with read_file before editing it"))?;
-        ensure_visible(&snap.text, &old_text, &snap.seen_lines, &path)?;
+        for hunk in &hunks {
+            ensure_visible(&snap.text, &hunk.old, &snap.seen_lines, &path)?;
+        }
         (snap.text.clone(), snap.seen_lines.clone(), snap.format)
     } else {
         (live.clone(), BTreeSet::new(), live_format)
@@ -128,11 +169,10 @@ async fn run_edit(
             "`{path}` changed after it was read; re-read it and retry"
         ));
     }
-    let live_offset = unique_match_offset(&live, &old_text, &path)?;
-    let edited = replace_unique(&live, &old_text, &new_text, &path)?;
+    let (matched, edited) = match_hunks(&live, &hunks, &path)?;
     if edited == live {
         return Err(format!(
-            "no change to `{path}`; old_text and new_text produce identical content"
+            "no change to `{path}`; the edits produce identical content"
         ));
     }
 
@@ -140,19 +180,12 @@ async fn run_edit(
         .await
         .map_err(|e| format!("could not re-check `{path}` before writing: {e}"))?
         .permissions();
-    let rendered = replace_raw(&live_raw, live_offset, old_text.len(), &new_text, format);
+    let rendered = splice_raw(&live_raw, &matched, format);
     write_atomic_if_unchanged(&resolved, &rendered, Some(permissions), live_raw.as_bytes()).await?;
     let edited_format = snapshot::TextFormat::detect(&rendered);
 
     if let Some(store) = snapshots {
-        let seen = remap_seen_lines(
-            &live,
-            &edited,
-            live_offset,
-            &old_text,
-            &new_text,
-            &seen_lines,
-        );
+        let seen = remap_seen_lines(&live, &edited, &matched, &seen_lines);
         let mut guard = store.write().map_err(|e| e.to_string())?;
         guard.record_with_format(&path, &edited, edited_format, Some(&seen));
     }
@@ -166,17 +199,48 @@ async fn run_edit(
     Ok(format!("Edited: {path}\n{rendered}").trim_end().to_string())
 }
 
-fn parse_args(arguments: Value) -> Result<Args, String> {
+fn parse_args(arguments: Value) -> Result<(String, Vec<Hunk>), String> {
     let args: Args = serde_json::from_value(arguments).map_err(|e| {
-        format!("edit_file requires path, old_text, and new_text string fields: {e}")
+        format!(
+            "edit_file requires path plus either old_text/new_text or a non-empty edits array: {e}"
+        )
     })?;
     if args.path.trim().is_empty() {
         return Err("`path` must not be empty".to_string());
     }
-    if args.old_text.is_empty() && args.new_text.is_empty() {
-        return Err("`old_text` and `new_text` cannot both be empty".to_string());
+    let mut hunks = Vec::new();
+    match (args.old_text, args.new_text, args.edits) {
+        (None, None, Some(mut edits)) if !edits.is_empty() => {
+            for edit in edits.drain(..) {
+                hunks.push(Hunk {
+                    old: snapshot::normalize_text(&edit.old_text),
+                    new: snapshot::normalize_text(&edit.new_text),
+                });
+            }
+        }
+        (Some(old), Some(new), None) => {
+            if old.is_empty() && new.is_empty() {
+                return Err("`old_text` and `new_text` cannot both be empty".to_string());
+            }
+            hunks.push(Hunk {
+                old: snapshot::normalize_text(&old),
+                new: snapshot::normalize_text(&new),
+            });
+        }
+        (Some(_), Some(_), Some(_)) => {
+            return Err("provide either old_text/new_text or edits, not both".to_string());
+        }
+        (None, None, None) => {
+            return Err("provide either old_text/new_text or a non-empty edits array".to_string());
+        }
+        (Some(_), None, None) | (None, Some(_), None) => {
+            return Err("old_text and new_text must be provided together".to_string());
+        }
+        (_, _, Some(_)) => {
+            return Err("`edits` must not be empty".to_string());
+        }
     }
-    Ok(args)
+    Ok((args.path, hunks))
 }
 
 fn unique_match_offset(text: &str, needle: &str, path: &str) -> Result<usize, String> {
@@ -203,13 +267,57 @@ fn unique_match_offset(text: &str, needle: &str, path: &str) -> Result<usize, St
     Ok(offset)
 }
 
-fn replace_unique(text: &str, old: &str, new: &str, path: &str) -> Result<String, String> {
-    let offset = unique_match_offset(text, old, path)?;
-    let mut result = String::with_capacity(text.len() - old.len() + new.len());
-    result.push_str(&text[..offset]);
-    result.push_str(new);
-    result.push_str(&text[offset + old.len()..]);
-    Ok(result)
+/// Match every hunk against the original normalized `text`, reject duplicates
+/// and overlaps, and return the sorted matches plus the edited text. Each
+/// hunk anchors on the original content — never on an intermediate result.
+fn match_hunks(
+    text: &str,
+    hunks: &[Hunk],
+    path: &str,
+) -> Result<(Vec<MatchedHunk>, String), String> {
+    let mut matched: Vec<MatchedHunk> = hunks
+        .iter()
+        .map(|hunk| {
+            let offset = unique_match_offset(text, &hunk.old, path)?;
+            Ok(MatchedHunk {
+                offset,
+                old: hunk.old.clone(),
+                new: hunk.new.clone(),
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    matched.sort_by_key(|hunk| hunk.offset);
+    for pair in matched.windows(2) {
+        let (earlier, later) = (&pair[0], &pair[1]);
+        if earlier.old == later.old {
+            return Err(
+                "edits contains the same replacement twice; each hunk must be unique".to_string(),
+            );
+        }
+        let overlaps = earlier.offset + earlier.old.len() > later.offset
+            || (earlier.offset + earlier.old.len() == later.offset
+                && (earlier.old.is_empty() || later.old.is_empty()));
+        if overlaps {
+            return Err(format!(
+                "edits hunks overlap in `{path}`; split them into separate calls"
+            ));
+        }
+    }
+    let edited = splice(text, &matched);
+    Ok((matched, edited))
+}
+
+fn splice(text: &str, hunks: &[MatchedHunk]) -> String {
+    let mut result = String::with_capacity(text.len());
+    let mut cursor = 0usize;
+    for hunk in hunks {
+        debug_assert!(cursor <= hunk.offset && hunk.offset + hunk.old.len() <= text.len());
+        result.push_str(&text[cursor..hunk.offset]);
+        result.push_str(&hunk.new);
+        cursor = hunk.offset + hunk.old.len();
+    }
+    result.push_str(&text[cursor..]);
+    result
 }
 
 fn raw_offset(raw: &str, normalized_offset: usize) -> usize {
@@ -235,20 +343,21 @@ fn raw_offset(raw: &str, normalized_offset: usize) -> usize {
     raw_offset
 }
 
-fn replace_raw(
-    raw: &str,
-    normalized_offset: usize,
-    old_len: usize,
-    new: &str,
-    format: snapshot::TextFormat,
-) -> String {
-    let start = raw_offset(raw, normalized_offset);
-    let end = raw_offset(raw, normalized_offset + old_len);
-    let replacement = format.restore_newlines(new);
-    let mut result = String::with_capacity(raw.len() - (end - start) + replacement.len());
-    result.push_str(&raw[..start]);
-    result.push_str(&replacement);
-    result.push_str(&raw[end..]);
+/// Splice the sorted, non-overlapping matches into the raw (BOM / CRLF) text,
+/// mapping every normalized offset back to raw bytes and restoring the file's
+/// line-ending convention per hunk.
+fn splice_raw(raw: &str, hunks: &[MatchedHunk], format: snapshot::TextFormat) -> String {
+    let mut result = String::with_capacity(raw.len());
+    let mut cursor = 0usize;
+    for hunk in hunks {
+        let start = raw_offset(raw, hunk.offset);
+        let end = raw_offset(raw, hunk.offset + hunk.old.len());
+        debug_assert!(cursor <= start && start <= end);
+        result.push_str(&raw[cursor..start]);
+        result.push_str(&format.restore_newlines(&hunk.new));
+        cursor = end;
+    }
+    result.push_str(&raw[cursor..]);
     result
 }
 
@@ -283,35 +392,61 @@ fn ensure_visible(
 fn remap_seen_lines(
     live: &str,
     edited: &str,
-    offset: usize,
-    old_text: &str,
-    new_text: &str,
+    hunks: &[MatchedHunk],
     seen_lines: &BTreeSet<usize>,
 ) -> Vec<usize> {
-    if old_text.is_empty() {
+    if hunks.iter().any(|hunk| hunk.old.is_empty()) {
+        // Insertion into an empty file: every line is new.
         return (1..=snapshot::numbered_lines(edited).len()).collect();
     }
 
-    let start_line = 1 + live[..offset].bytes().filter(|b| *b == b'\n').count();
-    let old_end_line = start_line + old_text.bytes().filter(|b| *b == b'\n').count()
-        - usize::from(old_text.ends_with('\n'));
-    let delta = snapshot::numbered_lines(edited).len() as isize
-        - snapshot::numbered_lines(live).len() as isize;
+    // Per-hunk line geometry in the original text: (start_line, old_end_line,
+    // new_span, line_delta). `line_delta` is the change in line numbering for
+    // the unchanged suffix, while `new_span` is the replacement range to mark
+    // visible; these are different when editing within a line.
+    let geometry: Vec<(usize, usize, usize, isize)> = hunks
+        .iter()
+        .map(|hunk| {
+            let start_line = 1 + live[..hunk.offset].bytes().filter(|b| *b == b'\n').count();
+            let old_newlines = hunk.old.bytes().filter(|b| *b == b'\n').count();
+            let new_newlines = hunk.new.bytes().filter(|b| *b == b'\n').count();
+            let old_end_line = start_line + old_newlines - usize::from(hunk.old.ends_with('\n'));
+            let unchanged_suffix_continues = hunk.new.ends_with('\n')
+                && !hunk.old.ends_with('\n')
+                && hunk.offset + hunk.old.len() < live.len();
+            let new_span = if hunk.new.is_empty() {
+                0
+            } else {
+                snapshot::numbered_lines(&hunk.new).len().max(1)
+                    + usize::from(unchanged_suffix_continues)
+            };
+            let line_delta = new_newlines as isize - old_newlines as isize;
+            (start_line, old_end_line, new_span, line_delta)
+        })
+        .collect();
+
     let mut remapped = BTreeSet::new();
     for &line in seen_lines {
-        if line < start_line {
-            remapped.insert(line);
-        } else if line > old_end_line {
-            remapped.insert((line as isize + delta) as usize);
+        let mut shift = 0isize;
+        let mut replaced = false;
+        for (start_line, old_end_line, _, delta) in &geometry {
+            if *start_line <= line && line <= *old_end_line {
+                replaced = true;
+                break;
+            }
+            if line > *old_end_line {
+                shift += *delta;
+            }
+        }
+        if !replaced {
+            remapped.insert((line as isize + shift) as usize);
         }
     }
-    if !new_text.is_empty() {
-        let unchanged_suffix_continues = new_text.ends_with('\n')
-            && !old_text.ends_with('\n')
-            && offset + old_text.len() < live.len();
-        let count = snapshot::numbered_lines(new_text).len().max(1)
-            + usize::from(unchanged_suffix_continues);
-        remapped.extend(start_line..start_line + count);
+    let mut shift = 0isize;
+    for (start_line, _, new_span, delta) in &geometry {
+        let remapped_start = (*start_line as isize + shift) as usize;
+        remapped.extend(remapped_start..remapped_start + new_span);
+        shift += *delta;
     }
     remapped.into_iter().collect()
 }

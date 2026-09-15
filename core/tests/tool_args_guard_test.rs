@@ -50,10 +50,9 @@ async fn empty_object_arguments_are_rejected_with_required_fields() {
         "unexpected: {}",
         result.content
     );
+    // edit_file's schema now requires only `path` (old_text/new_text or edits).
     assert!(
-        result.content.contains("path")
-            && result.content.contains("old_text")
-            && result.content.contains("new_text"),
+        result.content.contains("path"),
         "should name required fields: {}",
         result.content
     );

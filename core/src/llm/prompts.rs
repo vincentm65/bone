@@ -2,10 +2,21 @@
 
 use crate::config::bone_dir;
 
+/// Fixed tool-usage guidance appended to every main-agent system prompt.
+/// Lives in code rather than `core/defaults/config.yaml` because seeding is
+/// create-if-missing, so a YAML prompt change would not reach existing
+/// installs.
+const TOOL_USAGE_GUIDANCE: &str = "\
+Tool usage:\n\
+- You may issue multiple independent tool calls in a single turn; batch related reads/searches instead of one per turn.\n\
+- edit_file accepts several disjoint replacements in one call via edits.\n\
+- Do not re-read a file you just changed unless the edit reported the file changed.";
+
 /// System prompt injected at the start of a normal conversation.
 ///
 /// Runtime configuration-directory and working-directory context is always
-/// appended to the configured base prompt.
+/// appended to the configured base prompt, preceded by the fixed
+/// [`TOOL_USAGE_GUIDANCE`] block.
 pub fn system_prompt(base: &str) -> String {
     let cwd = std::env::current_dir()
         .map(|p| p.display().to_string())
@@ -13,7 +24,9 @@ pub fn system_prompt(base: &str) -> String {
     let bone = bone_dir().display().to_string();
     let separator = if base.ends_with('\n') { "" } else { "\n\n" };
     format!(
-        "{base}{separator}Resolved config directory: {bone}\nCurrent working directory: {cwd}\n"
+        "{base}{separator}{TOOL_USAGE_GUIDANCE}\n\n\
+         Resolved config directory: {bone}\n\
+         Current working directory: {cwd}\n"
     )
 }
 

@@ -42,6 +42,27 @@ async fn edit_live(
         .map(|out| out.content)
 }
 
+fn edits_args(path: &PathBuf, edits: &[(&str, &str)]) -> serde_json::Value {
+    json!({
+        "path": path,
+        "edits": edits
+            .iter()
+            .map(|(old, new)| json!({ "old_text": old, "new_text": new }))
+            .collect::<Vec<_>>(),
+    })
+}
+
+async fn edit_live_edits(
+    path: &PathBuf,
+    edits: &[(&str, &str)],
+    context: &ToolExecutionContext,
+) -> Result<String, String> {
+    EditFileTool
+        .execute_output_live(edits_args(path, edits), None, context.clone())
+        .await
+        .map(|out| out.content)
+}
+
 #[tokio::test]
 async fn replaces_exact_unique_text_after_read() {
     let path = setup("replace.txt", "alpha\nbeta\ngamma\n").await;
@@ -351,10 +372,218 @@ async fn preview_uses_session_working_dir_without_writing() {
     let _ = fs::remove_file(path).await;
 }
 
+#[tokio::test]
+async fn applies_multiple_hunks_in_one_call() {
+    let path = setup("multi-hunk.txt", "alpha\nbeta\ngamma\ndelta\n").await;
+    let context = ToolExecutionContext::default();
+    read_into_context(&path, &context).await;
+
+    let result = edit_live_edits(&path, &[("alpha", "ALPHA"), ("gamma", "GAMMA")], &context)
+        .await
+        .unwrap();
+    assert!(result.contains("Edited:"));
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "ALPHA\nbeta\nGAMMA\ndelta\n"
+    );
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn hunks_match_the_original_text_not_intermediate_results() {
+    // "x" only exists once the first hunk has applied; it must not be
+    // matchable by a later hunk in the same call.
+    let path = setup("hunk-order.txt", "one\ntwo\n").await;
+    let context = ToolExecutionContext::default();
+    read_into_context(&path, &context).await;
+
+    let error = edit_live_edits(&path, &[("one", "x"), ("x", "y")], &context)
+        .await
+        .unwrap_err();
+    assert!(error.contains("not found"), "{error}");
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), "one\ntwo\n");
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn rejects_duplicate_and_overlapping_hunks() {
+    let path = setup("overlap.txt", "same\nother\nsame\n").await;
+    let context = ToolExecutionContext::default();
+    read_into_context(&path, &context).await;
+
+    let duplicate = edit_live_edits(&path, &[("other", "O"), ("other", "X")], &context)
+        .await
+        .unwrap_err();
+    assert!(duplicate.contains("same replacement twice"), "{duplicate}");
+
+    // "same\nother" spans the second hunk's match.
+    let overlap = edit_live_edits(&path, &[("same\nother", "X"), ("other", "O")], &context)
+        .await
+        .unwrap_err();
+    assert!(overlap.contains("overlap"), "{overlap}");
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "same\nother\nsame\n"
+    );
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn rejects_mixed_forms_empty_edits_and_split_pairs() {
+    let path = setup("mixed-form.txt", "old\n").await;
+    let context = ToolExecutionContext::default();
+    read_into_context(&path, &context).await;
+
+    let mixed = EditFileTool
+        .execute_output_live(
+            json!({ "path": path, "old_text": "old", "new_text": "new", "edits": [] }),
+            None,
+            context.clone(),
+        )
+        .await
+        .unwrap_err();
+    assert!(mixed.contains("not both"), "{mixed}");
+
+    let empty = edit_live_edits(&path, &[], &context).await.unwrap_err();
+    assert!(empty.contains("must not be empty"), "{empty}");
+
+    let split = EditFileTool
+        .execute_output_live(
+            json!({ "path": path, "old_text": "old" }),
+            None,
+            context.clone(),
+        )
+        .await
+        .unwrap_err();
+    assert!(split.contains("together"), "{split}");
+
+    let missing = EditFileTool
+        .execute_output_live(json!({ "path": path }), None, context.clone())
+        .await
+        .unwrap_err();
+    assert!(missing.contains("old_text"), "{missing}");
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), "old\n");
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn multi_hunk_preserves_crlf_and_bom() {
+    let path = temp_path("multi-crlf.txt");
+    fs::write(&path, "\u{feff}alpha\r\nbeta\r\ngamma\r\n")
+        .await
+        .unwrap();
+    let context = ToolExecutionContext::default();
+    read_into_context(&path, &context).await;
+
+    edit_live_edits(&path, &[("alpha", "ALPHA"), ("gamma", "GAMMA")], &context)
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read(&path).await.unwrap(),
+        "\u{feff}ALPHA\r\nbeta\r\nGAMMA\r\n".as_bytes()
+    );
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn rejects_when_any_hunk_falls_outside_the_read_range() {
+    let path = setup("hunk-range.txt", "one\ntwo\nthree\nfour\n").await;
+    let context = ToolExecutionContext::default();
+    ReadFileTool
+        .execute_output_live(
+            json!({ "path": path, "start_line": 1, "max_lines": 2 }),
+            None,
+            context.clone(),
+        )
+        .await
+        .unwrap();
+
+    let error = edit_live_edits(&path, &[("two", "TWO"), ("four", "FOUR")], &context)
+        .await
+        .unwrap_err();
+    assert!(error.contains("not shown"), "{error}");
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "one\ntwo\nthree\nfour\n"
+    );
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn follow_up_edit_succeeds_without_reread_after_multi_hunk() {
+    let path = setup("follow-up.txt", "one\ntwo\nthree\nfour\n").await;
+    let context = ToolExecutionContext::default();
+    read_into_context(&path, &context).await;
+
+    // Both targets of the second/third calls were produced by the first call
+    // and have never been re-read.
+    edit_live_edits(
+        &path,
+        &[("two", "TWO inserted"), ("four", "FOUR inserted")],
+        &context,
+    )
+    .await
+    .unwrap();
+    edit_live(&path, "TWO inserted", "TWO edited", &context)
+        .await
+        .unwrap();
+    edit_live(&path, "FOUR inserted", "FOUR edited", &context)
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "one\nTWO edited\nthree\nFOUR edited\n"
+    );
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn follow_up_edit_after_multiline_batch_uses_shifted_visibility() {
+    let path = setup("multiline-batch-follow-up.txt", "one\ntwo\nthree\nfour\n").await;
+    let context = ToolExecutionContext::default();
+    read_into_context(&path, &context).await;
+
+    edit_live_edits(
+        &path,
+        &[("one", "one\ninserted"), ("four", "FOUR")],
+        &context,
+    )
+    .await
+    .unwrap();
+    edit_live(&path, "FOUR", "FOUR edited", &context)
+        .await
+        .unwrap();
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "one\ninserted\ntwo\nthree\nFOUR edited\n"
+    );
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn inline_deletion_preserves_visibility_of_later_lines() {
+    let path = setup("inline-delete-follow-up.txt", "prefix foo\nmiddle\nlast\n").await;
+    let context = ToolExecutionContext::default();
+    read_into_context(&path, &context).await;
+
+    edit_live(&path, "foo", "", &context).await.unwrap();
+    edit_live(&path, "last", "LAST", &context).await.unwrap();
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "prefix \nmiddle\nLAST\n"
+    );
+    let _ = fs::remove_file(path).await;
+}
+
 #[test]
-fn schema_has_only_the_three_simple_fields() {
+fn schema_requires_path_and_advertises_both_forms() {
     let schema = EditFileTool.definition().input_schema;
-    assert_eq!(schema["required"], json!(["path", "old_text", "new_text"]));
+    assert_eq!(schema["required"], json!(["path"]));
     assert!(schema["properties"].get("input").is_none());
     assert_eq!(schema["additionalProperties"], false);
+    let edits = &schema["properties"]["edits"];
+    assert_eq!(edits["type"], "array");
+    assert_eq!(edits["items"]["required"], json!(["old_text", "new_text"]));
+    assert_eq!(edits["items"]["additionalProperties"], false);
+    assert!(EditFileTool.definition().description.contains("edits"));
 }
