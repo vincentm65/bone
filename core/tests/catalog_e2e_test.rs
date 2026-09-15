@@ -3,9 +3,10 @@
 //! the cached index without auto-installing, fall back to the cache when
 //! offline, reject a bad checksum, and remove the item.
 //!
-//! Drives `BONE_CATALOG_URL` (the fixture) and `XDG_CONFIG_HOME` (so the client
-//! writes into a temp `bone-rust` dir). Kept to a single test to avoid env-var
-//! races across threads.
+//! Drives `BONE_CATALOG_URL` (the fixture) and both config-root overrides
+//! (`BONE_DIR`, `XDG_CONFIG_HOME`) so the client writes into a temp `bone-rust`
+//! dir whatever the caller's environment sets. Kept to a single test to avoid
+//! env-var races across threads.
 
 use std::fs;
 use std::path::Path;
@@ -53,8 +54,13 @@ fn catalog_fetch_install_update_remove() {
     fs::create_dir_all(fixture.join("assets/demo")).unwrap();
 
     // SAFETY: single-test file; no other threads read these vars concurrently.
+    // `BONE_DIR` outranks `XDG_CONFIG_HOME` in `config::try_bone_dir`, so set it
+    // too: an inherited `BONE_DIR` (a sandboxed run, a developer shell, CI) would
+    // otherwise leave this test writing into — and `remove()`-ing from — the real
+    // config dir.
     unsafe {
         std::env::set_var("BONE_CATALOG_URL", &fixture);
+        std::env::set_var("BONE_DIR", cfg.join("bone-rust"));
         std::env::set_var("XDG_CONFIG_HOME", &cfg);
     }
     let installed_path = cfg.join("bone-rust").join("lua/tools/demo.lua");

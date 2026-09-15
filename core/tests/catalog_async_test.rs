@@ -6,16 +6,20 @@
 
 use bone_core::ext::catalog;
 
+mod common;
+
 #[test]
 fn fetch_index_from_async_context_does_not_panic() {
     // Point at an unreachable http endpoint so `fetch_remote` runs (the panicky
-    // path) but returns quickly. SAFETY: single-test file, no other threads.
+    // path) but returns quickly. The isolated config root means an inherited
+    // `BONE_DIR` cannot make this read a real cached index: `BONE_DIR` outranks
+    // `XDG_CONFIG_HOME` in `config::try_bone_dir`, so both are set to one unique
+    // temp dir. SAFETY: single-test file, no other threads.
+    let cfg = common::temp_dir("catalog-async-cfg");
     unsafe {
         std::env::set_var("BONE_CATALOG_URL", "http://127.0.0.1:1");
-        std::env::set_var(
-            "XDG_CONFIG_HOME",
-            std::env::temp_dir().join("bone-catalog-async-cfg"),
-        );
+        std::env::set_var("BONE_DIR", cfg.join("bone-rust"));
+        std::env::set_var("XDG_CONFIG_HOME", &cfg);
     }
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -28,4 +32,6 @@ fn fetch_index_from_async_context_does_not_panic() {
     // an empty index.
     let entries = rt.block_on(async { catalog::fetch_index() });
     assert!(entries.is_empty(), "unreachable catalog yields no entries");
+
+    let _ = std::fs::remove_dir_all(&cfg);
 }
