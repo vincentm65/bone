@@ -333,6 +333,7 @@ pub(crate) fn emit_event(
         | crate::runtime::RuntimeEvent::HostResponse { .. }
         | crate::runtime::RuntimeEvent::ConversationLoaded { .. }
         | crate::runtime::RuntimeEvent::ConversationLoadFailed { .. }
+        | crate::runtime::RuntimeEvent::OlderMessagesLoaded { .. }
         | crate::runtime::RuntimeEvent::ViewDiff { .. }
         | crate::runtime::RuntimeEvent::CommandComplete { .. }
         | crate::runtime::RuntimeEvent::KeymapDispatched { .. }

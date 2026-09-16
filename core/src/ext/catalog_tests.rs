@@ -208,3 +208,76 @@ fn plugin_entries_survive_index_round_trip() {
     assert_eq!(entries[0].dir_segment(), "plugins");
     assert_eq!(entries[0].files.len(), 1);
 }
+
+#[test]
+fn min_bone_version_gate_accepts_and_rejects() {
+    let make = |min: Option<&str>| {
+        let mut entry = plugin_entry("gated");
+        entry.min_bone_version = min.map(str::to_string);
+        entry
+    };
+
+    assert!(make(None).bone_version_ok().is_ok(), "no requirement passes");
+    assert!(
+        make(Some("0.1.0")).bone_version_ok().is_ok(),
+        "a satisfied bare version passes"
+    );
+    assert!(
+        make(Some(">=2.4")).bone_version_ok().is_ok(),
+        "a satisfied range passes"
+    );
+    assert!(
+        make(Some("not-a-version")).bone_version_ok().is_ok(),
+        "an unparseable requirement must never block an install"
+    );
+
+    let error = make(Some("999.0.0")).bone_version_ok().unwrap_err();
+    assert!(
+        error.starts_with("requires Bone 999.0.0 (current "),
+        "unexpected error: {error}"
+    );
+    assert!(make(Some(">=3.0")).bone_version_ok().is_err());
+}
+
+#[test]
+fn plugin_legacy_flat_paths_derive_from_the_scoped_layout() {
+    let mut entry = plugin_entry("skill");
+    entry.files = vec![
+        CatalogFile {
+            path: "plugins/skill/lib/skill.lua".into(),
+            sha256: String::new(),
+        },
+        CatalogFile {
+            path: "plugins/skill/commands/skill.lua".into(),
+            sha256: String::new(),
+        },
+    ];
+    let lua = crate::config::bone_dir().join("lua");
+    assert_eq!(
+        entry.legacy_primary_paths(),
+        vec![lua.join("tools/skill.lua"), lua.join("commands/skill.lua")]
+    );
+    assert_eq!(
+        entry
+            .files
+            .iter()
+            .map(|file| entry.legacy_bundled_path(file).unwrap())
+            .collect::<Vec<_>>(),
+        vec![lua.join("lib/skill.lua"), lua.join("commands/skill.lua")],
+        "the scoped path minus its package prefix; a bundled command may
+        coincide with a legacy primary candidate"
+    );
+
+    // Non-plugins were never installed flat, so they have no legacy layout.
+    let tool = CatalogEntry {
+        name: "weather.lua".into(),
+        kind: "tool".into(),
+        files: vec![CatalogFile {
+            path: "themes/nord.lua".into(),
+            sha256: String::new(),
+        }],
+        ..CatalogEntry::default()
+    };
+    assert!(tool.legacy_primary_paths().is_empty());
+    assert_eq!(tool.legacy_bundled_path(&tool.files[0]), None);
+}

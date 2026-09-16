@@ -617,6 +617,7 @@ async fn synchronize_is_correlated_when_idle_and_during_a_turn() {
             RuntimeCommand::Synchronize {
                 request_id: 41,
                 include_messages: false,
+                window: None,
             },
             &mut commands,
         )
@@ -660,6 +661,7 @@ async fn synchronize_is_correlated_when_idle_and_during_a_turn() {
             .send(RuntimeCommand::Synchronize {
                 request_id: 42,
                 include_messages: true,
+                window: None,
             })
             .unwrap();
         loop {
@@ -1426,7 +1428,7 @@ fn managed_projection_late_attach_uses_actor_runtime_replacements() {
     // ManagedRuntime attachment.
     ctx.publish_snapshot();
 
-    let initial = projection.initial_events(false);
+    let initial = projection.initial_events(false, None);
     assert!(matches!(
         initial.get(2),
         Some(RuntimeEvent::ConversationLoaded { .. })
@@ -1871,6 +1873,7 @@ async fn synchronize_reports_busy_during_interactive_command() {
             .send(RuntimeCommand::Synchronize {
                 request_id: 73,
                 include_messages: false,
+                window: None,
             })
             .unwrap();
         let synchronized = loop {
@@ -1931,6 +1934,7 @@ async fn synchronize_replays_and_routes_pending_command_approval() {
             .send(RuntimeCommand::Synchronize {
                 request_id: 74,
                 include_messages: false,
+                window: None,
             })
             .unwrap();
 
@@ -2154,6 +2158,7 @@ async fn turn_queues_idle_commands_and_preserves_correlated_replies() {
             .send(RuntimeCommand::Synchronize {
                 request_id: 204,
                 include_messages: false,
+                window: None,
             })
             .unwrap();
         loop {
@@ -2263,6 +2268,7 @@ async fn interactive_command_queues_idle_work_in_fifo_order() {
             .send(RuntimeCommand::Synchronize {
                 request_id: 303,
                 include_messages: false,
+                window: None,
             })
             .unwrap();
         loop {
@@ -2359,6 +2365,7 @@ async fn interactive_command_queues_idle_work_in_fifo_order() {
             RuntimeCommand::Synchronize {
                 request_id: 304,
                 include_messages: false,
+                window: None,
             },
             &mut commands,
         )
@@ -3071,7 +3078,7 @@ async fn managed_connections_isolate_events_and_run_concurrently() {
             // Both initially attach to actor 1. Move only B to actor 2.
             assert_eq!(read_managed_initial(&mut read_a).await, (Some(1), false));
             assert_eq!(read_managed_initial(&mut read_b).await, (Some(1), false));
-            codec::write_message(&mut write_b, &RuntimeCommand::LoadConversation { id: 2 })
+            codec::write_message(&mut write_b, &RuntimeCommand::LoadConversation { id: 2, window: None })
                 .await
                 .unwrap();
             assert_eq!(read_managed_initial(&mut read_b).await, (Some(2), false));
@@ -3189,7 +3196,7 @@ async fn managed_reload_is_host_scoped_while_ordinary_commands_remain_actor_loca
             // Populate two cached actors, then connect to actor 1.
             drop(
                 manager
-                    .attach(SessionTarget::Conversation(2))
+                    .attach(SessionTarget::Conversation(2), None)
                     .await
                     .unwrap(),
             );
@@ -3257,7 +3264,7 @@ async fn managed_load_failure_is_correlated() {
             let mut read = codec::MessageReader::new(read);
             assert_eq!(read_managed_initial(&mut read).await, (Some(1), false));
 
-            codec::write_message(&mut write, &RuntimeCommand::LoadConversation { id: 404 })
+            codec::write_message(&mut write, &RuntimeCommand::LoadConversation { id: 404, window: None })
                 .await
                 .unwrap();
             let failed: RuntimeEvent =
@@ -3365,7 +3372,7 @@ async fn managed_actor_panic_does_not_stop_other_sessions() {
             }));
 
             let mut failed = manager
-                .attach(SessionTarget::Conversation(1))
+                .attach(SessionTarget::Conversation(1), None)
                 .await
                 .unwrap();
             let panic_status =
@@ -3379,7 +3386,7 @@ async fn managed_actor_panic_does_not_stop_other_sessions() {
             ));
 
             let mut healthy = manager
-                .attach(SessionTarget::Conversation(2))
+                .attach(SessionTarget::Conversation(2), None)
                 .await
                 .expect("manager stopped after another actor panicked");
             healthy
@@ -3476,14 +3483,14 @@ async fn managed_sessions_never_evict_attached_actors() {
             for id in 1..=MAX_CACHED_ACTORS as i64 + 1 {
                 attachments.push(
                     manager
-                        .attach(SessionTarget::Conversation(id))
+                        .attach(SessionTarget::Conversation(id), None)
                         .await
                         .unwrap(),
                 );
             }
             drop(
                 manager
-                    .attach(SessionTarget::Conversation(1))
+                    .attach(SessionTarget::Conversation(1), None)
                     .await
                     .unwrap(),
             );
@@ -3519,7 +3526,7 @@ async fn managed_sessions_evict_the_oldest_disconnected_actor() {
             for id in 1..=MAX_CACHED_ACTORS as i64 + 1 {
                 drop(
                     manager
-                        .attach(SessionTarget::Conversation(id))
+                        .attach(SessionTarget::Conversation(id), None)
                         .await
                         .unwrap(),
                 );
@@ -3533,7 +3540,7 @@ async fn managed_sessions_evict_the_oldest_disconnected_actor() {
             // reconstructed rather than retained beyond the cache bound.
             drop(
                 manager
-                    .attach(SessionTarget::Conversation(1))
+                    .attach(SessionTarget::Conversation(1), None)
                     .await
                     .unwrap(),
             );
@@ -3579,7 +3586,7 @@ async fn evicting_a_cached_actor_releases_its_lua_vm() {
             for id in 1..=MAX_CACHED_ACTORS as i64 + 1 {
                 drop(
                     manager
-                        .attach(SessionTarget::Conversation(id))
+                        .attach(SessionTarget::Conversation(id), None)
                         .await
                         .unwrap(),
                 );
@@ -3665,7 +3672,7 @@ async fn managed_sessions_do_not_evict_disconnected_running_actor() {
             }));
 
             let mut running = manager
-                .attach(SessionTarget::Conversation(1))
+                .attach(SessionTarget::Conversation(1), None)
                 .await
                 .unwrap();
             running
@@ -3689,14 +3696,14 @@ async fn managed_sessions_do_not_evict_disconnected_running_actor() {
             for id in 2..=MAX_CACHED_ACTORS as i64 + 1 {
                 drop(
                     manager
-                        .attach(SessionTarget::Conversation(id))
+                        .attach(SessionTarget::Conversation(id), None)
                         .await
                         .unwrap(),
                 );
             }
             drop(
                 manager
-                    .attach(SessionTarget::Conversation(1))
+                    .attach(SessionTarget::Conversation(1), None)
                     .await
                     .unwrap(),
             );
@@ -3833,7 +3840,7 @@ async fn set_incognito_publishes_status_and_snapshot_and_blocks_loads() {
 
     // While incognito the daemon refuses to re-attach a conversation: that
     // would silently resume DB writes behind the INC badge.
-    ctx.handle_idle_command(RuntimeCommand::LoadConversation { id: 7 }, &mut commands)
+    ctx.handle_idle_command(RuntimeCommand::LoadConversation { id: 7, window: None }, &mut commands)
         .await;
     assert!(matches!(
         events.recv().await.unwrap(),
@@ -4152,7 +4159,7 @@ fn initial_attach_bounds_oversized_conversation_loaded_frame() {
     );
 
     let loaded = projection
-        .initial_events(false)
+        .initial_events(false, None)
         .into_iter()
         .find_map(|event| match event {
             RuntimeEvent::ConversationLoaded {

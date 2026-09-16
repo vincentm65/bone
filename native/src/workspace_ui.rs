@@ -10,6 +10,10 @@ use bone_protocol::view::PanelSlot;
 use bone_protocol::{Component, PanePresentation};
 
 const TAB_HEIGHT: f32 = 36.0;
+/// Drop target trailing the last tab of a pane. The per-tab width has to
+/// reserve it: otherwise the strip overflows by exactly this much and scrolls
+/// the leading tab's title out from under the pane controls.
+const TABS_TRAILING_DROP_TARGET: f32 = 32.0;
 const CONFIG_PANEL_ID: &str = "bone.native.config";
 const CATALOG_PANEL_ID: &str = "bone.native.catalog";
 
@@ -610,14 +614,23 @@ impl DesktopApp {
             data.get_temp::<bool>(egui::Id::new(("sidebar-hidden", window)))
                 .unwrap_or(false)
         });
-        let (sidebar_width, resized) = if plan.show_sidebar && !hidden {
+        let visible = plan.show_sidebar && !hidden;
+        ctx.data_mut(|data| {
+            data.insert_temp(
+                egui::Id::new(("sidebar-auto-hidden", window)),
+                !plan.show_sidebar,
+            );
+            data.insert_temp(egui::Id::new(("sidebar-visible", window)), visible);
+        });
+        let (sidebar_width, resized) = if visible {
             let id = egui::Id::new(("sidebar", window));
-            let default_width =
-                layout::default_sidebar_width(ui.input(|i| i.viewport_rect().width()));
-            Self::cap_panel_width(&ctx, id, plan.sidebar_cap);
-            if !self.display.sidebar_width_manual {
-                Self::set_panel_width(&ctx, id, default_width);
-            }
+            let desired_width = if self.display.sidebar_width_manual {
+                self.display.sidebar_width as f32
+            } else {
+                layout::default_sidebar_width(ui.available_width())
+            };
+            let effective_width = desired_width.min(plan.sidebar_cap);
+            Self::set_panel_width(&ctx, id, effective_width);
             let response = egui::Panel::left(id)
                 .frame(
                     egui::Frame::new()
@@ -625,16 +638,15 @@ impl DesktopApp {
                         .inner_margin(12),
                 )
                 .resizable(true)
-                .default_size(if self.display.sidebar_width_manual {
-                    self.display.sidebar_width as f32
-                } else {
-                    default_width
-                })
+                .default_size(effective_width)
                 .min_size(layout::SIDEBAR_WIDTH_MIN as f32)
-                .max_size(plan.sidebar_cap)
+                .max_size(plan.sidebar_cap.min(layout::SIDEBAR_WIDTH_MAX as f32))
                 .show(ui, |ui| self.sidebar(ui));
             let width = response.response.rect.width();
-            (Some(width), (width - default_width).abs() > 0.5)
+            let resized = (width - effective_width).abs() > 0.5;
+            // Responsive clamping must not overwrite the user's saved wide-window size.
+            let persist = resized || !self.display.sidebar_width_manual;
+            (persist.then_some(width), resized)
         } else {
             (None, false)
         };
@@ -1404,18 +1416,28 @@ impl DesktopApp {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 ui.add_space(4.0);
                 // Fixed controls stay visible. Conversation names scroll horizontally, never wrap.
-                if icons::button(
-                    ui,
-                    icons::Icon::Plus,
-                    "New conversation in this pane (Ctrl+T)",
-                )
-                .clicked()
+                let sidebar_visible = ctx.data(|data| {
+                    data.get_temp::<bool>(egui::Id::new((
+                        "sidebar-visible",
+                        self.window_ui.rendering,
+                    )))
+                    .unwrap_or(false)
+                });
+                if !sidebar_visible
+                    && icons::button(ui, icons::Icon::Plus, "New task in this pane (Ctrl/Cmd+T)")
+                        .clicked()
                 {
                     self.focus_group(pane.id, &ctx);
                     self.apply_shortcut(egui::Key::T, &ctx);
                 }
                 let pane_menu = icons::button(ui, icons::Icon::Panes, "Manage tabs and panes");
                 egui::Popup::menu(&pane_menu).show(|ui| {
+                    if ui.button("New task in this pane  Ctrl/Cmd+T").clicked() {
+                        self.focus_group(pane.id, &ctx);
+                        self.apply_shortcut(egui::Key::T, &ctx);
+                        ui.close();
+                    }
+                    ui.separator();
                     for id in &pane.tabs {
                         if let Some(tab) = self.tabs.iter().find(|tab| tab.id == *id)
                             && ui
@@ -1454,6 +1476,7 @@ impl DesktopApp {
                 });
                 ui.add_space(4.0);
                 let tab_width = ((ui.available_width()
+                    - TABS_TRAILING_DROP_TARGET
                     - pane.tabs.len().saturating_sub(1) as f32 * 4.0)
                     / pane.tabs.len().max(1) as f32)
                     .clamp(132.0, 220.0);
@@ -1462,6 +1485,7 @@ impl DesktopApp {
                     .auto_shrink([false, true])
                     .max_height(44.0)
                     .show(ui, |ui| {
+                        let viewport = ui.clip_rect();
                         ui.allocate_ui_with_layout(
                             egui::vec2(ui.available_width(), TAB_HEIGHT),
                             egui::Layout::left_to_right(egui::Align::Center),
@@ -1490,7 +1514,15 @@ impl DesktopApp {
                                         tab_width,
                                     );
                                     if reveal && pane.active == Some(*id) {
-                                        response.scroll_to_me(Some(egui::Align::Center));
+                                        // Reveal the tab without recentering a
+                                        // strip that already shows it: centering
+                                        // pushes the leading tabs under the
+                                        // pane controls.
+                                        if response.rect.left() < viewport.left() {
+                                            response.scroll_to_me(Some(egui::Align::Min));
+                                        } else if response.rect.right() > viewport.right() {
+                                            response.scroll_to_me(Some(egui::Align::Max));
+                                        }
                                         ctx.data_mut(|data| data.insert_temp(reveal_id, *id));
                                         self.window_ui.reveal_tab = None;
                                     }
@@ -1550,7 +1582,7 @@ impl DesktopApp {
                                     }
                                 }
                                 let (_, target) = ui.allocate_exact_size(
-                                    egui::vec2(32.0, TAB_HEIGHT),
+                                    egui::vec2(TABS_TRAILING_DROP_TARGET, TAB_HEIGHT),
                                     egui::Sense::hover(),
                                 );
                                 if let Some(payload) = target.dnd_release_payload::<DragTab>() {
@@ -1743,8 +1775,7 @@ fn workspace_tab(
     let response = ui.interact(body_rect, widget, egui::Sense::click_and_drag());
     let close = ui.interact(close_rect, widget.with("close"), egui::Sense::click());
     let hovered = response.hovered() || close.hovered();
-    // The active tab is marked by a lighter grey fill (its title is also
-    // bold); no underline is drawn.
+    // The active tab reads from its fill and bold title alone; no underline.
     let fill = if active {
         ui.visuals().extreme_bg_color
     } else if hovered {
@@ -1867,6 +1898,90 @@ mod tests {
     fn settle(app: &mut DesktopApp, ctx: &egui::Context) {
         for _ in 0..3 {
             frame(app, ctx, vec![]).drop_without_applying_deltas();
+        }
+    }
+
+    #[test]
+    fn responsive_sidebar_preserves_manual_width_and_drafts() {
+        let ctx = egui::Context::default();
+        let mut app = fixture(&ctx);
+        app.display.sidebar_width = 500;
+        app.display.sidebar_width_manual = true;
+        for (width, expected) in [
+            (1280.0, Some(500.0)),
+            (840.0, Some(280.0)),
+            (700.0, None),
+            (1280.0, Some(500.0)),
+        ] {
+            for _ in 0..3 {
+                ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(width, 900.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| app.render_native_window(0, ui, false),
+                )
+                .drop_without_applying_deltas();
+            }
+            let visible = ctx
+                .data(|data| data.get_temp::<bool>(egui::Id::new(("sidebar-visible", 0_u64))))
+                .unwrap();
+            assert_eq!(visible, expected.is_some());
+            if let Some(expected) = expected {
+                let panel =
+                    egui::PanelState::load(&ctx, egui::Id::new(("sidebar", 0_u64))).unwrap();
+                assert!(
+                    (panel.outer_rect.width() - expected).abs() < 1.0,
+                    "{width}: {:?}",
+                    panel.outer_rect
+                );
+            }
+            assert_eq!(app.display.sidebar_width, 500);
+            assert!(app.display.sidebar_width_manual);
+            assert_eq!(app.tabs[0].composer, "Source draft");
+            assert_eq!(app.tabs[1].composer, "Target draft");
+            assert_eq!(app.tabs[0].queue.front().unwrap(), "Queued instruction");
+        }
+    }
+
+    #[test]
+    fn selected_task_surfaces_have_accent_edges() {
+        let ctx = egui::Context::default();
+        for active in [false, true] {
+            let mut accent = egui::Color32::TRANSPARENT;
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                accent = ui.visuals().hyperlink_color;
+                workspace_tab(
+                    ui,
+                    1,
+                    "Task",
+                    ("Ready", RowIndicator::None, egui::Color32::WHITE),
+                    false,
+                    active,
+                    180.0,
+                );
+                crate::task_row::task_row(
+                    ui,
+                    RowIndicator::None,
+                    egui::Color32::WHITE,
+                    egui::RichText::new("Task"),
+                    active,
+                );
+            });
+            output.textures_delta.clear();
+            // The selected task row still paints its 3px accent bar…
+            let bar = output.shapes.iter().filter(|shape| matches!(shape.shape,
+                egui::Shape::LineSegment { stroke, .. } if stroke.width == 3.0 && stroke.color == accent
+            )).count();
+            assert_eq!(bar, usize::from(active));
+            // …but the active tab no longer draws a 2px accent underline.
+            let underline = output.shapes.iter().filter(|shape| matches!(shape.shape,
+                egui::Shape::LineSegment { stroke, .. } if stroke.width == 2.0 && stroke.color == accent
+            )).count();
+            assert_eq!(underline, 0);
         }
     }
 

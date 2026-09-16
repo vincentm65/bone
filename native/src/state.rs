@@ -182,6 +182,31 @@ pub struct State {
     /// first. A New tab skips exactly that one and lets its own conversation
     /// (created via `NewConversation`) load next.
     pub ignore_first_load: bool,
+    /// When set, request only the newest `window` display messages on load and
+    /// fetch older pages on demand; `None` keeps the whole transcript (matching
+    /// the TUI, which always loads everything). Preserved across resets.
+    pub window: Option<u32>,
+    /// Whether older messages remain before the currently loaded suffix, so the
+    /// "load older" affordance is shown. Set by `ConversationLoaded` (inferred
+    /// from the window size) and `OlderMessagesLoaded`; cleared on a fresh load.
+    pub has_older: bool,
+    /// True while an older-page request is in flight (disables the affordance).
+    pub loading_older: bool,
+    /// Request id of the in-flight `LoadOlderMessages`, for reply correlation.
+    older_request: Option<u64>,
+    /// The display messages currently held (the suffix rendered into `rows`),
+    /// tracked so older pages can be prepended without re-fetching the suffix
+    /// and so `synchronize` can request at least what is already held.
+    loaded_messages: Vec<ChatMessage>,
+    /// Rows produced by the most recent [`Self::replace`]. Live turn events
+    /// append rows beyond it, and since one display message can span several
+    /// rows (or none) that growth cannot be recounted from `rows` — until the
+    /// next replace rebuilds both, `loaded_messages` no longer counts every
+    /// message held and [`Self::synchronize`] must go unbounded.
+    replaced_rows: usize,
+    /// Rows prepended by the most recent older-page load, pending the renderer's
+    /// transcript-cache shift; `None` when no prepend is pending.
+    pub pending_prepend: Option<usize>,
     assistant: Option<usize>,
     tools: HashMap<String, usize>,
     answered: HashSet<u64>,
@@ -256,6 +281,7 @@ impl State {
             expected_id,
             ignore_first_load,
             next_id: self.next_id,
+            window: self.window,
             ..Self::default()
         };
     }
@@ -286,6 +312,12 @@ impl State {
         self.repairing = false;
         self.last_error = None;
         self.status = "Ready".into();
+        self.has_older = false;
+        self.loading_older = false;
+        self.older_request = None;
+        self.loaded_messages.clear();
+        self.replaced_rows = 0;
+        self.pending_prepend = None;
     }
 
     pub fn next_id(&mut self) -> u64 {
@@ -299,7 +331,39 @@ impl State {
         RuntimeCommand::Synchronize {
             request_id,
             include_messages: true,
+            // Request at least what the client already holds so a repair sync
+            // never discards loaded older pages, while staying bounded by the
+            // window (not the full transcript). Rows appended live since the
+            // last replace break that arithmetic (`loaded_messages` understates
+            // what is held), so any such growth makes the sync unbounded rather
+            // than risk a reply shorter than the transcript on screen.
+            window: if self.rows.len() <= self.replaced_rows {
+                self
+                    .window
+                    .map(|window| window.max(self.loaded_messages.len() as u32))
+            } else {
+                None
+            },
         }
+    }
+
+    /// Request the next page of older messages before the currently loaded
+    /// suffix. Returns `None` when a turn is running (a rebuild would drop its
+    /// streaming rows), a page is already in flight, the transcript is complete,
+    /// or windowing is disabled.
+    pub fn load_older(&mut self) -> Option<RuntimeCommand> {
+        if self.busy || self.loading_older || !self.has_older {
+            return None;
+        }
+        let window = self.window?;
+        let request_id = self.next_id();
+        self.older_request = Some(request_id);
+        self.loading_older = true;
+        Some(RuntimeCommand::LoadOlderMessages {
+            request_id,
+            offset: self.loaded_messages.len() as u32,
+            limit: window,
+        })
     }
 
     pub fn answered(&mut self, id: u64) {
@@ -473,7 +537,15 @@ impl State {
         );
     }
 
-    fn replace(&mut self, messages: Vec<ChatMessage>, busy: bool) {
+    /// Rebuild the row projection from `messages`. `prefix_len` leading
+    /// messages are a freshly prepended older page (0 for a full replace); the
+    /// return value is the row index at which the suffix begins, so the caller
+    /// can shift its index-keyed caches by exactly that many rows. The count
+    /// must come from the rebuild itself: a suffix's leading tool result can
+    /// merge into a prefix tool-call row and add no row of its own, so the
+    /// number of prepended rows is not `rows.len() - old_rows`.
+    fn replace(&mut self, messages: Vec<ChatMessage>, busy: bool, prefix_len: usize) -> usize {
+        self.loaded_messages = messages.clone();
         self.rows.clear();
         self.images.clear();
         self.image_keys.clear();
@@ -482,13 +554,21 @@ impl State {
         self.live_reasoning = None;
         self.assistant = None;
         self.tools.clear();
-        for message in messages {
+        let total = messages.len();
+        let mut prefix_rows = 0;
+        for (index, message) in messages.into_iter().enumerate() {
+            if index == prefix_len {
+                prefix_rows = self.rows.len();
+            }
             if message.role == ChatRole::System {
                 continue;
             }
-            // The row this message's reasoning attaches to: its content row, else
-            // its first tool row. `None` when the message produces no row at all.
-            let mut reasoning_target: Option<usize> = None;
+            // The row this message's reasoning attaches to. A tool row is
+            // preferred so settled reasoning is revealed inside an expanded call;
+            // otherwise it is the message's content row. `None` when the message
+            // produces no row at all.
+            let mut content_target: Option<usize> = None;
+            let mut tool_target: Option<usize> = None;
             // Computed before `content`/`reasoning` are moved out below.
             let synthetic_relay = message.is_synthetic_relay();
             let reasoning = message.reasoning.map(|reasoning| reasoning.text);
@@ -501,8 +581,7 @@ impl State {
                         .map(|card| card.name.clone())
                         .unwrap_or_else(|| "output".into())
                 });
-                reasoning_target =
-                    Some(self.tool_result(id, name, message.content, message.is_error));
+                tool_target = Some(self.tool_result(id, name, message.content, message.is_error));
             } else if !message.content.is_empty() {
                 // A runtime relay of tool-returned images reads as ambient text
                 // (a system note), not a user prompt, after a history reload.
@@ -511,12 +590,12 @@ impl State {
                 } else {
                     message.role.as_str()
                 };
-                reasoning_target = Some(self.push_row(role, message.content));
+                content_target = Some(self.push_row(role, message.content));
             }
             for call in message.tool_calls {
                 let args = (!call.arguments.is_null()).then(|| call.arguments.to_string());
                 let (i, _) = self.tool_row(call.id, call.name.clone());
-                reasoning_target.get_or_insert(i);
+                tool_target.get_or_insert(i);
                 // Keep arguments separate from output. A following saved or live
                 // result fills this same card and supplies its authoritative state.
                 let label = self.tool_label_for(&call.name, &call.arguments, "", false);
@@ -548,19 +627,21 @@ impl State {
                 self.push_row("attachments", format!("{} image(s)", message.images.len()));
             }
             // Reasoning is surfaced only when configured, matching the live gate.
-            // It attaches to the row this message produced; a reasoning-only
-            // message keeps a standalone row (rendered as a collapsed disclosure).
+            // It attaches to the tool row this message produced, if any; a message
+            // with no tool row simply keeps no reasoning (there is nowhere to reveal
+            // it — reasoning is never a peer row).
             if self.show_reasoning
                 && let Some(reasoning) = reasoning
+                && let Some(row) = tool_target.or(content_target)
             {
-                match reasoning_target {
-                    Some(row) => self.attach_thinking(row, reasoning),
-                    None => {
-                        self.push_row("reasoning", reasoning);
-                    }
-                }
+                self.attach_thinking(row, reasoning);
             }
         }
+        self.replaced_rows = self.rows.len();
+        if prefix_len >= total {
+            prefix_rows = self.rows.len();
+        }
+        prefix_rows
     }
 
     fn delta(&mut self, text: String, reasoning: bool) {
@@ -725,7 +806,18 @@ impl State {
                 snapshot,
                 busy,
             } => {
-                self.replace(messages, busy);
+                // The daemon returns `min(total, window)` newest messages, so a
+                // full page at the window size means older messages remain. (A
+                // transcript that exactly fills the window reports one harmless
+                // extra page, whose empty reply clears the affordance.)
+                let has_older = self
+                    .window
+                    .is_some_and(|window| messages.len() >= window as usize);
+                self.replace(messages, busy, 0);
+                self.has_older = has_older;
+                self.loading_older = false;
+                self.older_request = None;
+                self.pending_prepend = None;
                 self.snapshot = snapshot;
                 self.busy = busy;
                 self.ready = true;
@@ -759,7 +851,7 @@ impl State {
                 self.sync_id = None;
                 self.last_error = None;
                 if let Some(messages) = messages {
-                    self.replace(messages, busy);
+                    self.replace(messages, busy, 0);
                 }
                 self.snapshot = snapshot;
                 self.busy = busy;
@@ -774,6 +866,26 @@ impl State {
                 if !busy {
                     self.status = "Ready".into();
                 }
+            }
+            RuntimeEvent::OlderMessagesLoaded {
+                request_id,
+                messages,
+                has_older,
+            } if self.older_request == Some(request_id) => {
+                self.older_request = None;
+                self.loading_older = false;
+                // A turn started while the page was in flight: rebuilding now
+                // would discard its streaming rows, so drop the page.
+                if self.busy {
+                    return None;
+                }
+                self.has_older = has_older;
+                let mut older = messages;
+                let prefix_len = older.len();
+                let mut combined = std::mem::take(&mut self.loaded_messages);
+                older.append(&mut combined);
+                let prefix_rows = self.replace(older, false, prefix_len);
+                self.pending_prepend = Some(prefix_rows);
             }
             RuntimeEvent::StateSnapshot { snapshot } => self.snapshot = snapshot,
             RuntimeEvent::Started {
@@ -858,6 +970,11 @@ impl State {
                 self.approvals.clear();
                 self.last_error = None;
                 self.status = "Ready".into();
+                // The post-turn sync is unbounded whenever the turn appended
+                // rows, so its reply holds the whole transcript and no older
+                // page can remain; meanwhile a stale affordance would page
+                // against the stale `loaded_messages` offset.
+                self.has_older &= self.rows.len() <= self.replaced_rows;
                 return Some(self.synchronize());
             }
             RuntimeEvent::Failed { message } => {
@@ -992,6 +1109,126 @@ mod tests {
             busy: false,
         });
         state
+    }
+
+    #[test]
+    fn windowed_load_requests_and_prepends_older_messages() {
+        let mut s = State {
+            window: Some(2),
+            ..Default::default()
+        };
+        // A transcript that fills the window implies older history remains.
+        let _ = s.reduce(RuntimeEvent::ConversationLoaded {
+            messages: vec![
+                ChatMessage::new(ChatRole::User, "u2"),
+                ChatMessage::new(ChatRole::Assistant, "a2"),
+            ],
+            snapshot: SessionSnapshot::default(),
+            busy: false,
+        });
+        assert!(s.has_older);
+        assert_eq!(s.loaded_messages.len(), 2);
+
+        let command = s.load_older().expect("older page requested");
+        let (request_id, offset, limit) = match command {
+            RuntimeCommand::LoadOlderMessages {
+                request_id,
+                offset,
+                limit,
+            } => (request_id, offset, limit),
+            other => panic!("unexpected command: {other:?}"),
+        };
+        assert_eq!((offset, limit), (2, 2));
+        assert!(s.loading_older);
+        // A second page cannot be requested while one is already in flight.
+        assert!(s.load_older().is_none());
+
+        let _ = s.reduce(RuntimeEvent::OlderMessagesLoaded {
+            request_id,
+            messages: vec![
+                ChatMessage::new(ChatRole::User, "u1"),
+                ChatMessage::new(ChatRole::Assistant, "a1"),
+            ],
+            has_older: false,
+        });
+        assert!(!s.has_older);
+        assert!(!s.loading_older);
+        assert_eq!(s.loaded_messages.len(), 4);
+        // Older messages precede the previously loaded suffix.
+        assert_eq!(s.loaded_messages.first().unwrap().content, "u1");
+        assert_eq!(s.loaded_messages.last().unwrap().content, "a2");
+        // The prepend is signalled for the transcript cache to shift.
+        assert!(s.pending_prepend.is_some());
+    }
+
+    #[test]
+    fn older_page_prepend_counts_rows_when_boundary_splits_a_tool_pair() {
+        // The page boundary lands between an assistant tool call (older page)
+        // and its result (first suffix message). On the fresh rebuild the
+        // result merges into the prefix call row and adds no row of its own, so
+        // the prepend count must come from the rebuild itself, not
+        // `new_rows - old_suffix_rows`.
+        let mut s = State {
+            window: Some(2),
+            ..Default::default()
+        };
+        // Suffix: an orphaned tool result (its call lives in the older page)
+        // followed by a user message. The orphan still gets its own row.
+        let _ = s.reduce(RuntimeEvent::ConversationLoaded {
+            messages: vec![
+                ChatMessage::tool(bone_protocol::ToolResult {
+                    call_id: "t1".into(),
+                    name: "shell".into(),
+                    content: "ok".into(),
+                    ..Default::default()
+                }),
+                ChatMessage::new(ChatRole::User, "u2"),
+            ],
+            snapshot: SessionSnapshot::default(),
+            busy: false,
+        });
+        assert!(s.has_older);
+        assert_eq!(s.rows.len(), 2);
+
+        let command = s.load_older().expect("older page requested");
+        let request_id = match command {
+            RuntimeCommand::LoadOlderMessages { request_id, .. } => request_id,
+            other => panic!("unexpected command: {other:?}"),
+        };
+        let _ = s.reduce(RuntimeEvent::OlderMessagesLoaded {
+            request_id,
+            messages: vec![
+                ChatMessage::new(ChatRole::User, "u1"),
+                ChatMessage::assistant_with_tools(
+                    "",
+                    vec![ToolCall {
+                        id: "t1".into(),
+                        name: "shell".into(),
+                        arguments: json!({"command": "ls"}),
+                    }],
+                ),
+            ],
+            has_older: false,
+        });
+        // u1, the call row (the result merged into it), and u2: three rows, with
+        // the suffix starting at index 2 — not the 2 - 1 = 1 a subtraction gives.
+        assert_eq!(s.rows.len(), 3);
+        assert_eq!(s.pending_prepend, Some(2));
+    }
+
+    #[test]
+    fn windowed_load_without_older_history_hides_the_affordance() {
+        let mut s = State {
+            window: Some(4),
+            ..Default::default()
+        };
+        let _ = s.reduce(RuntimeEvent::ConversationLoaded {
+            messages: vec![ChatMessage::new(ChatRole::User, "only")],
+            snapshot: SessionSnapshot::default(),
+            busy: false,
+        });
+        assert!(!s.has_older);
+        assert!(s.load_older().is_none());
     }
 
     #[test]

@@ -1150,6 +1150,7 @@ fn process_snapshot_cache_and_rejected_config_updates_are_applied() {
         crate::runtime::RuntimeCommand::Synchronize {
             request_id,
             include_messages: false,
+            window: _,
         } => request_id,
         other => panic!("expected synchronization probe, got {other:?}"),
     };
@@ -1177,6 +1178,7 @@ fn process_snapshot_cache_and_rejected_config_updates_are_applied() {
         crate::runtime::RuntimeCommand::Synchronize {
             request_id: id,
             include_messages: true,
+            window: _,
         } if id == request_id
     ));
     let original_provider = app.view.provider_id.clone();

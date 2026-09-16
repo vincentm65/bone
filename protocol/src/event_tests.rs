@@ -270,6 +270,7 @@ fn every_runtime_command_variant_round_trips() {
         RuntimeCommand::Synchronize {
             request_id: 17,
             include_messages: true,
+            window: None,
         },
         RuntimeCommand::HostRequest {
             request_id: 18,
@@ -284,7 +285,10 @@ fn every_runtime_command_variant_round_trips() {
             input: "".into(),
         },
         RuntimeCommand::NewConversation,
-        RuntimeCommand::LoadConversation { id: 42 },
+        RuntimeCommand::LoadConversation {
+            id: 42,
+            window: None,
+        },
         RuntimeCommand::ClearConversation,
         RuntimeCommand::ReplaceConversation {
             messages: vec![ChatMessage::new(ChatRole::User, "replacement")],
@@ -385,7 +389,8 @@ fn synchronize_defaults_to_snapshot_only() {
         command,
         RuntimeCommand::Synchronize {
             request_id: 9,
-            include_messages: false
+            include_messages: false,
+            window: None
         }
     ));
 

@@ -159,6 +159,7 @@ impl RuntimeConn for LocalConn {
             | RuntimeCommand::CancelProcess { .. }
             | RuntimeCommand::NewConversation
             | RuntimeCommand::LoadConversation { .. }
+            | RuntimeCommand::LoadOlderMessages { .. }
             | RuntimeCommand::ClearConversation
             | RuntimeCommand::SwitchProvider { .. }
             | RuntimeCommand::SetConversationModel { .. }

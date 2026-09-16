@@ -122,7 +122,11 @@ seed default tools/commands → run tool files → run command files → run ena
 plugins (`lua/plugins/*/init.lua`, one level, sorted) → collect the registered
 tools and commands. A plugin is skipped when disabled via the
 canonical `plugins.<name>` setting; disabling never deletes files, and because
-reload rebuilds a fresh VM the change takes effect on the next reload.
+reload rebuilds a fresh VM the change takes effect on the next reload. Each
+enabled package directory is appended to `package.path`, so a plugin can
+`require` its own submodules (the global `lua/lib` wins name collisions), and a
+plugin's `themes/` subdirectory is a theme discovery root behind the user's own
+`lua/themes/`.
 
 Configuration surfaces expose this uniformly: the `ConfigStore` schema emits one
 `plugins` page that flat-lists standalone tools, standalone commands, and plugin

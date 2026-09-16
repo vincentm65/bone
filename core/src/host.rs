@@ -83,7 +83,7 @@ impl HostService {
     }
 
     fn stats(&self, range: Option<bone_protocol::DateRange>) -> HostResponse {
-        let result = SessionDb::open(&self.db_path).and_then(|db| match range {
+        let result = SessionDb::open_for_reads(&self.db_path).and_then(|db| match range {
             Some(range) => db.usage_stats_range(&range.start, &range.end),
             None => db.usage_stats_snapshot(),
         });
@@ -107,7 +107,8 @@ impl HostService {
     /// "some recents" without tuning a number.
     fn conversations(&self, limit: u32) -> HostResponse {
         let limit = Self::resolve_conversation_limit(limit);
-        let result = SessionDb::open(&self.db_path).and_then(|db| db.recent_conversations(limit));
+        let result =
+            SessionDb::open_for_reads(&self.db_path).and_then(|db| db.recent_conversations(limit));
         match result {
             Ok(conversations) => HostResponse::Conversations(conversations),
             Err(error) => host_error(HostErrorCode::Unavailable, error),
@@ -314,8 +315,15 @@ impl HostService {
 }
 
 fn load_catalog(state: &mut HostState, refresh: bool) -> &[CatalogEntry] {
-    if refresh || state.catalog.is_none() {
+    if refresh {
         state.catalog = Some(catalog::sync_quiet());
+    } else if state.catalog.is_none() {
+        let cached = catalog::cached_index();
+        state.catalog = Some(if cached.is_empty() {
+            catalog::sync_quiet()
+        } else {
+            cached
+        });
     }
     state.catalog.as_deref().unwrap_or_default()
 }
@@ -423,6 +431,9 @@ fn apply_catalog_entry(
             return CatalogItemOutcome::Unchanged;
         }
         CatalogActionKind::Install => {
+            if let Err(message) = entry.bone_version_ok() {
+                return CatalogItemOutcome::Failed { message };
+            }
             catalog::install(entry).map(|()| CatalogItemOutcome::Installed)
         }
         CatalogActionKind::Remove if !catalog::has_installed_files(entry) => {

@@ -10,6 +10,7 @@ mod config_view;
 mod connection;
 mod daemon;
 mod file_refs;
+mod graphics;
 mod icons;
 mod images;
 #[cfg(test)]
@@ -80,6 +81,11 @@ const MAX_ATTACHMENT_BYTES: usize = 15 * 1024 * 1024;
 /// chars]` placeholder in the composer instead of filling it with the whole
 /// blob, mirroring the TUI's `PASTE_PLACEHOLDER_THRESHOLD`.
 const PASTE_PLACEHOLDER_THRESHOLD: usize = 500;
+
+/// Newest display messages loaded on conversation open; older pages are fetched
+/// on demand via the "Load older messages" control. The TUI keeps loading the
+/// full transcript (its `window` is `None`).
+const LOAD_WINDOW: u32 = 200;
 
 /// How long to wait for a host request (stats/catalog) before surfacing an
 /// error. Guards against a daemon that accepts the socket but never replies.
@@ -237,7 +243,6 @@ struct ModelSelector {
     label: String,
     /// Full `provider · model` text used for hover and the popup header.
     detail: String,
-    color: egui::Color32,
     /// `(provider id, label, is-current)` for the provider section.
     providers: Vec<(String, String, bool)>,
     /// Known model ids for the current provider (configured, saved, and seen).
@@ -320,6 +325,14 @@ struct Tab {
     stick_to_bottom: bool,
     jump_to_latest: bool,
     has_new_output: bool,
+    /// Bottom-relative viewport offset to restore after an older page prepends
+    /// rows above the viewport (`None` when no restore is in flight): holds the
+    /// distance from the bottom and the content height seen on the previous
+    /// anchored frame, so the restore stops once the height settles.
+    load_anchor: Option<(f32, f32)>,
+    /// Distance from the transcript bottom captured on the last frame; seeds
+    /// `load_anchor` when the next frame applies an older-page prepend.
+    last_bottom_distance: f32,
     transcript: transcript::Cache,
     live_pane: live_pane::LivePane,
     image_cache: images::ImageCache,
@@ -419,6 +432,8 @@ impl Tab {
             stick_to_bottom: true,
             jump_to_latest: false,
             has_new_output: false,
+            load_anchor: None,
+            last_bottom_distance: 0.0,
             transcript: transcript::Cache::new(),
             live_pane: live_pane::LivePane::default(),
             repair_at: Instant::now(),
@@ -445,6 +460,7 @@ impl Tab {
             approval_peek: false,
             approval_nav_id: None,
         };
+        tab.state.window = Some(LOAD_WINDOW);
         tab.reset_for_attach();
         tab
     }
@@ -471,7 +487,8 @@ impl Tab {
         };
         self.state.last_error = None;
         self.state.status = "Loading conversation…".into();
-        self.command(RuntimeCommand::LoadConversation { id })
+        let window = self.state.window;
+        self.command(RuntimeCommand::LoadConversation { id, window })
     }
 
     fn command(&mut self, command: RuntimeCommand) -> bool {
@@ -991,7 +1008,8 @@ impl Tab {
         if let Some(load) = action.conversation_load
             && let Some(id) = load.conversation_id
         {
-            self.command(RuntimeCommand::LoadConversation { id });
+            let window = self.state.window;
+            self.command(RuntimeCommand::LoadConversation { id, window });
         }
         action
             .config_action
@@ -1062,8 +1080,9 @@ impl Tab {
                 self.host_api_version = 0;
                 self.connection_status = "Connected".into();
                 self.reset_for_attach();
+                let window = self.state.window;
                 let command = match self.conversation_id {
-                    Some(id) => RuntimeCommand::LoadConversation { id },
+                    Some(id) => RuntimeCommand::LoadConversation { id, window },
                     None => RuntimeCommand::NewConversation,
                 };
                 if !self.command(command) {
@@ -1936,6 +1955,8 @@ impl DesktopApp {
             stick_to_bottom: true,
             jump_to_latest: false,
             has_new_output: false,
+            load_anchor: None,
+            last_bottom_distance: 0.0,
             transcript: transcript::Cache::new(),
             live_pane: live_pane::LivePane::default(),
             repair_at: Instant::now(),
@@ -4513,7 +4534,7 @@ impl DesktopApp {
     /// the full "Choose model" dialog offers (configured default, saved models
     /// from the conversation list, and models observed on other tabs).
     fn model_selector_data(&self, index: usize) -> ModelSelector {
-        let (label, detail, color) = self.model_pill(index);
+        let (label, detail, _) = self.model_pill(index);
         let snapshot = self.tabs.get(index).map(|tab| &tab.state.snapshot);
         let active_provider = snapshot.map(|s| s.provider_id.clone()).unwrap_or_default();
         let active_model = snapshot
@@ -4557,7 +4578,6 @@ impl DesktopApp {
         ModelSelector {
             label,
             detail,
-            color,
             providers,
             models,
             saved_model,
@@ -4575,17 +4595,25 @@ impl DesktopApp {
             return ("Demo".into(), egui::Color32::from_rgb(140, 170, 255));
         }
         match &self.daemon_phase {
-            daemon::Phase::Ready => (
-                format!(
-                    "Connected · {}",
-                    self.tabs
-                        .get(self.selected)
-                        .map(|tab| tab.endpoint.as_str())
-                        .filter(|s| !s.is_empty())
-                        .unwrap_or(&self.address)
-                ),
-                egui::Color32::from_rgb(110, 200, 120),
-            ),
+            daemon::Phase::Ready => {
+                let tab = self.tabs.get(self.selected);
+                let connected = tab.is_some_and(|tab| tab.connected && tab.state.ready);
+                let endpoint = tab
+                    .map(|tab| tab.endpoint.as_str())
+                    .filter(|endpoint| !endpoint.is_empty())
+                    .unwrap_or(&self.address);
+                (
+                    format!(
+                        "{} · {endpoint}",
+                        if connected { "Connected" } else { "Connecting" }
+                    ),
+                    if connected {
+                        egui::Color32::from_rgb(110, 200, 120)
+                    } else {
+                        egui::Color32::from_rgb(235, 190, 80)
+                    },
+                )
+            }
             daemon::Phase::Probe | daemon::Phase::Starting { .. } => (
                 "… Starting daemon".into(),
                 egui::Color32::from_rgb(235, 190, 80),
@@ -4907,28 +4935,6 @@ impl DesktopApp {
         ui.add_space(2.0);
         task_ui::task_search(ui, &mut self.history_search);
         ui.add_space(4.0);
-        // Pin the workspace links to the sidebar bottom as a self-sizing panel
-        // so the history viewport yields exactly the space they need. Reserving
-        // a fixed height clipped the links: at the minimum sidebar width they
-        // wrap to two rows, and the sidebar is not itself scrollable.
-        if !self.demo {
-            // Id is salted with the hosting ui so multiple windows do not
-            // collide.
-            egui::Panel::bottom(ui.id().with("sidebar-workspace")).show(ui, |ui| {
-                ui.label(egui::RichText::new("Workspace").weak().size(12.0));
-                ui.horizontal_wrapped(|ui| {
-                    if ui.button("Settings").clicked() {
-                        self.open_utility("Settings");
-                    }
-                    if ui.button("Plugins").clicked() {
-                        self.open_utility("Plugins");
-                    }
-                    if ui.button("Usage").clicked() {
-                        self.open_utility("Usage");
-                    }
-                });
-            });
-        }
         egui::ScrollArea::vertical()
             .id_salt("sidebar-scroll")
             .auto_shrink([false, false])
@@ -5019,24 +5025,51 @@ impl DesktopApp {
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
-        ui.horizontal(|ui| {
-            if icons::button(ui, icons::Icon::Sidebar, "Toggle task sidebar").clicked() {
-                ui.ctx().data_mut(|data| {
-                    let id = egui::Id::new(("sidebar-hidden", self.window_ui.rendering));
-                    let hidden = data.get_temp::<bool>(id).unwrap_or(false);
-                    data.insert_temp(id, !hidden);
-                });
-            }
-            // A text-only menu bar in the spirit of File/Edit/View: the labels
-            // carry no button chrome and drop their menus on click. Keep the
-            // controls grouped from the app shell, through workspace/task work,
-            // to server state and policy. The active conversation's title stays
-            // in the tab strip below, not up here.
-            egui::MenuBar::new().ui(ui, |ui| {
-                // App shell: window, pane, and display controls.
-                ui.menu_button("View", |ui| self.window_menu(ui))
-                    .response
-                    .on_hover_text("Windows, split layout, and view settings");
+        egui::MenuBar::new().ui(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                let auto_hidden = ui
+                    .ctx()
+                    .data(|data| {
+                        data.get_temp::<bool>(egui::Id::new((
+                            "sidebar-auto-hidden",
+                            self.window_ui.rendering,
+                        )))
+                    })
+                    .unwrap_or_else(|| {
+                        !layout::responsive_plan(ui.ctx().content_rect().width()).show_sidebar
+                    });
+                let hint = if auto_hidden {
+                    "Find a task (Ctrl/Cmd+P)"
+                } else {
+                    "Toggle task sidebar"
+                };
+                if icons::button(ui, icons::Icon::Sidebar, hint).clicked() {
+                    if auto_hidden {
+                        self.palette
+                            .open(false, self.tabs.get(self.selected).map_or(0, |tab| tab.id));
+                    } else {
+                        ui.ctx().data_mut(|data| {
+                            let id = egui::Id::new(("sidebar-hidden", self.window_ui.rendering));
+                            let hidden = data.get_temp::<bool>(id).unwrap_or(false);
+                            data.insert_temp(id, !hidden);
+                        });
+                    }
+                }
+                // Workspace utilities remain reachable even when the sidebar yields.
+                ui.menu_button("Workspace", |ui| {
+                    if !self.demo {
+                        for destination in ["Settings", "Plugins", "Usage"] {
+                            if ui.button(destination).clicked() {
+                                self.open_utility(destination);
+                                ui.close();
+                            }
+                        }
+                        ui.separator();
+                    }
+                    self.window_menu(ui);
+                })
+                .response
+                .on_hover_text("Settings, plugins, usage, windows, and view settings");
                 ui.separator();
 
                 // Workspace: move between tasks, then review this workspace.
@@ -5073,20 +5106,17 @@ impl DesktopApp {
                     .on_hover_text("Tool-call display and execution permissions");
                 ui.separator();
 
-                // Server scope: the status indicator sits beside connection and
-                // provider controls.
+                // Connection state is readable, not encoded only by a colored dot.
                 let (pill, color) = self.daemon_pill();
-                let (dot, response) =
-                    ui.allocate_exact_size(egui::vec2(12.0, 20.0), egui::Sense::hover());
+                let status = pill.split('·').next().unwrap_or(&pill).trim();
+                let (dot, _) = ui.allocate_exact_size(egui::vec2(8.0, 20.0), egui::Sense::hover());
                 ui.painter().circle_filled(dot.center(), 3.0, color);
-                response.on_hover_text(&pill);
-                if !self.demo && !matches!(self.daemon_phase, daemon::Phase::Ready) {
-                    ui.label(egui::RichText::new(pill).small());
-                }
-                if !self.demo {
-                    ui.menu_button("Server", |ui| self.server_menu(ui))
+                if self.demo {
+                    ui.label(status);
+                } else {
+                    ui.menu_button(status, |ui| self.server_menu(ui))
                         .response
-                        .on_hover_text("Daemon connection and provider setup");
+                        .on_hover_text(format!("{pill}\nServer connection and provider setup"));
                 }
                 ui.separator();
 
@@ -5268,7 +5298,7 @@ impl DesktopApp {
         {
             self.show_plugins = !self.show_plugins;
             if self.show_plugins {
-                self.request_catalog(true);
+                self.request_catalog(false);
             }
             ui.close();
         }
@@ -5608,7 +5638,7 @@ impl DesktopApp {
         self.show_stats = destination == "Usage";
         self.stats_picker = None;
         if self.show_plugins && self.catalog.is_none() {
-            self.request_catalog(true);
+            self.request_catalog(false);
         }
         if self.show_stats && self.stats.is_none() {
             self.refresh_stats();
@@ -6624,25 +6654,24 @@ impl Tab {
         let input_style = self.state.input_style.clone();
         let pad_h = (input_style.horizontal_padding.min(8) as i8) * 4;
         let pad_v = (input_style.vertical_padding.min(8) as i8) * 4;
-        let mut frame = egui::Frame::default().inner_margin(egui::Margin {
-            left: pad_h,
-            right: pad_h,
-            top: pad_v,
-            bottom: pad_v,
-        });
-        match input_style.preset {
-            state::InputPreset::Lines => {}
-            state::InputPreset::Box => {
-                frame = frame
-                    .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-                    .corner_radius(4.0);
-            }
-            state::InputPreset::Filled => {
-                // The composer surface already carries the filled background
-                // (see `body`), so the input draws no second box: one uniform
-                // surface.
-            }
-        }
+        let frame = egui::Frame::default()
+            .inner_margin(egui::Margin {
+                left: pad_h + 8,
+                right: pad_h + 8,
+                top: pad_v + 2,
+                bottom: pad_v + 2,
+            })
+            // One flat text surface: no second border, so the composer stays a
+            // single uniform color regardless of focus.
+            .corner_radius(10.0);
+        let composer_hint = if self.state.rows.is_empty() {
+            "Ask anything, or / for commands"
+        } else {
+            "Continue this task, or / for commands"
+        };
+        // One row, plus one per Shift+Enter line break: the editor hugs a short
+        // draft instead of reserving a second empty line above the footer.
+        let editor_rows = (self.composer.matches('\n').count() + 1).clamp(1, 6);
         let editor = egui::ScrollArea::vertical()
             .id_salt((self.id, "composer-scroll"))
             .max_height(180.0)
@@ -6657,13 +6686,13 @@ impl Tab {
                                 egui::TextEdit::multiline(&mut self.composer)
                                     .id(editor_id)
                                     .desired_width(f32::INFINITY)
-                                    .desired_rows(2)
+                                    .desired_rows(editor_rows)
                                     .frame(egui::Frame::NONE)
                                     .return_key(egui::KeyboardShortcut::new(
                                         egui::Modifiers::SHIFT,
                                         egui::Key::Enter,
                                     ))
-                                    .hint_text("Ask anything, or / for commands"),
+                                    .hint_text(composer_hint),
                             )
                         } else {
                             ui.horizontal_top(|ui| {
@@ -6672,13 +6701,13 @@ impl Tab {
                                     egui::TextEdit::multiline(&mut self.composer)
                                         .id(editor_id)
                                         .desired_width(ui.available_width())
-                                        .desired_rows(2)
+                                        .desired_rows(editor_rows)
                                         .frame(egui::Frame::NONE)
                                         .return_key(egui::KeyboardShortcut::new(
                                             egui::Modifiers::SHIFT,
                                             egui::Key::Enter,
                                         ))
-                                        .hint_text("Ask anything, or / for commands"),
+                                        .hint_text(composer_hint),
                                 )
                             })
                             .inner
@@ -6731,6 +6760,7 @@ impl Tab {
             self.handle_input_shortcuts(ui);
         }
         ui.add_space(4.0);
+        let footer_width = ui.available_width();
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().interact_size.y = theme::CONTROL_HEIGHT;
             ui.spacing_mut().button_padding = egui::vec2(10.0, 7.0);
@@ -6739,92 +6769,158 @@ impl Tab {
                     .on_hover_text("This task is not being saved to conversation history");
             }
             if let Some(selector) = model_selector {
-                // A framed, tinted chip (not a bare label) so it reads as a
-                // clickable control. Clicking toggles the chooser popup below.
-                let button = egui::Button::new(
-                    egui::RichText::new(selector.label.trim_start_matches("Model: ")).small(),
-                )
-                .corner_radius(theme::CONTROL_RADIUS)
-                .fill(ui.visuals().widgets.inactive.weak_bg_fill)
-                .stroke(egui::Stroke::new(1.0, selector.color.gamma_multiply(0.45)));
-                let response = ui.add(button).on_hover_text(format!(
-                    "Click to choose provider, model & reasoning: {}",
-                    selector.detail
-                ));
+                // Plain white text with no chrome: the chooser stays secondary to
+                // the editor and its full provider/model detail remains on hover.
+                // The width hugs the label so the attach `+` sits beside it, with a
+                // cap so a long model name cannot crowd the rest of the row.
+                let label = selector.label.trim_start_matches("Model: ");
+                let font = egui::TextStyle::Small.resolve(ui.style());
+                let text_width = ui
+                    .painter()
+                    .layout_no_wrap(label.to_owned(), font, ui.visuals().text_color())
+                    .size()
+                    .x;
+                let model_width = (text_width + 12.0)
+                    .min((footer_width * 0.5).max(120.0))
+                    .min(footer_width);
+                let response = ui
+                    .add_sized(
+                        egui::vec2(model_width, theme::CONTROL_HEIGHT),
+                        egui::Button::new(
+                            egui::RichText::new(label)
+                                .small()
+                                .color(ui.visuals().text_color()),
+                        )
+                        .truncate()
+                        .frame(false),
+                    )
+                    .on_hover_text(format!(
+                        "Choose provider, model & reasoning: {}",
+                        selector.detail
+                    ));
                 self.model_chooser_popup(&response, &selector);
             }
-            // Image attach button, next to the model name. Mirrors the
-            // `paste_image` keybinding and drag-and-drop paths.
+            // Attach is a quiet `+` control beside the model chooser; the tooltip
+            // also documents drag-and-drop and paste support.
             if !self.demo
-                && icons::button(
+                && crate::icons::quiet_button(
                     ui,
-                    icons::Icon::Plus,
-                    "Attach an image (png, jpeg, webp, gif)",
+                    crate::icons::Icon::Plus,
+                    "Attach an image (png, jpeg, webp, gif); you can also drop or paste images",
                 )
                 .clicked()
             {
                 self.attach_image_dialog();
                 changed = true;
             }
-            let actions_width = if self.state.busy { 252.0 } else { 68.0 };
-            ui.add_space((ui.available_size_before_wrap().x - actions_width).max(0.0));
-            let primary = |ui: &egui::Ui, label: &str| {
-                egui::Button::new(egui::RichText::new(label).color(ui.visuals().panel_fill))
-                    .fill(ui.visuals().text_color())
-                    .stroke(egui::Stroke::NONE)
-                    .corner_radius(theme::CONTROL_RADIUS)
-                    .min_size(egui::vec2(68.0, theme::CONTROL_HEIGHT))
-            };
-            if self.state.busy {
-                if ui
-                    .add_enabled(
-                        self.can_steer(),
-                        egui::Button::new("Send now")
-                            .frame(false)
-                            .min_size(egui::vec2(84.0, theme::CONTROL_HEIGHT)),
-                    )
-                    .on_hover_text("Send this message into the running turn (Ctrl/Cmd+Enter)")
-                    .clicked()
-                    || steer_shortcut
-                {
-                    self.steer_composer();
-                    changed = true;
-                }
-                if ui
-                    .add_enabled(
-                        self.can_queue(),
-                        egui::Button::new("Queue next")
-                            .frame(false)
-                            .min_size(egui::vec2(84.0, theme::CONTROL_HEIGHT)),
-                    )
-                    .on_hover_text("Send this message when the current turn finishes (Enter)")
-                    .clicked()
-                    || send_shortcut
-                {
-                    self.enqueue_composer();
-                    changed = true;
-                }
-            } else if ui
-                .add_enabled(self.can_send(), primary(ui, "Send"))
-                .clicked()
-                || send_shortcut
-                || steer_shortcut
-            {
-                self.submit_composer();
-                changed = true;
+            let send_size = theme::CONTROL_HEIGHT;
+            let actions_width = if self.state.busy { 244.0 } else { send_size };
+            let remaining = ui.available_size_before_wrap().x;
+            if remaining > actions_width {
+                ui.add_space((remaining - actions_width - ui.spacing().item_spacing.x).max(0.0));
             }
-            // Show exactly one primary action: Stop replaces Send while a turn
-            // is running (Steer/Queue stay available above as busy alternatives).
-            if self.state.busy
-                && ui
-                    .add_enabled(self.connected && self.state.ready, primary(ui, "Stop"))
-                    .on_hover_text("Cancel the current turn")
-                    .clicked()
-            {
-                self.command(RuntimeCommand::Cancel);
-                self.state.status = state::CANCEL_STATUS.into();
-            }
+            // Wrap the action group as a unit instead of stranding Stop on its own.
+            ui.allocate_ui_with_layout(
+                egui::vec2(actions_width.min(footer_width), theme::CONTROL_HEIGHT),
+                egui::Layout::left_to_right(egui::Align::Center).with_main_wrap(true),
+                |ui| {
+                    let primary = |ui: &egui::Ui, label: &str| {
+                        egui::Button::new(egui::RichText::new(label).color(ui.visuals().panel_fill))
+                            .fill(ui.visuals().text_color())
+                            .stroke(egui::Stroke::NONE)
+                            .corner_radius(theme::CONTROL_RADIUS)
+                            .min_size(egui::vec2(64.0, theme::CONTROL_HEIGHT))
+                    };
+                    if self.state.busy {
+                        if ui
+                            .add_enabled(
+                                self.can_steer(),
+                                egui::Button::new("Send now")
+                                    .frame(false)
+                                    .min_size(egui::vec2(80.0, theme::CONTROL_HEIGHT)),
+                            )
+                            .on_hover_text(
+                                "Send this message into the running turn (Ctrl/Cmd+Enter)",
+                            )
+                            .clicked()
+                            || steer_shortcut
+                        {
+                            self.steer_composer();
+                            changed = true;
+                        }
+                        if ui
+                            .add_enabled(
+                                self.can_queue(),
+                                egui::Button::new("Queue next")
+                                    .frame(false)
+                                    .min_size(egui::vec2(84.0, theme::CONTROL_HEIGHT)),
+                            )
+                            .on_hover_text(
+                                "Send this message when the current turn finishes (Enter)",
+                            )
+                            .clicked()
+                            || send_shortcut
+                        {
+                            self.enqueue_composer();
+                            changed = true;
+                        }
+                    } else {
+                        // A filled circular send control, like the up-arrow
+                        // composers use; the busy alternatives stay text buttons.
+                        // A disabled send (empty draft) dims to a faint disc: the
+                        // bright fill would otherwise read as ready to click.
+                        let can_send = self.can_send();
+                        let send_fill = if can_send {
+                            ui.visuals().text_color()
+                        } else {
+                            ui.visuals().text_color().gamma_multiply(0.14)
+                        };
+                        let send_glyph = if can_send {
+                            ui.visuals().panel_fill
+                        } else {
+                            ui.visuals().weak_text_color()
+                        };
+                        let send = egui::Button::new(
+                            egui::RichText::new("↑").size(18.0).color(send_glyph),
+                        )
+                        .fill(send_fill)
+                        .stroke(egui::Stroke::NONE)
+                        .corner_radius((send_size * 0.5) as u8)
+                        .min_size(egui::vec2(send_size, send_size));
+                        if ui
+                            .add_enabled(can_send, send)
+                            .on_hover_text("Send (Enter)")
+                            .clicked()
+                            || send_shortcut
+                            || steer_shortcut
+                        {
+                            self.submit_composer();
+                            changed = true;
+                        }
+                    }
+                    // Show exactly one primary action: Stop replaces Send while a turn
+                    // is running (Steer/Queue stay available above as busy alternatives).
+                    if self.state.busy
+                        && ui
+                            .add_enabled(self.connected && self.state.ready, primary(ui, "Stop"))
+                            .on_hover_text("Cancel the current turn")
+                            .clicked()
+                    {
+                        self.command(RuntimeCommand::Cancel);
+                        self.state.status = state::CANCEL_STATUS.into();
+                    }
+                },
+            );
         });
+        ui.label(
+            egui::RichText::new(if self.state.busy {
+                "Enter: queue next · Ctrl/Cmd+Enter: send now · Shift+Enter: new line"
+            } else {
+                "Enter: send · Shift+Enter: new line"
+            })
+            .small()
+            .weak(),
+        );
         changed
     }
 
@@ -6928,7 +7024,7 @@ impl Tab {
                                 .fill(composer_fill)
                                 .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
                                 .corner_radius(theme::SURFACE_RADIUS)
-                                .inner_margin(egui::Margin::symmetric(16, 12))
+                                .inner_margin(egui::Margin::symmetric(16, 10))
                                 .show(ui, |ui| {
                                     ui.spacing_mut().item_spacing.x = 8.0;
                                     self.composer_panel(
@@ -7071,6 +7167,29 @@ impl Tab {
         let max_scroll = (response.content_size.y - response.inner_rect.height()).max(0.0);
         let at_bottom = (max_scroll - response.state.offset.y).abs() < 8.0;
         self.stick_to_bottom = at_bottom;
+        // Preserve the reading position across an older-page prepend: the cache
+        // shift runs before layout (see DesktopApp::ui), so compensate the
+        // scroll offset once the taller content has been measured. The content
+        // height settles a frame after the prepend, hence the two-frame settle.
+        let bottom_distance =
+            (response.content_size.y - response.state.offset.y - response.inner_rect.height())
+                .max(0.0);
+        self.last_bottom_distance = bottom_distance;
+        if let Some((distance, last_h)) = self.load_anchor {
+            let height = response.content_size.y;
+            let target = (height - distance - response.inner_rect.height()).max(0.0);
+            if (response.state.offset.y - target).abs() > 0.5 {
+                let mut scroll = response.state;
+                scroll.offset.y = target;
+                scroll.store(ui.ctx(), response.id);
+                ui.ctx().request_repaint();
+            }
+            self.load_anchor = if (height - last_h).abs() < 0.5 {
+                None
+            } else {
+                Some((distance, height))
+            };
+        }
         if !self.stick_to_bottom {
             // Overlay the transcript without allocating space in the parent.
             // Adding a composer row changes its bottom panel's height one frame
@@ -7097,6 +7216,33 @@ impl Tab {
                 self.jump_to_latest = true;
             }
         }
+        if self.state.has_older {
+            // Top overlay: fetch an earlier page without shifting the layout.
+            let mut overlay = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(("load-older", self.id))
+                    .max_rect(response.inner_rect.shrink(8.0))
+                    .layout(egui::Layout::top_down(egui::Align::Center)),
+            );
+            overlay.set_clip_rect(ui.clip_rect().intersect(response.inner_rect));
+            let loading = self.state.loading_older;
+            let enabled = !loading && !self.state.busy;
+            let button = overlay.add_enabled(
+                enabled,
+                egui::Button::new(if loading {
+                    "Loading older…"
+                } else {
+                    "↑ Load older messages"
+                })
+                .fill(ui.visuals().widgets.inactive.bg_fill),
+            );
+            if enabled
+                && button.on_hover_text("Load earlier messages").clicked()
+                && let Some(command) = self.state.load_older()
+            {
+                self.command(command);
+            }
+        }
         if self.jump_to_latest {
             let mut scroll = response.state;
             scroll.offset.y = max_scroll;
@@ -7113,7 +7259,7 @@ impl Tab {
 }
 
 impl eframe::App for DesktopApp {
-    fn on_exit(&mut self) {
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         if !self.save_workspace_now() {
             eprintln!("{}", self.sidebar_notice);
         }
@@ -7158,6 +7304,22 @@ impl eframe::App for DesktopApp {
         // vector before anything draws (changed rows are drained per frame).
         for tab in &mut self.tabs {
             let rows_len = tab.state.rows.len();
+            if let Some(added) = tab.state.pending_prepend.take() {
+                // Older messages were prepended above the loaded suffix. Shift
+                // the index-keyed cache down so existing measurements stay
+                // aligned, and drop the full "all rows changed" list that
+                // `replace` produced (the suffix was already measured).
+                let _ = std::mem::take(&mut tab.state.changed_rows);
+                tab.transcript.prepend_rows(added, rows_len);
+                tab.transcript.sync_with_cards(
+                    rows_len,
+                    &(0..added).collect::<Vec<_>>(),
+                    &tab.state.toolcards,
+                );
+                // Anchor the viewport to the rows the user was already reading.
+                tab.load_anchor = Some((tab.last_bottom_distance, -1.0));
+                continue;
+            }
             let changed = std::mem::take(&mut tab.state.changed_rows);
             if !tab.stick_to_bottom && !changed.is_empty() {
                 tab.has_new_output = true;
@@ -7206,17 +7368,7 @@ fn main() -> eframe::Result {
                 .ok();
         }
     }
-    eframe::run_native(
-        "Bone Desktop",
-        eframe::NativeOptions {
-            renderer: eframe::Renderer::Wgpu,
-            viewport: egui::ViewportBuilder::default()
-                .with_inner_size([1000.0, 720.0])
-                .with_min_inner_size([520.0, 400.0]),
-            ..Default::default()
-        },
-        Box::new(move |cc| Ok(Box::new(DesktopApp::new(cc.egui_ctx.clone(), cli)))),
-    )
+    graphics::run(cli)
 }
 
 #[cfg(test)]
@@ -11973,6 +12125,39 @@ mod tests {
     }
 
     #[test]
+    fn composer_hint_distinguishes_continuation_without_replacing_drafts() {
+        let ctx = egui::Context::default();
+        let (mut app, dir) = fresh_app(&ctx, "composer-continuation");
+        let tab = &mut app.tabs[0];
+        for continued in [false, true] {
+            if continued {
+                tab.state
+                    .rows
+                    .push(("user".into(), "Earlier request".into()));
+            }
+            for draft in ["", "Keep this draft"] {
+                tab.composer = draft.into();
+                let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                    tab.composer_panel(ui, None, false, true);
+                });
+                output.textures_delta.clear();
+                let expected = if !draft.is_empty() {
+                    draft
+                } else if continued {
+                    "Continue this task, or / for commands"
+                } else {
+                    "Ask anything, or / for commands"
+                };
+                assert!(output.shapes.iter().any(|shape| matches!(&shape.shape,
+                    egui::Shape::Text(text) if text.galley.text() == expected
+                )));
+                assert_eq!(tab.composer, draft);
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn composer_surface_is_centered_bounded_and_keeps_primary_actions() {
         for width in [320.0, 672.0, 1200.0] {
             for busy in [false, true] {
@@ -11999,9 +12184,8 @@ mod tests {
                                 &colors,
                                 None,
                                 Some(ModelSelector {
-                                    label: "Model: Example model".into(),
+                                    label: "Model: Example model with a very long provider and version identifier".into(),
                                     detail: "Example".into(),
-                                    color: colors.tool_call,
                                     providers: Vec::new(),
                                     models: Vec::new(),
                                     saved_model: String::new(),
@@ -12051,14 +12235,51 @@ mod tests {
                             _ => None,
                         })
                         .collect();
-                    assert_eq!(texts.contains(&"Send"), !busy);
+                    assert_eq!(texts.contains(&"↑"), !busy);
                     assert_eq!(texts.contains(&"Stop"), busy);
                     assert_eq!(texts.contains(&"Send now"), busy);
                     assert_eq!(texts.contains(&"Queue next"), busy);
                     let panel =
                         egui::PanelState::load(&ctx, egui::Id::new(("composer", tab.id))).unwrap();
                     assert_eq!(panel.outer_rect.right(), width);
-                    let max_height = if width >= 672.0 { 140.0 } else { 240.0 };
+                    let action_rect = |label: &str| {
+                        output
+                            .shapes
+                            .iter()
+                            .find_map(|shape| match &shape.shape {
+                                egui::Shape::Text(text) if text.galley.text() == label => {
+                                    let rect = text.galley.rect.translate(text.pos.to_vec2());
+                                    assert!(
+                                        surface.contains_rect(rect),
+                                        "{label} outside composer: {rect:?}"
+                                    );
+                                    assert!(
+                                        shape.clip_rect.contains_rect(rect),
+                                        "{label} is clipped: {rect:?}"
+                                    );
+                                    Some(rect)
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or_else(|| panic!("missing {label}"))
+                    };
+                    if busy {
+                        let send = action_rect("Send now");
+                        let queue = action_rect("Queue next");
+                        let stop = action_rect("Stop");
+                        assert_eq!(send.center().y, queue.center().y);
+                        assert_eq!(queue.center().y, stop.center().y);
+                        assert!(send.right() < queue.left() && queue.right() < stop.left());
+                    } else {
+                        action_rect("↑");
+                    }
+                    assert!(
+                        texts
+                            .iter()
+                            .any(|text| text.contains("Shift+Enter: new line"))
+                    );
+                    // One persistent keyboard-hint row adds 21px to the wide composer.
+                    let max_height = if width >= 672.0 { 162.0 } else { 240.0 };
                     assert!(
                         panel.outer_rect.height() < max_height,
                         "composer should stay compact: {:?}, width={width}, busy={busy}",
@@ -12068,6 +12289,100 @@ mod tests {
                 std::fs::remove_dir_all(dir).unwrap();
             }
         }
+    }
+
+    /// An empty draft must not advertise a ready-to-send control: the circular
+    /// send button dims to a faint disc and brightens once the draft has text.
+    #[test]
+    fn send_control_dims_until_the_draft_has_content() {
+        let send_fill = |draft: &str| {
+            let ctx = egui::Context::default();
+            let (mut app, dir) = fresh_app(&ctx, "send-dimming");
+            let tab = &mut app.tabs[0];
+            tab.state.ready = true;
+            tab.connected = true;
+            tab.composer = draft.into();
+            let colors = theme::ThemeColors::default();
+            let mut fill = None;
+            for _ in 0..3 {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(672.0, 700.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        tab.body(ui, &colors, None, None, false, true, None);
+                    },
+                );
+                fill = output.shapes.iter().find_map(|shape| match &shape.shape {
+                    egui::Shape::Rect(rect)
+                        if rect.corner_radius
+                            == egui::CornerRadius::same((theme::CONTROL_HEIGHT * 0.5) as u8)
+                            && (rect.rect.width() - theme::CONTROL_HEIGHT).abs() < 1.0 =>
+                    {
+                        Some(rect.fill)
+                    }
+                    _ => None,
+                });
+                output.textures_delta.clear();
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+            fill.expect("circular send control")
+        };
+        let disabled = send_fill("");
+        let enabled = send_fill("hello");
+        assert!(
+            disabled.r() < 80 && disabled.a() < 80,
+            "disabled send should stay faint: {disabled:?}"
+        );
+        assert!(enabled.r() > 200, "enabled send stays bright: {enabled:?}");
+    }
+
+    /// A short draft must not reserve a second empty editor row above the
+    /// footer: each Shift+Enter line grows the composer by about one text line.
+    #[test]
+    fn composer_editor_grows_one_line_at_a_time() {
+        let height_for = |draft: &str| {
+            let ctx = egui::Context::default();
+            let (mut app, dir) = fresh_app(&ctx, "composer-rows");
+            let tab = &mut app.tabs[0];
+            tab.state.ready = true;
+            tab.connected = true;
+            tab.composer = draft.into();
+            let colors = theme::ThemeColors::default();
+            let mut height = 0.0;
+            for _ in 0..3 {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(672.0, 700.0),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        tab.body(ui, &colors, None, None, false, true, None);
+                    },
+                );
+                output.textures_delta.clear();
+                height = egui::PanelState::load(&ctx, egui::Id::new(("composer", tab.id)))
+                    .expect("composer panel")
+                    .outer_rect
+                    .height();
+            }
+            std::fs::remove_dir_all(dir).unwrap();
+            height
+        };
+        let one = height_for("hello");
+        let two = height_for("hello\nworld");
+        let grown = two - one;
+        assert!(
+            (10.0..40.0).contains(&grown),
+            "a second line should add about one line of height: {one} -> {two}"
+        );
     }
 
     /// One uniform composer surface: the `filled` preset must tint the single
@@ -12256,6 +12571,102 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[test]
+    fn connection_status_tracks_the_selected_tab_readiness() {
+        let ctx = egui::Context::default();
+        let (mut app, dir) = fresh_app(&ctx, "connection-status");
+        app.daemon_phase = daemon::Phase::Ready;
+        app.tabs[0].endpoint = "127.0.0.1:7777".into();
+        for (connected, ready, label) in [
+            (false, false, "Connecting"),
+            (true, false, "Connecting"),
+            (true, true, "Connected"),
+            (false, true, "Connecting"),
+        ] {
+            app.tabs[0].connected = connected;
+            app.tabs[0].state.ready = ready;
+            assert_eq!(app.daemon_pill().0, format!("{label} · 127.0.0.1:7777"));
+        }
+        app.tabs[0].connected = true;
+        app.add_tab(Intent::New, &ctx);
+        assert!(app.daemon_pill().0.starts_with("Connecting"));
+        app.selected = 0;
+        assert!(app.daemon_pill().0.starts_with("Connected"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn narrow_toolbar_opens_task_picker_without_changing_draft() {
+        let ctx = egui::Context::default();
+        let (mut app, dir) = fresh_app(&ctx, "narrow-toolbar");
+        app.tabs[0].composer = "Keep this draft".into();
+        let render = |app: &mut DesktopApp, events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(520.0, 700.0),
+                    )),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    egui::Panel::top("toolbar").show(ui, |ui| app.toolbar(ui));
+                },
+            );
+            output.textures_delta.clear();
+            output
+        };
+        let mut output = render(&mut app, vec![]);
+        for _ in 0..2 {
+            output = render(&mut app, vec![]);
+        }
+        for shape in &output.shapes {
+            if let egui::Shape::Text(text) = &shape.shape {
+                let rect = text.galley.rect.translate(text.pos.to_vec2());
+                assert!(
+                    shape.clip_rect.contains_rect(rect),
+                    "toolbar clips {:?}: {rect:?}",
+                    text.galley.text()
+                );
+            }
+        }
+        let pos = output
+            .shapes
+            .iter()
+            .find_map(|shape| match &shape.shape {
+                egui::Shape::Rect(rect) if rect.rect.size() == egui::vec2(26.0, 24.0) => {
+                    Some(rect.rect.center())
+                }
+                _ => None,
+            })
+            .expect("sidebar button");
+        render(
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        render(
+            &mut app,
+            vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: egui::Modifiers::NONE,
+            }],
+        );
+        assert!(app.palette.open);
+        assert_eq!(app.tabs[0].composer, "Keep this draft");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     /// The header is a text-only menu bar. Its labels follow the shell →
     /// workspace → server → help hierarchy and do not duplicate task identity.
     #[test]
@@ -12297,6 +12708,9 @@ mod tests {
         app.tabs[0].conversation_id = Some(7);
         app.tabs[0].workspace = "/home/user/project".into();
         app.tabs[0].saved_title = Some((7, "Refactor the parser".into()));
+        app.daemon_phase = daemon::Phase::Ready;
+        app.tabs[0].connected = true;
+        app.tabs[0].state.ready = true;
         let mut header = Vec::new();
         let mut output = None;
         for _ in 0..3 {
@@ -12308,13 +12722,13 @@ mod tests {
             output = Some(out);
         }
         let output = output.as_ref().unwrap();
-        for menu in ["View", "Task", "Changes", "Tools", "Server", "Help"] {
+        let ordered = ["Workspace", "Task", "Changes", "Tools", "Connected", "Help"];
+        for menu in ordered {
             assert!(
                 header.iter().any(|t| t == menu),
                 "menu bar shows `{menu}`: {header:?}"
             );
         }
-        let ordered = ["View", "Task", "Changes", "Tools", "Server", "Help"];
         for pair in ordered.windows(2) {
             assert!(
                 text_x(output, pair[0]) < text_x(output, pair[1]),
@@ -12411,20 +12825,25 @@ mod tests {
             "menus start closed before any click: {closed:?}"
         );
 
-        // `View` drops the window/split menu.
-        let view = label_center(&settled, "View").expect("View label is visible");
-        click(&mut app, view);
+        // Workspace utilities remain accessible even when the sidebar is hidden.
+        let workspace = label_center(&settled, "Workspace").expect("Workspace label is visible");
+        click(&mut app, workspace);
         let mut open = Vec::new();
         for _ in 0..3 {
-            open = texts(&render(&mut app, vec![egui::Event::PointerMoved(view)]));
+            open = texts(&render(
+                &mut app,
+                vec![egui::Event::PointerMoved(workspace)],
+            ));
             if open.iter().any(|t| t.contains("New window")) {
                 break;
             }
         }
-        assert!(
-            open.iter().any(|t| t.contains("New window")),
-            "clicking View opens its menu: {open:?}"
-        );
+        for label in ["New window", "Settings", "Plugins", "Usage"] {
+            assert!(
+                open.iter().any(|t| t.contains(label)),
+                "Workspace menu exposes {label}: {open:?}"
+            );
+        }
 
         // `Tools` groups display detail with shared tool permissions.
         let tools = label_center(&settled, "Tools").expect("Tools label is visible");

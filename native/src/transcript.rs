@@ -23,11 +23,10 @@
 //!   the row is re-measured after each change.
 //! - User/assistant rows use Markdown with a role hierarchy: users are
 //!   accented with the theme link color and headings are selectable.
-//! - Reasoning is off by default and, when surfaced, is never a peer row.
-//!   In-progress reasoning shows as a trailing "✻ Thinking…" badge that scrolls
-//!   with the chat; settled reasoning attaches to the row it produced as a faint
-//!   "✻" that reveals a small, dim, headings-flattened body. A reasoning-only
-//!   message (no answer, no tool call) keeps a quiet "Thinking" disclosure.
+//! - Reasoning is never a peer row: in-progress reasoning shows as a trailing
+//!   "✻ Thinking…" badge that scrolls with the chat, and settled reasoning is
+//!   revealed only inside an expanded tool call that produced it, as a small,
+//!   dim, headings-flattened body.
 //!
 //! Layout notes (egui 0.36):
 //! - A row's real height is measured by scoping it into a child ui whose
@@ -56,8 +55,10 @@ const MEASURE_BOUND: f32 = 1.0e7;
 /// Output lines laid out per chunk of an expanded tool row. Keeping this
 /// bounded caps the tallest row height regardless of output size.
 pub const CHUNK_LINES: usize = 200;
-/// Compact separation between transcript messages.
-const TRANSCRIPT_ROW_GAP: f32 = 20.0;
+/// Separation between transcript messages. Rows (a collapsed tool call among
+/// them) are already 36px tall, so this stays under one body line: a larger
+/// gap left consecutive one-line calls floating apart.
+const TRANSCRIPT_ROW_GAP: f32 = 8.0;
 /// Footprint of the live reasoning badge's painted marker. The marker is drawn
 /// with the painter only, inside an allocation of exactly this size, so the
 /// animation can never change a laid-out dimension.
@@ -119,9 +120,6 @@ pub(crate) struct Cache {
     /// Measured height of the status line, reused as its layout bound next
     /// frame (0.0 means "not measured yet").
     status_height: f32,
-    /// Per-row disclosure for the thinking attached to a row (independent of the
-    /// tool output `expanded` state). Collapsed by default.
-    thinking_expanded: Vec<bool>,
     /// Whether the trailing live-reasoning badge is expanded into its stream.
     /// Measured height of the live-reasoning badge, reused as its layout bound
     /// next frame (0.0 means "not measured yet").
@@ -174,7 +172,6 @@ impl Cache {
             parse_calls: 0,
             status: None,
             status_height: 0.0,
-            thinking_expanded: Vec::new(),
             live_height: 0.0,
             live_expanded: false,
             paint: None,
@@ -272,13 +269,11 @@ impl Cache {
         }
         self.heights.resize(rows_len, 0.0);
         self.parsed.resize(rows_len, None);
-        // New rows start collapsed. Attached thinking stays a faint "✻" until the
-        // user opens it, instead of dumping every thought block into the chat;
-        // tool rows open per their lifecycle.
+        // New rows start collapsed: reasoning is revealed only by opening the
+        // tool call that produced it; tool rows open per their lifecycle.
         self.expanded.resize(rows_len, false);
         self.expansion_chosen.resize(rows_len, false);
         self.chunks.resize(rows_len, 1);
-        self.thinking_expanded.resize(rows_len, false);
         // Only automatic expansion follows the tool lifecycle.
         for i in (0..rows_len).filter(|i| *i >= old_len || changed.contains(i)) {
             if !self.expansion_chosen[i]
@@ -288,6 +283,27 @@ impl Cache {
                     || default_tool_expanded(card);
             }
         }
+    }
+
+    /// Shift the index-keyed caches down by `added` rows after older messages
+    /// are prepended to the transcript. Existing measurements and disclosure
+    /// state describe the suffix (now starting at `added`); the prepended rows
+    /// start unmeasured. `rows_len` is the new authoritative row count.
+    pub(crate) fn prepend_rows(&mut self, added: usize, rows_len: usize) {
+        if added == 0 {
+            return;
+        }
+        self.heights.splice(0..0, vec![0.0; added]);
+        self.parsed.splice(0..0, vec![None; added]);
+        self.expanded.splice(0..0, vec![false; added]);
+        self.expansion_chosen.splice(0..0, vec![false; added]);
+        self.chunks.splice(0..0, vec![1; added]);
+        self.heights.truncate(rows_len);
+        self.parsed.truncate(rows_len);
+        self.expanded.truncate(rows_len);
+        self.expansion_chosen.truncate(rows_len);
+        self.chunks.truncate(rows_len);
+        self.unknown = self.unknown.saturating_add(added);
     }
 
     /// Test-friendly entry point: a transcript with no reasoning. No-reasoning
@@ -596,15 +612,11 @@ impl Cache {
             let top = ui.max_rect().top() + content_y as f32;
             let left = ui.max_rect().center().x - width * 0.5;
             let rect = Rect::from_min_size(egui::pos2(left, top), egui::vec2(width, bound));
-            let row_thinking = if row.0 == "assistant" || is_tool {
+            let attached = if is_tool {
                 thinking.get(i).and_then(Option::as_deref)
             } else {
                 None
             };
-            let attached = row_thinking.map(|text| RowThinking {
-                text,
-                expanded: &mut self.thinking_expanded[i],
-            });
             let row_expanded = &mut self.expanded[i];
             let was_expanded = *row_expanded;
             let row_chunks = &mut self.chunks[i];
@@ -775,17 +787,6 @@ pub(crate) struct RowUi<'a> {
     pub resized: &'a mut bool,
 }
 
-/// Reasoning attached to the row it produced: the text plus its own disclosure
-/// flag. Passed to [`render_row_contents`] so a settled answer or tool call
-/// carries a faint "✻" that expands into a small, dim, flattened body rather
-/// than occupying a peer transcript row.
-pub(crate) struct RowThinking<'a> {
-    /// The reasoning stream that led to this row.
-    pub text: &'a str,
-    /// Whether the attached body is expanded; flipped by the "✻" affordance.
-    pub expanded: &'a mut bool,
-}
-
 /// Body of one transcript row group: a role/tool heading followed by the
 /// rendered content. Tool rows render preformatted raw output; everything
 /// else renders its parsed Markdown blocks. `card` is the tool overlay state
@@ -800,7 +801,7 @@ pub(crate) fn render_row_contents(
     card: Option<&ToolCard>,
     text: &str,
     blocks: &[markdown::Block],
-    mut thinking: Option<RowThinking<'_>>,
+    thinking: Option<&str>,
     row: &mut RowUi,
     colors: &ThemeColors,
 ) {
@@ -832,36 +833,17 @@ pub(crate) fn render_row_contents(
                     ui.visuals_mut().override_text_color = Some(colors.user_msg);
                     ui.set_width((bubble - 24.0).max(1.0));
                     ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                        role_heading(ui, "user", colors);
                         markdown::render_blocks(ui, row_index, blocks, colors);
                     });
                 });
         });
-    } else if role == "reasoning" {
-        render_reasoning_row(ui, row_index, blocks, row, colors);
     } else {
-        if let Some(t) = &mut thinking {
-            // The heading and its attached "✻" sit on one line: a settled answer
-            // keeps its reasoning one quiet click away, never as a peer row.
-            ui.horizontal(|ui| {
-                ui.spacing_mut().item_spacing.x = 6.0;
-                role_heading(ui, role, colors);
-                if thinking_affordance(ui, *t.expanded, colors) {
-                    *t.expanded = !*t.expanded;
-                    *row.resized = true;
-                }
-            });
-        } else {
-            role_heading(ui, role, colors);
-        }
+        role_heading(ui, role, colors);
         if role == "system" && text.starts_with('\n') {
             markdown::render_diff_preview(ui, text, colors);
         } else {
             markdown::render_blocks(ui, row_index, blocks, colors);
-        }
-        if let Some(t) = &thinking
-            && *t.expanded
-        {
-            render_thinking_body(ui, t.text, colors);
         }
     }
 }
@@ -877,95 +859,6 @@ fn render_status_row(ui: &mut Ui, text: &str, colors: &ThemeColors) {
                 .selectable(false),
         );
     });
-}
-
-/// A single, quiet thinking affordance. Collapsed (the default) is only a dim
-/// "Thinking" caption and a chevron — no body — so a long reasoning stream never
-/// floods the transcript. Clicking either the chevron or the caption expands the
-/// reasoning into a small, dim body with headings flattened, keeping it clearly
-/// secondary to the answer. The toggle re-measures the row via [`RowUi::resized`].
-fn render_reasoning_row(
-    ui: &mut Ui,
-    row_index: usize,
-    blocks: &[markdown::Block],
-    row: &mut RowUi,
-    colors: &ThemeColors,
-) {
-    let clicked = ui
-        .horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
-            let toggle = crate::icons::button(
-                ui,
-                if *row.expanded {
-                    crate::icons::Icon::ChevronDown
-                } else {
-                    crate::icons::Icon::ChevronRight
-                },
-                if *row.expanded {
-                    "Hide thinking"
-                } else {
-                    "Show thinking"
-                },
-            );
-            let caption = ui.add(
-                egui::Label::new(
-                    egui::RichText::new("Thinking")
-                        .small()
-                        .weak()
-                        .italics()
-                        .color(colors.thinking),
-                )
-                .selectable(false)
-                .sense(egui::Sense::click()),
-            );
-            toggle.clicked() || caption.clicked()
-        })
-        .inner;
-    if clicked {
-        *row.expanded = !*row.expanded;
-        *row.resized = true;
-    }
-    if *row.expanded {
-        ui.scope(|ui| {
-            ui.visuals_mut().override_text_color = Some(colors.thinking);
-            ui.style_mut()
-                .text_styles
-                .insert(egui::TextStyle::Body, egui::FontId::proportional(14.0));
-            let demoted = demote_reasoning(blocks);
-            markdown::render_blocks(ui, row_index, &demoted, colors);
-        });
-    }
-}
-
-/// A six-point "✻" drawn as three crossing diameters, so the affordance never
-/// depends on a font shipping the glyph. `color` is expected to be pre-dimmed.
-fn paint_asterisk(painter: &egui::Painter, center: egui::Pos2, radius: f32, color: egui::Color32) {
-    let stroke = egui::Stroke::new(1.4, color);
-    for degrees in [90.0_f32, 150.0, 210.0] {
-        let (sin, cos) = degrees.to_radians().sin_cos();
-        let arm = egui::vec2(cos, sin) * radius;
-        painter.line_segment([center - arm, center + arm], stroke);
-    }
-}
-
-/// A faint, hover-brightened "✻" that toggles attached reasoning. It always
-/// allocates one fixed footprint so the virtualizer's measured and drawn heights
-/// agree across hover/expand states — only the color changes. Returns whether the
-/// affordance was clicked this frame.
-fn thinking_affordance(ui: &mut Ui, expanded: bool, colors: &ThemeColors) -> bool {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(16.0, 16.0), egui::Sense::click());
-    let lit = expanded || response.hovered();
-    let color = if lit {
-        colors.thinking
-    } else {
-        colors.thinking.gamma_multiply(0.4)
-    };
-    paint_asterisk(ui.painter(), rect.center(), rect.height() * 0.3, color);
-    let clicked = response.clicked();
-    if lit {
-        response.on_hover_cursor(egui::CursorIcon::PointingHand);
-    }
-    clicked
 }
 
 /// The dim, flattened reasoning stream attached to a row. Headings are demoted
@@ -1134,11 +1027,15 @@ fn demote_reasoning(blocks: &[markdown::Block]) -> Vec<markdown::Block> {
 /// Quiet, selectable role captions; message content carries the visual emphasis.
 fn role_heading(ui: &mut Ui, role: &str, colors: &ThemeColors) {
     let rich = match role {
-        "user" => egui::RichText::new("You").small().color(colors.user_msg),
+        "user" => egui::RichText::new("You")
+            .small()
+            .strong()
+            .color(colors.user_msg),
         "system" => egui::RichText::new("System")
             .small()
             .color(colors.system_msg),
-        "assistant" => egui::RichText::new("Bone").small().weak(),
+        // The assistant is the default voice; a label would only add chrome.
+        "assistant" => return,
         _ => egui::RichText::new(role.to_string()).small().weak(),
     };
     ui.add(egui::Label::new(rich).selectable(true));
@@ -1152,7 +1049,7 @@ fn render_tool_row(
     role: &str,
     card: Option<&ToolCard>,
     text: &str,
-    mut thinking: Option<RowThinking<'_>>,
+    thinking: Option<&str>,
     row: &mut RowUi,
     colors: &ThemeColors,
 ) {
@@ -1166,7 +1063,41 @@ fn render_tool_row(
     };
     let total_lines = text.lines().count();
 
+    // The heading is one click target: hovering the name paints the chip the
+    // chevron already shows, so a collapsed call never reads as dead text. The
+    // chip is a placeholder shape filled in once the heading rect is known, so
+    // it lands behind the chevron and label rather than over them.
+    let heading_backdrop = ui.painter().add(egui::Shape::Noop);
+    let mut heading_rect = egui::Rect::NOTHING;
     ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        let disclosure = crate::icons::button(
+            ui,
+            if *row.expanded {
+                crate::icons::Icon::ChevronDown
+            } else {
+                crate::icons::Icon::ChevronRight
+            },
+            if *row.expanded {
+                "Hide tool details"
+            } else {
+                "Show tool details and output"
+            },
+        );
+        heading_rect = disclosure.rect;
+        if disclosure.clicked() {
+            *row.expanded = !*row.expanded;
+            *row.resized = true;
+        }
+        // Successful calls stay quiet; only failures need an extra status label.
+        // Running calls already have a spinner below.
+        if is_error {
+            ui.label(
+                egui::RichText::new("Failed")
+                    .small()
+                    .color(colors.tool_error),
+            );
+        }
         if matches!(
             card.map(|c| c.state),
             Some(crate::state::ToolState::Running)
@@ -1201,26 +1132,20 @@ fn render_tool_row(
                 *row.expanded = !*row.expanded;
                 *row.resized = true;
             }
+            // The label's own hover repaints text only, so the chip below
+            // covers the chevron and the label as one target.
+            heading_rect = heading_rect.union(label.rect);
             label
                 .on_hover_cursor(egui::CursorIcon::PointingHand)
                 .on_hover_text(name);
         }
-        // Attached reasoning rides the tool heading, independent of the output
-        // disclosure: the call keeps the thinking that produced it one click away.
-        if let Some(t) = &mut thinking
-            && thinking_affordance(ui, *t.expanded, colors)
-        {
-            *t.expanded = !*t.expanded;
-            *row.resized = true;
-        }
     });
-
-    // Drawn before the collapsed-summary early return below, so attached
-    // reasoning is reachable even while the tool output stays collapsed.
-    if let Some(t) = &thinking
-        && *t.expanded
-    {
-        render_thinking_body(ui, t.text, colors);
+    let heading_rect = heading_rect.expand2(egui::vec2(3.0, 3.0));
+    if ui.rect_contains_pointer(heading_rect) {
+        ui.painter().set(
+            heading_backdrop,
+            egui::Shape::rect_filled(heading_rect, 6.0, ui.visuals().widgets.hovered.weak_bg_fill),
+        );
     }
 
     // Applied edits remain inspectable in either mode, independently of the
@@ -1235,6 +1160,18 @@ fn render_tool_row(
     // A collapsed call is a single summary; shell logs require explicit details.
     if !*row.expanded {
         return;
+    }
+
+    // Settled reasoning is revealed only inside the expanded call that produced
+    // it, as a small, dim, headings-flattened body above the arguments/output.
+    if let Some(reasoning) = thinking.filter(|text| !text.is_empty()) {
+        ui.label(
+            egui::RichText::new("Reasoning")
+                .small()
+                .italics()
+                .color(colors.thinking),
+        );
+        render_thinking_body(ui, reasoning, colors);
     }
 
     if !text.is_empty() {
@@ -1636,6 +1573,12 @@ mod tests {
                     );
                     assert!(ui.min_rect().height() < 10_000.0);
                 });
+                output.textures_delta.clear();
+                assert!(
+                    painted_text(&output)
+                        .iter()
+                        .any(|text| text.galley.job.text == "You")
+                );
                 let bubble = output
                     .shapes
                     .iter()
@@ -1653,10 +1596,12 @@ mod tests {
                 );
                 assert!(bubble.left() >= 0.0 && bubble.width() <= width);
                 if text == "Hello" {
-                    assert!(bubble.height() < 48.0, "short prompt should stay compact");
+                    assert!(
+                        bubble.height() < 72.0,
+                        "labelled short prompt should stay compact"
+                    );
                 }
                 bubble_widths.push(bubble.width());
-                output.textures_delta.clear();
             }
             assert!(
                 bubble_widths[0] < 100.0,
@@ -2108,6 +2053,33 @@ mod tests {
         // Out-of-range change indices are ignored.
         c.sync(4, &[9]);
         assert_eq!(c.unknown, 1);
+    }
+
+    /// (c2) prepend_rows() shifts the index-keyed caches down so measurements
+    /// and disclosure state stay aligned with the older-first row vector.
+    #[test]
+    fn prepend_rows_shifts_measurements_and_disclosure() {
+        let mut c = Cache::new();
+        c.sync(3, &[]);
+        c.heights.copy_from_slice(&[30.0, 0.0, 45.0]);
+        c.unknown = 1;
+        c.parsed[0] = Some(Vec::new());
+        c.expanded[2] = true;
+        c.chunks[2] = 3;
+        c.expansion_chosen[2] = true;
+
+        c.prepend_rows(2, 5);
+
+        assert_eq!(c.heights.len(), 5);
+        assert_eq!(&c.heights[..], &[0.0, 0.0, 30.0, 0.0, 45.0]);
+        // Two prepended unknowns plus the one still-unmeasured suffix row.
+        assert_eq!(c.unknown, 3);
+        assert!(c.parsed[0].is_none() && c.parsed[1].is_none());
+        assert!(c.parsed[2].is_some());
+        assert!(!c.expanded[1]);
+        assert!(c.expanded[4]);
+        assert_eq!(c.chunks[4], 3);
+        assert!(c.expansion_chosen[4]);
     }
 
     /// (d) Huge outputs stay bounded: a 1500-line Markdown code block and a
@@ -3056,11 +3028,15 @@ mod tests {
         let ctx = egui::Context::default();
         let seen = frame_text_colors(&ctx, input(0, W), |ui| {
             role_heading(ui, "user", &colors);
-            let (mut expanded, mut chunks, mut resized) = (false, 0usize, false);
-            render_reasoning_row(
+            // Reasoning renders only inside an expanded tool call, so the
+            // thinking color has to reach the shapes through a tool row.
+            let (mut expanded, mut chunks, mut resized) = (true, 0usize, false);
+            render_tool_row(
                 ui,
-                0,
-                &[],
+                "tool: read_file",
+                None,
+                "",
+                Some("settled reasoning"),
                 &mut RowUi {
                     expanded: &mut expanded,
                     chunks: &mut chunks,
@@ -3162,133 +3138,28 @@ mod tests {
         );
     }
 
-    /// A reasoning row is a single quiet disclosure: collapsed (the default)
-    /// paints only the "Thinking" caption and hides the body; expanding reveals
-    /// the full reasoning text.
-    #[test]
-    fn reasoning_row_is_collapsed_by_default_and_expands() {
-        let colors = ThemeColors::default();
-        let text = "first reasoning line\nmiddle reasoning line\ntail reasoning line";
-        let blocks = markdown::parse_markdown(text);
-
-        let collapsed = frame_texts(&egui::Context::default(), input(0, W), |ui| {
-            let (mut expanded, mut chunks, mut resized) = (false, 0usize, false);
-            render_row_contents(
-                ui,
-                0,
-                "reasoning",
-                None,
-                text,
-                &blocks,
-                None,
-                &mut RowUi {
-                    expanded: &mut expanded,
-                    chunks: &mut chunks,
-                    resized: &mut resized,
-                },
-                &colors,
-            );
-        });
-        let collapsed = collapsed.join("\n");
-        assert!(
-            collapsed.contains("Thinking"),
-            "collapsed shows the thinking caption, saw {collapsed:?}"
-        );
-        assert!(
-            !collapsed.contains("first reasoning line"),
-            "collapsed hides the reasoning body, saw {collapsed:?}"
-        );
-        assert!(
-            !collapsed.contains("tail reasoning line"),
-            "collapsed hides the reasoning body, saw {collapsed:?}"
-        );
-
-        let expanded = frame_texts(&egui::Context::default(), input(0, W), |ui| {
-            let (mut expanded, mut chunks, mut resized) = (true, 0usize, false);
-            render_row_contents(
-                ui,
-                0,
-                "reasoning",
-                None,
-                text,
-                &blocks,
-                None,
-                &mut RowUi {
-                    expanded: &mut expanded,
-                    chunks: &mut chunks,
-                    resized: &mut resized,
-                },
-                &colors,
-            );
-        });
-        let expanded = expanded.join("\n");
-        assert!(
-            expanded.contains("first reasoning line"),
-            "expanded shows the reasoning body, saw {expanded:?}"
-        );
-        assert!(
-            expanded.contains("tail reasoning line"),
-            "expanded keeps the tail, saw {expanded:?}"
-        );
-    }
-
-    /// The virtualizer opens new reasoning rows collapsed, so the *painted*
-    /// transcript never contains the reasoning body until the user expands it.
-    #[test]
-    fn new_reasoning_rows_start_collapsed() {
-        let ctx = egui::Context::default();
-        let mut cache = Cache::new();
-        let rows = vec![(
-            "reasoning".to_string(),
-            "secret reasoning body\nsecond line".to_string(),
-        )];
-        let cards = vec![None];
-        for frame in 0..FRAMES {
-            run_frame(&ctx, input(frame, W), |ui| {
-                cache.show(ui, TAB, true, &rows, &cards, &ThemeColors::default());
-            });
-        }
-        assert!(!cache.expanded[0], "reasoning must start collapsed");
-        let texts = frame_texts(&ctx, input(FRAMES + 1, W), |ui| {
-            cache.show(ui, TAB, true, &rows, &cards, &ThemeColors::default());
-        });
-        assert!(
-            texts.iter().any(|t| t == "Thinking"),
-            "the caption must be painted, saw {texts:?}"
-        );
-        assert!(
-            !texts.iter().any(|t| t.contains("secret reasoning body")),
-            "the collapsed row must not paint the reasoning body, saw {texts:?}"
-        );
-    }
-
-    /// Reasoning attached to a row stays hidden until the row's "✻" affordance is
-    /// toggled; when expanded it paints the flattened, dim stream beneath the row
-    /// body. Driven through `render_row_contents` so the disclosure wiring — not
-    /// the virtualizer's height cache — is under test.
+    /// Reasoning attached to a tool call stays hidden until that call is
+    /// expanded; when expanded it paints the flattened, dim stream beneath the
+    /// tool heading. Driven through `render_row_contents` so the disclosure
+    /// wiring — not the virtualizer's height cache — is under test.
     #[test]
     fn attached_thinking_is_hidden_until_expanded() {
         let colors = ThemeColors::default();
         let body = "attached reasoning stream\nsecond line";
-        let blocks = markdown::parse_markdown("the answer body");
 
         let render = |expand: bool| {
             frame_texts(&egui::Context::default(), input(0, W), |ui| {
                 let mut expanded = expand;
-                let mut row_expanded = expand;
                 let mut chunks = 1usize;
                 let mut resized = false;
                 render_row_contents(
                     ui,
                     0,
-                    "assistant",
+                    "tool: shell",
                     None,
-                    "the answer body",
-                    &blocks,
-                    Some(RowThinking {
-                        text: body,
-                        expanded: &mut row_expanded,
-                    }),
+                    "",
+                    &[],
+                    Some(body),
                     &mut RowUi {
                         expanded: &mut expanded,
                         chunks: &mut chunks,
@@ -3302,18 +3173,14 @@ mod tests {
 
         let collapsed = render(false);
         assert!(
-            collapsed.contains("the answer body"),
-            "the row body still paints, saw {collapsed:?}"
-        );
-        assert!(
             !collapsed.contains("attached reasoning stream"),
-            "collapsed attached thinking must stay hidden, saw {collapsed:?}"
+            "a collapsed tool call must hide its attached reasoning, saw {collapsed:?}"
         );
 
         let expanded = render(true);
         assert!(
             expanded.contains("attached reasoning stream"),
-            "expanded attached thinking must paint its body, saw {expanded:?}"
+            "an expanded tool call must paint its reasoning body, saw {expanded:?}"
         );
     }
 
@@ -3351,8 +3218,9 @@ mod tests {
     }
 
     /// End-to-end through `show_with`: `thinking` stays index-aligned with `rows`,
-    /// so an expanded attached body paints under its own row (assistant or tool),
-    /// while the trailing live badge draws collapsed by default.
+    /// but reasoning is revealed only inside an expanded tool call that produced
+    /// it — never under an assistant row — while the trailing live badge draws
+    /// collapsed by default.
     #[test]
     fn show_with_attaches_thinking_per_row_and_a_live_badge() {
         let colors = ThemeColors::default();
@@ -3368,9 +3236,12 @@ mod tests {
             None,
             Some("thought for the tool call".to_string()),
         ];
-        // Expand both attached bodies before the first frame so the reflow
-        // measures them in place.
-        cache.thinking_expanded = vec![true, false, true];
+        // Reasoning attaches to the tool row and shows only while it is expanded.
+        // Mark the choice so the lifecycle reset leaves it open.
+        cache.expanded = vec![false; rows.len()];
+        cache.expansion_chosen = vec![false; rows.len()];
+        cache.expanded[2] = true;
+        cache.expansion_chosen[2] = true;
 
         let texts = frame_texts(&egui::Context::default(), input(0, W), |ui| {
             cache.show_with(
@@ -3387,13 +3258,12 @@ mod tests {
         .join("\n");
 
         assert!(
-            texts.contains("thought for the answer"),
-            "the assistant row's attached thinking expands in place, saw {texts:?}"
+            !texts.contains("thought for the answer"),
+            "reasoning never renders under an assistant row, saw {texts:?}"
         );
         assert!(
             texts.contains("thought for the tool call"),
-            "the tool row's attached thinking expands even while its output stays \
-             collapsed, saw {texts:?}"
+            "the expanded tool row reveals its attached reasoning, saw {texts:?}"
         );
         assert!(
             texts.contains("Thinking"),
@@ -3602,10 +3472,14 @@ mod tests {
     }
 
     /// Rows for the streaming jitter tests:
-    /// `[3 filler] [streaming tool] [MIDMARKER] [20 filler] [BELOW_MARKER]`.
+    /// `[3 filler] [streaming tool] [MIDMARKER] [36 filler] [BELOW_MARKER]`.
     /// The tool row's attached thinking grows every frame, pushing every row
-    /// after it down; there is enough content to overflow the viewport, so the
-    /// view can pin to the bottom. `tool_index` is the growing row.
+    /// after it down; there is enough content to overflow the viewport *from the
+    /// first frame*, so the view pins to the bottom immediately and the marker
+    /// motion the tests measure is jitter, not the pre-overflow slide. (The row
+    /// count must clear `H` at the current `TRANSCRIPT_ROW_GAP`; too few rows and
+    /// the transcript starts shorter than the viewport.) `tool_index` is the
+    /// growing row.
     fn streaming_bottom_fixture() -> (Vec<(String, String)>, Vec<Option<ToolCard>>, usize) {
         let mut rows: Vec<(String, String)> = (0..3)
             .map(|i| {
@@ -3631,7 +3505,7 @@ mod tests {
             "MIDMARKER pushed by the stream".to_string(),
         ));
         cards.push(None);
-        for i in 0..20 {
+        for i in 0..36 {
             rows.push((
                 "assistant".to_string(),
                 format!("trail filler row {i} with enough words to take one line"),
@@ -3675,9 +3549,12 @@ mod tests {
         let colors = ThemeColors::default();
         let (rows, cards, tool) = streaming_bottom_fixture();
         let mut cache = Cache::new();
-        cache.thinking_expanded = vec![false; rows.len()];
-        cache.thinking_expanded[tool] = true;
+        // Reasoning shows only inside the expanded tool row; mark the choice so
+        // the lifecycle reset leaves it open while its stream grows.
         cache.expanded = vec![false; rows.len()];
+        cache.expansion_chosen = vec![false; rows.len()];
+        cache.expanded[tool] = true;
+        cache.expansion_chosen[tool] = true;
         let ctx = egui::Context::default();
         let mut below_ys: Vec<f32> = Vec::new();
         for frame in 0..30usize {
@@ -3707,9 +3584,10 @@ mod tests {
         let colors = ThemeColors::default();
         let (rows, cards, tool) = streaming_bottom_fixture();
         let mut cache = Cache::new();
-        cache.thinking_expanded = vec![false; rows.len()];
-        cache.thinking_expanded[tool] = true;
         cache.expanded = vec![false; rows.len()];
+        cache.expansion_chosen = vec![false; rows.len()];
+        cache.expanded[tool] = true;
+        cache.expansion_chosen[tool] = true;
         let ctx = egui::Context::default();
         let mut marker_ys: Vec<f32> = Vec::new();
         for frame in 0..30usize {
@@ -3753,9 +3631,10 @@ mod tests {
         let colors = ThemeColors::default();
         let (rows, cards, tool) = streaming_bottom_fixture();
         let mut cache = Cache::new();
-        cache.thinking_expanded = vec![false; rows.len()];
-        cache.thinking_expanded[tool] = true;
         cache.expanded = vec![false; rows.len()];
+        cache.expansion_chosen = vec![false; rows.len()];
+        cache.expanded[tool] = true;
+        cache.expansion_chosen[tool] = true;
         let ctx = egui::Context::default();
         let mut distances: Vec<f32> = Vec::new();
         for frame in 0..30usize {
@@ -3807,9 +3686,10 @@ mod tests {
         let colors = ThemeColors::default();
         let (rows, cards, tool) = streaming_bottom_fixture();
         let mut cache = Cache::new();
-        cache.thinking_expanded = vec![false; rows.len()];
-        cache.thinking_expanded[tool] = true;
         cache.expanded = vec![false; rows.len()];
+        cache.expansion_chosen = vec![false; rows.len()];
+        cache.expanded[tool] = true;
+        cache.expansion_chosen[tool] = true;
         let ctx = egui::Context::default();
         let viewport_h = H - 120.0;
         let hover = egui::Pos2::new(W * 0.5, viewport_h * 0.5);
@@ -3905,7 +3785,6 @@ mod tests {
         let colors = ThemeColors::default();
         let (rows, cards, _tool) = streaming_bottom_fixture();
         let mut cache = Cache::new();
-        cache.thinking_expanded = vec![false; rows.len()];
         cache.expanded = vec![false; rows.len()];
         // A tall (expanded) live badge makes the turn-end shrink large and obvious.
         cache.live_expanded = true;
@@ -3979,24 +3858,46 @@ mod tests {
         );
     }
 
+    /// Regression: expanding a *past* row's reasoning in a non-pinned,
+    /// scrolled-up transcript must leave the viewport put — the offset never
+    /// moves on its own and no painted text lurches for a single frame before
+    /// snapping back. Reasoning lives only inside the tool call that produced it,
+    /// so the disclosure under test is that tool row's heading.
     #[test]
     fn expanding_a_past_rows_reasoning_does_not_jitter_the_transcript() {
-        // Non-pinned "past message" path: settle pinned, wheel up to rest in the
-        // middle of the transcript, then click the median visible row's reasoning
-        // affordance. A correct expand leaves the viewport put: the offset never
-        // moves on its own and no painted text lurches for a single frame before
-        // snapping back.
         let colors = ThemeColors::default();
-        let (rows, cards, tool) = streaming_bottom_fixture();
-        let n = rows.len();
-        let mut cache = Cache::new();
-        cache.thinking_expanded = vec![false; n];
-        cache.thinking_expanded[tool] = true;
-        cache.expanded = vec![false; n];
-        let mut thinking: Vec<Option<String>> = (0..n)
-            .map(|_| Some("short reasoning\nsecond line".to_string()))
+        // A tall transcript with one reasoning-bearing tool row in the middle, so
+        // a scrolled view holds rows both above and below it.
+        let n = 50;
+        let tool = 25;
+        let rows: Vec<(String, String)> = (0..n)
+            .map(|i| {
+                if i == tool {
+                    ("tool: shell".to_string(), "TOOLROW ran".to_string())
+                } else {
+                    (
+                        "assistant".to_string(),
+                        format!("filler row {i} with enough words to take one line"),
+                    )
+                }
+            })
             .collect();
-        thinking[tool] = Some(streaming_thinking(6));
+        let cards: Vec<Option<ToolCard>> = (0..n)
+            .map(|i| {
+                (i == tool).then(|| ToolCard {
+                    name: "shell".into(),
+                    state: ToolState::Done,
+                    args: None,
+                    label: Some("TOOLROW".into()),
+                    show_result: Some(false),
+                    eager: None,
+                })
+            })
+            .collect();
+        let mut cache = Cache::new();
+        cache.expanded = vec![false; n];
+        let mut thinking: Vec<Option<String>> = vec![None; n];
+        thinking[tool] = Some("short reasoning\nsecond line".to_string());
         let ctx = egui::Context::default();
         let viewport_h = 1200.0;
 
@@ -4078,18 +3979,18 @@ mod tests {
                 );
             }
             if frame == 12 || frame == 13 {
-                // Click the median visible row's "✻" so rows sit both above and
-                // below the row whose reasoning body expands.
-                let mut bones: Vec<Rect> = texts
+                // Click the tool row's heading, which reveals its reasoning body
+                // while rows above and below it stay put.
+                let heading = texts
                     .iter()
-                    .filter(|(s, r)| {
-                        s == "Bone" && r.top() > inner_top + 2.0 && r.bottom() < inner_bottom - 2.0
+                    .find(|(s, r)| {
+                        s == "TOOLROW"
+                            && r.top() > inner_top + 2.0
+                            && r.bottom() < inner_bottom - 2.0
                     })
                     .map(|(_, r)| *r)
-                    .collect();
-                bones.sort_by(|a, b| a.top().partial_cmp(&b.top()).unwrap());
-                let bone = bones[bones.len() / 2];
-                let pos = egui::pos2(bone.right() + 11.0, bone.center().y);
+                    .expect("the tool row heading should be visible");
+                let pos = heading.center();
                 events.push(egui::Event::PointerMoved(pos));
                 events.push(egui::Event::PointerButton {
                     pos,

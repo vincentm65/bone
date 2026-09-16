@@ -3371,6 +3371,7 @@ fn dispatch_event(
         | RuntimeEvent::HostResponse { .. }
         | RuntimeEvent::ConversationLoaded { .. }
         | RuntimeEvent::ConversationLoadFailed { .. }
+        | RuntimeEvent::OlderMessagesLoaded { .. }
         | RuntimeEvent::ViewDiff { .. }
         | RuntimeEvent::CommandComplete { .. }
         | RuntimeEvent::KeymapDispatched { .. }

@@ -12,9 +12,26 @@ pub enum Icon {
 }
 
 pub fn button(ui: &mut Ui, icon: Icon, tooltip: &str) -> Response {
+    // Plus/Panes anchor a toolbar, so they keep a persistent chip.
+    paint(ui, icon, tooltip, matches!(icon, Icon::Plus | Icon::Panes))
+}
+
+/// Like [`button`], but the chip is painted only on hover/focus, so the glyph
+/// can sit inside a flat surface (the composer) without adding chrome.
+pub fn quiet_button(ui: &mut Ui, icon: Icon, tooltip: &str) -> Response {
+    paint(ui, icon, tooltip, false)
+}
+
+fn paint(ui: &mut Ui, icon: Icon, tooltip: &str, always_fill: bool) -> Response {
     let pane_control = matches!(icon, Icon::Plus | Icon::Panes);
     let size = if pane_control {
-        vec2(32.0, 32.0)
+        // A toolbar chip needs a wide target; the quiet composer variant only
+        // needs to cover its glyph so the row stays tight.
+        if always_fill {
+            vec2(32.0, 32.0)
+        } else {
+            vec2(24.0, 24.0)
+        }
     } else {
         vec2(26.0, 24.0)
     };
@@ -26,7 +43,7 @@ pub fn button(ui: &mut Ui, icon: Icon, tooltip: &str) -> Response {
         let visuals = ui.style().interact(&response);
         let menu_open = matches!(icon, Icon::Panes)
             && egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
-        if pane_control
+        if always_fill
             || response.hovered()
             || response.has_focus()
             || matches!(icon, Icon::Sidebar)

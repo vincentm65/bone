@@ -357,6 +357,9 @@ const FULL_SCHEMA: &str = "
     CREATE INDEX IF NOT EXISTS idx_messages_conversation_seq
         ON messages(conversation_id, seq);
 
+    CREATE INDEX IF NOT EXISTS idx_messages_conversation_created
+        ON messages(conversation_id, created_at DESC);
+
     CREATE INDEX IF NOT EXISTS idx_context_checkpoints_conversation
         ON conversation_context_checkpoints(conversation_id, id DESC);
 ";
@@ -416,7 +419,7 @@ const BUCKET_PROJECTION: &str = "COALESCE(usage.prompt,0), COALESCE(usage.comple
 
 /// Latest conversations.db schema version. Bumped when `setup_schema` gains a
 /// new migration step; tests assert against this instead of a bare literal.
-pub(crate) const SCHEMA_VERSION: u32 = 11;
+pub(crate) const SCHEMA_VERSION: u32 = 12;
 
 const STARTUP_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 const STARTUP_RETRY_DEADLINE: Duration = Duration::from_secs(3);
@@ -605,6 +608,29 @@ impl SessionDb {
         db.setup_schema()?;
         db.prune_ended_empty_conversations()?;
         Ok(db)
+    }
+
+    /// Open the database for read-only queries without the schema-migration and
+    /// pruning write transactions [`Self::open`] runs. Listing conversations and
+    /// reading stats are hot paths, and taking those write locks there queued
+    /// them behind the daemon's own writes (up to the busy timeout) and paid for
+    /// a `DELETE` prune on every call. Falls back to `open` when the schema is
+    /// not yet current, so a cold or migrating database is still created and
+    /// initialized exactly as before.
+    pub fn open_for_reads(path: &Path) -> rusqlite::Result<Self> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
+        }
+        let conn = Connection::open(path)?;
+        conn.busy_timeout(NORMAL_BUSY_TIMEOUT)?;
+        conn.execute_batch("PRAGMA foreign_keys=ON;")?;
+        let version: u32 = conn.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if version == SCHEMA_VERSION {
+            return Ok(Self { conn });
+        }
+        drop(conn);
+        Self::open(path)
     }
 
     /// Open the database while preserving startup operation and contention
@@ -829,6 +855,17 @@ impl SessionDb {
             version = 11;
         }
 
+        if version == 11 {
+            // v11 -> v12: index each conversation's messages by `created_at` so
+            // the sidebar's per-conversation `MAX(created_at)` is a covering seek
+            // instead of a scan of every message in the conversation.
+            tx.execute_batch(
+                "CREATE INDEX IF NOT EXISTS idx_messages_conversation_created
+                     ON messages(conversation_id, created_at DESC);",
+            )?;
+            version = 12;
+        }
+
         if version != current_version {
             tx.pragma_update(None, "user_version", version)?;
         }
@@ -877,7 +914,9 @@ impl SessionDb {
 
     /// Recent durable conversations with display-safe metadata, newest first.
     ///
-    /// No schema change: both projections come from the existing tables.
+    /// Backed by the `idx_messages_conversation_created` covering index (schema
+    /// v12) so the per-conversation metadata lookups stay index seeks rather
+    /// than table scans.
     /// `updated_at` is the latest message timestamp (ISO-UTC, string-sortable),
     /// falling back to the conversation's start; `title` is a one-line
     /// derivation of the first non-empty user message, or `"(new)"` when the
@@ -897,22 +936,18 @@ impl SessionDb {
                              WHERE m.conversation_id = c.id
                          ) AS message_count
                  FROM conversations c
-             ), first_user AS (
-                 SELECT conversation_id AS id, content AS title,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY conversation_id
-                            ORDER BY seq ASC, id ASC
-                        ) AS rn
-                 FROM messages
-                 WHERE role = 'user' AND TRIM(content) <> ''
              )
              SELECT meta.id, meta.provider, meta.model, meta.updated_at,
                     meta.message_count,
                     COALESCE(
                         NULLIF(TRIM(COALESCE(meta.title, '')), ''),
                         (
-                            SELECT title FROM first_user
-                            WHERE first_user.id = meta.id AND first_user.rn = 1
+                            SELECT m.content
+                            FROM messages m
+                            WHERE m.conversation_id = meta.id
+                              AND m.role = 'user'
+                              AND TRIM(m.content) <> ''
+                            ORDER BY m.seq ASC, m.id ASC
                             LIMIT 1
                         ),
                         ''
@@ -1715,6 +1750,74 @@ impl SessionDb {
         conversation_id: i64,
     ) -> rusqlite::Result<Vec<StoredMessage>> {
         self.query_messages(conversation_id, None)
+    }
+
+    /// Number of stored messages for a conversation.
+    fn message_count(&self, conversation_id: i64) -> rusqlite::Result<i64> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id = ?1",
+            params![conversation_id],
+            |row| row.get(0),
+        )
+    }
+
+    /// Load only the newest `limit` display messages (ascending order), plus
+    /// whether older messages remain. `None` loads the complete transcript.
+    /// Avoids reading and serializing an entire long conversation on attach.
+    pub(crate) fn load_message_window(
+        &self,
+        conversation_id: i64,
+        limit: Option<u32>,
+    ) -> rusqlite::Result<(Vec<StoredMessage>, bool)> {
+        let Some(limit) = limit else {
+            return Ok((self.load_messages(conversation_id)?, false));
+        };
+        if limit == 0 {
+            return Ok((Vec::new(), self.message_count(conversation_id)? > 0));
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, role, content, tool_name, tool_call_id, tool_calls,
+                    images, is_error, payload_json, created_at
+             FROM messages WHERE conversation_id = ?1
+             ORDER BY seq DESC, id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(
+            params![conversation_id, i64::from(limit)],
+            Self::stored_message_from_row,
+        )?;
+        let mut messages: Vec<StoredMessage> = rows.collect::<rusqlite::Result<_>>()?;
+        messages.reverse();
+        let has_older = self.message_count(conversation_id)? > messages.len() as i64;
+        Ok((messages, has_older))
+    }
+
+    /// Load one page of display messages older than the newest `offset`
+    /// messages, in ascending order, plus whether older messages remain. Stable
+    /// under concurrent appends because the client always holds a contiguous
+    /// suffix and the log is append-only.
+    pub(crate) fn load_older_messages(
+        &self,
+        conversation_id: i64,
+        offset: u32,
+        limit: u32,
+    ) -> rusqlite::Result<(Vec<StoredMessage>, bool)> {
+        if limit == 0 {
+            return Ok((Vec::new(), false));
+        }
+        let mut stmt = self.conn.prepare(
+            "SELECT seq, role, content, tool_name, tool_call_id, tool_calls,
+                    images, is_error, payload_json, created_at
+             FROM messages WHERE conversation_id = ?1
+             ORDER BY seq DESC, id DESC LIMIT ?2 OFFSET ?3",
+        )?;
+        let rows = stmt.query_map(
+            params![conversation_id, i64::from(limit), i64::from(offset)],
+            Self::stored_message_from_row,
+        )?;
+        let mut messages: Vec<StoredMessage> = rows.collect::<rusqlite::Result<_>>()?;
+        messages.reverse();
+        let has_older = self.message_count(conversation_id)? > i64::from(offset) + messages.len() as i64;
+        Ok((messages, has_older))
     }
 
     /// Load the durable model-facing context. The immutable message log remains

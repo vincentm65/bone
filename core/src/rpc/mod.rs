@@ -285,13 +285,17 @@ impl RuntimeProjection {
     }
 
     /// Build the authoritative replay for one newly attached client.
-    pub fn initial_events(&self, busy: bool) -> Vec<RuntimeEvent> {
+    ///
+    /// `window` limits only this client's initial `ConversationLoaded`
+    /// transcript; `None` replays the complete transcript (TUI behavior).
+    pub fn initial_events(&self, busy: bool, window: Option<u32>) -> Vec<RuntimeEvent> {
         let (llm, extensions) = {
             let runtime = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
             (runtime.llm.clone(), runtime.extensions.clone())
         };
         let session = self.session.lock().unwrap_or_else(|e| e.into_inner());
         let snapshot = session.snapshot(llm.id(), llm.model());
+        let (messages, _) = session.display_window(window);
         vec![
             frontend_state(&extensions, &session.tools),
             RuntimeEvent::StateSnapshot {
@@ -299,7 +303,7 @@ impl RuntimeProjection {
             },
             // Always send this, including for an empty new conversation, so
             // switching actors clears stale frontend scrollback.
-            bounded_conversation_loaded(session.display_transcript(), snapshot, busy),
+            bounded_conversation_loaded(messages, snapshot, busy),
             // Apply the full view after ConversationLoaded resets transient
             // client state; otherwise the reset can immediately discard panes
             // from this authoritative projection.
@@ -327,13 +331,13 @@ struct ManagedEntry {
 }
 
 impl ManagedEntry {
-    fn attach(&mut self, conversation_id: i64, clock: u64) -> SessionAttachment {
+    fn attach(&mut self, conversation_id: i64, clock: u64, window: Option<u32>) -> SessionAttachment {
         self.last_used = clock;
         SessionAttachment {
             conversation_id,
             commands: self.hub.command_sender(),
             events: self.hub.subscribe(),
-            initial: self.projection.initial_events(self.hub.is_busy()),
+            initial: self.projection.initial_events(self.hub.is_busy(), window),
             group: self.hub.group.clone(),
         }
     }
@@ -352,6 +356,8 @@ struct SessionAttachment {
 enum SessionRequest {
     Attach {
         target: SessionTarget,
+        /// Per-attachment display-message window; `None` replays everything.
+        window: Option<u32>,
         reply: oneshot::Sender<Result<SessionAttachment, String>>,
     },
 }
@@ -369,10 +375,18 @@ impl SessionManager {
         (Self { requests }, SessionManagerReceiver { receiver })
     }
 
-    async fn attach(&self, target: SessionTarget) -> Result<SessionAttachment, String> {
+    async fn attach(
+        &self,
+        target: SessionTarget,
+        window: Option<u32>,
+    ) -> Result<SessionAttachment, String> {
         let (reply, response) = oneshot::channel();
         self.requests
-            .send(SessionRequest::Attach { target, reply })
+            .send(SessionRequest::Attach {
+                target,
+                window,
+                reply,
+            })
             .map_err(|_| "session manager stopped".to_string())?;
         response
             .await
@@ -406,7 +420,7 @@ where
     loop {
         tokio::select! {
             request = receiver.receiver.recv() => {
-                let Some(SessionRequest::Attach { target, reply }) = request else {
+                let Some(SessionRequest::Attach { target, window, reply }) = request else {
                     break;
                 };
 
@@ -419,7 +433,7 @@ where
                 if let Some(id) = requested_id
                     && let Some(entry) = sessions.get_mut(&id)
                 {
-                    let _ = reply.send(Ok(entry.attach(id, clock)));
+                    let _ = reply.send(Ok(entry.attach(id, clock, window)));
                     latest_id = Some(id);
                     continue;
                 }
@@ -483,7 +497,7 @@ where
                         }
                         latest_id = Some(id);
                         let entry = sessions.get_mut(&id).expect("managed session inserted");
-                        let _ = reply.send(Ok(entry.attach(id, clock)));
+                        let _ = reply.send(Ok(entry.attach(id, clock, window)));
                     }
                     Err(err) => { let _ = reply.send(Err(err)); }
                 }
@@ -502,9 +516,10 @@ where
 async fn attach_with_initial<W: AsyncWrite + Unpin>(
     manager: &SessionManager,
     target: SessionTarget,
+    window: Option<u32>,
     writer: &mut W,
 ) -> std::io::Result<Result<SessionAttachment, String>> {
-    let mut attachment = match manager.attach(target).await {
+    let mut attachment = match manager.attach(target, window).await {
         Ok(attachment) => attachment,
         Err(error) => return Ok(Err(error)),
     };
@@ -528,17 +543,18 @@ where
 {
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = codec::MessageReader::new(read_half);
-    let mut attachment = attach_with_initial(&manager, initial_target, &mut write_half)
+    let mut attachment = attach_with_initial(&manager, initial_target, None, &mut write_half)
         .await?
         .map_err(std::io::Error::other)?;
 
     loop {
         tokio::select! {
             incoming = reader.read::<RuntimeCommand>() => match incoming {
-                Some(Ok(RuntimeCommand::LoadConversation { id })) => {
+                Some(Ok(RuntimeCommand::LoadConversation { id, window })) => {
                     match attach_with_initial(
                         &manager,
                         SessionTarget::Conversation(id),
+                        window,
                         &mut write_half,
                     ).await? {
                         Ok(next) => attachment = next,
@@ -552,6 +568,7 @@ where
                     match attach_with_initial(
                         &manager,
                         SessionTarget::New,
+                        None,
                         &mut write_half,
                     ).await? {
                         Ok(next) => attachment = next,
@@ -1256,7 +1273,13 @@ impl DaemonCtx {
         });
     }
 
-    fn publish_synchronized_state(&self, request_id: u64, include_messages: bool, busy: bool) {
+    fn publish_synchronized_state(
+        &self,
+        request_id: u64,
+        include_messages: bool,
+        window: Option<u32>,
+        busy: bool,
+    ) {
         let theme = self
             .extensions
             .active_theme()
@@ -1266,7 +1289,9 @@ impl DaemonCtx {
             let snapshot = session.snapshot(self.llm.id(), self.llm.model());
             let view: Option<bone_protocol::ViewModel> =
                 Some(crate::ext::api_ui::snapshot(&self.extensions.ui_handle()).into());
-            let messages = include_messages.then(|| session.display_transcript());
+            // Window applies only to this request's reply; the client filters by
+            // `request_id`, so other attached clients keep their full state.
+            let messages = include_messages.then(|| session.display_window(window).0);
             (snapshot, view, messages)
         };
         // Bound the repair transcript too: the same cap applies whether the
@@ -1297,6 +1322,23 @@ impl DaemonCtx {
         // state. Replay live gates afterwards so applying that full view cannot
         // immediately erase a recovered approval/key prompt.
         self.pending_interactions.replay(&self.hub);
+    }
+
+    /// Reply to a windowed client with a page of display messages older than the
+    /// newest `offset` it already holds. The page is not byte-bounded: the client
+    /// controls `limit`, and preserving the exact page keeps its `offset` (its
+    /// row count) aligned with the database for the next page.
+    fn publish_older_messages(&self, request_id: u64, offset: u32, limit: u32) {
+        let (messages, has_older) = self
+            .session
+            .lock()
+            .unwrap()
+            .older_display_messages(offset, limit);
+        self.hub.publish(RuntimeEvent::OlderMessagesLoaded {
+            request_id,
+            messages,
+            has_older,
+        });
     }
 
     fn refresh_projection(&self) {
@@ -1586,8 +1628,8 @@ impl DaemonCtx {
                         self.key_registry.resolve(id, key);
                         self.pending_interactions.remove(InteractionId::Key(id));
                     }
-                    Some(RuntimeCommand::Synchronize { request_id, include_messages }) => {
-                        self.publish_synchronized_state(request_id, include_messages, true)
+                    Some(RuntimeCommand::Synchronize { request_id, include_messages, window }) => {
+                        self.publish_synchronized_state(request_id, include_messages, window, true)
                     }
                     Some(command) if is_config_command(&command) => {
                         let _ = Box::pin(self.handle_idle_command(command, commands)).await;
@@ -2321,8 +2363,18 @@ impl DaemonCtx {
                 self.publish_snapshot();
                 Flow::Continue
             }
-            RuntimeCommand::LoadConversation { id } => {
+            RuntimeCommand::LoadConversation { id, window: _ } => {
+                // The per-connection transport applies any window; this actor
+                // load broadcasts the full transcript to every attached client.
                 self.load_conversation(id);
+                Flow::Continue
+            }
+            RuntimeCommand::LoadOlderMessages {
+                request_id,
+                offset,
+                limit,
+            } => {
+                self.publish_older_messages(request_id, offset, limit);
                 Flow::Continue
             }
             RuntimeCommand::SetApprovalMode { mode: mode_str } => {
@@ -2895,8 +2947,9 @@ impl DaemonCtx {
             RuntimeCommand::Synchronize {
                 request_id,
                 include_messages,
+                window,
             } => {
-                self.publish_synchronized_state(request_id, include_messages, false);
+                self.publish_synchronized_state(request_id, include_messages, window, false);
                 Flow::Continue
             }
             RuntimeCommand::CancelProcess { id } => {
@@ -3047,12 +3100,18 @@ impl DaemonCtx {
                         conn.send(cmd);
                     }
                     Some(RuntimeCommand::CancelJob { id }) => self.cancel_job(&id),
+                    Some(RuntimeCommand::LoadOlderMessages {
+                        request_id,
+                        offset,
+                        limit,
+                    }) => self.publish_older_messages(request_id, offset, limit),
                     Some(RuntimeCommand::GetProcesses) => self.publish_processes(true),
                     Some(RuntimeCommand::GetJobs) => self.publish_jobs(true),
                     Some(RuntimeCommand::Synchronize {
                         request_id,
                         include_messages,
-                    }) => self.publish_synchronized_state(request_id, include_messages, true),
+                        window,
+                    }) => self.publish_synchronized_state(request_id, include_messages, window, true),
                     Some(RuntimeCommand::CancelProcess { id }) => self.cancel_process(&id),
                     // Mid-turn Safe/Danger toggle: applies to the rest of the turn
                     // (the gate reads the shared atomic per call).

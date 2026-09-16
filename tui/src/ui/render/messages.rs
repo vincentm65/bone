@@ -6,7 +6,7 @@ use crate::chat::{Message, ToolDisplay};
 use crate::llm::ChatRole;
 use crate::ui::render::{markdown, wrap};
 use crate::ui::theme::Theme;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Wrap};
 
@@ -808,8 +808,8 @@ fn render_diff_preview(
         let (visual_lines, style, fill_background) =
             if let Some((gutter, body, marker)) = numbered_diff_parts(raw_line) {
                 let style = match marker {
-                    '-' => Style::default().bg(theme.diff_removed),
-                    '+' => Style::default().bg(theme.diff_added),
+                    '-' => diff_line_style(theme.diff_removed_bg, theme.diff_removed),
+                    '+' => diff_line_style(theme.diff_added_bg, theme.diff_added),
                     _ => Style::default().fg(theme.tool_call),
                 };
                 (
@@ -838,6 +838,15 @@ fn render_diff_preview(
                 lines.push(Line::from(Span::styled(line, style)));
             }
         }
+    }
+}
+
+/// Style for a diff body line: the band fill plus an optional explicit text
+/// color. An unset text color inherits the terminal foreground.
+fn diff_line_style(bg: Color, fg: Option<Color>) -> Style {
+    match fg {
+        Some(fg) => Style::default().fg(fg).bg(bg),
+        None => Style::default().bg(bg),
     }
 }
 

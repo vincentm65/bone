@@ -30,7 +30,8 @@ pub const SIDEBAR_WIDTH_MAX: u16 = 500;
 /// Fresh layouts use this fraction of the available window width. A manually
 /// resized sidebar is stored as an absolute width instead.
 pub const SIDEBAR_DEFAULT_FRACTION: f32 = 0.20;
-pub const CENTRAL_WIDTH_MIN: u16 = 320;
+/// Leave a readable transcript and room for composer actions before showing navigation.
+pub const CENTRAL_WIDTH_MIN: u16 = 560;
 
 /// How much tool detail the desktop shows without opening an individual call.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -945,17 +946,18 @@ mod tests {
         // always keeps its minimum.
         let plan = responsive_plan(1200.0);
         assert!(plan.show_sidebar);
-        assert_eq!(plan.sidebar_cap, 1200.0 - 320.0); // 880
-        assert!(1200.0 - plan.sidebar_cap >= 320.0);
+        assert_eq!(plan.sidebar_cap, 1200.0 - CENTRAL_WIDTH_MIN as f32);
+        assert!(1200.0 - plan.sidebar_cap >= CENTRAL_WIDTH_MIN as f32);
     }
 
     #[test]
     fn responsive_plan_hides_sidebar_when_window_is_narrow() {
-        // The sidebar hides below the sidebar+central minimum (220+320=540).
-        assert!(responsive_plan(540.0).show_sidebar);
-        assert!(!responsive_plan(539.0).show_sidebar);
-        assert_eq!(responsive_plan(539.0).sidebar_cap, 0.0);
-        assert!(!responsive_plan(520.0).show_sidebar);
+        // The sidebar yields before the transcript becomes a cramped column.
+        let threshold = (SIDEBAR_WIDTH_MIN + CENTRAL_WIDTH_MIN) as f32;
+        assert!(responsive_plan(threshold).show_sidebar);
+        assert!(!responsive_plan(threshold - 1.0).show_sidebar);
+        assert_eq!(responsive_plan(threshold - 1.0).sidebar_cap, 0.0);
+        assert!(!responsive_plan(700.0).show_sidebar);
     }
 
     #[test]

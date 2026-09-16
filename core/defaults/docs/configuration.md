@@ -141,8 +141,10 @@ shell or syntax keys.
 | `approval_danger` | fg | yes |
 | `tool_call` | fg | yes |
 | `tool_error` | fg | yes |
-| `diff_removed` | fg | yes |
-| `diff_added` | fg | yes |
+| `diff_removed` | fg + bg | yes |
+| `diff_removed_bg` | bg | yes |
+| `diff_added` | fg + bg | yes |
+| `diff_added_bg` | bg | yes |
 | `thinking` | fg | yes |
 | `shell_program` | fg | yes |
 | `shell_separator` | fg | yes |

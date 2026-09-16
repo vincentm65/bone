@@ -22,7 +22,7 @@ fn registry_is_complete_unique_and_excludes_removed_role() {
         .iter()
         .copied()
         .collect::<std::collections::HashSet<_>>();
-    assert_eq!(names.len(), 10 + 15 + 8 + 18 + 7 + 4);
+    assert_eq!(names.len(), 10 + 17 + 8 + 18 + 7 + 4);
     assert_eq!(names.len(), unique.len());
     assert!(role("markdown_heading").is_some());
     assert!(role("tab_active").is_none());

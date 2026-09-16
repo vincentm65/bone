@@ -13,13 +13,11 @@ fn line_text(line: &Line<'static>) -> String {
 }
 
 fn preview_lines(content: &str, width: u16) -> Vec<Line<'static>> {
-    msg_to_lines(
-        &[Message::system(content)],
-        &Theme::default(),
-        None,
-        width,
-        false,
-    )
+    preview_lines_with(content, width, &Theme::default())
+}
+
+fn preview_lines_with(content: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
+    msg_to_lines(&[Message::system(content)], theme, None, width, false)
 }
 
 #[test]
@@ -38,12 +36,14 @@ fn long_added_and_removed_diff_lines_wrap_with_blank_gutters_and_backgrounds() {
     let removed = lines
         .iter()
         .filter(|line| {
-            line.spans.first().and_then(|span| span.style.bg) == Some(theme.diff_removed)
+            line.spans.first().and_then(|span| span.style.bg) == Some(theme.diff_removed_bg)
         })
         .collect::<Vec<_>>();
     let added = lines
         .iter()
-        .filter(|line| line.spans.first().and_then(|span| span.style.bg) == Some(theme.diff_added))
+        .filter(|line| {
+            line.spans.first().and_then(|span| span.style.bg) == Some(theme.diff_added_bg)
+        })
         .collect::<Vec<_>>();
 
     assert!(removed.len() > 1);
@@ -63,12 +63,12 @@ fn long_added_and_removed_diff_lines_wrap_with_blank_gutters_and_backgrounds() {
     assert!(
         removed
             .iter()
-            .all(|line| line.spans[0].style.bg == Some(theme.diff_removed))
+            .all(|line| line.spans[0].style.bg == Some(theme.diff_removed_bg))
     );
     assert!(
         added
             .iter()
-            .all(|line| line.spans[0].style.bg == Some(theme.diff_added))
+            .all(|line| line.spans[0].style.bg == Some(theme.diff_added_bg))
     );
     assert!(removed.iter().chain(added.iter()).all(|line| {
         UnicodeWidthStr::width(line_text(line).as_str()) == usize::from(width)
@@ -117,4 +117,46 @@ fn diff_header_and_context_are_explicitly_wrapped_to_terminal_width() {
     );
     let texts = lines.iter().map(line_text).collect::<Vec<_>>();
     assert!(texts.iter().any(|line| line.starts_with("          ")));
+}
+
+#[test]
+fn default_theme_keeps_diff_text_inheriting_terminal_foreground() {
+    let theme = Theme::default();
+    assert_eq!(theme.diff_removed, None);
+    assert_eq!(theme.diff_added, None);
+
+    let lines = preview_lines("\nfile.rs | -1 | +1\n   12 - old\n   12 + new", 40);
+    let removed = lines
+        .iter()
+        .find(|line| line.spans[0].style.bg == Some(theme.diff_removed_bg))
+        .expect("removed diff line");
+    let added = lines
+        .iter()
+        .find(|line| line.spans[0].style.bg == Some(theme.diff_added_bg))
+        .expect("added diff line");
+
+    assert_eq!(removed.spans[0].style.fg, None);
+    assert_eq!(added.spans[0].style.fg, None);
+}
+
+#[test]
+fn diff_text_colors_apply_over_the_band_fill_when_set() {
+    let mut theme = Theme::default();
+    theme.diff_removed = Some(Color::Rgb(155, 17, 30));
+    theme.diff_removed_bg = Color::Rgb(192, 192, 192);
+    theme.diff_added = Some(Color::Rgb(158, 206, 106));
+    theme.diff_added_bg = Color::Rgb(58, 58, 58);
+
+    let lines = preview_lines_with("\nfile.rs | -1 | +1\n   12 - old\n   12 + new", 40, &theme);
+    let removed = lines
+        .iter()
+        .find(|line| line.spans[0].style.bg == Some(theme.diff_removed_bg))
+        .expect("removed diff line");
+    let added = lines
+        .iter()
+        .find(|line| line.spans[0].style.bg == Some(theme.diff_added_bg))
+        .expect("added diff line");
+
+    assert_eq!(removed.spans[0].style.fg, Some(Color::Rgb(155, 17, 30)));
+    assert_eq!(added.spans[0].style.fg, Some(Color::Rgb(158, 206, 106)));
 }

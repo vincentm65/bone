@@ -400,8 +400,10 @@ pub enum ThemeStyleSpec {
 
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ThemeSettings {
-    /// Selected `lua/themes/<name>.lua` theme. The resolved fields below are
-    /// persisted alongside it so frontends never need filesystem or Lua access.
+    /// Selected theme from `lua/themes/<name>.lua` or a plugin-shipped
+    /// `lua/plugins/<pkg>/themes/<name>.lua` (a user copy wins). The resolved
+    /// fields below are persisted alongside it so frontends never need
+    /// filesystem or Lua access.
     pub name: Option<String>,
     pub palette: ThemePaletteSettings,
     pub shell: ThemeShellSettings,
@@ -416,8 +418,14 @@ pub struct ThemeSettings {
     pub approval_danger: Option<String>,
     pub tool_call: Option<String>,
     pub tool_error: Option<String>,
+    /// Diff *text* color for removed (`-`) lines; the band fill is `diff_removed_bg`.
     pub diff_removed: Option<String>,
+    /// Diff *text* color for added (`+`) lines; the band fill is `diff_added_bg`.
     pub diff_added: Option<String>,
+    /// Band fill behind removed (`-`) diff lines.
+    pub diff_removed_bg: Option<String>,
+    /// Band fill behind added (`+`) diff lines.
+    pub diff_added_bg: Option<String>,
     pub thinking: Option<String>,
     pub markdown_marker: Option<String>,
     pub markdown_heading: Option<String>,
@@ -464,6 +472,8 @@ struct ThemeSettingsInput {
     shell_path: Option<String>,
     diff_removed: Option<String>,
     diff_added: Option<String>,
+    diff_removed_bg: Option<String>,
+    diff_added_bg: Option<String>,
     thinking: Option<String>,
     markdown_marker: Option<String>,
     markdown_heading: Option<String>,
@@ -551,6 +561,8 @@ impl<'de> Deserialize<'de> for ThemeSettings {
             tool_error: input.tool_error,
             diff_removed: input.diff_removed,
             diff_added: input.diff_added,
+            diff_removed_bg: input.diff_removed_bg,
+            diff_added_bg: input.diff_added_bg,
             thinking: input.thinking,
             markdown_marker: input.markdown_marker,
             markdown_heading: input.markdown_heading,

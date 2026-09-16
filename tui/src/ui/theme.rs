@@ -59,8 +59,13 @@ pub struct Theme {
     pub shell_variable: Color,
     pub shell_comment: Color,
     pub shell_path: Color,
-    pub diff_removed: Color,
-    pub diff_added: Color,
+    /// Diff preview roles: `diff_removed`/`diff_added` color the text of `-`/`+`
+    /// lines (unset inherits the terminal foreground) and the matching `_bg`
+    /// fields fill the line band behind them.
+    pub diff_removed: Option<Color>,
+    pub diff_removed_bg: Color,
+    pub diff_added: Option<Color>,
+    pub diff_added_bg: Color,
     pub thinking: Color,
     pub markdown_marker: Color,
     pub markdown_heading: Color,
@@ -130,8 +135,10 @@ impl Default for Theme {
             shell_variable: Color::Rgb(180, 160, 220),
             shell_comment: Color::DarkGray,
             shell_path: Color::Rgb(140, 190, 190),
-            diff_removed: Color::Rgb(135, 1, 1),
-            diff_added: Color::Rgb(0, 95, 0),
+            diff_removed: None,
+            diff_removed_bg: Color::Rgb(135, 1, 1),
+            diff_added: None,
+            diff_added_bg: Color::Rgb(0, 95, 0),
             thinking: palette.accent,
             markdown_marker: palette.muted,
             markdown_heading: palette.fg,
@@ -386,8 +393,10 @@ impl Theme {
             "shell_variable" => self.shell_variable = color,
             "shell_comment" => self.shell_comment = color,
             "shell_path" => self.shell_path = color,
-            "diff_removed" => self.diff_removed = color,
-            "diff_added" => self.diff_added = color,
+            "diff_removed" => self.diff_removed = Some(color),
+            "diff_removed_bg" => self.diff_removed_bg = color,
+            "diff_added" => self.diff_added = Some(color),
+            "diff_added_bg" => self.diff_added_bg = color,
             "thinking" => self.thinking = color,
             "markdown_marker" => self.markdown_marker = color,
             "markdown_heading" => self.markdown_heading = color,
@@ -423,6 +432,19 @@ impl Theme {
         true
     }
 
+    /// The role holding a highlight's band fill: `*_bg` roles are their own
+    /// background, any other composite role pairs with a `<name>_bg` sibling
+    /// (for example `user_msg` → `user_msg_bg`, `diff_removed` →
+    /// `diff_removed_bg`). Foreground-only roles have no background to fill.
+    fn background_role_for(name: &str) -> Option<String> {
+        if name.ends_with("_bg") {
+            return Some(name.to_string());
+        }
+        bone_core::config::theme::role(name)
+            .is_some_and(|role| role.kind == bone_core::config::theme::RoleKind::Composite)
+            .then(|| format!("{name}_bg"))
+    }
+
     fn apply_highlight_spec(&mut self, name: &str, spec: &crate::config::settings::ThemeStyleSpec) {
         match spec {
             crate::config::settings::ThemeStyleSpec::Color(s) => {
@@ -454,20 +476,11 @@ impl Theme {
                 }
                 if let Some(bg) = bg {
                     if let Some(c) = self.resolve_color_ref(bg) {
-                        let bg_name = match name {
-                            "user_msg" => Some("user_msg_bg"),
-                            other if other.ends_with("_bg") => Some(other),
-                            _ => None,
-                        };
-                        if let Some(bg_name) = bg_name {
-                            if !self.set_named_color(bg_name, c) {
-                                bone_core::ext::ctx::runtime_warn_once(format!(
-                                    "bone-lua warn: unknown highlight bg group: {bg_name}"
-                                ));
-                            }
-                        } else {
+                        if let Some(bg_name) = Self::background_role_for(name)
+                            && !self.set_named_color(&bg_name, c)
+                        {
                             bone_core::ext::ctx::runtime_warn_once(format!(
-                                "bone-lua warn: highlight has no bg role: {name}"
+                                "bone-lua warn: unknown highlight bg group: {bg_name}"
                             ));
                         }
                     } else {
@@ -540,6 +553,21 @@ impl Theme {
             };
         }
 
+        macro_rules! apply_opt_ref {
+            ($target:ident, $value:expr) => {
+                if let Some(s) = $value.as_ref() {
+                    if let Some(c) = theme.resolve_color_ref(s) {
+                        theme.$target = Some(c);
+                    } else {
+                        bone_core::ext::ctx::runtime_warn_once(format!(
+                            "bone-lua warn: invalid theme color for {}: {s}",
+                            stringify!($target)
+                        ));
+                    }
+                }
+            };
+        }
+
         apply_ref!(shell_program, snap.shell.program);
         apply_ref!(shell_separator, snap.shell.separator);
         apply_ref!(shell_redirect, snap.shell.redirect);
@@ -577,8 +605,10 @@ impl Theme {
         apply_ref!(approval_danger, snap.approval_danger);
         apply_ref!(tool_call, snap.tool_call);
         apply_ref!(tool_error, snap.tool_error);
-        apply_ref!(diff_removed, snap.diff_removed);
-        apply_ref!(diff_added, snap.diff_added);
+        apply_ref!(diff_removed_bg, snap.diff_removed_bg);
+        apply_ref!(diff_added_bg, snap.diff_added_bg);
+        apply_opt_ref!(diff_removed, snap.diff_removed);
+        apply_opt_ref!(diff_added, snap.diff_added);
         apply_ref!(thinking, snap.thinking);
         apply_ref!(markdown_marker, snap.markdown_marker);
         apply_ref!(markdown_heading, snap.markdown_heading);

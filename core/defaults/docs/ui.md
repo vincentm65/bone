@@ -19,13 +19,19 @@ Loading a conversation changes only the requesting client. Approvals and
 cancellation are scoped to the attached conversation.
 
 - The first native desktop client is `bone-desktop` in `native/`. It is a thin
-  eframe/wgpu client of a loopback daemon; for a standard loopback address with
+  eframe client of a loopback daemon; for a standard loopback address with
   nothing listening it can autostart its own daemon, but custom ports and remote
   addresses never do. Connections are restricted to loopback because the daemon
   protocol has no encryption or authentication; remote use requires an SSH
   tunnel to a forwarded `127.0.0.1` port. Its background Tokio transport reduces
   typed events into a local transcript and never retries a prompt after
-  uncertain delivery.
+  uncertain delivery. Graphics default to wgpu; a returned GPU initialization
+  error before app creation triggers one fresh-process retry using OpenGL (glow).
+  This never restarts a running app or retries a prompt. Driver panics/aborts are
+  not recoverable by this fallback. Set `BONE_DESKTOP_RENDERER=auto|wgpu|glow`
+  to choose explicitly; `wgpu` disables the fallback, and `WGPU_ADAPTER_NAME`
+  optionally filters presentable adapters by a case-insensitive name substring.
+  Startup diagnostics are printed to stderr.
 - Native supports multiple conversation tabs arranged in a frontend-only, Zed-style
   recursive split pane tree (each leaf pane holds one conversation), streamed
   Markdown text with images, multiline prompts, cancellation,
@@ -47,16 +53,30 @@ cancellation are scoped to the attached conversation.
   owning tab and raises its window. Renames update the open
   task title. Deleting an open task explicitly confirms stopping work and
   discarding its draft, closes its connection, then deletes the saved history.
-  The desktop toolbar shows connection, task/workspace identity, sidebar and
-  split controls, a unified Tools menu for local tool-call display and
-  server-scoped tool permissions. The model selector lives in the compact
-  growing composer footer. Secondary actions (incognito, activity, stats, catalog,
-  extensions, dialogs) sit in one menu, and the layout is
-  responsive: the central transcript always keeps a minimum width, so in a
-  narrow window the split tree is retained but a single branch is focused and
-  the sidebar is hidden (both return when the window widens); an overflowing
-  tab row exposes a Focus pane action.
-  The composer shows either Send or Stop, never both; empty ready conversations show a calm start prompt, and load failures present brief recovery actions with full technical details behind a disclosure rather than duplicating raw daemon errors across the chrome and transcript. Permission/privacy mutation feedback is surfaced in the main toolbar without adding transcript clutter.
+  The toolbar groups Settings, Plugins, Usage and window/view controls under
+  Workspace, task actions under Task, and local tool-call display plus
+  server-scoped permissions under Tools. Changes opens the workspace diff.
+  Readable connection status opens the server menu; Connected requires the
+  selected task's connection and initial state to be ready, not merely a running
+  daemon. Hover for its endpoint. Task identity stays in the sidebar/tab strip.
+  The model selector lives in the composer footer, explicitly labeled Model and
+  truncated with full details on hover. The toolbar and composer actions wrap.
+  Navigation yields before squeezing the transcript: the sidebar requires 220px
+  plus 560px for central content (780 logical pixels total, after other panels).
+  Responsive clamping never overwrites a saved manual sidebar width. In a narrow
+  window its toggle opens the task picker instead; the retained split tree focuses
+  one branch and returns when space allows. Active tasks have an accent edge in
+  both navigation surfaces. New task is prominent in the sidebar or, when hidden,
+  the pane strip, and remains available in the pane menu and via Ctrl/Cmd+T.
+  The composer shows either Send or Stop, never both, alongside a labeled image
+  attachment action and persistent keyboard guidance: Enter sends (queues while
+  busy), Ctrl/Cmd+Enter sends into a running turn, and Shift+Enter inserts a line.
+  Empty ready conversations retain the welcome prompt; restored history instead
+  offers a continuation hint without replacing drafts or resetting the task.
+  Load failures present brief recovery actions with full technical details behind
+  a disclosure rather than duplicating raw daemon errors across the chrome and
+  transcript. Permission/privacy mutation feedback is surfaced in the main
+  toolbar without adding transcript clutter.
 
 - Panes split recursively: Ctrl+\ splits the focused pane to the right and
   Ctrl+Shift+\ below. Each pane holds a single row of tabs that scrolls
@@ -91,6 +111,8 @@ cancellation are scoped to the attached conversation.
   and egui's fallback fonts retained for symbols. Conversation text uses a 16px
   face with 24px lines, compact section spacing, unboxed assistant answers, and
   content-sized short prompts inside right-aligned, lightly rounded surfaces.
+  Explicit You/Bone captions distinguish messages from controls, and attached
+  reasoning has a labeled disclosure rather than an unexplained icon.
   Code uses an integrated language/Copy header; tables and rules have quiet
   outlines. Small corner radii and tighter padding give chat an editor-like
   density. The flat, subtly outlined composer keeps the model selector secondary to
@@ -98,9 +120,10 @@ cancellation are scoped to the attached conversation.
   Tools → Concise (default) or Verbose controls tool-call detail, remembered
   across restarts and applied to every conversation. Concise mode shows one-line
   labels with file paths or shell commands; raw arguments and shell output stay
-  behind the disclosure. Verbose mode expands those details. Successful calls
-  omit Done labels; failures remain visible. Individual expansion choices survive
-  live updates until the display mode changes. Copy always includes full output.
+  behind explicit chevron disclosures. Verbose mode expands those details.
+  Successful calls omit Done labels; failures retain a visible Failed label.
+  Individual expansion choices survive live updates until the display mode
+  changes. Copy always includes full output.
   Applied edit_file results show numbered red/green diffs in both modes, with
   more lines available on demand. These diffs come from the daemon's actual tool
   result, including in reopened conversations. Running calls retain a spinner.

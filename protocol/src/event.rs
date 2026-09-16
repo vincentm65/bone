@@ -217,6 +217,16 @@ pub enum RuntimeEvent {
         id: i64,
         message: String,
     },
+    /// Correlated reply to [`RuntimeCommand::LoadOlderMessages`]: a page of
+    /// display messages older than the client's current suffix, in ascending
+    /// (chronological) order, ready to prepend.
+    OlderMessagesLoaded {
+        request_id: u64,
+        messages: Vec<ChatMessage>,
+        /// Whether still-older messages remain beyond this page.
+        #[serde(default)]
+        has_older: bool,
+    },
     /// Legacy, uncorrelated model-turn completion.
     TurnComplete,
     /// Completion of a model turn started by a correlated prompt submission.
@@ -480,6 +490,12 @@ pub enum RuntimeCommand {
         request_id: u64,
         #[serde(default)]
         include_messages: bool,
+        /// When set, include only the newest `window` display messages instead
+        /// of the full transcript. Applies only to this request's reply
+        /// (`request_id`-correlated), so other attached clients are unaffected.
+        /// `None` requests the complete transcript.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u32>,
     },
     /// Request data or a mutation whose authority lives beside the daemon.
     HostRequest {
@@ -500,6 +516,20 @@ pub enum RuntimeCommand {
     NewConversation,
     LoadConversation {
         id: i64,
+        /// When set, the initial `ConversationLoaded` reply carries only the
+        /// newest `window` display messages; older messages load on demand via
+        /// [`LoadOlderMessages`](Self::LoadOlderMessages). `None` load everything.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        window: Option<u32>,
+    },
+    /// Request a page of display messages older than those already held by the
+    /// client. Correlated reply is [`RuntimeEvent::OlderMessagesLoaded`].
+    LoadOlderMessages {
+        request_id: u64,
+        /// Number of newest messages to skip (the count the client already holds).
+        offset: u32,
+        /// Maximum number of messages to return.
+        limit: u32,
     },
     ClearConversation,
     ReplaceConversation {

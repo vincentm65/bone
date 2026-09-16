@@ -366,52 +366,55 @@ fn setup_theme_api(
     settings_path: &Path,
     shared_ui: super::api_ui::SharedUi,
 ) -> Result<(), String> {
-    let themes_dir = settings_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("lua/themes");
+    let theme_roots = theme_roots(
+        settings_path.parent().unwrap_or_else(|| Path::new(".")),
+    );
     let theme = lua.create_table().map_err(crate::util::errstr)?;
 
-    let list_dir = themes_dir.clone();
+    let list_roots = theme_roots.clone();
     let list = lua
         .create_function(move |lua, ()| {
             let mut names = Vec::new();
-            if let Ok(entries) = std::fs::read_dir(&list_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().and_then(|ext| ext.to_str()) == Some("lua")
-                        && let Some(name) = path.file_stem().and_then(|name| name.to_str())
-                    {
-                        names.push(name.to_string());
+            for root in &list_roots {
+                if let Ok(entries) = std::fs::read_dir(root) {
+                    for entry in entries.flatten() {
+                        let path = entry.path();
+                        if path.extension().and_then(|ext| ext.to_str()) == Some("lua")
+                            && let Some(name) = path.file_stem().and_then(|name| name.to_str())
+                        {
+                            names.push(name.to_string());
+                        }
                     }
                 }
             }
             names.sort();
+            names.dedup();
             lua.create_sequence_from(names)
         })
         .map_err(crate::util::errstr)?;
     theme.set("list", list).map_err(crate::util::errstr)?;
 
-    let load_dir = themes_dir.clone();
+    let load_roots = theme_roots.clone();
     let load_store = Arc::clone(&settings);
     let load_path = settings_path.to_path_buf();
     let load_ui = shared_ui.clone();
     let load = lua
         .create_function(move |lua, name: String| {
-            let resolved = load_theme(lua, &load_dir, &load_store, &load_path, &name)
-                .map_err(mlua::Error::external)?;
+            let resolved =
+                load_theme(lua, &load_roots, &load_store, &load_path, &name)
+                    .map_err(mlua::Error::external)?;
             publish_theme(&load_ui, &resolved).map_err(mlua::Error::external)
         })
         .map_err(crate::util::errstr)?;
     theme.set("load", load).map_err(crate::util::errstr)?;
 
-    let preview_dir = themes_dir.clone();
+    let preview_roots = theme_roots.clone();
     let preview_store = Arc::clone(&settings);
     let preview = lua
         .create_function(move |lua, name: Option<String>| {
             let resolved = match name {
                 Some(name) => {
-                    resolve_theme(lua, &preview_dir, &name).map_err(mlua::Error::external)?
+                    resolve_theme(lua, &preview_roots, &name).map_err(mlua::Error::external)?
                 }
                 None => preview_store
                     .lock()
@@ -434,7 +437,7 @@ fn setup_theme_api(
         .name
         .clone();
     if let Some(name) = selected
-        && let Err(error) = load_theme(lua, &themes_dir, &settings, settings_path, &name)
+        && let Err(error) = load_theme(lua, &theme_roots, &settings, settings_path, &name)
     {
         super::ctx::runtime_warn_once(format!(
             "bone-lua warn: could not reload theme '{name}': {error}"
@@ -443,9 +446,28 @@ fn setup_theme_api(
     Ok(())
 }
 
+/// Theme discovery roots, in search order: the user's `lua/themes/` first, then
+/// the `themes/` subdirectory of every installed plugin package (so a
+/// catalog-shipped themes plugin can publish theme files). A user theme with
+/// the same name wins over a plugin-shipped one.
+fn theme_roots(config_root: &Path) -> Vec<PathBuf> {
+    let lua_dir = config_root.join("lua");
+    let mut roots = vec![lua_dir.join("themes")];
+    let plugins_dir = lua_dir.join("plugins");
+    if let Ok(entries) = std::fs::read_dir(&plugins_dir) {
+        for entry in entries.flatten() {
+            let themes = entry.path().join("themes");
+            if themes.is_dir() {
+                roots.push(themes);
+            }
+        }
+    }
+    roots
+}
+
 fn resolve_theme(
     lua: &Lua,
-    themes_dir: &Path,
+    theme_roots: &[PathBuf],
     name: &str,
 ) -> Result<crate::config::settings::ThemeSettings, String> {
     if name.is_empty()
@@ -455,7 +477,14 @@ fn resolve_theme(
     {
         return Err("theme name must contain only ASCII letters, digits, '-' or '_'".into());
     }
-    let path = themes_dir.join(format!("{name}.lua"));
+    let file = format!("{name}.lua");
+    let path = theme_roots
+        .iter()
+        .find_map(|root| {
+            let candidate = root.join(&file);
+            candidate.is_file().then_some(candidate)
+        })
+        .ok_or_else(|| format!("theme '{name}' not found"))?;
     let source = std::fs::read_to_string(&path)
         .map_err(|error| format!("failed to read {}: {error}", path.display()))?;
     let value = lua
@@ -473,12 +502,12 @@ fn resolve_theme(
 
 fn load_theme(
     lua: &Lua,
-    themes_dir: &Path,
+    theme_roots: &[PathBuf],
     settings: &Arc<Mutex<Settings>>,
     settings_path: &Path,
     name: &str,
 ) -> Result<crate::config::settings::ThemeSettings, String> {
-    let resolved = resolve_theme(lua, themes_dir, name)?;
+    let resolved = resolve_theme(lua, theme_roots, name)?;
     settings
         .lock()
         .map_err(|e| format!("settings lock poisoned: {e}"))?

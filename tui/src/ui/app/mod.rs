@@ -761,6 +761,7 @@ impl App {
             .send(crate::runtime::RuntimeCommand::Synchronize {
                 request_id: request_seed,
                 include_messages: false,
+                window: None,
             })
             .is_ok()
         {
@@ -1465,6 +1466,7 @@ impl App {
             .send(crate::runtime::RuntimeCommand::Synchronize {
                 request_id,
                 include_messages,
+                window: None,
             })
             .is_err()
         {
@@ -1680,7 +1682,7 @@ impl App {
         };
 
         self.command_tx
-            .send(crate::runtime::RuntimeCommand::LoadConversation { id })
+            .send(crate::runtime::RuntimeCommand::LoadConversation { id, window: None })
             .map_err(|_| {
                 io::Error::new(io::ErrorKind::BrokenPipe, "runtime command channel closed")
             })?;

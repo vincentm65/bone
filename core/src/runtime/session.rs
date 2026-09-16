@@ -145,6 +145,39 @@ impl RuntimeSession {
         self.transcript.clone()
     }
 
+    /// Newest `limit` display messages plus whether older history remains.
+    /// Windowed frontends load older pages on demand; `None` returns the
+    /// complete transcript with `has_older = false`.
+    pub fn display_window(&self, limit: Option<u32>) -> (Vec<ChatMessage>, bool) {
+        if let (Some(db), Some(conv_id)) = (self.session_db.as_ref(), self.conversation_id)
+            && let Ok((rows, has_older)) = db.load_message_window(conv_id, limit)
+        {
+            return (
+                rows.into_iter()
+                    .map(crate::session_db::stored_to_chat_message)
+                    .collect(),
+                has_older,
+            );
+        }
+        (self.transcript.clone(), false)
+    }
+
+    /// One page of display messages older than the newest `offset` the client
+    /// already holds, plus whether still-older history remains.
+    pub fn older_display_messages(&self, offset: u32, limit: u32) -> (Vec<ChatMessage>, bool) {
+        if let (Some(db), Some(conv_id)) = (self.session_db.as_ref(), self.conversation_id)
+            && let Ok((rows, has_older)) = db.load_older_messages(conv_id, offset, limit)
+        {
+            return (
+                rows.into_iter()
+                    .map(crate::session_db::stored_to_chat_message)
+                    .collect(),
+                has_older,
+            );
+        }
+        (Vec::new(), false)
+    }
+
     /// Open the session database and make a conversation active for `llm`'s
     /// provider/model. Idempotent and preserves structured startup failures.
     ///

@@ -75,10 +75,18 @@ pub struct ThemeSettings {
     pub tool_call: Option<String>,
     #[serde(default)]
     pub tool_error: Option<String>,
+    /// Diff text color for removed (`-`) lines.
     #[serde(default)]
     pub diff_removed: Option<String>,
+    /// Diff band fill for removed (`-`) lines.
+    #[serde(default)]
+    pub diff_removed_bg: Option<String>,
+    /// Diff text color for added (`+`) lines.
     #[serde(default)]
     pub diff_added: Option<String>,
+    /// Diff band fill for added (`+`) lines.
+    #[serde(default)]
+    pub diff_added_bg: Option<String>,
     #[serde(default)]
     pub thinking: Option<String>,
     #[serde(default)]
@@ -153,6 +161,12 @@ pub struct ThemeColors {
     pub diff_added: egui::Color32,
     /// Background fill for removed (`-`) diff lines.
     pub diff_removed: egui::Color32,
+    /// Text color for added (`+`) diff lines; unset falls back to a tint
+    /// derived from the band.
+    pub diff_added_text: Option<egui::Color32>,
+    /// Text color for removed (`-`) diff lines; unset falls back to a tint
+    /// derived from the band.
+    pub diff_removed_text: Option<egui::Color32>,
     /// Whether the background is dark; selects the syntect theme for code.
     pub syntax_dark: bool,
 }
@@ -324,8 +338,11 @@ impl ThemeSettings {
                 .or_else(|| resolve(&palette.border))
                 .unwrap_or(fg),
             markdown_table_header: resolve(&self.markdown_table_header).unwrap_or(accent),
-            diff_added: resolve(&self.diff_added).unwrap_or(egui::Color32::from_rgb(0, 95, 0)),
-            diff_removed: resolve(&self.diff_removed).unwrap_or(egui::Color32::from_rgb(135, 1, 1)),
+            diff_added: resolve(&self.diff_added_bg).unwrap_or(egui::Color32::from_rgb(0, 95, 0)),
+            diff_removed: resolve(&self.diff_removed_bg)
+                .unwrap_or(egui::Color32::from_rgb(135, 1, 1)),
+            diff_added_text: resolve(&self.diff_added),
+            diff_removed_text: resolve(&self.diff_removed),
             syntax_dark: is_dark(bg),
         }
     }
@@ -701,5 +718,27 @@ mod tests {
             egui::Color32::from_rgb(0x80, 0x80, 0x80)
         );
         assert_eq!(colors.tool_error, egui::Color32::from_rgb(0xff, 0x55, 0x55));
+    }
+
+    #[test]
+    fn diff_band_and_text_roles_resolve_independently() {
+        let theme = ThemeSettings {
+            diff_added: Some("#9ece6a".into()),
+            diff_added_bg: Some("#3a3a3a".into()),
+            ..Default::default()
+        };
+        let colors = theme.colors();
+        assert_eq!(colors.diff_added, egui::Color32::from_rgb(0x3a, 0x3a, 0x3a));
+        assert_eq!(
+            colors.diff_added_text,
+            Some(egui::Color32::from_rgb(0x9e, 0xce, 0x6a))
+        );
+        // The removed side keeps its band default and has no explicit text.
+        assert_eq!(colors.diff_removed, egui::Color32::from_rgb(135, 1, 1));
+        assert!(colors.diff_removed_text.is_none());
+        // Text roles stay unset until a `diff_*` text value is present.
+        let bare = ThemeSettings::default().colors();
+        assert!(bare.diff_added_text.is_none());
+        assert!(bare.diff_removed_text.is_none());
     }
 }

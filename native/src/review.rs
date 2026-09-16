@@ -275,19 +275,29 @@ fn render_diff(
     let mut job = egui::text::LayoutJob::default();
     job.wrap.max_width = f32::INFINITY;
     for line in diff.split_inclusive('\n').take(1000) {
-        let background = if line.starts_with('+') && !line.starts_with("+++") {
-            colors.diff_added
+        let (color, background) = if line.starts_with('+') && !line.starts_with("+++") {
+            (
+                colors
+                    .diff_added_text
+                    .unwrap_or_else(|| ui.visuals().text_color()),
+                colors.diff_added,
+            )
         } else if line.starts_with('-') && !line.starts_with("---") {
-            colors.diff_removed
+            (
+                colors
+                    .diff_removed_text
+                    .unwrap_or_else(|| ui.visuals().text_color()),
+                colors.diff_removed,
+            )
         } else {
-            egui::Color32::TRANSPARENT
+            (ui.visuals().text_color(), egui::Color32::TRANSPARENT)
         };
         job.append(
             line,
             0.0,
             egui::TextFormat {
                 font_id: egui::FontId::monospace(13.0),
-                color: ui.visuals().text_color(),
+                color,
                 background,
                 ..Default::default()
             },

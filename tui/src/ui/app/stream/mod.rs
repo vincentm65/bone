@@ -1188,6 +1188,9 @@ impl App {
             // a turn. Ignoring it here avoids invalidating live message indices.
             | RuntimeEvent::FrontendState { .. }
             | RuntimeEvent::ConversationLoaded { .. }
+            // Older-page loads are a desktop-only opt-in; the TUI always holds
+            // the full transcript, so this never arrives and is a no-op.
+            | RuntimeEvent::OlderMessagesLoaded { .. }
             | RuntimeEvent::StreamLagged { .. }
             | RuntimeEvent::HostResponse { .. }
             | RuntimeEvent::TurnComplete

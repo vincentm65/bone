@@ -378,3 +378,60 @@ fn full_snapshot_and_equivalent_incremental_updates_have_equal_layers() {
     assert_eq!(snapshot.code().settings, incremental.code().settings);
     assert_eq!(snapshot.code().scopes, incremental.code().scopes);
 }
+
+#[test]
+fn diff_roles_apply_text_and_band_from_flat_snapshot_and_highlights() {
+    // Flat fields: `diff_*` is the text color, `diff_*_bg` the band fill.
+    let mut theme = Theme::default();
+    theme.apply_snapshot(&crate::config::settings::ThemeSettings {
+        diff_removed: Some("#9b111e".into()),
+        diff_removed_bg: Some("#c0c0c0".into()),
+        diff_added: Some("#9ece6a".into()),
+        diff_added_bg: Some("#3a3a3a".into()),
+        ..Default::default()
+    });
+    assert_eq!(theme.diff_removed, Some(Color::Rgb(0x9b, 0x11, 0x1e)));
+    assert_eq!(theme.diff_removed_bg, Color::Rgb(0xc0, 0xc0, 0xc0));
+    assert_eq!(theme.diff_added, Some(Color::Rgb(0x9e, 0xce, 0x6a)));
+    assert_eq!(theme.diff_added_bg, Color::Rgb(0x3a, 0x3a, 0x3a));
+
+    // A composite highlight routes fg to the text role and bg to its `_bg` sibling.
+    let mut highlights = std::collections::BTreeMap::new();
+    highlights.insert(
+        "diff_removed".to_string(),
+        crate::config::settings::ThemeStyleSpec::Style {
+            fg: Some("error".to_string()),
+            bg: Some("selection".to_string()),
+        },
+    );
+    let mut theme = Theme::default();
+    theme.apply_snapshot(&crate::config::settings::ThemeSettings {
+        palette: crate::config::settings::ThemePaletteSettings {
+            error: Some("#010203".into()),
+            selection: Some("#040506".into()),
+            ..Default::default()
+        },
+        highlights,
+        ..Default::default()
+    });
+    assert_eq!(theme.diff_removed, Some(Color::Rgb(1, 2, 3)));
+    assert_eq!(theme.diff_removed_bg, Color::Rgb(4, 5, 6));
+}
+
+#[test]
+fn diff_roles_support_runtime_overrides_and_reset_to_inherited_text() {
+    let mut theme = Theme::default();
+    assert!(theme.set_highlight("diff_added", Some("#00ff00")));
+    assert!(theme.set_highlight("diff_added_bg", Some("#202020")));
+    assert_eq!(theme.diff_added, Some(Color::Rgb(0, 255, 0)));
+    assert_eq!(theme.diff_added_bg, Color::Rgb(0x20, 0x20, 0x20));
+
+    // Reset reveals the default: unset text (terminal fg) and the default band.
+    assert!(theme.set_highlight("diff_added", None));
+    assert!(theme.set_highlight("diff_added_bg", None));
+    assert_eq!(theme.diff_added, None);
+    assert_eq!(theme.diff_added_bg, Theme::default().diff_added_bg);
+
+    // Unknown group names are rejected without mutating state.
+    assert!(!theme.set_highlight("diff_added_text", Some("#ffffff")));
+}

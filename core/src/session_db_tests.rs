@@ -301,6 +301,123 @@ fn append_chat_message_repairs_stale_or_duplicate_sequence_hints() {
     assert_eq!(contents, vec!["one", "two"]);
 }
 
+/// A windowed load must expose a contiguous newest suffix, and paging older
+/// must walk all the way back to the first message: no gaps, no duplicates,
+/// ascending order, and `has_older` flipping exactly once at the end.
+#[test]
+fn message_window_pages_back_to_the_start_without_gaps() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+
+    const TOTAL: usize = 450;
+    const PAGE: u32 = 100;
+    for i in 0..TOTAL {
+        let role = if i % 2 == 0 {
+            ChatRole::User
+        } else {
+            ChatRole::Assistant
+        };
+        db.append_chat_message(
+            conv,
+            &ChatMessage::new(role, format!("message {i}")),
+            i as i64 + 1,
+        )
+        .unwrap();
+    }
+    let expected: Vec<String> = (0..TOTAL).map(|i| format!("message {i}")).collect();
+    let contents = |rows: Vec<super::StoredMessage>| -> Vec<String> {
+        rows.into_iter().map(|m| m.content).collect()
+    };
+
+    // The full loader and the windowed loader must describe the same log.
+    assert_eq!(contents(db.load_messages(conv).unwrap()), expected);
+
+    // Newest page: the tail of the log, still in ascending order.
+    let (newest, mut has_older) = db.load_message_window(conv, Some(PAGE)).unwrap();
+    assert!(has_older, "a 450-message conversation has older history");
+    let mut loaded = contents(newest);
+    assert_eq!(loaded, expected[TOTAL - PAGE as usize..].to_vec());
+
+    // Walk older until the history is exhausted.
+    let mut pages = 0;
+    while has_older {
+        let (older, more) = db
+            .load_older_messages(conv, loaded.len() as u32, PAGE)
+            .unwrap();
+        let older = contents(older);
+        assert!(!older.is_empty(), "has_older promised an older page");
+        let mut joined = older;
+        joined.extend(loaded);
+        loaded = joined;
+        has_older = more;
+        pages += 1;
+        assert!(pages <= 10, "paging failed to terminate");
+    }
+
+    // The pages reassemble the transcript exactly: contiguous, ordered, no dupes.
+    assert_eq!(loaded, expected);
+    assert_eq!(pages, 4, "450 messages page back in four 100-message pages");
+}
+
+/// Window edges: an empty window, an exact-fit window, a short final page, and
+/// an offset already past the start must all report `has_older` correctly.
+#[test]
+fn message_window_edges_report_older_history_correctly() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+    let conv = db.create_conversation("openai", "gpt-4").unwrap();
+    for i in 0..30 {
+        db.append_chat_message(
+            conv,
+            &ChatMessage::new(ChatRole::User, format!("m{i}")),
+            i + 1,
+        )
+        .unwrap();
+    }
+    let contents = |rows: Vec<super::StoredMessage>| -> Vec<String> {
+        rows.into_iter().map(|m| m.content).collect()
+    };
+    let all: Vec<String> = (0..30).map(|i| format!("m{i}")).collect();
+
+    // `None` loads everything and never advertises older history.
+    let (full, has_older) = db.load_message_window(conv, None).unwrap();
+    assert_eq!(contents(full), all);
+    assert!(!has_older);
+
+    // An exact-fit window covers the log without claiming more history.
+    let (exact, has_older) = db.load_message_window(conv, Some(30)).unwrap();
+    assert_eq!(contents(exact), all);
+    assert!(!has_older);
+
+    // A zero window loads nothing but still points at the remaining history.
+    let (empty, has_older) = db.load_message_window(conv, Some(0)).unwrap();
+    assert!(empty.is_empty());
+    assert!(has_older);
+
+    // Offset 0 means "the client holds nothing yet", i.e. the newest page.
+    let (first_page, has_older) = db.load_older_messages(conv, 0, 10).unwrap();
+    assert_eq!(contents(first_page), all[20..].to_vec());
+    assert!(has_older);
+
+    // A short final page exhausts the history.
+    let (tail, has_older) = db.load_older_messages(conv, 25, 10).unwrap();
+    assert_eq!(contents(tail), all[..5].to_vec());
+    assert!(!has_older);
+
+    // Asking past the start yields nothing and stops advertising older history.
+    let (none, has_older) = db.load_older_messages(conv, 30, 10).unwrap();
+    assert!(none.is_empty());
+    assert!(!has_older);
+
+    // A zero-length page is a no-op rather than an unbounded read.
+    let (none, has_older) = db.load_older_messages(conv, 0, 0).unwrap();
+    assert!(none.is_empty());
+    assert!(!has_older);
+}
+
 #[test]
 fn append_turn_persists_system_messages() {
     let conn = Connection::open_in_memory().unwrap();

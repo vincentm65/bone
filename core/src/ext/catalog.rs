@@ -180,6 +180,68 @@ impl CatalogEntry {
                 .join(&self.name)
         })
     }
+
+    /// Legacy flat-file locations of a plugin's primary file, when it was
+    /// previously published as a bare tool (`lua/tools/<name>.lua`) or
+    /// command (`lua/commands/<name>.lua`). Empty for non-plugins.
+    fn legacy_primary_paths(&self) -> Vec<PathBuf> {
+        if !self.is_plugin() {
+            return Vec::new();
+        }
+        let lua = crate::config::bone_dir().join("lua");
+        [
+            lua.join("tools").join(format!("{}.lua", self.name)),
+            lua.join("commands").join(format!("{}.lua", self.name)),
+        ]
+        .into_iter()
+        .collect()
+    }
+
+    /// Legacy flat-file location of a plugin's bundled file: the scoped path
+    /// with its `plugins/<name>/` prefix removed (e.g.
+    /// `plugins/skill/lib/skill.lua` → `lua/lib/skill.lua`). `None` when the
+    /// file is not part of the package.
+    fn legacy_bundled_path(&self, file: &CatalogFile) -> Option<PathBuf> {
+        let prefix = format!("plugins/{}/", self.name);
+        file.path
+            .strip_prefix(&prefix)
+            .map(|scoped| crate::config::bone_dir().join("lua").join(scoped))
+    }
+
+    /// Whether this Bone build satisfies the entry's `min_bone_version`.
+    ///
+    /// A bare full version (`"2.4.5"`) is a minimum ("at least 2.4.5"), not a
+    /// caret range, so it never blocks a newer build. Unparseable requirements
+    /// (or a non-parseable local version) pass through: version metadata must
+    /// never block an install.
+    pub fn bone_version_ok(&self) -> Result<(), String> {
+        let Some(required) = self.min_bone_version.as_deref() else {
+            return Ok(());
+        };
+        let Ok(current) = semver::Version::parse(crate::build_info::VERSION) else {
+            return Ok(());
+        };
+        let requirement = match semver::Version::parse(required) {
+            Ok(version) => {
+                // semver parses a bare version as a caret requirement
+                // (`^2.4` → `<3.0.0`), which would wrongly reject future
+                // builds; normalize to `>=`.
+                semver::VersionReq::parse(&format!(">={version}")).ok()
+            }
+            Err(_) => semver::VersionReq::parse(required).ok(),
+        };
+        let Some(requirement) = requirement else {
+            return Ok(());
+        };
+        if requirement.matches(&current) {
+            Ok(())
+        } else {
+            Err(format!(
+                "requires Bone {required} (current {})",
+                crate::build_info::VERSION
+            ))
+        }
+    }
 }
 
 /// The configured base URL or path.
@@ -271,7 +333,7 @@ pub fn sync_quiet() -> Vec<CatalogEntry> {
 
 /// Read the cached index only (no network). Returns an empty list if nothing is
 /// cached yet.
-fn cached_index() -> Vec<CatalogEntry> {
+pub(crate) fn cached_index() -> Vec<CatalogEntry> {
     std::fs::read(cache_dir().join("catalog.json"))
         .ok()
         .and_then(|b| parse_index(&b))
@@ -284,32 +346,42 @@ fn bundled_path(file: &CatalogFile) -> PathBuf {
     crate::config::bone_dir().join("lua").join(&file.path)
 }
 
-/// True if the item's primary file and all bundled files are present on disk.
+/// True if the item's primary file is present in the current layout, or (for
+/// plugins) in the legacy flat layout awaiting migration.
+fn primary_present(entry: &CatalogEntry) -> bool {
+    entry.primary_path().exists()
+        || entry
+            .legacy_primary_paths()
+            .iter()
+            .any(|path| path.exists())
+}
+
+/// True if a bundled file is present in the current layout, or (for plugins)
+/// in its legacy flat location.
+fn bundled_present(entry: &CatalogEntry, file: &CatalogFile) -> bool {
+    bundled_path(file).exists()
+        || entry
+            .legacy_bundled_path(file)
+            .is_some_and(|path| path.exists())
+}
+
+/// True if the item's primary file and all bundled files are present on disk,
+/// in either the current or (for plugins) the legacy flat layout.
 pub fn is_installed(entry: &CatalogEntry) -> bool {
     entry.validate().is_ok()
-        && entry.primary_path().exists()
-        && entry.files.iter().all(|file| bundled_path(file).exists())
+        && primary_present(entry)
+        && entry.files.iter().all(|file| bundled_present(entry, file))
 }
 
-/// True if any file managed by the item is present on disk.
+/// True if any file managed by the item is present on disk (current or
+/// legacy layout).
 pub fn has_installed_files(entry: &CatalogEntry) -> bool {
     entry.validate().is_ok()
-        && (entry.primary_path().exists()
-            || entry.files.iter().any(|file| bundled_path(file).exists()))
-}
-
-/// Installed catalog commands that are not bundled defaults.
-pub fn installed_command_names() -> std::collections::HashSet<String> {
-    let bundled: std::collections::HashSet<&str> = super::DEFAULT_LUA_COMMANDS
-        .iter()
-        .map(|(name, _)| *name)
-        .collect();
-    cached_index()
-        .into_iter()
-        .filter(|entry| entry.is_command() && !bundled.contains(entry.name.as_str()))
-        .filter(is_installed)
-        .map(|entry| entry.name.trim_end_matches(".lua").to_string())
-        .collect()
+        && (primary_present(entry)
+            || entry
+                .files
+                .iter()
+                .any(|file| bundled_present(entry, file)))
 }
 
 fn bundled_sha256(entry: &CatalogEntry) -> Option<String> {
@@ -342,7 +414,9 @@ fn file_needs_update(path: &Path, expected: &str, bundled: Option<&str>) -> bool
     }
 }
 
-/// True if any installed file differs from the catalog's current content.
+/// True if any installed file differs from the catalog's current content, or
+/// (for plugins) if any file still sits in the legacy flat layout awaiting
+/// migration by [`install`].
 pub fn needs_update(entry: &CatalogEntry) -> bool {
     if entry.validate().is_err() {
         return false;
@@ -353,6 +427,15 @@ pub fn needs_update(entry: &CatalogEntry) -> bool {
             .files
             .iter()
             .any(|file| file_needs_update(&bundled_path(file), &file.sha256, None))
+        || entry
+            .legacy_primary_paths()
+            .iter()
+            .any(|path| path.exists())
+        || entry.files.iter().any(|file| {
+            entry
+                .legacy_bundled_path(file)
+                .is_some_and(|path| path.exists())
+        })
 }
 
 /// Number of installed items with a newer version available, read from the
@@ -379,40 +462,65 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// Download and install a catalog item and any files bundled with it beneath
 /// `~/.bone-rust/lua/`.
 /// Verifies declared sha256 values before writing anything.
+///
+/// Plugin entries previously installed under the legacy flat layout
+/// (`lua/tools/<name>.lua`, `lua/lib/…`, …) are migrated in place: a legacy
+/// file's bytes are moved into the package directory — preserving any user
+/// edits, so that file is not re-downloaded — and the leftover legacy path is
+/// deleted. Files already present in the package are updated from the catalog
+/// as usual.
 pub fn install(entry: &CatalogEntry) -> Result<(), String> {
     entry.validate()?;
-    let primary_rel = entry.primary_rel();
-    let mut downloads = Vec::with_capacity(entry.files.len() + 1);
-    downloads.push((
-        primary_rel.clone(),
-        entry.primary_path(),
-        entry.sha256.as_str(),
-    ));
-    downloads.extend(
-        entry
-            .files
-            .iter()
-            .map(|file| (file.path.clone(), bundled_path(file), file.sha256.as_str())),
-    );
+    let lua_root = crate::config::bone_dir().join("lua");
 
-    let downloads = downloads
-        .into_iter()
-        .map(|(rel, path, expected)| {
-            let bytes = fetch(&base_url(), &rel)
-                .ok_or_else(|| format!("could not download {rel} from catalog"))?;
-            if !expected.is_empty() {
-                let got = sha256_hex(&bytes);
-                if !got.eq_ignore_ascii_case(expected) {
-                    return Err(format!(
-                        "checksum mismatch for {rel} (expected {expected}, got {got})"
-                    ));
-                }
+    // (destination, bytes) moved from a legacy flat file — no download.
+    let mut writes: Vec<(PathBuf, Vec<u8>)> = Vec::new();
+    // (catalog rel path, expected sha) to download and verify.
+    let mut downloads: Vec<(String, &str)> = Vec::new();
+
+    let primary_dest = entry.primary_path();
+    if !primary_dest.exists()
+        && let Some(legacy) = entry
+            .legacy_primary_paths()
+            .into_iter()
+            .find(|path| path.exists())
+    {
+        let bytes = std::fs::read(&legacy)
+            .map_err(|e| format!("could not read legacy file {}: {e}", legacy.display()))?;
+        writes.push((primary_dest, bytes));
+    } else {
+        downloads.push((entry.primary_rel(), entry.sha256.as_str()));
+    }
+
+    for file in &entry.files {
+        let dest = bundled_path(file);
+        if !dest.exists()
+            && let Some(bytes) = entry
+                .legacy_bundled_path(file)
+                .filter(|legacy| legacy.exists())
+                .and_then(|legacy| std::fs::read(&legacy).ok())
+        {
+            writes.push((dest, bytes));
+        } else {
+            downloads.push((file.path.clone(), file.sha256.as_str()));
+        }
+    }
+
+    for (rel, expected) in downloads {
+        let bytes = fetch(&base_url(), &rel)
+            .ok_or_else(|| format!("could not download {rel} from catalog"))?;
+        if !expected.is_empty() {
+            let got = sha256_hex(&bytes);
+            if !got.eq_ignore_ascii_case(expected) {
+                return Err(format!(
+                    "checksum mismatch for {rel} (expected {expected}, got {got})"
+                ));
             }
-            Ok((path, bytes))
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+        }
+        writes.push((lua_root.join(&rel), bytes));
+    }
 
-    for (path, bytes) in downloads {
+    for (path, bytes) in writes {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir)
                 .map_err(|e| format!("could not create {}: {e}", dir.display()))?;
@@ -421,15 +529,41 @@ pub fn install(entry: &CatalogEntry) -> Result<(), String> {
         crate::tools::write_atomic::write_atomic_sync(&path, &bytes, permissions)
             .map_err(|e| format!("could not write {}: {e}", path.display()))?;
     }
+
+    // Sweep the legacy flat files the migration consumed (or that shadow a
+    // freshly written package file) so old and new layouts never coexist.
+    for legacy in entry.legacy_primary_paths()
+        .into_iter()
+        .chain(entry.files.iter().filter_map(|file| entry.legacy_bundled_path(file)))
+    {
+        if legacy.exists() {
+            if let Err(e) = std::fs::remove_file(&legacy) {
+                super::ctx::runtime_warn(format!(
+                    "bone: warning: could not remove legacy file {}: {e}",
+                    legacy.display()
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
-/// Remove an installed catalog item and every file bundled with it. For a
+/// Remove an installed catalog item and every file bundled with it — in the
+/// current layout and, for plugins, any leftover legacy flat files. For a
 /// plugin, the now-empty package directories left behind are pruned.
 pub fn remove(entry: &CatalogEntry) -> Result<(), String> {
     entry.validate()?;
     let mut paths = vec![entry.primary_path()];
     paths.extend(entry.files.iter().map(bundled_path));
+    if entry.is_plugin() {
+        paths.extend(entry.legacy_primary_paths());
+        paths.extend(
+            entry
+                .files
+                .iter()
+                .filter_map(|file| entry.legacy_bundled_path(file)),
+        );
+    }
     for path in paths {
         if path.exists() {
             std::fs::remove_file(&path)

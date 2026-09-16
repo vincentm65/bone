@@ -29,6 +29,13 @@ pub(crate) fn task_row(
         ui.painter()
             .rect_filled(rect, crate::theme::CONTROL_RADIUS, visuals.bg_fill);
     }
+    if selected {
+        ui.painter().vline(
+            rect.left() + 1.5,
+            (rect.top() + 7.0)..=(rect.bottom() - 7.0),
+            egui::Stroke::new(3.0, ui.visuals().hyperlink_color),
+        );
+    }
     if response.has_focus() {
         ui.painter().rect_stroke(
             rect,

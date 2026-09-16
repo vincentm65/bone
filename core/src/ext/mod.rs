@@ -411,6 +411,11 @@ pub fn run_lua_command_files(
 /// which plugin it came from; capabilities therefore inherit their plugin's
 /// enable state.
 ///
+/// Each enabled package's directory is added to `package.path` (see
+/// [`extend_plugin_package_path`]) so plugin code can `require` its own
+/// submodules — `require("lib.util")` resolves under the package's `lib/`
+/// before the global `lua/lib` is consulted.
+///
 /// A directory without `init.lua` is an inert, non-error package. Names in
 /// `disabled` are skipped without being removed from disk; `disabled == None`
 /// runs every installed plugin.
@@ -445,6 +450,7 @@ pub fn run_lua_plugin_files(
         if !init.is_file() {
             continue;
         }
+        extend_plugin_package_path(lua, &dir);
         if let Err(e) = exec_lua_file(lua, &init, &name, Some(&name)) {
             ctx::runtime_warn(format!("bone: warning: plugin '{name}': {e}"));
             errors.push(format!("plugin '{name}': {e}"));
@@ -455,6 +461,41 @@ pub fn run_lua_plugin_files(
         Ok(())
     } else {
         Err(errors.join("; "))
+    }
+}
+
+/// Append a plugin package's module patterns to `package.path` so its code
+/// can `require` its own files: `require("x")` resolves against
+/// `<pkg>/x.lua`, `<pkg>/lib/x.lua`, and `<pkg>/lib/x/init.lua`.
+///
+/// The patterns are appended *after* the existing ones, so the global
+/// `lua/lib` wins any name collision (a plugin's own `ui.menu` can never
+/// shadow the seeded one). Idempotent: patterns already present are not
+/// re-appended, which keeps hot reloads from duplicating search paths.
+fn extend_plugin_package_path(lua: &mlua::Lua, package_dir: &std::path::Path) {
+    let Ok(package) = lua.globals().get::<mlua::Table>("package") else {
+        return;
+    };
+    let Ok(existing) = package.get::<String>("path") else {
+        return;
+    };
+    let dir = package_dir.to_string_lossy();
+    let patterns = [
+        format!("{dir}/?.lua"),
+        format!("{dir}/lib/?.lua"),
+        format!("{dir}/lib/?/init.lua"),
+    ];
+    let mut updated = existing.clone();
+    for pattern in &patterns {
+        if !updated.contains(pattern.as_str()) {
+            if !updated.ends_with(';') {
+                updated.push(';');
+            }
+            updated.push_str(pattern);
+        }
+    }
+    if updated != existing {
+        let _ = package.set("path", updated);
     }
 }
 

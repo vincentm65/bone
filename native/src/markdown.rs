@@ -1323,8 +1323,18 @@ pub fn render_diff_preview(ui: &mut Ui, content: &str, colors: &ThemeColors) {
     let mut job = LayoutJob::default();
     for (index, raw) in lines.iter().enumerate() {
         let (fg, bg) = match numbered_diff_marker(raw) {
-            Some('-') => (diff_line_fg(colors.diff_removed), Some(colors.diff_removed)),
-            Some('+') => (diff_line_fg(colors.diff_added), Some(colors.diff_added)),
+            Some('-') => (
+                colors
+                    .diff_removed_text
+                    .unwrap_or_else(|| diff_line_fg(colors.diff_removed)),
+                Some(colors.diff_removed),
+            ),
+            Some('+') => (
+                colors
+                    .diff_added_text
+                    .unwrap_or_else(|| diff_line_fg(colors.diff_added)),
+                Some(colors.diff_added),
+            ),
             Some(_) => (colors.tool_call, None),
             None => (colors.system_msg, None),
         };
@@ -1875,6 +1885,65 @@ mod tests {
             |target: egui::Color32| galley.job.sections.iter().any(|s| s.format.color == target);
         assert!(fg_of(diff_line_fg(colors.diff_added)));
         assert!(fg_of(diff_line_fg(colors.diff_removed)));
+        assert!(fg_of(colors.tool_call), "context uses the muted tool color");
+    }
+
+    #[test]
+    fn diff_preview_uses_explicit_text_colors_over_band_tints() {
+        let added_text = egui::Color32::from_rgb(0x9e, 0xce, 0x6a);
+        let removed_text = egui::Color32::from_rgb(0xf1, 0x4c, 0x4c);
+        let colors = ThemeColors {
+            diff_added_text: Some(added_text),
+            diff_removed_text: Some(removed_text),
+            ..Default::default()
+        };
+        let content =
+            "\n    edit_file x (-1 | +1)\n    1 - short\n    2 + an added line\n    3  context";
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(200.0, 600.0),
+                )),
+                ..Default::default()
+            },
+            |ui| render_diff_preview(ui, content, &colors),
+        );
+        fn galleys(shape: &egui::epaint::Shape, out: &mut Vec<std::sync::Arc<egui::Galley>>) {
+            match shape {
+                egui::epaint::Shape::Text(t) => out.push(t.galley.clone()),
+                egui::epaint::Shape::Vec(shapes) => {
+                    for s in shapes {
+                        galleys(s, out);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut found = Vec::new();
+        for clipped in &out.shapes {
+            galleys(&clipped.shape, &mut found);
+        }
+        out.textures_delta.clear();
+        let galley = found
+            .iter()
+            .find(|g| g.job.text.contains("edit_file x"))
+            .expect("diff preview galley");
+        // The explicit text colors win over the band-derived tints, and the
+        // band fills still appear as row backgrounds.
+        let bg_of = |target: egui::Color32| {
+            galley
+                .job
+                .sections
+                .iter()
+                .any(|s| s.format.background == target)
+        };
+        let fg_of =
+            |target: egui::Color32| galley.job.sections.iter().any(|s| s.format.color == target);
+        assert!(fg_of(added_text), "added text uses the explicit color");
+        assert!(fg_of(removed_text), "removed text uses the explicit color");
+        assert!(bg_of(colors.diff_added) && bg_of(colors.diff_removed));
         assert!(fg_of(colors.tool_call), "context uses the muted tool color");
     }
 

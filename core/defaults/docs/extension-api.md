@@ -8,8 +8,10 @@ created. Errors in startup Lua are warnings; core continues without that wiring.
 
 Use the namespaced APIs below. Keep `init.lua` as wiring and put implementations
 in `lua/tools/`, `lua/commands/`, `lua/themes/`, `lua/plugins/<name>/`, or
-`lua/lib/` as appropriate. `require` resolves only against `lua/lib/` as a module
-root, so `require("ui.menu")` loads `lua/lib/ui/menu.lua`. Native helper binaries
+`lua/lib/` as appropriate. `require` resolves against `lua/lib/` as the shared
+module root, so `require("ui.menu")` loads `lua/lib/ui/menu.lua`; inside a
+plugin, `require` additionally resolves against that plugin's own package
+directory (see [Plugins](#plugins)). Native helper binaries
 belong in the never-auto-loaded `lua/helpers/` directory, exposed as
 `bone.helpers_dir`.
 
@@ -61,6 +63,16 @@ the same `_settings_owner` rollback behavior as other startup Lua: a failing
 plugin is reported and skipped without taking down the runtime. Capabilities
 inherit their plugin's state — disabling a plugin skips its `init.lua`, so none
 of its tools or commands register.
+
+A plugin may `require` its own submodules. While its `init.lua` runs, the
+package directory is appended to `package.path`, so `require("x")` resolves
+against `<pkg>/x.lua`, `<pkg>/lib/x.lua`, and `<pkg>/lib/x/init.lua`. The global
+`lua/lib` keeps name priority, so a plugin's `ui.menu` can never shadow a seeded
+helper.
+
+A plugin can also ship theme files under `lua/plugins/<name>/themes/`. They
+appear in `bone.theme.list()` alongside the user's `lua/themes/` entries, and a
+user theme with the same name wins.
 
 Remove a plugin through the catalog screen (or by deleting its directory). Enable
 or disable it without deleting files through the `plugins.<name>` setting in the

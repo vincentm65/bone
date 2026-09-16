@@ -338,6 +338,113 @@ fn theme_list_load_and_reload_selected_theme() {
 }
 
 #[test]
+fn plugin_packages_can_ship_themes_and_user_themes_win() {
+    let root = std::env::temp_dir().join(format!(
+        "bone-plugin-theme-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let user_themes = root.join("lua/themes");
+    let plugin_themes = root.join("lua/plugins/palettes/themes");
+    std::fs::create_dir_all(&user_themes).unwrap();
+    std::fs::create_dir_all(&plugin_themes).unwrap();
+    std::fs::write(
+        user_themes.join("ocean.lua"),
+        r##"return { palette = { accent = "#112233" } }"##,
+    )
+    .unwrap();
+    std::fs::write(
+        plugin_themes.join("nord.lua"),
+        r##"return { palette = { accent = "#223344" } }"##,
+    )
+    .unwrap();
+    // Same name as the user theme: the user file must win.
+    std::fs::write(
+        plugin_themes.join("ocean.lua"),
+        r##"return { palette = { accent = "#0a0b0c" } }"##,
+    )
+    .unwrap();
+    let settings_path = root.join("config.yaml");
+    let settings = Arc::new(Mutex::new(crate::config::settings::Settings::defaults()));
+
+    let lua = Lua::new();
+    let bone = lua.create_table().unwrap();
+    super::super::ops_events::setup_on(&lua, &bone).unwrap();
+    let shared_ui = super::super::api_ui::new_shared();
+    setup_api(
+        &lua,
+        &bone,
+        Arc::clone(&settings),
+        Arc::new(std::sync::RwLock::new(Default::default())),
+        settings_path.clone(),
+        shared_ui.clone(),
+    )
+    .unwrap();
+    lua.globals().set("bone", bone).unwrap();
+
+    // Plugin-shipped themes are listed once, alongside user themes.
+    lua.load(
+        r#"
+        local themes = bone.theme.list()
+        assert(#themes == 2 and themes[1] == "nord" and themes[2] == "ocean")
+        "#,
+    )
+    .exec()
+    .unwrap();
+
+    // A plugin-shipped theme loads and persists like a user theme.
+    lua.load("bone.theme.load('nord')").exec().unwrap();
+    {
+        let store = settings.lock().unwrap();
+        assert_eq!(store.resolved().theme.name.as_deref(), Some("nord"));
+        assert_eq!(
+            store.resolved().theme.palette.accent.as_deref(),
+            Some("#223344")
+        );
+    }
+    assert!(
+        std::fs::read_to_string(&settings_path)
+            .unwrap()
+            .contains("name: nord")
+    );
+    // Consume the SetTheme diff the load emitted, so the preview below is
+    // inspected in isolation.
+    let diffs = super::super::api_ui::lock_shared(&shared_ui).drain_diffs();
+    assert!(matches!(
+        diffs.as_slice(),
+        [crate::runtime::view::ViewDiff::SetTheme { .. }]
+    ));
+
+    // On a name collision the user's own theme wins over the plugin's copy.
+    lua.load("bone.theme.preview('ocean')").exec().unwrap();
+    let diffs = super::super::api_ui::lock_shared(&shared_ui).drain_diffs();
+    let crate::runtime::view::ViewDiff::SetTheme { theme } = &diffs[0] else {
+        panic!("preview emitted unexpected diff: {:?}", diffs[0]);
+    };
+    let preview: crate::config::settings::ThemeSettings =
+        serde_json::from_value(theme.clone()).unwrap();
+    assert_eq!(preview.name.as_deref(), Some("ocean"));
+    assert_eq!(
+        preview.palette.accent.as_deref(),
+        Some("#112233"),
+        "the user's lua/themes copy must win the collision"
+    );
+
+    // A theme that exists in no root is still a clean error.
+    let error = lua
+        .load("bone.theme.load('missing')")
+        .exec()
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("theme 'missing' not found"), "unexpected: {error}");
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[test]
 fn settings_get_set_reset_persist_and_validate() {
     let lua = Lua::new();
     let bone = lua.create_table().unwrap();
