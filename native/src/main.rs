@@ -2620,6 +2620,7 @@ impl DesktopApp {
             fast_mode: None,
             supports_prompt_cache_key: None,
             stream_usage: None,
+            request_timeout_s: provider.request_timeout_s,
             api_key: None,
         };
         let sent = self.tabs[index].command(RuntimeCommand::UpsertProvider {
@@ -2672,6 +2673,7 @@ impl DesktopApp {
             fast_mode: None,
             supports_prompt_cache_key: None,
             stream_usage: None,
+            request_timeout_s: provider.request_timeout_s,
             api_key: None,
         };
         let sent = self.tabs[index].command(RuntimeCommand::UpsertProvider {
@@ -8064,6 +8066,7 @@ mod tests {
                     fast_mode: false,
                     supports_prompt_cache_key: false,
                     stream_usage: "auto".into(),
+                    request_timeout_s: None,
                     api_key_configured: true,
                 })
                 .collect(),

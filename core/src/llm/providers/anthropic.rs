@@ -21,8 +21,9 @@ use std::collections::BTreeMap;
 
 use crate::config::ProviderEntry;
 use crate::llm::provider::{
-    ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, LlmProvider, ProviderRequestContext,
-    ResponseStream, http_error, parse_tool_arguments, streaming_client,
+    ChatEvent, ChatMessage, ChatRole, DEFAULT_LLM_REQUEST_TIMEOUT, LlmError, LlmErrorKind,
+    LlmProvider, ProviderRequestContext, ResponseStream, http_error, parse_tool_arguments,
+    streaming_client,
 };
 use crate::tools::{ToolCall, ToolDefinition};
 
@@ -41,6 +42,7 @@ pub struct AnthropicProvider {
     max_tokens: Option<u32>,
     reasoning_effort: Option<String>,
     context_window_tokens: Option<u64>,
+    request_timeout: std::time::Duration,
 }
 
 impl AnthropicProvider {
@@ -61,6 +63,10 @@ impl AnthropicProvider {
             max_tokens: None,
             reasoning_effort: entry.reasoning_effort_opt(),
             context_window_tokens: entry.context_window_tokens,
+            request_timeout: entry
+                .request_timeout_s
+                .map(std::time::Duration::from_secs)
+                .unwrap_or(DEFAULT_LLM_REQUEST_TIMEOUT),
         }
     }
 
@@ -277,6 +283,10 @@ impl LlmProvider for AnthropicProvider {
 
     fn context_window_tokens(&self) -> Option<u64> {
         self.context_window_tokens
+    }
+
+    fn request_timeout(&self) -> std::time::Duration {
+        self.request_timeout
     }
 
     async fn chat_stream(

@@ -110,6 +110,13 @@ pub struct ProviderEntry {
     #[serde(default, deserialize_with = "optional_u64")]
     pub context_window_tokens: Option<u64>,
 
+    /// Total wall-clock budget in seconds for one LLM request (headers plus
+    /// the full response stream). A stream that stalls past this budget fails
+    /// with a timeout error instead of hanging the turn. Missing values use
+    /// the built-in default (600s).
+    #[serde(default, deserialize_with = "optional_u64")]
+    pub request_timeout_s: Option<u64>,
+
     /// Maximum delegated agents that may use this provider at once, shared
     /// across Bone processes. Missing values mean unlimited concurrency.
     #[serde(default, deserialize_with = "optional_usize")]

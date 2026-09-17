@@ -262,6 +262,7 @@ impl HostService {
                     fast_mode: Some(entry.fast_mode),
                     supports_prompt_cache_key: Some(entry.supports_prompt_cache_key),
                     stream_usage: Some(entry.stream_usage.clone()),
+                    request_timeout_s: entry.request_timeout_s,
                     api_key: Some(api_key),
                 };
                 if let Err(error) = self.config.upsert_provider(update, revision) {

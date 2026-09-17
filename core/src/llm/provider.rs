@@ -50,6 +50,15 @@ pub enum ChatEvent {
         encrypted_content: String,
     },
     ToolCall(ToolCall),
+    /// Usage of one completed LLM request — per-request values, not
+    /// conversation totals.
+    ///
+    /// `prompt_tokens` covers the entire history sent in *this* request, so
+    /// it grows across the tool rounds of a single run; `completion_tokens`
+    /// is this response's output only. Sum these events (or read
+    /// `RuntimeEvent::TokenUsage`, which already reports the
+    /// conversation-cumulative totals) for session-wide numbers — never treat
+    /// one event's `prompt_tokens` as the run total.
     TokenUsage {
         prompt_tokens: u32,
         completion_tokens: u32,
@@ -135,8 +144,8 @@ pub fn http_status_to_error_kind(status: reqwest::StatusCode) -> LlmErrorKind {
 }
 
 /// Build a `reqwest::Client` tuned for SSE streaming: a 10s connect timeout
-/// and a 120s idle/read timeout (NOT a total-request timeout, so a long
-/// reasoning stream is never killed mid-turn).
+/// and a 120s idle/read timeout. Neither bounds the *total* request duration:
+/// that is enforced by the driver via `LlmProvider::request_timeout`.
 pub fn streaming_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
@@ -144,6 +153,12 @@ pub fn streaming_client() -> reqwest::Client {
         .build()
         .unwrap_or_default()
 }
+
+/// Default total wall-clock budget for one LLM request (response headers plus
+/// the full response stream). A provider can override it with the
+/// `request_timeout_s` setting; a stream that stalls past the budget fails
+/// with a `Timeout` error instead of hanging the turn.
+pub const DEFAULT_LLM_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Build a user-facing error message from a failed HTTP response, surfacing
 /// the backend's body (capped at 2000 chars) so the *why* isn't hidden behind
@@ -206,6 +221,13 @@ pub trait LlmProvider: Send + Sync {
     /// Maximum model context in tokens, or `None` when unknown.
     fn context_window_tokens(&self) -> Option<u64> {
         None
+    }
+
+    /// Total wall-clock budget for one LLM request (headers plus the full
+    /// response stream). The driver enforces it; a request still in flight
+    /// past the deadline fails with a `Timeout` error.
+    fn request_timeout(&self) -> std::time::Duration {
+        DEFAULT_LLM_REQUEST_TIMEOUT
     }
 
     async fn chat_stream(

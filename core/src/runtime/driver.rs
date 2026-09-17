@@ -1034,6 +1034,20 @@ impl Driver {
                 append_turn_messages(&mut request_history, &turn_messages);
                 last_turn_messages = turn_messages;
             }
+            // Total budget for this turn's provider request: connection +
+            // response headers + stream consumption. A provider that accepts
+            // the connection but never finishes (e.g. a stream that only ever
+            // sends keep-alive comments) must fail after the budget instead
+            // of hanging forever — reqwest's read timeout only bounds the gap
+            // between bytes, not the request as a whole. The budget is shared
+            // across retry attempts: once it is spent, the turn fails rather
+            // than retrying into an exhausted deadline.
+            let request_deadline = tokio::time::Instant::now() + llm.request_timeout();
+            let timeout_secs = llm.request_timeout().as_secs();
+            let request_timeout_message = format!(
+                "provider request timed out after {timeout_secs}s without completing (raise request_timeout_s to allow longer)"
+            );
+            let mut request_timed_out = false;
             'request: for attempt in 1..=3 {
                 let send = llm.chat_stream_with_context(
                     request_history.clone(),
@@ -1049,6 +1063,10 @@ impl Driver {
                 let result = tokio::select! {
                     biased;
                     _ = await_cancel() => break 'request,
+                    _ = tokio::time::sleep_until(request_deadline) => {
+                        request_timed_out = true;
+                        break 'request;
+                    }
                     result = send => result,
                 };
                 match result {
@@ -1063,6 +1081,10 @@ impl Driver {
                         tokio::select! {
                             biased;
                             _ = await_cancel() => break 'request,
+                            _ = tokio::time::sleep_until(request_deadline) => {
+                                request_timed_out = true;
+                                break 'request;
+                            }
                             _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
                         }
                     }
@@ -1074,8 +1096,14 @@ impl Driver {
                     }
                 }
             }
-            // Cancelled while connecting/backing off: discard this turn.
+            // Cancelled or timed out while connecting/backing off.
             let Some(mut stream) = stream else {
+                if request_timed_out {
+                    emit_runtime(RuntimeEvent::Failed {
+                        message: request_timeout_message.clone(),
+                    });
+                    break 'turn Err(request_timeout_message);
+                }
                 break 'turn Ok(String::new());
             };
 
@@ -1100,9 +1128,14 @@ impl Driver {
             // stream, so a cancel that landed between chunks wins promptly. A
             // `None` here means cancelled (or the stream ended); the
             // `is_cancelled()` check just below discards the partial turn.
+            let mut stream_timed_out = false;
             while let Some(chunk) = tokio::select! {
                 biased;
                 _ = await_cancel() => None,
+                _ = tokio::time::sleep_until(request_deadline) => {
+                    stream_timed_out = true;
+                    None
+                }
                 chunk = stream.next() => chunk,
             } {
                 touch_activity(&activity);
@@ -1214,6 +1247,16 @@ impl Driver {
                         break;
                     }
                 }
+            }
+
+            // The turn's request budget ran out mid-stream: fail the turn
+            // instead of treating the partial (never-completing) response as
+            // finished output.
+            if stream_timed_out {
+                emit_runtime(RuntimeEvent::Failed {
+                    message: request_timeout_message.clone(),
+                });
+                break 'turn Err(request_timeout_message);
             }
 
             if !had_usage && !stream_error {

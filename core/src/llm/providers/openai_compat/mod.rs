@@ -10,8 +10,9 @@ use std::collections::BTreeMap;
 
 use crate::config::ProviderEntry;
 use crate::llm::provider::{
-    ChatEvent, ChatMessage, ChatRole, LlmError, LlmErrorKind, LlmProvider, ProviderRequestContext,
-    ResponseStream, http_error, parse_tool_arguments, streaming_client,
+    ChatEvent, ChatMessage, ChatRole, DEFAULT_LLM_REQUEST_TIMEOUT, LlmError, LlmErrorKind,
+    LlmProvider, ProviderRequestContext, ResponseStream, http_error, parse_tool_arguments,
+    streaming_client,
 };
 use crate::tools::{ToolCall, ToolDefinition};
 
@@ -42,6 +43,9 @@ pub struct OpenAiCompatProvider {
     /// per-provider `stream_usage` setting (`auto` keeps the legacy host list).
     stream_usage: bool,
     context_window_tokens: Option<u64>,
+    /// Total wall-clock budget for one request (headers plus full stream);
+    /// enforced by the driver.
+    request_timeout: std::time::Duration,
     /// Optional transport overrides used by subscription-backed providers
     /// that speak the same Chat Completions wire format.
     api_key_override: Option<String>,
@@ -70,6 +74,10 @@ impl OpenAiCompatProvider {
             supports_prompt_cache_key: entry.supports_prompt_cache_key,
             stream_usage: entry.stream_usage_enabled(),
             context_window_tokens: entry.context_window_tokens,
+            request_timeout: entry
+                .request_timeout_s
+                .map(std::time::Duration::from_secs)
+                .unwrap_or(DEFAULT_LLM_REQUEST_TIMEOUT),
             api_key_override: None,
             extra_headers: Vec::new(),
             conversation_header: None,
@@ -561,6 +569,10 @@ impl LlmProvider for OpenAiCompatProvider {
 
     fn context_window_tokens(&self) -> Option<u64> {
         self.context_window_tokens
+    }
+
+    fn request_timeout(&self) -> std::time::Duration {
+        self.request_timeout
     }
 
     async fn chat_stream(

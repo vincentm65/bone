@@ -1453,6 +1453,12 @@ async fn run_private_completion(
             .map(|json| json.chars().count())
             .unwrap_or(0),
     );
+    let request_timeout = provider.request_timeout();
+    let request_deadline = tokio::time::Instant::now() + request_timeout;
+    let request_timeout_message = format!(
+        "provider request timed out after {}s without completing (raise request_timeout_s to allow longer)",
+        request_timeout.as_secs()
+    );
     let request = provider.chat_stream_with_context(messages, tools, request_context);
     let mut stream = match tokio::select! {
         biased;
@@ -1463,6 +1469,15 @@ async fn run_private_completion(
                 usage: None,
                 error: Some("LLM completion cancelled".to_string()),
                 cancelled: true,
+            };
+        }
+        _ = tokio::time::sleep_until(request_deadline) => {
+            return PrivateLlmCompletion {
+                content: String::new(),
+                tool_calls: Vec::new(),
+                usage: None,
+                error: Some(request_timeout_message),
+                cancelled: false,
             };
         }
         result = request => result,
@@ -1493,6 +1508,15 @@ async fn run_private_completion(
                     usage,
                     error: Some("LLM completion cancelled".to_string()),
                     cancelled: true,
+                };
+            }
+            _ = tokio::time::sleep_until(request_deadline) => {
+                return PrivateLlmCompletion {
+                    content,
+                    tool_calls,
+                    usage,
+                    error: Some(request_timeout_message),
+                    cancelled: false,
                 };
             }
             event = stream.next() => event,
@@ -2187,6 +2211,7 @@ fn build_canonical_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlu
                     provider.supports_prompt_cache_key,
                 )?;
                 row.set("max_concurrency", provider.max_concurrency)?;
+                row.set("request_timeout_s", provider.request_timeout_s)?;
                 row.set("api_key_configured", provider.api_key_configured)?;
                 if let Some(tokens) = provider.context_window_tokens {
                     row.set("context_window_tokens", tokens)?;
@@ -2217,6 +2242,7 @@ fn build_canonical_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlu
                     .unwrap_or_else(|| "openai".into()),
                 context_window_tokens: entry.get("context_window_tokens")?,
                 max_concurrency: entry.get("max_concurrency")?,
+                request_timeout_s: entry.get("request_timeout_s")?,
                 reasoning_effort: entry
                     .get::<Option<String>>("reasoning_effort")?
                     .unwrap_or_default(),

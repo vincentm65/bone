@@ -15,6 +15,7 @@ fn redacted_provider_never_serializes_a_secret_field() {
         fast_mode: false,
         supports_prompt_cache_key: true,
         stream_usage: "auto".into(),
+        request_timeout_s: None,
         api_key_configured: true,
     };
     let json = serde_json::to_value(provider).unwrap();

@@ -98,6 +98,7 @@ async fn task_model_choice_is_isolated_persisted_and_keeps_shared_defaults() {
             fast_mode: false,
             supports_prompt_cache_key: false,
             stream_usage: "auto".into(),
+            request_timeout_s: None,
         },
     );
     crate::config::domains::persist_providers(&providers).unwrap();
@@ -2479,6 +2480,7 @@ async fn invalid_provider_mutations_leave_config_and_runtime_unchanged() {
         fast_mode: false,
         supports_prompt_cache_key: false,
         stream_usage: "auto".into(),
+        request_timeout_s: None,
     };
     let mut providers = crate::config::ProvidersConfig::default();
     providers
@@ -2526,6 +2528,7 @@ async fn invalid_provider_mutations_leave_config_and_runtime_unchanged() {
                 fast_mode: None,
                 supports_prompt_cache_key: None,
                 stream_usage: None,
+                request_timeout_s: None,
             },
             expected_revision: revision,
             request_id: Some("upsert".into()),
@@ -3078,9 +3081,15 @@ async fn managed_connections_isolate_events_and_run_concurrently() {
             // Both initially attach to actor 1. Move only B to actor 2.
             assert_eq!(read_managed_initial(&mut read_a).await, (Some(1), false));
             assert_eq!(read_managed_initial(&mut read_b).await, (Some(1), false));
-            codec::write_message(&mut write_b, &RuntimeCommand::LoadConversation { id: 2, window: None })
-                .await
-                .unwrap();
+            codec::write_message(
+                &mut write_b,
+                &RuntimeCommand::LoadConversation {
+                    id: 2,
+                    window: None,
+                },
+            )
+            .await
+            .unwrap();
             assert_eq!(read_managed_initial(&mut read_b).await, (Some(2), false));
 
             codec::write_message(
@@ -3264,9 +3273,15 @@ async fn managed_load_failure_is_correlated() {
             let mut read = codec::MessageReader::new(read);
             assert_eq!(read_managed_initial(&mut read).await, (Some(1), false));
 
-            codec::write_message(&mut write, &RuntimeCommand::LoadConversation { id: 404, window: None })
-                .await
-                .unwrap();
+            codec::write_message(
+                &mut write,
+                &RuntimeCommand::LoadConversation {
+                    id: 404,
+                    window: None,
+                },
+            )
+            .await
+            .unwrap();
             let failed: RuntimeEvent =
                 tokio::time::timeout(std::time::Duration::from_secs(1), read.read())
                     .await
@@ -3840,8 +3855,14 @@ async fn set_incognito_publishes_status_and_snapshot_and_blocks_loads() {
 
     // While incognito the daemon refuses to re-attach a conversation: that
     // would silently resume DB writes behind the INC badge.
-    ctx.handle_idle_command(RuntimeCommand::LoadConversation { id: 7, window: None }, &mut commands)
-        .await;
+    ctx.handle_idle_command(
+        RuntimeCommand::LoadConversation {
+            id: 7,
+            window: None,
+        },
+        &mut commands,
+    )
+    .await;
     assert!(matches!(
         events.recv().await.unwrap(),
         RuntimeEvent::ConversationLoadFailed { id: 7, message } if message.contains("incognito")

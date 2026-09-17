@@ -28,6 +28,7 @@ fn provider_update(id: &str, model: &str) -> ProviderUpdate {
         fast_mode: None,
         supports_prompt_cache_key: None,
         stream_usage: None,
+        request_timeout_s: None,
         api_key: None,
     }
 }

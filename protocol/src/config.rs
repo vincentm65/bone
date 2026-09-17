@@ -79,6 +79,10 @@ pub struct ProviderConfig {
     pub endpoint: String,
     pub handler: String,
     pub context_window_tokens: Option<u64>,
+    /// Total per-request LLM wall-clock budget in seconds; `None` uses the
+    /// built-in default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_s: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrency: Option<usize>,
     pub reasoning_effort: String,
@@ -106,6 +110,8 @@ pub struct ProviderUpdate {
     pub endpoint: String,
     pub handler: String,
     pub context_window_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_timeout_s: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrency: Option<usize>,
     pub reasoning_effort: String,

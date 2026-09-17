@@ -59,6 +59,14 @@ pub enum RuntimeEvent {
         #[serde(default)]
         stderr: bool,
     },
+    /// Conversation-cumulative token usage, emitted after every LLM request.
+    ///
+    /// `sent` and `received` are running totals across all requests (and
+    /// usage-less estimates) of this conversation — they only grow until the
+    /// conversation resets and are *not* per-request deltas. `context_length`
+    /// is the context size of the most recent request (provider-reported
+    /// prompt tokens, or an estimate), i.e. the current history size, not a
+    /// sum.
     TokenUsage {
         sent: u64,
         received: u64,

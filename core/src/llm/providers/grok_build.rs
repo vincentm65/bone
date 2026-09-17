@@ -16,7 +16,8 @@ use tokio::sync::Mutex;
 
 use crate::config::ProviderEntry;
 use crate::llm::provider::{
-    ChatMessage, LlmError, LlmErrorKind, LlmProvider, ProviderRequestContext, ResponseStream,
+    ChatMessage, DEFAULT_LLM_REQUEST_TIMEOUT, LlmError, LlmErrorKind, LlmProvider,
+    ProviderRequestContext, ResponseStream,
 };
 use crate::tools::ToolDefinition;
 
@@ -40,6 +41,7 @@ pub struct GrokBuildProvider {
     model: String,
     reasoning_effort: String,
     context_window_tokens: Option<u64>,
+    request_timeout_s: Option<u64>,
     credentials: Arc<Mutex<Option<GrokCredentials>>>,
 }
 
@@ -78,6 +80,7 @@ impl GrokBuildProvider {
             },
             reasoning_effort: entry.reasoning_effort.clone(),
             context_window_tokens: entry.context_window_tokens,
+            request_timeout_s: entry.request_timeout_s,
             credentials: Arc::new(Mutex::new(None)),
         }
     }
@@ -126,6 +129,7 @@ impl GrokBuildProvider {
             endpoint: self.endpoint.clone(),
             handler: "openai".to_string(),
             context_window_tokens: self.context_window_tokens,
+            request_timeout_s: self.request_timeout_s,
             max_concurrency: None,
             reasoning_effort: self.reasoning_effort.clone(),
             fast_mode: false,
@@ -160,6 +164,12 @@ impl LlmProvider for GrokBuildProvider {
 
     fn context_window_tokens(&self) -> Option<u64> {
         self.context_window_tokens
+    }
+
+    fn request_timeout(&self) -> std::time::Duration {
+        self.request_timeout_s
+            .map(Duration::from_secs)
+            .unwrap_or(DEFAULT_LLM_REQUEST_TIMEOUT)
     }
 
     async fn validate(&self) -> Result<(), LlmError> {

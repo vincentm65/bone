@@ -127,6 +127,7 @@ local function edit_provider(ctx, provider)
       api_key_configured = provider.api_key_configured == true,
       context_window_tokens = provider.context_window_tokens,
       max_concurrency = provider.max_concurrency,
+      request_timeout_s = provider.request_timeout_s,
       reasoning_effort = provider.reasoning_effort or "",
       fast_mode = provider.fast_mode == true,
    }

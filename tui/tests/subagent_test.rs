@@ -333,8 +333,11 @@ fn spawn_lifecycle_no_provider() {
         let snap = registry.snapshot_scoped(None);
         if let Some(arr) = snap.as_array() {
             for job in arr {
+                // Wait for a terminal status: a freshly dispatched job is
+                // `queued` until its runner thread starts it, and peeking
+                // before then sees nothing (peek only returns done/error).
                 if job["task"].as_str() == Some(task_marker)
-                    && job["status"].as_str() != Some("running")
+                    && matches!(job["status"].as_str(), Some("done") | Some("error"))
                 {
                     job_id = Some(job["id"].as_str().unwrap().to_string());
                     break;

@@ -44,6 +44,7 @@ enum MockAttempt {
 struct MockProvider {
     model: String,
     script: Mutex<Vec<MockAttempt>>,
+    context_window_tokens: Option<u64>,
 }
 
 impl MockProvider {
@@ -54,12 +55,21 @@ impl MockProvider {
         )
     }
 
+    /// Report a fixed model context window so Lua code that reads
+    /// `ctx.model.context_window_tokens` (e.g. the compact plugin's trigger)
+    /// can be driven in-process.
+    fn with_context_window(mut self, tokens: u64) -> Self {
+        self.context_window_tokens = Some(tokens);
+        self
+    }
+
     /// Per-call scripts; later calls pop in reverse order. A `ConnErr`
     /// attempt makes `chat_stream` itself return `Err`.
     fn new_raw(model: &str, attempts: Vec<MockAttempt>) -> Self {
         Self {
             model: model.to_string(),
             script: Mutex::new(attempts.into_iter().rev().collect()),
+            context_window_tokens: None,
         }
     }
 }
@@ -74,6 +84,9 @@ impl LlmProvider for MockProvider {
     }
     fn model(&self) -> &str {
         &self.model
+    }
+    fn context_window_tokens(&self) -> Option<u64> {
+        self.context_window_tokens
     }
     fn set_model(&mut self, model: String) {
         self.model = model;
@@ -1807,8 +1820,19 @@ end)
     let callback_capture = Arc::clone(&callback_usage);
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let cancel_later = Arc::clone(&cancel);
+    // Cancel only once the hook's private request is actually in flight. A
+    // fixed grace sleep can expire before the hook issues that request on a
+    // slow machine, which would exercise "cancel before the turn" instead of
+    // "cancel mid-private-request" and leave zero captured requests.
+    let in_flight = Arc::clone(&llm);
     tokio::spawn(async move {
-        tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while in_flight.captured.lock().unwrap().is_empty() {
+            if std::time::Instant::now() > deadline {
+                break; // let the assertions report the real state
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
         cancel_later.store(true, std::sync::atomic::Ordering::Relaxed);
     });
     let prompt = "original prompt";
@@ -2649,6 +2673,159 @@ end)
 
     std::fs::remove_dir_all(&config_dir).ok();
 }
+
+/// Sibling `bone-catalog` checkout holding the real compact plugin. Optional
+/// for this workspace (same convention as `tui::common::seed_catalog_into`):
+/// tests that need it skip when it is absent.
+fn catalog_dir() -> std::path::PathBuf {
+    std::env::var_os("BONE_CATALOG_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bone-catalog")
+        })
+}
+
+// Regression: the catalog compact plugin's before_turn gate must fire once
+// the pending context passes `trigger_percentage` of the model's context
+// window — older turns collapse into a checkpoint, recent turns survive
+// verbatim, and the run continues to a normal completion. In the benchmark
+// runs the gate never fired (peak 91.8k vs a 102.4k trigger); this test
+// drives it past the trigger in-process with a tiny window and a chatty
+// history, using the *real* plugin file from the catalog checkout.
+#[tokio::test]
+async fn driver_compact_gate_fires_past_trigger_and_run_continues() {
+    let plugin_path = catalog_dir().join("plugins/compact/init.lua");
+    let Ok(plugin_source) = std::fs::read_to_string(&plugin_path) else {
+        eprintln!(
+            "skipping: {} is not present in this checkout",
+            plugin_path.display()
+        );
+        return;
+    };
+
+    let config_dir = common::temp_dir("driver-compact-gate");
+    std::fs::create_dir_all(config_dir.join("lua/plugins/compact")).unwrap();
+    std::fs::write(
+        config_dir.join("lua/plugins/compact/init.lua"),
+        &plugin_source,
+    )
+    .unwrap();
+
+    // The loader only enables hook dispatch once a startup init.lua has
+    // actually run (a real install always has one — onboarding or the
+    // first-boot seed creates it), so seed a trivial one; without it the
+    // plugin loads but its before_turn gate would never fire.
+    std::fs::write(config_dir.join("init.lua"), "-- init\n").unwrap();
+    let config = common::config_store();
+    let booted = boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &config,
+        false,
+        BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+
+    // Chatty history: 20 user/assistant turns, each user message ~4k chars.
+    // Pending context lands around ~21k tokens.
+    let mut transcript: Vec<ChatMessage> = Vec::new();
+    for i in 0..20 {
+        transcript.push(ChatMessage::new(
+            ChatRole::User,
+            format!("turn-{i} {}", "x".repeat(4000)),
+        ));
+        transcript.push(ChatMessage::new(ChatRole::Assistant, format!("ack-{i}")));
+    }
+    let history = build_chat_history(&transcript, "test system prompt");
+
+    // Tiny window: 20k tokens → 80% trigger = 16k < the ~21k pending context.
+    let llm = Arc::new(
+        MockProvider::new_raw(
+            "mock-compact",
+            vec![
+                // 1st provider call: the plugin's private summarizer request.
+                MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta(
+                    "Capsule: 20 prior turns explored the repo and agreed on constraints.".into(),
+                ))]),
+                // 2nd: the main turn, issued after compaction replaced the history.
+                MockAttempt::Stream(vec![Ok(ChatEvent::TextDelta("done".into()))]),
+            ],
+        )
+        .with_context_window(20_000),
+    );
+
+    let prompt = "continue the work";
+    let driver = Driver {
+        llm,
+        extensions: booted.manager,
+        tools: ToolHandler::new(builtin_tools()),
+        session: Arc::new(NullSessionSink),
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Safe),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: None,
+        history,
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        conversation_id: None,
+        background_scope: None,
+        agent_cache_scope: None,
+        config_store: common::config_store(),
+        turn_nudge: Arc::new(std::sync::Mutex::new(None)),
+    };
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    outcome.result.expect("driver run");
+
+    assert!(
+        outcome.transcript_replaced,
+        "the compact gate must replace the transcript"
+    );
+    let first = outcome.transcript.first().expect("transcript is non-empty");
+    assert!(
+        first.content.starts_with("[Context checkpoint v1]"),
+        "older turns must collapse into the checkpoint; got {:?}",
+        first.content.chars().take(80).collect::<String>()
+    );
+    assert!(
+        outcome
+            .transcript
+            .iter()
+            .any(|m| m.content.contains("turn-19")),
+        "the most recent original turn must remain verbatim"
+    );
+    assert_eq!(
+        outcome
+            .transcript
+            .last()
+            .expect("transcript is non-empty")
+            .content,
+        "done",
+        "the run must continue to a normal completion after compaction"
+    );
+    // 20 turns were ~80k user chars; the compacted transcript is the
+    // checkpoint plus the plugin's ≤24k-char recent budget plus the prompt.
+    let compacted_chars: usize = outcome
+        .transcript
+        .iter()
+        .map(|m| m.content.chars().count())
+        .sum();
+    assert!(
+        compacted_chars < 40_000,
+        "compacted transcript must be far smaller than the original ~80k chars; got {compacted_chars}"
+    );
+
+    std::fs::remove_dir_all(&config_dir).ok();
+}
+
 // --- Connection-level retry path (chat_stream returns Err) ---
 
 #[tokio::test]

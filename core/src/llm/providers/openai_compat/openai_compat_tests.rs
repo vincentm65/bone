@@ -75,6 +75,7 @@ fn requests_stream_usage_from_grok_proxy() {
         fast_mode: false,
         supports_prompt_cache_key: false,
         stream_usage: "auto".into(),
+        request_timeout_s: None,
     };
     assert!(entry.stream_usage_enabled());
 }
@@ -351,6 +352,7 @@ fn from_entry_reads_reasoning_effort() {
         fast_mode: false,
         supports_prompt_cache_key: true,
         stream_usage: "auto".into(),
+        request_timeout_s: None,
     };
     let provider = OpenAiCompatProvider::from_entry("grok", &entry);
     assert_eq!(provider.reasoning_effort.as_deref(), Some("high"));

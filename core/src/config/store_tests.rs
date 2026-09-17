@@ -117,6 +117,7 @@ fn provider_mutation_accepts_custom_reasoning_effort() {
         fast_mode: None,
         supports_prompt_cache_key: Some(true),
         stream_usage: None,
+        request_timeout_s: None,
         api_key: None,
     };
 
@@ -177,6 +178,7 @@ fn provider_mutation_rejects_invalid_completed_candidates() {
             fast_mode,
             supports_prompt_cache_key: None,
             stream_usage: None,
+            request_timeout_s: None,
             api_key: None,
         };
 
@@ -224,6 +226,7 @@ fn provider_mutation_validates_and_normalizes_stream_usage() {
         fast_mode: None,
         supports_prompt_cache_key: None,
         stream_usage: Some("maybe".into()),
+        request_timeout_s: None,
         api_key: None,
     };
     let error = store.upsert_provider(invalid, before.revision).unwrap_err();
@@ -251,6 +254,7 @@ fn provider_mutation_validates_and_normalizes_stream_usage() {
         fast_mode: None,
         supports_prompt_cache_key: None,
         stream_usage: Some(" TRUE ".into()),
+        request_timeout_s: None,
         api_key: None,
     };
     store.upsert_provider(normalized, before.revision).unwrap();
@@ -585,6 +589,7 @@ fn reload_settings_does_not_adopt_peer_documents() {
             fast_mode: false,
             supports_prompt_cache_key: false,
             stream_usage: "auto".into(),
+            request_timeout_s: None,
         },
     );
     super::super::domains::persist_providers(&providers).unwrap();

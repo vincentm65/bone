@@ -37,6 +37,7 @@ fn invalid_provider_updates_preserve_existing_document() {
                     fast_mode,
                     supports_prompt_cache_key: false,
                     stream_usage: "auto".into(),
+                    request_timeout_s: None,
                 },
             );
 

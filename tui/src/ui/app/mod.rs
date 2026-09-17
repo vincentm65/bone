@@ -3849,6 +3849,7 @@ impl App {
                             fast_mode: Some(provider.fast_mode),
                             supports_prompt_cache_key: Some(provider.supports_prompt_cache_key),
                             stream_usage: Some(provider.stream_usage.clone()),
+                            request_timeout_s: provider.request_timeout_s,
                             api_key: None,
                         };
                         let request_id =

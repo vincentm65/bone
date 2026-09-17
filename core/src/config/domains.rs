@@ -106,6 +106,7 @@ pub fn load_or_seed_providers() -> Result<super::ProvidersConfig, String> {
                 endpoint: endpoint.into(),
                 handler: handler.into(),
                 context_window_tokens: None,
+                request_timeout_s: None,
                 max_concurrency: None,
                 reasoning_effort: String::new(),
                 fast_mode: false,
@@ -137,6 +138,11 @@ pub(crate) fn validate_providers(config: &super::ProvidersConfig) -> Result<(), 
     for (id, provider) in &config.providers {
         if provider.max_concurrency == Some(0) {
             return Err(format!("providers.{id}.max_concurrency must be at least 1"));
+        }
+        if provider.request_timeout_s == Some(0) {
+            return Err(format!(
+                "providers.{id}.request_timeout_s must be at least 1"
+            ));
         }
         if provider.fast_mode && provider.handler != "codex" {
             return Err(format!(
