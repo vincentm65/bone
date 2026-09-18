@@ -152,7 +152,7 @@ fn recent_context(meta: &ConversationMeta) -> String {
     let time = time_of_day(timestamp)
         .or_else(|| timestamp.split_once('T').map(|(_, time)| time.to_owned()))
         .unwrap_or_else(|| timestamp.clone());
-    [time.as_str(), meta.provider.as_str(), meta.model.as_str()]
+    [time.as_str(), meta.model.as_str()]
         .into_iter()
         .filter(|value| !value.trim().is_empty())
         .collect::<Vec<_>>()
@@ -722,12 +722,12 @@ mod tests {
     fn recent_context_uses_twelve_hour_clock() {
         assert_eq!(
             recent_context(&sample_meta("2026-09-10T19:07:43Z", "2026-09-10T19:07:43")),
-            "7:07pm · openai · gpt-5"
+            "7:07pm · gpt-5"
         );
         // Empty local stamps fall back to the UTC `updated_at` time part.
         assert_eq!(
             recent_context(&sample_meta("2026-09-10T08:05:00Z", "")),
-            "8:05am · openai · gpt-5"
+            "8:05am · gpt-5"
         );
     }
 
