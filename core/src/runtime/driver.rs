@@ -1048,6 +1048,11 @@ impl Driver {
                 "provider request timed out after {timeout_secs}s without completing (raise request_timeout_s to allow longer)"
             );
             let mut request_timed_out = false;
+            // Downscale any oversized images at the model boundary. The
+            // request-only history is mutated in place; the durable transcript
+            // keeps the original captures. Idempotent across retries and later
+            // tool rounds.
+            crate::llm::normalize_images_in_messages(&mut request_history);
             'request: for attempt in 1..=3 {
                 let send = llm.chat_stream_with_context(
                     request_history.clone(),

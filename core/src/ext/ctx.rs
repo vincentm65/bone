@@ -1446,7 +1446,9 @@ async fn run_private_completion(
     tools: Vec<crate::tools::ToolDefinition>,
     cancelled: Option<Arc<AtomicBool>>,
 ) -> PrivateLlmCompletion {
-    let messages = crate::chat::provider_facing_messages(&messages);
+    let mut messages = crate::chat::provider_facing_messages(&messages);
+    // Downscale any oversized images at the model boundary.
+    crate::llm::normalize_images_in_messages(&mut messages);
     let prompt_chars = crate::agent::estimate_context_chars(
         &messages,
         serde_json::to_string(&tools)
