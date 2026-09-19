@@ -5,10 +5,13 @@
 //! validate an exact replacement without making the model repeat hashes or a
 //! custom patch language. Image files are returned as attachments unchanged.
 
-use std::path::Path;
+use std::collections::BTreeSet;
+use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 use base64::Engine;
+use globset::{GlobBuilder, GlobMatcher};
+use ignore::WalkBuilder;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::io::ErrorKind;
@@ -36,14 +39,12 @@ fn image_media_type(path: &str) -> Option<&'static str> {
 const MAX_TEXT_FILE_BYTES: u64 = 50 * 1024 * 1024;
 const MAX_IMAGE_FILE_BYTES: u64 = 10 * 1024 * 1024;
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
+const MAX_BULK_FILES: usize = 50;
+const MAX_BULK_OUTPUT_BYTES: usize = 100 * 1024;
 /// Default window when the model omits `max_lines`. High enough that typical
 /// source files fit in one full read (safer first-try edits) while still
 /// hard-capped at the schema maximum of 1000.
 const DEFAULT_MAX_LINES: usize = 1000;
-async fn ensure_size(path: &str, max_bytes: u64) -> Result<(), String> {
-    let metadata = fs::metadata(path).await.map_err(crate::util::errstr)?;
-    ensure_len(metadata.len(), max_bytes)
-}
 
 fn ensure_len(len: u64, max_bytes: u64) -> Result<(), String> {
     if len > max_bytes {
@@ -95,10 +96,55 @@ fn range_header(
 }
 
 #[derive(Deserialize)]
+#[serde(untagged)]
+enum StringList {
+    One(String),
+    Many(Vec<String>),
+}
+
+fn deserialize_string_list<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(match StringList::deserialize(deserializer)? {
+        StringList::One(value) => vec![value],
+        StringList::Many(values) => values,
+    })
+}
+
+#[derive(Deserialize)]
 struct Args {
     path: String,
+    #[serde(default, deserialize_with = "deserialize_string_list")]
+    paths: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_string_list")]
+    exclude: Vec<String>,
     start_line: Option<usize>,
     max_lines: Option<usize>,
+}
+
+impl Args {
+    fn is_bulk(&self) -> bool {
+        !self.paths.is_empty()
+            || !self.exclude.is_empty()
+            || has_glob_magic(&self.path)
+            || self.paths.iter().any(|path| has_glob_magic(path))
+    }
+
+    fn literal(path: String) -> Self {
+        Self {
+            path,
+            paths: Vec::new(),
+            exclude: Vec::new(),
+            start_line: None,
+            max_lines: None,
+        }
+    }
+}
+
+fn has_glob_magic(path: &str) -> bool {
+    path.chars()
+        .any(|character| matches!(character, '*' | '?' | '[' | '{'))
 }
 
 #[async_trait]
@@ -107,14 +153,24 @@ impl Tool for ReadFileTool {
         ToolDefinition {
             name: "read_file".to_string(),
             description:
-                "Preferred tool for reading file contents; use this instead of shell commands such as cat, head, tail, or sed. Reads a UTF-8 text file and returns the resolved path, range information, and numbered lines, stopping at 50 KiB of output. To edit, copy an exact unique block of shown text into edit_file.old_text and provide its replacement as new_text. Optionally pass start_line and max_lines; defaults to the first 1000 lines. Image files (png, jpg, jpeg, gif, webp) are returned as an image you can view."
+                "Preferred tool for reading file contents; use this instead of shell commands such as cat, head, tail, or sed. Reads a UTF-8 text file and returns the resolved path, range information, and numbered lines, stopping at 50 KiB of output. To edit, copy an exact unique block of shown text into edit_file.old_text and provide its replacement as new_text. Optionally pass start_line and max_lines; defaults to the first 1000 lines. `path` may be a glob (`*` and `?` never cross directory boundaries; use `**` to recurse); use additive `paths` for more literals or globs and `exclude` to omit matches. Bulk reads skip hidden files and honor .gitignore, cap the match count and aggregate output, and preserve image attachments. Image files (png, jpg, jpeg, gif, webp) are returned as an image you can view."
                     .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "File path to read. Relative paths resolve from the working directory."
+                        "description": "File path or glob to read. Relative paths resolve from the working directory."
+                    },
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Additional literal paths or globs to read."
+                    },
+                    "exclude": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Glob patterns to omit from a bulk read."
                     },
                     "start_line": {
                         "type": "integer",
@@ -135,8 +191,9 @@ impl Tool for ReadFileTool {
     }
 
     async fn execute(&self, arguments: Value) -> Result<String, String> {
-        let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
-        read_text(&args, None, None).await
+        self.read_file_inner(arguments, None, None)
+            .await
+            .map(|output| output.content)
     }
 
     async fn execute_output(&self, arguments: Value) -> Result<ToolOutput, String> {
@@ -167,34 +224,253 @@ impl ReadFileTool {
         snapshots: Option<&Snapshots>,
         working_dir: Option<&Path>,
     ) -> Result<ToolOutput, String> {
-        let path = arguments.get("path").and_then(|v| v.as_str());
-        if let Some(media_type) = path.and_then(image_media_type) {
-            let resolved = snapshot::resolve_existing_path(path.unwrap(), working_dir).await?;
-            let path = resolved.to_string_lossy().into_owned();
-            ensure_size(&path, MAX_IMAGE_FILE_BYTES).await?;
-            let bytes = fs::read(&resolved).await.map_err(crate::util::errstr)?;
-            ensure_len(bytes.len() as u64, MAX_IMAGE_FILE_BYTES)?;
-            let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
-            let note = format!("[read image {path} ({media_type}, {} bytes)]", bytes.len());
-            let (width, height) = crate::llm::parse_image_dimensions(&bytes)
-                .map(|(w, h)| (Some(w), Some(h)))
-                .unwrap_or_default();
-            return Ok(ToolOutput::with_images(
-                note,
-                vec![ImageData {
-                    media_type: media_type.to_string(),
-                    data,
-                    width,
-                    height,
-                    ..Default::default()
-                }],
-            ));
+        let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
+        if args.is_bulk() {
+            return read_bulk(&args, snapshots, working_dir).await;
         }
 
-        let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
+        let path = &args.path;
+        if let Some(media_type) = image_media_type(path) {
+            let resolved = snapshot::resolve_existing_path(path, working_dir).await?;
+            return read_image_resolved(&resolved, media_type).await;
+        }
+
         let text = read_text(&args, snapshots, working_dir).await?;
         Ok(ToolOutput::text(text))
     }
+}
+
+async fn read_image_resolved(resolved: &Path, media_type: &str) -> Result<ToolOutput, String> {
+    let path = resolved.to_string_lossy().into_owned();
+    ensure_readable(&path, MAX_IMAGE_FILE_BYTES).await?;
+    let bytes = fs::read(resolved).await.map_err(crate::util::errstr)?;
+    ensure_len(bytes.len() as u64, MAX_IMAGE_FILE_BYTES)?;
+    let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    let note = format!("[read image {path} ({media_type}, {} bytes)]", bytes.len());
+    let (width, height) = crate::llm::parse_image_dimensions(&bytes)
+        .map(|(w, h)| (Some(w), Some(h)))
+        .unwrap_or_default();
+    Ok(ToolOutput::with_images(
+        note,
+        vec![ImageData {
+            media_type: media_type.to_string(),
+            data,
+            width,
+            height,
+            ..Default::default()
+        }],
+    ))
+}
+
+#[derive(Debug)]
+struct BulkPattern {
+    matcher: GlobMatcher,
+    absolute: bool,
+}
+
+fn path_text(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
+fn compile_bulk_pattern(raw: &str) -> Result<BulkPattern, String> {
+    let absolute = Path::new(raw).is_absolute();
+    let mut pattern = path_text(Path::new(raw));
+    if !absolute {
+        while let Some(stripped) = pattern.strip_prefix("./") {
+            pattern = stripped.to_string();
+        }
+    }
+    let matcher = GlobBuilder::new(&pattern)
+        .literal_separator(true)
+        .build()
+        .map_err(|error| format!("invalid glob `{raw}`: {error}"))?
+        .compile_matcher();
+    Ok(BulkPattern { matcher, absolute })
+}
+
+impl BulkPattern {
+    fn matches(&self, path: &Path, base: &Path) -> bool {
+        let candidate = if self.absolute {
+            path.to_path_buf()
+        } else {
+            path.strip_prefix(base).unwrap_or(path).to_path_buf()
+        };
+        self.matcher.is_match(candidate)
+    }
+}
+
+fn bulk_walk_root(raw: &str, base: &Path) -> PathBuf {
+    if !Path::new(raw).is_absolute() {
+        return base.to_path_buf();
+    }
+    let mut root = PathBuf::new();
+    for component in Path::new(raw).components() {
+        let segment = component.as_os_str().to_string_lossy();
+        if has_glob_magic(&segment) {
+            break;
+        }
+        root.push(component.as_os_str());
+    }
+    if root.as_os_str().is_empty() {
+        PathBuf::from(std::path::MAIN_SEPARATOR.to_string())
+    } else {
+        root
+    }
+}
+
+fn is_hidden_bulk_path(path: &Path, base: &Path) -> bool {
+    path.strip_prefix(base)
+        .unwrap_or(path)
+        .components()
+        .any(|component| {
+            component
+                .as_os_str()
+                .to_str()
+                .is_some_and(|name| name.starts_with('.') && name != "." && name != "..")
+        })
+}
+
+async fn bulk_base(working_dir: Option<&Path>) -> Result<PathBuf, String> {
+    let base = working_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    fs::canonicalize(base)
+        .await
+        .map_err(|error| format!("could not resolve bulk working directory: {error}"))
+}
+
+async fn expand_bulk_paths(
+    args: &Args,
+    working_dir: Option<&Path>,
+) -> Result<Vec<PathBuf>, String> {
+    let base = bulk_base(working_dir).await?;
+    let mut patterns = Vec::with_capacity(1 + args.paths.len());
+    patterns.push(args.path.as_str());
+    patterns.extend(args.paths.iter().map(String::as_str));
+    let exclusions = args
+        .exclude
+        .iter()
+        .map(|pattern| compile_bulk_pattern(pattern))
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut matched = BTreeSet::new();
+
+    for raw in patterns {
+        if has_glob_magic(raw) {
+            let pattern = compile_bulk_pattern(raw)?;
+            let root = bulk_walk_root(raw, &base);
+            let walker = WalkBuilder::new(root)
+                .standard_filters(true)
+                .hidden(true)
+                .git_ignore(true)
+                .require_git(false)
+                .build();
+            for entry in walker {
+                let Ok(entry) = entry else { continue };
+                let Some(file_type) = entry.file_type() else {
+                    continue;
+                };
+                if !file_type.is_file() || !pattern.matches(entry.path(), &base) {
+                    continue;
+                }
+                if is_hidden_bulk_path(entry.path(), &base)
+                    || exclusions
+                        .iter()
+                        .any(|exclude| exclude.matches(entry.path(), &base))
+                {
+                    continue;
+                }
+                let Ok(resolved) = fs::canonicalize(entry.path()).await else {
+                    continue;
+                };
+                matched.insert(resolved);
+            }
+        } else {
+            let resolved = snapshot::resolve_existing_path(raw, working_dir).await?;
+            if is_hidden_bulk_path(&resolved, &base)
+                || exclusions
+                    .iter()
+                    .any(|exclude| exclude.matches(&resolved, &base))
+            {
+                continue;
+            }
+            matched.insert(resolved);
+        }
+    }
+
+    Ok(matched.into_iter().collect())
+}
+
+async fn read_bulk(
+    args: &Args,
+    snapshots: Option<&Snapshots>,
+    working_dir: Option<&Path>,
+) -> Result<ToolOutput, String> {
+    if args.start_line.is_some() || args.max_lines.is_some() {
+        return Err(
+            "start_line and max_lines are only supported for a single literal path; remove them from a bulk/glob read or read each file individually"
+                .to_string(),
+        );
+    }
+
+    let paths = expand_bulk_paths(args, working_dir).await?;
+    if paths.is_empty() {
+        return Err(format!(
+            "bulk read matched no visible regular files for `{}`",
+            args.path
+        ));
+    }
+
+    let total = paths.len();
+    let mut items: Vec<ToolOutput> = Vec::new();
+    let mut body_bytes = 0usize;
+    for path in paths.iter().take(MAX_BULK_FILES) {
+        let path_text = path.to_string_lossy().into_owned();
+        let result = if let Some(media_type) = image_media_type(&path_text) {
+            read_image_resolved(path, media_type).await
+        } else {
+            read_text(&Args::literal(path_text), snapshots, working_dir)
+                .await
+                .map(ToolOutput::text)
+        };
+        let Ok(output) = result else { continue };
+
+        // Reserve room for the summary line and separators so the aggregate
+        // never exceeds the cap, without reading files only to drop them.
+        let prospective = items.len() + 1;
+        let summary_len = format!(
+            "Bulk read: returned {prospective} of {total} matched files; skipped {}.",
+            total - prospective
+        )
+        .len();
+        let added = 2 + output.content.len();
+        if !items.is_empty() && summary_len + body_bytes + added > MAX_BULK_OUTPUT_BYTES {
+            // This file was read (arming unchanged-read dedup) but is not
+            // returned; drop its dedup entry so a later read is not stubbed.
+            if let Some(store) = snapshots
+                && let Ok(mut store) = store.write()
+            {
+                store.clear_last_read(&path.to_string_lossy());
+            }
+            break;
+        }
+        body_bytes += added;
+        items.push(output);
+    }
+
+    let returned = items.len();
+    let skipped = total - returned;
+    let mut content =
+        format!("Bulk read: returned {returned} of {total} matched files; skipped {skipped}.");
+    for item in &items {
+        content.push_str("\n\n");
+        content.push_str(&item.content);
+    }
+    let images = items.into_iter().flat_map(|item| item.images).collect();
+    Ok(ToolOutput::with_images(content, images))
+}
+
+async fn ensure_readable(path: &str, max_bytes: u64) -> Result<(), String> {
+    snapshot::ensure_readable_regular_file(path, max_bytes).await
 }
 
 /// Read text, optionally recording the snapshot and shown line numbers.
@@ -205,7 +481,7 @@ async fn read_text(
 ) -> Result<String, String> {
     let resolved = snapshot::resolve_existing_path(&args.path, working_dir).await?;
     let path = resolved.to_string_lossy().into_owned();
-    ensure_size(&path, MAX_TEXT_FILE_BYTES).await?;
+    ensure_readable(&path, MAX_TEXT_FILE_BYTES).await?;
     let raw = fs::read_to_string(&resolved).await.map_err(|e| {
         if e.kind() == ErrorKind::InvalidData {
             "file is not valid UTF-8 (probably binary); use shell to inspect it".to_string()
@@ -226,7 +502,7 @@ async fn read_text(
 
     if first > total {
         // Range starts past EOF: nothing to show, but still report totals.
-        record_snapshot(snapshots, &path, &raw, &normalized, &[])?;
+        record_snapshot(snapshots, &path, &raw, &normalized, &[], None)?;
         return Ok(if total > 0 {
             format!(
                 "File: {path}\nRange: no lines; file has {total} line{}",
@@ -240,6 +516,21 @@ async fn read_text(
     // Collect the requested window, bounding both individual lines and the
     // complete rendered tool output. Lines are never split by the output cap.
     let requested_end = (start + max).min(total);
+    // Measure the widest header we could emit once, so the byte cap counts it
+    // without rebuilding the header for every candidate line. The header is
+    // longest when the read continues past the window (it then carries the
+    // "Stopped"/"Continue" lines), and only grows with the shown line number and
+    // truncated-line count, so sizing it for the whole window is a safe bound.
+    let header_end = requested_end.min(total.saturating_sub(1)).max(first);
+    let header_reserve = range_header(
+        &path,
+        first,
+        header_end,
+        total,
+        Some("50 KiB output limit"),
+        requested_end.saturating_sub(first) + 1,
+    )
+    .len();
     let mut end = start;
     let mut body = String::new();
     let mut shown_nums: Vec<usize> = Vec::with_capacity(requested_end - start);
@@ -256,30 +547,26 @@ async fn read_text(
         } else {
             format!("{n:>5} | {content}\n")
         };
-        let next_truncated = truncated_count + usize::from(overlong);
-        let header = range_header(
-            &path,
-            first,
-            n,
-            total,
-            Some("50 KiB output limit"),
-            next_truncated,
-        );
-        if !body.is_empty() && header.len() + body.len() + rendered.len() > MAX_OUTPUT_BYTES {
+        if !body.is_empty() && header_reserve + body.len() + rendered.len() > MAX_OUTPUT_BYTES {
             byte_limited = true;
             break;
         }
         body.push_str(&rendered);
         end = n;
-        truncated_count = next_truncated;
+        truncated_count += usize::from(overlong);
         if !overlong {
             shown_nums.push(n);
         }
     }
 
-    // Record the full normalized text + only the shown (editable) line numbers.
-    // Elided and truncated lines are not editable (visible-line guard).
-    record_snapshot(snapshots, &path, &raw, &normalized, &shown_nums)?;
+    let window = (!shown_nums.is_empty()).then_some((first, end));
+    let (tag, unchanged) =
+        record_snapshot(snapshots, &path, &raw, &normalized, &shown_nums, window)?;
+    if unchanged {
+        return Ok(format!(
+            "File: {path}\nUnchanged: lines {first}-{end}, tag {tag} — identical to the earlier read; that content is already in context."
+        ));
+    }
 
     let stopped = if byte_limited {
         Some("50 KiB output limit")
@@ -309,17 +596,27 @@ fn record_snapshot(
     raw: &str,
     normalized: &str,
     seen: &[usize],
-) -> Result<(), String> {
+    window: Option<(usize, usize)>,
+) -> Result<(String, bool), String> {
+    let tag = snapshot::compute_tag(normalized);
     if let Some(store) = snapshots {
         let mut guard = store
             .write()
             .map_err(|_| "snapshot store lock is poisoned".to_string())?;
-        guard.record_with_format(
+        let tag = guard.record_with_format(
             path,
             normalized,
             snapshot::TextFormat::detect(raw),
             Some(seen),
         );
+        let unchanged = if let Some((first, end)) = window {
+            let digest = snapshot::compute_digest(normalized);
+            guard.take_unchanged(path, &digest, first, end)
+        } else {
+            guard.clear_last_read(path);
+            false
+        };
+        return Ok((tag, unchanged));
     }
-    Ok(())
+    Ok((tag, false))
 }

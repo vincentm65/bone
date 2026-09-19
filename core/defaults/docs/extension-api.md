@@ -165,6 +165,35 @@ host-owned panes.
 `ctx.tools.call(name, args, { approval = "safe" | "read_only" | "danger" })`
 uses the normal registry and approval pipeline. Lua tool nesting is bounded.
 
+### Native `read_file`
+
+Use the native `read_file` tool for source and text inspection instead of shell
+commands such as `cat`, `head`, `tail`, or `sed`. A single literal `path` keeps
+the normal line-window behavior: `start_line` is 1-based and `max_lines`
+defaults to 1,000. Images with `png`, `jpg`, `jpeg`, `gif`, or `webp`
+extensions are returned as image attachments.
+
+Bulk reads are additive. Keep the required scalar `path` and use `paths` for
+additional literals or globs; `exclude` accepts one pattern or an array of
+patterns to omit. A glob in `path`, a glob in `paths`, or either additive field
+selects bulk mode. Bulk reads do not accept `start_line` or `max_lines`; read a
+specific literal separately when a line range is needed.
+
+Bulk expansion honors `.gitignore`, skips hidden paths and `.git`, and applies
+`exclude` patterns after matching. Results are canonicalized and de-duplicated.
+At most 50 matched files are considered, and the aggregate returned text is
+capped at 100 KiB between complete files; the result reports returned, matched,
+and skipped counts. Text output is still bounded per file at 50 KiB. Matching
+image files remain attachments. Missing literal paths get bounded spelling
+repair and did-you-mean suggestions, while special files such as devices,
+streams, directories, and other non-regular files are rejected safely.
+
+When the same unchanged literal window is read twice in the live session, the
+second result may be a one-use `Unchanged` stub because the content is already
+in context. The stub is consumed on use, so the next identical read returns the
+content again. Deduplication is per file for bulk reads and does not replace
+image, empty, out-of-range, or uneditable-only responses.
+
 ## Commands and return actions
 
 Commands are invoked as `/name args`. A command can return:
