@@ -63,3 +63,44 @@ fn compute_tag_matches_across_line_endings() {
     // CRLF and LF of the same logical content must hash identically.
     assert_eq!(compute_tag(&normalize_text("a\r\nb")), compute_tag("a\nb"));
 }
+
+#[test]
+fn snapshot_keeps_full_digest_separate_from_display_tag() {
+    let mut store = SnapshotStore::with_dedup(true);
+    let first = "version = 18\n";
+    let second = "version = 93\n";
+    assert_eq!(compute_tag(first), compute_tag(second));
+    assert_ne!(compute_digest(first), compute_digest(second));
+
+    store.record("a.txt", first, Some(&[1]));
+    assert_eq!(store.head("a.txt").unwrap().digest, compute_digest(first));
+    assert!(!store.take_unchanged("a.txt", &compute_digest(first), 1, 1));
+    assert!(!store.take_unchanged("a.txt", &compute_digest(second), 1, 1));
+}
+
+#[test]
+fn unchanged_read_is_consumed_and_mismatches_rearm() {
+    let digest = compute_digest("content");
+    let mut store = SnapshotStore::with_dedup(true);
+    assert!(!store.take_unchanged("a.txt", &digest, 1, 2));
+    assert!(store.take_unchanged("a.txt", &digest, 1, 2));
+    assert!(!store.take_unchanged("a.txt", &digest, 1, 2));
+
+    assert!(!store.take_unchanged("a.txt", &digest, 3, 4));
+    assert!(store.take_unchanged("a.txt", &digest, 3, 4));
+    assert!(!store.take_unchanged("a.txt", &compute_digest("changed"), 3, 4));
+    assert!(store.take_unchanged("a.txt", &compute_digest("changed"), 3, 4));
+}
+
+#[test]
+fn clearing_store_and_disabled_dedup_drop_pending_reads() {
+    let digest = compute_digest("content");
+    let mut store = SnapshotStore::with_dedup(true);
+    assert!(!store.take_unchanged("a.txt", &digest, 1, 1));
+    store.clear();
+    assert!(!store.take_unchanged("a.txt", &digest, 1, 1));
+
+    let mut disabled = SnapshotStore::with_dedup(false);
+    assert!(!disabled.take_unchanged("a.txt", &digest, 1, 1));
+    assert!(!disabled.take_unchanged("a.txt", &digest, 1, 1));
+}

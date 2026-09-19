@@ -331,7 +331,12 @@ struct ManagedEntry {
 }
 
 impl ManagedEntry {
-    fn attach(&mut self, conversation_id: i64, clock: u64, window: Option<u32>) -> SessionAttachment {
+    fn attach(
+        &mut self,
+        conversation_id: i64,
+        clock: u64,
+        window: Option<u32>,
+    ) -> SessionAttachment {
         self.last_used = clock;
         SessionAttachment {
             conversation_id,
@@ -2431,6 +2436,7 @@ impl DaemonCtx {
                         crate::agent::estimate_context_chars(&history, tool_defs_json_chars);
                     s.token_stats.set_context_estimate(prompt_chars);
                 }
+                self.reset_host_tool_state();
                 self.publish_snapshot();
                 Flow::Continue
             }

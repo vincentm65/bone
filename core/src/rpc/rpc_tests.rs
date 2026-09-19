@@ -1690,6 +1690,9 @@ async fn interactive_command_private_completion_returns_replace_and_accounts_usa
     );
     session.session_db = Some(db);
     session.conversation_id = Some(conversation_id);
+    session.tools.snapshots = std::sync::Arc::new(std::sync::RwLock::new(
+        crate::tools::snapshot::SnapshotStore::with_dedup(true),
+    ));
     session.transcript.push(crate::llm::ChatMessage::new(
         crate::llm::ChatRole::User,
         "original history",
@@ -1745,6 +1748,15 @@ async fn interactive_command_private_completion_returns_replace_and_accounts_usa
     assert_eq!(persisted.request_count, 1);
     drop(session);
 
+    let digest = crate::tools::snapshot::compute_digest("reset content\n");
+    {
+        let session = ctx.session.lock().unwrap();
+        let mut snapshots = session.tools.snapshots.write().unwrap();
+        snapshots.record("reset.txt", "reset content\n", Some(&[1]));
+        assert!(!snapshots.take_unchanged("reset.txt", &digest, 1, 1));
+        assert!(snapshots.head("reset.txt").is_some());
+    }
+
     assert!(matches!(
         ctx.handle_idle_command(
             RuntimeCommand::ReplaceConversation {
@@ -1756,6 +1768,10 @@ async fn interactive_command_private_completion_returns_replace_and_accounts_usa
         Flow::Continue
     ));
     let session = ctx.session.lock().unwrap();
+    let mut snapshots = session.tools.snapshots.write().unwrap();
+    assert!(snapshots.head("reset.txt").is_none());
+    assert!(!snapshots.take_unchanged("reset.txt", &digest, 1, 1));
+    drop(snapshots);
     assert_eq!(session.transcript, replacement);
     let effective = session
         .session_db

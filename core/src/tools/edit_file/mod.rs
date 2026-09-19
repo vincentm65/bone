@@ -452,10 +452,8 @@ fn remap_seen_lines(
 }
 
 async fn read_live(path: &Path) -> Result<(String, String), String> {
-    let meta = fs::metadata(path).await.map_err(crate::util::errstr)?;
-    if !meta.is_file() {
-        return Err(format!("`{}` is not a regular file", path.display()));
-    }
+    let display = path.to_string_lossy();
+    snapshot::ensure_readable_regular_file(&display, u64::MAX).await?;
     let raw = fs::read_to_string(path)
         .await
         .map_err(crate::util::errstr)?;

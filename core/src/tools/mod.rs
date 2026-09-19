@@ -4,6 +4,7 @@ pub mod approval;
 pub mod command_policy;
 pub mod create_file;
 pub mod edit_file;
+pub mod path_repair;
 pub mod read_file;
 pub mod registry;
 pub mod shell;
