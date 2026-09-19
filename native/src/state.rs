@@ -338,8 +338,7 @@ impl State {
             // what is held), so any such growth makes the sync unbounded rather
             // than risk a reply shorter than the transcript on screen.
             window: if self.rows.len() <= self.replaced_rows {
-                self
-                    .window
+                self.window
                     .map(|window| window.max(self.loaded_messages.len() as u32))
             } else {
                 None

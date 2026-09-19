@@ -541,7 +541,11 @@ fn plugin_package_path_enables_in_package_requires() {
     let dir = tempfile::tempdir().unwrap();
     let plugins = dir.path().join("plugins");
     std::fs::create_dir_all(plugins.join("alpha/lib")).unwrap();
-    std::fs::write(plugins.join("alpha/lib/helper.lua"), "return { answer = 42 }\n").unwrap();
+    std::fs::write(
+        plugins.join("alpha/lib/helper.lua"),
+        "return { answer = 42 }\n",
+    )
+    .unwrap();
     std::fs::write(
         plugins.join("alpha/init.lua"),
         r#"
@@ -553,9 +557,8 @@ fn plugin_package_path_enables_in_package_requires() {
     std::fs::create_dir_all(plugins.join("inactive")).unwrap();
     std::fs::write(plugins.join("inactive/init.lua"), ALPHA_TOOL_LUA).unwrap();
 
-    let disabled: std::collections::HashSet<String> = ["inactive".to_string()]
-        .into_iter()
-        .collect();
+    let disabled: std::collections::HashSet<String> =
+        ["inactive".to_string()].into_iter().collect();
     let lua = plugin_test_lua();
     run_lua_plugin_files(&lua, &plugins, Some(&disabled)).unwrap();
 
@@ -584,8 +587,14 @@ fn plugin_package_path_enables_in_package_requires() {
     );
 
     // The require inside init.lua resolved against the plugin's own lib/.
-    assert_eq!(registered_tool_plugins(&lua), vec![Some("alpha".to_string())]);
-    let answer: i64 = lua.load(r#"return require("lib.helper").answer"#).eval().unwrap();
+    assert_eq!(
+        registered_tool_plugins(&lua),
+        vec![Some("alpha".to_string())]
+    );
+    let answer: i64 = lua
+        .load(r#"return require("lib.helper").answer"#)
+        .eval()
+        .unwrap();
     assert_eq!(answer, 42);
 
     // A hot reload re-runs the packages but must not duplicate search paths.

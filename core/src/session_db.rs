@@ -1816,7 +1816,8 @@ impl SessionDb {
         )?;
         let mut messages: Vec<StoredMessage> = rows.collect::<rusqlite::Result<_>>()?;
         messages.reverse();
-        let has_older = self.message_count(conversation_id)? > i64::from(offset) + messages.len() as i64;
+        let has_older =
+            self.message_count(conversation_id)? > i64::from(offset) + messages.len() as i64;
         Ok((messages, has_older))
     }
 

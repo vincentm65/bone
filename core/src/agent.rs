@@ -3,7 +3,8 @@
 use crate::chat::build_chat_history;
 use crate::config::store::ConfigStore;
 use crate::llm::{
-    ChatMessage, ChatRole, TokenStats, providers::create_provider_with_config,
+    ChatMessage, ChatRole, TokenStats,
+    providers::create_provider_with_config,
     token_tracker::{
         CHARS_PER_TOKEN, ImageTokenProfile, estimate_image_tokens, parse_image_dimensions,
     },

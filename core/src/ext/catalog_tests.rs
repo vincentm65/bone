@@ -217,7 +217,10 @@ fn min_bone_version_gate_accepts_and_rejects() {
         entry
     };
 
-    assert!(make(None).bone_version_ok().is_ok(), "no requirement passes");
+    assert!(
+        make(None).bone_version_ok().is_ok(),
+        "no requirement passes"
+    );
     assert!(
         make(Some("0.1.0")).bone_version_ok().is_ok(),
         "a satisfied bare version passes"

@@ -16,9 +16,15 @@ fn default_profile_matches_qwen2_vl() {
 #[test]
 fn estimate_prefers_known_then_sniffed_then_unknown() {
     let p = ImageTokenProfile::default();
-    assert_eq!(estimate_image_tokens(Some((448, 448)), Some((28, 28)), &p), 256);
+    assert_eq!(
+        estimate_image_tokens(Some((448, 448)), Some((28, 28)), &p),
+        256
+    );
     // Zero/absent known dims fall through to the sniffed value.
-    assert_eq!(estimate_image_tokens(Some((0, 0)), Some((448, 448)), &p), 256);
+    assert_eq!(
+        estimate_image_tokens(Some((0, 0)), Some((448, 448)), &p),
+        256
+    );
     assert_eq!(estimate_image_tokens(None, Some((56, 56)), &p), 4);
     assert_eq!(estimate_image_tokens(None, None, &p), 512);
 }

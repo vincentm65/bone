@@ -43,7 +43,9 @@ impl ImageTokenProfile {
     /// Token count for a single image of `width`×`height` pixels.
     pub fn tokens_for(&self, width: u32, height: u32) -> u32 {
         let stride = (self.patch_size * self.merge_size).max(1);
-        let tiles = width.div_ceil(stride).saturating_mul(height.div_ceil(stride));
+        let tiles = width
+            .div_ceil(stride)
+            .saturating_mul(height.div_ceil(stride));
         tiles.clamp(self.min_tokens, self.max_tokens)
     }
 }
@@ -131,11 +133,7 @@ fn jpeg_dimensions(data: &[u8]) -> Option<(u32, u32)> {
         }
         let marker = data[i + 1];
         // SOF0..SOF15 except DHT (C4), JPG (C8), DAC (CC) carry the size.
-        if (0xC0..=0xCF).contains(&marker)
-            && marker != 0xC4
-            && marker != 0xC8
-            && marker != 0xCC
-        {
+        if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC {
             let h = u16::from_be_bytes([data[i + 5], data[i + 6]]) as u32;
             let w = u16::from_be_bytes([data[i + 7], data[i + 8]]) as u32;
             return non_zero(w, h);

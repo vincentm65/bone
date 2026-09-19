@@ -377,11 +377,7 @@ pub fn is_installed(entry: &CatalogEntry) -> bool {
 /// legacy layout).
 pub fn has_installed_files(entry: &CatalogEntry) -> bool {
     entry.validate().is_ok()
-        && (primary_present(entry)
-            || entry
-                .files
-                .iter()
-                .any(|file| bundled_present(entry, file)))
+        && (primary_present(entry) || entry.files.iter().any(|file| bundled_present(entry, file)))
 }
 
 fn bundled_sha256(entry: &CatalogEntry) -> Option<String> {
@@ -532,10 +528,12 @@ pub fn install(entry: &CatalogEntry) -> Result<(), String> {
 
     // Sweep the legacy flat files the migration consumed (or that shadow a
     // freshly written package file) so old and new layouts never coexist.
-    for legacy in entry.legacy_primary_paths()
-        .into_iter()
-        .chain(entry.files.iter().filter_map(|file| entry.legacy_bundled_path(file)))
-    {
+    for legacy in entry.legacy_primary_paths().into_iter().chain(
+        entry
+            .files
+            .iter()
+            .filter_map(|file| entry.legacy_bundled_path(file)),
+    ) {
         if legacy.exists() {
             if let Err(e) = std::fs::remove_file(&legacy) {
                 super::ctx::runtime_warn(format!(

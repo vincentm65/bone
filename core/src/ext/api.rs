@@ -366,9 +366,7 @@ fn setup_theme_api(
     settings_path: &Path,
     shared_ui: super::api_ui::SharedUi,
 ) -> Result<(), String> {
-    let theme_roots = theme_roots(
-        settings_path.parent().unwrap_or_else(|| Path::new(".")),
-    );
+    let theme_roots = theme_roots(settings_path.parent().unwrap_or_else(|| Path::new(".")));
     let theme = lua.create_table().map_err(crate::util::errstr)?;
 
     let list_roots = theme_roots.clone();
@@ -400,9 +398,8 @@ fn setup_theme_api(
     let load_ui = shared_ui.clone();
     let load = lua
         .create_function(move |lua, name: String| {
-            let resolved =
-                load_theme(lua, &load_roots, &load_store, &load_path, &name)
-                    .map_err(mlua::Error::external)?;
+            let resolved = load_theme(lua, &load_roots, &load_store, &load_path, &name)
+                .map_err(mlua::Error::external)?;
             publish_theme(&load_ui, &resolved).map_err(mlua::Error::external)
         })
         .map_err(crate::util::errstr)?;

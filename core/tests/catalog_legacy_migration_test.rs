@@ -73,9 +73,16 @@ fn legacy_flat_install_migrates_to_the_plugin_package() {
     assert!(!catalog::is_installed(&entry));
     catalog::install(&entry).unwrap();
     assert_eq!(fs::read_to_string(&package_init).unwrap(), "-- demo v1\n");
-    assert_eq!(fs::read_to_string(&package_helper).unwrap(), "-- helper v1\n");
+    assert_eq!(
+        fs::read_to_string(&package_helper).unwrap(),
+        "-- helper v1\n"
+    );
     for legacy in [&legacy_tool, &legacy_command, &legacy_helper] {
-        assert!(!legacy.exists(), "fresh install must not create {}", legacy.display());
+        assert!(
+            !legacy.exists(),
+            "fresh install must not create {}",
+            legacy.display()
+        );
     }
     assert!(catalog::is_installed(&entry));
     assert!(!catalog::needs_update(&entry));
@@ -115,7 +122,10 @@ fn legacy_flat_install_migrates_to_the_plugin_package() {
     fs::create_dir_all(legacy_helper.parent().unwrap()).unwrap();
     fs::write(&legacy_tool, "-- demo v1, edited locally\n").unwrap();
     fs::write(&legacy_helper, "-- helper v2\n").unwrap();
-    assert!(catalog::is_installed(&entry), "legacy-only still counts as installed");
+    assert!(
+        catalog::is_installed(&entry),
+        "legacy-only still counts as installed"
+    );
     assert!(catalog::needs_update(&entry));
     catalog::install(&entry).unwrap();
     assert_eq!(
@@ -149,7 +159,10 @@ fn legacy_flat_install_migrates_to_the_plugin_package() {
     catalog::remove(&entry).unwrap();
     assert!(!package_init.exists());
     assert!(!package_helper.exists());
-    assert!(!package_dir.exists(), "empty package directory must be pruned");
+    assert!(
+        !package_dir.exists(),
+        "empty package directory must be pruned"
+    );
     for legacy in [&legacy_tool, &legacy_command, &legacy_helper] {
         assert!(!legacy.exists(), "{} must be removed", legacy.display());
     }

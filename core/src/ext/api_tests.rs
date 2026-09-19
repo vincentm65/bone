@@ -439,7 +439,10 @@ fn plugin_packages_can_ship_themes_and_user_themes_win() {
         .exec()
         .unwrap_err()
         .to_string();
-    assert!(error.contains("theme 'missing' not found"), "unexpected: {error}");
+    assert!(
+        error.contains("theme 'missing' not found"),
+        "unexpected: {error}"
+    );
 
     std::fs::remove_dir_all(root).ok();
 }

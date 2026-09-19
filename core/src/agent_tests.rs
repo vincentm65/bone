@@ -216,8 +216,8 @@ fn injection_rejects_max_tokens() {
 
 #[test]
 fn estimate_counts_images_only_on_non_tool_messages() {
-    use crate::llm::{ChatRole, ImageData};
     use crate::llm::token_tracker::{CHARS_PER_TOKEN, ImageTokenProfile, estimate_image_tokens};
+    use crate::llm::{ChatRole, ImageData};
 
     // A 448×448 image under the default (Qwen2-VL) profile = 256 tokens.
     let image = ImageData {
@@ -227,21 +227,16 @@ fn estimate_counts_images_only_on_non_tool_messages() {
         height: Some(448),
         ..Default::default()
     };
-    let img_chars = (estimate_image_tokens(
-        Some((448, 448)),
-        None,
-        &ImageTokenProfile::default(),
-    ) as f64
+    let img_chars = (estimate_image_tokens(Some((448, 448)), None, &ImageTokenProfile::default())
+        as f64
         * CHARS_PER_TOKEN)
         .ceil() as usize;
     assert_eq!(img_chars, 973); // 256 * 3.8, rounded up
 
     // A relay (user) message's image IS counted, and adds exactly img_chars.
     let relay_empty = ChatMessage::user_with_images("Image output from read_file:", vec![]);
-    let relay_with = ChatMessage::user_with_images(
-        "Image output from read_file:",
-        vec![image.clone()],
-    );
+    let relay_with =
+        ChatMessage::user_with_images("Image output from read_file:", vec![image.clone()]);
     assert_eq!(
         super::estimate_context_chars(&[relay_with.clone()], 0)
             - super::estimate_context_chars(&[relay_empty.clone()], 0),
