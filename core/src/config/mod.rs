@@ -232,26 +232,25 @@ pub fn seed_file_forced(path: &Path, content: &str) {
         ));
     }
 }
-/// The onboarding wizard's persisted choices: which bundled tools/commands the
+/// The onboarding wizard's persisted choices: which bundled plugin packages the
 /// user opted into. Doubles as the "already onboarded" marker — its presence
 /// means setup has run. Absent it, seeding falls back to "seed everything".
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+///
+/// The always-on `core` package is seeded regardless of this list. Plugin
+/// packages are the only extension unit: standalone tools and commands are
+/// installed inside a package (`lua/plugins/<name>/init.lua`) and enabled under
+/// the single `plugins` settings namespace.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SetupSelection {
-    /// Chosen tool filenames, e.g. `["subagent.lua", "web_search.lua"]`.
-    pub tools: Vec<String>,
-    /// Chosen command filenames, e.g. `["compact.lua"]`.
-    pub commands: Vec<String>,
+    /// Chosen plugin package names, e.g. `["core", "themes"]`.
+    #[serde(default)]
+    pub plugins: Vec<String>,
 }
 
 impl SetupSelection {
-    /// The selected tool filenames as a lookup set.
-    pub fn tool_set(&self) -> std::collections::HashSet<String> {
-        self.tools.iter().cloned().collect()
-    }
-
-    /// The selected command filenames as a lookup set.
-    pub fn command_set(&self) -> std::collections::HashSet<String> {
-        self.commands.iter().cloned().collect()
+    /// The selected plugin package names as a lookup set.
+    pub fn plugin_set(&self) -> std::collections::HashSet<String> {
+        self.plugins.iter().cloned().collect()
     }
 }
 
@@ -271,8 +270,8 @@ pub fn save_setup_selection(selection: &SetupSelection) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let json = serde_json::to_string_pretty(selection)
-        .unwrap_or_else(|_| "{\"tools\":[],\"commands\":[]}".to_string());
+    let json =
+        serde_json::to_string_pretty(selection).unwrap_or_else(|_| "{\"plugins\":[]}".to_string());
     fs::write(path, json)
 }
 
@@ -297,14 +296,14 @@ pub fn needs_onboarding() -> bool {
 }
 
 /// Seed the always-safe, selection-independent config (command policy, AGENTS,
-/// and Lua libraries). Idempotent.
+/// and the bundled plugin packages). Idempotent.
 pub fn seed_base() -> Result<(), String> {
     seed_command_policy_if_missing()?;
     sync_agents_md();
     sync_core_docs();
     migrate_memory_to_catalog(&bone_dir());
-    ext::seed_default_lua_libs(&bone_dir().join("lua/lib"), None, false);
-    ext::seed_helpers_dir(&bone_dir().join("lua/helpers"));
+    ext::seed_default_lua_plugins(&bone_dir().join("lua/plugins"), None, false);
+    ext::migrate_flat_lua_extensions(&bone_dir().join("lua"));
     Ok(())
 }
 
@@ -378,12 +377,13 @@ fn migrate_memory_to_catalog_with_hash(dir: &Path, bundled_command_sha256: &str)
     }
 }
 
-/// Seed base config plus default tools, filtered by the onboarding selection.
-/// `None` seeds every bundled tool (default / upgrade behavior).
+/// Seed base config plus bundled plugin packages, filtered by the onboarding
+/// selection. `None` seeds every bundled package (default / upgrade behavior);
+/// the always-on `core` package is seeded either way.
 pub fn seed_all_with(selection: Option<&SetupSelection>) -> Result<(), String> {
     seed_base()?;
-    let allow = selection.map(SetupSelection::tool_set);
-    ext::seed_default_lua_tools(&bone_dir().join("lua/tools"), allow.as_ref(), false);
+    let allow = selection.map(SetupSelection::plugin_set);
+    ext::seed_default_lua_plugins(&bone_dir().join("lua/plugins"), allow.as_ref(), false);
     Ok(())
 }
 
@@ -424,7 +424,8 @@ fn seed_starter_subagent() -> std::io::Result<()> {
 
 /// Persist the wizard's results and materialize them on disk: the selection
 /// file (also the onboarding marker), the chosen `init.lua`, canonical starter
-/// sub-agent configuration, and seeded tools/commands filtered to the selection.
+/// sub-agent configuration, and seeded plugin packages filtered to the
+/// selection.
 pub fn apply_onboarding(selection: &SetupSelection, init: InitChoice) -> std::io::Result<()> {
     // Materialize everything first; only write the selection file (the
     // "onboarding complete" marker) last, so a failure partway through leaves
@@ -446,14 +447,9 @@ pub fn apply_onboarding(selection: &SetupSelection, init: InitChoice) -> std::io
     }
 
     seed_base().map_err(std::io::Error::other)?;
-    ext::seed_default_lua_tools(
-        &bone_dir().join("lua/tools"),
-        Some(&selection.tool_set()),
-        false,
-    );
-    ext::seed_default_lua_commands(
-        &bone_dir().join("lua/commands"),
-        Some(&selection.command_set()),
+    ext::seed_default_lua_plugins(
+        &bone_dir().join("lua/plugins"),
+        Some(&selection.plugin_set()),
         false,
     );
 

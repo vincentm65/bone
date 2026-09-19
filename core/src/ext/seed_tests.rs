@@ -28,50 +28,28 @@ fn canonical_disabled_tools_are_excluded() {
 }
 
 #[test]
-fn extract_description_prefers_field_then_comment() {
-    assert_eq!(
-        extract_description("-- header\nregister_tool({ description = \"does a thing\" })"),
-        "does a thing"
-    );
-    assert_eq!(
-        extract_description("-- just a comment\nlocal x = 1"),
-        "just a comment"
-    );
-    assert_eq!(extract_description("local x = 1"), "");
-}
-
-#[test]
 fn catalog_extensions_are_not_bundled_defaults() {
+    let bundled = |key: &str| DEFAULT_LUA_PLUGINS.iter().any(|(name, _)| *name == key);
     assert!(
-        !DEFAULT_LUA_TOOLS
-            .iter()
-            .any(|(name, _)| *name == "task_list.lua"),
-        "task_list.lua should be installed only through the catalog"
+        !bundled("task_list/init.lua"),
+        "task_list should be installed only through the catalog"
     );
 
-    for command in ["compact.lua", "memory.lua", "usage.lua"] {
+    for stem in ["compact", "memory", "usage"] {
         assert!(
-            !DEFAULT_LUA_COMMANDS
-                .iter()
-                .any(|(name, _)| *name == command),
-            "{command} should not be embedded as a default command"
-        );
-        assert!(
-            !default_command_catalog()
-                .iter()
-                .any(|(name, _)| *name == command),
-            "{command} should not appear in the default command catalog"
+            !bundled(&format!("{stem}/init.lua")),
+            "{stem} should not be embedded as a bundled default"
         );
     }
 }
 
 #[test]
-fn user_authored_commands_load_even_with_restrictive_selection() {
+fn user_authored_plugins_load_even_with_restrictive_selection() {
     assert!(
-        !DEFAULT_LUA_COMMANDS
+        !DEFAULT_LUA_PLUGINS
             .iter()
-            .any(|(name, _)| *name == "agents.lua"),
-        "agents.lua is user-owned and must not be embedded"
+            .any(|(name, _)| name.starts_with("agents/")),
+        "agents is user-owned and must not be embedded"
     );
 
     let dir = std::env::temp_dir().join(format!(
@@ -80,18 +58,18 @@ fn user_authored_commands_load_even_with_restrictive_selection() {
         std::thread::current().id()
     ));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("agents.lua"), "loaded_user_agents = true").unwrap();
+    std::fs::create_dir_all(dir.join("agents")).unwrap();
+    std::fs::write(dir.join("agents/init.lua"), "loaded_user_agents = true").unwrap();
 
     let restrictive: HashSet<String> = HashSet::new();
     let lua = mlua::Lua::new();
-    run_lua_command_files(&lua, &dir, Some(&restrictive)).unwrap();
+    run_lua_plugin_files(&lua, &dir, Some(&restrictive)).unwrap();
     assert!(lua.globals().get::<bool>("loaded_user_agents").unwrap());
     let _ = std::fs::remove_dir_all(dir);
 }
 
 #[test]
-fn allow_filter_seeds_only_named_files() {
+fn allow_filter_seeds_only_named_packages() {
     let dir = std::env::temp_dir().join(format!(
         "bone-seed-test-{}-{:?}",
         std::process::id(),
@@ -99,26 +77,61 @@ fn allow_filter_seeds_only_named_files() {
     ));
     let _ = std::fs::remove_dir_all(&dir);
 
-    // Optional tools all moved to the catalog, so exercise the (identical)
-    // seed logic against the bundled commands instead.
-    // Pick the first bundled command to allow, exclude the rest.
-    let first = DEFAULT_LUA_COMMANDS[0].0.to_string();
-    let allow: HashSet<String> = std::iter::once(first.clone()).collect();
-    seed_default_lua_commands(&dir, Some(&allow), false);
+    // Only `core` ships bundled today, so exercise the package-selection logic
+    // (as `seed_default_lua_plugins` drives it) against a synthetic list.
+    let bundled: &[(&'static str, &'static str)] =
+        &[("core/init.lua", "core"), ("extra/init.lua", "extra")];
 
-    assert!(dir.join(&first).exists(), "allowed file should be seeded");
-    for (name, _) in DEFAULT_LUA_COMMANDS.iter().skip(1) {
+    // Selecting only `extra` still seeds the always-on `core` package.
+    let allow: HashSet<String> = std::iter::once("extra".to_string()).collect();
+    let keep = |name: &str| {
+        let package = bundled_plugin_of(name);
+        package == BUNDLED_CORE_PLUGIN || allow.contains(package)
+    };
+    seed_default_lua(&dir, bundled, keep, false);
+    assert!(dir.join("core/init.lua").exists(), "core is always seeded");
+    assert!(
+        dir.join("extra/init.lua").exists(),
+        "selected package seeded"
+    );
+
+    // Selecting nothing seeds `core` and excludes every optional package.
+    let dir2 = dir.join("none");
+    let allow: HashSet<String> = HashSet::new();
+    let keep = |name: &str| {
+        let package = bundled_plugin_of(name);
+        package == BUNDLED_CORE_PLUGIN || allow.contains(package)
+    };
+    seed_default_lua(&dir2, bundled, keep, false);
+    assert!(dir2.join("core/init.lua").exists());
+    assert!(
+        !dir2.join("extra/init.lua").exists(),
+        "an unselected package must not be seeded"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn seed_default_lua_plugins_always_seeds_core() {
+    let dir = std::env::temp_dir().join(format!(
+        "bone-seed-core-test-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+
+    // An empty selection (everything deselected) still materializes the whole
+    // bundled `core` package.
+    let allow: HashSet<String> = HashSet::new();
+    seed_default_lua_plugins(&dir, Some(&allow), false);
+    for (name, _) in DEFAULT_LUA_PLUGINS {
         assert!(
-            !dir.join(name).exists(),
-            "non-selected file {name} should not be seeded"
+            dir.join(name).exists(),
+            "bundled {name} should be seeded even with an empty selection"
         );
     }
-
-    // None seeds everything.
-    seed_default_lua_commands(&dir, None, false);
-    for (name, _) in DEFAULT_LUA_COMMANDS {
-        assert!(dir.join(name).exists(), "{name} should be seeded with None");
-    }
+    assert!(dir.join("core/init.lua").exists());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -132,12 +145,12 @@ fn force_overwrites_existing_file() {
     ));
     let _ = std::fs::remove_dir_all(&dir);
 
-    let (first, content) = DEFAULT_LUA_COMMANDS[0];
-    std::fs::create_dir_all(&dir).unwrap();
+    let (first, content) = DEFAULT_LUA_PLUGINS[0];
+    std::fs::create_dir_all(dir.join("core")).unwrap();
     std::fs::write(dir.join(first), "-- user edit with canonical-config-v7\n").unwrap();
 
     // Without force, an existing current-format file is left untouched.
-    seed_default_lua_commands(&dir, None, false);
+    seed_default_lua_plugins(&dir, None, false);
     assert_eq!(
         std::fs::read_to_string(dir.join(first)).unwrap(),
         "-- user edit with canonical-config-v7\n",
@@ -145,7 +158,7 @@ fn force_overwrites_existing_file() {
     );
 
     // With force, the bundled default replaces it.
-    seed_default_lua_commands(&dir, None, true);
+    seed_default_lua_plugins(&dir, None, true);
     assert_eq!(
         std::fs::read_to_string(dir.join(first)).unwrap(),
         content,
@@ -167,12 +180,12 @@ fn bundled_ui_seeds_refresh_pre_feature_copies() {
 
     let history = dir.join("history.lua");
     std::fs::write(&history, "-- old history helper\n").unwrap();
-    assert!(should_refresh_seeded_lua(&history, "history.lua").unwrap());
+    assert!(should_refresh_seeded_lua(&history, "core/lib/history.lua").unwrap());
 
     // Older history helpers that already had token counts still need the
     // candidate-first list query refresh.
     std::fs::write(&history, "function M.list() return total_token_count end\n").unwrap();
-    assert!(should_refresh_seeded_lua(&history, "history.lua").unwrap());
+    assert!(should_refresh_seeded_lua(&history, "core/lib/history.lua").unwrap());
 
     let menu = dir.join("menu.lua");
     std::fs::write(
@@ -180,7 +193,7 @@ fn bundled_ui_seeds_refresh_pre_feature_copies() {
         "local pane = require(\"ui.pane\")\n-- SELECTED_BG description_spans label_modifiers\n",
     )
     .unwrap();
-    assert!(should_refresh_seeded_lua(&menu, "ui/menu.lua").unwrap());
+    assert!(should_refresh_seeded_lua(&menu, "core/lib/ui/menu.lua").unwrap());
 
     std::fs::write(
         &menu,
@@ -188,7 +201,7 @@ fn bundled_ui_seeds_refresh_pre_feature_copies() {
     )
     .unwrap();
     assert!(
-        should_refresh_seeded_lua(&menu, "ui/menu.lua").unwrap(),
+        should_refresh_seeded_lua(&menu, "core/lib/ui/menu.lua").unwrap(),
         "menus predating content-aware preview sizing should refresh"
     );
 
@@ -197,34 +210,34 @@ fn bundled_ui_seeds_refresh_pre_feature_copies() {
         "require(\"ui.pane\") -- SELECTED_BG description_spans label_modifiers initial_checked preview_row_budget multi-space-toggle-v2\n",
     )
     .unwrap();
-    assert!(!should_refresh_seeded_lua(&menu, "ui/menu.lua").unwrap());
+    assert!(!should_refresh_seeded_lua(&menu, "core/lib/ui/menu.lua").unwrap());
 
     let config = dir.join("config.lua");
     std::fs::write(&config, "-- old config command\n").unwrap();
-    assert!(!should_refresh_seeded_lua(&config, "config.lua").unwrap());
+    assert!(!should_refresh_seeded_lua(&config, "core/init.lua").unwrap());
     std::fs::write(&config, "-- canonical-config-v2\n").unwrap();
-    assert!(!should_refresh_seeded_lua(&config, "config.lua").unwrap());
+    assert!(!should_refresh_seeded_lua(&config, "core/init.lua").unwrap());
     std::fs::write(&config, "-- canonical-config-v3\n").unwrap();
-    assert!(!should_refresh_seeded_lua(&config, "config.lua").unwrap());
+    assert!(!should_refresh_seeded_lua(&config, "core/init.lua").unwrap());
     std::fs::write(&config, "-- canonical-config-v4\n").unwrap();
-    assert!(!should_refresh_seeded_lua(&config, "config.lua").unwrap());
+    assert!(!should_refresh_seeded_lua(&config, "core/init.lua").unwrap());
     std::fs::write(&config, "-- canonical-config-v5\n").unwrap();
-    assert!(!should_refresh_seeded_lua(&config, "config.lua").unwrap());
+    assert!(!should_refresh_seeded_lua(&config, "core/init.lua").unwrap());
     std::fs::write(&config, "-- canonical-config-v6\n-- user customization\n").unwrap();
     assert!(
-        !should_refresh_seeded_lua(&config, "config.lua").unwrap(),
+        !should_refresh_seeded_lua(&config, "core/init.lua").unwrap(),
         "customized v6 config must be preserved"
     );
     std::fs::write(&config, "-- canonical-config-v7\n").unwrap();
-    assert!(!should_refresh_seeded_lua(&config, "config.lua").unwrap());
+    assert!(!should_refresh_seeded_lua(&config, "core/init.lua").unwrap());
     // v8 is now a legacy seed too: the pristine digest (see
     // CANONICAL_CONFIG_V8_SHA256) refreshes, but any edited v8 the user has
     // changed — even one keeping the marker — is preserved.
     std::fs::write(&config, "-- canonical-config-v8\n").unwrap();
-    assert!(!should_refresh_seeded_lua(&config, "config.lua").unwrap());
+    assert!(!should_refresh_seeded_lua(&config, "core/init.lua").unwrap());
     std::fs::write(&config, "-- canonical-config-v8\n-- user customization\n").unwrap();
     assert!(
-        !should_refresh_seeded_lua(&config, "config.lua").unwrap(),
+        !should_refresh_seeded_lua(&config, "core/init.lua").unwrap(),
         "edited v8 config must be preserved"
     );
 
@@ -233,11 +246,7 @@ fn bundled_ui_seeds_refresh_pre_feature_copies() {
 
 #[test]
 fn bundled_seed_names_use_forward_slashes() {
-    for (name, _) in DEFAULT_LUA_LIBS
-        .iter()
-        .chain(DEFAULT_LUA_TOOLS)
-        .chain(DEFAULT_LUA_COMMANDS)
-    {
+    for (name, _) in DEFAULT_LUA_PLUGINS {
         assert!(
             !name.contains('\\'),
             "bundled seed name {name:?} must use `/`, because refresh rules match literal forward-slash paths"
@@ -245,12 +254,12 @@ fn bundled_seed_names_use_forward_slashes() {
     }
 
     // Regression: the Windows build used to emit `ui\menu.lua`, so the
-    // `name == "ui/menu.lua"` refresh rule below never fired and the seeded
-    // menu drifted forever.
-    let (name, content) = DEFAULT_LUA_LIBS
+    // `name == "core/lib/ui/menu.lua"` refresh rule below never fired and the
+    // seeded menu drifted forever.
+    let (name, content) = DEFAULT_LUA_PLUGINS
         .iter()
-        .find(|(name, _)| *name == "ui/menu.lua")
-        .expect("bundled libs include ui/menu.lua");
+        .find(|(name, _)| *name == "core/lib/ui/menu.lua")
+        .expect("bundled plugins include core/lib/ui/menu.lua");
 
     let dir = std::env::temp_dir().join(format!(
         "bone-seed-name-separator-test-{}-{:?}",
@@ -304,13 +313,23 @@ fn lua_loading_continues_after_unreadable_and_invalid_files() {
         std::thread::current().id()
     ));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(dir.join("a.lua")).unwrap();
-    std::fs::write(dir.join("b.lua"), "this is not valid lua (").unwrap();
-    std::fs::write(dir.join("c.lua"), "loaded_after_failure = true").unwrap();
 
+    // An unreadable source path reports a read error rather than panicking.
     let lua = mlua::Lua::new();
-    let error = run_lua_files_filtered(&lua, &dir, |_| true).unwrap_err();
-    assert!(error.contains("failed to read"));
+    let error = exec_lua_file(&lua, &dir.join("missing.lua"), "missing", None).unwrap_err();
+    assert!(
+        error.contains("failed to read"),
+        "unexpected error: {error}"
+    );
+
+    // A broken plugin does not stop later plugins from loading.
+    let plugins = dir.join("plugins");
+    std::fs::create_dir_all(plugins.join("b")).unwrap();
+    std::fs::write(plugins.join("b/init.lua"), "this is not valid lua (").unwrap();
+    std::fs::create_dir_all(plugins.join("c")).unwrap();
+    std::fs::write(plugins.join("c/init.lua"), "loaded_after_failure = true").unwrap();
+
+    let error = run_lua_plugin_files(&lua, &plugins, None).unwrap_err();
     assert!(error.contains("error executing"));
     assert!(lua.globals().get::<bool>("loaded_after_failure").unwrap());
 
@@ -325,9 +344,12 @@ fn settings_owners_are_scoped_and_failed_files_roll_back_all_pages() {
         std::thread::current().id()
     ));
     let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
+    let plugins = dir.join("plugins");
+    for name in ["a", "b", "c"] {
+        std::fs::create_dir_all(plugins.join(name)).unwrap();
+    }
     std::fs::write(
-        dir.join("a.lua"),
+        plugins.join("a/init.lua"),
         r#"
         bone.settings.define("original", {
           title = "Original",
@@ -337,7 +359,7 @@ fn settings_owners_are_scoped_and_failed_files_roll_back_all_pages() {
     )
     .unwrap();
     std::fs::write(
-        dir.join("b.lua"),
+        plugins.join("b/init.lua"),
         r#"
         bone.settings.define("transient_one", {
           title = "One",
@@ -352,7 +374,7 @@ fn settings_owners_are_scoped_and_failed_files_roll_back_all_pages() {
     )
     .unwrap();
     std::fs::write(
-        dir.join("c.lua"),
+        plugins.join("c/init.lua"),
         r#"
         assert(not pcall(bone.settings.define, "original", {
           title = "Collision",
@@ -383,7 +405,7 @@ fn settings_owners_are_scoped_and_failed_files_roll_back_all_pages() {
     .unwrap();
     lua.globals().set("bone", bone).unwrap();
 
-    let error = run_lua_files_filtered(&lua, &dir, |_| true).unwrap_err();
+    let error = run_lua_plugin_files(&lua, &plugins, None).unwrap_err();
     assert!(error.contains("fail after registration"));
 
     let pages = registry.read().unwrap().pages();
@@ -394,8 +416,8 @@ fn settings_owners_are_scoped_and_failed_files_roll_back_all_pages() {
             .collect::<Vec<_>>(),
         vec!["original", "survivor"]
     );
-    assert_eq!(pages[0].owner, dir.join("a.lua").to_string_lossy());
-    assert_eq!(pages[1].owner, dir.join("c.lua").to_string_lossy());
+    assert_eq!(pages[0].owner, plugins.join("a/init.lua").to_string_lossy());
+    assert_eq!(pages[1].owner, plugins.join("c/init.lua").to_string_lossy());
     let bone: mlua::Table = lua.globals().get("bone").unwrap();
     assert!(
         bone.get::<Option<String>>("_settings_owner")
@@ -417,15 +439,170 @@ fn unreadable_seed_target_is_preserved() {
     let target = dir.join("locked.lua");
     std::fs::create_dir_all(&target).unwrap();
 
-    seed_default_lua(&dir, &[("locked.lua", "replacement")], None, false);
+    seed_default_lua(&dir, &[("locked.lua", "replacement")], |_| true, false);
     assert!(
         target.is_dir(),
         "unreadable existing target was not preserved"
     );
 
-    seed_default_lua(&dir, &[("locked.lua", "replacement")], None, true);
+    seed_default_lua(&dir, &[("locked.lua", "replacement")], |_| true, true);
     assert!(target.is_dir(), "force replaced a directory with a file");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ── Flat → plugin-package migration ─────────────────────────────────────────
+
+/// Run `f` against a fresh `lua/` tree with `BONE_DIR` pointed at the temp root,
+/// so migration notices never touch the real config directory. `f` receives the
+/// `lua/` directory and the config root.
+fn with_migration_root(f: impl FnOnce(&Path, &Path)) {
+    let _guard = crate::util::test_env_lock();
+    let previous = std::env::var_os("BONE_DIR");
+    let root = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("BONE_DIR", root.path()) };
+    let lua = root.path().join("lua");
+    std::fs::create_dir_all(&lua).unwrap();
+    f(&lua, root.path());
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+}
+
+#[test]
+fn migrate_flat_files_become_packages_and_prune_dirs() {
+    with_migration_root(|lua, _root| {
+        std::fs::create_dir_all(lua.join("tools")).unwrap();
+        std::fs::create_dir_all(lua.join("commands")).unwrap();
+        std::fs::write(lua.join("tools/weather.lua"), "weather body").unwrap();
+        std::fs::write(lua.join("commands/agents.lua"), "agents body").unwrap();
+
+        migrate_flat_lua_extensions(lua);
+
+        assert_eq!(
+            std::fs::read_to_string(lua.join("plugins/weather/init.lua")).unwrap(),
+            "weather body"
+        );
+        assert_eq!(
+            std::fs::read_to_string(lua.join("plugins/agents/init.lua")).unwrap(),
+            "agents body"
+        );
+        assert!(
+            !lua.join("tools").exists(),
+            "emptied tools dir should be pruned"
+        );
+        assert!(
+            !lua.join("commands").exists(),
+            "emptied commands dir should be pruned"
+        );
+    });
+}
+
+#[test]
+fn migrate_deletes_flat_file_identical_to_destination() {
+    with_migration_root(|lua, _root| {
+        std::fs::create_dir_all(lua.join("plugins/weather")).unwrap();
+        std::fs::write(lua.join("plugins/weather/init.lua"), "same").unwrap();
+        std::fs::create_dir_all(lua.join("tools")).unwrap();
+        std::fs::write(lua.join("tools/weather.lua"), "same").unwrap();
+
+        migrate_flat_lua_extensions(lua);
+
+        assert!(!lua.join("tools/weather.lua").exists());
+        assert_eq!(
+            std::fs::read_to_string(lua.join("plugins/weather/init.lua")).unwrap(),
+            "same"
+        );
+    });
+}
+
+#[test]
+fn migrate_preserves_conflicting_flat_file_as_backup() {
+    with_migration_root(|lua, _root| {
+        std::fs::create_dir_all(lua.join("plugins/weather")).unwrap();
+        std::fs::write(lua.join("plugins/weather/init.lua"), "bundled").unwrap();
+        std::fs::create_dir_all(lua.join("tools")).unwrap();
+        std::fs::write(lua.join("tools/weather.lua"), "user edit").unwrap();
+
+        migrate_flat_lua_extensions(lua);
+
+        assert_eq!(
+            std::fs::read_to_string(lua.join("plugins/weather/init.lua")).unwrap(),
+            "bundled"
+        );
+        assert!(!lua.join("tools/weather.lua").exists());
+        assert_eq!(
+            std::fs::read_to_string(lua.join("tools/weather.lua.bundled-backup")).unwrap(),
+            "user edit"
+        );
+    });
+}
+
+#[test]
+fn migrate_remaps_pristine_config_command_into_bundled_core() {
+    with_migration_root(|lua, _root| {
+        let (_, bundled) = DEFAULT_LUA_PLUGINS
+            .iter()
+            .find(|(name, _)| *name == "core/init.lua")
+            .expect("core is bundled");
+        std::fs::create_dir_all(lua.join("commands")).unwrap();
+        std::fs::write(lua.join("commands/config.lua"), bundled).unwrap();
+
+        migrate_flat_lua_extensions(lua);
+
+        assert!(!lua.join("commands/config.lua").exists());
+        assert!(
+            !lua.join("plugins/config").exists(),
+            "config must never migrate into a shadow package"
+        );
+    });
+}
+
+#[test]
+fn migrate_sets_aside_customized_config_command() {
+    with_migration_root(|lua, _root| {
+        std::fs::create_dir_all(lua.join("commands")).unwrap();
+        std::fs::write(lua.join("commands/config.lua"), "-- my own config\n").unwrap();
+
+        migrate_flat_lua_extensions(lua);
+
+        assert!(!lua.join("commands/config.lua").exists());
+        assert!(!lua.join("plugins/config").exists());
+        assert_eq!(
+            std::fs::read_to_string(lua.join("commands/config.lua.bundled-backup")).unwrap(),
+            "-- my own config\n"
+        );
+    });
+}
+
+#[test]
+fn migrate_relocates_legacy_lib_modules() {
+    with_migration_root(|lua, _root| {
+        // A pristine copy of a bundled module is deleted; an edited one is set
+        // aside so it can never shadow the package copy.
+        let (_, exact) = DEFAULT_LUA_PLUGINS
+            .iter()
+            .find(|(name, _)| *name == "core/lib/history.lua")
+            .expect("core/lib/history.lua is bundled");
+        std::fs::create_dir_all(lua.join("lib/ui")).unwrap();
+        std::fs::write(lua.join("lib/history.lua"), exact).unwrap();
+        std::fs::write(lua.join("lib/ui/menu.lua"), "-- customized menu\n").unwrap();
+
+        migrate_flat_lua_extensions(lua);
+
+        assert!(!lua.join("lib/history.lua").exists());
+        assert!(!lua.join("lib/ui/menu.lua").exists());
+        assert_eq!(
+            std::fs::read_to_string(lua.join("lib/ui/menu.lua.bundled-backup")).unwrap(),
+            "-- customized menu\n"
+        );
+        assert!(
+            lua.join("lib/ui").is_dir(),
+            "a dir holding a backup is retained"
+        );
+    });
 }
 
 // ── Plugin package loading (Model A) ────────────────────────────────────────

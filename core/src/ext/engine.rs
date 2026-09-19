@@ -8,7 +8,7 @@ use mlua::{Function, Lua, LuaSerdeExt, Result as LuaResult, Table};
 use super::types::BootOptions;
 
 /// Default `init.lua`: lightweight wiring only. Substantial banner logic lives
-/// in the seeded `lua/lib/banner.lua` module.
+/// in the bundled `core` plugin's `lib/banner.lua` module.
 const DEFAULT_INIT_LUA: &str = r#"-- Bone init.lua
 require("banner")
 "#;
@@ -61,8 +61,12 @@ pub(crate) fn create_engine(
     bone.set("config_dir", config_dir.to_string_lossy().to_string())
         .map_err(crate::util::errstr)?;
 
-    // Conventional location for user-supplied native helper binaries, created by
-    // `seed_helpers_dir`. Exposed so scripts locate it without hard-coding paths.
+    // Conventional location for user-supplied native helper binaries. Bone no
+    // longer pre-creates this directory; the user creates it when needed. It is
+    // exposed so scripts locate it without hard-coding paths. Bone never
+    // discovers or executes files here — helpers are invoked explicitly through
+    // approved shell or process APIs, and their contents are outside the Lua
+    // source fingerprint.
     bone.set(
         "helpers_dir",
         config_dir.join("lua/helpers").to_string_lossy().to_string(),
@@ -111,9 +115,15 @@ pub(crate) fn create_engine(
         .set("print", print_fn)
         .map_err(crate::util::errstr)?;
 
-    // Restrict `require` to the `lua/lib` module root so packaged modules
-    // resolve predictably (`require("ui.menu")` → `lua/lib/ui/menu.lua`). The
-    // `lua/` directory itself is not a module search path.
+    // `require` resolves against the bundled `core` package's `lib/` first, then
+    // the user's `lua/lib` module root. Core comes first so fresh bundled modules
+    // (`require("ui.menu")`, `require("banner")`, `require("history")`) always
+    // win over stale copies left in `lua/lib`; `lua/lib` remains a searchable root
+    // for user modules whose names do not collide.
+    let core_lib_dir = config_dir
+        .join("lua/plugins")
+        .join(super::BUNDLED_CORE_PLUGIN)
+        .join("lib");
     let lua_lib_dir = config_dir.join("lua").join("lib");
     let package: Table = globals
         .get("package")
@@ -124,10 +134,12 @@ pub(crate) fn create_engine(
     } else {
         ";"
     };
-    let lua_lib_dir_str = lua_lib_dir.to_string_lossy();
+    let core_lib_dir = core_lib_dir.to_string_lossy();
+    let lua_lib_dir = lua_lib_dir.to_string_lossy();
     let new_path = format!(
-        "{lua_lib_dir_str}/?.lua;{lua_lib_dir_str}/?/init.lua{sep}{existing_path}",
-        lua_lib_dir_str = lua_lib_dir_str,
+        "{core}/?.lua;{core}/?/init.lua;{lib}/?.lua;{lib}/?/init.lua{sep}{existing_path}",
+        core = core_lib_dir,
+        lib = lua_lib_dir,
     );
     package.set("path", new_path).map_err(crate::util::errstr)?;
 

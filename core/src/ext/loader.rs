@@ -114,11 +114,25 @@ pub fn boot(
         }
     }
 
-    // Seed libraries before init.lua so user startup code can `require` them,
-    // and create the conventional native-helper directory.
+    // Seed bundled plugin packages before init.lua so startup code can
+    // `require` them — at minimum the always-on `core` package, which ships the
+    // canonical `/config` command and the shared `banner`/`history`/`ui.*`
+    // modules. Then migrate any pre-package flat extensions
+    // (`lua/{tools,commands}/*.lua`, `lua/lib/*.lua`) into `lua/plugins/`.
+    // A persisted setup selection (from the onboarding wizard) narrows which
+    // bundled packages are seeded; absent it, all are. Sub-agent VMs load no
+    // user extensions at all.
+    let selection = crate::config::load_setup_selection();
+    let plugin_allow = selection
+        .as_ref()
+        .map(crate::config::SetupSelection::plugin_set);
     if !subagent {
-        super::seed_default_lua_libs(&config_dir.join("lua/lib"), None, false);
-        super::seed_helpers_dir(&config_dir.join("lua/helpers"));
+        super::seed_default_lua_plugins(
+            &config_dir.join("lua/plugins"),
+            plugin_allow.as_ref(),
+            false,
+        );
+        super::migrate_flat_lua_extensions(&config_dir.join("lua"));
     }
 
     let mut source_errors = Vec::new();
@@ -130,43 +144,6 @@ pub fn boot(
             false
         }
     };
-
-    // Seed default Lua tools and commands (never overwrite user files).
-    // A persisted setup selection (from the onboarding wizard) narrows which
-    // bundled tools/commands get seeded; absent it, all are seeded.
-    let selection = crate::config::load_setup_selection();
-    let tool_allow = selection
-        .as_ref()
-        .map(crate::config::SetupSelection::tool_set);
-    let cmd_allow = selection
-        .as_ref()
-        .map(crate::config::SetupSelection::command_set);
-    if !subagent {
-        super::seed_default_lua_tools(&config_dir.join("lua/tools"), tool_allow.as_ref(), false);
-        super::seed_default_lua_commands(
-            &config_dir.join("lua/commands"),
-            cmd_allow.as_ref(),
-            false,
-        );
-    }
-
-    // Run tool and command files from lua/{tools,commands}/ directories. The
-    // onboarding selection is enforced here too, not just at seed time: a
-    // previously seeded bundled file the user later deselected stays on disk
-    // but must not load.
-    if let Err(e) =
-        super::run_lua_tool_files(&lua, &config_dir.join("lua/tools"), tool_allow.as_ref())
-    {
-        log_boot_warning(config_dir, format_args!("Lua tools failed: {e}"));
-        source_errors.push(e);
-    }
-    if !subagent
-        && let Err(e) =
-            super::run_lua_command_files(&lua, &config_dir.join("lua/commands"), cmd_allow.as_ref())
-    {
-        log_boot_warning(config_dir, format_args!("Lua commands failed: {e}"));
-        source_errors.push(e);
-    }
 
     // Run installed plugin *packages* (lua/plugins/<name>/init.lua). A plugin
     // disabled in canonical settings is skipped entirely: its entry point never

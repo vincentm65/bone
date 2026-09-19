@@ -369,7 +369,7 @@ fn catalog_apply_installs_and_removes_with_per_item_results() {
             CatalogItemOutcome::Installed
         ));
         assert_ne!(result.snapshot.revision, snapshot.revision);
-        assert!(bone.join("lua/tools/weather.lua").exists());
+        assert!(bone.join("lua/plugins/weather/init.lua").exists());
 
         let remove = HostRequest::CatalogApply {
             expected_revision: result.snapshot.revision,
@@ -385,7 +385,7 @@ fn catalog_apply_installs_and_removes_with_per_item_results() {
             result.results[0].outcome,
             CatalogItemOutcome::Removed
         ));
-        assert!(!bone.join("lua/tools/weather.lua").exists());
+        assert!(!bone.join("lua/plugins/weather").exists());
     });
 }
 

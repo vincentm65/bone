@@ -155,26 +155,15 @@ fn main() {
 
     emit_build_identity(&manifest_dir);
 
-    for (source, output, constant, recursive) in [
-        (
-            "defaults/lua/tools",
-            "default_lua_tools.rs",
-            "DEFAULT_LUA_TOOLS",
-            false,
-        ),
-        (
-            "defaults/lua/commands",
-            "default_lua_commands.rs",
-            "DEFAULT_LUA_COMMANDS",
-            false,
-        ),
-        (
-            "defaults/lua/lib",
-            "default_lua_libs.rs",
-            "DEFAULT_LUA_LIBS",
-            true,
-        ),
-    ] {
-        generate_lua_table(&manifest_dir, &out_dir, source, output, constant, recursive);
-    }
+    // Every bundled default is a plugin *package*:
+    // `defaults/lua/plugins/<name>/init.lua` plus its submodules. Names are
+    // package-relative (`core/init.lua`, `core/lib/ui/menu.lua`).
+    generate_lua_table(
+        &manifest_dir,
+        &out_dir,
+        "defaults/lua/plugins",
+        "default_lua_plugins.rs",
+        "DEFAULT_LUA_PLUGINS",
+        true,
+    );
 }

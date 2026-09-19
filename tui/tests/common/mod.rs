@@ -49,27 +49,37 @@ pub fn temp_dir(label: &str) -> PathBuf {
     std::env::temp_dir().join(format!("bone-{label}-{suffix}"))
 }
 
-/// Copy the in-repo catalog tools/commands into `config_dir/lua/{tools,commands}`,
-/// simulating items the user installed from the catalog. These optional tools
-/// no longer ship in the binary, so tests that need them seed them this way.
+/// Copy every plugin package from the in-repo catalog into
+/// `config_dir/lua/plugins/<name>/`, simulating packages the user installed from
+/// the catalog. These extensions no longer ship in the binary, so tests that
+/// need them seed them this way. A missing checkout is a no-op.
 #[allow(dead_code)]
 pub fn seed_catalog_into(config_dir: &std::path::Path) {
     let repo = std::env::var_os("BONE_CATALOG_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../bone-catalog"));
-    for (src, dst) in [("tools", "lua/tools"), ("commands", "lua/commands")] {
-        let from = repo.join(src);
-        let to = config_dir.join(dst);
-        std::fs::create_dir_all(&to).unwrap();
-        let Ok(entries) = std::fs::read_dir(&from) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "lua") {
-                let name = path.file_name().unwrap();
-                std::fs::copy(&path, to.join(name)).unwrap();
-            }
+    let to = config_dir.join("lua/plugins");
+    let Ok(entries) = std::fs::read_dir(repo.join("plugins")) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let from = entry.path();
+        if from.is_dir() {
+            copy_dir(&from, &to.join(entry.file_name())).unwrap();
         }
     }
+}
+
+fn copy_dir(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)?.flatten() {
+        let src = entry.path();
+        let dst = to.join(entry.file_name());
+        if src.is_dir() {
+            copy_dir(&src, &dst)?;
+        } else {
+            std::fs::copy(&src, &dst)?;
+        }
+    }
+    Ok(())
 }

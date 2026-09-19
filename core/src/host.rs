@@ -277,11 +277,7 @@ impl HostService {
         }
 
         let selection = SetupSelection {
-            tools: Vec::new(),
-            commands: crate::ext::default_command_catalog()
-                .into_iter()
-                .map(|(name, _)| name.to_string())
-                .collect(),
+            plugins: crate::ext::default_lua_plugin_names(),
         };
         let init = match init {
             InitChoice::Populated => config::InitChoice::Populated,

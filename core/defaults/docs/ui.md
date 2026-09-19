@@ -273,15 +273,14 @@ install, update, remove, and enable/disable controls. Enable/disable is
 plugin-level: a disabled plugin stays installed but none of its capabilities
 (tools, commands) register. The TUI reaches the same plugin install/update/remove
 through `/catalog`. The config UI presents a single **Plugins** page that unifies
-standalone tools, standalone commands, and plugin packages in one flat list — each
-row carrying its `tool` / `command` / `plugin` type in a dedicated **Type** column
-(blank for any row without one) — so a plugin, a plain-file
-tool, and a plain-file command are managed the same way. Enabling or disabling any
-row routes to the matching canonical setting (`tools.disabled` / `commands.disabled`
-/ `plugins.disabled`). Installing or updating a plugin asks for explicit consent
-first — Bone Lua is not sandboxed and runs with the user's authority — and declining
-leaves the plugin tree unchanged. Every file's `sha256` is verified before anything
-is written.
+every plugin package with the built-in capabilities that no plugin owns in one
+flat list — each row carrying its `tool` / `command` / `plugin` type in a
+dedicated **Type** column (blank for any row without one). Enabling or disabling
+any row routes to the matching canonical setting (`tools.disabled` /
+`commands.disabled` / `plugins.disabled`). Installing or updating a plugin asks
+for explicit consent first — Bone Lua is not sandboxed and runs with the user's
+authority — and declining leaves the plugin tree unchanged. Every file's `sha256`
+is verified before anything is written.
 
 The daemon owns core conversation history and active transcript state. A client may
 request list/load/new actions and render the resulting snapshot, but clients must not

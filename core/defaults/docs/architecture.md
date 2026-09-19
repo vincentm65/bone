@@ -19,8 +19,8 @@ TUI / desktop client / headless runner / remote client
 ## Workspace boundaries
 
 - `core` owns the agent loop, providers, tools, approvals, configuration, Lua
-  extensions (plain files and directory-based plugins under `lua/plugins/<name>/`),
-  runtime sessions, jobs, and persistence.
+  extensions (plugin packages under `lua/plugins/<name>/`), runtime sessions,
+  jobs, and persistence.
 - `protocol` owns the serializable commands, events, configuration snapshots,
   session snapshots, tool types, and view types that cross a frontend boundary.
 - `tui` owns the native terminal client and its rendering/input code.
@@ -116,22 +116,23 @@ keeps an isolated Lua VM. A catalog change reloads every cached actor without
 letting `ConfigStore` retain those VMs. Frontends keep the fullscreen workflow
 and rendering, but never substitute their own database or config directory.
 
-Building an actor's Lua VM is an ordered boot: seed library modules and the
-`lua/helpers/` directory → run `init.lua` (config root, then `lua/init.lua`) →
-seed default tools/commands → run tool files → run command files → run enabled
-plugins (`lua/plugins/*/init.lua`, one level, sorted) → collect the registered
-tools and commands. A plugin is skipped when disabled via the
-canonical `plugins.<name>` setting; disabling never deletes files, and because
-reload rebuilds a fresh VM the change takes effect on the next reload. Each
-enabled package directory is appended to `package.path`, so a plugin can
-`require` its own submodules (the global `lua/lib` wins name collisions), and a
+Building an actor's Lua VM is an ordered boot: seed the bundled plugin packages
+under `lua/plugins/` and migrate any legacy flat extension files into packages →
+run `init.lua` (config root, then `lua/init.lua`) → run enabled plugin packages
+(`lua/plugins/*/init.lua`, one level, sorted) → collect the registered tools and
+commands. A plugin is skipped when disabled via the canonical `plugins.<name>`
+setting; disabling never deletes files, and because reload rebuilds a fresh VM
+the change takes effect on the next reload. `require` resolves against the
+bundled `core` package's `lib/` first, then the user's `lua/lib` (a shared,
+non-seeded module root), and finally each enabled package's own directory, so a
+plugin can `require` its own submodules without shadowing bundled helpers. A
 plugin's `themes/` subdirectory is a theme discovery root behind the user's own
 `lua/themes/`.
 
 Configuration surfaces expose this uniformly: the `ConfigStore` schema emits one
-`plugins` page that flat-lists standalone tools, standalone commands, and plugin
-packages, each row carrying its `kind` in a dedicated **Type** column and its true
-`tools./commands./plugins.`
+`plugins` page that flat-lists every plugin package together with the built-in
+tools and commands that no plugin owns. Each row carries its `kind` in a
+dedicated **Type** column and its true `tools./commands./plugins.`
 enablement path. The old separate `tools` and `commands` pages are gone; a row's
 toggle writes to `tools.disabled`, `commands.disabled`, or `plugins.disabled`
 accordingly.

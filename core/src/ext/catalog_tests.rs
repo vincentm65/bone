@@ -41,7 +41,8 @@ fn parses_index_with_defaults_and_metadata() {
     assert!(entries[1].version.is_none());
     assert!(entries[1].dependencies.is_empty());
     assert_eq!(entries[1].dir_segment(), "commands");
-    assert!(entries[1].is_command());
+    assert_eq!(entries[1].package_name(), "goal");
+    assert_eq!(entries[1].install_rel(), "plugins/goal/init.lua");
     assert_eq!(entries[1].files.len(), 1);
     assert_eq!(entries[1].files[0].path, "themes/nord.lua");
     assert_eq!(entries[1].files[0].sha256, "def");
@@ -111,7 +112,7 @@ fn bundled_paths_are_validated_and_unique() {
         vec!["themes/../nord.lua"],
         vec!["themes/./nord.lua"],
         vec!["themes\\nord.lua"],
-        vec!["commands/themes.lua"],
+        vec!["plugins/themes/init.lua"],
         vec!["themes/nord.lua", "themes/nord.lua"],
     ] {
         let mut entry = valid.clone();
@@ -154,10 +155,10 @@ fn plugin_entries_validate_and_resolve_package_paths() {
     assert!(entry.validate().is_ok());
     assert!(entry.is_plugin());
     assert_eq!(entry.dir_segment(), "plugins");
-    assert_eq!(entry.primary_rel(), "plugins/myplugin/init.lua");
+    assert_eq!(entry.install_rel(), "plugins/myplugin/init.lua");
     assert_eq!(
-        entry.plugin_dir(),
-        Some(crate::config::bone_dir().join("lua/plugins/myplugin"))
+        entry.package_dir(),
+        crate::config::bone_dir().join("lua/plugins/myplugin")
     );
 }
 
@@ -271,7 +272,9 @@ fn plugin_legacy_flat_paths_derive_from_the_scoped_layout() {
         coincide with a legacy primary candidate"
     );
 
-    // Non-plugins were never installed flat, so they have no legacy layout.
+    // Every kind now installs into a plugin package directory; only the
+    // catalog fetch path (and, for tools/commands, the legacy flat location)
+    // still depends on the kind.
     let tool = CatalogEntry {
         name: "weather.lua".into(),
         kind: "tool".into(),
@@ -281,6 +284,11 @@ fn plugin_legacy_flat_paths_derive_from_the_scoped_layout() {
         }],
         ..CatalogEntry::default()
     };
-    assert!(tool.legacy_primary_paths().is_empty());
+    assert_eq!(tool.catalog_rel(), "tools/weather.lua");
+    assert_eq!(tool.install_rel(), "plugins/weather/init.lua");
+    assert_eq!(
+        tool.legacy_primary_paths(),
+        vec![lua.join("tools/weather.lua")]
+    );
     assert_eq!(tool.legacy_bundled_path(&tool.files[0]), None);
 }

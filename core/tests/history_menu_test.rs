@@ -3,8 +3,8 @@ use std::sync::{Arc, Mutex};
 use mlua::{Lua, Table};
 use rusqlite::Connection;
 
-const HISTORY_LUA: &str = include_str!("../defaults/lua/lib/history.lua");
-const MENU_LUA: &str = include_str!("../defaults/lua/lib/ui/menu.lua");
+const HISTORY_LUA: &str = include_str!("../defaults/lua/plugins/core/lib/history.lua");
+const MENU_LUA: &str = include_str!("../defaults/lua/plugins/core/lib/ui/menu.lua");
 
 fn history_sql() -> &'static str {
     let marker = "ctx.db.query([[";

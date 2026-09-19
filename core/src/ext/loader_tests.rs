@@ -46,7 +46,7 @@ fn boot_reports_invalid_init_source() {
 }
 
 #[test]
-fn boot_reports_invalid_tool_source() {
+fn boot_reports_invalid_migrated_tool_source() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("init.lua"), "-- valid").unwrap();
     std::fs::create_dir_all(dir.path().join("lua/tools")).unwrap();
@@ -59,22 +59,25 @@ fn boot_reports_invalid_tool_source() {
     let result = boot(
         dir.path(),
         dir.path(),
-        BootOptions {
-            agent_depth: 1,
-            ..Default::default()
-        },
+        BootOptions::default(),
         "test-model",
         "test-provider",
         Some(Arc::new(Mutex::new(Settings::defaults()))),
     );
 
     assert!(result.manager.is_available());
+    // The flat file is migrated to `lua/plugins/broken/init.lua` and then loaded
+    // as a plugin package, so its syntax error surfaces under the plugin name.
     assert!(
         result
             .source_errors
             .iter()
-            .any(|error| error.contains("broken.lua"))
+            .any(|error| error.contains("broken")),
+        "unexpected errors: {:?}",
+        result.source_errors
     );
+    assert!(!dir.path().join("lua/tools/broken.lua").exists());
+    assert!(dir.path().join("lua/plugins/broken/init.lua").exists());
 }
 
 #[test]
@@ -122,10 +125,7 @@ fn boot_ignores_uppercase_lua_tool_files() {
     let result = boot(
         dir.path(),
         dir.path(),
-        BootOptions {
-            agent_depth: 1,
-            ..Default::default()
-        },
+        BootOptions::default(),
         "test-model",
         "test-provider",
         Some(Arc::new(Mutex::new(Settings::defaults()))),
@@ -136,10 +136,13 @@ fn boot_ignores_uppercase_lua_tool_files() {
         result
             .source_errors
             .iter()
-            .all(|error| !error.contains("Foo.lua")),
+            .all(|error| !error.contains("Foo")),
         "uppercase file should not be loaded: {:?}",
         result.source_errors
     );
+    // Uppercase files are neither migrated nor loaded.
+    assert!(dir.path().join("lua/tools/Foo.lua").exists());
+    assert!(!dir.path().join("lua/plugins/Foo").exists());
 }
 
 #[test]

@@ -25,9 +25,36 @@ pub mod types;
 pub use engine::{blank_init_lua, populated_init_lua};
 pub use types::{BootOptions, BootResult, BootedTools, EventDispatchResult, ExtensionManager};
 
-include!(concat!(env!("OUT_DIR"), "/default_lua_tools.rs"));
-include!(concat!(env!("OUT_DIR"), "/default_lua_commands.rs"));
-include!(concat!(env!("OUT_DIR"), "/default_lua_libs.rs"));
+include!(concat!(env!("OUT_DIR"), "/default_lua_plugins.rs"));
+
+/// Name of the always-seeded bundled plugin package. It ships the canonical
+/// `/config` command and the shared `banner`/`history`/`ui.*` modules every
+/// install relies on, so it can never be deselected.
+pub const BUNDLED_CORE_PLUGIN: &str = "core";
+
+/// Legacy flat extensions that cannot become a stem-named package. `/config`
+/// now lives in the bundled `core` package, so `commands/config.lua` must never
+/// migrate to a `plugins/config` package that would shadow it.
+const LEGACY_FLAT_REMAP: &[(&str, &str)] = &[("commands/config.lua", "core/init.lua")];
+
+/// The package name a bundled relative path belongs to (`core/lib/ui/menu.lua`
+/// → `core`).
+fn bundled_plugin_of(name: &str) -> &str {
+    name.split('/').next().unwrap_or_default()
+}
+
+/// Names of every bundled default plugin package (top-level directories under
+/// `defaults/lua/plugins/`), sorted and deduplicated.
+pub fn default_lua_plugin_names() -> Vec<String> {
+    let mut names: Vec<String> = DEFAULT_LUA_PLUGINS
+        .iter()
+        .map(|(name, _)| bundled_plugin_of(name).to_owned())
+        .filter(|name| !name.is_empty())
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
 
 use std::collections::HashSet;
 use std::path::{Component, Path};
@@ -84,49 +111,6 @@ pub(crate) fn is_lowercase_lua_path(path: &Path) -> bool {
         })
 }
 
-/// Extract a one-line description from bundled default Lua content for the
-/// setup wizard's pickers. Prefers a `description = "..."` field (as used by
-/// `register_tool`/`register_command`), then falls back to the first `--`
-/// comment line, then an empty string.
-fn extract_description(content: &str) -> String {
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed
-            .split_once("description")
-            .and_then(|(_, r)| r.trim_start().strip_prefix('='))
-        {
-            let rest = rest.trim();
-            if let Some(stripped) = rest.strip_prefix('"')
-                && let Some(end) = stripped.find('"')
-            {
-                return stripped[..end].to_string();
-            }
-        }
-    }
-    for line in content.lines() {
-        let trimmed = line.trim();
-        if let Some(rest) = trimmed.strip_prefix("--") {
-            let rest = rest.trim_start_matches('-').trim();
-            if !rest.is_empty() {
-                return rest.to_string();
-            }
-        }
-    }
-    String::new()
-}
-
-fn catalog(items: &[(&'static str, &'static str)]) -> Vec<(&'static str, String)> {
-    items
-        .iter()
-        .map(|(name, content)| (*name, extract_description(content)))
-        .collect()
-}
-
-/// `(filename, description)` for every bundled default command.
-pub fn default_command_catalog() -> Vec<(&'static str, String)> {
-    catalog(DEFAULT_LUA_COMMANDS)
-}
-
 fn should_refresh_seeded_lua(path: &Path, name: &str) -> std::io::Result<bool> {
     let existing = std::fs::read_to_string(path)?;
     Ok(existing.contains("ctx.ui.interact")
@@ -134,7 +118,7 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> std::io::Result<bool> {
         || existing.contains("bone.register_tool")
         || existing.contains("bone.register_command")
         // Refresh menus predating the pane migration or current option-row styling.
-        || (name == "ui/menu.lua"
+        || (name == "core/lib/ui/menu.lua"
             && (!existing.contains("require(\"ui.pane\")")
                 || !existing.contains("SELECTED_BG")
                 || !existing.contains("description_spans")
@@ -144,16 +128,11 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> std::io::Result<bool> {
                 || !existing.contains("multi-space-toggle-v2")))
         // History now includes aggregate message and token counts/status,
         // and lists via a candidate-first CTE instead of a full messages join.
-        || (name == "history.lua"
-            && (!existing.contains("total_token_count")
-                || !existing.contains("WITH recent AS")))
-        // subagent's eager-render + dispatch label moved from hardcoded host
-        // special-casing to declared `display.eager` / `display.template`;
-        // refresh older seeded copies that predate those fields.
-        || (name == "subagent.lua" && !existing.contains("eager"))
+        || (name == "core/lib/history.lua"
+            && (!existing.contains("total_token_count") || !existing.contains("WITH recent AS")))
         // Config migrations refresh only exact bundled v6/v7/v8 seeds; preserve
         // any copy the user has edited, even if it has a known marker.
-        || (name == "config.lua" && is_unmodified_canonical_config(&existing)))
+        || (name == "core/init.lua" && is_unmodified_canonical_config(&existing)))
 }
 
 /// Boot the Lua extension system.
@@ -285,14 +264,15 @@ fn boot_with_tools_inner(
 
 /// Seed bundled default Lua files from `bundled` into `dir`.
 ///
-/// Creates `dir` (and each file's parent) as needed. `allow == Some(set)` seeds
-/// only the named files; `None` seeds all. `force` unconditionally overwrites.
-/// Existing files are refreshed when [`should_refresh_seeded_lua`] says so
-/// (e.g. they still use a removed Rust interaction API).
+/// Creates `dir` (and each file's parent) as needed. Only entries for which
+/// `keep(name)` is true are considered, where `name` is the bundled path
+/// relative to `dir` (e.g. `core/lib/ui/menu.lua`). `force` unconditionally
+/// overwrites. Existing files are refreshed when [`should_refresh_seeded_lua`]
+/// says so (e.g. they still use a removed Rust interaction API).
 fn seed_default_lua(
     dir: &Path,
     bundled: &[(&'static str, &'static str)],
-    allow: Option<&HashSet<String>>,
+    keep: impl Fn(&str) -> bool,
     force: bool,
 ) {
     if let Err(e) = std::fs::create_dir_all(dir) {
@@ -303,9 +283,7 @@ fn seed_default_lua(
         return;
     }
     for (name, content) in bundled {
-        if let Some(allow) = allow
-            && !allow.contains(*name)
-        {
+        if !keep(name) {
             continue;
         }
         let path = dir.join(name);
@@ -348,57 +326,198 @@ fn seed_default_lua(
     }
 }
 
-/// Seed bundled default Lua tools. See [`seed_default_lua`].
-pub fn seed_default_lua_tools(dir: &Path, allow: Option<&HashSet<String>>, force: bool) {
-    seed_default_lua(dir, DEFAULT_LUA_TOOLS, allow, force)
-}
-
-/// Seed bundled default Lua libraries. See [`seed_default_lua`].
-pub fn seed_default_lua_libs(dir: &Path, allow: Option<&HashSet<String>>, force: bool) {
-    seed_default_lua(dir, DEFAULT_LUA_LIBS, allow, force)
-}
-
-/// Seed bundled default Lua commands. See [`seed_default_lua`].
-pub fn seed_default_lua_commands(dir: &Path, allow: Option<&HashSet<String>>, force: bool) {
-    seed_default_lua(dir, DEFAULT_LUA_COMMANDS, allow, force)
-}
-
-/// Ensure the `lua/helpers/` directory exists for user-supplied native helper
-/// binaries.
+/// Seed bundled default Lua plugin *packages* into `dir` (the `lua/plugins`
+/// directory), placing each at `dir/<package>/…`.
 ///
-/// Bone never discovers or executes files here: helpers are located through
-/// `bone.helpers_dir` and invoked explicitly through approved shell or process
-/// APIs. Their contents are also outside the Lua source fingerprint. The
-/// directory only pins the conventional location so scripts have a stable path.
-pub fn seed_helpers_dir(dir: &Path) {
-    if let Err(e) = std::fs::create_dir_all(dir) {
-        ctx::runtime_warn(format!(
-            "bone: warning: could not create {}: {e}",
-            dir.display()
-        ));
+/// `allow == Some(set)` seeds only packages named in `set`, plus the always-on
+/// bundled [`BUNDLED_CORE_PLUGIN`]; `None` seeds every bundled package. See
+/// [`seed_default_lua`].
+pub fn seed_default_lua_plugins(dir: &Path, allow: Option<&HashSet<String>>, force: bool) {
+    seed_default_lua(
+        dir,
+        DEFAULT_LUA_PLUGINS,
+        |name| {
+            let package = bundled_plugin_of(name);
+            package == BUNDLED_CORE_PLUGIN || allow.is_none_or(|allow| allow.contains(package))
+        },
+        force,
+    )
+}
+
+/// One-time, data-preserving migration from the flat extension layout
+/// (`lua/{tools,commands}/<stem>.lua`, `lua/lib/<module>.lua`) to plugin
+/// packages (`lua/plugins/<name>/`).
+///
+/// Bundled packages are seeded before this runs, so a destination package may
+/// already exist. Every branch preserves the user's bytes somewhere:
+/// - a flat file identical to the bundled/current destination is deleted;
+/// - a flat file with different bytes is renamed to `<file>.bundled-backup`
+///   (never merged, never silently dropped) and a notice is logged;
+/// - otherwise the flat file's bytes move into the destination package and the
+///   flat file is deleted.
+///
+/// Empty `tools`/`commands`/`lib` directories left behind are pruned; files are
+/// never deleted without a preserved copy.
+pub fn migrate_flat_lua_extensions(lua_dir: &Path) {
+    if !lua_dir.is_dir() {
+        return;
+    }
+
+    // Flat tools/commands become packages named after the file stem, except for
+    // the documented remaps whose destination is a bundled package.
+    for flat_dir in ["tools", "commands"] {
+        for flat in sorted_lowercase_lua_files(&lua_dir.join(flat_dir)) {
+            let Some(file_name) = flat.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let rel = format!("{flat_dir}/{file_name}");
+            if let Some((_, dest_rel)) = LEGACY_FLAT_REMAP.iter().find(|(from, _)| *from == rel) {
+                if let Some((_, bundled)) = DEFAULT_LUA_PLUGINS
+                    .iter()
+                    .find(|(name, _)| name == dest_rel)
+                {
+                    migrate_remapped_flat_file(&flat, bundled);
+                }
+                continue;
+            }
+            let Some(stem) = flat.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            migrate_flat_file(&flat, &lua_dir.join("plugins").join(stem).join("init.lua"));
+        }
+    }
+
+    // Bundled library modules were previously seeded at `lua/lib/<module>.lua`.
+    let core_lib_prefix = format!("{BUNDLED_CORE_PLUGIN}/lib/");
+    for (name, bundled) in DEFAULT_LUA_PLUGINS {
+        let Some(rel) = name.strip_prefix(core_lib_prefix.as_str()) else {
+            continue;
+        };
+        let flat = lua_dir.join("lib").join(rel);
+        match std::fs::read(&flat) {
+            Ok(existing) if existing == bundled.as_bytes() => {
+                let _ = std::fs::remove_file(&flat);
+            }
+            Ok(_) => {
+                set_aside_bundled_backup(&flat);
+            }
+            Err(_) => {}
+        }
+    }
+
+    prune_empty_source_dirs(lua_dir);
+}
+
+/// Lowercase `.lua` files directly inside `dir`, sorted. A missing directory
+/// yields an empty list.
+fn sorted_lowercase_lua_files(dir: &Path) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut files: Vec<_> = entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| is_lowercase_lua_path(path))
+        .collect();
+    files.sort();
+    files
+}
+
+/// Relocate a legacy flat extension to a plugin package entry point.
+fn migrate_flat_file(flat: &Path, dest: &Path) {
+    let Ok(bytes) = std::fs::read(flat) else {
+        return;
+    };
+    match std::fs::read(dest) {
+        Ok(existing) if existing == bytes => {
+            let _ = std::fs::remove_file(flat);
+        }
+        Ok(_) => {
+            set_aside_bundled_backup(flat);
+        }
+        Err(_) => {
+            if let Some(parent) = dest.parent()
+                && let Err(e) = std::fs::create_dir_all(parent)
+            {
+                ctx::runtime_warn(format!(
+                    "bone: warning: could not create {}: {e}",
+                    parent.display()
+                ));
+                return;
+            }
+            let permissions = std::fs::metadata(flat).ok().map(|meta| meta.permissions());
+            if let Err(e) = crate::tools::write_atomic::write_atomic_sync(dest, &bytes, permissions)
+            {
+                ctx::runtime_warn(format!(
+                    "bone: warning: could not write {}: {e}",
+                    dest.display()
+                ));
+                return;
+            }
+            let _ = std::fs::remove_file(flat);
+        }
     }
 }
 
-/// Execute the Lua tool files from `dir`, honoring the onboarding selection.
-/// Bundled default tools the user deselected are skipped; user-authored files
-/// (not among the bundled defaults) always run. `allow == None` runs every
-/// file (default / upgrade behavior).
-pub fn run_lua_tool_files(
-    lua: &mlua::Lua,
-    dir: &std::path::Path,
-    allow: Option<&HashSet<String>>,
-) -> Result<(), String> {
-    run_lua_files_selected(lua, dir, DEFAULT_LUA_TOOLS, allow)
+/// Handle a legacy flat file whose destination is a bundled package entry
+/// point. Identical bytes are redundant; anything else is the user's own copy,
+/// set aside so it can never shadow the bundled package.
+fn migrate_remapped_flat_file(flat: &Path, bundled: &str) {
+    match std::fs::read(flat) {
+        Ok(existing) if existing == bundled.as_bytes() => {
+            let _ = std::fs::remove_file(flat);
+        }
+        Ok(_) => {
+            set_aside_bundled_backup(flat);
+        }
+        Err(_) => {}
+    }
 }
 
-/// Execute the Lua command files from `dir`, honoring the onboarding selection.
-/// See [`run_lua_tool_files`] for semantics.
-pub fn run_lua_command_files(
-    lua: &mlua::Lua,
-    dir: &std::path::Path,
-    allow: Option<&HashSet<String>>,
-) -> Result<(), String> {
-    run_lua_files_selected(lua, dir, DEFAULT_LUA_COMMANDS, allow)
+/// Rename a legacy flat file to `<file>.bundled-backup` so it can never shadow
+/// the plugin package that now owns its name. The copy is preserved, never
+/// merged; a notice is logged so the move is discoverable.
+fn set_aside_bundled_backup(flat: &Path) {
+    let mut backup = flat.as_os_str().to_os_string();
+    backup.push(".bundled-backup");
+    let backup = std::path::PathBuf::from(backup);
+    match std::fs::rename(flat, &backup) {
+        Ok(()) => ctx::runtime_warn(format!(
+            "bone: {} was set aside as {}; the current copy lives under lua/plugins/",
+            flat.display(),
+            backup.display()
+        )),
+        Err(e) => ctx::runtime_warn(format!(
+            "bone: warning: could not set aside {}: {e}",
+            flat.display()
+        )),
+    }
+}
+
+/// Remove the now-empty flat extension directories (`tools`, `commands`, `lib`),
+/// deepest first. Files that remain (e.g. user-authored additions or backups)
+/// keep their directories in place.
+fn prune_empty_source_dirs(lua_dir: &Path) {
+    for flat_dir in ["tools", "commands", "lib"] {
+        let root = lua_dir.join(flat_dir);
+        let mut stack = vec![root.clone()];
+        let mut dirs = Vec::new();
+        while let Some(dir) = stack.pop() {
+            dirs.push(dir.clone());
+            if let Ok(entries) = std::fs::read_dir(&dir) {
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    }
+                }
+            }
+        }
+        dirs.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
+        for dir in dirs {
+            let _ = std::fs::remove_dir(&dir);
+        }
+    }
 }
 
 /// Execute the `init.lua` entry point of every plugin package under
@@ -522,64 +641,6 @@ pub fn installed_plugin_names(plugins_dir: &std::path::Path) -> Vec<String> {
         .collect();
     names.sort();
     names
-}
-
-fn run_lua_files_selected(
-    lua: &mlua::Lua,
-    dir: &std::path::Path,
-    bundled: &[(&'static str, &'static str)],
-    allow: Option<&HashSet<String>>,
-) -> Result<(), String> {
-    let bundled_names: HashSet<&str> = bundled.iter().map(|(n, _)| *n).collect();
-    run_lua_files_filtered(lua, dir, |name| match allow {
-        // A deselected bundled default is skipped; anything not bundled (a
-        // user's own file) always loads, as does everything when no selection
-        // is persisted.
-        Some(allow) if bundled_names.contains(name) => allow.contains(name),
-        _ => true,
-    })
-}
-
-/// Execute the `.lua` files in `dir` (sorted) for which `keep(file_name)` is
-/// true.
-fn run_lua_files_filtered(
-    lua: &mlua::Lua,
-    dir: &std::path::Path,
-    keep: impl Fn(&str) -> bool,
-) -> Result<(), String> {
-    if !dir.is_dir() {
-        return Ok(());
-    }
-
-    let mut entries: Vec<_> = std::fs::read_dir(dir)
-        .map_err(|e| format!("failed to read {}: {e}", dir.display()))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| is_lowercase_lua_path(p))
-        .collect();
-    entries.sort();
-
-    let mut errors = Vec::new();
-    for path in entries {
-        let name = path
-            .file_name()
-            .unwrap_or_default()
-            .to_string_lossy()
-            .into_owned();
-        if !keep(&name) {
-            continue;
-        }
-        if let Err(message) = exec_lua_file(lua, &path, &name, None) {
-            ctx::runtime_warn(format!("bone: warning: {message}"));
-            errors.push(message);
-        }
-    }
-
-    if errors.is_empty() {
-        Ok(())
-    } else {
-        Err(errors.join("; "))
-    }
 }
 
 /// Execute a single Lua file `path` (Lua chunk name `name`). While the file

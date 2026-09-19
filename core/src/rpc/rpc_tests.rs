@@ -977,8 +977,7 @@ fn automatic_reload_is_atomic_suppressed_and_bypasses_manual_handoff() {
     let dir = tempfile::tempdir().unwrap();
     unsafe { std::env::set_var("BONE_DIR", dir.path()) };
     crate::config::save_setup_selection(&crate::config::SetupSelection {
-        tools: Vec::new(),
-        commands: Vec::new(),
+        plugins: Vec::new(),
     })
     .unwrap();
     std::fs::write(
@@ -1134,8 +1133,7 @@ fn grouped_automatic_reload_claims_once_and_commits_before_broadcast() {
     let dir = tempfile::tempdir().unwrap();
     unsafe { std::env::set_var("BONE_DIR", dir.path()) };
     crate::config::save_setup_selection(&crate::config::SetupSelection {
-        tools: Vec::new(),
-        commands: Vec::new(),
+        plugins: Vec::new(),
     })
     .unwrap();
     std::fs::write(dir.path().join("init.lua"), "-- initial").unwrap();

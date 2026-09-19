@@ -7,13 +7,17 @@ If neither exists, the runtime behaves as before and a blank root `init.lua` is
 created. Errors in startup Lua are warnings; core continues without that wiring.
 
 Use the namespaced APIs below. Keep `init.lua` as wiring and put implementations
-in `lua/tools/`, `lua/commands/`, `lua/themes/`, `lua/plugins/<name>/`, or
-`lua/lib/` as appropriate. `require` resolves against `lua/lib/` as the shared
-module root, so `require("ui.menu")` loads `lua/lib/ui/menu.lua`; inside a
-plugin, `require` additionally resolves against that plugin's own package
-directory (see [Plugins](#plugins)). Native helper binaries
-belong in the never-auto-loaded `lua/helpers/` directory, exposed as
-`bone.helpers_dir`.
+in plugin packages: a directory `lua/plugins/<name>/init.lua` plus any submodules
+next to it. That is the only extension layout — tools, commands, themes,
+settings, and hooks all ship inside a package.
+
+`require` resolves against two shared module roots, in order: the bundled `core`
+package's `lib/` directory, then `lua/lib/`. So `require("ui.menu")` loads
+`lua/plugins/core/lib/ui/menu.lua`, and `lua/lib/` stays searchable for your own
+modules. Inside a plugin, `require` additionally resolves against that plugin's
+own package directory, searched last (see [Plugins](#plugins)). Native helper
+binaries belong in the never-auto-loaded `lua/helpers/` directory — create it
+yourself — exposed as `bone.helpers_dir`.
 
 ## Reloading
 
@@ -58,17 +62,18 @@ distributed through the catalog as `kind = "plugin"` entries, installed under
 `lua/plugins/<name>/`, and discovered at VM build. No hand-editing of a shared
 `init.lua` is required; the plugin's own `init.lua` runs automatically.
 
-Boot runs plugins after tools and commands, in sorted directory order, each with
-the same `_settings_owner` rollback behavior as other startup Lua: a failing
-plugin is reported and skipped without taking down the runtime. Capabilities
-inherit their plugin's state — disabling a plugin skips its `init.lua`, so none
-of its tools or commands register.
+Boot runs plugin packages — the bundled `core` package and every user package —
+after `init.lua`, in sorted directory order, each with the same `_settings_owner`
+rollback behavior as other startup Lua: a failing plugin is reported and skipped
+without taking down the runtime. Capabilities inherit their plugin's state —
+disabling a plugin skips its `init.lua`, so none of its tools or commands
+register.
 
 A plugin may `require` its own submodules. While its `init.lua` runs, the
 package directory is appended to `package.path`, so `require("x")` resolves
-against `<pkg>/x.lua`, `<pkg>/lib/x.lua`, and `<pkg>/lib/x/init.lua`. The global
-`lua/lib` keeps name priority, so a plugin's `ui.menu` can never shadow a seeded
-helper.
+against `<pkg>/x.lua`, `<pkg>/lib/x.lua`, and `<pkg>/lib/x/init.lua`. Those
+patterns come last, so the bundled `core` `lib/` and the shared `lua/lib` root
+keep name priority: a plugin's `ui.menu` can never shadow a bundled helper.
 
 A plugin can also ship theme files under `lua/plugins/<name>/themes/`. They
 appear in `bone.theme.list()` alongside the user's `lua/themes/` entries, and a

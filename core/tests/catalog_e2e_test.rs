@@ -63,7 +63,7 @@ fn catalog_fetch_install_update_remove() {
         std::env::set_var("BONE_DIR", cfg.join("bone-rust"));
         std::env::set_var("XDG_CONFIG_HOME", &cfg);
     }
-    let installed_path = cfg.join("bone-rust").join("lua/tools/demo.lua");
+    let installed_path = cfg.join("bone-rust").join("lua/plugins/demo/init.lua");
     let installed_theme_path = cfg.join("bone-rust").join("lua/themes/nord.lua");
     let installed_asset_path = cfg.join("bone-rust").join("lua/assets/demo/README.md");
 

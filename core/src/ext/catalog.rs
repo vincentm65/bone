@@ -1,10 +1,14 @@
 //! Catalog client.
 //!
-//! Optional tools and commands live in a separate `bone-catalog` repo served as
-//! raw content (not embedded in the binary). This module fetches the catalog
-//! index and downloads individual items on demand. Installed items and their
-//! bundled files are written beneath `~/.bone-rust/lua/` — once on disk the
-//! normal loader runs them like any user file. Updates are detected by comparing
+//! Optional extensions live in a separate `bone-catalog` repo served as raw
+//! content (not embedded in the binary). This module fetches the catalog index
+//! and downloads individual entries on demand. Every entry installs as a plugin
+//! *package*: its primary file is written to
+//! `~/.bone-rust/lua/plugins/<package>/init.lua`, and any extra files land inside
+//! the same `plugins/<package>/` tree — once on disk the normal loader runs them
+//! like any user package. `kind` (`"tool"`, `"command"`, or `"plugin"`) only
+//! decides the catalog fetch path and the legacy flat location an entry may
+//! still occupy on disk. Updates are detected by comparing each
 //! file's sha256 against the catalog's, and surfaced to the user (`/catalog`
 //! tag + startup hint); they're applied only when the user asks. Index entries
 //! may also publish optional version, authorship, links, compatibility,
@@ -29,7 +33,7 @@ const REFRESH_THROTTLE: Duration = Duration::from_secs(6 * 60 * 60);
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct CatalogFile {
     /// Path relative to both the catalog root and `~/.bone-rust/lua/`, e.g.
-    /// `"themes/nord.lua"`.
+    /// `"themes/nord.lua"` or a plugin's scoped `"plugins/core/lib/x.lua"`.
     pub path: String,
     #[serde(default)]
     pub sha256: String,
@@ -38,9 +42,11 @@ pub struct CatalogFile {
 /// One catalog entry, as listed in `catalog.json`.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct CatalogEntry {
-    /// File name, e.g. `"weather.lua"`.
+    /// File name (`"weather.lua"`) for a tool/command, or the package directory
+    /// name (`"core"`) for a plugin.
     pub name: String,
-    /// `"tool"` or `"command"`.
+    /// `"tool"`, `"command"`, or `"plugin"`. All install as plugin packages;
+    /// the kind only decides the catalog fetch path and legacy locations.
     pub kind: String,
     #[serde(default)]
     pub description: String,
@@ -109,8 +115,8 @@ impl CatalogEntry {
                 self.name
             ));
         }
-        let primary_path = self.primary_rel();
-        let plugin_prefix = format!("plugins/{}/", self.name);
+        let primary_rel = self.install_rel();
+        let plugin_prefix = format!("plugins/{}/", self.package_name());
         let mut paths = std::collections::HashSet::new();
         for file in &self.files {
             let path = Path::new(&file.path);
@@ -128,17 +134,13 @@ impl CatalogEntry {
             let scoped = !self.is_plugin() || file.path.starts_with(&plugin_prefix);
             if !is_safe_relative
                 || !scoped
-                || file.path == primary_path
+                || file.path == primary_rel
                 || !paths.insert(file.path.as_str())
             {
                 return Err(format!("invalid bundled catalog path '{}'", file.path));
             }
         }
         Ok(())
-    }
-
-    fn is_command(&self) -> bool {
-        self.kind == "command"
     }
 
     fn is_plugin(&self) -> bool {
@@ -154,47 +156,58 @@ impl CatalogEntry {
         }
     }
 
-    /// Primary file path relative to both the catalog root and `~/.bone-rust/lua/`.
-    /// Tools/commands are single files (`tools/weather.lua`); a plugin's primary
-    /// file is its package entry point (`plugins/<name>/init.lua`).
-    fn primary_rel(&self) -> String {
+    /// Package directory name: a plugin's own directory, or a tool/command's
+    /// file stem (`weather.lua` → `weather`).
+    fn package_name(&self) -> &str {
+        self.name.strip_suffix(".lua").unwrap_or(&self.name)
+    }
+
+    /// Primary file path relative to the catalog root. Tools and commands are
+    /// single files (`tools/weather.lua`, `commands/memory.lua`); a plugin's
+    /// entry point is its package entry (`plugins/<name>/init.lua`).
+    fn catalog_rel(&self) -> String {
         if self.is_plugin() {
-            format!("plugins/{}/init.lua", self.name)
+            format!("plugins/{}/init.lua", self.package_name())
         } else {
             format!("{}/{}", self.dir_segment(), self.name)
         }
+    }
+
+    /// Primary file path relative to `~/.bone-rust/lua/`. Every item installs as
+    /// a plugin package, so tools/commands land at `plugins/<stem>/init.lua` and
+    /// a plugin keeps its own directory (`plugins/<name>/init.lua`).
+    fn install_rel(&self) -> String {
+        format!("plugins/{}/init.lua", self.package_name())
     }
 
     /// Absolute path of the item's primary file beneath `~/.bone-rust/lua/`.
     fn primary_path(&self) -> PathBuf {
         crate::config::bone_dir()
             .join("lua")
-            .join(self.primary_rel())
+            .join(self.install_rel())
     }
 
-    /// Absolute path of a plugin's package directory (empty for non-plugins).
-    fn plugin_dir(&self) -> Option<PathBuf> {
-        self.is_plugin().then(|| {
-            crate::config::bone_dir()
-                .join("lua/plugins")
-                .join(&self.name)
-        })
+    /// Absolute path of the item's plugin package directory.
+    fn package_dir(&self) -> PathBuf {
+        crate::config::bone_dir()
+            .join("lua/plugins")
+            .join(self.package_name())
     }
 
-    /// Legacy flat-file locations of a plugin's primary file, when it was
-    /// previously published as a bare tool (`lua/tools/<name>.lua`) or
-    /// command (`lua/commands/<name>.lua`). Empty for non-plugins.
+    /// Legacy flat-file locations of the item's primary file, from when tools
+    /// and commands lived as bare files (`lua/tools/<name>.lua`,
+    /// `lua/commands/<name>.lua`). A plugin maps to both, since it may have been
+    /// published earlier as either kind.
     fn legacy_primary_paths(&self) -> Vec<PathBuf> {
-        if !self.is_plugin() {
-            return Vec::new();
-        }
         let lua = crate::config::bone_dir().join("lua");
-        [
-            lua.join("tools").join(format!("{}.lua", self.name)),
-            lua.join("commands").join(format!("{}.lua", self.name)),
-        ]
-        .into_iter()
-        .collect()
+        if self.is_plugin() {
+            vec![
+                lua.join("tools").join(format!("{}.lua", self.name)),
+                lua.join("commands").join(format!("{}.lua", self.name)),
+            ]
+        } else {
+            vec![lua.join(self.dir_segment()).join(&self.name)]
+        }
     }
 
     /// Legacy flat-file location of a plugin's bundled file: the scoped path
@@ -202,7 +215,7 @@ impl CatalogEntry {
     /// `plugins/skill/lib/skill.lua` → `lua/lib/skill.lua`). `None` when the
     /// file is not part of the package.
     fn legacy_bundled_path(&self, file: &CatalogFile) -> Option<PathBuf> {
-        let prefix = format!("plugins/{}/", self.name);
+        let prefix = format!("plugins/{}/", self.package_name());
         file.path
             .strip_prefix(&prefix)
             .map(|scoped| crate::config::bone_dir().join("lua").join(scoped))
@@ -381,18 +394,13 @@ pub fn has_installed_files(entry: &CatalogEntry) -> bool {
 }
 
 fn bundled_sha256(entry: &CatalogEntry) -> Option<String> {
-    // Plugins are never bundled defaults.
-    if entry.is_plugin() {
-        return None;
-    }
-    let bundled = if entry.is_command() {
-        super::DEFAULT_LUA_COMMANDS
-    } else {
-        super::DEFAULT_LUA_TOOLS
-    };
-    bundled
+    // The bundled default for an install rel `plugins/<name>/init.lua` is keyed
+    // by its package-relative path (`<name>/init.lua`).
+    let key = entry.install_rel();
+    let key = key.strip_prefix("plugins/")?;
+    super::DEFAULT_LUA_PLUGINS
         .iter()
-        .find(|(name, _)| *name == entry.name)
+        .find(|(name, _)| *name == key)
         .map(|(_, content)| sha256_hex(content.as_bytes()))
 }
 
@@ -455,8 +463,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
         .collect()
 }
 
-/// Download and install a catalog item and any files bundled with it beneath
-/// `~/.bone-rust/lua/`.
+/// Download and install a catalog entry and any files bundled with it under
+/// `~/.bone-rust/lua/plugins/<package>/`.
 /// Verifies declared sha256 values before writing anything.
 ///
 /// Plugin entries previously installed under the legacy flat layout
@@ -467,12 +475,11 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// as usual.
 pub fn install(entry: &CatalogEntry) -> Result<(), String> {
     entry.validate()?;
-    let lua_root = crate::config::bone_dir().join("lua");
 
     // (destination, bytes) moved from a legacy flat file — no download.
     let mut writes: Vec<(PathBuf, Vec<u8>)> = Vec::new();
-    // (catalog rel path, expected sha) to download and verify.
-    let mut downloads: Vec<(String, &str)> = Vec::new();
+    // (destination, catalog rel path, expected sha) to download and verify.
+    let mut downloads: Vec<(PathBuf, String, &str)> = Vec::new();
 
     let primary_dest = entry.primary_path();
     if !primary_dest.exists()
@@ -485,7 +492,7 @@ pub fn install(entry: &CatalogEntry) -> Result<(), String> {
             .map_err(|e| format!("could not read legacy file {}: {e}", legacy.display()))?;
         writes.push((primary_dest, bytes));
     } else {
-        downloads.push((entry.primary_rel(), entry.sha256.as_str()));
+        downloads.push((primary_dest, entry.catalog_rel(), entry.sha256.as_str()));
     }
 
     for file in &entry.files {
@@ -498,11 +505,11 @@ pub fn install(entry: &CatalogEntry) -> Result<(), String> {
         {
             writes.push((dest, bytes));
         } else {
-            downloads.push((file.path.clone(), file.sha256.as_str()));
+            downloads.push((dest, file.path.clone(), file.sha256.as_str()));
         }
     }
 
-    for (rel, expected) in downloads {
+    for (dest, rel, expected) in downloads {
         let bytes = fetch(&base_url(), &rel)
             .ok_or_else(|| format!("could not download {rel} from catalog"))?;
         if !expected.is_empty() {
@@ -513,7 +520,7 @@ pub fn install(entry: &CatalogEntry) -> Result<(), String> {
                 ));
             }
         }
-        writes.push((lua_root.join(&rel), bytes));
+        writes.push((dest, bytes));
     }
 
     for (path, bytes) in writes {
@@ -534,13 +541,13 @@ pub fn install(entry: &CatalogEntry) -> Result<(), String> {
             .iter()
             .filter_map(|file| entry.legacy_bundled_path(file)),
     ) {
-        if legacy.exists() {
-            if let Err(e) = std::fs::remove_file(&legacy) {
-                super::ctx::runtime_warn(format!(
-                    "bone: warning: could not remove legacy file {}: {e}",
-                    legacy.display()
-                ));
-            }
+        if legacy.exists()
+            && let Err(e) = std::fs::remove_file(&legacy)
+        {
+            super::ctx::runtime_warn(format!(
+                "bone: warning: could not remove legacy file {}: {e}",
+                legacy.display()
+            ));
         }
     }
     Ok(())
@@ -553,24 +560,20 @@ pub fn remove(entry: &CatalogEntry) -> Result<(), String> {
     entry.validate()?;
     let mut paths = vec![entry.primary_path()];
     paths.extend(entry.files.iter().map(bundled_path));
-    if entry.is_plugin() {
-        paths.extend(entry.legacy_primary_paths());
-        paths.extend(
-            entry
-                .files
-                .iter()
-                .filter_map(|file| entry.legacy_bundled_path(file)),
-        );
-    }
+    paths.extend(entry.legacy_primary_paths());
+    paths.extend(
+        entry
+            .files
+            .iter()
+            .filter_map(|file| entry.legacy_bundled_path(file)),
+    );
     for path in paths {
         if path.exists() {
             std::fs::remove_file(&path)
                 .map_err(|e| format!("could not remove {}: {e}", path.display()))?;
         }
     }
-    if let Some(dir) = entry.plugin_dir() {
-        prune_empty_dirs(&dir);
-    }
+    prune_empty_dirs(&entry.package_dir());
     Ok(())
 }
 

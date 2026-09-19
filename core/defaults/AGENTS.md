@@ -14,7 +14,7 @@ core behavior changes.
 |---|---|
 | Understand ownership, runtime flow, sessions, and persistence | `docs/architecture.md` |
 | Change settings, providers, policies, themes, or keymaps | `docs/configuration.md` |
-| Add or change Lua tools, commands, hooks, plugins, or UI APIs | `docs/extension-api.md` |
+| Add or change Lua tools, commands, hooks, or UI APIs (all shipped as `lua/plugins/<name>/` packages) | `docs/extension-api.md` |
 | Change delegation, approvals, cancellation, or background jobs | `docs/agents.md` |
 | Change TUI, web, daemon connections, events, or rendering | `docs/ui.md` |
 | Build, test, validate, or update bundled documentation | `docs/development.md` |

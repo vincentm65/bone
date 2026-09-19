@@ -602,10 +602,9 @@ fn event_ctx_has_ui_notify_but_not_tools_agent_shell() {
 #[test]
 fn reload_picks_up_new_tools_and_commands() {
     let config_dir = common::temp_dir("reload");
-    let tools_dir = config_dir.join("lua/tools");
-    std::fs::create_dir_all(&tools_dir).unwrap();
+    std::fs::create_dir_all(&config_dir).unwrap();
 
-    // Boot once — no custom tools.
+    // Boot once — no custom packages.
     let config = common::config_store();
     let booted1 = bone_core::ext::boot_with_tools(
         &config_dir,
@@ -627,9 +626,11 @@ fn reload_picks_up_new_tools_and_commands() {
         "reload_test_tool should not exist on first boot",
     );
 
-    // Write a new tool and a new command.
+    // Write a new tool and a new command, each as its own plugin package.
+    let tool_pkg = config_dir.join("lua/plugins/reload_test");
+    std::fs::create_dir_all(&tool_pkg).unwrap();
     std::fs::write(
-        tools_dir.join("reload_test.lua"),
+        tool_pkg.join("init.lua"),
         r#"
 bone.tool.register({
   name = "reload_test_tool",
@@ -641,10 +642,10 @@ bone.tool.register({
 "#,
     )
     .unwrap();
-    let cmd_dir = config_dir.join("lua/commands");
-    std::fs::create_dir_all(&cmd_dir).unwrap();
+    let cmd_pkg = config_dir.join("lua/plugins/reload_cmd");
+    std::fs::create_dir_all(&cmd_pkg).unwrap();
     std::fs::write(
-        cmd_dir.join("reload_cmd.lua"),
+        cmd_pkg.join("init.lua"),
         r#"
 bone.command.register("reload_test_cmd", {
   description = "command added after initial boot",

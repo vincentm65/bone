@@ -40,8 +40,7 @@ fn with_test_bone_dir(test: impl FnOnce(&Path)) {
 
 fn empty_selection() -> SetupSelection {
     SetupSelection {
-        tools: Vec::new(),
-        commands: Vec::new(),
+        plugins: Vec::new(),
     }
 }
 
@@ -236,6 +235,23 @@ fn core_docs_are_synced_during_base_seed() {
                 content
             );
         }
+    });
+}
+
+#[test]
+fn fresh_seed_materializes_only_plugin_packages_under_lua() {
+    with_test_bone_dir(|dir| {
+        seed_base().unwrap();
+
+        assert!(dir.join("lua/plugins/core/init.lua").is_file());
+        assert!(dir.join("lua/plugins/core/lib/banner.lua").is_file());
+
+        let mut seeded: Vec<_> = fs::read_dir(dir.join("lua"))
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        seeded.sort();
+        assert_eq!(seeded, ["plugins"], "lua/ holds plugin packages only");
     });
 }
 
