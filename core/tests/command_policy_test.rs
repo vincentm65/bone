@@ -657,13 +657,13 @@ fn compound_newlines_comments_and_pipes_readonly() {
     let command = r#"
       # Lines in dedicated test files (tests/ directory + *_test.rs in src/)
     echo "=== Dedicated test files ==="
-    find /home/vincent/projects/bone -type f \( -path "*/tests/*" -o -name "*_test.rs" \) -not -path "*/target/*" -not -path "*/.git/*" -print0 |
+    find /home/example/projects/bone -type f \( -path "*/tests/*" -o -name "*_test.rs" \) -not -path "*/target/*" -not -path "*/.git/*" -print0 |
       xargs -0 wc -l 2>/dev/null |
       sort -n
 
       # Lines inside #[cfg(test)] modules within src/ (non-test files)
     echo "=== Test lines inside src/ (non-test files) ==="
-    rg -n '#\[cfg\(test\)\]' /home/vincent/projects/bone/src/ --no-filename
+    rg -n '#\[cfg\(test\)\]' /home/example/projects/bone/src/ --no-filename
 "#;
 
     assert_eq!(classify_command(command), CommandSafety::ReadOnly);
@@ -672,7 +672,7 @@ fn compound_newlines_comments_and_pipes_readonly() {
 #[test]
 fn compound_with_command_substitution_is_danger() {
     let command = r#"
-    find /home/vincent/projects/bone/src -name "*.rs" |
+    find /home/example/projects/bone/src -name "*.rs" |
       sort |
       while read f;
       do echo "$(wc -l < "$f") $f";

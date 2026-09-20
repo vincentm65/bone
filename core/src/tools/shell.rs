@@ -744,6 +744,11 @@ impl Tool for ShellTool {
             .map(ToolOutput::text);
         }
         let (command, timeout_ms, background) = parse_run_args(args)?;
+        let guard_roots =
+            crate::tools::command_guard::GuardRoots::detect(context.working_dir.as_deref());
+        if let Some(reason) = crate::tools::command_guard::hard_deny(&command, &guard_roots) {
+            return Err(reason);
+        }
         if background {
             let id = crate::processes::registry().spawn(
                 command,

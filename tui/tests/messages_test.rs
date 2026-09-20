@@ -128,7 +128,7 @@ fn file_tool_labels_highlight_path_and_mute_summary() {
 fn wrapped_file_tool_label_keeps_only_path_colored() {
     let theme = Theme::default();
     let tool = ToolDisplay {
-        label: "read_file /home/vincent/projects/bone/core/src/tools/edit_file/diff.rs (lines 1-102, 102 read)".to_string(),
+        label: "read_file /home/example/projects/bone/core/src/tools/edit_file/diff.rs (lines 1-102, 102 read)".to_string(),
         is_error: false,
         is_shell: false,
     };
@@ -137,7 +137,7 @@ fn wrapped_file_tool_label_keeps_only_path_colored() {
 
     assert_eq!(
         line_text(&lines[0]),
-        "    read_file /home/vincent/projects/bone/core/src/tools/edit_file/diff.rs"
+        "    read_file /home/example/projects/bone/core/src/tools/edit_file/diff.rs"
     );
     assert_eq!(line_text(&lines[1]), "     (lines 1-102, 102 read)");
     assert_eq!(
