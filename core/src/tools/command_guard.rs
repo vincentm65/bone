@@ -638,6 +638,7 @@ fn tokenize(segment: &str) -> Result<Vec<String>, &'static str> {
                 }
                 _ => current.push(ch),
             },
+            Some(_) => unreachable!("invalid shell quote state"),
             None => match ch {
                 '\'' | '"' => {
                     quote = Some(ch);
