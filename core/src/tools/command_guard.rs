@@ -11,6 +11,12 @@
 //! detected). Ambiguity — globs, `$VAR`, backticks, an unknown working
 //! directory, a target that does not resolve — resolves to a denial, so the
 //! guard fails closed.
+//!
+//! Destructive verbs are judged at their own power. `rmdir` and `rm -d` can only
+//! unlink *empty* directory nodes, so they cannot destroy data, and a scratch path
+//! under `$HOME` but outside the workspace — a sibling checkout, a harness log
+//! directory — stays cleanable. Roots, ancestors of `$HOME` or the workspace,
+//! `.git` metadata, and system locations are refused at every power.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -59,6 +65,18 @@ const COMMAND_WRAPPERS: &[&str] = &[
 
 /// Verbs that delete or overwrite their operands.
 const DESTRUCTIVE_VERBS: &[&str] = &["rm", "rmdir", "unlink", "shred", "truncate", "mv"];
+
+/// How much a destructive verb can actually destroy. A verb that can only
+/// remove *empty* directories leaves every file in place, so a target under
+/// `$HOME` but outside the workspace is scratch, not user data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeletePower {
+    /// Removes or overwrites its operands: their previous contents are gone.
+    Unbounded,
+    /// Removes empty directories only, so the blast radius is the directory
+    /// node itself (`rmdir`, `rm -d` without a recursive flag).
+    EmptyDirsOnly,
+}
 
 /// Paths that must never be the target of a destructive command. `/tmp` is
 /// intentionally absent so scratch-space cleanup stays legal.
@@ -177,6 +195,19 @@ fn check_segment(
     // A `cd`/`pushd` segment rebinds the directory subsequent relative targets
     // resolve against.
     update_cwd(&tokens, roots, cwd);
+    // A `$(...)` substitution actually runs at the point it appears, so it must be
+    // inspected with the cwd this segment has already established. It runs in a
+    // subshell, so it gets a clone: a `cd` inside it must not leak outward.
+    let substitutions = match nested_command_substitutions(segment) {
+        Ok(substitutions) => substitutions,
+        Err(reason) => return Some(reason),
+    };
+    for substitution in substitutions {
+        let mut nested_cwd = cwd.clone();
+        if let Some(reason) = scan_segments(&substitution, roots, &mut nested_cwd, depth + 1) {
+            return Some(reason);
+        }
+    }
     if let Some(reason) = check_redirection(&tokens, roots, cwd.as_deref()) {
         return Some(reason);
     }
@@ -200,6 +231,15 @@ fn check_segment(
 
     if let Some(index) = command_index(&tokens) {
         let raw = tokens[index].clone();
+        // The verb checks below key off the literal program name, so a name the
+        // shell only produces at run time (`$(echo rm)`, `${CMD}`, `` `…` ``)
+        // would slip past them. Fail closed rather than guess the program.
+        if is_dynamic_command(&raw) {
+            return Some(format!(
+                "it runs `{raw}`, whose program name is a shell expansion this guard cannot \
+                 resolve"
+            ));
+        }
         let verb = verb_name(&raw);
         let args = &tokens[index + 1..];
         if is_absolute_verb(&verb) {
@@ -241,7 +281,7 @@ fn check_segment(
 /// actually ends up in. A bare `cd`/`pushd` goes to `$HOME`; `cd -`, `$VAR`, a
 /// glob, or an otherwise unresolvable target leaves the cwd unknown, which makes
 /// later relative targets deny (fail closed).
-fn update_cwd(tokens: &[String], roots: &GuardRoots, cwd: &mut Option<PathBuf>) {
+fn update_cwd(tokens: &[Token], roots: &GuardRoots, cwd: &mut Option<PathBuf>) {
     let Some(index) = command_index(tokens) else {
         return;
     };
@@ -270,7 +310,7 @@ fn update_cwd(tokens: &[String], roots: &GuardRoots, cwd: &mut Option<PathBuf>) 
 fn check_destructive(
     verb: &str,
     raw: &str,
-    args: &[String],
+    args: &[Token],
     roots: &GuardRoots,
     cwd: Option<&Path>,
 ) -> Option<String> {
@@ -285,20 +325,33 @@ fn check_destructive(
         "truncate" => "overwrite",
         _ => "delete",
     };
+    let power = destructive_power(verb, args);
     for target in &targets {
-        if let Some(reason) = target_verdict(target, roots, cwd) {
+        if let Some(reason) = target_verdict(target, roots, cwd, power) {
             return Some(format!("it would {action} {reason}"));
         }
     }
     None
 }
 
-fn check_dd(args: &[String], roots: &GuardRoots, cwd: Option<&Path>) -> Option<String> {
+/// Classifies how much damage a destructive verb can do. `rmdir` and `rm -d`
+/// without a recursive flag only remove *empty* directories, so they can never
+/// destroy a tree's contents; every other destructive verb removes or overwrites
+/// data outright.
+fn destructive_power(verb: &str, args: &[Token]) -> DeletePower {
+    match verb {
+        "rmdir" => DeletePower::EmptyDirsOnly,
+        "rm" if removes_empty_dirs_only(args) => DeletePower::EmptyDirsOnly,
+        _ => DeletePower::Unbounded,
+    }
+}
+
+fn check_dd(args: &[Token], roots: &GuardRoots, cwd: Option<&Path>) -> Option<String> {
     let mut has_output = false;
     for arg in args {
         if let Some(value) = arg.strip_prefix("of=") {
             has_output = true;
-            if let Some(reason) = target_verdict(value, roots, cwd) {
+            if let Some(reason) = target_verdict(value, roots, cwd, DeletePower::Unbounded) {
                 return Some(format!("it writes raw data over {reason}"));
             }
         }
@@ -311,8 +364,8 @@ fn check_dd(args: &[String], roots: &GuardRoots, cwd: Option<&Path>) -> Option<S
     None
 }
 
-fn check_find(args: &[String], roots: &GuardRoots, cwd: Option<&Path>) -> Option<String> {
-    if !args.iter().any(|arg| arg == "-delete") {
+fn check_find(args: &[Token], roots: &GuardRoots, cwd: Option<&Path>) -> Option<String> {
+    if !args.iter().any(|arg| arg.as_str() == "-delete") {
         return None;
     }
     let mut paths = Vec::new();
@@ -320,7 +373,7 @@ fn check_find(args: &[String], roots: &GuardRoots, cwd: Option<&Path>) -> Option
         if is_flag_like(arg) {
             break;
         }
-        paths.push(arg.clone());
+        paths.push(arg.as_str().to_string());
     }
     if paths.is_empty() {
         return Some(
@@ -328,15 +381,15 @@ fn check_find(args: &[String], roots: &GuardRoots, cwd: Option<&Path>) -> Option
         );
     }
     for path in &paths {
-        if let Some(reason) = target_verdict(path, roots, cwd) {
+        if let Some(reason) = target_verdict(path, roots, cwd, DeletePower::Unbounded) {
             return Some(format!("it would delete files under {reason}"));
         }
     }
     None
 }
 
-fn check_git(args: &[String], roots: &GuardRoots, cwd: Option<&Path>) -> Option<String> {
-    if args.first().map(String::as_str) != Some("clean") {
+fn check_git(args: &[Token], roots: &GuardRoots, cwd: Option<&Path>) -> Option<String> {
+    if args.first().map(Token::as_str) != Some("clean") {
         return None;
     }
     let rest = &args[1..];
@@ -352,7 +405,7 @@ fn check_git(args: &[String], roots: &GuardRoots, cwd: Option<&Path>) -> Option<
         );
     }
     for target in &targets {
-        if let Some(reason) = target_verdict(target, roots, cwd) {
+        if let Some(reason) = target_verdict(target, roots, cwd, DeletePower::Unbounded) {
             return Some(format!("it would delete untracked files under {reason}"));
         }
     }
@@ -361,7 +414,7 @@ fn check_git(args: &[String], roots: &GuardRoots, cwd: Option<&Path>) -> Option<
 
 fn check_recursive(
     raw: &str,
-    args: &[String],
+    args: &[Token],
     roots: &GuardRoots,
     cwd: Option<&Path>,
 ) -> Option<String> {
@@ -369,19 +422,19 @@ fn check_recursive(
         return None;
     }
     for target in operands(args) {
-        if let Some(reason) = target_verdict(&target, roots, cwd) {
+        if let Some(reason) = target_verdict(&target, roots, cwd, DeletePower::Unbounded) {
             return Some(format!("it applies `{raw}` recursively to {reason}"));
         }
     }
     None
 }
 
-fn check_rsync(args: &[String], roots: &GuardRoots, cwd: Option<&Path>) -> Option<String> {
+fn check_rsync(args: &[Token], roots: &GuardRoots, cwd: Option<&Path>) -> Option<String> {
     if !args.iter().any(|arg| arg.starts_with("--delete")) {
         return None;
     }
     for target in operands(args) {
-        if let Some(reason) = target_verdict(&target, roots, cwd) {
+        if let Some(reason) = target_verdict(&target, roots, cwd, DeletePower::Unbounded) {
             return Some(format!("it would delete extra files under {reason}"));
         }
     }
@@ -393,7 +446,14 @@ fn check_rsync(args: &[String], roots: &GuardRoots, cwd: Option<&Path>) -> Optio
 /// by an executor has an operand set this guard cannot bound, so a destructive
 /// verb there is refused outright: `find / -exec rm {} +` deletes with no `-r`
 /// flag and would otherwise slip past the flag heuristic below.
-fn secondary_scan(tokens: &[String], roots: &GuardRoots, cwd: Option<&Path>) -> Option<String> {
+///
+/// Outside an executor, a verb word is only read as an invocation when it is
+/// unquoted and followed by a flag, and it is then judged at its own
+/// [`DeletePower`] against the segment's non-flag words. Both restrictions are
+/// deliberate: a quoted word is data, and an unquoted verb followed by a flag
+/// plus a protected target stays refused even when it is really an argument, so
+/// unknown wrappers cannot slip a real delete through.
+fn secondary_scan(tokens: &[Token], roots: &GuardRoots, cwd: Option<&Path>) -> Option<String> {
     let has_executor = tokens
         .iter()
         .any(|token| EXECUTOR_VERBS.contains(&verb_name(token).as_str()));
@@ -407,18 +467,25 @@ fn secondary_scan(tokens: &[String], roots: &GuardRoots, cwd: Option<&Path>) -> 
             }
         }
     }
-    let has_protected = tokens
-        .iter()
-        .filter(|token| !is_flag_like(token))
-        .any(|token| target_verdict(token, roots, cwd).is_some());
-    if !has_protected {
-        return None;
-    }
     for (index, token) in tokens.iter().enumerate() {
+        // A quoted word is data — a search pattern, a log line, a commit subject —
+        // not a nested program name, so `grep -rn "rmdir" …` must not read as a
+        // `rmdir` invocation. A real verb in command position is already checked by
+        // `check_segment` before this scan runs.
+        if token.is_quoted() {
+            continue;
+        }
         let verb = verb_name(token);
-        if DESTRUCTIVE_VERBS.contains(&verb.as_str())
-            && tokens.get(index + 1).is_some_and(|next| is_flag_like(next))
-        {
+        if !DESTRUCTIVE_VERBS.contains(&verb.as_str()) {
+            continue;
+        }
+        if !tokens.get(index + 1).is_some_and(|next| is_flag_like(next)) {
+            continue;
+        }
+        // Judge this nested verb at its own power: an `rmdir` whose targets are
+        // all outside the workspace is still only removing empty directories.
+        let power = destructive_power(&verb, &tokens[index + 1..]);
+        if has_protected_target(tokens, roots, cwd, power) {
             return Some(format!(
                 "it contains a nested `{token}` invocation that this guard cannot bound"
             ));
@@ -427,18 +494,36 @@ fn secondary_scan(tokens: &[String], roots: &GuardRoots, cwd: Option<&Path>) -> 
     None
 }
 
+/// True when some non-flag word in the segment resolves to a target that is
+/// protected at `power`.
+fn has_protected_target(
+    tokens: &[Token],
+    roots: &GuardRoots,
+    cwd: Option<&Path>,
+    power: DeletePower,
+) -> bool {
+    tokens
+        .iter()
+        .filter(|token| !is_flag_like(token))
+        .any(|token| target_verdict(token, roots, cwd, power).is_some())
+}
+
 fn is_unbounded_nested_verb(verb: &str) -> bool {
     is_absolute_verb(verb)
         || DESTRUCTIVE_VERBS.contains(&verb)
         || matches!(verb, "dd" | "find" | "git" | "chmod" | "chown" | "rsync" | "eval")
 }
 
-fn check_redirection(tokens: &[String], roots: &GuardRoots, cwd: Option<&Path>) -> Option<String> {
+fn check_redirection(
+    tokens: &[Token],
+    roots: &GuardRoots,
+    cwd: Option<&Path>,
+) -> Option<String> {
     for (index, token) in tokens.iter().enumerate() {
         let Some(position) = token.find('>') else {
             continue;
         };
-        let rest = token[position + 1..].trim_start_matches('>');
+        let rest = token.as_str()[position + 1..].trim_start_matches('>');
         let target = if rest.is_empty() {
             match tokens.get(index + 1) {
                 Some(next) => next.as_str(),
@@ -451,7 +536,7 @@ fn check_redirection(tokens: &[String], roots: &GuardRoots, cwd: Option<&Path>) 
         if target.is_empty() || target.starts_with('&') || is_dev_sink(target) {
             continue;
         }
-        if let Some(reason) = target_verdict(target, roots, cwd) {
+        if let Some(reason) = target_verdict(target, roots, cwd, DeletePower::Unbounded) {
             return Some(format!("it would redirect output into {reason}"));
         }
     }
@@ -472,10 +557,15 @@ enum Resolution {
     Ambiguous,
 }
 
-fn target_verdict(token: &str, roots: &GuardRoots, cwd: Option<&Path>) -> Option<String> {
+fn target_verdict(
+    token: &str,
+    roots: &GuardRoots,
+    cwd: Option<&Path>,
+    power: DeletePower,
+) -> Option<String> {
     match resolve_target(token, roots, cwd) {
         Resolution::Ambiguous => Some(format!("the unresolvable target `{token}`")),
-        Resolution::Resolved(path) => protected_reason(&path, roots),
+        Resolution::Resolved(path) => protected_reason(&path, roots, power),
     }
 }
 
@@ -506,7 +596,7 @@ fn resolve_target(token: &str, roots: &GuardRoots, cwd: Option<&Path>) -> Resolu
     }
 }
 
-fn protected_reason(path: &Path, roots: &GuardRoots) -> Option<String> {
+fn protected_reason(path: &Path, roots: &GuardRoots, power: DeletePower) -> Option<String> {
     if path == Path::new("/") {
         return Some("the filesystem root `/`".to_string());
     }
@@ -546,6 +636,13 @@ fn protected_reason(path: &Path, roots: &GuardRoots) -> Option<String> {
     if let Some(home) = &roots.home
         && path.starts_with(home)
     {
+        // An empty-directory-only delete cannot destroy anything inside the tree,
+        // so sibling scratch under `$HOME` — another checkout, a harness log
+        // directory — stays cleanable. Roots, ancestors of the home directory, and
+        // system locations were already refused above.
+        if power == DeletePower::EmptyDirsOnly {
+            return None;
+        }
         return Some(format!("`{}`, inside your home directory", path.display()));
     }
     for root in SYSTEM_ROOTS {
@@ -577,13 +674,173 @@ fn normalize_lexical(path: &Path) -> PathBuf {
 
 fn unsupported_nested_syntax(command: &str) -> Option<&'static str> {
     [
-        ("command substitution", "$("),
         ("backtick", "`"),
         ("process substitution", "<("),
         ("process substitution", ">("),
     ]
     .into_iter()
     .find_map(|(label, syntax)| command.contains(syntax).then_some(label))
+}
+
+/// Returns the command bodies of top-level `$(...)` substitutions. Nested
+/// substitutions remain inside their parent body and are inspected recursively
+/// by `scan_segments`.
+fn nested_command_substitutions(command: &str) -> Result<Vec<String>, String> {
+    let chars: Vec<char> = command.chars().collect();
+    let ranges = command_substitution_ranges(&chars)?;
+    Ok(ranges
+        .into_iter()
+        .map(|(start, end)| chars[start..end].iter().collect())
+        .collect())
+}
+
+/// Finds top-level command substitutions while respecting quotes, escapes, and
+/// nested parentheses. The returned ranges contain only the substitution body,
+/// not the `$(` or closing `)` delimiters.
+fn command_substitution_ranges(chars: &[char]) -> Result<Vec<(usize, usize)>, String> {
+    let mut ranges = Vec::new();
+    let mut index = 0;
+    let mut single = false;
+    let mut double = false;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if single {
+            if ch == '\'' {
+                single = false;
+            }
+            index += 1;
+            continue;
+        }
+        if double {
+            match ch {
+                '\\' => index += 2,
+                '"' => {
+                    double = false;
+                    index += 1;
+                }
+                '$' if chars.get(index + 1) == Some(&'(') => {
+                    let (end, body_end) = consume_command_substitution(chars, index + 2)?;
+                    ranges.push((index + 2, body_end));
+                    index = end;
+                }
+                _ => index += 1,
+            }
+            continue;
+        }
+        match ch {
+            '\\' => index += 2,
+            '\'' => {
+                single = true;
+                index += 1;
+            }
+            '"' => {
+                double = true;
+                index += 1;
+            }
+            '$' if chars.get(index + 1) == Some(&'(') => {
+                let (end, body_end) = consume_command_substitution(chars, index + 2)?;
+                ranges.push((index + 2, body_end));
+                index = end;
+            }
+            _ => index += 1,
+        }
+    }
+    Ok(ranges)
+}
+
+fn consume_command_substitution(
+    chars: &[char],
+    body_start: usize,
+) -> Result<(usize, usize), String> {
+    let mut index = body_start;
+    let mut depth = 1;
+    let mut single = false;
+    let mut double = false;
+    let mut comment = false;
+    let mut at_word_start = true;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if comment {
+            if ch == '\n' {
+                comment = false;
+                at_word_start = true;
+            }
+            index += 1;
+            continue;
+        }
+        if single {
+            if ch == '\'' {
+                single = false;
+            }
+            index += 1;
+            at_word_start = false;
+            continue;
+        }
+        if double {
+            match ch {
+                '\\' => {
+                    index += 2;
+                    at_word_start = false;
+                }
+                '"' => {
+                    double = false;
+                    index += 1;
+                    at_word_start = false;
+                }
+                _ => {
+                    index += 1;
+                    at_word_start = false;
+                }
+            }
+            continue;
+        }
+        if ch == '\\' {
+            index += 2;
+            at_word_start = false;
+            continue;
+        }
+        if ch == '\'' {
+            single = true;
+            index += 1;
+            at_word_start = false;
+            continue;
+        }
+        if ch == '"' {
+            double = true;
+            index += 1;
+            at_word_start = false;
+            continue;
+        }
+        if ch == '#' && at_word_start {
+            comment = true;
+            index += 1;
+            at_word_start = false;
+            continue;
+        }
+        match ch {
+            '(' => {
+                depth += 1;
+                index += 1;
+                at_word_start = true;
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Ok((index + 1, index));
+                }
+                index += 1;
+                at_word_start = true;
+            }
+            _ => {
+                index += 1;
+                at_word_start =
+                    ch.is_whitespace() || matches!(ch, '&' | '|' | ';' | '(' | ')');
+            }
+        }
+    }
+    Err("it contains an unterminated command substitution".to_string())
 }
 
 fn is_ambiguous(raw: &str) -> bool {
@@ -605,9 +862,43 @@ fn strip_key_prefix(token: &str) -> &str {
 
 // ── Tokenization helpers ────────────────────────────────────────────────────
 
-fn tokenize(segment: &str) -> Result<Vec<String>, &'static str> {
+/// One shell word plus whether it was quoted. Quoting only matters to the
+/// nested-verb heuristic in `secondary_scan`: a quoted word is data (a search
+/// pattern, a commit message), never a nested program name.
+#[derive(Debug, Clone)]
+struct Token {
+    text: String,
+    quoted: bool,
+}
+
+impl Token {
+    fn as_str(&self) -> &str {
+        &self.text
+    }
+
+    fn is_quoted(&self) -> bool {
+        self.quoted
+    }
+}
+
+impl std::ops::Deref for Token {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        &self.text
+    }
+}
+
+impl std::fmt::Display for Token {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.text)
+    }
+}
+
+fn tokenize(segment: &str) -> Result<Vec<Token>, &'static str> {
     let mut tokens = Vec::new();
     let mut current = String::new();
+    let mut current_quoted = false;
     let mut chars = segment.chars().peekable();
     let mut quote = None;
     let mut token_started = false;
@@ -643,6 +934,7 @@ fn tokenize(segment: &str) -> Result<Vec<String>, &'static str> {
                 '\'' | '"' => {
                     quote = Some(ch);
                     token_started = true;
+                    current_quoted = true;
                 }
                 '\\' => {
                     let Some(next) = chars.next() else {
@@ -655,7 +947,10 @@ fn tokenize(segment: &str) -> Result<Vec<String>, &'static str> {
                 }
                 ch if ch.is_whitespace() => {
                     if token_started {
-                        tokens.push(std::mem::take(&mut current));
+                        tokens.push(Token {
+                            text: std::mem::take(&mut current),
+                            quoted: std::mem::replace(&mut current_quoted, false),
+                        });
                         token_started = false;
                     }
                 }
@@ -671,12 +966,15 @@ fn tokenize(segment: &str) -> Result<Vec<String>, &'static str> {
         return Err("it contains an unterminated shell quote");
     }
     if token_started {
-        tokens.push(current);
+        tokens.push(Token {
+            text: current,
+            quoted: current_quoted,
+        });
     }
     Ok(tokens)
 }
 
-fn shell_payloads(tokens: &[String]) -> Result<Vec<String>, String> {
+fn shell_payloads(tokens: &[Token]) -> Result<Vec<Token>, String> {
     let mut payloads = Vec::new();
     for (index, token) in tokens.iter().enumerate() {
         if !SHELL_WRAPPERS.contains(&verb_name(token).as_str()) {
@@ -707,7 +1005,7 @@ fn is_shell_command_flag(flag: &str) -> bool {
     flag == "command" || flag == "c" || (flag.len() <= 3 && flag.contains('c'))
 }
 
-fn command_index(tokens: &[String]) -> Option<usize> {
+fn command_index(tokens: &[Token]) -> Option<usize> {
     let mut index = 0;
     while index < tokens.len() {
         let token = tokens[index].as_str();
@@ -734,7 +1032,7 @@ fn command_flag_takes_value(token: &str) -> bool {
     !token.contains('=') && COMMAND_VALUE_FLAGS.contains(&name)
 }
 
-fn operands(args: &[String]) -> Vec<String> {
+fn operands(args: &[Token]) -> Vec<String> {
     let mut out = Vec::new();
     let mut positional_only = false;
     let mut index = 0;
@@ -751,7 +1049,7 @@ fn operands(args: &[String]) -> Vec<String> {
             index += if takes_value { 2 } else { 1 };
             continue;
         }
-        out.push(args[index].clone());
+        out.push(args[index].as_str().to_string());
         index += 1;
     }
     out
@@ -765,6 +1063,14 @@ fn verb_name(token: &str) -> String {
     let token = token.trim_start_matches('\\');
     let base = token.rsplit('/').next().unwrap_or(token);
     base.to_ascii_lowercase()
+}
+
+/// True when a command word is only known at run time, e.g. `$(...)`, `${VAR}`,
+/// `$VAR`, or a backtick/process-substitution name. Backticks and process
+/// substitutions are already refused globally; they are matched here as well so
+/// this check stays fail-closed on its own.
+fn is_dynamic_command(raw: &str) -> bool {
+    raw.contains('$') || raw.contains('`') || raw.contains("<(") || raw.contains(">(")
 }
 
 fn is_flag_like(token: &str) -> bool {
@@ -809,6 +1115,18 @@ fn is_recursive_flag(arg: &str) -> bool {
             && (arg.contains('R') || arg.contains('r')))
 }
 
+/// True for `rm -d`/`rm --dir` when no recursive flag is also present: `-d`
+/// combined with `-r` collapses back into an ordinary recursive delete.
+fn removes_empty_dirs_only(args: &[Token]) -> bool {
+    if args.iter().any(|arg| is_recursive_flag(arg)) {
+        return false;
+    }
+    args.iter().any(|arg| {
+        arg.as_str() == "--dir"
+            || (arg.starts_with('-') && !arg.starts_with("--") && arg.contains('d'))
+    })
+}
+
 fn is_fork_bomb(command: &str) -> bool {
     command.contains(":(){") || command.contains(":|:&") || command.contains(": |: &")
 }
@@ -816,6 +1134,10 @@ fn is_fork_bomb(command: &str) -> bool {
 // ── Shell segment handling ───────────────────────────────────────────────────
 
 fn split_segments(command: &str) -> Vec<String> {
+    // `shell_split` is `$( )`-nest-aware, so connectors that belong to a nested
+    // command substitution stay attached to the outer segment instead of
+    // splitting it, and the substitution body reaches `nested_command_substitutions`
+    // verbatim (comments and newlines included) for a faithful re-inspection.
     crate::shell_split::shell_split(
         command,
         &crate::shell_split::ShellSplitOptions {

@@ -156,9 +156,6 @@ async fn run_edit(
         let snap = guard
             .head(&path)
             .ok_or_else(|| format!("read `{path}` with read_file before editing it"))?;
-        for hunk in &hunks {
-            ensure_visible(&snap.text, &hunk.old, &snap.seen_lines, &path)?;
-        }
         (snap.text.clone(), snap.seen_lines.clone(), snap.format)
     } else {
         (live.clone(), BTreeSet::new(), live_format)
@@ -168,6 +165,12 @@ async fn run_edit(
         return Err(format!(
             "`{path}` changed after it was read; re-read it and retry"
         ));
+    }
+    if snapshots.is_some() {
+        for (index, hunk) in hunks.iter().enumerate() {
+            ensure_visible(&base, &hunk.old, &seen_lines, &path)
+                .map_err(|error| format!("hunk {} of {}: {error}", index + 1, hunks.len()))?;
+        }
     }
     let (matched, edited) = match_hunks(&live, &hunks, &path)?;
     if edited == live {
@@ -200,6 +203,14 @@ async fn run_edit(
 }
 
 fn parse_args(arguments: Value) -> Result<(String, Vec<Hunk>), String> {
+    if !arguments.is_object() {
+        return Err(
+            "edit_file arguments must be an object containing `path` and an edit".to_string(),
+        );
+    }
+    if arguments.get("path").is_none() {
+        return Err("edit_file is missing `path`; provide the file path with the edit".to_string());
+    }
     let args: Args = serde_json::from_value(arguments).map_err(|e| {
         format!(
             "edit_file requires path plus either old_text/new_text or a non-empty edits array: {e}"
@@ -275,17 +286,16 @@ fn match_hunks(
     hunks: &[Hunk],
     path: &str,
 ) -> Result<(Vec<MatchedHunk>, String), String> {
-    let mut matched: Vec<MatchedHunk> = hunks
-        .iter()
-        .map(|hunk| {
-            let offset = unique_match_offset(text, &hunk.old, path)?;
-            Ok(MatchedHunk {
-                offset,
-                old: hunk.old.clone(),
-                new: hunk.new.clone(),
-            })
-        })
-        .collect::<Result<Vec<_>, String>>()?;
+    let mut matched = Vec::with_capacity(hunks.len());
+    for (index, hunk) in hunks.iter().enumerate() {
+        let offset = unique_match_offset(text, &hunk.old, path)
+            .map_err(|error| format!("hunk {} of {}: {error}", index + 1, hunks.len()))?;
+        matched.push(MatchedHunk {
+            offset,
+            old: hunk.old.clone(),
+            new: hunk.new.clone(),
+        });
+    }
     matched.sort_by_key(|hunk| hunk.offset);
     for pair in matched.windows(2) {
         let (earlier, later) = (&pair[0], &pair[1]);

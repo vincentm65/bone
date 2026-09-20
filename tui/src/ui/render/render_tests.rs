@@ -257,3 +257,58 @@ fn system_message_renders_as_muted_markdown() {
         "system message emphasis should render italic"
     );
 }
+
+#[test]
+fn representative_tool_sequence_has_one_scrollback_separator() {
+    let messages = vec![
+        crate::chat::Message::tool_row(
+            "read_file native/src/main.rs (lines 7245-7344, 100 read)".into(),
+            false,
+        ),
+        crate::chat::Message::system("\n    edit_file native/src/main.rs (-0 | +0)\n(no changes)"),
+        crate::ui::tool_display::shell_row(
+            "ps -ef | grep bone",
+            "exit code: 0\nstdout:\n123 bone\n\nstderr:\n".into(),
+            false,
+        ),
+        crate::chat::Message::system(
+            "\n    edit_file tui/src/ui/app/mod.rs (-5 | +7)\n    1 - old\n    1 + new",
+        ),
+        crate::ui::tool_display::shell_row(
+            "rm -f /tmp/x && git status --short",
+            "exit code: 0\nstdout:\n M tui/src/ui/app/mod.rs\n\nstderr:\n".into(),
+            false,
+        ),
+    ];
+    let theme = Theme::default();
+    let logical = super::messages::msg_to_lines(&messages, &theme, None, 120, false);
+    let logical_blank_runs = logical
+        .windows(2)
+        .filter(|pair| {
+            pair.iter()
+                .all(|line| line.spans.iter().all(|span| span.content.trim().is_empty()))
+        })
+        .count();
+    assert_eq!(
+        logical_blank_runs, 0,
+        "fixture must not contain consecutive blank rows"
+    );
+
+    let mut renderer = Renderer::new();
+    let deduped = renderer.dedup_scrollback_blanks(&logical);
+    assert_eq!(
+        deduped.len(),
+        logical.len(),
+        "dedup should not remove fixture rows"
+    );
+    assert_eq!(
+        logical_lines_row_count(&logical, 120),
+        logical_lines_row_count(&deduped, 120),
+        "insert_before receives the same row count after deduplication"
+    );
+    assert_eq!(
+        logical_lines_row_count(&deduped, 120),
+        deduped.len() as u16,
+        "representative fixture has no wrapped rows"
+    );
+}

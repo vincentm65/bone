@@ -31,8 +31,10 @@ and documentation; do not describe them as built-in core behavior.
 - Keep one core `Driver`: the daemon owns sessions, transcripts, approvals,
   tools, jobs, configuration, and durable state. Frontends are thin clients of
   the protocol.
-- Treat paths as relative to the resolved config directory unless a path is
-  explicitly absolute. Preserve unrelated user data and working-tree changes.
+- A path starting with `.bone-rust/` resolves inside the resolved config
+  directory; every other relative path resolves against the working directory,
+  and absolute paths are used as written. Preserve unrelated user data and
+  working-tree changes.
 - Prefer native file tools for file contents. Read before editing; use `shell`
   for commands and only when a dedicated file operation cannot express the job.
 - After directly editing `providers.yaml`, `subagents.yaml`, `extensions.yaml`,

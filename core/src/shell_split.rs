@@ -11,57 +11,128 @@ pub struct ShellSplitOptions {
     pub strip_comments: bool,
 }
 
+#[derive(Default)]
+struct ShellState {
+    single: bool,
+    double: bool,
+    escaped: bool,
+    comment: bool,
+    at_word_start: bool,
+    /// Parenthesis depth for a command substitution, including its `$(`.
+    /// Zero denotes the outer shell rather than a substitution.
+    paren_depth: usize,
+}
+
 /// Split a shell command string into segments at unquoted separators.
 ///
-/// Handles single/double quoting and backslash escaping. Separator characters
-/// (`&&`, `||`, `|`, `;`, and optionally `\n`) are treated as segment
-/// boundaries.
+/// Handles single/double quoting, backslash escaping, and `$( )` command
+/// substitution nesting: a separator that belongs to a nested command is part of
+/// that command, not of the surrounding one, so it does not split here. The body
+/// of a substitution is passed through verbatim, `#` comments included, because
+/// whoever inspects it (the destructive-command guard) re-splits and re-inspects
+/// it as a command in its own right.
 pub fn shell_split(command: &str, opts: &ShellSplitOptions) -> Vec<String> {
     let mut segments = Vec::new();
     let mut current = String::new();
-    let mut single = false;
-    let mut double = false;
-    let mut escaped = false;
-    let mut at_word_start = true;
+    let mut states = vec![ShellState {
+        at_word_start: true,
+        ..ShellState::default()
+    }];
     let mut chars = command.chars().peekable();
 
     while let Some(ch) = chars.next() {
-        if escaped {
+        let in_substitution = states.len() > 1;
+        let state = states.last_mut().expect("outer shell state exists");
+
+        if state.comment {
             current.push(ch);
-            escaped = false;
-            at_word_start = ch.is_whitespace();
+            if ch == '\n' {
+                state.comment = false;
+                state.at_word_start = true;
+            }
+            continue;
+        }
+        if state.escaped {
+            current.push(ch);
+            state.escaped = false;
+            // A backslash-quoted character is literal data: even when it is a
+            // separator (`\;`, `\)`) or `#`, it continues the current word, so the
+            // next `#` is still mid-word and does not start a comment.
+            state.at_word_start = false;
             continue;
         }
         if ch == '\\' {
             current.push(ch);
-            escaped = true;
-            at_word_start = false;
+            state.escaped = true;
+            state.at_word_start = false;
             continue;
         }
-        if ch == '\'' && !double {
-            single = !single;
+        if ch == '\'' && !state.double {
+            state.single = !state.single;
             current.push(ch);
-            at_word_start = false;
+            state.at_word_start = false;
             continue;
         }
-        if ch == '"' && !single {
-            double = !double;
+        if ch == '"' && !state.single {
+            state.double = !state.double;
             current.push(ch);
-            at_word_start = false;
+            state.at_word_start = false;
             continue;
         }
+        if ch == '$' && !state.single && chars.peek() == Some(&'(') {
+            chars.next();
+            current.push_str("$(");
+            state.at_word_start = false;
+            states.push(ShellState {
+                at_word_start: true,
+                paren_depth: 1,
+                ..ShellState::default()
+            });
+            continue;
+        }
+
+        if in_substitution {
+            if !state.single && !state.double {
+                if opts.strip_comments && ch == '#' && state.at_word_start {
+                    current.push(ch);
+                    state.comment = true;
+                    state.at_word_start = false;
+                    continue;
+                }
+                if ch == '(' {
+                    state.paren_depth += 1;
+                } else if ch == ')' {
+                    state.paren_depth -= 1;
+                    current.push(ch);
+                    if state.paren_depth == 0 {
+                        states.pop();
+                        states
+                            .last_mut()
+                            .expect("substitution has an outer state")
+                            .at_word_start = false;
+                    } else {
+                        state.at_word_start = true;
+                    }
+                    continue;
+                }
+            }
+            current.push(ch);
+            state.at_word_start = is_word_boundary(ch);
+            continue;
+        }
+
         // Comment stripping: at word start, outside quotes, consume to newline.
-        if opts.strip_comments && ch == '#' && !single && !double && at_word_start {
+        if opts.strip_comments && ch == '#' && !state.single && !state.double && state.at_word_start {
             for next in chars.by_ref() {
                 if next == '\n' {
                     push_segment(&mut segments, &mut current);
-                    at_word_start = true;
+                    state.at_word_start = true;
                     break;
                 }
             }
             continue;
         }
-        if !single && !double {
+        if !state.single && !state.double {
             let is_sep = match ch {
                 '&' if chars.peek() == Some(&'&') => {
                     if opts.keep_separators {
@@ -88,16 +159,20 @@ pub fn shell_split(command: &str, opts: &ShellSplitOptions) -> Vec<String> {
             };
             if is_sep {
                 push_segment(&mut segments, &mut current);
-                at_word_start = true;
+                state.at_word_start = true;
                 continue;
             }
         }
 
         current.push(ch);
-        at_word_start = ch.is_whitespace();
+        state.at_word_start = is_word_boundary(ch);
     }
     push_segment(&mut segments, &mut current);
     segments
+}
+
+fn is_word_boundary(ch: char) -> bool {
+    ch.is_whitespace() || matches!(ch, '&' | '|' | ';' | '(' | ')')
 }
 
 fn push_segment(segments: &mut Vec<String>, segment: &mut String) {

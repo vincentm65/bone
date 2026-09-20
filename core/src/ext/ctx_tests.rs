@@ -1141,6 +1141,43 @@ fn ctx_exec_and_codec_are_available_and_binary_safe() {
 }
 
 #[test]
+fn ctx_codec_png_resize_returns_bounded_png_dimensions() {
+    let cfg = test_ctx_config();
+    let lua = Lua::new();
+    let ctx = create_ctx_table(&lua, &cfg).unwrap();
+    lua.globals().set("ctx", ctx).unwrap();
+
+    let source = image::RgbaImage::from_pixel(3000, 2000, image::Rgba([20, 40, 80, 255]));
+    let mut source_png = Vec::new();
+    source
+        .write_to(
+            &mut std::io::Cursor::new(&mut source_png),
+            image::ImageFormat::Png,
+        )
+        .unwrap();
+    lua.globals()
+        .set("source_png", lua.create_string(&source_png).unwrap())
+        .unwrap();
+
+    let result: Table = lua
+        .load("return ctx.codec.png_resize(source_png, 1920, 1080)")
+        .eval()
+        .unwrap();
+    let png: mlua::String = result.get("png").unwrap();
+    let width: u32 = result.get("width").unwrap();
+    let height: u32 = result.get("height").unwrap();
+    let resized: bool = result.get("resized").unwrap();
+
+    assert_eq!((width, height), (1620, 1080));
+    assert!(resized);
+    assert_eq!(
+        crate::llm::parse_image_dimensions(&png.as_bytes()),
+        Some((1620, 1080))
+    );
+    assert!(image::load_from_memory(&png.as_bytes()).is_ok());
+}
+
+#[test]
 fn ctx_time_is_monotonic_and_sleep_is_native() {
     let cfg = test_ctx_config();
     let lua = Lua::new();

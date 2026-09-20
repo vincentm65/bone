@@ -38,6 +38,22 @@ fn job_quit_confirmation_required(is_remote: bool, active_jobs: usize) -> bool {
 
 const HOST_REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Traces one autocomplete/input event when `BONE_TRACE_AUTOCOMPLETE` is set.
+///
+/// `detail` is a closure so callers do not format the message (cloning the input
+/// buffer, walking the match list) on the hot path when tracing is off.
+fn trace_autocomplete(event: &str, detail: impl FnOnce() -> String) {
+    if std::env::var_os("BONE_TRACE_AUTOCOMPLETE").is_some() {
+        static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        let elapsed = START.get_or_init(Instant::now).elapsed();
+        eprintln!(
+            "[autocomplete-trace +{:>8}us] {event}: {}",
+            elapsed.as_micros(),
+            detail()
+        );
+    }
+}
+
 type HostResult = Result<bone_protocol::HostResponse, String>;
 type HostUiCall = (
     bone_protocol::HostRequest,
@@ -2008,6 +2024,7 @@ impl App {
                 } else {
                     match event::read()? {
                         Event::Key(key) if key.kind == KeyEventKind::Press => {
+                            trace_autocomplete("key_received", || format!("{:?}", key.code));
                             // Coalesce a non-bracketed paste burst (Windows conhost
                             // delivers a paste as a flood of Char events) into one
                             // insert_paste so large pastes collapse to a placeholder
@@ -2230,7 +2247,17 @@ impl App {
 
         let old_height = self.renderer.viewport_height;
         if desired != old_height {
-            Renderer::resize_viewport(terminal, old_height, desired)?;
+            let resize_started = Instant::now();
+            let result = Renderer::resize_viewport(terminal, old_height, desired);
+            trace_autocomplete("resize_viewport", || {
+                format!(
+                    "{} -> {} in {:?}",
+                    old_height,
+                    desired,
+                    resize_started.elapsed()
+                )
+            });
+            result?;
             self.renderer.viewport_height = desired;
         }
         Ok(())
@@ -2396,7 +2423,10 @@ impl App {
     }
 
     fn redraw(&mut self, terminal: &mut BoneTerminal) -> io::Result<()> {
-        self.ensure_viewport_and_draw(terminal)
+        let started = Instant::now();
+        let result = self.ensure_viewport_and_draw(terminal);
+        trace_autocomplete("redraw", || format!("{:?}", started.elapsed()));
+        result
     }
 
     /// Recreate the inline viewport after another terminal UI temporarily owned
@@ -2460,14 +2490,13 @@ impl App {
         // A pending tool-approval is interactive too — it now lives in the pane
         // region like Lua menus, so pause the spinner/timer the same way.
         let interacting = self.has_lua_menu_pane() || self.active_prompt.is_some();
-        // A live Lua command (e.g. /shotgun) runs through `run_remote_command`
-        // without setting `streaming`, but it's still working — keep spinner/timer
-        // alive so the UI doesn't look frozen during long multi-model runs.
-        let spinner_active = (self.streaming || self.live_command) && !interacting;
-        let elapsed = if interacting {
-            None
-        } else {
+        // Slash commands are not model turns and should not show the thinking
+        // spinner or timer.
+        let spinner_active = self.streaming && !interacting;
+        let elapsed = if spinner_active {
             self.timer_elapsed()
+        } else {
+            None
         };
         let mut info = stream_status_info_with_token_stats(
             estimated_tokens,
@@ -2949,6 +2978,8 @@ impl App {
     /// Update autocomplete state based on current input buffer.
     /// Shows autocomplete when buffer starts with `/`, hides otherwise.
     fn update_autocomplete(&mut self) {
+        let started = Instant::now();
+        trace_autocomplete("autocomplete_begin", || self.input.buffer.clone());
         // Don't open autocomplete while navigating history — prevents the
         // dropdown from reopening on every arrow press when a history entry
         // starts with '/'.
@@ -2964,7 +2995,16 @@ impl App {
                 return;
             }
             if self.autocomplete.is_none() {
-                self.autocomplete = Some(AutocompleteState::new(self.collect_commands()));
+                let collect_started = Instant::now();
+                let commands = self.collect_commands();
+                trace_autocomplete("collect_commands", || {
+                    format!(
+                        "{} commands in {:?}",
+                        commands.len(),
+                        collect_started.elapsed()
+                    )
+                });
+                self.autocomplete = Some(AutocompleteState::new(commands));
             }
             if let Some(ref mut ac) = self.autocomplete {
                 ac.update(query);
@@ -2972,6 +3012,13 @@ impl App {
         } else {
             self.autocomplete = None;
         }
+        trace_autocomplete("autocomplete_end", || {
+            format!(
+                "{:?}, {} matches",
+                started.elapsed(),
+                self.autocomplete.as_ref().map_or(0, |ac| ac.matches.len())
+            )
+        });
     }
 
     /// Collect all available slash commands with descriptions: native builtins
@@ -3290,8 +3337,18 @@ impl App {
 
         // Detect a non-bracketed paste flood: if more key events are already
         // buffered behind this one, we're mid-paste (e.g. Windows conhost).
+        let input_started = Instant::now();
         self.input.paste_mode = event::poll(std::time::Duration::from_millis(0)).unwrap_or(false);
-        match self.input.apply_key(code, modifiers) {
+        let action = self.input.apply_key(code, modifiers);
+        trace_autocomplete("apply_key", || {
+            format!(
+                "{:?} in {:?}, buffer={:?}",
+                action,
+                input_started.elapsed(),
+                self.input.buffer
+            )
+        });
+        match action {
             InputAction::Cancel => self.handle_ctrl_c(term),
             InputAction::Submit => {
                 self.autocomplete = None;

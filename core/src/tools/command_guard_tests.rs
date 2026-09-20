@@ -73,10 +73,72 @@ fn denies_wrappers_after_connectors_and_nested_wrappers() {
 }
 
 #[test]
-fn denies_command_substitutions_and_backticks() {
-    for command in ["echo $(rm -rf /)", "echo `rm -rf /`"] {
+fn handles_command_substitutions_recursively() {
+    for command in [
+        r#"echo "lines=$(wc -l < results.jsonl)""#,
+        r#"a && echo "$(true && printf ok)" || b"#,
+        r#"sleep 600; cd /home/example/bench; echo "lines=$(wc -l < .bone-bench/results.jsonl)"; tail -4 .bone-bench/results.jsonl | grep -o '"run_id":"[^"]*"' | paste -sd' ' -; ls .bone-bench/worktrees/"#,
+        r#"echo '$(rm -rf /)'"#,
+        "echo \"$(printf '%s' ')')\"",
+        "echo $( (true && printf ok); printf done )",
+        "echo $(true # comment )\nprintf ok)",
+        // A `#` inside a substitution is part of that command, not a comment on the
+        // outer line: the newline it runs up to must stay visible to the splitter.
+        "echo $(true # counting\n)",
+        "echo $(true\n)",
+    ] {
+        assert_allowed(command);
+    }
+    for command in [
+        "echo $(rm -rf /)",
+        "echo $(true && rm -rf /home/example)",
+        "echo $(echo $(rm -rf /))",
+        // The `;` that follows the substitution is a real top-level separator, so
+        // the trailing `rm` is a second segment and must still be refused.
+        "echo $(true # note\n); rm -rf /home/example",
+        // Here the newline is *inside* the substitution, so the `rm` is part of
+        // the substitution body and must be refused there.
+        "echo $(true # note\nrm -rf /home/example)",
+    ] {
         assert_denied(command);
     }
+}
+
+#[test]
+fn substitutions_are_inspected_with_the_segment_cwd() {
+    // The substitution runs after the `cd`, so `worktrees` resolves under the
+    // directory the segment changed into, not under the workspace.
+    assert_denied("cd /home/example/bench; echo \"$(rm -rf worktrees)\"");
+    // The reverse must also hold: a `cd` *inside* the substitution runs in a
+    // subshell, so it must not leak out and make the later relative `sub`
+    // resolve under `/home/example`.
+    assert_allowed("echo $(cd /home/example); rm -rf sub");
+    // Quotes and ordinary grouping inside a substitution must not make its
+    // closing delimiter look like an earlier command boundary.
+    assert_denied("echo $(printf \" ) && ; \"; rm -rf /home/example)");
+    assert_denied("echo $( (cd /home/example); rm -rf . )");
+}
+
+#[test]
+fn denies_dynamic_command_names() {
+    // The program name is only known at run time, so the literal-name verb checks
+    // cannot see it; the guard refuses instead of guessing.
+    for command in [
+        "$(echo git) clean -f",
+        "$(echo rm) -rf /home/example/projects",
+        "${CMD} clean -f",
+        "sudo $(echo rm) -rf /home/example",
+    ] {
+        assert_denied(command);
+    }
+    // A substitution in an *argument* leaves the program name literal and known.
+    assert_allowed("git commit -m \"$(date)\"");
+}
+
+#[test]
+fn still_denies_unsupported_nested_syntax() {
+    assert_denied("echo `rm -rf /`");
+    assert_denied("cat <(rm -rf /)");
 }
 
 #[test]
@@ -88,6 +150,27 @@ fn denies_shell_escapes_that_reconstruct_dangerous_tokens() {
     ] {
         assert_denied(command);
     }
+}
+
+#[test]
+fn denies_a_command_hidden_behind_an_escaped_separator() {
+    // A backslash-quoted separator is literal data, so a `#` right after it is
+    // still mid-word and does not open a comment. Bash runs the tail as its own
+    // command, so the guard must inspect it.
+    for command in [
+        r"echo a\;# x; rm -rf /home/example",
+        r"echo a\)# z; rm -rf /home/example",
+        r"echo a\|# q; rm -rf /home/example",
+        r"echo a\&# r; rm -rf /home/example",
+        r"echo a\(# s; rm -rf /home/example",
+        r"echo a\ # y; rm -rf /home/example",
+        r"echo a\;# x; rm -rf ~",
+        r"sh -c 'echo a\;# x; rm -rf /home/example'",
+    ] {
+        assert_denied(command);
+    }
+    // A real comment still hides the tail, because bash never runs it.
+    assert_allowed(r"echo a # x; rm -rf /home/example");
 }
 
 #[test]
@@ -156,6 +239,89 @@ fn canary_matches_whole_token_only() {
     // A word that merely contains the canary name is a different token, so it is
     // not refused: the canary check is exact, not a substring match.
     assert_allowed("echo bone-guard-selftest-backup");
+}
+
+#[test]
+fn allows_empty_dir_removal_outside_the_workspace() {
+    // Verb-power rule: `rmdir` and `rm -d` / `rm --dir` unlink *empty* directory
+    // nodes only, so they cannot destroy data. A scratch path under `$HOME` but
+    // outside the workspace is therefore cleanable — including another checkout,
+    // which is what a benchmark harness leaves behind.
+    for command in [
+        "rmdir /home/example/projects/bone-bench/.bone-bench/logs/1789920887083-rg-004-bone",
+        "rmdir -p /home/example/scratch/empty",
+        "rmdir ~/scratch/empty",
+        "rm -d /home/example/scratch/empty",
+        "rm --dir /home/example/scratch/empty",
+        "bash -c 'rmdir ~/scratch/empty'",
+        "cd /home/example/scratch && rmdir empty",
+    ] {
+        assert_allowed(command);
+    }
+}
+
+#[test]
+fn empty_dir_power_never_reaches_roots_ancestors_or_system_paths() {
+    for command in [
+        // The home directory itself and everything above it stay refused.
+        "rmdir /home/example",
+        "rmdir /home/example/",
+        "rmdir ~",
+        "rmdir -p /",
+        "rmdir /home",
+        // An ancestor of the workspace is not scratch.
+        "rmdir /home/example/projects",
+        // Git metadata is protected at every power.
+        "rmdir /home/example/projects/bone/.git/refs",
+        // System locations stay refused.
+        "rmdir /usr/share/empty",
+        "rmdir /var/tmp",
+        // The power is per invocation, so an unbounded or recursive delete of the
+        // same path is still refused.
+        "rm -rf /home/example/scratch/empty",
+        "rm -rd /home/example/scratch/empty",
+        "rm -r /home/example/scratch/empty",
+        "rmdir /home/example/scratch/empty /home/example/projects",
+        "rmdir $TARGET",
+        "rmdir /home/example/scratch/*",
+    ] {
+        assert_denied(command);
+    }
+}
+
+#[test]
+fn quoted_verb_words_are_data_not_nested_invocations() {
+    // A quoted word is a search pattern, a commit subject, a log line — never a
+    // nested program name, so it must not trip the nested-verb heuristic.
+    for command in [
+        "grep -rn \"rmdir\" --include=*.rs /home/example/projects/bone /home/example/.bone-rust",
+        "git commit -m 'rmdir -p the old scratch logs'",
+        "echo \"rm -rf ~\"",
+    ] {
+        assert_allowed(command);
+    }
+    // A real nested invocation is unquoted and still refused.
+    for command in [
+        "timeout 5 rm -rf ~",
+        "find /home/example -print0 | xargs -0 rmdir",
+        "find ~ -exec rm {} +",
+    ] {
+        assert_denied(command);
+    }
+}
+
+#[test]
+fn unquoted_verb_word_in_an_argument_position_still_denies() {
+    // Known, accepted false positive: without command identity the guard cannot
+    // tell `grep -rn rm … <home path>` from `timeout 5 rm -rf ~`, because the verb
+    // word is followed by a flag and a protected target either way. Only quote
+    // provenance is honoured, so this unquoted form stays refused — quote the
+    // pattern (`grep -rn \"rm\" …`) and it is allowed.
+    assert_denied(
+        "grep -rn rm --include=*.rs /home/example/projects/bone /home/example/.bone-rust",
+    );
+    // The same word *not* followed by a flag is not read as an invocation at all.
+    assert_allowed("grep -rn rmdir /home/example/.bone-rust");
 }
 
 #[test]

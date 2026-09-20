@@ -104,3 +104,81 @@ fn clearing_store_and_disabled_dedup_drop_pending_reads() {
     assert!(!disabled.take_unchanged("a.txt", &digest, 1, 1));
     assert!(!disabled.take_unchanged("a.txt", &digest, 1, 1));
 }
+
+#[test]
+fn config_dir_paths_anchor_to_the_resolved_config_directory() {
+    let _guard = crate::util::test_env_lock();
+    let bone = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let old_bone_dir = std::env::var_os("BONE_DIR");
+
+    let result = std::panic::catch_unwind(|| {
+        // SAFETY: held under test_env_lock; restored below.
+        unsafe { std::env::set_var("BONE_DIR", bone.path()) };
+        assert_eq!(
+            resolve_path(".bone-rust/AGENTS.md", Some(project.path())).unwrap(),
+            bone.path().join("AGENTS.md")
+        );
+        assert_eq!(
+            resolve_path("./.bone-rust/AGENTS.md", Some(project.path())).unwrap(),
+            bone.path().join("AGENTS.md")
+        );
+        assert_eq!(
+            resolve_path(".bone-rust", Some(project.path())).unwrap(),
+            bone.path()
+        );
+    });
+
+    match old_bone_dir {
+        Some(value) => unsafe { std::env::set_var("BONE_DIR", value) },
+        None => unsafe { std::env::remove_var("BONE_DIR") },
+    }
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+#[test]
+fn project_local_config_dir_wins_over_the_config_redirect() {
+    let _guard = crate::util::test_env_lock();
+    let bone = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let local = project.path().join(".bone-rust");
+    std::fs::create_dir(&local).unwrap();
+    let old_bone_dir = std::env::var_os("BONE_DIR");
+
+    let result = std::panic::catch_unwind(|| {
+        // SAFETY: held under test_env_lock; restored below.
+        unsafe { std::env::set_var("BONE_DIR", bone.path()) };
+        assert_eq!(
+            resolve_path(".bone-rust/AGENTS.md", Some(project.path())).unwrap(),
+            local.join("AGENTS.md")
+        );
+    });
+
+    match old_bone_dir {
+        Some(value) => unsafe { std::env::set_var("BONE_DIR", value) },
+        None => unsafe { std::env::remove_var("BONE_DIR") },
+    }
+    if let Err(payload) = result {
+        std::panic::resume_unwind(payload);
+    }
+}
+
+#[test]
+fn other_relative_paths_stay_in_the_working_directory() {
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(
+        resolve_path("core/src/lib.rs", Some(dir.path())).unwrap(),
+        dir.path().join("core/src/lib.rs")
+    );
+    assert_eq!(
+        resolve_path("../outside.txt", Some(dir.path())).unwrap(),
+        dir.path().join("../outside.txt")
+    );
+    assert_eq!(
+        resolve_path("/etc/hosts", Some(dir.path())).unwrap(),
+        PathBuf::from("/etc/hosts")
+    );
+    assert!(resolve_path("   ", Some(dir.path())).is_err());
+}

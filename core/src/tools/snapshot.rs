@@ -65,17 +65,52 @@ impl TextFormat {
     }
 }
 
+/// Component that names the Bone config directory in prompt-facing paths.
+const CONFIG_DIR_PREFIX: &str = ".bone-rust";
+
 /// Anchor a path to the session working directory. Absolute paths are unchanged.
+///
+/// A leading `.bone-rust` component means the resolved config directory — the
+/// shape Bone's system prompt and `AGENTS.md` use — so it is anchored there
+/// instead of the working directory. A working directory that really contains
+/// such an entry keeps winning, so project-local trees stay reachable.
 pub fn resolve_path(path: &str, working_dir: Option<&Path>) -> Result<PathBuf, String> {
     if path.trim().is_empty() {
         return Err("`path` must not be empty".to_string());
     }
     let path = PathBuf::from(path);
-    Ok(if path.is_relative() {
-        working_dir.map_or(path.clone(), |cwd| cwd.join(path))
-    } else {
-        path
+    if path.is_absolute() {
+        return Ok(path);
+    }
+    let cwd = working_dir
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok());
+    if let Some(rest) = config_relative(&path) {
+        let shadowed = cwd
+            .as_deref()
+            .is_some_and(|cwd| cwd.join(CONFIG_DIR_PREFIX).exists());
+        if !shadowed && let Some(bone) = crate::config::try_bone_dir() {
+            return Ok(bone.join(rest));
+        }
+    }
+    Ok(match cwd {
+        Some(cwd) => cwd.join(path),
+        None => path,
     })
+}
+
+/// Split the leading `.bone-rust` component off `path`, if it has one.
+fn config_relative(path: &Path) -> Option<PathBuf> {
+    let trimmed = path.strip_prefix(".").unwrap_or(path);
+    let trimmed = if trimmed.as_os_str().is_empty() {
+        path
+    } else {
+        trimmed
+    };
+    trimmed
+        .strip_prefix(CONFIG_DIR_PREFIX)
+        .ok()
+        .map(Path::to_path_buf)
 }
 
 /// Resolve an existing path to one stable identity. Canonicalization collapses

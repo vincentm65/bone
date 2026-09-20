@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::io::Cursor;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1020,7 +1021,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
     )?;
     ctx.set("exec", exec_fn)?;
 
-    // ctx.codec — binary-safe encoding and hashing helpers.
+    // ctx.codec — binary-safe encoding, image, and hashing helpers.
     let codec = lua.create_table()?;
     codec.set(
         "base64_encode",
@@ -1035,6 +1036,51 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
             use sha2::{Digest, Sha256};
             Ok(format!("{:x}", Sha256::digest(input.as_bytes())))
         })?,
+    )?;
+    codec.set(
+        "png_resize",
+        lua.create_function(
+            |lua, (input, max_width, max_height): (mlua::String, u32, u32)| {
+                if max_width == 0 || max_height == 0 {
+                    return Err(mlua::Error::external(
+                        "png_resize bounds must be greater than zero",
+                    ));
+                }
+                let source = input.as_bytes();
+                if !matches!(image::guess_format(&source), Ok(image::ImageFormat::Png)) {
+                    return Err(mlua::Error::external("png_resize input is not a valid PNG"));
+                }
+                let loaded = image::load_from_memory(&source).map_err(|error| {
+                    mlua::Error::external(format!("png_resize could not decode image: {error}"))
+                })?;
+                let (width, height) = (loaded.width(), loaded.height());
+                let result = lua.create_table()?;
+                if width <= max_width && height <= max_height {
+                    result.set("png", lua.create_string(source)?)?;
+                    result.set("width", width)?;
+                    result.set("height", height)?;
+                    result.set("resized", false)?;
+                    return Ok(result);
+                }
+
+                let scale = (f64::from(max_width) / f64::from(width))
+                    .min(f64::from(max_height) / f64::from(height));
+                let new_width = (f64::from(width) * scale).round().max(1.0) as u32;
+                let new_height = (f64::from(height) * scale).round().max(1.0) as u32;
+                let resized = image::imageops::thumbnail(&loaded, new_width, new_height);
+                let mut png = Vec::new();
+                image::DynamicImage::ImageRgba8(resized)
+                    .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
+                    .map_err(|error| {
+                        mlua::Error::external(format!("png_resize could not encode PNG: {error}"))
+                    })?;
+                result.set("png", lua.create_string(&png)?)?;
+                result.set("width", new_width)?;
+                result.set("height", new_height)?;
+                result.set("resized", true)?;
+                Ok(result)
+            },
+        )?,
     )?;
     codec.set(
         "random_hex",
