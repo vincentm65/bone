@@ -63,6 +63,28 @@ async fn range_is_clear_and_provides_the_next_call() {
 }
 
 #[tokio::test]
+async fn explicit_modes_reject_ambiguous_combinations() {
+    let single_error = ReadFileTool
+        .execute(json!({
+            "path": "src/**/*.rs",
+            "mode": "single",
+        }))
+        .await
+        .unwrap_err();
+    assert!(single_error.contains("mode=single requires one literal file path"));
+
+    let bulk_error = ReadFileTool
+        .execute(json!({
+            "path": "src/**/*.rs",
+            "mode": "bulk",
+            "max_lines": 20,
+        }))
+        .await
+        .unwrap_err();
+    assert!(bulk_error.contains("mode=bulk cannot use start_line or max_lines"));
+}
+
+#[tokio::test]
 async fn start_beyond_eof_and_empty_files_are_explicit() {
     let path = temp_path("empty-range.txt");
     fs::write(&path, "only").await.unwrap();
@@ -500,10 +522,7 @@ async fn bulk_reads_reject_line_ranges_and_preserve_image_attachments() {
         )
         .await
         .unwrap_err();
-    assert!(
-        error.contains("only supported for a single literal path"),
-        "{error}"
-    );
+    assert!(error.contains("Bulk read detected"), "{error}");
 
     let output = tool
         .execute_output_live(json!({ "path": "*" }), None, context)
@@ -603,6 +622,10 @@ async fn unchanged_bulk_reads_are_deduplicated_per_file() {
 fn schema_is_small_and_bounded() {
     let schema = ReadFileTool.definition().input_schema;
     assert_eq!(schema["required"], json!(["path"]));
+    assert_eq!(
+        schema["properties"]["mode"]["enum"],
+        json!(["single", "bulk"])
+    );
     assert_eq!(schema["properties"]["max_lines"]["maximum"], 1000);
     assert_eq!(schema["properties"]["path"]["type"], "string");
     assert_eq!(schema["properties"]["paths"]["type"], "array");

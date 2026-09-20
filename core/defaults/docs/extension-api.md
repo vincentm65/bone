@@ -173,16 +173,21 @@ uses the normal registry and approval pipeline. Lua tool nesting is bounded.
 ### Native `read_file`
 
 Use the native `read_file` tool for source and text inspection instead of shell
-commands such as `cat`, `head`, `tail`, or `sed`. A single literal `path` keeps
-the normal line-window behavior: `start_line` is 1-based and `max_lines`
-defaults to 1,000. Images with `png`, `jpg`, `jpeg`, `gif`, or `webp`
-extensions are returned as image attachments.
+commands such as `cat`, `head`, `tail`, or `sed`. The tool has two explicit
+modes. For one file, use `mode: "single"` with a literal `path`; `start_line`
+is 1-based and `max_lines` defaults to 1,000. For multiple files, use
+`mode: "bulk"`; `path` may be a glob, and `paths` adds literals or globs while
+`exclude` omits matches. Do not combine bulk mode with `start_line` or
+`max_lines`. For example:
 
-Bulk reads are additive. Keep the required scalar `path` and use `paths` for
-additional literals or globs; `exclude` accepts one pattern or an array of
-patterns to omit. A glob in `path`, a glob in `paths`, or either additive field
-selects bulk mode. Bulk reads do not accept `start_line` or `max_lines`; read a
-specific literal separately when a line range is needed.
+```json
+{"path":"core/src/agent.rs","mode":"single","start_line":220,"max_lines":80}
+{"path":"core/src/**/*.rs","mode":"bulk","exclude":["**/tests/**"]}
+```
+
+If `mode` is omitted, Bone infers it for backward compatibility. Images with
+`png`, `jpg`, `jpeg`, `gif`, or `webp` extensions are returned as image
+attachments.
 
 Bulk expansion honors `.gitignore`, skips hidden paths and `.git`, and applies
 `exclude` patterns after matching. Results are canonicalized and de-duplicated.

@@ -112,9 +112,17 @@ where
     })
 }
 
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ReadMode {
+    Single,
+    Bulk,
+}
+
 #[derive(Deserialize)]
 struct Args {
     path: String,
+    mode: Option<ReadMode>,
     #[serde(default, deserialize_with = "deserialize_string_list")]
     paths: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_string_list")]
@@ -124,16 +132,40 @@ struct Args {
 }
 
 impl Args {
+    fn validate(&self) -> Result<(), String> {
+        let has_bulk_arguments = !self.paths.is_empty() || !self.exclude.is_empty();
+        let has_glob =
+            has_glob_magic(&self.path) || self.paths.iter().any(|path| has_glob_magic(path));
+        let has_range = self.start_line.is_some() || self.max_lines.is_some();
+
+        match self.mode {
+            Some(ReadMode::Single) if has_bulk_arguments || has_glob => Err(
+                "mode=single requires one literal file path and cannot use paths, exclude, or glob syntax. Use mode=bulk for multiple files or patterns.".to_string(),
+            ),
+            Some(ReadMode::Bulk) if has_range => Err(
+                "mode=bulk cannot use start_line or max_lines. Remove the range fields to read all matched files, or use mode=single with one literal path. For example: {\"path\":\"core/src/agent.rs\",\"mode\":\"single\",\"start_line\":220,\"max_lines\":80}.".to_string(),
+            ),
+            _ => Ok(()),
+        }
+    }
+
     fn is_bulk(&self) -> bool {
-        !self.paths.is_empty()
-            || !self.exclude.is_empty()
-            || has_glob_magic(&self.path)
-            || self.paths.iter().any(|path| has_glob_magic(path))
+        match self.mode {
+            Some(ReadMode::Single) => false,
+            Some(ReadMode::Bulk) => true,
+            None => {
+                !self.paths.is_empty()
+                    || !self.exclude.is_empty()
+                    || has_glob_magic(&self.path)
+                    || self.paths.iter().any(|path| has_glob_magic(path))
+            }
+        }
     }
 
     fn literal(path: String) -> Self {
         Self {
             path,
+            mode: None,
             paths: Vec::new(),
             exclude: Vec::new(),
             start_line: None,
@@ -153,14 +185,19 @@ impl Tool for ReadFileTool {
         ToolDefinition {
             name: "read_file".to_string(),
             description:
-                "Preferred tool for reading file contents; use this instead of shell commands such as cat, head, tail, or sed. Reads a UTF-8 text file and returns the resolved path, range information, and numbered lines, stopping at 50 KiB of output. To edit, copy an exact unique block of shown text into edit_file.old_text and provide its replacement as new_text. Optionally pass start_line and max_lines; defaults to the first 1000 lines. `path` may be a glob (`*` and `?` never cross directory boundaries; use `**` to recurse); use additive `paths` for more literals or globs and `exclude` to omit matches. Bulk reads skip hidden files and honor .gitignore, cap the match count and aggregate output, and preserve image attachments. Image files (png, jpg, jpeg, gif, webp) are returned as an image you can view."
+                "Preferred tool for reading file contents; use this instead of shell commands such as cat, head, tail, or sed. This one tool has two modes. SINGLE: read exactly one literal file with mode=single; start_line and max_lines are allowed, and default to the first 1000 lines. BULK: read multiple files with mode=bulk; use a glob in path or add paths and exclude; do not use start_line or max_lines. If mode is omitted, Bone infers it for backward compatibility. Examples: {\"path\":\"core/src/agent.rs\",\"mode\":\"single\",\"start_line\":220,\"max_lines\":80}; {\"path\":\"core/src/**/*.rs\",\"mode\":\"bulk\",\"exclude\":[\"**/tests/**\"]}. Relative paths resolve from the working directory. Bulk reads skip hidden files and honor .gitignore, cap the match count and aggregate output, and preserve image attachments. To edit, copy an exact unique block of shown text into edit_file.old_text and provide its replacement as new_text."
                     .to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "File path or glob to read. Relative paths resolve from the working directory."
+                        "description": "In single mode, one literal file path. In bulk mode, a file path or glob. Relative paths resolve from the working directory."
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["single", "bulk"],
+                        "description": "Use single for one literal file and optional line ranges; use bulk for globs or multiple files. Omit only for backward-compatible mode inference."
                     },
                     "paths": {
                         "type": "array",
@@ -175,17 +212,37 @@ impl Tool for ReadFileTool {
                     "start_line": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "1-based first line to include. Omit to start at line 1."
+                        "description": "Single mode only: 1-based first line to include. Do not combine with bulk mode, globs, paths, or exclude."
                     },
                     "max_lines": {
                         "type": "integer",
                         "minimum": 1,
                         "maximum": 1000,
-                        "description": "Max lines to return. Defaults to 1000."
+                        "description": "Single mode only: maximum lines to return. Do not combine with bulk mode, globs, paths, or exclude. Defaults to 1000."
                     }
                 },
                 "required": ["path"],
-                "additionalProperties": false
+                "additionalProperties": false,
+                "allOf": [
+                    {
+                        "if": {
+                            "required": ["mode"],
+                            "properties": {"mode": {"const": "single"}}
+                        },
+                        "then": {
+                            "not": {"anyOf": [{"required": ["paths"]}, {"required": ["exclude"]}]}
+                        }
+                    },
+                    {
+                        "if": {
+                            "required": ["mode"],
+                            "properties": {"mode": {"const": "bulk"}}
+                        },
+                        "then": {
+                            "not": {"anyOf": [{"required": ["start_line"]}, {"required": ["max_lines"]}]}
+                        }
+                    }
+                ]
             }),
         }
     }
@@ -225,6 +282,7 @@ impl ReadFileTool {
         working_dir: Option<&Path>,
     ) -> Result<ToolOutput, String> {
         let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
+        args.validate()?;
         if args.is_bulk() {
             return read_bulk(&args, snapshots, working_dir).await;
         }
@@ -407,7 +465,7 @@ async fn read_bulk(
 ) -> Result<ToolOutput, String> {
     if args.start_line.is_some() || args.max_lines.is_some() {
         return Err(
-            "start_line and max_lines are only supported for a single literal path; remove them from a bulk/glob read or read each file individually"
+            "Bulk read detected. Do not use start_line or max_lines with mode=bulk, a glob, paths, or exclude. Remove the range fields, or use mode=single with one literal path, for example {\"path\":\"core/src/agent.rs\",\"mode\":\"single\",\"start_line\":220,\"max_lines\":80}."
                 .to_string(),
         );
     }
