@@ -920,7 +920,7 @@ impl Driver {
                 // provider accounting more closely than a raw whole-history
                 // estimate. The next provider usage event replaces this estimate.
                 token_stats.context_length = token_stats.anchored_context_estimate(
-                    estimate_context_chars(&history, tool_defs_json_chars),
+                    estimate_context_chars(&request_history, tool_defs_json_chars),
                 );
                 let mut extras = BeforeTurnExtras::default();
                 let hook_mode = approval_mode.get();
@@ -1003,7 +1003,8 @@ impl Driver {
                 }
 
                 if history_rebuilt {
-                    let prompt_chars = estimate_context_chars(&history, tool_defs_json_chars);
+                    let prompt_chars =
+                        estimate_context_chars(&request_history, tool_defs_json_chars);
                     token_stats.context_length =
                         token_stats.anchored_context_estimate(prompt_chars);
                 }

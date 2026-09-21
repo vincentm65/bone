@@ -63,3 +63,30 @@ fn turn_messages_after_user_append_trailing_user_message() {
         "<system-reminder>\nremember\n</system-reminder>"
     );
 }
+
+#[test]
+fn pending_context_estimate_includes_ephemeral_image_relays() {
+    use crate::llm::ImageData;
+
+    let history = vec![ChatMessage::new(ChatRole::User, "hello")];
+    let relay_without_image = ChatMessage::user_with_images("image relay", vec![]);
+    let relay_with_image = ChatMessage::user_with_images(
+        "image relay",
+        vec![ImageData {
+            media_type: "image/png".to_string(),
+            width: Some(448),
+            height: Some(448),
+            ..Default::default()
+        }],
+    );
+    let mut request_history = history.clone();
+    request_history.push(relay_with_image);
+
+    let durable_estimate = super::estimate_context_chars(&history, 0);
+    let pending_estimate = super::estimate_context_chars(&request_history, 0);
+    let pending_without_image =
+        super::estimate_context_chars(&[history[0].clone(), relay_without_image], 0);
+
+    assert!(pending_estimate > durable_estimate);
+    assert_eq!(pending_estimate - pending_without_image, 973);
+}
