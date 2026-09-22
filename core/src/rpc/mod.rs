@@ -1428,18 +1428,31 @@ impl DaemonCtx {
         }
     }
 
-    /// Drop conversation-scoped host tool state (task_list, …) and remove the
-    /// task_list pane. Used on `/new`, `/clear`, and conversation load so
-    /// checklists never leak across chats.
+    /// Drop conversation-scoped host tool state (task_list, task_loop, …) and
+    /// remove every host-stateful tool's pane. Used on `/new`, `/clear`, and
+    /// conversation load so checklists never leak across chats.
     fn reset_host_tool_state(&self) {
-        {
+        let state_keys = {
             let mut s = self.session.lock().unwrap();
             s.tools.clear_host_state();
-        }
+            s.tools.host_state_keys()
+        };
         let ui = self.extensions.ui_handle();
-        crate::ext::api_ui::lock_shared(&ui).apply(crate::runtime::ViewDiff::Remove {
-            id: "task_list".into(),
-        });
+        // The UiState mutex is non-reentrant: the guard must be dropped before
+        // `drain_diffs` below, which re-locks the same mutex. Holding it across
+        // the drain deadlocked the daemon command loop (TUI froze on /new).
+        {
+            let mut shared = crate::ext::api_ui::lock_shared(&ui);
+            // Legacy hardcoded id kept so panes from tools that don't declare
+            // `stateful` (e.g. an older task_list plugin) are still removed.
+            shared.apply(crate::runtime::ViewDiff::Remove {
+                id: "task_list".into(),
+            });
+            for key in &state_keys {
+                shared.apply(crate::runtime::ViewDiff::Remove { id: key.clone() });
+            }
+        }
+        self.submit_inbox.drain();
         if self.forward_view_diffs {
             self.drain_diffs();
         }

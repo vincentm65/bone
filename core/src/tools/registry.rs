@@ -284,6 +284,13 @@ impl ToolHandler {
         self.host_state_keys.get(name).map(String::as_str)
     }
 
+    /// All host-held state keys (one per `stateful = true` tool), e.g.
+    /// `["task_list", "task_loop"]`. Used to remove every stateful tool's
+    /// pane on conversation reset.
+    pub fn host_state_keys(&self) -> Vec<String> {
+        self.host_state_keys.values().cloned().collect()
+    }
+
     fn result_clears_default_state(result: &ToolResult, state_key: &str) -> bool {
         result
             .pane_page

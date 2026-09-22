@@ -12,11 +12,9 @@
 //! directory, a target that does not resolve — resolves to a denial, so the
 //! guard fails closed.
 //!
-//! Destructive verbs are judged at their own power. `rmdir` and `rm -d` can only
-//! unlink *empty* directory nodes, so they cannot destroy data, and a scratch path
-//! under `$HOME` but outside the workspace — a sibling checkout, a harness log
-//! directory — stays cleanable. Roots, ancestors of `$HOME` or the workspace,
-//! `.git` metadata, and system locations are refused at every power.
+//! Destructive paths may be cleaned outside the workspace, but the home directory
+//! itself and its ancestors remain protected. The workspace root, its ancestors,
+//! `.git` metadata, and system locations are also refused.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -66,9 +64,9 @@ const COMMAND_WRAPPERS: &[&str] = &[
 /// Verbs that delete or overwrite their operands.
 const DESTRUCTIVE_VERBS: &[&str] = &["rm", "rmdir", "unlink", "shred", "truncate", "mv"];
 
-/// How much a destructive verb can actually destroy. A verb that can only
-/// remove *empty* directories leaves every file in place, so a target under
-/// `$HOME` but outside the workspace is scratch, not user data.
+/// How much a destructive verb can actually destroy. `rmdir` and `rm -d`
+/// without a recursive flag only remove *empty* directories, so they cannot
+/// destroy a tree's contents.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DeletePower {
     /// Removes or overwrites its operands: their previous contents are gone.
@@ -81,7 +79,7 @@ enum DeletePower {
 /// Paths that must never be the target of a destructive command. `/tmp` is
 /// intentionally absent so scratch-space cleanup stays legal.
 const SYSTEM_ROOTS: &[&str] = &[
-    "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64", "/media", "/mnt", "/opt",
+    "/bin", "/boot", "/dev", "/etc", "/lib", "/lib64", "/media", "/mnt", "/opt",
     "/proc", "/root", "/run", "/sbin", "/srv", "/sys", "/usr", "/var",
 ];
 
@@ -326,8 +324,15 @@ fn check_destructive(
         _ => "delete",
     };
     let power = destructive_power(verb, args);
+    let allow_home_descendants = matches!(verb, "rm" | "rmdir" | "unlink" | "shred");
     for target in &targets {
-        if let Some(reason) = target_verdict(target, roots, cwd, power) {
+        if let Some(reason) = target_verdict_with_home_policy(
+            target,
+            roots,
+            cwd,
+            power,
+            allow_home_descendants,
+        ) {
             return Some(format!("it would {action} {reason}"));
         }
     }
@@ -482,10 +487,14 @@ fn secondary_scan(tokens: &[Token], roots: &GuardRoots, cwd: Option<&Path>) -> O
         if !tokens.get(index + 1).is_some_and(|next| is_flag_like(next)) {
             continue;
         }
-        // Judge this nested verb at its own power: an `rmdir` whose targets are
-        // all outside the workspace is still only removing empty directories.
+        // Judge this nested verb at its own power so `rmdir` and `rm -d` remain
+        // limited to empty directories.
         let power = destructive_power(&verb, &tokens[index + 1..]);
-        if has_protected_target(tokens, roots, cwd, power) {
+        let allow_home_descendants = matches!(
+            verb.as_str(),
+            "rm" | "rmdir" | "unlink" | "shred"
+        );
+        if has_protected_target(tokens, roots, cwd, power, allow_home_descendants) {
             return Some(format!(
                 "it contains a nested `{token}` invocation that this guard cannot bound"
             ));
@@ -501,11 +510,21 @@ fn has_protected_target(
     roots: &GuardRoots,
     cwd: Option<&Path>,
     power: DeletePower,
+    allow_home_descendants: bool,
 ) -> bool {
     tokens
         .iter()
         .filter(|token| !is_flag_like(token))
-        .any(|token| target_verdict(token, roots, cwd, power).is_some())
+        .any(|token| {
+            target_verdict_with_home_policy(
+                token,
+                roots,
+                cwd,
+                power,
+                allow_home_descendants,
+            )
+            .is_some()
+        })
 }
 
 fn is_unbounded_nested_verb(verb: &str) -> bool {
@@ -563,9 +582,19 @@ fn target_verdict(
     cwd: Option<&Path>,
     power: DeletePower,
 ) -> Option<String> {
+    target_verdict_with_home_policy(token, roots, cwd, power, false)
+}
+
+fn target_verdict_with_home_policy(
+    token: &str,
+    roots: &GuardRoots,
+    cwd: Option<&Path>,
+    power: DeletePower,
+    allow_home_descendants: bool,
+) -> Option<String> {
     match resolve_target(token, roots, cwd) {
         Resolution::Ambiguous => Some(format!("the unresolvable target `{token}`")),
-        Resolution::Resolved(path) => protected_reason(&path, roots, power),
+        Resolution::Resolved(path) => protected_reason(&path, roots, power, allow_home_descendants),
     }
 }
 
@@ -596,7 +625,12 @@ fn resolve_target(token: &str, roots: &GuardRoots, cwd: Option<&Path>) -> Resolu
     }
 }
 
-fn protected_reason(path: &Path, roots: &GuardRoots, power: DeletePower) -> Option<String> {
+fn protected_reason(
+    path: &Path,
+    roots: &GuardRoots,
+    _power: DeletePower,
+    allow_home_descendants: bool,
+) -> Option<String> {
     if path == Path::new("/") {
         return Some("the filesystem root `/`".to_string());
     }
@@ -635,14 +669,8 @@ fn protected_reason(path: &Path, roots: &GuardRoots, power: DeletePower) -> Opti
     }
     if let Some(home) = &roots.home
         && path.starts_with(home)
+        && !allow_home_descendants
     {
-        // An empty-directory-only delete cannot destroy anything inside the tree,
-        // so sibling scratch under `$HOME` — another checkout, a harness log
-        // directory — stays cleanable. Roots, ancestors of the home directory, and
-        // system locations were already refused above.
-        if power == DeletePower::EmptyDirsOnly {
-            return None;
-        }
         return Some(format!("`{}`, inside your home directory", path.display()));
     }
     for root in SYSTEM_ROOTS {

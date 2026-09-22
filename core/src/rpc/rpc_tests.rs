@@ -1505,6 +1505,87 @@ fn conversation_load_replays_canonical_view_after_reset_event() {
     assert_eq!(view.components[0].id(), "survives-conversation-load");
 }
 
+/// Regression: `/new` / `/clear` / load must remove every host-stateful
+/// tool's pane (task_list AND the task_loop plugin), not just the hardcoded
+/// `task_list` id, and must drop queued auto-continuations so they cannot
+/// fire as the first turn of the next conversation.
+#[test]
+fn reset_host_tool_state_removes_stateful_panes_and_drains_submit_inbox() {
+    let extensions = crate::ext::ExtensionManager::unloaded();
+    let ui = extensions.ui_handle();
+    let stale = |id: &str| crate::runtime::Component::StatusLine {
+        id: id.into(),
+        segments: Vec::new(),
+    };
+    {
+        let mut shared = crate::ext::api_ui::lock_shared(&ui);
+        shared.apply(crate::runtime::ViewDiff::Upsert {
+            component: stale("task_list"),
+        });
+        shared.apply(crate::runtime::ViewDiff::Upsert {
+            component: stale("task_loop"),
+        });
+        shared.apply(crate::runtime::ViewDiff::Upsert {
+            component: stale("stays-after-reset"),
+        });
+    }
+
+    let tools = crate::tools::registry::ToolHandler::with_enabled_safety_and_display(
+        crate::tools::builtin_tools(),
+        &[],
+        std::collections::HashMap::new(),
+        std::collections::HashMap::new(),
+        std::collections::HashMap::from([
+            ("task_list".to_string(), "task_list".to_string()),
+            ("task_loop".to_string(), "task_loop".to_string()),
+        ]),
+    );
+    let session = crate::runtime::RuntimeSession::new(tools);
+    let (mut ctx, hub, _commands) =
+        test_daemon_ctx(Arc::new(ConfigTestProvider), extensions, session);
+    // Must be true: the live TUI forwards view diffs, and draining the diff
+    // queue re-locks the UiState mutex — holding the apply guard across the
+    // drain deadlocked the daemon command loop (TUI freeze on /new).
+    ctx.forward_view_diffs = true;
+    let mut events = hub.subscribe();
+
+    ctx.submit_inbox.push("Continue the autonomous task list".to_string());
+
+    ctx.reset_host_tool_state();
+
+    let mut forwarded = Vec::new();
+    while let Ok(RuntimeEvent::ViewDiff { diff }) = events.try_recv() {
+        forwarded.push(diff);
+    }
+    let removed: Vec<&str> = forwarded
+        .iter()
+        .filter_map(|d| match d {
+            crate::runtime::ViewDiff::Remove { id } => Some(id.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        removed.contains(&"task_list") && removed.contains(&"task_loop"),
+        "removes must be forwarded to frontends, got {removed:?}"
+    );
+
+    let handle = ctx.extensions.ui_handle();
+    let shared = crate::ext::api_ui::lock_shared(&handle);
+    let ids: Vec<&str> = shared.view.components.iter().map(|c| c.id()).collect();
+    assert!(
+        !ids.contains(&"task_list") && !ids.contains(&"task_loop"),
+        "stateful tool panes must be removed on reset, got {ids:?}"
+    );
+    assert!(
+        ids.contains(&"stays-after-reset"),
+        "unrelated components must survive reset, got {ids:?}"
+    );
+    assert!(
+        ctx.submit_inbox.pop().is_none(),
+        "queued submit must be drained on reset"
+    );
+}
+
 fn private_command_extensions() -> crate::ext::ExtensionManager {
     let lua = mlua::Lua::new();
     let bone = lua.create_table().unwrap();

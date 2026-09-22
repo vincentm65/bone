@@ -107,8 +107,9 @@ fn handles_command_substitutions_recursively() {
 #[test]
 fn substitutions_are_inspected_with_the_segment_cwd() {
     // The substitution runs after the `cd`, so `worktrees` resolves under the
-    // directory the segment changed into, not under the workspace.
-    assert_denied("cd /home/example/bench; echo \"$(rm -rf worktrees)\"");
+    // directory the segment changed into, not under the workspace; deletion
+    // outside the workspace is allowed.
+    assert_allowed("cd /home/example/bench; echo \"$(rm -rf worktrees)\"");
     // The reverse must also hold: a `cd` *inside* the substitution runs in a
     // subshell, so it must not leak out and make the later relative `sub`
     // resolve under `/home/example`.
@@ -242,45 +243,41 @@ fn canary_matches_whole_token_only() {
 }
 
 #[test]
-fn allows_empty_dir_removal_outside_the_workspace() {
-    // Verb-power rule: `rmdir` and `rm -d` / `rm --dir` unlink *empty* directory
-    // nodes only, so they cannot destroy data. A scratch path under `$HOME` but
-    // outside the workspace is therefore cleanable — including another checkout,
-    // which is what a benchmark harness leaves behind.
+fn allows_deletion_outside_workspace_but_not_home_or_ancestors() {
     for command in [
+        "rm -rf /home/example/scratch/tree",
+        "rm -rf /home/example/projects/bone-bench",
+        "rm -r /home/example/scratch/tree",
         "rmdir /home/example/projects/bone-bench/.bone-bench/logs/1789920887083-rg-004-bone",
         "rmdir -p /home/example/scratch/empty",
         "rmdir ~/scratch/empty",
         "rm -d /home/example/scratch/empty",
         "rm --dir /home/example/scratch/empty",
         "bash -c 'rmdir ~/scratch/empty'",
-        "cd /home/example/scratch && rmdir empty",
+        "cd /home/example/scratch && rm -rf tree",
+        "rm -rf /tmp/bone-guard-canary",
     ] {
         assert_allowed(command);
     }
 }
 
 #[test]
-fn empty_dir_power_never_reaches_roots_ancestors_or_system_paths() {
+fn deletion_never_reaches_home_ancestors_or_system_paths() {
     for command in [
         // The home directory itself and everything above it stay refused.
-        "rmdir /home/example",
+        "rm -rf /home/example",
         "rmdir /home/example/",
         "rmdir ~",
         "rmdir -p /",
         "rmdir /home",
         // An ancestor of the workspace is not scratch.
         "rmdir /home/example/projects",
-        // Git metadata is protected at every power.
+        // Git metadata is protected.
         "rmdir /home/example/projects/bone/.git/refs",
         // System locations stay refused.
         "rmdir /usr/share/empty",
         "rmdir /var/tmp",
-        // The power is per invocation, so an unbounded or recursive delete of the
-        // same path is still refused.
-        "rm -rf /home/example/scratch/empty",
-        "rm -rd /home/example/scratch/empty",
-        "rm -r /home/example/scratch/empty",
+        // Mixed targets and ambiguous paths remain refused.
         "rmdir /home/example/scratch/empty /home/example/projects",
         "rmdir $TARGET",
         "rmdir /home/example/scratch/*",
