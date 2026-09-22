@@ -2946,14 +2946,16 @@ fn launch_background_job(
                 let edit_preview = match &event {
                     crate::runtime::RuntimeEvent::ToolCall {
                         name, arguments, ..
-                    } if name == "edit_file" => crate::tools::edit_file::preview_edit_file(
-                        name,
-                        arguments.clone(),
-                        working_dir.as_deref(),
-                    )
-                    .await
-                    .ok()
-                    .map(|preview| preview.diff),
+                    } if name == "edit_file" => Some(
+                        crate::tools::edit_file::preview_edit_file(
+                            name,
+                            arguments.clone(),
+                            working_dir.as_deref(),
+                        )
+                        .await
+                        .map(|preview| preview.diff)
+                        .unwrap_or_else(|error| format!("Cannot preview edit_file: {error}")),
+                    ),
                     _ => None,
                 };
                 match &event {

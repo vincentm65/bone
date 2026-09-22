@@ -137,6 +137,17 @@ enablement path. The old separate `tools` and `commands` pages are gone; a row's
 toggle writes to `tools.disabled`, `commands.disabled`, or `plugins.disabled`
 accordingly.
 
+## File editing
+
+`edit_file` accepts a single replacement or a batch of disjoint replacements.
+Preview and execution share exact matching against the original text and reject
+no-op edits, duplicates, and overlaps. Execution reuses each match's position to
+check read visibility; errors identify the hunk and the range to read. Stale-file
+checks, atomic writes, BOM/newline preservation, and snapshot updates remain in
+core. Approval and background-job previews display preparation errors rather
+than silently omitting the preview. Previews do not replace execution-time
+snapshot and write checks.
+
 ## Invariants
 
 - There is one core `Driver` implementation for headless, TUI, and daemon turns.

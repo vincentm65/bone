@@ -68,6 +68,46 @@ async fn approval_preview_uses_daemon_session_working_dir() {
 }
 
 #[tokio::test]
+async fn approval_preview_surfaces_edit_errors_without_changing_approval_policy() {
+    let registry = ApprovalReplyRegistry::new();
+    let (events, mut receiver) = mpsc::unbounded_channel();
+    let gate = ChannelApprovalGate::new(events, registry.clone(), None, None);
+    let decision = tokio::spawn(async move {
+        gate.decide(
+            Some("policy block".into()),
+            false,
+            &ToolCall {
+                id: "bad-edit".into(),
+                name: "edit_file".into(),
+                arguments: serde_json::json!({"edits": []}),
+            },
+        )
+        .await
+    });
+    let RuntimeEvent::ApprovalRequest {
+        id,
+        preview,
+        blocked,
+        auto_allows,
+        ..
+    } = receiver.recv().await.unwrap()
+    else {
+        panic!("expected approval request");
+    };
+    assert_eq!(
+        preview.as_deref(),
+        Some(
+            "Cannot preview edit_file: edit_file is missing `path`; provide the file path with the edit"
+        )
+    );
+    assert_eq!(blocked.as_deref(), Some("policy block"));
+    assert!(!auto_allows);
+    assert!(registry.resolve(id, CallOutcome::Denied));
+    assert_eq!(decision.await.unwrap(), CallOutcome::Denied);
+    assert_eq!(registry.pending_count(), 0);
+}
+
+#[tokio::test]
 async fn approval_registry_cleans_up_when_frontend_is_gone() {
     let registry = ApprovalReplyRegistry::new();
     let (events, receiver) = mpsc::unbounded_channel();

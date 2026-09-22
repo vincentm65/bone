@@ -1,7 +1,7 @@
 //! Simple exact-text editing for existing files.
 //!
-//! The agent supplies a path plus one exact `old_text` → `new_text`
-//! replacement. Context-aware calls require a preceding `read_file`; the
+//! The agent supplies a path plus one or more exact `old_text` → `new_text`
+//! replacements. Context-aware calls require a preceding `read_file`; the
 //! snapshot stays internal and is used for visibility and stale-file checks.
 
 use std::collections::BTreeSet;
@@ -52,6 +52,7 @@ struct Hunk {
 
 /// A hunk matched against the original normalized file text.
 struct MatchedHunk {
+    index: usize,
     offset: usize,
     old: String,
     new: String,
@@ -133,7 +134,7 @@ pub async fn preview_edit_file(
     let resolved = snapshot::resolve_existing_path(&path_arg, working_dir).await?;
     let path = resolved.to_string_lossy().into_owned();
     let (_, live) = read_live(&resolved).await?;
-    let (_, edited) = match_hunks(&live, &hunks, &path)?;
+    let (_, edited) = match_hunks(&live, &hunks, &path, None)?;
     Ok(EditPreview {
         before_hash: snapshot::compute_tag(&live),
         diff: diff::build_unified_diff("edit_file", &path, &live, &edited),
@@ -166,18 +167,7 @@ async fn run_edit(
             "`{path}` changed after it was read; re-read it and retry"
         ));
     }
-    if snapshots.is_some() {
-        for (index, hunk) in hunks.iter().enumerate() {
-            ensure_visible(&base, &hunk.old, &seen_lines, &path)
-                .map_err(|error| format!("hunk {} of {}: {error}", index + 1, hunks.len()))?;
-        }
-    }
-    let (matched, edited) = match_hunks(&live, &hunks, &path)?;
-    if edited == live {
-        return Err(format!(
-            "no change to `{path}`; the edits produce identical content"
-        ));
-    }
+    let (matched, edited) = match_hunks(&live, &hunks, &path, snapshots.map(|_| &seen_lines))?;
 
     let permissions = fs::metadata(&resolved)
         .await
@@ -219,38 +209,32 @@ fn parse_args(arguments: Value) -> Result<(String, Vec<Hunk>), String> {
     if args.path.trim().is_empty() {
         return Err("`path` must not be empty".to_string());
     }
-    let mut hunks = Vec::new();
-    match (args.old_text, args.new_text, args.edits) {
-        (None, None, Some(mut edits)) if !edits.is_empty() => {
-            for edit in edits.drain(..) {
-                hunks.push(Hunk {
-                    old: snapshot::normalize_text(&edit.old_text),
-                    new: snapshot::normalize_text(&edit.new_text),
-                });
-            }
+    let edits = match (args.old_text, args.new_text, args.edits) {
+        (Some(_), _, Some(_)) | (_, Some(_), Some(_)) => {
+            return Err("provide either old_text/new_text or edits, not both".to_string());
         }
-        (Some(old), Some(new), None) => {
-            if old.is_empty() && new.is_empty() {
+        (None, None, Some(edits)) if edits.is_empty() => {
+            return Err("`edits` must not be empty".to_string());
+        }
+        (None, None, Some(edits)) => edits,
+        (Some(old_text), Some(new_text), None) => {
+            if old_text.is_empty() && new_text.is_empty() {
                 return Err("`old_text` and `new_text` cannot both be empty".to_string());
             }
-            hunks.push(Hunk {
-                old: snapshot::normalize_text(&old),
-                new: snapshot::normalize_text(&new),
-            });
-        }
-        (Some(_), Some(_), Some(_)) => {
-            return Err("provide either old_text/new_text or edits, not both".to_string());
+            vec![EditHunk { old_text, new_text }]
         }
         (None, None, None) => {
             return Err("provide either old_text/new_text or a non-empty edits array".to_string());
         }
-        (Some(_), None, None) | (None, Some(_), None) => {
-            return Err("old_text and new_text must be provided together".to_string());
-        }
-        (_, _, Some(_)) => {
-            return Err("`edits` must not be empty".to_string());
-        }
-    }
+        _ => return Err("old_text and new_text must be provided together".to_string()),
+    };
+    let hunks = edits
+        .into_iter()
+        .map(|edit| Hunk {
+            old: snapshot::normalize_text(&edit.old_text),
+            new: snapshot::normalize_text(&edit.new_text),
+        })
+        .collect();
     Ok((args.path, hunks))
 }
 
@@ -279,18 +263,30 @@ fn unique_match_offset(text: &str, needle: &str, path: &str) -> Result<usize, St
 }
 
 /// Match every hunk against the original normalized `text`, reject duplicates
-/// and overlaps, and return the sorted matches plus the edited text. Each
-/// hunk anchors on the original content — never on an intermediate result.
+/// and overlaps, and return the sorted matches plus the edited text. Preview
+/// and execution share this path; execution also checks visibility using the
+/// same offsets. Each hunk anchors on the original content.
 fn match_hunks(
     text: &str,
     hunks: &[Hunk],
     path: &str,
+    seen_lines: Option<&BTreeSet<usize>>,
 ) -> Result<(Vec<MatchedHunk>, String), String> {
     let mut matched = Vec::with_capacity(hunks.len());
     for (index, hunk) in hunks.iter().enumerate() {
-        let offset = unique_match_offset(text, &hunk.old, path)
-            .map_err(|error| format!("hunk {} of {}: {error}", index + 1, hunks.len()))?;
+        let offset = unique_match_offset(text, &hunk.old, path).map_err(|error| {
+            format!(
+                "hunk {} of {}: {error}; {index} earlier hunks matched; no changes written",
+                index + 1,
+                hunks.len()
+            )
+        })?;
+        if let Some(seen) = seen_lines {
+            ensure_visible(text, offset, &hunk.old, seen, path)
+                .map_err(|error| format!("hunk {} of {}: {error}", index + 1, hunks.len()))?;
+        }
         matched.push(MatchedHunk {
+            index: index + 1,
             offset,
             old: hunk.old.clone(),
             new: hunk.new.clone(),
@@ -300,20 +296,27 @@ fn match_hunks(
     for pair in matched.windows(2) {
         let (earlier, later) = (&pair[0], &pair[1]);
         if earlier.old == later.old {
-            return Err(
-                "edits contains the same replacement twice; each hunk must be unique".to_string(),
-            );
+            return Err(format!(
+                "edits contains the same replacement twice (hunks {} and {}); remove the duplicate hunk",
+                earlier.index, later.index
+            ));
         }
         let overlaps = earlier.offset + earlier.old.len() > later.offset
             || (earlier.offset + earlier.old.len() == later.offset
                 && (earlier.old.is_empty() || later.old.is_empty()));
         if overlaps {
             return Err(format!(
-                "edits hunks overlap in `{path}`; split them into separate calls"
+                "edits hunks {} and {} overlap in `{path}`; combine them into one replacement",
+                earlier.index, later.index
             ));
         }
     }
     let edited = splice(text, &matched);
+    if edited == text {
+        return Err(format!(
+            "no change to `{path}`; the edits produce identical content"
+        ));
+    }
     Ok((matched, edited))
 }
 
@@ -373,6 +376,7 @@ fn splice_raw(raw: &str, hunks: &[MatchedHunk], format: snapshot::TextFormat) ->
 
 fn ensure_visible(
     snapshot_text: &str,
+    offset: usize,
     old_text: &str,
     seen_lines: &BTreeSet<usize>,
     path: &str,
@@ -380,20 +384,16 @@ fn ensure_visible(
     if old_text.is_empty() && snapshot_text.is_empty() {
         return Ok(());
     }
-    let offset = unique_match_offset(snapshot_text, old_text, path)?;
     let start_line = 1 + snapshot_text[..offset]
         .bytes()
         .filter(|b| *b == b'\n')
         .count();
-    let last_byte = offset + old_text.len() - 1;
-    let end_line = 1 + snapshot_text[..=last_byte]
-        .bytes()
-        .filter(|b| *b == b'\n')
-        .count()
+    let end = offset + old_text.len();
+    let end_line = 1 + snapshot_text[..end].bytes().filter(|b| *b == b'\n').count()
         - usize::from(old_text.ends_with('\n'));
     if (start_line..=end_line).any(|line| !seen_lines.contains(&line)) {
         return Err(format!(
-            "old_text includes lines that were not shown from `{path}`; read that range before editing"
+            "old_text includes lines that were not shown from `{path}`; read lines {start_line}-{end_line} with read_file before editing"
         ));
     }
     Ok(())

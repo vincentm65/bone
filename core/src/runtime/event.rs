@@ -257,14 +257,16 @@ impl ApprovalGate for ChannelApprovalGate {
         let (reply_tx, reply_rx) = oneshot::channel();
         let id = self.registry.register(reply_tx);
         let preview = if call.name == "edit_file" {
-            crate::tools::edit_file::preview_edit_file(
-                &call.name,
-                call.arguments.clone(),
-                self.working_dir.as_deref(),
+            Some(
+                crate::tools::edit_file::preview_edit_file(
+                    &call.name,
+                    call.arguments.clone(),
+                    self.working_dir.as_deref(),
+                )
+                .await
+                .map(|preview| preview.diff)
+                .unwrap_or_else(|error| format!("Cannot preview edit_file: {error}")),
             )
-            .await
-            .ok()
-            .map(|preview| preview.diff)
         } else {
             None
         };

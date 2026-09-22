@@ -401,6 +401,9 @@ async fn hunks_match_the_original_text_not_intermediate_results() {
         .await
         .unwrap_err();
     assert!(error.contains("not found"), "{error}");
+    assert!(error.contains("hunk 2 of 2"), "{error}");
+    assert!(error.contains("1 earlier hunks matched"), "{error}");
+    assert!(error.contains("no changes written"), "{error}");
     assert_eq!(fs::read_to_string(&path).await.unwrap(), "one\ntwo\n");
     let _ = fs::remove_file(path).await;
 }
@@ -415,12 +418,14 @@ async fn rejects_duplicate_and_overlapping_hunks() {
         .await
         .unwrap_err();
     assert!(duplicate.contains("same replacement twice"), "{duplicate}");
+    assert!(duplicate.contains("hunks 1 and 2"), "{duplicate}");
 
     // "same\nother" spans the second hunk's match.
     let overlap = edit_live_edits(&path, &[("same\nother", "X"), ("other", "O")], &context)
         .await
         .unwrap_err();
-    assert!(overlap.contains("overlap"), "{overlap}");
+    assert!(overlap.contains("hunks 1 and 2 overlap"), "{overlap}");
+    assert!(overlap.contains("combine them"), "{overlap}");
     assert_eq!(
         fs::read_to_string(&path).await.unwrap(),
         "same\nother\nsame\n"
@@ -498,10 +503,17 @@ async fn rejects_when_any_hunk_falls_outside_the_read_range() {
         .await
         .unwrap();
 
-    let error = edit_live_edits(&path, &[("two", "TWO"), ("four", "FOUR")], &context)
-        .await
-        .unwrap_err();
+    // Input order differs from file order; diagnostics must use input indexes.
+    let error = edit_live_edits(
+        &path,
+        &[("two", "TWO"), ("four", "FOUR"), ("one", "ONE")],
+        &context,
+    )
+    .await
+    .unwrap_err();
     assert!(error.contains("not shown"), "{error}");
+    assert!(error.contains("hunk 2 of 3"), "{error}");
+    assert!(error.contains("read lines 4-4 with read_file"), "{error}");
     assert_eq!(
         fs::read_to_string(&path).await.unwrap(),
         "one\ntwo\nthree\nfour\n"
@@ -572,6 +584,65 @@ async fn inline_deletion_preserves_visibility_of_later_lines() {
         fs::read_to_string(&path).await.unwrap(),
         "prefix \nmiddle\nLAST\n"
     );
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn preview_and_execution_agree_on_batch_errors() {
+    let path = setup("preview-errors.txt", "one\ntwo\nthree\n").await;
+    let context = ToolExecutionContext::default();
+    read_into_context(&path, &context).await;
+    for edits in [
+        vec![("three", "THREE"), ("missing", "X")],
+        vec![("one", "ONE"), ("one", "X")],
+        vec![("two", "TWO"), ("one\ntwo", "X")],
+        vec![("one", "one")],
+    ] {
+        let preview_error = preview_edit_file("edit_file", edits_args(&path, &edits), None)
+            .await
+            .err()
+            .expect("preview must fail");
+        let error = edit_live_edits(&path, &edits, &context).await.unwrap_err();
+        assert_eq!(preview_error, error);
+        assert_eq!(
+            fs::read_to_string(&path).await.unwrap(),
+            "one\ntwo\nthree\n"
+        );
+    }
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn preview_matches_executed_diff_with_unicode_and_format_preservation() {
+    let original = "\u{feff}alpha\r\ncafé\r\n東京\r\n";
+    let path = setup("preview-unicode.txt", original).await;
+    let context = ToolExecutionContext::default();
+    read_into_context(&path, &context).await;
+    let edits = &[("東京", "大阪\n京都"), ("café", "thé")];
+    let preview = preview_edit_file("edit_file", edits_args(&path, edits), None)
+        .await
+        .unwrap();
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), original);
+    let output = edit_live_edits(&path, edits, &context).await.unwrap();
+    assert_eq!(output.split_once('\n').unwrap().1, preview.diff.trim_end());
+    assert_eq!(
+        fs::read_to_string(&path).await.unwrap(),
+        "\u{feff}alpha\r\nthé\r\n大阪\r\n京都\r\n"
+    );
+    edit_live(&path, "京都", "Kyoto", &context).await.unwrap();
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn partial_mixed_forms_report_mixing_not_empty_edits() {
+    let path = setup("partial-mixed.txt", "old\n").await;
+    for field in ["old_text", "new_text"] {
+        let mut args = edits_args(&path, &[("old", "new")]);
+        args[field] = json!("old");
+        let error = EditFileTool.execute(args).await.unwrap_err();
+        assert_eq!(error, "provide either old_text/new_text or edits, not both");
+    }
+    assert_eq!(fs::read_to_string(&path).await.unwrap(), "old\n");
     let _ = fs::remove_file(path).await;
 }
 
