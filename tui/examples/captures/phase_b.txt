@@ -1,0 +1,33 @@
+REPRO_MARKER_DIR=/home/vincent/projects/bone/tui/examples/captures/markers /home/vincent/projects/bo
+ne/tui/examples/../../target/debug/examples/ask_user_swallow
+[vincent@archlinux examples]$ REPRO_MARKER_DIR=/home/vincent/projects/bone/tui/examples/captures/mar
+kers /home/vincent/projects/bone/tui/examples/../../target/debug/examples/ask_user_swallow
+> Which deployment targets does bone support?
+
+Here are the deployment targets bone can build for:
+
+0. linux/amd64 — the primary target
+1. darwin/arm64 — Apple silicon
+2. windows/x86_64 — MSVC build
+
+Each target is produced by the same build pipeline; the
+cross-compiler flags are selected per target in the CI
+matrix. Artifacts are cached for repeat builds.
+
+Let me know which one you want and I will kick off a
+build for it.
+
+A full matrix build takes about four minutes on the CI
+────────────────────────────────────────────────────────────────────────────────────────────────────
+>  er the current git short SHA.
+────────────────────────────────────────────────────────────────────────────────────────────────────
+You can also pass --target to the CLI directly if you
+Question 1 of 1-off binary for local testing. The
+Which deployment target should bone use?ching the
+ > linux/amd64
+SEdarwin/arm64AGENT-LINE-4f9c
+  windows/x86_64
+↑↓/j/k move · Enter select · Esc cancel
+
+
+repro | Safe | curr 0 / in 0 / out 0 / total 0
