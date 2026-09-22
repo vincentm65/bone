@@ -1,49 +1,88 @@
 #!/usr/bin/env bash
-# Probe tmux DECSTBM semantics: does CUD (CSI B) scroll when the cursor sits
-# BELOW the bottom of an active DECSTBM scrolling region?
-#
-# vt100/xterm semantics: it must NOT scroll (it clamps at the screen bottom),
-# because only a cursor *inside* the region at the region's bottom row triggers
-# a region scroll. This is the behavior the ask_user-swallow demo relies on:
-# a leftover DECSTBM region makes tmux's CUD behave like a clamping terminal.
-#
-# Method: a pane running `cat` (echo disabled) reflects raw bytes to the pane
-# output, so `send-keys -l` sequences are processed by tmux as terminal
-# OUTPUT, exactly like app escape sequences.
-set -uo pipefail
+# Compare actual CUD and newline OUTPUT, with/without restricted DECSTBM margins.
+set -euo pipefail
 
-S=decstbm-test
-tmux kill-session -t "$S" 2>/dev/null || true
-tmux new-session -d -s "$S" -x 100 -y 24 'bash -c "stty -echo; exec cat"'
-sleep 0.5
+if [[ ${1:-} == --pane ]]; then
+  out="$2"; region="$3"; movement="$4"
+  stty raw -echo
+  sync_output() {
+    local reply
+    printf '\033[6n'
+    IFS= read -rs -d R -t 5 reply
+  }
+  printf '\033[2J\033[H'
+  for ((row = 1; row <= 24; row++)); do
+    printf '\033[%d;1HROW-%02d' "$row" "$row"
+  done
+  [[ "$region" == restricted ]] && printf '\033[1;20r'
+  # DECSTBM homes the cursor. Reposition AFTER setting the margins, below them.
+  printf '\033[21;1H'
+  sync_output
+  touch "$out/baseline"
+  for ((i = 0; i < 400; i++)); do
+    [[ -f "$out/continue" ]] && break
+    sleep 0.05
+  done
+  [[ -f "$out/continue" ]] || exit 1
+  if [[ "$movement" == CUD ]]; then
+    printf '\033[12B'
+  else
+    for ((i = 0; i < 12; i++)); do printf '\n'; done
+  fi
+  sync_output
+  touch "$out/moved"
+  sleep 30
+  exit 0
+fi
 
-out=$'\033[2J'
-for i in 01 02 03 04 05 06 07 08 09 10 11 12 13 14 15 16 17 18; do
-  out+=$'FILLER-'"$i"$'\n'
+DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$DIR/../.." && pwd)"
+mkdir -p "$ROOT/target"
+OUT="$(mktemp -d "$ROOT/target/decstbm-probe.XXXXXXXX")"
+SOCKET="$OUT/tmux.sock"
+mux() { tmux -S "$SOCKET" -f /dev/null "$@"; }
+cleanup() { mux kill-server 2>/dev/null || true; }
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+fail() { echo "FAIL: $* (captures: $OUT)" >&2; exit 1; }
+wait_marker() {
+  for ((i = 0; i < 400; i++)); do
+    [[ -f "$1" ]] && return 0
+    sleep 0.05
+  done
+  fail "timed out waiting for $1"
+}
+
+for region in full restricted; do
+  for movement in CUD LF; do
+    run="$OUT/$region-$movement"
+    SOCKET="$run/tmux.sock"
+    mkdir -p "$run"
+    printf -v launch 'bash %q --pane %q %q %q' "$DIR/decstbm_probe.sh" "$run" "$region" "$movement"
+    mux new-session -d -s probe -x 100 -y 24 "$launch"
+    wait_marker "$run/baseline"
+    [[ $(mux display-message -p -t probe '#{pane_width}x#{pane_height}') == 100x24 ]] || fail 'wrong pane size'
+    [[ $(mux display-message -p -t probe '#{cursor_x},#{cursor_y},#{history_size}') == 0,20,0 ]] || fail 'wrong baseline geometry'
+    bounds=0,23
+    [[ "$region" == restricted ]] && bounds=0,19
+    [[ $(mux display-message -p -t probe '#{scroll_region_upper},#{scroll_region_lower}') == "$bounds" ]] || fail 'wrong scroll region'
+    mux capture-pane -p -t probe > "$run/before.txt"
+    touch "$run/continue"
+    wait_marker "$run/moved"
+    mux capture-pane -p -t probe > "$run/after.txt"
+    history=$(mux display-message -p -t probe '#{history_size}')
+    cursor=$(mux display-message -p -t probe '#{cursor_x},#{cursor_y}')
+    sentinel_row=$(grep -nx 'ROW-19' "$run/after.txt" | cut -d: -f1)
+    expected_history=0; expected_row=19
+    if [[ "$region" == full && "$movement" == LF ]]; then
+      expected_history=9; expected_row=10
+    fi
+    [[ "$history" == "$expected_history" && "$sentinel_row" == "$expected_row" && "$cursor" == 0,23 ]] || \
+      fail "$region/$movement: history=$history row=$sentinel_row cursor=$cursor"
+    echo "PASS $region/$movement: history=$history, ROW-19 now at row $sentinel_row, cursor=$cursor (zero-based)"
+    mux kill-session -t probe
+  done
 done
-out+=$'SENTINEL-CLAMP-TEST\n'
-for i in 20 21 22 23; do
-  out+=$'FILLER-'"$i"$'\n'
-done
-# Row 24 (screen bottom), then re-home the cursor to row 24 col 1.
-out+=$'\033[24;1HFILLER-24'
-out+=$'\033[24;1H'
-tmux send-keys -t "$S" -l "$out"
-sleep 0.5
 
-echo "=== baseline (no region; sentinel on row 19) ==="
-tmux capture-pane -t "$S" -p | cat -n | sed -n '17,24p'
-
-# DECSTBM region rows 1..20 (1-based): excludes the bottom row (24) where the
-# cursor sits. Then CUD x3 from the bottom row.
-tmux send-keys -t "$S" -l $'\033[1;20r'
-sleep 0.3
-tmux send-keys -t "$S" -l $'\033[3B'
-sleep 0.3
-
-echo "=== after ESC[1;20r + CUD x3 ==="
-tmux capture-pane -t "$S" -p | cat -n | sed -n '17,24p'
-n=$(tmux capture-pane -t "$S" -p -S -20 | grep -c 'SENTINEL-CLAMP-TEST' || true)
-echo "sentinel occurrences in (history + visible): $n  (1 => clamped/no scroll, 2 => scrolled)"
-
-tmux kill-session -t "$S" 2>/dev/null || true
+echo "captures: $OUT"

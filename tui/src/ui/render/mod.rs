@@ -209,6 +209,15 @@ impl Renderer {
         _old_height: u16,
         new_height: u16,
     ) -> io::Result<()> {
+        // Inline allocation uses newlines to scroll space for a growing pane.
+        // A restricted DECSTBM region can suppress that scroll below its bottom
+        // margin, causing the replacement viewport to overwrite the transcript.
+        // Reset before clear(): DECSTBM homes the cursor, while clear() restores
+        // the tracked viewport top. Let ratatui allocate once, without an extra
+        // explicit scroll. Windows does not use our ANSI scrolling-region path.
+        #[cfg(not(windows))]
+        crossterm::queue!(term.backend_mut(), crossterm::style::Print("\x1b[r"))?;
+
         // Clear the current viewport region, then recreate the terminal at the
         // new height. Use ratatui's `term.clear()` rather than manual cursor
         // movement: it clears the viewport's actual tracked area and positions

@@ -1,42 +1,21 @@
-//! Reproduction of the `ask_user` "swallowed last line" visual bug, driven
-//! through the real TUI render pipeline (ratatui 0.29 inline viewport,
-//! `insert_before` scrollback streaming, `resize_viewport` grow path).
+//! Regression fixture for transcript overwrites during inline viewport growth.
 //!
-//! It replays the exact sequence the app performs when the ask_user plugin
-//! opens its menu:
+//! Uses real Renderer/ratatui calls, but constructs a menu page directly rather
+//! than running Lua or a daemon. Run `ask_user_swallow_repro.sh` in tmux 100x24.
 //!
-//!   Phase A: 4-row idle viewport; user + assistant messages are flushed into
-//!            native scrollback via `insert_before`. The assistant's final line
-//!            (a sentinel) is visible on screen just above the viewport.
+//! A: flush messages above the 4-row idle viewport.
+//! A2: inject DECSTBM rows 1..20 (unless REPRO_SCROLL_REGION=full). This makes
+//!     newlines below that region stop scrolling; it is fault injection, not
+//!     evidence that the live app leaves a region active. DECSTBM also homes
+//!     the cursor, which the subsequent viewport clear repositions.
+//! B: open a menu, growing 4 -> 13. Before the fix, ratatui's append_lines
+//!    emitted newlines without scrolling, and the new pane overwrote messages.
+//! C: hard reset + transcript replay, as after a physical resize.
+//! D/E: close and reopen the menu to check shrinking and repeated growth.
 //!
-//!   Phase A2: injects the one condition the swallow requires — a terminal
-//!            state where CUD at the screen bottom is a NO-OP (clamps) rather
-//!            than scrolling. Empirically (tmux 3.7b, verified in
-//!            decstbm_probe.sh), this happens when a DECSTBM region excludes
-//!            the bottom rows: a CUD with the cursor below the region's bottom
-//!            margin neither scrolls the region nor the screen. Real-world
-//!            equivalents are clamping terminals; ratatui's own region use is
-//!            always followed by `ESC[r`, so the app itself never leaves a
-//!            region active — the injection stands in for that terminal class.
-//!
-//!   Phase B: an ask_user `PanePage` appears in the page region.
-//!            `Renderer::ensure_viewport_height` grows the viewport 4 -> 13
-//!            through the real `resize_viewport` path (`term.clear()` +
-//!            `replace_terminal` => fresh `Terminal::with_options(Inline(13))`;
-//!            `compute_inline_size`'s CUD clamps instead of scrolling, so the
-//!            `missing_lines` math places the new viewport over the on-screen
-//!            message tail without moving anything into history). The first
-//!            draw of the larger viewport overwrites those rows — including
-//!            the sentinel — which is the bug: the line is *hidden*, not
-//!            deleted; it still lives in the message state.
-//!
-//!   Phase C: `hard_reset_viewport` + `reset_scrollback_state` + re-flush
-//!            (what the app does after a terminal resize) — the sentinel
-//!            reappears, proving the state was never lost.
-//!
-//! Run under tmux (100x24) so `insert_before`'s DECSTBM path behaves as it
-//! does in the real app. Set `REPRO_MARKER_DIR` to a directory: one file per
-//! phase is written there so a driver script can `capture-pane` each phase.
+//! Each marker includes viewport and terminal geometry. With REPRO_MARKER_DIR,
+//! wait for `<phase>.continue` so captures cannot race the next draw; without
+//! it, pause briefly per phase for manual inspection.
 
 use std::io::{self, Write};
 use std::time::{Duration, Instant};
@@ -52,13 +31,26 @@ use ratatui::text::{Line, Span};
 
 const SENTINEL: &str = "SENTINEL-LAST-AGENT-LINE-4f9c";
 
-fn marker(name: &str, note: &str) {
+fn marker(name: &str, note: &str) -> io::Result<()> {
+    // A cursor report is an output barrier: tmux has processed the preceding
+    // draw before the driver sees the marker and captures the pane.
+    io::stdout().flush()?;
+    crossterm::cursor::position()?;
     if let Ok(dir) = std::env::var("REPRO_MARKER_DIR") {
-        let _ = std::fs::create_dir_all(&dir);
-        let _ = std::fs::write(format!("{dir}/{name}"), note);
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(format!("{dir}/{name}"), note)?;
+        let resume = std::path::PathBuf::from(format!("{dir}/{name}.continue"));
+        let deadline = Instant::now() + Duration::from_secs(30);
+        while !resume.exists() {
+            if Instant::now() >= deadline {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, name.to_owned()));
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    } else {
+        std::thread::sleep(Duration::from_millis(2500));
     }
-    // Give the driver script time to capture-pane before the next phase.
-    std::thread::sleep(Duration::from_millis(2500));
+    Ok(())
 }
 
 /// Long enough that, after the user message + inter-message blanks, the
@@ -102,24 +94,23 @@ fn assistant_body() -> String {
     body
 }
 
-/// Menu lines exactly as `lua/plugins/core/lib/ui/menu.lua` render_select emits
-/// them: progress, question, option rows (selected one gets a full-width bg),
-/// hint row, trailing blank.
+/// Representative menu lines; Lua is not invoked by this renderer fixture.
 fn menu_lines() -> Vec<Line<'static>> {
     vec![
         Line::from(Span::styled(
             "Question 1 of 1",
-            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
         )),
         Line::from(Span::styled(
             "Which deployment target should bone use?",
-            Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
         )),
-        Line::from(vec![
-            Span::raw(" > "),
-            Span::raw("linux/amd64"),
-        ])
-        .style(Style::default().bg(Color::Rgb(0x3A, 0x3F, 0x4B))),
+        Line::from(vec![Span::raw(" > "), Span::raw("linux/amd64")])
+            .style(Style::default().bg(Color::Rgb(0x3A, 0x3F, 0x4B))),
         Line::from("  darwin/arm64"),
         Line::from("  windows/x86_64"),
         Line::from(Span::styled(
@@ -188,28 +179,33 @@ fn main() -> std::io::Result<()> {
     let height = term.size().map(|s| s.height).unwrap_or(0);
     marker(
         "phase_a",
-        &format!("viewport={} terminal_h={}", renderer.viewport_height, height),
-    );
+        &format!(
+            "viewport={} terminal_h={}",
+            renderer.viewport_height, height
+        ),
+    )?;
 
-    // --- Phase A2: inject the clamping-terminal condition -----------------
-    // The swallow requires the resize's CUD (sent by `compute_inline_size` on
-    // the fresh terminal) to be a no-op at the screen bottom. In tmux 3.7b a
-    // bare CUD there *does* scroll (verified), which is why the pure app path
-    // does not reproduce. A DECSTBM region that excludes the bottom rows makes
-    // tmux's CUD clamp exactly like a clamping terminal: the cursor sits below
-    // the region's bottom margin, so neither the region nor the screen scrolls
-    // (decstbm_probe.sh demonstrates the raw semantics).
-    //
-    // Region rows 1..20 (1-based) = everything above the idle viewport top
-    // (row 21, 1-based). The app's own `insert_before` never leaves a region
-    // active — every `ScrollUpInRegion` ends with `ESC[r` — so this stands in
-    // for the terminal class where the bug was observed.
-    crossterm::queue!(io::stdout(), crossterm::style::Print("\x1b[1;20r"))?;
-    io::stdout().flush()?;
+    // --- Phase A2: optional restricted-scroll-region fault injection ------
+    let region = std::env::var("REPRO_SCROLL_REGION").unwrap_or_else(|_| "restricted".into());
+    match region.as_str() {
+        "restricted" => {
+            crossterm::queue!(io::stdout(), crossterm::style::Print("\x1b[1;20r"))?;
+            io::stdout().flush()?;
+        }
+        "full" => {}
+        _ => {
+            return Err(io::Error::other(
+                "REPRO_SCROLL_REGION must be restricted or full",
+            ));
+        }
+    }
     marker(
         "phase_a2",
-        &format!("region=1..20 viewport={} terminal_h={}", renderer.viewport_height, height),
-    );
+        &format!(
+            "region={region} viewport={} terminal_h={height}",
+            renderer.viewport_height
+        ),
+    )?;
 
     // --- Phase B: ask_user menu page opens -> viewport grows 4 -> 13 ------
     let page = PanePage {
@@ -241,8 +237,11 @@ fn main() -> std::io::Result<()> {
     }
     marker(
         "phase_b",
-        &format!("viewport={} terminal_h={}", renderer.viewport_height, height),
-    );
+        &format!(
+            "viewport={} terminal_h={}",
+            renderer.viewport_height, height
+        ),
+    )?;
 
     // --- Phase C: hard reset + re-flush (the app's resize recovery) ------
     Renderer::hard_reset_viewport(&mut term, renderer.viewport_height)?;
@@ -259,7 +258,35 @@ fn main() -> std::io::Result<()> {
         };
         term.draw(|frame| renderer.draw_bottom_pane(frame, &draw, None))?;
     }
-    marker("phase_c", &format!("viewport={}", renderer.viewport_height));
+    marker("phase_c", &format!("viewport={}", renderer.viewport_height))?;
+
+    // Closing and reopening must neither lose nor duplicate transcript rows.
+    for (phase, pages) in [
+        ("phase_d", &[][..]),
+        ("phase_e", std::slice::from_ref(&page)),
+    ] {
+        renderer.ensure_viewport_height(
+            &mut term,
+            &PaneSizing {
+                input: &input,
+                prompt: None,
+                pages,
+                active_page: 0,
+                autocomplete: None,
+                running: 0,
+            },
+        )?;
+        let draw = PaneDraw {
+            input: &input,
+            status_info: &status,
+            pages,
+            active_page: 0,
+            autocomplete: None,
+            running: &running,
+        };
+        term.draw(|frame| renderer.draw_bottom_pane(frame, &draw, None))?;
+        marker(phase, &format!("viewport={}", renderer.viewport_height))?;
+    }
 
     // Leave the terminal's scroll region in its default (whole-screen) state.
     crossterm::queue!(io::stdout(), crossterm::style::Print("\x1b[r"))?;

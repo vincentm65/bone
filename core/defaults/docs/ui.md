@@ -220,9 +220,13 @@ Approval and key-request IDs are separate namespaces; clients must track answere
 IDs separately so an approval cannot suppress a tool's keyboard input request.
 
 The TUI owns terminal layout, wrapping, cursor/input behavior, and color
-rendering. The desktop client maps the same semantic events to its eframe
-components and its document/diff canvas. Neither frontend should duplicate
-agent-loop, approval, configuration, session-persistence, or extension behavior.
+rendering. On non-Windows terminals, resizing the inline viewport first resets
+ANSI scrolling margins, then clears at the tracked viewport top before rebuilding.
+This lets newline-based allocation scroll transcript rows out of a growing pane's
+way even if a restricted scrolling region was active. The desktop client maps the
+same semantic events to its eframe components and its document/diff canvas. Neither
+frontend should duplicate agent-loop, approval, configuration, session-persistence,
+or extension behavior.
 
 ## Shared plugin panels
 
