@@ -211,6 +211,7 @@ fn allows_workspace_scoped_commands() {
         "cat ~/.bashrc",
         "grep -rn \"rm\" /etc/hosts",
         "git commit -m \"fix rm -rf bug\"",
+        "node -e 'const f = x => Object.keys(x); console.log(f({a: 1}))'",
         "cargo build",
         "touch notes.md",
         "mv target/a target/b",

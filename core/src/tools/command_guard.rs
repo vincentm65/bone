@@ -206,7 +206,7 @@ fn check_segment(
             return Some(reason);
         }
     }
-    if let Some(reason) = check_redirection(&tokens, roots, cwd.as_deref()) {
+    if let Some(reason) = check_redirection(segment, roots, cwd.as_deref()) {
         return Some(reason);
     }
 
@@ -533,35 +533,46 @@ fn is_unbounded_nested_verb(verb: &str) -> bool {
         || matches!(verb, "dd" | "find" | "git" | "chmod" | "chown" | "rsync" | "eval")
 }
 
-fn check_redirection(
-    tokens: &[Token],
-    roots: &GuardRoots,
-    cwd: Option<&Path>,
-) -> Option<String> {
-    for (index, token) in tokens.iter().enumerate() {
-        let Some(position) = token.find('>') else {
-            continue;
-        };
-        let rest = token.as_str()[position + 1..].trim_start_matches('>');
-        let target = if rest.is_empty() {
-            match tokens.get(index + 1) {
-                Some(next) => next.as_str(),
-                None => continue,
-            }
-        } else {
-            rest
-        };
-        let target = target.trim_matches(|ch: char| matches!(ch, '"' | '\''));
-        if target.is_empty() || target.starts_with('&') || is_dev_sink(target) {
+fn check_redirection(segment: &str, roots: &GuardRoots, cwd: Option<&Path>) -> Option<String> {
+    let (mut single, mut double, mut escaped) = (false, false, false);
+    for (i, ch) in segment.char_indices() {
+        if escaped {
+            escaped = false;
             continue;
         }
-        if let Some(reason) = target_verdict(target, roots, cwd, DeletePower::Unbounded) {
-            return Some(format!("it would redirect output into {reason}"));
+        if ch == '\\' && !single {
+            escaped = true;
+            continue;
+        }
+        if ch == '\'' && !double {
+            single = !single;
+            continue;
+        }
+        if ch == '"' && !single {
+            double = !double;
+            continue;
+        }
+        if ch != '>' || single || double {
+            continue;
+        }
+        let rest = segment[i + 1..].trim_start_matches('>').trim_start();
+        if rest.is_empty() || rest.starts_with('&') {
+            continue;
+        }
+        let Some(target) = tokenize(rest)
+            .ok()
+            .and_then(|mut tokens| (!tokens.is_empty()).then(|| tokens.remove(0)))
+        else {
+            continue;
+        };
+        if !is_dev_sink(&target) {
+            if let Some(reason) = target_verdict(&target, roots, cwd, DeletePower::Unbounded) {
+                return Some(format!("it would redirect output into {reason}"));
+            }
         }
     }
     None
 }
-
 fn is_dev_sink(target: &str) -> bool {
     matches!(
         target,
