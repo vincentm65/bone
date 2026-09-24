@@ -1392,6 +1392,7 @@ impl Driver {
                         text: std::mem::take(&mut reasoning_text),
                         echo_field: reasoning_echo_field.take(),
                     });
+                    assistant.reasoning_provider = Some(llm.id().to_string());
                 }
                 if !reasoning_items.is_empty() {
                     assistant.reasoning_items = std::mem::take(&mut reasoning_items);
@@ -1416,6 +1417,7 @@ impl Driver {
                     text: std::mem::take(&mut reasoning_text),
                     echo_field: reasoning_echo_field.take(),
                 });
+                assistant.reasoning_provider = Some(llm.id().to_string());
             }
             if !reasoning_items.is_empty() {
                 assistant.reasoning_items = std::mem::take(&mut reasoning_items);

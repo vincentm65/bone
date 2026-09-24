@@ -480,6 +480,7 @@ fn complete_message_roundtrip_preserves_codex_provider_order() {
         text: "summary".into(),
         echo_field: Some("reasoning_content".into()),
     });
+    message.reasoning_provider = Some("codex".into());
     message.reasoning_items = vec![reasoning_a.clone(), reasoning_b.clone()];
     message.tool_calls = vec![call_a.clone(), call_b.clone()];
     message.output_sequence = vec![

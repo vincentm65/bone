@@ -155,6 +155,11 @@ pub struct ChatMessage {
     pub synthetic: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<Reasoning>,
+    /// Provider identity for provider-specific reasoning replay. This is
+    /// internal metadata: it is persisted separately and never sent to the
+    /// frontend.
+    #[serde(skip)]
+    pub reasoning_provider: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reasoning_items: Vec<ReasoningItem>,
     /// UTC time when this message was produced.
@@ -176,6 +181,7 @@ impl ChatMessage {
             is_error: false,
             synthetic: false,
             reasoning: None,
+            reasoning_provider: None,
             reasoning_items: Vec::new(),
             created_at: None,
             output_sequence: Vec::new(),
@@ -207,6 +213,7 @@ impl ChatMessage {
             is_error: result.is_error,
             synthetic: false,
             reasoning: None,
+            reasoning_provider: None,
             reasoning_items: Vec::new(),
             created_at: None,
             output_sequence: Vec::new(),

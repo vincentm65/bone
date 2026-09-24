@@ -223,7 +223,10 @@ fn openai_tools(tools: Vec<ToolDefinition>) -> Vec<OpenAiTool> {
         .collect()
 }
 
-pub(crate) fn openai_messages(messages: Vec<ChatMessage>) -> Vec<OpenAiMessage> {
+/// Replays provider-specific reasoning only to the provider that emitted it.
+/// Messages without known provenance are conservatively sent without that
+/// provider-specific field.
+pub(crate) fn openai_messages(messages: Vec<ChatMessage>, provider_id: &str) -> Vec<OpenAiMessage> {
     messages
         .into_iter()
         .map(|message| OpenAiMessage {
@@ -274,11 +277,17 @@ pub(crate) fn openai_messages(messages: Vec<ChatMessage>) -> Vec<OpenAiMessage> 
                 .collect(),
             tool_call_id: message.tool_call_id,
             name: message.name,
-            reasoning: match message.reasoning {
-                Some(crate::llm::Reasoning {
-                    text,
-                    echo_field: Some(key),
-                }) => BTreeMap::from([(key, text)]),
+            reasoning: match (
+                message.reasoning_provider.as_deref() == Some(provider_id),
+                message.reasoning,
+            ) {
+                (
+                    true,
+                    Some(crate::llm::Reasoning {
+                        text,
+                        echo_field: Some(key),
+                    }),
+                ) => BTreeMap::from([(key, text)]),
                 _ => BTreeMap::new(),
             },
         })
@@ -596,7 +605,7 @@ impl LlmProvider for OpenAiCompatProvider {
 
         let request = ChatRequest {
             model: self.model.clone(),
-            messages: openai_messages(messages),
+            messages: openai_messages(messages, &self.id),
             stream: true,
             tools: openai_tools(tools),
             stream_options,
