@@ -1339,3 +1339,39 @@ fn pending_config_clears_only_for_matching_response() {
     );
     assert_eq!(pending.len(), 1);
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn older_job_snapshot_does_not_replace_newer_visible_jobs() {
+    let (stream, _server) = tokio::io::duplex(64);
+    let (rx, tx) = tokio::io::split(stream);
+    let mut app = App::with_daemon(
+        crate::config::UserConfig::default(),
+        crate::rpc::RemoteClient::connect(rx, tx),
+    )
+    .unwrap();
+    let job = |id: &str| bone_protocol::JobSnapshot {
+        id: id.into(),
+        agent: "worker".into(),
+        task: "work".into(),
+        title: "Work".into(),
+        status: bone_protocol::JobStatus::Running,
+        started_at: 1,
+        token_sent: 0,
+        token_received: 0,
+        provider: "test".into(),
+        activity: None,
+        events: Vec::new(),
+    };
+
+    app.apply_idle_event(crate::runtime::RuntimeEvent::JobsSnapshot {
+        version: 10,
+        jobs: vec![job("job-newer")],
+    });
+    app.apply_idle_event(crate::runtime::RuntimeEvent::JobsSnapshot {
+        version: 9,
+        jobs: vec![job("job-older")],
+    });
+
+    assert_eq!(app.jobs_version, 10);
+    assert_eq!(app.jobs[0].id, "job-newer");
+}
