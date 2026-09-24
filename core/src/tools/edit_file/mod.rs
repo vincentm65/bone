@@ -63,7 +63,7 @@ impl Tool for EditFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "edit_file".to_string(),
-            description: "Preferred tool for modifying existing file contents; use this instead of shell commands such as sed -i, tee, heredocs, scripts, or redirection. Replaces one exact, unique block in an existing UTF-8 file, or several disjoint blocks in one call via `edits`. Read the file first, then pass the same path, copy unique blocks of shown text into `old_text` (or each `edits` entry's `old_text`), and put the desired replacement in `new_text`. Use an empty new_text to delete. To insert, include a small unchanged surrounding block in both old_text and new_text. Returns a unified diff.".to_string(),
+            description: "Preferred tool for modifying existing file contents; use this instead of shell commands such as sed -i, tee, heredocs, scripts, or redirection. Read the file first, then pass the same path and copy exact text from displayed `read_file` lines without line-number prefixes, including enough unchanged surrounding context to make each hunk unique, not merely the changed line. Replaces one exact, unique block in an existing UTF-8 file, or several disjoint blocks in one call via `edits`. For disjoint edits, provide one complete `old_text`/`new_text` pair per `edits` entry; each hunk is matched against the original file. Use an empty new_text to delete. To insert, include a small unchanged surrounding block in both old_text and new_text. Returns a unified diff.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -73,7 +73,7 @@ impl Tool for EditFileTool {
                     },
                     "old_text": {
                         "type": "string",
-                        "description": "Exact unique text copied from read_file output, without line-number prefixes, for a single replacement. May be empty only when the file is empty. Provide either old_text/new_text or edits, not both."
+                        "description": "Exact unique text copied from displayed `read_file` lines, without line-number prefixes, for a single replacement. Include enough unchanged surrounding context to make it unique, not just the changed text. May be empty only when the file is empty. Provide either old_text/new_text or edits, not both."
                     },
                     "new_text": {
                         "type": "string",
@@ -81,13 +81,13 @@ impl Tool for EditFileTool {
                     },
                     "edits": {
                         "type": "array",
-                        "description": "Several disjoint replacements applied in one call. Each hunk is matched against the original file content, not the result of earlier hunks.",
+                        "description": "Several disjoint replacements applied in one call. Provide one complete `old_text`/`new_text` pair per `edits` entry; each hunk is matched against the original file content, not the result of earlier hunks.",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "old_text": {
                                     "type": "string",
-                                    "description": "Exact unique text copied from read_file output, without line-number prefixes. May be empty only when the file is empty."
+                                    "description": "Exact unique text copied from displayed `read_file` lines, without line-number prefixes. Include enough unchanged surrounding context to make this hunk unique, not just the changed text. May be empty only when the file is empty."
                                 },
                                 "new_text": {
                                     "type": "string",

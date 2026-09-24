@@ -2,6 +2,10 @@
 
 use similar::TextDiff;
 
+/// Row between two hunks, marking the unchanged lines skipped between them.
+/// It carries no line number, so diff renderers show it as plain text.
+pub(crate) const HUNK_SEPARATOR: &str = "  ...";
+
 pub(crate) fn build_unified_diff(tool_name: &str, path: &str, old: &str, new: &str) -> String {
     let (lines, insertions, deletions) = build_numbered_diff_lines(old, new, 3);
     let header = format!("    {tool_name} {path} (-{deletions} | +{insertions})");
@@ -41,6 +45,9 @@ pub(super) fn build_numbered_diff_lines(
         }
 
         if raw_line.starts_with("@@ ") {
+            if !lines.is_empty() {
+                lines.push(HUNK_SEPARATOR.to_string());
+            }
             if let Some((old_start, new_start)) = parse_hunk_header(raw_line) {
                 old_line = Some(old_start);
                 new_line = Some(new_start);
@@ -93,3 +100,7 @@ pub(super) fn parse_hunk_start(part: &str) -> Option<usize> {
     let start = range.split(',').next()?;
     start.parse().ok()
 }
+
+#[cfg(test)]
+#[path = "diff_tests.rs"]
+mod tests;
