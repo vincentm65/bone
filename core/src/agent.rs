@@ -575,6 +575,7 @@ pub async fn run_agent(request: AgentRequest) -> Result<AgentResponse, String> {
             .or_else(|| session_report.conv_id()),
         agent_cache_scope: request.cache_scope,
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
+        live_tail: Arc::new(std::sync::Mutex::new(Vec::new())),
     };
 
     // Snapshot before the turn so an injected sink reused across turns still

@@ -1278,17 +1278,29 @@ impl DaemonCtx {
         });
     }
 
+    /// Replay the daemon's authoritative state to a resynchronizing client.
+    /// `live_tail` carries the in-turn driver's uncommitted messages (busy
+    /// turns only); when non-empty they are appended to the *full* committed DB
+    /// set — a windowed DB slice cannot carry a busy merge, because the slice
+    /// would silently drop the rows the turn just durably committed.
     fn publish_synchronized_state(
         &self,
         request_id: u64,
         include_messages: bool,
         window: Option<u32>,
         busy: bool,
+        live_tail: Option<&[ChatMessage]>,
     ) {
         let theme = self
             .extensions
             .active_theme()
             .or_else(|| self.extensions.configured_theme());
+        // Snapshot the driver's in-turn tail (everything since the last
+        // successful checkpoint) before taking the session lock — both locks
+        // are synchronous, so a fixed acquisition order is all that matters.
+        let live_tail: Vec<ChatMessage> = include_messages
+            .then(|| live_tail.unwrap_or_default().to_vec())
+            .unwrap_or_default();
         let (snapshot, view, messages) = {
             let session = self.session.lock().unwrap();
             let snapshot = session.snapshot(self.llm.id(), self.llm.model());
@@ -1296,7 +1308,18 @@ impl DaemonCtx {
                 Some(crate::ext::api_ui::snapshot(&self.extensions.ui_handle()).into());
             // Window applies only to this request's reply; the client filters by
             // `request_id`, so other attached clients keep their full state.
-            let messages = include_messages.then(|| session.display_window(window).0);
+            let messages = if include_messages {
+                let mut messages = session
+                    .display_window(if live_tail.is_empty() { window } else { None })
+                    .0;
+                // Busy Synchronize: the DB holds only what checkpoints durably
+                // committed, so append the driver's still-uncommitted tail — the
+                // rows in strict continuation order, with nothing duplicated.
+                messages.extend(live_tail);
+                Some(messages)
+            } else {
+                None
+            };
             (snapshot, view, messages)
         };
         // Bound the repair transcript too: the same cap applies whether the
@@ -1647,7 +1670,15 @@ impl DaemonCtx {
                         self.pending_interactions.remove(InteractionId::Key(id));
                     }
                     Some(RuntimeCommand::Synchronize { request_id, include_messages, window }) => {
-                        self.publish_synchronized_state(request_id, include_messages, window, true)
+                        // Managed-hook / private-LLM busy work runs no Driver, so
+                        // there is no in-turn tail to merge: DB-only reply.
+                        self.publish_synchronized_state(
+                            request_id,
+                            include_messages,
+                            window,
+                            true,
+                            None,
+                        )
                     }
                     Some(command) if is_config_command(&command) => {
                         let _ = Box::pin(self.handle_idle_command(command, commands)).await;
@@ -2968,7 +2999,14 @@ impl DaemonCtx {
                 include_messages,
                 window,
             } => {
-                self.publish_synchronized_state(request_id, include_messages, window, false);
+                // Idle: no in-turn driver, so nothing uncommitted to merge.
+                self.publish_synchronized_state(
+                    request_id,
+                    include_messages,
+                    window,
+                    false,
+                    None,
+                );
                 Flow::Continue
             }
             RuntimeCommand::CancelProcess { id } => {
@@ -3044,6 +3082,10 @@ impl DaemonCtx {
                 session_sink,
             )
         };
+        // Give the daemon its own handle to the driver's in-turn tail so a
+        // `Synchronize` arriving mid-turn can merge the uncommitted messages
+        // into its reply (the driver itself moves into `conn` next).
+        let live_tail = driver.live_tail.clone();
         let mut conn = LocalConn::new(
             rt_rx,
             rt_tx,
@@ -3130,7 +3172,20 @@ impl DaemonCtx {
                         request_id,
                         include_messages,
                         window,
-                    }) => self.publish_synchronized_state(request_id, include_messages, window, true),
+                    }) => {
+                        // Busy Synchronize: merge the driver's uncommitted live
+                        // tail with the committed DB rows. The tail lock is held
+                        // across the (fully synchronous) publish and is always
+                        // taken before the session lock.
+                        let tail = live_tail.lock().unwrap();
+                        self.publish_synchronized_state(
+                            request_id,
+                            include_messages,
+                            window,
+                            true,
+                            Some(&*tail),
+                        );
+                    }
                     Some(RuntimeCommand::CancelProcess { id }) => self.cancel_process(&id),
                     // Mid-turn Safe/Danger toggle: applies to the rest of the turn
                     // (the gate reads the shared atomic per call).

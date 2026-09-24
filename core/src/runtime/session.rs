@@ -458,6 +458,7 @@ impl RuntimeSession {
             background_scope: Some(self.background_scope()),
             agent_cache_scope: None,
             turn_nudge: self.turn_nudge.clone(),
+            live_tail: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
