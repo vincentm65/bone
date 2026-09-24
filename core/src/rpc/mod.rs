@@ -1252,6 +1252,24 @@ impl DaemonCtx {
     /// a conversation that was created with a different provider. A no-op when
     /// already matching. Failure keeps the current provider — the caller still
     /// snapshots so the frontend proceeds with the old provider label.
+    /// Keep the current conversation's stored provider/model in step with the
+    /// active provider, so the sidebar and the reopen path (`restore_provider`)
+    /// reflect a mid-conversation switch rather than the provider the row was
+    /// minted with. A no-op while incognito or before a conversation exists.
+    fn record_conversation_provider(&self) {
+        let session = self.session.lock().unwrap();
+        if !session.incognito
+            && let (Some(db), Some(id)) = (session.session_db.as_ref(), session.conversation_id)
+            && let Err(error) = db.set_conversation_provider(id, self.llm.id(), self.llm.model())
+        {
+            self.hub.publish(RuntimeEvent::Status {
+                message: format!(
+                    "Provider switched, but could not save it for this conversation: {error}"
+                ),
+            });
+        }
+    }
+
     fn restore_provider(&mut self, provider_id: &str, model: &str) {
         if self.llm.id() == provider_id && self.llm.model() == model {
             return;
@@ -2492,20 +2510,7 @@ impl DaemonCtx {
                 ) {
                     Ok(new_provider) => {
                         self.llm = Arc::from(new_provider);
-                        // Keep the current conversation's stored provider/model in
-                        // step with the active provider, so the sidebar and the
-                        // reopen path (restore_provider) reflect this choice rather
-                        // than the default the row was minted with.
-                        let s = self.session.lock().unwrap();
-                        if let (Some(db), Some(conv_id)) =
-                            (s.session_db.as_ref(), s.conversation_id)
-                        {
-                            let _ = db.set_conversation_provider(
-                                conv_id,
-                                self.llm.id(),
-                                self.llm.model(),
-                            );
-                        }
+                        self.record_conversation_provider();
                     }
                     Err(err) => self.hub.publish(RuntimeEvent::Status {
                         message: format!("failed to switch provider: {err}"),
@@ -2532,19 +2537,7 @@ impl DaemonCtx {
                 match result {
                     Ok(provider) => {
                         self.llm = Arc::from(provider);
-                        let session = self.session.lock().unwrap();
-                        if !session.incognito
-                            && let (Some(db), Some(id)) =
-                                (session.session_db.as_ref(), session.conversation_id)
-                            && let Err(error) =
-                                db.set_conversation_provider(id, self.llm.id(), self.llm.model())
-                        {
-                            self.hub.publish(RuntimeEvent::Status {
-                                message: format!(
-                                    "Model selected, but could not save the task's model: {error}"
-                                ),
-                            });
-                        }
+                        self.record_conversation_provider();
                     }
                     Err(error) => self.hub.publish(RuntimeEvent::Status {
                         message: format!("Could not select model: {error}"),
@@ -2627,6 +2620,7 @@ impl DaemonCtx {
                     && let Some(candidate) = candidate
                 {
                     self.llm = Arc::from(candidate);
+                    self.record_conversation_provider();
                 }
                 self.finish_config_mutation(
                     vec![format!("providers.{id}")],
@@ -2678,6 +2672,7 @@ impl DaemonCtx {
                         let result = self.config.set_active_provider(&id, expected_revision);
                         if result.is_ok() {
                             self.llm = Arc::from(candidate);
+                            self.record_conversation_provider();
                         }
                         result
                     }

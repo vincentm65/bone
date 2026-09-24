@@ -202,6 +202,94 @@ async fn task_model_choice_is_isolated_persisted_and_keeps_shared_defaults() {
     );
 }
 
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn active_provider_switch_keeps_conversation_and_records_its_provider() {
+    let _lock = crate::util::test_env_lock();
+    struct RestoreEnv(Option<std::ffi::OsString>);
+    impl Drop for RestoreEnv {
+        fn drop(&mut self) {
+            unsafe {
+                match &self.0 {
+                    Some(value) => std::env::set_var("BONE_DIR", value),
+                    None => std::env::remove_var("BONE_DIR"),
+                }
+            }
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let _restore = RestoreEnv(std::env::var_os("BONE_DIR"));
+    unsafe {
+        std::env::set_var("BONE_DIR", dir.path());
+    }
+    let entry = |model: &str| crate::config::ProviderEntry {
+        label: "Mock".into(),
+        base_url: "http://localhost".into(),
+        model: model.into(),
+        api_key: Default::default(),
+        endpoint: "/chat/completions".into(),
+        handler: "openai".into(),
+        context_window_tokens: None,
+        max_concurrency: None,
+        reasoning_effort: String::new(),
+        fast_mode: false,
+        supports_prompt_cache_key: false,
+        stream_usage: "auto".into(),
+        request_timeout_s: None,
+    };
+    let mut providers = crate::config::ProvidersConfig {
+        last_provider: "mock".into(),
+        ..Default::default()
+    };
+    providers.providers.insert("mock".into(), entry("mock-1"));
+    providers.providers.insert("other".into(), entry("other-1"));
+    crate::config::domains::persist_providers(&providers).unwrap();
+    let config =
+        crate::config::store::ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
+    let db = crate::session_db::SessionDb::open(&dir.path().join("tasks.db")).unwrap();
+    let id = db.create_conversation("mock", "mock-1").unwrap();
+    let mut session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    session.session_db = Some(db);
+    session.conversation_id = Some(id);
+    session
+        .transcript
+        .push(ChatMessage::new(crate::llm::ChatRole::User, "earlier turn"));
+    let (mut task, _hub, mut commands) = test_daemon_ctx(
+        Arc::new(ConfigTestProvider),
+        crate::ext::ExtensionManager::unloaded(),
+        session,
+    );
+    task.config = config.clone();
+
+    task.handle_idle_command(
+        RuntimeCommand::SetActiveProvider {
+            id: "other".into(),
+            expected_revision: config.snapshot().revision,
+            request_id: None,
+        },
+        &mut commands,
+    )
+    .await;
+    assert_eq!(task.llm.id(), "other");
+    {
+        let session = task.session.lock().unwrap();
+        assert_eq!(session.conversation_id, Some(id), "switch keeps the conversation");
+        assert_eq!(session.transcript.len(), 1, "switch keeps the history");
+        assert_eq!(
+            session
+                .session_db
+                .as_ref()
+                .unwrap()
+                .conversation_provider_model(id)
+                .unwrap(),
+            Some(("other".into(), "other-1".into())),
+            "reopening must restore the provider the conversation switched to"
+        );
+    }
+}
+
 #[async_trait::async_trait]
 impl crate::llm::provider::LlmProvider for ConfigTestProvider {
     fn id(&self) -> &str {
