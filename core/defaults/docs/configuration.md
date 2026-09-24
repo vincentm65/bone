@@ -47,6 +47,63 @@ the environment.
 wiring. Put substantial implementations in a plugin package
 (`lua/plugins/<name>/init.lua`) and do not define a second settings table there.
 
+## Local providers and API keys
+
+The built-in provider id `local` is keyless-capable regardless of its configured
+`base_url`. Custom providers are also keyless-capable when their base URL host is
+`localhost`, `127.0.0.1`, or `::1` (including bracketed IPv6 `[::1]`), so a blank
+`api_key` is valid for these providers. `0.0.0.0` is a bind/listen address, not a
+normal local connect destination; a custom provider using it still requires an
+API key.
+
+## Claude Code subscription provider
+
+The `claude_code` handler uses the locally installed Claude Code CLI and its own
+authentication. Install Claude Code and sign in with the CLI before using this
+provider; Bone does not read CLI OAuth credentials, require a provider API key,
+or send credentials to Anthropic's Messages API. Provider selection and config
+validation are local and do not submit a model request; missing CLI or login
+errors appear on the first actual turn.
+
+For example, add an entry to `providers.yaml`:
+
+```yaml
+version: 1
+active: claude-subscription
+providers:
+  claude-subscription:
+    handler: claude_code
+    label: Claude Code
+    model: sonnet
+```
+
+`model` is passed to the CLI's `--model` option (default: `sonnet`). The handler
+also accepts the common provider settings such as `context_window_tokens` and
+`request_timeout_s`; `api_key` is not used.
+
+Bone starts `claude -p` in an isolated temporary working directory with built-in
+CLI tools disabled, an empty strict MCP configuration, settings sources,
+slash commands, Chrome, and session persistence disabled. Bone tool definitions
+are sent only as prompt data. Claude returns text and proposed tool-call data;
+Bone validates the returned names, then its `Driver` alone executes Bone tools
+and applies Bone's usual approval policy. Claude Code receives no executable
+Bone tools, and this setup does not grant the CLI authority to perform Bone
+operations directly.
+
+This handler replays prior text, tool calls, and tool results as serialized
+conversation data. It rejects image-bearing history and provider-specific
+reasoning history rather than silently dropping them; continue such conversations
+with the original provider or start a new conversation. The structured JSON
+response-envelope behavior has not been verified against a live Claude CLI
+request; mock-executable tests do not prove CLI protocol compatibility.
+
+The terms question for subscription-backed use through a locally run harness is
+unresolved here. Running Claude Code locally does not by itself establish that a
+particular integration is permitted; check the current terms and plan rules
+before use. Relevant references are [Use the Claude Agent SDK with your Claude
+plan](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
+and the [Agent SDK overview](https://code.claude.com/docs/en/agent-sdk/overview).
+
 ## Provider prompt cache keys
 
 OpenAI-compatible Chat Completions providers can set

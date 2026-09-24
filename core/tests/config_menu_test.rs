@@ -118,7 +118,7 @@ fn provider_handler_cycles_all_supported_values_and_autosaves() {
         end
 
         local result = config_handler("providers", ctx)
-        assert(table.concat(saved_handlers, ",") == "codex,grok_build,openai,anthropic")
+        assert(table.concat(saved_handlers, ",") == "codex,grok_build,claude_code,openai")
         assert(defaults[1] == 1)
         for i = 2, 5 do assert(defaults[i] == 5, "editor focus was not retained") end
         assert(result.action == "config.apply")
@@ -170,6 +170,56 @@ fn provider_text_edit_autosaves_and_retains_field_focus() {
 
         local result = config_handler("providers", ctx)
         assert(saved_model == "new-model")
+        assert(result.action == "config.apply")
+        "#,
+    )
+    .exec()
+    .unwrap();
+}
+
+#[test]
+fn keyless_provider_editor_shows_not_required_without_mutating_metadata() {
+    let lua = config_lua();
+    lua.load(
+        r#"
+        local select_calls, saved_entry = 0, nil
+        test_menu.clear = function() end
+        test_menu.select = function(_, opts)
+          select_calls = select_calls + 1
+          assert(opts.options[6] == "api_key · (not required)", opts.options[6])
+          if select_calls == 1 then
+            return { value = opts.options[2], selected = 2 }
+          end
+          return { cancelled = true }
+        end
+        test_menu.text_input = function(_, opts)
+          assert(opts.initial == "old-model")
+          return { value = "new-model" }
+        end
+
+        local keys, key_index = { { code = "Char", char = "e" }, { code = "Esc" } }, 0
+        local provider = {
+          id = "active", label = "Active", model = "old-model", base_url = "http://localhost",
+          endpoint = "/v1", handler = "openai", active = true,
+          api_key_configured = false, api_key_required = false,
+        }
+        local ctx = { renders = {}, ui = {}, config = {} }
+        ctx.ui.key = function() key_index = key_index + 1; return keys[key_index] end
+        ctx.ui.notify = function() end
+        ctx.config.get_pages = function()
+          return { { namespace = "providers", title = "Providers", fields = {} } }
+        end
+        ctx.config.list_providers = function() return { provider } end
+        ctx.config.set_provider_entry = function(_, entry)
+          saved_entry = entry
+          provider.model = entry.model
+          return true
+        end
+
+        local result = config_handler("providers", ctx)
+        assert(saved_entry ~= nil)
+        assert(saved_entry.api_key_required == nil, "capability metadata must not be mutated")
+        assert(saved_entry.model == "new-model")
         assert(result.action == "config.apply")
         "#,
     )

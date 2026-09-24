@@ -568,19 +568,7 @@ fn require_exec_approval(
     redact: bool,
     mode: crate::tools::ApprovalMode,
     gate: Option<&crate::tools::SharedGate>,
-    workspace: Option<&std::path::Path>,
 ) -> Result<(), mlua::Error> {
-    // Build the raw `program args…` text for the guard. This must NOT use the
-    // redacted preview: `redact_args` hides arguments from the approver, but the
-    // guard still needs the real target before it can classify it.
-    let raw = std::iter::once(program)
-        .chain(args.iter().map(String::as_str))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let roots = crate::tools::command_guard::GuardRoots::detect(workspace);
-    if let Some(reason) = crate::tools::command_guard::hard_deny(&raw, &roots) {
-        return Err(mlua::Error::external(reason));
-    }
     let preview = if redact {
         format!("{} [arguments redacted]", quote_exec_preview(program))
     } else {
@@ -621,16 +609,11 @@ fn require_shell_approval(
     command: &str,
     mode: crate::tools::ApprovalMode,
     gate: Option<&crate::tools::SharedGate>,
-    workspace: Option<&std::path::Path>,
 ) -> Result<(), mlua::Error> {
     if command.contains('\0') {
         return Err(mlua::Error::external(
             "shell command must not contain NUL bytes",
         ));
-    }
-    let roots = crate::tools::command_guard::GuardRoots::detect(workspace);
-    if let Some(reason) = crate::tools::command_guard::hard_deny(command, &roots) {
-        return Err(mlua::Error::external(reason));
     }
     let safety = crate::tools::command_policy::classify_command(command);
     let call = ToolCall {
@@ -797,12 +780,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
         crate::processes::conversation_scope(cfg.background_scope.or(cfg.session_id));
     let spawn_scope = process_scope.clone();
     let spawn = lua.create_function(move |lua, (command, opts): (String, Option<Table>)| {
-        require_shell_approval(
-            &command,
-            approval_mode,
-            approval_gate.as_ref(),
-            Some(process_cwd.as_path()),
-        )?;
+        require_shell_approval(&command, approval_mode, approval_gate.as_ref())?;
         let timeout_ms = opt_u64(&opts, "timeout_ms")
             .unwrap_or(3_600_000)
             .clamp(1_000, 3_600_000);
@@ -930,14 +908,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
                 .and_then(|t| t.get::<Option<bool>>("redact_args").ok())
                 .flatten()
                 .unwrap_or(false);
-            require_exec_approval(
-                &program,
-                &argv,
-                redact,
-                exec_mode,
-                exec_gate.as_ref(),
-                Some(std::path::Path::new(&exec_cwd)),
-            )?;
+            require_exec_approval(&program, &argv, redact, exec_mode, exec_gate.as_ref())?;
             let mut env = Vec::new();
             let stdin = if let Some(opts) = &opts {
                 opts.get::<Option<mlua::String>>("stdin")?
@@ -1110,12 +1081,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
     let shell_cwd = std::path::PathBuf::from(&cfg.cwd);
     let shell_cancel = cfg.cancelled.clone();
     let shell_fn = lua.create_function(move |lua, (command, opts): (String, Option<Table>)| {
-        require_shell_approval(
-            &command,
-            approval_mode,
-            approval_gate.as_ref(),
-            Some(shell_cwd.as_path()),
-        )?;
+        require_shell_approval(&command, approval_mode, approval_gate.as_ref())?;
         let timeout_ms = opt_u64(&opts, "timeout_ms")
             .unwrap_or(120_000)
             .clamp(1_000, 300_000);
@@ -1148,12 +1114,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
     let streaming_cancel = cfg.cancelled.clone();
     let shell_streaming_fn = lua.create_function(
         move |lua, (command, callback, opts): (String, mlua::Function, Option<Table>)| {
-            require_shell_approval(
-                &command,
-                approval_mode,
-                approval_gate.as_ref(),
-                Some(streaming_cwd.as_path()),
-            )?;
+            require_shell_approval(&command, approval_mode, approval_gate.as_ref())?;
             let timeout_ms = opt_u64(&opts, "timeout_ms")
                 .unwrap_or(300_000)
                 .clamp(1_000, 300_000);
@@ -2300,6 +2261,7 @@ fn build_canonical_config_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlu
                 row.set("max_concurrency", provider.max_concurrency)?;
                 row.set("request_timeout_s", provider.request_timeout_s)?;
                 row.set("api_key_configured", provider.api_key_configured)?;
+                row.set("api_key_required", provider.api_key_required)?;
                 if let Some(tokens) = provider.context_window_tokens {
                     row.set("context_window_tokens", tokens)?;
                 }

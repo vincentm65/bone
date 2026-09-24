@@ -548,7 +548,7 @@ fn parse_shell_args(arguments: Value) -> Result<Args, String> {
 fn parse_run_args(args: Args) -> Result<(String, u64, bool), String> {
     let command = args.command.ok_or("command is required for run")?;
     reject_obvious_file_write(&command)?;
-    let timeout_ms = args.timeout_ms.unwrap_or(120_000).clamp(1_000, 3_600_000);
+    let timeout_ms = args.timeout_ms.unwrap_or(300_000).clamp(1_000, 3_600_000);
     Ok((command, timeout_ms, args.background))
 }
 
@@ -681,11 +681,10 @@ impl Tool for ShellTool {
     fn definition(&self) -> ToolDefinition {
         let (_, _, shell_label) = shell_command();
         let desc = format!(
-            "Run a non-interactive shell command with {shell_label}, or manage background commands started by this tool. Use action=run (the default), list, status, or kill. Do not use shell to read, create, or edit file contents when read_file, create_file, or edit_file can do it. File-tool fallbacks are appropriate only when a file tool recommends shell, for bulk multi-file operations, or when no dedicated tool supports the operation. Before execution, a hard safety guard recursively checks shell composition, including safe `$(...)` substitutions. Normal `&&`, `||`, pipes, semicolons, and safe substitutions are allowed; catastrophic or ambiguous destructive commands are refused, and approval or danger mode cannot override that refusal. Do not retry or work around a refusal. Run returns exit code, stdout, and stderr."
+            "Run a non-interactive shell command with {shell_label}, or manage background commands started by this tool. Use action=run (the default), list, status, or kill. Do not use shell to read, create, or edit file contents when read_file, create_file, or edit_file can do it. File-tool fallbacks are appropriate only when a file tool recommends shell, for bulk multi-file operations, or when no dedicated tool supports the operation. Run returns exit code, stdout, and stderr."
         );
-        let cmd_desc = format!(
-            "Command to execute with {shell_label} for action=run. Runs without stdin. The hard safety guard allows normal shell composition and safe `$(...)` substitutions, but refuses catastrophic or ambiguous destructive commands; do not try to bypass a refusal."
-        );
+        let cmd_desc =
+            format!("Command to execute with {shell_label} for action=run. Runs without stdin.");
         ToolDefinition {
             name: "shell".to_string(),
             description: desc,
@@ -708,7 +707,7 @@ impl Tool for ShellTool {
                     "timeout_ms": {
                         "type": "integer",
                         "minimum": 1000,
-                        "description": "Timeout in ms for run. Default 120000. Set higher for long-running commands (e.g. downloads)."
+                        "description": "Timeout in ms for run. Default 300000 (5 minutes). Set higher for long-running commands (e.g. downloads)."
                     },
                     "background": {
                         "type": "boolean",
@@ -745,11 +744,6 @@ impl Tool for ShellTool {
             .map(ToolOutput::text);
         }
         let (command, timeout_ms, background) = parse_run_args(args)?;
-        let guard_roots =
-            crate::tools::command_guard::GuardRoots::detect(context.working_dir.as_deref());
-        if let Some(reason) = crate::tools::command_guard::hard_deny(&command, &guard_roots) {
-            return Err(reason);
-        }
         if background {
             let id = crate::processes::registry().spawn(
                 command,

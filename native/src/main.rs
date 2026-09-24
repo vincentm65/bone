@@ -7952,6 +7952,7 @@ mod tests {
                     id: (*id).into(),
                     label: (*label).into(),
                     api_key_configured: *configured,
+                    api_key_required: true,
                 })
                 .collect(),
             active_provider: active.into(),
@@ -8068,6 +8069,7 @@ mod tests {
                     stream_usage: "auto".into(),
                     request_timeout_s: None,
                     api_key_configured: true,
+                    api_key_required: true,
                 })
                 .collect(),
             active_provider: active.into(),

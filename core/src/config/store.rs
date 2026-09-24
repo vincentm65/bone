@@ -655,6 +655,7 @@ impl ConfigStore {
                 supports_prompt_cache_key: provider.supports_prompt_cache_key,
                 stream_usage: provider.stream_usage.clone(),
                 api_key_configured: !provider.api_key.is_empty(),
+                api_key_required: super::api_key_required(id, provider),
             })
             .collect();
         entries.sort_by(|left, right| left.id.cmp(&right.id));

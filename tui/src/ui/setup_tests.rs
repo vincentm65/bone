@@ -37,6 +37,7 @@ fn seeded_provider_is_submitted_without_an_api_key() {
             id: "local".into(),
             label: "Local".into(),
             api_key_configured: false,
+            api_key_required: false,
         }],
         active_provider: "local".into(),
         init_exists: false,

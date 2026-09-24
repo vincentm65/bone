@@ -82,7 +82,7 @@ local REASONING_EFFORTS = {
    { label = "XHigh", value = "xhigh" },
 }
 
-local PROVIDER_HANDLERS = { "openai", "anthropic", "codex", "grok_build" }
+local PROVIDER_HANDLERS = { "openai", "anthropic", "codex", "grok_build", "claude_code" }
 
 local function next_provider_handler(current)
    for i, handler in ipairs(PROVIDER_HANDLERS) do
@@ -117,6 +117,7 @@ local function update_provider_field(ctx, provider_id, entry, field, value)
 end
 
 local function edit_provider(ctx, provider)
+   local api_key_required = provider.api_key_required ~= false
    local entry = {
       label = provider.label or "",
       model = provider.model or "",
@@ -143,7 +144,8 @@ local function edit_provider(ctx, provider)
          "endpoint \u{00b7} " .. entry.endpoint,
          "handler \u{00b7} " .. entry.handler,
          "api_key \u{00b7} " .. (entry.api_key ~= "" and mask_secret(entry.api_key)
-            or (entry.api_key_configured and "(configured)" or "(empty)")),
+            or (not api_key_required and "(not required)"
+                or (entry.api_key_configured and "(configured)" or "(empty)"))),
          "context_window_tokens \u{00b7} " .. tostring(entry.context_window_tokens or "unknown"),
          "max_concurrency \u{00b7} " .. tostring(entry.max_concurrency or "unlimited"),
          "reasoning_effort \u{00b7} " .. (entry.reasoning_effort ~= "" and entry.reasoning_effort or "default"),

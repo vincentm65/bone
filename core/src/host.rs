@@ -183,6 +183,7 @@ impl HostService {
                 id: provider.id,
                 label: provider.label,
                 api_key_configured: provider.api_key_configured,
+                api_key_required: provider.api_key_required,
             })
             .collect();
         HostResponse::Setup(SetupSnapshot {

@@ -14,6 +14,10 @@ fn is_auto_stream_usage(value: &str) -> bool {
     value == "auto"
 }
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ConfigSchema {
     pub pages: Vec<ConfigPage>,
@@ -97,6 +101,10 @@ pub struct ProviderConfig {
     )]
     pub stream_usage: String,
     pub api_key_configured: bool,
+    /// Whether this provider needs an API key to operate. Missing capability
+    /// metadata is required for compatibility with older daemons.
+    #[serde(default = "default_true")]
+    pub api_key_required: bool,
 }
 
 /// Provider mutation payload. An omitted key preserves an existing credential;

@@ -242,6 +242,10 @@ pub struct ProviderChoice {
     pub label: String,
     #[serde(default)]
     pub api_key_configured: bool,
+    /// Whether this provider needs an API key to operate. Missing capability
+    /// metadata is required for compatibility with older daemons.
+    #[serde(default = "default_true")]
+    pub api_key_required: bool,
 }
 
 /// Initial daemon-owned data for the setup wizard.

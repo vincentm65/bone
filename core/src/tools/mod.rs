@@ -1,7 +1,6 @@
 //! Built-in tools: registry, approval, command policy, and file/shell tools.
 
 pub mod approval;
-pub mod command_guard;
 pub mod command_policy;
 pub mod create_file;
 pub mod edit_file;

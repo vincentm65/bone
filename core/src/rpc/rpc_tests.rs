@@ -1549,7 +1549,8 @@ fn reset_host_tool_state_removes_stateful_panes_and_drains_submit_inbox() {
     ctx.forward_view_diffs = true;
     let mut events = hub.subscribe();
 
-    ctx.submit_inbox.push("Continue the autonomous task list".to_string());
+    ctx.submit_inbox
+        .push("Continue the autonomous task list".to_string());
 
     ctx.reset_host_tool_state();
 

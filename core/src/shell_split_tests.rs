@@ -63,7 +63,8 @@ fn nested_substitutions_and_grouping_keep_inner_connectors() {
         split_newlines: true,
         strip_comments: false,
     };
-    let command = "echo $( (true && printf ok); printf \"$(false || true)\" ) ; rm -rf /home/example";
+    let command =
+        "echo $( (true && printf ok); printf \"$(false || true)\" ) ; rm -rf /home/example";
     assert_eq!(
         shell_split(command, &opts),
         vec![
@@ -81,7 +82,10 @@ fn comments_end_at_newline_inside_and_outside_substitutions() {
         strip_comments: true,
     };
     assert_eq!(
-        shell_split("echo $(true # inner ) still comment\nprintf ok); rm -rf /home/example", &opts),
+        shell_split(
+            "echo $(true # inner ) still comment\nprintf ok); rm -rf /home/example",
+            &opts
+        ),
         vec![
             "echo $(true # inner ) still comment\nprintf ok)".to_string(),
             "rm -rf /home/example".to_string(),

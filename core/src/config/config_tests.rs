@@ -1,7 +1,8 @@
 use super::{
-    DEFAULT_AGENTS_MD, DEFAULT_CORE_DOCS, InitChoice, SetupSelection, apply_onboarding, domains,
-    migrate_memory_to_catalog, migrate_memory_to_catalog_with_hash, seed_base,
-    settings::SubagentSettings, sync_bundled_file,
+    DEFAULT_AGENTS_MD, DEFAULT_CORE_DOCS, InitChoice, ProviderEntry, ProvidersConfig,
+    SetupSelection, api_key_required, apply_onboarding, domains, migrate_memory_to_catalog,
+    migrate_memory_to_catalog_with_hash, needs_onboarding, seed_base, settings::SubagentSettings,
+    sync_bundled_file,
 };
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -42,6 +43,90 @@ fn empty_selection() -> SetupSelection {
     SetupSelection {
         plugins: Vec::new(),
     }
+}
+
+fn provider_entry(base_url: &str, handler: &str) -> ProviderEntry {
+    ProviderEntry {
+        label: "Test provider".into(),
+        base_url: base_url.into(),
+        model: "test-model".into(),
+        api_key: Default::default(),
+        endpoint: "/v1/chat/completions".into(),
+        handler: handler.into(),
+        context_window_tokens: None,
+        request_timeout_s: None,
+        max_concurrency: None,
+        reasoning_effort: String::new(),
+        fast_mode: false,
+        supports_prompt_cache_key: false,
+        stream_usage: "auto".into(),
+    }
+}
+
+#[test]
+fn api_key_required_classifies_local_and_cli_providers() {
+    with_test_bone_dir(|_| {
+        let cases = [
+            ("local", "https://remote.example/v1", "openai", false),
+            ("custom", "http://localhost:8080/v1", "openai", false),
+            ("custom", "http://127.0.0.1:8080/v1", "openai", false),
+            ("custom", "http://[::1]:8080/v1", "openai", false),
+            ("remote", "https://remote.example/v1", "openai", true),
+            ("bind", "http://0.0.0.0:8080/v1", "openai", true),
+            ("claude", "https://remote.example", "claude_code", false),
+        ];
+
+        for (id, base_url, handler, required) in cases {
+            let entry = provider_entry(base_url, handler);
+            assert_eq!(
+                api_key_required(id, &entry),
+                required,
+                "unexpected key requirement for {id} at {base_url}"
+            );
+        }
+    });
+}
+
+#[test]
+fn selected_keyless_provider_skips_onboarding_with_an_empty_key() {
+    with_test_bone_dir(|_| {
+        let mut config = ProvidersConfig::default();
+        config.last_provider = "local".into();
+        config.providers.insert(
+            "local".into(),
+            provider_entry("http://127.0.0.1:8080/v1", "openai"),
+        );
+        domains::persist_providers(&config).unwrap();
+
+        assert!(config.providers["local"].api_key.is_empty());
+        assert!(!needs_onboarding());
+    });
+}
+
+#[test]
+fn unselected_keyless_provider_does_not_suppress_onboarding() {
+    with_test_bone_dir(|_| {
+        let mut config = ProvidersConfig::default();
+        config.providers.insert(
+            "local".into(),
+            provider_entry("http://127.0.0.1:8080/v1", "openai"),
+        );
+        domains::persist_providers(&config).unwrap();
+
+        assert!(config.last_provider.is_empty());
+        assert!(needs_onboarding());
+    });
+}
+
+#[test]
+fn seeded_default_providers_still_require_onboarding() {
+    with_test_bone_dir(|_| {
+        let config = domains::load_or_seed_providers().unwrap();
+
+        assert!(config.last_provider.is_empty());
+        assert!(config.providers["local"].api_key.is_empty());
+        assert!(needs_onboarding());
+    });
 }
 
 #[test]

@@ -28,9 +28,8 @@ struct ShellState {
 /// Handles single/double quoting, backslash escaping, and `$( )` command
 /// substitution nesting: a separator that belongs to a nested command is part of
 /// that command, not of the surrounding one, so it does not split here. The body
-/// of a substitution is passed through verbatim, `#` comments included, because
-/// whoever inspects it (the destructive-command guard) re-splits and re-inspects
-/// it as a command in its own right.
+/// of a substitution is passed through verbatim, `#` comments included, so callers
+/// that inspect nested commands can split and inspect each substitution body separately.
 pub fn shell_split(command: &str, opts: &ShellSplitOptions) -> Vec<String> {
     let mut segments = Vec::new();
     let mut current = String::new();
@@ -122,7 +121,8 @@ pub fn shell_split(command: &str, opts: &ShellSplitOptions) -> Vec<String> {
         }
 
         // Comment stripping: at word start, outside quotes, consume to newline.
-        if opts.strip_comments && ch == '#' && !state.single && !state.double && state.at_word_start {
+        if opts.strip_comments && ch == '#' && !state.single && !state.double && state.at_word_start
+        {
             for next in chars.by_ref() {
                 if next == '\n' {
                     push_segment(&mut segments, &mut current);

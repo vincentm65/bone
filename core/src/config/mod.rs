@@ -289,10 +289,11 @@ pub fn needs_onboarding() -> bool {
     let Ok(Some(providers)) = domains::load_providers() else {
         return true;
     };
-    !providers
-        .providers
-        .values()
-        .any(|entry| !entry.api_key.is_empty())
+    let selected = providers.last_provider.as_str();
+    !providers.providers.iter().any(|(id, entry)| {
+        !entry.api_key.is_empty()
+            || (!selected.is_empty() && id == selected && !api_key_required(id, entry))
+    })
 }
 
 /// Seed the always-safe, selection-independent config (command policy, AGENTS,
@@ -471,6 +472,19 @@ fn is_local_base_url(base_url: &str) -> bool {
     host.eq_ignore_ascii_case("localhost") || matches!(host, "127.0.0.1" | "::1")
 }
 
+/// Whether a provider can operate without a provider API key.
+///
+/// The built-in `local` id is intentionally keyless-capable regardless of its
+/// configured URL. Custom providers are keyless-capable only for loopback
+/// destinations, while handlers such as Claude Code own authentication outside
+/// of Bone. Bind-all addresses like `0.0.0.0` are not treated as connectable
+/// local destinations.
+pub fn api_key_required(provider_id: &str, entry: &ProviderEntry) -> bool {
+    !(provider_id == "local"
+        || entry.handler == "claude_code"
+        || is_local_base_url(&entry.base_url))
+}
+
 fn has_codex_auth_token() -> bool {
     // Codex auth lives under the user home, not under bone_dir (which may be
     // `$XDG_CONFIG_HOME/bone-rust` — its parent is not `$HOME`).
@@ -501,7 +515,7 @@ pub fn warn_if_no_api_key_for(provider_id: &str, config: &ProvidersConfig) {
     };
 
     if !entry.api_key.is_empty()
-        || is_local_base_url(&entry.base_url)
+        || !api_key_required(provider_id, entry)
         || (entry.handler == "codex" && has_codex_auth_token())
         || (entry.handler == "grok_build" && crate::llm::providers::grok_build::has_cached_auth())
     {

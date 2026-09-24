@@ -132,6 +132,16 @@ fn init_options(init_exists: bool) -> Vec<InitOption> {
     options
 }
 
+fn provider_key_suffix(provider: &ProviderChoice) -> &'static str {
+    if provider.api_key_configured || !provider.api_key_required {
+        ""
+    } else {
+        " (no API key)"
+    }
+}
+
+const MISSING_KEY_WARNING: &str = "No API key for this provider yet — it will stay unusable until you add one (via /config or /setup).";
+
 /// Result of feeding one correlated response into [`SetupUi::handle_response`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -340,10 +350,11 @@ impl SetupUi {
         self.api_key = key.to_owned();
     }
 
-    /// True when the selected provider still has no key on the daemon — the
-    /// actionable onboarding state this dialog exists to fix.
+    /// True when the selected provider still has no required key on the daemon —
+    /// the actionable onboarding state this dialog exists to fix.
     pub fn needs_key(&self) -> bool {
-        self.selected().is_some_and(|p| !p.api_key_configured)
+        self.selected()
+            .is_some_and(|p| !p.api_key_configured && p.api_key_required)
     }
 
     /// Client-side credential sanity check for the typed key.
@@ -372,10 +383,20 @@ impl SetupUi {
         self.selected().is_some() && self.key_error().is_none()
     }
 
-    /// True when the selected provider has no configured key and none was typed,
-    /// so applying would leave it unusable (mirrors the TUI's no-key warning).
+    /// True when the selected provider has no configured required key and none
+    /// was typed, so applying would leave it unusable.
     pub fn missing_key_warning(&self) -> bool {
-        self.selected().is_some_and(|p| !p.api_key_configured) && self.api_key.trim().is_empty()
+        self.selected()
+            .is_some_and(|p| !p.api_key_configured && p.api_key_required)
+            && self.api_key.trim().is_empty()
+    }
+
+    fn confirm_warning(&self) -> Option<&'static str> {
+        if self.missing_key_warning() {
+            Some(MISSING_KEY_WARNING)
+        } else {
+            None
+        }
     }
 
     /// Auto-offer setup only when the daemon reports first-launch onboarding.
@@ -543,6 +564,14 @@ impl SetupUi {
             return "Contacting daemon…".into();
         }
         if let Some(snapshot) = &self.snapshot {
+            if self.selected().is_some_and(|p| !p.api_key_required) {
+                return format!(
+                    "Provider {} does not require an API key",
+                    self.provider
+                        .as_deref()
+                        .unwrap_or(&snapshot.active_provider)
+                );
+            }
             if self.needs_key() {
                 return format!(
                     "Provider {} has no API key",
@@ -693,9 +722,9 @@ impl SetupUi {
     fn render_provider(&mut self, ui: &mut egui::Ui) {
         // Clone so the loop can mutate `self` while reading the list.
         let providers = self.providers().to_vec();
-        ui.label(egui::RichText::new("Pick a provider and add a key").strong());
+        ui.label(egui::RichText::new("Pick a provider and add a key if needed").strong());
         if self.snapshot.as_ref().is_some_and(|s| s.needs_onboarding) {
-            ui.weak("First launch: pick a provider and add its API key to get started.");
+            ui.weak("First launch: pick a provider and add an API key if it requires one.");
         }
         ui.add_space(4.0);
         if providers.is_empty() {
@@ -715,11 +744,7 @@ impl SetupUi {
                 } else {
                     provider.label.clone()
                 };
-                let suffix = if provider.api_key_configured {
-                    String::new()
-                } else {
-                    " (no API key)".to_string()
-                };
+                let suffix = provider_key_suffix(provider);
                 let selected = self.provider.as_deref() == Some(provider.id.as_str());
                 if ui
                     .selectable_label(
@@ -819,7 +844,9 @@ impl SetupUi {
             })
             .unwrap_or_else(|| "skipped".to_string());
         let key = if self.api_key.trim().is_empty() {
-            if self.selected().is_some_and(|p| p.api_key_configured) {
+            if self.selected().is_some_and(|p| !p.api_key_required) {
+                "not required".to_string()
+            } else if self.selected().is_some_and(|p| p.api_key_configured) {
                 "keep current".to_string()
             } else {
                 "skipped".to_string()
@@ -837,12 +864,8 @@ impl SetupUi {
         ui.add_space(4.0);
         if let Some(error) = self.key_error() {
             ui.colored_label(egui::Color32::from_rgb(235, 90, 90), error);
-        } else if self.missing_key_warning() {
-            ui.colored_label(
-                egui::Color32::from_rgb(235, 190, 80),
-                "No API key for this provider yet — it will stay unusable until you \
-                 add one (via /config or /setup).",
-            );
+        } else if let Some(warning) = self.confirm_warning() {
+            ui.colored_label(egui::Color32::from_rgb(235, 190, 80), warning);
         }
         ui.weak("Apply sends this plan to the daemon host; Cancel leaves config unchanged.");
     }
@@ -858,6 +881,16 @@ mod tests {
             id: id.to_string(),
             label: id.to_string(),
             api_key_configured: key,
+            api_key_required: true,
+        }
+    }
+
+    fn keyless_provider(id: &str) -> ProviderChoice {
+        ProviderChoice {
+            id: id.to_string(),
+            label: id.to_string(),
+            api_key_configured: false,
+            api_key_required: false,
         }
     }
 
@@ -1229,12 +1262,28 @@ mod tests {
         let mut ui = SetupUi::new();
         ui.show(snapshot(1, "c", vec![provider("local", false)], "local"));
         assert!(ui.missing_key_warning());
+        assert_eq!(ui.confirm_warning(), Some(MISSING_KEY_WARNING));
+        assert_eq!(
+            provider_key_suffix(ui.selected().expect("selected")),
+            " (no API key)"
+        );
         ui.set_api_key("sk-123");
         assert!(!ui.missing_key_warning());
         // Provider already has a key: no warning even with an empty field.
         let mut ui = SetupUi::new();
         ui.show(snapshot(1, "c", vec![provider("local", true)], "local"));
         assert!(!ui.missing_key_warning());
+    }
+
+    #[test]
+    fn keyless_provider_needs_no_key_or_confirmation_warning() {
+        let mut ui = SetupUi::new();
+        ui.show(snapshot(1, "c", vec![keyless_provider("local")], "local"));
+        assert!(!ui.needs_key());
+        assert!(!ui.missing_key_warning());
+        assert_eq!(provider_key_suffix(ui.selected().expect("selected")), "");
+        assert!(ui.status_line().contains("does not require an API key"));
+        assert_eq!(ui.confirm_warning(), None);
     }
 
     #[test]

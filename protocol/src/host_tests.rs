@@ -101,6 +101,7 @@ fn setup() -> SetupSnapshot {
             id: "openai".into(),
             label: "OpenAI".into(),
             api_key_configured: true,
+            api_key_required: true,
         }],
         active_provider: "openai".into(),
         init_exists: true,
@@ -235,6 +236,26 @@ fn request_defaults_preserve_snapshot_only_and_cached_catalog_behavior() {
             ..CatalogItem::default()
         }
     );
+}
+
+#[test]
+fn provider_choice_key_capability_defaults_to_required_for_old_daemon_payloads() {
+    let choice: ProviderChoice = serde_json::from_value(serde_json::json!({
+        "id": "local",
+        "label": "Local",
+        "api_key_configured": false
+    }))
+    .unwrap();
+    assert!(choice.api_key_required);
+
+    let current = ProviderChoice {
+        id: "local".into(),
+        label: "Local".into(),
+        api_key_configured: false,
+        api_key_required: false,
+    };
+    let json = serde_json::to_value(current).unwrap();
+    assert_eq!(json["api_key_required"], false);
 }
 
 #[test]

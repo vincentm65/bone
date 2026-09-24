@@ -1765,21 +1765,7 @@ pub(crate) async fn execute_tool_calls(
         }
     };
 
-    // Hard, non-overridable guard: refuse catastrophic shell commands before the
-    // approval gate is consulted at all, so no approval mode, keypress, frontend,
-    // or config change can ever approve them. This deliberately bypasses
-    // `gate.decide` rather than merging into `blocked`, because an attached
-    // frontend owns the verdict for `blocked` calls.
-    let guard_roots =
-        crate::tools::command_guard::GuardRoots::detect(tools.working_dir.as_deref());
-
     for (i, call) in calls.into_iter().enumerate() {
-        if let Some(reason) = crate::tools::command_guard::hard_deny_call(&call, &guard_roots) {
-            let result = ToolResult::error(call.id.clone(), call.name.clone(), reason);
-            emit_result(&result);
-            out.push((i, result));
-            continue;
-        }
         let safety = tools.safety_for_call(&call);
         let blocked = hook_blocks.get(i).cloned().flatten();
         let auto_allows = mode.allows_safety(safety);

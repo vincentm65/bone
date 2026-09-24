@@ -4,6 +4,7 @@ use super::provider::{LlmError, LlmErrorKind, LlmProvider};
 use crate::config::ProvidersConfig;
 
 pub mod anthropic;
+pub mod claude_code;
 pub mod codex;
 pub mod grok_build;
 pub mod openai_compat;
@@ -31,6 +32,11 @@ pub fn create_provider_with_config(
             "codex" => {
                 return Ok(Box::new(codex::CodexProvider::from_entry(id, entry)));
             }
+            "claude_code" => {
+                return Ok(Box::new(claude_code::ClaudeCodeProvider::from_entry(
+                    id, entry,
+                )));
+            }
             "grok_build" => {
                 return Ok(Box::new(grok_build::GrokBuildProvider::from_entry(
                     id, entry,
@@ -50,7 +56,7 @@ pub fn create_provider_with_config(
                 return Err(LlmError::new_with_kind(
                     LlmErrorKind::Config,
                     format!(
-                        "unsupported handler `{}` for provider `{id}`; supported: openai, anthropic, codex, grok_build",
+                        "unsupported handler `{}` for provider `{id}`; supported: openai, anthropic, codex, grok_build, claude_code",
                         entry.handler
                     ),
                 ));
