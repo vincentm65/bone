@@ -462,7 +462,7 @@ impl ConfigStore {
                             "Input style",
                             "enum",
                             &["custom", "lines", "box", "filled"],
-                            serde_json::Value::Null,
+                            serde_json::json!("lines"),
                         ),
                     ],
                     pages: Vec::new(),

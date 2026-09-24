@@ -199,6 +199,20 @@ fn missing_and_null_prompts_hydrate_and_persist_while_empty_is_preserved() {
 }
 
 #[test]
+fn missing_ui_section_defaults_input_preset_to_lines() {
+    let himp = temp_path("fresh-ui-defaults");
+    fs::write(&himp, "version: 2\n").unwrap();
+    let loaded = Settings::load_path(&himp).unwrap().unwrap();
+    assert_eq!(
+        loaded.inner.ui.input.preset.as_deref(),
+        Some("lines"),
+        "fresh install with no ui: section should default preset to 'lines'"
+    );
+    let _ = fs::remove_file(&himp);
+    let _ = fs::remove_file(lock_path_for(&himp));
+}
+
+#[test]
 fn field_updates_reload_latest_document_before_saving() {
     let path = temp_path("concurrent-updates");
     let initial = Settings::defaults();

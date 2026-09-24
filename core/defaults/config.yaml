@@ -5,3 +5,6 @@ general:
     work only in the current directory unless instructed otherwise. Do not modify
     `.bone-rust` unless explicitly requested. For Bone internals, follow
     `AGENTS.md` in the resolved config directory.
+ui:
+  input:
+    preset: "lines"

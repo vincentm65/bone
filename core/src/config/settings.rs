@@ -226,7 +226,7 @@ pub struct UiInputBorderSettings {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UiInputSettings {
-    #[serde(default)]
+    #[serde(default = "default_input_preset")]
     pub preset: Option<String>,
     #[serde(default)]
     pub prefix: Option<String>,
@@ -245,7 +245,7 @@ pub struct UiInputSettings {
 impl Default for UiInputSettings {
     fn default() -> Self {
         Self {
-            preset: None,
+            preset: Some("lines".into()),
             prefix: None,
             show_prefix: true,
             horizontal_padding: None,
@@ -254,6 +254,10 @@ impl Default for UiInputSettings {
             border: UiInputBorderSettings::default(),
         }
     }
+}
+
+fn default_input_preset() -> Option<String> {
+    Some("lines".to_string())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
