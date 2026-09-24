@@ -2,10 +2,10 @@ use super::stream::{StreamAttempt, discard_stream_attempt};
 use super::{
     App, ConfigView, PendingApproval, TerminalBackgroundTransition, WireTools, apply_queue_nav_key,
     approval_already_pending, assistant_display_message, background_pane_needs_refresh,
-    config_rejection_message, configured_input_style, edit_diff_message, idle_state_needs_redraw,
-    job_quit_confirmation_required, job_snapshot_messages, lua_config_available,
-    orphaned_tool_result_row, parse_config_value, prepare_streaming_replay, render_config_page,
-    run_insertion_lifecycle, should_open_agent_log, stream::is_retry_status,
+    config_approval_is, config_rejection_message, configured_input_style, edit_diff_message,
+    idle_state_needs_redraw, job_quit_confirmation_required, job_snapshot_messages,
+    lua_config_available, orphaned_tool_result_row, parse_config_value, prepare_streaming_replay,
+    render_config_page, run_insertion_lifecycle, should_open_agent_log, stream::is_retry_status,
     streaming_rebuild_index, take_pending_config, take_terminal_width_change,
     terminal_background_transition, terminal_dimensions_changed,
 };
@@ -431,6 +431,19 @@ fn redelivered_pending_approval_is_not_prompted_twice() {
     assert!(approval_already_pending(Some(&pending), 42));
     assert!(!approval_already_pending(Some(&pending), 43));
     assert!(!approval_already_pending(None, 42));
+}
+
+#[test]
+fn danger_reassert_is_skipped_when_daemon_already_persists_danger() {
+    // A subagent in its own Safe mode escalates approvals while the daemon is
+    // already Danger; reasserting then rewrote config on every escalated call.
+    let danger = serde_json::json!({ "general": { "approval": "danger" } });
+    let safe = serde_json::json!({ "general": { "approval": "safe" } });
+
+    assert!(config_approval_is(Some(&danger), "danger"));
+    assert!(!config_approval_is(Some(&safe), "danger"));
+    assert!(!config_approval_is(Some(&serde_json::json!({})), "danger"));
+    assert!(!config_approval_is(None, "danger"));
 }
 
 #[test]

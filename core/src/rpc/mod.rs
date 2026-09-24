@@ -871,6 +871,14 @@ struct DaemonCtx {
     /// sender kept here is a keep-alive, so the receiver never disconnects.
     background_events_tx: mpsc::UnboundedSender<RuntimeEvent>,
     background_events_rx: mpsc::UnboundedReceiver<RuntimeEvent>,
+    /// True while `run_turn` pumps a turn. The daemon shares its thread with the
+    /// in-process TUI, and a running Lua tool holds the VM lock for its whole
+    /// call (e.g. `ctx.agent.wait` for up to five minutes), so mid-turn work
+    /// on this thread must never block on the Lua VM.
+    turn_active: bool,
+    /// A config mutation landed mid-turn and deferred its `FrontendState`
+    /// (whose banner calls into Lua); republished once the turn ends.
+    frontend_state_stale: std::sync::atomic::AtomicBool,
 }
 
 fn job_snapshot(job: crate::ext::jobs::Job) -> Option<bone_protocol::JobSnapshot> {
@@ -1216,6 +1224,13 @@ impl DaemonCtx {
         self.hub.publish_global(self.config_event());
     }
 
+    fn publish_frontend_state(&self) {
+        self.hub.publish_global(frontend_state(
+            &self.extensions,
+            &self.session.lock().unwrap().tools,
+        ));
+    }
+
     fn finish_config_mutation(
         &self,
         changed_paths: Vec<String>,
@@ -1232,10 +1247,15 @@ impl DaemonCtx {
                     restart_required,
                     request_id,
                 });
-                self.hub.publish_global(frontend_state(
-                    &self.extensions,
-                    &self.session.lock().unwrap().tools,
-                ));
+                if self.turn_active {
+                    // `frontend_state` calls `bone.banner()`, which blocks on the
+                    // Lua VM a running tool may hold for minutes — freezing the
+                    // TUI that shares this thread. Defer it to turn end.
+                    self.frontend_state_stale
+                        .store(true, std::sync::atomic::Ordering::Relaxed);
+                } else {
+                    self.publish_frontend_state();
+                }
             }
             Err((current_revision, error)) => {
                 self.hub.publish(RuntimeEvent::ConfigMutationRejected {
@@ -3106,6 +3126,7 @@ impl DaemonCtx {
         // drains it afterwards — which is how a recap notice fired by an idle
         // timer reaches clients that are still attached.
         let mut diff_timer = tokio::time::interval(std::time::Duration::from_millis(50));
+        self.turn_active = true;
         loop {
             tokio::select! {
                 biased;
@@ -3217,6 +3238,13 @@ impl DaemonCtx {
                     None => break,
                 },
             }
+        }
+        self.turn_active = false;
+        if self
+            .frontend_state_stale
+            .swap(false, std::sync::atomic::Ordering::Relaxed)
+        {
+            self.publish_frontend_state();
         }
         self.pending_interactions.clear();
         // Flush any diffs emitted between the last tick and turn end.
@@ -3401,6 +3429,8 @@ async fn run_daemon_inner(
         processes_seen: None,
         jobs_seen: None,
         projection,
+        turn_active: false,
+        frontend_state_stale: std::sync::atomic::AtomicBool::new(false),
         background_events_tx: background_events.0,
         background_events_rx: background_events.1,
     };

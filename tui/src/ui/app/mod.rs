@@ -352,6 +352,15 @@ pub struct PendingApproval {
     advising: bool,
 }
 
+/// Whether config `values` persist `mode` as the approval mode. `false` when
+/// no config snapshot has arrived yet.
+fn config_approval_is(values: Option<&serde_json::Value>, mode: &str) -> bool {
+    values
+        .and_then(|values| values.pointer("/general/approval"))
+        .and_then(|v| v.as_str())
+        == Some(mode)
+}
+
 fn approval_already_pending(pending: Option<&PendingApproval>, id: u64) -> bool {
     pending.is_some_and(|pending| pending.id == id)
 }
@@ -1076,6 +1085,12 @@ impl App {
             .command_tx
             .send(crate::runtime::RuntimeCommand::GetConfig);
         take_pending_config(&mut self.pending_config, request_id)
+    }
+
+    /// Whether the daemon's last config snapshot already holds `mode` as the
+    /// persisted approval mode.
+    fn daemon_approval_is(&self, mode: &str) -> bool {
+        config_approval_is(self.config_view.snapshot.as_ref().map(|s| &s.values), mode)
     }
 
     /// Re-read `approval_mode` from the current config-view snapshot so the TUI
@@ -3529,13 +3544,9 @@ impl App {
             self.pump_show_edit_preview(&request.call.id, preview, term)?;
         }
         // Danger UI means every tool is allowed. Even if the daemon still sent
-        // a prompt (mode desync), auto-accept and reassert Danger so the gate
-        // catches up for subsequent calls.
+        // a prompt, auto-accept. Reply first so the approval never queues
+        // behind a config mutation.
         if request.auto_allows || matches!(self.approval_mode, ApprovalMode::Danger) {
-            if !request.auto_allows {
-                self.user_config.approval_mode = ApprovalMode::Danger;
-                self.persist_runtime_config();
-            }
             let _ = self
                 .command_tx
                 .send(crate::runtime::RuntimeCommand::ApprovalReply {
@@ -3543,6 +3554,13 @@ impl App {
                     outcome: CallOutcome::Approve,
                 });
             self.answered_approvals.insert(request.id);
+            // Reassert Danger only on a real desync. A subagent running in its
+            // own Safe mode escalates denied calls here while the daemon is
+            // already Danger; rewriting config on each of those is pointless.
+            if !request.auto_allows && !self.daemon_approval_is("danger") {
+                self.user_config.approval_mode = ApprovalMode::Danger;
+                self.persist_runtime_config();
+            }
         } else {
             self.begin_approval(&request.call, request.id, term)?;
         }
