@@ -1927,11 +1927,6 @@ impl App {
         self.pending_approval = None;
     }
 
-    async fn start_new_conversation(&mut self, term: &mut BoneTerminal) {
-        self.send_and_await_snapshot(crate::runtime::RuntimeCommand::NewConversation, Some(term))
-            .await;
-    }
-
     /// Clear chat history, end the current DB conversation, start a fresh one,
     /// and display a usage summary.
     async fn clear_chat(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
@@ -4011,10 +4006,9 @@ impl App {
             _ => format!("Unknown command: /{cmd}. Type /help for available commands."),
         };
 
-        // If provider or model identity changed, start a new conversation.
-        if self.view.provider_id != prev_provider || self.view.provider_model != prev_model {
-            self.start_new_conversation(term).await;
-        }
+        // A provider/model switch keeps the conversation: the new provider sees
+        // the full history, and provider-specific reasoning is only replayed to
+        // the provider that produced it (see `ChatMessage::reasoning_provider`).
 
         self.messages.push(Message::system(reply));
         self.flush_new_messages_to_scrollback(term)?;
