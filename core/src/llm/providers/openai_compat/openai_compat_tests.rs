@@ -4,7 +4,8 @@ use super::{
     split_reasoning_events,
 };
 use crate::llm::provider::ProviderRequestContext;
-use crate::llm::{ChatMessage, ChatRole, ImageData};
+use crate::llm::{ChatMessage, ChatRole, ImageData, Reasoning};
+use crate::tools::ToolCall;
 use std::collections::BTreeMap;
 
 #[test]
@@ -192,16 +193,19 @@ fn wraps_truncated_tool_arguments_in_valid_marker_object() {
 
 #[test]
 fn serializes_images_as_openai_content_parts() {
-    let messages = openai_messages(vec![ChatMessage::user_with_images(
-        "look",
-        vec![ImageData {
-            media_type: "image/png".to_string(),
-            data: "abc".to_string(),
-            width: Some(1),
-            height: Some(1),
-            sha256: Some("ignored-metadata".into()),
-        }],
-    )]);
+    let messages = openai_messages(
+        vec![ChatMessage::user_with_images(
+            "look",
+            vec![ImageData {
+                media_type: "image/png".to_string(),
+                data: "abc".to_string(),
+                width: Some(1),
+                height: Some(1),
+                sha256: Some("ignored-metadata".into()),
+            }],
+        )],
+        "openai",
+    );
     let json = serde_json::to_value(&messages[0]).unwrap();
 
     assert_eq!(json["content"][0]["type"], "text");
@@ -218,7 +222,7 @@ fn serializes_images_as_openai_content_parts() {
 
 #[test]
 fn serializes_text_only_as_plain_string() {
-    let messages = openai_messages(vec![ChatMessage::new(ChatRole::User, "hello")]);
+    let messages = openai_messages(vec![ChatMessage::new(ChatRole::User, "hello")], "openai");
     let json = serde_json::to_value(&messages[0]).unwrap();
     assert_eq!(json["content"], "hello");
 }
@@ -243,12 +247,37 @@ fn serializes_tool_message_with_images_as_plain_string() {
         is_error: false,
         ..Default::default()
     });
-    let messages = openai_messages(vec![tool]);
+    let messages = openai_messages(vec![tool], "openai");
     let json = serde_json::to_value(&messages[0]).unwrap();
 
     assert_eq!(json["role"], "tool");
     assert_eq!(json["content"], "read 1 image");
     assert_eq!(json["tool_call_id"], "call-a");
+}
+
+#[test]
+fn gates_reasoning_replay_by_provider_provenance() {
+    let mut assistant = ChatMessage::assistant_with_tools(
+        "answer",
+        vec![ToolCall {
+            id: "call-1".into(),
+            name: "shell".into(),
+            arguments: serde_json::json!({"command": "pwd"}),
+        }],
+    );
+    assistant.reasoning = Some(Reasoning {
+        text: "private".into(),
+        echo_field: Some("reasoning_content".into()),
+    });
+    assistant.reasoning_provider = Some("deepseek".into());
+
+    let other = serde_json::to_value(openai_messages(vec![assistant.clone()], "openai")).unwrap();
+    assert!(other[0].get("reasoning_content").is_none());
+    assert_eq!(other[0]["tool_calls"][0]["id"], "call-1");
+
+    let same = serde_json::to_value(openai_messages(vec![assistant], "deepseek")).unwrap();
+    assert_eq!(same[0]["reasoning_content"], "private");
+    assert_eq!(same[0]["tool_calls"][0]["id"], "call-1");
 }
 
 #[test]

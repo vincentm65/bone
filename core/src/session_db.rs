@@ -118,6 +118,8 @@ struct PersistedMessageV2 {
     message: ChatMessage,
     #[serde(default)]
     output_sequence: Vec<OutputItem>,
+    #[serde(default)]
+    reasoning_provider: Option<String>,
 }
 
 /// Borrowed write shape avoids cloning message text, images, or output items.
@@ -127,6 +129,8 @@ struct PersistedMessageV2Ref<'a> {
     message: &'a ChatMessage,
     #[serde(skip_serializing_if = "slice_is_empty")]
     output_sequence: &'a [OutputItem],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_provider: Option<&'a str>,
 }
 
 fn slice_is_empty<T>(items: &&[T]) -> bool {
@@ -139,6 +143,7 @@ impl<'a> From<&'a ChatMessage> for PersistedMessageV2Ref<'a> {
             version: PERSISTED_MESSAGE_VERSION,
             message,
             output_sequence: &message.output_sequence,
+            reasoning_provider: message.reasoning_provider.as_deref(),
         }
     }
 }
@@ -148,6 +153,7 @@ impl PersistedMessageV2 {
         if self.version != PERSISTED_MESSAGE_VERSION {
             return None;
         }
+        self.message.reasoning_provider = self.reasoning_provider;
         self.message.output_sequence = std::mem::take(&mut self.output_sequence);
         Some(self.message)
     }
@@ -228,6 +234,7 @@ pub(crate) fn stored_to_chat_message(msg: StoredMessage) -> crate::llm::ChatMess
         is_error: msg.is_error,
         synthetic: false,
         reasoning: None,
+        reasoning_provider: None,
         reasoning_items: Vec::new(),
         created_at: Some(msg.created_at),
         output_sequence: Vec::new(),
