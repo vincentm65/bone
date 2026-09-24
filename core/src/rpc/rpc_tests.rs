@@ -4419,3 +4419,276 @@ fn bounded_conversation_loaded_preserves_snapshot_and_busy() {
     assert_eq!(got_snapshot, snapshot);
     assert!(busy);
 }
+
+/// Scripted provider: call 1 replies with a text delta plus a Danger
+/// `create_file` tool call; call 2 closes the turn with plain text.
+struct ScriptedToolProvider {
+    file_path: String,
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait::async_trait]
+impl crate::llm::provider::LlmProvider for ScriptedToolProvider {
+    fn id(&self) -> &str {
+        "scripted"
+    }
+
+    fn name(&self) -> &str {
+        "Scripted"
+    }
+
+    fn model(&self) -> &str {
+        "scripted-1"
+    }
+
+    fn set_model(&mut self, _: String) {}
+
+    async fn chat_stream(
+        &self,
+        _: Vec<crate::llm::ChatMessage>,
+        _: Vec<crate::tools::ToolDefinition>,
+    ) -> Result<crate::llm::ResponseStream, crate::llm::LlmError> {
+        match self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 => Ok(Box::pin(futures_util::stream::iter([
+                Ok(crate::llm::ChatEvent::TextDelta("I will create the file.".into())),
+                Ok(crate::llm::ChatEvent::ToolCall(bone_protocol::ToolCall {
+                    id: "call_1".into(),
+                    name: "create_file".into(),
+                    arguments: serde_json::json!({
+                        "path": self.file_path,
+                        "content": "hello from turn",
+                    }),
+                })),
+            ]))),
+            _ => Ok(Box::pin(futures_util::stream::iter([
+                Ok(crate::llm::ChatEvent::TextDelta("The file was created.".into())),
+            ]))),
+        }
+    }
+}
+
+/// Regression (issue #10, provider-switch history loss): a `Synchronize`
+/// arriving mid-turn while the driver still holds uncommitted messages must
+/// merge the live tail over the *full* committed DB set — a windowed DB slice
+/// cannot carry the busy merge, because it silently drops rows the turn has
+/// not yet durably committed.
+///
+/// Timeline: the DB is pre-seeded with one committed (question, answer) pair;
+/// `SubmitPrompt` commits the second question; then the persistent sink any
+/// new connection would see is broken (the DB file is replaced by a
+/// directory), so the turn's durable writes cannot land. Model call 1 replies
+/// with text plus a Danger `create_file` request, stalling the turn at the
+/// approval gate while its assistant message sits only in the driver's
+/// `live_tail`. A mid-turn `Synchronize { include_messages }` must still
+/// answer with the whole conversation so far (`[q1, a1, q2, assistant+tc]`)
+/// rather than the requested window (`[a1, q2]`). Approval runs the tool,
+/// call 2 finishes the turn, and the tail commits through the session's
+/// still-open connection; the post-turn idle `Synchronize` then returns all
+/// six rows with nothing lost and nothing duplicated.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn synchronize_in_turn_merges_uncommitted_live_tail_over_full_db() {
+    let _guard = crate::util::test_env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let old_bone = std::env::var_os("BONE_DIR");
+    unsafe {
+        std::env::set_var("BONE_DIR", dir.path());
+    }
+
+    let provider = Arc::new(ScriptedToolProvider {
+        file_path: dir.path().join("created.txt").to_string_lossy().into_owned(),
+        calls: std::sync::atomic::AtomicUsize::new(0),
+    });
+
+    let mut session = crate::runtime::RuntimeSession::new(crate::tools::registry::ToolHandler::new(
+        crate::tools::builtin_tools(),
+    ));
+    session
+        .init_db(&*provider, "regression system prompt")
+        .expect("fresh startup database");
+    let conversation = session.conversation_id.expect("startup conversation");
+    {
+        let db = session.session_db.as_ref().unwrap();
+        db.append_chat_message(
+            conversation,
+            &ChatMessage::new(crate::llm::ChatRole::User, "first question"),
+            1,
+        )
+        .unwrap();
+        db.append_chat_message(
+            conversation,
+            &ChatMessage::new(crate::llm::ChatRole::Assistant, "first answer"),
+            2,
+        )
+        .unwrap();
+    }
+
+    let (mut ctx, hub, mut commands) =
+        test_daemon_ctx(provider.clone(), crate::ext::ExtensionManager::unloaded(), session);
+    // Two subscribers from the start: the observer drives the turn, the main
+    // task keeps a live stream for the post-turn idle synchronize (turn events
+    // replay to both; each only consumes until its own target).
+    let mut events = hub.subscribe();
+    let mut main_events = hub.subscribe();
+
+    let Flow::StartTurn {
+        request_id,
+        text,
+        display,
+    } = ctx
+        .handle_idle_command(
+            RuntimeCommand::SubmitPrompt {
+                request_id: None,
+                text: "second question".into(),
+                images: Vec::new(),
+            },
+            &mut commands,
+        )
+        .await
+    else {
+        panic!("prompt did not start a turn");
+    };
+
+    // Break the sink that later connections would open: the session keeps
+    // writing through its still-open inode (unlink is fine on POSIX), but a
+    // fresh `SessionDb::open(db_path())` — the turn's tool-checkpoint sink —
+    // now fails, so no in-turn durable write can land on disk.
+    let db_file = dir.path().join("data").join("conversations.db");
+    std::fs::remove_file(&db_file).unwrap();
+    std::fs::create_dir(&db_file).unwrap();
+
+    let command_tx = hub.command_sender();
+    let observer = tokio::spawn(async move {
+        // Call 1: text delta, then the Danger `create_file` request. Safe
+        // mode approves only ReadOnly, so the turn stalls at the approval
+        // gate with its assistant message still uncommitted.
+        let approval_id = loop {
+            match events.recv().await.unwrap() {
+                RuntimeEvent::ApprovalRequest { id, name, .. } if name == "create_file" => {
+                    break id;
+                }
+                _ => {}
+            }
+        };
+        command_tx
+            .send(RuntimeCommand::Synchronize {
+                request_id: 75,
+                include_messages: true,
+                window: Some(2),
+            })
+            .unwrap();
+        let synchronized = loop {
+            match events.recv().await.unwrap() {
+                RuntimeEvent::StateSynchronized {
+                    request_id: 75,
+                    busy,
+                    messages,
+                    ..
+                } => break (busy, messages),
+                _ => {}
+            }
+        };
+        command_tx
+            .send(RuntimeCommand::ApprovalReply {
+                id: approval_id,
+                outcome: bone_protocol::CallOutcome::Approve,
+            })
+            .unwrap();
+        synchronized
+    });
+
+    let turn = ctx.run_turn(request_id, text, display, &mut commands);
+    let (_, observer_result) = tokio::join!(turn, observer);
+    let (busy, busy_messages) = observer_result.expect("observer task panicked");
+
+    // Env is no longer consulted (all DB traffic rides the open connections);
+    // restore before the remaining assertions.
+    unsafe {
+        match &old_bone {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+
+    assert!(busy, "synchronize during a running turn must report busy");
+    let messages = busy_messages.expect("requested transcript was omitted");
+    // Pre-fix this response held only the windowed DB slice `[first answer,
+    // second question]`: the in-turn assistant+tool-call was invisible.
+    assert_eq!(
+        messages.len(),
+        4,
+        "busy synchronize must merge the uncommitted live tail over the full committed set: {:?}",
+        messages
+            .iter()
+            .map(|m| (m.role, &m.content, &m.tool_calls))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(messages[0].role, crate::llm::ChatRole::User);
+    assert_eq!(messages[0].content, "first question");
+    assert_eq!(messages[1].role, crate::llm::ChatRole::Assistant);
+    assert_eq!(messages[1].content, "first answer");
+    assert_eq!(messages[2].role, crate::llm::ChatRole::User);
+    assert_eq!(messages[2].content, "second question");
+    assert_eq!(messages[3].role, crate::llm::ChatRole::Assistant);
+    assert_eq!(messages[3].content, "I will create the file.");
+    assert_eq!(
+        messages[3].tool_calls.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        ["create_file"],
+        "the uncommitted in-turn tool call must be part of the repair reply"
+    );
+
+    // The approved tool really ran on disk.
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("created.txt")).unwrap(),
+        "hello from turn"
+    );
+
+    // After the turn settles, its rows committed through the session's
+    // still-open connection; the idle synchronize returns the full
+    // six-row conversation with nothing lost or duplicated.
+    let flow = ctx
+        .handle_idle_command(
+            RuntimeCommand::Synchronize {
+                request_id: 76,
+                include_messages: true,
+                window: None,
+            },
+            &mut commands,
+        )
+        .await;
+    assert!(matches!(flow, Flow::Continue));
+    let (final_busy, final_messages) = loop {
+        match main_events.recv().await.unwrap() {
+            RuntimeEvent::StateSynchronized {
+                request_id: 76,
+                busy,
+                messages,
+                ..
+            } => break (busy, messages),
+            _ => {}
+        }
+    };
+    assert!(!final_busy, "synchronize after turn end must report idle");
+    let final_messages = final_messages.expect("requested transcript was omitted");
+    assert_eq!(
+        final_messages.len(),
+        6,
+        "idle synchronize must return the full committed turn: {:?}",
+        final_messages
+            .iter()
+            .map(|m| (m.role, &m.content))
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(final_messages[0].content, "first question");
+    assert_eq!(final_messages[1].content, "first answer");
+    assert_eq!(final_messages[2].content, "second question");
+    assert_eq!(final_messages[3].content, "I will create the file.");
+    assert_eq!(
+        final_messages[3].tool_calls.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        ["create_file"]
+    );
+    assert_eq!(final_messages[4].role, crate::llm::ChatRole::Tool);
+    assert_eq!(final_messages[4].tool_call_id.as_deref(), Some("call_1"));
+    assert_eq!(final_messages[5].role, crate::llm::ChatRole::Assistant);
+    assert_eq!(final_messages[5].content, "The file was created.");
+}

@@ -107,16 +107,29 @@ fn record_hook_usage(
     }
 }
 
+/// Mirror the driver's uncommitted `persist_messages` into the in-turn live
+/// tail that a busy `Synchronize` merges over the committed DB rows. Poisoned
+/// locks are reused: a panic here would only corrupt a snapshot, never the
+/// canonical `persist_messages`, which is the source of truth.
+fn sync_live_tail(
+    live_tail: &Arc<Mutex<Vec<ChatMessage>>>,
+    persist_messages: &[ChatMessage],
+) {
+    *live_tail.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = persist_messages.to_vec();
+}
+
 /// Durably commit every completed message accumulated since the previous tool
 /// boundary. On failure the batch stays in `persist_messages` so the normal
 /// end-of-turn transaction can retry it.
 fn checkpoint_tool_boundary(
     session: &dyn SessionSink,
     persist_messages: &mut Vec<ChatMessage>,
+    live_tail: &Arc<Mutex<Vec<ChatMessage>>>,
 ) -> usize {
     if !persist_messages.is_empty() && session.checkpoint_messages(persist_messages) {
         let persisted = persist_messages.len();
         persist_messages.clear();
+        sync_live_tail(live_tail, persist_messages);
         persisted
     } else {
         0
@@ -131,6 +144,7 @@ fn apply_hook_operations(
     persist_messages: &mut Vec<ChatMessage>,
     session: &dyn SessionSink,
     session_seq: &mut i64,
+    live_tail: &Arc<Mutex<Vec<ChatMessage>>>,
 ) {
     for operation in operations {
         match operation {
@@ -145,6 +159,7 @@ fn apply_hook_operations(
                     request_history.push(model_facing_message(&message, None));
                     transcript.push(message.clone());
                     persist_messages.push(message);
+                    sync_live_tail(live_tail, persist_messages);
                 }
             }
             crate::ext::ctx::ConversationOperation::Load(_) => {
@@ -195,6 +210,7 @@ struct DriverHookState<'a> {
     history: &'a mut Vec<ChatMessage>,
     request_history: &'a mut Vec<ChatMessage>,
     persist_messages: &'a mut Vec<ChatMessage>,
+    live_tail: &'a Arc<Mutex<Vec<ChatMessage>>>,
     session: &'a dyn SessionSink,
     session_seq: &'a mut i64,
     usage_records: &'a mut Vec<UsageRecord>,
@@ -401,6 +417,7 @@ impl DriverHookRuntime<'_> {
                 state.persist_messages,
                 state.session,
                 state.session_seq,
+                state.live_tail,
             );
         }
         (result, cancelled)
@@ -464,6 +481,12 @@ pub struct Driver {
     /// Shared steer nudge. `LocalConn::send(Steer)` sets it; the driver
     /// loop checks and consumes it at the top of each iteration.
     pub turn_nudge: Arc<Mutex<Option<String>>>,
+    /// In-turn display tail: a low-frequency, message-boundary mirror of the
+    /// driver's uncommitted `persist_messages`. A daemon `Synchronize` arriving
+    /// while a turn is busy merges this tail over the committed DB rows, so a
+    /// reconnecting client re-renders everything so far instead of only what
+    /// has reached the DB.
+    pub live_tail: Arc<Mutex<Vec<ChatMessage>>>,
 }
 
 /// What [`Driver::run`] hands back so a stateful frontend (the TUI) can reabsorb
@@ -602,6 +625,7 @@ impl Driver {
             background_scope,
             agent_cache_scope,
             turn_nudge,
+            live_tail,
         } = self;
         let tool_names = tools
             .all_definitions()
@@ -705,6 +729,7 @@ impl Driver {
             history.push(model_facing_message(&message, None));
             transcript.push(message.clone());
             persist_messages.push(message);
+            sync_live_tail(&live_tail, &persist_messages);
         } else {
             let message = transcript
                 .last_mut()
@@ -766,6 +791,7 @@ impl Driver {
                 history: &mut history,
                 request_history: &mut request_history,
                 persist_messages: &mut persist_messages,
+                live_tail: &live_tail,
                 session: session.as_ref(),
                 session_seq: &mut session_seq,
                 usage_records: &mut usage_records,
@@ -798,6 +824,7 @@ impl Driver {
                 history: &mut history,
                 request_history: &mut request_history,
                 persist_messages: &mut persist_messages,
+                live_tail: &live_tail,
                 session: session.as_ref(),
                 session_seq: &mut session_seq,
                 usage_records: &mut usage_records,
@@ -834,6 +861,7 @@ impl Driver {
                 history: &mut history,
                 request_history: &mut request_history,
                 persist_messages: &mut persist_messages,
+                live_tail: &live_tail,
                 session: session.as_ref(),
                 session_seq: &mut session_seq,
                 usage_records: &mut usage_records,
@@ -937,6 +965,7 @@ impl Driver {
                             history: &mut history,
                             request_history: &mut request_history,
                             persist_messages: &mut persist_messages,
+                            live_tail: &live_tail,
                             session: session.as_ref(),
                             session_seq: &mut session_seq,
                             usage_records: &mut usage_records,
@@ -989,6 +1018,7 @@ impl Driver {
                             &mut persist_messages,
                             session.as_ref(),
                             &mut session_seq,
+                            &live_tail,
                         );
                     }
                     if !sys_appends.is_empty() {
@@ -1319,6 +1349,7 @@ impl Driver {
                         history: &mut history,
                         request_history: &mut request_history,
                         persist_messages: &mut persist_messages,
+                        live_tail: &live_tail,
                         session: session.as_ref(),
                         session_seq: &mut session_seq,
                         usage_records: &mut usage_records,
@@ -1370,6 +1401,7 @@ impl Driver {
                 session.append_chat_message(&assistant, session_seq);
                 transcript.push(assistant.clone());
                 persist_messages.push(assistant);
+                sync_live_tail(&live_tail, &persist_messages);
                 break Ok(assistant_text);
             }
 
@@ -1397,10 +1429,11 @@ impl Driver {
             request_history.push(provider_assistant);
             transcript.push(assistant.clone());
             persist_messages.push(assistant);
+            sync_live_tail(&live_tail, &persist_messages);
             // A tool may run for a long time. Make its completed request and
             // every earlier message recoverable before execution starts.
             checkpointed_messages +=
-                checkpoint_tool_boundary(session.as_ref(), &mut persist_messages);
+                checkpoint_tool_boundary(session.as_ref(), &mut persist_messages, &live_tail);
 
             // Execute tool calls.
             for call in &tool_calls {
@@ -1461,6 +1494,7 @@ impl Driver {
                         history: &mut history,
                         request_history: &mut request_history,
                         persist_messages: &mut persist_messages,
+                        live_tail: &live_tail,
                         session: session.as_ref(),
                         session_seq: &mut session_seq,
                         usage_records: &mut usage_records,
@@ -1503,6 +1537,7 @@ impl Driver {
                         history: &mut history,
                         request_history: &mut request_history,
                         persist_messages: &mut persist_messages,
+                        live_tail: &live_tail,
                         session: session.as_ref(),
                         session_seq: &mut session_seq,
                         usage_records: &mut usage_records,
@@ -1559,6 +1594,7 @@ impl Driver {
                 request_history.push(provider_message);
                 transcript.push(message.clone());
                 persist_messages.push(message);
+                sync_live_tail(&live_tail, &persist_messages);
 
                 // Deferred until the batch finishes (see `image_relays` above).
                 if !result.images.is_empty() {
@@ -1573,7 +1609,7 @@ impl Driver {
                 // Checkpoint after each completed tool result. Parallel tool
                 // batches still get one small transaction per completed item.
                 checkpointed_messages +=
-                    checkpoint_tool_boundary(session.as_ref(), &mut persist_messages);
+                    checkpoint_tool_boundary(session.as_ref(), &mut persist_messages, &live_tail);
             }
 
             // Append the batch's image relays after every tool reply. Ephemeral
@@ -1591,10 +1627,11 @@ impl Driver {
                     request_history.push(provider_relay);
                     transcript.push(relay.clone());
                     persist_messages.push(relay);
+                    sync_live_tail(&live_tail, &persist_messages);
                 }
             }
             checkpointed_messages +=
-                checkpoint_tool_boundary(session.as_ref(), &mut persist_messages);
+                checkpoint_tool_boundary(session.as_ref(), &mut persist_messages, &live_tail);
 
             // Runaway brake. Build a signature from this round's *failing*
             // calls, keyed on tool name + error text: a bad edit produces a
@@ -1693,6 +1730,7 @@ impl Driver {
                 history: &mut history,
                 request_history: &mut request_history,
                 persist_messages: &mut persist_messages,
+                live_tail: &live_tail,
                 session: session.as_ref(),
                 session_seq: &mut session_seq,
                 usage_records: &mut usage_records,
@@ -1711,6 +1749,7 @@ impl Driver {
                 history: &mut history,
                 request_history: &mut request_history,
                 persist_messages: &mut persist_messages,
+                live_tail: &live_tail,
                 session: session.as_ref(),
                 session_seq: &mut session_seq,
                 usage_records: &mut usage_records,
