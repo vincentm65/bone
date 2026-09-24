@@ -2546,6 +2546,9 @@ impl App {
     }
 
     fn apply_jobs_snapshot(&mut self, version: u64, jobs: Vec<bone_protocol::JobSnapshot>) {
+        if version < self.jobs_version {
+            return;
+        }
         let had_jobs = !self.jobs.is_empty();
         self.jobs_version = version;
         self.jobs = jobs;
