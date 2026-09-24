@@ -414,6 +414,8 @@ fn test_daemon_ctx(
             projection: None,
             background_events_tx,
             background_events_rx,
+            turn_active: false,
+            frontend_state_stale: std::sync::atomic::AtomicBool::new(false),
         },
         hub,
         commands,
@@ -935,6 +937,8 @@ async fn setup_apply_reloads_locally_routes_to_peers_and_republishes_config() {
         projection: None,
         background_events_tx,
         background_events_rx,
+        turn_active: false,
+        frontend_state_stale: std::sync::atomic::AtomicBool::new(false),
     };
     ctx.set_incognito(true);
     assert_eq!(ctx.actor_id, Some(77));
@@ -2611,6 +2615,8 @@ fn daemon_actors_only_consume_their_own_submitted_prompts() {
             projection: None,
             background_events_tx,
             background_events_rx,
+            turn_active: false,
+            frontend_state_stale: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -2832,6 +2838,8 @@ async fn resetting_approval_updates_live_mode() {
         projection: None,
         background_events_tx,
         background_events_rx,
+        turn_active: false,
+        frontend_state_stale: std::sync::atomic::AtomicBool::new(false),
     };
 
     let _ = ctx
@@ -2901,6 +2909,8 @@ async fn reload_settings_reports_config_yaml_and_fresh_snapshot() {
         projection: None,
         background_events_tx,
         background_events_rx,
+        turn_active: false,
+        frontend_state_stale: std::sync::atomic::AtomicBool::new(false),
     };
 
     let _ = ctx
@@ -3969,6 +3979,8 @@ async fn process_commands_are_conversation_scoped() {
         projection: None,
         background_events_tx,
         background_events_rx,
+        turn_active: false,
+        frontend_state_stale: std::sync::atomic::AtomicBool::new(false),
     };
 
     ctx.handle_idle_command(RuntimeCommand::GetProcesses, &mut commands)
@@ -4779,4 +4791,67 @@ async fn synchronize_in_turn_merges_uncommitted_live_tail_over_full_db() {
     assert_eq!(final_messages[4].tool_call_id.as_deref(), Some("call_1"));
     assert_eq!(final_messages[5].role, crate::llm::ChatRole::Assistant);
     assert_eq!(final_messages[5].content, "The file was created.");
+}
+
+/// Regression for the subagent TUI freeze: a Lua tool blocked inside a Rust
+/// callback (e.g. `ctx.agent.wait`) holds the mlua state lock. A mid-turn
+/// config mutation (Safe/Danger toggle) must not call into Lua for the
+/// `FrontendState` banner on the daemon thread — which the in-process TUI
+/// shares — or the whole UI blocks until the tool returns.
+#[test]
+fn mid_turn_config_mutation_does_not_block_on_busy_lua_vm() {
+    let session = crate::runtime::RuntimeSession::new(crate::tools::registry::ToolHandler::new(
+        crate::tools::builtin_tools(),
+    ));
+    let extensions = crate::ext::ExtensionManager::unloaded();
+    let lua = extensions.lua_handle();
+    let (mut ctx, hub, _commands) =
+        test_daemon_ctx(Arc::new(ConfigTestProvider), extensions, session);
+    let mut events = hub.subscribe();
+
+    // Hold the VM the way a running Lua tool does: outer mutex released,
+    // mlua's internal lock held for the duration of the call.
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel::<()>();
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let blocking = {
+            let lua = lua.lock().unwrap();
+            lua.create_function(move |_, ()| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+            .unwrap()
+        };
+        blocking.call::<()>(()).unwrap();
+    });
+    entered_rx.recv().unwrap();
+
+    ctx.turn_active = true;
+    let (done_tx, done_rx) = std::sync::mpsc::channel::<DaemonCtx>();
+    std::thread::spawn(move || {
+        ctx.persist_mode("danger");
+        let _ = done_tx.send(ctx);
+    });
+    let result = done_rx.recv_timeout(std::time::Duration::from_secs(5));
+    release_tx.send(()).unwrap();
+    holder.join().unwrap();
+    let ctx = result.expect("mid-turn config mutation blocked on the busy Lua VM");
+
+    assert!(
+        ctx.frontend_state_stale
+            .load(std::sync::atomic::Ordering::Relaxed),
+        "deferred FrontendState must be republished at turn end"
+    );
+    let mut saw_config_changed = false;
+    while let Ok(event) = events.try_recv() {
+        match event {
+            RuntimeEvent::ConfigChanged { .. } => saw_config_changed = true,
+            RuntimeEvent::FrontendState { .. } => {
+                panic!("FrontendState must be deferred while a turn is active")
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_config_changed, "mode change must still be acknowledged");
 }
