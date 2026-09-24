@@ -15,12 +15,18 @@ use std::{
     sync::atomic::{AtomicU64, Ordering},
     time::Duration,
 };
-use tokio::io::AsyncWriteExt;
+use tempfile::TempDir;
+use tokio::{
+    io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
+    process::{Child, ChildStdin, ChildStdout},
+    sync::Mutex,
+    task::JoinHandle,
+};
 
 use crate::config::ProviderEntry;
 use crate::llm::provider::{
     ChatEvent, ChatMessage, ChatRole, DEFAULT_LLM_REQUEST_TIMEOUT, LlmError, LlmErrorKind,
-    LlmProvider, OutputItem, ResponseStream,
+    LlmProvider, OutputItem, ProviderRequestContext, ResponseStream,
 };
 use crate::tools::{ToolCall, ToolDefinition};
 
@@ -36,6 +42,7 @@ pub struct ClaudeCodeProvider {
     context_window_tokens: Option<u64>,
     request_timeout_s: Option<u64>,
     executable: PathBuf,
+    session: Mutex<Option<ClaudeCodeSession>>,
 }
 
 impl ClaudeCodeProvider {
@@ -55,6 +62,7 @@ impl ClaudeCodeProvider {
             context_window_tokens: entry.context_window_tokens,
             request_timeout_s: entry.request_timeout_s,
             executable: PathBuf::from("claude"),
+            session: Mutex::new(None),
         }
     }
 
@@ -102,43 +110,42 @@ impl LlmProvider for ClaudeCodeProvider {
         messages: Vec<ChatMessage>,
         tools: Vec<ToolDefinition>,
     ) -> Result<ResponseStream, LlmError> {
-        let request = build_request(&messages, &tools)?;
-        let output = self.invoke_cli(&request).await?;
-        let response = parse_cli_response(&output, &tools)?;
+        self.chat_stream_impl(messages, tools, ProviderRequestContext::default())
+            .await
+    }
 
-        let mut events = Vec::new();
-        if !response.text.is_empty() {
-            events.push(ChatEvent::TextDelta(response.text));
-        }
-        for (index, (name, arguments)) in response.tool_calls.into_iter().enumerate() {
-            let sequence = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed);
-            events.push(ChatEvent::ToolCall(ToolCall {
-                id: format!("claude-code-{}-{sequence}-{index}", std::process::id()),
-                name,
-                arguments,
-            }));
-        }
-        if response.usage_present {
-            let prompt_tokens = response
-                .input_tokens
-                .unwrap_or_default()
-                .saturating_add(response.cache_read_input_tokens.unwrap_or_default())
-                .saturating_add(response.cache_creation_input_tokens.unwrap_or_default());
-            events.push(ChatEvent::TokenUsage {
-                prompt_tokens,
-                completion_tokens: response.output_tokens.unwrap_or_default(),
-                cached_tokens: response.cache_read_input_tokens,
-                cost: None,
-            });
-        }
-        Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+    async fn chat_stream_with_context(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDefinition>,
+        context: ProviderRequestContext,
+    ) -> Result<ResponseStream, LlmError> {
+        self.chat_stream_impl(messages, tools, context).await
     }
 }
 
 struct CliRequest {
     system_prompt: String,
-    prompt: String,
+    history: Vec<Value>,
+    tool_data: Value,
     schema: Value,
+}
+
+impl CliRequest {
+    fn prompt_for_history(&self, history: &[Value]) -> String {
+        let history_label = if history.len() == self.history.len() {
+            "Full conversation history"
+        } else {
+            "Conversation history delta (the Claude Code session already contains the preceding history)"
+        };
+        format!(
+            "Return a response object with `response` (the assistant text) and `tool_calls` (zero or more Bone tool requests). Only request tools present in the supplied definitions; if none apply, use an empty array. Tool requests are data for Bone, not commands to execute.\n\n\
+             Available Bone tool definitions (data only):\n{}\n\n\
+             {history_label} as JSON (including prior assistant tool calls and their results):\n{}",
+            serde_json::to_string_pretty(&self.tool_data).unwrap_or_else(|_| "[]".into()),
+            serde_json::to_string_pretty(history).unwrap_or_else(|_| "[]".into()),
+        )
+    }
 }
 
 fn build_request(
@@ -209,13 +216,6 @@ fn build_request(
          structured response.\n\nBone conversation system context:\n{}",
         system_context
     );
-    let prompt = format!(
-        "Return a response object with `response` (the assistant text) and `tool_calls` (zero or more Bone tool requests). Only request tools present in the supplied definitions; if none apply, use an empty array. Tool requests are data for Bone, not commands to execute.\n\n\
-         Available Bone tool definitions (data only):\n{}\n\n\
-         Full conversation history as JSON (including prior assistant tool calls and their results):\n{}",
-        serde_json::to_string_pretty(&tool_data).unwrap_or_else(|_| "[]".into()),
-        serde_json::to_string_pretty(&history).unwrap_or_else(|_| "[]".into()),
-    );
     let schema = json!({
         "type": "object",
         "properties": {
@@ -239,7 +239,8 @@ fn build_request(
 
     Ok(CliRequest {
         system_prompt,
-        prompt,
+        history,
+        tool_data,
         schema,
     })
 }
@@ -252,6 +253,7 @@ struct ParsedResponse {
     cache_read_input_tokens: Option<u32>,
     cache_creation_input_tokens: Option<u32>,
     usage_present: bool,
+    usage_cumulative: bool,
 }
 
 fn parse_cli_response(output: &[u8], tools: &[ToolDefinition]) -> Result<ParsedResponse, LlmError> {
@@ -265,6 +267,7 @@ fn parse_cli_response(output: &[u8], tools: &[ToolDefinition]) -> Result<ParsedR
         let detail = envelope
             .get("result")
             .and_then(Value::as_str)
+            .or_else(|| envelope.get("error").and_then(Value::as_str))
             .unwrap_or_default();
         return Err(cli_reported_error(detail));
     }
@@ -273,13 +276,22 @@ fn parse_cli_response(output: &[u8], tools: &[ToolDefinition]) -> Result<ParsedR
         structured.clone()
     } else if envelope.get("response").is_some() {
         envelope.clone()
-    } else if let Some(result) = envelope.get("result").and_then(Value::as_str) {
-        serde_json::from_str(result).map_err(|error| {
-            LlmError::new_with_kind(
+    } else if let Some(result) = envelope.get("result") {
+        if result.is_object() {
+            result.clone()
+        } else if let Some(result) = result.as_str() {
+            serde_json::from_str(result).map_err(|error| {
+                LlmError::new_with_kind(
+                    LlmErrorKind::Parse,
+                    format!("Claude Code CLI response did not contain structured output: {error}"),
+                )
+            })?
+        } else {
+            return Err(LlmError::new_with_kind(
                 LlmErrorKind::Parse,
-                format!("Claude Code CLI response did not contain structured output: {error}"),
-            )
-        })?
+                "Claude Code JSON result did not contain structured output",
+            ));
+        }
     } else {
         return Err(LlmError::new_with_kind(
             LlmErrorKind::Parse,
@@ -297,8 +309,13 @@ fn parse_cli_response(output: &[u8], tools: &[ToolDefinition]) -> Result<ParsedR
                 .and_then(|result| result.get("usage"))
                 .filter(|value| value.is_object())
         });
-    let (input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens) =
-        parse_usage(usage);
+    let (
+        input_tokens,
+        output_tokens,
+        cache_read_input_tokens,
+        cache_creation_input_tokens,
+        usage_cumulative,
+    ) = parse_usage(usage);
 
     let text = payload
         .get("response")
@@ -354,12 +371,15 @@ fn parse_cli_response(output: &[u8], tools: &[ToolDefinition]) -> Result<ParsedR
         cache_read_input_tokens,
         cache_creation_input_tokens,
         usage_present: usage.is_some(),
+        usage_cumulative,
     })
 }
 
-fn parse_usage(usage: Option<&Value>) -> (Option<u32>, Option<u32>, Option<u32>, Option<u32>) {
+fn parse_usage(
+    usage: Option<&Value>,
+) -> (Option<u32>, Option<u32>, Option<u32>, Option<u32>, bool) {
     let Some(usage) = usage else {
-        return (None, None, None, None);
+        return (None, None, None, None, false);
     };
     let token_count = |name: &str| {
         usage
@@ -367,23 +387,48 @@ fn parse_usage(usage: Option<&Value>) -> (Option<u32>, Option<u32>, Option<u32>,
             .and_then(Value::as_u64)
             .map(|value| value.min(u32::MAX as u64) as u32)
     };
-    let cache_creation_input_tokens = token_count("cache_creation_input_tokens").or_else(|| {
-        usage
-            .get("cache_creation")
-            .and_then(Value::as_object)
-            .map(|cache_creation| {
-                ["ephemeral_1h_input_tokens", "ephemeral_5m_input_tokens"]
-                    .into_iter()
-                    .filter_map(|name| cache_creation.get(name).and_then(Value::as_u64))
-                    .fold(0u64, u64::saturating_add)
-                    .min(u32::MAX as u64) as u32
-            })
-    });
+    let usage_cumulative = usage
+        .get("cumulative")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || [
+            "total_input_tokens",
+            "total_output_tokens",
+            "total_cache_read_input_tokens",
+            "total_cache_creation_input_tokens",
+        ]
+        .iter()
+        .any(|name| usage.get(*name).is_some());
+    let choose_count = |per_request: &str, cumulative: &str| {
+        if usage_cumulative {
+            token_count(cumulative).or_else(|| token_count(per_request))
+        } else {
+            token_count(per_request).or_else(|| token_count(cumulative))
+        }
+    };
+    let cache_creation_input_tokens = if usage_cumulative {
+        token_count("total_cache_creation_input_tokens")
+            .or_else(|| token_count("cache_creation_input_tokens"))
+    } else {
+        token_count("cache_creation_input_tokens").or_else(|| {
+            usage
+                .get("cache_creation")
+                .and_then(Value::as_object)
+                .map(|cache_creation| {
+                    ["ephemeral_1h_input_tokens", "ephemeral_5m_input_tokens"]
+                        .into_iter()
+                        .filter_map(|name| cache_creation.get(name).and_then(Value::as_u64))
+                        .fold(0u64, u64::saturating_add)
+                        .min(u32::MAX as u64) as u32
+                })
+        })
+    };
     (
-        token_count("input_tokens"),
-        token_count("output_tokens"),
-        token_count("cache_read_input_tokens"),
+        choose_count("input_tokens", "total_input_tokens"),
+        choose_count("output_tokens", "total_output_tokens"),
+        choose_count("cache_read_input_tokens", "total_cache_read_input_tokens"),
         cache_creation_input_tokens,
+        usage_cumulative,
     )
 }
 
@@ -410,8 +455,297 @@ fn cli_reported_error(detail: &str) -> LlmError {
     }
 }
 
+#[derive(Clone, Default)]
+struct UsageSnapshot {
+    input_tokens: Option<u32>,
+    output_tokens: Option<u32>,
+    cache_read_input_tokens: Option<u32>,
+    cache_creation_input_tokens: Option<u32>,
+}
+
+struct ClaudeCodeSession {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
+    stderr_task: Option<JoinHandle<String>>,
+    executable: PathBuf,
+    model: String,
+    system_prompt: String,
+    conversation_id: Option<i64>,
+    cache_scope: Option<String>,
+    synchronized_history: Option<Vec<Value>>,
+    in_flight: bool,
+    cumulative_usage: Option<UsageSnapshot>,
+    // Keep the working directory alive for the whole CLI session. It is
+    // declared after the child so the process is dropped before the directory.
+    _isolated_dir: TempDir,
+}
+
+impl ClaudeCodeSession {
+    fn matches(
+        &self,
+        executable: &PathBuf,
+        model: &str,
+        request: &CliRequest,
+        context: &ProviderRequestContext,
+    ) -> bool {
+        self.executable == *executable
+            && self.model == model
+            && self.system_prompt == request.system_prompt
+            && self.conversation_id == context.conversation_id
+            && self.cache_scope == context.cache_scope
+    }
+
+    fn history_is_prefix(&self, history: &[Value]) -> bool {
+        self.synchronized_history.as_ref().is_none_or(|synced| {
+            history.len() >= synced.len() && history[..synced.len()] == synced[..]
+        })
+    }
+
+    fn normalize_usage(&mut self, response: &mut ParsedResponse) {
+        if !response.usage_cumulative {
+            return;
+        }
+        let current = UsageSnapshot {
+            input_tokens: response.input_tokens,
+            output_tokens: response.output_tokens,
+            cache_read_input_tokens: response.cache_read_input_tokens,
+            cache_creation_input_tokens: response.cache_creation_input_tokens,
+        };
+        let previous = self.cumulative_usage.as_ref();
+        response.input_tokens = delta_count(
+            current.input_tokens,
+            previous.and_then(|usage| usage.input_tokens),
+        );
+        response.output_tokens = delta_count(
+            current.output_tokens,
+            previous.and_then(|usage| usage.output_tokens),
+        );
+        response.cache_read_input_tokens = delta_count(
+            current.cache_read_input_tokens,
+            previous.and_then(|usage| usage.cache_read_input_tokens),
+        );
+        response.cache_creation_input_tokens = delta_count(
+            current.cache_creation_input_tokens,
+            previous.and_then(|usage| usage.cache_creation_input_tokens),
+        );
+        self.cumulative_usage = Some(current);
+    }
+
+    async fn exchange(
+        &mut self,
+        prompt: &str,
+        tools: &[ToolDefinition],
+    ) -> Result<ParsedResponse, LlmError> {
+        let input = json!({
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": prompt,
+            },
+        });
+        let mut encoded = serde_json::to_vec(&input).map_err(|error| {
+            LlmError::new_with_kind(
+                LlmErrorKind::Parse,
+                format!("could not encode Claude Code stream input: {error}"),
+            )
+        })?;
+        encoded.push(b'\n');
+        self.stdin.write_all(&encoded).await.map_err(|error| {
+            LlmError::new_with_kind(
+                LlmErrorKind::Connection,
+                format!("could not send the prompt to Claude Code CLI stdin: {error}"),
+            )
+        })?;
+        self.stdin.flush().await.map_err(|error| {
+            LlmError::new_with_kind(
+                LlmErrorKind::Connection,
+                format!("could not flush Claude Code CLI stdin: {error}"),
+            )
+        })?;
+
+        loop {
+            let mut line = String::new();
+            let bytes_read = self.stdout.read_line(&mut line).await.map_err(|error| {
+                LlmError::new_with_kind(
+                    LlmErrorKind::Connection,
+                    format!("could not read Claude Code CLI output: {error}"),
+                )
+            })?;
+            if bytes_read == 0 {
+                return Err(self.eof_error().await);
+            }
+            if line.trim().is_empty() {
+                continue;
+            }
+            let event: Value = serde_json::from_str(&line).map_err(|error| {
+                LlmError::new_with_kind(
+                    LlmErrorKind::Parse,
+                    format!("Claude Code CLI returned invalid stream JSON: {error}"),
+                )
+            })?;
+            match event.get("type").and_then(Value::as_str) {
+                Some("result") => return parse_cli_response(line.as_bytes(), tools),
+                Some("error") => {
+                    let detail = event
+                        .get("error")
+                        .and_then(Value::as_str)
+                        .or_else(|| event.get("message").and_then(Value::as_str))
+                        .or_else(|| event.get("result").and_then(Value::as_str))
+                        .unwrap_or_default();
+                    return Err(cli_reported_error(detail));
+                }
+                Some(_) => {}
+                None => {
+                    return Err(LlmError::new_with_kind(
+                        LlmErrorKind::Parse,
+                        "Claude Code stream event did not include a string `type`",
+                    ));
+                }
+            }
+        }
+    }
+
+    async fn eof_error(&mut self) -> LlmError {
+        let status = match self.child.try_wait() {
+            Ok(Some(status)) => Some(status),
+            Ok(None) => {
+                let _ = self.child.kill().await;
+                self.child.wait().await.ok()
+            }
+            Err(_) => None,
+        };
+        let detail = match self.stderr_task.take() {
+            Some(task) => task.await.unwrap_or_default(),
+            None => String::new(),
+        };
+        if let Some(status) = status.filter(|status| !status.success()) {
+            let reported = cli_reported_error(&detail);
+            if matches!(reported.kind, LlmErrorKind::Auth | LlmErrorKind::RateLimit) {
+                return reported;
+            }
+            let detail = detail.trim();
+            let message = if detail.is_empty() {
+                format!(
+                    "Claude Code CLI exited with status {}; check its local configuration and logs",
+                    status
+                )
+            } else {
+                format!(
+                    "Claude Code CLI exited with status {status}: {detail}; check its local configuration and logs"
+                )
+            };
+            return LlmError::new_with_kind(LlmErrorKind::Server(500), message);
+        }
+        LlmError::new_with_kind(
+            LlmErrorKind::Connection,
+            "Claude Code CLI closed its stream before returning a result",
+        )
+    }
+}
+
+fn delta_count(current: Option<u32>, previous: Option<u32>) -> Option<u32> {
+    current.map(|current| current.saturating_sub(previous.unwrap_or_default()))
+}
+
 impl ClaudeCodeProvider {
-    async fn invoke_cli(&self, request: &CliRequest) -> Result<Vec<u8>, LlmError> {
+    async fn chat_stream_impl(
+        &self,
+        messages: Vec<ChatMessage>,
+        tools: Vec<ToolDefinition>,
+        context: ProviderRequestContext,
+    ) -> Result<ResponseStream, LlmError> {
+        let request = build_request(&messages, &tools)?;
+        let mut session_guard = self.session.lock().await;
+        let needs_reset = match session_guard.as_ref() {
+            Some(session) => {
+                session.in_flight
+                    || !session.matches(&self.executable, &self.model, &request, &context)
+                    || !session.history_is_prefix(&request.history)
+            }
+            None => false,
+        };
+        if needs_reset {
+            *session_guard = None;
+        }
+        if session_guard.is_none() {
+            *session_guard = Some(self.start_session(&request, &context)?);
+        }
+
+        let history_to_send = {
+            let session = session_guard
+                .as_ref()
+                .expect("Claude session was just created");
+            match &session.synchronized_history {
+                Some(synchronized) => request.history[synchronized.len()..].to_vec(),
+                None => request.history.clone(),
+            }
+        };
+        let prompt = request.prompt_for_history(&history_to_send);
+        let result = {
+            let session = session_guard.as_mut().expect("Claude session disappeared");
+            session.in_flight = true;
+            tokio::time::timeout(
+                self.request_timeout_value(),
+                session.exchange(&prompt, &tools),
+            )
+            .await
+        };
+        let mut response = match result {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                *session_guard = None;
+                return Err(error);
+            }
+            Err(_) => {
+                *session_guard = None;
+                return Err(LlmError::new_with_kind(
+                    LlmErrorKind::Timeout,
+                    "Claude Code CLI request timed out; the session was discarded before retry",
+                ));
+            }
+        };
+
+        let session = session_guard
+            .as_mut()
+            .expect("Claude session disappeared after a successful response");
+        session.in_flight = false;
+        session.normalize_usage(&mut response);
+        session.synchronized_history = Some(request.history);
+
+        let mut events = Vec::new();
+        if !response.text.is_empty() {
+            events.push(ChatEvent::TextDelta(response.text));
+        }
+        for (index, (name, arguments)) in response.tool_calls.into_iter().enumerate() {
+            let sequence = NEXT_CALL_ID.fetch_add(1, Ordering::Relaxed);
+            events.push(ChatEvent::ToolCall(ToolCall {
+                id: format!("claude-code-{}-{sequence}-{index}", std::process::id()),
+                name,
+                arguments,
+            }));
+        }
+        if response.usage_present {
+            let prompt_tokens = response
+                .input_tokens
+                .unwrap_or_default()
+                .saturating_add(response.cache_read_input_tokens.unwrap_or_default())
+                .saturating_add(response.cache_creation_input_tokens.unwrap_or_default());
+            events.push(ChatEvent::TokenUsage {
+                prompt_tokens,
+                completion_tokens: response.output_tokens.unwrap_or_default(),
+                cached_tokens: response.cache_read_input_tokens,
+                cost: None,
+            });
+        }
+        Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
+    }
+
+    fn start_session(
+        &self,
+        request: &CliRequest,
+        context: &ProviderRequestContext,
+    ) -> Result<ClaudeCodeSession, LlmError> {
         let isolated_dir = tempfile::Builder::new()
             .prefix("bone-claude-code-")
             .tempdir()
@@ -425,11 +759,12 @@ impl ClaudeCodeProvider {
         command
             .arg("-p")
             .arg("--output-format")
-            .arg("json")
+            .arg("stream-json")
+            .arg("--verbose")
+            .arg("--input-format")
+            .arg("stream-json")
             .arg("--json-schema")
             .arg(request.schema.to_string())
-            .arg("--input-format")
-            .arg("text")
             .arg("--tools")
             .arg("")
             .arg("--system-prompt")
@@ -437,6 +772,8 @@ impl ClaudeCodeProvider {
             .arg("--model")
             .arg(&self.model)
             .arg("--no-session-persistence")
+            .arg("--system-prompt-snapshot")
+            .arg("on")
             .arg("--strict-mcp-config")
             .arg("--mcp-config")
             .arg(EMPTY_MCP_CONFIG)
@@ -462,41 +799,45 @@ impl ClaudeCodeProvider {
                 )
             }
         })?;
-        let mut stdin = child.stdin.take().ok_or_else(|| {
+        let stdin = child.stdin.take().ok_or_else(|| {
             LlmError::new_with_kind(
                 LlmErrorKind::Connection,
                 "could not open Claude Code CLI stdin",
             )
         })?;
-        if let Err(error) = stdin.write_all(request.prompt.as_bytes()).await {
-            let _ = child.kill().await;
-            return Err(LlmError::new_with_kind(
-                LlmErrorKind::Connection,
-                format!("could not send the prompt to Claude Code CLI stdin: {error}"),
-            ));
-        }
-        drop(stdin);
-        let output = child.wait_with_output().await.map_err(|error| {
+        let stdout = child.stdout.take().ok_or_else(|| {
             LlmError::new_with_kind(
                 LlmErrorKind::Connection,
-                format!("could not wait for Claude Code CLI: {error}"),
+                "could not open Claude Code CLI stdout",
             )
         })?;
-        if !output.status.success() {
-            let detail = String::from_utf8_lossy(&output.stderr);
-            let mut error = cli_reported_error(&detail);
-            if matches!(&error.kind, LlmErrorKind::Server(_)) {
-                error = LlmError::new_with_kind(
-                    LlmErrorKind::Server(500),
-                    format!(
-                        "Claude Code CLI exited with status {}; check its local configuration and logs",
-                        output.status
-                    ),
-                );
-            }
-            return Err(error);
-        }
-        Ok(output.stdout)
+        let stderr = child.stderr.take().ok_or_else(|| {
+            LlmError::new_with_kind(
+                LlmErrorKind::Connection,
+                "could not open Claude Code CLI stderr",
+            )
+        })?;
+        let stderr_task = tokio::spawn(async move {
+            let mut stderr = stderr.take(8192);
+            let mut bytes = Vec::new();
+            let _ = stderr.read_to_end(&mut bytes).await;
+            String::from_utf8_lossy(&bytes).into_owned()
+        });
+        Ok(ClaudeCodeSession {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+            stderr_task: Some(stderr_task),
+            executable: self.executable.clone(),
+            model: self.model.clone(),
+            system_prompt: request.system_prompt.clone(),
+            conversation_id: context.conversation_id,
+            cache_scope: context.cache_scope.clone(),
+            synchronized_history: None,
+            in_flight: false,
+            cumulative_usage: None,
+            _isolated_dir: isolated_dir,
+        })
     }
 }
 
