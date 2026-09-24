@@ -648,7 +648,8 @@ async fn partial_mixed_forms_report_mixing_not_empty_edits() {
 
 #[test]
 fn schema_requires_path_and_advertises_both_forms() {
-    let schema = EditFileTool.definition().input_schema;
+    let definition = EditFileTool.definition();
+    let schema = definition.input_schema;
     assert_eq!(schema["required"], json!(["path"]));
     assert!(schema["properties"].get("input").is_none());
     assert_eq!(schema["additionalProperties"], false);
@@ -656,5 +657,16 @@ fn schema_requires_path_and_advertises_both_forms() {
     assert_eq!(edits["type"], "array");
     assert_eq!(edits["items"]["required"], json!(["old_text", "new_text"]));
     assert_eq!(edits["items"]["additionalProperties"], false);
-    assert!(EditFileTool.definition().description.contains("edits"));
+    assert!(definition.description.contains("edits"));
+    assert!(
+        definition
+            .description
+            .contains("enough unchanged surrounding context")
+    );
+    assert!(
+        edits["description"]
+            .as_str()
+            .unwrap()
+            .contains("one complete `old_text`/`new_text` pair")
+    );
 }
