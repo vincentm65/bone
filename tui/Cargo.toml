@@ -14,7 +14,7 @@ path = "src/main.rs"
 [dependencies]
 bone-core = { path = "../core", features = ["tui"] }
 bone-protocol = { path = "../protocol" }
-tokio = { version = "1", features = ["rt-multi-thread", "io-util", "io-std", "macros", "process", "signal", "sync", "time", "fs", "net"] }
+tokio = { version = "1", features = ["rt-multi-thread", "io-util", "io-std", "macros", "process", "signal", "sync", "time", "net"] }
 ratatui = { version = "0.29", features = ["unstable-rendered-line-info", "unstable-backend-writer"] }
 crossterm = "0.28"
 unicode-width = "0.2"
