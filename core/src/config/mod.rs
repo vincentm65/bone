@@ -98,6 +98,9 @@ pub struct UserConfig {
     pub spinner_text_custom: String,
     /// Input composer preset selected in `/config`; `None` keeps the init.lua preset.
     pub input_preset: Option<String>,
+    /// Rendered chat rows the TUI retains in memory (`ui.history_rows`); older
+    /// rows are dropped after they reach terminal scrollback. 0 keeps all.
+    pub history_rows: u32,
 }
 
 pub fn default_enabled_tools() -> Vec<String> {
@@ -123,6 +126,7 @@ impl Default for UserConfig {
             spinner_text_speed: 0,
             spinner_text_custom: String::new(),
             input_preset: None,
+            history_rows: settings::default_history_rows(),
         }
     }
 }

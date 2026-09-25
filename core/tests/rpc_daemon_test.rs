@@ -282,70 +282,27 @@ async fn prompt_received_during_turn_is_queued_and_appended_after_completion() {
 }
 
 #[tokio::test]
-async fn cancel_stops_managed_shell_processes_while_idle_and_mid_turn() {
+async fn turn_cancel_keeps_managed_shell_processes_and_new_conversation_stops_them() {
     let provider: Arc<dyn LlmProvider> = Arc::new(PendingProvider);
     let (_addr, hub, background_scope) = spawn_daemon(provider).await;
     let mut events = hub.subscribe();
     let commands = hub.command_sender();
     let scope = bone_core::processes::conversation_scope(Some(background_scope));
-
-    async fn wait_until_stopped(id: &str) {
-        tokio::time::timeout(Duration::from_secs(10), async {
-            loop {
-                if !bone_core::processes::registry()
-                    .get(id)
-                    .expect("managed process disappeared")
-                    .running
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .expect("managed process was not cancelled");
-    }
+    let running = |id: &str| {
+        bone_core::processes::registry()
+            .get(id)
+            .expect("managed process disappeared")
+            .running
+    };
 
     #[cfg(windows)]
     let long_running_command = "Start-Sleep -Seconds 60";
     #[cfg(not(windows))]
     let long_running_command = "sleep 60";
 
-    let idle_process = bone_core::processes::registry().spawn(
-        long_running_command.into(),
-        scope.clone(),
-        60_000,
-        None,
-    );
+    let process =
+        bone_core::processes::registry().spawn(long_running_command.into(), scope, None, None);
     commands.send(RuntimeCommand::Cancel).unwrap();
-    wait_until_stopped(&idle_process).await;
-
-    #[cfg(windows)]
-    let child_pid_file = std::env::temp_dir().join(format!(
-        "bone-cancel-child-{}-{}.pid",
-        std::process::id(),
-        idle_process
-    ));
-    #[cfg(windows)]
-    let turn_command = format!(
-        "$child = Start-Process powershell.exe -ArgumentList '-NoProfile -Command Start-Sleep -Seconds 60' -PassThru; Set-Content -LiteralPath '{}' -Value $child.Id; Start-Sleep -Seconds 60",
-        child_pid_file.display().to_string().replace('\'', "''")
-    );
-    #[cfg(not(windows))]
-    let turn_command = long_running_command.to_string();
-
-    let turn_process = bone_core::processes::registry().spawn(turn_command, scope, 60_000, None);
-    #[cfg(windows)]
-    let child_pid = tokio::time::timeout(Duration::from_secs(5), async {
-        loop {
-            if let Ok(pid) = std::fs::read_to_string(&child_pid_file) {
-                break pid.trim().parse::<u32>().expect("invalid child pid");
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("managed process did not spawn its child");
 
     commands
         .send(RuntimeCommand::SubmitPrompt {
@@ -365,26 +322,20 @@ async fn cancel_stops_managed_shell_processes_while_idle_and_mid_turn() {
     .expect("turn did not start");
 
     commands.send(RuntimeCommand::Cancel).unwrap();
-    wait_until_stopped(&turn_process).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        running(&process),
+        "turn cancel must not stop shell processes"
+    );
 
-    #[cfg(windows)]
-    {
-        let status = std::process::Command::new("powershell.exe")
-            .args([
-                "-NoProfile",
-                "-Command",
-                &format!(
-                    "if (Get-Process -Id {child_pid} -ErrorAction SilentlyContinue) {{ exit 1 }}"
-                ),
-            ])
-            .status()
-            .expect("failed to check child process");
-        assert!(
-            status.success(),
-            "managed child process {child_pid} survived"
-        );
-        std::fs::remove_file(child_pid_file).ok();
-    }
+    commands.send(RuntimeCommand::NewConversation).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while running(&process) {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("new conversation did not stop the managed process");
 }
 
 #[tokio::test]

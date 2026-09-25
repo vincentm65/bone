@@ -3,6 +3,7 @@ use super::{
     App, ConfigView, PendingApproval, TerminalBackgroundTransition, WireTools, apply_queue_nav_key,
     approval_already_pending, assistant_display_message, background_pane_needs_refresh,
     config_approval_is, config_rejection_message, configured_input_style, edit_diff_message,
+    history_trim_count, queue_draft_behind,
     idle_state_needs_redraw, job_quit_confirmation_required, job_snapshot_messages,
     lua_config_available, orphaned_tool_result_row, parse_config_value, prepare_streaming_replay,
     render_config_page, run_insertion_lifecycle, should_open_agent_log, stream::is_retry_status,
@@ -1387,4 +1388,33 @@ async fn older_job_snapshot_does_not_replace_newer_visible_jobs() {
 
     assert_eq!(app.jobs_version, 10);
     assert_eq!(app.jobs[0].id, "job-newer");
+}
+
+#[test]
+fn history_trim_replaces_flushed_rows_with_one_marker() {
+    assert_eq!(history_trim_count(10, 8, 0), 0, "cap 0 keeps everything");
+    assert_eq!(history_trim_count(5, 5, 5), 0, "nothing to trim at the cap");
+    assert_eq!(history_trim_count(10, 0, 5), 0, "unflushed rows are never trimmed");
+    assert_eq!(history_trim_count(10, 2, 5), 0, "one row for one marker saves nothing");
+    assert_eq!(history_trim_count(10, 3, 5), 2, "stops before the last flushed row");
+    assert_eq!(history_trim_count(10, 10, 5), 6, "six rows become one marker: 10 -> 5");
+}
+
+#[test]
+fn enter_with_queued_prompts_puts_the_draft_last() {
+    let mut queue = VecDeque::from(["A".to_string()]);
+    let mut input = InputState {
+        buffer: "B".into(),
+        ..InputState::default()
+    };
+    assert!(queue_draft_behind(&mut input, &mut queue));
+    assert_eq!(queue, VecDeque::from(["A".to_string(), "B".to_string()]));
+    assert!(input.buffer.is_empty());
+
+    let mut input = InputState {
+        buffer: "C".into(),
+        ..InputState::default()
+    };
+    assert!(!queue_draft_behind(&mut input, &mut VecDeque::new()));
+    assert_eq!(input.buffer, "C", "nothing queued: the draft is sent directly");
 }

@@ -787,7 +787,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
         let id = crate::processes::registry().spawn(
             command,
             spawn_scope.clone(),
-            timeout_ms,
+            Some(timeout_ms),
             Some(process_cwd.clone()),
         );
         let result = lua.create_table()?;
@@ -940,7 +940,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
                     env,
                     stdin,
                     working_dir: Some(exec_cwd.clone().into()),
-                    timeout_ms,
+                    timeout_ms: Some(timeout_ms),
                     cancel: exec_cancel.clone(),
                 },
                 |is_stderr, bytes| {
@@ -1089,7 +1089,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
         let output = block_on(run_script(ScriptRequest {
             command,
             env: Vec::new(),
-            timeout_ms,
+            timeout_ms: Some(timeout_ms),
             working_dir: Some(shell_cwd.clone()),
             cancel: shell_cancel.clone(),
         }));
@@ -1122,7 +1122,7 @@ fn add_io_primitives(lua: &Lua, ctx: &Table, cfg: &CtxConfig) -> Result<(), mlua
                 ScriptRequest {
                     command,
                     env: Vec::new(),
-                    timeout_ms,
+                    timeout_ms: Some(timeout_ms),
                     working_dir: Some(streaming_cwd.clone()),
                     cancel: streaming_cancel.clone(),
                 },

@@ -3944,8 +3944,8 @@ async fn process_commands_are_conversation_scoped() {
     let scope = crate::processes::conversation_scope(Some(conversation_id));
     let foreign_scope = crate::processes::conversation_scope(Some(conversation_id + 1));
     let registry = crate::processes::registry();
-    let own_id = registry.spawn("sleep 30".into(), scope.clone(), 60_000, None);
-    let foreign_id = registry.spawn("sleep 30".into(), foreign_scope.clone(), 60_000, None);
+    let own_id = registry.spawn("sleep 30".into(), scope.clone(), Some(60_000), None);
+    let foreign_id = registry.spawn("sleep 30".into(), foreign_scope.clone(), Some(60_000), None);
 
     let extensions = crate::ext::ExtensionManager::unloaded();
     let submit_inbox = extensions.submit_inbox();
@@ -4302,7 +4302,7 @@ fn jobs_snapshots_are_scoped_filtered_and_refreshed_after_cancellation() {
     ));
     assert!(jobs.iter().all(|job| job.id != foreign));
 
-    ctx.cancel_background_work();
+    ctx.cancel_background_work(true);
     let cancelled_snapshot = loop {
         match events.try_recv().unwrap() {
             RuntimeEvent::JobsSnapshot { jobs, .. } => break jobs,

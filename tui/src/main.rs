@@ -408,6 +408,7 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
             eprintln!("bone: parent stdin closed; shutting down server")
         }
     }
+    bone::processes::registry().shutdown_all().await;
     Ok(())
 }
 
@@ -742,6 +743,7 @@ async fn main() -> std::io::Result<()> {
                 true, // forward view diffs: the TUI is a pure client
             ));
             let result = app.run().await;
+            bone::processes::registry().shutdown_all().await;
             daemon.abort();
             result
         })

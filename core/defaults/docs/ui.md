@@ -293,6 +293,12 @@ modify core-owned messages or transcript state. On reconnect, restore the select
 conversation by id and request authoritative state rather than replaying guessed local
 state.
 
+The TUI bounds how many rendered rows it keeps in memory via `ui.history_rows`
+(default 3000, 0 = keep all). Between turns, rows already flushed to terminal
+scrollback beyond the cap are replaced by one marker row, and conversation loads
+request only the newest window. This is client-side display state: the daemon's
+SQLite store and the model-facing context keep the full history.
+
 ## Adding a client feature
 
 1. Define or update the cross-boundary type in `protocol`.

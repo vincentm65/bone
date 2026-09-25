@@ -90,7 +90,7 @@ impl App {
             | bone_protocol::KeymapDispatchKind::Prompt { text } => {
                 self.input.buffer = text;
                 self.input.cursor_pos = self.input.buffer.chars().count();
-                self.send_message(term).await
+                self.submit_message_in_order(term).await
             }
         }
     }

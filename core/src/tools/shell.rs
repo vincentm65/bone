@@ -26,11 +26,14 @@ unsafe extern "C" {
 }
 
 #[cfg(unix)]
-fn kill_process_group(pid: u32) {
+fn signal_process_group(pid: u32, signal: i32) {
     unsafe {
-        let _ = kill(-(pid as i32), 9);
+        let _ = kill(-(pid as i32), signal);
     }
 }
+
+/// How long a stopped process tree gets to exit after SIGTERM before SIGKILL.
+const KILL_GRACE: Duration = Duration::from_secs(2);
 
 #[cfg(windows)]
 async fn kill_process_tree(pid: u32) {
@@ -48,10 +51,18 @@ pub struct DirectExecError {
     pub message: String,
 }
 
+fn spawned_err(message: impl ToString) -> DirectExecError {
+    DirectExecError {
+        spawned: true,
+        message: message.to_string(),
+    }
+}
+
 pub struct ScriptRequest {
     pub command: String,
     pub env: Vec<(String, String)>,
-    pub timeout_ms: u64,
+    /// `None` runs without a deadline (managed background processes).
+    pub timeout_ms: Option<u64>,
     pub working_dir: Option<PathBuf>,
     /// Cooperative cancel flag. When set (Esc/Ctrl+C mid-turn), the executor
     /// kills the process tree and returns promptly with partial output instead
@@ -74,7 +85,7 @@ pub(crate) struct ProcessRequest {
     pub(crate) env: Vec<(String, String)>,
     pub(crate) stdin: Option<Vec<u8>>,
     pub(crate) working_dir: Option<PathBuf>,
-    pub(crate) timeout_ms: u64,
+    pub(crate) timeout_ms: Option<u64>,
     pub(crate) cancel: Option<Arc<AtomicBool>>,
 }
 
@@ -206,10 +217,9 @@ where
         spawned: false,
         message: error.to_string(),
     })?;
-    let pid = child.id().ok_or_else(|| DirectExecError {
-        spawned: true,
-        message: "failed to obtain child process id".into(),
-    })?;
+    let pid = child
+        .id()
+        .ok_or_else(|| spawned_err("failed to obtain child process id"))?;
     if let Some(input) = request.stdin
         && let Some(mut stdin) = child.stdin.take()
     {
@@ -218,14 +228,8 @@ where
             let _ = stdin.write_all(&input).await;
         });
     }
-    let stdout = child.stdout.take().ok_or_else(|| DirectExecError {
-        spawned: true,
-        message: "failed to capture stdout".into(),
-    })?;
-    let stderr = child.stderr.take().ok_or_else(|| DirectExecError {
-        spawned: true,
-        message: "failed to capture stderr".into(),
-    })?;
+    let stdout = (child.stdout.take()).ok_or_else(|| spawned_err("failed to capture stdout"))?;
+    let stderr = (child.stderr.take()).ok_or_else(|| spawned_err("failed to capture stderr"))?;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<(bool, Vec<u8>)>(16);
     let mut readers = Vec::with_capacity(2);
     for (is_stderr, mut reader) in [
@@ -249,7 +253,8 @@ where
     }
     drop(tx);
 
-    let deadline = tokio::time::Instant::now() + Duration::from_millis(request.timeout_ms);
+    let deadline =
+        (request.timeout_ms).map(|ms| tokio::time::Instant::now() + Duration::from_millis(ms));
     let mut status = None;
     let mut output_open = true;
     let mut timed_out = false;
@@ -262,13 +267,8 @@ where
         tokio::select! {
             biased;
             _ = await_cancel(request.cancel.as_ref()) => { cancelled = true; break; }
-            _ = tokio::time::sleep_until(deadline) => { timed_out = true; break; }
-            result = child.wait(), if status.is_none() => {
-                status = Some(result.map_err(|error| DirectExecError {
-                    spawned: true,
-                    message: error.to_string(),
-                })?);
-            }
+            _ = tokio::time::sleep_until(deadline.unwrap_or_else(tokio::time::Instant::now)), if deadline.is_some() => { timed_out = true; break; }
+            result = child.wait(), if status.is_none() => status = Some(result.map_err(spawned_err)?),
             chunk = rx.recv(), if output_open => match chunk {
                 Some((is_stderr, bytes)) => if let Err(error) = emit(is_stderr, &bytes) {
                     stream_error = Some(error);
@@ -279,16 +279,23 @@ where
         }
     }
     if timed_out || cancelled || stream_error.is_some() {
+        // Unix: SIGTERM the group so servers can shut down cleanly, then
+        // SIGKILL whatever is left after the grace period.
         #[cfg(unix)]
-        kill_process_group(pid);
+        {
+            signal_process_group(pid, 15);
+            if status.is_none()
+                && let Ok(result) = tokio::time::timeout(KILL_GRACE, child.wait()).await
+            {
+                status = Some(result.map_err(spawned_err)?);
+            }
+            signal_process_group(pid, 9);
+        }
         #[cfg(windows)]
         kill_process_tree(pid).await;
         let _ = child.start_kill();
         if status.is_none() {
-            status = Some(child.wait().await.map_err(|error| DirectExecError {
-                spawned: true,
-                message: error.to_string(),
-            })?);
+            status = Some(child.wait().await.map_err(spawned_err)?);
         }
     }
     if stream_error.is_none() {
@@ -317,15 +324,9 @@ where
     }
     let output_limit_exceeded = matches!(stream_error, Some(StreamError::OutputLimit));
     if let Some(StreamError::Other(message)) = stream_error {
-        return Err(DirectExecError {
-            spawned: true,
-            message,
-        });
+        return Err(spawned_err(message));
     }
-    let status = status.ok_or_else(|| DirectExecError {
-        spawned: true,
-        message: "process ended without status".into(),
-    })?;
+    let status = status.ok_or_else(|| spawned_err("process ended without status"))?;
     Ok(ProcessOutput {
         exit_code: status.code(),
         signal: exit_signal(&status),
@@ -344,7 +345,7 @@ pub(crate) async fn run_script_stream<F>(
 where
     F: FnMut(bool, &[u8]) -> Result<(), String>,
 {
-    let timeout_ms = request.timeout_ms.clamp(1_000, 3_600_000);
+    let timeout_ms = request.timeout_ms.unwrap_or_default();
     let output = run_script_stream_with_metadata(request, emit).await?;
     if output.cancelled || output.timed_out {
         let why = if output.cancelled {
@@ -372,7 +373,6 @@ where
     if request.command.contains('\0') {
         return Err("shell command must not contain NUL bytes".into());
     }
-    let timeout_ms = request.timeout_ms.clamp(1_000, 3_600_000);
     let cancel = request.cancel.clone();
     let (shell, shell_arg, _) = shell_command();
     let mut out = OutputCapture::new();
@@ -384,7 +384,7 @@ where
             env: request.env,
             stdin: None,
             working_dir: request.working_dir,
-            timeout_ms,
+            timeout_ms: request.timeout_ms,
             cancel: request.cancel,
         },
         |is_stderr, bytes| {
@@ -545,10 +545,14 @@ fn parse_shell_args(arguments: Value) -> Result<Args, String> {
     serde_json::from_value(arguments).map_err(crate::util::errstr)
 }
 
-fn parse_run_args(args: Args) -> Result<(String, u64, bool), String> {
+/// Foreground runs default to 5 minutes; background runs have no deadline
+/// unless `timeout_ms` is given.
+fn parse_run_args(args: Args) -> Result<(String, Option<u64>, bool), String> {
     let command = args.command.ok_or("command is required for run")?;
     reject_obvious_file_write(&command)?;
-    let timeout_ms = args.timeout_ms.unwrap_or(300_000).clamp(1_000, 3_600_000);
+    let timeout_ms = (args.timeout_ms)
+        .or((!args.background).then_some(300_000))
+        .map(|ms| ms.clamp(1_000, 3_600_000));
     Ok((command, timeout_ms, args.background))
 }
 
@@ -707,11 +711,11 @@ impl Tool for ShellTool {
                     "timeout_ms": {
                         "type": "integer",
                         "minimum": 1000,
-                        "description": "Timeout in ms for run. Default 300000 (5 minutes). Set higher for long-running commands (e.g. downloads)."
+                        "description": "Timeout in ms for run. Foreground default 300000 (5 minutes); set higher for long commands (e.g. downloads). Background runs have no timeout unless this is set."
                     },
                     "background": {
                         "type": "boolean",
-                        "description": "For run, start a managed background process and return its id immediately."
+                        "description": "For run, start a managed background process and return its id immediately. Use for dev servers, watchers, and other long-lived processes; check with status and stop with kill."
                     }
                 },
                 "additionalProperties": false
@@ -736,12 +740,8 @@ impl Tool for ShellTool {
             },
         );
         if args.action != "run" {
-            return crate::processes::execute_action(
-                &args.action,
-                args.id.as_deref(),
-                Some(&scope),
-            )
-            .map(ToolOutput::text);
+            return crate::processes::execute_action(&args.action, args.id.as_deref(), &scope)
+                .map(ToolOutput::text);
         }
         let (command, timeout_ms, background) = parse_run_args(args)?;
         if background {

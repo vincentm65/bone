@@ -242,7 +242,7 @@ fn canonical_config_pages_and_mutations_use_the_daemon_store() {
     assert_eq!(plugin_fields[2]["kind"], "tool");
     assert_eq!(plugin_fields[2]["path"], "tools.shell");
     assert_eq!(plugin_fields[3]["key"], "tool:worker");
-    assert_eq!(pages[3]["fields"].as_array().unwrap().len(), 15);
+    assert_eq!(pages[3]["fields"].as_array().unwrap().len(), 16);
 
     let set_value: mlua::Function = config.get("set_value").unwrap();
     assert!(

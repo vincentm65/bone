@@ -23,6 +23,12 @@ fn shell_timeout_defaults_to_five_minutes() {
     let args = parse_shell_args(serde_json::json!({ "command": "true" })).unwrap();
     let (_, timeout_ms, background) = parse_run_args(args).unwrap();
 
-    assert_eq!(timeout_ms, 300_000);
+    assert_eq!(timeout_ms, Some(300_000));
     assert!(!background);
+
+    let args =
+        parse_shell_args(serde_json::json!({ "command": "true", "background": true })).unwrap();
+    let (_, timeout_ms, background) = parse_run_args(args).unwrap();
+    assert_eq!(timeout_ms, None);
+    assert!(background);
 }

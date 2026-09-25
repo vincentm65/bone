@@ -1544,7 +1544,7 @@ impl DaemonCtx {
         if changing {
             // Background work belongs to the scope being left. Cancel it before
             // `conversation_id` changes so its result cannot be orphaned.
-            self.cancel_background_work();
+            self.cancel_background_work(true);
         }
         let result = self
             .session
@@ -1725,7 +1725,7 @@ impl DaemonCtx {
                     Some(RuntimeCommand::GetJobs) => self.publish_jobs(true),
                     Some(RuntimeCommand::CancelProcess { id }) => self.cancel_process(&id),
                     Some(RuntimeCommand::Cancel) => {
-                        self.cancel_background_work();
+                        self.cancel_background_work(false);
                         cancel.store(true, Ordering::Relaxed);
                         self.approval_registry.cancel_all();
                         self.key_registry.cancel_all();
@@ -1744,7 +1744,7 @@ impl DaemonCtx {
                     }
                     None => {
                         if cancel_background_on_disconnect {
-                            self.cancel_background_work();
+                            self.cancel_background_work(true);
                         }
                         cancel.store(true, Ordering::Relaxed);
                         self.approval_registry.cancel_all();
@@ -1791,10 +1791,10 @@ impl DaemonCtx {
         }
     }
 
-    /// Terminate every running background sub-agent and managed shell process
-    /// for this session, surfacing notices when anything was cancelled. Called
-    /// on turn cancel (Ctrl+C) and on conversation reset (`/new`, `/clear`).
-    fn cancel_background_work(&mut self) {
+    /// Terminate every running background sub-agent for this session and, on
+    /// conversation reset, its managed shell processes. Turn cancel (Esc/Ctrl+C)
+    /// leaves shell processes such as dev servers running.
+    fn cancel_background_work(&mut self, include_processes: bool) {
         // Scope to this session's conversation so a process hosting several
         // conversations (`bone serve`) doesn't kill another one's work.
         let scope = self.session.lock().unwrap().background_scope();
@@ -1806,6 +1806,9 @@ impl DaemonCtx {
             self.publish_jobs(true);
         }
 
+        if !include_processes {
+            return;
+        }
         let process_scope = crate::processes::conversation_scope(Some(scope));
         let cancelled_processes = crate::processes::registry().kill_all_scoped(&process_scope);
         if cancelled_processes > 0 {
@@ -2003,7 +2006,7 @@ impl DaemonCtx {
                 let changing_conversation =
                     self.session.lock().unwrap().conversation_id != Some(id);
                 if changing_conversation {
-                    self.cancel_background_work();
+                    self.cancel_background_work(true);
                 }
                 if let Some((provider_id, model)) = provider_model {
                     self.restore_provider(&provider_id, &model);
@@ -2416,7 +2419,7 @@ impl DaemonCtx {
             RuntimeCommand::NewConversation => {
                 // Resetting the conversation also ends its background work —
                 // it belongs to the conversation being left.
-                self.cancel_background_work();
+                self.cancel_background_work(true);
                 {
                     let mut s = self.session.lock().unwrap();
                     // Already on an empty conversation? Reuse it instead of
@@ -2490,7 +2493,7 @@ impl DaemonCtx {
                 Flow::Continue
             }
             RuntimeCommand::ClearConversation => {
-                self.cancel_background_work();
+                self.cancel_background_work(true);
                 {
                     let mut s = self.session.lock().unwrap();
                     s.transcript.clear();
@@ -3028,10 +3031,10 @@ impl DaemonCtx {
                 self.cancel_process(&id);
                 Flow::Continue
             }
-            // A cancel while idle has no turn to stop, but background work may
-            // still be running — terminate it.
+            // A cancel while idle has no turn to stop, but background sub-agents
+            // may still be running — terminate them.
             RuntimeCommand::Cancel => {
-                self.cancel_background_work();
+                self.cancel_background_work(false);
                 Flow::Continue
             }
             // Acknowledge other non-turn commands so a client isn't left waiting.
@@ -3159,11 +3162,9 @@ impl DaemonCtx {
                 },
                 cmd = commands.recv() => match cmd {
                     // A turn cancel also terminates the session's background
-                    // sub-agents and managed shell processes: they were spawned
-                    // by this conversation, so Ctrl+C should stop them too rather
-                    // than leave them running after the user abandoned the turn.
+                    // sub-agents; managed shell processes keep running.
                     Some(cmd @ RuntimeCommand::Cancel) => {
-                        self.cancel_background_work();
+                        self.cancel_background_work(false);
                         self.pending_interactions.clear();
                         conn.send(cmd);
                     }

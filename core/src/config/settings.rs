@@ -299,10 +299,18 @@ pub struct UiSettings {
     pub spinner_text_rotate: bool,
     #[serde(default)]
     pub spinner_text_speed: u64,
+
+    /// Rendered rows the TUI keeps in memory; older rows stay in the session
+    /// database and load on demand. 0 keeps every row.
+    #[serde(default = "default_history_rows")]
+    pub history_rows: u32,
 }
 
 fn default_true() -> bool {
     true
+}
+pub fn default_history_rows() -> u32 {
+    3000
 }
 fn default_spinner_style() -> String {
     "braille".to_string()
@@ -330,6 +338,7 @@ impl Default for UiSettings {
             spinner_speed: 0,
             spinner_text_rotate: true,
             spinner_text_speed: 0,
+            history_rows: default_history_rows(),
         }
     }
 }

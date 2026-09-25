@@ -1243,6 +1243,21 @@ impl Tab {
         self.history_index = None;
     }
 
+    /// Submit an idle composer behind prompts already queued (text-only, like
+    /// `enqueue_composer`).
+    fn submit_composer_in_order(&mut self) {
+        if self.queue.is_empty() {
+            self.submit_composer();
+            return;
+        }
+        let text = self.expanded_composer().trim().to_string();
+        if !text.is_empty() {
+            self.queue.push_back(text);
+            self.clear_input();
+        }
+        self.drain_queue();
+    }
+
     /// Move a queued prompt up one position (no-op at the top).
     fn move_queued_up(&mut self, index: usize) {
         if index > 0 && index < self.queue.len() {
@@ -6894,8 +6909,10 @@ impl Tab {
                             .on_hover_text("Send (Enter)")
                             .clicked()
                             || send_shortcut
-                            || steer_shortcut
                         {
+                            self.submit_composer_in_order();
+                            changed = true;
+                        } else if steer_shortcut {
                             self.submit_composer();
                             changed = true;
                         }

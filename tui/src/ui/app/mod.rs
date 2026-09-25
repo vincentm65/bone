@@ -206,6 +206,34 @@ fn prepare_streaming_replay(renderer: &mut Renderer) {
 ///
 /// A `None` result rebuilds every message as committed; a `Some(idx)` result
 /// replays that assistant through the incremental streaming path.
+/// Leading rows to replace with one hidden-history marker so `len` fits `cap`
+/// (0 = keep all). Only rows already flushed to native scrollback (`< cursor`)
+/// are eligible, and the last flushed row is kept so the renderer can still
+/// derive `prev_role` spacing for the next flush.
+fn history_trim_count(len: usize, cursor: usize, cap: usize) -> usize {
+    if cap == 0 || len <= cap {
+        return 0;
+    }
+    let n = (len + 1 - cap).min(cursor.saturating_sub(1));
+    if n < 2 { 0 } else { n }
+}
+
+fn hidden_history_marker() -> Message {
+    Message::system("… earlier rows hidden (ui.history_rows); full history is kept in the session")
+}
+
+/// Move a non-empty draft behind already queued prompts so Enter cannot jump
+/// the queue. Attachments are dropped, as for any queued prompt.
+fn queue_draft_behind(input: &mut InputState, queue: &mut VecDeque<String>) -> bool {
+    let text = input.expanded().trim().to_string();
+    if queue.is_empty() || text.is_empty() {
+        return false;
+    }
+    queue.push_back(text);
+    input.reset();
+    true
+}
+
 fn streaming_rebuild_index(streaming: bool, assistant_idx: Option<usize>) -> Option<usize> {
     streaming.then_some(assistant_idx).flatten()
 }
@@ -1497,7 +1525,7 @@ impl App {
             .send(crate::runtime::RuntimeCommand::Synchronize {
                 request_id,
                 include_messages,
-                window: None,
+                window: self.history_window(),
             })
             .is_err()
         {
@@ -1713,7 +1741,10 @@ impl App {
         };
 
         self.command_tx
-            .send(crate::runtime::RuntimeCommand::LoadConversation { id, window: None })
+            .send(crate::runtime::RuntimeCommand::LoadConversation {
+                id,
+                window: self.history_window(),
+            })
             .map_err(|_| {
                 io::Error::new(io::ErrorKind::BrokenPipe, "runtime command channel closed")
             })?;
@@ -1894,9 +1925,36 @@ impl App {
     }
 
     fn replace_transcript(&mut self, transcript: Vec<ChatMessage>) {
-        self.messages = self.rebuild_scrollback_from_transcript(&transcript);
+        let mut rows = self.rebuild_scrollback_from_transcript(&transcript);
+        // A windowed load returns at most `cap` messages, so a full window
+        // means older ones may exist; an in-process runtime ignores the window.
+        let cap = self.user_config.history_rows as usize;
+        if cap > 0 && transcript.len() >= cap {
+            let n = rows.len().saturating_sub(cap - 1);
+            rows.splice(..n, [hidden_history_marker()]);
+        }
+        self.messages = rows;
         self.renderer.scrollback_cursor = 0;
         self.streaming_assistant_idx = None;
+    }
+
+    fn history_window(&self) -> Option<u32> {
+        (self.user_config.history_rows > 0).then_some(self.user_config.history_rows)
+    }
+
+    /// Replace rows beyond `ui.history_rows` that are already in native
+    /// scrollback with one marker. Only between turns: the stream pump holds
+    /// indices into `messages`.
+    fn trim_history(&mut self) {
+        if self.streaming || self.live_command {
+            return;
+        }
+        let cap = self.user_config.history_rows as usize;
+        let n = history_trim_count(self.messages.len(), self.renderer.scrollback_cursor, cap);
+        if n > 0 {
+            self.messages.splice(..n, [hidden_history_marker()]);
+            self.renderer.scrollback_cursor -= n - 1;
+        }
     }
 
     /// Reset transient per-turn UI state before switching conversations:
@@ -2182,6 +2240,7 @@ impl App {
                 self.flush_new_messages_to_scrollback(&mut terminal)?;
                 self.redraw(&mut terminal)?;
             }
+            self.trim_history();
 
             // Keep native process/sub-agent panes live; turn injection is daemon-owned.
             if self.maybe_refresh_jobs_pane() {
@@ -2531,6 +2590,14 @@ impl App {
     /// True when Lua is showing its shared menu pane.
     fn has_lua_menu_pane(&self) -> bool {
         self.pages.iter().any(|p| p.source == "interact")
+    }
+
+    /// Submit the draft behind any already queued prompts, then drain them.
+    async fn submit_message_in_order(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+        if !queue_draft_behind(&mut self.input, &mut self.queue) {
+            self.send_message(term).await?;
+        }
+        self.drain_queue_when_input_empty(term).await
     }
 
     /// Submit queued turns without overwriting text typed while a turn runs.
@@ -3318,8 +3385,7 @@ impl App {
                         self.input.cursor_pos = self.input.buffer.chars().count();
                         if code == KeyCode::Enter {
                             self.autocomplete = None;
-                            self.send_message(term).await?;
-                            self.drain_queue_when_input_empty(term).await?;
+                            self.submit_message_in_order(term).await?;
                         } else {
                             self.autocomplete = None;
                             self.redraw(term)?;
@@ -3372,8 +3438,7 @@ impl App {
                     self.active_page =
                         PanePage::remove(&mut self.pages, "interact", self.active_page);
                 }
-                self.send_message(term).await?;
-                self.drain_queue_when_input_empty(term).await?;
+                self.submit_message_in_order(term).await?;
                 Ok(())
             }
             InputAction::ClearQueue => {
@@ -4341,6 +4406,7 @@ fn apply_settings_to_user_config(
     cfg.spinner_text_rotate = settings.ui.spinner_text_rotate;
     cfg.spinner_text_speed = settings.ui.spinner_text_speed;
     cfg.spinner_text_custom = settings.ui.spinner_custom.clone();
+    cfg.history_rows = settings.ui.history_rows;
 }
 
 #[cfg(test)]

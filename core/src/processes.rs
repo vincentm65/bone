@@ -89,7 +89,7 @@ impl ProcessRegistry {
         &self,
         command: String,
         owner: String,
-        timeout_ms: u64,
+        timeout_ms: Option<u64>,
         working_dir: Option<std::path::PathBuf>,
     ) -> String {
         let order = self.next.fetch_add(1, Ordering::Relaxed);
@@ -266,6 +266,18 @@ impl ProcessRegistry {
         killed
     }
 
+    /// Stop every running process and wait, bounded, until their trees are
+    /// reaped (SIGTERM, then SIGKILL after the grace period). Used on shutdown.
+    pub async fn shutdown_all(&self) {
+        for process in self.processes.lock().unwrap().values() {
+            process.cancel.store(true, Ordering::Relaxed);
+        }
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline && self.list(None).iter().any(|p| p.running) {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
     /// Remove every finished process owned by `scope`, returning the number
     /// removed. Called when a new user turn starts: a finished process stays
     /// visible for the turn in which it finished, then the next turn clears it.
@@ -284,20 +296,6 @@ impl ProcessRegistry {
             self.bump_version();
         }
         removed
-    }
-
-    pub fn kill(&self, id: &str) -> bool {
-        let processes = self.processes.lock().unwrap();
-        let Some(p) = processes.get(id) else {
-            return false;
-        };
-        if !p.snapshot.running {
-            return false;
-        }
-        p.cancel.store(true, Ordering::Relaxed);
-        drop(processes);
-        self.bump_version();
-        true
     }
 }
 pub fn conversation_scope(session_id: Option<i64>) -> String {
@@ -335,11 +333,11 @@ fn format_elapsed(process: &ProcessSnapshot) -> String {
 pub(crate) fn execute_action(
     action: &str,
     id: Option<&str>,
-    scope: Option<&str>,
+    scope: &str,
 ) -> Result<String, String> {
     match action {
         "list" => Ok(registry()
-            .list(scope)
+            .list(Some(scope))
             .into_iter()
             .map(|process| {
                 format!(
@@ -354,11 +352,7 @@ pub(crate) fn execute_action(
             .join("\n")),
         "status" => {
             let id = id.ok_or("id is required for status")?;
-            let process = match scope {
-                Some(scope) => registry().get_scoped(scope, id),
-                None => registry().get(id),
-            }
-            .ok_or("unknown process")?;
+            let process = registry().get_scoped(scope, id).ok_or("unknown process")?;
             Ok(format!(
                 "{}\nstate: {}\nelapsed: {}\nrunning: {}\nexit code: {}\nsignal: {}\nstdout:\n{}\nstderr:\n{}\n{}",
                 process.id,
@@ -378,11 +372,7 @@ pub(crate) fn execute_action(
         }
         "kill" => {
             let id = id.ok_or("id is required for kill")?;
-            let killed = match scope {
-                Some(scope) => registry().kill_scoped(scope, id),
-                None => registry().kill(id),
-            };
-            if killed {
+            if registry().kill_scoped(scope, id) {
                 Ok(format!("stop requested for {id}"))
             } else {
                 Err(format!("process {id} is unknown or already finished"))

@@ -129,10 +129,15 @@ fn clear_completed_scoped_removes_only_finished_processes_in_scope() {
 async fn records_exit_timeout_cancel_and_timestamps() {
     let registry = registry();
     let owner = format!("process-test:{}", now_millis());
-    let exited = registry.spawn("printf normal".into(), owner.clone(), 5_000, None);
-    let nonzero = registry.spawn("printf failed; exit 7".into(), owner.clone(), 5_000, None);
-    let timed_out = registry.spawn("sleep 2".into(), owner.clone(), 1_000, None);
-    let cancelled = registry.spawn("printf partial; sleep 2".into(), owner, 5_000, None);
+    let exited = registry.spawn("printf normal".into(), owner.clone(), Some(5_000), None);
+    let nonzero = registry.spawn(
+        "printf failed; exit 7".into(),
+        owner.clone(),
+        Some(5_000),
+        None,
+    );
+    let timed_out = registry.spawn("sleep 2".into(), owner.clone(), Some(1_000), None);
+    let cancelled = registry.spawn("printf partial; sleep 2".into(), owner.clone(), None, None);
 
     while [
         exited.as_str(),
@@ -147,7 +152,7 @@ async fn records_exit_timeout_cancel_and_timestamps() {
             .get(&cancelled)
             .is_some_and(|process| process.stdout.contains("partial"))
         {
-            let _ = registry.kill(&cancelled);
+            let _ = registry.kill_scoped(&owner, &cancelled);
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }

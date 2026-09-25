@@ -246,7 +246,8 @@ async fn background_output_is_visible_before_completion() {
     .await
     .expect("live output should become visible");
 
-    assert!(processes::registry().kill(id));
+    let owner = processes::registry().get(id).unwrap().owner;
+    assert!(processes::registry().kill_scoped(&owner, id));
 }
 
 #[tokio::test]
@@ -382,7 +383,7 @@ async fn line_stream_bounds_one_unterminated_line_and_delivers_it_once() {
                 MAX_TOOL_LINE_CHARS * 4 + 100
             ),
             env: Vec::new(),
-            timeout_ms: 5_000,
+            timeout_ms: Some(5_000),
             working_dir: None,
             cancel: None,
         },
@@ -539,7 +540,7 @@ async fn cancel_does_not_wait_for_an_escaped_descendant_pipe() {
             ScriptRequest {
                 command: "setsid sh -c 'sleep 2' & printf 'ready\\n'; sleep 30".into(),
                 env: Vec::new(),
-                timeout_ms: 30_000,
+                timeout_ms: Some(30_000),
                 working_dir: None,
                 cancel: Some(cancel_for_task),
             },
@@ -584,7 +585,7 @@ async fn cancellation_does_not_invoke_callbacks_for_buffered_output() {
         ScriptRequest {
             command: BUFFERED_OUTPUT_THEN_SLEEP.into(),
             env: Vec::new(),
-            timeout_ms: 30_000,
+            timeout_ms: Some(30_000),
             working_dir: None,
             cancel: Some(cancel),
         },

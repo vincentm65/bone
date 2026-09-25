@@ -381,6 +381,27 @@ fn window_manager_steering_and_queued_pastes_keep_their_contents() {
 }
 
 #[test]
+fn queued_prompt_precedes_draft_after_completion_boundary() {
+    let mut app = DesktopApp::open(egui::Context::default(), false, None);
+    let tab = &mut app.tabs[0];
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    tab.commands = tx;
+    tab.connected = true;
+    tab.state.ready = true;
+    tab.queue.push_back("queued A".into());
+    tab.composer = "draft B".into();
+
+    tab.submit_composer_in_order();
+    let sent = std::iter::from_fn(|| rx.try_recv().ok()).find_map(|command| match command {
+        Command::Send(RuntimeCommand::SubmitPrompt { text, .. }) => Some(text),
+        _ => None,
+    });
+    assert_eq!(sent.as_deref(), Some("queued A"));
+    assert_eq!(tab.queue.front().map(String::as_str), Some("draft B"));
+    assert!(tab.composer.is_empty());
+}
+
+#[test]
 fn window_manager_reconnect_keeps_queue_paused_until_resumed() {
     let ctx = egui::Context::default();
     let mut app = DesktopApp::open(ctx, false, None);
