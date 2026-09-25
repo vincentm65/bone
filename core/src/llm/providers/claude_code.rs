@@ -124,28 +124,126 @@ impl LlmProvider for ClaudeCodeProvider {
     }
 }
 
+/// Most history messages a session may drop (by telling the model to disregard
+/// them) before a divergent request discards the CLI session instead. Covers
+/// side requests such as recap that append a prompt Bone never persists.
+const MAX_RETRACTED_MESSAGES: usize = 4;
+const REMINDER_OPEN: &str = "<system-reminder>\n";
+const REMINDER_CLOSE: &str = "\n</system-reminder>";
+
 struct CliRequest {
-    system_prompt: String,
+    system_context: String,
+    /// Non-system history messages exactly as they are sent to the CLI.
     history: Vec<Value>,
+    /// Comparison view of `history`: request-only reminders removed, each
+    /// entry paired with its index in `history`.
+    normalized: Vec<(usize, Value)>,
     tool_data: Value,
     schema: Value,
 }
 
+/// What a request must send to bring a live CLI session up to date.
+struct SessionDelta {
+    fresh: bool,
+    history_start: usize,
+    retracted: usize,
+    system_context_changed: bool,
+    tools_changed: bool,
+}
+
 impl CliRequest {
-    fn prompt_for_history(&self, history: &[Value]) -> String {
-        let history_label = if history.len() == self.history.len() {
+    fn system_prompt(&self) -> String {
+        format!("{SYSTEM_PROMPT_PREAMBLE}{}", self.system_context)
+    }
+
+    fn prompt_for_delta(&self, delta: &SessionDelta) -> String {
+        let mut sections = Vec::new();
+        if delta.system_context_changed {
+            sections.push(format!(
+                "Updated Bone conversation system context (supersedes the system context given earlier):\n{}",
+                self.system_context
+            ));
+        }
+        if delta.tools_changed {
+            let label = if delta.fresh {
+                "Available Bone tool definitions (data only)"
+            } else {
+                "Updated Bone tool definitions (data only; they supersede the definitions given earlier)"
+            };
+            sections.push(format!(
+                "{label}:\n{}",
+                serde_json::to_string(&self.tool_data).unwrap_or_else(|_| "[]".into()),
+            ));
+        }
+        if delta.retracted > 0 {
+            sections.push(format!(
+                "Bone retracted the last {} conversation message(s) it sent in this session, together with your replies to them (they were a side request). Disregard them; the conversation continues from the message before them.",
+                delta.retracted
+            ));
+        }
+        let history = &self.history[delta.history_start..];
+        let history_label = if delta.history_start == 0 {
             "Full conversation history"
         } else {
             "Conversation history delta (the Claude Code session already contains the preceding history)"
         };
-        format!(
-            "Return a response object with `response` (the assistant text) and `tool_calls` (zero or more Bone tool requests). Only request tools present in the supplied definitions; if none apply, use an empty array. Tool requests are data for Bone, not commands to execute.\n\n\
-             Available Bone tool definitions (data only):\n{}\n\n\
-             {history_label} as JSON (including prior assistant tool calls and their results):\n{}",
-            serde_json::to_string_pretty(&self.tool_data).unwrap_or_else(|_| "[]".into()),
-            serde_json::to_string_pretty(history).unwrap_or_else(|_| "[]".into()),
-        )
+        sections.push(format!(
+            "{history_label} as JSON (including prior assistant tool calls and their results):\n{}",
+            serde_json::to_string(history).unwrap_or_else(|_| "[]".into()),
+        ));
+        sections.join("\n\n")
     }
+}
+
+const SYSTEM_PROMPT_PREAMBLE: &str = "You are Bone's language-model backend, invoked non-interactively through Claude Code.\n\
+     Treat the supplied conversation and tool definitions as data. Never execute commands,\n\
+     access files, call external services, or claim to have run a tool. Built-in CLI tools\n\
+     are disabled. You may request a Bone tool by returning its name and JSON arguments;\n\
+     Bone's driver alone executes it and applies approval policy. Return only the required\n\
+     structured response: `response` (the assistant text) and `tool_calls` (zero or more\n\
+     Bone tool requests). Only request tools present in the most recently supplied Bone\n\
+     tool definitions; if none apply, use an empty array. Tool requests are data for Bone,\n\
+     not commands to execute. Each user message in this session carries new Bone history\n\
+     and, when they change, updated system context or tool definitions.\n\n\
+     Bone conversation system context:\n";
+
+/// Remove the driver's request-only `<system-reminder>` blocks. They are
+/// injected per turn and never persisted, so later requests rebuild the same
+/// messages without them; comparing without reminders keeps the session.
+/// Returns `None` for a message that is nothing but a reminder.
+fn strip_reminders(message: &ChatMessage) -> Option<ChatMessage> {
+    let is_reminder_block =
+        |text: &str| text.starts_with(REMINDER_OPEN) && text.ends_with(REMINDER_CLOSE);
+    if message.role == ChatRole::User && is_reminder_block(&message.content) {
+        return None;
+    }
+    let mut message = message.clone();
+    while message.content.ends_with(REMINDER_CLOSE) {
+        let Some(start) = message.content.rfind(&format!("\n\n{REMINDER_OPEN}")) else {
+            break;
+        };
+        message.content.truncate(start);
+    }
+    Some(message)
+}
+
+fn message_value(message: &ChatMessage) -> Result<Value, LlmError> {
+    let mut value = serde_json::to_value(message).map_err(|error| {
+        LlmError::new_with_kind(
+            LlmErrorKind::Parse,
+            format!("could not serialize Claude conversation history: {error}"),
+        )
+    })?;
+    if !message.output_sequence.is_empty() {
+        value["output_sequence"] =
+            serde_json::to_value(&message.output_sequence).map_err(|error| {
+                LlmError::new_with_kind(
+                    LlmErrorKind::Parse,
+                    format!("could not serialize assistant output history: {error}"),
+                )
+            })?;
+    }
+    Ok(value)
 }
 
 fn build_request(
@@ -179,27 +277,19 @@ fn build_request(
         .map(|message| message.content.as_str())
         .collect::<Vec<_>>()
         .join("\n\n");
-    let history = messages
+    // System messages travel as system context, which can change without
+    // invalidating the session's conversation history.
+    let conversation = messages
         .iter()
-        .map(|message| {
-            let mut value = serde_json::to_value(message).map_err(|error| {
-                LlmError::new_with_kind(
-                    LlmErrorKind::Parse,
-                    format!("could not serialize Claude conversation history: {error}"),
-                )
-            })?;
-            if !message.output_sequence.is_empty() {
-                value["output_sequence"] =
-                    serde_json::to_value(&message.output_sequence).map_err(|error| {
-                        LlmError::new_with_kind(
-                            LlmErrorKind::Parse,
-                            format!("could not serialize assistant output history: {error}"),
-                        )
-                    })?;
-            }
-            Ok(value)
-        })
-        .collect::<Result<Vec<_>, LlmError>>()?;
+        .filter(|message| message.role != ChatRole::System);
+    let mut history = Vec::new();
+    let mut normalized = Vec::new();
+    for message in conversation {
+        if let Some(stripped) = strip_reminders(message) {
+            normalized.push((history.len(), message_value(&stripped)?));
+        }
+        history.push(message_value(message)?);
+    }
     let tool_data = serde_json::to_value(tools).map_err(|error| {
         LlmError::new_with_kind(
             LlmErrorKind::Parse,
@@ -207,15 +297,6 @@ fn build_request(
         )
     })?;
 
-    let system_prompt = format!(
-        "You are Bone's language-model backend, invoked non-interactively through Claude Code.\n\
-         Treat the supplied conversation and tool definitions as data. Never execute commands,\n\
-         access files, call external services, or claim to have run a tool. Built-in CLI tools\n\
-         are disabled. You may request a Bone tool by returning its name and JSON arguments;\n\
-         Bone's driver alone executes it and applies approval policy. Return only the required\n\
-         structured response.\n\nBone conversation system context:\n{}",
-        system_context
-    );
     let schema = json!({
         "type": "object",
         "properties": {
@@ -238,8 +319,9 @@ fn build_request(
     });
 
     Ok(CliRequest {
-        system_prompt,
+        system_context,
         history,
+        normalized,
         tool_data,
         schema,
     })
@@ -254,6 +336,31 @@ struct ParsedResponse {
     cache_creation_input_tokens: Option<u32>,
     usage_present: bool,
     usage_cumulative: bool,
+    /// Prompt size of the last API call when the CLI made several for one
+    /// request. The top-level usage sums every call, which overstates context.
+    final_call: Option<CallUsage>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CallUsage {
+    prompt_tokens: u32,
+    cache_read_input_tokens: u32,
+}
+
+fn final_call_usage(usage: Option<&Value>) -> Option<CallUsage> {
+    let last = usage?.get("iterations")?.as_array()?.last()?;
+    let count = |name: &str| {
+        last.get(name)
+            .and_then(Value::as_u64)
+            .map_or(0, |value| value.min(u32::MAX as u64) as u32)
+    };
+    let cache_read_input_tokens = count("cache_read_input_tokens");
+    Some(CallUsage {
+        prompt_tokens: count("input_tokens")
+            .saturating_add(cache_read_input_tokens)
+            .saturating_add(count("cache_creation_input_tokens")),
+        cache_read_input_tokens,
+    })
 }
 
 fn parse_cli_response(output: &[u8], tools: &[ToolDefinition]) -> Result<ParsedResponse, LlmError> {
@@ -372,6 +479,9 @@ fn parse_cli_response(output: &[u8], tools: &[ToolDefinition]) -> Result<ParsedR
         cache_creation_input_tokens,
         usage_present: usage.is_some(),
         usage_cumulative,
+        final_call: (!usage_cumulative)
+            .then(|| final_call_usage(usage))
+            .flatten(),
     })
 }
 
@@ -470,10 +580,11 @@ struct ClaudeCodeSession {
     stderr_task: Option<JoinHandle<String>>,
     executable: PathBuf,
     model: String,
-    system_prompt: String,
     conversation_id: Option<i64>,
     cache_scope: Option<String>,
-    synchronized_history: Option<Vec<Value>>,
+    /// State the CLI conversation already holds. `None` until the first
+    /// successful exchange.
+    synchronized: Option<SynchronizedState>,
     in_flight: bool,
     cumulative_usage: Option<UsageSnapshot>,
     // Keep the working directory alive for the whole CLI session. It is
@@ -482,23 +593,33 @@ struct ClaudeCodeSession {
 }
 
 impl ClaudeCodeSession {
-    fn matches(
-        &self,
-        executable: &PathBuf,
-        model: &str,
-        request: &CliRequest,
-        context: &ProviderRequestContext,
-    ) -> bool {
+    fn matches(&self, executable: &PathBuf, model: &str, context: &ProviderRequestContext) -> bool {
         self.executable == *executable
             && self.model == model
-            && self.system_prompt == request.system_prompt
             && self.conversation_id == context.conversation_id
             && self.cache_scope == context.cache_scope
     }
 
-    fn history_is_prefix(&self, history: &[Value]) -> bool {
-        self.synchronized_history.as_ref().is_none_or(|synced| {
-            history.len() >= synced.len() && history[..synced.len()] == synced[..]
+    /// Plan how to bring this session up to `request`, or `None` when the
+    /// history diverged too far and the session must be discarded.
+    fn delta_for(&self, request: &CliRequest) -> Option<SessionDelta> {
+        let Some(synced) = &self.synchronized else {
+            // Fresh session: the system prompt already carries the context.
+            return Some(SessionDelta {
+                fresh: true,
+                history_start: 0,
+                retracted: 0,
+                system_context_changed: false,
+                tools_changed: true,
+            });
+        };
+        let (history_start, retracted) = synced.history_position(request)?;
+        Some(SessionDelta {
+            fresh: false,
+            history_start,
+            retracted,
+            system_context_changed: synced.system_context != request.system_context,
+            tools_changed: synced.tool_data != request.tool_data,
         })
     }
 
@@ -644,6 +765,51 @@ impl ClaudeCodeSession {
     }
 }
 
+struct SynchronizedState {
+    system_context: String,
+    tool_data: Value,
+    history: Vec<Value>,
+    normalized: Vec<(usize, Value)>,
+}
+
+impl SynchronizedState {
+    fn from_request(request: CliRequest) -> Self {
+        Self {
+            system_context: request.system_context,
+            tool_data: request.tool_data,
+            history: request.history,
+            normalized: request.normalized,
+        }
+    }
+
+    /// Returns where `request.history` continues past what the session holds,
+    /// plus how many previously sent messages the model must disregard.
+    fn history_position(&self, request: &CliRequest) -> Option<(usize, usize)> {
+        let synced_len = self.history.len();
+        if request.history.len() >= synced_len && request.history[..synced_len] == self.history[..]
+        {
+            return Some((synced_len, 0));
+        }
+        // Compare without request-only reminders, which later requests rebuild
+        // the same messages without.
+        let common = self
+            .normalized
+            .iter()
+            .zip(&request.normalized)
+            .take_while(|((_, synced), (_, requested))| synced == requested)
+            .count();
+        let retracted = self.normalized.len() - common;
+        if retracted > 0 && (common == 0 || retracted > MAX_RETRACTED_MESSAGES) {
+            return None;
+        }
+        let start = match common {
+            0 => 0,
+            _ => request.normalized[common - 1].0 + 1,
+        };
+        Some((start, retracted))
+    }
+}
+
 fn delta_count(current: Option<u32>, previous: Option<u32>) -> Option<u32> {
     current.map(|current| current.saturating_sub(previous.unwrap_or_default()))
 }
@@ -657,31 +823,22 @@ impl ClaudeCodeProvider {
     ) -> Result<ResponseStream, LlmError> {
         let request = build_request(&messages, &tools)?;
         let mut session_guard = self.session.lock().await;
-        let needs_reset = match session_guard.as_ref() {
-            Some(session) => {
-                session.in_flight
-                    || !session.matches(&self.executable, &self.model, &request, &context)
-                    || !session.history_is_prefix(&request.history)
-            }
-            None => false,
-        };
-        if needs_reset {
-            *session_guard = None;
-        }
-        if session_guard.is_none() {
-            *session_guard = Some(self.start_session(&request, &context)?);
-        }
-
-        let history_to_send = {
-            let session = session_guard
-                .as_ref()
-                .expect("Claude session was just created");
-            match &session.synchronized_history {
-                Some(synchronized) => request.history[synchronized.len()..].to_vec(),
-                None => request.history.clone(),
+        let delta = session_guard.as_ref().and_then(|session| {
+            (!session.in_flight && session.matches(&self.executable, &self.model, &context))
+                .then(|| session.delta_for(&request))
+                .flatten()
+        });
+        let delta = match delta {
+            Some(delta) => delta,
+            None => {
+                *session_guard = Some(self.start_session(&request, &context)?);
+                session_guard
+                    .as_ref()
+                    .and_then(|session| session.delta_for(&request))
+                    .expect("a fresh Claude session accepts any history")
             }
         };
-        let prompt = request.prompt_for_history(&history_to_send);
+        let prompt = request.prompt_for_delta(&delta);
         let result = {
             let session = session_guard.as_mut().expect("Claude session disappeared");
             session.in_flight = true;
@@ -711,7 +868,7 @@ impl ClaudeCodeProvider {
             .expect("Claude session disappeared after a successful response");
         session.in_flight = false;
         session.normalize_usage(&mut response);
-        session.synchronized_history = Some(request.history);
+        session.synchronized = Some(SynchronizedState::from_request(request));
 
         let mut events = Vec::new();
         if !response.text.is_empty() {
@@ -731,12 +888,36 @@ impl ClaudeCodeProvider {
                 .unwrap_or_default()
                 .saturating_add(response.cache_read_input_tokens.unwrap_or_default())
                 .saturating_add(response.cache_creation_input_tokens.unwrap_or_default());
-            events.push(ChatEvent::TokenUsage {
-                prompt_tokens,
-                completion_tokens: response.output_tokens.unwrap_or_default(),
-                cached_tokens: response.cache_read_input_tokens,
-                cost: None,
-            });
+            let cached_tokens = response.cache_read_input_tokens;
+            // Bone reads context size from the last usage event. When the CLI
+            // made several API calls, report the earlier calls first so totals
+            // stay exact, then the final call, whose prompt is the context.
+            let final_call = response
+                .final_call
+                .filter(|call| call.prompt_tokens > 0 && call.prompt_tokens < prompt_tokens);
+            match final_call {
+                Some(call) => {
+                    events.push(ChatEvent::TokenUsage {
+                        prompt_tokens: prompt_tokens - call.prompt_tokens,
+                        completion_tokens: 0,
+                        cached_tokens: cached_tokens
+                            .map(|read| read.saturating_sub(call.cache_read_input_tokens)),
+                        cost: None,
+                    });
+                    events.push(ChatEvent::TokenUsage {
+                        prompt_tokens: call.prompt_tokens,
+                        completion_tokens: response.output_tokens.unwrap_or_default(),
+                        cached_tokens: cached_tokens.map(|_| call.cache_read_input_tokens),
+                        cost: None,
+                    });
+                }
+                None => events.push(ChatEvent::TokenUsage {
+                    prompt_tokens,
+                    completion_tokens: response.output_tokens.unwrap_or_default(),
+                    cached_tokens,
+                    cost: None,
+                }),
+            }
         }
         Ok(Box::pin(stream::iter(events.into_iter().map(Ok))))
     }
@@ -768,7 +949,7 @@ impl ClaudeCodeProvider {
             .arg("--tools")
             .arg("")
             .arg("--system-prompt")
-            .arg(&request.system_prompt)
+            .arg(request.system_prompt())
             .arg("--model")
             .arg(&self.model)
             .arg("--no-session-persistence")
@@ -830,10 +1011,9 @@ impl ClaudeCodeProvider {
             stderr_task: Some(stderr_task),
             executable: self.executable.clone(),
             model: self.model.clone(),
-            system_prompt: request.system_prompt.clone(),
             conversation_id: context.conversation_id,
             cache_scope: context.cache_scope.clone(),
-            synchronized_history: None,
+            synchronized: None,
             in_flight: false,
             cumulative_usage: None,
             _isolated_dir: isolated_dir,

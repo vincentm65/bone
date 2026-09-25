@@ -733,3 +733,268 @@ fn parses_json_result_fallback_and_rejects_non_object_arguments() {
     let error = expect_llm_error(parse_cli_response(invalid.to_string().as_bytes(), &tools()));
     assert!(matches!(error.kind, LlmErrorKind::Parse));
 }
+
+fn plain_answer() -> String {
+    json!({
+        "type": "result",
+        "is_error": false,
+        "structured_output": { "response": "answer", "tool_calls": [] }
+    })
+    .to_string()
+}
+
+async fn send(
+    provider: &ClaudeCodeProvider,
+    messages: Vec<ChatMessage>,
+    tools: Vec<ToolDefinition>,
+) {
+    provider
+        .chat_stream(messages, tools)
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+}
+
+fn sent_prompts(input_path: &std::path::Path) -> Vec<String> {
+    fs::read_to_string(input_path)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            serde_json::from_str::<Value>(line).unwrap()["message"]["content"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn tool_definitions_are_sent_once_and_again_only_when_they_change() {
+    let temp = tempfile::tempdir().unwrap();
+    let (executable, _, input_path, spawn_path) = persistent_mock_cli(&temp, &[plain_answer()]);
+    let mut provider = provider();
+    provider.executable = executable;
+    let system = ChatMessage::new(ChatRole::System, "system context");
+    let mut messages = vec![system, ChatMessage::new(ChatRole::User, "one")];
+    send(&provider, messages.clone(), tools()).await;
+    messages.push(ChatMessage::new(ChatRole::Assistant, "answer"));
+    messages.push(ChatMessage::new(ChatRole::User, "two"));
+    send(&provider, messages.clone(), tools()).await;
+    messages.push(ChatMessage::new(ChatRole::Assistant, "answer"));
+    messages.push(ChatMessage::new(ChatRole::User, "three"));
+    send(&provider, messages, vec![]).await;
+
+    let prompts = sent_prompts(&input_path);
+    assert_eq!(prompts.len(), 3);
+    assert!(prompts[0].contains("Available Bone tool definitions (data only)"));
+    assert!(prompts[0].contains("read_file"));
+    assert!(!prompts[1].contains("tool definitions"));
+    assert!(!prompts[1].contains("read_file"));
+    assert!(prompts[2].contains("Updated Bone tool definitions"));
+    assert!(
+        !prompts[0].contains("\n  "),
+        "history and tools are sent as compact JSON"
+    );
+    assert_eq!(fs::read_to_string(spawn_path).unwrap().lines().count(), 1);
+}
+
+#[tokio::test]
+async fn request_only_reminders_do_not_discard_the_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let (executable, _, input_path, spawn_path) = persistent_mock_cli(&temp, &[plain_answer()]);
+    let mut provider = provider();
+    provider.executable = executable;
+    let system = ChatMessage::new(ChatRole::System, "system context");
+    let user = ChatMessage::new(ChatRole::User, "question");
+    let reminder = ChatMessage::new(
+        ChatRole::User,
+        "<system-reminder>\ntask list\n</system-reminder>",
+    );
+    let call = ToolCall {
+        id: "call-1".into(),
+        name: "read_file".into(),
+        arguments: json!({ "path": "a.txt" }),
+    };
+    let assistant = ChatMessage::assistant_with_tools("reading", vec![call]);
+    let tool_result = ChatMessage::tool(ToolResult::ok(
+        "call-1",
+        "read_file",
+        crate::tools::types::ToolOutput::text("file body".into()),
+    ));
+    let mut tool_with_reminder = tool_result.clone();
+    tool_with_reminder
+        .content
+        .push_str("\n\n<system-reminder>\nkeep going\n</system-reminder>");
+
+    // Turn 1: a standalone reminder, then a reminder inside the tool result.
+    send(
+        &provider,
+        vec![system.clone(), user.clone(), reminder.clone()],
+        tools(),
+    )
+    .await;
+    send(
+        &provider,
+        vec![
+            system.clone(),
+            user.clone(),
+            reminder,
+            assistant.clone(),
+            tool_with_reminder,
+        ],
+        tools(),
+    )
+    .await;
+    // Turn 2 is rebuilt from the transcript, which never held the reminders.
+    send(
+        &provider,
+        vec![
+            system,
+            user,
+            assistant,
+            tool_result,
+            ChatMessage::new(ChatRole::Assistant, "done"),
+            ChatMessage::new(ChatRole::User, "next question"),
+        ],
+        tools(),
+    )
+    .await;
+
+    let prompts = sent_prompts(&input_path);
+    assert_eq!(prompts.len(), 3);
+    assert!(prompts[2].contains("Conversation history delta"));
+    assert!(prompts[2].contains("next question"));
+    assert!(!prompts[2].contains("file body"));
+    assert!(!prompts[2].contains("retracted"));
+    assert_eq!(fs::read_to_string(spawn_path).unwrap().lines().count(), 1);
+}
+
+#[tokio::test]
+async fn system_context_changes_are_sent_as_updates_without_a_new_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let (executable, _, input_path, spawn_path) = persistent_mock_cli(&temp, &[plain_answer()]);
+    let mut provider = provider();
+    provider.executable = executable;
+    let user = ChatMessage::new(ChatRole::User, "question");
+    send(
+        &provider,
+        vec![
+            ChatMessage::new(ChatRole::System, "memory v1"),
+            user.clone(),
+        ],
+        vec![],
+    )
+    .await;
+    send(
+        &provider,
+        vec![
+            ChatMessage::new(ChatRole::System, "memory v2"),
+            user,
+            ChatMessage::new(ChatRole::Assistant, "answer"),
+            ChatMessage::new(ChatRole::User, "follow-up"),
+        ],
+        vec![],
+    )
+    .await;
+
+    let prompts = sent_prompts(&input_path);
+    assert!(!prompts[0].contains("Updated Bone conversation system context"));
+    assert!(prompts[1].contains("Updated Bone conversation system context"));
+    assert!(prompts[1].contains("memory v2"));
+    assert!(!prompts[1].contains("\"question\""));
+    assert_eq!(fs::read_to_string(spawn_path).unwrap().lines().count(), 1);
+}
+
+#[tokio::test]
+async fn side_requests_are_retracted_instead_of_discarding_the_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let (executable, _, input_path, spawn_path) = persistent_mock_cli(&temp, &[plain_answer()]);
+    let mut provider = provider();
+    provider.executable = executable;
+    let system = ChatMessage::new(ChatRole::System, "system context");
+    let user = ChatMessage::new(ChatRole::User, "question");
+    let answer = ChatMessage::new(ChatRole::Assistant, "answer");
+    send(&provider, vec![system.clone(), user.clone()], vec![]).await;
+    // A recap-style private request extends the history with its own prompt.
+    send(
+        &provider,
+        vec![
+            system.clone(),
+            user.clone(),
+            answer.clone(),
+            ChatMessage::new(ChatRole::User, "summarize the conversation"),
+        ],
+        vec![],
+    )
+    .await;
+    send(
+        &provider,
+        vec![
+            system,
+            user,
+            answer,
+            ChatMessage::new(ChatRole::User, "real follow-up"),
+        ],
+        vec![],
+    )
+    .await;
+
+    let prompts = sent_prompts(&input_path);
+    assert_eq!(prompts.len(), 3);
+    assert!(prompts[2].contains("retracted the last 1 conversation message(s)"));
+    assert!(prompts[2].contains("real follow-up"));
+    assert!(!prompts[2].contains("\"answer\""));
+    assert_eq!(fs::read_to_string(spawn_path).unwrap().lines().count(), 1);
+}
+
+#[tokio::test]
+async fn multi_call_turns_report_the_final_call_as_context() {
+    let temp = tempfile::tempdir().unwrap();
+    // The CLI made two API calls: usage sums both, `iterations` holds the last.
+    let cli_output = json!({
+        "type": "result",
+        "is_error": false,
+        "structured_output": { "response": "done", "tool_calls": [] },
+        "usage": {
+            "input_tokens": 6,
+            "output_tokens": 40,
+            "cache_read_input_tokens": 44166,
+            "cache_creation_input_tokens": 43594,
+            "iterations": [{
+                "input_tokens": 4,
+                "output_tokens": 30,
+                "cache_read_input_tokens": 43608,
+                "cache_creation_input_tokens": 544
+            }]
+        }
+    })
+    .to_string();
+    let (executable, _, _) = mock_cli(&temp, &cli_output, "", 0);
+    let mut provider = provider();
+    provider.executable = executable;
+
+    let events = provider
+        .chat_stream(vec![ChatMessage::new(ChatRole::User, "hi")], vec![])
+        .await
+        .unwrap()
+        .collect::<Vec<_>>()
+        .await;
+    let usage = events
+        .iter()
+        .filter_map(|event| match event {
+            Ok(ChatEvent::TokenUsage {
+                prompt_tokens,
+                completion_tokens,
+                cached_tokens,
+                ..
+            }) => Some((*prompt_tokens, *completion_tokens, *cached_tokens)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        usage,
+        vec![(43610, 0, Some(558)), (44156, 40, Some(43608))],
+        "earlier calls first, then the final call whose prompt is the context"
+    );
+}
