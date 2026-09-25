@@ -1243,10 +1243,10 @@ impl Tab {
         self.history_index = None;
     }
 
-    /// Submit an idle composer behind prompts already queued (text-only, like
-    /// `enqueue_composer`).
+    /// Submit an idle composer behind prompts already queued. The queue is
+    /// text-only, so a draft with attachments is sent directly.
     fn submit_composer_in_order(&mut self) {
-        if self.queue.is_empty() {
+        if self.queue.is_empty() || !self.attachments.is_empty() {
             self.submit_composer();
             return;
         }
@@ -10898,6 +10898,29 @@ mod tests {
         tab.drain_queue();
         assert_eq!(tab.queue.len(), 1, "draft keeps the queue waiting");
         assert_eq!(tab.composer, "draft");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn image_submit_is_sent_directly_ahead_of_text_queue() {
+        let ctx = egui::Context::default();
+        let (mut app, dir) = fresh_app(&ctx, "queueimage");
+        let tab = &mut app.tabs[0];
+        tab.connected = true;
+        tab.state.ready = true;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tab.commands = tx;
+        tab.queue.push_back("queued".into());
+        tab.attachments
+            .push(Attachment::from_file("a.png", vec![1, 2, 3]).unwrap());
+
+        tab.submit_composer_in_order();
+
+        assert!(tab.attachments.is_empty());
+        assert_eq!(tab.queue.front().map(String::as_str), Some("queued"));
+        assert!(
+            matches!(rx.try_recv(), Ok(Command::Send(RuntimeCommand::SubmitPrompt { images, .. })) if images.len() == 1)
+        );
         std::fs::remove_dir_all(&dir).unwrap();
     }
 

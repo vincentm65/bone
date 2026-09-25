@@ -222,11 +222,15 @@ fn hidden_history_marker() -> Message {
     Message::system("… earlier rows hidden (ui.history_rows); full history is kept in the session")
 }
 
+fn history_window_rows(history_rows: u32) -> Option<u32> {
+    (history_rows > 0).then_some(history_rows.saturating_add(1))
+}
+
 /// Move a non-empty draft behind already queued prompts so Enter cannot jump
-/// the queue. Attachments are dropped, as for any queued prompt.
+/// the queue. Drafts with images are sent directly: the queue is text-only.
 fn queue_draft_behind(input: &mut InputState, queue: &mut VecDeque<String>) -> bool {
     let text = input.expanded().trim().to_string();
-    if queue.is_empty() || text.is_empty() {
+    if queue.is_empty() || !input.images().is_empty() || text.is_empty() {
         return false;
     }
     queue.push_back(text);
@@ -1926,10 +1930,10 @@ impl App {
 
     fn replace_transcript(&mut self, transcript: Vec<ChatMessage>) {
         let mut rows = self.rebuild_scrollback_from_transcript(&transcript);
-        // A windowed load returns at most `cap` messages, so a full window
-        // means older ones may exist; an in-process runtime ignores the window.
+        // A windowed load returns at most `cap + 1` probe messages; only a
+        // result beyond the configured cap means older ones may exist.
         let cap = self.user_config.history_rows as usize;
-        if cap > 0 && transcript.len() >= cap {
+        if cap > 0 && transcript.len() > cap {
             let n = rows.len().saturating_sub(cap - 1);
             rows.splice(..n, [hidden_history_marker()]);
         }
@@ -1939,7 +1943,7 @@ impl App {
     }
 
     fn history_window(&self) -> Option<u32> {
-        (self.user_config.history_rows > 0).then_some(self.user_config.history_rows)
+        history_window_rows(self.user_config.history_rows)
     }
 
     /// Replace rows beyond `ui.history_rows` that are already in native

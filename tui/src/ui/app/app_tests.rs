@@ -3,9 +3,9 @@ use super::{
     App, ConfigView, PendingApproval, TerminalBackgroundTransition, WireTools, apply_queue_nav_key,
     approval_already_pending, assistant_display_message, background_pane_needs_refresh,
     config_approval_is, config_rejection_message, configured_input_style, edit_diff_message,
-    history_trim_count, queue_draft_behind,
-    idle_state_needs_redraw, job_quit_confirmation_required, job_snapshot_messages,
-    lua_config_available, orphaned_tool_result_row, parse_config_value, prepare_streaming_replay,
+    history_trim_count, history_window_rows, idle_state_needs_redraw,
+    job_quit_confirmation_required, job_snapshot_messages, lua_config_available,
+    orphaned_tool_result_row, parse_config_value, prepare_streaming_replay, queue_draft_behind,
     render_config_page, run_insertion_lifecycle, should_open_agent_log, stream::is_retry_status,
     streaming_rebuild_index, take_pending_config, take_terminal_width_change,
     terminal_background_transition, terminal_dimensions_changed,
@@ -1417,4 +1417,22 @@ fn enter_with_queued_prompts_puts_the_draft_last() {
     };
     assert!(!queue_draft_behind(&mut input, &mut VecDeque::new()));
     assert_eq!(input.buffer, "C", "nothing queued: the draft is sent directly");
+}
+
+#[test]
+fn image_draft_is_sent_directly_instead_of_queued() {
+    let mut queue = VecDeque::from(["A".to_string()]);
+    let mut input = InputState::default();
+    input.insert_image(Default::default());
+
+    assert!(!queue_draft_behind(&mut input, &mut queue));
+    assert_eq!(queue, VecDeque::from(["A".to_string()]));
+    assert!(input.has_images(), "the image stays in the draft to be sent");
+}
+
+#[test]
+fn history_window_probes_one_row_without_windowing_unbounded_history() {
+    assert_eq!(history_window_rows(0), None);
+    assert_eq!(history_window_rows(5), Some(6));
+    assert_eq!(history_window_rows(u32::MAX), Some(u32::MAX));
 }
