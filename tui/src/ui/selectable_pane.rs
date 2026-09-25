@@ -52,9 +52,10 @@ pub(crate) fn apply_nav_key(
     }
 }
 
-/// Treat submitted inputs and agent rows as one vertical navigation sequence.
+/// Treat submitted inputs and pane rows as one vertical navigation sequence.
 /// The pane sits below the input: Down walks history back to live input before
 /// entering the pane at its top row; Up leaves the top row for live input.
+/// `k` cancels only while the pane is focused so it stays typeable otherwise.
 pub(crate) fn apply_agent_nav_key(
     code: KeyCode,
     modifiers: KeyModifiers,
@@ -104,6 +105,7 @@ pub(crate) fn apply_agent_nav_key(
                 SelectablePaneAction::InputChanged
             }
         }
+        KeyCode::Char('k') if !*pane_focused => SelectablePaneAction::Unhandled,
         _ => apply_nav_key(code, modifiers, active_ids, selected_id, allow_open),
     }
 }

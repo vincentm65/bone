@@ -26,7 +26,7 @@ use super::input::{InputAction, InputState};
 use super::pane_page::PanePage;
 use super::prompt::{Decision, Prompt};
 use super::render::{BoneTerminal, MAX_PANE_ROWS, PaneDraw, PaneSizing, Renderer, StatusInfo};
-use super::selectable_pane::{SelectablePaneAction, apply_agent_nav_key, apply_nav_key};
+use super::selectable_pane::{SelectablePaneAction, apply_agent_nav_key};
 
 fn should_open_agent_log(input: &InputState) -> bool {
     input.buffer.trim().is_empty()
@@ -766,6 +766,8 @@ pub struct App {
     agent_list_focused: bool,
     /// Process selected in the native Processes pane.
     selected_process_id: Option<String>,
+    /// Whether Up/Down currently navigates process rows rather than input history.
+    process_list_focused: bool,
     /// Set after the user was warned that quitting a local runtime kills
     /// running sub-agent jobs; the next quit request goes through.
     quit_despite_jobs: bool,
@@ -887,6 +889,7 @@ impl App {
             selected_job_id: None,
             agent_list_focused: false,
             selected_process_id: None,
+            process_list_focused: false,
             quit_despite_jobs: false,
             terminal_bg_set: false,
             published_terminal_width: None,
@@ -1987,6 +1990,8 @@ impl App {
         self.processes_seen_version = u64::MAX;
         self.selected_job_id = None;
         self.selected_process_id = None;
+        self.agent_list_focused = false;
+        self.process_list_focused = false;
         if clear_queue {
             self.queue.clear();
             self.queue_selected = 0;
@@ -2832,15 +2837,20 @@ impl App {
             .map(|process| process.id.clone())
             .collect();
         crate::ui::selectable_pane::reconcile_selection(&mut self.selected_process_id, &all_ids);
+        let visible_selection = self
+            .process_list_focused
+            .then_some(self.selected_process_id.as_deref())
+            .flatten();
         if let Some(page) = crate::ui::processes_pane::render(
             &self.renderer.theme,
             &self.processes,
-            self.selected_process_id.as_deref(),
+            visible_selection,
         ) {
             let (_, new_active) = PanePage::upsert(&mut self.pages, self.active_page, page);
             self.active_page = new_active;
             self.panes_visible = true;
         } else {
+            self.process_list_focused = false;
             self.active_page = PanePage::remove(
                 &mut self.pages,
                 crate::ui::processes_pane::PANE_SOURCE,
@@ -3122,8 +3132,9 @@ impl App {
                 self.handle_key(key.code, key.modifiers, term).await
             }
             Event::Paste(text) => {
-                if self.agent_list_focused {
+                if self.agent_list_focused || self.process_list_focused {
                     self.agent_list_focused = false;
+                    self.process_list_focused = false;
                     self.refresh_jobs_pane();
                 }
                 self.input.insert_paste(&text);
@@ -3275,14 +3286,31 @@ impl App {
 
         if self.processes_pane_active() {
             let active_ids = process_ids(&self.processes);
-            match apply_nav_key(
-                code,
-                modifiers,
-                &active_ids,
-                &mut self.selected_process_id,
-                should_open_agent_log(&self.input),
-            ) {
-                SelectablePaneAction::Unhandled | SelectablePaneAction::InputChanged => {}
+            let allow_open = should_open_agent_log(&self.input);
+            let was_process_list_focused = self.process_list_focused;
+            let action =
+                if self.autocomplete.is_none() || !matches!(code, KeyCode::Up | KeyCode::Down) {
+                    apply_agent_nav_key(
+                        code,
+                        modifiers,
+                        &active_ids,
+                        &mut self.selected_process_id,
+                        &mut self.input,
+                        &mut self.process_list_focused,
+                        allow_open,
+                    )
+                } else {
+                    SelectablePaneAction::Unhandled
+                };
+            match action {
+                SelectablePaneAction::Unhandled => {}
+                SelectablePaneAction::InputChanged => {
+                    if was_process_list_focused != self.process_list_focused {
+                        self.refresh_jobs_pane();
+                    }
+                    self.update_autocomplete();
+                    return self.redraw(term);
+                }
                 SelectablePaneAction::SelectionChanged => {
                     self.refresh_jobs_pane();
                     return self.redraw(term);
@@ -3413,8 +3441,11 @@ impl App {
         }
 
         // Editing the prompt returns arrow navigation to input history.
-        if !matches!(code, KeyCode::Up | KeyCode::Down) && self.agent_list_focused {
+        if !matches!(code, KeyCode::Up | KeyCode::Down)
+            && (self.agent_list_focused || self.process_list_focused)
+        {
             self.agent_list_focused = false;
+            self.process_list_focused = false;
             self.refresh_jobs_pane();
         }
 

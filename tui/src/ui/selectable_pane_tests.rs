@@ -272,3 +272,38 @@ fn render_marks_selection_and_scrolls_it_into_view() {
     assert!(page.content[9].to_string().contains('›'));
     assert_eq!(page.content[9].style.bg, Some(theme.palette.selection));
 }
+
+#[test]
+fn k_types_into_input_unless_pane_is_focused() {
+    let ids = vec!["item".into()];
+    let mut selected = Some("item".into());
+    let mut input = InputState::default();
+    let mut pane_focused = false;
+
+    assert_eq!(
+        apply_agent_nav_key(
+            KeyCode::Char('k'),
+            KeyModifiers::NONE,
+            &ids,
+            &mut selected,
+            &mut input,
+            &mut pane_focused,
+            true,
+        ),
+        SelectablePaneAction::Unhandled
+    );
+
+    pane_focused = true;
+    assert_eq!(
+        apply_agent_nav_key(
+            KeyCode::Char('k'),
+            KeyModifiers::NONE,
+            &ids,
+            &mut selected,
+            &mut input,
+            &mut pane_focused,
+            true,
+        ),
+        SelectablePaneAction::Cancel("item".into())
+    );
+}

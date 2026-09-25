@@ -7,7 +7,7 @@ use crate::tools::{ApprovalMode, Tool, ToolCall};
 use crate::ui::input::{InputAction, InputState};
 use crate::ui::pane_page::PanePage;
 use crate::ui::render::{BoneTerminal, PaneDraw};
-use crate::ui::selectable_pane::{SelectablePaneAction, apply_agent_nav_key, apply_nav_key};
+use crate::ui::selectable_pane::{SelectablePaneAction, apply_agent_nav_key};
 use crate::ui::timing::TimingBlockFilter;
 use crate::ui::tool_display::{build_tool_row, format_shell_call_label};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
@@ -511,6 +511,7 @@ impl App {
                     &mut self.selected_job_id,
                     &mut self.agent_list_focused,
                     &mut self.selected_process_id,
+                    &mut self.process_list_focused,
                     &self.processes,
                     &self.jobs,
                     &mut self.queue_selected,
@@ -824,6 +825,7 @@ impl App {
                     &mut self.selected_job_id,
                     &mut self.agent_list_focused,
                     &mut self.selected_process_id,
+                    &mut self.process_list_focused,
                     &self.processes,
                     &self.jobs,
                     &mut self.queue_selected,
@@ -1674,6 +1676,7 @@ impl App {
         selected_job_id: &mut Option<String>,
         agent_list_focused: &mut bool,
         selected_process_id: &mut Option<String>,
+        process_list_focused: &mut bool,
         processes: &[bone_protocol::ProcessSnapshot],
         jobs: &[bone_protocol::JobSnapshot],
         queue_selected: &mut usize,
@@ -1703,8 +1706,9 @@ impl App {
                             shift: false,
                         });
                     } else {
-                        if *agent_list_focused {
+                        if *agent_list_focused || *process_list_focused {
                             *agent_list_focused = false;
+                            *process_list_focused = false;
                             result.jobs_changed = true;
                         }
                         input.insert_paste(&text);
@@ -1795,15 +1799,24 @@ impl App {
                             .is_some_and(|p| p.source == crate::ui::processes_pane::PANE_SOURCE);
                     if processes_active {
                         let active_ids = process_ids(processes);
-                        match apply_nav_key(
+                        let allow_open = should_open_agent_log(input);
+                        let was_process_list_focused = *process_list_focused;
+                        match apply_agent_nav_key(
                             key.code,
                             key.modifiers,
                             &active_ids,
                             selected_process_id,
-                            should_open_agent_log(input),
+                            input,
+                            process_list_focused,
+                            allow_open,
                         ) {
-                            SelectablePaneAction::Unhandled
-                            | SelectablePaneAction::InputChanged => {}
+                            SelectablePaneAction::Unhandled => {}
+                            SelectablePaneAction::InputChanged => {
+                                if was_process_list_focused != *process_list_focused {
+                                    result.processes_changed = true;
+                                }
+                                continue;
+                            }
                             SelectablePaneAction::SelectionChanged => {
                                 result.processes_changed = true;
                                 continue;
@@ -1880,8 +1893,11 @@ impl App {
                     {
                         continue;
                     }
-                    if !matches!(key.code, KeyCode::Up | KeyCode::Down) && *agent_list_focused {
+                    if !matches!(key.code, KeyCode::Up | KeyCode::Down)
+                        && (*agent_list_focused || *process_list_focused)
+                    {
                         *agent_list_focused = false;
+                        *process_list_focused = false;
                         result.jobs_changed = true;
                     }
                     let mut next = Some(Event::Key(key));
