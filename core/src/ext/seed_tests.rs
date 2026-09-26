@@ -35,7 +35,7 @@ fn catalog_extensions_are_not_bundled_defaults() {
         "task_list should be installed only through the catalog"
     );
 
-    for stem in ["compact", "memory", "usage"] {
+    for stem in ["compact", "usage"] {
         assert!(
             !bundled(&format!("{stem}/init.lua")),
             "{stem} should not be embedded as a bundled default"

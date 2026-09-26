@@ -171,7 +171,7 @@ impl CatalogEntry {
     }
 
     /// Primary file path relative to the catalog root. Tools and commands are
-    /// single files (`tools/weather.lua`, `commands/memory.lua`); a plugin's
+    /// single files (`tools/weather.lua`, `commands/example.lua`); a plugin's
     /// entry point is its package entry (`plugins/<name>/init.lua`).
     fn catalog_rel(&self) -> String {
         if self.is_plugin() {

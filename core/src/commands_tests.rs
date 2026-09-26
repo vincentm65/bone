@@ -25,7 +25,7 @@ fn only_builtin_commands_are_protected() {
         );
     }
 
-    for command in ["agents", "compact", "context", "usage", "memory", "review"] {
+    for command in ["agents", "compact", "context", "usage", "review"] {
         assert!(
             !is_protected_builtin(command),
             "/{command} should be overridable"

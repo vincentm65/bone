@@ -461,7 +461,7 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
     // managed context and authoritative transcript are available.
     // Any delegated agent (depth > 0) gets the runtime's headless contract
     // wrapped around the caller-supplied persona — independent of which tool or
-    // command dispatched it (subagent, compact, memory, shotgun).
+    // command dispatched it (subagent, compact, shotgun).
     let system_prompt_override = if request.agent_depth > 0 {
         Some(crate::llm::prompts::headless_agent_system_prompt(
             request.system_prompt.as_deref(),
