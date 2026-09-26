@@ -59,10 +59,11 @@ but must not redefine core ownership or protocol contracts.
 
 ## Generated and bundled files
 
-The theme role table in `docs/configuration.md` is generated from the Rust theme
-registry. Keep its `BEGIN GENERATED THEME ROLES` and `END GENERATED THEME ROLES`
-markers unchanged, update the generator/test target if the document moves, and
-run the theme documentation test.
+The theme role table in `docs/configuration.md` mirrors the Rust theme registry
+in `core/src/config/theme.rs`. Keep its `BEGIN GENERATED THEME ROLES` and
+`END GENERATED THEME ROLES` markers, and update the table by hand in the same
+change whenever a theme role is added, removed, or retyped — no test regenerates
+it, so verify the table against `theme.rs` manually.
 
 Bundled docs are compiled with `include_str!`; adding or renaming a topic requires
 updating the synchronization list and its tests. Verify both missing-file

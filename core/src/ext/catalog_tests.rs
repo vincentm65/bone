@@ -197,6 +197,29 @@ fn plugin_names_reject_lua_suffix_and_unsafe_segments() {
 }
 
 #[test]
+fn catalog_entries_reject_the_reserved_core_package_name() {
+    // `core` is the built-in lua/core package; no catalog item may claim it.
+    assert!(
+        plugin_entry("core").validate().is_err(),
+        "accepted a plugin named after the built-in core package"
+    );
+    // Tools and commands install under their file stem, so `core.lua`
+    // collides with the core package just the same.
+    for kind in ["tool", "command"] {
+        let entry = CatalogEntry {
+            name: "core.lua".into(),
+            kind: kind.into(),
+            ..CatalogEntry::default()
+        };
+        assert!(
+            entry.validate().is_err(),
+            "accepted {kind} name {:?} for the built-in core package",
+            entry.name
+        );
+    }
+}
+
+#[test]
 fn plugin_entries_survive_index_round_trip() {
     let json = br#"[
         { "name": "myplugin", "kind": "plugin", "description": "d",

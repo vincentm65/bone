@@ -391,7 +391,11 @@ impl ConfigStore {
             .collect();
         command_names.sort();
         command_names.dedup();
-        let mut plugin_names: Vec<_> = plugin_names.to_vec();
+        let mut plugin_names: Vec<_> = plugin_names
+            .iter()
+            .filter(|name| **name != crate::ext::BUNDLED_CORE_DIR)
+            .cloned()
+            .collect();
         plugin_names.sort();
         plugin_names.dedup();
 
@@ -851,6 +855,12 @@ impl ConfigStore {
         expected: u64,
     ) -> Result<(), (u64, String)> {
         let file = super::settings::settings_path();
+        if namespace == "plugins" && name == crate::ext::BUNDLED_CORE_DIR {
+            return Err((
+                expected,
+                "the built-in lua/core is always loaded and cannot be enabled or disabled".into(),
+            ));
+        }
         self.mutate(expected, |inner| {
             let mut disabled = match namespace {
                 "tools" => inner.disabled_tools.clone(),

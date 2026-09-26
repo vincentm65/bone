@@ -155,9 +155,18 @@ fn main() {
 
     emit_build_identity(&manifest_dir);
 
-    // Every bundled default is a plugin *package*:
-    // `defaults/lua/plugins/<name>/init.lua` plus its submodules. Names are
-    // package-relative (`core/init.lua`, `core/lib/ui/menu.lua`).
+    // Bone-owned core Lua lives separately from installable plugin packages.
+    // Core names are relative to `defaults/lua/core` (`init.lua`,
+    // `lib/ui/menu.lua`); plugin names are relative to
+    // `defaults/lua/plugins` (`<name>/init.lua`).
+    generate_lua_table(
+        &manifest_dir,
+        &out_dir,
+        "defaults/lua/core",
+        "default_lua_core.rs",
+        "DEFAULT_LUA_CORE",
+        true,
+    );
     generate_lua_table(
         &manifest_dir,
         &out_dir,

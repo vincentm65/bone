@@ -69,51 +69,43 @@ fn user_authored_plugins_load_even_with_restrictive_selection() {
 }
 
 #[test]
-fn allow_filter_seeds_only_named_packages() {
+fn optional_selection_does_not_affect_core_seeding() {
     let dir = std::env::temp_dir().join(format!(
-        "bone-seed-test-{}-{:?}",
+        "bone-seed-split-test-{}-{:?}",
         std::process::id(),
         std::thread::current().id()
     ));
     let _ = std::fs::remove_dir_all(&dir);
 
-    // Only `core` ships bundled today, so exercise the package-selection logic
-    // (as `seed_default_lua_plugins` drives it) against a synthetic list.
-    let bundled: &[(&'static str, &'static str)] =
-        &[("core/init.lua", "core"), ("extra/init.lua", "extra")];
-
-    // Selecting only `extra` still seeds the always-on `core` package.
-    let allow: HashSet<String> = std::iter::once("extra".to_string()).collect();
-    let keep = |name: &str| {
-        let package = bundled_plugin_of(name);
-        package == BUNDLED_CORE_PLUGIN || allow.contains(package)
-    };
-    seed_default_lua(&dir, bundled, keep, false);
-    assert!(dir.join("core/init.lua").exists(), "core is always seeded");
-    assert!(
-        dir.join("extra/init.lua").exists(),
-        "selected package seeded"
-    );
-
-    // Selecting nothing seeds `core` and excludes every optional package.
-    let dir2 = dir.join("none");
+    // An empty selection (everything deselected) still materializes the whole
+    // Bone-owned core package.
     let allow: HashSet<String> = HashSet::new();
-    let keep = |name: &str| {
-        let package = bundled_plugin_of(name);
-        package == BUNDLED_CORE_PLUGIN || allow.contains(package)
-    };
-    seed_default_lua(&dir2, bundled, keep, false);
-    assert!(dir2.join("core/init.lua").exists());
+    seed_default_lua_core(&dir.join("core"), false);
+    seed_default_lua_plugins(&dir.join("plugins"), Some(&allow), false);
+
+    for (name, _) in DEFAULT_LUA_CORE {
+        assert!(
+            dir.join("core").join(name).exists(),
+            "core {name} is always seeded regardless of optional selection"
+        );
+    }
+    // Core is a separate embedded table and never an optional plugin package.
     assert!(
-        !dir2.join("extra/init.lua").exists(),
-        "an unselected package must not be seeded"
+        !DEFAULT_LUA_PLUGINS
+            .iter()
+            .any(|(name, _)| bundled_plugin_of(name) == BUNDLED_CORE_DIR),
+        "core must not appear among the optional bundled plugins"
+    );
+    assert!(
+        !dir.join("plugins").join(BUNDLED_CORE_DIR).exists(),
+        "core must not be seeded under lua/plugins"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
-fn seed_default_lua_plugins_always_seeds_core() {
+fn seed_default_lua_core_seeds_every_core_file() {
     let dir = std::env::temp_dir().join(format!(
         "bone-seed-core-test-{}-{:?}",
         std::process::id(),
@@ -121,17 +113,11 @@ fn seed_default_lua_plugins_always_seeds_core() {
     ));
     let _ = std::fs::remove_dir_all(&dir);
 
-    // An empty selection (everything deselected) still materializes the whole
-    // bundled `core` package.
-    let allow: HashSet<String> = HashSet::new();
-    seed_default_lua_plugins(&dir, Some(&allow), false);
-    for (name, _) in DEFAULT_LUA_PLUGINS {
-        assert!(
-            dir.join(name).exists(),
-            "bundled {name} should be seeded even with an empty selection"
-        );
+    seed_default_lua_core(&dir, false);
+    for (name, _) in DEFAULT_LUA_CORE {
+        assert!(dir.join(name).exists(), "core {name} should be seeded");
     }
-    assert!(dir.join("core/init.lua").exists());
+    assert!(dir.join("init.lua").exists());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -145,12 +131,15 @@ fn force_overwrites_existing_file() {
     ));
     let _ = std::fs::remove_dir_all(&dir);
 
-    let (first, content) = DEFAULT_LUA_PLUGINS[0];
-    std::fs::create_dir_all(dir.join("core")).unwrap();
+    let &(first, content) = DEFAULT_LUA_CORE
+        .iter()
+        .find(|(name, _)| *name == "init.lua")
+        .expect("core init.lua is bundled");
+    std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join(first), "-- user edit with canonical-config-v7\n").unwrap();
 
     // Without force, an existing current-format file is left untouched.
-    seed_default_lua_plugins(&dir, None, false);
+    seed_default_lua_core(&dir, false);
     assert_eq!(
         std::fs::read_to_string(dir.join(first)).unwrap(),
         "-- user edit with canonical-config-v7\n",
@@ -158,7 +147,7 @@ fn force_overwrites_existing_file() {
     );
 
     // With force, the bundled default replaces it.
-    seed_default_lua_plugins(&dir, None, true);
+    seed_default_lua_core(&dir, true);
     assert_eq!(
         std::fs::read_to_string(dir.join(first)).unwrap(),
         content,
@@ -180,12 +169,12 @@ fn bundled_ui_seeds_refresh_pre_feature_copies() {
 
     let history = dir.join("history.lua");
     std::fs::write(&history, "-- old history helper\n").unwrap();
-    assert!(should_refresh_seeded_lua(&history, "core/lib/history.lua").unwrap());
+    assert!(should_refresh_seeded_lua(&history, "lib/history.lua").unwrap());
 
     // Older history helpers that already had token counts still need the
     // candidate-first list query refresh.
     std::fs::write(&history, "function M.list() return total_token_count end\n").unwrap();
-    assert!(should_refresh_seeded_lua(&history, "core/lib/history.lua").unwrap());
+    assert!(should_refresh_seeded_lua(&history, "lib/history.lua").unwrap());
 
     let menu = dir.join("menu.lua");
     std::fs::write(
@@ -193,7 +182,7 @@ fn bundled_ui_seeds_refresh_pre_feature_copies() {
         "local pane = require(\"ui.pane\")\n-- SELECTED_BG description_spans label_modifiers\n",
     )
     .unwrap();
-    assert!(should_refresh_seeded_lua(&menu, "core/lib/ui/menu.lua").unwrap());
+    assert!(should_refresh_seeded_lua(&menu, "lib/ui/menu.lua").unwrap());
 
     std::fs::write(
         &menu,
@@ -201,7 +190,7 @@ fn bundled_ui_seeds_refresh_pre_feature_copies() {
     )
     .unwrap();
     assert!(
-        should_refresh_seeded_lua(&menu, "core/lib/ui/menu.lua").unwrap(),
+        should_refresh_seeded_lua(&menu, "lib/ui/menu.lua").unwrap(),
         "menus predating content-aware preview sizing should refresh"
     );
 
@@ -210,43 +199,47 @@ fn bundled_ui_seeds_refresh_pre_feature_copies() {
         "require(\"ui.pane\") -- SELECTED_BG description_spans label_modifiers initial_checked preview_row_budget multi-space-toggle-v2\n",
     )
     .unwrap();
-    assert!(!should_refresh_seeded_lua(&menu, "core/lib/ui/menu.lua").unwrap());
+    assert!(!should_refresh_seeded_lua(&menu, "lib/ui/menu.lua").unwrap());
 
     let config = dir.join("config.lua");
     std::fs::write(&config, "-- old config command\n").unwrap();
-    assert!(!should_refresh_seeded_lua(&config, "core/init.lua").unwrap());
+    assert!(!should_refresh_seeded_lua(&config, "init.lua").unwrap());
     std::fs::write(&config, "-- canonical-config-v2\n").unwrap();
-    assert!(!should_refresh_seeded_lua(&config, "core/init.lua").unwrap());
+    assert!(!should_refresh_seeded_lua(&config, "init.lua").unwrap());
     std::fs::write(&config, "-- canonical-config-v3\n").unwrap();
-    assert!(!should_refresh_seeded_lua(&config, "core/init.lua").unwrap());
+    assert!(!should_refresh_seeded_lua(&config, "init.lua").unwrap());
     std::fs::write(&config, "-- canonical-config-v4\n").unwrap();
-    assert!(!should_refresh_seeded_lua(&config, "core/init.lua").unwrap());
+    assert!(!should_refresh_seeded_lua(&config, "init.lua").unwrap());
     std::fs::write(&config, "-- canonical-config-v5\n").unwrap();
-    assert!(!should_refresh_seeded_lua(&config, "core/init.lua").unwrap());
+    assert!(!should_refresh_seeded_lua(&config, "init.lua").unwrap());
     std::fs::write(&config, "-- canonical-config-v6\n-- user customization\n").unwrap();
     assert!(
-        !should_refresh_seeded_lua(&config, "core/init.lua").unwrap(),
+        !should_refresh_seeded_lua(&config, "init.lua").unwrap(),
         "customized v6 config must be preserved"
     );
     std::fs::write(&config, "-- canonical-config-v7\n").unwrap();
-    assert!(!should_refresh_seeded_lua(&config, "core/init.lua").unwrap());
+    assert!(!should_refresh_seeded_lua(&config, "init.lua").unwrap());
     // v8 is now a legacy seed too: the pristine digest (see
     // CANONICAL_CONFIG_V8_SHA256) refreshes, but any edited v8 the user has
     // changed — even one keeping the marker — is preserved.
     std::fs::write(&config, "-- canonical-config-v8\n").unwrap();
-    assert!(!should_refresh_seeded_lua(&config, "core/init.lua").unwrap());
+    assert!(!should_refresh_seeded_lua(&config, "init.lua").unwrap());
     std::fs::write(&config, "-- canonical-config-v8\n-- user customization\n").unwrap();
     assert!(
-        !should_refresh_seeded_lua(&config, "core/init.lua").unwrap(),
+        !should_refresh_seeded_lua(&config, "init.lua").unwrap(),
         "edited v8 config must be preserved"
     );
+    // v9: only the exact pre-88ba547 seed digest refreshes; the marker alone
+    // (including the current bundled file) never does.
+    std::fs::write(&config, "-- canonical-config-v9\n").unwrap();
+    assert!(!should_refresh_seeded_lua(&config, "init.lua").unwrap());
 
     let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
 fn bundled_seed_names_use_forward_slashes() {
-    for (name, _) in DEFAULT_LUA_PLUGINS {
+    for (name, _) in DEFAULT_LUA_CORE {
         assert!(
             !name.contains('\\'),
             "bundled seed name {name:?} must use `/`, because refresh rules match literal forward-slash paths"
@@ -254,12 +247,12 @@ fn bundled_seed_names_use_forward_slashes() {
     }
 
     // Regression: the Windows build used to emit `ui\menu.lua`, so the
-    // `name == "core/lib/ui/menu.lua"` refresh rule below never fired and the
+    // `name == "lib/ui/menu.lua"` refresh rule below never fired and the
     // seeded menu drifted forever.
-    let (name, content) = DEFAULT_LUA_PLUGINS
+    let (name, content) = DEFAULT_LUA_CORE
         .iter()
-        .find(|(name, _)| *name == "core/lib/ui/menu.lua")
-        .expect("bundled plugins include core/lib/ui/menu.lua");
+        .find(|(name, _)| *name == "lib/ui/menu.lua")
+        .expect("bundled core includes lib/ui/menu.lua");
 
     let dir = std::env::temp_dir().join(format!(
         "bone-seed-name-separator-test-{}-{:?}",
@@ -543,9 +536,9 @@ fn migrate_preserves_conflicting_flat_file_as_backup() {
 #[test]
 fn migrate_remaps_pristine_config_command_into_bundled_core() {
     with_migration_root(|lua, _root| {
-        let (_, bundled) = DEFAULT_LUA_PLUGINS
+        let (_, bundled) = DEFAULT_LUA_CORE
             .iter()
-            .find(|(name, _)| *name == "core/init.lua")
+            .find(|(name, _)| *name == "init.lua")
             .expect("core is bundled");
         std::fs::create_dir_all(lua.join("commands")).unwrap();
         std::fs::write(lua.join("commands/config.lua"), bundled).unwrap();
@@ -582,10 +575,10 @@ fn migrate_relocates_legacy_lib_modules() {
     with_migration_root(|lua, _root| {
         // A pristine copy of a bundled module is deleted; an edited one is set
         // aside so it can never shadow the package copy.
-        let (_, exact) = DEFAULT_LUA_PLUGINS
+        let (_, exact) = DEFAULT_LUA_CORE
             .iter()
-            .find(|(name, _)| *name == "core/lib/history.lua")
-            .expect("core/lib/history.lua is bundled");
+            .find(|(name, _)| *name == "lib/history.lua")
+            .expect("core lib/history.lua is bundled");
         std::fs::create_dir_all(lua.join("lib/ui")).unwrap();
         std::fs::write(lua.join("lib/history.lua"), exact).unwrap();
         std::fs::write(lua.join("lib/ui/menu.lua"), "-- customized menu\n").unwrap();
@@ -710,6 +703,173 @@ fn plugin_owner_global_is_reset_after_load() {
             .unwrap()
             .is_none(),
         "_plugin_owner leaked past plugin execution"
+    );
+}
+
+// ── Built-in core loading ────────────────────────────────────────────────────
+
+const CORE_TOOL_LUA: &str = r#"bone.tool.register({ name = "core_tool", description = "d", parameters = {}, execute = function() return "ok" end })"#;
+
+#[test]
+fn core_init_loads_without_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let core = dir.path().join("core");
+    std::fs::create_dir_all(&core).unwrap();
+    std::fs::write(core.join("init.lua"), CORE_TOOL_LUA).unwrap();
+
+    let lua = plugin_test_lua();
+    run_lua_core_file(&lua, &core).unwrap();
+
+    // Core registrations carry no plugin owner.
+    assert_eq!(registered_tool_plugins(&lua), vec![None]);
+    let bone: mlua::Table = lua.globals().get("bone").unwrap();
+    assert!(
+        bone.get::<Option<String>>("_plugin_owner")
+            .unwrap()
+            .is_none(),
+        "core must leave _plugin_owner unset"
+    );
+}
+
+#[test]
+fn legacy_plugins_core_dir_is_ignored_and_preserved() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugins = dir.path().join("plugins");
+    // A legacy `lua/plugins/core` package (pre-split layout) plus a normal one.
+    std::fs::create_dir_all(plugins.join("core")).unwrap();
+    std::fs::write(plugins.join("core/init.lua"), CORE_TOOL_LUA).unwrap();
+    std::fs::create_dir_all(plugins.join("alpha")).unwrap();
+    std::fs::write(plugins.join("alpha/init.lua"), ALPHA_TOOL_LUA).unwrap();
+
+    // A persisted disabled set may still contain "core"; the legacy dir is
+    // ignored (never executed) and a normal plugin keeps loading.
+    let disabled: std::collections::HashSet<String> = ["core".to_string()].into_iter().collect();
+    let lua = plugin_test_lua();
+    run_lua_plugin_files(&lua, &plugins, Some(&disabled)).unwrap();
+
+    assert_eq!(
+        registered_tool_plugins(&lua),
+        vec![Some("alpha".to_string())],
+        "the legacy plugins/core dir must never execute"
+    );
+    assert!(
+        plugins.join("core/init.lua").exists(),
+        "the legacy plugins/core dir must not be deleted"
+    );
+}
+
+/// A bundled core file that no refresh rule touches, for migration tests.
+fn banner_core_file() -> (&'static str, &'static str) {
+    *DEFAULT_LUA_CORE
+        .iter()
+        .find(|(name, _)| *name == "lib/banner.lua")
+        .expect("bundled lib/banner.lua")
+}
+
+fn write_legacy_core(lua: &std::path::Path, name: &str, content: &str) {
+    let path = lua.join("plugins/core").join(name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, content).unwrap();
+}
+
+#[test]
+fn migrate_legacy_plugins_core_moves_missing_files_and_prunes() {
+    let dir = tempfile::tempdir().unwrap();
+    let lua = dir.path();
+    write_legacy_core(lua, "init.lua", CORE_TOOL_LUA);
+    write_legacy_core(lua, "lib/custom.lua", "return {}\n");
+
+    migrate_legacy_plugins_core(lua);
+    seed_default_lua_core(&lua.join("core"), false);
+
+    assert_eq!(
+        std::fs::read_to_string(lua.join("core/init.lua")).unwrap(),
+        CORE_TOOL_LUA,
+        "a customized legacy init.lua must survive migration and seeding"
+    );
+    assert_eq!(
+        std::fs::read_to_string(lua.join("core/lib/custom.lua")).unwrap(),
+        "return {}\n"
+    );
+    assert!(!lua.join("plugins/core").exists(), "empty legacy dir must be pruned");
+    for (name, _) in DEFAULT_LUA_CORE {
+        assert!(lua.join("core").join(name).exists(), "{name} was not seeded");
+    }
+}
+
+#[test]
+fn migrate_legacy_plugins_core_deletes_identical_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let lua = dir.path();
+    let (name, bundled) = banner_core_file();
+    seed_default_lua_core(&lua.join("core"), false);
+    write_legacy_core(lua, name, bundled);
+
+    migrate_legacy_plugins_core(lua);
+
+    assert_eq!(std::fs::read_to_string(lua.join("core").join(name)).unwrap(), bundled);
+    assert!(!lua.join("plugins/core").exists());
+}
+
+#[test]
+fn migrate_legacy_plugins_core_customized_copy_replaces_pristine_core() {
+    let dir = tempfile::tempdir().unwrap();
+    let lua = dir.path();
+    let (name, _) = banner_core_file();
+    seed_default_lua_core(&lua.join("core"), false);
+    write_legacy_core(lua, name, "-- custom banner\n");
+
+    migrate_legacy_plugins_core(lua);
+
+    assert_eq!(
+        std::fs::read_to_string(lua.join("core").join(name)).unwrap(),
+        "-- custom banner\n"
+    );
+    assert!(!lua.join("plugins/core").exists());
+}
+
+#[test]
+fn migrate_legacy_plugins_core_conflict_sets_legacy_aside() {
+    let dir = tempfile::tempdir().unwrap();
+    let lua = dir.path();
+    let (name, _) = banner_core_file();
+    seed_default_lua_core(&lua.join("core"), false);
+    std::fs::write(lua.join("core").join(name), "-- core edit\n").unwrap();
+    write_legacy_core(lua, name, "-- legacy edit\n");
+
+    migrate_legacy_plugins_core(lua);
+
+    let legacy = lua.join("plugins/core").join(name);
+    let mut backup = legacy.as_os_str().to_os_string();
+    backup.push(".bundled-backup");
+    assert_eq!(
+        std::fs::read_to_string(lua.join("core").join(name)).unwrap(),
+        "-- core edit\n"
+    );
+    assert_eq!(std::fs::read_to_string(backup).unwrap(), "-- legacy edit\n");
+    assert!(!legacy.exists());
+
+    // A second run leaves the backup alone.
+    migrate_legacy_plugins_core(lua);
+    assert_eq!(
+        std::fs::read_to_string(lua.join("core").join(name)).unwrap(),
+        "-- core edit\n"
+    );
+}
+
+#[test]
+fn installed_plugin_names_excludes_core() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugins = dir.path().join("plugins");
+    std::fs::create_dir_all(plugins.join("core")).unwrap();
+    std::fs::write(plugins.join("core/init.lua"), CORE_TOOL_LUA).unwrap();
+    std::fs::create_dir_all(plugins.join("alpha")).unwrap();
+    std::fs::write(plugins.join("alpha/init.lua"), ALPHA_TOOL_LUA).unwrap();
+
+    assert_eq!(
+        installed_plugin_names(&plugins),
+        vec!["alpha".to_string()],
+        "core must never appear among installed plugin names"
     );
 }
 

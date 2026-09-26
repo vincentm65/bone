@@ -43,7 +43,7 @@ pub struct CatalogFile {
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct CatalogEntry {
     /// File name (`"weather.lua"`) for a tool/command, or the package directory
-    /// name (`"core"`) for a plugin.
+    /// name (`"myplugin"`) for a plugin.
     pub name: String,
     /// `"tool"`, `"command"`, or `"plugin"`. All install as plugin packages;
     /// the kind only decides the catalog fetch path and legacy locations.
@@ -99,6 +99,14 @@ impl CatalogEntry {
     fn validate(&self) -> Result<(), String> {
         if !matches!(self.kind.as_str(), "tool" | "command" | "plugin") {
             return Err(format!("invalid catalog kind '{}'", self.kind));
+        }
+        // `core` is the reserved built-in package name; no catalog item may
+        // claim it (every item installs under `plugins/<package>/`).
+        if self.package_name() == super::BUNDLED_CORE_DIR {
+            return Err(format!(
+                "catalog name '{}' collides with the built-in lua/core package",
+                self.name
+            ));
         }
         if self.is_plugin() {
             // A plugin is a directory `plugins/<name>/` whose entry point is

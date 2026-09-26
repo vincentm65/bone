@@ -10,8 +10,6 @@ pub mod theme;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use sha2::{Digest, Sha256};
-
 use crate::ext;
 use crate::tools::ApprovalMode;
 pub use providers_config::{ProviderCredential, ProviderEntry, ProvidersConfig};
@@ -236,25 +234,39 @@ pub fn seed_file_forced(path: &Path, content: &str) {
         ));
     }
 }
-/// The onboarding wizard's persisted choices: which bundled plugin packages the
-/// user opted into. Doubles as the "already onboarded" marker — its presence
-/// means setup has run. Absent it, seeding falls back to "seed everything".
+/// The onboarding wizard's persisted choices: which optional bundled plugin
+/// packages the user opted into. Doubles as the "already onboarded" marker — its
+/// presence means setup has run. Absent it, seeding falls back to "seed
+/// everything".
 ///
-/// The always-on `core` package is seeded regardless of this list. Plugin
-/// packages are the only extension unit: standalone tools and commands are
-/// installed inside a package (`lua/plugins/<name>/init.lua`) and enabled under
-/// the single `plugins` settings namespace.
+/// Bone-owned core is seeded regardless of this list and is never a setup choice.
+/// Plugin packages are the only installable extension unit: standalone tools and
+/// commands are installed inside a package (`lua/plugins/<name>/init.lua`) and
+/// enabled under the single `plugins` settings namespace.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 pub struct SetupSelection {
-    /// Chosen plugin package names, e.g. `["core", "themes"]`.
+    /// Chosen optional plugin package names, e.g. `["themes"]`.
     #[serde(default)]
     pub plugins: Vec<String>,
 }
 
 impl SetupSelection {
-    /// The selected plugin package names as a lookup set.
+    /// Return a normalized selection that cannot represent Bone-owned core.
+    fn normalized(&self) -> Self {
+        let mut plugins: Vec<_> = self
+            .plugins
+            .iter()
+            .filter(|name| name.as_str() != ext::BUNDLED_CORE_DIR)
+            .cloned()
+            .collect();
+        plugins.sort();
+        plugins.dedup();
+        Self { plugins }
+    }
+
+    /// The selected optional plugin package names as a lookup set.
     pub fn plugin_set(&self) -> std::collections::HashSet<String> {
-        self.plugins.iter().cloned().collect()
+        self.normalized().plugins.into_iter().collect()
     }
 }
 
@@ -265,17 +277,21 @@ pub fn setup_selection_path() -> PathBuf {
 /// Load the persisted onboarding selection, if the user has run setup.
 pub fn load_setup_selection() -> Option<SetupSelection> {
     let data = fs::read_to_string(setup_selection_path()).ok()?;
-    serde_json::from_str(&data).ok()
+    let selection: SetupSelection = serde_json::from_str(&data).ok()?;
+    Some(selection.normalized())
 }
 
-/// Persist the onboarding selection (also marks onboarding complete).
+/// Persist the onboarding selection (also marks onboarding complete). Reserved
+/// Bone-owned core is removed before writing, so it cannot become an optional
+/// package selection through an old or programmatically constructed value.
 pub fn save_setup_selection(selection: &SetupSelection) -> std::io::Result<()> {
     let path = setup_selection_path();
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    let selection = selection.normalized();
     let json =
-        serde_json::to_string_pretty(selection).unwrap_or_else(|_| "{\"plugins\":[]}".to_string());
+        serde_json::to_string_pretty(&selection).unwrap_or_else(|_| "{\"plugins\":[]}".to_string());
     fs::write(path, json)
 }
 
@@ -301,92 +317,24 @@ pub fn needs_onboarding() -> bool {
 }
 
 /// Seed the always-safe, selection-independent config (command policy, AGENTS,
-/// and the bundled plugin packages). Idempotent.
+/// docs, Bone-owned core, and bundled optional plugin packages). Idempotent.
 pub fn seed_base() -> Result<(), String> {
     seed_command_policy_if_missing()?;
     sync_agents_md();
     sync_core_docs();
-    migrate_memory_to_catalog(&bone_dir());
+    ext::migrate_legacy_plugins_core(&bone_dir().join("lua"));
+    ext::seed_default_lua_core(&bone_dir().join("lua/core"), false);
     ext::seed_default_lua_plugins(&bone_dir().join("lua/plugins"), None, false);
     ext::migrate_flat_lua_extensions(&bone_dir().join("lua"));
     Ok(())
 }
 
-const MEMORY_CATALOG_MIGRATION_MARKER: &str = ".memory-catalog-migrated";
-const LEGACY_BUNDLED_MEMORY_COMMAND_SHA256: &str =
-    "4da7cd58831fa28cedeec77ade6bdce907d95c7fa667b8c663dcf3ceeefa0ec8";
-
-fn has_sha256(path: &Path, expected: &str) -> bool {
-    let Ok(content) = fs::read(path) else {
-        return false;
-    };
-    format!("{:x}", Sha256::digest(content)) == expected
-}
-
-/// One-time, data-preserving migration for the extraction of `/memory` from
-/// bundled defaults. A known bundled command is renamed to a non-loadable backup;
-/// catalog-installed and customized commands are left untouched. Legacy
-/// `memory.md` is copied only when scoped global memory does not already exist.
-fn migrate_memory_to_catalog(dir: &Path) {
-    migrate_memory_to_catalog_with_hash(dir, LEGACY_BUNDLED_MEMORY_COMMAND_SHA256);
-}
-
-fn migrate_memory_to_catalog_with_hash(dir: &Path, bundled_command_sha256: &str) {
-    let marker = dir.join(MEMORY_CATALOG_MIGRATION_MARKER);
-    if marker.exists() {
-        return;
-    }
-
-    let legacy = dir.join("memory.md");
-    let scoped = dir.join("memory/global.md");
-    let installed_command = dir.join("lua/commands/memory.lua");
-    let bundled_command = has_sha256(&installed_command, bundled_command_sha256);
-    let has_memory = legacy.exists() || dir.join("memory").exists();
-
-    if legacy.exists() && !scoped.exists() {
-        let Some(parent) = scoped.parent() else {
-            return;
-        };
-        if let Err(e) =
-            fs::create_dir_all(parent).and_then(|_| fs::copy(&legacy, &scoped).map(|_| ()))
-        {
-            crate::ext::ctx::runtime_warn(format!(
-                "bone: warning: could not copy legacy memory.md to memory/global.md: {e}"
-            ));
-            return;
-        }
-    }
-
-    if bundled_command {
-        let backup = dir.join("lua/commands/memory.lua.bundled-backup");
-        if let Err(e) = fs::rename(&installed_command, &backup) {
-            crate::ext::ctx::runtime_warn(format!(
-                "bone: warning: could not back up legacy lua/commands/memory.lua: {e}"
-            ));
-            return;
-        }
-    }
-
-    if has_memory || bundled_command {
-        let notice = if bundled_command {
-            "bone: /memory is now an optional bone-catalog extension; the legacy memory.lua command was backed up and existing memory data was preserved"
-        } else {
-            "bone: /memory is now an optional bone-catalog extension; existing memory data was preserved"
-        };
-        crate::ext::ctx::runtime_warn(notice);
-    }
-    if let Err(e) = fs::write(&marker, "memory moved to bone-catalog\n") {
-        crate::ext::ctx::runtime_warn(format!(
-            "bone: warning: could not record /memory migration notice: {e}"
-        ));
-    }
-}
-
-/// Seed base config plus bundled plugin packages, filtered by the onboarding
-/// selection. `None` seeds every bundled package (default / upgrade behavior);
-/// the always-on `core` package is seeded either way.
+/// Seed base config plus bundled optional plugin packages, filtered by the
+/// onboarding selection. `None` seeds every optional package (default / upgrade
+/// behavior); Bone-owned core is seeded independently either way.
 pub fn seed_all_with(selection: Option<&SetupSelection>) -> Result<(), String> {
     seed_base()?;
+    ext::seed_default_lua_core(&bone_dir().join("lua/core"), false);
     let allow = selection.map(SetupSelection::plugin_set);
     ext::seed_default_lua_plugins(&bone_dir().join("lua/plugins"), allow.as_ref(), false);
     Ok(())
@@ -452,11 +400,9 @@ pub fn apply_onboarding(selection: &SetupSelection, init: InitChoice) -> std::io
     }
 
     seed_base().map_err(std::io::Error::other)?;
-    ext::seed_default_lua_plugins(
-        &bone_dir().join("lua/plugins"),
-        Some(&selection.plugin_set()),
-        false,
-    );
+    ext::seed_default_lua_core(&bone_dir().join("lua/core"), false);
+    let plugin_allow = selection.plugin_set();
+    ext::seed_default_lua_plugins(&bone_dir().join("lua/plugins"), Some(&plugin_allow), false);
 
     save_setup_selection(selection)
 }

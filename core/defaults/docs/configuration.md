@@ -18,7 +18,8 @@ The resolved config directory is provided in the system prompt. Its default is
 | `extensions.yaml` | Namespaced extension values |
 | `command-policy.yaml` | Shell command safety classifications |
 | `init.lua` | Optional runtime wiring; also read from `lua/init.lua`; not a competing settings store |
-| `lua/plugins/<name>/` | Plugin packages: `init.lua` plus optional submodules; the only Lua extension layout |
+| `lua/core/` | Bone-owned built-in Lua package: `init.lua` plus `lib/` modules; always seeded and loaded, never a plugin, not enable/disable-able |
+| `lua/plugins/<name>/` | Plugin packages: `init.lua` plus optional submodules; the user Lua extension layout |
 | `lua/themes/` | User theme modules, loaded by `bone.theme.load(name)` |
 | `lua/helpers/` | Native helper binaries invoked by Lua scripts; never auto-loaded; Bone does not create it |
 | `AGENTS.md` and `docs/` | Bone-owned bundled reference documents |

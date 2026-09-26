@@ -19,8 +19,8 @@ TUI / desktop client / headless runner / remote client
 ## Workspace boundaries
 
 - `core` owns the agent loop, providers, tools, approvals, configuration, Lua
-  extensions (plugin packages under `lua/plugins/<name>/`), runtime sessions,
-  jobs, and persistence.
+  extensions (the Bone-owned `lua/core` package and plugin packages under
+  `lua/plugins/<name>/`), runtime sessions, jobs, and persistence.
 - `protocol` owns the serializable commands, events, configuration snapshots,
   session snapshots, tool types, and view types that cross a frontend boundary.
 - `tui` owns the native terminal client and its rendering/input code.
@@ -116,22 +116,27 @@ keeps an isolated Lua VM. A catalog change reloads every cached actor without
 letting `ConfigStore` retain those VMs. Frontends keep the fullscreen workflow
 and rendering, but never substitute their own database or config directory.
 
-Building an actor's Lua VM is an ordered boot: seed the bundled plugin packages
-under `lua/plugins/` and migrate any legacy flat extension files into packages →
-run `init.lua` (config root, then `lua/init.lua`) → run enabled plugin packages
-(`lua/plugins/*/init.lua`, one level, sorted) → collect the registered tools and
-commands. A plugin is skipped when disabled via the canonical `plugins.<name>`
-setting; disabling never deletes files, and because reload rebuilds a fresh VM
-the change takes effect on the next reload. `require` resolves against the
-bundled `core` package's `lib/` first, then the user's `lua/lib` (a shared,
-non-seeded module root), and finally each enabled package's own directory, so a
-plugin can `require` its own submodules without shadowing bundled helpers. A
-plugin's `themes/` subdirectory is a theme discovery root behind the user's own
-`lua/themes/`.
+Building an actor's Lua VM is an ordered boot: seed the Bone-owned `lua/core`
+package (always, independent of setup selection and plugin enablement) → seed
+the bundled plugin packages under `lua/plugins/` per the setup selection and
+migrate any legacy flat extension files into packages → run `lua/core/init.lua`
+→ run `init.lua` (config root, then `lua/init.lua`) → run enabled plugin
+packages (`lua/plugins/*/init.lua`, one level, sorted) → collect the registered
+tools and commands. The core package is never a plugin: it has no enable/
+disable row, is excluded from `plugins.disabled`, and loads even in sub-agent
+VMs, which still skip user plugins. A plugin is skipped when disabled via the
+canonical `plugins.<name>` setting; disabling never deletes files, and because
+reload rebuilds a fresh VM the change takes effect on the next reload.
+`require` resolves against `lua/core/lib` first, then the user's `lua/lib` (a
+shared, non-seeded module root), and finally each enabled package's own
+directory, so a plugin can `require` its own submodules without shadowing core
+helpers. A plugin's `themes/` subdirectory is a theme discovery root behind the
+user's own `lua/themes/`.
 
 Configuration surfaces expose this uniformly: the `ConfigStore` schema emits one
-`plugins` page that flat-lists every plugin package together with the built-in
-tools and commands that no plugin owns. Each row carries its `kind` in a
+`plugins` page that flat-lists every plugin package (the built-in `core`
+package is always loaded and has no row) together with the built-in tools and
+commands that no plugin owns. Each row carries its `kind` in a
 dedicated **Type** column and its true `tools./commands./plugins.`
 enablement path. The old separate `tools` and `commands` pages are gone; a row's
 toggle writes to `tools.disabled`, `commands.disabled`, or `plugins.disabled`
@@ -139,14 +144,24 @@ accordingly.
 
 ## File editing
 
-`edit_file` accepts a single replacement or a batch of disjoint replacements.
-Preview and execution share exact matching against the original text and reject
-no-op edits, duplicates, and overlaps. Execution reuses each match's position to
-check read visibility; errors identify the hunk and the range to read. Stale-file
-checks, atomic writes, BOM/newline preservation, and snapshot updates remain in
-core. Approval and background-job previews display preparation errors rather
-than silently omitting the preview. Previews do not replace execution-time
-snapshot and write checks.
+`edit_file` addresses lines by anchor rather than by re-typed text. Like every
+registered builtin, it is enabled unless listed in `tools.disabled`. While it is
+enabled, `read_file` renders each line as `N#HASH|content`. `HASH` is a
+2-character FNV-1a hash of the exact line bytes. Edits use `at` (with an
+optional inclusive `end`) to replace or delete lines, and `after`/`before` to
+insert (`after: "0"` means the start of the file). All edits in a call anchor
+on the same file state and apply all-or-nothing. An anchor that no longer
+matches the live file is resolved through the path's snapshot history (up to 8
+earlier reads or edits) and mapped to the live file with a line diff. If an
+anchor resolves to more than one live line, the call is rejected as ambiguous
+and the error shows fresh anchors for each candidate. A miss also returns fresh
+anchors, so the model can retry without a re-read.
+
+Stale-file checks, atomic writes, BOM/newline preservation, and snapshot updates
+remain in core. Approval and background-job previews resolve anchors against the
+same session snapshots and display preparation errors rather than silently
+omitting the preview. Previews do not replace execution-time snapshot and write
+checks.
 
 ## Invariants
 

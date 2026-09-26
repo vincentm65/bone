@@ -25,26 +25,27 @@ pub mod types;
 pub use engine::{blank_init_lua, populated_init_lua};
 pub use types::{BootOptions, BootResult, BootedTools, EventDispatchResult, ExtensionManager};
 
+include!(concat!(env!("OUT_DIR"), "/default_lua_core.rs"));
 include!(concat!(env!("OUT_DIR"), "/default_lua_plugins.rs"));
 
-/// Name of the always-seeded bundled plugin package. It ships the canonical
-/// `/config` command and the shared `banner`/`history`/`ui.*` modules every
-/// install relies on, so it can never be deselected.
-pub const BUNDLED_CORE_PLUGIN: &str = "core";
+/// Directory name reserved for Bone-owned Lua core. It is not an installable
+/// plugin package and must not enter plugin enablement or catalog surfaces.
+pub const BUNDLED_CORE_DIR: &str = "core";
 
 /// Legacy flat extensions that cannot become a stem-named package. `/config`
-/// now lives in the bundled `core` package, so `commands/config.lua` must never
+/// now lives in `lua/core/init.lua`, so `commands/config.lua` must never
 /// migrate to a `plugins/config` package that would shadow it.
-const LEGACY_FLAT_REMAP: &[(&str, &str)] = &[("commands/config.lua", "core/init.lua")];
+const LEGACY_FLAT_REMAP: &[(&str, &str)] = &[("commands/config.lua", "init.lua")];
 
-/// The package name a bundled relative path belongs to (`core/lib/ui/menu.lua`
-/// → `core`).
+/// The package name a bundled relative path belongs to (`extra/lib/util.lua`
+/// → `extra`).
 fn bundled_plugin_of(name: &str) -> &str {
     name.split('/').next().unwrap_or_default()
 }
 
-/// Names of every bundled default plugin package (top-level directories under
-/// `defaults/lua/plugins/`), sorted and deduplicated.
+/// Names of every bundled optional plugin package (top-level directories under
+/// `defaults/lua/plugins/`), sorted and deduplicated. Bone-owned core is kept
+/// in a separate embedded table and never appears here.
 pub fn default_lua_plugin_names() -> Vec<String> {
     let mut names: Vec<String> = DEFAULT_LUA_PLUGINS
         .iter()
@@ -82,11 +83,20 @@ const CANONICAL_CONFIG_V8_SHA256: [u8; 32] = [
     5, 208, 53, 210, 247, 193, 233, 187, 165, 70, 249,
 ];
 
+// The v9 seed shipped before the Claude Code provider (88ba547). The current
+// bundled file keeps the v9 marker but has a different digest.
+// SHA-256 df10e32d72a93864be2743185471f8db251f284ff8480252410a6c219feb5e4f
+const CANONICAL_CONFIG_V9_SHA256: [u8; 32] = [
+    223, 16, 227, 45, 114, 169, 56, 100, 190, 39, 67, 24, 84, 113, 248, 219, 37, 31, 40, 79, 248,
+    72, 2, 82, 65, 10, 108, 33, 159, 235, 94, 79,
+];
+
 fn is_unmodified_canonical_config(existing: &str) -> bool {
     let digest: [u8; 32] = Sha256::digest(existing.as_bytes()).into();
     (existing.contains("canonical-config-v6") && digest == CANONICAL_CONFIG_V6_SHA256)
         || (existing.contains("canonical-config-v7") && digest == CANONICAL_CONFIG_V7_SHA256)
         || (existing.contains("canonical-config-v8") && digest == CANONICAL_CONFIG_V8_SHA256)
+        || (existing.contains("canonical-config-v9") && digest == CANONICAL_CONFIG_V9_SHA256)
 }
 
 fn is_safe_leaf_name(name: &str) -> bool {
@@ -118,7 +128,7 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> std::io::Result<bool> {
         || existing.contains("bone.register_tool")
         || existing.contains("bone.register_command")
         // Refresh menus predating the pane migration or current option-row styling.
-        || (name == "core/lib/ui/menu.lua"
+        || (name == "lib/ui/menu.lua"
             && (!existing.contains("require(\"ui.pane\")")
                 || !existing.contains("SELECTED_BG")
                 || !existing.contains("description_spans")
@@ -128,11 +138,11 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> std::io::Result<bool> {
                 || !existing.contains("multi-space-toggle-v2")))
         // History now includes aggregate message and token counts/status,
         // and lists via a candidate-first CTE instead of a full messages join.
-        || (name == "core/lib/history.lua"
+        || (name == "lib/history.lua"
             && (!existing.contains("total_token_count") || !existing.contains("WITH recent AS")))
-        // Config migrations refresh only exact bundled v6/v7/v8 seeds; preserve
+        // Config migrations refresh only exact bundled v6-v9 seeds; preserve
         // any copy the user has edited, even if it has a known marker.
-        || (name == "core/init.lua" && is_unmodified_canonical_config(&existing)))
+        || (name == "init.lua" && is_unmodified_canonical_config(&existing)))
 }
 
 /// Boot the Lua extension system.
@@ -326,19 +336,24 @@ fn seed_default_lua(
     }
 }
 
+/// Seed Bone-owned core Lua files into `lua/core`.
+pub fn seed_default_lua_core(dir: &Path, force: bool) {
+    seed_default_lua(dir, DEFAULT_LUA_CORE, |_| true, force);
+}
+
 /// Seed bundled default Lua plugin *packages* into `dir` (the `lua/plugins`
 /// directory), placing each at `dir/<package>/…`.
 ///
-/// `allow == Some(set)` seeds only packages named in `set`, plus the always-on
-/// bundled [`BUNDLED_CORE_PLUGIN`]; `None` seeds every bundled package. See
-/// [`seed_default_lua`].
+/// `allow == Some(set)` seeds only optional packages named in `set`; `None`
+/// seeds every bundled package. Bone-owned core is seeded separately by
+/// [`seed_default_lua_core`]. See [`seed_default_lua`].
 pub fn seed_default_lua_plugins(dir: &Path, allow: Option<&HashSet<String>>, force: bool) {
     seed_default_lua(
         dir,
         DEFAULT_LUA_PLUGINS,
         |name| {
             let package = bundled_plugin_of(name);
-            package == BUNDLED_CORE_PLUGIN || allow.is_none_or(|allow| allow.contains(package))
+            allow.is_none_or(|allow| allow.contains(package))
         },
         force,
     )
@@ -364,7 +379,7 @@ pub fn migrate_flat_lua_extensions(lua_dir: &Path) {
     }
 
     // Flat tools/commands become packages named after the file stem, except for
-    // the documented remaps whose destination is a bundled package.
+    // the documented remaps whose destination is Bone-owned core.
     for flat_dir in ["tools", "commands"] {
         for flat in sorted_lowercase_lua_files(&lua_dir.join(flat_dir)) {
             let Some(file_name) = flat.file_name().and_then(|name| name.to_str()) else {
@@ -372,9 +387,8 @@ pub fn migrate_flat_lua_extensions(lua_dir: &Path) {
             };
             let rel = format!("{flat_dir}/{file_name}");
             if let Some((_, dest_rel)) = LEGACY_FLAT_REMAP.iter().find(|(from, _)| *from == rel) {
-                if let Some((_, bundled)) = DEFAULT_LUA_PLUGINS
-                    .iter()
-                    .find(|(name, _)| name == dest_rel)
+                if let Some((_, bundled)) =
+                    DEFAULT_LUA_CORE.iter().find(|(name, _)| *name == *dest_rel)
                 {
                     migrate_remapped_flat_file(&flat, bundled);
                 }
@@ -387,10 +401,12 @@ pub fn migrate_flat_lua_extensions(lua_dir: &Path) {
         }
     }
 
-    // Bundled library modules were previously seeded at `lua/lib/<module>.lua`.
-    let core_lib_prefix = format!("{BUNDLED_CORE_PLUGIN}/lib/");
-    for (name, bundled) in DEFAULT_LUA_PLUGINS {
-        let Some(rel) = name.strip_prefix(core_lib_prefix.as_str()) else {
+    // Bundled core library modules were previously seeded at
+    // `lua/lib/<module>.lua`. The new canonical copy lives under
+    // `lua/core/lib`; remove an identical flat seed and set aside a customized
+    // one so it cannot shadow the managed core search root.
+    for (name, bundled) in DEFAULT_LUA_CORE {
+        let Some(rel) = name.strip_prefix("lib/") else {
             continue;
         };
         let flat = lua_dir.join("lib").join(rel);
@@ -399,13 +415,103 @@ pub fn migrate_flat_lua_extensions(lua_dir: &Path) {
                 let _ = std::fs::remove_file(&flat);
             }
             Ok(_) => {
-                set_aside_bundled_backup(&flat);
+                set_aside_bundled_backup(&flat, "lua/core/lib/");
             }
             Err(_) => {}
         }
     }
 
     prune_empty_source_dirs(lua_dir);
+}
+
+/// One-time, data-preserving migration of the pre-split Bone core package
+/// (`lua/plugins/core/...`) into the Bone-owned `lua/core/...` root.
+///
+/// Must run before [`seed_default_lua_core`], so a legacy file can land where
+/// no core copy exists yet. For each legacy file:
+/// - destination missing: the legacy bytes move there;
+/// - destination byte-identical: the legacy copy is deleted;
+/// - destination is the pristine bundled file: the legacy copy (the version
+///   the user was actually running) replaces it;
+/// - otherwise both were customized: the legacy copy is set aside as
+///   `<file>.bundled-backup` and a notice is logged.
+///
+/// Empty legacy directories are pruned afterwards; nothing is deleted without
+/// a preserved copy.
+pub fn migrate_legacy_plugins_core(lua_dir: &Path) {
+    let legacy_root = lua_dir.join("plugins").join(BUNDLED_CORE_DIR);
+    if !legacy_root.is_dir() {
+        return;
+    }
+    let core_root = lua_dir.join(BUNDLED_CORE_DIR);
+
+    let mut files = Vec::new();
+    let mut dirs = Vec::new();
+    let mut stack = vec![legacy_root.clone()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        dirs.push(dir);
+        for entry in entries.flatten() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
+                stack.push(entry.path());
+            } else if file_type.is_file() {
+                files.push(entry.path());
+            }
+        }
+    }
+    files.sort();
+
+    for legacy in files {
+        let Ok(rel) = legacy.strip_prefix(&legacy_root) else {
+            continue;
+        };
+        let Some(rel_name) = rel.to_str().map(|rel| rel.replace(std::path::MAIN_SEPARATOR, "/"))
+        else {
+            continue;
+        };
+        if rel_name.ends_with(".bundled-backup") {
+            continue;
+        }
+        let bundled = DEFAULT_LUA_CORE
+            .iter()
+            .find(|(name, _)| *name == rel_name)
+            .map(|(_, content)| *content);
+        migrate_legacy_core_file(&legacy, &core_root.join(rel), bundled);
+    }
+
+    dirs.sort_by_key(|dir| std::cmp::Reverse(dir.components().count()));
+    for dir in dirs {
+        let _ = std::fs::remove_dir(&dir);
+    }
+}
+
+/// Apply the [`migrate_legacy_plugins_core`] rules to one legacy file.
+fn migrate_legacy_core_file(legacy: &Path, dest: &Path, bundled: Option<&str>) {
+    let Ok(bytes) = std::fs::read(legacy) else {
+        return;
+    };
+    match std::fs::read(dest) {
+        Ok(existing) if existing == bytes => {
+            let _ = std::fs::remove_file(legacy);
+        }
+        Ok(existing) if bundled.is_some_and(|bundled| existing == bundled.as_bytes()) => {
+            relocate_file(legacy, dest, &bytes);
+        }
+        Ok(_) => set_aside_bundled_backup(legacy, "lua/core/"),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            relocate_file(legacy, dest, &bytes);
+        }
+        Err(e) => ctx::runtime_warn(format!(
+            "bone: warning: could not inspect {}; leaving {} in place: {e}",
+            dest.display(),
+            legacy.display()
+        )),
+    }
 }
 
 /// Lowercase `.lua` files directly inside `dir`, sorted. A missing directory
@@ -433,30 +539,33 @@ fn migrate_flat_file(flat: &Path, dest: &Path) {
             let _ = std::fs::remove_file(flat);
         }
         Ok(_) => {
-            set_aside_bundled_backup(flat);
+            set_aside_bundled_backup(flat, "lua/plugins/");
         }
-        Err(_) => {
-            if let Some(parent) = dest.parent()
-                && let Err(e) = std::fs::create_dir_all(parent)
-            {
-                ctx::runtime_warn(format!(
-                    "bone: warning: could not create {}: {e}",
-                    parent.display()
-                ));
-                return;
-            }
-            let permissions = std::fs::metadata(flat).ok().map(|meta| meta.permissions());
-            if let Err(e) = crate::tools::write_atomic::write_atomic_sync(dest, &bytes, permissions)
-            {
-                ctx::runtime_warn(format!(
-                    "bone: warning: could not write {}: {e}",
-                    dest.display()
-                ));
-                return;
-            }
-            let _ = std::fs::remove_file(flat);
-        }
+        Err(_) => relocate_file(flat, dest, &bytes),
     }
+}
+
+/// Atomically write `bytes` (read from `src`) to `dest`, keeping `src`'s
+/// permissions, then delete `src`. On any failure `src` stays in place.
+fn relocate_file(src: &Path, dest: &Path, bytes: &[u8]) {
+    if let Some(parent) = dest.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        ctx::runtime_warn(format!(
+            "bone: warning: could not create {}: {e}",
+            parent.display()
+        ));
+        return;
+    }
+    let permissions = std::fs::metadata(src).ok().map(|meta| meta.permissions());
+    if let Err(e) = crate::tools::write_atomic::write_atomic_sync(dest, bytes, permissions) {
+        ctx::runtime_warn(format!(
+            "bone: warning: could not write {}: {e}",
+            dest.display()
+        ));
+        return;
+    }
+    let _ = std::fs::remove_file(src);
 }
 
 /// Handle a legacy flat file whose destination is a bundled package entry
@@ -468,22 +577,22 @@ fn migrate_remapped_flat_file(flat: &Path, bundled: &str) {
             let _ = std::fs::remove_file(flat);
         }
         Ok(_) => {
-            set_aside_bundled_backup(flat);
+            set_aside_bundled_backup(flat, "lua/core/");
         }
         Err(_) => {}
     }
 }
 
-/// Rename a legacy flat file to `<file>.bundled-backup` so it can never shadow
-/// the plugin package that now owns its name. The copy is preserved, never
-/// merged; a notice is logged so the move is discoverable.
-fn set_aside_bundled_backup(flat: &Path) {
+/// Rename a legacy file to `<file>.bundled-backup` so it can never shadow the
+/// copy that now owns its name under `current_home`. The copy is preserved,
+/// never merged; a notice is logged so the move is discoverable.
+fn set_aside_bundled_backup(flat: &Path, current_home: &str) {
     let mut backup = flat.as_os_str().to_os_string();
     backup.push(".bundled-backup");
     let backup = std::path::PathBuf::from(backup);
     match std::fs::rename(flat, &backup) {
         Ok(()) => ctx::runtime_warn(format!(
-            "bone: {} was set aside as {}; the current copy lives under lua/plugins/",
+            "bone: {} was set aside as {}; the current copy lives under {current_home}",
             flat.display(),
             backup.display()
         )),
@@ -520,6 +629,21 @@ fn prune_empty_source_dirs(lua_dir: &Path) {
     }
 }
 
+/// Execute Bone's built-in core entry point from `lua/core/init.lua`.
+///
+/// Core is not a plugin: it runs without `_plugin_owner`, so its tools,
+/// commands, and hooks remain ordinary built-in capabilities.
+pub fn run_lua_core_file(lua: &mlua::Lua, core_dir: &std::path::Path) -> Result<(), String> {
+    let init = core_dir.join("init.lua");
+    if !init.is_file() {
+        return Err(format!(
+            "bundled core init.lua is missing: {}",
+            init.display()
+        ));
+    }
+    exec_lua_file(lua, &init, "core/init.lua", None)
+}
+
 /// Execute the `init.lua` entry point of every plugin package under
 /// `plugins_dir` (one directory level, sorted by name).
 ///
@@ -537,7 +661,8 @@ fn prune_empty_source_dirs(lua_dir: &Path) {
 ///
 /// A directory without `init.lua` is an inert, non-error package. Names in
 /// `disabled` are skipped without being removed from disk; `disabled == None`
-/// runs every installed plugin.
+/// runs every installed plugin. The legacy `lua/plugins/core` directory is
+/// ignored because built-in core is loaded separately from `lua/core`.
 pub fn run_lua_plugin_files(
     lua: &mlua::Lua,
     plugins_dir: &std::path::Path,
@@ -562,6 +687,9 @@ pub fn run_lua_plugin_files(
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned();
+        if name == BUNDLED_CORE_DIR {
+            continue;
+        }
         if disabled.is_some_and(|disabled| disabled.contains(&name)) {
             continue;
         }
@@ -618,10 +746,10 @@ fn extend_plugin_package_path(lua: &mlua::Lua, package_dir: &std::path::Path) {
     }
 }
 
-/// Names of the installed plugin packages under `plugins_dir` (one directory
-/// level, sorted): each directory that contains an `init.lua`. Directories
-/// without one are inert and omitted. Disabled plugins are still listed so
-/// their enable/disable toggle remains reachable.
+/// Names of the installed user/plugin packages under `plugins_dir` (one
+/// directory level, sorted): each directory that contains an `init.lua`.
+/// Directories without one are inert and omitted. The legacy `core` directory
+/// is omitted because built-in core lives under `lua/core` and has no toggle.
 pub fn installed_plugin_names(plugins_dir: &std::path::Path) -> Vec<String> {
     if !plugins_dir.is_dir() {
         return Vec::new();
@@ -631,7 +759,11 @@ pub fn installed_plugin_names(plugins_dir: &std::path::Path) -> Vec<String> {
         .flatten()
         .flatten()
         .map(|entry| entry.path())
-        .filter(|path| path.is_dir() && path.join("init.lua").is_file())
+        .filter(|path| {
+            path.is_dir()
+                && path.join("init.lua").is_file()
+                && path.file_name().and_then(|name| name.to_str()) != Some(BUNDLED_CORE_DIR)
+        })
         .map(|path| {
             path.file_name()
                 .unwrap_or_default()
@@ -662,9 +794,13 @@ fn exec_lua_file(
     if let Some(bone) = &bone {
         bone.set("_settings_owner", owner.as_str())
             .map_err(crate::util::errstr)?;
-        if let Some(plugin) = plugin_owner {
-            bone.set("_plugin_owner", plugin)
-                .map_err(crate::util::errstr)?;
+        match plugin_owner {
+            Some(plugin) => bone
+                .set("_plugin_owner", plugin)
+                .map_err(crate::util::errstr)?,
+            None => bone
+                .set("_plugin_owner", mlua::Value::Nil)
+                .map_err(crate::util::errstr)?,
         }
     }
     let result = lua.load(&source).set_name(name).exec();
@@ -678,10 +814,8 @@ fn exec_lua_file(
     if let Some(bone) = bone {
         bone.set("_settings_owner", mlua::Value::Nil)
             .map_err(crate::util::errstr)?;
-        if plugin_owner.is_some() {
-            bone.set("_plugin_owner", mlua::Value::Nil)
-                .map_err(crate::util::errstr)?;
-        }
+        bone.set("_plugin_owner", mlua::Value::Nil)
+            .map_err(crate::util::errstr)?;
     }
     result.map_err(|e| format!("error executing {}: {e}", path.display()))
 }

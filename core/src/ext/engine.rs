@@ -8,7 +8,7 @@ use mlua::{Function, Lua, LuaSerdeExt, Result as LuaResult, Table};
 use super::types::BootOptions;
 
 /// Default `init.lua`: lightweight wiring only. Substantial banner logic lives
-/// in the bundled `core` plugin's `lib/banner.lua` module.
+/// in Bone-owned core's `lib/banner.lua` module.
 const DEFAULT_INIT_LUA: &str = r#"-- Bone init.lua
 require("banner")
 "#;
@@ -120,10 +120,7 @@ pub(crate) fn create_engine(
     // (`require("ui.menu")`, `require("banner")`, `require("history")`) always
     // win over stale copies left in `lua/lib`; `lua/lib` remains a searchable root
     // for user modules whose names do not collide.
-    let core_lib_dir = config_dir
-        .join("lua/plugins")
-        .join(super::BUNDLED_CORE_PLUGIN)
-        .join("lib");
+    let core_lib_dir = config_dir.join("lua/core/lib");
     let lua_lib_dir = config_dir.join("lua").join("lib");
     let package: Table = globals
         .get("package")

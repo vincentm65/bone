@@ -17,9 +17,10 @@ fn log_boot_warning(config_dir: &Path, message: impl std::fmt::Display) {
 /// Boot the Lua extension system.
 ///
 /// 1. Creates the Lua VM with the `bone` global table.
-/// 2. Executes the startup `init.lua` (config root, then `lua/init.lua`) if present.
-/// 3. Collects any tools registered via `bone.tool.register()`.
-/// 4. Returns a `BootResult` owning the Lua VM and registered tools.
+/// 2. Seeds and executes Bone-owned `lua/core`.
+/// 3. Executes the startup `init.lua` (config root, then `lua/init.lua`) if present.
+/// 4. Collects any tools registered via `bone.tool.register()`.
+/// 5. Returns a `BootResult` owning the Lua VM and registered tools.
 ///
 /// Errors during Lua construction or init.lua execution are logged and
 /// the app continues without Lua support.
@@ -114,19 +115,25 @@ pub fn boot(
         }
     }
 
-    // Seed bundled plugin packages before init.lua so startup code can
-    // `require` them — at minimum the always-on `core` package, which ships the
-    // canonical `/config` command and the shared `banner`/`history`/`ui.*`
-    // modules. Then migrate any pre-package flat extensions
-    // (`lua/{tools,commands}/*.lua`, `lua/lib/*.lua`) into `lua/plugins/`.
-    // A persisted setup selection (from the onboarding wizard) narrows which
-    // bundled packages are seeded; absent it, all are. Sub-agent VMs load no
-    // user extensions at all.
-    let selection = crate::config::load_setup_selection();
-    let plugin_allow = selection
-        .as_ref()
-        .map(crate::config::SetupSelection::plugin_set);
+    // Bone-owned core is always seeded and loaded, independently of setup
+    // selection and plugin enablement. Sub-agent VMs share this built-in core,
+    // but continue to avoid user/plugin packages as before. The main VM first
+    // moves a pre-split `lua/plugins/core` tree into `lua/core` so customized
+    // legacy files are kept rather than silently ignored.
     if !subagent {
+        super::migrate_legacy_plugins_core(&config_dir.join("lua"));
+    }
+    super::seed_default_lua_core(&config_dir.join("lua/core"), false);
+
+    if !subagent {
+        // A persisted setup selection (from the onboarding wizard) narrows which
+        // optional bundled packages are seeded; absent it, all are. Then migrate
+        // any pre-package flat extensions (`lua/{tools,commands}/*.lua`,
+        // `lua/lib/*.lua`) into `lua/plugins/`.
+        let selection = crate::config::load_setup_selection();
+        let plugin_allow = selection
+            .as_ref()
+            .map(crate::config::SetupSelection::plugin_set);
         super::seed_default_lua_plugins(
             &config_dir.join("lua/plugins"),
             plugin_allow.as_ref(),
@@ -136,6 +143,11 @@ pub fn boot(
     }
 
     let mut source_errors = Vec::new();
+    if let Err(e) = super::run_lua_core_file(&lua, &config_dir.join("lua/core")) {
+        log_boot_warning(config_dir, format_args!("Lua core failed: {e}"));
+        source_errors.push(e);
+    }
+
     let loaded = match engine::run_init(&lua, config_dir) {
         Ok(loaded) => loaded,
         Err(e) => {

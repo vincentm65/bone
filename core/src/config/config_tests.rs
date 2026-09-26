@@ -1,25 +1,11 @@
 use super::{
     DEFAULT_AGENTS_MD, DEFAULT_CORE_DOCS, InitChoice, ProviderEntry, ProvidersConfig,
-    SetupSelection, api_key_required, apply_onboarding, domains, migrate_memory_to_catalog,
-    migrate_memory_to_catalog_with_hash, needs_onboarding, seed_base, settings::SubagentSettings,
-    sync_bundled_file,
+    SetupSelection, api_key_required, apply_onboarding, domains, needs_onboarding, seed_base,
+    settings::SubagentSettings, sync_bundled_file,
 };
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
-
-fn migration_test_dir(name: &str) -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "bone-memory-catalog-{name}-{}-{:?}",
-        std::process::id(),
-        std::thread::current().id()
-    ))
-}
-
-fn sha256(content: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(content))
-}
+use std::path::Path;
 
 fn with_test_bone_dir(test: impl FnOnce(&Path)) {
     let _guard = crate::util::test_env_lock();
@@ -324,19 +310,27 @@ fn core_docs_are_synced_during_base_seed() {
 }
 
 #[test]
-fn fresh_seed_materializes_only_plugin_packages_under_lua() {
+fn fresh_seed_materializes_core_and_plugin_packages_under_lua() {
     with_test_bone_dir(|dir| {
         seed_base().unwrap();
 
-        assert!(dir.join("lua/plugins/core/init.lua").is_file());
-        assert!(dir.join("lua/plugins/core/lib/banner.lua").is_file());
+        assert!(dir.join("lua/core/init.lua").is_file());
+        assert!(dir.join("lua/core/lib/banner.lua").is_file());
+        assert!(
+            !dir.join("lua/plugins/core").exists(),
+            "core must not be seeded under lua/plugins"
+        );
 
         let mut seeded: Vec<_> = fs::read_dir(dir.join("lua"))
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         seeded.sort();
-        assert_eq!(seeded, ["plugins"], "lua/ holds plugin packages only");
+        assert_eq!(
+            seeded,
+            ["core", "plugins"],
+            "lua/ holds the built-in core and optional plugin packages"
+        );
     });
 }
 
@@ -352,125 +346,4 @@ fn bundled_doc_index_only_references_synced_docs() {
         .collect::<std::collections::BTreeSet<_>>();
 
     assert_eq!(indexed, synced);
-}
-
-#[test]
-fn clean_memory_migration_marks_complete_before_catalog_install() {
-    let dir = migration_test_dir("clean");
-    fs::create_dir_all(&dir).unwrap();
-
-    migrate_memory_to_catalog(&dir);
-    assert!(dir.join(".memory-catalog-migrated").exists());
-
-    let command = dir.join("lua/commands/memory.lua");
-    fs::create_dir_all(command.parent().unwrap()).unwrap();
-    fs::write(&command, "-- catalog command").unwrap();
-    migrate_memory_to_catalog(&dir);
-    assert_eq!(fs::read_to_string(&command).unwrap(), "-- catalog command");
-
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn known_bundled_memory_command_is_backed_up() {
-    let dir = migration_test_dir("bundled");
-    let command = dir.join("lua/commands/memory.lua");
-    fs::create_dir_all(command.parent().unwrap()).unwrap();
-    let bundled = b"-- bundled command";
-    fs::write(&command, bundled).unwrap();
-
-    migrate_memory_to_catalog_with_hash(&dir, &sha256(bundled));
-
-    assert!(!command.exists());
-    assert_eq!(
-        fs::read(dir.join("lua/commands/memory.lua.bundled-backup")).unwrap(),
-        bundled
-    );
-    assert!(dir.join(".memory-catalog-migrated").exists());
-
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn catalog_memory_command_present_before_migration_is_preserved() {
-    let dir = migration_test_dir("catalog");
-    let command = dir.join("lua/commands/memory.lua");
-    fs::create_dir_all(command.parent().unwrap()).unwrap();
-    fs::write(&command, "-- catalog command").unwrap();
-
-    migrate_memory_to_catalog(&dir);
-
-    assert_eq!(fs::read_to_string(&command).unwrap(), "-- catalog command");
-    assert!(dir.join(".memory-catalog-migrated").exists());
-
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn user_modified_bundled_memory_command_is_preserved() {
-    let dir = migration_test_dir("modified");
-    let command = dir.join("lua/commands/memory.lua");
-    fs::create_dir_all(command.parent().unwrap()).unwrap();
-    let bundled = b"-- bundled command";
-    let modified = b"-- bundled command\n-- user customization";
-    fs::write(&command, modified).unwrap();
-
-    migrate_memory_to_catalog_with_hash(&dir, &sha256(bundled));
-
-    assert_eq!(fs::read(&command).unwrap(), modified);
-    assert!(dir.join(".memory-catalog-migrated").exists());
-
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn memory_catalog_migration_does_not_overwrite_scoped_data() {
-    let dir = migration_test_dir("scoped");
-    fs::create_dir_all(dir.join("memory")).unwrap();
-    fs::write(dir.join("memory.md"), "legacy memory").unwrap();
-    fs::write(dir.join("memory/global.md"), "scoped memory").unwrap();
-
-    migrate_memory_to_catalog(&dir);
-
-    assert_eq!(
-        fs::read_to_string(dir.join("memory/global.md")).unwrap(),
-        "scoped memory"
-    );
-    assert!(dir.join(".memory-catalog-migrated").exists());
-
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn failed_memory_command_backup_leaves_migration_unmarked() {
-    let dir = migration_test_dir("failed-backup");
-    let command = dir.join("lua/commands/memory.lua");
-    fs::create_dir_all(command.parent().unwrap()).unwrap();
-    let bundled = b"-- bundled command";
-    fs::write(&command, bundled).unwrap();
-    fs::create_dir(dir.join("lua/commands/memory.lua.bundled-backup")).unwrap();
-
-    migrate_memory_to_catalog_with_hash(&dir, &sha256(bundled));
-
-    assert!(command.exists());
-    assert!(!dir.join(".memory-catalog-migrated").exists());
-
-    fs::remove_dir_all(dir).unwrap();
-}
-
-#[test]
-fn memory_catalog_migration_copies_legacy_data() {
-    let dir = migration_test_dir("legacy-data");
-    fs::create_dir_all(&dir).unwrap();
-    fs::write(dir.join("memory.md"), "legacy memory").unwrap();
-
-    migrate_memory_to_catalog(&dir);
-
-    assert_eq!(
-        fs::read_to_string(dir.join("memory/global.md")).unwrap(),
-        "legacy memory"
-    );
-    assert!(dir.join(".memory-catalog-migrated").exists());
-
-    fs::remove_dir_all(dir).unwrap();
 }

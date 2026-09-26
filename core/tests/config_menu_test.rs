@@ -1,6 +1,6 @@
 use mlua::Lua;
 
-const CONFIG_LUA: &str = include_str!("../defaults/lua/plugins/core/init.lua");
+const CONFIG_LUA: &str = include_str!("../defaults/lua/core/init.lua");
 
 fn config_lua() -> Lua {
     let lua = Lua::new();

@@ -41,10 +41,11 @@ finished jobs, pending ids, timeout, or caller cancellation. `followup(id,
 prompt)` continues a completed job only when its saved transcript belongs to the
 same conversation.
 
-The native `subagent` tool uses the same contract: batch independent dispatches
-in one call, use `wait` when the next operation depends on their results, and
-otherwise let completed background results be delivered when the main agent is
-idle. Do not poll in a loop.
+The `subagent` tool — shipped as a catalog plugin over the same core delegation
+APIs — uses the same contract: batch independent dispatches in one call, use
+`wait` when the next operation depends on their results, and otherwise let
+completed background results be delivered when the main agent is idle. Do not
+poll in a loop.
 
 ## Boundaries and safety
 

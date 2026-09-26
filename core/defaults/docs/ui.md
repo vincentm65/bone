@@ -101,9 +101,10 @@ cancellation are scoped to the attached conversation.
   editor; clearing the composer still exposes Undo. Incognito
   targets the selected task, with persistent sidebar and composer indicators.
   Model selection offers configured and previously used models plus custom IDs.
-  Host API 3 adds `SetConversationModel`, which selects and persists a model for
-  one conversation without changing shared provider defaults; incognito choices
-  stay in memory. Older servers can still switch among configured providers.
+  `RuntimeCommand::SetConversationModel` (added with host API 3) selects and
+  persists a model for one conversation without changing shared provider
+  defaults; incognito choices stay in memory. Older servers can still switch
+  among configured providers.
   Shared provider-default editing is a separate, explicitly labeled section.
   Transcript and composer columns share an 800-logical-pixel cap and centered
   side insets; wide code and tables scroll horizontally. Bundled Inter regular
@@ -281,10 +282,12 @@ every plugin package with the built-in capabilities that no plugin owns in one
 flat list — each row carrying its `tool` / `command` / `plugin` type in a
 dedicated **Type** column (blank for any row without one). Enabling or disabling
 any row routes to the matching canonical setting (`tools.disabled` /
-`commands.disabled` / `plugins.disabled`). Installing or updating a plugin asks
-for explicit consent first — Bone Lua is not sandboxed and runs with the user's
-authority — and declining leaves the plugin tree unchanged. Every file's `sha256`
-is verified before anything is written.
+`commands.disabled` / `plugins.disabled`). The Bone-owned `lua/core` package is
+absent from all of these: it is always loaded, so it has no catalog entry and no
+enable/disable row, and a `plugins.core` value is rejected. Installing or
+updating a plugin asks for explicit consent first — Bone Lua is not sandboxed
+and runs with the user's authority — and declining leaves the plugin tree
+unchanged. Every file's `sha256` is verified before anything is written.
 
 The daemon owns core conversation history and active transcript state. A client may
 request list/load/new actions and render the resulting snapshot, but clients must not
@@ -297,7 +300,8 @@ The TUI bounds how many rendered rows it keeps in memory via `ui.history_rows`
 (default 3000, 0 = keep all). Between turns, rows already flushed to terminal
 scrollback beyond the cap are replaced by one marker row, and conversation loads
 request only the newest window. This is client-side display state: the daemon's
-SQLite store and the model-facing context keep the full history.
+SQLite store and the model-facing context keep the full history. Ctrl+O opens
+the paged transcript viewer, which fetches older pages on demand.
 
 ## Adding a client feature
 

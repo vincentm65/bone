@@ -409,6 +409,62 @@ fn schema_for_exposes_plugins_page_and_snapshot_tracks_disabled_plugins() {
 }
 
 #[test]
+fn reserved_core_is_outside_plugin_enablement_surface() {
+    let _guard = crate::util::test_env_lock();
+    let old_bone = std::env::var_os("BONE_DIR");
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+
+    // A legacy persisted config may still list `core` as a disabled plugin;
+    // loading must sanitize it out.
+    std::fs::write(
+        dir.path().join("config.yaml"),
+        "version: 2\nplugins:\n  disabled:\n    - core\n    - alpha\n",
+    )
+    .unwrap();
+
+    let store = ConfigStore::new(crate::ext::ExtensionManager::unloaded()).unwrap();
+    assert_eq!(
+        store.disabled_plugins(),
+        vec!["alpha".to_string()],
+        "legacy persisted `core` must be sanitized away"
+    );
+
+    // `core` never appears as a plugin enablement row, even when requested.
+    let schema = store.schema_for(&[], &[], &["core".into(), "alpha".into()]);
+    let page = schema
+        .pages
+        .iter()
+        .find(|page| page.namespace == "plugins")
+        .expect("plugins page");
+    assert!(
+        page.fields.iter().all(|field| field.path != "plugins.core"),
+        "core must not be a plugin config row"
+    );
+    assert!(
+        page.fields
+            .iter()
+            .any(|field| field.path == "plugins.alpha")
+    );
+
+    // Toggling core is rejected outright.
+    let revision = store.snapshot().revision;
+    let error = store
+        .set_enabled("plugins", "core", false, revision)
+        .unwrap_err();
+    assert!(error.1.contains("lua/core"), "unexpected: {error:?}");
+    // The snapshot is unchanged by the rejected mutation.
+    assert_eq!(store.disabled_plugins(), vec!["alpha".to_string()]);
+
+    unsafe {
+        match old_bone {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+}
+
+#[test]
 fn unified_plugins_page_merges_tools_commands_and_plugins() {
     let _guard = crate::util::test_env_lock();
     let old_bone = std::env::var_os("BONE_DIR");

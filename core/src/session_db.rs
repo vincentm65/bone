@@ -3,90 +3,19 @@
 use crate::llm::{ChatMessage, ChatRole, OutputItem};
 use crate::runtime::UsageRecord;
 use rusqlite::{
-    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+    Connection, OptionalExtension, Transaction, TransactionBehavior, params,
 };
 use serde::{Deserialize, Serialize};
-use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Returns the path to the conversations database.
 /// Centralizes the path so all callers (TUI, headless, stats-popup) stay in sync.
 /// Uses [`crate::config::bone_dir`] so XDG/`HOME` isolation matches config/Lua.
-/// One-time: when using the default/XDG root, copy the pre-XDG legacy database
-/// with SQLite's backup API so existing history isn't orphaned.
-pub fn db_path() -> std::path::PathBuf {
-    db_path_with_legacy(legacy_db_path().as_deref())
-}
-
-fn db_path_with_legacy(legacy: Option<&Path>) -> PathBuf {
-    let path = crate::config::bone_dir()
+pub fn db_path() -> PathBuf {
+    crate::config::bone_dir()
         .join("data")
-        .join("conversations.db");
-    let explicit_root = matches!(std::env::var("BONE_DIR"), Ok(dir) if !dir.is_empty());
-    if !explicit_root
-        && let Some(legacy) = legacy
-        && migrate_legacy_db_if_needed(legacy, &path).is_err()
-    {
-        // Keep using the legacy database when snapshotting fails. Returning the
-        // new path would let SessionDb::open create an empty database there and
-        // suppress every future migration attempt.
-        return legacy.to_path_buf();
-    }
-    path
-}
-
-/// Pre-unification location: always `~/.bone-rust/data/conversations.db`,
-/// ignoring `XDG_CONFIG_HOME`. Kept only for the one-shot migrate.
-fn legacy_db_path() -> Option<std::path::PathBuf> {
-    dirs::home_dir().map(|h| h.join(".bone-rust/data/conversations.db"))
-}
-
-fn migrate_legacy_db_if_needed(
-    legacy: &Path,
-    path: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    if path.exists() || !legacy.exists() || legacy == path {
-        return Ok(());
-    }
-    let parent = path.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "session database path has no parent",
-        )
-    })?;
-    std::fs::create_dir_all(parent)?;
-
-    // Serialize migration across Bone processes. The destination only appears
-    // after SQLite has produced and closed a complete snapshot, so no peer can
-    // open a partially copied database.
-    let lock_path = parent.join(".conversations.db.migrate.lock");
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(lock_path)?;
-    fs2::FileExt::lock_exclusive(&lock)?;
-    if path.exists() {
-        return Ok(());
-    }
-
-    let source = Connection::open_with_flags(legacy, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    let temp = tempfile::NamedTempFile::new_in(parent)?;
-    let mut destination = Connection::open(temp.path())?;
-    let backup = rusqlite::backup::Backup::new(&source, &mut destination)?;
-    backup.run_to_completion(100, Duration::from_millis(10), None)?;
-    drop(backup);
-    drop(destination);
-    drop(source);
-
-    std::fs::set_permissions(temp.path(), std::fs::metadata(legacy)?.permissions())?;
-    if path.exists() {
-        return Ok(());
-    }
-    temp.persist(path)?;
-    Ok(())
+        .join("conversations.db")
 }
 
 /// A stored message for retrieval.

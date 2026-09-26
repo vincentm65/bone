@@ -135,9 +135,11 @@ pub struct BoneSettings {
     pub tools: EnablementSettings,
     #[serde(default)]
     pub commands: EnablementSettings,
-    /// Plugin *packages* under `lua/plugins/<name>/`. Disabling a plugin skips
-    /// its `init.lua`, so the tools/commands/hooks it registers never exist;
-    /// capabilities therefore inherit their plugin's enable state.
+    /// Optional plugin *packages* under `lua/plugins/<name>/`. Disabling a
+    /// plugin skips its `init.lua`, so the tools/commands/hooks it registers
+    /// never exist; capabilities therefore inherit their plugin's enable
+    /// state. The built-in `lua/core` is always loaded and is never part of
+    /// this enablement surface (a persisted `"core"` entry is dropped).
     #[serde(default)]
     pub plugins: EnablementSettings,
     #[serde(default)]
@@ -779,6 +781,8 @@ impl Settings {
             return Err(SettingsError::BadVersion(inner.version));
         }
 
+        sanitize_plugin_enablement(&mut inner.plugins);
+
         if hydrated {
             inner.general.system_prompt = Some(shipped_system_prompt().to_owned());
         }
@@ -943,6 +947,15 @@ fn validate_settings(settings: &BoneSettings) -> Result<(), SettingsError> {
     validate_general(&settings.general)?;
     validate_theme(&settings.theme)?;
     validate_keymaps(&settings.keymaps)
+}
+
+/// The built-in `lua/core` is always loaded and is not an optional plugin, so
+/// it can never appear in the plugin enablement surface. Drop any persisted
+/// `"core"` entry so legacy configs (and mutations) stay clean.
+fn sanitize_plugin_enablement(enablement: &mut EnablementSettings) {
+    enablement
+        .disabled
+        .retain(|name| name != crate::ext::BUNDLED_CORE_DIR);
 }
 
 fn validate_subagent_name(name: &str) -> Result<(), SettingsError> {
