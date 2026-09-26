@@ -1,7 +1,9 @@
 use super::*;
+use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::text::Line;
+use ratatui::{Terminal, TerminalOptions, Viewport};
 
 fn desired_height(
     renderer: &Renderer,
@@ -108,6 +110,61 @@ fn consecutive_scrollback_separators_are_deduplicated() {
     let content = [Line::raw("next")];
     assert_eq!(renderer.dedup_scrollback_blanks(&content).len(), 1);
     assert_eq!(renderer.dedup_scrollback_blanks(&blank).len(), 1);
+}
+
+#[test]
+fn streamed_assistant_output_has_one_row_before_inline_composer() {
+    let mut renderer = Renderer::new();
+    let input = crate::ui::input::InputState::default();
+    let status = StatusInfo {
+        model: "test".into(),
+        token_stats: crate::llm::TokenStats::new(),
+        streaming_completion_tokens: None,
+        streaming: false,
+        approval_mode: crate::tools::ApprovalMode::Safe,
+        queue_len: 0,
+        incognito: false,
+        status_show: std::collections::HashMap::new(),
+        elapsed: None,
+        lua_status: Vec::new(),
+        spinner_frames: Vec::new(),
+        spinner_speed_ms: 0,
+        spinner_texts: Vec::new(),
+        spinner_text_rotate: true,
+        spinner_text_speed_ms: 0,
+        spinner_elapsed_ms: 0,
+    };
+    let args = PaneDraw {
+        input: &input,
+        status_info: &status,
+        pages: &[],
+        active_page: 0,
+        autocomplete: None,
+        running: &[],
+    };
+    let mut terminal = Terminal::with_options(
+        TestBackend::new(40, 5),
+        TerminalOptions {
+            viewport: Viewport::Inline(3),
+        },
+    )
+    .unwrap();
+
+    renderer
+        .flush_streaming_message("answer\n\n", &mut terminal)
+        .unwrap();
+    terminal
+        .draw(|frame| renderer.draw_bottom_pane(frame, &args, None))
+        .unwrap();
+
+    let row = |y: u16| {
+        (0..40)
+            .map(|x| terminal.backend().buffer().cell((x, y)).unwrap().symbol())
+            .collect::<String>()
+    };
+    assert_eq!(row(0).trim_end(), "answer");
+    assert!(row(1).trim().is_empty(), "missing streamed/composer gap");
+    assert!(!row(2).trim().is_empty(), "composer should follow the gap");
 }
 
 /// Reproduces the panic shape from counting wrap height at a wider width than

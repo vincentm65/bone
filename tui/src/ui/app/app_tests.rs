@@ -1394,10 +1394,26 @@ async fn older_job_snapshot_does_not_replace_newer_visible_jobs() {
 fn history_trim_replaces_flushed_rows_with_one_marker() {
     assert_eq!(history_trim_count(10, 8, 0), 0, "cap 0 keeps everything");
     assert_eq!(history_trim_count(5, 5, 5), 0, "nothing to trim at the cap");
-    assert_eq!(history_trim_count(10, 0, 5), 0, "unflushed rows are never trimmed");
-    assert_eq!(history_trim_count(10, 2, 5), 0, "one row for one marker saves nothing");
-    assert_eq!(history_trim_count(10, 3, 5), 2, "stops before the last flushed row");
-    assert_eq!(history_trim_count(10, 10, 5), 6, "six rows become one marker: 10 -> 5");
+    assert_eq!(
+        history_trim_count(10, 0, 5),
+        0,
+        "unflushed rows are never trimmed"
+    );
+    assert_eq!(
+        history_trim_count(10, 2, 5),
+        0,
+        "one row for one marker saves nothing"
+    );
+    assert_eq!(
+        history_trim_count(10, 3, 5),
+        2,
+        "stops before the last flushed row"
+    );
+    assert_eq!(
+        history_trim_count(10, 10, 5),
+        6,
+        "six rows become one marker: 10 -> 5"
+    );
 }
 
 #[test]
@@ -1416,7 +1432,10 @@ fn enter_with_queued_prompts_puts_the_draft_last() {
         ..InputState::default()
     };
     assert!(!queue_draft_behind(&mut input, &mut VecDeque::new()));
-    assert_eq!(input.buffer, "C", "nothing queued: the draft is sent directly");
+    assert_eq!(
+        input.buffer, "C",
+        "nothing queued: the draft is sent directly"
+    );
 }
 
 #[test]
@@ -1427,7 +1446,10 @@ fn image_draft_is_sent_directly_instead_of_queued() {
 
     assert!(!queue_draft_behind(&mut input, &mut queue));
     assert_eq!(queue, VecDeque::from(["A".to_string()]));
-    assert!(input.has_images(), "the image stays in the draft to be sent");
+    assert!(
+        input.has_images(),
+        "the image stays in the draft to be sent"
+    );
 }
 
 #[test]

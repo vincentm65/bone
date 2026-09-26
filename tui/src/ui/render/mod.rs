@@ -7,6 +7,7 @@ pub mod messages;
 pub mod wrap;
 
 use messages::wrapped_line_count;
+use ratatui::backend::Backend;
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::text::Line;
@@ -176,7 +177,7 @@ impl Renderer {
     /// messages — which bypass `msg_to_lines`' surrounding blanks — a trailing
     /// blank: after the final reply (so it doesn't touch the input) and when a
     /// streamed assistant message is followed by a tool row.
-    pub fn flush_separator(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
+    pub fn flush_separator<B: Backend>(&mut self, term: &mut Terminal<B>) -> io::Result<()> {
         self.insert_lines_to_scrollback(term, &[Line::raw("")])
     }
 
@@ -271,9 +272,9 @@ impl Renderer {
         Ok(())
     }
 
-    fn insert_lines_to_scrollback(
+    fn insert_lines_to_scrollback<B: Backend>(
         &mut self,
-        term: &mut BoneTerminal,
+        term: &mut Terminal<B>,
         lines: &[Line<'static>],
     ) -> io::Result<()> {
         if lines.is_empty() {
@@ -379,27 +380,31 @@ impl Renderer {
     /// During streaming: flush complete source lines as soon as they are safe
     /// to render. Fenced code blocks and pipe tables are buffered until their
     /// final rendering is known.
-    pub fn flush_streaming_message(
+    pub fn flush_streaming_message<B: Backend>(
         &mut self,
         content: &str,
-        term: &mut BoneTerminal,
+        term: &mut Terminal<B>,
     ) -> io::Result<()> {
-        self.flush_fragment(
+        if self.flush_fragment(
             content,
             safe_markdown_prefix_end(content, self.streaming_source_flushed),
             term,
-        )
+        )? {
+            self.flush_separator(term)?;
+        }
+        Ok(())
     }
 
     /// Flush all remaining lines from the streaming message, including
     /// the incomplete trailing paragraph that `flush_streaming_message`
     /// holds back during streaming.
-    pub fn finalize_streaming_message(
+    pub fn finalize_streaming_message<B: Backend>(
         &mut self,
         content: &str,
-        term: &mut BoneTerminal,
+        term: &mut Terminal<B>,
     ) -> io::Result<()> {
-        self.flush_fragment(content, content.len(), term)
+        let _ = self.flush_fragment(content, content.len(), term)?;
+        Ok(())
     }
 
     /// Render `content[streaming_source_flushed..end]` as a standalone block
@@ -410,14 +415,14 @@ impl Renderer {
     /// fragment edges, which we re-insert at the seam. Rendering only the new
     /// slice (rather than the whole prefix every delta) keeps streaming O(N)
     /// and highlights each code block exactly once.
-    fn flush_fragment(
+    fn flush_fragment<B: Backend>(
         &mut self,
         content: &str,
         end: usize,
-        term: &mut BoneTerminal,
-    ) -> io::Result<()> {
+        term: &mut Terminal<B>,
+    ) -> io::Result<bool> {
         if end <= self.streaming_source_flushed {
-            return Ok(());
+            return Ok(false);
         }
         let width = scrollback_insert_width(term);
         let fragment = &content[self.streaming_source_flushed..end];
@@ -427,9 +432,10 @@ impl Renderer {
             // dedup_scrollback_blanks collapses any accidental double.
             rendered.insert(0, Line::raw(""));
         }
+        let visible = !rendered.is_empty();
         self.insert_lines_to_scrollback(term, &rendered)?;
         self.streaming_source_flushed = end;
-        Ok(())
+        Ok(visible)
     }
 
     /// Redraw the bottom pane during streaming (elapsed-time spinner advances).
@@ -461,7 +467,7 @@ fn logical_lines_row_count(lines: &[Line<'static>], width: u16) -> u16 {
 ///
 /// Must be used for both row-count precomputation and content wrapping so the
 /// draw closure never writes past the allocated height.
-fn scrollback_insert_width(term: &mut BoneTerminal) -> u16 {
+fn scrollback_insert_width<B: Backend>(term: &mut Terminal<B>) -> u16 {
     term.get_frame().area().width.max(1)
 }
 
