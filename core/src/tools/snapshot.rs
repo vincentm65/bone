@@ -11,7 +11,7 @@
 //! Per path we keep the most recent read and the line numbers the model
 //! actually saw, so the visibility guard can reject edits to elided lines.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io::ErrorKind;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, RwLock};
@@ -276,42 +276,46 @@ pub struct Snapshot {
     pub seen_lines: BTreeSet<usize>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-struct LastRead {
-    digest: [u8; 32],
-    first: usize,
-    end: usize,
-}
+/// Earlier snapshots kept per path so `edit_file` anchors from an older
+/// read or edit still resolve after the file changed.
+const HISTORY_LIMIT: usize = 8;
 
 /// Per-session store of the latest file snapshot, keyed by path.
 #[derive(Debug)]
 pub struct SnapshotStore {
     paths: HashMap<String, Snapshot>,
-    last_reads: HashMap<String, LastRead>,
-    dedup_enabled: bool,
+    history: HashMap<String, VecDeque<Snapshot>>,
+    hashline: bool,
 }
 
 impl Default for SnapshotStore {
     fn default() -> Self {
-        let enabled = std::env::var("BONE_READ_DEDUP").as_deref() != Ok("0");
-        Self::with_dedup(enabled)
+        Self {
+            paths: HashMap::new(),
+            history: HashMap::new(),
+            hashline: false,
+        }
     }
 }
 
 impl SnapshotStore {
-    /// Construct a store with unchanged-read deduplication explicitly enabled
-    /// or disabled. The default reads `BONE_READ_DEDUP` once at construction.
-    pub fn with_dedup(enabled: bool) -> Self {
-        Self {
-            paths: HashMap::new(),
-            last_reads: HashMap::new(),
-            dedup_enabled: enabled,
-        }
-    }
-
     /// Most recent snapshot for `path`, if any.
     pub fn head(&self, path: &str) -> Option<&Snapshot> {
         self.paths.get(path)
+    }
+
+    /// Earlier snapshots for `path`, newest first (bounded).
+    pub fn history(&self, path: &str) -> impl Iterator<Item = &Snapshot> {
+        self.history.get(path).into_iter().flatten()
+    }
+
+    /// Force `read_file` hashline rendering regardless of enabled tools.
+    pub fn set_hashline(&mut self, enabled: bool) {
+        self.hashline = enabled;
+    }
+
+    pub fn hashline(&self) -> bool {
+        self.hashline
     }
 
     /// Record a normalized snapshot for `path`, returning its tag. A repeated
@@ -343,7 +347,7 @@ impl SnapshotStore {
         if let Some(lines) = seen_lines {
             seen.extend(lines.iter().copied());
         }
-        self.paths.insert(
+        let previous = self.paths.insert(
             path.to_string(),
             Snapshot {
                 text: text.to_string(),
@@ -353,46 +357,19 @@ impl SnapshotStore {
                 seen_lines: seen,
             },
         );
+        if let Some(previous) = previous {
+            let history = self.history.entry(path.to_string()).or_default();
+            history.retain(|old| old.digest != previous.digest);
+            history.push_front(previous);
+            history.truncate(HISTORY_LIMIT);
+        }
         tag
-    }
-
-    /// Consume a matching previous read, or arm this read for the next call.
-    /// A mismatch replaces stale state, so a changed file/window is real once
-    /// and its unchanged repeat is the next deduplicated call.
-    pub fn take_unchanged(
-        &mut self,
-        path: &str,
-        digest: &[u8; 32],
-        first: usize,
-        end: usize,
-    ) -> bool {
-        if !self.dedup_enabled {
-            return false;
-        }
-        let current = LastRead {
-            digest: *digest,
-            first,
-            end,
-        };
-        if self.last_reads.get(path) == Some(&current) {
-            self.last_reads.remove(path);
-            true
-        } else {
-            self.last_reads.insert(path.to_string(), current);
-            false
-        }
-    }
-
-    /// Do not arm unchanged-read deduplication for a response with no visible
-    /// lines, such as an empty or out-of-range file.
-    pub fn clear_last_read(&mut self, path: &str) {
-        self.last_reads.remove(path);
     }
 
     /// Clear everything (session reset).
     pub fn clear(&mut self) {
         self.paths.clear();
-        self.last_reads.clear();
+        self.history.clear();
     }
 }
 

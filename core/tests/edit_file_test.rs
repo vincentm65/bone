@@ -2,39 +2,48 @@ mod common;
 
 use std::path::PathBuf;
 
-use bone_core::tools::edit_file::{EditFileTool, preview_edit_file};
+use bone_core::tools::edit_file::{EditFileTool, line_hash, render_line};
 use bone_core::tools::read_file::ReadFileTool;
 use bone_core::tools::types::{Tool, ToolExecutionContext};
-use bone_core::tools::write_atomic::write_atomic_if_unchanged;
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::fs;
 
-fn temp_path(name: &str) -> PathBuf {
-    common::temp_path(&format!("simple-edit-{name}"))
-}
-
 async fn setup(name: &str, content: &str) -> PathBuf {
-    let path = temp_path(name);
+    let path = common::temp_path(&format!("edit_file-{name}"));
     fs::write(&path, content).await.expect("setup");
     path
 }
 
-async fn read_into_context(path: &PathBuf, context: &ToolExecutionContext) {
-    ReadFileTool
-        .execute_output_live(json!({ "path": path }), None, context.clone())
-        .await
-        .expect("read");
+fn context() -> ToolExecutionContext {
+    let context = ToolExecutionContext::default();
+    context.snapshots.write().unwrap().set_hashline(true);
+    context
 }
 
-async fn edit_live(
+async fn read(path: &PathBuf, context: &ToolExecutionContext) -> String {
+    read_args(json!({ "path": path }), context).await
+}
+
+async fn read_args(args: Value, context: &ToolExecutionContext) -> String {
+    ReadFileTool
+        .execute_output_live(args, None, context.clone())
+        .await
+        .expect("read")
+        .content
+}
+
+fn a(line: usize, content: &str) -> String {
+    format!("{line}#{}", line_hash(content))
+}
+
+async fn edit(
     path: &PathBuf,
-    old: &str,
-    new: &str,
+    edits: Value,
     context: &ToolExecutionContext,
 ) -> Result<String, String> {
     EditFileTool
         .execute_output_live(
-            json!({ "path": path, "old_text": old, "new_text": new }),
+            json!({ "path": path, "edits": edits }),
             None,
             context.clone(),
         )
@@ -42,631 +51,409 @@ async fn edit_live(
         .map(|out| out.content)
 }
 
-fn edits_args(path: &PathBuf, edits: &[(&str, &str)]) -> serde_json::Value {
-    json!({
-        "path": path,
-        "edits": edits
-            .iter()
-            .map(|(old, new)| json!({ "old_text": old, "new_text": new }))
-            .collect::<Vec<_>>(),
-    })
+async fn contents(path: &PathBuf) -> String {
+    fs::read_to_string(path).await.unwrap()
 }
 
-async fn edit_live_edits(
-    path: &PathBuf,
-    edits: &[(&str, &str)],
-    context: &ToolExecutionContext,
-) -> Result<String, String> {
-    EditFileTool
-        .execute_output_live(edits_args(path, edits), None, context.clone())
-        .await
-        .map(|out| out.content)
+const ABC: &str = "alpha\nbeta\ngamma\ndelta\nepsilon\n";
+
+#[tokio::test]
+async fn read_file_renders_anchors_in_edit_file_mode() {
+    let path = setup("render.txt", ABC).await;
+    let out = read(&path, &context()).await;
+    assert!(out.contains(&render_line(2, "beta")), "{out}");
+    assert!(out.contains(&format!("{}|beta", a(2, "beta"))), "{out}");
+    let _ = fs::remove_file(path).await;
 }
 
 #[tokio::test]
-async fn replaces_exact_unique_text_after_read() {
-    let path = setup("replace.txt", "alpha\nbeta\ngamma\n").await;
-    let context = ToolExecutionContext::default();
-    read_into_context(&path, &context).await;
+async fn plain_read_is_unchanged_without_edit_file() {
+    let path = setup("plain.txt", ABC).await;
+    let out = read_args(json!({ "path": path }), &ToolExecutionContext::default()).await;
+    assert!(!out.contains(&render_line(2, "beta")), "{out}");
+    let _ = fs::remove_file(path).await;
+}
 
-    let result = edit_live(&path, "beta", "BETA", &context).await.unwrap();
-    assert!(result.contains("Edited:"));
-    assert!(result.contains("BETA"));
+#[tokio::test]
+async fn replaces_single_line() {
+    let path = setup("single.txt", ABC).await;
+    let ctx = context();
+    read(&path, &ctx).await;
+    let out = edit(&path, json!([{ "at": a(2, "beta"), "text": "BETA" }]), &ctx)
+        .await
+        .unwrap();
+    assert!(out.contains("Edited:"), "{out}");
+    assert!(out.contains(&render_line(2, "BETA")), "{out}");
     assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "alpha\nBETA\ngamma\n"
+        contents(&path).await,
+        "alpha\nBETA\ngamma\ndelta\nepsilon\n"
     );
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn single_edit_at_top_level_is_accepted() {
+    let path = setup("toplevel.txt", ABC).await;
+    let ctx = context();
+    read(&path, &ctx).await;
+    EditFileTool
+        .execute_output_live(
+            json!({ "path": path, "at": a(1, "alpha"), "text": "ALPHA" }),
+            None,
+            ctx.clone(),
+        )
+        .await
+        .unwrap();
+    assert!(contents(&path).await.starts_with("ALPHA\nbeta\n"));
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn replaces_range_with_more_lines() {
+    let path = setup("range.txt", ABC).await;
+    let ctx = context();
+    read(&path, &ctx).await;
+    edit(
+        &path,
+        json!([{ "at": a(2, "beta"), "end": a(4, "delta"), "text": "x\ny\nz\nw" }]),
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(contents(&path).await, "alpha\nx\ny\nz\nw\nepsilon\n");
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn empty_text_deletes_range() {
+    let path = setup("delete.txt", ABC).await;
+    let ctx = context();
+    read(&path, &ctx).await;
+    edit(
+        &path,
+        json!([{ "at": a(2, "beta"), "end": a(3, "gamma"), "text": "" }]),
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(contents(&path).await, "alpha\ndelta\nepsilon\n");
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn inserts_after_before_and_at_start() {
+    let path = setup("insert.txt", ABC).await;
+    let ctx = context();
+    read(&path, &ctx).await;
+    edit(
+        &path,
+        json!([
+            { "after": "0", "text": "head" },
+            { "after": a(2, "beta"), "text": "after-beta" },
+            { "before": a(5, "epsilon"), "text": "before-eps1\nbefore-eps2" },
+        ]),
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        contents(&path).await,
+        "head\nalpha\nbeta\nafter-beta\ngamma\ndelta\nbefore-eps1\nbefore-eps2\nepsilon\n"
+    );
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn multi_edit_applies_against_one_snapshot() {
+    let path = setup("multi.txt", ABC).await;
+    let ctx = context();
+    read(&path, &ctx).await;
+    edit(
+        &path,
+        json!([
+            { "at": a(5, "epsilon"), "text": "EPS" },
+            { "at": a(1, "alpha"), "text": "A1\nA2" },
+            { "at": a(3, "gamma"), "text": "" },
+        ]),
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(contents(&path).await, "A1\nA2\nbeta\ndelta\nEPS\n");
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn overlapping_edits_are_rejected_atomically() {
+    let path = setup("overlap.txt", ABC).await;
+    let ctx = context();
+    read(&path, &ctx).await;
+    let err = edit(
+        &path,
+        json!([
+            { "at": a(2, "beta"), "end": a(4, "delta"), "text": "X" },
+            { "at": a(3, "gamma"), "text": "Y" },
+        ]),
+        &ctx,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("no changes written"), "{err}");
+    assert_eq!(contents(&path).await, ABC);
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn chained_edits_reuse_old_anchors_without_reread() {
+    let path = setup("chain.txt", ABC).await;
+    let ctx = context();
+    read(&path, &ctx).await;
+    edit(&path, json!([{ "after": "0", "text": "n1\nn2" }]), &ctx)
+        .await
+        .unwrap();
+    // `delta` moved from line 4 to 6, but the stale anchor still resolves.
+    edit(
+        &path,
+        json!([{ "at": a(4, "delta"), "text": "DELTA" }]),
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        contents(&path).await,
+        "n1\nn2\nalpha\nbeta\ngamma\nDELTA\nepsilon\n"
+    );
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn external_insertion_is_remapped() {
+    let path = setup("external.txt", ABC).await;
+    let ctx = context();
+    read(&path, &ctx).await;
+    fs::write(&path, format!("// header\n{ABC}")).await.unwrap();
+    edit(
+        &path,
+        json!([{ "at": a(3, "gamma"), "text": "GAMMA" }]),
+        &ctx,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        contents(&path).await,
+        "// header\nalpha\nbeta\nGAMMA\ndelta\nepsilon\n"
+    );
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn changed_target_is_rejected_with_fresh_anchors_then_retry_works() {
+    let path = setup("changed.txt", ABC).await;
+    let ctx = context();
+    read(&path, &ctx).await;
+    fs::write(&path, "alpha\nbeta\nGAMMA!\ndelta\nepsilon\n")
+        .await
+        .unwrap();
+    let err = edit(&path, json!([{ "at": a(3, "gamma"), "text": "x" }]), &ctx)
+        .await
+        .unwrap_err();
+    assert!(err.contains("no changes written"), "{err}");
+    let fresh = render_line(3, "GAMMA!");
+    assert!(err.contains(&fresh), "{err}");
+    assert_eq!(
+        contents(&path).await,
+        "alpha\nbeta\nGAMMA!\ndelta\nepsilon\n"
+    );
+    // Retry with the anchor from the error message, no re-read.
+    edit(&path, json!([{ "at": a(3, "GAMMA!"), "text": "x" }]), &ctx)
+        .await
+        .unwrap();
+    assert_eq!(contents(&path).await, "alpha\nbeta\nx\ndelta\nepsilon\n");
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn wrong_hash_is_rejected() {
+    let path = setup("wrong.txt", ABC).await;
+    let ctx = context();
+    read(&path, &ctx).await;
+    let err = edit(
+        &path,
+        json!([{ "at": a(2, "not beta"), "text": "x" }]),
+        &ctx,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains(&render_line(2, "beta")), "{err}");
+    assert_eq!(contents(&path).await, ABC);
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn range_over_unseen_lines_is_rejected() {
+    let body: String = (1..=300).map(|n| format!("line {n}\n")).collect();
+    let path = setup("unseen.txt", &body).await;
+    let ctx = context();
+    read_args(json!({ "path": path, "max_lines": 10 }), &ctx).await;
+    let err = edit(
+        &path,
+        json!([{ "at": a(2, "line 2"), "end": a(200, "line 200"), "text": "x" }]),
+        &ctx,
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("no changes written"), "{err}");
+    assert_eq!(contents(&path).await, body);
     let _ = fs::remove_file(path).await;
 }
 
 #[tokio::test]
 async fn preserves_crlf_and_bom() {
-    let path = temp_path("crlf-bom.txt");
-    fs::write(&path, "\u{feff}alpha\r\nbeta\r\ngamma\r\n")
-        .await
-        .unwrap();
-    let context = ToolExecutionContext::default();
-    read_into_context(&path, &context).await;
-
-    edit_live(&path, "beta", "BETA", &context).await.unwrap();
-    assert_eq!(
-        fs::read(&path).await.unwrap(),
-        "\u{feff}alpha\r\nBETA\r\ngamma\r\n".as_bytes()
-    );
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn preserves_mixed_line_endings_outside_the_edit() {
-    let path = temp_path("mixed-endings.txt");
-    fs::write(&path, "alpha\r\nbeta\ngamma\rdelta")
-        .await
-        .unwrap();
-    let context = ToolExecutionContext::default();
-    read_into_context(&path, &context).await;
-
-    edit_live(&path, "beta", "BETA", &context).await.unwrap();
-    assert_eq!(
-        fs::read(&path).await.unwrap(),
-        b"alpha\r\nBETA\ngamma\rdelta"
-    );
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn deletion_and_contextual_insertion_use_the_same_contract() {
-    let path = setup("delete-insert.txt", "one\ntwo\nthree\n").await;
-    let context = ToolExecutionContext::default();
-    read_into_context(&path, &context).await;
-    edit_live(&path, "two\n", "", &context).await.unwrap();
-    edit_live(&path, "one\nthree", "one\ntwo-and-a-half\nthree", &context)
-        .await
-        .unwrap();
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "one\ntwo-and-a-half\nthree\n"
-    );
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn can_insert_into_an_empty_file() {
-    let path = setup("empty.txt", "").await;
-    let context = ToolExecutionContext::default();
-    read_into_context(&path, &context).await;
-    edit_live(&path, "", "first line\n", &context)
-        .await
-        .unwrap();
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), "first line\n");
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn rejects_missing_and_ambiguous_old_text() {
-    let path = setup("matches.txt", "same\nother\nsame\n").await;
-    let context = ToolExecutionContext::default();
-    read_into_context(&path, &context).await;
-
-    let ambiguous = edit_live(&path, "same", "changed", &context)
-        .await
-        .unwrap_err();
-    assert!(ambiguous.contains("more than once"), "{ambiguous}");
-    let missing = edit_live(&path, "missing", "changed", &context)
-        .await
-        .unwrap_err();
-    assert!(missing.contains("not found"), "{missing}");
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "same\nother\nsame\n"
-    );
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn requires_read_for_context_aware_calls() {
-    let path = setup("unread.txt", "old\n").await;
-    let error = edit_live(&path, "old", "new", &ToolExecutionContext::default())
-        .await
-        .unwrap_err();
-    assert!(error.contains("read_file before editing"), "{error}");
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn rejects_text_outside_the_read_range() {
-    let path = setup("range.txt", "one\ntwo\nthree\nfour\n").await;
-    let context = ToolExecutionContext::default();
-    ReadFileTool
-        .execute_output_live(
-            json!({ "path": path, "start_line": 2, "max_lines": 1 }),
-            None,
-            context.clone(),
-        )
-        .await
-        .unwrap();
-    let error = edit_live(&path, "three", "THREE", &context)
-        .await
-        .unwrap_err();
-    assert!(error.contains("not shown"), "{error}");
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn rejects_external_changes_even_when_the_match_remains_unique() {
-    let path = setup("drift.txt", "alpha\nbeta\ngamma\n").await;
-    let context = ToolExecutionContext::default();
-    read_into_context(&path, &context).await;
-    fs::write(&path, "prefix\nalpha\nbeta\ngamma\n")
-        .await
-        .unwrap();
-
-    let error = edit_live(&path, "beta", "BETA", &context)
-        .await
-        .unwrap_err();
-    assert!(error.contains("changed after it was read"), "{error}");
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "prefix\nalpha\nbeta\ngamma\n"
-    );
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn stale_conflict_requests_a_reread() {
-    let path = setup("conflict.txt", "alpha\nbeta\n").await;
-    let context = ToolExecutionContext::default();
-    read_into_context(&path, &context).await;
-    fs::write(&path, "alpha\nBETA ELSEWHERE\n").await.unwrap();
-
-    let error = edit_live(&path, "beta", "BETA", &context)
-        .await
-        .unwrap_err();
-    assert!(error.contains("changed after it was read"), "{error}");
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn relative_and_absolute_paths_share_snapshot_identity() {
-    let path = setup("path.txt", "old\n").await;
-    let project_dir = path.parent().unwrap().to_path_buf();
-    let relative = PathBuf::from(path.file_name().unwrap());
-    let context = ToolExecutionContext::default().with_working_dir(project_dir);
-    read_into_context(&relative, &context).await;
-    edit_live(&path, "old", "new", &context).await.unwrap();
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), "new\n");
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn partial_read_stays_partial_after_an_edit() {
-    let path = setup("partial-after-edit.txt", "one\ntwo\nthree\nfour\n").await;
-    let context = ToolExecutionContext::default();
-    ReadFileTool
-        .execute_output_live(
-            json!({ "path": path, "start_line": 2, "max_lines": 1 }),
-            None,
-            context.clone(),
-        )
-        .await
-        .unwrap();
-
-    edit_live(&path, "two", "TWO", &context).await.unwrap();
-    let error = edit_live(&path, "four", "FOUR", &context)
-        .await
-        .unwrap_err();
-    assert!(error.contains("not shown"), "{error}");
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn preserves_other_visible_lines_after_an_edit() {
-    let path = setup("two-edits.txt", "one\ntwo\nthree\nfour\nfive\n").await;
-    let context = ToolExecutionContext::default();
-    ReadFileTool
-        .execute_output_live(
-            json!({ "path": path, "start_line": 2, "max_lines": 3 }),
-            None,
-            context.clone(),
-        )
-        .await
-        .unwrap();
-
-    edit_live(&path, "two", "TWO", &context).await.unwrap();
-    edit_live(&path, "four", "FOUR", &context).await.unwrap();
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "one\nTWO\nthree\nFOUR\nfive\n"
-    );
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn newline_replacement_preserves_visible_unchanged_suffix() {
-    let path = setup("newline-suffix.txt", "abcDEFghi").await;
-    let context = ToolExecutionContext::default();
-    ReadFileTool
-        .execute_output_live(json!({ "path": path }), None, context.clone())
-        .await
-        .unwrap();
-
-    edit_live(&path, "DEF", "X\n", &context).await.unwrap();
-    edit_live(&path, "ghi", "GHI", &context).await.unwrap();
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), "abcX\nGHI");
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn deletion_shifts_later_visible_lines() {
-    let path = setup("delete-shift.txt", "one\ntwo\nthree\nfour\nfive\n").await;
-    let context = ToolExecutionContext::default();
-    ReadFileTool
-        .execute_output_live(
-            json!({ "path": path, "start_line": 2, "max_lines": 3 }),
-            None,
-            context.clone(),
-        )
-        .await
-        .unwrap();
-
-    edit_live(&path, "two\n", "", &context).await.unwrap();
-    edit_live(&path, "four", "FOUR", &context).await.unwrap();
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "one\nthree\nFOUR\nfive\n"
-    );
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn insertion_shifts_later_visible_lines() {
-    let path = setup("insert-shift.txt", "one\ntwo\nthree\nfour\nfive\n").await;
-    let context = ToolExecutionContext::default();
-    ReadFileTool
-        .execute_output_live(
-            json!({ "path": path, "start_line": 2, "max_lines": 3 }),
-            None,
-            context.clone(),
-        )
-        .await
-        .unwrap();
-
-    edit_live(&path, "two", "two\ninserted", &context)
-        .await
-        .unwrap();
-    edit_live(&path, "four", "FOUR", &context).await.unwrap();
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "one\ntwo\ninserted\nthree\nFOUR\nfive\n"
-    );
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn conditional_atomic_write_rejects_changed_destination() {
-    let path = setup("conditional-write.txt", "current\n").await;
-    let error = write_atomic_if_unchanged(&path, "replacement\n", None, b"stale\n")
-        .await
-        .unwrap_err();
-    assert!(
-        error.contains("changed while the edit was being prepared"),
-        "{error}"
-    );
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), "current\n");
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn preview_uses_session_working_dir_without_writing() {
-    let path = setup("preview.txt", "old\n").await;
-    let project_dir = path.parent().unwrap();
-    let relative = path.file_name().unwrap().to_string_lossy();
-    let preview = preview_edit_file(
-        "edit_file",
-        json!({ "path": relative, "old_text": "old", "new_text": "new" }),
-        Some(project_dir),
+    let path = setup("crlf.txt", "\u{feff}alpha\r\nbeta\r\ngamma\r\n").await;
+    let ctx = context();
+    read(&path, &ctx).await;
+    edit(
+        &path,
+        json!([{ "at": a(2, "beta"), "text": "b1\nb2" }]),
+        &ctx,
     )
     .await
     .unwrap();
-    assert!(preview.diff.contains("new"));
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), "old\n");
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn applies_multiple_hunks_in_one_call() {
-    let path = setup("multi-hunk.txt", "alpha\nbeta\ngamma\ndelta\n").await;
-    let context = ToolExecutionContext::default();
-    read_into_context(&path, &context).await;
-
-    let result = edit_live_edits(&path, &[("alpha", "ALPHA"), ("gamma", "GAMMA")], &context)
-        .await
-        .unwrap();
-    assert!(result.contains("Edited:"));
     assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "ALPHA\nbeta\nGAMMA\ndelta\n"
+        contents(&path).await,
+        "\u{feff}alpha\r\nb1\r\nb2\r\ngamma\r\n"
     );
     let _ = fs::remove_file(path).await;
 }
 
 #[tokio::test]
-async fn hunks_match_the_original_text_not_intermediate_results() {
-    // "x" only exists once the first hunk has applied; it must not be
-    // matchable by a later hunk in the same call.
-    let path = setup("hunk-order.txt", "one\ntwo\n").await;
-    let context = ToolExecutionContext::default();
-    read_into_context(&path, &context).await;
-
-    let error = edit_live_edits(&path, &[("one", "x"), ("x", "y")], &context)
-        .await
-        .unwrap_err();
-    assert!(error.contains("not found"), "{error}");
-    assert!(error.contains("hunk 2 of 2"), "{error}");
-    assert!(error.contains("1 earlier hunks matched"), "{error}");
-    assert!(error.contains("no changes written"), "{error}");
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), "one\ntwo\n");
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn rejects_duplicate_and_overlapping_hunks() {
-    let path = setup("overlap.txt", "same\nother\nsame\n").await;
-    let context = ToolExecutionContext::default();
-    read_into_context(&path, &context).await;
-
-    let duplicate = edit_live_edits(&path, &[("other", "O"), ("other", "X")], &context)
-        .await
-        .unwrap_err();
-    assert!(duplicate.contains("same replacement twice"), "{duplicate}");
-    assert!(duplicate.contains("hunks 1 and 2"), "{duplicate}");
-
-    // "same\nother" spans the second hunk's match.
-    let overlap = edit_live_edits(&path, &[("same\nother", "X"), ("other", "O")], &context)
-        .await
-        .unwrap_err();
-    assert!(overlap.contains("hunks 1 and 2 overlap"), "{overlap}");
-    assert!(overlap.contains("combine them"), "{overlap}");
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "same\nother\nsame\n"
-    );
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn rejects_mixed_forms_empty_edits_and_split_pairs() {
-    let path = setup("mixed-form.txt", "old\n").await;
-    let context = ToolExecutionContext::default();
-    read_into_context(&path, &context).await;
-
-    let mixed = EditFileTool
-        .execute_output_live(
-            json!({ "path": path, "old_text": "old", "new_text": "new", "edits": [] }),
-            None,
-            context.clone(),
-        )
-        .await
-        .unwrap_err();
-    assert!(mixed.contains("not both"), "{mixed}");
-
-    let empty = edit_live_edits(&path, &[], &context).await.unwrap_err();
-    assert!(empty.contains("must not be empty"), "{empty}");
-
-    let split = EditFileTool
-        .execute_output_live(
-            json!({ "path": path, "old_text": "old" }),
-            None,
-            context.clone(),
-        )
-        .await
-        .unwrap_err();
-    assert!(split.contains("together"), "{split}");
-
-    let missing = EditFileTool
-        .execute_output_live(json!({ "path": path }), None, context.clone())
-        .await
-        .unwrap_err();
-    assert!(missing.contains("old_text"), "{missing}");
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), "old\n");
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn multi_hunk_preserves_crlf_and_bom() {
-    let path = temp_path("multi-crlf.txt");
-    fs::write(&path, "\u{feff}alpha\r\nbeta\r\ngamma\r\n")
+async fn preserves_missing_trailing_newline() {
+    let path = setup("notrail.txt", "alpha\nbeta").await;
+    let ctx = context();
+    read(&path, &ctx).await;
+    edit(&path, json!([{ "at": a(2, "beta"), "text": "BETA" }]), &ctx)
         .await
         .unwrap();
-    let context = ToolExecutionContext::default();
-    read_into_context(&path, &context).await;
-
-    edit_live_edits(&path, &[("alpha", "ALPHA"), ("gamma", "GAMMA")], &context)
-        .await
-        .unwrap();
-    assert_eq!(
-        fs::read(&path).await.unwrap(),
-        "\u{feff}ALPHA\r\nbeta\r\nGAMMA\r\n".as_bytes()
-    );
+    assert_eq!(contents(&path).await, "alpha\nBETA");
     let _ = fs::remove_file(path).await;
 }
 
 #[tokio::test]
-async fn rejects_when_any_hunk_falls_outside_the_read_range() {
-    let path = setup("hunk-range.txt", "one\ntwo\nthree\nfour\n").await;
-    let context = ToolExecutionContext::default();
-    ReadFileTool
-        .execute_output_live(
-            json!({ "path": path, "start_line": 1, "max_lines": 2 }),
-            None,
-            context.clone(),
-        )
-        .await
-        .unwrap();
-
-    // Input order differs from file order; diagnostics must use input indexes.
-    let error = edit_live_edits(
+async fn handles_unicode_lines() {
+    let path = setup("unicode.txt", "héllo\n日本語\n🦀 crab\n").await;
+    let ctx = context();
+    read(&path, &ctx).await;
+    edit(
         &path,
-        &[("two", "TWO"), ("four", "FOUR"), ("one", "ONE")],
-        &context,
-    )
-    .await
-    .unwrap_err();
-    assert!(error.contains("not shown"), "{error}");
-    assert!(error.contains("hunk 2 of 3"), "{error}");
-    assert!(error.contains("read lines 4-4 with read_file"), "{error}");
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "one\ntwo\nthree\nfour\n"
-    );
-    let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn follow_up_edit_succeeds_without_reread_after_multi_hunk() {
-    let path = setup("follow-up.txt", "one\ntwo\nthree\nfour\n").await;
-    let context = ToolExecutionContext::default();
-    read_into_context(&path, &context).await;
-
-    // Both targets of the second/third calls were produced by the first call
-    // and have never been re-read.
-    edit_live_edits(
-        &path,
-        &[("two", "TWO inserted"), ("four", "FOUR inserted")],
-        &context,
+        json!([{ "at": a(2, "日本語"), "text": "中文" }]),
+        &ctx,
     )
     .await
     .unwrap();
-    edit_live(&path, "TWO inserted", "TWO edited", &context)
-        .await
-        .unwrap();
-    edit_live(&path, "FOUR inserted", "FOUR edited", &context)
-        .await
-        .unwrap();
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "one\nTWO edited\nthree\nFOUR edited\n"
-    );
+    assert_eq!(contents(&path).await, "héllo\n中文\n🦀 crab\n");
     let _ = fs::remove_file(path).await;
 }
 
 #[tokio::test]
-async fn follow_up_edit_after_multiline_batch_uses_shifted_visibility() {
-    let path = setup("multiline-batch-follow-up.txt", "one\ntwo\nthree\nfour\n").await;
-    let context = ToolExecutionContext::default();
-    read_into_context(&path, &context).await;
-
-    edit_live_edits(
+async fn copied_anchor_prefixes_are_tolerated() {
+    let path = setup("copied.txt", ABC).await;
+    let ctx = context();
+    read(&path, &ctx).await;
+    let text = format!("{}\n{}", render_line(2, "B"), render_line(3, "G"));
+    edit(
         &path,
-        &[("one", "one\ninserted"), ("four", "FOUR")],
-        &context,
+        json!([{ "at": render_line(2, "beta"), "end": a(3, "gamma"), "text": text }]),
+        &ctx,
     )
     .await
     .unwrap();
-    edit_live(&path, "FOUR", "FOUR edited", &context)
+    assert_eq!(contents(&path).await, "alpha\nB\nG\ndelta\nepsilon\n");
+    let _ = fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn no_op_edit_fails() {
+    let path = setup("noop.txt", ABC).await;
+    let ctx = context();
+    read(&path, &ctx).await;
+    let err = edit(&path, json!([{ "at": a(2, "beta"), "text": "beta" }]), &ctx)
         .await
-        .unwrap();
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "one\ninserted\ntwo\nthree\nFOUR edited\n"
-    );
+        .unwrap_err();
+    assert!(!err.is_empty());
+    assert_eq!(contents(&path).await, ABC);
     let _ = fs::remove_file(path).await;
 }
 
 #[tokio::test]
-async fn inline_deletion_preserves_visibility_of_later_lines() {
-    let path = setup("inline-delete-follow-up.txt", "prefix foo\nmiddle\nlast\n").await;
-    let context = ToolExecutionContext::default();
-    read_into_context(&path, &context).await;
-
-    edit_live(&path, "foo", "", &context).await.unwrap();
-    edit_live(&path, "last", "LAST", &context).await.unwrap();
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "prefix \nmiddle\nLAST\n"
-    );
-    let _ = fs::remove_file(path).await;
+async fn missing_path_fails() {
+    let path = common::temp_path("edit_file-missing.txt");
+    let err = edit(&path, json!([{ "at": "1#aa", "text": "x" }]), &context())
+        .await
+        .unwrap_err();
+    assert!(!err.is_empty());
 }
 
 #[tokio::test]
-async fn preview_and_execution_agree_on_batch_errors() {
-    let path = setup("preview-errors.txt", "one\ntwo\nthree\n").await;
-    let context = ToolExecutionContext::default();
-    read_into_context(&path, &context).await;
-    for edits in [
-        vec![("three", "THREE"), ("missing", "X")],
-        vec![("one", "ONE"), ("one", "X")],
-        vec![("two", "TWO"), ("one\ntwo", "X")],
-        vec![("one", "one")],
+async fn invalid_edit_shapes_are_rejected() {
+    let path = setup("shape.txt", ABC).await;
+    let ctx = context();
+    read(&path, &ctx).await;
+    for bad in [
+        json!([{ "at": a(1, "alpha"), "after": a(2, "beta"), "text": "x" }]),
+        json!([{ "after": a(1, "alpha"), "end": a(2, "beta"), "text": "x" }]),
+        json!([{ "at": a(3, "gamma"), "end": a(1, "alpha"), "text": "x" }]),
+        json!([{ "after": a(1, "alpha"), "text": "" }]),
+        json!([{ "text": "x" }]),
     ] {
-        let preview_error = preview_edit_file("edit_file", edits_args(&path, &edits), None)
-            .await
-            .err()
-            .expect("preview must fail");
-        let error = edit_live_edits(&path, &edits, &context).await.unwrap_err();
-        assert_eq!(preview_error, error);
-        assert_eq!(
-            fs::read_to_string(&path).await.unwrap(),
-            "one\ntwo\nthree\n"
-        );
+        assert!(edit(&path, bad.clone(), &ctx).await.is_err(), "{bad}");
     }
+    assert_eq!(contents(&path).await, ABC);
+    let _ = fs::remove_file(path).await;
+}
+
+const BLANKS: &str = "a\n\nb\nc\n\nd\n";
+
+#[tokio::test]
+async fn stale_low_entropy_anchor_after_own_edit_is_ambiguous() {
+    let path = setup("ambiguous.txt", BLANKS).await;
+    let ctx = context();
+    read(&path, &ctx).await;
+    edit(
+        &path,
+        json!([{ "after": a(1, "a"), "text": "x\ny\nz" }]),
+        &ctx,
+    )
+    .await
+    .unwrap();
+    let after_insert = contents(&path).await;
+    assert_eq!(after_insert, "a\nx\ny\nz\n\nb\nc\n\nd\n");
+    // `5#..` from the first read meant the blank before `d` (now line 8), but
+    // live line 5 is also blank. Guessing either would risk corruption.
+    let err = edit(&path, json!([{ "at": a(5, ""), "text": "BLANK" }]), &ctx)
+        .await
+        .unwrap_err();
+    assert!(err.contains("ambiguous"), "{err}");
+    assert!(err.contains(&render_line(5, "")), "{err}");
+    assert!(err.contains(&render_line(8, "")), "{err}");
+    assert_eq!(contents(&path).await, after_insert);
     let _ = fs::remove_file(path).await;
 }
 
 #[tokio::test]
-async fn preview_matches_executed_diff_with_unicode_and_format_preservation() {
-    let original = "\u{feff}alpha\r\ncafé\r\n東京\r\n";
-    let path = setup("preview-unicode.txt", original).await;
-    let context = ToolExecutionContext::default();
-    read_into_context(&path, &context).await;
-    let edits = &[("東京", "大阪\n京都"), ("café", "thé")];
-    let preview = preview_edit_file("edit_file", edits_args(&path, edits), None)
+async fn stale_unique_anchor_after_own_edit_follows_the_line() {
+    let path = setup("follow.txt", BLANKS).await;
+    let ctx = context();
+    read(&path, &ctx).await;
+    edit(
+        &path,
+        json!([{ "after": a(1, "a"), "text": "x\ny\nz" }]),
+        &ctx,
+    )
+    .await
+    .unwrap();
+    edit(&path, json!([{ "at": a(4, "c"), "text": "C" }]), &ctx)
         .await
         .unwrap();
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), original);
-    let output = edit_live_edits(&path, edits, &context).await.unwrap();
-    assert_eq!(output.split_once('\n').unwrap().1, preview.diff.trim_end());
-    assert_eq!(
-        fs::read_to_string(&path).await.unwrap(),
-        "\u{feff}alpha\r\nthé\r\n大阪\r\n京都\r\n"
-    );
-    edit_live(&path, "京都", "Kyoto", &context).await.unwrap();
+    assert_eq!(contents(&path).await, "a\nx\ny\nz\n\nb\nC\n\nd\n");
     let _ = fs::remove_file(path).await;
-}
-
-#[tokio::test]
-async fn partial_mixed_forms_report_mixing_not_empty_edits() {
-    let path = setup("partial-mixed.txt", "old\n").await;
-    for field in ["old_text", "new_text"] {
-        let mut args = edits_args(&path, &[("old", "new")]);
-        args[field] = json!("old");
-        let error = EditFileTool.execute(args).await.unwrap_err();
-        assert_eq!(error, "provide either old_text/new_text or edits, not both");
-    }
-    assert_eq!(fs::read_to_string(&path).await.unwrap(), "old\n");
-    let _ = fs::remove_file(path).await;
-}
-
-#[test]
-fn schema_requires_path_and_advertises_both_forms() {
-    let definition = EditFileTool.definition();
-    let schema = definition.input_schema;
-    assert_eq!(schema["required"], json!(["path"]));
-    assert!(schema["properties"].get("input").is_none());
-    assert_eq!(schema["additionalProperties"], false);
-    let edits = &schema["properties"]["edits"];
-    assert_eq!(edits["type"], "array");
-    assert_eq!(edits["items"]["required"], json!(["old_text", "new_text"]));
-    assert_eq!(edits["items"]["additionalProperties"], false);
-    assert!(definition.description.contains("edits"));
-    assert!(
-        definition
-            .description
-            .contains("enough unchanged surrounding context")
-    );
-    assert!(
-        edits["description"]
-            .as_str()
-            .unwrap()
-            .contains("one complete `old_text`/`new_text` pair")
-    );
 }

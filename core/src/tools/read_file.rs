@@ -185,7 +185,7 @@ impl Tool for ReadFileTool {
         ToolDefinition {
             name: "read_file".to_string(),
             description:
-                "Preferred tool for reading file contents; use this instead of shell commands such as cat, head, tail, or sed. This one tool has two modes. SINGLE: read exactly one literal file with mode=single; start_line and max_lines are allowed, and default to the first 1000 lines. BULK: read multiple files with mode=bulk; use a glob in path or add paths and exclude; do not use start_line or max_lines. If mode is omitted, Bone infers it for backward compatibility. Examples: {\"path\":\"core/src/agent.rs\",\"mode\":\"single\",\"start_line\":220,\"max_lines\":80}; {\"path\":\"core/src/**/*.rs\",\"mode\":\"bulk\",\"exclude\":[\"**/tests/**\"]}. Relative paths resolve from the working directory. Bulk reads skip hidden files and honor .gitignore, cap the match count and aggregate output, and preserve image attachments. To edit, copy an exact unique block of displayed text into edit_file.old_text without line-number prefixes, including enough unchanged surrounding context to make it unique; for disjoint edits, provide one complete old_text/new_text pair per edits entry."
+                "Preferred tool for reading file contents; use this instead of shell commands such as cat, head, tail, or sed. This one tool has two modes. SINGLE: read exactly one literal file with mode=single; start_line and max_lines are allowed, and default to the first 1000 lines. BULK: read multiple files with mode=bulk; use a glob in path or add paths and exclude; do not use start_line or max_lines. If mode is omitted, Bone infers it for backward compatibility. Examples: {\"path\":\"core/src/agent.rs\",\"mode\":\"single\",\"start_line\":220,\"max_lines\":80}; {\"path\":\"core/src/**/*.rs\",\"mode\":\"bulk\",\"exclude\":[\"**/tests/**\"]}. Relative paths resolve from the working directory. Bulk reads skip hidden files and honor .gitignore, cap the match count and aggregate output, and preserve image attachments. To edit, reference the lines you read by their LINE#HASH anchors in edit_file; anchors stay valid while the lines are unchanged, and the edit result shows fresh anchors."
                     .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -263,10 +263,20 @@ impl Tool for ReadFileTool {
         _events: Option<tokio::sync::mpsc::UnboundedSender<crate::pane_content::KeyRequest>>,
         context: ToolExecutionContext,
     ) -> Result<ToolOutput, String> {
-        self.read_file_inner(
+        let hashline = context
+            .tool_handler
+            .as_ref()
+            .is_some_and(|handler| handler.is_enabled(crate::tools::edit_file::TOOL_NAME))
+            || context
+                .snapshots
+                .read()
+                .map(|store| store.hashline())
+                .unwrap_or(false);
+        self.read_file_inner_mode(
             arguments,
             Some(&context.snapshots),
             context.working_dir.as_deref(),
+            hashline,
         )
         .await
     }
@@ -281,10 +291,21 @@ impl ReadFileTool {
         snapshots: Option<&Snapshots>,
         working_dir: Option<&Path>,
     ) -> Result<ToolOutput, String> {
+        self.read_file_inner_mode(arguments, snapshots, working_dir, false)
+            .await
+    }
+
+    async fn read_file_inner_mode(
+        &self,
+        arguments: Value,
+        snapshots: Option<&Snapshots>,
+        working_dir: Option<&Path>,
+        hashline: bool,
+    ) -> Result<ToolOutput, String> {
         let args: Args = serde_json::from_value(arguments).map_err(crate::util::errstr)?;
         args.validate()?;
         if args.is_bulk() {
-            return read_bulk(&args, snapshots, working_dir).await;
+            return read_bulk(&args, snapshots, working_dir, hashline).await;
         }
 
         let path = &args.path;
@@ -293,7 +314,7 @@ impl ReadFileTool {
             return read_image_resolved(&resolved, media_type).await;
         }
 
-        let text = read_text(&args, snapshots, working_dir).await?;
+        let text = read_text(&args, snapshots, working_dir, hashline).await?;
         Ok(ToolOutput::text(text))
     }
 }
@@ -462,6 +483,7 @@ async fn read_bulk(
     args: &Args,
     snapshots: Option<&Snapshots>,
     working_dir: Option<&Path>,
+    hashline: bool,
 ) -> Result<ToolOutput, String> {
     if args.start_line.is_some() || args.max_lines.is_some() {
         return Err(
@@ -486,7 +508,7 @@ async fn read_bulk(
         let result = if let Some(media_type) = image_media_type(&path_text) {
             read_image_resolved(path, media_type).await
         } else {
-            read_text(&Args::literal(path_text), snapshots, working_dir)
+            read_text(&Args::literal(path_text), snapshots, working_dir, hashline)
                 .await
                 .map(ToolOutput::text)
         };
@@ -502,13 +524,6 @@ async fn read_bulk(
         .len();
         let added = 2 + output.content.len();
         if !items.is_empty() && summary_len + body_bytes + added > MAX_BULK_OUTPUT_BYTES {
-            // This file was read (arming unchanged-read dedup) but is not
-            // returned; drop its dedup entry so a later read is not stubbed.
-            if let Some(store) = snapshots
-                && let Ok(mut store) = store.write()
-            {
-                store.clear_last_read(&path.to_string_lossy());
-            }
             break;
         }
         body_bytes += added;
@@ -536,6 +551,7 @@ async fn read_text(
     args: &Args,
     snapshots: Option<&Snapshots>,
     working_dir: Option<&Path>,
+    hashline: bool,
 ) -> Result<String, String> {
     let resolved = snapshot::resolve_existing_path(&args.path, working_dir).await?;
     let path = resolved.to_string_lossy().into_owned();
@@ -560,7 +576,7 @@ async fn read_text(
 
     if first > total {
         // Range starts past EOF: nothing to show, but still report totals.
-        record_snapshot(snapshots, &path, &raw, &normalized, &[], None)?;
+        record_snapshot(snapshots, &path, &raw, &normalized, &[])?;
         return Ok(if total > 0 {
             format!(
                 "File: {path}\nRange: no lines; file has {total} line{}",
@@ -597,13 +613,17 @@ async fn read_text(
     for n in first..=requested_end {
         let content = lines[n - 1];
         let overlong = content.chars().count() > MAX_TOOL_LINE_CHARS;
-        let rendered = if overlong {
-            format!(
+        let rendered = match (overlong, hashline) {
+            (true, true) => format!(
+                "{n}#--|{}  [not editable — line exceeds {MAX_TOOL_LINE_CHARS} chars]\n",
+                truncate_line(content)
+            ),
+            (true, false) => format!(
                 "{n:>5} | {}  [not editable — line exceeds {MAX_TOOL_LINE_CHARS} chars]\n",
                 truncate_line(content)
-            )
-        } else {
-            format!("{n:>5} | {content}\n")
+            ),
+            (false, true) => format!("{}\n", crate::tools::edit_file::render_line(n, content)),
+            (false, false) => format!("{n:>5} | {content}\n"),
         };
         if !body.is_empty() && header_reserve + body.len() + rendered.len() > MAX_OUTPUT_BYTES {
             byte_limited = true;
@@ -617,14 +637,7 @@ async fn read_text(
         }
     }
 
-    let window = (!shown_nums.is_empty()).then_some((first, end));
-    let (tag, unchanged) =
-        record_snapshot(snapshots, &path, &raw, &normalized, &shown_nums, window)?;
-    if unchanged {
-        return Ok(format!(
-            "File: {path}\nUnchanged: lines {first}-{end}, tag {tag} — identical to the earlier read; that content is already in context."
-        ));
-    }
+    record_snapshot(snapshots, &path, &raw, &normalized, &shown_nums)?;
 
     let stopped = if byte_limited {
         Some("50 KiB output limit")
@@ -654,27 +667,17 @@ fn record_snapshot(
     raw: &str,
     normalized: &str,
     seen: &[usize],
-    window: Option<(usize, usize)>,
-) -> Result<(String, bool), String> {
-    let tag = snapshot::compute_tag(normalized);
+) -> Result<(), String> {
     if let Some(store) = snapshots {
         let mut guard = store
             .write()
             .map_err(|_| "snapshot store lock is poisoned".to_string())?;
-        let tag = guard.record_with_format(
+        guard.record_with_format(
             path,
             normalized,
             snapshot::TextFormat::detect(raw),
             Some(seen),
         );
-        let unchanged = if let Some((first, end)) = window {
-            let digest = snapshot::compute_digest(normalized);
-            guard.take_unchanged(path, &digest, first, end)
-        } else {
-            guard.clear_last_read(path);
-            false
-        };
-        return Ok((tag, unchanged));
     }
-    Ok((tag, false))
+    Ok(())
 }

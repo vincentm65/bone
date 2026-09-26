@@ -31,6 +31,7 @@ fn nested_request(session_sink: Option<Arc<dyn SessionSink>>) -> AgentRequest {
         transcript: None,
         config_store: Some(crate::config::store::ConfigStore::for_test()),
         cancel: None,
+        snapshots: None,
     }
 }
 
@@ -153,6 +154,7 @@ fn request(llm: Arc<dyn LlmProvider>) -> AgentRequest {
         transcript: None,
         cancel: None,
         config_store: None,
+        snapshots: None,
     }
 }
 

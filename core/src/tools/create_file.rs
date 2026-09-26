@@ -2,7 +2,7 @@
 //!
 //! On success it records the file's normalized content as a fresh snapshot
 //! (all lines visible — the model just authored them) so a following
-//! `edit_file` can validate a simple exact-text replacement.
+//! `edit_file` can anchor on any of those lines.
 
 use std::path::Path;
 
@@ -29,7 +29,7 @@ impl Tool for CreateFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "create_file".to_string(),
-            description: "Create a NEW UTF-8 text file; use this instead of shell commands such as tee, printf, heredocs, or redirection. This tool never overwrites and errors if the path already exists. Never delete an existing file just to make create_file succeed. To change an existing file, read it and use edit_file with path, old_text, and new_text.".to_string(),
+            description: "Create a NEW UTF-8 text file; use this instead of shell commands such as tee, printf, heredocs, or redirection. This tool never overwrites and errors if the path already exists. Never delete an existing file just to make create_file succeed. To change an existing file, read it and use edit_file with path and LINE#HASH anchors.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -90,7 +90,7 @@ async fn create_file_inner(
         Ok(_) => {
             return Err(
                 "file already exists — create_file only creates new files. Do NOT retry create_file for this path, and do not delete the existing file to make create_file succeed. \
-                 To change it, read the file and call edit_file with path, old_text, and new_text."
+                 To change it, read the file and call edit_file with path and LINE#HASH anchors."
                     .to_string(),
             );
         }

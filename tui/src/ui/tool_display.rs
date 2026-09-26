@@ -277,16 +277,21 @@ fn format_display_value(value: &Value) -> String {
     }
 }
 
+/// A read_file content row: plain `   N | text` or hashline `N#HH|text`.
+fn is_numbered_read_row(line: &str) -> bool {
+    let line = line.trim_start();
+    let rest = line.trim_start_matches(|c: char| c.is_ascii_digit());
+    rest.len() < line.len() && (rest.starts_with(" | ") || rest.starts_with('#'))
+}
+
 pub fn read_file_line_summary(call: &ToolCall, result: &ToolResult) -> String {
-    // Current read_file output has two metadata lines followed by `N | text`.
-    // Count only numbered content rows, not the File/Range/Note headers.
+    // Current read_file output has metadata lines followed by numbered rows
+    // (`N | text`, or `N#HH|text` in hashline mode). Count only those rows,
+    // not the File/Range/Note headers.
     let numbered_lines = result
         .content
         .lines()
-        .filter(|line| {
-            line.split_once(" | ")
-                .is_some_and(|(prefix, _)| prefix.trim().parse::<usize>().is_ok())
-        })
+        .filter(|line| is_numbered_read_row(line))
         .count();
     if result.content.starts_with("File: ") {
         if numbered_lines == 0 {

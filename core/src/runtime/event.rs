@@ -228,6 +228,9 @@ pub struct ChannelApprovalGate {
     registry: ApprovalReplyRegistry,
     timer: Option<WorkTimer>,
     working_dir: Option<std::path::PathBuf>,
+    /// Session snapshots so `edit_file` previews resolve anchors exactly
+    /// as execution will (snapshot remapping, ambiguity checks).
+    snapshots: Option<crate::tools::snapshot::Snapshots>,
 }
 
 impl ChannelApprovalGate {
@@ -242,7 +245,14 @@ impl ChannelApprovalGate {
             registry,
             timer,
             working_dir,
+            snapshots: None,
         }
+    }
+
+    /// Attach the session snapshot store used by edit previews.
+    pub fn with_snapshots(mut self, snapshots: crate::tools::snapshot::Snapshots) -> Self {
+        self.snapshots = Some(snapshots);
+        self
     }
 }
 
@@ -259,8 +269,8 @@ impl ApprovalGate for ChannelApprovalGate {
         let preview = if call.name == "edit_file" {
             Some(
                 crate::tools::edit_file::preview_edit_file(
-                    &call.name,
                     call.arguments.clone(),
+                    self.snapshots.as_ref(),
                     self.working_dir.as_deref(),
                 )
                 .await

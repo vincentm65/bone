@@ -9,7 +9,7 @@ use crate::config::bone_dir;
 const TOOL_USAGE_GUIDANCE: &str = "\
 Tool usage:\n\
 - You may issue multiple independent tool calls in a single turn; batch related reads/searches instead of one per turn.\n\
-- edit_file accepts several disjoint replacements in one call via edits.\n\
+- edit_file replaces lines by `LINE#HASH` anchors shown by read_file; pass several disjoint edits in one call via edits.\n\
 - Do not re-read a file you just changed unless the edit reported the file changed.";
 
 /// System prompt injected at the start of a normal conversation.

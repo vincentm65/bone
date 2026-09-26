@@ -64,8 +64,8 @@ async fn refuses_to_overwrite_existing_file() {
         "unexpected error: {err}"
     );
     assert!(
-        err.contains("edit_file") && err.contains("old_text"),
-        "error should point at the simple edit_file contract: {err}"
+        err.contains("edit_file") && err.contains("LINE#HASH"),
+        "error should point at the anchor-based edit_file contract: {err}"
     );
     assert_eq!(
         fs::read_to_string(&path)

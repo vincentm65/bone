@@ -1058,13 +1058,15 @@ impl BlockingCtxSetup {
         let (key_tx, key_rx) = mpsc::unbounded_channel();
         let (status_tx, status_rx) = mpsc::unbounded_channel();
         let app_state = daemon.app_ctx_snapshot();
-        let approval_gate =
-            crate::tools::SharedGate(Arc::new(crate::runtime::ChannelApprovalGate::new(
+        let approval_gate = crate::tools::SharedGate(Arc::new(
+            crate::runtime::ChannelApprovalGate::new(
                 status_tx.clone(),
                 daemon.approval_registry.clone(),
                 None,
                 app_state.tool_handler.working_dir.clone(),
-            )));
+            )
+            .with_snapshots(app_state.tool_handler.snapshots.clone()),
+        ));
         Self {
             app_state,
             cancel: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -3067,13 +3069,19 @@ impl DaemonCtx {
         let cancel = Arc::new(AtomicBool::new(false));
         let work_timer = crate::runtime::timer::WorkTimer::start();
         self.key_registry.set_timer(Some(work_timer.clone()));
-        let working_dir = self.session.lock().unwrap().tools.working_dir.clone();
-        let gate = Arc::new(ChannelApprovalGate::new(
-            bg_tx.clone(),
-            self.approval_registry.clone(),
-            Some(work_timer.clone()),
-            working_dir,
-        ));
+        let (working_dir, snapshots) = {
+            let s = self.session.lock().unwrap();
+            (s.tools.working_dir.clone(), s.tools.snapshots.clone())
+        };
+        let gate = Arc::new(
+            ChannelApprovalGate::new(
+                bg_tx.clone(),
+                self.approval_registry.clone(),
+                Some(work_timer.clone()),
+                working_dir,
+            )
+            .with_snapshots(snapshots),
+        );
         let driver = {
             let s = self.session.lock().unwrap();
             let session_sink: Arc<dyn crate::session_sink::SessionSink> = match s.conversation_id {

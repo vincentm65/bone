@@ -406,3 +406,23 @@ fn read_file_summary_counts_only_new_numbered_rows() {
         tool.label
     );
 }
+
+#[test]
+fn read_file_summary_counts_hashline_rows() {
+    let call = call(
+        "read_file",
+        json!({ "path": "src/main.rs", "start_line": 20 }),
+    );
+    let result = result(
+        "read_file",
+        "File: /repo/src/main.rs\nRange: lines 20-22 of 30.\n20#k3|alpha\n21#--|long  [not editable]\n22#t6|",
+    );
+
+    let row = build_tool_row(&call, &result, None);
+    let tool = row.tool.unwrap();
+    assert!(
+        tool.label.contains("(lines 20-22, 3 read)"),
+        "label: {}",
+        tool.label
+    );
+}

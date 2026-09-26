@@ -2850,6 +2850,9 @@ fn launch_background_job(
     built.request.event_sender = Some(event_tx);
     let job_cancel = Arc::new(AtomicBool::new(false));
     built.request.cancel = Some(job_cancel.clone());
+    // One snapshot store shared by the job's tools and its edit previews.
+    let snapshots: crate::tools::snapshot::Snapshots = Default::default();
+    built.request.snapshots = Some(snapshots.clone());
     let id = crate::ext::jobs::registry().create(crate::ext::jobs::NewJob {
         agent,
         task,
@@ -2910,8 +2913,8 @@ fn launch_background_job(
                         name, arguments, ..
                     } if name == "edit_file" => Some(
                         crate::tools::edit_file::preview_edit_file(
-                            name,
                             arguments.clone(),
+                            Some(&snapshots),
                             working_dir.as_deref(),
                         )
                         .await
@@ -3062,6 +3065,7 @@ fn build_agent_request(
         transcript,
         config_store: Some(config_store),
         cancel: None,
+        snapshots: None,
     };
     Ok(BuiltAgent {
         request,

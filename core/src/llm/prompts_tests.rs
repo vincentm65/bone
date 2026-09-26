@@ -16,9 +16,7 @@ fn configured_prompt_gets_tool_guidance_and_runtime_context_appended() {
     assert!(!prompt.contains("You are bone, a coding assistant"));
     assert!(prompt.contains("multiple independent tool calls in a single turn"));
     assert!(prompt.contains("batch related reads/searches"));
-    assert!(
-        prompt.contains("edit_file accepts several disjoint replacements in one call via edits")
-    );
+    assert!(prompt.contains("edit_file replaces lines by `LINE#HASH` anchors shown by read_file"));
     assert!(prompt.contains("Do not re-read a file you just changed"));
     assert!(prompt.contains("Resolved config directory: "));
     assert!(prompt.contains("Current working directory: "));

@@ -207,6 +207,9 @@ pub struct AgentRequest {
     /// killed mid-execution when the user cancels, rather than only at the
     /// watchdog's next boundary.
     pub cancel: Option<Arc<std::sync::atomic::AtomicBool>>,
+    /// Optional snapshot store for the agent's file tools, shared with edit
+    /// previews so `edit_file` previews resolve anchors like execution.
+    pub snapshots: Option<crate::tools::snapshot::Snapshots>,
 }
 
 /// Current time in epoch milliseconds.
@@ -447,7 +450,10 @@ fn agent_setup(request: &AgentRequest) -> Result<AgentSetup, String> {
         config.runtime_settings_handle(),
     );
     let extensions = booted.manager;
-    let tools = booted.tools;
+    let mut tools = booted.tools;
+    if let Some(snapshots) = request.snapshots.clone() {
+        tools.snapshots = snapshots;
+    }
 
     let mut transcript = request.transcript.clone().unwrap_or_default();
     transcript.push(ChatMessage::new(ChatRole::User, &request.prompt));

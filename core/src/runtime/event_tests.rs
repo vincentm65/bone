@@ -45,8 +45,7 @@ async fn approval_preview_uses_daemon_session_working_dir() {
                 name: "edit_file".into(),
                 arguments: serde_json::json!({
                     "path": "target.txt",
-                    "old_text": "old",
-                    "new_text": "new"
+                    "edits": [{ "at": format!("1#{}", crate::tools::edit_file::line_hash("old")), "text": "new" }]
                 }),
             },
         )
@@ -61,6 +60,61 @@ async fn approval_preview_uses_daemon_session_working_dir() {
     // fragment of the proposed diff body rather than the pre-canonical path.
     assert!(preview.contains("target.txt"), "{preview}");
     assert!(preview.contains("+ new"), "{preview}");
+    assert!(registry.resolve(id, CallOutcome::Approve));
+    assert_eq!(decision.await.unwrap(), CallOutcome::Approve);
+
+    std::fs::remove_dir_all(root).ok();
+}
+
+#[tokio::test]
+async fn anchor_edit_approval_preview_uses_session_snapshots() {
+    use crate::tools::edit_file::line_hash;
+    use crate::tools::snapshot::Snapshots;
+
+    let root = std::env::temp_dir().join(format!("bone-hashline-preview-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let path = root.join("target.txt");
+    let original = "alpha\nbeta\ngamma\ndelta\nepsilon\n";
+    std::fs::write(&path, original).unwrap();
+    let canonical = std::fs::canonicalize(&path).unwrap();
+
+    let snapshots: Snapshots = Default::default();
+    {
+        let mut store = snapshots.write().unwrap();
+        store.set_hashline(true);
+        store.record(&canonical.to_string_lossy(), original, None);
+    }
+    // The file shifts after the model read it; the anchor still names line 3.
+    std::fs::write(&path, format!("// header\n{original}")).unwrap();
+
+    let registry = ApprovalReplyRegistry::new();
+    let (events, mut receiver) = mpsc::unbounded_channel();
+    let gate = ChannelApprovalGate::new(events, registry.clone(), None, Some(root.clone()))
+        .with_snapshots(snapshots);
+    let anchor = format!("3#{}", line_hash("gamma"));
+    let decision = tokio::spawn(async move {
+        gate.decide(
+            None,
+            true,
+            &ToolCall {
+                id: "call-1".into(),
+                name: "edit_file".into(),
+                arguments: serde_json::json!({
+                    "path": "target.txt",
+                    "edits": [{"at": anchor, "text": "GAMMA"}]
+                }),
+            },
+        )
+        .await
+    });
+
+    let RuntimeEvent::ApprovalRequest { id, preview, .. } = receiver.recv().await.unwrap() else {
+        panic!("expected approval request");
+    };
+    let preview = preview.expect("edit_file preview");
+    assert!(!preview.starts_with("Cannot preview"), "{preview}");
+    assert!(preview.contains("+ GAMMA"), "{preview}");
+    assert!(preview.contains("- gamma"), "{preview}");
     assert!(registry.resolve(id, CallOutcome::Approve));
     assert_eq!(decision.await.unwrap(), CallOutcome::Approve);
 
@@ -97,7 +151,7 @@ async fn approval_preview_surfaces_edit_errors_without_changing_approval_policy(
     assert_eq!(
         preview.as_deref(),
         Some(
-            "Cannot preview edit_file: edit_file is missing `path`; provide the file path with the edit"
+            "Cannot preview edit_file: edit_file is missing `path`; provide the file path with the edits"
         )
     );
     assert_eq!(blocked.as_deref(), Some("policy block"));

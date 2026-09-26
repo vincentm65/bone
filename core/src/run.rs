@@ -129,6 +129,7 @@ pub async fn run_headless(request: RunRequest) -> Result<AgentResponse, String> 
         transcript: None,
         config_store: Some(config),
         cancel: None,
+        snapshots: None,
     })
     .await
 }

@@ -310,15 +310,20 @@ fn format_display_value(value: &Value) -> String {
     }
 }
 
+/// A read_file content row: plain `   N | text` or hashline `N#HH|text`.
+fn is_numbered_read_row(line: &str) -> bool {
+    let line = line.trim_start();
+    let rest = line.trim_start_matches(|c: char| c.is_ascii_digit());
+    rest.len() < line.len() && (rest.starts_with(" | ") || rest.starts_with('#'))
+}
+
 fn read_file_line_summary(arguments: &Value, content: &str) -> String {
-    // Current read_file output has two metadata lines followed by `N | text`.
-    // Count only numbered content rows, not the File/Range/Note headers.
+    // Current read_file output has metadata lines followed by numbered rows
+    // (`N | text`, or `N#HH|text` in hashline mode). Count only those rows,
+    // not the File/Range/Note headers.
     let numbered_lines = content
         .lines()
-        .filter(|line| {
-            line.split_once(" | ")
-                .is_some_and(|(prefix, _)| prefix.trim().parse::<usize>().is_ok())
-        })
+        .filter(|line| is_numbered_read_row(line))
         .count();
     if content.starts_with("File: ") {
         if numbered_lines == 0 {
@@ -728,6 +733,16 @@ mod tests {
             Some(&ToolDisplayConfig::default()),
         );
         assert_eq!(label.as_deref(), Some("read_file a.rs (lines 1-2, 2 read)"));
+
+        let hashline = "File: a.rs\nRange: lines 5-7 of 9.\n5#k3|a\n6#--|long  [not editable]\n7#t6|";
+        let label = custom_label(
+            "read_file",
+            &json!({"path": "a.rs", "start_line": 5}),
+            hashline,
+            false,
+            Some(&ToolDisplayConfig::default()),
+        );
+        assert_eq!(label.as_deref(), Some("read_file a.rs (lines 5-7, 3 read)"));
     }
 
     #[test]
