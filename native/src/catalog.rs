@@ -121,11 +121,11 @@ mod tests {
 
     #[test]
     fn matches_item_filters_by_tab_and_query() {
-        let memory = item("memory", true, true);
+        let weather = item("weather", true, true);
         let browser = item("browser", false, false);
-        assert!(matches_item(&memory, Filter::Updates, "memory tool"));
+        assert!(matches_item(&weather, Filter::Updates, "weather tool"));
         assert!(!matches_item(&browser, Filter::Installed, ""));
-        assert!(!matches_item(&memory, Filter::Browse, "missing"));
+        assert!(!matches_item(&weather, Filter::Browse, "missing"));
         assert!(matches_item(&browser, Filter::Browse, ""));
     }
 

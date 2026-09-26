@@ -720,10 +720,10 @@ mod tests {
 
     #[test]
     fn search_matches_category_and_field_across_words() {
-        let mut f = field("extensions.memory.limit", "number");
-        f.label = "History limit".into();
-        assert!(matches(&f, "Extensions / Memory", "memory history"));
-        assert!(!matches(&f, "Extensions / Memory", "memory unknown"));
+        let mut f = field("extensions.example.limit", "number");
+        f.label = "Example limit".into();
+        assert!(matches(&f, "Extensions / Example", "example limit"));
+        assert!(!matches(&f, "Extensions / Example", "example unknown"));
     }
 
     fn field(path: &str, value_type: &str) -> SettingDefinition {
