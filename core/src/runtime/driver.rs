@@ -111,11 +111,10 @@ fn record_hook_usage(
 /// tail that a busy `Synchronize` merges over the committed DB rows. Poisoned
 /// locks are reused: a panic here would only corrupt a snapshot, never the
 /// canonical `persist_messages`, which is the source of truth.
-fn sync_live_tail(
-    live_tail: &Arc<Mutex<Vec<ChatMessage>>>,
-    persist_messages: &[ChatMessage],
-) {
-    *live_tail.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = persist_messages.to_vec();
+fn sync_live_tail(live_tail: &Arc<Mutex<Vec<ChatMessage>>>, persist_messages: &[ChatMessage]) {
+    *live_tail
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = persist_messages.to_vec();
 }
 
 /// Durably commit every completed message accumulated since the previous tool

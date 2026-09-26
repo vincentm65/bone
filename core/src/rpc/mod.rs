@@ -3018,13 +3018,7 @@ impl DaemonCtx {
                 window,
             } => {
                 // Idle: no in-turn driver, so nothing uncommitted to merge.
-                self.publish_synchronized_state(
-                    request_id,
-                    include_messages,
-                    window,
-                    false,
-                    None,
-                );
+                self.publish_synchronized_state(request_id, include_messages, window, false, None);
                 Flow::Continue
             }
             RuntimeCommand::CancelProcess { id } => {

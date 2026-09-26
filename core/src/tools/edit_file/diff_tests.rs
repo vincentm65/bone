@@ -23,7 +23,11 @@ fn separates_hunks_with_a_marker_row() {
     assert_eq!(separators.len(), 1, "one separator between two hunks");
     let at = separators[0];
     assert_eq!(lines[at - 1], "    8   line 8", "first hunk ends before it");
-    assert_eq!(lines[at + 1], "   27   line 27", "second hunk starts after it");
+    assert_eq!(
+        lines[at + 1],
+        "   27   line 27",
+        "second hunk starts after it"
+    );
 }
 
 #[test]

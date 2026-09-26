@@ -338,7 +338,7 @@ fn driver_with_gate(
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
     (driver, prompt)
 }
@@ -373,7 +373,7 @@ fn driver_with_raw(attempts: Vec<MockAttempt>, mode: ApprovalMode) -> (Driver, &
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
     (driver, prompt)
 }
@@ -522,7 +522,7 @@ async fn driver_usage_only_sink_persists_to_parent_conversation() {
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     let outcome = driver.run_to_outcome(prompt).await;
@@ -824,7 +824,7 @@ async fn driver_key_reply_completes_turn() {
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     let run = tokio::spawn(async move { driver.run(prompt).await });
@@ -982,7 +982,7 @@ end)
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     let response = driver.run(prompt).await.expect("driver run");
@@ -1276,7 +1276,7 @@ record("session_end", true)
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     let outcome = driver.run_to_outcome(prompt).await;
@@ -1365,7 +1365,7 @@ end)
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     let outcome = tokio::time::timeout(
@@ -1467,7 +1467,7 @@ end)
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     let outcome = tokio::time::timeout(
@@ -1533,7 +1533,7 @@ end)
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     let outcome = driver.run_to_outcome(prompt).await;
@@ -1606,7 +1606,7 @@ end)
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     let outcome = driver.run_to_outcome(prompt).await;
@@ -1715,7 +1715,7 @@ end)
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     let outcome = driver.run_to_outcome(prompt).await;
@@ -1874,7 +1874,7 @@ end)
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     let started = std::time::Instant::now();
@@ -1952,7 +1952,7 @@ end)
         agent_cache_scope: None,
         config_store: config,
         turn_nudge: Arc::new(Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     let outcome = driver.run_to_outcome(prompt).await;
@@ -2050,7 +2050,7 @@ async fn driver_preserves_ephemeral_images_in_request_history() {
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     let outcome = driver.run_to_outcome(prompt).await;
@@ -2175,7 +2175,7 @@ bone.tool.register({
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     driver.run(prompt).await.expect("driver run");
@@ -2272,7 +2272,7 @@ bone.tool.register({
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     driver.run(prompt).await.expect("driver run");
@@ -2341,7 +2341,7 @@ async fn driver_keeps_tool_preamble_as_assistant_content() {
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     let response = driver.run(prompt).await.expect("driver run");
@@ -2453,7 +2453,7 @@ end)
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     let response = driver.run(prompt).await.expect("driver run");
@@ -2561,7 +2561,7 @@ end)
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     let outcome = driver.run_to_outcome(prompt).await;
@@ -2664,7 +2664,7 @@ end)
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     driver.run(prompt).await.expect("driver run");
@@ -2800,7 +2800,7 @@ async fn driver_compact_gate_fires_past_trigger_and_run_continues() {
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     let outcome = driver.run_to_outcome(prompt).await;
@@ -3019,7 +3019,7 @@ end, { timeout_ms = 60000 })
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     let outcome = tokio::time::timeout(
@@ -3105,7 +3105,7 @@ end)
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     let outcome = tokio::time::timeout(
@@ -3242,7 +3242,7 @@ async fn repeated_identical_failing_tool_call_aborts() {
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(std::sync::Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     // Bound the whole thing: if the brake regresses, this loops forever, so the
@@ -3302,7 +3302,7 @@ async fn driver_passes_delegation_depth_and_agent_scope_to_provider() {
         agent_cache_scope,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     // Top level: depth 0 and no agent scope -> the conversation-derived scope.
@@ -3439,7 +3439,7 @@ async fn driver_emits_image_relays_after_the_whole_tool_batch() {
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     let outcome = driver.run_to_outcome(prompt).await;
@@ -3558,7 +3558,7 @@ async fn driver_keeps_mixed_image_batch_adjacent_and_ephemeral_out_of_transcript
         agent_cache_scope: None,
         config_store: common::config_store(),
         turn_nudge: Arc::new(Mutex::new(None)),
-        live_tail: Arc::new(Mutex::new(Vec::new()))
+        live_tail: Arc::new(Mutex::new(Vec::new())),
     };
 
     let outcome = driver.run_to_outcome(prompt).await;

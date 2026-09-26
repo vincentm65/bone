@@ -275,7 +275,11 @@ async fn active_provider_switch_keeps_conversation_and_records_its_provider() {
     assert_eq!(task.llm.id(), "other");
     {
         let session = task.session.lock().unwrap();
-        assert_eq!(session.conversation_id, Some(id), "switch keeps the conversation");
+        assert_eq!(
+            session.conversation_id,
+            Some(id),
+            "switch keeps the conversation"
+        );
         assert_eq!(session.transcript.len(), 1, "switch keeps the history");
         assert_eq!(
             session
@@ -1863,7 +1867,7 @@ async fn interactive_command_private_completion_returns_replace_and_accounts_usa
     session.session_db = Some(db);
     session.conversation_id = Some(conversation_id);
     session.tools.snapshots = std::sync::Arc::new(std::sync::RwLock::new(
-        crate::tools::snapshot::SnapshotStore::with_dedup(true),
+        crate::tools::snapshot::SnapshotStore::default(),
     ));
     session.transcript.push(crate::llm::ChatMessage::new(
         crate::llm::ChatRole::User,
@@ -1920,12 +1924,10 @@ async fn interactive_command_private_completion_returns_replace_and_accounts_usa
     assert_eq!(persisted.request_count, 1);
     drop(session);
 
-    let digest = crate::tools::snapshot::compute_digest("reset content\n");
     {
         let session = ctx.session.lock().unwrap();
         let mut snapshots = session.tools.snapshots.write().unwrap();
         snapshots.record("reset.txt", "reset content\n", Some(&[1]));
-        assert!(!snapshots.take_unchanged("reset.txt", &digest, 1, 1));
         assert!(snapshots.head("reset.txt").is_some());
     }
 
@@ -1940,9 +1942,8 @@ async fn interactive_command_private_completion_returns_replace_and_accounts_usa
         Flow::Continue
     ));
     let session = ctx.session.lock().unwrap();
-    let mut snapshots = session.tools.snapshots.write().unwrap();
+    let snapshots = session.tools.snapshots.write().unwrap();
     assert!(snapshots.head("reset.txt").is_none());
-    assert!(!snapshots.take_unchanged("reset.txt", &digest, 1, 1));
     drop(snapshots);
     assert_eq!(session.transcript, replacement);
     let effective = session
@@ -4550,7 +4551,9 @@ impl crate::llm::provider::LlmProvider for ScriptedToolProvider {
     ) -> Result<crate::llm::ResponseStream, crate::llm::LlmError> {
         match self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
             0 => Ok(Box::pin(futures_util::stream::iter([
-                Ok(crate::llm::ChatEvent::TextDelta("I will create the file.".into())),
+                Ok(crate::llm::ChatEvent::TextDelta(
+                    "I will create the file.".into(),
+                )),
                 Ok(crate::llm::ChatEvent::ToolCall(bone_protocol::ToolCall {
                     id: "call_1".into(),
                     name: "create_file".into(),
@@ -4560,9 +4563,9 @@ impl crate::llm::provider::LlmProvider for ScriptedToolProvider {
                     }),
                 })),
             ]))),
-            _ => Ok(Box::pin(futures_util::stream::iter([
-                Ok(crate::llm::ChatEvent::TextDelta("The file was created.".into())),
-            ]))),
+            _ => Ok(Box::pin(futures_util::stream::iter([Ok(
+                crate::llm::ChatEvent::TextDelta("The file was created.".into()),
+            )]))),
         }
     }
 }
@@ -4596,13 +4599,17 @@ async fn synchronize_in_turn_merges_uncommitted_live_tail_over_full_db() {
     }
 
     let provider = Arc::new(ScriptedToolProvider {
-        file_path: dir.path().join("created.txt").to_string_lossy().into_owned(),
+        file_path: dir
+            .path()
+            .join("created.txt")
+            .to_string_lossy()
+            .into_owned(),
         calls: std::sync::atomic::AtomicUsize::new(0),
     });
 
-    let mut session = crate::runtime::RuntimeSession::new(crate::tools::registry::ToolHandler::new(
-        crate::tools::builtin_tools(),
-    ));
+    let mut session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
     session
         .init_db(&*provider, "regression system prompt")
         .expect("fresh startup database");
@@ -4623,8 +4630,11 @@ async fn synchronize_in_turn_merges_uncommitted_live_tail_over_full_db() {
         .unwrap();
     }
 
-    let (mut ctx, hub, mut commands) =
-        test_daemon_ctx(provider.clone(), crate::ext::ExtensionManager::unloaded(), session);
+    let (mut ctx, hub, mut commands) = test_daemon_ctx(
+        provider.clone(),
+        crate::ext::ExtensionManager::unloaded(),
+        session,
+    );
     // Two subscribers from the start: the observer drives the turn, the main
     // task keeps a live stream for the post-turn idle synchronize (turn events
     // replay to both; each only consumes until its own target).
@@ -4732,7 +4742,11 @@ async fn synchronize_in_turn_merges_uncommitted_live_tail_over_full_db() {
     assert_eq!(messages[3].role, crate::llm::ChatRole::Assistant);
     assert_eq!(messages[3].content, "I will create the file.");
     assert_eq!(
-        messages[3].tool_calls.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        messages[3]
+            .tool_calls
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect::<Vec<_>>(),
         ["create_file"],
         "the uncommitted in-turn tool call must be part of the repair reply"
     );
@@ -4784,7 +4798,11 @@ async fn synchronize_in_turn_merges_uncommitted_live_tail_over_full_db() {
     assert_eq!(final_messages[2].content, "second question");
     assert_eq!(final_messages[3].content, "I will create the file.");
     assert_eq!(
-        final_messages[3].tool_calls.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        final_messages[3]
+            .tool_calls
+            .iter()
+            .map(|t| t.name.as_str())
+            .collect::<Vec<_>>(),
         ["create_file"]
     );
     assert_eq!(final_messages[4].role, crate::llm::ChatRole::Tool);
