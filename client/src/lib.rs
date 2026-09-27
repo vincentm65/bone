@@ -7,6 +7,8 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc};
 
+pub mod ssh;
+
 pub const MAX_LINE_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug)]

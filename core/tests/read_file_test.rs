@@ -260,7 +260,7 @@ async fn repaired_relative_paths_cannot_escape_working_directory() {
 }
 
 #[tokio::test]
-async fn bulk_glob_reads_honor_gitignore_hidden_and_exclude() {
+async fn bulk_glob_reads_honor_gitignore_and_exclude_but_include_hidden() {
     let root = common::temp_dir("simple-read-bulk-tree");
     fs::create_dir_all(root.join("src")).await.unwrap();
     fs::create_dir_all(root.join(".git")).await.unwrap();
@@ -299,9 +299,38 @@ async fn bulk_glob_reads_honor_gitignore_hidden_and_exclude() {
     assert!(output.content.contains("extra"), "{}", output.content);
     assert!(!output.content.contains("excluded"), "{}", output.content);
     assert!(!output.content.contains("ignored"), "{}", output.content);
-    assert!(!output.content.contains("hidden"), "{}", output.content);
+    assert!(output.content.contains("hidden"), "{}", output.content);
     assert!(!output.content.contains("git"), "{}", output.content);
-    assert!(output.content.contains("returned 2 of 2 matched files"));
+    assert!(output.content.contains("returned 3 of 3 matched files"));
+    let _ = fs::remove_dir_all(root).await;
+}
+
+#[tokio::test]
+async fn bulk_literal_reads_hidden_files() {
+    let root = common::temp_dir("simple-read-bulk-hidden-literal");
+    fs::create_dir_all(root.join(".config")).await.unwrap();
+    fs::write(root.join(".config/settings.toml"), "hidden settings")
+        .await
+        .unwrap();
+
+    let context = live_context().with_working_dir(root.clone());
+    let output = ReadFileTool
+        .execute_output_live(
+            json!({
+                "path": ".config/settings.toml",
+                "mode": "bulk",
+            }),
+            None,
+            context,
+        )
+        .await
+        .unwrap();
+    assert!(
+        output.content.contains("hidden settings"),
+        "{}",
+        output.content
+    );
+    assert!(output.content.contains("returned 1 of 1 matched files"));
     let _ = fs::remove_dir_all(root).await;
 }
 

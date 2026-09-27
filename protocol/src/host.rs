@@ -221,6 +221,9 @@ pub struct CatalogApplyResult {
 /// `updated_at_local` is the same instant as `updated_at` converted to the
 /// daemon's local time (`YYYY-MM-DDTHH:MM:SS`, no zone), for display. It is
 /// empty from older daemons, which must fall back to `updated_at`.
+///
+/// `token_count` sums recorded prompt + completion tokens and `status` says
+/// whether the last user turn got an answer; both default for older daemons.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ConversationMeta {
     pub id: i64,
@@ -233,6 +236,26 @@ pub struct ConversationMeta {
     pub message_count: i64,
     pub provider: String,
     pub model: String,
+    #[serde(default)]
+    pub token_count: i64,
+    #[serde(default)]
+    pub status: ConversationStatus,
+}
+
+/// Completion state of a conversation's latest user turn.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationStatus {
+    /// The latest user message has an assistant reply after it.
+    Completed,
+    /// The latest user message never got an assistant reply.
+    Interrupted,
+    /// No user message yet.
+    Empty,
+    /// Sent by older daemons, or a status this client does not know.
+    #[default]
+    #[serde(other)]
+    Unknown,
 }
 
 /// Minimal provider data needed by onboarding; credentials remain redacted.
@@ -369,3 +392,63 @@ pub enum HostResponse {
 #[cfg(test)]
 #[path = "host_tests.rs"]
 mod tests;
+
+/// Time range selector shared between session_db and stats UI.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ViewMode {
+    Today,
+    SevenDays,
+    FourWeeks,
+    Yearly,
+    Months,
+}
+
+impl ViewMode {
+    const ALL: [Self; 5] = [
+        Self::Today,
+        Self::SevenDays,
+        Self::FourWeeks,
+        Self::Yearly,
+        Self::Months,
+    ];
+
+    pub fn index(self) -> usize {
+        Self::ALL.iter().position(|&m| m == self).unwrap()
+    }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::Today => "Today",
+            Self::SevenDays => "7 days",
+            Self::FourWeeks => "4 weeks",
+            Self::Yearly => "Yearly",
+            Self::Months => "All time",
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Today => "1",
+            Self::SevenDays => "2",
+            Self::FourWeeks => "3",
+            Self::Yearly => "4",
+            Self::Months => "5",
+        }
+    }
+
+    pub fn prev(self) -> Self {
+        let idx = self.index();
+        Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
+    }
+
+    pub fn next(self) -> Self {
+        let idx = self.index();
+        Self::ALL[(idx + 1) % Self::ALL.len()]
+    }
+}
+
+impl From<ViewMode> for usize {
+    fn from(mode: ViewMode) -> Self {
+        mode.index()
+    }
+}

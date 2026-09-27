@@ -1,9 +1,14 @@
-<!-- bone-agents-reference-version: 5 -->
-# Bone Core Reference
+<!-- bone-agents-reference-version: 6 -->
+# Bone Self-Modification Guide
 
-Bone refreshes this concise index and the focused core documents from the
-running build. Paths below are relative to the resolved Bone config directory
-unless explicitly absolute.
+This is not a project `AGENTS.md`. It is Bone's guide for an agent changing
+Bone itself: its source, bundled Lua, configuration, or reference docs. It lives
+in the resolved config directory named in the system prompt, never in the
+working directory.
+
+In tool paths, a leading `.bone-rust/` resolves to the resolved config
+directory, so the document paths below work exactly as written from any
+working directory.
 
 ## Start Here
 
@@ -12,19 +17,20 @@ core behavior changes.
 
 | Task | Document |
 |---|---|
-| Understand ownership, runtime flow, sessions, and persistence | `docs/architecture.md` |
-| Change settings, providers, policies, themes, or keymaps | `docs/configuration.md` |
-| Add or change Lua tools, commands, hooks, or UI APIs (all shipped as `lua/plugins/<name>/` packages) | `docs/extension-api.md` |
-| Change delegation, approvals, cancellation, or background jobs | `docs/agents.md` |
-| Change TUI, web, daemon connections, events, or rendering | `docs/ui.md` |
-| Build, test, validate, or update bundled documentation | `docs/development.md` |
+| Understand ownership, runtime flow, sessions, and persistence | `.bone-rust/docs/architecture.md` |
+| Change settings, providers, policies, themes, or keymaps | `.bone-rust/docs/configuration.md` |
+| Add or change Lua tools, commands, hooks, or UI APIs (all shipped as `lua/plugins/<name>/` packages) | `.bone-rust/docs/extension-api.md` |
+| Change delegation, approvals, cancellation, or background jobs | `.bone-rust/docs/agents.md` |
+| Change TUI, desktop, daemon connections, events, or rendering | `.bone-rust/docs/ui.md` |
+| Build, test, validate, or update bundled documentation | `.bone-rust/docs/development.md` |
 
-These files are bundled from `core/defaults/docs/`, included in new Bone
-builds, and materialized under the resolved config directory at startup. Bone
-refreshes them to match the running version, so edit the bundled source rather
-than the generated `.bone-rust/docs/` copy. The bundled core reference documents
-platform contracts only. Optional installed extensions own their feature behavior
-and documentation; do not describe them as built-in core behavior.
+This guide and those documents are bundled from `core/defaults/` in the Bone
+source repository and rewritten under the config directory at startup to match
+the running build. Edit the bundled source (`core/defaults/AGENTS.md` and
+`core/defaults/docs/`), never the generated copies. The bundled core reference
+documents platform contracts only. Optional installed extensions own their
+feature behavior and documentation; do not describe them as built-in core
+behavior.
 
 ## Universal operating rules
 

@@ -2,9 +2,7 @@
 
 use crate::llm::{ChatMessage, ChatRole, OutputItem};
 use crate::runtime::UsageRecord;
-use rusqlite::{
-    Connection, OptionalExtension, Transaction, TransactionBehavior, params,
-};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -171,69 +169,9 @@ pub(crate) fn stored_to_chat_message(msg: StoredMessage) -> crate::llm::ChatMess
 }
 
 pub use bone_protocol::{
-    ConversationMeta, DateRange, HourUsage, ProviderUsage, UsageBucket, UsageStatsSnapshot,
-    UsageSummary,
+    ConversationMeta, ConversationStatus, DateRange, HourUsage, ProviderUsage, UsageBucket,
+    UsageStatsSnapshot, UsageSummary, ViewMode,
 };
-
-/// Time range selector shared between session_db and stats UI.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum ViewMode {
-    Today,
-    SevenDays,
-    FourWeeks,
-    Yearly,
-    Months,
-}
-
-impl ViewMode {
-    const ALL: [Self; 5] = [
-        Self::Today,
-        Self::SevenDays,
-        Self::FourWeeks,
-        Self::Yearly,
-        Self::Months,
-    ];
-
-    pub fn index(self) -> usize {
-        Self::ALL.iter().position(|&m| m == self).unwrap()
-    }
-
-    pub fn title(self) -> &'static str {
-        match self {
-            Self::Today => "Today",
-            Self::SevenDays => "7 days",
-            Self::FourWeeks => "4 weeks",
-            Self::Yearly => "Yearly",
-            Self::Months => "All time",
-        }
-    }
-
-    pub fn key(self) -> &'static str {
-        match self {
-            Self::Today => "1",
-            Self::SevenDays => "2",
-            Self::FourWeeks => "3",
-            Self::Yearly => "4",
-            Self::Months => "5",
-        }
-    }
-
-    pub fn prev(self) -> Self {
-        let idx = self.index();
-        Self::ALL[(idx + Self::ALL.len() - 1) % Self::ALL.len()]
-    }
-
-    pub fn next(self) -> Self {
-        let idx = self.index();
-        Self::ALL[(idx + 1) % Self::ALL.len()]
-    }
-}
-
-impl From<ViewMode> for usize {
-    fn from(mode: ViewMode) -> Self {
-        mode.index()
-    }
-}
 
 /// Full schema at the latest version, used to initialize a fresh database.
 /// Existing databases are migrated forward incrementally in `setup_schema`;
@@ -852,26 +790,54 @@ impl SessionDb {
     ///
     /// Backed by the `idx_messages_conversation_created` covering index (schema
     /// v12) so the per-conversation metadata lookups stay index seeks rather
-    /// than table scans.
+    /// than table scans. The top `limit` rows are picked before the heavier
+    /// title/status/usage lookups so those only run for listed conversations.
     /// `updated_at` is the latest message timestamp (ISO-UTC, string-sortable),
     /// falling back to the conversation's start; `title` is a one-line
     /// derivation of the first non-empty user message, or `"(new)"` when the
-    /// conversation holds no user message yet.
+    /// conversation holds no user message yet. `status` mirrors the `/history`
+    /// picker: `empty` without a real user message, `interrupted` when the last
+    /// one has no assistant reply after it, else `completed`.
     pub fn recent_conversations(&self, limit: i64) -> rusqlite::Result<Vec<ConversationMeta>> {
         let mut stmt = self.conn.prepare(
-            "WITH meta AS (
+            "WITH recent AS (
                  SELECT c.id, c.provider, c.model, c.title,
                         COALESCE((
                              SELECT MAX(m.created_at)
                              FROM messages m
                              WHERE m.conversation_id = c.id
-                         ), c.started_at) AS updated_at,
+                         ), c.started_at) AS updated_at
+                 FROM conversations c
+                 ORDER BY updated_at DESC, c.id DESC
+                 LIMIT ?1
+             ),
+             meta AS (
+                 SELECT r.*,
                         (
                              SELECT COUNT(*)
                              FROM messages m
-                             WHERE m.conversation_id = c.id
-                         ) AS message_count
-                 FROM conversations c
+                             WHERE m.conversation_id = r.id
+                         ) AS message_count,
+                        (
+                             SELECT MAX(m.seq)
+                             FROM messages m
+                             WHERE m.conversation_id = r.id
+                               AND m.role = 'user'
+                               AND m.content <> ''
+                               AND m.content NOT LIKE '[Context summary]%'
+                         ) AS last_user_seq,
+                        (
+                             SELECT MAX(m.seq)
+                             FROM messages m
+                             WHERE m.conversation_id = r.id
+                               AND m.role = 'assistant'
+                         ) AS last_assistant_seq,
+                        COALESCE((
+                             SELECT SUM(u.prompt_tokens + u.completion_tokens)
+                             FROM usage_events u
+                             WHERE u.conversation_id = r.id
+                         ), 0) AS token_count
+                 FROM recent r
              )
              SELECT meta.id, meta.provider, meta.model, meta.updated_at,
                     meta.message_count,
@@ -890,14 +856,21 @@ impl SessionDb {
                     ) AS title,
                     COALESCE(meta.title, '') AS stored_title,
                     strftime('%Y-%m-%dT%H:%M:%S', meta.updated_at, 'localtime')
-                        AS updated_at_local
+                        AS updated_at_local,
+                    meta.token_count,
+                    CASE
+                        WHEN meta.last_user_seq IS NULL THEN 'empty'
+                        WHEN COALESCE(meta.last_assistant_seq, -1) < meta.last_user_seq
+                            THEN 'interrupted'
+                        ELSE 'completed'
+                    END AS status
              FROM meta
-             ORDER BY meta.updated_at DESC, meta.id DESC
-             LIMIT ?1",
+             ORDER BY meta.updated_at DESC, meta.id DESC",
         )?;
         let rows = stmt.query_map(params![limit.max(1)], |row| {
             let raw_title: String = row.get(5)?;
             let title = conversation_title(&raw_title);
+            let status: String = row.get(9)?;
             Ok(ConversationMeta {
                 id: row.get(0)?,
                 title: if title.is_empty() {
@@ -911,6 +884,12 @@ impl SessionDb {
                 message_count: row.get(4)?,
                 provider: row.get(1)?,
                 model: row.get(2)?,
+                token_count: row.get(8)?,
+                status: match status.as_str() {
+                    "empty" => ConversationStatus::Empty,
+                    "interrupted" => ConversationStatus::Interrupted,
+                    _ => ConversationStatus::Completed,
+                },
             })
         })?;
         rows.collect()

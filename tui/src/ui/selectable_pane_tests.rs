@@ -1,4 +1,6 @@
 use super::*;
+use crate::ui::theme::Theme;
+use ratatui::text::Line;
 
 #[test]
 fn navigation_moves_and_clamps() {
@@ -265,7 +267,7 @@ fn render_marks_selection_and_scrolls_it_into_view() {
         .collect();
     let mut theme = Theme::default();
     theme.palette.selection = ratatui::style::Color::Blue;
-    let page = render(&theme, "test", "Test".into(), rows);
+    let page = bone_render::panes::selectable(&theme, "test", "Test".into(), rows);
 
     assert_eq!(page.visible_rows, 8);
     assert_eq!(page.scroll, 2);

@@ -22,7 +22,6 @@ use std::time::{Duration, Instant};
 
 use bone::chat::Message;
 use bone::llm::TokenStats;
-use bone::tools::ApprovalMode;
 use bone::ui::input::InputState;
 use bone::ui::pane_page::PanePage;
 use bone::ui::render::{PaneDraw, PaneSizing, Renderer, StatusInfo};
@@ -127,7 +126,8 @@ fn status() -> StatusInfo {
         token_stats: TokenStats::default(),
         streaming_completion_tokens: None,
         streaming: false,
-        approval_mode: ApprovalMode::Safe,
+        approval_label: "Safe".into(),
+        approval_danger: false,
         queue_len: 0,
         incognito: false,
         status_show: std::collections::HashMap::new(),

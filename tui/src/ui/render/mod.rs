@@ -6,20 +6,18 @@ pub mod markdown;
 pub mod messages;
 pub mod wrap;
 
-use messages::wrapped_line_count;
+use bone_render::messages::{
+    logical_lines_row_count, render_scrollback_lines, render_scrollback_lines_with_bg,
+};
 use ratatui::backend::Backend;
-use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::text::Line;
 
-use ratatui::widgets::{Paragraph, Widget, Wrap};
 use ratatui::{Terminal, Viewport};
 use std::io::{self, Stdout, Write};
 
 use super::theme::Theme;
 use crate::chat::Message;
-use crate::llm::TokenStats;
-use crate::tools::ApprovalMode;
 use backend::BoneBackend;
 
 /// Minimum viewport rows: top-sep + input(1) + status.
@@ -46,50 +44,14 @@ pub(crate) fn max_viewport_height(terminal_height: u16) -> u16 {
 pub(crate) fn initial_viewport_height(terminal_height: u16) -> u16 {
     MIN_ROWS.min(max_viewport_height(terminal_height))
 }
-pub(crate) use bottom_pane::approval_pane_lines;
-pub(crate) use bottom_pane::clamped_pane_visible_rows;
+pub(crate) use bone_render::approval::approval_pane_lines;
 pub use bottom_pane::{DEFAULT_PANE_ROWS, MAX_PANE_ROWS};
 pub use bottom_pane::{InputPreset, InputStyle};
 pub use bottom_pane::{PaneDraw, PaneSizing};
 
 pub type BoneTerminal = Terminal<BoneBackend<Stdout>>;
 
-/// Status bar info passed from App to Renderer for each draw.
-pub struct StatusInfo {
-    pub model: String,
-    pub token_stats: TokenStats,
-    /// Live cumulative output-token estimate during streaming.
-    pub streaming_completion_tokens: Option<u64>,
-    pub streaming: bool,
-    pub approval_mode: ApprovalMode,
-    pub queue_len: usize,
-    /// Whether the session is in incognito mode (no durable writes while on).
-    pub incognito: bool,
-    pub status_show: std::collections::HashMap<String, bool>,
-    /// Formatted elapsed time string (e.g. "1:23") for the current turn.
-    pub elapsed: Option<String>,
-    /// Lua-defined status segments (`bone.api.ui.set_statusline`), appended to
-    /// the native status bar. Empty when Lua has not set one.
-    pub lua_status: Vec<crate::runtime::view::StatusSegment>,
-    /// Resolved spinner frames for the currently-selected style.
-    pub spinner_frames: Vec<String>,
-    /// Resolved frame speed in ms (override or style default).
-    pub spinner_speed_ms: u64,
-    /// Resolved rotating thinking-text phrases for the selected preset.
-    pub spinner_texts: Vec<String>,
-    /// Whether thinking-text phrases rotate while streaming.
-    pub spinner_text_rotate: bool,
-    /// Thinking-text rotation speed in ms/phrase; 0 means one phrase per spinner cycle.
-    pub spinner_text_speed_ms: u64,
-    /// Raw elapsed milliseconds of the current turn (for frame indexing).
-    pub spinner_elapsed_ms: u64,
-}
-
-impl StatusInfo {
-    pub fn show(&self, key: &str) -> bool {
-        self.status_show.get(key).copied().unwrap_or(true)
-    }
-}
+pub use bone_render::status::StatusInfo;
 
 /// Owns all terminal rendering state and drawing logic.
 pub struct Renderer {
@@ -456,57 +418,12 @@ impl Renderer {
     }
 }
 
-fn logical_lines_row_count(lines: &[Line<'static>], width: u16) -> u16 {
-    lines
-        .iter()
-        .map(|line| wrapped_line_count(line, width))
-        .sum()
-}
-
 /// Width of the temporary buffer `Terminal::insert_before` will allocate.
 ///
 /// Must be used for both row-count precomputation and content wrapping so the
 /// draw closure never writes past the allocated height.
 fn scrollback_insert_width<B: Backend>(term: &mut Terminal<B>) -> u16 {
     term.get_frame().area().width.max(1)
-}
-
-/// Paint logical lines into an `insert_before` temp buffer, wrapping each line
-/// to `buf.area.width` and never advancing past `buf.area.height`.
-fn render_scrollback_lines(lines: &[Line<'static>], buf: &mut ratatui::buffer::Buffer) {
-    render_scrollback_lines_with_bg(lines, buf, None);
-}
-
-fn render_scrollback_lines_with_bg(
-    lines: &[Line<'static>],
-    buf: &mut ratatui::buffer::Buffer,
-    user_background: Option<Color>,
-) {
-    let mut row = 0u16;
-    let width = buf.area.width;
-    for line in lines {
-        let remaining = buf.area.height.saturating_sub(row);
-        if remaining == 0 {
-            break;
-        }
-        // Clamp to remaining rows so a line_count/render mismatch cannot OOB.
-        let height = wrapped_line_count(line, width.max(1)).min(remaining);
-        let area = Rect {
-            x: 0,
-            y: row,
-            width,
-            height,
-        };
-        if let Some(bg) = user_background
-            && line.spans.iter().any(|span| span.style.bg == Some(bg))
-        {
-            buf.set_style(area, ratatui::style::Style::default().bg(bg));
-        }
-        Paragraph::new(line.clone())
-            .wrap(Wrap { trim: false })
-            .render(area, buf);
-        row = row.saturating_add(height);
-    }
 }
 
 pub fn safe_markdown_prefix_end(content: &str, from: usize) -> usize {

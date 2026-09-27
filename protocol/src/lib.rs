@@ -10,6 +10,7 @@ pub mod host;
 pub mod input;
 pub mod message;
 pub mod session;
+pub mod theme;
 pub mod tokens;
 pub mod tools;
 pub mod view;
@@ -23,9 +24,10 @@ pub use event::{
 };
 pub use host::{
     CatalogAction, CatalogActionKind, CatalogApplyResult, CatalogItem, CatalogItemOutcome,
-    CatalogItemResult, CatalogSnapshot, ConversationMeta, DateRange, HOST_API_VERSION,
-    HostErrorCode, HostRequest, HostResponse, HourUsage, InitChoice, ProviderChoice, ProviderUsage,
-    SetupApplyResult, SetupSnapshot, UsageBucket, UsageStatsSnapshot, UsageSummary,
+    CatalogItemResult, CatalogSnapshot, ConversationMeta, ConversationStatus, DateRange,
+    HOST_API_VERSION, HostErrorCode, HostRequest, HostResponse, HourUsage, InitChoice,
+    ProviderChoice, ProviderUsage, SetupApplyResult, SetupSnapshot, UsageBucket,
+    UsageStatsSnapshot, UsageSummary, ViewMode,
 };
 pub use input::KeyEvent;
 pub use message::{
@@ -37,7 +39,7 @@ pub use tokens::{
     CHARS_PER_TOKEN, ImageTokenProfile, TokenStats, estimate_image_tokens, format_tokens,
     parse_image_dimensions,
 };
-pub use tools::{CallOutcome, ToolDefinition, ToolOutput};
+pub use tools::{CallOutcome, ToolDefinition, ToolDisplayConfig, ToolOutput};
 pub use view::{
     Align, Anchor, Component, FloatRect, PaneContent, PaneLineSpec, PanePresentation, PaneSpanSpec,
     PanelPlacement, PanelSlot, StatusSegment, ViewDiff, ViewModel, view_diff_from_pane_content,

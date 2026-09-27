@@ -7,7 +7,7 @@ use bone_protocol::{
     RuntimeEvent, SessionSnapshot, ViewDiff, ViewModel,
 };
 
-use crate::tool_display::{self, ToolDisplayConfig};
+use bone_protocol::ToolDisplayConfig;
 
 /// Status shown while the daemon waits for a `ctx.ui.key()` reply. Set when the
 /// `KeyRequest` arrives; cleared by [`State::finish_command`] once the command
@@ -119,9 +119,6 @@ pub struct State {
     /// Authoritative image attachments from the current transcript. Renderers
     /// must use these payloads rather than fetching by filename or path.
     pub images: Vec<ImageData>,
-    /// Stable image-cache keys parallel to `images`, hashed once when the
-    /// transcript is rebuilt so per-frame rendering never re-hashes payloads.
-    pub image_keys: Vec<String>,
     /// Parallel to `rows`: tool-card overlay state for tool rows (`None` for
     /// ordinary text rows). Every row append goes through [`Self::push_row`]
     /// so the two vectors stay index-aligned.
@@ -227,21 +224,16 @@ pub enum ToolState {
 pub struct ToolCard {
     pub name: String,
     pub state: ToolState,
+    /// The call's JSON arguments, or the command line for a local shell row.
     pub args: Option<String>,
-    /// Custom heading from `ToolDisplayConfig` when the tool has one; `None`
-    /// falls back to the generic `name` heading. `Some("")` hides the heading.
-    pub label: Option<String>,
-    /// `ToolDisplayConfig.show_result`; `Some(false)` hides the result body.
-    pub show_result: Option<bool>,
-    /// Daemon expansion hint, retained for replay; the desktop verbosity choice takes precedence.
-    pub eager: Option<bool>,
+    /// When a live call started, for the running-shell strip.
+    pub started: Option<std::time::Instant>,
 }
 
 pub struct Approval {
     pub id: u64,
-    pub name: String,
-    pub summary: String,
-    pub preview: Option<String>,
+    /// The call awaiting approval, for the prompt title and command preview.
+    pub call: bone_protocol::ToolCall,
     pub blocked: Option<String>,
 }
 
@@ -253,7 +245,6 @@ pub struct Approval {
 pub struct FrontendState {
     pub settings: serde_json::Value,
     pub commands: Vec<(String, String)>,
-    pub catalog_updates: usize,
 }
 
 /// Most recent per-turn token accounting from the daemon.
@@ -295,7 +286,6 @@ impl State {
     pub fn clear_conversation(&mut self) {
         self.rows.clear();
         self.images.clear();
-        self.image_keys.clear();
         self.toolcards.clear();
         self.thinking.clear();
         self.live_reasoning = None;
@@ -392,36 +382,6 @@ impl State {
         }
     }
 
-    pub fn needs_approval(&self) -> bool {
-        !self.approvals.is_empty()
-    }
-
-    /// Best tab label: first user prompt, whitespace-collapsed and truncated;
-    /// falls back to the conversation id, then "New conversation".
-    pub fn short_title(&self) -> String {
-        let mut title = String::new();
-        for (role, text) in &self.rows {
-            if role != "user" {
-                continue;
-            }
-            title = text.split_whitespace().collect::<Vec<_>>().join(" ");
-            if !title.is_empty() {
-                break;
-            }
-        }
-        if title.is_empty() {
-            return match self.snapshot.conversation_id {
-                Some(id) => format!("Conversation {id}"),
-                None => "New conversation".into(),
-            };
-        }
-        let mut shortened: String = title.chars().take(46).collect();
-        if shortened != title {
-            shortened.push('…');
-        }
-        shortened
-    }
-
     /// Every append to `rows` must go through here so `toolcards` and `thinking`
     /// (both parallel to `rows`) keep their indexes aligned with `rows`.
     pub(crate) fn push_row(&mut self, role: impl Into<String>, text: impl Into<String>) -> usize {
@@ -457,85 +417,6 @@ impl State {
         }
     }
 
-    /// Custom heading for a tool row from the parsed display map; `None` means
-    /// the tool has no config and the caller renders its generic heading.
-    fn tool_label_for(
-        &self,
-        name: &str,
-        arguments: &serde_json::Value,
-        content: &str,
-        is_error: bool,
-    ) -> Option<String> {
-        tool_display::custom_label(
-            name,
-            arguments,
-            content,
-            is_error,
-            self.tool_display.get(name),
-        )
-    }
-
-    /// Like [`Self::tool_label_for`] but for events that only retained the
-    /// serialized arguments (e.g. `ToolResult`).
-    fn tool_label_from_args(
-        &self,
-        name: &str,
-        args: &Option<String>,
-        content: &str,
-        is_error: bool,
-    ) -> Option<String> {
-        let value: serde_json::Value = args
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or(serde_json::Value::Null);
-        self.tool_label_for(name, &value, content, is_error)
-    }
-
-    fn show_result_for(&self, name: &str) -> Option<bool> {
-        self.tool_display.get(name).and_then(|d| d.show_result)
-    }
-
-    fn eager_for(&self, name: &str) -> Option<bool> {
-        self.tool_display.get(name).and_then(|d| d.eager)
-    }
-
-    /// Recompute custom headings, result visibility, and expansion defaults for
-    /// after the display map changes. `FrontendState` can arrive after a
-    /// replayed conversation, so cards built before it must be refreshed.
-    fn refresh_tool_labels(&mut self) {
-        // Recomputed per-card display: `(label, show_result, eager)`.
-        type Computed = Option<(Option<String>, Option<bool>, Option<bool>)>;
-        let computed: Vec<Computed> = self
-            .toolcards
-            .iter()
-            .enumerate()
-            .map(|(i, card)| {
-                card.as_ref().map(|card| {
-                    let content = self.rows.get(i).map(|row| row.1.as_str()).unwrap_or("");
-                    let is_error = card.state == ToolState::Error;
-                    let label =
-                        self.tool_label_from_args(&card.name, &card.args, content, is_error);
-                    let show_result = self.show_result_for(&card.name);
-                    let eager = self.eager_for(&card.name);
-                    (label, show_result, eager)
-                })
-            })
-            .collect();
-        for (card, computed) in self.toolcards.iter_mut().zip(computed) {
-            if let (Some(card), Some((label, show_result, eager))) = (card.as_mut(), computed) {
-                card.label = label;
-                card.show_result = show_result;
-                card.eager = eager;
-            }
-        }
-        self.changed_rows.extend(
-            self.toolcards
-                .iter()
-                .enumerate()
-                .filter_map(|(i, card)| card.is_some().then_some(i)),
-        );
-    }
-
     /// Rebuild the row projection from `messages`. `prefix_len` leading
     /// messages are a freshly prepended older page (0 for a full replace); the
     /// return value is the row index at which the suffix begins, so the caller
@@ -547,7 +428,6 @@ impl State {
         self.loaded_messages = messages.clone();
         self.rows.clear();
         self.images.clear();
-        self.image_keys.clear();
         self.toolcards.clear();
         self.thinking.clear();
         self.live_reasoning = None;
@@ -597,9 +477,6 @@ impl State {
                 tool_target.get_or_insert(i);
                 // Keep arguments separate from output. A following saved or live
                 // result fills this same card and supplies its authoritative state.
-                let label = self.tool_label_for(&call.name, &call.arguments, "", false);
-                let show_result = self.show_result_for(&call.name);
-                let eager = self.eager_for(&call.name);
                 self.toolcards[i] = Some(ToolCard {
                     name: call.name,
                     state: if busy {
@@ -608,21 +485,11 @@ impl State {
                         ToolState::Done
                     },
                     args,
-                    label,
-                    show_result,
-                    eager,
+                    started: None,
                 });
             }
             if !message.images.is_empty() {
-                for image in &message.images {
-                    let name = format!("Image {}", self.images.len() + 1);
-                    self.image_keys.push(crate::images::cache_key(
-                        &name,
-                        &image.media_type,
-                        &image.data,
-                    ));
-                    self.images.push(image.clone());
-                }
+                self.images.extend(message.images.iter().cloned());
                 self.push_row("attachments", format!("{} image(s)", message.images.len()));
             }
             // Reasoning is surfaced only when configured, matching the live gate.
@@ -707,9 +574,6 @@ impl State {
         let args = self.toolcards[i]
             .as_ref()
             .and_then(|card| card.args.clone());
-        let label = self.tool_label_from_args(&name, &args, &content, is_error);
-        let show_result = self.show_result_for(&name);
-        let eager = self.eager_for(&name);
         self.rows[i] = (
             format!("tool: {name}{}", if is_error { " (error)" } else { "" }),
             content,
@@ -725,9 +589,7 @@ impl State {
                 ToolState::Done
             },
             args,
-            label,
-            show_result,
-            eager,
+            started: None,
         });
         i
     }
@@ -920,16 +782,11 @@ impl State {
                     self.changed_rows.push(i);
                 }
                 let args = (!arguments.is_null()).then(|| arguments.to_string());
-                let label = self.tool_label_for(&name, &arguments, "", false);
-                let show_result = self.show_result_for(&name);
-                let eager = self.eager_for(&name);
                 self.toolcards[i] = Some(ToolCard {
                     name,
                     state: ToolState::Running,
                     args,
-                    label,
-                    show_result,
-                    eager,
+                    started: Some(std::time::Instant::now()),
                 });
             }
             RuntimeEvent::ToolOutput {
@@ -985,9 +842,9 @@ impl State {
             }
             RuntimeEvent::ApprovalRequest {
                 id,
+                call_id,
                 name,
-                summary,
-                preview,
+                arguments,
                 blocked,
                 auto_allows,
                 ..
@@ -1005,9 +862,11 @@ impl State {
                 }
                 self.approvals.push(Approval {
                     id,
-                    name,
-                    summary,
-                    preview,
+                    call: bone_protocol::ToolCall {
+                        id: call_id,
+                        name,
+                        arguments,
+                    },
                     blocked,
                 });
             }
@@ -1062,10 +921,9 @@ impl State {
                 settings,
                 commands,
                 tool_display,
-                catalog_updates,
                 ..
             } => {
-                self.tool_display = tool_display::parse_map(&tool_display);
+                self.tool_display = serde_json::from_value(tool_display).unwrap_or_default();
                 self.show_reasoning = settings
                     .pointer("/general/show_reasoning")
                     .and_then(serde_json::Value::as_bool)
@@ -1081,12 +939,9 @@ impl State {
                 {
                     self.theme = Some(theme);
                 }
-                self.frontend = Some(FrontendState {
-                    settings,
-                    commands,
-                    catalog_updates,
-                });
-                self.refresh_tool_labels();
+                self.frontend = Some(FrontendState { settings, commands });
+                // Rows are relabelled at render time from this map.
+                self.changed_rows.extend(0..self.rows.len());
             }
             _ => {}
         }
@@ -1492,7 +1347,6 @@ mod tests {
         });
         assert!(s.ready);
         assert_eq!(s.expected_id, Some(4));
-        assert_eq!(s.short_title(), "first prompt");
         // A reconnect must filter the default replay by expected id.
         s.reset(Some(4));
         s.reduce(RuntimeEvent::ConversationLoaded {
@@ -1590,6 +1444,7 @@ mod tests {
             busy: false,
         });
         assert_eq!(s.rows.len(), 3, "results belong inside the original cards");
+        assert_eq!(s.tool_display["shell"].show_result, Some(true));
         assert_eq!(s.rows[0], ("assistant".into(), "Checking".into()));
         for (i, id, body, state) in [
             (1, "a", "success", ToolState::Done),
@@ -1600,9 +1455,6 @@ mod tests {
             let card = s.toolcards[i].as_ref().unwrap();
             assert_eq!(card.state, state);
             assert_eq!(card.args, Some(json!({"command": id}).to_string()));
-            assert!(card.label.as_deref().unwrap().contains(id));
-            assert_eq!(card.show_result, Some(true));
-            assert_eq!(card.eager, Some(true));
         }
         let rows = s.rows.clone();
         let RuntimeCommand::Synchronize { request_id, .. } = s.synchronize() else {
@@ -1718,7 +1570,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_display_config_drives_custom_labels_and_visibility() {
+    fn frontend_state_updates_the_display_map_and_marks_rows_for_relabel() {
         let mut s = loaded();
         s.reduce(RuntimeEvent::ToolCall {
             id: "c1".into(),
@@ -1726,72 +1578,18 @@ mod tests {
             summary: "searching".into(),
             arguments: json!({"query": "foo"}),
         });
-        let i = s.rows.len() - 1;
-        // No config yet: generic heading (label None).
-        assert_eq!(s.toolcards[i].as_ref().unwrap().label, None);
-
-        // A template config produces the custom heading.
+        let _ = std::mem::take(&mut s.changed_rows);
         s.reduce(frontend_state(json!({
             "grep": { "template": "search {query}" }
         })));
         assert_eq!(
-            s.toolcards[i].as_ref().unwrap().label.as_deref(),
-            Some("grep search foo")
+            s.tool_display["grep"].template.as_deref(),
+            Some("search {query}")
         );
-
-        // show=false hides the heading; show_result=false hides the body.
-        s.reduce(frontend_state(json!({
-            "task_loop": { "show": false, "show_result": false }
-        })));
-        s.reduce(RuntimeEvent::ToolCall {
-            id: "c2".into(),
-            name: "task_loop".into(),
-            summary: "loop".into(),
-            arguments: json!({}),
-        });
         let i = s.rows.len() - 1;
+        assert!(s.changed_rows.contains(&i), "rendered rows relabel");
         let card = s.toolcards[i].as_ref().unwrap();
-        assert_eq!(card.label.as_deref(), Some(""));
-        assert_eq!(card.show_result, Some(false));
-        s.reduce(RuntimeEvent::ToolResult {
-            call_id: "c2".into(),
-            name: "task_loop".into(),
-            content: "result".into(),
-            is_error: false,
-        });
-        let card = s.toolcards[s.rows.len() - 1].as_ref().unwrap();
-        assert_eq!(card.label.as_deref(), Some(""));
-        assert_eq!(card.show_result, Some(false));
-    }
-
-    #[test]
-    fn frontend_state_after_load_refreshes_replayed_cards() {
-        let mut s = State::default();
-        let mut message = ChatMessage::new(ChatRole::Assistant, "");
-        message.tool_calls.push(ToolCall {
-            id: "c1".into(),
-            name: "read_file".into(),
-            arguments: json!({"path": "src/main.rs"}),
-        });
-        s.reduce(RuntimeEvent::ConversationLoaded {
-            messages: vec![message],
-            snapshot: SessionSnapshot::default(),
-            busy: false,
-        });
-        let i = s.rows.len() - 1;
-        assert_eq!(
-            s.toolcards[i].as_ref().unwrap().label.as_deref(),
-            Some("read_file src/main.rs")
-        );
-        // FrontendState can arrive after the replayed conversation; existing
-        // cards must pick up the config.
-        s.reduce(frontend_state(json!({
-            "read_file": { "args": ["path"] }
-        })));
-        assert_eq!(
-            s.toolcards[i].as_ref().unwrap().label.as_deref(),
-            Some("read_file path=src/main.rs")
-        );
+        assert_eq!(card.args, Some(json!({"query": "foo"}).to_string()));
     }
 
     #[test]
@@ -2173,7 +1971,6 @@ mod tests {
             fe.commands,
             vec![("help".to_string(), "Show help".to_string())]
         );
-        assert_eq!(fe.catalog_updates, 3);
     }
 
     #[test]

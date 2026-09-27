@@ -470,7 +470,9 @@ pub fn migrate_legacy_plugins_core(lua_dir: &Path) {
         let Ok(rel) = legacy.strip_prefix(&legacy_root) else {
             continue;
         };
-        let Some(rel_name) = rel.to_str().map(|rel| rel.replace(std::path::MAIN_SEPARATOR, "/"))
+        let Some(rel_name) = rel
+            .to_str()
+            .map(|rel| rel.replace(std::path::MAIN_SEPARATOR, "/"))
         else {
             continue;
         };

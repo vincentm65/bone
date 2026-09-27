@@ -71,7 +71,7 @@ const CONFIG_DIR_PREFIX: &str = ".bone-rust";
 /// Anchor a path to the session working directory. Absolute paths are unchanged.
 ///
 /// A leading `.bone-rust` component means the resolved config directory — the
-/// shape Bone's system prompt and `AGENTS.md` use — so it is anchored there
+/// shape `AGENTS.md` uses for its document paths — so it is anchored there
 /// instead of the working directory. A working directory that really contains
 /// such an entry keeps winning, so project-local trees stay reachable.
 pub fn resolve_path(path: &str, working_dir: Option<&Path>) -> Result<PathBuf, String> {

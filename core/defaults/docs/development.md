@@ -45,7 +45,8 @@ requested.
 
 ## Documentation ownership
 
-`core/defaults/AGENTS.md` is the bundled universal index. The focused documents
+`core/defaults/AGENTS.md` is the bundled self-modification guide and index; the
+system prompt gives agents its absolute path. The focused documents
 under `core/defaults/docs/` are Bone-owned core-platform references and are
 materialized under the resolved config directory at startup. Startup
 synchronization forcibly replaces stale bundled reference files so the running

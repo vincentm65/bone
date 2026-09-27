@@ -53,8 +53,8 @@ pub fn merge_commands(advertised: &[(String, String)]) -> Vec<(String, String)> 
     commands.into_iter().collect()
 }
 
-/// Render the `/help` reference: the merged command list plus the native input
-/// and window shortcut cheat sheets. Plain text (no ANSI) because the native
+/// Render the `/help` reference: the merged command list plus the native
+/// shortcut cheat sheet. Plain text (no ANSI) because the native
 /// transcript renders Markdown, not a terminal; the command section mirrors
 /// `tui::ui::commands::help` while the shortcuts reflect the desktop app's
 /// actual bindings.
@@ -72,28 +72,22 @@ pub fn help(advertised: &[(String, String)]) -> String {
     }
     lines.push("  :           — run a shell command inline (: <command>)".to_string());
     lines.push(String::new());
-    lines.push("Input shortcuts".to_string());
+    lines.push("Shortcuts".to_string());
     lines.push("  Enter        — send; queue while a turn is running".to_string());
     lines.push("  Ctrl+Enter   — steer the running turn".to_string());
-    lines.push("  Shift+Enter  — queue for after the running turn".to_string());
-    lines.push("  Ctrl+Up      — recall the previous prompt".to_string());
-    lines.push("  Ctrl+Down    — recall the next prompt".to_string());
-    lines.push("  Ctrl+D       — clear the queued prompts (empty composer)".to_string());
-    lines.push("  Esc          — dismiss a picker; keep the draft".to_string());
-    lines.push("  Copy / Cut   — standard text editing".to_string());
-    lines.push("  /edit        — open the draft in a larger editor".to_string());
-    lines.push(String::new());
-    lines.push("Window shortcuts".to_string());
-    lines.push("  Ctrl+T        — new conversation".to_string());
-    lines.push("  Ctrl+W        — close conversation".to_string());
-    lines.push("  Ctrl+PageUp   — previous conversation".to_string());
-    lines.push("  Ctrl+PageDown — next conversation".to_string());
-    lines.push("  Ctrl+1…9      — select conversation".to_string());
-    lines.push("  Ctrl+\\        — split right".to_string());
-    lines.push("  Ctrl+Shift+\\  — split down".to_string());
-    lines.push("  Ctrl+Shift+N  — new window".to_string());
-    lines.push("  Ctrl+K        — command palette".to_string());
-    lines.push("  Ctrl+P        — switch task".to_string());
+    lines.push("  Shift+Enter  — new line".to_string());
+    lines.push("  Ctrl+Up/Down — recall previous/next prompt".to_string());
+    lines.push("  Ctrl+D       — clear the queued prompts (empty input)".to_string());
+    lines.push("  Esc          — stop the running turn".to_string());
+    lines.push("  Tab          — switch live pane page".to_string());
+    lines.push("  PgUp/PgDn    — scroll the live pane".to_string());
+    lines.push("  ↑/↓ Enter    — select and open agents, processes, queue".to_string());
+    lines.push("  Ctrl+O       — expand or collapse tool output".to_string());
+    lines.push("  Alt+V        — attach the clipboard image".to_string());
+    lines.push("  Ctrl+N       — new conversation in this tab".to_string());
+    lines.push("  Ctrl+T/W     — new chat tab / close tab".to_string());
+    lines.push("  Ctrl+Tab     — next tab (Ctrl+1…9 to jump)".to_string());
+    lines.push("Keymaps from config.yaml (`keymaps.bindings`) take precedence.".to_string());
     lines.join("\n")
 }
 
@@ -305,22 +299,8 @@ mod tests {
             text.contains("run a shell command inline"),
             "documents the inline shell prefix"
         );
-        assert!(text.contains("Input shortcuts"), "has input shortcuts");
-        assert!(text.contains("Ctrl+Enter"), "documents send shortcut");
-        assert!(text.contains("Window shortcuts"), "has window shortcuts");
-        assert!(text.contains("Ctrl+T"), "documents new-tab shortcut");
-        assert!(
-            text.contains("Ctrl+Shift+N"),
-            "documents new-window shortcut"
-        );
-        assert!(text.contains("Ctrl+K"), "documents command palette");
-        assert!(text.contains("Ctrl+P"), "documents switch task");
-        assert!(text.contains("split right"), "documents split right");
-        assert!(text.contains("split down"), "documents split down");
-        assert!(
-            !text.contains("toggle split view"),
-            "no stale single-split wording"
-        );
+        assert!(text.contains("Shortcuts"), "has a shortcuts section");
+        assert!(text.contains("Ctrl+Enter"), "documents steer shortcut");
         // Lua-advertised commands are merged into the listing.
         let text = help(&[("custom".into(), "a Lua command".into())]);
         assert!(text.contains("/custom"), "lists advertised Lua commands");

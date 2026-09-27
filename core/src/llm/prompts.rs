@@ -12,21 +12,31 @@ Tool usage:\n\
 - edit_file replaces lines by `LINE#HASH` anchors shown by read_file; pass several disjoint edits in one call via edits.\n\
 - Do not re-read a file you just changed unless the edit reported the file changed.";
 
+/// Environment facts appended to every prompt. The guide path is absolute
+/// because a bare `AGENTS.md` resolves against the working directory, where it
+/// does not exist.
+fn runtime_context() -> String {
+    let cwd = std::env::current_dir()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    let bone = std::env::current_dir().map_or_else(|_| bone_dir(), |cwd| cwd.join(bone_dir()));
+    format!(
+        "Resolved config directory: {}\nBone self-modification guide: {} (read it before changing Bone itself; it is not a project AGENTS.md)\nCurrent working directory: {cwd}\n",
+        bone.display(),
+        bone.join("AGENTS.md").display()
+    )
+}
+
 /// System prompt injected at the start of a normal conversation.
 ///
 /// Runtime configuration-directory and working-directory context is always
 /// appended to the configured base prompt, preceded by the fixed
 /// [`TOOL_USAGE_GUIDANCE`] block.
 pub fn system_prompt(base: &str) -> String {
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "unknown".to_string());
-    let bone = bone_dir().display().to_string();
     let separator = if base.ends_with('\n') { "" } else { "\n\n" };
     format!(
-        "{base}{separator}{TOOL_USAGE_GUIDANCE}\n\n\
-         Resolved config directory: {bone}\n\
-         Current working directory: {cwd}\n"
+        "{base}{separator}{TOOL_USAGE_GUIDANCE}\n\n{}",
+        runtime_context()
     )
 }
 
@@ -37,10 +47,6 @@ pub fn system_prompt(base: &str) -> String {
 /// the identity line, while the environment facts and non-interactive rules
 /// (the runtime's contract for delegated agents) are always included.
 pub fn headless_agent_system_prompt(persona: Option<&str>) -> String {
-    let cwd = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "unknown".to_string());
-    let bone = bone_dir().display().to_string();
     let persona = persona.map(str::trim).filter(|p| !p.is_empty()).unwrap_or(
         "You are a sub-agent of bone, a coding assistant running in the user's terminal. \
              Complete the delegated task; do nothing beyond it.",
@@ -54,9 +60,8 @@ pub fn headless_agent_system_prompt(persona: Option<&str>) -> String {
          - Always work in the current working directory. Do not search or modify files in other projects or directories unless explicitly instructed.\n\
          - Never modify your own `.bone-rust` files unless the user explicitly asks you to.\n\
          - You run non-interactively: never ask questions; make reasonable assumptions and state them.\n\
-         - Your final message is returned verbatim to the agent that dispatched you. Make it a complete, self-contained answer to the task (include file paths and key findings).\n\n\
-         Resolved config directory: {bone}\n\
-         Current working directory: {cwd}\n"
+         - Your final message is returned verbatim to the agent that dispatched you. Make it a complete, self-contained answer to the task (include file paths and key findings).\n\n{}",
+        runtime_context()
     )
 }
 

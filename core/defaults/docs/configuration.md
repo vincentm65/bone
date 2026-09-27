@@ -22,7 +22,7 @@ The resolved config directory is provided in the system prompt. Its default is
 | `lua/plugins/<name>/` | Plugin packages: `init.lua` plus optional submodules; the user Lua extension layout |
 | `lua/themes/` | User theme modules, loaded by `bone.theme.load(name)` |
 | `lua/helpers/` | Native helper binaries invoked by Lua scripts; never auto-loaded; Bone does not create it |
-| `AGENTS.md` and `docs/` | Bone-owned bundled reference documents |
+| `AGENTS.md` and `docs/` | Bone-owned bundled self-modification guide and reference documents |
 
 Built-in schemas, labels, types, and option lists live in Rust. The shipped
 main-agent prompt is the exception: its canonical prose lives in Bone's bundled
@@ -122,10 +122,12 @@ When an existing version-2 configuration omits the field or sets it to `null`,
 Bone restores the shipped prompt and persists it. User-provided strings are
 preserved exactly; an empty string intentionally omits all base prose.
 
-Bone appends the generated configuration-directory and current-working-directory
-context to the configured base, and Lua `before_turn.system_prompt_append` hooks
-remain additive. Changes made through a frontend or the daemon configuration API
-apply when the next main-agent turn is built. Reset restores the shipped
+Bone appends generated context to the configured base: the configuration
+directory, the absolute path of the self-modification guide (`AGENTS.md`), and
+the current working directory. Delegated agents receive the same context, and
+Lua `before_turn.system_prompt_append` hooks remain additive. Changes made
+through a frontend or the daemon configuration API apply when the next
+main-agent turn is built. Reset restores the shipped
 YAML-owned prompt. Explicit `bone run --system-prompt` values and delegated or
 subagent prompt overrides are separate and are not replaced by this setting.
 

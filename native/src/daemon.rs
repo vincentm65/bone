@@ -46,22 +46,6 @@ pub fn split_host_port(address: &str) -> Option<(String, u16)> {
     Some((host.to_owned(), port.parse().ok()?))
 }
 
-/// True when the address points at the local machine (auto-start is safe).
-pub fn is_loopback(address: &str) -> bool {
-    split_host_port(address)
-        .map(|(host, _)| host_is_loopback(&host))
-        .unwrap_or(false)
-}
-
-fn host_is_loopback(host: &str) -> bool {
-    if host.eq_ignore_ascii_case("localhost") {
-        return true;
-    }
-    host.parse::<IpAddr>()
-        .map(|ip| ip.is_loopback())
-        .unwrap_or(false)
-}
-
 /// Append `:7878` when the address has no port so connect/spawn always have a
 /// concrete target. Bare IPv6 is returned unchanged (callers reject it).
 pub fn ensure_port(address: &str) -> String {
@@ -127,6 +111,12 @@ pub fn is_mid_session_drop(reason: &str) -> bool {
 
 fn executable_name() -> &'static str {
     if cfg!(windows) { "bone.exe" } else { "bone" }
+}
+
+/// Whether `program` is an executable on `PATH`.
+pub fn on_path(program: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(program).is_file()))
 }
 
 /// Locate the `bone` daemon binary: an explicit `BONE_DESKTOP_DAEMON` override,
@@ -231,16 +221,6 @@ mod tests {
         assert_eq!(split_host_port("[::1]:9000"), Some(("::1".into(), 9000)));
         assert_eq!(split_host_port("127.0.0.1"), None);
         assert_eq!(split_host_port(""), None);
-    }
-
-    #[test]
-    fn loopback_detection() {
-        assert!(is_loopback("127.0.0.1:7878"));
-        assert!(is_loopback("localhost:1234"));
-        assert!(is_loopback("[::1]:1"));
-        assert!(!is_loopback("10.0.0.5:8080"));
-        assert!(!is_loopback("example.com:443"));
-        assert!(!is_loopback("127.0.0.1")); // no port: not a socket target
     }
 
     #[test]

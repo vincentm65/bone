@@ -342,7 +342,7 @@ fn bundled_doc_index_only_references_synced_docs() {
         .collect::<std::collections::BTreeSet<_>>();
     let indexed = DEFAULT_AGENTS_MD
         .split('`')
-        .filter_map(|value| value.strip_prefix("docs/"))
+        .filter_map(|value| value.strip_prefix(".bone-rust/docs/"))
         .collect::<std::collections::BTreeSet<_>>();
 
     assert_eq!(indexed, synced);

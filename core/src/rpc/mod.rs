@@ -132,6 +132,11 @@ impl HubPublisher {
         let _ = self.events_tx.send(event);
     }
 
+    /// Current attached-client count (event subscribers).
+    pub fn client_count(&self) -> usize {
+        self.events_tx.receiver_count()
+    }
+
     /// Broadcast daemon-global state to clients attached to every conversation.
     pub fn publish_global(&self, event: RuntimeEvent) {
         if let Some(group) = &self.group {
@@ -787,6 +792,11 @@ impl PendingInteractions {
 
     fn clear(&mut self) {
         self.events.clear();
+    }
+
+    fn clear_keys(&mut self) {
+        self.events
+            .retain(|id, _| !matches!(id, InteractionId::Key(_)));
     }
 }
 
@@ -1476,6 +1486,16 @@ impl DaemonCtx {
         ));
     }
 
+    /// A key request nobody can answer: the last client detached while a
+    /// `ctx.ui.key()` menu waited. Cancel it so the menu's command fails
+    /// instead of holding the Lua runtime (and every other client) forever.
+    fn cancel_abandoned_keys(&mut self) {
+        if self.key_registry.pending_count() > 0 && self.hub.client_count() == 0 {
+            self.key_registry.cancel_all();
+            self.pending_interactions.clear_keys();
+        }
+    }
+
     fn cancel_process(&mut self, id: &str) {
         let scope = crate::processes::conversation_scope(Some(
             self.session.lock().unwrap().background_scope(),
@@ -1699,6 +1719,7 @@ impl DaemonCtx {
                     self.publish_processes(false);
                     self.publish_jobs(false);
                     self.drain_diffs();
+                    self.cancel_abandoned_keys();
                 }
                 command = commands.recv() => match command {
                     Some(RuntimeCommand::ApprovalReply { id, outcome }) => {
@@ -3158,6 +3179,7 @@ impl DaemonCtx {
                 _ = diff_timer.tick() => {
                     self.publish_processes(false);
                     self.publish_jobs(false);
+                    self.cancel_abandoned_keys();
                     if self.forward_view_diffs {
                         self.drain_diffs();
                     }

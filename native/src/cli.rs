@@ -1,8 +1,8 @@
 //! Command-line parsing for the desktop frontend.
 //!
 //! The desktop app is a pure client of a `bone serve` daemon, so its CLI is a
-//! strict subset of the `bone` binary's: startup options plus a few subcommands
-//! that merely open a dialog. Daemon-side subcommands (`serve`, `web`, `run`,
+//! strict subset of the `bone` binary's: startup options only. Daemon-side
+//! subcommands (`serve`, `web`, `run`,
 //! `install`, `update`) are rejected with a pointer to `bone`.
 
 use crate::daemon;
@@ -27,16 +27,8 @@ pub struct Cli {
     /// `--connect <addr>` / `connect --listen <addr>`: daemon address to open
     /// tabs against (loopback only; remote access must tunnel to loopback).
     pub address: Option<String>,
-    /// `--provider <id>`: activate this provider once connected.
-    pub provider: Option<String>,
-    /// `--model <name>`: set the active provider's model once connected.
-    pub model: Option<String>,
-    /// Open the provider setup wizard on launch.
-    pub open_setup: bool,
-    /// Open the plugins browser on launch.
-    pub open_plugins: bool,
-    /// Open the token-stats dashboard on launch.
-    pub open_stats: bool,
+    /// `--ssh <host>`: reach the daemon via `ssh <host> -- bone stdio`.
+    pub ssh_host: Option<String>,
     pub command: Command,
 }
 
@@ -54,21 +46,12 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
                 cli.address = Some(validate_address(value)?);
                 i += 1;
             }
-            "--provider" => {
-                let value = args.get(i + 1).ok_or("--provider requires a value")?;
-                cli.provider = Some(value.clone());
+            "--ssh" => {
+                let value = args.get(i + 1).ok_or("--ssh requires a host")?;
+                bone_client::ssh::ssh_args(value, "bone").map_err(|error| error.to_string())?;
+                cli.ssh_host = Some(value.trim().to_string());
                 i += 1;
             }
-            "--model" => {
-                let value = args.get(i + 1).ok_or("--model requires a value")?;
-                cli.model = Some(value.clone());
-                i += 1;
-            }
-            // Dialog-opening subcommands mirror the TUI's `/setup`, `/catalog`
-            // and `stats-popup`.
-            "setup" => cli.open_setup = true,
-            "plugins" | "catalog" => cli.open_plugins = true,
-            "stats-popup" => cli.open_stats = true,
             // Daemon-side operations: this binary has no runtime to run them.
             "connect" => cli.command = Command::DaemonSide("connect"),
             "serve" => cli.command = Command::DaemonSide("serve"),
@@ -79,6 +62,9 @@ pub fn parse(args: &[String]) -> Result<Cli, String> {
             other => return Err(format!("unknown argument: {other}\n\n{}", usage())),
         }
         i += 1;
+    }
+    if cli.address.is_some() && cli.ssh_host.is_some() {
+        return Err("--connect and --ssh are mutually exclusive".into());
     }
     Ok(cli)
 }
@@ -102,16 +88,12 @@ pub fn version() -> String {
 }
 
 pub fn usage() -> String {
-    "Usage: bone-desktop [--connect <addr>] [--provider <id>] [--model <name>]
-       bone-desktop setup          # open the provider setup wizard
-       bone-desktop plugins        # open the plugins browser
-       bone-desktop stats-popup    # open the token-stats dashboard
-       bone-desktop connect --listen <addr>   # GUI against a daemon
+    "Usage: bone-desktop [--connect <addr> | --ssh <host>]
 
 Options:
   --connect <addr>   Daemon address (default 127.0.0.1:7878; loopback only)
-  --provider <id>    Activate this provider once connected
-  --model <name>     Set the active provider's model once connected
+  --ssh <host>       Use the daemon on <host> via `ssh <host> -- bone stdio`
+                     (keys or an agent required; `bone` must be on its PATH)
   -V, --version      Print version and exit
   -h, --help         Print this help and exit
 
@@ -162,22 +144,12 @@ mod tests {
     }
 
     #[test]
-    fn provider_and_model_flags_capture_values() {
-        let cli = parse(&args(&["--provider", "openai", "--model", "gpt-5"])).unwrap();
-        assert_eq!(cli.provider.as_deref(), Some("openai"));
-        assert_eq!(cli.model.as_deref(), Some("gpt-5"));
-        assert_eq!(cli.command, Command::Gui);
-        assert!(parse(&args(&["--provider"])).is_err());
-        assert!(parse(&args(&["--model"])).is_err());
-    }
-
-    #[test]
-    fn dialog_subcommands_set_open_flags() {
-        assert!(parse(&args(&["setup"])).unwrap().open_setup);
-        assert!(parse(&args(&["plugins"])).unwrap().open_plugins);
-        // `catalog` stays accepted as an alias for the old chrome.
-        assert!(parse(&args(&["catalog"])).unwrap().open_plugins);
-        assert!(parse(&args(&["stats-popup"])).unwrap().open_stats);
+    fn ssh_flag_takes_a_host_and_rejects_option_like_values() {
+        let cli = parse(&args(&["--ssh", "devbox"])).unwrap();
+        assert_eq!(cli.ssh_host.as_deref(), Some("devbox"));
+        assert!(parse(&args(&["--ssh"])).is_err());
+        assert!(parse(&args(&["--ssh", "-oProxyCommand=x"])).is_err());
+        assert!(parse(&args(&["--ssh", "devbox", "--connect", "127.0.0.1"])).is_err());
     }
 
     #[test]

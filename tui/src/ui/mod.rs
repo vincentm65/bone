@@ -23,3 +23,33 @@ pub mod theme;
 pub(crate) mod timing;
 pub mod tool_display;
 pub mod transcript_view;
+
+/// Convert a terminal key press into the key type shared screens match on.
+pub fn screen_key(key: crossterm::event::KeyEvent) -> bone_render::screens::Key {
+    use bone_render::screens::KeyCode as Screen;
+    use crossterm::event::{KeyCode, KeyModifiers};
+    let code = match key.code {
+        KeyCode::Char(c) => Screen::Char(c),
+        KeyCode::Enter => Screen::Enter,
+        KeyCode::Esc => Screen::Esc,
+        KeyCode::Tab => Screen::Tab,
+        KeyCode::BackTab => Screen::BackTab,
+        KeyCode::Backspace => Screen::Backspace,
+        KeyCode::Delete => Screen::Delete,
+        KeyCode::Up => Screen::Up,
+        KeyCode::Down => Screen::Down,
+        KeyCode::Left => Screen::Left,
+        KeyCode::Right => Screen::Right,
+        KeyCode::PageUp => Screen::PageUp,
+        KeyCode::PageDown => Screen::PageDown,
+        KeyCode::Home => Screen::Home,
+        KeyCode::End => Screen::End,
+        _ => Screen::Other,
+    };
+    bone_render::screens::Key {
+        code,
+        ctrl: key.modifiers.contains(KeyModifiers::CONTROL),
+        alt: key.modifiers.contains(KeyModifiers::ALT),
+        shift: key.modifiers.contains(KeyModifiers::SHIFT),
+    }
+}

@@ -2,15 +2,22 @@ use super::stream::{StreamAttempt, discard_stream_attempt};
 use super::{
     App, ConfigView, PendingApproval, TerminalBackgroundTransition, WireTools, apply_queue_nav_key,
     approval_already_pending, assistant_display_message, background_pane_needs_refresh,
-    config_approval_is, config_rejection_message, configured_input_style, edit_diff_message,
-    history_trim_count, history_window_rows, idle_state_needs_redraw,
-    job_quit_confirmation_required, job_snapshot_messages, lua_config_available,
-    orphaned_tool_result_row, parse_config_value, prepare_streaming_replay, queue_draft_behind,
-    render_config_page, run_insertion_lifecycle, should_open_agent_log, stream::is_retry_status,
-    streaming_rebuild_index, take_pending_config, take_terminal_width_change,
-    terminal_background_transition, terminal_dimensions_changed,
+    config_approval_is, config_rejection_message, configured_input_style, history_trim_count,
+    history_window_rows, idle_state_needs_redraw, job_quit_confirmation_required,
+    lua_config_available, orphaned_tool_result_row, parse_config_value, prepare_streaming_replay,
+    queue_draft_behind, render_config_page, run_insertion_lifecycle, should_open_agent_log,
+    stream::is_retry_status, streaming_rebuild_index, take_pending_config,
+    take_terminal_width_change, terminal_background_transition, terminal_dimensions_changed,
 };
 use crate::ui::input::InputState;
+use bone_render::transcript::edit_diff_message;
+
+fn job_snapshot_messages(
+    job: &bone_protocol::JobSnapshot,
+    wire_tools: &WireTools,
+) -> Vec<crate::chat::Message> {
+    bone_render::transcript::job_messages(job, |call| wire_tools.display_for_call(call))
+}
 use crate::ui::render::InputPreset;
 use crate::ui::selectable_pane::{SelectablePaneAction, apply_nav_key};
 use crossterm::event::{KeyCode, KeyModifiers};

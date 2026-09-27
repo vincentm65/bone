@@ -185,7 +185,7 @@ impl Tool for ReadFileTool {
         ToolDefinition {
             name: "read_file".to_string(),
             description:
-                "Preferred tool for reading file contents; use this instead of shell commands such as cat, head, tail, or sed. This one tool has two modes. SINGLE: read exactly one literal file with mode=single; start_line and max_lines are allowed, and default to the first 1000 lines. BULK: read multiple files with mode=bulk; use a glob in path or add paths and exclude; do not use start_line or max_lines. If mode is omitted, Bone infers it for backward compatibility. Examples: {\"path\":\"core/src/agent.rs\",\"mode\":\"single\",\"start_line\":220,\"max_lines\":80}; {\"path\":\"core/src/**/*.rs\",\"mode\":\"bulk\",\"exclude\":[\"**/tests/**\"]}. Relative paths resolve from the working directory. Bulk reads skip hidden files and honor .gitignore, cap the match count and aggregate output, and preserve image attachments. To edit, reference the lines you read by their LINE#HASH anchors in edit_file; anchors stay valid while the lines are unchanged, and the edit result shows fresh anchors."
+                "Preferred tool for reading file contents; use this instead of shell commands such as cat, head, tail, or sed. This one tool has two modes. SINGLE: read exactly one literal file with mode=single; start_line and max_lines are allowed, and default to the first 1000 lines. BULK: read multiple files with mode=bulk; use a glob in path or add paths and exclude; do not use start_line or max_lines. If mode is omitted, Bone infers it for backward compatibility. Examples: {\"path\":\"core/src/agent.rs\",\"mode\":\"single\",\"start_line\":220,\"max_lines\":80}; {\"path\":\"core/src/**/*.rs\",\"mode\":\"bulk\",\"exclude\":[\"**/tests/**\"]}. Relative paths resolve from the working directory. Bulk reads honor .gitignore, cap the match count and aggregate output, and preserve image attachments. To edit, reference the lines you read by their LINE#HASH anchors in edit_file; anchors stay valid while the lines are unchanged, and the edit result shows fresh anchors."
                     .to_string(),
             input_schema: json!({
                 "type": "object",
@@ -397,18 +397,6 @@ fn bulk_walk_root(raw: &str, base: &Path) -> PathBuf {
     }
 }
 
-fn is_hidden_bulk_path(path: &Path, base: &Path) -> bool {
-    path.strip_prefix(base)
-        .unwrap_or(path)
-        .components()
-        .any(|component| {
-            component
-                .as_os_str()
-                .to_str()
-                .is_some_and(|name| name.starts_with('.') && name != "." && name != "..")
-        })
-}
-
 async fn bulk_base(working_dir: Option<&Path>) -> Result<PathBuf, String> {
     let base = working_dir
         .map(PathBuf::from)
@@ -439,7 +427,7 @@ async fn expand_bulk_paths(
             let root = bulk_walk_root(raw, &base);
             let walker = WalkBuilder::new(root)
                 .standard_filters(true)
-                .hidden(true)
+                .hidden(false)
                 .git_ignore(true)
                 .require_git(false)
                 .build();
@@ -451,10 +439,9 @@ async fn expand_bulk_paths(
                 if !file_type.is_file() || !pattern.matches(entry.path(), &base) {
                     continue;
                 }
-                if is_hidden_bulk_path(entry.path(), &base)
-                    || exclusions
-                        .iter()
-                        .any(|exclude| exclude.matches(entry.path(), &base))
+                if exclusions
+                    .iter()
+                    .any(|exclude| exclude.matches(entry.path(), &base))
                 {
                     continue;
                 }
@@ -465,10 +452,9 @@ async fn expand_bulk_paths(
             }
         } else {
             let resolved = snapshot::resolve_existing_path(raw, working_dir).await?;
-            if is_hidden_bulk_path(&resolved, &base)
-                || exclusions
-                    .iter()
-                    .any(|exclude| exclude.matches(&resolved, &base))
+            if exclusions
+                .iter()
+                .any(|exclude| exclude.matches(&resolved, &base))
             {
                 continue;
             }
@@ -495,7 +481,7 @@ async fn read_bulk(
     let paths = expand_bulk_paths(args, working_dir).await?;
     if paths.is_empty() {
         return Err(format!(
-            "bulk read matched no visible regular files for `{}`",
+            "bulk read matched no regular files for `{}`",
             args.path
         ));
     }

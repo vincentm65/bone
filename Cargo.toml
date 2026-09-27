@@ -1,6 +1,6 @@
 [workspace]
-members = ["protocol", "core", "tui", "client", "native"]
-default-members = ["protocol", "core", "tui"]
+members = ["protocol", "render", "core", "tui", "client", "native", "android"]
+default-members = ["protocol", "render", "core", "tui"]
 resolver = "2"
 
 [workspace.package]

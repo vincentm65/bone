@@ -10,9 +10,9 @@ use paste::{apply_input_key_with_paste_burst, collect_paste_burst, is_paste_burs
 use crate::chat::Message;
 use crate::config::UserConfig;
 use crate::llm::{ChatMessage, LlmProvider};
+use bone_render::transcript::{assistant_display_message, orphaned_tool_result_row};
 
-use crate::tools::{ApprovalMode, CallOutcome, ToolCall, ToolResult};
-use crate::ui::tool_display::build_tool_row;
+use crate::tools::{ApprovalMode, CallOutcome, ToolCall};
 use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use std::collections::{BTreeMap, HashSet, VecDeque};
 use std::io;
@@ -1865,70 +1865,9 @@ impl App {
     /// arguments via [`build_tool_row`], and `edit_file` renders its diff
     /// preview (the diff is embedded in the persisted result content).
     fn rebuild_scrollback_from_transcript(&self, transcript: &[ChatMessage]) -> Vec<Message> {
-        use crate::llm::ChatRole;
-        // Map each tool_call_id to its originating call so a tool-result row can
-        // be relabelled from the call's `arguments`, matching the live path.
-        let calls: std::collections::HashMap<&str, &ToolCall> = transcript
-            .iter()
-            .flat_map(|m| m.tool_calls.iter())
-            .map(|c| (c.id.as_str(), c))
-            .collect();
-        let mut rows = Vec::new();
-        for msg in transcript {
-            match msg.role {
-                ChatRole::User => {
-                    if msg.is_synthetic_relay() {
-                        // A runtime relay of tool-returned images: the user did
-                        // not type it, so show it as ambient text, not a prompt.
-                        rows.push(Message::system(msg.content.clone()));
-                    } else {
-                        rows.push(Message::user_with_images(
-                            msg.content.clone(),
-                            msg.images.len(),
-                        ));
-                    }
-                }
-                ChatRole::Assistant => {
-                    if let Some(message) = assistant_display_message(&msg.content) {
-                        rows.push(message);
-                    }
-                }
-                ChatRole::Tool => {
-                    if let Some(diff) = edit_diff_message(
-                        msg.name.as_deref().unwrap_or_default(),
-                        msg.is_error,
-                        &msg.content,
-                    ) {
-                        rows.push(diff);
-                        continue;
-                    }
-                    let row = match msg.tool_call_id.as_deref().and_then(|id| calls.get(id)) {
-                        Some(call) => build_tool_row(
-                            call,
-                            &ToolResult {
-                                content: msg.content.clone(),
-                                images: msg.images.clone(),
-                                is_error: msg.is_error,
-                                ..Default::default()
-                            },
-                            self.wire_tools.display_for_call(call),
-                        ),
-                        None => {
-                            let label = msg.name.clone().unwrap_or_else(|| "tool".to_string());
-                            let Some(mut row) = orphaned_tool_result_row(label, msg.is_error)
-                            else {
-                                continue;
-                            };
-                            row.image_count = msg.images.len();
-                            row
-                        }
-                    };
-                    rows.push(row);
-                }
-                ChatRole::System => {}
-            }
-        }
-        rows
+        bone_render::transcript::transcript_rows(transcript, |call| {
+            self.wire_tools.display_for_call(call)
+        })
     }
 
     fn replace_transcript(&mut self, transcript: Vec<ChatMessage>) {
@@ -2860,116 +2799,9 @@ impl App {
     }
 }
 
-fn assistant_display_message(content: &str) -> Option<Message> {
-    let content = crate::ui::timing::strip_timing_blocks(content);
-    (!content.trim().is_empty()).then(|| Message::assistant(content))
-}
-
-fn edit_diff_message(name: &str, is_error: bool, content: &str) -> Option<Message> {
-    if name != "edit_file" || is_error || !content.starts_with("Edited: ") {
-        return None;
-    }
-    let newline = content.find('\n')?;
-    Some(Message::system(content[newline..].to_string()))
-}
-
-/// An unmatched successful result has no useful label or content to render.
-/// Keep unmatched errors visible, but do not leak bare tool names into the UI.
-fn orphaned_tool_result_row(name: String, is_error: bool) -> Option<Message> {
-    is_error.then(|| Message::tool_row(name, true))
-}
-
-/// Render a point-in-time view of a running job from its bounded runtime-event log.
-fn job_snapshot_messages(job: &bone_protocol::JobSnapshot, wire_tools: &WireTools) -> Vec<Message> {
-    let mut rows = vec![Message::user(job.task.clone())];
-    let mut answer = String::new();
-    let mut timing_filter = crate::ui::timing::TimingBlockFilter::default();
-    let mut calls = std::collections::HashMap::new();
-    let mut shown_edit_previews = std::collections::HashSet::new();
-    for event in &job.events {
-        match event {
-            bone_protocol::JobEventSnapshot::TextDelta { text } => {
-                answer.push_str(&timing_filter.push(text));
-            }
-            bone_protocol::JobEventSnapshot::ReasoningDelta { text } if !text.is_empty() => {
-                rows.push(Message::system(format!("thinking: {text}")));
-            }
-            bone_protocol::JobEventSnapshot::ToolCall {
-                id,
-                name,
-                arguments,
-                edit_preview,
-            } => {
-                answer.push_str(&timing_filter.finish());
-                if let Some(message) = assistant_display_message(&answer) {
-                    rows.push(message);
-                }
-                answer.clear();
-                calls.insert(
-                    id.clone(),
-                    ToolCall {
-                        id: id.clone(),
-                        name: name.clone(),
-                        arguments: arguments.clone(),
-                    },
-                );
-                if let Some(diff) = edit_preview {
-                    rows.push(Message::system(diff.clone()));
-                    shown_edit_previews.insert(id.clone());
-                }
-            }
-            bone_protocol::JobEventSnapshot::ToolResult {
-                name,
-                call_id,
-                content,
-                is_error,
-            } => {
-                if shown_edit_previews.contains(call_id) && !is_error {
-                    continue;
-                }
-                if let Some(diff) = edit_diff_message(name, *is_error, content) {
-                    rows.push(diff);
-                    continue;
-                }
-                let result = ToolResult {
-                    call_id: call_id.clone(),
-                    name: name.clone(),
-                    content: content.clone(),
-                    is_error: *is_error,
-                    ..Default::default()
-                };
-                let row = match calls.get(call_id) {
-                    Some(call) => build_tool_row(call, &result, wire_tools.display_for_call(call)),
-                    None => {
-                        let Some(row) = orphaned_tool_result_row(name.clone(), *is_error) else {
-                            continue;
-                        };
-                        row
-                    }
-                };
-                rows.push(row);
-            }
-            bone_protocol::JobEventSnapshot::Failed { message } => {
-                rows.push(Message::system(format!("failed: {message}")))
-            }
-            bone_protocol::JobEventSnapshot::ReasoningDelta { .. } => {}
-        }
-    }
-    answer.push_str(&timing_filter.finish());
-    if let Some(message) = assistant_display_message(&answer) {
-        rows.push(message);
-    }
-    if rows.len() == 1 {
-        let status = job.activity.as_deref().unwrap_or("starting");
-        rows.push(Message::system(format!("{} — {status}", job.id)));
-    }
-    rows
-}
-
 /// Built-in spinner used when no Lua preset resolves, so the streaming spinner
 /// is never blank. Mirrors the bundled `braille` preset.
-const FALLBACK_SPINNER_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const FALLBACK_SPINNER_SPEED_MS: u64 = 80;
+use bone_render::status::{FALLBACK_SPINNER_FRAMES, FALLBACK_SPINNER_SPEED_MS};
 
 /// Build a [`StatusInfo`] with a live streaming cumulative output-token estimate.
 #[allow(clippy::too_many_arguments)]
@@ -3030,7 +2862,8 @@ pub(crate) fn stream_status_info_with_token_stats(
         token_stats: token_stats.clone(),
         streaming_completion_tokens,
         streaming,
-        approval_mode,
+        approval_label: approval_mode.label().to_string(),
+        approval_danger: matches!(approval_mode, crate::tools::ApprovalMode::Danger),
         queue_len,
         incognito,
         status_show: cfg.status_show.clone(),
@@ -3231,7 +3064,9 @@ impl App {
         let Some(job) = self.jobs.iter().find(|job| job.id == id) else {
             return Ok(());
         };
-        let messages = job_snapshot_messages(job, &self.wire_tools);
+        let messages = bone_render::transcript::job_messages(job, |call| {
+            self.wire_tools.display_for_call(call)
+        });
         let result = crate::ui::transcript_view::run_collapsed(&messages, &self.renderer.theme);
         self.force_redraw(term)?;
         result
@@ -3678,45 +3513,7 @@ impl App {
         id: u64,
         term: &mut BoneTerminal,
     ) -> io::Result<()> {
-        let summary = match call.name.as_str() {
-            "read_file" | "create_file" | "edit_file" => {
-                call.arguments["path"].as_str().unwrap_or("?").to_string()
-            }
-            "shell" => call.arguments["command"]
-                .as_str()
-                .unwrap_or("?")
-                .to_string(),
-            _ => call.name.clone(),
-        };
-
-        let is_shell = call.name == "shell";
-        let title = if is_shell {
-            call.arguments["display_label"]
-                .as_str()
-                .map(String::from)
-                .unwrap_or_else(|| {
-                    call.arguments["command"]
-                        .as_str()
-                        .unwrap_or("?")
-                        .lines()
-                        .next()
-                        .unwrap_or("")
-                        .chars()
-                        .take(80)
-                        .collect::<String>()
-                })
-        } else {
-            summary
-        };
-        let mut prompt = Prompt::new(
-            format!("{} — {}", call.name, title),
-            vec!["Accept", "Advise", "Cancel"],
-        );
-        prompt.full_command = if is_shell {
-            call.arguments["command"].as_str().map(String::from)
-        } else {
-            None
-        };
+        let prompt = bone_render::approval::approval_prompt(call);
         self.active_prompt = Some(prompt);
         self.pending_approval = Some(PendingApproval {
             id,
@@ -3870,9 +3667,9 @@ impl App {
         if let Some(pending) = self.pending_approval.take() {
             let resolved = match decision {
                 Decision::Accept => CallOutcome::Approve,
-                Decision::Advise(advice) => CallOutcome::Blocked(format!(
-                    "[exit_code=1] Tool not executed. User advice: {advice}"
-                )),
+                Decision::Advise(advice) => {
+                    CallOutcome::Blocked(bone_render::approval::advice_reply(&advice))
+                }
                 Decision::Cancel => {
                     self.cancel_streaming = true;
                     CallOutcome::Denied

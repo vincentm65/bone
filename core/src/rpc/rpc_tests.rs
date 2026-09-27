@@ -2423,6 +2423,41 @@ async fn turn_queues_idle_commands_and_preserves_correlated_replies() {
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn key_request_is_cancelled_when_the_last_client_detaches() {
+    let _guard = crate::util::test_env_lock();
+    let extensions = interactive_test_extensions();
+    let session = crate::runtime::RuntimeSession::new(crate::tools::registry::ToolHandler::new(
+        crate::tools::builtin_tools(),
+    ));
+    let (mut ctx, hub, mut commands) =
+        test_daemon_ctx(Arc::new(ConfigTestProvider), extensions, session);
+    let mut client = hub.subscribe();
+    // The only client sees the menu's key request, then goes away without
+    // answering (e.g. its window was closed mid-menu).
+    let detach = tokio::spawn(async move {
+        loop {
+            if let RuntimeEvent::KeyRequest { .. } = client.recv().await.unwrap() {
+                break;
+            }
+        }
+        drop(client);
+    });
+
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        ctx.run_interactive_command(&mut commands, "wait_for_key".into(), String::new()),
+    )
+    .await;
+    detach.await.unwrap();
+    assert!(
+        result.is_ok(),
+        "an abandoned key request must not block the daemon"
+    );
+    assert!(ctx.pending_interactions.events.is_empty());
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interactive_command_queues_idle_work_in_fifo_order() {
     let _guard = crate::util::test_env_lock();
     let extensions = interactive_test_extensions();

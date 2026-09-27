@@ -50,3 +50,21 @@ impl ToolOutput {
         }
     }
 }
+
+/// Per-tool transcript presentation declared by the tool (label template,
+/// argument labels, and result visibility).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ToolDisplayConfig {
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub template: Option<String>,
+    #[serde(default)]
+    pub value_labels: std::collections::HashMap<String, std::collections::HashMap<String, String>>,
+    #[serde(default)]
+    pub show: Option<bool>,
+    #[serde(default)]
+    pub show_result: Option<bool>,
+    #[serde(default)]
+    pub eager: Option<bool>,
+}

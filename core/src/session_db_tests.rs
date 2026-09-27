@@ -1,5 +1,5 @@
 use super::{
-    FULL_SCHEMA, SCHEMA_VERSION, SessionDb, StartupDbOperation, db_path,
+    ConversationStatus, FULL_SCHEMA, SCHEMA_VERSION, SessionDb, StartupDbOperation, db_path,
     retry_startup_sqlite_with_deadline,
 };
 use crate::llm::{ChatMessage, ChatRole, ImageData};
@@ -1243,6 +1243,48 @@ fn recent_conversations_orders_by_last_activity_and_derives_titles() {
     assert_eq!(empty.title, "(new)");
     assert_eq!(empty.message_count, 0);
     assert_eq!(empty.updated_at, "2026-07-05T00:00:00Z");
+}
+
+/// Status and token totals match the `/history` picker's classification.
+#[test]
+fn recent_conversations_report_status_and_token_totals() {
+    let conn = Connection::open_in_memory().unwrap();
+    let db = SessionDb { conn };
+    db.setup_schema().unwrap();
+
+    let append = |id: i64, role: ChatRole, content: &str, seq: i64| {
+        let mut message = ChatMessage::new(role, content);
+        message.created_at = Some(format!("2026-07-01T10:00:{seq:02}Z"));
+        db.append_chat_message(id, &message, seq).unwrap();
+    };
+
+    let completed = db.create_conversation("openai", "gpt").unwrap();
+    append(completed, ChatRole::User, "question", 1);
+    append(completed, ChatRole::Assistant, "answer", 2);
+    db.record_usage(completed, "openai", "gpt", 100, 25, None, None, false)
+        .unwrap();
+    db.record_usage(completed, "openai", "gpt", 200, 50, None, None, false)
+        .unwrap();
+
+    let interrupted = db.create_conversation("openai", "gpt").unwrap();
+    append(interrupted, ChatRole::User, "first", 1);
+    append(interrupted, ChatRole::Assistant, "reply", 2);
+    append(interrupted, ChatRole::User, "unanswered", 3);
+
+    // A context summary is not a real user turn.
+    let summary_only = db.create_conversation("openai", "gpt").unwrap();
+    append(summary_only, ChatRole::User, "[Context summary] earlier", 1);
+
+    let empty = db.create_conversation("openai", "gpt").unwrap();
+
+    let all = db.recent_conversations(10).unwrap();
+    let by_id = |id: i64| all.iter().find(|c| c.id == id).unwrap();
+    assert_eq!(by_id(completed).status, ConversationStatus::Completed);
+    assert_eq!(by_id(completed).token_count, 375);
+    assert_eq!(by_id(interrupted).status, ConversationStatus::Interrupted);
+    assert_eq!(by_id(interrupted).token_count, 0);
+    assert_eq!(by_id(summary_only).status, ConversationStatus::Empty);
+    assert_eq!(by_id(empty).status, ConversationStatus::Empty);
 }
 
 #[test]

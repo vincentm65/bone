@@ -12,6 +12,17 @@
 
 use eframe::egui;
 
+const CJK_FALLBACKS: &[&str] = &[
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/wenquanyi/wqy-microhei/wqy-microhei.ttc",
+    "/System/Library/Fonts/PingFang.ttc",
+    "/System/Library/Fonts/Hiragino Sans GB.ttc",
+    "C:\\Windows\\Fonts\\msyh.ttc",
+    "C:\\Windows\\Fonts\\YuGothM.ttc",
+];
+
 /// Embedded fonts keep the desktop consistent across machines; egui's original
 /// fallback chain remains available for symbols and characters outside Latin.
 pub fn install_fonts(ctx: &egui::Context) {
@@ -49,13 +60,22 @@ pub fn install_fonts(ctx: &egui::Context) {
         .get_mut(&egui::FontFamily::Monospace)
         .unwrap()
         .insert(0, "JetBrains Mono".into());
+    // The bundled fonts have no CJK glyphs; fall back to a system font when one
+    // is installed.
+    if let Some(bytes) = CJK_FALLBACKS
+        .iter()
+        .find_map(|path| std::fs::read(path).ok())
+    {
+        fonts
+            .font_data
+            .insert("cjk".into(), egui::FontData::from_owned(bytes).into());
+        for family in fonts.families.values_mut() {
+            family.push("cjk".into());
+        }
+    }
     ctx.set_fonts(fonts);
 }
 
-/// One shared width for the transcript and composer, including side padding.
-pub const CHAT_WIDTH: f32 = 800.0;
-pub const CHAT_PADDING: i8 = 20;
-pub const CONTROL_HEIGHT: f32 = 34.0;
 pub const CONTROL_RADIUS: u8 = 8;
 pub const SURFACE_RADIUS: u8 = 12;
 
@@ -65,48 +85,6 @@ pub const SURFACE_RADIUS: u8 = 12;
 pub struct ThemeSettings {
     #[serde(default)]
     pub palette: Palette,
-    #[serde(default)]
-    pub user_msg: Option<String>,
-    #[serde(default)]
-    pub user_msg_bg: Option<String>,
-    #[serde(default)]
-    pub system_msg: Option<String>,
-    #[serde(default)]
-    pub tool_call: Option<String>,
-    #[serde(default)]
-    pub tool_error: Option<String>,
-    /// Diff text color for removed (`-`) lines.
-    #[serde(default)]
-    pub diff_removed: Option<String>,
-    /// Diff band fill for removed (`-`) lines.
-    #[serde(default)]
-    pub diff_removed_bg: Option<String>,
-    /// Diff text color for added (`+`) lines.
-    #[serde(default)]
-    pub diff_added: Option<String>,
-    /// Diff band fill for added (`+`) lines.
-    #[serde(default)]
-    pub diff_added_bg: Option<String>,
-    #[serde(default)]
-    pub thinking: Option<String>,
-    #[serde(default)]
-    pub markdown_marker: Option<String>,
-    #[serde(default)]
-    pub markdown_heading: Option<String>,
-    #[serde(default)]
-    pub markdown_link: Option<String>,
-    #[serde(default)]
-    pub markdown_inline_code: Option<String>,
-    #[serde(default)]
-    pub markdown_rule: Option<String>,
-    #[serde(default)]
-    pub markdown_table_border: Option<String>,
-    #[serde(default)]
-    pub markdown_table_header: Option<String>,
-    #[serde(default)]
-    pub heat_low: Option<String>,
-    #[serde(default)]
-    pub heat_high: Option<String>,
 }
 
 /// Core palette channels used to derive egui visuals.
@@ -119,62 +97,15 @@ pub struct Palette {
     #[serde(default)]
     pub muted: Option<String>,
     #[serde(default)]
-    pub subtle: Option<String>,
-    #[serde(default)]
     pub border: Option<String>,
     #[serde(default)]
     pub accent: Option<String>,
-    #[serde(default)]
-    pub good: Option<String>,
     #[serde(default)]
     pub warn: Option<String>,
     #[serde(default)]
     pub error: Option<String>,
     #[serde(default)]
     pub selection: Option<String>,
-}
-
-/// Pre-resolved render roles. Defaults mirror the TUI's `derive_palette_roles`
-/// so a theme that only sets a palette behaves like the terminal: user messages
-/// use the foreground, reasoning/tool names the muted channel, tool errors and
-/// approvals the error channel, etc. Each role may itself reference a palette
-/// role, a named ANSI color, or a hex string.
-#[derive(Debug, Clone)]
-pub struct ThemeColors {
-    pub user_msg: egui::Color32,
-    pub user_msg_bg: egui::Color32,
-    pub system_msg: egui::Color32,
-    pub warn: egui::Color32,
-    pub tool_call: egui::Color32,
-    pub tool_error: egui::Color32,
-    pub thinking: egui::Color32,
-    pub markdown_marker: egui::Color32,
-    pub markdown_heading: egui::Color32,
-    pub markdown_link: egui::Color32,
-    pub markdown_inline_code: egui::Color32,
-    pub markdown_rule: egui::Color32,
-    /// Border color for rendered Markdown tables.
-    pub markdown_table_border: egui::Color32,
-    /// Header text color for rendered Markdown tables.
-    pub markdown_table_header: egui::Color32,
-    /// Background fill for added (`+`) diff lines.
-    pub diff_added: egui::Color32,
-    /// Background fill for removed (`-`) diff lines.
-    pub diff_removed: egui::Color32,
-    /// Text color for added (`+`) diff lines; unset falls back to a tint
-    /// derived from the band.
-    pub diff_added_text: Option<egui::Color32>,
-    /// Text color for removed (`-`) diff lines; unset falls back to a tint
-    /// derived from the band.
-    pub diff_removed_text: Option<egui::Color32>,
-    /// Whether the background is dark; selects the syntect theme for code.
-    pub syntax_dark: bool,
-}
-
-impl Default for ThemeColors {
-    fn default() -> Self {
-        ThemeSettings::default().colors()
-    }
 }
 
 impl Palette {
@@ -276,96 +207,28 @@ impl ThemeSettings {
         visuals
     }
 
-    /// Native defaults for readable conversation text and compact controls.
-    /// Font roles remain explicit so code can opt into `Monospace` without
-    /// making the surrounding conversation monospace.
+    /// Terminal-like defaults: every text role is monospace, matching the TUI.
     pub fn style(&self) -> egui::Style {
         let mut style = egui::Style {
             visuals: self.visuals(),
             ..Default::default()
         };
-        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-        style.spacing.button_padding = egui::vec2(12.0, 7.0);
-        style.spacing.interact_size = egui::vec2(CONTROL_HEIGHT, CONTROL_HEIGHT);
+        style.spacing.item_spacing = egui::vec2(8.0, 4.0);
+        style.spacing.button_padding = egui::vec2(6.0, 2.0);
+        style.spacing.interact_size = egui::vec2(24.0, 20.0);
         style.spacing.slider_width = 120.0;
-        style
-            .text_styles
-            .insert(egui::TextStyle::Body, egui::FontId::proportional(15.0));
-        style
-            .text_styles
-            .insert(egui::TextStyle::Button, egui::FontId::proportional(14.0));
-        style
-            .text_styles
-            .insert(egui::TextStyle::Small, egui::FontId::proportional(12.0));
-        style.text_styles.insert(
-            egui::TextStyle::Heading,
-            egui::FontId::new(22.0, egui::FontFamily::Name("semibold".into())),
-        );
-        style
-            .text_styles
-            .insert(egui::TextStyle::Monospace, egui::FontId::monospace(14.0));
-        style
-    }
-
-    /// Pre-resolve every render role into concrete colors. Absent roles inherit
-    /// a palette-derived default (mirroring the TUI), so a partial theme stays
-    /// legible; present roles are resolved through [`resolve_color`] so they may
-    /// name a palette role, an ANSI color, or a hex string.
-    pub fn colors(&self) -> ThemeColors {
-        let palette = &self.palette;
-        let (bg, fg, accent) = palette.resolved();
-        let resolve =
-            |value: &Option<String>| value.as_deref().and_then(|s| resolve_color(s, palette));
-        let muted = resolve(&palette.muted).unwrap_or(fg);
-        let subtle = resolve(&palette.subtle).unwrap_or(fg);
-        let warn = resolve(&palette.warn).unwrap_or(accent);
-        let error = resolve(&palette.error).unwrap_or(egui::Color32::from_rgb(235, 90, 90));
-        let prompt_surface = mix(bg, fg, 0.075);
-        ThemeColors {
-            user_msg: resolve(&self.user_msg).unwrap_or(fg),
-            user_msg_bg: resolve(&self.user_msg_bg).unwrap_or(prompt_surface),
-            system_msg: resolve(&self.system_msg).unwrap_or(fg),
-            warn,
-            tool_call: resolve(&self.tool_call).unwrap_or(muted),
-            tool_error: resolve(&self.tool_error).unwrap_or(error),
-            thinking: resolve(&self.thinking).unwrap_or(accent),
-            markdown_marker: resolve(&self.markdown_marker).unwrap_or(muted),
-            markdown_heading: resolve(&self.markdown_heading).unwrap_or(fg),
-            markdown_link: resolve(&self.markdown_link).unwrap_or(muted),
-            markdown_inline_code: resolve(&self.markdown_inline_code).unwrap_or(muted),
-            markdown_rule: resolve(&self.markdown_rule).unwrap_or(subtle),
-            markdown_table_border: resolve(&self.markdown_table_border)
-                .or_else(|| resolve(&palette.border))
-                .unwrap_or(fg),
-            markdown_table_header: resolve(&self.markdown_table_header).unwrap_or(accent),
-            diff_added: resolve(&self.diff_added_bg).unwrap_or(egui::Color32::from_rgb(0, 95, 0)),
-            diff_removed: resolve(&self.diff_removed_bg)
-                .unwrap_or(egui::Color32::from_rgb(135, 1, 1)),
-            diff_added_text: resolve(&self.diff_added),
-            diff_removed_text: resolve(&self.diff_removed),
-            syntax_dark: is_dark(bg),
+        for (text_style, size) in [
+            (egui::TextStyle::Body, 14.0),
+            (egui::TextStyle::Button, 14.0),
+            (egui::TextStyle::Small, 12.0),
+            (egui::TextStyle::Heading, 15.0),
+            (egui::TextStyle::Monospace, 14.0),
+        ] {
+            style
+                .text_styles
+                .insert(text_style, egui::FontId::monospace(size));
         }
-    }
-
-    /// Resolve themed heatmap colors. Empty cells remain subdued, and the
-    /// default active gradient grows from a tinted surface to the accent.
-    pub fn heat_colors(&self) -> (egui::Color32, egui::Color32, egui::Color32) {
-        let palette = &self.palette;
-        let (bg, fg, accent) = palette.resolved();
-        let channel = |value: &Option<String>| value.as_deref().and_then(parse_color);
-        let subtle = channel(&palette.subtle).unwrap_or_else(|| mix(bg, fg, 0.085));
-        let good = channel(&palette.good).unwrap_or(accent);
-        let high = self
-            .heat_high
-            .as_deref()
-            .and_then(|value| resolve_color(value, palette))
-            .unwrap_or(good);
-        let low = self
-            .heat_low
-            .as_deref()
-            .and_then(|value| resolve_color(value, palette))
-            .unwrap_or_else(|| mix(bg, high, 0.3));
-        (low, high, subtle)
+        style
     }
 }
 
@@ -455,33 +318,6 @@ fn named_color(value: &str) -> Option<egui::Color32> {
     })
 }
 
-/// Named palette role (`fg`, `accent`, `muted`, …) → egui color, mirroring the
-/// TUI's `resolve_color_ref`. `muted`/`subtle`/`border` fall back to the
-/// foreground; `good`/`warn`/`error`/`selection` return `None` when unset.
-pub fn palette_role(value: &str, palette: &Palette) -> Option<egui::Color32> {
-    let (bg, fg, accent) = palette.resolved();
-    let channel = |name: &Option<String>| name.as_deref().and_then(parse_color);
-    match value {
-        "bg" => Some(bg),
-        "fg" => Some(fg),
-        "accent" => Some(accent),
-        "muted" => channel(&palette.muted).or(Some(fg)),
-        "subtle" => channel(&palette.subtle).or(Some(fg)),
-        "border" => channel(&palette.border).or(Some(fg)),
-        "good" => channel(&palette.good),
-        "warn" => channel(&palette.warn),
-        "error" => channel(&palette.error),
-        "selection" => channel(&palette.selection),
-        _ => None,
-    }
-}
-
-/// Resolve a color reference: a palette role name, a named ANSI color, or a hex
-/// string. Returns `None` for unknown references so callers keep their fallback.
-pub fn resolve_color(value: &str, palette: &Palette) -> Option<egui::Color32> {
-    palette_role(value, palette).or_else(|| parse_color(value))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,8 +339,6 @@ mod tests {
         });
         let theme: ThemeSettings = serde_json::from_value(json).expect("parses");
         assert_eq!(theme.palette.bg.as_deref(), Some("#101014"));
-        assert_eq!(theme.user_msg.as_deref(), Some("#8be9fd"));
-        assert_eq!(theme.thinking.as_deref(), Some("#6272a4"));
         assert!(theme.palette.muted.is_none());
         let (bg, fg, accent) = theme.palette.resolved();
         assert_eq!(bg, egui::Color32::from_rgb(0x10, 0x10, 0x14));
@@ -550,26 +384,20 @@ mod tests {
     }
 
     #[test]
-    fn style_keeps_conversation_proportional_and_controls_compact() {
+    fn style_is_monospace_like_the_terminal() {
         let style = ThemeSettings::default().style();
-        assert_eq!(
-            style.text_styles[&egui::TextStyle::Body].family,
-            egui::FontFamily::Proportional
-        );
-        assert_eq!(
-            style.text_styles[&egui::TextStyle::Monospace].family,
-            egui::FontFamily::Monospace
-        );
-        assert_eq!(style.spacing.item_spacing, egui::vec2(8.0, 6.0));
-        assert_eq!(
-            style.spacing.interact_size,
-            egui::vec2(CONTROL_HEIGHT, CONTROL_HEIGHT)
-        );
+        for text_style in [
+            egui::TextStyle::Body,
+            egui::TextStyle::Button,
+            egui::TextStyle::Heading,
+            egui::TextStyle::Monospace,
+        ] {
+            assert_eq!(
+                style.text_styles[&text_style].family,
+                egui::FontFamily::Monospace
+            );
+        }
         assert_eq!(style.visuals.panel_fill, egui::Color32::from_gray(27));
-        assert_eq!(
-            style.text_styles[&egui::TextStyle::Heading].family,
-            egui::FontFamily::Name("semibold".into())
-        );
     }
 
     #[test]
@@ -648,97 +476,5 @@ mod tests {
             Some(egui::Color32::from_rgb(0xc0, 0xc0, 0xc0))
         );
         assert_eq!(parse_color("chartreuse"), None);
-    }
-
-    #[test]
-    fn resolve_color_prefers_palette_role_over_named_and_hex() {
-        let palette: Palette = serde_json::from_value(serde_json::json!({
-            "bg": "#101014",
-            "fg": "#e0e0e0",
-            "accent": "#4f9cf9",
-            "muted": "#808080",
-            "error": "#ff5555"
-        }))
-        .unwrap();
-        // A palette role wins even though it is not a named/hex color.
-        assert_eq!(
-            resolve_color("accent", &palette),
-            Some(egui::Color32::from_rgb(0x4f, 0x9c, 0xf9))
-        );
-        assert_eq!(
-            resolve_color("muted", &palette),
-            Some(egui::Color32::from_rgb(0x80, 0x80, 0x80))
-        );
-        // `muted` falls back to the foreground when the channel is unset.
-        let bare: Palette = serde_json::from_value(serde_json::json!({ "fg": "#abcdef" })).unwrap();
-        assert_eq!(
-            resolve_color("muted", &bare),
-            Some(egui::Color32::from_rgb(0xab, 0xcd, 0xef))
-        );
-        // `error` returns None when unset, so a hex/named string still resolves.
-        assert_eq!(resolve_color("error", &bare), None);
-        assert_eq!(
-            resolve_color("red", &bare),
-            Some(egui::Color32::from_rgb(0xcd, 0x31, 0x31))
-        );
-        assert_eq!(
-            resolve_color("#123456", &bare),
-            Some(egui::Color32::from_rgb(0x12, 0x34, 0x56))
-        );
-        assert_eq!(resolve_color("not-a-color", &bare), None);
-    }
-
-    #[test]
-    fn colors_maps_roles_from_hex_named_and_palette_references() {
-        let theme: ThemeSettings = serde_json::from_value(serde_json::json!({
-            "palette": {
-                "bg": "#101014",
-                "fg": "#e0e0e0",
-                "accent": "#4f9cf9",
-                "muted": "#808080",
-                "error": "#ff5555"
-            },
-            // hex, a named ANSI color, and a palette-role reference respectively.
-            "tool_call": "accent",
-            "markdown_heading": "LightGreen",
-            "thinking": "#123456"
-        }))
-        .unwrap();
-        let colors = theme.colors();
-        assert_eq!(colors.tool_call, egui::Color32::from_rgb(0x4f, 0x9c, 0xf9));
-        assert_eq!(
-            colors.markdown_heading,
-            egui::Color32::from_rgb(0x23, 0xd1, 0x8b)
-        );
-        assert_eq!(colors.thinking, egui::Color32::from_rgb(0x12, 0x34, 0x56));
-        // Palette-derived defaults still apply to unset roles.
-        assert_eq!(colors.user_msg, egui::Color32::from_rgb(0xe0, 0xe0, 0xe0));
-        assert_eq!(
-            colors.markdown_marker,
-            egui::Color32::from_rgb(0x80, 0x80, 0x80)
-        );
-        assert_eq!(colors.tool_error, egui::Color32::from_rgb(0xff, 0x55, 0x55));
-    }
-
-    #[test]
-    fn diff_band_and_text_roles_resolve_independently() {
-        let theme = ThemeSettings {
-            diff_added: Some("#9ece6a".into()),
-            diff_added_bg: Some("#3a3a3a".into()),
-            ..Default::default()
-        };
-        let colors = theme.colors();
-        assert_eq!(colors.diff_added, egui::Color32::from_rgb(0x3a, 0x3a, 0x3a));
-        assert_eq!(
-            colors.diff_added_text,
-            Some(egui::Color32::from_rgb(0x9e, 0xce, 0x6a))
-        );
-        // The removed side keeps its band default and has no explicit text.
-        assert_eq!(colors.diff_removed, egui::Color32::from_rgb(135, 1, 1));
-        assert!(colors.diff_removed_text.is_none());
-        // Text roles stay unset until a `diff_*` text value is present.
-        let bare = ThemeSettings::default().colors();
-        assert!(bare.diff_added_text.is_none());
-        assert!(bare.diff_removed_text.is_none());
     }
 }

@@ -1,6 +1,5 @@
 use bone::ext::snapshots::{InputBorderSnapshot, InputStyleSnapshot};
 use bone::llm::TokenStats;
-use bone::tools::ApprovalMode;
 use bone::ui::autocomplete::AutocompleteState;
 use bone::ui::input::InputState;
 use bone::ui::pane_page::PanePage;
@@ -41,7 +40,8 @@ fn status_info() -> StatusInfo {
         token_stats: TokenStats::new(),
         streaming_completion_tokens: None,
         streaming: false,
-        approval_mode: ApprovalMode::Safe,
+        approval_label: "Safe".into(),
+        approval_danger: false,
         queue_len: 0,
         incognito: false,
         status_show,

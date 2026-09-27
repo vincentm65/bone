@@ -5,10 +5,16 @@
 
 pub mod ui;
 
+/// Conversation helpers from core plus the display rows shared with the desktop.
+pub mod chat {
+    pub use bone_core::chat::*;
+    pub use bone_render::{Message, ToolDisplay};
+}
+
 #[cfg(test)]
 pub(crate) static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 pub use bone_core::{
-    agent, build_info, chat, commands, config, ext, host, llm, pane_content, processes, rpc, run,
+    agent, build_info, commands, config, ext, host, llm, pane_content, processes, rpc, run,
     runtime, session_db, session_sink, shell_split, tools, update_check, util,
 };

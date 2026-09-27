@@ -1447,32 +1447,11 @@ impl App {
         self.thinking_clear_at = None;
         self.thinking_first_shown.get_or_insert_with(Instant::now);
 
-        use ratatui::style::{Modifier, Style};
-        use ratatui::text::Line;
-        let header_style = Style::default()
-            .fg(self.renderer.theme.thinking)
-            .add_modifier(Modifier::BOLD);
-        let body_style = Style::default().fg(self.renderer.theme.palette.muted);
-        // Header + the last reasoning lines that fit; the header stays pinned.
-        let mut tail: Vec<&str> = self
-            .thinking_tail
-            .rsplit('\n')
-            .take(Self::THINKING_MAX_ROWS - 1)
-            .collect();
-        tail.reverse();
-        let mut content = vec![Line::styled("✻ Thinking", header_style)];
-        content.extend(
-            tail.iter()
-                .map(|line| Line::styled((*line).to_string(), body_style)),
+        let page = bone_render::panes::thinking(
+            &self.thinking_tail,
+            Self::THINKING_MAX_ROWS,
+            &self.renderer.theme,
         );
-        let visible_rows = content.len();
-        let page = PanePage {
-            source: "thinking".to_string(),
-            title: "thinking".to_string(),
-            content,
-            visible_rows,
-            scroll: 0,
-        };
         let (_, active) = PanePage::upsert(&mut self.pages, self.active_page, page);
         self.active_page = active;
     }

@@ -1,14 +1,8 @@
 //! Shared selection, navigation, and layout mechanics for native list panes.
 
 use crossterm::event::{KeyCode, KeyModifiers};
-use ratatui::style::Style;
-use ratatui::text::{Line, Span};
 
 use super::input::InputState;
-use super::pane_page::PanePage;
-use crate::ui::theme::Theme;
-
-pub(crate) const VISIBLE_ROWS: usize = 8;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum SelectablePaneAction {
@@ -116,43 +110,6 @@ pub(crate) fn reconcile_selection(selected_id: &mut Option<String>, active_ids: 
         .is_some_and(|selected| active_ids.contains(selected))
     {
         *selected_id = active_ids.first().cloned();
-    }
-}
-
-pub(crate) fn render(
-    theme: &Theme,
-    source: &str,
-    title: String,
-    rows: Vec<(bool, Line<'static>)>,
-) -> PanePage {
-    let selected_index = rows.iter().position(|(selected, _)| *selected).unwrap_or(0);
-    let content = rows
-        .into_iter()
-        .map(|(selected, mut line)| {
-            line.spans.insert(
-                0,
-                Span::styled(
-                    if selected { " › " } else { "   " },
-                    Style::default().fg(if selected {
-                        theme.palette.accent
-                    } else {
-                        theme.palette.muted
-                    }),
-                ),
-            );
-            if selected {
-                line = line.style(Style::default().bg(theme.palette.selection));
-            }
-            line
-        })
-        .collect();
-
-    PanePage {
-        source: source.into(),
-        title,
-        content,
-        visible_rows: VISIBLE_ROWS,
-        scroll: selected_index.saturating_sub(VISIBLE_ROWS.saturating_sub(1)),
     }
 }
 

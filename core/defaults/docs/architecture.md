@@ -22,11 +22,21 @@ TUI / desktop client / headless runner / remote client
   extensions (the Bone-owned `lua/core` package and plugin packages under
   `lua/plugins/<name>/`), runtime sessions, jobs, and persistence.
 - `protocol` owns the serializable commands, events, configuration snapshots,
-  session snapshots, tool types, and view types that cross a frontend boundary.
-- `tui` owns the native terminal client and its rendering/input code.
+  session snapshots, tool types, theme settings, and view types that cross a
+  frontend boundary.
+- `render` owns presentation shared by every frontend: Markdown, tool rows and
+  previews, wrapping, the color theme, the status bar, live-pane pages, the
+  approval prompt, and the full-screen screens (stats, setup, catalog, process
+  and transcript viewers), all producing styled terminal lines or ratatui
+  frames. It depends only on `protocol`, never on `core`.
+- `tui` owns the native terminal client, its input handling, and the terminal
+  side of rendering.
 - `client` owns the shared lightweight JSONL/socket transport used by thin remote
-  frontends; it does not contain daemon/session logic.
-- `native` owns the `bone-desktop` eframe UI and local event reduction.
+  frontends, including the SSH transport (`ssh <host> -- bone stdio`) and the
+  `bone stdio` byte bridge; it does not contain daemon/session logic. The daemon
+  itself only listens on loopback: remote access is SSH's job, never daemon auth.
+- `native` owns the `bone-desktop` eframe UI and local event reduction; it paints
+  the same `render` output on a character grid, so the transcript matches the TUI.
 
 Keep dependencies flowing toward `core` and `protocol`. Core must not depend on
 terminal rendering details.

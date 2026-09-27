@@ -1,0 +1,24 @@
+[package]
+name = "bone-android"
+version.workspace = true
+edition.workspace = true
+description = "Phone client for a Bone daemon, reached over SSH"
+
+# `cdylib` is what an Android APK loads; `rlib` lets the desktop preview binary
+# and tests link the same code.
+[lib]
+name = "bone_android"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+# Phone-sized desktop window for developing the UI without a device.
+[[bin]]
+name = "bone-android-preview"
+path = "src/main.rs"
+
+[dependencies]
+bone-client = { path = "../client" }
+bone-protocol = { path = "../protocol" }
+eframe = "0.36.1"
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "net", "sync", "time", "macros", "process"] }

@@ -791,9 +791,15 @@ fn migrate_legacy_plugins_core_moves_missing_files_and_prunes() {
         std::fs::read_to_string(lua.join("core/lib/custom.lua")).unwrap(),
         "return {}\n"
     );
-    assert!(!lua.join("plugins/core").exists(), "empty legacy dir must be pruned");
+    assert!(
+        !lua.join("plugins/core").exists(),
+        "empty legacy dir must be pruned"
+    );
     for (name, _) in DEFAULT_LUA_CORE {
-        assert!(lua.join("core").join(name).exists(), "{name} was not seeded");
+        assert!(
+            lua.join("core").join(name).exists(),
+            "{name} was not seeded"
+        );
     }
 }
 
@@ -807,7 +813,10 @@ fn migrate_legacy_plugins_core_deletes_identical_copy() {
 
     migrate_legacy_plugins_core(lua);
 
-    assert_eq!(std::fs::read_to_string(lua.join("core").join(name)).unwrap(), bundled);
+    assert_eq!(
+        std::fs::read_to_string(lua.join("core").join(name)).unwrap(),
+        bundled
+    );
     assert!(!lua.join("plugins/core").exists());
 }
 

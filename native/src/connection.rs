@@ -1,17 +1,62 @@
 //! Socket lifecycle stays off the GUI thread. Every delivered event wakes egui.
+//!
+//! A chat reaches its daemon either over loopback TCP or through
+//! `ssh <host> -- bone stdio` ([`bone_client::ssh`]); both yield the same
+//! newline-JSON byte stream, so everything after the connect is shared.
 use bone_client::SocketConn;
+use bone_client::ssh::SshSession;
 use bone_protocol::{RuntimeCommand, RuntimeEvent};
 use eframe::egui;
 use std::time::Duration;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
+
+/// How long an SSH connect may take, login included, before the daemon's first
+/// event arrives.
+const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Where a chat's daemon lives.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Target {
+    /// A loopback `host:port`.
+    Local(String),
+    /// An SSH destination (`~/.ssh/config` alias or `user@host`) whose
+    /// `bone stdio` bridges to that machine's loopback daemon.
+    Ssh(String),
+}
+
+impl Target {
+    /// Short label for the status bar and messages.
+    pub fn label(&self) -> String {
+        match self {
+            Self::Local(address) => address.clone(),
+            Self::Ssh(host) => format!("ssh: {host}"),
+        }
+    }
+}
+
+type Reader = Box<dyn AsyncRead + Unpin + Send>;
+type Writer = Box<dyn AsyncWrite + Unpin + Send>;
+
+/// Result of trying to open one connection.
+enum Opened {
+    Ready {
+        read: Reader,
+        write: Writer,
+        ssh: Option<SshSession>,
+    },
+    Failed(String),
+    Cancelled,
+    /// The command channel closed: the tab is gone.
+    Closed,
+}
 
 // Both are IPC message enums sent over a channel; `Box`ing the large runtime
 // payloads would allocate per message and churn every match arm, so keep the
 // payloads inline.
 #[allow(clippy::large_enum_variant)]
 pub enum Command {
-    Connect(String),
-    Disconnect,
+    Connect(Target),
     Send(RuntimeCommand),
 }
 #[allow(clippy::large_enum_variant)]
@@ -122,61 +167,77 @@ async fn worker(
 ) {
     let mut sink = EventSink::new(events);
     while let Some(command) = commands.recv().await {
-        let Command::Connect(address) = command else {
+        let Command::Connect(target) = command else {
             continue;
         };
-        let endpoints = match crate::daemon::local_endpoints(&address) {
-            Ok(endpoints) => endpoints,
-            Err(reason) => {
+        let opened = match &target {
+            Target::Local(address) => open_tcp(address, &mut commands).await,
+            Target::Ssh(host) => open_ssh(host),
+        };
+        let (read, write, mut ssh) = match opened {
+            Opened::Ready { read, write, ssh } => (read, write, ssh),
+            Opened::Failed(reason) => {
                 if !sink.send_control(Event::Disconnected(format!("Connect failed: {reason}"))) {
                     return;
                 }
                 ctx.request_repaint();
                 continue;
             }
-        };
-        // Try every loopback candidate (a `localhost` host may be IPv4 or IPv6)
-        // until one connects; a refusal on one family must not hide a daemon on
-        // the other.
-        let mut stream = None;
-        let mut last_error = String::new();
-        let mut cancelled = false;
-        for endpoint in endpoints {
-            let result = tokio::select! {
-                result = tokio::time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(endpoint)) => result,
-                command = commands.recv() => {
-                    if command.is_none() { return; }
-                    cancelled = true;
-                    break;
+            Opened::Cancelled => {
+                if !sink.send_control(Event::Disconnected("Connection cancelled".into())) {
+                    return;
                 }
-            };
-            match result {
-                Ok(Ok(connected)) => {
-                    stream = Some(connected);
-                    break;
-                }
-                Ok(Err(error)) => last_error = error.to_string(),
-                Err(_) => last_error = "connection timed out after 10 seconds".into(),
+                ctx.request_repaint();
+                continue;
             }
-        }
-        if cancelled {
-            if !sink.send_control(Event::Disconnected("Connection cancelled".into())) {
-                return;
-            }
-            ctx.request_repaint();
-            continue;
-        }
-        let Some(stream) = stream else {
-            if !sink.send_control(Event::Disconnected(format!("Connect failed: {last_error}"))) {
-                return;
-            }
-            ctx.request_repaint();
-            continue;
+            Opened::Closed => return,
         };
-        let (read, write) = stream.into_split();
         let mut conn = SocketConn::new(read, write);
         let sender = conn.command_sender();
+        // The ssh child starts instantly even when its login will fail, so an
+        // SSH link counts as connected only once the daemon's first event
+        // (sent unprompted on attach) arrives; otherwise report ssh's reason.
+        let mut first = None;
+        if let Some(session) = ssh.take() {
+            let result = tokio::select! {
+                result = tokio::time::timeout(SSH_CONNECT_TIMEOUT, conn.next_event()) => result,
+                command = commands.recv() => {
+                    if command.is_none() { return; }
+                    if !sink.send_control(Event::Disconnected("Connection cancelled".into())) {
+                        return;
+                    }
+                    ctx.request_repaint();
+                    continue;
+                }
+            };
+            let failure = match result {
+                Ok(Some(event)) => {
+                    first = Some(event);
+                    ssh = Some(session);
+                    None
+                }
+                // EOF: ssh exited before the daemon answered.
+                Ok(None) => Some(session.failure().await),
+                Err(_) => Some(format!(
+                    "{} did not reach the daemon within {} seconds",
+                    target.label(),
+                    SSH_CONNECT_TIMEOUT.as_secs()
+                )),
+            };
+            if let Some(reason) = failure {
+                if !sink.send_control(Event::Disconnected(format!("Connect failed: {reason}"))) {
+                    return;
+                }
+                ctx.request_repaint();
+                continue;
+            }
+        }
         if !sink.send_control(Event::Connected) {
+            return;
+        }
+        if let Some(event) = first
+            && !sink.send_runtime(event)
+        {
             return;
         }
         ctx.request_repaint();
@@ -188,7 +249,6 @@ async fn worker(
                     Some(Command::Send(command)) => {
                         if sender.send(command).is_err() { break "Connection writer closed; delivery may be uncertain."; }
                     }
-                    Some(Command::Disconnect) => break "Disconnected",
                     Some(Command::Connect(_)) => {}, // UI disables Connect while attached
                     None => return,
                 },
@@ -203,10 +263,57 @@ async fn worker(
             }
         };
         drop(conn);
-        if !sink.send_control(Event::Disconnected(reason.into())) {
+        let reason = match ssh.take() {
+            Some(session) => format!("{reason} ({})", session.failure().await),
+            None => reason.into(),
+        };
+        if !sink.send_control(Event::Disconnected(reason)) {
             return;
         }
         ctx.request_repaint();
+    }
+}
+
+/// Try every loopback candidate (a `localhost` host may be IPv4 or IPv6) until
+/// one connects; a refusal on one family must not hide a daemon on the other.
+async fn open_tcp(address: &str, commands: &mut mpsc::UnboundedReceiver<Command>) -> Opened {
+    let endpoints = match crate::daemon::local_endpoints(address) {
+        Ok(endpoints) => endpoints,
+        Err(reason) => return Opened::Failed(reason),
+    };
+    let mut last_error = String::new();
+    for endpoint in endpoints {
+        let result = tokio::select! {
+            result = tokio::time::timeout(Duration::from_secs(10), tokio::net::TcpStream::connect(endpoint)) => result,
+            command = commands.recv() => {
+                return if command.is_none() { Opened::Closed } else { Opened::Cancelled };
+            }
+        };
+        match result {
+            Ok(Ok(stream)) => {
+                let (read, write) = stream.into_split();
+                return Opened::Ready {
+                    read: Box::new(read),
+                    write: Box::new(write),
+                    ssh: None,
+                };
+            }
+            Ok(Err(error)) => last_error = error.to_string(),
+            Err(_) => last_error = "connection timed out after 10 seconds".into(),
+        }
+    }
+    Opened::Failed(last_error)
+}
+
+/// Start `ssh <host> -- bone stdio`; the worker confirms the link.
+fn open_ssh(host: &str) -> Opened {
+    match bone_client::ssh::ssh_connect(host) {
+        Ok((read, write, session)) => Opened::Ready {
+            read: Box::new(read),
+            write: Box::new(write),
+            ssh: Some(session),
+        },
+        Err(error) => Opened::Failed(format!("could not start ssh: {error}")),
     }
 }
 
@@ -252,7 +359,7 @@ mod tests {
         let (tx, rx) = mpsc::unbounded_channel();
         let (events, mut received) = mpsc::channel(256);
         let task = tokio::spawn(worker(rx, events, egui::Context::default()));
-        tx.send(Command::Connect(address)).unwrap();
+        tx.send(Command::Connect(Target::Local(address))).unwrap();
         let (stream, _) = listener.accept().await.unwrap();
         let (read, mut write) = stream.into_split();
         assert!(matches!(received.recv().await, Some(Event::Connected)));
@@ -273,17 +380,6 @@ mod tests {
             reader.read::<RuntimeCommand>().await.unwrap(),
             Ok(RuntimeCommand::Cancel)
         ));
-        tx.send(Command::Disconnect).unwrap();
-        assert!(matches!(
-            received.recv().await,
-            Some(Event::Disconnected(_))
-        ));
-        assert!(
-            tokio::time::timeout(Duration::from_secs(2), reader.read::<RuntimeCommand>())
-                .await
-                .unwrap()
-                .is_none()
-        );
         drop(tx);
         tokio::time::timeout(Duration::from_secs(2), task)
             .await
@@ -291,44 +387,84 @@ mod tests {
             .unwrap();
     }
 
+    /// A stand-in `ssh` program: `script` runs in place of the remote
+    /// `bone stdio`.
+    #[cfg(unix)]
+    fn fake_ssh(name: &str, script: &str) -> std::path::PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("bone-fake-ssh-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ssh");
+        std::fs::write(&path, format!("#!/bin/sh\n{script}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path
+    }
+
+    /// One test owns `BONE_SSH` so parallel tests never race on it.
+    #[cfg(unix)]
     #[tokio::test]
-    async fn disconnect_is_not_blocked_by_a_runtime_event_flood() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap().to_string();
+    async fn ssh_target_connects_on_the_first_event_and_reports_ssh_failures() {
+        let hello = serde_json::to_string(&RuntimeEvent::TextDelta {
+            text: "hello".into(),
+        })
+        .unwrap();
+        let ok = fake_ssh(
+            "ok",
+            &format!("printf '%s\\n' '{hello}'; exec cat >/dev/null"),
+        );
+        let denied = fake_ssh(
+            "denied",
+            "echo 'devbox: Permission denied (publickey).' >&2; exit 255",
+        );
         let (tx, rx) = mpsc::unbounded_channel();
         let (events, mut received) = mpsc::channel(256);
         let task = tokio::spawn(worker(rx, events, egui::Context::default()));
-        tx.send(Command::Connect(address)).unwrap();
-        let (stream, _) = listener.accept().await.unwrap();
-        let (_read, mut write) = stream.into_split();
+        let next = async |received: &mut mpsc::Receiver<Event>| {
+            tokio::time::timeout(Duration::from_secs(5), received.recv())
+                .await
+                .unwrap()
+        };
 
-        // The test receiver intentionally does not drain the GUI queue. Once
-        // the reserved-capacity threshold is reached, additional runtime
-        // events are dropped while the worker remains able to read commands.
-        for index in 0..512 {
-            bone_client::write_message(
-                &mut write,
-                &RuntimeEvent::TextDelta {
-                    text: index.to_string(),
-                },
-            )
-            .await
+        // SAFETY: only this test reads or writes `BONE_SSH`.
+        unsafe { std::env::set_var(bone_client::ssh::SSH_PROGRAM_ENV, &ok) };
+        tx.send(Command::Connect(Target::Ssh("devbox".into())))
             .unwrap();
-        }
-        tx.send(Command::Disconnect).unwrap();
+        assert!(matches!(next(&mut received).await, Some(Event::Connected)));
+        assert!(matches!(
+            next(&mut received).await,
+            Some(Event::Runtime(RuntimeEvent::TextDelta { text })) if text == "hello"
+        ));
+
         drop(tx);
-        tokio::time::timeout(Duration::from_secs(1), task)
+        tokio::time::timeout(Duration::from_secs(2), task)
             .await
-            .expect("disconnect must interrupt event delivery")
+            .unwrap()
             .unwrap();
 
-        // The lifecycle event occupies the reserved queue slot and remains
-        // available to the GUI even though it never drained the flood.
-        assert!(received.len() >= 2);
-        assert!(matches!(received.try_recv(), Ok(Event::Connected)));
-        assert!(
-            std::iter::from_fn(|| received.try_recv().ok())
-                .any(|event| matches!(event, Event::Disconnected(_)))
-        );
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (events, mut received) = mpsc::channel(256);
+        let task = tokio::spawn(worker(rx, events, egui::Context::default()));
+        unsafe { std::env::set_var(bone_client::ssh::SSH_PROGRAM_ENV, &denied) };
+        tx.send(Command::Connect(Target::Ssh("devbox".into())))
+            .unwrap();
+        match next(&mut received).await {
+            Some(Event::Disconnected(reason)) => {
+                assert!(reason.starts_with("Connect failed: ssh"), "{reason}");
+                assert!(
+                    reason.ends_with("Permission denied (publickey)."),
+                    "{reason}"
+                );
+            }
+            _ => panic!("expected a connect failure"),
+        }
+        unsafe { std::env::remove_var(bone_client::ssh::SSH_PROGRAM_ENV) };
+        drop(tx);
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .unwrap()
+            .unwrap();
+        for path in [ok, denied] {
+            let _ = std::fs::remove_dir_all(path.parent().unwrap());
+        }
     }
 }

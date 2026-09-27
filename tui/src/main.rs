@@ -98,7 +98,7 @@ fn resolve_configured_theme(
 }
 
 fn configured_theme() -> bone::ui::theme::Theme {
-    resolve_configured_theme(bone::ui::theme::Theme::load_configured(), |message| {
+    resolve_configured_theme(bone::ui::theme::load_configured(), |message| {
         eprintln!("{message}");
     })
 }
@@ -412,6 +412,72 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
     Ok(())
 }
 
+/// `bone stdio` — the remote end of a frontend's `ssh <host> -- bone stdio`:
+/// connect to the loopback daemon (starting `bone serve` when none is
+/// listening), then copy the newline-JSON stream between stdio and it. SSH owns
+/// authentication, so the daemon itself never leaves loopback.
+async fn run_stdio(args: &[String]) -> std::io::Result<()> {
+    let addr = parse_listen_addr(args);
+    let stream = match tokio::net::TcpStream::connect(&addr).await {
+        Ok(stream) => stream,
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+            spawn_detached_serve(&addr)?;
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+            loop {
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                match tokio::net::TcpStream::connect(&addr).await {
+                    Ok(stream) => break stream,
+                    Err(error) if tokio::time::Instant::now() >= deadline => {
+                        return Err(std::io::Error::other(format!(
+                            "started `bone serve` but {addr} did not accept connections: {error}"
+                        )));
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        Err(error) => {
+            return Err(std::io::Error::other(format!(
+                "failed to connect to daemon at {addr}: {error}"
+            )));
+        }
+    };
+    bone_client::ssh::stdio_bridge(stream, tokio::io::stdin(), tokio::io::stdout()).await
+}
+
+/// Start `bone serve --listen <addr>` detached from this process (own process
+/// group, stdio redirected to `<bone dir>/logs/daemon.log`) so it outlives the
+/// SSH session that started it.
+fn spawn_detached_serve(addr: &str) -> std::io::Result<()> {
+    let log_path = bone::config::try_bone_dir()
+        .ok_or_else(|| std::io::Error::other("no bone config directory (set $HOME or $BONE_DIR)"))?
+        .join("logs")
+        .join("daemon.log");
+    if let Some(parent) = log_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let log = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)?;
+    let mut command = std::process::Command::new(std::env::current_exe()?);
+    command
+        .args(["serve", "--listen", addr])
+        .stdin(std::process::Stdio::null())
+        .stdout(log.try_clone()?)
+        .stderr(log);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    eprintln!(
+        "bone: no daemon on {addr}; started one (log: {})",
+        log_path.display()
+    );
+    command.spawn().map(drop)
+}
+
 /// `bone connect` — a line-oriented RPC frontend, the reference *remote client*:
 /// each stdin line is a prompt, the daemon's `RuntimeEvent`s are printed, and
 /// tool-approval requests are answered over the wire (auto-approve what the
@@ -478,8 +544,13 @@ async fn run_connect(args: &[String]) -> std::io::Result<()> {
     Ok(())
 }
 
+fn runtime_warn(message: String) {
+    bone_core::ext::ctx::runtime_warn(message);
+}
+
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
+    bone_render::set_warn_hook(runtime_warn);
     let args: Vec<String> = std::env::args().skip(1).collect();
 
     if matches!(args.first().map(String::as_str), Some("--version" | "-V")) {
@@ -503,6 +574,10 @@ async fn main() -> std::io::Result<()> {
     }
     if args.first().map(String::as_str) == Some("connect") {
         return run_connect(&args[1..]).await;
+    }
+    // Before any bootstrap that might print: stdout carries only protocol bytes.
+    if args.first().map(String::as_str) == Some("stdio") {
+        return run_stdio(&args[1..]).await;
     }
 
     let tui_cli_options = if args.first().is_none_or(|arg| arg.starts_with('-')) {
@@ -600,6 +675,7 @@ async fn main() -> std::io::Result<()> {
         Some("run")
             | Some("serve")
             | Some("connect")
+            | Some("stdio")
             | Some("stats-popup")
             | Some("update")
             | Some("install")

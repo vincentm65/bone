@@ -81,6 +81,40 @@ fn expanded_shell_output_has_no_marker() {
     assert!(rendered.contains(&"      │ 4".to_string()));
 }
 
+fn long_command_lines(expanded: bool) -> Vec<String> {
+    let command = (1..=20)
+        .map(|n| format!("echo {n}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    msg_to_lines(
+        &[shell_row(&command, String::new(), false)],
+        &Theme::default(),
+        None,
+        80,
+        expanded,
+    )
+    .iter()
+    .map(line_text)
+    .collect()
+}
+
+#[test]
+fn long_shell_command_collapses_after_ten_lines() {
+    let rendered = long_command_lines(false);
+
+    assert_eq!(rendered.len(), 10, "{rendered:#?}");
+    assert!(rendered[8].ends_with("echo 9"));
+    assert_eq!(rendered[9], "    ⋮ +11 command lines (ctrl+o)");
+}
+
+#[test]
+fn expanded_shell_command_is_not_collapsed() {
+    let rendered = long_command_lines(true);
+
+    assert!(rendered.iter().any(|line| line.ends_with("echo 20")));
+    assert!(rendered.iter().all(|line| !line.contains("command lines")));
+}
+
 #[test]
 fn shell_tool_boilerplate_is_hidden() {
     let rendered = shell_lines(

@@ -32,13 +32,18 @@ const READER_JOIN_TIMEOUT: Duration = Duration::from_secs(1);
 /// Result of a client-local background task, delivered to the owning tab.
 pub enum LocalResult {
     /// `/update` finished; `reply` is the user-facing status line.
-    Update { tab_id: u64, reply: String },
+    Update { tab: u64, reply: String },
     /// An inline shell command finished; `output` is the formatted result.
     Shell {
-        tab_id: u64,
+        tab: u64,
         command: String,
         output: String,
         is_error: bool,
+    },
+    /// `/edit` finished: the edited draft, or why the editor failed.
+    Edited {
+        tab: u64,
+        text: Result<String, String>,
     },
 }
 
@@ -52,13 +57,6 @@ pub fn update_reply(exit_code: Option<i32>) -> String {
         Some(_) => "Update failed.".to_string(),
         None => "Run `bone update` from your shell to update bone.".to_string(),
     }
-}
-
-/// Heading for an inline-shell transcript row, mirroring the TUI's
-/// `format_shell_label` (`shell <first line>`).
-pub fn shell_label(command: &str) -> String {
-    let first = command.lines().next().unwrap_or(command);
-    format!("shell {first}")
 }
 
 /// The `$ cmd\n<output>` text folded into the daemon transcript, truncated to
@@ -210,7 +208,7 @@ fn terminate_child_tree(child: &mut Child) {
 pub fn spawn_update(
     ctx: egui::Context,
     tx: Sender<LocalResult>,
-    tab_id: u64,
+    tab: u64,
     binary: std::path::PathBuf,
 ) {
     std::thread::spawn(move || {
@@ -218,22 +216,115 @@ pub fn spawn_update(
             Ok(status) => update_reply(status.code()),
             Err(_) => update_reply(None),
         };
-        let _ = tx.send(LocalResult::Update { tab_id, reply });
+        let _ = tx.send(LocalResult::Update { tab, reply });
         ctx.request_repaint();
     });
 }
 
 /// Spawn an inline shell command on a worker thread and deliver
 /// [`LocalResult::Shell`].
-pub fn spawn_shell(ctx: egui::Context, tx: Sender<LocalResult>, tab_id: u64, command: String) {
+pub fn spawn_shell(ctx: egui::Context, tx: Sender<LocalResult>, tab: u64, command: String) {
     std::thread::spawn(move || {
         let (output, is_error) = run_shell(&command);
         let _ = tx.send(LocalResult::Shell {
-            tab_id,
+            tab,
             command,
             output,
             is_error,
         });
+        ctx.request_repaint();
+    });
+}
+
+/// Terminal editors need a terminal window; GUI editors run directly.
+const TERMINAL_EDITORS: &[&str] = &[
+    "vi", "vim", "nvim", "nano", "pico", "micro", "hx", "helix", "kak", "emacs", "ne", "joe", "mg",
+];
+const TERMINALS: &[&str] = &[
+    "foot",
+    "kitty",
+    "alacritty",
+    "wezterm",
+    "ghostty",
+    "gnome-terminal",
+    "konsole",
+    "xterm",
+];
+
+/// The command that opens `editor` on `path`, wrapped in a terminal window
+/// when the editor needs one.
+fn editor_launch(editor: &[String], path: &std::path::Path) -> Vec<String> {
+    let mut command: Vec<String> = editor.to_vec();
+    command.push(path.display().to_string());
+    let program = editor
+        .first()
+        .map(|program| {
+            std::path::Path::new(program)
+                .file_name()
+                .map_or(program.as_str(), |name| name.to_str().unwrap_or(program))
+                .to_owned()
+        })
+        .unwrap_or_default();
+    let emacs_gui = program == "emacs" && !editor.iter().any(|arg| arg == "-nw");
+    if cfg!(windows) || !TERMINAL_EDITORS.contains(&program.as_str()) || emacs_gui {
+        return command;
+    }
+    let terminal = std::env::var("TERMINAL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| {
+            TERMINALS
+                .iter()
+                .find(|terminal| crate::daemon::on_path(terminal))
+                .map(|terminal| (*terminal).to_owned())
+        });
+    match terminal {
+        Some(terminal) if terminal.ends_with("gnome-terminal") => {
+            let mut wrapped = vec![terminal, "--wait".into(), "--".into()];
+            wrapped.extend(command);
+            wrapped
+        }
+        Some(terminal) => {
+            let mut wrapped = vec![terminal, "-e".into()];
+            wrapped.extend(command);
+            wrapped
+        }
+        None => command,
+    }
+}
+
+/// Client-local `/edit`: open the draft in the user's editor on a worker
+/// thread and deliver the edited text as [`LocalResult::Edited`].
+pub fn spawn_editor(ctx: egui::Context, tx: Sender<LocalResult>, tab: u64, draft: String) {
+    std::thread::spawn(move || {
+        let path = std::env::temp_dir().join(format!(
+            "bone-edit-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |duration| duration.as_nanos())
+        ));
+        let text = std::fs::write(&path, &draft)
+            .map_err(|error| format!("Could not create the edit file: {error}"))
+            .and_then(|()| {
+                let command = editor_launch(&bone_render::editor::editor_command(), &path);
+                let status = Command::new(&command[0])
+                    .args(&command[1..])
+                    .status()
+                    .map_err(|error| {
+                        format!(
+                            "Editor failed: could not launch `{}`: {error}. Set VISUAL or EDITOR to an installed editor.",
+                            command.join(" ")
+                        )
+                    })?;
+                if !status.success() {
+                    return Err(format!("Editor exited with status: {status}"));
+                }
+                std::fs::read_to_string(&path)
+                    .map_err(|error| format!("Could not read editor input: {error}"))
+            });
+        let _ = std::fs::remove_file(&path);
+        let _ = tx.send(LocalResult::Edited { tab, text });
         ctx.request_repaint();
     });
 }
@@ -315,12 +406,6 @@ mod tests {
             update_reply(None),
             "Run `bone update` from your shell to update bone."
         );
-    }
-
-    #[test]
-    fn shell_label_uses_first_line() {
-        assert_eq!(shell_label("echo hi"), "shell echo hi");
-        assert_eq!(shell_label("ls\npwd"), "shell ls");
     }
 
     #[test]

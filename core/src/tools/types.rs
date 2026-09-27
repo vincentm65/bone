@@ -4,31 +4,14 @@
 //! non-wire types (`ToolDisplayConfig`, `ToolExecutionContext`,
 //! `Tool`) stay core-local.
 
-use std::{collections::HashMap, path::PathBuf};
+use std::path::PathBuf;
 
 use crate::pane_content::KeyRequest;
 use async_trait::async_trait;
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 // Re-export wire-format types from protocol.
-pub use bone_protocol::{ToolCall, ToolDefinition, ToolOutput, ToolResult};
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ToolDisplayConfig {
-    #[serde(default)]
-    pub args: Vec<String>,
-    #[serde(default)]
-    pub template: Option<String>,
-    #[serde(default)]
-    pub value_labels: HashMap<String, HashMap<String, String>>,
-    #[serde(default)]
-    pub show: Option<bool>,
-    #[serde(default)]
-    pub show_result: Option<bool>,
-    #[serde(default)]
-    pub eager: Option<bool>,
-}
+pub use bone_protocol::{ToolCall, ToolDefinition, ToolDisplayConfig, ToolOutput, ToolResult};
 
 #[derive(Debug, Clone, Default)]
 pub struct ToolExecutionContext {

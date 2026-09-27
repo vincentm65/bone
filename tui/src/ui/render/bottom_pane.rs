@@ -5,16 +5,17 @@ use ratatui::layout::Rect;
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::{Clear, Paragraph, Wrap};
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use super::StatusInfo;
 use super::wrap;
-use crate::tools::ApprovalMode;
 use crate::ui::autocomplete::{AutocompleteState, MAX_VISIBLE};
 use crate::ui::input::InputState;
 use crate::ui::pane_page::PanePage;
 use crate::ui::prompt::Prompt;
-use crate::ui::tool_display;
+use bone_render::approval::{
+    COMMAND_PREVIEW_LINES, prompt_option_line, shell_command_preview_lines, shell_prompt_title,
+};
 
 /// Arguments shared by pane-drawing methods.
 pub struct PaneDraw<'a> {
@@ -38,20 +39,12 @@ pub struct PaneSizing<'a> {
     pub running: usize,
 }
 
-fn push_metric(parts: &mut Vec<Span<'static>>, style: Style, label: &str) {
-    if !parts.is_empty() {
-        parts.push(Span::styled(" / ", style));
-    }
-    parts.push(Span::styled(label.to_string(), style));
-}
-
-const COMMAND_PREVIEW_LINES: usize = 6;
 const BLANK_CURSOR_CELL: &str = "\u{00a0}";
 
 /// Default rows of pane page content visible at once.
-pub const DEFAULT_PANE_ROWS: usize = 8;
+pub use bone_render::panes::DEFAULT_PANE_ROWS;
 /// Upper safety cap for rows of pane page content visible at once.
-pub const MAX_PANE_ROWS: usize = 24;
+pub use bone_render::panes::MAX_PANE_ROWS;
 
 /// Pre-computed layout for the page region of the bottom pane.
 /// Shared by `desired_height` (unclamped) and drawing (clamped to available space).
@@ -226,196 +219,6 @@ impl InputStyle {
     }
 }
 
-fn shell_prompt_title(prompt: &Prompt) -> String {
-    format!(
-        "  {}",
-        prompt.title.split(" — ").next().unwrap_or(&prompt.title)
-    )
-}
-
-fn shell_command_preview_lines(command: &str, width: usize) -> Vec<String> {
-    tool_display::format_shell_command(command)
-        .into_iter()
-        .flat_map(|line| wrap::wrap_text_with_prefix(&line, "  ", "  ", width))
-        .collect()
-}
-
-fn running_elapsed(started_at: std::time::Instant) -> String {
-    let elapsed = started_at.elapsed();
-    if elapsed.as_secs() < 60 {
-        format!("{:.1}s", elapsed.as_secs_f64())
-    } else {
-        format!("{}m {:02}s", elapsed.as_secs() / 60, elapsed.as_secs() % 60)
-    }
-}
-
-fn truncate_display_width(text: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(text) <= max_width {
-        return text.to_string();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-
-    let mut width = 0;
-    let mut truncated = String::new();
-    for ch in text.chars() {
-        let ch_width = ch.width().unwrap_or(0);
-        if width + ch_width >= max_width {
-            break;
-        }
-        truncated.push(ch);
-        width += ch_width;
-    }
-    truncated.push('…');
-    truncated
-}
-
-fn prompt_option_line(
-    theme: &crate::ui::theme::Theme,
-    option: &str,
-    selected: bool,
-) -> Line<'static> {
-    let marker_style = if selected {
-        Style::default()
-            .fg(theme.palette.accent)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.palette.muted)
-    };
-    let text_style = if selected {
-        Style::default()
-            .fg(theme.palette.fg)
-            .add_modifier(Modifier::BOLD)
-    } else {
-        Style::default().fg(theme.palette.muted)
-    };
-    let muted_style = Style::default().fg(theme.status_text);
-    let good_style = Style::default().fg(theme.approval_safe);
-
-    let (marker, marker_style) = if selected {
-        ("›", marker_style)
-    } else {
-        (" ", marker_style)
-    };
-
-    let mut spans = vec![Span::styled(format!("  {marker} "), marker_style)];
-    spans.extend(styled_circle_option_spans(
-        option,
-        text_style,
-        muted_style,
-        good_style,
-    ));
-    Line::from(spans)
-}
-
-/// Build the styled content lines for the tool-approval prompt rendered as a
-/// live pane (consistent with `/config` and other interactive menus, which all
-/// live in the pane region). Mirrors the title/command/option styling the old
-/// input-slot prompt used, so the move is visual-only. `width` is the pane's
-/// render width, used to wrap the shell command preview.
-pub(crate) fn approval_pane_lines(
-    theme: &crate::ui::theme::Theme,
-    prompt: &Prompt,
-    advising: bool,
-    width: u16,
-) -> Vec<Line<'static>> {
-    let mut lines: Vec<Line<'static>> = Vec::new();
-
-    // Title: tool name + summary (for shell, the short label).
-    let title = if prompt.full_command.is_some() {
-        shell_prompt_title(prompt)
-    } else {
-        format!("  {}", prompt.title)
-    };
-    lines.push(Line::from(Span::styled(
-        title,
-        Style::default().fg(theme.system_msg),
-    )));
-
-    // Shell command preview, respecting peek mode.
-    if let Some(ref cmd) = prompt.full_command {
-        let cmd_lines = shell_command_preview_lines(cmd, width as usize);
-        let max_preview = if prompt.peek_mode {
-            cmd_lines.len()
-        } else {
-            cmd_lines.len().min(COMMAND_PREVIEW_LINES)
-        };
-        for visual_line in cmd_lines.iter().take(max_preview) {
-            lines.push(Line::from(Span::styled(
-                visual_line.clone(),
-                Style::default().fg(theme.tool_call),
-            )));
-        }
-        if prompt.peek_mode {
-            lines.push(Line::from(Span::styled(
-                "    Press P to hide full command".to_string(),
-                Style::default().fg(theme.system_msg),
-            )));
-        } else if cmd_lines.len() > COMMAND_PREVIEW_LINES {
-            let remaining = cmd_lines.len() - COMMAND_PREVIEW_LINES;
-            lines.push(Line::from(Span::styled(
-                format!("    … [+{remaining} more lines]  Press P to show full command"),
-                Style::default().fg(theme.system_msg),
-            )));
-        }
-    }
-
-    if advising {
-        // Free-form advice mode: the user types into the chat input field
-        // (rendered above the status bar); the pane shows the instruction.
-        lines.push(Line::from(Span::styled(
-            "  Type advice below · Enter to send · Esc to cancel".to_string(),
-            Style::default().fg(theme.status_text),
-        )));
-    } else {
-        for (i, option) in prompt.options.iter().enumerate() {
-            lines.push(prompt_option_line(theme, option, i == prompt.selected));
-        }
-    }
-    lines
-}
-
-fn push_prompt_text_spans(
-    text: &str,
-    text_style: Style,
-    muted_style: Style,
-    spans: &mut Vec<Span<'static>>,
-) {
-    let mut first = true;
-    for part in text.split(" · ") {
-        if !first {
-            spans.push(Span::styled(" · ", muted_style));
-        }
-        spans.push(Span::styled(
-            part.to_string(),
-            if first { text_style } else { muted_style },
-        ));
-        first = false;
-    }
-}
-
-fn styled_circle_option_spans(
-    option: &str,
-    text_style: Style,
-    muted_style: Style,
-    good_style: Style,
-) -> Vec<Span<'static>> {
-    let mut spans = Vec::new();
-    if let Some(rest) = option.strip_prefix("● ") {
-        // green filled circle: value is active/true
-        spans.push(Span::styled("● ", good_style));
-        push_prompt_text_spans(rest, text_style, muted_style, &mut spans);
-    } else if let Some(rest) = option.strip_prefix("○ ") {
-        // empty circle: value is inactive/false
-        spans.push(Span::styled("○ ", muted_style));
-        push_prompt_text_spans(rest, text_style, muted_style, &mut spans);
-    } else {
-        push_prompt_text_spans(option, text_style, muted_style, &mut spans);
-    }
-    spans
-}
-
 /// Split input buffer at cursor into (before, char-at-cursor, after).
 fn cursor_split(input: &InputState) -> (String, char, String) {
     let chars: Vec<char> = input.buffer.chars().collect();
@@ -513,9 +316,7 @@ fn input_border_line(style: &InputStyle, width: u16, top: bool) -> String {
 }
 
 /// Clamp a tool-requested pane content height to the supported range.
-pub(crate) fn clamped_pane_visible_rows(visible_rows: usize) -> usize {
-    visible_rows.clamp(1, MAX_PANE_ROWS)
-}
+pub(crate) use bone_render::panes::clamped_pane_visible_rows;
 
 /// Compute how many rows a page's visible content occupies.
 fn page_visible_rows(page: &PanePage) -> usize {
@@ -622,45 +423,20 @@ impl super::Renderer {
 
         // ── Running shell commands strip (above the separator) ───────────
         if !args.running.is_empty() && y < content_bottom {
-            let spinner = spinner_frame(status_info);
+            let spinner = bone_render::status::spinner_frame(status_info);
             let total = args.running.len();
             for (index, (_, label, started_at)) in args.running.iter().enumerate() {
                 if y >= content_bottom {
                     break;
                 }
-                let first_line = label.lines().next().unwrap_or(label);
-                let command = first_line.strip_prefix("shell ").unwrap_or(first_line);
-                let mut spans = Vec::new();
-                let mut prefix_width = 0;
-                if let Some(ref s) = spinner {
-                    prefix_width += UnicodeWidthStr::width(s.as_str()) + 1;
-                    spans.push(Span::styled(
-                        s.clone(),
-                        Style::default().fg(self.theme.thinking),
-                    ));
-                    spans.push(Span::raw(" "));
-                }
-                let elapsed = format!("{}  ", running_elapsed(*started_at));
-                prefix_width += UnicodeWidthStr::width(elapsed.as_str());
-                spans.push(Span::styled(
-                    elapsed,
-                    Style::default().fg(self.theme.status_text),
-                ));
-
-                if total > 1 {
-                    let position = format!("[{}/{}] ", index + 1, total);
-                    prefix_width += UnicodeWidthStr::width(position.as_str());
-                    spans.push(Span::styled(
-                        position,
-                        Style::default().fg(self.theme.status_text),
-                    ));
-                }
-
-                let command = truncate_display_width(
-                    command,
-                    (area.width as usize).saturating_sub(prefix_width),
+                let spans = bone_render::messages::running_shell_line(
+                    label,
+                    started_at.elapsed(),
+                    (total > 1).then_some((index + 1, total)),
+                    spinner.as_deref(),
+                    area.width as usize,
+                    &self.theme,
                 );
-                spans.extend(super::messages::shell_spans(&command, &self.theme));
                 frame.render_widget(
                     Paragraph::new(Line::from(spans)),
                     Rect {
@@ -1057,217 +833,6 @@ impl super::Renderer {
     /// right-aligned Lua segments are drawn on the same row with their width
     /// reserved so they never overwrite the native/left content.
     fn draw_status_bar(&self, frame: &mut Frame, status_info: &StatusInfo, area: Rect) {
-        let mut status_spans: Vec<Span> = vec![];
-        let sep = || Span::styled(" | ", Style::default().fg(self.theme.status_text));
-
-        if status_info.show("status_show_model") {
-            status_spans.push(Span::styled(
-                status_info.model.to_string(),
-                Style::default().fg(self.theme.status_text),
-            ));
-            status_spans.push(sep());
-        }
-
-        // Incognito badge: rendered while the session is detached from durable
-        // storage, so the user always sees that chats are not being saved.
-        if status_info.incognito {
-            status_spans.push(Span::styled(
-                "INC",
-                Style::default()
-                    .fg(self.theme.palette.warn)
-                    .add_modifier(Modifier::BOLD),
-            ));
-            status_spans.push(sep());
-        }
-
-        if status_info.show("status_show_approval") {
-            status_spans.push(Span::styled(
-                status_info.approval_mode.label().to_string(),
-                Style::default().fg(match status_info.approval_mode {
-                    ApprovalMode::Safe => self.theme.approval_safe,
-                    ApprovalMode::Danger => self.theme.approval_danger,
-                }),
-            ));
-            status_spans.push(sep());
-        }
-
-        use crate::llm::token_tracker::format_tokens;
-
-        let received = status_info
-            .streaming_completion_tokens
-            .unwrap_or(status_info.token_stats.received);
-        let any_token_metric = status_info.show("status_show_tokens_curr")
-            || status_info.show("status_show_tokens_in")
-            || status_info.show("status_show_tokens_out")
-            || status_info.show("status_show_tokens_total");
-
-        if any_token_metric {
-            let mut metric_parts: Vec<Span> = vec![];
-            let s = Style::default().fg(self.theme.status_text);
-            if status_info.show("status_show_tokens_curr") {
-                push_metric(
-                    &mut metric_parts,
-                    s,
-                    &format!(
-                        "curr {}",
-                        format_tokens(status_info.token_stats.context_length)
-                    ),
-                );
-            }
-            if status_info.show("status_show_tokens_in") {
-                push_metric(
-                    &mut metric_parts,
-                    s,
-                    &format!("in {}", format_tokens(status_info.token_stats.sent)),
-                );
-            }
-            if status_info.show("status_show_tokens_out") {
-                push_metric(
-                    &mut metric_parts,
-                    s,
-                    &format!("out {}", format_tokens(received)),
-                );
-            }
-            if status_info.show("status_show_tokens_total") {
-                push_metric(
-                    &mut metric_parts,
-                    s,
-                    &format!(
-                        "total {}",
-                        format_tokens(status_info.token_stats.sent + received)
-                    ),
-                );
-            }
-            status_spans.extend(metric_parts);
-            status_spans.push(sep());
-        }
-
-        if status_info.show("status_show_queue") && status_info.queue_len > 0 {
-            status_spans.push(Span::styled(
-                format!("Q: {}", status_info.queue_len),
-                Style::default().fg(self.theme.status_text),
-            ));
-            status_spans.push(sep());
-        }
-
-        if status_info.show("status_show_timer")
-            && let Some(ref elapsed) = status_info.elapsed
-        {
-            status_spans.push(Span::styled(
-                elapsed.clone(),
-                Style::default().fg(self.theme.status_text),
-            ));
-            status_spans.push(sep());
-        }
-
-        if status_info.show("status_show_spinner") && status_info.streaming {
-            let frames = &status_info.spinner_frames;
-            if !frames.is_empty() {
-                let speed = if status_info.spinner_speed_ms > 0 {
-                    status_info.spinner_speed_ms
-                } else {
-                    80
-                };
-                let frame_idx = (status_info.spinner_elapsed_ms / speed) as usize % frames.len();
-                status_spans.push(Span::styled(
-                    frames[frame_idx].clone(),
-                    Style::default().fg(self.theme.thinking),
-                ));
-                let texts = &status_info.spinner_texts;
-                let label = if texts.is_empty() {
-                    " thinking".to_string()
-                } else if !status_info.spinner_text_rotate || texts.len() == 1 {
-                    format!(" {}", texts[0])
-                } else {
-                    let cycle = match status_info
-                        .spinner_elapsed_ms
-                        .checked_div(status_info.spinner_text_speed_ms)
-                    {
-                        Some(c) => c as usize,
-                        None => (status_info.spinner_elapsed_ms / speed) as usize / frames.len(),
-                    };
-                    let phrase = &texts[cycle % texts.len()];
-                    format!(" {phrase}")
-                };
-                status_spans.push(Span::styled(
-                    label,
-                    Style::default().fg(self.theme.status_text),
-                ));
-            }
-        }
-
-        // Remove trailing separator if present
-        if let Some(last) = status_spans.last()
-            && last.content == " | "
-        {
-            status_spans.pop();
-        }
-
-        // Append Lua-defined status segments (`bone.api.ui.set_statusline`).
-        // Left/center segments extend the native bar; right segments are drawn
-        // right-aligned on the same row.
-        use crate::runtime::view::Align;
-        let seg_span = |seg: &crate::runtime::view::StatusSegment| {
-            let color = seg
-                .fg
-                .as_deref()
-                .and_then(crate::ui::color::parse_color)
-                .unwrap_or(self.theme.status_text);
-            Span::styled(seg.text.clone(), Style::default().fg(color))
-        };
-        let mut right_spans: Vec<Span> = vec![];
-        for seg in &status_info.lua_status {
-            if matches!(seg.align, Align::Right) {
-                right_spans.push(seg_span(seg));
-            } else {
-                if !status_spans.is_empty() {
-                    status_spans.push(sep());
-                }
-                status_spans.push(seg_span(seg));
-            }
-        }
-
-        if area.height > 0 {
-            let row = Rect {
-                y: area.bottom() - 1,
-                height: 1,
-                ..area
-            };
-            let right_line = Line::from(right_spans);
-            // Reserve the right-aligned segments' width so they never overwrite
-            // the left/native content on the same row.
-            let right_width = right_line.width() as u16;
-            let left_row = if right_width > 0 {
-                Rect {
-                    width: row.width.saturating_sub(right_width + 1),
-                    ..row
-                }
-            } else {
-                row
-            };
-            frame.render_widget(Paragraph::new(Line::from(status_spans)), left_row);
-            if right_width > 0 {
-                frame.render_widget(
-                    Paragraph::new(right_line).alignment(ratatui::layout::Alignment::Right),
-                    row,
-                );
-            }
-        }
+        bone_render::status::draw_status_bar(frame, status_info, &self.theme, area);
     }
-}
-
-/// Current spinner frame string for the running-commands strip, mirroring
-/// the status bar's spinner computation.
-fn spinner_frame(status_info: &StatusInfo) -> Option<String> {
-    let frames = &status_info.spinner_frames;
-    if frames.is_empty() {
-        return None;
-    }
-    let speed = if status_info.spinner_speed_ms > 0 {
-        status_info.spinner_speed_ms
-    } else {
-        80
-    };
-    let idx = (status_info.spinner_elapsed_ms / speed) as usize % frames.len();
-    Some(frames[idx].clone())
 }

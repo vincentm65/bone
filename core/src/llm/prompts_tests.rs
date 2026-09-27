@@ -6,6 +6,8 @@ fn shipped_prompt_includes_configured_base_and_runtime_context() {
     let prompt = system_prompt(base);
     assert!(prompt.starts_with(base));
     assert!(prompt.contains("Resolved config directory: "));
+    let guide = bone_dir().join("AGENTS.md").display().to_string();
+    assert!(prompt.contains(&format!("Bone self-modification guide: {guide}")));
     assert!(prompt.contains("Current working directory: "));
 }
 

@@ -120,6 +120,8 @@ fn conversation() -> ConversationMeta {
         message_count: 12,
         provider: "openai".into(),
         model: "gpt".into(),
+        token_count: 4_210,
+        status: ConversationStatus::Interrupted,
     }
 }
 
@@ -172,6 +174,25 @@ fn every_host_request_variant_round_trips() {
     for value in variants {
         assert_eq!(roundtrip(&value), value);
     }
+}
+
+#[test]
+fn conversation_meta_from_older_daemons_defaults_new_fields() {
+    let meta: ConversationMeta = serde_json::from_str(
+        r#"{"id":7,"title":"t","updated_at":"2026-08-10T14:01:00Z","message_count":2,
+            "provider":"openai","model":"gpt"}"#,
+    )
+    .unwrap();
+    assert_eq!(meta.token_count, 0);
+    assert_eq!(meta.status, ConversationStatus::Unknown);
+    assert!(meta.updated_at_local.is_empty());
+
+    let future: ConversationMeta = serde_json::from_str(
+        r#"{"id":7,"title":"t","updated_at":"x","message_count":0,"provider":"p",
+            "model":"m","status":"archived"}"#,
+    )
+    .unwrap();
+    assert_eq!(future.status, ConversationStatus::Unknown);
 }
 
 #[test]
