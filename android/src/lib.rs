@@ -51,8 +51,17 @@ impl Connector for SshConnector {
     }
 }
 
-/// The connect screen until a link is up, then the desktop UI.
+/// The visible part of the window in physical pixels as
+/// `[left, top, right, bottom]` (on Android: above the on-screen keyboard).
+pub type VisibleArea = Box<dyn Fn() -> [i32; 4]>;
+
+/// The connect screen until a link is up, then the desktop UI, both laid out
+/// inside the window's visible area.
 pub struct Launcher {
+    /// `None` uses the whole window (the desktop preview).
+    visible_area: Option<VisibleArea>,
+    /// The area laid out last frame, to notice the keyboard opening or closing.
+    last_area: egui::Rect,
     data_dir: PathBuf,
     /// The app's SSH key, or why it could not be loaded.
     identity: Result<Arc<Identity>, String>,
@@ -64,7 +73,7 @@ pub struct Launcher {
 
 impl Launcher {
     /// `data_dir` holds the app's SSH key, pinned host keys, and settings.
-    pub fn new(ctx: &egui::Context, data_dir: PathBuf) -> Self {
+    pub fn new(ctx: &egui::Context, data_dir: PathBuf, visible_area: Option<VisibleArea>) -> Self {
         bone_desktop::install_look(ctx);
         let identity = Identity::load_or_create(&data_dir)
             .map(Arc::new)
@@ -72,6 +81,8 @@ impl Launcher {
         let saved = std::fs::read_to_string(data_dir.join(SETTINGS_FILE)).unwrap_or_default();
         let mut lines = saved.lines();
         Self {
+            visible_area,
+            last_area: egui::Rect::NOTHING,
             destination: lines.next().unwrap_or_default().to_string(),
             bone: lines.next().unwrap_or("bone").to_string(),
             data_dir,
@@ -170,8 +181,25 @@ impl Launcher {
     }
 }
 
-impl eframe::App for Launcher {
-    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+impl Launcher {
+    /// Where to lay out the UI: the window minus whatever covers it.
+    fn area(&self, ctx: &egui::Context, screen: egui::Rect) -> egui::Rect {
+        let Some(visible_area) = &self.visible_area else {
+            return screen;
+        };
+        let [left, top, right, bottom] = visible_area();
+        if right <= left || bottom <= top {
+            return screen;
+        }
+        let points = |px: i32| px as f32 / ctx.pixels_per_point();
+        egui::Rect::from_min_max(
+            egui::pos2(points(left), points(top)),
+            egui::pos2(points(right), points(bottom)),
+        )
+        .intersect(screen)
+    }
+
+    fn content(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         if let Some(app) = &mut self.app {
             match app.connection_failure() {
                 // Back to the connect screen, with the reason.
@@ -181,12 +209,33 @@ impl eframe::App for Launcher {
                     bone_desktop::install_look(ui.ctx());
                 }
                 None => {
-                    app.ui(ui, frame);
+                    eframe::App::ui(app, ui, frame);
                     return;
                 }
             }
         }
         self.connect_screen(ui);
+    }
+}
+
+impl eframe::App for Launcher {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        let screen = ui.max_rect();
+        let area = self.area(ui.ctx(), screen);
+        // Android does not announce the keyboard opening or closing, so keep
+        // checking while it may be up or the area is still settling.
+        if self.visible_area.is_some()
+            && (area != self.last_area || area != screen || ui.ctx().egui_wants_keyboard_input())
+        {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(150));
+        }
+        self.last_area = area;
+        ui.painter()
+            .rect_filled(screen, 0.0, ui.visuals().panel_fill);
+        ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+            self.content(ui, frame)
+        });
     }
 }
 
@@ -200,7 +249,7 @@ pub fn run_preview(data_dir: PathBuf) -> eframe::Result {
                 .with_min_inner_size([320.0, 480.0]),
             ..Default::default()
         },
-        Box::new(move |cc| Ok(Box::new(Launcher::new(&cc.egui_ctx, data_dir)))),
+        Box::new(move |cc| Ok(Box::new(Launcher::new(&cc.egui_ctx, data_dir, None)))),
     )
 }
 
@@ -211,6 +260,13 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
     let data_dir = app
         .internal_data_path()
         .unwrap_or_else(|| PathBuf::from("."));
+    // NativeActivity resizes its content view (not the surface) for the
+    // on-screen keyboard and reports it only as the content rect.
+    let content = app.clone();
+    let visible_area: VisibleArea = Box::new(move || {
+        let rect = content.content_rect();
+        [rect.left, rect.top, rect.right, rect.bottom]
+    });
     let result = eframe::run_native(
         "Bone",
         eframe::NativeOptions {
@@ -218,9 +274,70 @@ fn android_main(app: winit::platform::android::activity::AndroidApp) {
             renderer: eframe::Renderer::Glow,
             ..Default::default()
         },
-        Box::new(move |cc| Ok(Box::new(Launcher::new(&cc.egui_ctx, data_dir)))),
+        Box::new(move |cc| {
+            Ok(Box::new(Launcher::new(
+                &cc.egui_ctx,
+                data_dir,
+                Some(visible_area),
+            )))
+        }),
     );
     if let Err(error) = result {
         eprintln!("bone-android: {error}");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Top edge of the first painted text containing `needle`.
+    fn text_top(output: &egui::FullOutput, needle: &str) -> Option<f32> {
+        output
+            .shapes
+            .iter()
+            .find_map(|clipped| match &clipped.shape {
+                egui::Shape::Text(text) if text.galley.job.text.contains(needle) => {
+                    Some(text.pos.y)
+                }
+                _ => None,
+            })
+    }
+
+    #[test]
+    fn the_ui_is_laid_out_inside_the_visible_area() {
+        let dir = std::env::temp_dir().join(format!("bone-android-area-{}", std::process::id()));
+        let ctx = egui::Context::default();
+        // Visible from y=300 to y=500 of an 800pt-tall window.
+        let area: VisibleArea = Box::new(|| [0, 300, 400, 500]);
+        let mut launcher = Launcher::new(&ctx, dir.clone(), Some(area));
+        let mut output = None;
+        for _ in 0..2 {
+            if let Some(previous) = output.as_mut() {
+                let previous: &mut egui::FullOutput = previous;
+                previous.textures_delta.clear();
+            }
+            output = Some(ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400.0, 800.0),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    let screen = ui.max_rect();
+                    let area = launcher.area(ui.ctx(), screen);
+                    ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
+                        launcher.connect_screen(ui)
+                    });
+                },
+            ));
+        }
+        let mut output = output.unwrap();
+        output.textures_delta.clear();
+        let top = text_top(&output, "Computer").expect("connect screen");
+        assert!((300.0..500.0).contains(&top), "laid out at {top}");
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

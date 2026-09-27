@@ -43,5 +43,6 @@ name = "android.permission.INTERNET"
 
 [package.metadata.android.application]
 label = "Bone"
-# Full screen: no status bar or title bar over the UI.
-theme = "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"
+# No title bar. Not `Fullscreen`: Android ignores keyboard resizing for
+# full-screen windows, so the status bar stays and the window sits below it.
+theme = "@android:style/Theme.DeviceDefault.NoActionBar"
