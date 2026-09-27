@@ -22,6 +22,12 @@ use crate::ssh::{Destination, Identity};
 
 /// Last-used `user@host[:port]` and bone path, one per line, in the data dir.
 const SETTINGS_FILE: &str = "connection";
+/// The daemon's last theme payload, applied at startup so the default theme
+/// never flashes before the daemon's arrives.
+const THEME_FILE: &str = "theme.json";
+/// With no cached theme, how long to wait for the daemon's before showing the
+/// UI anyway.
+const THEME_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Opens `<bone> stdio` on the computer over in-app SSH, once per chat tab.
 struct SshConnector {
@@ -62,19 +68,28 @@ pub struct Launcher {
     visible_area: Option<VisibleArea>,
     /// The area laid out last frame, to notice the keyboard opening or closing.
     last_area: egui::Rect,
+    /// The focused text field's last keyboard request (see [`Launcher::ui`]).
+    last_ime: Option<egui::output::IMEOutput>,
     data_dir: PathBuf,
     /// The app's SSH key, or why it could not be loaded.
     identity: Result<Arc<Identity>, String>,
     destination: String,
     bone: String,
     error: String,
+    /// The last theme payload seen, cached in [`THEME_FILE`].
+    theme: Option<serde_json::Value>,
+    /// When the current connection attempt started.
+    connecting_since: Option<std::time::Instant>,
     app: Option<DesktopApp>,
 }
 
 impl Launcher {
     /// `data_dir` holds the app's SSH key, pinned host keys, and settings.
     pub fn new(ctx: &egui::Context, data_dir: PathBuf, visible_area: Option<VisibleArea>) -> Self {
-        bone_desktop::install_look(ctx);
+        let theme = std::fs::read(data_dir.join(THEME_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok());
+        restyle(ctx, theme.as_ref());
         let identity = Identity::load_or_create(&data_dir)
             .map(Arc::new)
             .map_err(|error| format!("could not create this app's SSH key: {error}"));
@@ -83,11 +98,14 @@ impl Launcher {
         Self {
             visible_area,
             last_area: egui::Rect::NOTHING,
+            last_ime: None,
             destination: lines.next().unwrap_or_default().to_string(),
             bone: lines.next().unwrap_or("bone").to_string(),
             data_dir,
             identity,
             error: String::new(),
+            theme,
+            connecting_since: None,
             app: None,
         }
     }
@@ -121,10 +139,12 @@ impl Launcher {
             destination,
             bone,
         };
-        self.app = Some(DesktopApp::remote(
-            ctx.clone(),
-            Target::Custom(Arc::new(connector)),
-        ));
+        let mut app = DesktopApp::remote(ctx.clone(), Target::Custom(Arc::new(connector)));
+        if let Some(theme) = &self.theme {
+            app.set_theme(ctx, theme.clone());
+        }
+        self.app = Some(app);
+        self.connecting_since = Some(std::time::Instant::now());
     }
 
     fn connect_screen(&mut self, ui: &mut egui::Ui) {
@@ -206,15 +226,49 @@ impl Launcher {
                 Some(reason) => {
                     self.error = reason.to_string();
                     self.app = None;
-                    bone_desktop::install_look(ui.ctx());
+                    restyle(ui.ctx(), self.theme.as_ref());
                 }
                 None => {
-                    eframe::App::ui(app, ui, frame);
+                    let waited = self
+                        .connecting_since
+                        .is_some_and(|since| since.elapsed() >= THEME_WAIT);
+                    if app.theme().is_some() || waited {
+                        eframe::App::ui(app, ui, frame);
+                    } else {
+                        // First launch, nothing cached: connect unseen so the
+                        // default theme never shows.
+                        ui.scope_builder(egui::UiBuilder::new().invisible(), |ui| {
+                            eframe::App::ui(app, ui, frame)
+                        });
+                        ui.painter().text(
+                            ui.max_rect().center(),
+                            egui::Align2::CENTER_CENTER,
+                            "Connecting…",
+                            egui::TextStyle::Body.resolve(ui.style()),
+                            ui.visuals().weak_text_color(),
+                        );
+                        ui.ctx()
+                            .request_repaint_after(std::time::Duration::from_millis(100));
+                    }
+                    if let Some(theme) = app.theme()
+                        && self.theme.as_ref() != Some(theme)
+                    {
+                        let _ = std::fs::write(self.data_dir.join(THEME_FILE), theme.to_string());
+                        self.theme = Some(theme.clone());
+                    }
                     return;
                 }
             }
         }
         self.connect_screen(ui);
+    }
+}
+
+/// The app's fonts and style, in `theme` when one is cached.
+fn restyle(ctx: &egui::Context, theme: Option<&serde_json::Value>) {
+    bone_desktop::install_look(ctx);
+    if let Some(theme) = theme {
+        bone_desktop::install_theme(ctx, theme);
     }
 }
 
@@ -236,6 +290,24 @@ impl eframe::App for Launcher {
         ui.scope_builder(egui::UiBuilder::new().max_rect(area), |ui| {
             self.content(ui, frame)
         });
+        // egui requests the keyboard only for a focused text field drawn in
+        // view. When a layout shift (live pane, keyboard animation) pushes the
+        // input out of view for one frame, Android would hide and reshow the
+        // keyboard; keep the request while a field still has focus.
+        let ctx = ui.ctx();
+        match ctx.output(|output| output.ime) {
+            // Replays must not repeat a one-off keyboard reset.
+            Some(ime) => {
+                self.last_ime = Some(egui::output::IMEOutput {
+                    should_interrupt_composition: false,
+                    ..ime
+                })
+            }
+            None if ctx.memory(|memory| memory.focused().is_some()) => {
+                ctx.output_mut(|output| output.ime = self.last_ime);
+            }
+            None => self.last_ime = None,
+        }
     }
 }
 
@@ -338,6 +410,21 @@ mod tests {
         output.textures_delta.clear();
         let top = text_top(&output, "Computer").expect("connect screen");
         assert!((300.0..500.0).contains(&top), "laid out at {top}");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_cached_theme_styles_the_app_from_the_first_frame() {
+        let dir = std::env::temp_dir().join(format!("bone-android-theme-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let theme = serde_json::json!({ "palette": { "bg": "#102030", "fg": "#eeeeee" } });
+        std::fs::write(dir.join(THEME_FILE), theme.to_string()).unwrap();
+        let ctx = egui::Context::default();
+        Launcher::new(&ctx, dir.clone(), None);
+        assert_eq!(
+            ctx.style_of(ctx.theme()).visuals.panel_fill,
+            egui::Color32::from_rgb(0x10, 0x20, 0x30)
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 }

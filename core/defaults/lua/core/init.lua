@@ -1,5 +1,5 @@
 -- /config — interactive settings editor.
--- canonical-config-v9
+-- canonical-config-v10
 --
 -- Renders its own styled bottom pane (full span control) for the tabbed
 -- settings overview, and reuses `ui.menu` only for the isolated sub-prompts
@@ -434,6 +434,7 @@ local function run(ctx, start_ns)
          else
             tspans[#tspans + 1] = span(label, COL.dim)
          end
+         tspans[#tspans].click = "tab:" .. i
       end
       lines[#lines + 1] = line_of(tspans)
 
@@ -480,6 +481,7 @@ local function run(ctx, start_ns)
          for i = first, last do
             local is_sel = i == sel
             lines[#lines + 1] = line_of(row_spans(rows[i], is_sel, pad_w, type_w), is_sel and COL.sel_bg or nil)
+            lines[#lines].click = "row:" .. i
          end
          if last < total then
             lines[#lines + 1] = line_of({ span("  \u{2193} " .. (total - last) .. " more", COL.dim) })
@@ -489,16 +491,39 @@ local function run(ctx, start_ns)
       lines[#lines + 1] = line_of({})
       local enter_label = is_providers and "switch provider" or "edit"
       local toggle_hint = not is_providers and "  \u{00b7}  Space toggle" or ""
-      lines[#lines + 1] = line_of({ span(string.format(
-         "  \u{2191}\u{2193} move  \u{00b7}  Enter %s%s  \u{00b7}  Tab/\u{2190}\u{2192} switch tab%s  \u{00b7}  Esc exit",
-         enter_label, toggle_hint, is_providers and "  \u{00b7}  e edit provider" or ""
-      ), COL.dim) })
+      -- Tapping "Enter …" or "Esc exit" acts as that key (touch frontends).
+      local enter_hint = span("Enter " .. enter_label, COL.dim)
+      enter_hint.click = "enter"
+      local esc_hint = span("Esc exit", COL.dim)
+      esc_hint.click = "esc"
+      lines[#lines + 1] = line_of({
+         span("  \u{2191}\u{2193} move  \u{00b7}  ", COL.dim),
+         enter_hint,
+         span(string.format(
+            "%s  \u{00b7}  Tab/\u{2190}\u{2192} switch tab%s  \u{00b7}  ",
+            toggle_hint, is_providers and "  \u{00b7}  e edit provider" or ""
+         ), COL.dim),
+         esc_hint,
+      })
 
       p:set_lines(lines, math.min(20, #lines))
 
       local key = wait_key(ctx)
       if not key then break end
       local code = key_name(key)
+      -- Taps from touch/mouse frontends: a tab switches to it, a row acts as
+      -- selecting it and pressing Enter, and tapped hints act as their keys.
+      if code == "Click" then
+         local value = tostring(key.char or "")
+         local tapped_tab = tonumber(value:match("^tab:(%d+)$"))
+         local tapped_row = tonumber(value:match("^row:(%d+)$"))
+         code = value == "enter" and "Enter" or value == "esc" and "Esc" or ""
+         if tapped_tab then
+            tab = clamp(tapped_tab, 1, #pages)
+         elseif tapped_row and rows[tapped_row] then
+            sel, code = tapped_row, "Enter"
+         end
+      end
 
       if code == "Esc" then
          break

@@ -6,7 +6,7 @@
 //! PageUp/PageDown scroll.
 use std::collections::{HashMap, VecDeque};
 
-use bone_protocol::{Component, JobSnapshot, ProcessSnapshot, ViewModel};
+use bone_protocol::{Component, JobSnapshot, PaneLineSpec, ProcessSnapshot, ViewModel};
 use bone_render::panes::{self, PanePage};
 use bone_render::theme::Theme;
 use eframe::egui;
@@ -21,24 +21,69 @@ const PROCESSES: &str = "processes";
 const QUEUE: &str = "queue";
 const THINKING_ROWS: usize = 10;
 
-/// What a click on a live-pane row opens.
+/// What a click on a live-pane row opens or answers.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Open {
     Process(String),
     Job(String),
+    /// A daemon pane line's `click` value (a `ui.menu` option).
+    Click(String),
+    /// An approval choice by index.
+    Approval(usize),
 }
 
 pub(crate) struct Page {
     pub page: PanePage,
     /// What clicking each content line opens.
     pub targets: Vec<Option<Open>>,
+    /// Per content line, tappable spans as (start column, end column, target).
+    pub spans: Vec<Vec<(usize, usize, Open)>>,
 }
 
 impl Page {
     fn plain(page: PanePage) -> Self {
+        Self::with_targets(page, Vec::new())
+    }
+
+    fn with_targets(page: PanePage, targets: Vec<Option<Open>>) -> Self {
         Self {
             page,
-            targets: Vec::new(),
+            targets,
+            spans: Vec::new(),
+        }
+    }
+
+    /// A daemon pane: its lines' and spans' `click` values become targets.
+    fn from_content(content: &bone_protocol::PaneContent) -> Self {
+        let mut targets = Vec::new();
+        let mut spans = Vec::new();
+        for line in &content.lines {
+            let PaneLineSpec::Spans {
+                spans: line_spans,
+                click,
+                ..
+            } = line
+            else {
+                targets.push(None);
+                spans.push(Vec::new());
+                continue;
+            };
+            targets.push(click.clone().map(Open::Click));
+            let mut column = 0;
+            let mut tappable = Vec::new();
+            for span in line_spans {
+                let width = unicode_width::UnicodeWidthStr::width(span.text.as_str());
+                if let Some(value) = &span.click {
+                    tappable.push((column, column + width, Open::Click(value.clone())));
+                }
+                column += width;
+            }
+            spans.push(tappable);
+        }
+        Self {
+            page: PanePage::from_content(content),
+            targets,
+            spans,
         }
     }
 }
@@ -50,8 +95,9 @@ pub(crate) struct Sources<'a> {
     pub processes: &'a [ProcessSnapshot],
     pub thinking: Option<&'a str>,
     pub queue: &'a VecDeque<String>,
-    /// The approval prompt's lines when a tool call awaits a decision.
-    pub approval: Option<Vec<Line<'static>>>,
+    /// The approval prompt's lines when a tool call awaits a decision, and how
+    /// many trailing lines are its choices.
+    pub approval: Option<(Vec<Line<'static>>, usize)>,
 }
 
 #[derive(Default)]
@@ -64,6 +110,9 @@ pub(crate) struct LivePane {
     /// Selected agent and process ids and queue index, like the TUI panes.
     pub job: Option<String>,
     pub process: Option<String>,
+    /// Selection is highlighted only while its list has keyboard focus.
+    pub job_focused: bool,
+    pub process_focused: bool,
     pub queue: usize,
 }
 
@@ -75,25 +124,33 @@ impl LivePane {
             .iter()
             .filter_map(Component::as_pane_content)
             .filter(|content| !content.lines.is_empty())
-            .map(|content| Page::plain(PanePage::from_content(&content)))
+            .map(|content| Page::from_content(&content))
             .collect();
-        if let Some(page) = panes::jobs::render_selected(theme, sources.jobs, self.job.as_deref()) {
+        let selected_job = if self.job_focused {
+            self.job.as_deref()
+        } else {
+            None
+        };
+        if let Some(page) = panes::jobs::render_selected(theme, sources.jobs, selected_job) {
             let targets = sources
                 .jobs
                 .iter()
                 .map(|job| Some(Open::Job(job.id.clone())))
                 .collect();
-            pages.push(Page { page, targets });
+            pages.push(Page::with_targets(page, targets));
         }
-        if let Some(page) =
-            panes::processes::render(theme, sources.processes, self.process.as_deref())
-        {
+        let selected_process = if self.process_focused {
+            self.process.as_deref()
+        } else {
+            None
+        };
+        if let Some(page) = panes::processes::render(theme, sources.processes, selected_process) {
             let targets = sources
                 .processes
                 .iter()
                 .map(|process| Some(Open::Process(process.id.clone())))
                 .collect();
-            pages.push(Page { page, targets });
+            pages.push(Page::with_targets(page, targets));
         }
         if let Some(page) = panes::queue::render(sources.queue, self.queue, theme) {
             pages.push(Page::plain(page));
@@ -101,15 +158,22 @@ impl LivePane {
         if let Some(text) = sources.thinking.filter(|text| !text.trim().is_empty()) {
             pages.push(Page::plain(panes::thinking(text, THINKING_ROWS, theme)));
         }
-        if let Some(content) = sources.approval {
+        if let Some((content, choices)) = sources.approval {
             let visible_rows = content.len();
-            pages.push(Page::plain(PanePage {
-                source: "approval".into(),
-                title: "approval".into(),
-                content,
-                visible_rows,
-                scroll: 0,
-            }));
+            let first_choice = content.len().saturating_sub(choices);
+            let targets = (0..content.len())
+                .map(|row| (row >= first_choice).then(|| Open::Approval(row - first_choice)))
+                .collect();
+            pages.push(Page::with_targets(
+                PanePage {
+                    source: "approval".into(),
+                    title: "approval".into(),
+                    content,
+                    visible_rows,
+                    scroll: 0,
+                },
+                targets,
+            ));
         }
         pages
     }
@@ -123,12 +187,37 @@ impl LivePane {
             self.active = ids.first().cloned();
         }
         self.scroll.retain(|id, _| ids.contains(id));
-        self.known = ids;
+        self.known = ids.clone();
         reconcile(&mut self.job, jobs.iter().map(|job| &job.id));
         reconcile(
             &mut self.process,
             processes.iter().map(|process| &process.id),
         );
+        if !ids.iter().any(|id| id == AGENTS) {
+            self.job = None;
+            self.job_focused = false;
+        }
+        if !ids.iter().any(|id| id == PROCESSES) {
+            self.process = None;
+            self.process_focused = false;
+        }
+    }
+
+    /// Clear keyboard focus while retaining the last row selections.
+    pub fn clear_focus(&mut self) {
+        self.job_focused = false;
+        self.process_focused = false;
+    }
+
+    /// Reset transient pane state when attaching to a new conversation/daemon.
+    pub fn reset_for_attach(&mut self) {
+        self.active = None;
+        self.known.clear();
+        self.scroll.clear();
+        self.job = None;
+        self.process = None;
+        self.queue = 0;
+        self.clear_focus();
     }
 
     pub fn cycle(&mut self) {
@@ -189,20 +278,30 @@ impl LivePane {
         );
         let end = (start + rows).min(content.len());
         let rects = grid::paint_lines(ui, &content[start..end]);
+        let cell = grid::metrics(ui).cell;
         let mut open = None;
         for (offset, rect) in rects.into_iter().enumerate() {
-            let Some(Some(target)) = page.targets.get(start + offset) else {
+            let row = start + offset;
+            let line_target = page.targets.get(row).cloned().flatten();
+            let spans = page.spans.get(row).map(Vec::as_slice).unwrap_or_default();
+            if line_target.is_none() && spans.is_empty() {
                 continue;
-            };
+            }
             let response = ui
-                .interact(
-                    rect,
-                    ui.id().with(("live-row", start + offset)),
-                    egui::Sense::click(),
-                )
+                .interact(rect, ui.id().with(("live-row", row)), egui::Sense::click())
                 .on_hover_cursor(egui::CursorIcon::PointingHand);
             if response.clicked() {
-                open = Some(target.clone());
+                // A tapped span (one tab on a tab row) wins over its line.
+                let column = response
+                    .interact_pointer_pos()
+                    .map(|pos| ((pos.x - rect.left()) / cell).max(0.0) as usize);
+                let span = column.and_then(|column| {
+                    spans
+                        .iter()
+                        .find(|(from, to, _)| (*from..*to).contains(&column))
+                        .map(|(_, _, target)| target.clone())
+                });
+                open = span.or(line_target);
             }
         }
         open
@@ -280,5 +379,98 @@ mod tests {
         let built = pages(&pane, &ViewModel::default(), &queue);
         pane.sync(&built, &[], &[]);
         assert_eq!(pane.active_list(), Some(QUEUE));
+    }
+
+    #[test]
+    fn menu_lines_and_approval_choices_are_tap_targets() {
+        let menu = Component::Float {
+            id: "menu".into(),
+            presentation: Default::default(),
+            title: "menu".into(),
+            lines: vec![
+                PaneLineSpec::Plain("Pick one".into()),
+                PaneLineSpec::Spans {
+                    spans: Vec::new(),
+                    bg: None,
+                    click: Some("1".into()),
+                },
+            ],
+            rect: bone_protocol::FloatRect {
+                anchor: Default::default(),
+                width: 0,
+                height: 4,
+                col: 0,
+                row: 0,
+            },
+            z: 0,
+            border: false,
+            scroll: 0,
+            placement: None,
+            owner: None,
+        };
+        let view = ViewModel {
+            components: vec![menu],
+            ..Default::default()
+        };
+        let approval: Vec<Line<'static>> = ["title", "Approve", "Advise", "Deny"]
+            .map(Line::from)
+            .to_vec();
+        let pages = LivePane::default().pages(
+            Sources {
+                view: &view,
+                jobs: &[],
+                processes: &[],
+                thinking: None,
+                queue: &VecDeque::new(),
+                approval: Some((approval, 3)),
+            },
+            &Theme::default(),
+        );
+        assert_eq!(pages[0].targets, [None, Some(Open::Click("1".into()))]);
+        assert_eq!(
+            pages[1].targets,
+            [
+                None,
+                Some(Open::Approval(0)),
+                Some(Open::Approval(1)),
+                Some(Open::Approval(2))
+            ]
+        );
+    }
+
+    #[test]
+    fn tappable_spans_record_their_columns() {
+        let span = |text: &str, click: Option<&str>| bone_protocol::PaneSpanSpec {
+            text: text.into(),
+            fg: None,
+            modifiers: Vec::new(),
+            click: click.map(Into::into),
+        };
+        let page = Page::from_content(&bone_protocol::PaneContent {
+            source: "config".into(),
+            title: "Config".into(),
+            lines: vec![PaneLineSpec::Spans {
+                spans: vec![
+                    span("  ", None),
+                    span("UI", Some("tab:1")),
+                    span("  │  ", None),
+                    span("Tools", Some("tab:2")),
+                ],
+                bg: None,
+                click: None,
+            }],
+            visible_rows: 1,
+            scroll: 0,
+            placement: None,
+            owner: None,
+        });
+        assert_eq!(page.targets, [None]);
+        assert_eq!(
+            page.spans[0],
+            [
+                (2, 4, Open::Click("tab:1".into())),
+                (9, 14, Open::Click("tab:2".into()))
+            ]
+        );
     }
 }

@@ -268,3 +268,52 @@ fn failed_provider_save_rolls_back_and_keeps_editor_open() {
     .exec()
     .unwrap();
 }
+
+#[test]
+fn taps_switch_tabs_act_on_rows_and_exit() {
+    let lua = config_lua();
+    lua.load(
+        r##"
+        test_menu.clear = function() end
+        local keys = {
+          { code = "Click", char = "tab:2" },
+          { code = "Click", char = "row:2" },
+          { code = "Click", char = "esc" },
+        }
+        local key_index, cycled, saved = 0, nil, nil
+        local ctx = { renders = {}, ui = {}, config = {} }
+        ctx.ui.key = function() key_index = key_index + 1; return keys[key_index] end
+        ctx.ui.notify = function() end
+        ctx.config.get_pages = function()
+          return {
+            { namespace = "ui", title = "UI", fields = { { key = "a", label = "A", type = "bool", value = true } } },
+            { namespace = "tools", title = "Tools", fields = {
+              { key = "x", label = "X", type = "bool", value = false },
+              { key = "y", label = "Y", type = "bool", value = false },
+            } },
+          }
+        end
+        ctx.config.cycle_field = function(ns, key, value) cycled = ns .. "." .. key; return not value end
+        ctx.config.set_value = function(ns, key, value) saved = ns .. "." .. key .. "=" .. tostring(value); return true end
+
+        local result = config_handler("", ctx)
+        assert(cycled == "tools.y", tostring(cycled))
+        assert(saved == "tools.y=true", tostring(saved))
+        assert(key_index == 3, "Esc tap exits")
+        assert(result and result.action == "config.reload_tools", "tools change needs a reload")
+
+        -- Tabs, rows, and the Esc hint carry their tap values.
+        local clicks = {}
+        for _, rendered in ipairs(ctx.renders[1].lines) do
+          if rendered.click then clicks[#clicks + 1] = rendered.click end
+          for _, value in ipairs(rendered.spans or {}) do
+            if value.click then clicks[#clicks + 1] = value.click end
+          end
+        end
+        local joined = table.concat(clicks, ",")
+        assert(joined == "tab:1,tab:2,row:1,enter,esc", joined)
+        "##,
+    )
+    .exec()
+    .unwrap();
+}

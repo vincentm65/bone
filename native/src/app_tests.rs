@@ -71,6 +71,300 @@ fn frame(app: &mut DesktopApp, ctx: &egui::Context, events: Vec<egui::Event>) {
     .clear();
 }
 
+fn job_snapshot(id: &str) -> bone_protocol::JobSnapshot {
+    bone_protocol::JobSnapshot {
+        id: id.into(),
+        agent: format!("agent-{id}"),
+        task: format!("task-{id}"),
+        title: String::new(),
+        status: bone_protocol::JobStatus::Running,
+        started_at: 0,
+        token_sent: 0,
+        token_received: 0,
+        provider: "test".into(),
+        activity: None,
+        events: Vec::new(),
+    }
+}
+
+fn process_snapshot(id: &str) -> bone_protocol::ProcessSnapshot {
+    bone_protocol::ProcessSnapshot {
+        id: id.into(),
+        command: format!("command-{id}"),
+        owner: "test".into(),
+        running: true,
+        state: bone_protocol::ProcessState::Running,
+        started_at: 0,
+        finished_at: None,
+        stdout: String::new(),
+        stderr: String::new(),
+        exit_code: None,
+        signal: None,
+        error: None,
+    }
+}
+
+#[test]
+fn plain_arrows_recall_history_and_navigate_jobs() {
+    let (mut app, ctx, _rx) = app();
+    {
+        let session = app.session_mut();
+        session.history = vec!["oldest".into(), "newest".into()];
+        session.state.jobs = vec![job_snapshot("first"), job_snapshot("second")];
+        session.live_pane.active = Some("jobs".into());
+    }
+    let none = egui::Modifiers::NONE;
+
+    frame(&mut app, &ctx, vec![key_event(egui::Key::ArrowUp, none)]);
+    assert_eq!(app.session().composer, "newest");
+    assert_eq!(app.session().history_index, Some(1));
+    frame(&mut app, &ctx, vec![key_event(egui::Key::ArrowUp, none)]);
+    assert_eq!(app.session().composer, "oldest");
+    assert_eq!(app.session().history_index, Some(0));
+    frame(&mut app, &ctx, vec![key_event(egui::Key::ArrowUp, none)]);
+    assert_eq!(
+        app.session().composer,
+        "oldest",
+        "history clamps at its oldest"
+    );
+
+    frame(&mut app, &ctx, vec![key_event(egui::Key::ArrowDown, none)]);
+    assert_eq!(app.session().composer, "newest");
+    frame(&mut app, &ctx, vec![key_event(egui::Key::ArrowDown, none)]);
+    assert!(app.session().composer.is_empty());
+    assert!(app.session().history_index.is_none());
+
+    frame(&mut app, &ctx, vec![key_event(egui::Key::ArrowDown, none)]);
+    assert_eq!(app.session().live_pane.job.as_deref(), Some("first"));
+    assert!(app.session().live_pane.job_focused);
+    frame(&mut app, &ctx, vec![key_event(egui::Key::ArrowDown, none)]);
+    assert_eq!(app.session().live_pane.job.as_deref(), Some("second"));
+    frame(&mut app, &ctx, vec![key_event(egui::Key::ArrowDown, none)]);
+    assert_eq!(app.session().live_pane.job.as_deref(), Some("second"));
+    frame(&mut app, &ctx, vec![key_event(egui::Key::ArrowUp, none)]);
+    assert_eq!(app.session().live_pane.job.as_deref(), Some("first"));
+    frame(&mut app, &ctx, vec![key_event(egui::Key::ArrowUp, none)]);
+    assert!(!app.session().live_pane.job_focused);
+    assert!(app.session().composer.is_empty());
+    assert!(app.session().history_index.is_none());
+
+    frame(&mut app, &ctx, vec![key_event(egui::Key::ArrowUp, none)]);
+    assert_eq!(app.session().composer, "newest");
+}
+
+#[test]
+fn plain_arrows_preserve_an_unsent_draft_without_history() {
+    let (mut app, ctx, _rx) = app();
+    {
+        let session = app.session_mut();
+        session.composer = "unsent draft".into();
+        session.state.jobs = vec![job_snapshot("job")];
+        session.live_pane.active = Some("jobs".into());
+    }
+    let none = egui::Modifiers::NONE;
+    frame(&mut app, &ctx, vec![key_event(egui::Key::ArrowUp, none)]);
+    frame(&mut app, &ctx, vec![key_event(egui::Key::ArrowDown, none)]);
+    assert_eq!(app.session().composer, "unsent draft");
+    assert!(app.session().history_index.is_none());
+    assert!(!app.session().live_pane.job_focused);
+    assert!(app.session().live_pane.job.is_none());
+}
+
+#[test]
+fn process_arrows_match_job_navigation() {
+    let (mut app, ctx, _rx) = app();
+    {
+        let session = app.session_mut();
+        session.state.processes = vec![process_snapshot("first"), process_snapshot("second")];
+        session.live_pane.active = Some("processes".into());
+    }
+    let none = egui::Modifiers::NONE;
+    frame(&mut app, &ctx, vec![key_event(egui::Key::ArrowDown, none)]);
+    assert_eq!(app.session().live_pane.process.as_deref(), Some("first"));
+    assert!(app.session().live_pane.process_focused);
+    frame(&mut app, &ctx, vec![key_event(egui::Key::ArrowDown, none)]);
+    assert_eq!(app.session().live_pane.process.as_deref(), Some("second"));
+    frame(&mut app, &ctx, vec![key_event(egui::Key::ArrowDown, none)]);
+    assert_eq!(app.session().live_pane.process.as_deref(), Some("second"));
+    frame(&mut app, &ctx, vec![key_event(egui::Key::ArrowUp, none)]);
+    assert_eq!(app.session().live_pane.process.as_deref(), Some("first"));
+    frame(&mut app, &ctx, vec![key_event(egui::Key::ArrowUp, none)]);
+    assert!(!app.session().live_pane.process_focused);
+    assert!(app.session().composer.is_empty());
+}
+
+#[test]
+fn enter_opens_a_selected_job_or_process_only_for_trimmed_empty_input() {
+    let (mut job_app, job_ctx, _rx) = app();
+    {
+        let session = job_app.session_mut();
+        session.state.jobs = vec![job_snapshot("job")];
+        session.live_pane.active = Some("jobs".into());
+    }
+    let none = egui::Modifiers::NONE;
+    frame(
+        &mut job_app,
+        &job_ctx,
+        vec![key_event(egui::Key::ArrowDown, none)],
+    );
+    job_app.session_mut().composer = "typed prompt".into();
+    frame(
+        &mut job_app,
+        &job_ctx,
+        vec![key_event(egui::Key::Enter, none)],
+    );
+    assert_eq!(job_app.tabs.len(), 1, "text keeps Enter in the composer");
+    job_app.session_mut().composer = " \n\t".into();
+    frame(
+        &mut job_app,
+        &job_ctx,
+        vec![key_event(egui::Key::Enter, none)],
+    );
+    assert_eq!(
+        job_app.tabs.len(),
+        2,
+        "trimmed-empty input opens the selected job"
+    );
+
+    let (mut process_app, process_ctx, _rx) = app();
+    {
+        let session = process_app.session_mut();
+        session.state.processes = vec![process_snapshot("process")];
+        session.live_pane.active = Some("processes".into());
+    }
+    frame(
+        &mut process_app,
+        &process_ctx,
+        vec![key_event(egui::Key::ArrowDown, none)],
+    );
+    frame(
+        &mut process_app,
+        &process_ctx,
+        vec![key_event(egui::Key::Enter, none)],
+    );
+    assert_eq!(
+        process_app.tabs.len(),
+        2,
+        "Enter opens the selected process"
+    );
+
+    let (mut stale_app, stale_ctx, _rx) = app();
+    {
+        let session = stale_app.session_mut();
+        session.state.jobs = vec![job_snapshot("real")];
+        session.live_pane.active = Some("jobs".into());
+        session.live_pane.job = Some("stale".into());
+        session.live_pane.job_focused = true;
+    }
+    frame(
+        &mut stale_app,
+        &stale_ctx,
+        vec![key_event(egui::Key::Enter, none)],
+    );
+    assert_eq!(stale_app.tabs.len(), 1, "stale selections never open");
+}
+
+#[test]
+fn autocomplete_has_plain_arrow_precedence_over_agent_navigation() {
+    let (mut app, ctx, _rx) = app();
+    {
+        let session = app.session_mut();
+        session.composer = "/".into();
+        session.state.jobs = vec![job_snapshot("job")];
+        session.live_pane.active = Some("jobs".into());
+    }
+    render_frame(&mut app, &ctx, Vec::new());
+    assert!(app.session().autocomplete_open());
+    render_frame(
+        &mut app,
+        &ctx,
+        vec![key_event(egui::Key::ArrowDown, egui::Modifiers::NONE)],
+    );
+    let session = app.session();
+    assert_eq!(session.autocomplete.as_ref().unwrap().selected, 1);
+    assert!(!session.live_pane.job_focused);
+    assert!(session.history_index.is_none());
+    assert_eq!(session.composer, "/");
+}
+
+#[test]
+fn editing_clears_agent_focus_and_only_focused_lists_highlight_selection() {
+    let (mut app, ctx, _rx) = app();
+    {
+        let session = app.session_mut();
+        session.composer = "x".into();
+        session.state.jobs = vec![job_snapshot("job")];
+        session.live_pane.active = Some("jobs".into());
+        session.live_pane.job = Some("job".into());
+        session.live_pane.job_focused = true;
+    }
+    frame(&mut app, &ctx, vec![egui::Event::Text("x".into())]);
+    assert!(!app.session().live_pane.job_focused);
+
+    let (mut session, _rx) = session();
+    session.state.jobs = vec![job_snapshot("job")];
+    session.state.processes = vec![process_snapshot("process")];
+    session.live_pane.job = Some("job".into());
+    session.live_pane.process = Some("process".into());
+    session.live_pane.job_focused = true;
+    let theme = bone_render::theme::Theme::default();
+    let pages = session.live_pane.pages(
+        live_pane::Sources {
+            view: &session.state.view,
+            jobs: &session.state.jobs,
+            processes: &session.state.processes,
+            thinking: None,
+            queue: &session.queue,
+            approval: None,
+        },
+        &theme,
+    );
+    let line = |source: &str| {
+        pages
+            .iter()
+            .find(|page| page.page.source == source)
+            .unwrap()
+            .page
+            .content[0]
+            .to_string()
+    };
+    assert!(line("jobs").starts_with(" › "));
+    assert!(line("processes").starts_with("   "));
+
+    session.live_pane.clear_focus();
+    let pages = session.live_pane.pages(
+        live_pane::Sources {
+            view: &session.state.view,
+            jobs: &session.state.jobs,
+            processes: &session.state.processes,
+            thinking: None,
+            queue: &session.queue,
+            approval: None,
+        },
+        &theme,
+    );
+    assert!(
+        pages
+            .iter()
+            .find(|page| page.page.source == "jobs")
+            .unwrap()
+            .page
+            .content[0]
+            .to_string()
+            .starts_with("   ")
+    );
+    assert!(
+        pages
+            .iter()
+            .find(|page| page.page.source == "processes")
+            .unwrap()
+            .page
+            .content[0]
+            .to_string()
+            .starts_with("   ")
+    );
+}
+
 #[test]
 fn config_and_provider_menus_run_the_lua_config_command() {
     let (mut session, mut rx) = session();
@@ -384,6 +678,52 @@ fn regions_stack_like_the_tui() {
     assert!(live < status, "{live} < {status}");
 }
 
+#[test]
+fn pending_attachment_keeps_last_theme_until_frontend_state_arrives() {
+    let ctx = egui::Context::default();
+    let mut app = DesktopApp::open(ctx.clone(), true);
+    let theme = serde_json::json!({
+        "name": "configured",
+        "palette": {
+            "bg": "#123456",
+            "fg": "#f0e0d0",
+            "accent": "#abcdef"
+        }
+    });
+
+    app.session_mut().state.theme = Some(theme.clone());
+    render_frame(&mut app, &ctx, Vec::new());
+    let configured_fill = ctx.style_of(ctx.theme()).visuals.panel_fill;
+    assert_eq!(configured_fill, egui::Color32::from_rgb(0x12, 0x34, 0x56));
+
+    // Loading another conversation clears the per-session snapshot while the
+    // renderer still has the daemon-global theme it previously applied.
+    app.session_mut().state.reset(Some(42));
+    render_frame(&mut app, &ctx, Vec::new());
+    assert_eq!(
+        ctx.style_of(ctx.theme()).visuals.panel_fill,
+        configured_fill
+    );
+    assert_eq!(app.applied_theme, Some(theme.clone()));
+
+    let _ = app.session_mut().state.reduce(RuntimeEvent::FrontendState {
+        banner: String::new(),
+        settings: serde_json::json!({ "theme": theme }),
+        commands: Vec::new(),
+        tool_defs: Vec::new(),
+        tool_display: serde_json::Value::Null,
+        subagents: Vec::new(),
+        host_api_version: 0,
+        catalog_updates: 0,
+        cwd: None,
+    });
+    render_frame(&mut app, &ctx, Vec::new());
+    assert_eq!(
+        ctx.style_of(ctx.theme()).visuals.panel_fill,
+        configured_fill
+    );
+}
+
 fn render_frame(
     app: &mut DesktopApp,
     ctx: &egui::Context,
@@ -582,4 +922,211 @@ fn narrow_windows_start_collapsed_and_open_the_sidebar_full_width() {
         text_top(&output, "Show me a Markdown sample").is_none(),
         "the drawer takes the whole window"
     );
+}
+
+#[test]
+fn touch_screens_get_a_stop_button_while_a_turn_runs() {
+    let (mut app, ctx, mut rx) = app();
+    app.session_mut().state.busy = true;
+    let touch = egui::Event::Touch {
+        device_id: egui::TouchDeviceId(1),
+        id: egui::TouchId(1),
+        phase: egui::TouchPhase::Start,
+        pos: egui::pos2(1.0, 1.0),
+        force: None,
+    };
+    render_at(&mut app, &ctx, 400.0, vec![touch]);
+    let output = render_at(&mut app, &ctx, 400.0, Vec::new());
+    let stop = output
+        .shapes
+        .iter()
+        .find_map(|clipped| match &clipped.shape {
+            egui::Shape::Text(text) if text.galley.job.text.contains("Stop") => Some(text.pos),
+            _ => None,
+        })
+        .expect("Stop button after a touch");
+    assert!(
+        stop.x > 300.0,
+        "pinned to the row's far right, at {}",
+        stop.x
+    );
+
+    let at = stop + egui::vec2(4.0, 4.0);
+    let press = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    render_at(&mut app, &ctx, 400.0, vec![egui::Event::PointerMoved(at)]);
+    render_at(&mut app, &ctx, 400.0, vec![press(true), press(false)]);
+    assert!(
+        sent(&mut rx)
+            .iter()
+            .any(|command| matches!(command, RuntimeCommand::Cancel)),
+        "tapping Stop cancels the turn"
+    );
+}
+
+#[test]
+fn input_presets_frame_the_composer_like_the_tui() {
+    let ctx = egui::Context::default();
+    let mut app = DesktopApp::open(ctx.clone(), true);
+    let mut frame_for = |preset: &str| {
+        app.session_mut().state.input_style = state::InputStyle::from_settings(
+            &serde_json::json!({ "ui": { "input": { "preset": preset } } }),
+        );
+        let mut frame = None;
+        ctx.run_ui(egui::RawInput::default(), |ui| {
+            frame = Some(app.input_frame(ui))
+        })
+        .textures_delta
+        .clear();
+        frame.unwrap()
+    };
+    let lines = frame_for("lines");
+    assert_eq!(lines.stroke.width, 0.0);
+    assert_eq!(lines.fill, egui::Color32::TRANSPARENT);
+    let boxed = frame_for("box");
+    assert!(boxed.stroke.width > 0.0, "box draws a border");
+    assert!(boxed.inner_margin.left > 0, "box pads its sides");
+    let filled = frame_for("filled");
+    assert_eq!(filled.stroke.width, 0.0);
+    assert_ne!(
+        filled.fill,
+        egui::Color32::TRANSPARENT,
+        "filled paints the input background"
+    );
+}
+
+fn key_replies(rx: &mut mpsc::UnboundedReceiver<Command>) -> Vec<(u64, bone_protocol::KeyEvent)> {
+    sent(rx)
+        .into_iter()
+        .filter_map(|command| match command {
+            RuntimeCommand::KeyReply { id, key } => Some((id, key)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn tapping_a_menu_line_answers_the_key_request_with_a_click() {
+    let (mut session, mut rx) = session();
+    session.state.pending_key = Some(7);
+    session.click_menu("2".into());
+    let replies = key_replies(&mut rx);
+    assert_eq!(replies.len(), 1);
+    assert_eq!(replies[0].0, 7);
+    assert_eq!(
+        (replies[0].1.code.as_str(), replies[0].1.char.as_deref()),
+        ("Click", Some("2"))
+    );
+    assert_eq!(session.state.pending_key, None);
+}
+
+#[test]
+fn text_typed_into_a_menu_is_sent_one_character_per_key_request() {
+    let (mut session, mut rx) = session();
+    let ctx = egui::Context::default();
+    let frame = |session: &mut Session, events: Vec<egui::Event>| {
+        ctx.run_ui(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ui| session.capture_key(ui),
+        )
+        .textures_delta
+        .clear();
+    };
+    // An on-screen keyboard delivers `@` as text; there is no egui key for it.
+    session.state.pending_key = Some(1);
+    frame(&mut session, vec![egui::Event::Text("@x".into())]);
+    session.state.pending_key = Some(2);
+    frame(&mut session, Vec::new());
+    let chars: Vec<_> = key_replies(&mut rx)
+        .into_iter()
+        .map(|(id, key)| (id, key.code, key.char))
+        .collect();
+    assert_eq!(
+        chars,
+        [
+            (1, "Char".to_string(), Some("@".to_string())),
+            (2, "Char".to_string(), Some("x".to_string()))
+        ]
+    );
+}
+
+#[test]
+fn an_open_menu_keeps_the_input_away_and_queues_text_between_key_requests() {
+    let (mut app, ctx, mut rx) = app();
+    app.session_mut().state.view.components = vec![bone_protocol::Component::Float {
+        id: "interact".into(),
+        presentation: Default::default(),
+        title: "Config".into(),
+        lines: vec![bone_protocol::PaneLineSpec::Plain("Edit value".into())],
+        rect: bone_protocol::FloatRect {
+            anchor: Default::default(),
+            width: 0,
+            height: 3,
+            col: 0,
+            row: 0,
+        },
+        z: 0,
+        border: false,
+        scroll: 0,
+        placement: None,
+        owner: None,
+    }];
+    let frame = |app: &mut DesktopApp, events: Vec<egui::Event>| {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events,
+                ..Default::default()
+            },
+            |ui| app.render(ui),
+        );
+        output.textures_delta.clear();
+        output
+    };
+    // Between key requests (none pending), the input stays hidden and never
+    // takes focus, so the on-screen keyboard is not reset per keystroke.
+    let output = frame(&mut app, vec![egui::Event::Text("a".into())]);
+    assert!(!ctx.memory(|memory| memory.has_focus(editor_id())));
+    assert!(
+        output.platform_output.ime.is_some(),
+        "the keyboard stays up"
+    );
+    assert!(
+        app.session().composer.is_empty(),
+        "typing does not leak into the input"
+    );
+    // The next key request gets the character typed in the gap.
+    app.session_mut().state.pending_key = Some(4);
+    frame(&mut app, Vec::new());
+    let replies: Vec<_> = sent(&mut rx)
+        .into_iter()
+        .filter_map(|command| match command {
+            RuntimeCommand::KeyReply { id, key } => Some((id, key.char)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(replies, [(4, Some("a".to_string()))]);
+}
+
+#[test]
+fn android_back_acts_as_esc() {
+    let (mut app, ctx, mut rx) = app();
+    let back = || vec![key_event(egui::Key::BrowserBack, egui::Modifiers::NONE)];
+    // Leaves a menu: the key request gets Esc.
+    app.session_mut().state.pending_key = Some(3);
+    frame(&mut app, &ctx, back());
+    assert!(matches!(
+        sent(&mut rx).as_slice(),
+        [RuntimeCommand::KeyReply { id: 3, key }] if key.code == "Esc"
+    ));
+    // Stops a running turn.
+    app.session_mut().state.busy = true;
+    frame(&mut app, &ctx, back());
+    assert!(matches!(sent(&mut rx).as_slice(), [RuntimeCommand::Cancel]));
 }

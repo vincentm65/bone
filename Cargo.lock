@@ -676,6 +676,7 @@ dependencies = [
  "bone-desktop",
  "eframe",
  "russh",
+ "serde_json",
  "tokio",
  "winit",
 ]

@@ -196,6 +196,8 @@ fn run_menu(keys: &str) -> (Option<i64>, bool, bool) {
         }})
         local lines = _G.last_menu_lines
         result.style_ok = lines[2].bg == "#3A3F4B"
+          and lines[2].click == "1"
+          and lines[3].click == "1"
           and lines[2].spans[3].fg == "white"
           and lines[2].spans[3].modifiers[1] == "bold"
           and lines[3].bg == "#3A3F4B"
@@ -561,4 +563,14 @@ fn searchable_menu_filters_only_on_enter_and_supports_jk() {
             { code = "Enter" }"#,
     );
     assert_eq!(navigated.0, Some(2));
+}
+
+#[test]
+fn clicking_an_option_row_chooses_it() {
+    let (value, cancelled, style_ok) = run_menu(r#"{ code = "Click", char = "3" }"#);
+    assert_eq!((value, cancelled), (Some(3), false));
+    assert!(style_ok, "option rows carry their index as `click`");
+    // A stale index is ignored; the menu keeps waiting for a real choice.
+    let (value, _, _) = run_menu(r#"{ code = "Click", char = "9" }, { code = "Enter" }"#);
+    assert_eq!(value, Some(1));
 }

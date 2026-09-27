@@ -33,7 +33,7 @@ use connection::{Command, Event};
 use eframe::egui;
 use local::LocalResult;
 use state::{State, ToolCard, ToolState};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -64,6 +64,8 @@ const SIDEBAR_WIDTH: f32 = 240.0;
 /// Below this window width the sidebar starts collapsed and, when opened,
 /// takes the whole window like a phone drawer.
 const NARROW_WIDTH: f32 = 700.0;
+/// Room kept at the end of the input row for the touch Stop button.
+const STOP_BUTTON_WIDTH: f32 = 72.0;
 
 fn brief_error(error: &str) -> &'static str {
     if error.to_ascii_lowercase().contains("conversation") {
@@ -151,6 +153,14 @@ struct PasteBlob {
     content: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum AgentNavAction {
+    Unhandled,
+    InputChanged,
+    SelectionChanged,
+    Open(live_pane::Open),
+}
+
 /// The window's one daemon session: its socket, reducer state, input, and
 /// transcript cache.
 struct Session {
@@ -215,6 +225,9 @@ struct Session {
     unread: bool,
     /// The approval prompt for the first pending approval, keyed by its id.
     prompt: Option<(u64, bone_render::prompt::Prompt)>,
+    /// Characters typed into a menu beyond the one sent for the current key
+    /// request; each later request takes the next one.
+    typed_ahead: VecDeque<char>,
     /// True once the user picked Advise and is typing advice in the input.
     advising: bool,
     /// Full-screen pages this chat asked for (`/stats`, `/setup`, `/catalog`).
@@ -275,6 +288,7 @@ impl Session {
             was_busy: false,
             unread: false,
             prompt: None,
+            typed_ahead: VecDeque::new(),
             advising: false,
             page_requests: Vec::new(),
             banner: None,
@@ -292,6 +306,7 @@ impl Session {
             None => self.state.reset_new(),
         }
         self.transcript.reset();
+        self.live_pane.reset_for_attach();
         self.pending_command = None;
         self.pending_command_echo = None;
         self.autocomplete = None;
@@ -500,89 +515,225 @@ impl Session {
     }
 
     /// Up/Down, Enter, and the queue keys for the live pane's list pages,
-    /// active while the input is empty (like the TUI's selectable panes).
+    /// plus the input-history bridge used when no selectable pane is active.
     fn handle_list_keys(&mut self, ui: &mut egui::Ui) -> Option<live_pane::Open> {
-        let list = self.live_pane.active_list()?.to_owned();
-        if !self.composer.is_empty() {
-            return None;
-        }
+        let list = self.live_pane.active_list().map(str::to_owned);
         let key =
             |ui: &mut egui::Ui, modifiers, key| ui.input_mut(|i| i.consume_key(modifiers, key));
         let none = egui::Modifiers::NONE;
         let shift = egui::Modifiers::SHIFT;
-        let step = |ids: &[String], current: &Option<String>, delta: isize| {
-            let index = current
-                .as_ref()
-                .and_then(|id| ids.iter().position(|candidate| candidate == id))
-                .unwrap_or(0) as isize;
-            let next = (index + delta).clamp(0, ids.len().saturating_sub(1) as isize) as usize;
-            ids.get(next).cloned()
+
+        // Queue navigation is deliberately separate from agent/process history
+        // navigation and remains available only for an exactly empty buffer.
+        if list.as_deref() == Some("queue") && self.composer.is_empty() {
+            let len = self.queue.len();
+            let index = self.live_pane.queue.min(len.saturating_sub(1));
+            if key(ui, shift, egui::Key::ArrowUp) && index > 0 {
+                self.queue.swap(index, index - 1);
+                self.live_pane.queue = index - 1;
+            } else if key(ui, shift, egui::Key::ArrowDown) && index + 1 < len {
+                self.queue.swap(index, index + 1);
+                self.live_pane.queue = index + 1;
+            } else if key(ui, none, egui::Key::ArrowUp) {
+                self.live_pane.queue = index.saturating_sub(1);
+            } else if key(ui, none, egui::Key::ArrowDown) {
+                self.live_pane.queue = (index + 1).min(len.saturating_sub(1));
+            } else if key(ui, none, egui::Key::Enter) {
+                if let Some(text) = self.queue.remove(index) {
+                    self.queue.push_front(text);
+                    self.live_pane.queue = 0;
+                }
+            } else if key(ui, none, egui::Key::F2) {
+                if let Some(text) = self.queue.remove(index) {
+                    self.composer = text;
+                }
+            } else if key(ui, none, egui::Key::Delete) {
+                self.queue.remove(index);
+            }
+            return None;
+        }
+
+        let agent_list = match list.as_deref() {
+            Some("jobs") | Some("processes") => list.as_deref(),
+            _ => None,
         };
-        match list.as_str() {
-            "queue" => {
-                let len = self.queue.len();
-                let index = self.live_pane.queue.min(len.saturating_sub(1));
-                if key(ui, shift, egui::Key::ArrowUp) && index > 0 {
-                    self.queue.swap(index, index - 1);
-                    self.live_pane.queue = index - 1;
-                } else if key(ui, shift, egui::Key::ArrowDown) && index + 1 < len {
-                    self.queue.swap(index, index + 1);
-                    self.live_pane.queue = index + 1;
-                } else if key(ui, none, egui::Key::ArrowUp) {
-                    self.live_pane.queue = index.saturating_sub(1);
-                } else if key(ui, none, egui::Key::ArrowDown) {
-                    self.live_pane.queue = (index + 1).min(len.saturating_sub(1));
-                } else if key(ui, none, egui::Key::Enter) {
-                    if let Some(text) = self.queue.remove(index) {
-                        self.queue.push_front(text);
-                        self.live_pane.queue = 0;
-                    }
-                } else if key(ui, none, egui::Key::F2) {
-                    if let Some(text) = self.queue.remove(index) {
-                        self.composer = text;
-                    }
-                } else if key(ui, none, egui::Key::Delete) {
-                    self.queue.remove(index);
-                }
-                None
+        let active_ids: Vec<String> = match agent_list {
+            Some("jobs") => self.state.jobs.iter().map(|job| job.id.clone()).collect(),
+            Some("processes") => self
+                .state
+                .processes
+                .iter()
+                .map(|process| process.id.clone())
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        // Consume every unmodified Up/Down before TextEdit can move its
+        // multiline cursor. The helper intentionally reports Unhandled at a
+        // history boundary, but that key is still a TUI-style no-op here.
+        let arrow = if plain_key_pressed(ui, egui::Key::ArrowUp)
+            && key(ui, none, egui::Key::ArrowUp)
+        {
+            Some(egui::Key::ArrowUp)
+        } else if plain_key_pressed(ui, egui::Key::ArrowDown) && key(ui, none, egui::Key::ArrowDown)
+        {
+            Some(egui::Key::ArrowDown)
+        } else {
+            None
+        };
+        if let Some(code) = arrow {
+            let action = self.apply_agent_nav_key(code, none, &active_ids, agent_list);
+            return self.finish_agent_nav(action);
+        }
+
+        // Enter is handed to the input editor unless the selectable pane has a
+        // valid selected row and the trimmed input is empty, matching the TUI's
+        // should_open_agent_log guard.
+        if agent_list.is_some() && plain_key_pressed(ui, egui::Key::Enter) {
+            let action = self.apply_agent_nav_key(egui::Key::Enter, none, &active_ids, agent_list);
+            if !matches!(action, AgentNavAction::Unhandled) {
+                key(ui, none, egui::Key::Enter);
+                return self.finish_agent_nav(action);
             }
-            list => {
-                let (ids, current): (Vec<String>, Option<String>) = if list == "jobs" {
-                    (
-                        self.state.jobs.iter().map(|job| job.id.clone()).collect(),
-                        self.live_pane.job.clone(),
-                    )
+        }
+        None
+    }
+
+    fn apply_agent_nav_key(
+        &mut self,
+        code: egui::Key,
+        modifiers: egui::Modifiers,
+        active_ids: &[String],
+        list: Option<&str>,
+    ) -> AgentNavAction {
+        if modifiers != egui::Modifiers::NONE {
+            return AgentNavAction::Unhandled;
+        }
+        let focused = match list {
+            Some("jobs") => self.live_pane.job_focused,
+            Some("processes") => self.live_pane.process_focused,
+            _ => false,
+        };
+        let selected = match list {
+            Some("jobs") => self.live_pane.job.clone(),
+            Some("processes") => self.live_pane.process.clone(),
+            _ => None,
+        };
+
+        match code {
+            egui::Key::ArrowUp if !focused => {
+                if self.history_prev() {
+                    AgentNavAction::InputChanged
                 } else {
-                    (
-                        self.state.processes.iter().map(|p| p.id.clone()).collect(),
-                        self.live_pane.process.clone(),
-                    )
-                };
-                let moved = if key(ui, none, egui::Key::ArrowUp) {
-                    step(&ids, &current, -1)
-                } else if key(ui, none, egui::Key::ArrowDown) {
-                    step(&ids, &current, 1)
-                } else {
-                    None
-                };
-                if let Some(id) = moved {
-                    if list == "jobs" {
-                        self.live_pane.job = Some(id);
-                    } else {
-                        self.live_pane.process = Some(id);
-                    }
-                    return None;
+                    AgentNavAction::Unhandled
                 }
-                if key(ui, none, egui::Key::Enter) {
-                    let id = current?;
-                    return Some(if list == "jobs" {
-                        live_pane::Open::Job(id)
-                    } else {
-                        live_pane::Open::Process(id)
-                    });
-                }
-                None
             }
+            egui::Key::ArrowDown if !focused => {
+                if self.history_next() {
+                    AgentNavAction::InputChanged
+                } else if self.history_index.is_none()
+                    && self.composer.is_empty()
+                    && let Some(first) = active_ids.first()
+                {
+                    self.set_agent_focus(list, true);
+                    self.set_agent_selection(list, Some(first.clone()));
+                    AgentNavAction::SelectionChanged
+                } else {
+                    AgentNavAction::Unhandled
+                }
+            }
+            egui::Key::ArrowUp if focused && !active_ids.is_empty() => {
+                let current = selected
+                    .as_deref()
+                    .and_then(|id| active_ids.iter().position(|active| active == id))
+                    .unwrap_or(0);
+                if current > 0 {
+                    self.set_agent_selection(list, Some(active_ids[current - 1].clone()));
+                    AgentNavAction::SelectionChanged
+                } else {
+                    self.set_agent_focus(list, false);
+                    self.select_live_input();
+                    AgentNavAction::InputChanged
+                }
+            }
+            egui::Key::ArrowDown if focused && !active_ids.is_empty() => {
+                let current = selected
+                    .as_deref()
+                    .and_then(|id| active_ids.iter().position(|active| active == id))
+                    .unwrap_or(0);
+                let next = (current + 1).min(active_ids.len() - 1);
+                self.set_agent_selection(list, Some(active_ids[next].clone()));
+                AgentNavAction::SelectionChanged
+            }
+            egui::Key::Enter if self.composer.trim().is_empty() => {
+                let Some(index) = selected
+                    .as_deref()
+                    .and_then(|id| active_ids.iter().position(|active| active == id))
+                else {
+                    return AgentNavAction::Unhandled;
+                };
+                let Some(id) = active_ids.get(index).cloned() else {
+                    return AgentNavAction::Unhandled;
+                };
+                match list {
+                    Some("jobs") => AgentNavAction::Open(live_pane::Open::Job(id)),
+                    Some("processes") => AgentNavAction::Open(live_pane::Open::Process(id)),
+                    _ => AgentNavAction::Unhandled,
+                }
+            }
+            _ => AgentNavAction::Unhandled,
+        }
+    }
+
+    fn finish_agent_nav(&mut self, action: AgentNavAction) -> Option<live_pane::Open> {
+        match action {
+            AgentNavAction::Unhandled
+            | AgentNavAction::InputChanged
+            | AgentNavAction::SelectionChanged => None,
+            AgentNavAction::Open(target) => Some(target),
+        }
+    }
+
+    fn set_agent_selection(&mut self, list: Option<&str>, selection: Option<String>) {
+        match list {
+            Some("jobs") => self.live_pane.job = selection,
+            Some("processes") => self.live_pane.process = selection,
+            _ => {}
+        }
+    }
+
+    fn set_agent_focus(&mut self, list: Option<&str>, focused: bool) {
+        match list {
+            Some("jobs") => self.live_pane.job_focused = focused,
+            Some("processes") => self.live_pane.process_focused = focused,
+            _ => {}
+        }
+    }
+
+    /// Clear a focused list before ordinary text-editor input. Arrow keys and
+    /// page navigation are left alone so their own handlers retain focus.
+    fn clear_agent_focus_for_input(&mut self, ui: &egui::Ui) {
+        if !self.live_pane.job_focused && !self.live_pane.process_focused {
+            return;
+        }
+        let editing = ui.input(|input| {
+            input.events.iter().any(|event| match event {
+                egui::Event::Text(text) | egui::Event::Paste(text) => !text.is_empty(),
+                egui::Event::Key {
+                    key, pressed: true, ..
+                } => !matches!(
+                    key,
+                    egui::Key::ArrowUp
+                        | egui::Key::ArrowDown
+                        | egui::Key::Tab
+                        | egui::Key::PageUp
+                        | egui::Key::PageDown
+                ),
+                _ => false,
+            })
+        });
+        if editing {
+            self.live_pane.clear_focus();
         }
     }
 
@@ -1156,22 +1307,25 @@ impl Session {
         self.history_index = None;
     }
 
-    fn history_prev(&mut self) {
+    /// Move toward older submitted prompts. Returns whether the input moved.
+    fn history_prev(&mut self) -> bool {
         if self.history.is_empty() {
-            return;
+            return false;
         }
-        let index = match self.history_index {
-            None => self.history.len() - 1,
-            Some(i) => i.saturating_sub(1),
-        };
-        self.history_index = Some(index);
-        self.composer = self.history[index].clone();
+        let index = self.history_index.unwrap_or(self.history.len());
+        if index == 0 {
+            return false;
+        }
+        self.history_index = Some(index - 1);
+        self.composer = self.history[index - 1].clone();
         self.autocomplete = None;
+        true
     }
 
-    fn history_next(&mut self) {
+    /// Move toward newer submitted prompts. Returns whether the input moved.
+    fn history_next(&mut self) -> bool {
         let Some(index) = self.history_index else {
-            return;
+            return false;
         };
         if index + 1 < self.history.len() {
             self.history_index = Some(index + 1);
@@ -1181,6 +1335,16 @@ impl Session {
             self.composer.clear();
         }
         self.autocomplete = None;
+        true
+    }
+
+    /// Return to the live draft after leaving a focused agent/process list.
+    fn select_live_input(&mut self) {
+        self.composer.clear();
+        self.pastes.clear();
+        self.attachments.clear();
+        self.autocomplete = None;
+        self.history_index = None;
     }
 
     /// Keep the approval prompt on the first pending approval; a new approval
@@ -1199,17 +1363,59 @@ impl Session {
     }
 
     /// The approval prompt's live-pane lines, as the TUI draws them.
+    /// The approval pane's lines, and how many trailing lines are choices.
     fn approval_lines(
         &self,
         theme: &bone_render::theme::Theme,
-    ) -> Option<Vec<ratatui::text::Line<'static>>> {
+    ) -> Option<(Vec<ratatui::text::Line<'static>>, usize)> {
         let (_, prompt) = self.prompt.as_ref()?;
-        Some(bone_render::approval::approval_pane_lines(
-            theme,
-            prompt,
-            self.advising,
-            100,
-        ))
+        let lines = bone_render::approval::approval_pane_lines(theme, prompt, self.advising, 100);
+        let choices = if self.advising {
+            0
+        } else {
+            prompt.options.len()
+        };
+        Some((lines, choices))
+    }
+
+    /// A tapped or clicked approval choice: select it, then act as Enter.
+    fn choose_approval(&mut self, index: usize) {
+        let Some((_, prompt)) = self.prompt.as_mut() else {
+            return;
+        };
+        prompt.selected = index.min(prompt.options.len().saturating_sub(1));
+        let decision = prompt.decision();
+        if matches!(decision, bone_render::prompt::Decision::Advise(_)) {
+            self.advising = true;
+        } else {
+            self.resolve_approval(decision);
+        }
+    }
+
+    /// A tapped or clicked menu line: answer the pending key request with a
+    /// `Click` carrying the line's value (`ui.menu` sends the option index).
+    fn click_menu(&mut self, value: String) {
+        let Some(id) = self.state.pending_key else {
+            return;
+        };
+        self.reply_key(
+            id,
+            bone_protocol::KeyEvent {
+                code: "Click".into(),
+                char: Some(value),
+                ctrl: false,
+                alt: false,
+                shift: false,
+            },
+        );
+    }
+
+    fn reply_key(&mut self, id: u64, key: bone_protocol::KeyEvent) {
+        self.state.answer_key(id);
+        if !self.command(RuntimeCommand::KeyReply { id, key }) {
+            self.state.last_error =
+                Some("Could not send the key reply; the connection is closed.".into());
+        }
     }
 
     /// Answer the pending approval: Accept approves, Advise sends the typed
@@ -1311,9 +1517,25 @@ impl Session {
     /// request (interactive menus such as `/config`).
     fn capture_key(&mut self, ui: &mut egui::Ui) {
         let Some(id) = self.state.pending_key else {
+            // Between an open menu's key requests, keep typing for its next one.
+            if self.menu_open() {
+                self.typed_ahead.extend(take_typed(ui).chars());
+            }
             return;
         };
         ui.memory_mut(|memory| memory.stop_text_input());
+        self.typed_ahead.extend(take_typed(ui).chars());
+        if let Some(ch) = self.typed_ahead.pop_front() {
+            let key = bone_protocol::KeyEvent {
+                code: "Char".into(),
+                char: Some(ch.to_string()),
+                ctrl: false,
+                alt: false,
+                shift: false,
+            };
+            self.reply_key(id, key);
+            return;
+        }
         let captured = ui.input_mut(|input| {
             let captured = input.events.iter().find_map(|event| match event {
                 egui::Event::Key {
@@ -1333,14 +1555,7 @@ impl Session {
             captured
         });
         if let Some((key, modifiers)) = captured {
-            self.state.answer_key(id);
-            if !self.command(RuntimeCommand::KeyReply {
-                id,
-                key: keys::key_event(key, modifiers),
-            }) {
-                self.state.last_error =
-                    Some("Could not send the key reply; the connection is closed.".into());
-            }
+            self.reply_key(id, keys::key_event(key, modifiers));
         }
     }
 
@@ -1728,10 +1943,13 @@ impl DesktopApp {
         }
     }
 
-    /// Open the viewer for a background process or agent listed in the live pane.
+    /// Act on a clicked live-pane row: open a process or agent viewer, or
+    /// answer a menu or approval.
     fn open_live_target(&mut self, target: live_pane::Open) {
         let chat = self.active_chat;
         match target {
+            live_pane::Open::Click(value) => self.session_mut().click_menu(value),
+            live_pane::Open::Approval(index) => self.session_mut().choose_approval(index),
             live_pane::Open::Process(id) => {
                 let Some(process) = self
                     .session()
@@ -2196,6 +2414,18 @@ impl DesktopApp {
     /// Window-level keys, handled before any widget sees them: tab shortcuts,
     /// then either the selected page or the active chat.
     fn handle_keys(&mut self, ui: &mut egui::Ui) {
+        // Android's Back button/gesture arrives as BrowserBack. Treat it as Esc
+        // so every Esc action (leave a menu, cancel an edit, deny an approval,
+        // stop a turn, close a page) has a touch equivalent.
+        ui.input_mut(|input| {
+            for event in &mut input.events {
+                if let egui::Event::Key { key, .. } = event
+                    && *key == egui::Key::BrowserBack
+                {
+                    *key = egui::Key::Escape;
+                }
+            }
+        });
         let consume =
             |ui: &mut egui::Ui, modifiers, key| ui.input_mut(|i| i.consume_key(modifiers, key));
         let ctrl_shift = egui::Modifiers::COMMAND | egui::Modifiers::SHIFT;
@@ -2241,7 +2471,7 @@ impl DesktopApp {
             return;
         }
 
-        if self.session().state.pending_key.is_some() {
+        if self.session().menu_open() {
             self.session_mut().capture_key(ui);
             return;
         }
@@ -2258,21 +2488,24 @@ impl DesktopApp {
         if consume(ui, egui::Modifiers::ALT, egui::Key::V) {
             self.session_mut().paste_clipboard_image();
         }
+        let autocomplete_open = self.session().autocomplete_open();
+        let mut opened_target = false;
         if self.session().prompt.is_none()
+            && !autocomplete_open
             && let Some(target) = self.session_mut().handle_list_keys(ui)
         {
+            opened_target = true;
             self.open_live_target(target);
         }
-        if self.session().autocomplete_open() {
+        if autocomplete_open {
+            self.session_mut().clear_agent_focus_for_input(ui);
             if consume(ui, egui::Modifiers::NONE, egui::Key::Escape) {
                 self.session_mut().autocomplete = None;
             }
             return;
         }
         if consume(ui, egui::Modifiers::NONE, egui::Key::Escape) && self.session().state.busy {
-            let session = self.session_mut();
-            session.command(RuntimeCommand::Cancel);
-            session.state.status = state::CANCEL_STATUS.into();
+            self.session_mut().cancel_turn();
         }
         if self.session().live_pane.has_pages() {
             let session = self.session_mut();
@@ -2286,6 +2519,9 @@ impl DesktopApp {
             if consume(ui, egui::Modifiers::NONE, egui::Key::PageDown) {
                 session.live_pane.scroll_by(rows);
             }
+        }
+        if !opened_target {
+            self.session_mut().clear_agent_focus_for_input(ui);
         }
     }
 
@@ -2333,36 +2569,70 @@ impl DesktopApp {
         }
     }
 
-    fn theme_settings(&self) -> theme::ThemeSettings {
-        self.session()
-            .state
-            .theme
-            .as_ref()
-            .and_then(|value| serde_json::from_value(value.clone()).ok())
-            .unwrap_or_default()
+    /// The composer's frame for `ui.input`, mirroring the TUI: `lines` has rules
+    /// above and below (drawn by the caller), `box` a border, `filled` or
+    /// `fill: true` the input background; padding is in terminal cells.
+    fn input_frame(&self, ui: &egui::Ui) -> egui::Frame {
+        let style = &self.session().state.input_style;
+        let font = egui::TextStyle::Monospace.resolve(ui.style());
+        let cell = egui::vec2(
+            ui.fonts_mut(|fonts| fonts.glyph_width(&font, 'M')),
+            ui.text_style_height(&egui::TextStyle::Monospace),
+        );
+        let margin = |cells: u16, size: f32| (f32::from(cells) * size).round() as i8;
+        let mut frame = egui::Frame::new().inner_margin(egui::Margin::symmetric(
+            margin(style.horizontal_padding, cell.x),
+            margin(style.vertical_padding, cell.y),
+        ));
+        let theme = &self.render_theme;
+        if style.fill {
+            frame =
+                frame.fill(grid::to_egui(theme.input_bg).unwrap_or(ui.visuals().extreme_bg_color));
+        }
+        if style.preset == state::InputPreset::Box {
+            let border = grid::to_egui(theme.input_border)
+                .unwrap_or(ui.visuals().widgets.noninteractive.bg_stroke.color);
+            frame = frame
+                .stroke(egui::Stroke::new(1.0, border))
+                .corner_radius(egui::CornerRadius::same(theme::CONTROL_RADIUS));
+        }
+        frame
     }
 
     /// Apply the daemon's resolved theme when the payload changes.
     fn apply_theme(&mut self, ctx: &egui::Context) {
-        if self.applied_theme.as_ref() == self.session().state.theme.as_ref() {
+        // An attachment reset clears the session snapshot before the daemon
+        // sends the target conversation authoritative frontend state. The theme
+        // is renderer-global, so keep the last applied visuals while that
+        // snapshot is in flight instead of treating the missing value as the
+        // default theme.
+        if let Some(theme) = self.session().state.theme.clone() {
+            self.set_theme(ctx, theme);
+        }
+    }
+
+    /// Apply a resolved theme payload unless it is already applied: the
+    /// daemon's, or one an embedder cached from [`DesktopApp::theme`] so the
+    /// first frames do not flash the default theme.
+    pub fn set_theme(&mut self, ctx: &egui::Context, theme: serde_json::Value) {
+        if self.applied_theme.as_ref() == Some(&theme) {
             return;
         }
-        self.applied_theme = self.session().state.theme.clone();
-        ctx.set_style_of(ctx.theme(), self.theme_settings().style());
-        self.render_theme = self
-            .session()
-            .state
-            .theme
-            .as_ref()
-            .and_then(|value| {
-                serde_json::from_value::<bone_protocol::theme::ThemeSettings>(value.clone()).ok()
-            })
-            .map(|settings| bone_render::theme::Theme::from_snapshot(&settings))
-            .unwrap_or_default();
+        install_theme(ctx, &theme);
+        self.render_theme =
+            serde_json::from_value::<bone_protocol::theme::ThemeSettings>(theme.clone())
+                .map(|settings| bone_render::theme::Theme::from_snapshot(&settings))
+                .unwrap_or_default();
+        self.applied_theme = Some(theme);
         for session in self.sessions_mut() {
             session.transcript.invalidate();
         }
         ctx.request_repaint();
+    }
+
+    /// The theme payload currently applied, if any.
+    pub fn theme(&self) -> Option<&serde_json::Value> {
+        self.applied_theme.as_ref()
     }
 
     fn schedule_retry(&mut self, ctx: &egui::Context, delay: Duration) {
@@ -2847,6 +3117,26 @@ impl Session {
     /// The input region: attachments, then a key-capture hint or the editor
     /// with its inline `/` autocomplete rows. While advising on an approval,
     /// the editor takes the advice.
+    /// Stop the running turn (Esc, or the touch Stop button).
+    fn cancel_turn(&mut self) {
+        self.command(RuntimeCommand::Cancel);
+        self.state.status = state::CANCEL_STATUS.into();
+    }
+
+    /// Keys go to a menu: one is waiting for a key, or its pane (`ui.menu`,
+    /// `/config`) is still open between key requests. The input stays out of
+    /// the way meanwhile, so it never retakes focus mid-menu (which resets the
+    /// on-screen keyboard on every keystroke).
+    fn menu_open(&self) -> bool {
+        self.state.pending_key.is_some()
+            || self
+                .state
+                .view
+                .components
+                .iter()
+                .any(|component| component.id() == MENU_PANE)
+    }
+
     fn input(&mut self, ui: &mut egui::Ui) {
         if let Some(error) = &self.state.last_error {
             ui.colored_label(ui.visuals().error_fg_color, brief_error(error))
@@ -2883,13 +3173,25 @@ impl Session {
         }
         if self.prompt.is_some() && !self.advising {
             ui.weak("Choose in the approval prompt below.");
+            keep_keyboard(ui);
             return;
         }
-        if self.state.pending_key.is_some() {
+        if self.menu_open() {
             ui.weak("Keys go to the menu below.");
+            keep_keyboard(ui);
             return;
         }
 
+        // handle_keys normally consumes these first. Keep a defensive no-op
+        // here so an unhandled history-boundary arrow cannot reach multiline
+        // TextEdit and move its cursor.
+        if !self.autocomplete_open() {
+            for key in [egui::Key::ArrowUp, egui::Key::ArrowDown] {
+                if plain_key_pressed(ui, key) {
+                    ui.input_mut(|input| input.consume_key(egui::Modifiers::NONE, key));
+                }
+            }
+        }
         let focused = ui.memory(|memory| memory.has_focus(editor_id()));
         self.refresh_autocomplete();
         let mut autocomplete_submit = false;
@@ -2920,22 +3222,33 @@ impl Session {
             self.state.input_style.prefix.clone()
         };
         let rows = (self.composer.matches('\n').count() + 1).clamp(1, 8);
+        // Touch screens have no Esc key: pin a Stop button to the row's end.
+        let stop = self.state.busy && ui.input(|input| input.has_touch_screen());
+        let mut cancel = false;
         let editor = ui
             .horizontal_top(|ui| {
                 ui.label(egui::RichText::new(prefix).weak());
-                ui.add(
+                let reserve = if stop { STOP_BUTTON_WIDTH } else { 0.0 };
+                let editor = ui.add(
                     egui::TextEdit::multiline(&mut self.composer)
                         .id(editor_id())
-                        .desired_width(ui.available_width())
+                        .desired_width((ui.available_width() - reserve).max(0.0))
                         .desired_rows(rows)
                         .frame(egui::Frame::NONE)
                         .return_key(egui::KeyboardShortcut::new(
                             egui::Modifiers::SHIFT,
                             egui::Key::Enter,
                         )),
-                )
+                );
+                if stop {
+                    cancel = ui.button("■ Stop").clicked();
+                }
+                editor
             })
             .inner;
+        if cancel {
+            self.cancel_turn();
+        }
         if editor.changed() {
             self.refresh_autocomplete();
         }
@@ -3156,6 +3469,23 @@ impl Session {
     }
 }
 
+/// Whether an exact, unmodified key press is waiting in egui's event queue.
+fn plain_key_pressed(ui: &egui::Ui, key: egui::Key) -> bool {
+    ui.input(|input| {
+        input.events.iter().any(|event| {
+            matches!(
+                event,
+                egui::Event::Key {
+                    key: pressed,
+                    pressed: true,
+                    modifiers,
+                    ..
+                } if *pressed == key && *modifiers == egui::Modifiers::NONE
+            )
+        })
+    })
+}
+
 /// A plain Enter press (no modifiers), consumed. `consume_key` ignores extra
 /// Shift/Alt, so the event is checked for exact modifiers first.
 fn plain_enter(ui: &mut egui::Ui) -> bool {
@@ -3349,9 +3679,15 @@ impl DesktopApp {
                 if !shells.is_empty() {
                     grid::paint_lines(ui, &shells);
                 }
-                ui.separator();
-                self.session_mut().input(ui);
-                ui.separator();
+                let frame = self.input_frame(ui);
+                let lines = self.session().state.input_style.preset == state::InputPreset::Lines;
+                if lines {
+                    ui.separator();
+                }
+                frame.show(ui, |ui| self.session_mut().input(ui));
+                if lines {
+                    ui.separator();
+                }
             });
         egui::CentralPanel::default()
             .frame(
@@ -3376,11 +3712,60 @@ impl DesktopApp {
     }
 }
 
+/// Pane id shared by `ui.menu` and `/config` while they take keys.
+const MENU_PANE: &str = "interact";
+
+/// Take this frame's typed text, dropping the key presses that produced it.
+/// Typed characters win over keys: on-screen keyboards deliver text, and
+/// symbols such as `@` have no egui key.
+fn take_typed(ui: &mut egui::Ui) -> String {
+    ui.input_mut(|input| {
+        let typed: String = input
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                egui::Event::Text(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        if !typed.is_empty() {
+            input.events.retain(|event| match event {
+                egui::Event::Text(_) => false,
+                egui::Event::Key { key, modifiers, .. } => {
+                    keys::key_event(*key, *modifiers).code != "Char"
+                }
+                _ => true,
+            });
+        }
+        typed
+    })
+}
+
+/// Keep the on-screen keyboard up while keys go to a menu or prompt instead of
+/// the input field, which is what normally asks for it.
+fn keep_keyboard(ui: &egui::Ui) {
+    let rect = ui.min_rect();
+    ui.output_mut(|output| {
+        output.ime = Some(egui::output::IMEOutput {
+            purpose: egui::viewport::IMEPurpose::Normal,
+            rect,
+            cursor_rect: rect,
+            should_interrupt_composition: false,
+        });
+    });
+}
+
 /// The app's fonts and default (pre-theme) style, for embedders that draw
 /// before a [`DesktopApp`] exists.
 pub fn install_look(ctx: &egui::Context) {
     theme::install_fonts(ctx);
     ctx.set_style_of(ctx.theme(), theme::ThemeSettings::default().style());
+}
+
+/// Style egui from a resolved theme payload (see [`DesktopApp::theme`]).
+pub fn install_theme(ctx: &egui::Context, theme: &serde_json::Value) {
+    let settings: theme::ThemeSettings = serde_json::from_value(theme.clone()).unwrap_or_default();
+    ctx.set_style_of(ctx.theme(), settings.style());
 }
 
 /// The `bone-desktop` binary: parse the command line, then run the GUI.

@@ -91,12 +91,21 @@ const CANONICAL_CONFIG_V9_SHA256: [u8; 32] = [
     72, 2, 82, 65, 10, 108, 33, 159, 235, 94, 79,
 ];
 
+// The last v9 seed, shipped before touch taps in `/config` (v10).
+// SHA-256 e64fcefb02ce6e10a25a2ddc955d668dcdc4528592ac5b24eb9aa0eb7ef9cba3
+const CANONICAL_CONFIG_V9_CLAUDE_CODE_SHA256: [u8; 32] = [
+    230, 79, 206, 251, 2, 206, 110, 16, 162, 90, 45, 220, 149, 93, 102, 141, 205, 196, 82, 133,
+    146, 172, 91, 36, 235, 154, 160, 235, 126, 249, 203, 163,
+];
+
 fn is_unmodified_canonical_config(existing: &str) -> bool {
     let digest: [u8; 32] = Sha256::digest(existing.as_bytes()).into();
     (existing.contains("canonical-config-v6") && digest == CANONICAL_CONFIG_V6_SHA256)
         || (existing.contains("canonical-config-v7") && digest == CANONICAL_CONFIG_V7_SHA256)
         || (existing.contains("canonical-config-v8") && digest == CANONICAL_CONFIG_V8_SHA256)
-        || (existing.contains("canonical-config-v9") && digest == CANONICAL_CONFIG_V9_SHA256)
+        || (existing.contains("canonical-config-v9")
+            && (digest == CANONICAL_CONFIG_V9_SHA256
+                || digest == CANONICAL_CONFIG_V9_CLAUDE_CODE_SHA256))
 }
 
 fn is_safe_leaf_name(name: &str) -> bool {

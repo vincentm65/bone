@@ -39,6 +39,10 @@ pub struct PaneSpanSpec {
     pub fg: Option<String>,
     #[serde(default, deserialize_with = "deserialize_vec_or_empty_map")]
     pub modifiers: Vec<String>,
+    /// Like a line's `click`, for one span (e.g. one tab on a tab row); a
+    /// tapped span takes precedence over its line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub click: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -50,6 +54,11 @@ pub enum PaneLineSpec {
         spans: Vec<PaneSpanSpec>,
         #[serde(default)]
         bg: Option<String>,
+        /// Sent as a `KeyEvent { code: "Click", char: <click> }` reply to the
+        /// pending key request when the line is tapped or clicked; `ui.menu`
+        /// sets it to the option index.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        click: Option<String>,
     },
 }
 

@@ -52,7 +52,7 @@ impl PanePage {
             .iter()
             .map(|spec| match spec {
                 PaneLineSpec::Plain(text) => Line::from(text.clone()),
-                PaneLineSpec::Spans { spans, bg } => {
+                PaneLineSpec::Spans { spans, bg, .. } => {
                     let ratatui_spans: Vec<Span<'static>> = spans
                         .iter()
                         .map(|s| {

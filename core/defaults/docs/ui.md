@@ -64,9 +64,10 @@ cancellation are scoped to the attached conversation.
   terminal. Clicking a tool row expands it; Ctrl/Cmd+O expands every row.
 - `/stats`, `/setup`, and `/catalog` open page tabs running the TUI's screens
   with the same keys; `/catalog install|remove NAME` applies directly. Clicking
-  an agent or process in the live pane (or selecting it with ↑/↓ and Enter
-  while the input is empty) opens its transcript or live-output viewer in a
-  page tab; Ctrl+C in a process viewer cancels the process.
+  an agent or process in the live pane (or focusing one with plain Down from
+  exact empty live input and pressing Enter with trimmed-empty input) opens its
+  transcript or live-output viewer in a page tab; Ctrl+C in a process viewer
+  cancels the process.
 - The live pane shows one page at a time: daemon panes (Lua panes and menus such
   as `/config` and `/provider`), the approval prompt, agents, processes, the
   queue, and live reasoning when `general.show_reasoning` is on. A newly arrived
@@ -81,9 +82,21 @@ cancellation are scoped to the attached conversation.
 - The input uses `ui.input.prefix` (default `> `). Enter sends (queues while
   busy), Ctrl/Cmd+Enter steers a running turn, Shift+Enter inserts a line,
   Ctrl/Cmd+Up/Down recalls history, Ctrl/Cmd+D clears the queue, Alt+V attaches
-  the clipboard image, and Esc stops the running turn. `/edit` opens the draft in
-  `$VISUAL`/`$EDITOR` (terminal editors in `$TERMINAL` or a detected terminal).
-  Configured `keymaps.bindings` take precedence.
+  the clipboard image, and Esc stops the running turn. Plain Up/Down recall
+  older/newer submitted prompts; Down from exact empty live input focuses the
+  first active agent/process, then plain Up/Down move a clamped selection, and
+  Up from the first row returns to empty live input. Enter opens the focused
+  agent/process only when `composer.trim().is_empty()`; autocomplete keeps plain
+  Up/Down for its own selection, and ordinary editing clears list focus. `/edit`
+  opens the draft in `$VISUAL`/`$EDITOR` (terminal editors in `$TERMINAL` or a
+  detected terminal). Configured `keymaps.bindings` take precedence.
+- Touch and mouse: pane lines and spans may carry a `click` value (`ui.menu`
+  sets option indexes and tappable hints, `/config` its tabs and rows); tapping
+  one answers the pending key request with `KeyEvent { code: "Click", char }`.
+  Approval choices are tappable. On touch screens a Stop button ends the input
+  row while a turn runs, Android Back acts as Esc, and the on-screen keyboard
+  stays up while a menu takes keys. The composer frame follows `ui.input.preset`
+  (`lines`, `box`, `filled`) with its padding and `fill`.
 
 ## Command and event boundary
 

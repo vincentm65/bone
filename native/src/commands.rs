@@ -81,7 +81,11 @@ pub fn help(advertised: &[(String, String)]) -> String {
     lines.push("  Esc          — stop the running turn".to_string());
     lines.push("  Tab          — switch live pane page".to_string());
     lines.push("  PgUp/PgDn    — scroll the live pane".to_string());
-    lines.push("  ↑/↓ Enter    — select and open agents, processes, queue".to_string());
+    lines.push(
+        "  ↑/↓          — recall prompts; from empty input, focus agents/processes".to_string(),
+    );
+    lines.push("  Enter        — open a focused agent/process with empty input".to_string());
+    lines.push("  Queue ↑/↓    — select; Enter sends next, F2 edits, Del removes".to_string());
     lines.push("  Ctrl+O       — expand or collapse tool output".to_string());
     lines.push("  Alt+V        — attach the clipboard image".to_string());
     lines.push("  Ctrl+N       — new conversation in this tab".to_string());
