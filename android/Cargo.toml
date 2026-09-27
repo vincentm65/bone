@@ -2,7 +2,7 @@
 name = "bone-android"
 version.workspace = true
 edition.workspace = true
-description = "Phone client for a Bone daemon, reached over SSH"
+description = "The Bone desktop UI on Android, attached to your computer over SSH"
 
 # `cdylib` is what an Android APK loads; `rlib` lets the desktop preview binary
 # and tests link the same code.
@@ -17,16 +17,10 @@ name = "bone-android-preview"
 path = "src/main.rs"
 
 [dependencies]
-bone-client = { path = "../client" }
-bone-protocol = { path = "../protocol" }
+bone-desktop = { path = "../native" }
 eframe = { version = "0.36.1", default-features = false, features = ["default_fonts", "glow"] }
 russh = { version = "0.63", default-features = false, features = ["ring", "flate2"] }
-serde_json = "1"
-tokio = { version = "1", features = ["rt", "net", "sync", "time", "macros", "process"] }
-
-# Desktop preview: Linux window-system backends.
-[target.'cfg(not(target_os = "android"))'.dependencies]
-eframe = { version = "0.36.1", default-features = false, features = ["wayland", "x11"] }
+tokio = { version = "1", features = ["io-util"] }
 
 # NativeActivity glue for the APK; `winit` is named directly for the
 # `android_main` signature and matches eframe's version.
@@ -49,3 +43,5 @@ name = "android.permission.INTERNET"
 
 [package.metadata.android.application]
 label = "Bone"
+# Full screen: no status bar or title bar over the UI.
+theme = "@android:style/Theme.DeviceDefault.NoActionBar.Fullscreen"

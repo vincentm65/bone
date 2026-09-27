@@ -31,7 +31,10 @@ cancellation are scoped to the attached conversation.
   owns authentication and host verification, and keys or an agent are required.
   A tab counts as connected only once the daemon's first event arrives, so a
   failed login surfaces ssh's stderr. `BONE_SSH` overrides the `ssh` program and
-  `BONE_SSH_REMOTE_BIN` the remote `bone` path. Its background Tokio transport reduces
+  `BONE_SSH_REMOTE_BIN` the remote `bone` path. `native` is also a library: an
+  embedder can attach `DesktopApp::remote` to a `connection::Target::Custom`
+  connector (the Android app's in-app SSH) and gets the same link
+  confirmation. Its background Tokio transport reduces
   typed events into a local transcript and never retries a prompt after
   uncertain delivery. Graphics default to wgpu; a returned GPU initialization
   error before app creation triggers one fresh-process retry using OpenGL (glow).
@@ -48,6 +51,9 @@ cancellation are scoped to the attached conversation.
   description line (`ConversationMeta.status` / `token_count`). A spinner marks
   a chat whose open tab is mid-turn, and a green dot marks one whose turn
   finished while its tab was not in view (cleared when viewed; desktop-local).
+  The ☰ button or Ctrl/Cmd+B collapses the sidebar. Windows narrower than
+  700pt start collapsed and open it full-window, closing it once a chat is
+  picked, so the same UI works on a phone.
   Ctrl/Cmd+T opens a chat tab, Ctrl/Cmd+W closes a tab (the last chat starts
   over instead), Ctrl/Cmd+Tab or Ctrl/Cmd+PageUp/PageDown cycle, and
   Ctrl/Cmd+1…9 jump. Selecting a history entry focuses the tab showing it,

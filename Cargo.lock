@@ -673,11 +673,9 @@ dependencies = [
 name = "bone-android"
 version = "2.4.5"
 dependencies = [
- "bone-client",
- "bone-protocol",
+ "bone-desktop",
  "eframe",
  "russh",
- "serde_json",
  "tokio",
  "winit",
 ]

@@ -485,3 +485,101 @@ fn a_turn_finishing_unseen_marks_the_chat_unread_until_viewed() {
     drain(&mut app, true);
     assert!(!app.session().unread, "viewing the tab marks it read");
 }
+
+fn render_at(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    width: f32,
+    events: Vec<egui::Event>,
+) -> egui::FullOutput {
+    let mut output = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(width, 700.0),
+            )),
+            events,
+            ..Default::default()
+        },
+        |ui| app.render(ui),
+    );
+    output.textures_delta.clear();
+    output
+}
+
+fn with_one_conversation(app: &mut DesktopApp) {
+    app.conversations = vec![ConversationMeta {
+        id: 41,
+        title: "sidebar chat".into(),
+        full_title: String::new(),
+        updated_at: "2020-01-02T14:22:00Z".into(),
+        updated_at_local: String::new(),
+        message_count: 1,
+        provider: "p".into(),
+        model: "m".into(),
+        token_count: 0,
+        status: Default::default(),
+    }];
+}
+
+#[test]
+fn ctrl_b_collapses_and_restores_the_sidebar_on_wide_windows() {
+    let ctx = egui::Context::default();
+    let mut app = DesktopApp::open(ctx.clone(), true);
+    with_one_conversation(&mut app);
+    render_at(&mut app, &ctx, 1000.0, Vec::new());
+    let output = render_at(&mut app, &ctx, 1000.0, Vec::new());
+    assert!(
+        text_top(&output, "sidebar chat").is_some(),
+        "wide windows start with the sidebar"
+    );
+
+    let ctrl_b = key_event(egui::Key::B, egui::Modifiers::COMMAND);
+    render_at(&mut app, &ctx, 1000.0, vec![ctrl_b.clone()]);
+    let output = render_at(&mut app, &ctx, 1000.0, Vec::new());
+    assert!(
+        text_top(&output, "sidebar chat").is_none(),
+        "Ctrl+B hides it"
+    );
+    assert!(
+        text_top(&output, "Show me a Markdown sample").is_some(),
+        "the chat stays"
+    );
+
+    render_at(&mut app, &ctx, 1000.0, vec![ctrl_b]);
+    let output = render_at(&mut app, &ctx, 1000.0, Vec::new());
+    assert!(
+        text_top(&output, "sidebar chat").is_some(),
+        "Ctrl+B shows it again"
+    );
+}
+
+#[test]
+fn narrow_windows_start_collapsed_and_open_the_sidebar_full_width() {
+    let ctx = egui::Context::default();
+    let mut app = DesktopApp::open(ctx.clone(), true);
+    with_one_conversation(&mut app);
+    render_at(&mut app, &ctx, 400.0, Vec::new());
+    let output = render_at(&mut app, &ctx, 400.0, Vec::new());
+    assert!(
+        text_top(&output, "sidebar chat").is_none(),
+        "phones start with the chat"
+    );
+    assert!(text_top(&output, "Show me a Markdown sample").is_some());
+
+    render_at(
+        &mut app,
+        &ctx,
+        400.0,
+        vec![key_event(egui::Key::B, egui::Modifiers::COMMAND)],
+    );
+    let output = render_at(&mut app, &ctx, 400.0, Vec::new());
+    assert!(
+        text_top(&output, "sidebar chat").is_some(),
+        "opened as a drawer"
+    );
+    assert!(
+        text_top(&output, "Show me a Markdown sample").is_none(),
+        "the drawer takes the whole window"
+    );
+}

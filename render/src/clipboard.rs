@@ -65,6 +65,7 @@ fn png_image_data(png_bytes: Vec<u8>) -> ImageData {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 fn wayland_clipboard_image() -> Result<ImageData, String> {
     run_clipboard_command("wl-paste", &["--type", "image/png"])
         .or_else(|_| run_clipboard_command("wl-paste", &["--type", "image/jpeg"]))

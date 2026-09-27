@@ -1,28 +1,34 @@
 //! Socket lifecycle stays off the GUI thread. Every delivered event wakes egui.
 //!
-//! A chat reaches its daemon either over loopback TCP or through
-//! `ssh <host> -- bone stdio` ([`bone_client::ssh`]); both yield the same
+//! A chat reaches its daemon over loopback TCP, through
+//! `ssh <host> -- bone stdio` ([`bone_client::ssh`]), or through an embedder's
+//! [`Connector`] (the Android app's in-app SSH). All yield the same
 //! newline-JSON byte stream, so everything after the connect is shared.
 use bone_client::SocketConn;
 use bone_client::ssh::SshSession;
 use bone_protocol::{RuntimeCommand, RuntimeEvent};
 use eframe::egui;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
 
-/// How long an SSH connect may take, login included, before the daemon's first
-/// event arrives.
+/// How long a remote connect may take, login included, before the daemon's
+/// first event arrives.
 const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Where a chat's daemon lives.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub enum Target {
     /// A loopback `host:port`.
     Local(String),
     /// An SSH destination (`~/.ssh/config` alias or `user@host`) whose
     /// `bone stdio` bridges to that machine's loopback daemon.
     Ssh(String),
+    /// A stream opened by the embedding app.
+    Custom(Arc<dyn Connector>),
 }
 
 impl Target {
@@ -31,19 +37,49 @@ impl Target {
         match self {
             Self::Local(address) => address.clone(),
             Self::Ssh(host) => format!("ssh: {host}"),
+            Self::Custom(connector) => connector.label(),
         }
+    }
+
+    /// Whether the daemon runs on another machine (never auto-started here).
+    pub fn is_remote(&self) -> bool {
+        !matches!(self, Self::Local(_))
     }
 }
 
-type Reader = Box<dyn AsyncRead + Unpin + Send>;
-type Writer = Box<dyn AsyncWrite + Unpin + Send>;
+impl std::fmt::Debug for Target {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.label())
+    }
+}
 
-/// Result of trying to open one connection.
+pub type Reader = Box<dyn AsyncRead + Unpin + Send>;
+pub type Writer = Box<dyn AsyncWrite + Unpin + Send>;
+
+/// An open daemon byte stream from a [`Connector`]; `guard` (e.g. the SSH
+/// session) is kept alive for as long as the stream is used.
+pub struct Stream {
+    pub read: Reader,
+    pub write: Writer,
+    pub guard: Box<dyn Send>,
+}
+
+/// Opens the newline-JSON daemon stream for [`Target::Custom`]. The link
+/// counts as connected once the daemon's first event arrives.
+pub trait Connector: Send + Sync {
+    fn label(&self) -> String;
+    fn connect(&self) -> Pin<Box<dyn Future<Output = Result<Stream, String>> + Send>>;
+}
+
+/// Result of trying to open one connection; short-lived, so kept unboxed.
+#[allow(clippy::large_enum_variant)]
 enum Opened {
     Ready {
         read: Reader,
         write: Writer,
         ssh: Option<SshSession>,
+        /// A custom connector's guard; also marks a link to confirm.
+        guard: Option<Box<dyn Send>>,
     },
     Failed(String),
     Cancelled,
@@ -173,9 +209,28 @@ async fn worker(
         let opened = match &target {
             Target::Local(address) => open_tcp(address, &mut commands).await,
             Target::Ssh(host) => open_ssh(host),
+            Target::Custom(connector) => tokio::select! {
+                result = connector.connect() => match result {
+                    Ok(stream) => Opened::Ready {
+                        read: stream.read,
+                        write: stream.write,
+                        ssh: None,
+                        guard: Some(stream.guard),
+                    },
+                    Err(reason) => Opened::Failed(reason),
+                },
+                command = commands.recv() => {
+                    if command.is_none() { Opened::Closed } else { Opened::Cancelled }
+                }
+            },
         };
-        let (read, write, mut ssh) = match opened {
-            Opened::Ready { read, write, ssh } => (read, write, ssh),
+        let (read, write, mut ssh, _guard) = match opened {
+            Opened::Ready {
+                read,
+                write,
+                ssh,
+                guard,
+            } => (read, write, ssh, guard),
             Opened::Failed(reason) => {
                 if !sink.send_control(Event::Disconnected(format!("Connect failed: {reason}"))) {
                     return;
@@ -194,11 +249,12 @@ async fn worker(
         };
         let mut conn = SocketConn::new(read, write);
         let sender = conn.command_sender();
-        // The ssh child starts instantly even when its login will fail, so an
-        // SSH link counts as connected only once the daemon's first event
-        // (sent unprompted on attach) arrives; otherwise report ssh's reason.
+        // A remote link counts as connected only once the daemon's first event
+        // (sent unprompted on attach) arrives: the ssh child starts instantly
+        // even when its login will fail, and a remote `bone stdio` may be
+        // missing. Otherwise report the reason.
         let mut first = None;
-        if let Some(session) = ssh.take() {
+        if target.is_remote() {
             let result = tokio::select! {
                 result = tokio::time::timeout(SSH_CONNECT_TIMEOUT, conn.next_event()) => result,
                 command = commands.recv() => {
@@ -213,11 +269,16 @@ async fn worker(
             let failure = match result {
                 Ok(Some(event)) => {
                     first = Some(event);
-                    ssh = Some(session);
                     None
                 }
-                // EOF: ssh exited before the daemon answered.
-                Ok(None) => Some(session.failure().await),
+                // EOF before the daemon answered.
+                Ok(None) => Some(match ssh.take() {
+                    Some(session) => session.failure().await,
+                    None => format!(
+                        "{} closed before the daemon answered; is `bone stdio` available there?",
+                        target.label()
+                    ),
+                }),
                 Err(_) => Some(format!(
                     "{} did not reach the daemon within {} seconds",
                     target.label(),
@@ -296,6 +357,7 @@ async fn open_tcp(address: &str, commands: &mut mpsc::UnboundedReceiver<Command>
                     read: Box::new(read),
                     write: Box::new(write),
                     ssh: None,
+                    guard: None,
                 };
             }
             Ok(Err(error)) => last_error = error.to_string(),
@@ -312,6 +374,7 @@ fn open_ssh(host: &str) -> Opened {
             read: Box::new(read),
             write: Box::new(write),
             ssh: Some(session),
+            guard: None,
         },
         Err(error) => Opened::Failed(format!("could not start ssh: {error}")),
     }
@@ -466,5 +529,77 @@ mod tests {
         for path in [ok, denied] {
             let _ = std::fs::remove_dir_all(path.parent().unwrap());
         }
+    }
+
+    /// Hands out one in-memory stream, like the Android app's SSH connector.
+    struct FakeConnector(std::sync::Mutex<Option<tokio::io::DuplexStream>>);
+
+    impl Connector for FakeConnector {
+        fn label(&self) -> String {
+            "ssh: phone-test".into()
+        }
+
+        fn connect(&self) -> Pin<Box<dyn Future<Output = Result<Stream, String>> + Send>> {
+            let stream = self.0.lock().unwrap().take();
+            Box::pin(async move {
+                let (read, write) = tokio::io::split(stream.ok_or("already used")?);
+                Ok(Stream {
+                    read: Box::new(read),
+                    write: Box::new(write),
+                    guard: Box::new(()),
+                })
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn custom_connectors_confirm_on_the_first_event_or_explain_an_early_close() {
+        let next = async |received: &mut mpsc::Receiver<Event>| {
+            tokio::time::timeout(Duration::from_secs(5), received.recv())
+                .await
+                .unwrap()
+        };
+
+        let (app_side, daemon_side) = tokio::io::duplex(4096);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (events, mut received) = mpsc::channel(256);
+        let task = tokio::spawn(worker(rx, events, egui::Context::default()));
+        let connector = Arc::new(FakeConnector(std::sync::Mutex::new(Some(app_side))));
+        tx.send(Command::Connect(Target::Custom(connector)))
+            .unwrap();
+        let (_daemon_read, mut daemon_write) = tokio::io::split(daemon_side);
+        bone_client::write_message(
+            &mut daemon_write,
+            &RuntimeEvent::TextDelta { text: "hi".into() },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(next(&mut received).await, Some(Event::Connected)));
+        assert!(matches!(
+            next(&mut received).await,
+            Some(Event::Runtime(RuntimeEvent::TextDelta { text })) if text == "hi"
+        ));
+        drop(tx);
+        task.await.unwrap();
+
+        let (app_side, daemon_side) = tokio::io::duplex(4096);
+        drop(daemon_side);
+        let (tx, rx) = mpsc::unbounded_channel();
+        let (events, mut received) = mpsc::channel(256);
+        let task = tokio::spawn(worker(rx, events, egui::Context::default()));
+        let connector = Arc::new(FakeConnector(std::sync::Mutex::new(Some(app_side))));
+        tx.send(Command::Connect(Target::Custom(connector)))
+            .unwrap();
+        match next(&mut received).await {
+            Some(Event::Disconnected(reason)) => assert!(
+                reason.starts_with(
+                    "Connect failed: ssh: phone-test closed before the daemon answered"
+                ),
+                "{reason}"
+            ),
+            _ => panic!("expected a connect failure"),
+        }
+        drop(tx);
+        task.await.unwrap();
     }
 }
