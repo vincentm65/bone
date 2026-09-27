@@ -2,20 +2,31 @@
 //! list, pending approvals above the input, and a Send/Stop button. Sized and
 //! spaced for touch.
 
+use std::path::PathBuf;
+use std::sync::Arc;
+
 use bone_protocol::RuntimeCommand;
 use eframe::egui;
 
 use crate::link::{Link, LinkEvent, Target};
+use crate::ssh::{Destination, Identity};
 use crate::state::{RowKind, State};
 
 const TEXT_SIZE: f32 = 16.0;
 const SMALL_SIZE: f32 = 13.0;
 /// Minimum height of anything tappable.
 const TOUCH: f32 = 44.0;
+/// Last-used `user@host` and bone path, one per line, in the data directory.
+const SETTINGS_FILE: &str = "connection";
 
 pub struct PhoneApp {
-    /// SSH host typed on the connect screen.
-    host: String,
+    data_dir: PathBuf,
+    /// The app's SSH key, or why it could not be loaded.
+    identity: Result<Arc<Identity>, String>,
+    /// `user@host[:port]` typed on the connect screen.
+    destination: String,
+    /// Path of `bone` on the computer.
+    bone: String,
     link: Option<Link>,
     target: Option<Target>,
     connected: bool,
@@ -28,14 +39,19 @@ pub struct PhoneApp {
 
 impl PhoneApp {
     /// `target` connects immediately; `None` starts on the connect screen.
-    pub fn new(ctx: &egui::Context, target: Option<Target>) -> Self {
+    /// `data_dir` holds the app's SSH key, pinned host keys, and settings.
+    pub fn new(ctx: &egui::Context, target: Option<Target>, data_dir: PathBuf) -> Self {
         apply_style(ctx);
-        let host = match &target {
-            Some(Target::Ssh(host)) => host.clone(),
-            _ => String::new(),
-        };
+        let identity = Identity::load_or_create(&data_dir)
+            .map(Arc::new)
+            .map_err(|error| format!("could not create this app's SSH key: {error}"));
+        let saved = std::fs::read_to_string(data_dir.join(SETTINGS_FILE)).unwrap_or_default();
+        let mut lines = saved.lines();
         let mut app = Self {
-            host,
+            data_dir,
+            identity,
+            destination: lines.next().unwrap_or_default().to_string(),
+            bone: lines.next().unwrap_or("bone").to_string(),
             link: None,
             target: None,
             connected: false,
@@ -51,10 +67,28 @@ impl PhoneApp {
     }
 
     fn connect(&mut self, ctx: &egui::Context, target: Target) {
+        let identity = match &self.identity {
+            Ok(identity) => identity.clone(),
+            Err(error) => {
+                self.error = error.clone();
+                return;
+            }
+        };
+        if let Target::Ssh { destination, bone } = &target {
+            self.destination = format!(
+                "{}@{}:{}",
+                destination.user, destination.host, destination.port
+            );
+            self.bone = bone.clone();
+            let _ = std::fs::write(
+                self.data_dir.join(SETTINGS_FILE),
+                format!("{}\n{}\n", self.destination, self.bone),
+            );
+        }
         self.error.clear();
         self.connected = false;
         self.state = State::default();
-        self.link = Some(Link::open(target.clone(), ctx.clone()));
+        self.link = Some(Link::open(target.clone(), identity, ctx.clone()));
         self.target = Some(target);
     }
 
@@ -105,35 +139,69 @@ impl PhoneApp {
     fn connect_screen(&mut self, ui: &mut egui::Ui) {
         let connecting = self.link.is_some();
         egui::CentralPanel::default().show(ui, |ui| {
-            ui.add_space(ui.available_height() * 0.2);
-            ui.vertical_centered(|ui| {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                ui.add_space(24.0);
                 ui.heading("Bone");
                 ui.add_space(16.0);
-                ui.label("SSH host (a ~/.ssh/config alias or user@host)");
-                let field = ui.add_enabled(
+                ui.label("Computer (user@host or user@host:port)");
+                ui.add_enabled(
                     !connecting,
-                    egui::TextEdit::singleline(&mut self.host)
-                        .hint_text("devbox")
+                    egui::TextEdit::singleline(&mut self.destination)
+                        .hint_text("me@192.168.1.20")
                         .desired_width(f32::INFINITY),
                 );
-                let submitted = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                ui.label("Path to bone on the computer");
+                ui.add_enabled(
+                    !connecting,
+                    egui::TextEdit::singleline(&mut self.bone)
+                        .hint_text("bone")
+                        .desired_width(f32::INFINITY),
+                );
                 ui.add_space(8.0);
                 let label = if connecting {
                     "Connecting…"
                 } else {
                     "Connect"
                 };
-                let button = ui.add_enabled(
-                    !connecting && !self.host.trim().is_empty(),
-                    egui::Button::new(label).min_size(egui::vec2(160.0, TOUCH)),
-                );
-                if (button.clicked() || submitted) && !connecting && !self.host.trim().is_empty() {
-                    let host = self.host.trim().to_string();
-                    self.connect(ui.ctx(), Target::Ssh(host));
+                let ready = !connecting && !self.destination.trim().is_empty();
+                if ui
+                    .add_enabled(
+                        ready,
+                        egui::Button::new(label).min_size(egui::vec2(160.0, TOUCH)),
+                    )
+                    .clicked()
+                {
+                    match Destination::parse(&self.destination) {
+                        Ok(destination) => {
+                            let bone = match self.bone.trim() {
+                                "" => "bone".to_string(),
+                                path => path.to_string(),
+                            };
+                            self.connect(ui.ctx(), Target::Ssh { destination, bone });
+                        }
+                        Err(error) => self.error = error,
+                    }
                 }
                 if !self.error.is_empty() {
-                    ui.add_space(12.0);
+                    ui.add_space(8.0);
                     ui.colored_label(ui.visuals().error_fg_color, &self.error);
+                }
+                if let Ok(identity) = &self.identity {
+                    ui.add_space(24.0);
+                    ui.label("Add this app's key to ~/.ssh/authorized_keys on the computer:");
+                    let mut line = identity.public_line();
+                    ui.add(
+                        egui::TextEdit::multiline(&mut line)
+                            .font(egui::TextStyle::Monospace)
+                            .desired_rows(3)
+                            .desired_width(f32::INFINITY),
+                    );
+                    if ui
+                        .add(egui::Button::new("Copy key").min_size(egui::vec2(120.0, TOUCH)))
+                        .clicked()
+                    {
+                        ui.ctx().copy_text(identity.public_line());
+                    }
                 }
             });
         });
