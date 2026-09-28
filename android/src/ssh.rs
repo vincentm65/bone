@@ -54,6 +54,48 @@ impl Identity {
     pub fn public_line(&self) -> String {
         self.key.public_key().to_openssh().unwrap_or_default()
     }
+
+    /// Whether this destination already has a host key in this app's pin
+    /// store. A key is considered pinned even when the next connection would
+    /// reject it as changed; that distinction is useful on the connect screen.
+    pub fn host_key_pinned(&self, destination: &Destination) -> bool {
+        russh::keys::known_hosts::known_host_keys_path(
+            &destination.host,
+            destination.port,
+            self.dir.join(KNOWN_HOSTS_FILE),
+        )
+        .is_ok_and(|keys| !keys.is_empty())
+    }
+
+    /// Remove only this destination's entries from the app's pin store.
+    /// Other hosts remain trusted, and the next successful connection will
+    /// deliberately pin this host again.
+    pub fn forget_host_key(&self, destination: &Destination) -> std::io::Result<bool> {
+        let path = self.dir.join(KNOWN_HOSTS_FILE);
+        let contents = match std::fs::read_to_string(&path) {
+            Ok(contents) => contents,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let matches = russh::keys::known_hosts::known_host_keys_path(
+            &destination.host,
+            destination.port,
+            &path,
+        )
+        .map_err(std::io::Error::other)?;
+        if matches.is_empty() {
+            return Ok(false);
+        }
+        let lines: Vec<usize> = matches.into_iter().map(|(line, _)| line).collect();
+        let kept: String = contents
+            .split_inclusive('\n')
+            .enumerate()
+            .filter(|(index, _)| !lines.contains(&(index + 1)))
+            .map(|(_, line)| line)
+            .collect();
+        std::fs::write(path, kept)?;
+        Ok(true)
+    }
 }
 
 #[cfg(unix)]
@@ -234,5 +276,50 @@ mod tests {
         );
         assert_eq!(Identity::load_or_create(&dir).unwrap().public_line(), line);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn host_key_pins_and_forgets_only_the_selected_destination() {
+        let dir = std::env::temp_dir().join(format!(
+            "bone-android-host-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let identity = Identity::load_or_create(&dir).unwrap();
+        let known_hosts = dir.join(KNOWN_HOSTS_FILE);
+        let first = PrivateKey::from(Ed25519Keypair::from_seed(&[1; 32]));
+        let second = PrivateKey::from(Ed25519Keypair::from_seed(&[2; 32]));
+        russh::keys::known_hosts::learn_known_hosts_path(
+            "devbox",
+            22,
+            first.public_key(),
+            &known_hosts,
+        )
+        .unwrap();
+        russh::keys::known_hosts::learn_known_hosts_path(
+            "otherbox",
+            22,
+            second.public_key(),
+            &known_hosts,
+        )
+        .unwrap();
+
+        let selected = Destination::parse("me@devbox").unwrap();
+        let other = Destination::parse("me@otherbox").unwrap();
+        assert!(identity.host_key_pinned(&selected));
+        assert!(identity.host_key_pinned(&other));
+        assert!(identity.forget_host_key(&selected).unwrap());
+        assert!(!identity.host_key_pinned(&selected));
+        assert!(identity.host_key_pinned(&other));
+        assert!(!identity.forget_host_key(&selected).unwrap());
+        let contents = std::fs::read_to_string(known_hosts).unwrap();
+        assert!(!contents.contains("devbox"));
+        assert!(contents.contains("otherbox"));
+
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

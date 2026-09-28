@@ -158,6 +158,7 @@ pub(crate) fn stored_to_chat_message(msg: StoredMessage) -> crate::llm::ChatMess
         tool_calls,
         tool_call_id: msg.tool_call_id,
         name: msg.tool_name,
+        edit_preview: None,
         is_error: msg.is_error,
         synthetic: false,
         reasoning: None,
@@ -748,15 +749,19 @@ impl SessionDb {
         Ok(())
     }
 
-    /// The most recent conversation and whether it holds any messages, or
-    /// `None` when the database is empty. Used at boot to resume the last
-    /// conversation in place (a non-empty one) or recycle a trailing empty row
-    /// instead of minting a fresh conversation on every launch.
+    /// The most recent durable conversation and whether it holds any messages,
+    /// or `None` when no durable state exists. Fully empty legacy rows are
+    /// ignored even when a read-only database handle bypassed startup pruning.
     pub fn latest_conversation(&self) -> rusqlite::Result<Option<(i64, bool)>> {
         self.conn
             .query_row(
                 "SELECT c.id, EXISTS(SELECT 1 FROM messages m WHERE m.conversation_id = c.id) \
-                 FROM conversations c ORDER BY c.id DESC LIMIT 1",
+                 FROM conversations c
+                 WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
+                    OR EXISTS (SELECT 1 FROM usage_events u WHERE u.conversation_id = c.id)
+                    OR EXISTS (SELECT 1 FROM conversation_context_checkpoints p
+                               WHERE p.conversation_id = c.id)
+                 ORDER BY c.id DESC LIMIT 1",
                 [],
                 |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)? != 0)),
             )
@@ -808,6 +813,10 @@ impl SessionDb {
                              WHERE m.conversation_id = c.id
                          ), c.started_at) AS updated_at
                  FROM conversations c
+                 WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conversation_id = c.id)
+                    OR EXISTS (SELECT 1 FROM usage_events u WHERE u.conversation_id = c.id)
+                    OR EXISTS (SELECT 1 FROM conversation_context_checkpoints p
+                               WHERE p.conversation_id = c.id)
                  ORDER BY updated_at DESC, c.id DESC
                  LIMIT ?1
              ),
@@ -1250,12 +1259,13 @@ impl SessionDb {
         tx.commit()
     }
 
-    /// Remove fully empty conversations left by older versions after they ended.
+    /// Remove fully empty conversations left by older versions, regardless of
+    /// whether they were marked ended. A row with any message, usage event, or
+    /// context checkpoint is durable state and is intentionally retained.
     fn prune_ended_empty_conversations(&self) -> rusqlite::Result<usize> {
         self.conn.execute(
             "DELETE FROM conversations
-             WHERE ended_at IS NOT NULL
-               AND NOT EXISTS (
+             WHERE NOT EXISTS (
                    SELECT 1 FROM messages WHERE conversation_id = conversations.id
                )
                AND NOT EXISTS (

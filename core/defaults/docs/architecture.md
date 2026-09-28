@@ -60,6 +60,20 @@ The daemon owns `RuntimeSession` and constructs `Driver`s. This is true both for
 the in-process daemon used with the TUI and for standalone `bone serve`. A TUI
 or desktop client sends commands and renders events; it does not own authoritative
 transcript, approval, job, or configuration state.
+A session may remain ephemeral while its transcript is empty. New sessions and
+`/new` detachments do not create a SQLite conversation row; the daemon allocates
+the durable conversation when the first message that needs persistence arrives,
+including locally appended context, and writes that message immediately. A first
+user prompt is still written before building the turn driver. Empty conversations
+are excluded from history and are removed rather than retained as durable
+placeholders.
+
+Managed actors therefore keep a stable process-local `actor_id` separately from
+the optional durable `conversation_id`. Routing can continue to follow `Latest`
+while an actor is ephemeral, and `Conversation(id)` becomes available after lazy
+allocation. This identity split keeps lifecycle and persistence daemon-owned
+without making a frontend guess whether a chat has been saved.
+
 
 ## Turn execution
 

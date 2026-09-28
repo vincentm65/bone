@@ -156,6 +156,11 @@ struct Plan {
     output: String,
 }
 
+struct EditResult {
+    content: String,
+    preview: String,
+}
+
 struct Failure {
     message: String,
     shown: Vec<usize>,
@@ -203,7 +208,9 @@ impl Tool for EditFileTool {
     }
 
     async fn execute(&self, arguments: Value) -> Result<String, String> {
-        run_edit(arguments, None, None).await
+        run_edit(arguments, None, None)
+            .await
+            .map(|result| result.content)
     }
 
     async fn execute_output_live(
@@ -218,7 +225,11 @@ impl Tool for EditFileTool {
             context.working_dir.as_deref(),
         )
         .await
-        .map(ToolOutput::text)
+        .map(|result| ToolOutput {
+            content: result.content,
+            edit_preview: Some(result.preview),
+            ..Default::default()
+        })
     }
 }
 
@@ -254,7 +265,7 @@ async fn run_edit(
     arguments: Value,
     snapshots: Option<&Snapshots>,
     working_dir: Option<&Path>,
-) -> Result<String, String> {
+) -> Result<EditResult, String> {
     let (path_arg, edits) = parse_args(arguments)?;
     let resolved = snapshot::resolve_existing_path(&path_arg, working_dir).await?;
     let path = resolved.to_string_lossy().into_owned();
@@ -283,6 +294,7 @@ async fn run_edit(
         }
     };
 
+    let preview = diff::build_unified_diff(TOOL_NAME, &path, &live, &plan.edited);
     let permissions = fs::metadata(&resolved)
         .await
         .map_err(|e| format!("could not re-check `{path}` before writing: {e}"))?
@@ -304,7 +316,10 @@ async fn run_edit(
             Some(&plan.seen),
         );
     }
-    Ok(plan.output)
+    Ok(EditResult {
+        content: plan.output,
+        preview,
+    })
 }
 
 fn store_view(

@@ -2,6 +2,7 @@
 
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
+use crate::ansi;
 use crate::theme::Theme;
 use crate::{Message, ToolDisplay};
 use crate::{markdown, wrap};
@@ -73,6 +74,10 @@ fn render_tool_with_hint(
     lines: &mut Vec<Line<'static>>,
     options: ToolRenderOptions,
 ) {
+    // Shell output and command replies can carry ANSI escapes; the transcript
+    // paints styled cells, so strip them rather than showing literal `[0m`.
+    let content = ansi::strip_ansi(content);
+    let content = content.as_ref();
     let marker = if tool.is_error { "✕ " } else { "  " };
     let name_style = tool_name_style(tool, theme);
     let rest_style = tool_rest_style(tool, theme);
@@ -974,14 +979,18 @@ fn wrap_user_line(raw_line: &str, first_line: bool, width: usize) -> Vec<String>
 }
 
 fn render_content(msg: &Message, theme: &Theme, lines: &mut Vec<Line<'static>>, width: u16) {
-    if matches!(msg.role, ChatRole::System) && msg.content.starts_with("\n") {
-        render_diff_preview(&msg.content, theme, lines, width as usize);
+    // Roles below bypass Markdown (`User`, `Tool`) or hand text to it, so the
+    // sanitized content is computed once here for every role.
+    let content = ansi::strip_ansi(&msg.content);
+    let content = content.as_ref();
+    if matches!(msg.role, ChatRole::System) && content.starts_with('\n') {
+        render_diff_preview(content, theme, lines, width as usize);
         return;
     }
 
     match msg.role {
         ChatRole::User => {
-            for (idx, raw_line) in msg.content.lines().enumerate() {
+            for (idx, raw_line) in content.lines().enumerate() {
                 for visual_line in wrap_user_line(raw_line, idx == 0, width as usize) {
                     lines.push(Line::from(Span::styled(
                         visual_line,
@@ -996,7 +1005,7 @@ fn render_content(msg: &Message, theme: &Theme, lines: &mut Vec<Line<'static>>, 
                     format!("image {idx} (PNG)")
                 };
                 for visual_line in
-                    wrap_user_line(&label, msg.content.is_empty() && idx == 1, width as usize)
+                    wrap_user_line(&label, content.is_empty() && idx == 1, width as usize)
                 {
                     lines.push(Line::from(Span::styled(
                         visual_line,
@@ -1006,7 +1015,7 @@ fn render_content(msg: &Message, theme: &Theme, lines: &mut Vec<Line<'static>>, 
             }
         }
         ChatRole::Assistant => {
-            let rendered = markdown::render_markdown(&msg.content, width, theme);
+            let rendered = markdown::render_markdown(content, width, theme);
             lines.extend(rendered);
         }
         ChatRole::System => {
@@ -1014,10 +1023,10 @@ fn render_content(msg: &Message, theme: &Theme, lines: &mut Vec<Line<'static>>, 
             // muted markdown, so catalog items can use inline styling (e.g.
             // /recap's italic summary) while the block reads as secondary.
             // Diff previews take the earlier branch.
-            lines.extend(markdown::render_markdown_muted(&msg.content, width, theme));
+            lines.extend(markdown::render_markdown_muted(content, width, theme));
         }
         ChatRole::Tool => {
-            for raw_line in msg.content.lines() {
+            for raw_line in content.lines() {
                 for visual_line in wrap::wrap_text(raw_line, width as usize) {
                     lines.push(Line::from(Span::styled(
                         visual_line,
@@ -1317,5 +1326,51 @@ mod tests {
                 .iter()
                 .any(|line| line.contains("⋮ +2 terminal lines"))
         );
+    }
+
+    fn flattened(lines: &[Line<'static>]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Command replies (`/usage`, `/help`) and shell output can embed ANSI
+    /// escapes, which must paint as plain text rather than literal `[0m`.
+    #[test]
+    fn ansi_styled_command_reply_renders_as_plain_text() {
+        let lines = msg_to_lines(
+            &[Message::system(
+                "\x1b[2m\x1b[36mPlan\x1b[0m \x1b[37m42%\x1b[0m",
+            )],
+            &Theme::default(),
+            None,
+            60,
+            false,
+        );
+        let text = flattened(&lines);
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(!text.contains("[0m"), "{text:?}");
+        assert!(text.contains("Plan 42%"), "{text:?}");
+    }
+
+    #[test]
+    fn ansi_styled_shell_output_renders_as_plain_text() {
+        let row = crate::tool_display::shell_row(
+            "probe",
+            "\x1b[31merror\x1b[0m: boom".to_string(),
+            false,
+        );
+        let lines = msg_to_lines(&[row], &Theme::default(), None, 60, true);
+        let text = flattened(&lines);
+        assert!(!text.contains('\u{1b}'), "{text:?}");
+        assert!(!text.contains("[0m"), "{text:?}");
+        assert!(text.contains("error: boom"), "{text:?}");
     }
 }

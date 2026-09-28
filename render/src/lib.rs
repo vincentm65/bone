@@ -2,6 +2,7 @@
 //! tool rows and previews, wrapping, and the color theme, producing styled
 //! terminal lines. Frontends only decide how to paint those lines.
 
+pub mod ansi;
 pub mod approval;
 pub mod clipboard;
 pub mod color;

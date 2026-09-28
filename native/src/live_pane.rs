@@ -20,6 +20,8 @@ const AGENTS: &str = "jobs";
 const PROCESSES: &str = "processes";
 const QUEUE: &str = "queue";
 const THINKING_ROWS: usize = 10;
+/// Bytes of reasoning tail retained between segments.
+const HELD_THINKING_BYTES: usize = 8192;
 
 /// What a click on a live-pane row opens or answers.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +32,22 @@ pub(crate) enum Open {
     Click(String),
     /// An approval choice by index.
     Approval(usize),
+    /// A queue row or an existing queue footer hint.
+    Queue(QueueAction),
+}
+
+/// Actions exposed by the queue's existing footer hints.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum QueueAction {
+    Select(usize),
+    SelectUp,
+    SelectDown,
+    MoveUp,
+    MoveDown,
+    Send,
+    Edit,
+    Remove,
+    Clear,
 }
 
 pub(crate) struct Page {
@@ -114,6 +132,11 @@ pub(crate) struct LivePane {
     pub job_focused: bool,
     pub process_focused: bool,
     pub queue: usize,
+    /// Latest reasoning tail, held after a segment settles so the thinking
+    /// page stays on screen (at a constant height) for the whole turn.
+    held_thinking: String,
+    /// Chat pane width in cells, used to wrap the thinking page.
+    cols: u16,
 }
 
 impl LivePane {
@@ -153,10 +176,42 @@ impl LivePane {
             pages.push(Page::with_targets(page, targets));
         }
         if let Some(page) = panes::queue::render(sources.queue, self.queue, theme) {
-            pages.push(Page::plain(page));
+            let mut targets: Vec<Option<Open>> = (0..sources.queue.len())
+                .map(|index| Some(Open::Queue(QueueAction::Select(index))))
+                .collect();
+            targets.extend([None, None]);
+            let mut page = Page::with_targets(page, targets);
+            let footer = sources.queue.len();
+            let hints = panes::queue::HINTS;
+            let mut spans = Vec::new();
+            for (label, action) in [
+                ("↑/↓", QueueAction::SelectDown),
+                ("⇧↑/⇧↓", QueueAction::MoveDown),
+                ("Enter", QueueAction::Send),
+                ("F2", QueueAction::Edit),
+                ("Del", QueueAction::Remove),
+                ("Ctrl+D", QueueAction::Clear),
+            ] {
+                if let Some(byte) = hints.find(label) {
+                    let from = hints[..byte].chars().count();
+                    let to = from + label.chars().count();
+                    spans.push((from, to, Open::Queue(action)));
+                }
+            }
+            page.spans = vec![Vec::new(); footer + 2];
+            page.spans[footer] = spans;
+            pages.push(page);
         }
-        if let Some(text) = sources.thinking.filter(|text| !text.trim().is_empty()) {
-            pages.push(Page::plain(panes::thinking(text, THINKING_ROWS, theme)));
+        let live = sources.thinking.filter(|text| !text.trim().is_empty());
+        let held = Some(self.held_thinking.as_str()).filter(|text| !text.trim().is_empty());
+        if let Some(text) = live.or(held) {
+            let cols = usize::from(self.cols).max(20);
+            pages.push(Page::plain(panes::thinking_fixed(
+                text,
+                cols,
+                THINKING_ROWS,
+                theme,
+            )));
         }
         if let Some((content, choices)) = sources.approval {
             let visible_rows = content.len();
@@ -203,6 +258,25 @@ impl LivePane {
         }
     }
 
+    /// Track the turn's reasoning so the thinking page persists between
+    /// segments: remember the newest tail while `busy` and drop it when the
+    /// turn ends. Also records the pane width used for wrapping.
+    pub fn hold_thinking(&mut self, live: Option<&str>, busy: bool, cols: u16) {
+        self.cols = cols;
+        if !busy {
+            self.held_thinking.clear();
+            return;
+        }
+        if let Some(live) = live.filter(|text| !text.trim().is_empty()) {
+            let mut start = live.len().saturating_sub(HELD_THINKING_BYTES);
+            while !live.is_char_boundary(start) {
+                start += 1;
+            }
+            self.held_thinking.clear();
+            self.held_thinking.push_str(&live[start..]);
+        }
+    }
+
     /// Clear keyboard focus while retaining the last row selections.
     pub fn clear_focus(&mut self) {
         self.job_focused = false;
@@ -217,6 +291,7 @@ impl LivePane {
         self.job = None;
         self.process = None;
         self.queue = 0;
+        self.held_thinking.clear();
         self.clear_focus();
     }
 
@@ -250,14 +325,14 @@ impl LivePane {
     }
 
     /// Draw the active page. Returns what a clicked row opens.
-    pub fn show(&mut self, ui: &mut egui::Ui, pages: &[Page]) -> Option<Open> {
+    pub fn show(&mut self, ui: &mut egui::Ui, pages: &[Page], touch: bool) -> Option<Open> {
         let index = self
             .active
             .as_ref()
             .and_then(|id| pages.iter().position(|page| &page.page.source == id))?;
         let page = &pages[index];
         if pages.len() > 1 {
-            ui.label(
+            let header = ui.label(
                 egui::RichText::new(format!(
                     "{}  [{}/{}]  Tab to switch",
                     page.page.title,
@@ -266,6 +341,18 @@ impl LivePane {
                 ))
                 .weak(),
             );
+            if touch
+                && ui
+                    .interact(
+                        header.rect,
+                        ui.id().with(("live-header", page.page.source.as_str())),
+                        egui::Sense::click(),
+                    )
+                    .clicked()
+            {
+                self.cycle();
+                return None;
+            }
         }
         let content = &page.page.content;
         let rows = panes::clamped_pane_visible_rows(page.page.visible_rows);
@@ -373,12 +460,57 @@ mod tests {
     }
 
     #[test]
+    fn thinking_page_keeps_constant_height_through_the_turn() {
+        let queue = VecDeque::new();
+        let view = ViewModel::default();
+        let mut pane = LivePane::default();
+        for live in [Some("one"), Some("one\ntwo\nthree"), None] {
+            pane.hold_thinking(live, true, 40);
+            let built = pane.pages(
+                Sources {
+                    view: &view,
+                    jobs: &[],
+                    processes: &[],
+                    thinking: live,
+                    queue: &queue,
+                    approval: None,
+                },
+                &Theme::default(),
+            );
+            let page = built
+                .iter()
+                .find(|page| page.page.source == "thinking")
+                .expect("thinking page stays up during the turn");
+            assert_eq!(page.page.visible_rows, THINKING_ROWS);
+        }
+        pane.hold_thinking(None, false, 40);
+        assert!(pages(&pane, &view, &queue).is_empty());
+    }
+
+    #[test]
     fn queued_prompts_are_a_selectable_list_page() {
         let queue: VecDeque<String> = ["first".to_string(), "second".to_string()].into();
         let mut pane = LivePane::default();
         let built = pages(&pane, &ViewModel::default(), &queue);
         pane.sync(&built, &[], &[]);
         assert_eq!(pane.active_list(), Some(QUEUE));
+    }
+
+    #[test]
+    fn queue_rows_and_footer_hints_are_tap_targets() {
+        let queue: VecDeque<String> = ["first".to_string(), "second".to_string()].into();
+        let pane = LivePane::default();
+        let built = pages(&pane, &ViewModel::default(), &queue);
+        let page = built
+            .iter()
+            .find(|page| page.page.source == QUEUE)
+            .expect("queue page");
+        assert_eq!(page.targets[0], Some(Open::Queue(QueueAction::Select(0))));
+        assert!(
+            page.spans[queue.len()]
+                .iter()
+                .any(|(_, _, target)| { matches!(target, Open::Queue(QueueAction::Send)) })
+        );
     }
 
     #[test]
@@ -472,5 +604,78 @@ mod tests {
                 (9, 14, Open::Click("tab:2".into()))
             ]
         );
+    }
+
+    #[test]
+    fn scrolled_menu_taps_return_the_absolute_visible_row_target() {
+        let lines = (0..6)
+            .map(|index| {
+                let value = format!("value-{index}");
+                PaneLineSpec::Spans {
+                    spans: vec![bone_protocol::PaneSpanSpec {
+                        text: format!("Option {index}"),
+                        fg: None,
+                        modifiers: Vec::new(),
+                        click: Some(value.clone()),
+                    }],
+                    bg: None,
+                    click: Some(value),
+                }
+            })
+            .collect();
+        let view = ViewModel {
+            components: vec![Component::float_from_pane_content(&PaneContent {
+                source: "menu".into(),
+                title: "Menu".into(),
+                visible_rows: 2,
+                scroll: 0,
+                placement: None,
+                owner: None,
+                lines,
+            })],
+            ..Default::default()
+        };
+        let queue = VecDeque::new();
+        let mut pane = LivePane::default();
+        let built = pages(&pane, &view, &queue);
+        pane.sync(&built, &[], &[]);
+        pane.scroll_by(2);
+
+        let ctx = egui::Context::default();
+        let mut tap = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(320.0, 160.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                let origin = ui.available_rect_before_wrap().min;
+                let row_height = grid::metrics(ui).row_height;
+                tap = Some(egui::pos2(origin.x + 4.0, origin.y + row_height * 1.5));
+                assert!(pane.show(ui, &built, true).is_none());
+            },
+        );
+        output.textures_delta.clear();
+        let tap = tap.expect("menu row position");
+        let press = |pressed| egui::Event::PointerButton {
+            pos: tap,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut opened = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events: vec![egui::Event::PointerMoved(tap), press(true), press(false)],
+                ..Default::default()
+            },
+            |ui| opened = pane.show(ui, &built, true),
+        );
+        output.textures_delta.clear();
+
+        assert_eq!(opened, Some(Open::Click("value-3".into())));
     }
 }

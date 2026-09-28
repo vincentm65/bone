@@ -224,6 +224,13 @@ Commands are invoked as `/name args`. A command can return:
 - a display table with `display`, `reply`, or `content` and `submit = false`; or
 - an action table to request a supported daemon state mutation.
 
+Command output is plain text. Core strips ANSI/VT escape sequences from `display`,
+`reply`, and `content` before any frontend draws it, so a `\x1b[2m` dim or
+`\x1b[36m` cyan label appears as its plain characters and never as raw escape
+bytes. The escapes are ignored, not interpreted: a plugin cannot color or dim
+command output this way and should use message roles or theme components instead.
+`\n` and `\t` are preserved; other control bytes are removed.
+
 The `conversation.replace` action replaces the model-facing transcript with
 validated `user`, `assistant`, and `tool` messages. Core recomputes the context
 estimate, persists a checkpoint, and keeps complete SQLite display history.

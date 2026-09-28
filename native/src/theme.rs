@@ -25,6 +25,10 @@ const CJK_FALLBACKS: &[&str] = &[
 
 /// Embedded fonts keep the desktop consistent across machines; egui's original
 /// fallback chain remains available for symbols and characters outside Latin.
+///
+/// Inter/JetBrains Mono cover text but not the symbol ranges core UI uses
+/// (braille spinner frames, box drawing, `✻`/`⧗`/`◑`); Adwaita Mono is
+/// appended as the last fallback in both families to fill those gaps.
 pub fn install_fonts(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     for (name, bytes) in [
@@ -40,6 +44,10 @@ pub fn install_fonts(ctx: &egui::Context) {
             "JetBrains Mono",
             include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf").as_slice(),
         ),
+        (
+            "Adwaita Mono",
+            include_bytes!("../assets/fonts/AdwaitaMono-Regular.ttf").as_slice(),
+        ),
     ] {
         fonts
             .font_data
@@ -50,16 +58,20 @@ pub fn install_fonts(ctx: &egui::Context) {
         .get_mut(&egui::FontFamily::Proportional)
         .unwrap();
     proportional.insert(0, "Inter".into());
+    proportional.push("Adwaita Mono".into());
     let mut semibold = proportional.clone();
     semibold.insert(0, "Inter SemiBold".into());
     fonts
         .families
         .insert(egui::FontFamily::Name("semibold".into()), semibold);
-    fonts
+    let monospace = fonts
         .families
         .get_mut(&egui::FontFamily::Monospace)
-        .unwrap()
-        .insert(0, "JetBrains Mono".into());
+        .unwrap();
+    monospace.insert(0, "JetBrains Mono".into());
+    // Before egui's built-ins: Adwaita Mono is a monospace face with the same
+    // advance width, so fallback glyphs stay on the terminal cell grid.
+    monospace.insert(1, "Adwaita Mono".into());
     // The bundled fonts have no CJK glyphs; fall back to a system font when one
     // is installed.
     if let Some(bytes) = CJK_FALLBACKS
@@ -412,6 +424,88 @@ mod tests {
         });
         assert!(!output.shapes.is_empty());
         output.textures_delta.clear();
+    }
+
+    /// Bundled default spinner presets, read from the Lua the daemon ships so a
+    /// new preset cannot silently introduce a glyph the desktop cannot draw.
+    const SPINNER_PRESETS: &str = include_str!("../../core/defaults/lua/core/lib/ui/spinners.lua");
+
+    /// Symbols the shared renderer draws with the monospace family: collapsed
+    /// markers (`⋮`), live-pane headers (`✻`), job/process states (`⧗ ◑`), the
+    /// block/box/arrow glyphs used by statuses and tool gutters, and the
+    /// `kaomoji` accent glyphs.
+    const CORE_UI_GLYPHS: &str = "⋮ ✻ ⧗ ◑ ◐ ✓ ✗ ✕ ⚠ │ ─ · — … › → ← ↑ ↓ ■ ● ○ ▸ ▲ ▶ ▼ ◀ ▏ ▎ ▍ ▌ ▋ ▊ ▉ ▁ ▃ ▅ ▇ ▂ ▄ ▆ ░ ▒ █ ╰ ╭ ╮ ╯ ├ ┤ ┼ ┏ ┓ ┗ ┛ ┃ ▰ ◕ ‿ ◠ ✿ ▽ ᴗ ~ ‾";
+
+    /// Every frame/phrase literal in the bundled spinner presets.
+    fn spinner_frames() -> Vec<String> {
+        let mut frames = Vec::new();
+        let mut entries = 0;
+        for line in SPINNER_PRESETS.lines() {
+            for key in ["frames = ", "phrases = "] {
+                let Some((_, rest)) = line.split_once(key) else {
+                    continue;
+                };
+                entries += 1;
+                let mut chars = rest.chars();
+                while let Some(ch) = chars.next() {
+                    if ch != '"' {
+                        continue;
+                    }
+                    let mut frame = String::new();
+                    for ch in chars.by_ref() {
+                        if ch == '"' {
+                            break;
+                        }
+                        frame.push(ch);
+                    }
+                    frames.push(frame);
+                }
+            }
+        }
+        assert!(entries >= 8, "parsed only {entries} spinner entries");
+        frames
+    }
+
+    /// The desktop paints the transcript, panes, and status bar on a character
+    /// cell grid using the monospace family; a codepoint no face covers is
+    /// drawn as egui's replacement box — the blank square users saw in place of
+    /// the thinking spinner.
+    #[test]
+    fn monospace_family_covers_rendered_glyphs() {
+        let ctx = egui::Context::default();
+        install_fonts(&ctx);
+        // Fonts are only resolved after one pass.
+        let mut output = ctx.run_ui(egui::RawInput::default(), |_ui| {});
+        let mono = egui::FontId::monospace(14.0);
+        // `has_glyph` is unusable here: it reports false for every char owned by
+        // the face egui chose as its replacement-glyph face, and that face
+        // (Adwaita Mono, which owns `◻`) covers exactly the symbols JetBrains
+        // Mono lacks. Probe drawability by advance width instead: a char no
+        // face covers resolves to a face without a glyph for it and measures 0.
+        let missing = ctx.fonts_mut(|view| {
+            let mut missing: Vec<String> = spinner_frames()
+                .iter()
+                .filter(|frame| frame.chars().any(|ch| view.glyph_width(&mono, ch) == 0.0))
+                .cloned()
+                .collect();
+            missing.extend(
+                CORE_UI_GLYPHS
+                    .chars()
+                    .filter(|ch| !ch.is_whitespace() && view.glyph_width(&mono, *ch) == 0.0)
+                    .map(|ch| format!("U+{:04X} {ch}", ch as u32)),
+            );
+            assert!(view.glyph_width(&mono, 'A') > 0.0, "probe font missing");
+            // Negative control: a codepoint none of the bundled or built-in
+            // faces covers must measure zero, or the probe proves nothing.
+            assert_eq!(
+                view.glyph_width(&mono, '\u{10800}'),
+                0.0,
+                "probe undiscriminating"
+            );
+            missing
+        });
+        output.textures_delta.clear();
+        assert!(missing.is_empty(), "undrawable glyphs: {missing:?}");
     }
 
     #[test]

@@ -70,6 +70,9 @@ pub struct Launcher {
     last_area: egui::Rect,
     /// The focused text field's last keyboard request (see [`Launcher::ui`]).
     last_ime: Option<egui::output::IMEOutput>,
+    /// Focus id associated with `last_ime`; prevents replaying a request for a
+    /// field that has since been closed or replaced.
+    last_ime_focus: Option<egui::Id>,
     data_dir: PathBuf,
     /// The app's SSH key, or why it could not be loaded.
     identity: Result<Arc<Identity>, String>,
@@ -78,6 +81,11 @@ pub struct Launcher {
     error: String,
     /// The last theme payload seen, cached in [`THEME_FILE`].
     theme: Option<serde_json::Value>,
+    /// The copy button gives explicit feedback instead of silently relying on
+    /// the platform clipboard.
+    key_copied: bool,
+    /// A second tap is required before deleting a pinned host key.
+    forget_host_pending: Option<Destination>,
     /// When the current connection attempt started.
     connecting_since: Option<std::time::Instant>,
     app: Option<DesktopApp>,
@@ -99,6 +107,9 @@ impl Launcher {
             visible_area,
             last_area: egui::Rect::NOTHING,
             last_ime: None,
+            last_ime_focus: None,
+            key_copied: false,
+            forget_host_pending: None,
             destination: lines.next().unwrap_or_default().to_string(),
             bone: lines.next().unwrap_or("bone").to_string(),
             data_dir,
@@ -134,6 +145,7 @@ impl Launcher {
             format!("{}\n{bone}\n", self.destination.trim()),
         );
         self.error.clear();
+        self.forget_host_pending = None;
         let connector = SshConnector {
             identity,
             destination,
@@ -148,39 +160,126 @@ impl Launcher {
     }
 
     fn connect_screen(&mut self, ui: &mut egui::Ui) {
+        // The embedded Android window has no separate navigation bar. A Back
+        // press first dismisses the keyboard by surrendering the focused field;
+        // only a second Back leaves the launcher. Desktop preview keeps its
+        // normal window behavior.
+        let android_back = self.visible_area.is_some()
+            && ui.input_mut(|input| {
+                input.consume_key(egui::Modifiers::NONE, egui::Key::BrowserBack)
+            });
+        if android_back {
+            if let Some(id) = ui.memory(|memory| memory.focused()) {
+                ui.memory_mut(|memory| {
+                    memory.surrender_focus(id);
+                    memory.stop_text_input();
+                });
+                self.last_ime = None;
+                self.last_ime_focus = None;
+            } else {
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+        }
+
+        let mut connect = false;
+        let mut forget = false;
+        let mut cancel_forget = false;
         let frame = egui::Frame::new()
             .fill(ui.visuals().panel_fill)
             .inner_margin(16);
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
+                let width = ui.available_width();
                 ui.heading("bone");
                 ui.add_space(12.0);
                 ui.weak("Computer (user@host or user@host:port)");
-                ui.add(
+                let destination = ui.add(
                     egui::TextEdit::singleline(&mut self.destination)
+                        .id(egui::Id::new("android-destination"))
                         .hint_text("me@100.64.0.1")
-                        .desired_width(f32::INFINITY),
-                );
-                ui.add_space(4.0);
-                ui.weak("Path to bone on the computer");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.bone)
-                        .hint_text("bone")
-                        .desired_width(f32::INFINITY),
+                        .desired_width(f32::INFINITY)
+                        .min_size(egui::vec2(0.0, 36.0))
+                        .return_key(egui::KeyboardShortcut::new(
+                            egui::Modifiers::NONE,
+                            egui::Key::Enter,
+                        )),
                 );
                 ui.add_space(8.0);
-                if ui
-                    .add_enabled(
-                        !self.destination.trim().is_empty(),
-                        egui::Button::new("Connect"),
-                    )
-                    .clicked()
-                {
-                    self.connect(ui.ctx());
+                ui.weak("Path to bone on the computer");
+                let bone = ui.add(
+                    egui::TextEdit::singleline(&mut self.bone)
+                        .id(egui::Id::new("android-bone-path"))
+                        .hint_text("bone")
+                        .font(egui::TextStyle::Monospace)
+                        .desired_width(f32::INFINITY)
+                        .min_size(egui::vec2(0.0, 36.0))
+                        .return_key(egui::KeyboardShortcut::new(
+                            egui::Modifiers::NONE,
+                            egui::Key::Enter,
+                        )),
+                );
+                ui.add_space(10.0);
+                let can_connect = !self.destination.trim().is_empty();
+                let button = ui
+                    .add_enabled_ui(can_connect, |ui| {
+                        ui.add_sized([width, 40.0], egui::Button::new("Connect"))
+                    })
+                    .inner;
+                connect = can_connect
+                    && (button.clicked()
+                        || (ui.input(|input| input.key_pressed(egui::Key::Enter))
+                            && (destination.lost_focus() || bone.lost_focus())));
+
+                let parsed = ssh::Destination::parse(&self.destination).ok();
+                let pinned = match (self.identity.as_ref(), parsed.as_ref()) {
+                    (Ok(identity), Some(destination)) => identity.host_key_pinned(destination),
+                    _ => false,
+                };
+                if pinned {
+                    ui.add_space(10.0);
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        format!("Host key pinned for {}.", self.destination.trim()),
+                    );
+                    ui.weak("A changed host key is refused. Forget it only after verifying the computer.");
+                    if self.forget_host_pending.as_ref() == parsed.as_ref() {
+                        ui.add_space(4.0);
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            "Forget this pin and trust the next key on reconnect?",
+                        );
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_sized([width * 0.55, 36.0], egui::Button::new("Forget pin"))
+                                .clicked()
+                            {
+                                forget = true;
+                            }
+                            if ui
+                                .add_sized([width * 0.35, 36.0], egui::Button::new("Keep"))
+                                .clicked()
+                            {
+                                cancel_forget = true;
+                            }
+                        });
+                    } else if ui
+                        .add_sized([width, 36.0], egui::Button::new("Forget pinned host key"))
+                        .clicked()
+                    {
+                        self.forget_host_pending = parsed.clone();
+                    }
+                } else if parsed.is_some() {
+                    ui.add_space(10.0);
+                    ui.weak("The first successful connection pins this computer's host key; changed keys are refused.");
                 }
+
                 if !self.error.is_empty() {
-                    ui.add_space(8.0);
+                    ui.add_space(10.0);
                     ui.colored_label(ui.visuals().error_fg_color, &self.error);
+                }
+                if let Err(error) = &self.identity {
+                    ui.add_space(8.0);
+                    ui.colored_label(ui.visuals().error_fg_color, error);
                 }
                 if let Ok(identity) = &self.identity {
                     ui.add_space(20.0);
@@ -190,14 +289,44 @@ impl Launcher {
                         egui::TextEdit::multiline(&mut line)
                             .font(egui::TextStyle::Monospace)
                             .desired_rows(3)
-                            .desired_width(f32::INFINITY),
+                            .desired_width(f32::INFINITY)
+                            .interactive(false),
                     );
-                    if ui.button("Copy key").clicked() {
+                    let label = if self.key_copied {
+                        "Copied ✓"
+                    } else {
+                        "Copy key"
+                    };
+                    if ui
+                        .add_sized([width, 40.0], egui::Button::new(label))
+                        .clicked()
+                    {
                         ui.ctx().copy_text(identity.public_line());
+                        self.key_copied = true;
+                    }
+                    if self.key_copied {
+                        ui.weak("Copied to the clipboard. Append the full line to authorized_keys.");
                     }
                 }
             });
         });
+        if cancel_forget {
+            self.forget_host_pending = None;
+        }
+        if forget {
+            let destination = self.forget_host_pending.take();
+            match (self.identity.as_ref(), destination) {
+                (Ok(identity), Some(destination)) => match identity.forget_host_key(&destination) {
+                    Ok(true) => self.error.clear(),
+                    Ok(false) => self.error = "No pinned host key was found.".into(),
+                    Err(error) => self.error = format!("Could not forget host key: {error}"),
+                },
+                _ => self.error = "Enter a valid user@host before forgetting its key.".into(),
+            }
+        }
+        if connect {
+            self.connect(ui.ctx());
+        }
     }
 }
 
@@ -226,6 +355,8 @@ impl Launcher {
                 Some(reason) => {
                     self.error = reason.to_string();
                     self.app = None;
+                    self.last_ime = None;
+                    self.last_ime_focus = None;
                     restyle(ui.ctx(), self.theme.as_ref());
                 }
                 None => {
@@ -262,6 +393,31 @@ impl Launcher {
         }
         self.connect_screen(ui);
     }
+    fn sync_ime(&mut self, ctx: &egui::Context) {
+        let focused = ctx.memory(|memory| memory.focused());
+        match (ctx.output(|output| output.ime), focused) {
+            (Some(ime), Some(focused)) => {
+                // Never repeat a one-off composition reset when Android asks us
+                // to replay the keyboard request during a layout animation.
+                self.last_ime = Some(egui::output::IMEOutput {
+                    should_interrupt_composition: false,
+                    ..ime
+                });
+                self.last_ime_focus = Some(focused);
+            }
+            (None, Some(focused)) if self.last_ime_focus == Some(focused) => {
+                // A visible-area change can make the editor omit IME output for
+                // one frame. Keep the same request alive for the same field.
+                ctx.output_mut(|output| output.ime = self.last_ime);
+            }
+            _ => {
+                // Focus loss, tab/page closure, or a different editor must not
+                // inherit a stale keyboard request.
+                self.last_ime = None;
+                self.last_ime_focus = None;
+            }
+        }
+    }
 }
 
 /// The app's fonts and style, in `theme` when one is cached.
@@ -294,20 +450,7 @@ impl eframe::App for Launcher {
         // view. When a layout shift (live pane, keyboard animation) pushes the
         // input out of view for one frame, Android would hide and reshow the
         // keyboard; keep the request while a field still has focus.
-        let ctx = ui.ctx();
-        match ctx.output(|output| output.ime) {
-            // Replays must not repeat a one-off keyboard reset.
-            Some(ime) => {
-                self.last_ime = Some(egui::output::IMEOutput {
-                    should_interrupt_composition: false,
-                    ..ime
-                })
-            }
-            None if ctx.memory(|memory| memory.focused().is_some()) => {
-                ctx.output_mut(|output| output.ime = self.last_ime);
-            }
-            None => self.last_ime = None,
-        }
+        self.sync_ime(ui.ctx());
     }
 }
 
@@ -374,6 +517,136 @@ mod tests {
                 }
                 _ => None,
             })
+    }
+
+    fn connect_frame(
+        launcher: &mut Launcher,
+        ctx: &egui::Context,
+        events: Vec<egui::Event>,
+    ) -> egui::FullOutput {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 800.0),
+                )),
+                events,
+                ..Default::default()
+            },
+            |ui| launcher.connect_screen(ui),
+        );
+        output.textures_delta.clear();
+        output
+    }
+
+    fn key_event(key: egui::Key) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        }
+    }
+
+    #[test]
+    fn enter_on_the_destination_field_starts_connecting() {
+        let dir = std::env::temp_dir().join(format!("bone-android-enter-{}", std::process::id()));
+        let ctx = egui::Context::default();
+        let mut launcher = Launcher::new(&ctx, dir.clone(), None);
+        launcher.destination = "me@example.test".into();
+        launcher.bone = "bone".into();
+        let _ = connect_frame(&mut launcher, &ctx, Vec::new());
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("android-destination")));
+        let _ = connect_frame(&mut launcher, &ctx, vec![key_event(egui::Key::Enter)]);
+
+        assert!(launcher.app.is_some(), "Enter should use the connect path");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_pending_forget_for_another_destination_does_not_confirm() {
+        let dir = std::env::temp_dir().join(format!("bone-android-forget-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ctx = egui::Context::default();
+        let mut launcher = Launcher::new(&ctx, dir.clone(), None);
+        let known_hosts = dir.join("known_hosts");
+        for (host, seed) in [("devbox", 1), ("otherbox", 2)] {
+            let key = russh::keys::PrivateKey::from(
+                russh::keys::ssh_key::private::Ed25519Keypair::from_seed(&[seed; 32]),
+            );
+            russh::keys::known_hosts::learn_known_hosts_path(
+                host,
+                22,
+                key.public_key(),
+                &known_hosts,
+            )
+            .unwrap();
+        }
+
+        launcher.forget_host_pending = Some(Destination::parse("me@devbox").unwrap());
+        launcher.destination = "me@otherbox".into();
+        let output = connect_frame(&mut launcher, &ctx, Vec::new());
+        assert!(text_top(&output, "Forget pinned host key").is_some());
+        assert!(text_top(&output, "Forget this pin").is_none());
+        let identity = launcher.identity.as_ref().unwrap();
+        assert!(identity.host_key_pinned(&Destination::parse("me@devbox").unwrap()));
+        assert!(identity.host_key_pinned(&Destination::parse("me@otherbox").unwrap()));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn android_back_surrenders_connect_field_focus_before_closing() {
+        let dir = std::env::temp_dir().join(format!("bone-android-back-{}", std::process::id()));
+        let ctx = egui::Context::default();
+        let area: VisibleArea = Box::new(|| [0, 0, 400, 800]);
+        let mut launcher = Launcher::new(&ctx, dir.clone(), Some(area));
+        let _ = connect_frame(&mut launcher, &ctx, Vec::new());
+        ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("android-destination")));
+        let _ = connect_frame(&mut launcher, &ctx, Vec::new());
+        assert_eq!(
+            ctx.memory(|memory| memory.focused()),
+            Some(egui::Id::new("android-destination"))
+        );
+
+        let _ = connect_frame(&mut launcher, &ctx, vec![key_event(egui::Key::BrowserBack)]);
+        assert!(launcher.app.is_none());
+        assert!(ctx.memory(|memory| memory.focused()).is_none());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn ime_replay_requires_the_same_focused_editor() {
+        let dir = std::env::temp_dir().join(format!("bone-android-ime-{}", std::process::id()));
+        let ctx = egui::Context::default();
+        let mut launcher = Launcher::new(&ctx, dir.clone(), None);
+        let ime = egui::output::IMEOutput {
+            purpose: egui::IMEPurpose::Normal,
+            rect: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(100.0, 30.0)),
+            cursor_rect: egui::Rect::from_min_size(egui::pos2(4.0, 4.0), egui::vec2(1.0, 20.0)),
+            should_interrupt_composition: true,
+        };
+        let expected = egui::output::IMEOutput {
+            should_interrupt_composition: false,
+            ..ime
+        };
+        let mut frame = |focus: &str, ime: Option<egui::output::IMEOutput>| {
+            let mut synced = None;
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                ui.memory_mut(|memory| memory.request_focus(egui::Id::new(focus)));
+                ui.output_mut(|output| output.ime = ime);
+                launcher.sync_ime(ui.ctx());
+                synced = ui.ctx().output(|output| output.ime);
+            });
+            output.textures_delta.clear();
+            synced
+        };
+
+        frame("ime-field", Some(ime));
+        assert_eq!(frame("ime-field", None), Some(expected));
+        assert_eq!(frame("other-field", None), None);
+        assert!(launcher.last_ime.is_none() && launcher.last_ime_focus.is_none());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

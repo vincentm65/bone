@@ -306,41 +306,39 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
         let settings = factory_config.runtime_settings_handle();
         let mut boot = boot_runtime_host_for(provider, &factory_config, target, settings, true)
             .map_err(|err| err.to_string())?;
-        let conversation_id = boot
-            .session
-            .lock()
-            .unwrap()
-            .conversation_id
-            .ok_or_else(|| "runtime has no durable conversation id".to_string())?;
-        // Each conversation actor should report and use the provider/model this
-        // conversation was created with, not the daemon's boot default. Look up
-        // the stored pair and rebuild the provider when it differs. (A brand-new
-        // conversation was just minted with the boot provider, so it matches and
-        // this is a no-op.)
-        if let Some((want_provider, want_model)) =
-            bone::session_db::SessionDb::open(&bone::session_db::db_path())
-                .ok()
-                .and_then(|db| {
-                    db.conversation_provider_model(conversation_id)
-                        .ok()
-                        .flatten()
-                })
-        {
-            let matches =
-                want_provider == boot.provider.id() && want_model == boot.provider.model();
-            if !matches {
-                match bone::llm::providers::build_provider(
-                    &want_provider,
-                    &want_model,
-                    &providers_config,
-                ) {
-                    Ok(p) => boot.provider = std::sync::Arc::from(p),
-                    Err(err) => eprintln!(
-                        "bone: warning: conversation {conversation_id} wants provider \
-                         `{want_provider}` but it could not be built ({err}); \
-                         using {}",
-                        boot.provider.id()
-                    ),
+        let (actor_id, conversation_id) = {
+            let session = boot.session.lock().unwrap();
+            (session.actor_id(), session.conversation_id)
+        };
+        // Existing durable conversations carry their provider/model metadata.
+        // New managed actors are intentionally metadata-free until their first
+        // prompt allocates a row using the current provider.
+        if let Some(conversation_id) = conversation_id {
+            if let Some((want_provider, want_model)) =
+                bone::session_db::SessionDb::open(&bone::session_db::db_path())
+                    .ok()
+                    .and_then(|db| {
+                        db.conversation_provider_model(conversation_id)
+                            .ok()
+                            .flatten()
+                    })
+            {
+                let matches =
+                    want_provider == boot.provider.id() && want_model == boot.provider.model();
+                if !matches {
+                    match bone::llm::providers::build_provider(
+                        &want_provider,
+                        &want_model,
+                        &providers_config,
+                    ) {
+                        Ok(p) => boot.provider = std::sync::Arc::from(p),
+                        Err(err) => eprintln!(
+                            "bone: warning: conversation {conversation_id} wants provider \
+                             `{want_provider}` but it could not be built ({err}); \
+                             using {}",
+                            boot.provider.id()
+                        ),
+                    }
                 }
             }
         }
@@ -365,6 +363,7 @@ async fn run_serve(args: &[String]) -> std::io::Result<()> {
             daemon_projection,
         ));
         Ok(bone::rpc::ManagedRuntime {
+            actor_id,
             conversation_id,
             hub,
             projection,

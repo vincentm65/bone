@@ -600,6 +600,27 @@ fn ui_status_without_frontend_is_inert() {
     lua.load("ctx.ui.status('headless line')").exec().unwrap();
 }
 
+#[test]
+fn interactive_ui_widths_are_local_to_each_request() {
+    let shared_ui = std::sync::Arc::new(std::sync::Mutex::new(crate::ext::api_ui::UiState {
+        terminal_width: 80,
+        ..Default::default()
+    }));
+
+    let mut cfg = test_ctx_config();
+    cfg.ui = Some(shared_ui.clone());
+    cfg.terminal_width = Some(41);
+    let lua = Lua::new();
+    lua.globals()
+        .set("ctx", create_ctx_table(&lua, &cfg).unwrap())
+        .unwrap();
+
+    let width = || -> u16 { lua.load("return ctx.ui.width()").eval().unwrap() };
+    assert_eq!(width(), 41);
+    shared_ui.lock().unwrap().terminal_width = 203;
+    assert_eq!(width(), 41);
+}
+
 // ── AppCtxState parity (commands ⇆ tools share one ctx) ─────────────────────
 
 fn sample_app_state(system_prompt_override: Option<String>) -> AppCtxState {

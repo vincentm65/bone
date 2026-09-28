@@ -5,7 +5,7 @@
 use bone_protocol::{HostRequest, HostResponse, ProcessSnapshot, RuntimeCommand};
 use bone_render::Message;
 use bone_render::screens::{
-    Key,
+    Key, TouchAction,
     catalog::{CatalogKeyAction, CatalogScreen},
     host,
     process::{ProcessAction, ProcessScreen},
@@ -138,6 +138,65 @@ impl Page {
         }
     }
 
+    /// Map a touch on an existing page row/footer to the same key path as the
+    /// keyboard. Full-screen geometry is supplied by the native cell painter.
+    pub fn touch_key(&self, row: u16, col: u16, cols: u16, rows: u16) -> Option<TouchAction> {
+        match &self.screen {
+            Screen::Stats(screen) => screen.touch_key(row, col, cols, rows),
+            Screen::Setup(Some(screen)) => screen.touch_key(row, col, cols, rows),
+            Screen::Catalog(Some(screen)) => screen.touch_key(row, col, cols, rows),
+            Screen::Process(screen) => screen
+                .touch_key(row, col, cols, rows)
+                .map(|key| TouchAction::Keys(vec![key])),
+            Screen::Transcript(screen) => screen
+                .touch_key(row, col, cols, rows)
+                .map(|key| TouchAction::Keys(vec![key])),
+            _ => None,
+        }
+    }
+
+    /// Whether this page exposes the setup provider API-key editor.
+    pub fn setup_api_key_available(&self) -> bool {
+        matches!(&self.screen, Screen::Setup(Some(screen)) if screen.api_key_editor_available())
+    }
+
+    /// Terminal rows occupied by the setup provider API-key field.
+    pub fn setup_api_key_rows(&self, rows: u16) -> Option<(u16, u16)> {
+        match &self.screen {
+            Screen::Setup(Some(screen)) => screen.api_key_rows(rows),
+            _ => None,
+        }
+    }
+
+    /// Borrow the setup provider API key for the native frontend's invisible
+    /// egui editor.
+    pub fn setup_api_key_mut(&mut self) -> Option<&mut String> {
+        match &mut self.screen {
+            Screen::Setup(Some(screen)) => screen.api_key_mut(),
+            _ => None,
+        }
+    }
+
+    /// Turn a vertical touch swipe into repeated page keys. This preserves the
+    /// existing bounded scroll state instead of maintaining a second viewport.
+    pub fn swipe(&mut self, delta_y: f32, row_height: f32) -> Effect {
+        if !matches!(
+            self.screen,
+            Screen::Stats(_) | Screen::Process(_) | Screen::Transcript(_)
+        ) {
+            return Effect::None;
+        }
+        let (code, count) = swipe_plan(delta_y, row_height);
+        let mut effect = Effect::None;
+        for _ in 0..count {
+            effect = self.handle_key(Key::plain(code));
+            if !matches!(effect, Effect::None) {
+                break;
+            }
+        }
+        effect
+    }
+
     /// Mouse-wheel scrolling, in notches (positive scrolls down).
     pub fn scroll(&mut self, notches: i64) {
         let lines = notches * bone_render::screens::transcript::MOUSE_WHEEL_LINES as i64;
@@ -231,6 +290,16 @@ impl Page {
     }
 }
 
+fn swipe_plan(delta_y: f32, row_height: f32) -> (bone_render::screens::KeyCode, usize) {
+    let code = if delta_y < 0.0 {
+        bone_render::screens::KeyCode::Down
+    } else {
+        bone_render::screens::KeyCode::Up
+    };
+    let count = ((delta_y.abs() / row_height.max(1.0)).round() as usize).clamp(1, 32);
+    (code, count)
+}
+
 fn stats_effect(action: StatsAction) -> Effect {
     match action {
         StatsAction::None => Effect::None,
@@ -246,4 +315,94 @@ fn one_line(text: &str, max: usize) -> String {
     }
     let kept: String = flat.chars().take(max.saturating_sub(1)).collect();
     format!("{kept}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bone_protocol::{CatalogItem, CatalogSnapshot, ProviderChoice, SetupSnapshot};
+    use bone_render::screens::{KeyCode, TouchAction};
+
+    fn setup_page() -> Page {
+        let mut screen = SetupScreen::new(
+            false,
+            SetupSnapshot {
+                config_revision: 1,
+                providers: vec![ProviderChoice {
+                    id: "demo".into(),
+                    label: "Demo".into(),
+                    api_key_configured: false,
+                    api_key_required: true,
+                }],
+                active_provider: "demo".into(),
+                init_exists: false,
+                needs_onboarding: false,
+                catalog: CatalogSnapshot {
+                    revision: "catalog-1".into(),
+                    items: Vec::new(),
+                },
+            },
+            &Theme::default(),
+        );
+        assert!(matches!(
+            screen.handle_key(Key::plain(KeyCode::Right)),
+            SetupAction::None
+        ));
+        Page {
+            screen: Screen::Setup(Some(screen)),
+            title: "setup".into(),
+            chat: 1,
+            pending: None,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn touch_key_dispatches_setup_catalog_stats_and_api_key_actions() {
+        let setup = setup_page();
+        assert!(matches!(
+            setup.touch_key(8, 4, 80, 20),
+            Some(TouchAction::Keys(_))
+        ));
+        assert_eq!(setup.touch_key(16, 4, 80, 20), Some(TouchAction::ApiKey));
+
+        let catalog = Page {
+            screen: Screen::Catalog(Some(CatalogScreen::new(
+                CatalogSnapshot {
+                    revision: "catalog-1".into(),
+                    items: vec![CatalogItem {
+                        name: "demo".into(),
+                        description: "Demo".into(),
+                        ..CatalogItem::default()
+                    }],
+                },
+                &Theme::default(),
+            ))),
+            title: "catalog".into(),
+            chat: 1,
+            pending: None,
+            error: None,
+        };
+        assert!(matches!(
+            catalog.touch_key(7, 3, 80, 20),
+            Some(TouchAction::Keys(_))
+        ));
+
+        let (stats, _) = Page::stats(1, &Theme::default());
+        assert_eq!(
+            stats.touch_key(2, 2, 80, 20),
+            Some(TouchAction::Keys(vec![Key::plain(KeyCode::Char('d'))]))
+        );
+    }
+
+    #[test]
+    fn page_swipes_preserve_the_existing_vertical_key_direction_and_count() {
+        assert_eq!(
+            swipe_plan(-4.0, 2.0),
+            (KeyCode::Down, 2),
+            "an upward finger swipe reveals later rows"
+        );
+        assert_eq!(swipe_plan(4.0, 2.0), (KeyCode::Up, 2));
+        assert_eq!(swipe_plan(100.0, 1.0), (KeyCode::Up, 32));
+    }
 }

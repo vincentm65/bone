@@ -76,27 +76,7 @@ pub(crate) fn info(inputs: Inputs<'_>) -> StatusInfo {
             })
             .unwrap_or_default()
     };
-    let style = ui_str("spinner_style");
-    let (mut spinner_frames, mut spinner_speed_ms) = presets("spinner_styles")
-        .iter()
-        .find(|preset| preset.get("name").and_then(Value::as_str) == Some(style.as_str()))
-        .map(|preset| {
-            let speed = match ui_u64("spinner_speed") {
-                0 => preset.get("speed").and_then(Value::as_u64).unwrap_or(0),
-                speed => speed,
-            };
-            (strings(preset.get("frames")), speed)
-        })
-        .unwrap_or_default();
-    if spinner_frames.is_empty() {
-        spinner_frames = FALLBACK_SPINNER_FRAMES
-            .iter()
-            .map(|s| s.to_string())
-            .collect();
-        if spinner_speed_ms == 0 {
-            spinner_speed_ms = FALLBACK_SPINNER_SPEED_MS;
-        }
-    }
+    let (spinner_frames, spinner_speed_ms) = spinner_style(inputs.settings);
     let custom = ui_str("spinner_custom");
     let spinner_texts = if custom.trim().is_empty() {
         let text = ui_str("spinner_text");
@@ -155,16 +135,108 @@ pub(crate) fn info(inputs: Inputs<'_>) -> StatusInfo {
     }
 }
 
-/// Draw the status bar as one terminal row.
-pub(crate) fn show(ui: &mut egui::Ui, info: &StatusInfo, theme: &bone_render::theme::Theme) {
+/// A spinner's frames and milliseconds per frame.
+pub(crate) type Spinner = (Vec<String>, u64);
+
+/// The daemon-resolved spinner style, falling back to the braille frames so a
+/// running turn is never unmarked.
+fn spinner_style(settings: Option<&Value>) -> Spinner {
+    let ui = |key: &str| settings.and_then(|settings| settings.pointer(&format!("/ui/{key}")));
+    let style = ui("spinner_style")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let speed_override = ui("spinner_speed").and_then(Value::as_u64).unwrap_or(0);
+    let preset = settings
+        .and_then(|settings| settings.get("spinner_styles"))
+        .and_then(Value::as_array)
+        .and_then(|presets| {
+            presets
+                .iter()
+                .find(|preset| preset.get("name").and_then(Value::as_str) == Some(style))
+        });
+    let mut frames: Vec<String> = preset
+        .and_then(|preset| preset.get("frames"))
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    let mut speed_ms = preset.map_or(0, |preset| match speed_override {
+        0 => preset.get("speed").and_then(Value::as_u64).unwrap_or(0),
+        speed => speed,
+    });
+    if frames.is_empty() {
+        frames = FALLBACK_SPINNER_FRAMES
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        if speed_ms == 0 {
+            speed_ms = FALLBACK_SPINNER_SPEED_MS;
+        }
+    }
+    (frames, speed_ms)
+}
+
+/// The spinner for tabs and history rows, which have room for one glyph: the
+/// configured style when every frame is a single character, else braille.
+pub(crate) fn indicator_style(settings: Option<&Value>) -> Spinner {
+    let (frames, speed_ms) = spinner_style(settings);
+    if frames.iter().all(|frame| frame.chars().count() == 1) {
+        (frames, speed_ms)
+    } else {
+        (
+            FALLBACK_SPINNER_FRAMES
+                .iter()
+                .map(|s| s.to_string())
+                .collect(),
+            FALLBACK_SPINNER_SPEED_MS,
+        )
+    }
+}
+
+/// Paint the current spinner frame centred on `center` and keep repainting.
+pub(crate) fn paint_indicator(
+    ui: &egui::Ui,
+    center: egui::Pos2,
+    color: egui::Color32,
+    (frames, speed_ms): &Spinner,
+) {
+    let speed_ms = (*speed_ms).max(16);
+    let tick = (ui.input(|input| input.time) * 1000.0) as u64 / speed_ms;
+    ui.painter().text(
+        center,
+        egui::Align2::CENTER_CENTER,
+        &frames[tick as usize % frames.len()],
+        egui::TextStyle::Monospace.resolve(ui.style()),
+        color,
+    );
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(speed_ms));
+}
+
+/// Draw the status bar as one terminal row. Touch screens on narrow layouts
+/// use the compact renderer so safety/activity indicators win over token detail.
+pub(crate) fn show(
+    ui: &mut egui::Ui,
+    info: &StatusInfo,
+    theme: &bone_render::theme::Theme,
+    compact: bool,
+) {
     let metrics = crate::grid::metrics(ui);
     let (rect, _) = ui.allocate_exact_size(
         egui::vec2(ui.available_width(), metrics.row_height),
         egui::Sense::hover(),
     );
-    crate::grid::paint_screen(ui, rect, |frame| {
+    let _ = crate::grid::paint_screen(ui, rect, |frame| {
         let area = frame.area();
-        bone_render::status::draw_status_bar(frame, info, theme, area);
+        if compact {
+            bone_render::status::draw_status_bar_compact(frame, info, theme, area);
+        } else {
+            bone_render::status::draw_status_bar(frame, info, theme, area);
+        }
     });
     if info.streaming {
         ui.ctx()

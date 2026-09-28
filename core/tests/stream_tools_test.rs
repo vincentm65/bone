@@ -89,6 +89,7 @@ impl Tool for PaneTool {
             images: Vec::new(),
             ephemeral_images: false,
             pane_page: Some(pane),
+            edit_preview: None,
             state: None,
         })
     }

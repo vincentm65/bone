@@ -24,6 +24,8 @@ pub(crate) struct Cache {
     expanded: Vec<bool>,
     /// Ctrl+O: expand every row (a clicked row flips against it).
     expand_all: bool,
+    /// Mouse selection over the flattened lines, for copying.
+    selection: Option<Selection>,
 }
 
 impl Cache {
@@ -33,6 +35,7 @@ impl Cache {
             lines: Vec::new(),
             expanded: Vec::new(),
             expand_all: false,
+            selection: None,
         }
     }
 
@@ -95,24 +98,10 @@ impl Cache {
         if cols != self.cols {
             self.cols = cols;
             self.invalidate();
+            self.selection = None;
         }
         for i in 0..rows.len() {
-            if self.lines[i].is_none() {
-                let prev = i.checked_sub(1).map(|p| row_role(&rows[p].0));
-                let lines = row_message(&rows[i], cards.get(i).and_then(Option::as_ref), displays)
-                    .map(|message| {
-                        let lines = messages::msg_to_lines(
-                            &[message],
-                            theme,
-                            prev,
-                            cols,
-                            self.expanded[i] != self.expand_all,
-                        );
-                        terminal_rows(&lines, cols, theme)
-                    })
-                    .unwrap_or_default();
-                self.lines[i] = Some(lines);
-            }
+            self.layout(i, rows, cards, displays, theme);
         }
         let tops: Vec<f32> = self
             .lines
@@ -123,16 +112,12 @@ impl Cache {
                 Some(top)
             })
             .collect();
-        let total = self
-            .lines
-            .last()
-            .zip(tops.last())
-            .map_or(0.0, |(lines, top)| {
-                top + lines.as_ref().map_or(0, Vec::len) as f32 * row_height
-            });
+        let total = self.height(row_height);
         let default_fg = ui.visuals().text_color();
         let mut toggled = None;
-        let output = egui::ScrollArea::vertical()
+        let mut selection = self.selection;
+        let cols = self.cols;
+        let mut output = egui::ScrollArea::vertical()
             .id_salt("transcript")
             .auto_shrink([false, false])
             .stick_to_bottom(stick_to_bottom)
@@ -140,9 +125,61 @@ impl Cache {
                 ui.set_height(total);
                 ui.set_width(ui.available_width());
                 let origin = ui.max_rect().min;
+                let total_lines = (total / row_height).round() as usize;
+                let locate = |pos: egui::Pos2| -> (usize, u16) {
+                    let line = (((pos.y - origin.y) / row_height).floor().max(0.0) as usize)
+                        .min(total_lines.saturating_sub(1));
+                    let col = (((pos.x - origin.x) / cell).round().max(0.0) as u16).min(cols);
+                    (line, col)
+                };
+                let tool_row_at = |line: usize| -> Option<usize> {
+                    let y = line as f32 * row_height;
+                    let i = tops.partition_point(|top| *top <= y).checked_sub(1)?;
+                    (rows[i].0.starts_with("tool:") && !self.lines[i].as_deref()?.is_empty())
+                        .then_some(i)
+                };
+                let full =
+                    egui::Rect::from_min_size(origin, egui::vec2(ui.max_rect().width(), total));
+                let response = ui.interact(
+                    full,
+                    ui.id().with("transcript-select"),
+                    egui::Sense::click_and_drag(),
+                );
+                if let Some(pos) = response.hover_pos() {
+                    ui.ctx()
+                        .set_cursor_icon(if tool_row_at(locate(pos).0).is_some() {
+                            egui::CursorIcon::PointingHand
+                        } else {
+                            egui::CursorIcon::Text
+                        });
+                }
+                if let Some(pos) = response.interact_pointer_pos() {
+                    if response.drag_started() {
+                        selection = Some((locate(pos), locate(pos)));
+                    } else if response.dragged()
+                        && let Some((anchor, _)) = selection
+                    {
+                        selection = Some((anchor, locate(pos)));
+                    }
+                    if response.clicked() {
+                        selection = None;
+                        toggled = tool_row_at(locate(pos).0);
+                    }
+                }
+                let sel = selection.map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
+                if let Some((start, end)) = sel
+                    && ui.input(|input| input.events.iter().any(|e| matches!(e, egui::Event::Copy)))
+                {
+                    let flat: Vec<&TermRow> = self
+                        .lines
+                        .iter()
+                        .flat_map(|lines| lines.as_deref().unwrap_or_default().iter())
+                        .collect();
+                    ui.ctx().copy_text(selected_text(&flat, start, end));
+                    ui.input_mut(|input| input.events.retain(|e| !matches!(e, egui::Event::Copy)));
+                }
                 let first = tops.partition_point(|top| *top + row_height <= viewport.min.y);
-                for i in first.saturating_sub(1)..rows.len() {
-                    let top = tops[i];
+                for (i, &top) in tops.iter().enumerate().skip(first.saturating_sub(1)) {
                     if top > viewport.max.y {
                         break;
                     }
@@ -153,29 +190,133 @@ impl Cache {
                             egui::pos2(origin.x, y),
                             egui::vec2(ui.max_rect().width(), row_height),
                         );
-                        grid::paint_row(ui, rect, &metrics, line, default_fg);
-                    }
-                    if rows[i].0.starts_with("tool:") && !lines.is_empty() {
-                        let rect = egui::Rect::from_min_size(
-                            egui::pos2(origin.x, origin.y + top),
-                            egui::vec2(ui.max_rect().width(), lines.len() as f32 * row_height),
-                        );
-                        let response = ui
-                            .interact(rect, ui.id().with(("tool-row", i)), egui::Sense::click())
-                            .on_hover_cursor(egui::CursorIcon::PointingHand);
-                        if response.clicked() {
-                            toggled = Some(i);
+                        let g = (top / row_height).round() as usize + n;
+                        if let Some((start, end)) = sel
+                            && let Some((from, to)) = selected_span(g, start, end, cols)
+                        {
+                            ui.painter().rect_filled(
+                                egui::Rect::from_min_max(
+                                    egui::pos2(origin.x + from as f32 * cell, y),
+                                    egui::pos2(origin.x + to as f32 * cell, y + row_height),
+                                ),
+                                0.0,
+                                ui.visuals().selection.bg_fill,
+                            );
                         }
+                        grid::paint_row(ui, rect, &metrics, line, default_fg);
                     }
                 }
             });
+        self.selection = selection;
         if let Some(i) = toggled {
             self.expanded[i] = !self.expanded[i];
             self.lines[i] = None;
+            // Lay the row out now and fix the scroll offset for the new height
+            // before the next frame paints. egui only clamps (or re-sticks) the
+            // offset after painting the content, so leaving it would draw one
+            // frame at the stale offset: blank after collapsing a long output,
+            // or shifted after expanding at the bottom. No repaint follows that
+            // correction, so the wrong frame stayed up until the pointer moved.
+            self.layout(i, rows, cards, displays, theme);
+            let total = self.height(row_height);
+            let max_offset = (total - output.inner_rect.height()).max(0.0);
+            output.state.offset.y = if stick_to_bottom {
+                max_offset
+            } else {
+                output.state.offset.y.min(max_offset)
+            };
+            output.content_size.y = total;
+            output.state.store(ui.ctx(), output.id);
             ui.ctx().request_repaint();
         }
         output
     }
+
+    /// Lay out row `i` into terminal rows unless it is already cached.
+    fn layout(
+        &mut self,
+        i: usize,
+        rows: &[(String, String)],
+        cards: &[Option<ToolCard>],
+        displays: &HashMap<String, ToolDisplayConfig>,
+        theme: &Theme,
+    ) {
+        if self.lines[i].is_some() {
+            return;
+        }
+        let prev = i.checked_sub(1).map(|p| row_role(&rows[p].0));
+        let lines = row_message(&rows[i], cards.get(i).and_then(Option::as_ref), displays)
+            .map(|message| {
+                let lines = messages::msg_to_lines(
+                    &[message],
+                    theme,
+                    prev,
+                    self.cols,
+                    self.expanded[i] != self.expand_all,
+                );
+                terminal_rows(&lines, self.cols, theme)
+            })
+            .unwrap_or_default();
+        self.lines[i] = Some(lines);
+    }
+
+    /// Total content height of the laid-out rows.
+    fn height(&self, row_height: f32) -> f32 {
+        self.lines
+            .iter()
+            .map(|lines| lines.as_ref().map_or(0, Vec::len))
+            .sum::<usize>() as f32
+            * row_height
+    }
+}
+
+/// A selection over flattened transcript lines: (line, cell column) anchor
+/// and head, in either order.
+type Selection = ((usize, u16), (usize, u16));
+
+/// Cell range of line `g` inside the ordered selection `(start, end)`.
+fn selected_span(
+    g: usize,
+    start: (usize, u16),
+    end: (usize, u16),
+    cols: u16,
+) -> Option<(u16, u16)> {
+    if g < start.0 || g > end.0 {
+        return None;
+    }
+    let from = if g == start.0 { start.1 } else { 0 };
+    let to = if g == end.0 { end.1 } else { cols };
+    (to > from).then_some((from, to))
+}
+
+/// Plain text of the cells `from..to` of one terminal row.
+fn row_text(line: &TermRow, from: u16, to: u16) -> String {
+    let mut text = String::new();
+    for run in line {
+        let mut col = run.col;
+        for ch in run.text.chars() {
+            let width = unicode_width::UnicodeWidthChar::width(ch)
+                .unwrap_or(1)
+                .max(1) as u16;
+            if col >= from && col < to {
+                text.push(ch);
+            }
+            col += width;
+        }
+    }
+    text.trim_end().to_owned()
+}
+
+/// Plain text of an ordered selection over flattened lines.
+fn selected_text(flat: &[&TermRow], start: (usize, u16), end: (usize, u16)) -> String {
+    (start.0..=end.0)
+        .filter_map(|g| {
+            let line = flat.get(g)?;
+            let (from, to) = selected_span(g, start, end, u16::MAX).unwrap_or((0, 0));
+            Some(row_text(line, from, to))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The TUI role a desktop row renders as.
@@ -336,5 +477,95 @@ mod tests {
             .flat_map(|row| row.iter().map(|run| run.text.clone()))
             .collect();
         assert!(text.contains("Title") && text.contains("bold"), "{text}");
+    }
+
+    /// Clicking a tool row must leave the scroll offset valid for the new
+    /// height before the next frame paints; otherwise that frame is drawn at
+    /// the stale offset (a blank or shifted chat).
+    #[test]
+    fn toggling_a_tool_row_fixes_the_scroll_offset_before_the_next_frame() {
+        let output: String = (1..=200).map(|n| format!("{n}\n")).collect();
+        let rows = vec![
+            ("user".to_string(), "count".to_string()),
+            ("tool: shell".to_string(), output),
+        ];
+        let cards = vec![
+            None,
+            Some(ToolCard {
+                name: "shell".into(),
+                state: ToolState::Done,
+                args: Some("seq 200".into()),
+                started: None,
+            }),
+        ];
+        let theme = Theme::default();
+        let ctx = egui::Context::default();
+        let mut cache = Cache::new();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(480.0, 240.0));
+        let frame = |events: Vec<egui::Event>, cache: &mut Cache| {
+            let mut result = None;
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| result = Some(cache.show(ui, true, &rows, &cards, &HashMap::new(), &theme)),
+            );
+            out.textures_delta.clear();
+            result.unwrap()
+        };
+        let click = |pos| {
+            let press = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            vec![egui::Event::PointerMoved(pos), press(true), press(false)]
+        };
+        let bottom = |output: &egui::scroll_area::ScrollAreaOutput<()>| {
+            (output.content_size.y - output.inner_rect.height()).max(0.0)
+        };
+
+        // The tool row's first line, in screen coordinates.
+        let tool_row = |output: &egui::scroll_area::ScrollAreaOutput<()>, cache: &Cache| {
+            let line_count: usize = cache.lines.iter().flatten().map(Vec::len).sum();
+            let row_height = output.content_size.y / line_count as f32;
+            let top = cache.lines[0].as_ref().map_or(0, Vec::len) as f32 * row_height;
+            egui::pos2(
+                output.inner_rect.left() + 10.0,
+                output.inner_rect.top() + top - output.state.offset.y + row_height / 2.0,
+            )
+        };
+
+        frame(Vec::new(), &mut cache);
+        let first = frame(Vec::new(), &mut cache);
+        let collapsed = first.content_size.y;
+        let tap = tool_row(&first, &cache);
+        frame(vec![egui::Event::PointerMoved(tap)], &mut cache);
+
+        let expanded = frame(click(tap), &mut cache);
+        assert!(cache.expanded[1]);
+        let stored = egui::scroll_area::State::load(&ctx, expanded.id).unwrap();
+        assert!(
+            expanded.content_size.y > collapsed,
+            "{} {}",
+            expanded.content_size.y,
+            collapsed
+        );
+        assert_eq!(stored.offset.y, bottom(&expanded));
+
+        // Settle at the bottom of the expanded output, where a collapse would
+        // otherwise leave the viewport past the end of the content.
+        let settled = frame(Vec::new(), &mut cache);
+        assert_eq!(settled.state.offset.y, bottom(&settled));
+        let tap = tool_row(&settled, &cache);
+        let tap = egui::pos2(tap.x, tap.y.max(settled.inner_rect.top() + 2.0));
+        frame(vec![egui::Event::PointerMoved(tap)], &mut cache);
+        let collapsed = frame(click(tap), &mut cache);
+        assert!(!cache.expanded[1]);
+        let stored = egui::scroll_area::State::load(&ctx, collapsed.id).unwrap();
+        assert!(stored.offset.y <= bottom(&collapsed), "{}", stored.offset.y);
     }
 }

@@ -72,6 +72,24 @@ creation and stale-file replacement in a temporary config directory. Never claim
 materialized docs exist until startup synchronization has been implemented and
 validated.
 
+## UI glyph coverage
+
+Desktop UI text is drawn from bundled fonts onto a character grid, so new spinner
+frames, box or block drawing, and decorative text are a font-coverage question.
+Inspect a candidate face with `fc-query --format=%{charset}` on the bundled file in
+`native/assets/fonts/`; `native/src/theme.rs` asserts that every bundled spinner
+preset and the core UI glyph set is drawable by the installed chain.
+
+Do not check coverage with egui's `has_glyph`/`has_glyphs`. `epaint` chooses the
+replacement face as the first face of a family that covers its own replacement
+character, and the bundled monospace fallback covers that character, so every
+glyph the fallback provides — exactly the set worth verifying — reports
+`has_glyph == false`. Probe advance width instead: after one `Context::run_ui` pass
+has resolved the fonts, `FontsView::glyph_width` returns `0.0` for a character no
+face provides and a positive value otherwise. Keep a positive control (a Latin
+letter must be nonzero) and a negative control (a codepoint the bundle does not
+cover, such as `U+10800`, must be zero) in the test so it cannot pass vacuously.
+
 ## Safety and review
 
 Use dedicated file tools for text contents, read before editing, and use shell

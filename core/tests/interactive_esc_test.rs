@@ -165,6 +165,7 @@ bone.command.register("picker", {
             request_id: None,
             name: "picker".into(),
             input: "".into(),
+            terminal_width: None,
         })
         .unwrap();
 
@@ -200,6 +201,7 @@ bone.command.register("picker", {
             request_id: None,
             name: "config".into(),
             input: "".into(),
+            terminal_width: None,
         })
         .unwrap();
     reply_next_key(&mut events, &cmd_tx, "Down").await;

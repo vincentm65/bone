@@ -59,6 +59,20 @@ impl TranscriptScreen {
         self.scroll = Some((scroll.max(0) as usize).min(self.max_scroll()));
     }
 
+    /// Map the existing close hint in the footer to Escape.
+    pub fn touch_key(&self, row: u16, col: u16, _width: u16, height: u16) -> Option<Key> {
+        if row + 1 != height {
+            return None;
+        }
+        let scroll = "↑/↓ PgUp/PgDn Home/End scroll";
+        let close = " · q/Esc/Ctrl+O close";
+        let start = scroll.chars().count() as u16;
+        let end = start + close.chars().count() as u16;
+        (start..end)
+            .contains(&col)
+            .then_some(Key::plain(KeyCode::Esc))
+    }
+
     fn max_scroll(&self) -> usize {
         self.lines.len().saturating_sub(self.height)
     }
@@ -102,5 +116,21 @@ impl TranscriptScreen {
             )])),
             chunks[1],
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn touch_on_the_existing_close_hint_returns_escape() {
+        let screen = TranscriptScreen::new(Vec::new(), false);
+        let start = "↑/↓ PgUp/PgDn Home/End scroll".chars().count() as u16;
+        assert_eq!(
+            screen.touch_key(9, start + 4, 80, 10).map(|key| key.code),
+            Some(KeyCode::Esc)
+        );
+        assert!(screen.touch_key(9, 0, 80, 10).is_none());
     }
 }

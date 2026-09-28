@@ -148,6 +148,8 @@ pub struct CtxConfig {
     /// `ctx.ui.pane` push `ViewDiff`s directly into this handle (no channel),
     /// so the TUI can drain them even while the VM lock is held.
     pub ui: Option<super::api_ui::SharedUi>,
+    /// Width supplied by an interactive frontend for request-local Lua UI wrapping.
+    pub terminal_width: Option<u16>,
     pub call_id: Option<String>,
     pub tool_handler: Option<crate::tools::registry::ToolHandler>,
     pub approval_mode: crate::tools::ApprovalMode,
@@ -203,6 +205,7 @@ impl CtxConfig {
             shared_state,
             key_sender: None,
             ui: None,
+            terminal_width: None,
             call_id: None,
             tool_handler: None,
             approval_mode: crate::tools::ApprovalMode::Safe,
@@ -1273,12 +1276,13 @@ fn build_ui_table(lua: &Lua, cfg: &CtxConfig) -> Result<Table, mlua::Error> {
         ui_table.set("pane", pane_unavailable_fn)?;
     }
 
-    // ctx.ui.width() → current terminal width in columns (0 when unknown).
-    // Read fresh each call from the shared handle (the renderer republishes it
-    // every frame), so interactive panes can wrap text to the live width.
+    // ctx.ui.width() → the request's terminal width when supplied by an interactive
+    // frontend; otherwise read the renderer's shared width (0 when unknown).
     if let Some(ui_state) = cfg.ui.clone() {
+        let request_width = cfg.terminal_width;
         let width_fn = lua.create_function(move |_, _: ()| {
-            let width = ui_state.lock().map(|ui| ui.terminal_width).unwrap_or(0);
+            let width = request_width
+                .unwrap_or_else(|| ui_state.lock().map(|ui| ui.terminal_width).unwrap_or(0));
             Ok(width)
         })?;
         ui_table.set("width", width_fn)?;

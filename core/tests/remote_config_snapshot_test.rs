@@ -154,6 +154,7 @@ bone.command.register("cfgapply", {
             request_id: None,
             name: "cfgapply".into(),
             input: "".into(),
+            terminal_width: None,
         })
         .unwrap();
     cmd_tx.send(RuntimeCommand::GetConfig).unwrap();

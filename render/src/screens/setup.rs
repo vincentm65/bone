@@ -7,7 +7,7 @@
 //! canonical `subagents.yaml`. The daemon supplies the snapshot and persists
 //! the returned plan; this module owns only interaction and rendering.
 
-use super::{Key, KeyCode};
+use super::{Key, KeyCode, TouchAction, cursor_keys};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -179,6 +179,115 @@ impl SetupScreen {
             _ => {}
         }
         SetupAction::None
+    }
+
+    /// Whether the provider step has a touch-editable API-key field.
+    pub fn api_key_editor_available(&self) -> bool {
+        matches!(self.state.step, Step::Provider) && !self.state.providers.is_empty()
+    }
+
+    /// Borrow the provider-step API key for the native frontend's invisible
+    /// egui editor. The rendered field remains the ratatui-masked row.
+    pub fn api_key_mut(&mut self) -> Option<&mut String> {
+        if self.api_key_editor_available() {
+            Some(&mut self.state.api_key)
+        } else {
+            None
+        }
+    }
+
+    /// Return the two terminal rows occupied by the provider API-key field.
+    /// This is shared with touch mapping so the native editor uses the exact
+    /// geometry already painted by the setup screen.
+    pub fn api_key_rows(&self, rows: u16) -> Option<(u16, u16)> {
+        if !self.api_key_editor_available() {
+            return None;
+        }
+        let key_y = LIST_Y.saturating_add(provider_list_height(rows));
+        Some((key_y, key_y.saturating_add(2)))
+    }
+
+    /// Map a tap on an existing setup row or footer hint to the same key path
+    /// used by keyboard input. The API-key field is returned as a touch-only
+    /// action; the native frontend owns focus and IME synchronization.
+    pub fn touch_key(&self, row: u16, col: u16, cols: u16, rows: u16) -> Option<TouchAction> {
+        let area_width = cols.min(90);
+        let area_x = cols.saturating_sub(area_width) / 2;
+        if col < area_x || col >= area_x.saturating_add(area_width) {
+            return None;
+        }
+        let local_col = col - area_x;
+
+        let footer_start = rows.saturating_sub(2);
+        if row >= footer_start {
+            let keys = footer_keys(self.state.step, self.state.fresh);
+            let (index, start, end) = picker::footer_hit(local_col, &keys)?;
+            return Some(setup_footer_action(
+                self.state.step,
+                index,
+                local_col,
+                start,
+                end,
+            ));
+        }
+        // Every tappable body row sits in the list area below the step header.
+        let visible_row = row.checked_sub(LIST_Y)? as usize;
+        let list_height = rows.saturating_sub(10);
+        let list_x = area_x.saturating_add(2);
+        let list_width = area_width.saturating_sub(2);
+        let list_rect = Rect::new(list_x, LIST_Y, list_width, list_height);
+        let in_rows = row < LIST_Y.saturating_add(list_height);
+        let in_cols = col >= list_x && col < list_x.saturating_add(list_width);
+
+        match self.state.step {
+            Step::Provider if !self.state.providers.is_empty() && in_cols => {
+                let (start, end) = picker::visible_window(
+                    self.state.providers.len(),
+                    self.state.provider_cursor,
+                    provider_list_height(rows) as usize,
+                );
+                if visible_row < end - start {
+                    return cursor_keys(
+                        self.state.provider_cursor,
+                        start + visible_row,
+                        self.state.providers.len(),
+                    )
+                    .map(TouchAction::Keys);
+                }
+                self.api_key_rows(rows)
+                    .is_some_and(|(key_y, key_end)| (key_y..key_end).contains(&row))
+                    .then_some(TouchAction::ApiKey)
+            }
+            Step::Catalog
+                if !self.state.cat_items.is_empty()
+                    && in_rows
+                    && picker::left_pane_hit(list_rect, col) =>
+            {
+                let target = picker::item_at_visible_row(
+                    &self.state.cat_items,
+                    self.state.cat_cursor,
+                    list_height as usize,
+                    visible_row,
+                )?;
+                let mut keys =
+                    cursor_keys(self.state.cat_cursor, target, self.state.cat_items.len())?;
+                keys.push(Key::plain(KeyCode::Char(' ')));
+                Some(TouchAction::Keys(keys))
+            }
+            Step::Init
+                if visible_row < self.state.init_options.len()
+                    && in_rows
+                    && picker::left_pane_hit(list_rect, col) =>
+            {
+                cursor_keys(
+                    self.state.init_cursor,
+                    visible_row,
+                    self.state.init_options.len(),
+                )
+                .map(TouchAction::Keys)
+            }
+            _ => None,
+        }
     }
 
     pub fn draw(&self, frame: &mut ratatui::Frame, theme: &Theme) {
@@ -633,28 +742,78 @@ fn summary(head: &str, value: String, theme: &Theme) -> Line<'static> {
     ])
 }
 
-fn draw_footer(frame: &mut ratatui::Frame, area: Rect, state: &State, theme: &Theme) {
-    let cancel_label = if state.fresh { "skip" } else { "cancel" };
-    let keys: &[(&str, &str)] = match state.step {
-        Step::Welcome => &[("→/enter", "start"), ("esc", cancel_label)],
-        Step::Provider => &[
+/// First terminal row of the provider/catalog/init list below the step header.
+const LIST_Y: u16 = 8;
+
+/// Rows of the provider list, which shares its area with the API-key field.
+fn provider_list_height(rows: u16) -> u16 {
+    rows.saturating_sub(12).max(1)
+}
+
+fn footer_keys(step: Step, fresh: bool) -> Vec<(&'static str, &'static str)> {
+    let cancel_label = if fresh { "skip" } else { "cancel" };
+    match step {
+        Step::Welcome => vec![("→/enter", "start"), ("esc", cancel_label)],
+        Step::Provider => vec![
             ("↑↓", "choose"),
             ("type", "key"),
             ("→", "next"),
             ("←", "back"),
             ("esc", cancel_label),
         ],
-        Step::Catalog => &[
+        Step::Catalog => vec![
             ("↑↓", "move"),
             ("space", "toggle"),
             ("a/n", "all/none"),
             ("→", "next"),
             ("←", "back"),
         ],
-        Step::Init => &[("↑↓", "choose"), ("→", "next"), ("←", "back")],
-        Step::Confirm => &[("enter", "apply"), ("←", "back"), ("esc", cancel_label)],
+        Step::Init => vec![("↑↓", "choose"), ("→", "next"), ("←", "back")],
+        Step::Confirm => vec![("enter", "apply"), ("←", "back"), ("esc", cancel_label)],
+    }
+}
+
+fn setup_footer_action(step: Step, index: usize, col: u16, start: u16, end: u16) -> TouchAction {
+    let key = match step {
+        Step::Welcome => match index {
+            0 => Key::plain(KeyCode::Right),
+            _ => Key::plain(KeyCode::Esc),
+        },
+        Step::Provider => match index {
+            0 => Key::plain(KeyCode::Down),
+            1 => return TouchAction::ApiKey,
+            2 => Key::plain(KeyCode::Right),
+            3 => Key::plain(KeyCode::Left),
+            _ => Key::plain(KeyCode::Esc),
+        },
+        Step::Catalog => match index {
+            0 => Key::plain(KeyCode::Down),
+            1 => Key::plain(KeyCode::Char(' ')),
+            2 => Key::plain(if picker::first_half(col, start, end) {
+                KeyCode::Char('a')
+            } else {
+                KeyCode::Char('n')
+            }),
+            3 => Key::plain(KeyCode::Right),
+            _ => Key::plain(KeyCode::Left),
+        },
+        Step::Init => match index {
+            0 => Key::plain(KeyCode::Down),
+            1 => Key::plain(KeyCode::Right),
+            _ => Key::plain(KeyCode::Left),
+        },
+        Step::Confirm => match index {
+            0 => Key::plain(KeyCode::Enter),
+            1 => Key::plain(KeyCode::Left),
+            _ => Key::plain(KeyCode::Esc),
+        },
     };
-    picker::draw_footer(frame, area, keys, theme);
+    TouchAction::Keys(vec![key])
+}
+
+fn draw_footer(frame: &mut ratatui::Frame, area: Rect, state: &State, theme: &Theme) {
+    let keys = footer_keys(state.step, state.fresh);
+    picker::draw_footer(frame, area, &keys, theme);
 }
 
 #[cfg(test)]

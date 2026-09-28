@@ -207,6 +207,11 @@ pub struct State {
     assistant: Option<usize>,
     tools: HashMap<String, usize>,
     answered: HashSet<u64>,
+    /// Call IDs whose daemon-computed edit preview already represents the result.
+    shown_tool_rows: HashSet<String>,
+    /// Daemon-computed edit previews retained for rebuilding the display transcript.
+    /// This is deliberately separate from the model-facing persisted tool result.
+    edit_previews: HashMap<String, String>,
     // Key and approval registries allocate IDs independently, both starting at 0.
     answered_keys: HashSet<u64>,
     sync_id: Option<u64>,
@@ -292,6 +297,8 @@ impl State {
         self.changed_rows.clear();
         self.approvals.clear();
         self.answered.clear();
+        self.shown_tool_rows.clear();
+        self.edit_previews.clear();
         self.answered_keys.clear();
         self.assistant = None;
         self.tools.clear();
@@ -308,6 +315,12 @@ impl State {
         self.loaded_messages.clear();
         self.replaced_rows = 0;
         self.pending_prepend = None;
+    }
+
+    /// Drop live edit previews when the daemon connection is lost.
+    pub(crate) fn clear_edit_previews(&mut self) {
+        self.shown_tool_rows.clear();
+        self.edit_previews.clear();
     }
 
     pub fn next_id(&mut self) -> u64 {
@@ -433,6 +446,12 @@ impl State {
         self.live_reasoning = None;
         self.assistant = None;
         self.tools.clear();
+        self.shown_tool_rows.clear();
+        let failed_calls: HashSet<String> = messages
+            .iter()
+            .filter(|message| message.role == ChatRole::Tool && message.is_error)
+            .filter_map(|message| message.tool_call_id.clone())
+            .collect();
         let total = messages.len();
         let mut prefix_rows = 0;
         for (index, message) in messages.into_iter().enumerate() {
@@ -460,7 +479,19 @@ impl State {
                         .map(|card| card.name.clone())
                         .unwrap_or_else(|| "output".into())
                 });
-                tool_target = Some(self.tool_result(id, name, message.content, message.is_error));
+                let has_preview = !message.is_error && self.edit_previews.contains_key(&id);
+                if message.is_error {
+                    self.edit_previews.remove(&id);
+                }
+                tool_target = Some(self.tool_result(
+                    id.clone(),
+                    name,
+                    (!has_preview).then_some(message.content),
+                    message.is_error,
+                ));
+                if has_preview {
+                    self.append_edit_preview(&id);
+                }
             } else if !message.content.is_empty() {
                 // A runtime relay of tool-returned images reads as ambient text
                 // (a system note), not a user prompt, after a history reload.
@@ -472,6 +503,7 @@ impl State {
                 content_target = Some(self.push_row(role, message.content));
             }
             for call in message.tool_calls {
+                let call_id = call.id.clone();
                 let args = (!call.arguments.is_null()).then(|| call.arguments.to_string());
                 let (i, _) = self.tool_row(call.id, call.name.clone());
                 tool_target.get_or_insert(i);
@@ -487,6 +519,9 @@ impl State {
                     args,
                     started: None,
                 });
+                if !failed_calls.contains(&call_id) {
+                    self.append_edit_preview(&call_id);
+                }
             }
             if !message.images.is_empty() {
                 self.images.extend(message.images.iter().cloned());
@@ -547,6 +582,17 @@ impl State {
         }
     }
 
+    /// Reinsert a cached daemon preview once, using the same marker that
+    /// suppresses the successful model-facing tool result.
+    fn append_edit_preview(&mut self, call_id: &str) {
+        let Some(preview) = self.edit_previews.get(call_id).cloned() else {
+            return;
+        };
+        if self.shown_tool_rows.insert(call_id.to_owned()) {
+            self.push_row("system", preview);
+        }
+    }
+
     /// Returns the tool row's index and whether this call created it. The tool
     /// events share one row per call id so a stream stays in place.
     fn tool_row(&mut self, id: String, name: String) -> (usize, bool) {
@@ -567,17 +613,17 @@ impl State {
         &mut self,
         call_id: String,
         name: String,
-        content: String,
+        content: Option<String>,
         is_error: bool,
     ) -> usize {
         let (i, created) = self.tool_row(call_id, name.clone());
         let args = self.toolcards[i]
             .as_ref()
             .and_then(|card| card.args.clone());
-        self.rows[i] = (
-            format!("tool: {name}{}", if is_error { " (error)" } else { "" }),
-            content,
-        );
+        self.rows[i].0 = format!("tool: {name}{}", if is_error { " (error)" } else { "" });
+        if let Some(content) = content {
+            self.rows[i].1 = content;
+        }
         if !created {
             self.changed_rows.push(i);
         }
@@ -759,6 +805,7 @@ impl State {
                 self.assistant = None;
                 self.live_reasoning = None;
                 self.tools.clear();
+                self.shown_tool_rows.clear();
                 self.busy = true;
                 self.status = format!("Running {model}");
             }
@@ -804,7 +851,15 @@ impl State {
                 content,
                 is_error,
             } => {
-                self.tool_result(call_id, name, content, is_error);
+                let shown_preview = self.shown_tool_rows.remove(&call_id);
+                if is_error {
+                    self.edit_previews.remove(&call_id);
+                    self.tool_result(call_id, name, Some(content), is_error);
+                } else if shown_preview || self.edit_previews.contains_key(&call_id) {
+                    self.tool_result(call_id, name, None, false);
+                } else {
+                    self.tool_result(call_id, name, Some(content), is_error);
+                }
             }
             RuntimeEvent::Finished { content } => {
                 // Finished is the final full response, not another delta.
@@ -847,10 +902,15 @@ impl State {
                 arguments,
                 blocked,
                 auto_allows,
+                preview,
                 ..
             } => {
                 if self.answered.contains(&id) || self.approvals.iter().any(|a| a.id == id) {
                     return None;
+                }
+                if let Some(preview) = preview {
+                    self.edit_previews.insert(call_id.clone(), preview);
+                    self.append_edit_preview(&call_id);
                 }
                 if auto_allows {
                     let outcome = match blocked {
@@ -1971,6 +2031,154 @@ mod tests {
             fe.commands,
             vec![("help".to_string(), "Show help".to_string())]
         );
+    }
+
+    #[test]
+    fn edit_preview_is_rendered_once_and_success_is_suppressed() {
+        let mut s = loaded();
+        let preview = "\nedit_file a.txt (-1 | +1)\n    1 - old\n    1 + new";
+        let approval = RuntimeEvent::ApprovalRequest {
+            id: 44,
+            call_id: "edit-1".into(),
+            name: "edit_file".into(),
+            summary: "edit a file".into(),
+            arguments: json!({"path": "a.txt"}),
+            blocked: None,
+            auto_allows: false,
+            preview: Some(preview.into()),
+        };
+
+        s.reduce(RuntimeEvent::ToolCall {
+            id: "edit-1".into(),
+            name: "edit_file".into(),
+            summary: "edit a file".into(),
+            arguments: json!({"path": "a.txt"}),
+        });
+
+        assert!(s.reduce(approval.clone()).is_none());
+        assert_eq!(
+            s.rows.last(),
+            Some(&("system".into(), preview.into())),
+            "the daemon preview is a system diff row"
+        );
+        assert!(s.shown_tool_rows.contains("edit-1"));
+        let row_count = s.rows.len();
+
+        // Synchronization clears the pending-approval registry before replaying gates.
+        s.approvals.clear();
+
+        // Replayed approval events must not duplicate the preview.
+        assert!(s.reduce(approval.clone()).is_none());
+        assert_eq!(s.rows.len(), row_count);
+
+        s.reduce(RuntimeEvent::ToolResult {
+            call_id: "edit-1".into(),
+            name: "edit_file".into(),
+            content: "1#deadbe|new".into(),
+            is_error: false,
+        });
+        assert_eq!(s.rows.len(), row_count);
+        assert!(!s.rows.iter().any(|(_, content)| content == "1#deadbe|new"));
+        assert!(!s.shown_tool_rows.contains("edit-1"));
+        let history = vec![
+            ChatMessage::assistant_with_tools(
+                "",
+                vec![ToolCall {
+                    id: "edit-1".into(),
+                    name: "edit_file".into(),
+                    arguments: json!({"path": "a.txt"}),
+                }],
+            ),
+            ChatMessage::tool(bone_protocol::ToolResult {
+                call_id: "edit-1".into(),
+                name: "edit_file".into(),
+                content: "1#deadbe|new".into(),
+                ..Default::default()
+            }),
+        ];
+        let RuntimeCommand::Synchronize { request_id, .. } = s.synchronize() else {
+            panic!("expected synchronization request");
+        };
+        s.reduce(RuntimeEvent::StateSynchronized {
+            request_id,
+            busy: false,
+            snapshot: SessionSnapshot::default(),
+            view: None,
+            messages: Some(history),
+            theme: None,
+        });
+        assert_eq!(
+            s.rows
+                .iter()
+                .filter(|(role, content)| role == "system" && content == preview)
+                .count(),
+            1,
+            "the cached preview survives transcript rebuilding"
+        );
+        assert!(
+            !s.rows.iter().any(|(_, content)| content == "1#deadbe|new"),
+            "the persisted hashline result stays hidden"
+        );
+        let tool_row = s
+            .rows
+            .iter()
+            .position(|(role, _)| role == "tool: edit_file")
+            .expect("the tool call remains represented");
+        assert_eq!(
+            s.toolcards[tool_row].as_ref().unwrap().state,
+            ToolState::Done
+        );
+
+        // A replayed approval after synchronization must not add a second row.
+        let row_count = s.rows.len();
+        assert!(s.reduce(approval).is_none());
+        assert_eq!(s.rows.len(), row_count);
+        assert_eq!(
+            s.rows
+                .iter()
+                .filter(|(role, content)| role == "system" && content == preview)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn failed_edit_and_non_preview_results_keep_tool_rows() {
+        let mut s = loaded();
+        s.reduce(RuntimeEvent::ApprovalRequest {
+            id: 45,
+            call_id: "edit-error".into(),
+            name: "edit_file".into(),
+            summary: "edit a file".into(),
+            arguments: json!({"path": "a.txt"}),
+            blocked: None,
+            auto_allows: false,
+            preview: Some("\nedit_file a.txt (-1 | +1)".into()),
+        });
+        s.reduce(RuntimeEvent::ToolResult {
+            call_id: "edit-error".into(),
+            name: "edit_file".into(),
+            content: "permission denied".into(),
+            is_error: true,
+        });
+        assert_eq!(s.rows.last().unwrap().0, "tool: edit_file (error)");
+        assert_eq!(s.rows.last().unwrap().1, "permission denied");
+        assert!(!s.shown_tool_rows.contains("edit-error"));
+
+        s.reduce(RuntimeEvent::ToolCall {
+            id: "shell-1".into(),
+            name: "shell".into(),
+            summary: "running".into(),
+            arguments: json!({"command": "true"}),
+        });
+        s.reduce(RuntimeEvent::ToolResult {
+            call_id: "shell-1".into(),
+            name: "shell".into(),
+            content: "exit code: 0".into(),
+            is_error: false,
+        });
+        assert_eq!(s.rows.last().unwrap().0, "tool: shell");
+        assert_eq!(s.rows.last().unwrap().1, "exit code: 0");
     }
 
     #[test]

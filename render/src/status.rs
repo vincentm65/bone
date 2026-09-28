@@ -69,14 +69,38 @@ pub fn spinner_frame(status_info: &StatusInfo) -> Option<String> {
 }
 
 pub fn draw_status_bar(frame: &mut Frame, status_info: &StatusInfo, theme: &Theme, area: Rect) {
+    draw_status_bar_inner(frame, status_info, theme, area, false);
+}
+
+/// Draw a touch-friendly one-row status bar. It keeps safety and activity
+/// indicators visible while dropping the lower-priority token breakdown that
+/// otherwise consumes most of a phone-width row.
+pub fn draw_status_bar_compact(
+    frame: &mut Frame,
+    status_info: &StatusInfo,
+    theme: &Theme,
+    area: Rect,
+) {
+    draw_status_bar_inner(frame, status_info, theme, area, true);
+}
+
+fn draw_status_bar_inner(
+    frame: &mut Frame,
+    status_info: &StatusInfo,
+    theme: &Theme,
+    area: Rect,
+    compact: bool,
+) {
     let mut status_spans: Vec<Span> = vec![];
     let sep = || Span::styled(" | ", Style::default().fg(theme.status_text));
 
     if status_info.show("status_show_model") {
-        status_spans.push(Span::styled(
-            status_info.model.to_string(),
-            Style::default().fg(theme.status_text),
-        ));
+        let model = if compact {
+            compact_status_text(&status_info.model, 24)
+        } else {
+            status_info.model.clone()
+        };
+        status_spans.push(Span::styled(model, Style::default().fg(theme.status_text)));
         status_spans.push(sep());
     }
 
@@ -113,7 +137,7 @@ pub fn draw_status_bar(frame: &mut Frame, status_info: &StatusInfo, theme: &Them
         || status_info.show("status_show_tokens_out")
         || status_info.show("status_show_tokens_total");
 
-    if any_token_metric {
+    if !compact && any_token_metric {
         let mut metric_parts: Vec<Span> = vec![];
         let s = Style::default().fg(theme.status_text);
         if status_info.show("status_show_tokens_curr") {
@@ -264,9 +288,95 @@ pub fn draw_status_bar(frame: &mut Frame, status_info: &StatusInfo, theme: &Them
     }
 }
 
+fn compact_status_text(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let prefix: String = chars.by_ref().take(max_chars.saturating_sub(1)).collect();
+    if chars.next().is_some() {
+        format!("{prefix}…")
+    } else {
+        prefix
+    }
+}
+
 fn push_metric(parts: &mut Vec<Span<'static>>, style: Style, label: &str) {
     if !parts.is_empty() {
         parts.push(Span::styled(" / ", style));
     }
     parts.push(Span::styled(label.to_string(), style));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn status() -> StatusInfo {
+        StatusInfo {
+            model: "abcdefghijklmnopqrstuvwxyz".into(),
+            token_stats: bone_protocol::TokenStats {
+                sent: 1_234,
+                received: 5_678,
+                context_length: 9_999,
+                ..Default::default()
+            },
+            streaming_completion_tokens: Some(42),
+            streaming: true,
+            approval_label: "Danger".into(),
+            approval_danger: true,
+            queue_len: 2,
+            incognito: true,
+            status_show: std::collections::HashMap::new(),
+            elapsed: Some("1:23".into()),
+            lua_status: Vec::new(),
+            spinner_frames: vec!["*".into()],
+            spinner_speed_ms: 80,
+            spinner_texts: vec!["thinking".into()],
+            spinner_text_rotate: false,
+            spinner_text_speed_ms: 0,
+            spinner_elapsed_ms: 0,
+        }
+    }
+
+    fn row_text(terminal: &ratatui::Terminal<ratatui::backend::TestBackend>) -> String {
+        (0..terminal.backend().buffer().area().width)
+            .map(|column| {
+                terminal
+                    .backend()
+                    .buffer()
+                    .cell((column, 0))
+                    .unwrap()
+                    .symbol()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn compact_status_keeps_safety_and_activity_but_hides_token_breakdown() {
+        let status = status();
+        let theme = Theme::default();
+        let mut compact =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(120, 1)).unwrap();
+        compact
+            .draw(|frame| draw_status_bar_compact(frame, &status, &theme, frame.area()))
+            .unwrap();
+        let compact = row_text(&compact);
+
+        assert!(compact.contains("abcdefghijklmnopqrstuvw…"), "{compact}");
+        assert!(compact.contains("INC"), "{compact}");
+        assert!(compact.contains("Danger"), "{compact}");
+        assert!(compact.contains("Q: 2"), "{compact}");
+        assert!(compact.contains("1:23"), "{compact}");
+        assert!(compact.contains("* thinking"), "{compact}");
+        assert!(!compact.contains("curr"), "{compact}");
+        assert!(!compact.contains("total"), "{compact}");
+
+        let mut normal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(160, 1)).unwrap();
+        normal
+            .draw(|frame| draw_status_bar(frame, &status, &theme, frame.area()))
+            .unwrap();
+        let normal = row_text(&normal);
+        assert!(normal.contains(&status.model), "{normal}");
+        assert!(normal.contains("curr"), "{normal}");
+        assert!(normal.contains("total"), "{normal}");
+    }
 }

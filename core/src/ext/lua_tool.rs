@@ -511,6 +511,7 @@ fn parse_tool_output(text: &str) -> Result<ToolOutput, String> {
                 images,
                 ephemeral_images,
                 pane_page,
+                edit_preview: None,
                 state,
             })
         }

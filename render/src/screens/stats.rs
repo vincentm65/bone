@@ -2,7 +2,7 @@
 
 use std::time::Instant;
 
-use super::{Key, KeyCode};
+use super::{Key, KeyCode, TouchAction};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -132,6 +132,23 @@ impl StatsScreen {
         StatsAction::None
     }
 
+    /// Map the existing tabs, date-picker fields, and footer hints to their
+    /// normal key paths. The chart itself remains scrollable through swipes.
+    pub fn touch_key(&self, row: u16, col: u16, cols: u16, rows: u16) -> Option<TouchAction> {
+        if let Some(pick) = &self.picker {
+            return date_picker_touch(pick, row, col, cols, rows);
+        }
+        if row.saturating_add(1) == rows {
+            return stats_footer_key(col).map(|key| TouchAction::Keys(vec![key]));
+        }
+        // Only the tab row (row 2) maps to tabs; row 1 is the panel title.
+        if row == 2 {
+            return tab_key(col, self.mode, self.custom.is_some())
+                .map(|key| TouchAction::Keys(vec![key]));
+        }
+        None
+    }
+
     pub fn draw(&self, frame: &mut ratatui::Frame, theme: &Theme) {
         let Some(snapshot) = &self.snapshot else {
             let text = self.error.as_deref().unwrap_or("Loading usage…");
@@ -233,6 +250,118 @@ fn handle_picker_key(code: KeyCode, pick: &mut DatePick) -> Option<PickerAction>
     }
 }
 
+fn popup_rect(cols: u16, rows: u16) -> Rect {
+    let width = 44u16;
+    let height = 9u16;
+    Rect {
+        x: (cols.saturating_sub(width)) / 2,
+        y: (rows.saturating_sub(height)) / 2,
+        width,
+        height,
+    }
+}
+
+fn date_picker_touch(
+    pick: &DatePick,
+    row: u16,
+    col: u16,
+    cols: u16,
+    rows: u16,
+) -> Option<TouchAction> {
+    let popup = popup_rect(cols, rows);
+    if col < popup.x
+        || col >= popup.x.saturating_add(popup.width)
+        || row < popup.y
+        || row >= popup.y.saturating_add(popup.height)
+    {
+        return None;
+    }
+
+    let target_field = if row == popup.y.saturating_add(3) {
+        Some(0)
+    } else if row == popup.y.saturating_add(5) {
+        Some(1)
+    } else {
+        None
+    };
+    if let Some(target) = target_field {
+        let keys = if pick.field == target {
+            Vec::new()
+        } else {
+            vec![Key::plain(KeyCode::Tab)]
+        };
+        return Some(TouchAction::Keys(keys));
+    }
+
+    let hint_row = popup.y.saturating_add(7);
+    if row == hint_row {
+        let relative = col.saturating_sub(popup.x.saturating_add(2)) as usize;
+        let hint = " Tab switch · Enter apply · Esc cancel";
+        if relative < hint.chars().count() {
+            let key = if relative < 12 {
+                KeyCode::Tab
+            } else if (14..=25).contains(&relative) {
+                KeyCode::Enter
+            } else {
+                KeyCode::Esc
+            };
+            return Some(TouchAction::Keys(vec![Key::plain(key)]));
+        }
+    }
+    None
+}
+
+fn tab_key(col: u16, active: ViewMode, custom: bool) -> Option<Key> {
+    // The header panel has a one-cell left border before its content.
+    let mut x = col.checked_sub(1)? as usize;
+    let modes = [
+        (ViewMode::Today, 'd'),
+        (ViewMode::SevenDays, 'w'),
+        (ViewMode::FourWeeks, 'm'),
+        (ViewMode::Yearly, 'y'),
+        (ViewMode::Months, 'a'),
+    ];
+    for (mode, shortcut) in modes {
+        let label = if !custom && mode == active {
+            format!("[{} {}]", mode.key(), mode.title())
+        } else {
+            format!(" {} {} ", mode.key(), mode.title())
+        };
+        let width = label.chars().count();
+        if x < width {
+            return Some(Key::plain(KeyCode::Char(shortcut)));
+        }
+        x = x.saturating_sub(width);
+        if x < 2 {
+            return None;
+        }
+        x -= 2;
+    }
+    if custom && x < "  [custom range]".chars().count() {
+        Some(Key::plain(KeyCode::Char('t')))
+    } else {
+        None
+    }
+}
+
+fn stats_footer_key(col: u16) -> Option<Key> {
+    let sections = [
+        (" q/Esc quit  ", KeyCode::Esc),
+        (" 1-5 d/w/m/y/a ←→ view  ", KeyCode::Right),
+        (" t dates  ", KeyCode::Char('t')),
+        (" r refresh  ", KeyCode::Char('r')),
+    ];
+    let mut col = col as usize;
+    for (text, code) in sections {
+        let width = text.chars().count();
+        if col < width {
+            return Some(Key::plain(code));
+        }
+        col -= width;
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 fn draw(
     frame: &mut ratatui::Frame,
@@ -258,7 +387,7 @@ fn draw(
     let vertical = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
+            Constraint::Length(4),
             Constraint::Length(3),
             Constraint::Min(12),
             Constraint::Length(1),

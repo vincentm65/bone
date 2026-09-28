@@ -11,6 +11,8 @@ pub mod connection;
 mod daemon;
 mod graphics;
 mod grid;
+#[cfg(test)]
+mod touch_tests;
 
 mod keymap;
 mod keys;
@@ -184,6 +186,8 @@ struct Session {
     /// Daemon-reported working directory, never inferred from the client cwd.
     workspace: String,
     connection_status: String,
+    /// Last pane width published to this daemon connection (in terminal cells).
+    published_width: Option<u16>,
     state: State,
     composer: String,
     pastes: Vec<PasteBlob>,
@@ -259,6 +263,7 @@ impl Session {
             host_api_version: 0,
             workspace: String::new(),
             connection_status: "Disconnected".into(),
+            published_width: None,
             state: State::default(),
             composer: String::new(),
             pastes: Vec::new(),
@@ -301,6 +306,7 @@ impl Session {
     /// Re-arm the reducer for a (re)connect: a new conversation skips the
     /// default-actor replay; a loaded one filters the replay by its id.
     fn reset_for_attach(&mut self) {
+        self.published_width = None;
         match self.conversation_id {
             Some(id) => self.state.reset(Some(id)),
             None => self.state.reset_new(),
@@ -322,6 +328,15 @@ impl Session {
         self.state.status = "Loading conversation…".into();
         let window = self.state.window;
         self.command(RuntimeCommand::LoadConversation { id, window })
+    }
+
+    fn publish_width(&mut self, width: u16) {
+        if self.connected
+            && self.published_width != Some(width)
+            && self.command(RuntimeCommand::SetTerminalWidth { width })
+        {
+            self.published_width = Some(width);
+        }
     }
 
     fn command(&mut self, command: RuntimeCommand) -> bool {
@@ -347,6 +362,7 @@ impl Session {
             request_id: Some(request_id),
             name: name.to_string(),
             input: input.to_string(),
+            terminal_width: self.published_width,
         });
         if sent {
             self.pending_command = Some(request_id);
@@ -514,6 +530,55 @@ impl Session {
             .collect()
     }
 
+    /// Apply a queue action from the same local queue state used by keyboard
+    /// controls. Queue contents are frontend-owned until they are submitted.
+    fn queue_action(&mut self, action: live_pane::QueueAction) {
+        if !self.composer.is_empty() {
+            return;
+        }
+        let len = self.queue.len();
+        if len == 0 {
+            return;
+        }
+        let index = self.live_pane.queue.min(len - 1);
+        match action {
+            live_pane::QueueAction::Select(index) => {
+                self.live_pane.queue = index.min(len - 1);
+            }
+            live_pane::QueueAction::SelectUp => {
+                self.live_pane.queue = index.saturating_sub(1);
+            }
+            live_pane::QueueAction::SelectDown => {
+                self.live_pane.queue = (index + 1).min(len - 1);
+            }
+            live_pane::QueueAction::MoveUp if index > 0 => {
+                self.queue.swap(index, index - 1);
+                self.live_pane.queue = index - 1;
+            }
+            live_pane::QueueAction::MoveDown if index + 1 < len => {
+                self.queue.swap(index, index + 1);
+                self.live_pane.queue = index + 1;
+            }
+            live_pane::QueueAction::Send => {
+                if let Some(text) = self.queue.remove(index) {
+                    self.queue.push_front(text);
+                    self.live_pane.queue = 0;
+                }
+            }
+            live_pane::QueueAction::Edit => {
+                if let Some(text) = self.queue.remove(index) {
+                    self.composer = text;
+                }
+            }
+            live_pane::QueueAction::Remove => {
+                self.queue.remove(index);
+                self.live_pane.queue = self.live_pane.queue.min(self.queue.len().saturating_sub(1));
+            }
+            live_pane::QueueAction::Clear => self.queue.clear(),
+            live_pane::QueueAction::MoveUp | live_pane::QueueAction::MoveDown => {}
+        }
+    }
+
     /// Up/Down, Enter, and the queue keys for the live pane's list pages,
     /// plus the input-history bridge used when no selectable pane is active.
     fn handle_list_keys(&mut self, ui: &mut egui::Ui) -> Option<live_pane::Open> {
@@ -529,26 +594,19 @@ impl Session {
             let len = self.queue.len();
             let index = self.live_pane.queue.min(len.saturating_sub(1));
             if key(ui, shift, egui::Key::ArrowUp) && index > 0 {
-                self.queue.swap(index, index - 1);
-                self.live_pane.queue = index - 1;
+                self.queue_action(live_pane::QueueAction::MoveUp);
             } else if key(ui, shift, egui::Key::ArrowDown) && index + 1 < len {
-                self.queue.swap(index, index + 1);
-                self.live_pane.queue = index + 1;
+                self.queue_action(live_pane::QueueAction::MoveDown);
             } else if key(ui, none, egui::Key::ArrowUp) {
-                self.live_pane.queue = index.saturating_sub(1);
+                self.queue_action(live_pane::QueueAction::SelectUp);
             } else if key(ui, none, egui::Key::ArrowDown) {
-                self.live_pane.queue = (index + 1).min(len.saturating_sub(1));
+                self.queue_action(live_pane::QueueAction::SelectDown);
             } else if key(ui, none, egui::Key::Enter) {
-                if let Some(text) = self.queue.remove(index) {
-                    self.queue.push_front(text);
-                    self.live_pane.queue = 0;
-                }
+                self.queue_action(live_pane::QueueAction::Send);
             } else if key(ui, none, egui::Key::F2) {
-                if let Some(text) = self.queue.remove(index) {
-                    self.composer = text;
-                }
+                self.queue_action(live_pane::QueueAction::Edit);
             } else if key(ui, none, egui::Key::Delete) {
-                self.queue.remove(index);
+                self.queue_action(live_pane::QueueAction::Remove);
             }
             return None;
         }
@@ -882,6 +940,7 @@ impl Session {
             return false;
         }
         self.queue.clear();
+        self.published_width = None;
         self.state.clear_conversation();
         self.transcript.reset();
         self.command(RuntimeCommand::NewConversation)
@@ -1064,6 +1123,7 @@ impl Session {
         if let Some(load) = action.conversation_load
             && let Some(id) = load.conversation_id
         {
+            self.published_width = None;
             let window = self.state.window;
             self.command(RuntimeCommand::LoadConversation { id, window });
         }
@@ -1142,6 +1202,7 @@ impl Session {
                 self.state.ready = false;
                 // Interactive requests cannot be answered after the socket is gone.
                 self.state.approvals.clear();
+                self.state.clear_edit_previews();
                 self.state.pending_key = None;
                 self.state.busy = false;
                 self.connection_status = reason.clone();
@@ -1604,6 +1665,10 @@ pub struct DesktopApp {
     sidebar_open: Option<bool>,
     /// The window was narrower than [`NARROW_WIDTH`] last frame.
     narrow: bool,
+    /// Narrow and touch-capable last frame: enables touch-only affordances.
+    touch: bool,
+    /// Tab id of the page whose touch-only API-key editor has focus.
+    page_input_focus: Option<u64>,
     ctx: egui::Context,
     tabs: Vec<Tab>,
     /// Index of the selected tab.
@@ -1631,6 +1696,15 @@ pub struct DesktopApp {
     conversations_request: Option<(u64, u64, Instant)>,
     /// Set when the sidebar should refetch the conversation list.
     conversations_stale: bool,
+    /// Conversation id being renamed in the sidebar dialog.
+    rename_target: Option<i64>,
+    rename_field: String,
+    /// (id, title) of the conversation awaiting delete confirmation.
+    delete_target: Option<(i64, String)>,
+    /// Conversation id waiting for its replacement chat connection before delete.
+    pending_delete: Option<i64>,
+    /// Conversation id targeted by an in-flight rename/delete request.
+    pending_conversation_mutation: Option<i64>,
     sidebar_notice: String,
     /// Last `ViewDiff::SetTheme` payload applied to egui visuals.
     applied_theme: Option<serde_json::Value>,
@@ -1700,7 +1774,9 @@ impl DesktopApp {
             remote: None,
             sidebar_open: None,
             narrow: false,
+            touch: false,
             ctx,
+            page_input_focus: None,
             tabs: vec![Tab {
                 id: 1,
                 kind: TabKind::Chat(Box::new(session)),
@@ -1717,6 +1793,11 @@ impl DesktopApp {
             conversations: Vec::new(),
             conversations_request: None,
             conversations_stale: true,
+            rename_target: None,
+            rename_field: String::new(),
+            delete_target: None,
+            pending_delete: None,
+            pending_conversation_mutation: None,
             sidebar_notice: String::new(),
             applied_theme: None,
             render_theme: bone_render::theme::Theme::default(),
@@ -1772,13 +1853,127 @@ impl DesktopApp {
         }
     }
 
-    fn select(&mut self, index: usize) {
-        let Some(tab) = self.tabs.get(index) else {
+    fn clear_page_input_focus(&mut self) {
+        let Some(tab_id) = self.page_input_focus.take() else {
             return;
         };
+        let id = setup_api_key_editor_id(tab_id);
+        self.ctx.memory_mut(|memory| {
+            memory.surrender_focus(id);
+            memory.stop_text_input();
+        });
+    }
+
+    /// Whether `tab_id` is the selected page and shows an editable API-key row.
+    fn setup_api_key_available(&self, tab_id: u64) -> bool {
+        self.tabs.get(self.selected).is_some_and(|tab| {
+            tab.id == tab_id
+                && matches!(&tab.kind, TabKind::Page(page) if page.setup_api_key_available())
+        })
+    }
+
+    fn page_api_key_input_active(&self) -> bool {
+        self.page_input_focus
+            .is_some_and(|tab_id| self.setup_api_key_available(tab_id))
+    }
+
+    /// Drop page editor focus once its tab or API-key row is gone.
+    fn sync_page_input_focus(&mut self) {
+        if self.page_input_focus.is_some() && !self.page_api_key_input_active() {
+            self.clear_page_input_focus();
+        }
+    }
+
+    fn focus_setup_api_key(&mut self, ui: &mut egui::Ui, tab_id: u64) {
+        if self.touch && self.setup_api_key_available(tab_id) {
+            self.page_input_focus = Some(tab_id);
+            ui.memory_mut(|memory| memory.request_focus(setup_api_key_editor_id(tab_id)));
+        }
+    }
+
+    /// Paint the touch-only egui editor over the ratatui API-key row. The
+    /// existing page remains the visual source of truth; this widget only owns
+    /// text editing, cursor movement, and IME focus on narrow touch clients.
+    fn setup_api_key_editor(
+        &mut self,
+        ui: &mut egui::Ui,
+        tab_id: u64,
+        geometry: &grid::ScreenGeometry,
+    ) {
+        if !self.touch {
+            return;
+        }
+        let Some((start, end)) = self
+            .selected_page()
+            .and_then(|page| page.setup_api_key_rows(geometry.row_count))
+        else {
+            return;
+        };
+        let rect = egui::Rect::from_min_size(
+            geometry.rect.left_top() + egui::vec2(0.0, start as f32 * geometry.row_height),
+            egui::vec2(
+                geometry.rect.width(),
+                end.saturating_sub(start) as f32 * geometry.row_height,
+            ),
+        );
+        let id = setup_api_key_editor_id(tab_id);
+        let Some(api_key) = self
+            .selected_page()
+            .and_then(|page| page.setup_api_key_mut())
+        else {
+            return;
+        };
+        ui.scope(|ui| {
+            let visuals = ui.visuals_mut();
+            visuals.selection.bg_fill = egui::Color32::TRANSPARENT;
+            visuals.selection.stroke = egui::Stroke::NONE;
+            visuals.text_cursor.stroke = egui::Stroke::NONE;
+            visuals.ime_composition.active_underline_stroke = egui::Stroke::NONE;
+            visuals.ime_composition.inactive_underline_stroke = egui::Stroke::NONE;
+            visuals.text_edit_bg_color = Some(egui::Color32::TRANSPARENT);
+            ui.put(
+                rect,
+                egui::TextEdit::singleline(api_key)
+                    .id(id)
+                    .desired_width(rect.width())
+                    .frame(egui::Frame::NONE)
+                    .margin(egui::Margin::ZERO)
+                    .background_color(egui::Color32::TRANSPARENT)
+                    .text_color(egui::Color32::TRANSPARENT)
+                    .password(true),
+            );
+        });
+    }
+
+    fn select(&mut self, index: usize) {
+        let Some((tab_id, is_chat)) = self
+            .tabs
+            .get(index)
+            .map(|tab| (tab.id, matches!(tab.kind, TabKind::Chat(_))))
+        else {
+            return;
+        };
+        if self.tabs.get(self.selected).map(|tab| tab.id) != Some(tab_id) {
+            self.clear_page_input_focus();
+        }
         self.selected = index;
-        if matches!(tab.kind, TabKind::Chat(_)) {
-            self.active_chat = tab.id;
+        if is_chat {
+            self.active_chat = tab_id;
+        }
+    }
+
+    /// Move a tab to a new position, keeping the same tab selected.
+    fn move_tab(&mut self, from: usize, to: usize) {
+        if from == to || from >= self.tabs.len() || to >= self.tabs.len() {
+            return;
+        }
+        let selected_id = self.tabs.get(self.selected).map(|tab| tab.id);
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+        if let Some(id) = selected_id
+            && let Some(index) = self.tabs.iter().position(|tab| tab.id == id)
+        {
+            self.selected = index;
         }
     }
 
@@ -1815,18 +2010,45 @@ impl DesktopApp {
             }
             return;
         }
+        self.finish_close_tab(index);
+    }
+
+    /// Remove a tab even when it is the last chat. Normal tab closing keeps a
+    /// chat alive by starting a new conversation; destructive conversation
+    /// actions must not do that before the daemon mutation is sent.
+    fn finish_close_tab(&mut self, index: usize) {
+        if index >= self.tabs.len() {
+            return;
+        }
+        let closing_id = self.tabs[index].id;
+        if self.page_input_focus == Some(closing_id) {
+            self.clear_page_input_focus();
+        }
         let closed = self.tabs.remove(index);
+        if self.tabs.is_empty() {
+            self.selected = 0;
+            self.active_chat = 0;
+            return;
+        }
         if self.selected >= self.tabs.len() || self.selected > index {
             self.selected = self.selected.saturating_sub(1);
         }
-        if closed.id == self.active_chat
-            && let Some(tab) = self
+        let active_chat = self.active_chat;
+        if closed.id == active_chat
+            || !self
+                .tabs
+                .iter()
+                .any(|tab| matches!(&tab.kind, TabKind::Chat(session) if session.id == active_chat))
+        {
+            self.active_chat = self
                 .tabs
                 .iter()
                 .rev()
-                .find(|tab| matches!(tab.kind, TabKind::Chat(_)))
-        {
-            self.active_chat = tab.id;
+                .find_map(|tab| match &tab.kind {
+                    TabKind::Chat(_) => Some(tab.id),
+                    TabKind::Page(_) => None,
+                })
+                .unwrap_or(0);
         }
         self.select(self.selected.min(self.tabs.len() - 1));
     }
@@ -1862,11 +2084,7 @@ impl DesktopApp {
                     })
                     .unwrap_or_else(|| "new chat".into());
                 let title: String = title.chars().take(24).collect();
-                if session.state.busy {
-                    format!("● {title}")
-                } else {
-                    title
-                }
+                title
             }
         }
     }
@@ -1949,6 +2167,7 @@ impl DesktopApp {
         let chat = self.active_chat;
         match target {
             live_pane::Open::Click(value) => self.session_mut().click_menu(value),
+            live_pane::Open::Queue(action) => self.session_mut().queue_action(action),
             live_pane::Open::Approval(index) => self.session_mut().choose_approval(index),
             live_pane::Open::Process(id) => {
                 let Some(process) = self
@@ -2058,10 +2277,16 @@ impl DesktopApp {
                 match response {
                     HostResponse::Conversations(conversations) => {
                         self.conversations = conversations;
+                        self.pending_conversation_mutation = None;
                         self.sidebar_notice.clear();
                     }
                     HostResponse::Error { message, .. } => {
-                        self.sidebar_notice = format!("Conversation list unavailable: {message}");
+                        let was_mutation = self.pending_conversation_mutation.take().is_some();
+                        self.sidebar_notice = if was_mutation {
+                            format!("Conversation update failed: {message}")
+                        } else {
+                            format!("Conversation list unavailable: {message}")
+                        };
                     }
                     _ => {}
                 }
@@ -2117,6 +2342,7 @@ impl DesktopApp {
             session.sync_prompt();
             session.drain_queue();
         }
+        self.poll_pending_delete();
         self.poll_conversations();
     }
 
@@ -2247,14 +2473,270 @@ impl DesktopApp {
         }
     }
 
+    fn request_conversation_mutation(&mut self, request: HostRequest) -> bool {
+        if self.demo || self.conversations_request.is_some() {
+            return false;
+        }
+        let mutation_id = match &request {
+            HostRequest::ConversationRename { id, .. }
+            | HostRequest::ConversationDelete { id, .. } => Some(*id),
+            _ => None,
+        };
+        let chat = self.tabs.iter().find_map(|tab| match &tab.kind {
+            TabKind::Chat(session) if session.connected => Some(tab.id),
+            _ => None,
+        });
+        let Some(chat) = chat else {
+            return false;
+        };
+        let (request_id, sent) = {
+            let Some(session) = self.chat_mut(chat) else {
+                return false;
+            };
+            let request_id = session.state.next_id();
+            let sent = session.command(RuntimeCommand::HostRequest {
+                request_id,
+                request,
+            });
+            (request_id, sent)
+        };
+        if sent {
+            self.conversations_request = Some((chat, request_id, Instant::now()));
+            self.conversations_stale = false;
+            self.pending_conversation_mutation = mutation_id;
+        }
+        sent
+    }
+
+    fn can_request_conversation_mutation(&self) -> bool {
+        !self.demo
+            && self.conversations_request.is_none()
+            && self.tabs.iter().any(|tab| match &tab.kind {
+                TabKind::Chat(session) => session.connected,
+                TabKind::Page(_) => false,
+            })
+    }
+
+    fn sidebar_title(&self, id: i64) -> Option<String> {
+        self.conversations
+            .iter()
+            .find(|meta| meta.id == id)
+            .map(|meta| {
+                if !meta.full_title.trim().is_empty() {
+                    meta.full_title.clone()
+                } else if !meta.title.trim().is_empty() {
+                    meta.title.clone()
+                } else {
+                    "Untitled".into()
+                }
+            })
+    }
+
+    fn start_rename(&mut self, id: i64) {
+        if self.pending_delete.is_some() || self.pending_conversation_mutation.is_some() {
+            return;
+        }
+        let Some(title) = self.sidebar_title(id) else {
+            return;
+        };
+        self.rename_field = title;
+        self.rename_target = Some(id);
+        self.delete_target = None;
+        self.sidebar_notice.clear();
+    }
+
+    fn cancel_rename(&mut self) {
+        self.rename_target = None;
+        self.rename_field.clear();
+    }
+
+    fn commit_rename(&mut self) {
+        let Some(id) = self.rename_target else {
+            return;
+        };
+        let title = self.rename_field.trim().to_owned();
+        if title.is_empty() {
+            self.sidebar_notice = "A conversation title cannot be blank.".into();
+            return;
+        }
+        if self.request_conversation_mutation(HostRequest::ConversationRename {
+            id,
+            title,
+            limit: 0,
+        }) {
+            self.cancel_rename();
+        } else {
+            self.sidebar_notice =
+                "Cannot rename right now: connect to the daemon and wait for the current update."
+                    .into();
+        }
+    }
+
+    fn start_delete(&mut self, id: i64) {
+        if self.pending_delete.is_some() || self.pending_conversation_mutation.is_some() {
+            return;
+        }
+        let title = self
+            .sidebar_title(id)
+            .unwrap_or_else(|| format!("Conversation {id}"));
+        self.cancel_rename();
+        self.delete_target = Some((id, title));
+        self.sidebar_notice.clear();
+    }
+
+    fn cancel_delete(&mut self) {
+        self.delete_target = None;
+    }
+
+    fn conversation_running(&self, id: i64) -> bool {
+        self.tabs.iter().any(|tab| match &tab.kind {
+            TabKind::Chat(session) => session.conversation_id == Some(id) && session.state.busy,
+            TabKind::Page(_) => false,
+        })
+    }
+
+    fn close_conversation_tabs(&mut self, id: i64) {
+        let chat_ids: Vec<u64> = self
+            .tabs
+            .iter()
+            .filter_map(|tab| match &tab.kind {
+                TabKind::Chat(session) if session.conversation_id == Some(id) => Some(tab.id),
+                _ => None,
+            })
+            .collect();
+        let indices: Vec<usize> = self
+            .tabs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, tab)| match &tab.kind {
+                TabKind::Chat(session) if session.conversation_id == Some(id) => Some(index),
+                TabKind::Page(page) if chat_ids.contains(&page.chat) => Some(index),
+                _ => None,
+            })
+            .collect();
+        for index in indices.into_iter().rev() {
+            self.finish_close_tab(index);
+        }
+        if self.tabs.is_empty() {
+            self.new_chat_tab(None);
+        }
+    }
+
+    fn commit_delete(&mut self) {
+        let Some((id, _)) = self.delete_target.clone() else {
+            return;
+        };
+        if !self.can_request_conversation_mutation() {
+            self.sidebar_notice =
+                "Cannot delete right now: connect to the daemon and wait for the current update."
+                    .into();
+            return;
+        }
+        if self.conversation_running(id) {
+            self.sidebar_notice = "Stop the active turn before deleting this conversation.".into();
+            return;
+        }
+        self.pending_delete = Some(id);
+        self.close_conversation_tabs(id);
+        self.cancel_delete();
+        self.poll_pending_delete();
+    }
+
+    fn sidebar_dialogs(&mut self, ctx: &egui::Context) {
+        if self.rename_target.is_some() {
+            let mut open = true;
+            let mut save = false;
+            let mut cancel = false;
+            let _ = egui::Window::new("Rename conversation")
+                .id(egui::Id::new("sidebar-rename"))
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    let input = ui.add(
+                        egui::TextEdit::singleline(&mut self.rename_field).desired_width(360.0),
+                    );
+                    if !ui.memory(|memory| memory.has_focus(input.id))
+                        && ui.memory(|memory| memory.focused().is_none())
+                    {
+                        input.request_focus();
+                    }
+                    let enter =
+                        input.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter));
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(
+                                !self.rename_field.trim().is_empty(),
+                                egui::Button::new("Rename"),
+                            )
+                            .clicked()
+                            || enter
+                        {
+                            save = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            if !open || cancel {
+                self.cancel_rename();
+            } else if save {
+                self.commit_rename();
+            }
+        }
+
+        if let Some((_id, title)) = self.delete_target.clone() {
+            let mut open = true;
+            let mut confirm = false;
+            let mut cancel = false;
+            let _ = egui::Window::new("Delete conversation?")
+                .id(egui::Id::new("sidebar-delete"))
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false)
+                .show(ctx, |ui| {
+                    ui.label(format!("Delete \u{201c}{title}\u{201d}?"));
+                    ui.label("This permanently deletes the saved messages and usage.");
+                    ui.horizontal(|ui| {
+                        if ui.button("Delete").clicked() {
+                            confirm = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            if !open || cancel {
+                self.cancel_delete();
+            } else if confirm {
+                self.commit_delete();
+            }
+        }
+    }
+
+    fn poll_pending_delete(&mut self) {
+        let Some(id) = self.pending_delete else {
+            return;
+        };
+        if self.conversations_request.is_some() || !self.can_request_conversation_mutation() {
+            return;
+        }
+        if self.request_conversation_mutation(HostRequest::ConversationDelete { id, limit: 0 }) {
+            self.pending_delete = None;
+        }
+    }
+
     /// Keep one `Conversations` request in flight while the list is stale.
     fn poll_conversations(&mut self) {
         if let Some((chat, _, sent)) = self.conversations_request {
             if !self.chat(chat).is_some_and(|session| session.connected) {
                 self.conversations_request = None;
+                self.pending_conversation_mutation = None;
                 self.conversations_stale = true;
             } else if sent.elapsed() >= HOST_REQUEST_TIMEOUT {
                 self.conversations_request = None;
+                self.pending_conversation_mutation = None;
                 self.sidebar_notice =
                     "No response from the daemon; the history may be stale.".into();
             }
@@ -2414,9 +2896,18 @@ impl DesktopApp {
     /// Window-level keys, handled before any widget sees them: tab shortcuts,
     /// then either the selected page or the active chat.
     fn handle_keys(&mut self, ui: &mut egui::Ui) {
-        // Android's Back button/gesture arrives as BrowserBack. Treat it as Esc
-        // so every Esc action (leave a menu, cancel an edit, deny an approval,
-        // stop a turn, close a page) has a touch equivalent.
+        self.sync_page_input_focus();
+        // Android's Back button/gesture arrives as BrowserBack. A focused
+        // touch-only page editor gets the first Back so the keyboard can close;
+        // the next Back follows the existing Escape path.
+        if self.touch
+            && self.page_api_key_input_active()
+            && ui
+                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::BrowserBack))
+        {
+            self.clear_page_input_focus();
+            return;
+        }
         ui.input_mut(|input| {
             for event in &mut input.events {
                 if let egui::Event::Key { key, .. } = event
@@ -2525,14 +3016,77 @@ impl DesktopApp {
         }
     }
 
+    /// Handle touch gestures over the painted page without adding a toolbar or
+    /// changing the desktop/mouse path.
+    fn page_touch(&mut self, ui: &mut egui::Ui, tab_id: u64, geometry: &grid::ScreenGeometry) {
+        if !self.touch {
+            return;
+        }
+        let response = ui.interact(
+            geometry.rect,
+            egui::Id::new(("full-screen-touch", tab_id)),
+            egui::Sense::click_and_drag(),
+        );
+        let delta = response.drag_delta();
+        if response.drag_stopped() && delta.y.abs() >= geometry.row_height * 1.5 {
+            let effect = self
+                .selected_page()
+                .map(|page| page.swipe(delta.y, geometry.row_height))
+                .unwrap_or(pages::Effect::None);
+            self.apply_page_effect(tab_id, effect);
+            return;
+        }
+        if !response.clicked() {
+            return;
+        }
+        let Some(pos) = response.interact_pointer_pos() else {
+            return;
+        };
+        let Some((row, col)) = geometry.cell_at(pos) else {
+            return;
+        };
+        let action = self
+            .selected_page()
+            .and_then(|page| page.touch_key(row, col, geometry.cols, geometry.row_count));
+        match action {
+            Some(bone_render::screens::TouchAction::ApiKey) => {
+                self.focus_setup_api_key(ui, tab_id);
+            }
+            Some(bone_render::screens::TouchAction::Keys(keys)) => {
+                self.clear_page_input_focus();
+                for key in keys {
+                    let Some(page) = self.selected_page() else {
+                        break;
+                    };
+                    let effect = page.handle_key(key);
+                    self.apply_page_effect(tab_id, effect);
+                    self.sync_page_input_focus();
+                }
+            }
+            None => self.clear_page_input_focus(),
+        }
+    }
+
     /// Forward this frame's key presses and typed text to the selected page.
     fn page_keys(&mut self, ui: &mut egui::Ui) {
         use bone_render::screens::{Key, KeyCode};
+        let editor_focused = self.page_api_key_input_active();
         let keys: Vec<Key> = ui.input_mut(|input| {
             let keys = input
                 .events
                 .iter()
-                .flat_map(|event| match event {
+                .filter_map(|event| match event {
+                    egui::Event::Key {
+                        key,
+                        pressed: true,
+                        modifiers,
+                        ..
+                    } if editor_focused => match key {
+                        egui::Key::Enter | egui::Key::Escape => {
+                            Some(Key::from(&keys::key_event(*key, *modifiers)))
+                        }
+                        _ => None,
+                    },
                     egui::Event::Key {
                         key,
                         pressed: true,
@@ -2542,15 +3096,36 @@ impl DesktopApp {
                         let key = Key::from(&keys::key_event(*key, *modifiers));
                         // Printable characters arrive as text events.
                         let text = matches!(key.code, KeyCode::Char(_)) && !key.ctrl && !key.alt;
-                        (!text).then_some(key).into_iter().collect::<Vec<_>>()
+                        (!text).then_some(key)
                     }
-                    egui::Event::Text(text) => {
-                        text.chars().map(|c| Key::plain(KeyCode::Char(c))).collect()
-                    }
-                    _ => Vec::new(),
+                    _ => None,
                 })
                 .collect();
-            input.events.clear();
+            // A focused API-key editor owns text, IME, paste, and editing keys.
+            // Keep only page-level Enter/Escape for the page state machine; all
+            // other keyboard events are consumed by the editor drawn below.
+            input.events.retain(|event| {
+                if matches!(
+                    event,
+                    egui::Event::PointerMoved(_)
+                        | egui::Event::PointerButton { .. }
+                        | egui::Event::Touch { .. }
+                ) {
+                    return true;
+                }
+                if editor_focused {
+                    !matches!(
+                        event,
+                        egui::Event::Key {
+                            key: egui::Key::Enter | egui::Key::Escape,
+                            pressed: true,
+                            ..
+                        }
+                    )
+                } else {
+                    false
+                }
+            });
             keys
         });
         let scroll = ui.input(|input| input.smooth_scroll_delta.y);
@@ -2566,6 +3141,7 @@ impl DesktopApp {
             };
             let effect = page.handle_key(key);
             self.apply_page_effect(tab_id, effect);
+            self.sync_page_input_focus();
         }
     }
 
@@ -2893,13 +3469,33 @@ impl DesktopApp {
             .map_or(0, |elapsed| elapsed.as_secs() as i64);
         // Relative stamps ("5m ago") age without any other repaint trigger.
         ui.ctx().request_repaint_after(Duration::from_secs(30));
+        let spinner = status_bar::indicator_style(self.settings());
+        let mut rename = None;
+        let mut delete = None;
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 for meta in &self.conversations {
                     let activity = activity.get(&meta.id).copied().unwrap_or_default();
-                    if sidebar::row(ui, meta, activity, &self.render_theme, now).clicked() {
+                    let response =
+                        sidebar::row(ui, meta, activity, &self.render_theme, &spinner, now);
+                    response.context_menu(|ui| {
+                        if ui.button("Rename…").clicked() {
+                            rename = Some(meta.id);
+                            ui.close();
+                        }
+                        let delete_response =
+                            ui.add_enabled(!activity.running, egui::Button::new("Delete…"));
+                        if delete_response.clicked() {
+                            delete = Some(meta.id);
+                            ui.close();
+                        }
+                        if activity.running {
+                            ui.weak("Stop the active turn before deleting.");
+                        }
+                    });
+                    if response.clicked() {
                         open = Some(meta.id);
                     }
                 }
@@ -2910,6 +3506,11 @@ impl DesktopApp {
             if self.narrow {
                 self.sidebar_open = Some(false);
             }
+        }
+        if let Some(id) = rename {
+            self.start_rename(id);
+        } else if let Some(id) = delete {
+            self.start_delete(id);
         }
     }
 
@@ -2922,7 +3523,8 @@ impl DesktopApp {
         let accent = visuals.hyperlink_color;
         let separator = visuals.widgets.noninteractive.bg_stroke.color;
         let tab_height = ui.spacing().interact_size.y + 4.0;
-        let titles: Vec<(u64, String, bool)> = self
+        let spinner = status_bar::indicator_style(self.settings());
+        let titles: Vec<(u64, String, bool, bool)> = self
             .tabs
             .iter()
             .map(|tab| {
@@ -2930,21 +3532,31 @@ impl DesktopApp {
                     tab.id,
                     self.tab_title(tab),
                     matches!(tab.kind, TabKind::Page(_)),
+                    matches!(&tab.kind, TabKind::Chat(session) if session.state.busy),
                 )
             })
             .collect();
+        let mut rects: Vec<egui::Rect> = Vec::new();
+        let mut moved: Option<(usize, f32)> = None;
         egui::ScrollArea::horizontal()
             .id_salt("tab-bar")
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
-                    for (index, (_, title, page)) in titles.iter().enumerate() {
+                    for (index, (_, title, page, busy)) in titles.iter().enumerate() {
                         let label = if *page {
                             format!("[{title}]")
                         } else {
                             title.clone()
                         };
                         let selected = index == self.selected;
+                        if *busy {
+                            let (rect, _) = ui.allocate_exact_size(
+                                egui::vec2(14.0, tab_height),
+                                egui::Sense::hover(),
+                            );
+                            status_bar::paint_indicator(ui, rect.center(), accent, &spinner);
+                        }
                         let response = ui.add(
                             egui::Button::new(
                                 egui::RichText::new(format!(" {label} ")).color(if selected {
@@ -2955,8 +3567,17 @@ impl DesktopApp {
                             )
                             .selected(selected)
                             .frame(false)
-                            .min_size(egui::vec2(0.0, tab_height)),
+                            .min_size(egui::vec2(0.0, tab_height))
+                            .sense(egui::Sense::click_and_drag()),
                         );
+                        if response.dragged() {
+                            ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                        }
+                        if response.drag_stopped()
+                            && let Some(pos) = response.interact_pointer_pos()
+                        {
+                            moved = Some((index, pos.x));
+                        }
                         if response.clicked() {
                             select = Some(index);
                         }
@@ -2979,6 +3600,7 @@ impl DesktopApp {
                         }
 
                         let tab_rect = response.rect.union(close_response.rect);
+                        rects.push(tab_rect);
                         if ui.is_rect_visible(tab_rect) {
                             if selected {
                                 ui.painter().line_segment(
@@ -3034,6 +3656,13 @@ impl DesktopApp {
                     }
                 });
             });
+        if let Some((from, pointer_x)) = moved {
+            let to = rects
+                .iter()
+                .position(|rect| pointer_x < rect.right())
+                .unwrap_or(rects.len().saturating_sub(1));
+            self.move_tab(from, to);
+        }
         if let Some(index) = select {
             self.select(index);
         }
@@ -3083,7 +3712,7 @@ impl DesktopApp {
             settings: self.settings(),
             view: &state.view,
         });
-        status_bar::show(ui, &info, &self.render_theme);
+        status_bar::show(ui, &info, &self.render_theme, self.touch);
     }
 }
 
@@ -3111,6 +3740,10 @@ struct CatalogOp {
 
 fn editor_id() -> egui::Id {
     egui::Id::new("input-editor")
+}
+
+fn setup_api_key_editor_id(tab_id: u64) -> egui::Id {
+    egui::Id::new(("setup-api-key-editor", tab_id))
 }
 
 impl Session {
@@ -3572,6 +4205,10 @@ impl DesktopApp {
         self.apply_theme(&ctx);
         self.pump_daemon(&ctx);
         self.sync_transcripts();
+        // Page keyboard handling runs before layout, so establish the narrow
+        // touch gate from this frame's actual available width first.
+        self.narrow = ui.available_width() < NARROW_WIDTH;
+        self.touch = self.narrow && ui.input(|input| input.has_touch_screen());
         self.handle_keys(ui);
         let dropped = ui.input(|i| i.raw.dropped_files.clone());
         if !dropped.is_empty() {
@@ -3582,7 +4219,6 @@ impl DesktopApp {
             .fill(fill)
             .inner_margin(egui::Margin::symmetric(12, 4));
 
-        self.narrow = ui.available_width() < NARROW_WIDTH;
         let sidebar = self.sidebar_visible();
         egui::Panel::top("tabs")
             .frame(side)
@@ -3611,6 +4247,7 @@ impl DesktopApp {
             egui::CentralPanel::default()
                 .frame(sidebar_frame)
                 .show(ui, |ui| self.sidebar(ui));
+            self.sidebar_dialogs(&ctx);
             return;
         }
         if sidebar {
@@ -3622,6 +4259,14 @@ impl DesktopApp {
                 .max_size(480.0)
                 .show(ui, |ui| self.sidebar(ui));
         }
+        self.sidebar_dialogs(&ctx);
+
+        // Publish the actual chat-pane cell width (excluding its 12pt side
+        // margins), not the host terminal width. Lua menus wrap to this value.
+        let width = ((ui.available_width() - 24.0).max(1.0) / grid::metrics(ui).cell)
+            .floor()
+            .clamp(1.0, u16::MAX as f32) as u16;
+        self.session_mut().publish_width(width);
 
         if self.selected_page().is_some() {
             let theme = self.render_theme.clone();
@@ -3629,8 +4274,15 @@ impl DesktopApp {
                 .frame(egui::Frame::new().fill(fill).inner_margin(12))
                 .show(ui, |ui| {
                     let rect = ui.available_rect_before_wrap();
-                    if let Some(page) = self.selected_page() {
-                        grid::paint_screen(ui, rect, |frame| page.draw(frame, &theme));
+                    let geometry = if let Some(page) = self.selected_page() {
+                        grid::paint_screen(ui, rect, |frame| page.draw(frame, &theme))
+                    } else {
+                        None
+                    };
+                    if let Some(geometry) = geometry {
+                        let tab_id = self.tabs[self.selected].id;
+                        self.setup_api_key_editor(ui, tab_id, &geometry);
+                        self.page_touch(ui, tab_id, &geometry);
                     }
                     ui.ctx().request_repaint_after(Duration::from_millis(500));
                 });
@@ -3638,6 +4290,14 @@ impl DesktopApp {
         }
 
         let theme = self.render_theme.clone();
+        {
+            let session = self.session_mut();
+            session.live_pane.hold_thinking(
+                session.state.live_reasoning.as_deref(),
+                session.state.busy,
+                width,
+            );
+        }
         let session = self.session();
         let pages = session.live_pane.pages(
             live_pane::Sources {
@@ -3663,7 +4323,8 @@ impl DesktopApp {
                 .frame(side)
                 .show_separator_line(false)
                 .show(ui, |ui| {
-                    open = self.session_mut().live_pane.show(ui, &pages);
+                    let touch = self.touch;
+                    open = self.session_mut().live_pane.show(ui, &pages, touch);
                 });
         }
         if let Some(target) = open {

@@ -7,7 +7,7 @@
 //! The daemon supplies snapshots and applies mutations; this module owns only
 //! picker state and rendering. The onboarding wizard reuses [`build_items`].
 
-use super::{Key, KeyCode};
+use super::{Key, KeyCode, TouchAction, cursor_keys};
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -272,6 +272,73 @@ impl CatalogScreen {
         CatalogKeyAction::None
     }
 
+    /// Map taps on the existing checklist rows, consent dialog, and footer
+    /// hints to the screen's normal key handling.
+    pub fn touch_key(&self, row: u16, col: u16, cols: u16, rows: u16) -> Option<TouchAction> {
+        if self.state.pending_consent.is_some() {
+            let modal = consent_rect(cols, rows);
+            if col >= modal.x
+                && col < modal.x.saturating_add(modal.width)
+                && row >= modal.y
+                && row < modal.y.saturating_add(modal.height)
+            {
+                let action_row = modal.y.saturating_add(modal.height.saturating_sub(4));
+                if row >= action_row {
+                    // Split at the drawn "[n]" (1-cell border + "[y] install    "),
+                    // not the modal midpoint, so taps on the visible "cancel" text cancel.
+                    let split = modal
+                        .x
+                        .saturating_add(1u16 + "[y] install    ".chars().count() as u16);
+                    let key = if col < split { 'y' } else { 'n' };
+                    return Some(TouchAction::Keys(vec![Key::plain(KeyCode::Char(key))]));
+                }
+                // Tapping the dialog body is the touch equivalent of dismissing
+                // the visible consent prompt with Escape.
+                return Some(TouchAction::Keys(vec![Key::plain(KeyCode::Esc)]));
+            }
+        }
+
+        if row >= rows.saturating_sub(2) {
+            let keys = catalog_footer_keys(&self.state);
+            let (index, start, end) = picker::footer_hit(col, &keys)?;
+            return Some(catalog_footer_action(&self.state, index, col, start, end));
+        }
+        if row < 3 || self.state.items.is_empty() {
+            return None;
+        }
+
+        let body_height = rows.saturating_sub(5);
+        let (list_area_y, list_area_height) = if self.state.result.is_some() {
+            (5u16, body_height.saturating_sub(2))
+        } else {
+            (3u16, body_height)
+        };
+        let padded_y = list_area_y.saturating_add(1);
+        let padded_height = list_area_height.saturating_sub(1);
+        let list_y = padded_y.saturating_add(3);
+        let list_height = padded_height.saturating_sub(3);
+        if row < list_y || row >= list_y.saturating_add(list_height) {
+            return None;
+        }
+
+        let list_rect = Rect::new(2, list_y, cols.saturating_sub(2), list_height);
+        if !picker::left_pane_hit(list_rect, col) {
+            return None;
+        }
+        let visible_row = (row - list_y) as usize;
+        let target = picker::item_at_visible_row(
+            &self.state.items,
+            self.state.cursor,
+            list_height as usize,
+            visible_row,
+        )?;
+        let mut keys = cursor_keys(self.state.cursor, target, self.state.items.len())?;
+        if self.state.result.is_none() {
+            keys.push(Key::plain(KeyCode::Char(' ')));
+        }
+        Some(TouchAction::Keys(keys))
+    }
+
     /// Deliver the reply to the most recent [`CatalogKeyAction::Apply`].
     pub fn applied(&mut self, result: Result<CatalogApplyResult, String>, theme: &Theme) {
         apply_result(&mut self.state, theme, result);
@@ -422,6 +489,70 @@ fn overlay_results(items: &mut [Item], results: &[CatalogItemResult], theme: &Th
     }
 }
 
+fn catalog_footer_keys(state: &State) -> Vec<(&'static str, &'static str)> {
+    if state.pending_consent.is_some() {
+        vec![("y", "install"), ("n", "cancel")]
+    } else if state.result.is_some() {
+        vec![("↑↓", "move"), ("enter/esc", "close")]
+    } else {
+        vec![
+            ("↑↓", "move"),
+            ("space", "toggle"),
+            ("a/n", "all/none"),
+            ("enter", "apply"),
+            ("esc", "close"),
+        ]
+    }
+}
+
+fn catalog_footer_action(
+    state: &State,
+    index: usize,
+    col: u16,
+    start: u16,
+    end: u16,
+) -> TouchAction {
+    let key = if state.pending_consent.is_some() {
+        match index {
+            0 => Key::plain(KeyCode::Char('y')),
+            _ => Key::plain(KeyCode::Char('n')),
+        }
+    } else if state.result.is_some() {
+        match index {
+            0 => Key::plain(KeyCode::Down),
+            _ => Key::plain(if picker::first_half(col, start, end) {
+                KeyCode::Enter
+            } else {
+                KeyCode::Esc
+            }),
+        }
+    } else {
+        match index {
+            0 => Key::plain(KeyCode::Down),
+            1 => Key::plain(KeyCode::Char(' ')),
+            2 => Key::plain(if picker::first_half(col, start, end) {
+                KeyCode::Char('a')
+            } else {
+                KeyCode::Char('n')
+            }),
+            3 => Key::plain(KeyCode::Enter),
+            _ => Key::plain(KeyCode::Esc),
+        }
+    };
+    TouchAction::Keys(vec![key])
+}
+
+fn consent_rect(cols: u16, rows: u16) -> Rect {
+    let width = cols.saturating_sub(8).clamp(24, 72);
+    let height = 11u16.min(rows);
+    Rect {
+        x: (cols.saturating_sub(width)) / 2,
+        y: (rows.saturating_sub(height)) / 2,
+        width,
+        height,
+    }
+}
+
 // ---- rendering ----------------------------------------------------------
 
 fn draw(frame: &mut ratatui::Frame, state: &State, theme: &Theme) {
@@ -484,14 +615,7 @@ fn draw_consent(frame: &mut ratatui::Frame, area: Rect, state: &State, theme: &T
             Style::default().fg(p.fg).add_modifier(Modifier::BOLD),
         )),
     ];
-    let width = area.width.saturating_sub(8).clamp(24, 72);
-    let height = 11u16.min(area.height);
-    let rect = Rect {
-        x: area.x + area.width.saturating_sub(width) / 2,
-        y: area.y + area.height.saturating_sub(height) / 2,
-        width,
-        height,
-    };
+    let rect = consent_rect(area.width, area.height);
     frame.render_widget(ratatui::widgets::Clear, rect);
     frame.render_widget(
         Paragraph::new(lines)
@@ -602,20 +726,8 @@ fn draw_body(frame: &mut ratatui::Frame, area: Rect, state: &State, theme: &Them
 }
 
 fn draw_footer(frame: &mut ratatui::Frame, area: Rect, state: &State, theme: &Theme) {
-    let keys: &[(&str, &str)] = if state.pending_consent.is_some() {
-        &[("y", "install"), ("n", "cancel")]
-    } else if state.result.is_some() {
-        &[("↑↓", "move"), ("enter/esc", "close")]
-    } else {
-        &[
-            ("↑↓", "move"),
-            ("space", "toggle"),
-            ("a/n", "all/none"),
-            ("enter", "apply"),
-            ("esc", "close"),
-        ]
-    };
-    picker::draw_footer(frame, area, keys, theme);
+    let keys = catalog_footer_keys(state);
+    picker::draw_footer(frame, area, &keys, theme);
 }
 
 #[cfg(test)]

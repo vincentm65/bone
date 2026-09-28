@@ -57,3 +57,41 @@ fn remove_missing_source_is_noop() {
     assert_eq!(p.len(), 2);
     assert_eq!(active, 1);
 }
+
+fn row_text(page: &PanePage) -> Vec<String> {
+    page.content
+        .iter()
+        .map(|line| line.spans.iter().map(|s| s.content.as_ref()).collect())
+        .collect()
+}
+
+#[test]
+fn fixed_thinking_height_is_constant() {
+    let theme = Theme::default();
+    for n in [1, 5, 30] {
+        let text = (0..n)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let page = thinking_fixed(&text, 40, 10, &theme);
+        assert_eq!(page.content.len(), 10);
+        assert_eq!(page.visible_rows, 10);
+    }
+}
+
+#[test]
+fn fixed_thinking_wraps_and_keeps_newest_text() {
+    let theme = Theme::default();
+    let text = format!("{}END", "a".repeat(100));
+    let rows = row_text(&thinking_fixed(&text, 20, 10, &theme));
+    assert!(rows.iter().any(|row| row == "END"));
+    assert!(rows.iter().all(|row| row.chars().count() <= 20));
+
+    let many = (0..50)
+        .map(|i| format!("l{i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let rows = row_text(&thinking_fixed(&many, 20, 10, &theme));
+    assert_eq!(rows[9], "l49");
+    assert_eq!(rows[1], "l41");
+}

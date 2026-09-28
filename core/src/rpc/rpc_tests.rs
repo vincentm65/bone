@@ -381,6 +381,50 @@ impl crate::llm::provider::LlmProvider for NamedTestProvider {
     }
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn append_message_allocates_and_persists_an_ephemeral_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = crate::session_db::SessionDb::open(&temp.path().join("sessions.db")).unwrap();
+    let mut session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    session.session_db = Some(db);
+
+    let (mut ctx, _hub, mut commands) = test_daemon_ctx(
+        Arc::new(NamedTestProvider {
+            id: "test",
+            model: "test-model",
+        }),
+        crate::ext::ExtensionManager::unloaded(),
+        session,
+    );
+    let content = "$ printf shell context\\noutput";
+    let flow = ctx
+        .handle_idle_command(
+            RuntimeCommand::AppendMessage {
+                role: "user".into(),
+                content: content.into(),
+            },
+            &mut commands,
+        )
+        .await;
+    assert!(matches!(flow, Flow::Continue));
+
+    let session = ctx.session.lock().unwrap();
+    let conversation_id = session
+        .conversation_id
+        .expect("appended context allocates a conversation");
+    assert_eq!(session.session_seq, 1);
+    let stored = session
+        .session_db
+        .as_ref()
+        .unwrap()
+        .load_messages(conversation_id)
+        .unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].content, content);
+}
+
 fn test_daemon_ctx(
     llm: Arc<dyn crate::llm::provider::LlmProvider>,
     extensions: crate::ext::ExtensionManager,
@@ -1058,6 +1102,7 @@ fn commands_and_prompts_check_extension_sources() {
         request_id: None,
         name: "config".into(),
         input: String::new(),
+        terminal_width: None,
     }));
     assert!(checks_extension_sources(&RuntimeCommand::SubmitPrompt {
         request_id: None,
@@ -1877,7 +1922,7 @@ async fn interactive_command_private_completion_returns_replace_and_accounts_usa
     let mut events = hub.subscribe();
 
     let (ret, operations) = ctx
-        .run_interactive_command(&mut commands, "private_replace".into(), String::new())
+        .run_interactive_command(&mut commands, "private_replace".into(), String::new(), None)
         .await
         .expect("registered command was not found");
     assert!(operations.is_empty());
@@ -1997,7 +2042,7 @@ async fn interactive_command_cancellation_drains_private_usage_with_bounded_grac
     });
     let started = std::time::Instant::now();
     let (ret, operations) = ctx
-        .run_interactive_command(&mut commands, "private_replace".into(), String::new())
+        .run_interactive_command(&mut commands, "private_replace".into(), String::new(), None)
         .await
         .expect("registered command was not found");
     cancel.await.unwrap();
@@ -2087,7 +2132,7 @@ async fn synchronize_reports_busy_during_interactive_command() {
     });
 
     let result = ctx
-        .run_interactive_command(&mut commands, "wait_for_key".into(), String::new())
+        .run_interactive_command(&mut commands, "wait_for_key".into(), String::new(), None)
         .await;
     assert!(result.is_some());
     assert!(matches!(
@@ -2161,7 +2206,12 @@ async fn synchronize_replays_and_routes_pending_command_approval() {
     });
 
     let (ret, operations) = ctx
-        .run_interactive_command(&mut commands, "wait_for_approval".into(), String::new())
+        .run_interactive_command(
+            &mut commands,
+            "wait_for_approval".into(),
+            String::new(),
+            None,
+        )
         .await
         .expect("registered command was not found");
     observer.await.unwrap();
@@ -2243,6 +2293,7 @@ async fn command_and_keymap_replies_echo_request_ids() {
                 request_id: Some(92),
                 name: "submit_output".into(),
                 input: String::new(),
+                terminal_width: None,
             },
             &mut commands,
         )
@@ -2334,6 +2385,7 @@ async fn turn_queues_idle_commands_and_preserves_correlated_replies() {
                 request_id: Some(202),
                 name: "missing".into(),
                 input: String::new(),
+                terminal_width: None,
             })
             .unwrap();
         command_tx
@@ -2445,7 +2497,7 @@ async fn key_request_is_cancelled_when_the_last_client_detaches() {
 
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(5),
-        ctx.run_interactive_command(&mut commands, "wait_for_key".into(), String::new()),
+        ctx.run_interactive_command(&mut commands, "wait_for_key".into(), String::new(), None),
     )
     .await;
     detach.await.unwrap();
@@ -2480,6 +2532,7 @@ async fn interactive_command_queues_idle_work_in_fifo_order() {
                 request_id: Some(301),
                 name: "missing".into(),
                 input: String::new(),
+                terminal_width: None,
             })
             .unwrap();
         command_tx
@@ -2523,7 +2576,7 @@ async fn interactive_command_queues_idle_work_in_fifo_order() {
     });
 
     let result = ctx
-        .run_interactive_command(&mut commands, "wait_for_key".into(), String::new())
+        .run_interactive_command(&mut commands, "wait_for_key".into(), String::new(), None)
         .await;
     assert!(result.is_some());
     observer.await.unwrap();
@@ -2613,6 +2666,84 @@ async fn interactive_command_queues_idle_work_in_fifo_order() {
             break;
         }
     }
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn new_conversation_does_not_create_an_empty_replacement() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = crate::session_db::SessionDb::open(&temp.path().join("sessions.db")).unwrap();
+    let mut session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    session.session_db = Some(db);
+    let (mut ctx, _hub, mut commands) = test_daemon_ctx(
+        Arc::new(ConfigTestProvider),
+        crate::ext::ExtensionManager::unloaded(),
+        session,
+    );
+
+    ctx.handle_idle_command(RuntimeCommand::NewConversation, &mut commands)
+        .await;
+    {
+        let session = ctx.session.lock().unwrap();
+        assert_eq!(session.conversation_id, None);
+        let count: i64 = session
+            .session_db
+            .as_ref()
+            .unwrap()
+            .conn_ref()
+            .query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    {
+        let mut session = ctx.session.lock().unwrap();
+        let id = session
+            .session_db
+            .as_ref()
+            .unwrap()
+            .create_conversation("test", "test-model")
+            .unwrap();
+        session
+            .session_db
+            .as_ref()
+            .unwrap()
+            .append_chat_message(
+                id,
+                &ChatMessage::new(crate::llm::ChatRole::User, "durable"),
+                1,
+            )
+            .unwrap();
+        session.conversation_id = Some(id);
+        session.session_seq = 1;
+        session.transcript = vec![ChatMessage::new(crate::llm::ChatRole::User, "durable")];
+    }
+
+    ctx.handle_idle_command(RuntimeCommand::NewConversation, &mut commands)
+        .await;
+    let session = ctx.session.lock().unwrap();
+    assert_eq!(session.conversation_id, None);
+    assert!(session.transcript.is_empty());
+    assert_eq!(
+        session
+            .session_db
+            .as_ref()
+            .unwrap()
+            .recent_conversations(10)
+            .unwrap()
+            .len(),
+        1
+    );
+    let count: i64 = session
+        .session_db
+        .as_ref()
+        .unwrap()
+        .conn_ref()
+        .query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
 }
 
 #[test]
@@ -3128,7 +3259,8 @@ async fn managed_socket_bridge_reports_broadcast_lag() {
                 let (hub, mut commands) = Hub::new();
                 let publisher = hub.publisher();
                 Ok(ManagedRuntime {
-                    conversation_id: 1,
+                    actor_id: 1,
+                    conversation_id: Some(1),
                     hub,
                     projection: fake_managed_projection(1),
                     task: Box::pin(async move {
@@ -3261,11 +3393,102 @@ fn fake_managed_runtime(
         }
     });
     ManagedRuntime {
-        conversation_id: id,
+        actor_id: id,
+        conversation_id: Some(id),
         hub,
         projection,
         task,
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn managed_ephemeral_actor_keeps_latest_and_acquires_conversation_alias() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let actor_id = -10_001;
+            let conversation_id = 9_876;
+            let session = Arc::new(Mutex::new(crate::runtime::RuntimeSession::new(
+                crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+            )));
+            let factory_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let factory_session = session.clone();
+            let factory_calls_ref = factory_calls.clone();
+            let (manager, receiver) = SessionManager::new();
+            let runner = tokio::task::spawn_local(run_session_manager(receiver, move |target| {
+                assert!(matches!(target, SessionTarget::Latest));
+                factory_calls_ref.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let (hub, mut commands) = Hub::new();
+                let publisher = hub.publisher();
+                let projection = RuntimeProjection::new(
+                    factory_session.clone(),
+                    Arc::new(ConfigTestProvider),
+                    crate::ext::ExtensionManager::unloaded(),
+                );
+                let task_session = factory_session.clone();
+                Ok(ManagedRuntime {
+                    actor_id,
+                    conversation_id: None,
+                    hub,
+                    projection,
+                    task: Box::pin(async move {
+                        while let Some(command) = commands.recv().await {
+                            if matches!(command, RuntimeCommand::SubmitPrompt { .. }) {
+                                task_session.lock().unwrap().conversation_id =
+                                    Some(conversation_id);
+                                publisher.publish(RuntimeEvent::Status {
+                                    message: "allocated".into(),
+                                });
+                            }
+                        }
+                    }),
+                })
+            }));
+
+            let latest = manager.attach(SessionTarget::Latest, None).await.unwrap();
+            assert_eq!(latest.actor_id, actor_id);
+            assert!(latest.initial.iter().any(|event| matches!(
+                event,
+                RuntimeEvent::StateSnapshot { snapshot }
+                    if snapshot.conversation_id.is_none()
+            )));
+            latest
+                .commands
+                .send(RuntimeCommand::SubmitPrompt {
+                    request_id: None,
+                    text: "first prompt".into(),
+                    images: vec![],
+                })
+                .unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while session.lock().unwrap().conversation_id != Some(conversation_id) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("ephemeral actor did not acquire a durable id");
+
+            let latest_after_prompt = manager.attach(SessionTarget::Latest, None).await.unwrap();
+            assert_eq!(latest_after_prompt.actor_id, actor_id);
+            assert!(latest_after_prompt.initial.iter().any(|event| matches!(
+                event,
+                RuntimeEvent::StateSnapshot { snapshot }
+                    if snapshot.conversation_id == Some(conversation_id)
+            )));
+            let by_conversation = manager
+                .attach(SessionTarget::Conversation(conversation_id), None)
+                .await
+                .unwrap();
+            assert_eq!(by_conversation.actor_id, actor_id);
+            assert_eq!(
+                factory_calls.load(std::sync::atomic::Ordering::SeqCst),
+                1,
+                "Latest and Conversation must share the re-keyed actor"
+            );
+
+            runner.abort();
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "current_thread")]
@@ -3402,7 +3625,8 @@ async fn managed_reload_is_host_scoped_while_ordinary_commands_remain_actor_loca
                 let mut reloads = factory_group.subscribe_extension_reloads();
                 let observed = observed_tx.clone();
                 Ok(ManagedRuntime {
-                    conversation_id: id,
+                    actor_id: id,
+                    conversation_id: Some(id),
                     hub,
                     projection: fake_managed_projection(id),
                     task: Box::pin(async move {
@@ -3606,7 +3830,8 @@ async fn managed_actor_panic_does_not_stop_other_sessions() {
                 if id == 1 {
                     let (hub, _commands) = Hub::new();
                     Ok(ManagedRuntime {
-                        conversation_id: id,
+                        actor_id: id,
+                        conversation_id: Some(id),
                         hub,
                         projection: fake_managed_projection(id),
                         task: Box::pin(async { panic!("actor boom") }),
@@ -3668,7 +3893,8 @@ async fn managed_event_channel_closure_writes_one_status_then_eof() {
             let runner = tokio::task::spawn_local(run_session_manager(receiver, |_| {
                 let (hub, _commands) = Hub::new();
                 Ok(ManagedRuntime {
-                    conversation_id: 1,
+                    actor_id: 1,
+                    conversation_id: Some(1),
                     hub,
                     projection: fake_managed_projection(1),
                     task: Box::pin(async {}),
@@ -3818,7 +4044,8 @@ async fn evicting_a_cached_actor_releases_its_lua_vm() {
                 }
                 let (hub, _commands) = Hub::new();
                 Ok(ManagedRuntime {
-                    conversation_id: id,
+                    actor_id: id,
+                    conversation_id: Some(id),
                     hub,
                     projection: fake_managed_projection(id),
                     task: Box::pin(async move {
@@ -3883,7 +4110,8 @@ async fn managed_sessions_do_not_evict_disconnected_running_actor() {
                 let (hub, mut commands) = Hub::new();
                 if id != 1 {
                     return Ok(ManagedRuntime {
-                        conversation_id: id,
+                        actor_id: id,
+                        conversation_id: Some(id),
                         hub,
                         projection: fake_managed_projection(id),
                         task: Box::pin(std::future::pending()),
@@ -3893,7 +4121,8 @@ async fn managed_sessions_do_not_evict_disconnected_running_actor() {
                 let publisher = hub.publisher();
                 let dropped = factory_dropped.clone();
                 Ok(ManagedRuntime {
-                    conversation_id: id,
+                    actor_id: id,
+                    conversation_id: Some(id),
                     hub,
                     projection: fake_managed_projection(id),
                     task: Box::pin(async move {
@@ -4170,7 +4399,7 @@ fn incognito_transitions_cancel_jobs_in_the_departing_scope() {
     assert!(incognito_flag.load(std::sync::atomic::Ordering::Relaxed));
     let session = ctx.session.lock().unwrap();
     assert!(!session.incognito);
-    assert!(session.conversation_id.is_some());
+    assert!(session.conversation_id.is_none());
     drop(session);
 
     registry.complete(&persisted_job, Err("cancelled".into()));
@@ -4648,7 +4877,10 @@ async fn synchronize_in_turn_merges_uncommitted_live_tail_over_full_db() {
     session
         .init_db(&*provider, "regression system prompt")
         .expect("fresh startup database");
-    let conversation = session.conversation_id.expect("startup conversation");
+    let conversation = session
+        .ensure_conversation(&*provider)
+        .expect("lazy startup conversation")
+        .expect("startup conversation");
     {
         let db = session.session_db.as_ref().unwrap();
         db.append_chat_message(

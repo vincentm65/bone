@@ -323,3 +323,93 @@ fn tool_install_applies_without_consent() {
     assert!(screen.state.pending_consent.is_none());
     assert!(screen.state.result.is_some());
 }
+
+#[test]
+fn touch_catalog_rows_include_sections_and_visible_offsets() {
+    let mut first = Item::new("first".into(), "".into(), false);
+    first.section = Some("Available (2)".into());
+    let mut second = Item::new("second".into(), "".into(), false);
+    second.section = Some("Installed (1)".into());
+    let mut screen = CatalogScreen {
+        state: State {
+            revision: "r1".into(),
+            entries: Vec::new(),
+            items: vec![first, second],
+            cursor: 1,
+            outcome: Outcome {
+                changed: false,
+                message: String::new(),
+            },
+            result: None,
+            pending_consent: None,
+        },
+    };
+
+    // Row 7 is the first visible line: the heading above `first` selects it.
+    let TouchAction::Keys(keys) = screen.touch_key(7, 3, 80, 20).expect("section row") else {
+        panic!("section heading should select its following item");
+    };
+    assert_eq!(keys.first().map(|key| key.code), Some(KeyCode::Down));
+    assert_eq!(keys.last().map(|key| key.code), Some(KeyCode::Char(' ')));
+
+    let mut items = (0..8)
+        .map(|index| Item::new(format!("item-{index}"), String::new(), false))
+        .collect::<Vec<_>>();
+    items[0].section = Some("Available".into());
+    screen.state.items = items;
+    screen.state.cursor = 6;
+    // With a three-row list, the first visible item is item 5 after centering.
+    let TouchAction::Keys(keys) = screen.touch_key(7, 3, 80, 12).expect("windowed row") else {
+        panic!("windowed row should remain tappable");
+    };
+    assert_eq!(keys.first().map(|key| key.code), Some(KeyCode::Up));
+    assert_eq!(keys.last().map(|key| key.code), Some(KeyCode::Char(' ')));
+}
+
+#[test]
+fn touch_catalog_consent_and_result_use_existing_close_paths() {
+    let mut screen = CatalogScreen {
+        state: consent_state("plugin"),
+    };
+    screen.state.pending_consent = Some(vec![CatalogAction {
+        name: "demo.lua".into(),
+        action: CatalogActionKind::Install,
+    }]);
+    let TouchAction::Keys(keys) = screen.touch_key(11, 10, 80, 20).expect("modal yes") else {
+        panic!("modal action should return a key");
+    };
+    assert_eq!(keys, vec![Key::plain(KeyCode::Char('y'))]);
+    // The visible "[n] cancel" text (cols 20..29 at 80 cols) must cancel.
+    let TouchAction::Keys(keys) = screen.touch_key(11, 24, 80, 20).expect("modal cancel text")
+    else {
+        panic!("modal action should return a key");
+    };
+    assert_eq!(keys, vec![Key::plain(KeyCode::Char('n'))]);
+    let TouchAction::Keys(keys) = screen.touch_key(11, 65, 80, 20).expect("modal no") else {
+        panic!("modal action should return a key");
+    };
+    assert_eq!(keys, vec![Key::plain(KeyCode::Char('n'))]);
+    assert_eq!(
+        screen.touch_key(6, 20, 80, 20),
+        Some(TouchAction::Keys(vec![Key::plain(KeyCode::Esc)]))
+    );
+
+    let result = CatalogScreen {
+        state: result_state("Done"),
+    };
+    let TouchAction::Keys(keys) = result.touch_key(9, 3, 80, 20).expect("result row") else {
+        panic!("result rows should remain selectable");
+    };
+    assert!(
+        keys.is_empty(),
+        "the current result row needs no cursor movement"
+    );
+    assert_eq!(
+        result.touch_key(18, 13, 80, 20),
+        Some(TouchAction::Keys(vec![Key::plain(KeyCode::Enter)]))
+    );
+    assert_eq!(
+        result.touch_key(18, 30, 80, 20),
+        Some(TouchAction::Keys(vec![Key::plain(KeyCode::Esc)]))
+    );
+}

@@ -15,7 +15,7 @@ struct Server {
 
 struct ServerResult {
     pid: u32,
-    conversation_id: i64,
+    conversation_id: Option<i64>,
     status: std::process::ExitStatus,
     stdout: String,
     stderr: String,
@@ -51,7 +51,7 @@ fn start_server(exe: &str, repo: &Path, bone_dir: &Path, addr: SocketAddr) -> Se
     Server { child, pid }
 }
 
-fn connect_and_read_conversation(addr: SocketAddr) -> Result<i64, String> {
+fn connect_and_read_conversation(addr: SocketAddr) -> Result<Option<i64>, String> {
     let deadline = Instant::now() + Duration::from_secs(15);
     let stream = loop {
         match TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
@@ -78,15 +78,13 @@ fn connect_and_read_conversation(addr: SocketAddr) -> Result<i64, String> {
         }
         let event: RuntimeEvent = serde_json::from_str(&line)
             .map_err(|error| format!("invalid event from {addr}: {error}: {line}"))?;
-        if let RuntimeEvent::StateSnapshot { snapshot } = event
-            && let Some(id) = snapshot.conversation_id
-        {
-            return Ok(id);
+        if let RuntimeEvent::StateSnapshot { snapshot } = event {
+            return Ok(snapshot.conversation_id);
         }
     }
 }
 
-fn finish_server(mut server: Server, conversation_id: i64) -> ServerResult {
+fn finish_server(mut server: Server, conversation_id: Option<i64>) -> ServerResult {
     drop(server.child.stdin.take());
     let output = server.child.wait_with_output().unwrap();
     ServerResult {
@@ -122,18 +120,18 @@ fn two_executables_start_concurrently_with_a_fresh_shared_bone_dir() {
         let _ = first.child.kill();
         let _ = second.child.kill();
     }
-    let first_result = finish_server(first, first_id.unwrap_or(-1));
-    let second_result = finish_server(second, second_id.unwrap_or(-1));
+    let first_result = finish_server(first, first_id.unwrap_or(None));
+    let second_result = finish_server(second, second_id.unwrap_or(None));
 
     eprintln!("executable={exe} bone_dir={}", bone_dir.display());
     for result in [&first_result, &second_result] {
         eprintln!(
-            "pid={} conversation_id={} status={} stdout={:?} stderr={:?}",
+            "pid={} conversation_id={:?} status={} stdout={:?} stderr={:?}",
             result.pid, result.conversation_id, result.status, result.stdout, result.stderr
         );
         assert!(
-            result.status.success() && result.conversation_id > 0,
-            "pid={} conversation_id={} status={} stdout={:?} stderr={:?}",
+            result.status.success() && result.conversation_id.is_none(),
+            "pid={} conversation_id={:?} status={} stdout={:?} stderr={:?}",
             result.pid,
             result.conversation_id,
             result.status,

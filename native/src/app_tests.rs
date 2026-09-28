@@ -790,6 +790,106 @@ fn sidebar_rows_show_a_timestamp_under_each_title_and_open_on_click() {
 }
 
 #[test]
+fn sidebar_rename_and_delete_send_host_mutations() {
+    let meta = |id: i64, title: &str| ConversationMeta {
+        id,
+        title: title.into(),
+        full_title: format!("{title} full"),
+        updated_at: "2020-01-02T14:22:00Z".into(),
+        updated_at_local: "2020-01-02T14:22:00".into(),
+        message_count: 1,
+        provider: "openai".into(),
+        model: "gpt".into(),
+        token_count: 0,
+        status: bone_protocol::ConversationStatus::Completed,
+    };
+
+    let (mut rename_app, _ctx, mut rx) = app();
+    rename_app.conversations = vec![meta(41, "old")];
+    rename_app.start_rename(41);
+    assert_eq!(rename_app.rename_field, "old full");
+    rename_app.rename_field = "renamed".into();
+    rename_app.commit_rename();
+    let requests = sent(&mut rx);
+    assert_eq!(requests.len(), 1);
+    match &requests[0] {
+        RuntimeCommand::HostRequest {
+            request: HostRequest::ConversationRename { id, title, .. },
+            ..
+        } => {
+            assert_eq!(*id, 41);
+            assert_eq!(title, "renamed");
+        }
+        other => panic!("unexpected request: {other:?}"),
+    }
+
+    let (mut app, _ctx, mut rx) = app();
+    app.conversations = vec![meta(41, "old")];
+    app.start_delete(41);
+    app.commit_delete();
+    let requests = sent(&mut rx);
+    assert_eq!(requests.len(), 1);
+    assert!(matches!(
+        &requests[0],
+        RuntimeCommand::HostRequest {
+            request: HostRequest::ConversationDelete { id: 41, .. },
+            ..
+        }
+    ));
+}
+
+#[test]
+fn deleting_only_empty_conversation_waits_for_a_replacement_chat() {
+    let (mut app, _ctx, mut rx) = app();
+    app.conversations = vec![ConversationMeta {
+        id: 41,
+        title: String::new(),
+        full_title: String::new(),
+        updated_at: "2020-01-02T14:22:00Z".into(),
+        updated_at_local: "2020-01-02T14:22:00".into(),
+        message_count: 0,
+        provider: "openai".into(),
+        model: "gpt".into(),
+        token_count: 0,
+        status: bone_protocol::ConversationStatus::Completed,
+    }];
+    app.session_mut().conversation_id = Some(41);
+    app.start_delete(41);
+    app.commit_delete();
+
+    assert_eq!(app.pending_delete, Some(41));
+    assert_eq!(
+        app.tabs.len(),
+        1,
+        "a replacement chat tab keeps the UI usable"
+    );
+    assert!(app.session().conversation_id.is_none());
+    assert!(
+        sent(&mut rx).is_empty(),
+        "deletion does not start a new conversation"
+    );
+
+    app.poll_pending_delete();
+    assert!(
+        sent(&mut rx).is_empty(),
+        "deletion waits for the replacement connection"
+    );
+
+    let (replacement_tx, mut replacement_rx) = mpsc::unbounded_channel();
+    app.session_mut().commands = replacement_tx;
+    app.session_mut().connected = true;
+    app.poll_pending_delete();
+    assert!(app.pending_delete.is_none());
+    assert!(matches!(
+        sent(&mut replacement_rx).as_slice(),
+        [RuntimeCommand::HostRequest {
+            request: HostRequest::ConversationDelete { id: 41, .. },
+            ..
+        }]
+    ));
+}
+
+#[test]
 fn a_turn_finishing_unseen_marks_the_chat_unread_until_viewed() {
     let (mut app, ctx, _rx) = app();
     let drain = |app: &mut DesktopApp, focused: bool| {
@@ -1129,4 +1229,87 @@ fn android_back_acts_as_esc() {
     app.session_mut().state.busy = true;
     frame(&mut app, &ctx, back());
     assert!(matches!(sent(&mut rx).as_slice(), [RuntimeCommand::Cancel]));
+}
+
+#[test]
+fn desktop_publishes_chat_pane_width_on_connect_and_resize() {
+    let (mut app, ctx, mut rx) = app();
+    render_at(&mut app, &ctx, 400.0, Vec::new());
+    let width = sent(&mut rx)
+        .into_iter()
+        .find_map(|command| match command {
+            RuntimeCommand::SetTerminalWidth { width } => Some(width),
+            _ => None,
+        })
+        .expect("pane width on first frame");
+    assert!(width > 20 && width < 80, "phone width: {width}");
+    render_at(&mut app, &ctx, 400.0, Vec::new());
+    assert!(
+        sent(&mut rx)
+            .into_iter()
+            .all(|command| !matches!(command, RuntimeCommand::SetTerminalWidth { .. }))
+    );
+    render_at(&mut app, &ctx, 600.0, Vec::new());
+    assert!(sent(&mut rx).into_iter().any(|command| matches!(command, RuntimeCommand::SetTerminalWidth { width: next } if next > width)));
+    app.session_mut()
+        .handle_event(Event::Disconnected("lost link".into()));
+    app.session_mut().handle_event(Event::Connected);
+    render_at(&mut app, &ctx, 600.0, Vec::new());
+    assert!(
+        sent(&mut rx)
+            .into_iter()
+            .any(|command| matches!(command, RuntimeCommand::SetTerminalWidth { .. })),
+        "reconnect republishes width"
+    );
+}
+
+#[test]
+fn desktop_republishes_chat_pane_width_after_local_conversation_attachments() {
+    let (mut app, ctx, mut rx) = app();
+    render_at(&mut app, &ctx, 400.0, Vec::new());
+    let width = sent(&mut rx).into_iter().find_map(|command| match command {
+        RuntimeCommand::SetTerminalWidth { width } => Some(width),
+        _ => None,
+    });
+    assert!(width.is_some(), "pane width on first frame");
+
+    assert!(app.session_mut().new_conversation());
+    assert!(matches!(
+        sent(&mut rx).as_slice(),
+        [RuntimeCommand::NewConversation]
+    ));
+    render_at(&mut app, &ctx, 400.0, Vec::new());
+    assert!(sent(&mut rx).into_iter().any(|command| matches!(
+        command,
+        RuntimeCommand::SetTerminalWidth { width: next } if Some(next) == width
+    )));
+
+    assert!(app.session_mut().load_conversation(42));
+    assert!(matches!(
+        sent(&mut rx).as_slice(),
+        [RuntimeCommand::LoadConversation { id: 42, .. }]
+    ));
+    render_at(&mut app, &ctx, 400.0, Vec::new());
+    assert!(sent(&mut rx).into_iter().any(|command| matches!(
+        command,
+        RuntimeCommand::SetTerminalWidth { width: next } if Some(next) == width
+    )));
+
+    let action = CommandAction {
+        conversation_load: Some(bone_protocol::ConversationLoad {
+            messages: Vec::new(),
+            conversation_id: Some(43),
+        }),
+        ..Default::default()
+    };
+    assert!(app.session_mut().apply_command_action(action).is_none());
+    assert!(matches!(
+        sent(&mut rx).as_slice(),
+        [RuntimeCommand::LoadConversation { id: 43, .. }]
+    ));
+    render_at(&mut app, &ctx, 400.0, Vec::new());
+    assert!(sent(&mut rx).into_iter().any(|command| matches!(
+        command,
+        RuntimeCommand::SetTerminalWidth { width: next } if Some(next) == width
+    )));
 }

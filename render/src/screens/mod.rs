@@ -44,6 +44,15 @@ pub struct Key {
     pub shift: bool,
 }
 
+/// A semantic target hit through an existing page row or footer token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TouchAction {
+    /// Feed the same key path used by keyboard input.
+    Keys(Vec<Key>),
+    /// Keep the touch-only API-key editor's IME active.
+    ApiKey,
+}
+
 impl Key {
     pub fn plain(code: KeyCode) -> Self {
         Self {
@@ -53,6 +62,23 @@ impl Key {
             shift: false,
         }
     }
+}
+
+/// Build the shortest sequence of existing cursor keys that selects `target`.
+/// Picker cursors wrap, so a touch can select an off-screen row without adding a
+/// second direct-selection path to the screen state machine.
+pub(super) fn cursor_keys(current: usize, target: usize, len: usize) -> Option<Vec<Key>> {
+    if len == 0 || target >= len {
+        return None;
+    }
+    let down = (target + len - current.min(len - 1)) % len;
+    let up = (current.min(len - 1) + len - target) % len;
+    let (code, count) = if down <= up {
+        (KeyCode::Down, down)
+    } else {
+        (KeyCode::Up, up)
+    };
+    Some((0..count).map(|_| Key::plain(code)).collect())
 }
 
 impl From<&KeyEvent> for Key {

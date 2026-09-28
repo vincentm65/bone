@@ -70,6 +70,57 @@ pub fn visible_window(len: usize, cursor: usize, height: usize) -> (usize, usize
     (start, start + height)
 }
 
+/// Map a visible checklist line back to its item index.
+///
+/// The renderer expands section headings into their own lines before applying
+/// the same cursor-centred window. A heading is intentionally treated as a hit
+/// for the item immediately below it, so a section label remains a useful
+/// touch target without adding a new selection path.
+pub fn item_at_visible_row(
+    items: &[Item],
+    cursor: usize,
+    height: usize,
+    visible_row: usize,
+) -> Option<usize> {
+    if visible_row >= height || items.is_empty() {
+        return None;
+    }
+
+    let mut total = 0usize;
+    let mut selected_row = 0usize;
+    for (index, item) in items.iter().enumerate() {
+        if item.section.is_some() {
+            total += 1;
+        }
+        if index == cursor {
+            selected_row = total;
+        }
+        total += 1;
+    }
+
+    let start = if total <= height {
+        0
+    } else {
+        selected_row.saturating_sub(height / 2).min(total - height)
+    };
+    let line = start + visible_row;
+
+    let mut line_index = 0usize;
+    for (index, item) in items.iter().enumerate() {
+        if item.section.is_some() {
+            if line == line_index {
+                return Some(index);
+            }
+            line_index += 1;
+        }
+        if line == line_index {
+            return Some(index);
+        }
+        line_index += 1;
+    }
+    None
+}
+
 /// Render a title + hint and a two-column checkbox list / detail pane.
 pub fn draw_list(
     frame: &mut ratatui::Frame,
@@ -254,6 +305,38 @@ pub fn draw_footer(frame: &mut ratatui::Frame, area: Rect, keys: &[(&str, &str)]
             ),
         area,
     );
+}
+
+/// Return the footer token/label span containing a terminal column.
+///
+/// The ranges mirror [`draw_footer`], including its padding, so callers can
+/// make the existing hint itself the touch target without changing its paint.
+pub fn footer_hit(col: u16, keys: &[(&str, &str)]) -> Option<(usize, u16, u16)> {
+    let mut start = 0u16;
+    for (index, (key, label)) in keys.iter().enumerate() {
+        let width = (key.chars().count() + label.chars().count() + 6) as u16;
+        let end = start.saturating_add(width);
+        if (start..end).contains(&col) {
+            return Some((index, start, end));
+        }
+        start = end;
+    }
+    None
+}
+
+/// Whether `col` falls in the item pane of the 1:2 list/detail split drawn over `list`.
+pub fn left_pane_hit(list: Rect, col: u16) -> bool {
+    let pane = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Ratio(1, 3), Constraint::Ratio(2, 3)])
+        .split(list)[0];
+    (pane.x..pane.x.saturating_add(pane.width)).contains(&col)
+}
+
+/// Whether `col` is in the first half of a footer hint spanning `start..end`,
+/// for hints such as `a/n` that carry two actions.
+pub fn first_half(col: u16, start: u16, end: u16) -> bool {
+    col < start.saturating_add(end.saturating_sub(start) / 2)
 }
 
 #[cfg(test)]

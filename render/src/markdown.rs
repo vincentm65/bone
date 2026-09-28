@@ -1,5 +1,6 @@
 //! Markdown rendering for the transcript via pulldown-cmark and syntect.
 
+use crate::ansi;
 use crate::theme::Theme;
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
@@ -731,7 +732,10 @@ fn contains_markdown_table(content: &str) -> bool {
 /// Render markdown content into ratatui lines. `theme` is the application
 /// theme; `Theme::code()` is used for fenced code highlighting.
 pub fn render_markdown(content: &str, width: u16, theme: &Theme) -> Vec<Line<'static>> {
-    let normalized = unwrap_markdown_table_fences(content);
+    // Command handlers and shell output may embed ANSI escapes; the transcript
+    // paints styled cells, so strip them instead of showing literal `[0m`.
+    let content = ansi::strip_ansi(content);
+    let normalized = unwrap_markdown_table_fences(&content);
     let parser = Parser::new_ext(&normalized, markdown_options());
     let mut renderer = MarkdownRenderer::new(width, theme);
 

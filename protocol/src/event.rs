@@ -520,6 +520,9 @@ pub enum RuntimeCommand {
         request_id: Option<u64>,
         name: String,
         input: String,
+        /// Terminal width of the requesting frontend, used for request-local Lua UI wrapping.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal_width: Option<u16>,
     },
     NewConversation,
     LoadConversation {

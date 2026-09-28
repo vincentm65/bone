@@ -317,3 +317,72 @@ fn taps_switch_tabs_act_on_rows_and_exit() {
     .exec()
     .unwrap();
 }
+
+#[test]
+fn narrow_provider_page_keeps_tabs_and_edit_hint_tappable() {
+    let lua = config_lua();
+    lua.load(
+        r##"
+        local edited = 0
+        test_menu.clear = function() end
+        test_menu.select = function()
+          edited = edited + 1
+          return { cancelled = true }
+        end
+        local keys = {
+          { code = "Click", char = "tab:2" },
+          { code = "Click", char = "edit" },
+          { code = "Click", char = "esc" },
+        }
+        local index = 0
+        local ctx = { renders = {}, ui = {}, config = {} }
+        ctx.ui.width = function() return 41 end
+        ctx.ui.key = function() index = index + 1; return keys[index] end
+        ctx.ui.notify = function() end
+        ctx.config.get_pages = function()
+          return {
+            { namespace = "general", title = "General", fields = {} },
+            { namespace = "providers", title = "Providers", fields = {} },
+            { namespace = "plugins", title = "Plugins", fields = {} },
+            { namespace = "status", title = "Status", fields = {} },
+          }
+        end
+        ctx.config.list_providers = function()
+          local providers = {}
+          for i = 1, 3 do
+            providers[i] = { id = "provider" .. i, model = "model", handler = "openai" }
+          end
+          return providers
+        end
+        config_handler("", ctx)
+        assert(edited == 1, "tapping edit must open the selected provider editor")
+        for render_i, render in ipairs(ctx.renders) do
+          local seen = {}
+          for i, line in ipairs(render.lines) do
+            if i <= render.visible_rows then
+              local text, has_span_click = "", false
+              if line.click then seen[line.click] = true end
+              for _, value in ipairs(line.spans or {}) do
+                text = text .. value.text
+                if value.click then
+                  seen[value.click] = true
+                  has_span_click = true
+                end
+              end
+              if has_span_click then
+                assert(utf8.len(text) <= 41, "clipped tap row: " .. text)
+              end
+            end
+          end
+          assert(seen["tab:4"], "last tab is visible and tappable")
+          if render_i > 1 then
+            assert(seen["edit"], "provider edit hint is visible and tappable")
+            assert(seen["esc"], "exit hint is visible and tappable")
+            assert(seen["row:1"], "provider rows are still tappable")
+          end
+        end
+        "##,
+    )
+    .exec()
+    .unwrap();
+}

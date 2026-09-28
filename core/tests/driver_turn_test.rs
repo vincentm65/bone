@@ -474,10 +474,15 @@ async fn driver_usage_only_sink_persists_to_parent_conversation() {
     // The sink opens the default conversations.db path (mirrors production:
     // nested agent opens the shared conversations.db path).
     let path = bone_core::session_db::db_path();
-    let parent_id = SessionDb::open(&path)
-        .unwrap()
-        .create_conversation("parent", "parent-model")
-        .unwrap();
+    let db = SessionDb::open(&path).unwrap();
+    let parent_id = db.create_conversation("parent", "parent-model").unwrap();
+    db.append_chat_message(
+        parent_id,
+        &ChatMessage::new(ChatRole::User, "parent prompt"),
+        1,
+    )
+    .unwrap();
+    drop(db);
     let sink: Arc<dyn SessionSink> = Arc::new(UsageOnlySessionSink::open_for(parent_id));
     match old_bone {
         Some(v) => unsafe { std::env::set_var("BONE_DIR", v) },
@@ -532,7 +537,7 @@ async fn driver_usage_only_sink_persists_to_parent_conversation() {
     let verify = SessionDb::open(&path).unwrap();
     assert_eq!(
         verify.max_message_seq(parent_id).unwrap(),
-        0,
+        1,
         "nested agent must not append parent transcript rows"
     );
     let usage = verify.conversation_usage(parent_id).unwrap();

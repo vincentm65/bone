@@ -138,6 +138,42 @@ impl ProcessScreen {
         ProcessAction::None
     }
 
+    /// Map the existing footer's action hints to the same keys as keyboard input.
+    pub fn touch_key(&self, row: u16, col: u16, _width: u16, height: u16) -> Option<Key> {
+        if row + 1 != height {
+            return None;
+        }
+        let state = process_state_label(self.process.state);
+        let elapsed = format_elapsed(&self.process);
+        let follow = if self.follow { " · following" } else { "" };
+        let prefix = format!("{state} · {elapsed}{follow}");
+        let cancel = if self.process.running {
+            " · Ctrl+C cancel"
+        } else {
+            ""
+        };
+        let cancel_start = prefix.chars().count() as u16;
+        let cancel_end = cancel_start + cancel.chars().count() as u16;
+        if self.process.running && (cancel_start..cancel_end).contains(&col) {
+            return Some(Key {
+                code: KeyCode::Char('c'),
+                ctrl: true,
+                alt: false,
+                shift: false,
+            });
+        }
+
+        let scroll = " · ↑/↓ PgUp/PgDn Home/End scroll";
+        let close = " · q/Esc/Ctrl+O close";
+        let close_start = cancel_end + scroll.chars().count() as u16;
+        let close_end = close_start + close.chars().count() as u16;
+        if (close_start..close_end).contains(&col) {
+            Some(Key::plain(KeyCode::Esc))
+        } else {
+            None
+        }
+    }
+
     pub fn draw(&mut self, frame: &mut ratatui::Frame, theme: &Theme) {
         let size = frame.area();
         let lines = process_lines(&self.process, size.width as usize, theme);

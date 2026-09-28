@@ -34,6 +34,7 @@ pub(crate) fn row(
     meta: &ConversationMeta,
     activity: Activity,
     theme: &bone_render::theme::Theme,
+    spinner: &crate::status_bar::Spinner,
     now: i64,
 ) -> egui::Response {
     let visuals = ui.visuals().clone();
@@ -111,17 +112,13 @@ pub(crate) fn row(
             egui::vec2(GUTTER, title_galley.size().y),
         );
         if activity.running {
-            // `paint_at` keeps requesting repaints while it is visible.
-            egui::Spinner::new()
-                .size(GUTTER - 4.0)
-                .color(color(theme.palette.accent))
-                .paint_at(
-                    ui,
-                    egui::Rect::from_center_size(
-                        indicator.center() - egui::vec2(2.0, 0.0),
-                        egui::Vec2::splat(GUTTER - 4.0),
-                    ),
-                );
+            // Keeps requesting repaints while it is visible.
+            crate::status_bar::paint_indicator(
+                ui,
+                indicator.center() - egui::vec2(2.0, 0.0),
+                color(theme.palette.accent),
+                spinner,
+            );
         } else if activity.unread {
             ui.painter().circle_filled(
                 indicator.center() - egui::vec2(2.0, 0.0),

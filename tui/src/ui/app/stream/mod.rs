@@ -777,12 +777,14 @@ impl App {
         self.turn_pause_start = None;
 
         let request_id = self.next_request();
+        let terminal_width = term.size().ok().map(|size| size.width);
         let _ = self
             .command_tx
             .send(crate::runtime::RuntimeCommand::RunCommand {
                 request_id: Some(request_id),
                 name: cmd.to_string(),
                 input: arg.to_string(),
+                terminal_width,
             });
 
         let mut pending_key = KeySink::new();

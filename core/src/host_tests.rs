@@ -99,17 +99,15 @@ fn conversations_lists_recent_metadata_through_the_service() {
 
         let service = HostService::with_db_path(config, path);
 
-        // A zero limit selects the daemon default and returns both rows.
+        // A zero limit selects the daemon default and omits fully empty rows.
         let HostResponse::Conversations(conversations) =
             service.execute(HostRequest::Conversations { limit: 0 })
         else {
             panic!("expected conversations response");
         };
-        assert_eq!(conversations.len(), 2);
+        assert_eq!(conversations.len(), 1);
         assert_eq!(conversations[0].id, chat);
         assert_eq!(conversations[0].title, "hello world");
-        assert_eq!(conversations[1].id, empty);
-        assert_eq!(conversations[1].title, "(new)");
 
         // An explicit limit keeps only the most recent conversation.
         let HostResponse::Conversations(limited) =
@@ -131,6 +129,9 @@ fn conversation_mutation_responses_honor_the_requested_limit() {
         message.created_at = Some("2026-07-03T08:00:00Z".into());
         db.append_chat_message(first, &message, 1).unwrap();
         let second = db.create_conversation("anthropic", "claude").unwrap();
+        let mut second_message = ChatMessage::new(ChatRole::User, "second chat");
+        second_message.created_at = Some("2026-07-01T08:00:00Z".into());
+        db.append_chat_message(second, &second_message, 1).unwrap();
         db.conn_ref()
             .execute(
                 "UPDATE conversations SET started_at = '2026-07-01T00:00:00Z' WHERE id = ?1",
@@ -299,6 +300,9 @@ fn conversation_delete_removes_the_row_and_refreshes_the_list() {
         db.record_usage(chat, "openai", "gpt", 10, 5, None, Some(0.1), false)
             .unwrap();
         let other = db.create_conversation("anthropic", "claude").unwrap();
+        let mut other_message = ChatMessage::new(ChatRole::User, "other chat");
+        other_message.created_at = Some("2026-07-02T08:00:00Z".into());
+        db.append_chat_message(other, &other_message, 1).unwrap();
         drop(db);
         let service = HostService::with_db_path(config, path);
 

@@ -128,7 +128,9 @@ fn incognito_on_detaches_persistence_and_off_persists_whole_transcript() {
     assert_eq!(session.conversation_id, None);
 
     // A user message and a completed turn must persist nothing while on.
-    session.append_user_to_db("still secret", None);
+    session
+        .append_user_to_db(&llm, "still secret", None)
+        .unwrap();
     let current = ChatMessage::new(ChatRole::Assistant, "in-memory answer");
     let outcome = DriverOutcome {
         result: Ok(crate::agent::AgentResponse {
@@ -180,7 +182,7 @@ fn incognito_on_detaches_persistence_and_off_persists_whole_transcript() {
 }
 
 #[test]
-fn incognito_off_with_empty_transcript_mints_an_empty_conversation() {
+fn incognito_off_with_empty_transcript_stays_ephemeral() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("sessions.db");
     let db = SessionDb::open(&path).unwrap();
@@ -194,15 +196,15 @@ fn incognito_off_with_empty_transcript_mints_an_empty_conversation() {
 
     session.set_incognito(false, &llm).unwrap();
     assert!(!session.incognito);
-    let conv_id = session.conversation_id.expect("fresh conversation minted");
-    let stored = session
-        .session_db
-        .as_ref()
-        .unwrap()
-        .load_messages(conv_id)
-        .unwrap();
-    assert!(stored.is_empty());
+    assert_eq!(session.conversation_id, None);
     assert_eq!(session.session_seq, 0);
+    let db = session.session_db.as_ref().unwrap();
+    let count: i64 = db
+        .conn_ref()
+        .query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    assert!(db.recent_conversations(10).unwrap().is_empty());
 
     drop(session);
 }
@@ -217,6 +219,126 @@ fn incognito_off_without_db_just_clears_the_flag() {
     session.set_incognito(false, &llm).unwrap();
     assert!(!session.incognito);
     assert_eq!(session.conversation_id, None);
+}
+
+#[test]
+fn first_prompt_lazily_allocates_one_conversation() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = SessionDb::open(&temp.path().join("sessions.db")).unwrap();
+    let mut session = RuntimeSession::new(ToolHandler::new(builtin_tools()));
+    session.session_db = Some(db);
+    let llm = TestProvider;
+
+    assert_eq!(session.conversation_id, None);
+    session
+        .append_user_to_db(&llm, "first prompt", None)
+        .unwrap();
+    let conversation_id = session
+        .conversation_id
+        .expect("first prompt allocates a row");
+    assert_eq!(session.session_seq, 1);
+    let db = session.session_db.as_ref().unwrap();
+    let count: i64 = db
+        .conn_ref()
+        .query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(db.load_messages(conversation_id).unwrap().len(), 1);
+
+    session
+        .append_user_to_db(&llm, "second prompt", None)
+        .unwrap();
+    let db = session.session_db.as_ref().unwrap();
+    let count: i64 = db
+        .conn_ref()
+        .query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 1);
+    assert_eq!(db.load_messages(conversation_id).unwrap().len(), 2);
+}
+
+#[test]
+fn startup_without_history_does_not_create_an_empty_conversation() {
+    let _guard = crate::util::test_env_lock();
+    let previous = std::env::var_os("BONE_DIR");
+    let dir = tempfile::tempdir().unwrap();
+    unsafe { std::env::set_var("BONE_DIR", dir.path()) };
+
+    let llm = TestProvider;
+    let mut resumed = RuntimeSession::new(ToolHandler::new(builtin_tools()));
+    resumed.init_db(&llm, "system prompt").unwrap();
+    assert_eq!(resumed.conversation_id, None);
+    let count: i64 = resumed
+        .session_db
+        .as_ref()
+        .unwrap()
+        .conn_ref()
+        .query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    drop(resumed);
+
+    let mut fresh = RuntimeSession::new(ToolHandler::new(builtin_tools()));
+    fresh.init_db_new(&llm).unwrap();
+    assert_eq!(fresh.conversation_id, None);
+    let count: i64 = fresh
+        .session_db
+        .as_ref()
+        .unwrap()
+        .conn_ref()
+        .query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
+    drop(fresh);
+
+    unsafe {
+        match previous {
+            Some(value) => std::env::set_var("BONE_DIR", value),
+            None => std::env::remove_var("BONE_DIR"),
+        }
+    }
+}
+
+#[test]
+fn detached_session_writes_do_not_allocate_persistence() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = SessionDb::open(&temp.path().join("sessions.db")).unwrap();
+    let mut session = RuntimeSession::new(ToolHandler::new(builtin_tools()));
+    session.session_db = Some(db);
+
+    session.append_db_message("assistant", "local context", None, None, None, None);
+    let current = ChatMessage::new(ChatRole::Assistant, "in-memory answer");
+    let (_, persistence_error) = session.apply_outcome(DriverOutcome {
+        result: Ok(crate::agent::AgentResponse {
+            content: current.content.clone(),
+            transcript: Vec::new(),
+        }),
+        tools: ToolHandler::new(builtin_tools()),
+        transcript: vec![current.clone()],
+        token_stats: Default::default(),
+        persist_messages: vec![current],
+        checkpointed_messages: 1,
+        transcript_replaced: true,
+        usage: vec![crate::runtime::driver::UsageRecord {
+            provider: "test".into(),
+            model: "test-model".into(),
+            prompt_tokens: 1,
+            completion_tokens: 1,
+            cached_tokens: None,
+            cost: None,
+            is_estimated: true,
+        }],
+    });
+    assert!(persistence_error.is_none());
+    assert_eq!(session.conversation_id, None);
+    let count: i64 = session
+        .session_db
+        .as_ref()
+        .unwrap()
+        .conn_ref()
+        .query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(count, 0);
 }
 
 #[test]

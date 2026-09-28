@@ -1086,18 +1086,24 @@ fn all_time_months_include_usage_older_than_three_years() {
 }
 
 #[test]
-fn opening_cleanup_prunes_only_ended_fully_empty_conversations() {
+fn opening_cleanup_prunes_all_fully_empty_conversations() {
     let conn = Connection::open_in_memory().unwrap();
     let db = SessionDb { conn };
     db.setup_schema().unwrap();
 
-    let empty = db.create_conversation("local", "local").unwrap();
+    let ended = db.create_conversation("local", "local").unwrap();
     db.conn
         .execute(
             "UPDATE conversations SET ended_at = '2026-01-01T00:00:00Z' WHERE id = ?1",
-            [empty],
+            [ended],
         )
         .unwrap();
+    let open = db.create_conversation("local", "local").unwrap();
+    let with_usage = db.create_conversation("local", "local").unwrap();
+    db.record_usage(with_usage, "local", "local", 1, 0, None, None, true)
+        .unwrap();
+    let with_checkpoint = db.create_conversation("local", "local").unwrap();
+    assert!(db.save_context_checkpoint(with_checkpoint, 0, &[]).unwrap());
     let kept = db.create_conversation("local", "local").unwrap();
     db.append_chat_message(kept, &ChatMessage::new(ChatRole::User, "keep"), 1)
         .unwrap();
@@ -1108,8 +1114,12 @@ fn opening_cleanup_prunes_only_ended_fully_empty_conversations() {
         )
         .unwrap();
 
-    assert_eq!(db.prune_ended_empty_conversations().unwrap(), 1);
+    assert_eq!(db.prune_ended_empty_conversations().unwrap(), 2);
     assert_eq!(db.latest_conversation().unwrap(), Some((kept, true)));
+    assert!(!db.conversation_exists(ended).unwrap());
+    assert!(!db.conversation_exists(open).unwrap());
+    assert!(db.conversation_exists(with_usage).unwrap());
+    assert!(db.conversation_exists(with_checkpoint).unwrap());
 }
 
 #[test]
@@ -1139,10 +1149,10 @@ fn ending_conversation_with_a_message_preserves_it() {
 }
 
 /// `latest_conversation` underpins resume-on-boot: it returns the most recent
-/// conversation and whether it holds any messages, so `init_db` can reload a
-/// non-empty conversation, recycle a trailing empty one, or mint the first.
+/// conversation with durable state, ignoring a legacy row that has no messages,
+/// usage, or context checkpoint.
 #[test]
-fn latest_conversation_reports_id_and_emptiness() {
+fn latest_conversation_ignores_fully_empty_rows() {
     let conn = Connection::open_in_memory().unwrap();
     let db = SessionDb { conn };
     db.setup_schema().unwrap();
@@ -1156,10 +1166,25 @@ fn latest_conversation_reports_id_and_emptiness() {
         .unwrap();
     assert_eq!(db.latest_conversation().unwrap(), Some((c1, true)));
 
-    // A newer, message-less conversation is reported as empty (recyclable).
+    // A newer, message-less legacy row is ignored rather than selected.
     let c2 = db.create_conversation("local", "local").unwrap();
-    assert_eq!(db.latest_conversation().unwrap(), Some((c2, false)));
-    assert!(c2 > c1, "latest is the highest id");
+    assert_eq!(db.latest_conversation().unwrap(), Some((c1, true)));
+    assert!(c2 > c1, "latest row is the highest id");
+    assert!(db.conversation_exists(c2).unwrap());
+}
+
+#[test]
+fn read_only_history_queries_ignore_legacy_empty_rows() {
+    let temp = tempfile::tempdir().unwrap();
+    let path = temp.path().join("sessions.db");
+    let db = SessionDb::open(&path).unwrap();
+    let empty = db.create_conversation("local", "local").unwrap();
+    drop(db);
+
+    let db = SessionDb::open_for_reads(&path).unwrap();
+    assert_eq!(db.latest_conversation().unwrap(), None);
+    assert!(db.recent_conversations(10).unwrap().is_empty());
+    assert!(db.conversation_exists(empty).unwrap());
 }
 
 /// `recent_conversations` feeds the daemon's conversation picker: newest
@@ -1193,24 +1218,15 @@ fn recent_conversations_orders_by_last_activity_and_derives_titles() {
     message.created_at = Some("2026-07-04T00:00:00Z".into());
     db.append_chat_message(assistant_only, &message, 1).unwrap();
 
-    // Message-less: falls back to `started_at` for recency.
-    let empty = db.create_conversation("openai", "gpt").unwrap();
-    db.conn
-        .execute(
-            "UPDATE conversations SET started_at = '2026-07-05T00:00:00Z' WHERE id = ?1",
-            [empty],
-        )
-        .unwrap();
-
     let all = db.recent_conversations(100).unwrap();
     let ids: Vec<i64> = all.iter().map(|c| c.id).collect();
-    assert_eq!(ids, vec![empty, assistant_only, first, second]);
+    assert_eq!(ids, vec![assistant_only, first, second]);
 
     // A smaller limit keeps only the most recent rows.
     let limited = db.recent_conversations(2).unwrap();
     assert_eq!(
         limited.iter().map(|c| c.id).collect::<Vec<_>>(),
-        vec![empty, assistant_only]
+        vec![assistant_only, first]
     );
 
     let by_id = |id: i64| all.iter().find(|c| c.id == id).unwrap();
@@ -1238,11 +1254,6 @@ fn recent_conversations_orders_by_last_activity_and_derives_titles() {
     let assistant_only = by_id(assistant_only);
     assert_eq!(assistant_only.title, "(new)");
     assert_eq!(assistant_only.message_count, 1);
-
-    let empty = by_id(empty);
-    assert_eq!(empty.title, "(new)");
-    assert_eq!(empty.message_count, 0);
-    assert_eq!(empty.updated_at, "2026-07-05T00:00:00Z");
 }
 
 /// Status and token totals match the `/history` picker's classification.
@@ -1275,8 +1286,6 @@ fn recent_conversations_report_status_and_token_totals() {
     let summary_only = db.create_conversation("openai", "gpt").unwrap();
     append(summary_only, ChatRole::User, "[Context summary] earlier", 1);
 
-    let empty = db.create_conversation("openai", "gpt").unwrap();
-
     let all = db.recent_conversations(10).unwrap();
     let by_id = |id: i64| all.iter().find(|c| c.id == id).unwrap();
     assert_eq!(by_id(completed).status, ConversationStatus::Completed);
@@ -1284,7 +1293,6 @@ fn recent_conversations_report_status_and_token_totals() {
     assert_eq!(by_id(interrupted).status, ConversationStatus::Interrupted);
     assert_eq!(by_id(interrupted).token_count, 0);
     assert_eq!(by_id(summary_only).status, ConversationStatus::Empty);
-    assert_eq!(by_id(empty).status, ConversationStatus::Empty);
 }
 
 #[test]
@@ -1458,7 +1466,7 @@ fn db_path_follows_bone_dir() {
 }
 
 #[test]
-fn concurrent_fresh_startups_create_independent_conversations() {
+fn concurrent_fresh_startups_leave_empty_database_without_conversations() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().join("conversations.db");
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(4));
@@ -1468,26 +1476,20 @@ fn concurrent_fresh_startups_create_independent_conversations() {
             let barrier = barrier.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                let db = SessionDb::open_for_startup(&path).unwrap();
-                db.create_conversation_for_startup(&path, "local", "local")
-                    .unwrap()
+                SessionDb::open_for_startup(&path).unwrap();
             })
         })
         .collect();
-    let mut ids: Vec<_> = handles
-        .into_iter()
-        .map(|handle| handle.join().unwrap())
-        .collect();
-    ids.sort_unstable();
-    ids.dedup();
-    assert_eq!(ids.len(), 4);
+    for handle in handles {
+        handle.join().unwrap();
+    }
 
     let db = SessionDb::open(&path).unwrap();
     let count: i64 = db
         .conn_ref()
         .query_row("SELECT COUNT(*) FROM conversations", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(count, 4);
+    assert_eq!(count, 0);
 }
 
 #[test]

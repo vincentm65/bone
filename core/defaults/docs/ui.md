@@ -57,11 +57,32 @@ cancellation are scoped to the attached conversation.
   Ctrl/Cmd+T opens a chat tab, Ctrl/Cmd+W closes a tab (the last chat starts
   over instead), Ctrl/Cmd+Tab or Ctrl/Cmd+PageUp/PageDown cycle, and
   Ctrl/Cmd+1…9 jump. Selecting a history entry focuses the tab showing it,
-  reuses an empty chat, or opens a new tab. Nothing is persisted locally.
+  reuses an empty chat, or opens a new tab. Right-click a sidebar row to rename
+  it or permanently delete it; delete asks for confirmation and closes open tabs
+  before removing saved history. Nothing is persisted locally.
+  A new chat, including one created by `/new`, remains ephemeral until its first
+  real prompt is submitted; empty chats are not written to SQLite and do not
+  appear in history or the sidebar. Persistence and lifecycle remain daemon-owned.
+  Sidebar actions are limited to `Rename…` and `Delete…`; archive is deferred.
 - Transcript, live pane, status bar, and pages are drawn by the shared
   `bone-render` crate exactly as the TUI draws them, then painted on a character
   cell grid, so Markdown, tool rows and previews, colors, and wrapping match the
   terminal. Clicking a tool row expands it; Ctrl/Cmd+O expands every row.
+- Command replies, shell output, and tool rows are plain text. `bone-render` strips
+  ANSI/VT escape sequences (SGR attributes, OSC/DCS strings, other C0 bytes and
+  DEL, while keeping `\n` and `\t`) before Markdown or row rendering, so escapes
+  are ignored rather than interpreted and both frontends show the same characters.
+  A styled `/help` banner or a Lua command's `\x1b[..m` labels render as their
+  plain text instead of raw escape bytes.
+- The desktop embeds its UI fonts and installs them ahead of egui's own faces:
+  Inter (proportional), Inter SemiBold (the `semibold` family), and JetBrains Mono
+  (monospace), with Adwaita Mono appended to both chains as the coverage fallback
+  for symbol ranges such as braille spinner frames and box drawing. Adwaita Mono
+  is inserted before egui's built-in monospace faces because it shares their
+  advance width, so fallback glyphs stay on the terminal cell grid. Bundled
+  spinner presets and other core UI text use only glyphs this set covers;
+  configured CJK fallbacks still come from the system and are tofu when none is
+  installed.
 - `/stats`, `/setup`, and `/catalog` open page tabs running the TUI's screens
   with the same keys; `/catalog install|remove NAME` applies directly. Clicking
   an agent or process in the live pane (or focusing one with plain Down from
@@ -70,7 +91,9 @@ cancellation are scoped to the attached conversation.
   cancels the process.
 - The live pane shows one page at a time: daemon panes (Lua panes and menus such
   as `/config` and `/provider`), the approval prompt, agents, processes, the
-  queue, and live reasoning when `general.show_reasoning` is on. A newly arrived
+  queue, and live reasoning when `general.show_reasoning` is on. The desktop's
+  reasoning page is a fixed 10 rows (wrapped, newest text at the bottom) and stays
+  up between segments until the turn ends. A newly arrived
   page becomes active, Tab cycles pages, and PageUp/PageDown scroll. The queue
   page takes ↑/↓, Shift+↑/↓ to reorder, Enter to send next, F2 to edit, and Del
   to remove. While a `ctx.ui.key()` request is pending every key, including Esc
@@ -91,8 +114,10 @@ cancellation are scoped to the attached conversation.
   opens the draft in `$VISUAL`/`$EDITOR` (terminal editors in `$TERMINAL` or a
   detected terminal). Configured `keymaps.bindings` take precedence.
 - Touch and mouse: pane lines and spans may carry a `click` value (`ui.menu`
-  sets option indexes and tappable hints, `/config` its tabs and rows); tapping
-  one answers the pending key request with `KeyEvent { code: "Click", char }`.
+  sets option indexes and tappable hints, `/config` its tabs, rows, and provider
+  editor action); tapping one answers the pending key request with
+  `KeyEvent { code: "Click", char }`. Desktop clients publish their pane width
+  so narrow clients wrap these controls instead of clipping them.
   Approval choices are tappable. On touch screens a Stop button ends the input
   row while a turn runs, Android Back acts as Esc, and the on-screen keyboard
   stays up while a menu takes keys. The composer frame follows `ui.input.preset`

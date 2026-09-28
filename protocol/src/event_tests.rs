@@ -283,6 +283,7 @@ fn every_runtime_command_variant_round_trips() {
             request_id: Some(12),
             name: "usage".into(),
             input: "".into(),
+            terminal_width: None,
         },
         RuntimeCommand::NewConversation,
         RuntimeCommand::LoadConversation {

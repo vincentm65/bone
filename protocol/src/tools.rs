@@ -26,6 +26,9 @@ pub struct ToolDefinition {
 #[derive(Debug, Clone, Default)]
 pub struct ToolOutput {
     pub content: String,
+    /// Optional display-only preview for a successful edit. The model-facing
+    /// tool content remains in `content`.
+    pub edit_preview: Option<String>,
     pub images: Vec<ImageData>,
     /// Keep image data only in the current provider tool loop. Ephemeral images
     /// are never added to durable transcript/session history.

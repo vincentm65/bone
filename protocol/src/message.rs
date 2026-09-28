@@ -59,6 +59,8 @@ pub struct ToolResult {
     pub call_id: String,
     pub name: String,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_preview: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageData>,
     /// Image attachments that exist only for the current provider tool loop.
@@ -81,6 +83,7 @@ impl ToolResult {
             call_id: call_id.into(),
             name: name.into(),
             content: output.content,
+            edit_preview: output.edit_preview,
             images: output.images,
             ephemeral_images: output.ephemeral_images,
             pane_page: output.pane_page,
@@ -145,6 +148,8 @@ pub struct ChatMessage {
     pub tool_call_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edit_preview: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub is_error: bool,
     /// True for messages synthesized by the runtime rather than typed by the
@@ -179,6 +184,7 @@ impl ChatMessage {
             tool_call_id: None,
             name: None,
             is_error: false,
+            edit_preview: None,
             synthetic: false,
             reasoning: None,
             reasoning_provider: None,
@@ -211,6 +217,7 @@ impl ChatMessage {
             tool_call_id: Some(result.call_id),
             name: Some(result.name),
             is_error: result.is_error,
+            edit_preview: result.edit_preview,
             synthetic: false,
             reasoning: None,
             reasoning_provider: None,

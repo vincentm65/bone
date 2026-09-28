@@ -103,8 +103,8 @@ pub struct RuntimeSession {
     /// Session-scoped incognito mode. While on, `conversation_id` is `None`, so
     /// every DB write path (which guards on `conversation_id: Option<i64>`)
     /// no-ops and reads fall back to the in-memory transcript. The DB itself
-    /// stays open; toggling off mints a fresh conversation and persists the
-    /// whole in-memory transcript into it.
+    /// stays open; toggling off persists a non-empty in-memory transcript into
+    /// a fresh conversation, while an empty transcript remains ephemeral.
     pub incognito: bool,
     /// Stable fallback identity while no durable conversation is attached.
     actor_scope: i64,
@@ -129,6 +129,11 @@ impl RuntimeSession {
     /// Scope used for jobs and managed processes owned by this actor.
     pub fn background_scope(&self) -> i64 {
         self.conversation_id.unwrap_or(self.actor_scope)
+    }
+
+    /// Stable process-local identity for managed-actor routing.
+    pub fn actor_id(&self) -> i64 {
+        self.actor_scope
     }
 
     /// Complete durable history for frontend scrollback. Falls back to the
@@ -178,19 +183,12 @@ impl RuntimeSession {
         (Vec::new(), false)
     }
 
-    /// Open the session database and make a conversation active for `llm`'s
-    /// provider/model. Idempotent and preserves structured startup failures.
-    ///
-    /// Boot resumes the **most recent** conversation in place rather than minting
-    /// a fresh one every launch: a non-empty conversation has its transcript
-    /// reloaded (so a restarted TUI / `bone serve` picks up where it left off
-    /// instead of opening an empty chat), a trailing empty conversation is
-    /// recycled, and only a truly empty database mints a new row. This is what
-    /// makes the conversation survive a runtime restart — the data was always
-    /// persisted, it just wasn't being reattached.
+    /// Open the session database and attach the latest durable conversation, if
+    /// one exists. Empty sessions stay entirely in memory until their first real
+    /// prompt allocates a conversation row.
     pub fn init_db(
         &mut self,
-        llm: &dyn LlmProvider,
+        _llm: &dyn LlmProvider,
         system_prompt: &str,
     ) -> Result<(), SessionInitError> {
         if self.session_db.is_some() {
@@ -217,12 +215,14 @@ impl RuntimeSession {
                 self.restore_usage_and_context(system_prompt);
                 Ok(())
             }
-            // Empty database: mint the first conversation.
+            // No durable history: keep the session ephemeral until the first
+            // prompt. `SessionDb::open_for_startup` has already removed legacy
+            // rows that contained no messages, usage, or checkpoints.
             Ok(None) => {
-                let conv_id =
-                    db.create_conversation_for_startup(&db_path, llm.id(), llm.model())?;
-                self.conversation_id = Some(conv_id);
+                self.session_seq = 0;
+                self.conversation_id = None;
                 self.session_db = Some(db);
+                self.restore_usage_and_context(system_prompt);
                 Ok(())
             }
             Err(error) => Err(StartupDbError::from_sqlite(
@@ -234,17 +234,36 @@ impl RuntimeSession {
         }
     }
 
-    /// Open a fresh durable conversation for an independently managed runtime.
-    pub fn init_db_new(&mut self, llm: &dyn LlmProvider) -> Result<(), SessionInitError> {
+    /// Open a fresh managed runtime without allocating an empty durable row.
+    pub fn init_db_new(&mut self, _llm: &dyn LlmProvider) -> Result<(), SessionInitError> {
         if self.session_db.is_some() {
             return Ok(());
         }
         let db_path = crate::session_db::db_path();
         let db = SessionDb::open_for_startup(&db_path)?;
-        let conv_id = db.create_conversation_for_startup(&db_path, llm.id(), llm.model())?;
-        self.conversation_id = Some(conv_id);
         self.session_db = Some(db);
+        self.conversation_id = None;
+        self.session_seq = 0;
         Ok(())
+    }
+
+    /// Allocate the durable row used by the first persisted message.
+    ///
+    /// Returns the newly allocated id, if this call created one. Incognito and
+    /// database-less sessions remain in memory and report no allocation.
+    pub fn ensure_conversation(&mut self, llm: &dyn LlmProvider) -> Result<Option<i64>, String> {
+        if self.incognito || self.conversation_id.is_some() {
+            return Ok(None);
+        }
+        let Some(db) = self.session_db.as_ref() else {
+            return Ok(None);
+        };
+        let conversation_id = db
+            .create_conversation(llm.id(), llm.model())
+            .map_err(|error| format!("failed to create conversation: {error}"))?;
+        self.conversation_id = Some(conversation_id);
+        self.session_seq = 0;
+        Ok(Some(conversation_id))
     }
 
     /// Open one existing durable conversation for an independently managed
@@ -331,11 +350,65 @@ impl RuntimeSession {
         tool_calls_json: Option<&str>,
         images_json: Option<&str>,
     ) {
+        let _ = self.append_db_message_result(
+            role,
+            content,
+            tool_name,
+            call_id,
+            tool_calls_json,
+            images_json,
+        );
+    }
+
+    /// Append a message, allocating a conversation when this session is still
+    /// ephemeral. Incognito and database-less sessions remain in memory.
+    #[allow(clippy::too_many_arguments)]
+    pub fn append_db_message_with_lazy_conversation(
+        &mut self,
+        llm: &dyn LlmProvider,
+        role: &str,
+        content: &str,
+        tool_name: Option<&str>,
+        call_id: Option<&str>,
+        tool_calls_json: Option<&str>,
+        images_json: Option<&str>,
+    ) -> Result<(), String> {
+        let allocated = self.ensure_conversation(llm)?;
+        let result = self.append_db_message_result(
+            role,
+            content,
+            tool_name,
+            call_id,
+            tool_calls_json,
+            images_json,
+        );
+        if result.is_err()
+            && let Some(conversation_id) = allocated
+        {
+            if let Some(db) = self.session_db.as_ref() {
+                let _ = db.delete_conversation(conversation_id);
+            }
+            self.conversation_id = None;
+            self.session_seq = 0;
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_db_message_result(
+        &mut self,
+        role: &str,
+        content: &str,
+        tool_name: Option<&str>,
+        call_id: Option<&str>,
+        tool_calls_json: Option<&str>,
+        images_json: Option<&str>,
+    ) -> Result<(), String> {
         let Some(conv_id) = self.conversation_id else {
-            return;
+            return Ok(());
         };
         let Some(db) = self.session_db.as_ref() else {
-            return;
+            return Ok(());
         };
         let requested_seq = self.session_seq.saturating_add(1);
         let chat_role = match role {
@@ -356,31 +429,41 @@ impl RuntimeSession {
         if let Ok(images) = images_json.map(serde_json::from_str).transpose() {
             message.images = images.unwrap_or_default();
         }
-        let persisted = db.append_chat_message(conv_id, &message, requested_seq);
-        if let Ok(allocated_seq) = persisted {
-            self.session_seq = allocated_seq;
-        }
+        let allocated_seq = db
+            .append_chat_message(conv_id, &message, requested_seq)
+            .map_err(|error| error.to_string())?;
+        self.session_seq = allocated_seq;
+        Ok(())
     }
 
-    /// Append a user message (optionally with image attachments) to the DB. The
-    /// turn's assistant/tool messages + usage are batched at turn end by
-    /// [`apply_outcome`](Self::apply_outcome).
-    pub fn append_user_to_db(&mut self, content: &str, images_json: Option<&str>) {
-        self.append_db_message("user", content, None, None, None, images_json);
+    /// Allocate persistence for the first real prompt, then append that prompt
+    /// before the caller builds its [`Driver`]. This makes the new id visible to
+    /// the turn's provider/cache and checkpoint wiring.
+    pub fn append_user_to_db(
+        &mut self,
+        llm: &dyn LlmProvider,
+        content: &str,
+        images_json: Option<&str>,
+    ) -> Result<(), String> {
+        self.append_db_message_with_lazy_conversation(
+            llm,
+            "user",
+            content,
+            None,
+            None,
+            None,
+            images_json,
+        )
     }
 
     /// Toggle session-scoped incognito mode.
     ///
     /// Turning on ends the active conversation (mirroring `/new`) and clears
-    /// `conversation_id` (the DB stays open — reads / `display_transcript` fall
-    /// back to the in-memory transcript), so every write path that guards on
-    /// `conversation_id: Option<i64>` no-ops: no messages, no usage, no new
-    /// conversation rows, no checkpoints.
-    ///
-    /// Turning off mints a fresh conversation and persists the whole in-memory
-    /// transcript into it (no usage — nothing was recorded while incognito).
-    /// On a persistence failure incognito stays on and the error message is
-    /// returned so the caller can surface it.
+    /// `conversation_id` (the DB stays open — `display_transcript` falls back to
+    /// the in-memory transcript), so every write path guarded by
+    /// `conversation_id: Option<i64>` no-ops. Turning off persists a non-empty
+    /// in-memory transcript into a fresh conversation; an empty transcript stays
+    /// ephemeral.
     pub fn set_incognito(&mut self, on: bool, llm: &dyn LlmProvider) -> Result<(), String> {
         if on {
             // End the conversation being left so it does not linger as a
@@ -390,9 +473,11 @@ impl RuntimeSession {
             }
             self.incognito = true;
             self.conversation_id = None;
+            self.session_seq = 0;
             return Ok(());
         }
         if self.incognito
+            && !self.transcript.is_empty()
             && let Some(db) = self.session_db.as_ref()
         {
             let conv_id = db
@@ -408,6 +493,9 @@ impl RuntimeSession {
                 };
             self.conversation_id = Some(conv_id);
             self.session_seq = next_seq;
+        } else if self.incognito {
+            self.conversation_id = None;
+            self.session_seq = 0;
         }
         self.incognito = false;
         Ok(())

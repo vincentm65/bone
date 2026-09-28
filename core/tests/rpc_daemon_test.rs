@@ -920,6 +920,7 @@ bone.command.register("preview", {
             request_id: None,
             name: "echo".into(),
             input: "hi".into(),
+            terminal_width: None,
         })
         .unwrap();
 
@@ -944,6 +945,7 @@ bone.command.register("preview", {
             request_id: None,
             name: "preview".into(),
             input: String::new(),
+            terminal_width: None,
         })
         .unwrap();
     let preview = tokio::time::timeout(Duration::from_secs(10), async {
@@ -971,6 +973,7 @@ bone.command.register("preview", {
             request_id: None,
             name: "restart".into(),
             input: String::new(),
+            terminal_width: None,
         })
         .unwrap();
     let restart = tokio::time::timeout(Duration::from_secs(10), async {
@@ -1073,6 +1076,7 @@ bone.command.register("noop", {
             request_id: None,
             name: "noop".into(),
             input: String::new(),
+            terminal_width: None,
         })
         .unwrap();
 

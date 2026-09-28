@@ -242,21 +242,24 @@ impl Hub {
 /// Which durable conversation a managed TCP connection should attach to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SessionTarget {
-    /// Attach to the daemon's most recently selected conversation.
+    /// Attach to the daemon's most recently selected actor, including one that
+    /// has not allocated a durable conversation yet.
     Latest,
-    /// Create a new durable conversation and attach to it.
+    /// Create a new actor; its durable conversation is allocated on first prompt.
     New,
     /// Attach to an existing conversation row.
     Conversation(i64),
 }
 
-/// One independently-running conversation created by a session-manager factory.
+/// One independently-running actor created by a session-manager factory.
 ///
-/// The manager retains `hub`, so the actor stays alive when its last browser
-/// disconnects. The typed projection is evaluated for every attachment, so a
-/// new client receives live actor state rather than caller-captured boot data.
+/// `actor_id` is stable and process-local. `conversation_id` is optional because
+/// lazy persistence leaves a new actor ephemeral until its first real prompt.
+/// The manager keys its cache and generations by `actor_id`, not by the mutable
+/// durable id.
 pub struct ManagedRuntime {
-    pub conversation_id: i64,
+    pub actor_id: i64,
+    pub conversation_id: Option<i64>,
     pub hub: Hub,
     pub projection: RuntimeProjection,
     pub task: LocalBoxFuture<'static, ()>,
@@ -287,6 +290,14 @@ impl RuntimeProjection {
             session,
             runtime: Arc::new(Mutex::new(RuntimeProjectionState { llm, extensions })),
         }
+    }
+
+    /// Current durable identity, if lazy persistence has allocated one.
+    fn conversation_id(&self) -> Option<i64> {
+        self.session
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .conversation_id
     }
 
     /// Build the authoritative replay for one newly attached client.
@@ -336,15 +347,10 @@ struct ManagedEntry {
 }
 
 impl ManagedEntry {
-    fn attach(
-        &mut self,
-        conversation_id: i64,
-        clock: u64,
-        window: Option<u32>,
-    ) -> SessionAttachment {
+    fn attach(&mut self, actor_id: i64, clock: u64, window: Option<u32>) -> SessionAttachment {
         self.last_used = clock;
         SessionAttachment {
-            conversation_id,
+            actor_id,
             commands: self.hub.command_sender(),
             events: self.hub.subscribe(),
             initial: self.projection.initial_events(self.hub.is_busy(), window),
@@ -356,7 +362,7 @@ impl ManagedEntry {
 const MAX_CACHED_ACTORS: usize = 16;
 
 struct SessionAttachment {
-    conversation_id: i64,
+    actor_id: i64,
     commands: mpsc::UnboundedSender<RuntimeCommand>,
     events: broadcast::Receiver<RuntimeEvent>,
     initial: Vec<RuntimeEvent>,
@@ -413,16 +419,18 @@ pub struct SessionManagerReceiver {
 /// Own and concurrently poll one daemon actor per active conversation.
 ///
 /// A factory is called only on the manager's task, so it may construct isolated
-/// Lua runtimes and return `!Send` futures. Conversations are keyed by their
-/// durable SQLite id; attaching another client to the same id reuses the actor.
+/// Lua runtimes and return `!Send` futures. Actors are keyed by their stable
+/// process-local id; durable conversation ids are aliases discovered from the
+/// live projection after lazy allocation.
 pub async fn run_session_manager<F>(mut receiver: SessionManagerReceiver, mut factory: F)
 where
     F: FnMut(SessionTarget) -> Result<ManagedRuntime, String>,
 {
     let mut sessions = std::collections::HashMap::<i64, ManagedEntry>::new();
-    // Generation tags prevent a retired actor from removing a replacement that
-    // was created for the same durable conversation before it finished exiting.
+    // Generation tags prevent a retired actor from removing a replacement for
+    // the same process-local actor key before it finished exiting.
     let mut actors = FuturesUnordered::<LocalBoxFuture<'static, (i64, u64)>>::new();
+    // This is an actor key, not necessarily a durable conversation id.
     let mut latest_id = None;
     let mut generation = 0u64;
     let mut clock = 0u64;
@@ -435,45 +443,52 @@ where
                 };
 
                 clock = clock.wrapping_add(1);
-                let requested_id = match target {
-                    SessionTarget::Conversation(id) => Some(id),
+                let requested_actor = match target {
+                    SessionTarget::Conversation(id) => sessions
+                        .iter()
+                        .find_map(|(actor_id, entry)| {
+                            (entry.projection.conversation_id() == Some(id)).then_some(*actor_id)
+                        }),
                     SessionTarget::Latest => latest_id,
                     SessionTarget::New => None,
                 };
-                if let Some(id) = requested_id
-                    && let Some(entry) = sessions.get_mut(&id)
+                if let Some(actor_id) = requested_actor
+                    && let Some(entry) = sessions.get_mut(&actor_id)
                 {
-                    let _ = reply.send(Ok(entry.attach(id, clock, window)));
-                    latest_id = Some(id);
+                    let _ = reply.send(Ok(entry.attach(actor_id, clock, window)));
+                    latest_id = Some(actor_id);
                     continue;
                 }
 
                 // Make room only when creating an actor. Attached actors are
                 // never evicted; the least recently attached idle actor goes.
                 while sessions.len() >= MAX_CACHED_ACTORS {
-                    let Some(id) = sessions
+                    let Some(actor_id) = sessions
                         .iter()
                         .filter(|(_, entry)| {
                             entry.hub.client_count() == 0 && !entry.hub.is_busy()
                         })
                         .min_by_key(|(_, entry)| entry.last_used)
-                        .map(|(id, _)| *id)
+                        .map(|(actor_id, _)| *actor_id)
                     else {
                         break;
                     };
-                    if let Some(entry) = sessions.remove(&id) {
+                    if let Some(entry) = sessions.remove(&actor_id) {
                         entry.abort.abort();
+                    }
+                    if latest_id == Some(actor_id) {
+                        latest_id = None;
                     }
                 }
 
                 match factory(target) {
                     Ok(runtime) => {
-                        let id = runtime.conversation_id;
+                        let actor_id = runtime.actor_id;
                         // A `Latest` factory may resolve to an actor already in
                         // memory. Prefer the existing owner to prevent two
                         // writers from advancing the same message sequence.
                         if let std::collections::hash_map::Entry::Vacant(entry) =
-                            sessions.entry(id)
+                            sessions.entry(actor_id)
                         {
                             generation = generation.wrapping_add(1);
                             let actor_generation = generation;
@@ -495,7 +510,7 @@ where
                                     }
                                 };
                                 let _ = Abortable::new(run, registration).await;
-                                (id, actor_generation)
+                                (actor_id, actor_generation)
                             }));
                             entry.insert(ManagedEntry {
                                 hub: runtime.hub,
@@ -505,18 +520,21 @@ where
                                 last_used: clock,
                             });
                         }
-                        latest_id = Some(id);
-                        let entry = sessions.get_mut(&id).expect("managed session inserted");
-                        let _ = reply.send(Ok(entry.attach(id, clock, window)));
+                        latest_id = Some(actor_id);
+                        let entry = sessions.get_mut(&actor_id).expect("managed session inserted");
+                        let _ = reply.send(Ok(entry.attach(actor_id, clock, window)));
                     }
                     Err(err) => { let _ = reply.send(Err(err)); }
                 }
             }
-            Some((id, generation)) = actors.next(), if !actors.is_empty() => {
+            Some((actor_id, generation)) = actors.next(), if !actors.is_empty() => {
                 // Do not let a retired actor remove a replacement for the same
-                // durable conversation.
-                if sessions.get(&id).is_some_and(|entry| entry.generation == generation) {
-                    sessions.remove(&id);
+                // process-local actor key.
+                if sessions.get(&actor_id).is_some_and(|entry| entry.generation == generation) {
+                    sessions.remove(&actor_id);
+                    if latest_id == Some(actor_id) {
+                        latest_id = None;
+                    }
                 }
             }
         }
@@ -593,7 +611,7 @@ where
                         .group
                         .as_ref()
                         .expect("guarded above")
-                        .request_extension_reload(attachment.conversation_id, None);
+                        .request_extension_reload(attachment.actor_id, None);
                 }
                 Some(Ok(command)) => {
                     if attachment.commands.send(command).is_err() {
@@ -1096,6 +1114,7 @@ impl BlockingCtxSetup {
     fn ctx_config(
         &mut self,
         conversation_tx: Option<std::sync::mpsc::Sender<crate::ext::ctx::ConversationOperation>>,
+        terminal_width: Option<u16>,
     ) -> crate::ext::ctx::CtxConfig {
         let mut config = crate::ext::ctx::CtxConfig::new(
             crate::config::bone_dir().to_string_lossy().to_string(),
@@ -1111,6 +1130,7 @@ impl BlockingCtxSetup {
             handler.approval_gate = Some(self.approval_gate.clone());
         }
         config.ui = Some(self.ui.clone());
+        config.terminal_width = terminal_width;
         config.cancelled = Some(self.cancel.clone());
         config.private_llm = Some(crate::ext::ctx::PrivateLlmContext {
             provider: Arc::clone(&self.provider),
@@ -1802,7 +1822,7 @@ impl DaemonCtx {
         blockable: bool,
     ) -> crate::ext::types::ManagedHookResult {
         let mut setup = BlockingCtxSetup::new(self);
-        let ctx_cfg = setup.ctx_config(None);
+        let ctx_cfg = setup.ctx_config(None, None);
         let extensions = self.extensions.clone();
         let handle = tokio::task::spawn_blocking(move || {
             extensions.dispatch_managed(&name, payload, ctx_cfg, blockable)
@@ -1896,6 +1916,7 @@ impl DaemonCtx {
         commands: &mut mpsc::UnboundedReceiver<RuntimeCommand>,
         name: String,
         input: String,
+        terminal_width: Option<u16>,
     ) -> Option<(
         Option<crate::ext::types::LuaCommandReturn>,
         Vec<crate::ext::ctx::ConversationOperation>,
@@ -1906,7 +1927,7 @@ impl DaemonCtx {
 
         let mut setup = BlockingCtxSetup::new(self);
         let (conversation_tx, conversation_rx) = std::sync::mpsc::channel();
-        let ctx_cfg = setup.ctx_config(Some(conversation_tx));
+        let ctx_cfg = setup.ctx_config(Some(conversation_tx), terminal_width);
         let lua = self.extensions.lua_handle();
         let command_owner = self.extensions.command_owner(&name);
 
@@ -2418,7 +2439,7 @@ impl DaemonCtx {
                 } else {
                     serde_json::to_string(&images).ok()
                 };
-                {
+                let persistence_result = {
                     let mut s = self.session.lock().unwrap();
                     if images.is_empty() {
                         s.transcript
@@ -2427,7 +2448,12 @@ impl DaemonCtx {
                         s.transcript
                             .push(ChatMessage::user_with_images(&text, images));
                     }
-                    s.append_user_to_db(&text, images_json.as_deref());
+                    s.append_user_to_db(self.llm.as_ref(), &text, images_json.as_deref())
+                };
+                if let Err(error) = persistence_result {
+                    self.hub.publish(RuntimeEvent::Status {
+                        message: format!("failed to persist prompt: {error}"),
+                    });
                 }
                 // The Driver dispatches `message` after recognizing this
                 // already-inserted prompt. Keeping lifecycle dispatch there gives
@@ -2445,30 +2471,14 @@ impl DaemonCtx {
                 self.cancel_background_work(true);
                 {
                     let mut s = self.session.lock().unwrap();
-                    // Already on an empty conversation? Reuse it instead of
-                    // stacking another empty row (and publish a fresh snapshot
-                    // below so the client still resets its view).
-                    let already_empty = s.transcript.is_empty() && s.session_seq == 0;
-                    if !already_empty
-                        && !s.incognito
-                        && let Some(db) = s.session_db.as_ref()
-                    {
-                        if let Some(conv_id) = s.conversation_id {
-                            let _ = db.end_conversation(conv_id);
-                        }
-                        match db.create_conversation(self.llm.id(), self.llm.model()) {
-                            Ok(conv_id) => {
-                                s.conversation_id = Some(conv_id);
-                                s.session_seq = 0;
-                            }
-                            Err(err) => {
-                                self.hub.publish(RuntimeEvent::Status {
-                                    message: format!("failed to create conversation: {err}"),
-                                });
-                                return Flow::Continue;
-                            }
-                        }
+                    if let (Some(db), Some(conv_id)) = (s.session_db.as_ref(), s.conversation_id) {
+                        let _ = db.end_conversation(conv_id);
                     }
+                    // Do not mint a replacement row here. The next real prompt
+                    // allocates it lazily, so `/new` on an empty chat remains
+                    // absent from durable history and the sidebar.
+                    s.conversation_id = None;
+                    s.session_seq = 0;
                     s.transcript.clear();
                     s.token_stats.reset();
                 }
@@ -2506,13 +2516,26 @@ impl DaemonCtx {
                     "system" => crate::llm::ChatRole::System,
                     _ => crate::llm::ChatRole::User,
                 };
-                let mut s = self.session.lock().unwrap();
-                s.transcript.push(ChatMessage::new(chat_role, &content));
-                // Persist so the folded context survives a reload / daemon
-                // restart, like the SubmitPrompt path's `append_user_to_db`.
-                // Without this the next turn captures `persist_from` past this
-                // message, so it is never written to the DB.
-                s.append_db_message(&role, &content, None, None, None, None);
+                let persistence_result = {
+                    let mut s = self.session.lock().unwrap();
+                    s.transcript.push(ChatMessage::new(chat_role, &content));
+                    // Persist so the folded context survives a reload / daemon
+                    // restart, like the SubmitPrompt path's `append_user_to_db`.
+                    s.append_db_message_with_lazy_conversation(
+                        self.llm.as_ref(),
+                        &role,
+                        &content,
+                        None,
+                        None,
+                        None,
+                        None,
+                    )
+                };
+                if let Err(error) = persistence_result {
+                    self.hub.publish(RuntimeEvent::Status {
+                        message: format!("failed to persist appended context: {error}"),
+                    });
+                }
                 Flow::Continue
             }
             RuntimeCommand::ClearConversation => {
@@ -2871,9 +2894,10 @@ impl DaemonCtx {
                 request_id,
                 name,
                 input,
+                terminal_width,
             } => {
                 let result = self
-                    .run_interactive_command(commands, name.clone(), input)
+                    .run_interactive_command(commands, name.clone(), input, terminal_width)
                     .await;
                 let (ret, operations) = match result {
                     // Command name isn't registered: the only genuine "unknown".
@@ -2956,11 +2980,16 @@ impl DaemonCtx {
                 if submit && !ret.output.is_empty() {
                     // Submit through the normal turn path. The Driver owns the
                     // lifecycle `message` hook for command-generated prompts too.
-                    {
+                    let persistence_result = {
                         let mut s = self.session.lock().unwrap();
                         s.transcript
                             .push(ChatMessage::new(crate::llm::ChatRole::User, &ret.output));
-                        s.append_user_to_db(&ret.output, None);
+                        s.append_user_to_db(self.llm.as_ref(), &ret.output, None)
+                    };
+                    if let Err(error) = persistence_result {
+                        self.hub.publish(RuntimeEvent::Status {
+                            message: format!("failed to persist prompt: {error}"),
+                        });
                     }
                     // Same finished-process cleanup as a typed prompt: the
                     // command-submitted prompt is a full user turn too.
@@ -3424,10 +3453,16 @@ async fn run_daemon_inner(
         .map(|group| group.host_service(config.clone()))
         .unwrap_or_else(|| crate::host::HostService::new(config.clone()));
     let submit_inbox = extensions.submit_inbox();
-    let actor_id = session
-        .lock()
-        .unwrap_or_else(|error| error.into_inner())
-        .conversation_id;
+    let actor_id = {
+        let session = session.lock().unwrap_or_else(|error| error.into_inner());
+        if projection.is_some() {
+            // Managed actors keep a stable process-local routing identity even
+            // after their optional durable conversation id is allocated.
+            Some(session.actor_id())
+        } else {
+            session.conversation_id
+        }
+    };
     let extension_sources = hub
         .group
         .as_ref()

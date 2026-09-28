@@ -282,6 +282,22 @@ local function line_of(spans, bg)
    return { spans = spans, bg = bg }
 end
 
+-- Keep each tappable tab / hint inside the pane width. One long line gets
+-- clipped on phones, hiding later config pages and the provider edit action.
+local function append_wrapped_spans(lines, spans, width)
+   local row, used = {}, 0
+   for _, value in ipairs(spans) do
+      local count = utf8.len(value.text) or #value.text
+      if used > 0 and used + count > width then
+         lines[#lines + 1] = line_of(row)
+         row, used = {}, 0
+      end
+      row[#row + 1] = value
+      used = used + count
+   end
+   if #row > 0 then lines[#lines + 1] = line_of(row) end
+end
+
 -- Right-pad `s` to `width` display columns (labels/ids are ASCII keys).
 local function pad(s, width)
    s = tostring(s or "")
@@ -423,6 +439,9 @@ local function run(ctx, start_ns)
       end
 
       local lines = {}
+      -- ctx.ui.width() is 0 when the width is unknown.
+      local width = math.floor(tonumber(ctx.ui.width and ctx.ui.width()) or 0)
+      if width < 1 then width = 80 end
 
       -- Styled tabs with ` │ ` separators.
       local tspans = { span("  ", COL.dim) }
@@ -436,7 +455,7 @@ local function run(ctx, start_ns)
          end
          tspans[#tspans].click = "tab:" .. i
       end
-      lines[#lines + 1] = line_of(tspans)
+      append_wrapped_spans(lines, tspans, width)
 
       -- Page subtitle + breathing room.
       lines[#lines + 1] = line_of({ span("  " .. (page.title or ns), COL.dim, { "italic" }) })
@@ -496,15 +515,20 @@ local function run(ctx, start_ns)
       enter_hint.click = "enter"
       local esc_hint = span("Esc exit", COL.dim)
       esc_hint.click = "esc"
-      lines[#lines + 1] = line_of({
+      local hints = {
          span("  \u{2191}\u{2193} move  \u{00b7}  ", COL.dim),
          enter_hint,
-         span(string.format(
-            "%s  \u{00b7}  Tab/\u{2190}\u{2192} switch tab%s  \u{00b7}  ",
-            toggle_hint, is_providers and "  \u{00b7}  e edit provider" or ""
-         ), COL.dim),
-         esc_hint,
-      })
+         span(toggle_hint .. "  \u{00b7}  Tab/\u{2190}\u{2192} switch tab", COL.dim),
+      }
+      if is_providers then
+         local edit_hint = span("e edit provider", COL.dim)
+         edit_hint.click = "edit"
+         hints[#hints + 1] = span("  \u{00b7}  ", COL.dim)
+         hints[#hints + 1] = edit_hint
+      end
+      hints[#hints + 1] = span("  \u{00b7}  ", COL.dim)
+      hints[#hints + 1] = esc_hint
+      append_wrapped_spans(lines, hints, width)
 
       p:set_lines(lines, math.min(20, #lines))
 
@@ -517,7 +541,8 @@ local function run(ctx, start_ns)
          local value = tostring(key.char or "")
          local tapped_tab = tonumber(value:match("^tab:(%d+)$"))
          local tapped_row = tonumber(value:match("^row:(%d+)$"))
-         code = value == "enter" and "Enter" or value == "esc" and "Esc" or ""
+         code = value == "enter" and "Enter" or value == "esc" and "Esc"
+            or value == "edit" and "Edit" or ""
          if tapped_tab then
             tab = clamp(tapped_tab, 1, #pages)
          elseif tapped_row and rows[tapped_row] then
@@ -569,7 +594,7 @@ local function run(ctx, start_ns)
                end
             end
          end
-      elseif is_text_key(key) and key.char == "e" and is_providers then
+      elseif is_providers and (code == "Edit" or (is_text_key(key) and key.char == "e")) then
          local row = rows[sel]
          if row and row.kind == "provider" and edit_provider(ctx, row.provider) then
             changed = true

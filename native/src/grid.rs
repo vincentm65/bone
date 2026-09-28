@@ -26,6 +26,30 @@ pub(crate) struct Metrics {
     pub cell: f32,
 }
 
+/// Geometry of the terminal grid painted for a full-screen page.
+#[derive(Clone)]
+pub(crate) struct ScreenGeometry {
+    pub rect: egui::Rect,
+    pub cell: f32,
+    pub row_height: f32,
+    pub cols: u16,
+    pub row_count: u16,
+}
+
+impl ScreenGeometry {
+    /// Convert a point in the painted screen to its terminal row and column.
+    /// Only painted rows are interactive; any remainder below the terminal
+    /// buffer stays outside the touch geometry.
+    pub(crate) fn cell_at(&self, pos: egui::Pos2) -> Option<(u16, u16)> {
+        if !self.rect.contains(pos) {
+            return None;
+        }
+        let row = ((pos.y - self.rect.top()) / self.row_height) as u16;
+        let col = ((pos.x - self.rect.left()) / self.cell) as u16;
+        (row < self.row_count).then_some((row, col))
+    }
+}
+
 pub(crate) fn metrics(ui: &Ui) -> Metrics {
     let font = egui::TextStyle::Monospace.resolve(ui.style());
     let row_height = ui.fonts_mut(|fonts| fonts.row_height(&font));
@@ -124,15 +148,21 @@ pub(crate) fn paint_lines(ui: &mut Ui, lines: &[ratatui::text::Line<'static>]) -
 }
 
 /// Draw a full-screen ratatui view into `rect` and paint it on the cell grid.
-pub(crate) fn paint_screen(ui: &mut Ui, rect: egui::Rect, draw: impl FnOnce(&mut ratatui::Frame)) {
+/// The returned geometry is used by the touch layer without changing the
+/// terminal layout that produced the page.
+pub(crate) fn paint_screen(
+    ui: &mut Ui,
+    rect: egui::Rect,
+    draw: impl FnOnce(&mut ratatui::Frame),
+) -> Option<ScreenGeometry> {
     let metrics = metrics(ui);
     let cols = ((rect.width() / metrics.cell).floor() as u16).max(1);
-    let rows = ((rect.height() / metrics.row_height).floor() as u16).max(1);
-    let Ok(mut terminal) = ratatui::Terminal::new(TestBackend::new(cols, rows)) else {
-        return;
+    let row_count = ((rect.height() / metrics.row_height).floor() as u16).max(1);
+    let Ok(mut terminal) = ratatui::Terminal::new(TestBackend::new(cols, row_count)) else {
+        return None;
     };
     if terminal.draw(draw).is_err() {
-        return;
+        return None;
     }
     let default_fg = ui.visuals().text_color();
     for (y, row) in buffer_rows(terminal.backend().buffer()).iter().enumerate() {
@@ -142,6 +172,13 @@ pub(crate) fn paint_screen(ui: &mut Ui, rect: egui::Rect, draw: impl FnOnce(&mut
         );
         paint_row(ui, line, &metrics, row, default_fg);
     }
+    Some(ScreenGeometry {
+        rect,
+        cell: metrics.cell,
+        row_height: metrics.row_height,
+        cols,
+        row_count,
+    })
 }
 
 /// Paint one terminal row: span colors and modifiers, plus a line background
@@ -242,5 +279,58 @@ fn indexed(index: u8) -> egui::Color32 {
             let gray = 8 + (index - 232) * 10;
             egui::Color32::from_gray(gray)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::text::Line;
+    use ratatui::widgets::Paragraph;
+
+    #[test]
+    fn screen_geometry_maps_painted_rows_and_cells() {
+        let ctx = egui::Context::default();
+        let rect = egui::Rect::from_min_size(egui::pos2(10.0, 20.0), egui::vec2(240.0, 120.0));
+        let mut geometry = None;
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400.0, 300.0),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                geometry = paint_screen(ui, rect, |frame| {
+                    frame.render_widget(
+                        Paragraph::new(vec![Line::from("one"), Line::from("two")]),
+                        frame.area(),
+                    );
+                });
+            },
+        );
+        output.textures_delta.clear();
+
+        let geometry = geometry.expect("screen geometry");
+        assert_eq!(geometry.rect, rect);
+        assert_eq!(
+            geometry.cell_at(egui::pos2(
+                rect.left() + geometry.cell * 2.25,
+                rect.top() + geometry.row_height * 1.5,
+            )),
+            Some((1, 2))
+        );
+        assert_eq!(
+            geometry.cell_at(egui::pos2(
+                rect.left() + 1.0,
+                rect.top() + geometry.row_height * geometry.row_count as f32 + 0.1,
+            )),
+            None
+        );
+        assert_eq!(
+            geometry.cell_at(egui::pos2(rect.left() - 1.0, rect.top() + 1.0)),
+            None
+        );
     }
 }

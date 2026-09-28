@@ -234,6 +234,9 @@ fn message_value(message: &ChatMessage) -> Result<Value, LlmError> {
             format!("could not serialize Claude conversation history: {error}"),
         )
     })?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("edit_preview");
+    }
     if !message.output_sequence.is_empty() {
         value["output_sequence"] =
             serde_json::to_value(&message.output_sequence).map_err(|error| {

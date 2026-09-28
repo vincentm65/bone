@@ -9,6 +9,7 @@ use super::PanePage;
 use crate::theme::Theme;
 
 pub const PANE_SOURCE: &str = "queue";
+pub const HINTS: &str = " ↑/↓ select  ⇧↑/⇧↓ reorder  Enter next  F2 edit  Del remove  Ctrl+D clear";
 
 pub fn render(queue: &VecDeque<String>, selected: usize, theme: &Theme) -> Option<PanePage> {
     if queue.is_empty() {
@@ -44,7 +45,7 @@ pub fn render(queue: &VecDeque<String>, selected: usize, theme: &Theme) -> Optio
         lines.push(line);
     }
     lines.push(Line::from(Span::styled(
-        " ↑/↓ select  ⇧↑/⇧↓ reorder  Enter next  F2 edit  Del remove  Ctrl+D clear",
+        HINTS,
         Style::default()
             .fg(theme.palette.muted)
             .add_modifier(Modifier::DIM),
