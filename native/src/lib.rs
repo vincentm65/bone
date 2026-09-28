@@ -16,6 +16,8 @@ mod touch_tests;
 
 mod keymap;
 mod keys;
+#[allow(dead_code)]
+mod layout;
 mod live_pane;
 mod local;
 mod pages;
