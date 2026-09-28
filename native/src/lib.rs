@@ -1684,6 +1684,8 @@ pub struct DesktopApp {
     layout: layout::Layout,
     /// Selected tab id of each pane. `selected` indexes the focused pane's.
     pane_selected: HashMap<layout::PaneId, u64>,
+    /// Tab dragged out of its strip: (tab index, release position).
+    tab_drop: Option<(usize, egui::Pos2)>,
     next_tab_id: u64,
     /// Local-daemon lifecycle used by the auto-connect coordinator.
     daemon_phase: daemon::Phase,
@@ -1792,6 +1794,7 @@ impl DesktopApp {
             }],
             layout: layout::Layout::new(),
             pane_selected: HashMap::from([(0, 1)]),
+            tab_drop: None,
             selected: 0,
             active_chat: 1,
             next_tab_id: 2,
@@ -1964,7 +1967,8 @@ impl DesktopApp {
         else {
             return;
         };
-        if self.tabs.get(self.selected).map(|tab| tab.id) != Some(tab_id) {
+        let changed = self.tabs.get(self.selected).map(|tab| tab.id) != Some(tab_id);
+        if changed {
             self.clear_page_input_focus();
         }
         self.selected = index;
@@ -1974,9 +1978,107 @@ impl DesktopApp {
         self.pane_selected.insert(pane, tab_id);
         if is_chat {
             self.active_chat = tab_id;
+            if changed {
+                self.ctx
+                    .memory_mut(|memory| memory.request_focus(editor_id(tab_id)));
+            }
         }
     }
 
+    /// Index into `tabs` of the tab showing in `pane`.
+    fn pane_tab_index(&self, pane: layout::PaneId) -> Option<usize> {
+        self.pane_selected
+            .get(&pane)
+            .and_then(|id| {
+                self.tabs
+                    .iter()
+                    .position(|tab| tab.id == *id && tab.pane == pane)
+            })
+            .or_else(|| self.pane_tab_indices(pane).first().copied())
+    }
+
+    /// Give `pane` keyboard focus, showing its selected tab.
+    fn focus_pane(&mut self, pane: layout::PaneId) {
+        match self.pane_tab_index(pane) {
+            Some(index) => self.select(index),
+            None => self.layout.focused = pane,
+        }
+    }
+
+    /// Split the focused pane; the new pane opens with a fresh chat.
+    fn split_pane(&mut self, axis: layout::Axis) {
+        if self.narrow {
+            return;
+        }
+        if self
+            .layout
+            .split(self.layout.focused, axis, false)
+            .is_some()
+        {
+            self.new_chat_tab(None);
+        }
+    }
+
+    /// Move a tab into another pane, closing its old pane if that empties it.
+    fn relocate_tab(&mut self, index: usize, target: layout::PaneId) {
+        let Some(tab) = self.tabs.get(index) else {
+            return;
+        };
+        let (id, from) = (tab.id, tab.pane);
+        if from == target || !self.layout.contains(target) {
+            return;
+        }
+        self.tabs[index].pane = target;
+        if self.pane_selected.get(&from) == Some(&id) {
+            match self.pane_tab_indices(from).last().copied() {
+                Some(i) => {
+                    let next = self.tabs[i].id;
+                    self.pane_selected.insert(from, next);
+                }
+                None => {
+                    self.pane_selected.remove(&from);
+                    self.layout.close(from);
+                }
+            }
+        }
+        self.select(index);
+    }
+
+    /// A tab was released at `pos`: the middle of a pane moves it there, an
+    /// edge splits that pane and moves it into the new half.
+    fn drop_tab(&mut self, index: usize, pos: egui::Pos2, leaves: &[(layout::PaneId, egui::Rect)]) {
+        let Some(&(pane, rect)) = leaves.iter().find(|(_, rect)| rect.contains(pos)) else {
+            return;
+        };
+        let Some(from) = self.tabs.get(index).map(|tab| tab.pane) else {
+            return;
+        };
+        let fx = (pos.x - rect.left()) / rect.width().max(1.0);
+        let fy = (pos.y - rect.top()) / rect.height().max(1.0);
+        let edge = 0.25;
+        let zone = if fx < edge {
+            Some((layout::Axis::Horizontal, true))
+        } else if fx > 1.0 - edge {
+            Some((layout::Axis::Horizontal, false))
+        } else if fy < edge {
+            Some((layout::Axis::Vertical, true))
+        } else if fy > 1.0 - edge {
+            Some((layout::Axis::Vertical, false))
+        } else {
+            None
+        };
+        match zone {
+            Some((axis, before)) => {
+                if from == pane && self.pane_tab_indices(pane).len() < 2 {
+                    return;
+                }
+                if let Some(new) = self.layout.split(pane, axis, before) {
+                    self.relocate_tab(index, new);
+                }
+            }
+            None => self.relocate_tab(index, pane),
+        }
+    }
     /// Indices into `tabs` of the tabs in `pane`, in strip order.
     fn pane_tab_indices(&self, pane: layout::PaneId) -> Vec<usize> {
         (0..self.tabs.len())
@@ -2929,14 +3031,15 @@ impl DesktopApp {
                     } else {
                         self.session().composer.chars().count()
                     };
-                    if let Some(mut state) = egui::text_edit::TextEditState::load(ctx, editor_id())
+                    if let Some(mut state) =
+                        egui::text_edit::TextEditState::load(ctx, editor_id(self.active_chat))
                     {
                         state
                             .cursor
                             .set_char_range(Some(egui::text::CCursorRange::one(
                                 egui::text::CCursor::new(char_index),
                             )));
-                        state.store(ctx, editor_id());
+                        state.store(ctx, editor_id(self.active_chat));
                     }
                 }
                 _ => {}
@@ -2986,6 +3089,23 @@ impl DesktopApp {
         }
         if consume(ui, egui::Modifiers::COMMAND, egui::Key::B) {
             self.toggle_sidebar();
+        }
+        if consume(ui, ctrl_shift, egui::Key::Backslash) || consume(ui, ctrl_shift, egui::Key::Pipe)
+        {
+            self.split_pane(layout::Axis::Vertical);
+        } else if consume(ui, egui::Modifiers::COMMAND, egui::Key::Backslash) {
+            self.split_pane(layout::Axis::Horizontal);
+        }
+        let ctrl_alt = egui::Modifiers::COMMAND | egui::Modifiers::ALT;
+        for (key, dir) in [
+            (egui::Key::ArrowLeft, layout::Dir::Left),
+            (egui::Key::ArrowRight, layout::Dir::Right),
+            (egui::Key::ArrowUp, layout::Dir::Up),
+            (egui::Key::ArrowDown, layout::Dir::Down),
+        ] {
+            if consume(ui, ctrl_alt, key) && self.layout.focus_dir(dir) {
+                self.focus_pane(self.layout.focused);
+            }
         }
         if consume(ui, ctrl_shift, egui::Key::Tab)
             || consume(ui, egui::Modifiers::COMMAND, egui::Key::PageUp)
@@ -3572,7 +3692,9 @@ impl DesktopApp {
         }
     }
 
-    fn tab_bar(&mut self, ui: &mut egui::Ui) {
+    fn tab_strip(&mut self, ui: &mut egui::Ui, pane: layout::PaneId) {
+        let pane_sel = self.pane_tab_index(pane);
+        let mut split: Option<(usize, layout::Axis)> = None;
         let mut select = None;
         let mut close = None;
         let visuals = ui.visuals().clone();
@@ -3582,12 +3704,14 @@ impl DesktopApp {
         let separator = visuals.widgets.noninteractive.bg_stroke.color;
         let tab_height = ui.spacing().interact_size.y + 4.0;
         let spinner = status_bar::indicator_style(self.settings());
-        let titles: Vec<(u64, String, bool, bool)> = self
+        let titles: Vec<(usize, String, bool, bool)> = self
             .tabs
             .iter()
-            .map(|tab| {
+            .enumerate()
+            .filter(|(_, tab)| tab.pane == pane)
+            .map(|(index, tab)| {
                 (
-                    tab.id,
+                    index,
                     self.tab_title(tab),
                     matches!(tab.kind, TabKind::Page(_)),
                     matches!(&tab.kind, TabKind::Chat(session) if session.state.busy),
@@ -3595,19 +3719,20 @@ impl DesktopApp {
             })
             .collect();
         let mut rects: Vec<egui::Rect> = Vec::new();
-        let mut moved: Option<(usize, f32)> = None;
+        let mut moved: Option<(usize, egui::Pos2)> = None;
         egui::ScrollArea::horizontal()
             .id_salt("tab-bar")
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
-                    for (index, (_, title, page, busy)) in titles.iter().enumerate() {
+                    for (index, title, page, busy) in titles.iter() {
+                        let index = *index;
                         let label = if *page {
                             format!("[{title}]")
                         } else {
                             title.clone()
                         };
-                        let selected = index == self.selected;
+                        let selected = pane_sel == Some(index);
                         if *busy {
                             let (rect, _) = ui.allocate_exact_size(
                                 egui::vec2(14.0, tab_height),
@@ -3634,8 +3759,22 @@ impl DesktopApp {
                         if response.drag_stopped()
                             && let Some(pos) = response.interact_pointer_pos()
                         {
-                            moved = Some((index, pos.x));
+                            moved = Some((index, pos));
                         }
+                        response.context_menu(|ui| {
+                            if ui.button("Split right").clicked() {
+                                split = Some((index, layout::Axis::Horizontal));
+                                ui.close();
+                            }
+                            if ui.button("Split down").clicked() {
+                                split = Some((index, layout::Axis::Vertical));
+                                ui.close();
+                            }
+                            if ui.button("Close").clicked() {
+                                close = Some(index);
+                                ui.close();
+                            }
+                        });
                         if response.clicked() {
                             select = Some(index);
                         }
@@ -3710,16 +3849,29 @@ impl DesktopApp {
                         .on_hover_text("New chat (Ctrl+T)")
                         .clicked()
                     {
+                        self.focus_pane(pane);
                         self.new_chat_tab(None);
                     }
                 });
             });
-        if let Some((from, pointer_x)) = moved {
-            let to = rects
-                .iter()
-                .position(|rect| pointer_x < rect.right())
-                .unwrap_or(rects.len().saturating_sub(1));
-            self.move_tab(from, to);
+        if let Some((from, pos)) = moved {
+            let strip =
+                egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), ui.min_rect().y_range());
+            if strip.contains(pos) {
+                let slot = rects
+                    .iter()
+                    .position(|rect| pos.x < rect.right())
+                    .unwrap_or(rects.len().saturating_sub(1));
+                if let Some(to) = titles.get(slot).map(|title| title.0) {
+                    self.move_tab(from, to);
+                }
+            } else {
+                self.tab_drop = Some((from, pos));
+            }
+        }
+        if let Some((index, axis)) = split {
+            self.select(index);
+            self.split_pane(axis);
         }
         if let Some(index) = select {
             self.select(index);
@@ -3796,8 +3948,8 @@ struct CatalogOp {
     applying: bool,
 }
 
-fn editor_id() -> egui::Id {
-    egui::Id::new("input-editor")
+fn editor_id(session: u64) -> egui::Id {
+    egui::Id::new(("input-editor", session))
 }
 
 fn setup_api_key_editor_id(tab_id: u64) -> egui::Id {
@@ -3828,7 +3980,7 @@ impl Session {
                 .any(|component| component.id() == MENU_PANE)
     }
 
-    fn input(&mut self, ui: &mut egui::Ui) {
+    fn input(&mut self, ui: &mut egui::Ui, focus: bool) {
         if let Some(error) = &self.state.last_error {
             ui.colored_label(ui.visuals().error_fg_color, brief_error(error))
                 .on_hover_text(error);
@@ -3883,7 +4035,7 @@ impl Session {
                 }
             }
         }
-        let focused = ui.memory(|memory| memory.has_focus(editor_id()));
+        let focused = ui.memory(|memory| memory.has_focus(editor_id(self.id)));
         self.refresh_autocomplete();
         let mut autocomplete_submit = false;
         if focused && self.autocomplete_open() {
@@ -3922,7 +4074,7 @@ impl Session {
                 let reserve = if stop { STOP_BUTTON_WIDTH } else { 0.0 };
                 let editor = ui.add(
                     egui::TextEdit::multiline(&mut self.composer)
-                        .id(editor_id())
+                        .id(editor_id(self.id))
                         .desired_width((ui.available_width() - reserve).max(0.0))
                         .desired_rows(rows)
                         .frame(egui::Frame::NONE)
@@ -3943,7 +4095,7 @@ impl Session {
         if editor.changed() {
             self.refresh_autocomplete();
         }
-        if ui.memory(|memory| memory.focused().is_none()) {
+        if focus && ui.memory(|memory| memory.focused().is_none()) {
             editor.request_focus();
         }
         if let Some(ac) = self
@@ -4026,20 +4178,21 @@ impl Session {
             return;
         }
         ui.input_mut(|i| i.events.retain(|event| !is_large(event)));
-        let mut char_index = egui::text_edit::TextEditState::load(ui.ctx(), editor_id())
+        let mut char_index = egui::text_edit::TextEditState::load(ui.ctx(), editor_id(self.id))
             .and_then(|state| state.cursor.char_range())
             .map(|range| range.primary.index.0)
             .unwrap_or_else(|| self.composer.chars().count());
         for text in large {
             char_index += self.insert_paste_placeholder(&text, char_index);
         }
-        if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id()) {
+        if let Some(mut state) = egui::text_edit::TextEditState::load(ui.ctx(), editor_id(self.id))
+        {
             state
                 .cursor
                 .set_char_range(Some(egui::text::CCursorRange::one(
                     egui::text::CCursor::new(char_index),
                 )));
-            state.store(ui.ctx(), editor_id());
+            state.store(ui.ctx(), editor_id(self.id));
         }
     }
 
@@ -4278,26 +4431,17 @@ impl DesktopApp {
             .inner_margin(egui::Margin::symmetric(12, 4));
 
         let sidebar = self.sidebar_visible();
-        egui::Panel::top("tabs")
-            .frame(side)
-            .show_separator_line(false)
-            .show(ui, |ui| {
-                ui.horizontal(|ui| {
-                    let label = egui::RichText::new("☰").weak();
-                    if ui
-                        .add(egui::Button::new(label).frame(false))
-                        .on_hover_text(if sidebar {
-                            "Hide sidebar (Ctrl+B)"
-                        } else {
-                            "Show sidebar (Ctrl+B)"
-                        })
-                        .clicked()
-                    {
-                        self.toggle_sidebar();
-                    }
-                    self.tab_bar(ui);
+        // Narrow (phone) windows stay single-pane and show only the focused one.
+        let multi = !self.narrow && self.layout.leaves().len() > 1;
+        if !multi {
+            egui::Panel::top("tabs")
+                .frame(side)
+                .show_separator_line(false)
+                .show(ui, |ui| {
+                    let pane = self.layout.focused;
+                    self.tab_strip(ui, pane);
                 });
-            });
+        }
         let sidebar_frame = egui::Frame::new()
             .fill(ui.visuals().window_fill)
             .inner_margin(12);
@@ -4319,14 +4463,172 @@ impl DesktopApp {
         }
         self.sidebar_dialogs(&ctx);
 
+        if self.selected_page().is_none() {
+            egui::Panel::bottom("status-bar")
+                .frame(side)
+                .show_separator_line(false)
+                .show(ui, |ui| self.status_bar(ui));
+        }
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| self.panes(ui, multi, fill, side));
+    }
+
+    /// Lay out the pane grid in the remaining space: each pane in its own
+    /// clipped child UI, draggable dividers between them, click to focus.
+    fn panes(&mut self, ui: &mut egui::Ui, multi: bool, fill: egui::Color32, side: egui::Frame) {
+        let area = ui.available_rect_before_wrap();
+        let to_px = |r: layout::URect| {
+            egui::Rect::from_min_max(
+                area.min + egui::vec2(r.x * area.width(), r.y * area.height()),
+                area.min + egui::vec2((r.x + r.w) * area.width(), (r.y + r.h) * area.height()),
+            )
+        };
+        let leaves: Vec<(layout::PaneId, egui::Rect)> = if multi {
+            self.layout
+                .rects()
+                .into_iter()
+                .map(|(id, r)| (id, to_px(r)))
+                .collect()
+        } else {
+            vec![(self.layout.focused, area)]
+        };
+        let accent = ui.visuals().hyperlink_color;
+        let separator = ui.visuals().widgets.noninteractive.bg_stroke.color;
+        let pressed = ui
+            .input(|input| input.pointer.primary_pressed())
+            .then(|| ui.input(|input| input.pointer.interact_pos()))
+            .flatten();
+        let mut clicked = None;
+        for &(pane, rect) in &leaves {
+            let mut child = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt(("pane", pane))
+                    .max_rect(rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            child.set_clip_rect(rect.intersect(ui.clip_rect()));
+            if multi {
+                egui::Panel::top(egui::Id::new(("pane-strip", pane)))
+                    .frame(side)
+                    .show_separator_line(false)
+                    .show(&mut child, |ui| self.tab_strip(ui, pane));
+            }
+            self.pane_body(&mut child, pane, fill, side);
+            if multi {
+                let color = if pane == self.layout.focused {
+                    accent.gamma_multiply(0.6)
+                } else {
+                    separator
+                };
+                ui.painter().rect_stroke(
+                    rect,
+                    egui::CornerRadius::ZERO,
+                    egui::Stroke::new(1.0, color),
+                    egui::StrokeKind::Inside,
+                );
+            }
+            if pressed.is_some_and(|pos| rect.contains(pos)) {
+                clicked = Some(pane);
+            }
+        }
+        if multi {
+            for divider in self.layout.dividers() {
+                let split = to_px(divider.rect);
+                let (hit, size, icon) = match divider.axis {
+                    layout::Axis::Horizontal => {
+                        let x = split.left() + divider.at * split.width();
+                        (
+                            egui::Rect::from_min_max(
+                                egui::pos2(x - 3.0, split.top()),
+                                egui::pos2(x + 3.0, split.bottom()),
+                            ),
+                            split.width(),
+                            egui::CursorIcon::ResizeHorizontal,
+                        )
+                    }
+                    layout::Axis::Vertical => {
+                        let y = split.top() + divider.at * split.height();
+                        (
+                            egui::Rect::from_min_max(
+                                egui::pos2(split.left(), y - 3.0),
+                                egui::pos2(split.right(), y + 3.0),
+                            ),
+                            split.height(),
+                            egui::CursorIcon::ResizeVertical,
+                        )
+                    }
+                };
+                let id = egui::Id::new(("divider", divider.path.clone(), divider.index));
+                let response = ui.interact(hit, id, egui::Sense::drag());
+                if response.hovered() || response.dragged() {
+                    ui.ctx().set_cursor_icon(icon);
+                }
+                if response.dragged() {
+                    let drag = response.drag_delta();
+                    let delta = match divider.axis {
+                        layout::Axis::Horizontal => drag.x,
+                        layout::Axis::Vertical => drag.y,
+                    } / size.max(1.0);
+                    self.layout.resize(&divider.path, divider.index, delta);
+                }
+                if response.hovered() || response.dragged() {
+                    ui.painter()
+                        .rect_filled(hit.shrink(1.0), 0.0, accent.gamma_multiply(0.5));
+                }
+            }
+        }
+        if let Some((index, pos)) = self.tab_drop.take() {
+            self.drop_tab(index, pos, &leaves);
+        } else if let Some(pane) = clicked.filter(|pane| *pane != self.layout.focused) {
+            self.focus_pane(pane);
+        }
+    }
+
+    /// Draw one pane's selected tab. The pane's tab stands in for the
+    /// selected tab (and active chat) while it draws.
+    fn pane_body(
+        &mut self,
+        ui: &mut egui::Ui,
+        pane: layout::PaneId,
+        fill: egui::Color32,
+        side: egui::Frame,
+    ) {
+        let Some(index) = self.pane_tab_index(pane) else {
+            return;
+        };
+        let saved = (self.selected, self.active_chat);
+        self.selected = index;
+        let is_chat = if let TabKind::Chat(session) = &self.tabs[index].kind {
+            self.active_chat = session.id;
+            true
+        } else {
+            false
+        };
+        let focus = pane == self.layout.focused;
+        self.pane_content(ui, pane, is_chat, focus, fill, side);
+        (self.selected, self.active_chat) = saved;
+    }
+
+    fn pane_content(
+        &mut self,
+        ui: &mut egui::Ui,
+        pane: layout::PaneId,
+        is_chat: bool,
+        focus: bool,
+        fill: egui::Color32,
+        side: egui::Frame,
+    ) {
         // Publish the actual chat-pane cell width (excluding its 12pt side
         // margins), not the host terminal width. Lua menus wrap to this value.
         let width = ((ui.available_width() - 24.0).max(1.0) / grid::metrics(ui).cell)
             .floor()
             .clamp(1.0, u16::MAX as f32) as u16;
-        self.session_mut().publish_width(width);
+        if is_chat {
+            self.session_mut().publish_width(width);
+        }
 
-        if self.selected_page().is_some() {
+        if !is_chat {
             let theme = self.render_theme.clone();
             egui::CentralPanel::default()
                 .frame(egui::Frame::new().fill(fill).inner_margin(12))
@@ -4371,13 +4673,9 @@ impl DesktopApp {
         let jobs = session.state.jobs.clone();
         let processes = session.state.processes.clone();
         self.session_mut().live_pane.sync(&pages, &jobs, &processes);
-        egui::Panel::bottom("status-bar")
-            .frame(side)
-            .show_separator_line(false)
-            .show(ui, |ui| self.status_bar(ui));
         let mut open = None;
         if self.panes_visible && !pages.is_empty() {
-            egui::Panel::bottom("live-pane")
+            egui::Panel::bottom(egui::Id::new(("live-pane", pane)))
                 .frame(side)
                 .show_separator_line(false)
                 .show(ui, |ui| {
@@ -4391,7 +4689,7 @@ impl DesktopApp {
         let shells = self
             .session()
             .running_shells(&theme, ui.input(|input| input.time));
-        egui::Panel::bottom("input")
+        egui::Panel::bottom(egui::Id::new(("input", pane)))
             .frame(side)
             .show_separator_line(false)
             .show(ui, |ui| {
@@ -4403,7 +4701,7 @@ impl DesktopApp {
                 if lines {
                     ui.separator();
                 }
-                frame.show(ui, |ui| self.session_mut().input(ui));
+                frame.show(ui, |ui| self.session_mut().input(ui, focus));
                 if lines {
                     ui.separator();
                 }

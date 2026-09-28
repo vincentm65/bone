@@ -1192,7 +1192,7 @@ fn an_open_menu_keeps_the_input_away_and_queues_text_between_key_requests() {
     // Between key requests (none pending), the input stays hidden and never
     // takes focus, so the on-screen keyboard is not reset per keystroke.
     let output = frame(&mut app, vec![egui::Event::Text("a".into())]);
-    assert!(!ctx.memory(|memory| memory.has_focus(editor_id())));
+    assert!(!ctx.memory(|memory| memory.has_focus(editor_id(app.active_chat))));
     assert!(
         output.platform_output.ime.is_some(),
         "the keyboard stays up"

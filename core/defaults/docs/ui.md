@@ -60,6 +60,11 @@ cancellation are scoped to the attached conversation.
   reuses an empty chat, or opens a new tab. Right-click a sidebar row to rename
   it or permanently delete it; delete asks for confirmation and closes open tabs
   before removing saved history. Nothing is persisted locally.
+  The main area is a grid of panes, each with its own tab strip. Ctrl+\ splits
+  right and Ctrl+Shift+\ splits down; Ctrl+Alt+arrows move focus between
+  panes. The tab right-click menu offers Split right, Split down and Close.
+  Drag a tab to another pane, or onto a pane edge to split, to move it; drag
+  dividers to resize. Narrow windows and Android stay single-pane.
   A new chat, including one created by `/new`, remains ephemeral until its first
   real prompt is submitted; empty chats are not written to SQLite and do not
   appear in history or the sidebar. Persistence and lifecycle remain daemon-owned.

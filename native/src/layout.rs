@@ -288,6 +288,84 @@ fn rects_of(node: &Node, r: URect, out: &mut Vec<(PaneId, URect)>) {
     }
 }
 
+/// A draggable boundary between two adjacent children of a split.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Divider {
+    /// Child indices from the root to the split that owns the boundary.
+    pub path: Vec<usize>,
+    /// The boundary sits after this child.
+    pub index: usize,
+    pub axis: Axis,
+    /// The owning split's rectangle.
+    pub rect: URect,
+    /// Boundary position as a fraction of the split's extent along `axis`.
+    pub at: f32,
+}
+
+impl Layout {
+    pub fn dividers(&self) -> Vec<Divider> {
+        let mut out = Vec::new();
+        dividers_of(&self.root, URect::UNIT, &mut Vec::new(), &mut out);
+        out
+    }
+}
+
+fn dividers_of(node: &Node, r: URect, path: &mut Vec<usize>, out: &mut Vec<Divider>) {
+    let Node::Split { axis, children } = node else {
+        return;
+    };
+    let mut off = 0.0;
+    for (i, (f, c)) in children.iter().enumerate() {
+        let start = off;
+        off += f;
+        if i + 1 < children.len() {
+            out.push(Divider {
+                path: path.clone(),
+                index: i,
+                axis: *axis,
+                rect: r,
+                at: off,
+            });
+        }
+        let cr = match axis {
+            Axis::Horizontal => URect {
+                x: r.x + start * r.w,
+                w: f * r.w,
+                ..r
+            },
+            Axis::Vertical => URect {
+                y: r.y + start * r.h,
+                h: f * r.h,
+                ..r
+            },
+        };
+        path.push(i);
+        dividers_of(c, cr, path, out);
+        path.pop();
+    }
+}
+
+#[cfg(test)]
+mod divider_tests {
+    use super::*;
+
+    #[test]
+    fn dividers_follow_the_tree() {
+        let mut l = Layout::new();
+        assert!(l.dividers().is_empty());
+        let b = l.split(0, Axis::Horizontal, false).unwrap();
+        let d = l.dividers();
+        assert_eq!(d.len(), 1);
+        assert_eq!((d[0].index, d[0].at), (0, 0.5));
+        assert!(d[0].path.is_empty());
+        l.split(b, Axis::Vertical, false).unwrap();
+        let d = l.dividers();
+        assert_eq!(d.len(), 2);
+        assert_eq!(d[1].path, vec![1]);
+        assert_eq!(d[1].rect.x, 0.5);
+        assert_eq!(d[1].axis, Axis::Vertical);
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
