@@ -1650,6 +1650,8 @@ enum TabKind {
 
 struct Tab {
     id: u64,
+    /// The layout pane whose tab strip holds this tab.
+    pane: layout::PaneId,
     kind: TabKind,
 }
 
@@ -1678,6 +1680,10 @@ pub struct DesktopApp {
     /// Tab id of the chat that owns the status bar, keymap, and theme: the
     /// selected tab when it is a chat, otherwise the last chat selected.
     active_chat: u64,
+    /// The pane grid; `layout.focused` is the pane that takes keyboard input.
+    layout: layout::Layout,
+    /// Selected tab id of each pane. `selected` indexes the focused pane's.
+    pane_selected: HashMap<layout::PaneId, u64>,
     next_tab_id: u64,
     /// Local-daemon lifecycle used by the auto-connect coordinator.
     daemon_phase: daemon::Phase,
@@ -1781,8 +1787,11 @@ impl DesktopApp {
             page_input_focus: None,
             tabs: vec![Tab {
                 id: 1,
+                pane: 0,
                 kind: TabKind::Chat(Box::new(session)),
             }],
+            layout: layout::Layout::new(),
+            pane_selected: HashMap::from([(0, 1)]),
             selected: 0,
             active_chat: 1,
             next_tab_id: 2,
@@ -1948,10 +1957,10 @@ impl DesktopApp {
     }
 
     fn select(&mut self, index: usize) {
-        let Some((tab_id, is_chat)) = self
+        let Some((tab_id, pane, is_chat)) = self
             .tabs
             .get(index)
-            .map(|tab| (tab.id, matches!(tab.kind, TabKind::Chat(_))))
+            .map(|tab| (tab.id, tab.pane, matches!(tab.kind, TabKind::Chat(_))))
         else {
             return;
         };
@@ -1959,9 +1968,20 @@ impl DesktopApp {
             self.clear_page_input_focus();
         }
         self.selected = index;
+        if self.layout.contains(pane) {
+            self.layout.focused = pane;
+        }
+        self.pane_selected.insert(pane, tab_id);
         if is_chat {
             self.active_chat = tab_id;
         }
+    }
+
+    /// Indices into `tabs` of the tabs in `pane`, in strip order.
+    fn pane_tab_indices(&self, pane: layout::PaneId) -> Vec<usize> {
+        (0..self.tabs.len())
+            .filter(|&i| self.tabs[i].pane == pane)
+            .collect()
     }
 
     /// Move a tab to a new position, keeping the same tab selected.
@@ -1982,7 +2002,8 @@ impl DesktopApp {
     fn push_tab(&mut self, kind: TabKind) -> usize {
         let id = self.next_tab_id;
         self.next_tab_id += 1;
-        self.tabs.push(Tab { id, kind });
+        let pane = self.layout.focused;
+        self.tabs.push(Tab { id, pane, kind });
         let index = self.tabs.len() - 1;
         self.select(index);
         index
@@ -2026,14 +2047,34 @@ impl DesktopApp {
         if self.page_input_focus == Some(closing_id) {
             self.clear_page_input_focus();
         }
+        let keep = self.tabs.get(self.selected).map(|tab| tab.id);
         let closed = self.tabs.remove(index);
         if self.tabs.is_empty() {
             self.selected = 0;
             self.active_chat = 0;
+            self.layout = layout::Layout::new();
+            self.pane_selected.clear();
             return;
         }
-        if self.selected >= self.tabs.len() || self.selected > index {
-            self.selected = self.selected.saturating_sub(1);
+        let pane = closed.pane;
+        if self.pane_selected.get(&pane) == Some(&closed.id) {
+            // The nearest remaining tab in the pane takes over.
+            let indices = self.pane_tab_indices(pane);
+            let next = indices
+                .iter()
+                .rev()
+                .find(|&&i| i < index)
+                .or_else(|| indices.first())
+                .map(|&i| self.tabs[i].id);
+            match next {
+                Some(id) => {
+                    self.pane_selected.insert(pane, id);
+                }
+                None => {
+                    self.pane_selected.remove(&pane);
+                    self.layout.close(pane);
+                }
+            }
         }
         let active_chat = self.active_chat;
         if closed.id == active_chat
@@ -2052,7 +2093,14 @@ impl DesktopApp {
                 })
                 .unwrap_or(0);
         }
-        self.select(self.selected.min(self.tabs.len() - 1));
+        // Stay on the previously selected tab unless it was the one closed.
+        let target = keep
+            .filter(|&id| id != closed.id)
+            .or_else(|| self.pane_selected.get(&self.layout.focused).copied())
+            .and_then(|id| self.tabs.iter().position(|tab| tab.id == id))
+            .or_else(|| self.pane_tab_indices(self.layout.focused).first().copied())
+            .unwrap_or(0);
+        self.select(target);
     }
 
     fn close_tab_id(&mut self, id: u64) {
@@ -2062,9 +2110,17 @@ impl DesktopApp {
     }
 
     fn cycle_tab(&mut self, delta: isize) {
-        let len = self.tabs.len() as isize;
-        let next = (self.selected as isize + delta).rem_euclid(len) as usize;
-        self.select(next);
+        let indices = self.pane_tab_indices(self.layout.focused);
+        if indices.is_empty() {
+            return;
+        }
+        let len = indices.len() as isize;
+        let current = indices
+            .iter()
+            .position(|&i| i == self.selected)
+            .unwrap_or(0);
+        let next = (current as isize + delta).rem_euclid(len) as usize;
+        self.select(indices[next]);
     }
 
     fn tab_title(&self, tab: &Tab) -> String {
