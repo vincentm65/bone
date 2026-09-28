@@ -1686,6 +1686,8 @@ pub struct DesktopApp {
     pane_selected: HashMap<layout::PaneId, u64>,
     /// Tab dragged out of its strip: (tab index, release position).
     tab_drop: Option<(usize, egui::Pos2)>,
+    /// Tab currently being dragged: (tab index, label), for drop feedback.
+    tab_dragging: Option<(usize, String)>,
     next_tab_id: u64,
     /// Local-daemon lifecycle used by the auto-connect coordinator.
     daemon_phase: daemon::Phase,
@@ -1795,6 +1797,7 @@ impl DesktopApp {
             layout: layout::Layout::new(),
             pane_selected: HashMap::from([(0, 1)]),
             tab_drop: None,
+            tab_dragging: None,
             selected: 0,
             active_chat: 1,
             next_tab_id: 2,
@@ -2044,19 +2047,13 @@ impl DesktopApp {
         self.select(index);
     }
 
-    /// A tab was released at `pos`: the middle of a pane moves it there, an
-    /// edge splits that pane and moves it into the new half.
-    fn drop_tab(&mut self, index: usize, pos: egui::Pos2, leaves: &[(layout::PaneId, egui::Rect)]) {
-        let Some(&(pane, rect)) = leaves.iter().find(|(_, rect)| rect.contains(pos)) else {
-            return;
-        };
-        let Some(from) = self.tabs.get(index).map(|tab| tab.pane) else {
-            return;
-        };
+    /// Which part of `rect` the pointer is over: `None` for the middle, or the
+    /// split (axis, new pane goes before) for an edge.
+    fn drop_zone(rect: egui::Rect, pos: egui::Pos2) -> Option<(layout::Axis, bool)> {
         let fx = (pos.x - rect.left()) / rect.width().max(1.0);
         let fy = (pos.y - rect.top()) / rect.height().max(1.0);
         let edge = 0.25;
-        let zone = if fx < edge {
+        if fx < edge {
             Some((layout::Axis::Horizontal, true))
         } else if fx > 1.0 - edge {
             Some((layout::Axis::Horizontal, false))
@@ -2066,7 +2063,40 @@ impl DesktopApp {
             Some((layout::Axis::Vertical, false))
         } else {
             None
+        }
+    }
+
+    /// Area a drop in `zone` of `rect` would occupy.
+    fn zone_rect(rect: egui::Rect, zone: Option<(layout::Axis, bool)>) -> egui::Rect {
+        let Some((axis, before)) = zone else {
+            return rect;
         };
+        let c = rect.center();
+        match (axis, before) {
+            (layout::Axis::Horizontal, true) => {
+                egui::Rect::from_min_max(rect.min, egui::pos2(c.x, rect.bottom()))
+            }
+            (layout::Axis::Horizontal, false) => {
+                egui::Rect::from_min_max(egui::pos2(c.x, rect.top()), rect.max)
+            }
+            (layout::Axis::Vertical, true) => {
+                egui::Rect::from_min_max(rect.min, egui::pos2(rect.right(), c.y))
+            }
+            (layout::Axis::Vertical, false) => {
+                egui::Rect::from_min_max(egui::pos2(rect.left(), c.y), rect.max)
+            }
+        }
+    }
+    /// A tab was released at `pos`: the middle of a pane moves it there, an
+    /// edge splits that pane and moves it into the new half.
+    fn drop_tab(&mut self, index: usize, pos: egui::Pos2, leaves: &[(layout::PaneId, egui::Rect)]) {
+        let Some(&(pane, rect)) = leaves.iter().find(|(_, rect)| rect.contains(pos)) else {
+            return;
+        };
+        let Some(from) = self.tabs.get(index).map(|tab| tab.pane) else {
+            return;
+        };
+        let zone = Self::drop_zone(rect, pos);
         match zone {
             Some((axis, before)) => {
                 if from == pane && self.pane_tab_indices(pane).len() < 2 {
@@ -3755,11 +3785,13 @@ impl DesktopApp {
                         );
                         if response.dragged() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                            self.tab_dragging = Some((index, label.to_string()));
                         }
-                        if response.drag_stopped()
-                            && let Some(pos) = response.interact_pointer_pos()
-                        {
-                            moved = Some((index, pos));
+                        if response.drag_stopped() {
+                            self.tab_dragging = None;
+                            if let Some(pos) = response.interact_pointer_pos() {
+                                moved = Some((index, pos));
+                            }
                         }
                         response.context_menu(|ui| {
                             if ui.button("Split right").clicked() {
@@ -3854,6 +3886,38 @@ impl DesktopApp {
                     }
                 });
             });
+        if let Some((from, _)) = self.tab_dragging
+            && let Some(pos) = ui.ctx().pointer_latest_pos()
+            && moved.is_none()
+        {
+            let strip =
+                egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), ui.min_rect().y_range());
+            if strip.contains(pos)
+                && let Some(slot) = rects
+                    .iter()
+                    .position(|rect| pos.x < rect.right())
+                    .or(rects.len().checked_sub(1))
+                && let Some(&(to, ..)) = titles.get(slot)
+            {
+                let x = if to < from {
+                    rects[slot].left()
+                } else {
+                    rects[slot].right()
+                };
+                ui.ctx()
+                    .layer_painter(egui::LayerId::new(
+                        egui::Order::Foreground,
+                        egui::Id::new("tab-insert"),
+                    ))
+                    .line_segment(
+                        [
+                            egui::pos2(x, strip.top() + 3.0),
+                            egui::pos2(x, strip.bottom() - 3.0),
+                        ],
+                        egui::Stroke::new(2.0, accent),
+                    );
+            }
+        }
         if let Some((from, pos)) = moved {
             let strip =
                 egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), ui.min_rect().y_range());
@@ -4576,6 +4640,50 @@ impl DesktopApp {
                     ui.painter()
                         .rect_filled(hit.shrink(1.0), 0.0, accent.gamma_multiply(0.5));
                 }
+            }
+        }
+        if let Some((index, label)) = self.tab_dragging.clone() {
+            if !ui.input(|input| input.pointer.any_down()) {
+                self.tab_dragging = None;
+            } else if let Some(pos) = ui.ctx().pointer_latest_pos() {
+                let painter = ui.ctx().layer_painter(egui::LayerId::new(
+                    egui::Order::Foreground,
+                    egui::Id::new("tab-drop"),
+                ));
+                let from = self.tabs.get(index).map(|tab| tab.pane);
+                if let Some(&(pane, rect)) = leaves.iter().find(|(_, rect)| rect.contains(pos))
+                    && pos.y > rect.top() + 30.0
+                {
+                    let zone = Self::drop_zone(rect, pos);
+                    if zone.is_none()
+                        || from != Some(pane)
+                        || self.pane_tab_indices(pane).len() >= 2
+                    {
+                        let target = Self::zone_rect(rect, zone).shrink(2.0);
+                        painter.rect_filled(target, 4.0, accent.gamma_multiply(0.18));
+                        painter.rect_stroke(
+                            target,
+                            4.0,
+                            egui::Stroke::new(2.0, accent.gamma_multiply(0.8)),
+                            egui::StrokeKind::Inside,
+                        );
+                    }
+                }
+                let galley = painter.layout_no_wrap(
+                    label,
+                    egui::FontId::proportional(13.0),
+                    ui.visuals().text_color(),
+                );
+                let ghost = egui::Rect::from_min_size(pos + egui::vec2(12.0, 12.0), galley.size())
+                    .expand2(egui::vec2(6.0, 3.0));
+                painter.rect_filled(ghost, 4.0, ui.visuals().window_fill.gamma_multiply(0.9));
+                painter.rect_stroke(
+                    ghost,
+                    4.0,
+                    egui::Stroke::new(1.0, accent),
+                    egui::StrokeKind::Inside,
+                );
+                painter.galley(ghost.min + egui::vec2(6.0, 3.0), galley, accent);
             }
         }
         if let Some((index, pos)) = self.tab_drop.take() {
