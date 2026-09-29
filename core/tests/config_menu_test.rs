@@ -325,12 +325,17 @@ fn narrow_provider_page_keeps_tabs_and_edit_hint_tappable() {
         r##"
         local edited = 0
         test_menu.clear = function() end
-        test_menu.select = function()
+        local picked = 0
+        test_menu.select = function(_, opts)
+          if tostring(opts.question):find("section", 1, true) then
+            picked = picked + 1
+            return { value = "2" }
+          end
           edited = edited + 1
           return { cancelled = true }
         end
         local keys = {
-          { code = "Click", char = "tab:2" },
+          { code = "Click", char = "picker" },
           { code = "Click", char = "edit" },
           { code = "Click", char = "esc" },
         }
@@ -369,14 +374,14 @@ fn narrow_provider_page_keeps_tabs_and_edit_hint_tappable() {
                   has_span_click = true
                 end
               end
-              -- The tab row stays on one line and pans horizontally; every
-              -- other tappable row must fit the pane.
-              if has_span_click and not text:find("\u{2502}", 1, true) then
+              if has_span_click then
                 assert(utf8.len(text) <= 41, "clipped tap row: " .. text)
               end
             end
           end
-          assert(seen["tab:4"], "last tab is visible and tappable")
+          assert(seen["picker"], "section header is visible and tappable")
+          assert(not seen["tab:1"], "clipping tab row is replaced by the picker")
+          assert(picked == 1 or render_i == 1, "picker opened once")
           if render_i > 1 then
             assert(seen["edit"], "provider edit hint is visible and tappable")
             assert(seen["esc"], "exit hint is visible and tappable")

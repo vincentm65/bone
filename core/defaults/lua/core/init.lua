@@ -443,24 +443,37 @@ local function run(ctx, start_ns)
       local width = math.floor(tonumber(ctx.ui.width and ctx.ui.width()) or 0)
       if width < 1 then width = 80 end
 
-      -- Styled tabs with ` │ ` separators.
-      local tspans = { span("  ", COL.dim) }
+      -- Tabs that fit keep the styled tab row (desktop / TUI). When the row
+      -- would clip (phones, very narrow panes) it collapses to one tappable
+      -- section header that opens a picker.
+      local sep = "  \u{2502}  "
+      local tabs_w = 2
       for i, pg in ipairs(pages) do
-         if i > 1 then tspans[#tspans + 1] = span("  \u{2502}  ", COL.dim) end
-         local label = pg.title or pg.namespace
-         if i == tab then
-            tspans[#tspans + 1] = span(label, COL.text, { "bold" })
-         else
-            tspans[#tspans + 1] = span(label, COL.dim)
-         end
-         tspans[#tspans].click = "tab:" .. i
+         tabs_w = tabs_w + (utf8.len(pg.title or pg.namespace) or 0) + (i > 1 and utf8.len(sep) or 0)
       end
-      -- One row; the desktop pans it horizontally when it is wider than the pane.
-      lines[#lines + 1] = line_of(tspans)
+      if tabs_w + 2 > width then
+         local head = span("  " .. (page.title or ns) .. " \u{25be}", COL.text, { "bold" })
+         head.click = "picker"
+         lines[#lines + 1] = line_of({ head })
+         lines[#lines + 1] = line_of({})
+      else
+         local tspans = { span("  ", COL.dim) }
+         for i, pg in ipairs(pages) do
+            if i > 1 then tspans[#tspans + 1] = span(sep, COL.dim) end
+            local label = pg.title or pg.namespace
+            if i == tab then
+               tspans[#tspans + 1] = span(label, COL.text, { "bold" })
+            else
+               tspans[#tspans + 1] = span(label, COL.dim)
+            end
+            tspans[#tspans].click = "tab:" .. i
+         end
+         lines[#lines + 1] = line_of(tspans)
 
-      -- Page subtitle + breathing room.
-      lines[#lines + 1] = line_of({ span("  " .. (page.title or ns), COL.dim, { "italic" }) })
-      lines[#lines + 1] = line_of({})
+         -- Page subtitle + breathing room.
+         lines[#lines + 1] = line_of({ span("  " .. (page.title or ns), COL.dim, { "italic" }) })
+         lines[#lines + 1] = line_of({})
+      end
 
       if total == 0 then
          lines[#lines + 1] = line_of({ span(
@@ -543,7 +556,7 @@ local function run(ctx, start_ns)
          local tapped_tab = tonumber(value:match("^tab:(%d+)$"))
          local tapped_row = tonumber(value:match("^row:(%d+)$"))
          code = value == "enter" and "Enter" or value == "esc" and "Esc"
-            or value == "edit" and "Edit" or ""
+            or value == "edit" and "Edit" or value == "picker" and "Picker" or ""
          if tapped_tab then
             tab = clamp(tapped_tab, 1, #pages)
          elseif tapped_row and rows[tapped_row] then
@@ -557,6 +570,19 @@ local function run(ctx, start_ns)
          sel = sel > 1 and sel - 1 or math.max(1, total)
       elseif code == "Down" then
          sel = sel < total and sel + 1 or 1
+      elseif code == "Picker" then
+         local options = {}
+         for i, pg in ipairs(pages) do
+            options[i] = { label = pg.title or pg.namespace, value = tostring(i) }
+         end
+         local picked = ask(ctx, {
+            question = "Go to section  \u{00b7}  Esc cancels",
+            type = "single_select",
+            options = options,
+            default = tab,
+         })
+         local n = picked and tonumber(picked.value)
+         if n then tab = clamp(n, 1, #pages) end
       elseif code == "Left" or code == "BackTab" then
          tab = tab > 1 and tab - 1 or #pages
       elseif code == "Right" or code == "Tab" then
