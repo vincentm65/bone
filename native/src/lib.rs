@@ -3768,14 +3768,10 @@ impl DesktopApp {
     }
 
     /// Narrow windows only: the tab context menu needs a right-click, which a
-    /// touch screen does not have, so the same actions get a ⋮ menu here.
+    /// touch screen does not have, so closing a tab gets a ⋮ menu here.
     fn actions_menu(&mut self, ui: &mut egui::Ui, pane: layout::PaneId) {
         let muted = ui.visuals().weak_text_color();
         ui.menu_button(egui::RichText::new("\u{22ee}").color(muted), |ui| {
-            if ui.button("Split below").clicked() {
-                self.split_pane(layout::Axis::Vertical);
-                ui.close();
-            }
             if ui.button("Close tab").clicked() {
                 if let Some(index) = self.pane_tab_index(pane) {
                     self.close_tab(index);

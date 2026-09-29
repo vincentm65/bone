@@ -132,18 +132,35 @@ impl Cache {
                     let col = (((pos.x - origin.x) / cell).round().max(0.0) as u16).min(cols);
                     (line, col)
                 };
+                let row_at = |line: usize| -> Option<usize> {
+                    let y = line as f32 * row_height + row_height / 2.0;
+                    tops.partition_point(|top| *top <= y).checked_sub(1)
+                };
+                // First flattened line of row `i`.
+                let row_line = |i: usize| (tops[i] / row_height).round() as usize;
                 let tool_row_at = |line: usize| -> Option<usize> {
-                    let y = line as f32 * row_height;
-                    let i = tops.partition_point(|top| *top <= y).checked_sub(1)?;
+                    let i = row_at(line)?;
                     (rows[i].0.starts_with("tool:") && !self.lines[i].as_deref()?.is_empty())
                         .then_some(i)
                 };
-                let full =
-                    egui::Rect::from_min_size(origin, egui::vec2(ui.max_rect().width(), total));
+                // On a touch screen the viewport only senses clicks: a click
+                // widget that senses drags would win the hit test against the
+                // scroll area below it, turning every touch drag into a
+                // selection. Click-only keeps dragging where it belongs.
+                let touch = ui.input(|input| input.has_touch_screen());
+                let hit = if touch {
+                    egui::Rect::from_min_size(origin, ui.max_rect().size())
+                } else {
+                    egui::Rect::from_min_size(origin, egui::vec2(ui.max_rect().width(), total))
+                };
                 let response = ui.interact(
-                    full,
+                    hit,
                     ui.id().with("transcript-select"),
-                    egui::Sense::click_and_drag(),
+                    if touch {
+                        egui::Sense::click()
+                    } else {
+                        egui::Sense::click_and_drag()
+                    },
                 );
                 if let Some(pos) = response.hover_pos() {
                     ui.ctx()
@@ -153,7 +170,19 @@ impl Cache {
                             egui::CursorIcon::Text
                         });
                 }
-                if let Some(pos) = response.interact_pointer_pos() {
+                let long_touched = response.long_touched();
+                if long_touched {
+                    // Long press on a touch screen: select the word under the
+                    // finger, and offer Copy in the context menu below.
+                    selection = response.interact_pointer_pos().and_then(|pos| {
+                        let at = locate(pos);
+                        let i = row_at(at.0)?;
+                        let offset = at.0.checked_sub(row_line(i))?;
+                        let line = self.lines[i].as_deref()?.get(offset)?;
+                        let (from, to) = word_span(line, at.1);
+                        (to > from).then_some(((at.0, from), (at.0, to)))
+                    });
+                } else if let Some(pos) = response.interact_pointer_pos() {
                     if response.drag_started() {
                         selection = Some((locate(pos), locate(pos)));
                     } else if response.dragged()
@@ -167,8 +196,19 @@ impl Cache {
                     }
                 }
                 let sel = selection.map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
+                let mut copy = false;
+                if touch {
+                    response.context_menu(|ui| {
+                        if ui.button("Copy").clicked() {
+                            copy = true;
+                            ui.close();
+                        }
+                    });
+                }
+                let shortcut =
+                    ui.input(|input| input.events.iter().any(|e| matches!(e, egui::Event::Copy)));
                 if let Some((start, end)) = sel
-                    && ui.input(|input| input.events.iter().any(|e| matches!(e, egui::Event::Copy)))
+                    && (copy || shortcut)
                 {
                     let flat: Vec<&TermRow> = self
                         .lines
@@ -305,6 +345,47 @@ fn row_text(line: &TermRow, from: u16, to: u16) -> String {
         }
     }
     text.trim_end().to_owned()
+}
+
+/// Character range of the word at cell `col` of one terminal row. `(c, c)`
+/// when that cell is not part of a word, so callers can ignore empty spans.
+fn word_span(line: &TermRow, col: u16) -> (u16, u16) {
+    let mut cells: Vec<(u16, char)> = Vec::new();
+    for run in line {
+        let mut cell = run.col;
+        for ch in run.text.chars() {
+            cells.push((cell, ch));
+            cell = cell.saturating_add(
+                unicode_width::UnicodeWidthChar::width(ch)
+                    .unwrap_or(1)
+                    .max(1) as u16,
+            );
+        }
+    }
+    let Some(at) = cells.iter().rposition(|&(cell, _)| cell <= col) else {
+        return (col, col);
+    };
+    let word = |ch: char| ch.is_alphanumeric() || ch == '_';
+    if !word(cells[at].1) {
+        return (cells[at].0, cells[at].0);
+    }
+    let start = cells[..at]
+        .iter()
+        .rposition(|&(_, ch)| !word(ch))
+        .map_or(0, |i| i + 1);
+    let end = cells[at + 1..]
+        .iter()
+        .position(|&(_, ch)| !word(ch))
+        .map_or(cells.len() - 1, |i| at + i);
+    let last = cells[end];
+    (
+        cells[start].0,
+        last.0.saturating_add(
+            unicode_width::UnicodeWidthChar::width(last.1)
+                .unwrap_or(1)
+                .max(1) as u16,
+        ),
+    )
 }
 
 /// Plain text of an ordered selection over flattened lines.
@@ -567,5 +648,297 @@ mod tests {
         assert!(!cache.expanded[1]);
         let stored = egui::scroll_area::State::load(&ctx, collapsed.id).unwrap();
         assert!(stored.offset.y <= bottom(&collapsed), "{}", stored.offset.y);
+    }
+    /// Frame-by-frame harness over one transcript, for pointer and touch tests.
+    struct Harness {
+        ctx: egui::Context,
+        cache: Cache,
+        rows: Vec<(String, String)>,
+        cards: Vec<Option<ToolCard>>,
+        screen: egui::Rect,
+        cell: f32,
+        row_height: f32,
+    }
+
+    impl Harness {
+        fn new(rows: Vec<(String, String)>, cards: Vec<Option<ToolCard>>) -> Self {
+            Self {
+                ctx: egui::Context::default(),
+                cache: Cache::new(),
+                rows,
+                cards,
+                screen: egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(480.0, 240.0)),
+                cell: 0.0,
+                row_height: 0.0,
+            }
+        }
+
+        fn frame(
+            &mut self,
+            time: f64,
+            events: Vec<egui::Event>,
+        ) -> egui::scroll_area::ScrollAreaOutput<()> {
+            let ctx = self.ctx.clone();
+            let Self {
+                cache,
+                rows,
+                cards,
+                screen,
+                cell,
+                row_height,
+                ..
+            } = self;
+            let theme = Theme::default();
+            let mut metrics = None;
+            let mut result = None;
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(*screen),
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    metrics = Some(grid::metrics(ui));
+                    result = Some(cache.show(ui, false, rows, cards, &HashMap::new(), &theme));
+                },
+            );
+            out.textures_delta.clear();
+            let metrics = metrics.expect("one frame");
+            *cell = metrics.cell;
+            *row_height = metrics.row_height;
+            result.expect("one frame")
+        }
+
+        /// Centre of the cell `(line, col)` of the flattened transcript.
+        fn cell_pos(
+            &self,
+            output: &egui::scroll_area::ScrollAreaOutput<()>,
+            line: usize,
+            col: u16,
+        ) -> egui::Pos2 {
+            egui::pos2(
+                output.inner_rect.left() + (col as f32 + 0.5) * self.cell,
+                output.inner_rect.top() - output.state.offset.y
+                    + (line as f32 + 0.5) * self.row_height,
+            )
+        }
+
+        /// Plain text of the selected span.
+        fn selected(&self) -> String {
+            let sel = self.cache.selection.expect("a selection");
+            let (start, end) = if sel.0 <= sel.1 { sel } else { (sel.1, sel.0) };
+            let flat: Vec<&TermRow> = self
+                .cache
+                .lines
+                .iter()
+                .flat_map(|lines| lines.as_deref().unwrap_or_default().iter())
+                .collect();
+            selected_text(&flat, start, end)
+        }
+    }
+
+    /// What egui-winit feeds egui for one finger: the touch event plus the
+    /// pointer events it synthesises from it.
+    fn touch_events(phase: egui::TouchPhase, pos: egui::Pos2) -> Vec<egui::Event> {
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        let mut events = vec![
+            egui::Event::Touch {
+                device_id: egui::TouchDeviceId(1),
+                id: egui::TouchId(1),
+                phase,
+                pos,
+                force: None,
+            },
+            egui::Event::PointerMoved(pos),
+        ];
+        match phase {
+            egui::TouchPhase::Start => events.push(button(true)),
+            egui::TouchPhase::End => {
+                events.push(button(false));
+                events.push(egui::Event::PointerGone);
+            }
+            _ => {}
+        }
+        events
+    }
+
+    /// First cell of `needle` in the flattened transcript lines.
+    fn cell_of(cache: &Cache, needle: &str) -> (usize, u16) {
+        let mut line = 0;
+        for lines in &cache.lines {
+            for row in lines.as_deref().unwrap_or_default() {
+                for run in row {
+                    if let Some(byte) = run.text.find(needle) {
+                        let width: u16 = run.text[..byte]
+                            .chars()
+                            .map(|ch| {
+                                unicode_width::UnicodeWidthChar::width(ch)
+                                    .unwrap_or(1)
+                                    .max(1) as u16
+                            })
+                            .sum();
+                        return (line, run.col + width);
+                    }
+                }
+                line += 1;
+            }
+        }
+        panic!("{needle:?} is not in the transcript");
+    }
+
+    fn run_row(col: u16, text: &str) -> TermRow {
+        vec![grid::Run {
+            col,
+            cells: text.chars().count() as u16,
+            text: text.to_owned(),
+            style: ratatui::style::Style::default(),
+        }]
+    }
+
+    #[test]
+    fn word_span_covers_the_word_under_the_cell() {
+        let line = run_row(0, "hello, world_x");
+        assert_eq!(word_span(&line, 0), (0, 5));
+        assert_eq!(word_span(&line, 4), (0, 5));
+        assert_eq!(word_span(&line, 5), (5, 5)); // a comma is not a word
+        assert_eq!(word_span(&line, 7), (7, 14));
+        assert_eq!(word_span(&line, 13), (7, 14));
+        // Past the end of the line: the last word is still what was pressed.
+        assert_eq!(word_span(&line, 40), (7, 14));
+        // A wide glyph is its own pair of cells.
+        assert_eq!(word_span(&run_row(0, "\u{65e5}\u{672c} go"), 3), (0, 4));
+    }
+
+    /// A finger drag scrolls the transcript; it must never start a selection.
+    #[test]
+    fn a_touch_drag_scrolls_instead_of_selecting() {
+        let text: String = (1..=200).map(|n| format!("line {n}\n")).collect();
+        let mut h = Harness::new(vec![("assistant".to_string(), text)], vec![None]);
+        // The first touch makes egui report a touch screen from then on.
+        h.frame(
+            0.0,
+            touch_events(egui::TouchPhase::Start, egui::pos2(10.0, 10.0)),
+        );
+        let warm = h.frame(
+            0.05,
+            touch_events(egui::TouchPhase::End, egui::pos2(10.0, 10.0)),
+        );
+        let at = h.cell_pos(&warm, 5, 3);
+
+        h.frame(0.1, touch_events(egui::TouchPhase::Start, at));
+        // 60 px towards the top of the screen: past egui's click slop.
+        let dragged = h.frame(
+            0.15,
+            touch_events(egui::TouchPhase::Move, at - egui::vec2(0.0, 60.0)),
+        );
+        assert!(
+            dragged.state.offset.y > 1.0,
+            "the drag scrolled to {}",
+            dragged.state.offset.y
+        );
+        assert!(h.cache.selection.is_none(), "a drag must not select");
+    }
+
+    /// A long press selects the word under the finger, for the Copy menu.
+    #[test]
+    fn a_long_press_selects_the_word_under_the_finger() {
+        let mut h = Harness::new(
+            vec![("user".to_string(), "hello world".to_string())],
+            vec![None],
+        );
+        h.frame(
+            0.0,
+            touch_events(egui::TouchPhase::Start, egui::pos2(10.0, 10.0)),
+        );
+        let warm = h.frame(
+            0.05,
+            touch_events(egui::TouchPhase::End, egui::pos2(10.0, 10.0)),
+        );
+        let (line, col) = cell_of(&h.cache, "hello");
+        let at = h.cell_pos(&warm, line, col);
+
+        h.frame(0.1, touch_events(egui::TouchPhase::Start, at));
+        // Hold still: egui calls it a long press after 0.8 s.
+        for step in 1..=20 {
+            h.frame(
+                0.1 + 0.05 * f64::from(step),
+                touch_events(egui::TouchPhase::Move, at),
+            );
+        }
+        let sel = h.cache.selection.expect("a long press selects a word");
+        let (start, end) = if sel.0 <= sel.1 { sel } else { (sel.1, sel.0) };
+        assert_eq!(start, (line, col), "the word is selected in place");
+        assert_eq!(end.0, line);
+        assert_eq!(h.selected(), "hello");
+    }
+
+    /// Tapping a tool row still expands it on a touch screen.
+    #[test]
+    fn a_touch_tap_still_toggles_a_tool_row() {
+        let output: String = (1..=40).map(|n| format!("line {n}\n")).collect();
+        let mut h = Harness::new(
+            vec![
+                ("user".to_string(), "count".to_string()),
+                ("tool: shell".to_string(), output),
+            ],
+            vec![None, card("shell", serde_json::json!({}), ToolState::Done)],
+        );
+        h.frame(
+            0.0,
+            touch_events(egui::TouchPhase::Start, egui::pos2(10.0, 10.0)),
+        );
+        let warm = h.frame(
+            0.05,
+            touch_events(egui::TouchPhase::End, egui::pos2(10.0, 10.0)),
+        );
+        // The tool row's first line.
+        let line = h.cache.lines[0].as_ref().map_or(0, Vec::len);
+        let at = h.cell_pos(&warm, line, 2);
+
+        h.frame(0.1, touch_events(egui::TouchPhase::Start, at));
+        h.frame(0.2, touch_events(egui::TouchPhase::End, at));
+        assert!(h.cache.expanded[1], "a tap expands the tool row");
+    }
+
+    /// A mouse drag still selects text, and does not scroll.
+    #[test]
+    fn a_mouse_drag_still_selects_text() {
+        let mut h = Harness::new(
+            vec![("assistant".to_string(), "alpha beta".to_string())],
+            vec![None],
+        );
+        h.frame(0.0, Vec::new());
+        let warm = h.frame(0.05, Vec::new());
+        let (line, col) = cell_of(&h.cache, "alpha");
+        let press = |pressed| egui::Event::PointerButton {
+            pos: h.cell_pos(&warm, line, col),
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+
+        h.frame(
+            0.1,
+            vec![
+                egui::Event::PointerMoved(h.cell_pos(&warm, line, col)),
+                press(true),
+            ],
+        );
+        let out = h.frame(
+            0.15,
+            vec![egui::Event::PointerMoved(h.cell_pos(&warm, line, col + 5))],
+        );
+        h.frame(
+            0.2,
+            vec![egui::Event::PointerMoved(h.cell_pos(&warm, line, col + 9))],
+        );
+        assert!(!h.selected().trim().is_empty(), "a mouse drag selects text");
+        assert_eq!(out.state.offset.y, 0.0, "a mouse drag must not scroll");
     }
 }

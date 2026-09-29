@@ -164,7 +164,21 @@ impl RuntimeSession {
                 has_older,
             );
         }
-        (self.transcript.clone(), false)
+        // A not-yet-persisted session keeps its history in memory only, so
+        // apply the same window here: an attach replay must be bounded by the
+        // request, not by whether the conversation reached the database.
+        let mut messages = self.transcript.clone();
+        let Some(limit) = limit else {
+            return (messages, false);
+        };
+        if limit == 0 {
+            return (Vec::new(), !messages.is_empty());
+        }
+        let limit = limit as usize;
+        if messages.len() > limit {
+            return (messages.split_off(messages.len() - limit), true);
+        }
+        (messages, false)
     }
 
     /// One page of display messages older than the newest `offset` the client

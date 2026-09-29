@@ -159,7 +159,7 @@ async fn task_model_choice_is_isolated_persisted_and_keeps_shared_defaults() {
         Some(("mock".into(), "task-model".into()))
     );
     task.llm = Arc::new(ConfigTestProvider);
-    task.load_conversation(id);
+    task.load_conversation(id, None);
     assert_eq!(
         task.llm.model(),
         "task-model",
@@ -1632,7 +1632,7 @@ fn conversation_load_replays_canonical_view_after_reset_event() {
         test_daemon_ctx(Arc::new(ConfigTestProvider), extensions, session);
     let mut events = hub.subscribe();
 
-    ctx.load_conversation(loaded_id);
+    ctx.load_conversation(loaded_id, None);
 
     assert!(matches!(
         events.try_recv().unwrap(),
@@ -4661,7 +4661,8 @@ fn initial_attach_bounds_oversized_conversation_loaded_frame() {
     let mut session = crate::runtime::RuntimeSession::new(
         crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
     );
-    for index in 0..170 {
+    // 250 messages × 100 KB: past the attach window, and far past the byte budget.
+    for index in 0..250 {
         session.transcript.push(ChatMessage::new(
             crate::llm::ChatRole::User,
             format!("message-{index}:{}", "x".repeat(100_000)),
@@ -4694,8 +4695,58 @@ fn initial_attach_bounds_oversized_conversation_loaded_frame() {
     let RuntimeEvent::ConversationLoaded { messages, .. } = loaded else {
         unreachable!()
     };
-    assert!(messages.len() < 170);
-    assert!(messages.last().unwrap().content.starts_with("message-169:"));
+    // 100 KB messages mean the byte budget, not the message count, is what
+    // binds here: the tail is trimmed below the count cap but still ends at
+    // the newest message.
+    assert!(messages.len() < super::ATTACH_REPLAY_MESSAGES as usize);
+    assert!(encoded.len() <= super::ATTACH_REPLAY_BYTES);
+    assert!(messages.last().unwrap().content.starts_with("message-249:"));
+}
+
+#[test]
+fn initial_attach_replays_a_bounded_tail_of_a_long_conversation() {
+    let mut session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    for index in 0..1_000 {
+        session.transcript.push(ChatMessage::new(
+            crate::llm::ChatRole::User,
+            format!("message-{index}"),
+        ));
+    }
+    let session = Arc::new(Mutex::new(session));
+    let projection = RuntimeProjection::new(
+        session.clone(),
+        Arc::new(ConfigTestProvider),
+        crate::ext::ExtensionManager::unloaded(),
+    );
+
+    let messages = projection
+        .initial_events(false, None)
+        .into_iter()
+        .find_map(|event| match event {
+            RuntimeEvent::ConversationLoaded { messages, .. } => Some(messages),
+            _ => None,
+        })
+        .expect("attach replay omitted ConversationLoaded");
+
+    // The replay is the newest window, not the whole transcript...
+    assert_eq!(messages.len(), super::ATTACH_REPLAY_MESSAGES as usize);
+    assert_eq!(messages.first().unwrap().content, "message-800");
+    assert_eq!(messages.last().unwrap().content, "message-999");
+    // ...and the session behind it is still complete.
+    assert_eq!(session.lock().unwrap().transcript.len(), 1_000);
+    // A client that names its own window still gets exactly that.
+    let windowed = projection
+        .initial_events(false, Some(3))
+        .into_iter()
+        .find_map(|event| match event {
+            RuntimeEvent::ConversationLoaded { messages, .. } => Some(messages),
+            _ => None,
+        })
+        .expect("attach replay omitted ConversationLoaded");
+    assert_eq!(windowed.len(), 3);
+    assert_eq!(windowed.first().unwrap().content, "message-997");
 }
 
 #[test]
@@ -4715,7 +4766,7 @@ fn conversation_load_reports_missing_id_without_mutating_session() {
     );
     let mut events = hub.subscribe();
 
-    ctx.load_conversation(existing_id + 1);
+    ctx.load_conversation(existing_id + 1, None);
 
     assert!(matches!(
         events.try_recv().unwrap(),
@@ -4753,7 +4804,7 @@ fn conversation_load_reports_sqlite_failure_details() {
     );
     let mut events = hub.subscribe();
 
-    ctx.load_conversation(id);
+    ctx.load_conversation(id, None);
 
     assert!(matches!(
         events.try_recv().unwrap(),
@@ -4765,6 +4816,59 @@ fn conversation_load_reports_sqlite_failure_details() {
     assert_eq!(ctx.session.lock().unwrap().conversation_id, Some(id));
 }
 
+#[test]
+fn windowed_conversation_load_bounds_the_broadcast_but_not_the_session() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = crate::session_db::SessionDb::open(&temp.path().join("sessions.db")).unwrap();
+    let id = db.create_conversation("mock", "mock-1").unwrap();
+    for index in 0..10 {
+        db.append_chat_message(
+            id,
+            &ChatMessage::new(crate::llm::ChatRole::User, format!("message-{index}")),
+            0,
+        )
+        .unwrap();
+    }
+    let mut session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    session.session_db = Some(db);
+    let (mut ctx, hub, _commands) = test_daemon_ctx(
+        Arc::new(ConfigTestProvider),
+        crate::ext::ExtensionManager::unloaded(),
+        session,
+    );
+    let mut events = hub.subscribe();
+
+    ctx.load_conversation(id, Some(3));
+
+    let RuntimeEvent::ConversationLoaded { messages, .. } = events.try_recv().unwrap() else {
+        panic!("windowed load did not publish ConversationLoaded");
+    };
+    assert_eq!(
+        messages.len(),
+        3,
+        "window must bound the broadcast to newest 3"
+    );
+    assert_eq!(messages[0].content, "message-7");
+    assert_eq!(messages[2].content, "message-9");
+    // The in-memory transcript keeps the complete effective conversation so
+    // later turns still replay full history to the model.
+    let full = ctx.session.lock().unwrap().transcript.clone();
+    assert_eq!(full.len(), 10);
+    assert_eq!(full[0].content, "message-0");
+
+    while events.try_recv().is_ok() {}
+    ctx.load_conversation(id, None);
+    let RuntimeEvent::ConversationLoaded { messages, .. } = events.try_recv().unwrap() else {
+        panic!("unwindowed load did not publish ConversationLoaded");
+    };
+    assert_eq!(
+        messages.len(),
+        10,
+        "no window must replay the whole conversation"
+    );
+}
 #[test]
 fn oversized_conversation_load_drops_oldest_messages_to_fit() {
     let snapshot = crate::runtime::SessionSnapshot::default();
@@ -4804,7 +4908,12 @@ fn oversized_conversation_load_drops_oldest_messages_to_fit() {
 fn bounded_conversation_loaded_preserves_snapshot_and_busy() {
     let snapshot = crate::runtime::SessionSnapshot::default();
     let messages = vec![ChatMessage::new(crate::llm::ChatRole::User, "hi")];
-    let event = super::bounded_conversation_loaded(messages.clone(), snapshot.clone(), true);
+    let event = super::bounded_conversation_loaded(
+        messages.clone(),
+        snapshot.clone(),
+        true,
+        crate::rpc::codec::MAX_LINE_BYTES,
+    );
     let RuntimeEvent::ConversationLoaded {
         messages: got,
         snapshot: got_snapshot,

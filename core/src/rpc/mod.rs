@@ -303,7 +303,10 @@ impl RuntimeProjection {
     /// Build the authoritative replay for one newly attached client.
     ///
     /// `window` limits only this client's initial `ConversationLoaded`
-    /// transcript; `None` replays the complete transcript (TUI behavior).
+    /// transcript; `None` replays [`ATTACH_REPLAY_MESSAGES`] of them, bounded
+    /// further to [`ATTACH_REPLAY_BYTES`]. The session keeps the complete
+    /// transcript either way, and a client that wants more asks for it with
+    /// `LoadConversation { window }` (or synchronizes with its own window).
     pub fn initial_events(&self, busy: bool, window: Option<u32>) -> Vec<RuntimeEvent> {
         let (llm, extensions) = {
             let runtime = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
@@ -311,7 +314,7 @@ impl RuntimeProjection {
         };
         let session = self.session.lock().unwrap_or_else(|e| e.into_inner());
         let snapshot = session.snapshot(llm.id(), llm.model());
-        let (messages, _) = session.display_window(window);
+        let (messages, _) = session.display_window(Some(window.unwrap_or(ATTACH_REPLAY_MESSAGES)));
         vec![
             frontend_state(&extensions, &session.tools),
             RuntimeEvent::StateSnapshot {
@@ -319,7 +322,7 @@ impl RuntimeProjection {
             },
             // Always send this, including for an empty new conversation, so
             // switching actors clears stale frontend scrollback.
-            bounded_conversation_loaded(messages, snapshot, busy),
+            bounded_conversation_loaded(messages, snapshot, busy, ATTACH_REPLAY_BYTES),
             // Apply the full view after ConversationLoaded resets transient
             // client state; otherwise the reset can immediately discard panes
             // from this authoritative projection.
@@ -1010,6 +1013,20 @@ fn bounded_jobs_snapshot(
     RuntimeEvent::JobsSnapshot { version, jobs }
 }
 
+/// Newest messages replayed to a client that attaches without naming a window.
+///
+/// A client attach is a *view* of the newest history, not the history itself:
+/// the session keeps the complete transcript, and a client that wants more asks
+/// for it with `LoadConversation { window }` or synchronizes with its own
+/// window. Uncapped, attaching replayed a conversation's whole transcript to
+/// every new connection — a phone opening the app over SSH waited seconds for a
+/// multi-megabyte frame it replaced with its own windowed load moments later.
+pub(crate) const ATTACH_REPLAY_MESSAGES: u32 = 200;
+
+/// Byte budget for the same attach replay, so a few huge messages cannot blow
+/// up the frame the count window allows.
+pub(crate) const ATTACH_REPLAY_BYTES: usize = 1024 * 1024;
+
 /// Trim `messages` to the newest suffix whose serialized event fits `max_bytes`.
 ///
 /// A long conversation's durable history can exceed [`MAX_LINE_BYTES`] once
@@ -1049,8 +1066,9 @@ fn bounded_conversation_loaded(
     messages: Vec<ChatMessage>,
     snapshot: crate::runtime::SessionSnapshot,
     busy: bool,
+    max_bytes: usize,
 ) -> RuntimeEvent {
-    let messages = bound_transcript(messages, crate::rpc::codec::MAX_LINE_BYTES, |msgs| {
+    let messages = bound_transcript(messages, max_bytes, |msgs| {
         serde_json::to_vec(&RuntimeEvent::ConversationLoaded {
             messages: msgs.to_vec(),
             snapshot: snapshot.clone(),
@@ -1982,7 +2000,11 @@ impl DaemonCtx {
     ) {
         for operation in operations {
             match operation {
-                crate::ext::ctx::ConversationOperation::Load(id) => self.load_conversation(id),
+                // A Lua-driven load has no requesting frontend window, so it
+                // keeps the complete-transcript behavior.
+                crate::ext::ctx::ConversationOperation::Load(id) => {
+                    self.load_conversation(id, None)
+                }
                 crate::ext::ctx::ConversationOperation::Append(messages) => {
                     let settings = self.config.runtime_settings_snapshot();
                     let system_prompt = crate::llm::prompts::system_prompt(
@@ -2012,7 +2034,14 @@ impl DaemonCtx {
         }
     }
 
-    fn load_conversation(&mut self, id: i64) {
+    /// Load `id` into this actor and broadcast it to every attached client.
+    ///
+    /// `window` is the requesting frontend's display window: `Some(n)` replays
+    /// only the newest `n` display messages (older pages load on demand via
+    /// [`RuntimeCommand::LoadOlderMessages`]) and `None` replays the complete
+    /// transcript. The in-memory model transcript is always the complete
+    /// effective one — the window bounds only what is sent to clients.
+    fn load_conversation(&mut self, id: i64, window: Option<u32>) {
         // Refuse while incognito: re-attaching `conversation_id` would silently
         // resume DB writes behind the INC badge. The user must explicitly turn
         // incognito off (which persists the pending transcript) first.
@@ -2033,7 +2062,7 @@ impl DaemonCtx {
                 Some(db) => match db.conversation_exists(id) {
                     Ok(false) => Err(format!("conversation {id} not found")),
                     Ok(true) => (|| {
-                        let rows = db.load_messages(id)?;
+                        let (rows, _) = db.load_message_window(id, window)?;
                         let effective = db.load_effective_transcript(id)?;
                         let provider_model = db.conversation_provider_model(id)?;
                         Ok((rows, effective, provider_model))
@@ -2087,8 +2116,12 @@ impl DaemonCtx {
                     s.snapshot(self.llm.id(), self.llm.model())
                 };
                 self.reset_host_tool_state();
-                self.hub
-                    .publish(bounded_conversation_loaded(messages, snapshot, false));
+                self.hub.publish(bounded_conversation_loaded(
+                    messages,
+                    snapshot,
+                    false,
+                    crate::rpc::codec::MAX_LINE_BYTES,
+                ));
                 // ConversationLoaded resets client-owned transient UI state. Reapply
                 // the canonical extension view afterwards so surviving status lines,
                 // highlights, and non-conversation panes remain visible.
@@ -2486,10 +2519,14 @@ impl DaemonCtx {
                 self.publish_snapshot();
                 Flow::Continue
             }
-            RuntimeCommand::LoadConversation { id, window: _ } => {
-                // The per-connection transport applies any window; this actor
-                // load broadcasts the full transcript to every attached client.
-                self.load_conversation(id);
+            RuntimeCommand::LoadConversation { id, window } => {
+                // The per-connection transport already applied `window` to the
+                // requesting client's initial transcript. Honour the same window
+                // here: an actor that broadcast the full transcript would flood
+                // every attached frontend with the messages it deliberately
+                // skipped, and a long conversation would stall the load while the
+                // client laid out rows it never asked to display.
+                self.load_conversation(id, window);
                 Flow::Continue
             }
             RuntimeCommand::LoadOlderMessages {

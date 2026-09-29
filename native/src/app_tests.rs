@@ -1110,24 +1110,31 @@ fn narrow_windows_stack_panes_even_when_a_side_split_is_asked_for() {
 }
 
 #[test]
-fn narrow_pane_actions_menu_splits_below() {
+fn narrow_pane_actions_menu_closes_the_tab_without_a_split_item() {
     let ctx = egui::Context::default();
     let mut app = DesktopApp::open(ctx.clone(), true);
     render_at(&mut app, &ctx, 400.0, Vec::new());
+    render_at(
+        &mut app,
+        &ctx,
+        400.0,
+        vec![key_event(egui::Key::T, egui::Modifiers::COMMAND)],
+    );
+    assert_eq!(app.tabs.len(), 2, "a second tab to close");
     let output = render_at(&mut app, &ctx, 400.0, Vec::new());
     let menu = text_pos(&output, "\u{22ee}").expect("pane actions menu in the tab row");
     tap_at(&mut app, &ctx, 400.0, menu + egui::vec2(4.0, 4.0));
 
     let output = render_at(&mut app, &ctx, 400.0, Vec::new());
-    let split = text_pos(&output, "Split below").expect("split item");
-    tap_at(&mut app, &ctx, 400.0, split + egui::vec2(4.0, 4.0));
-
-    assert_eq!(app.layout.leaves().len(), 2, "the menu splits the pane");
-    let rects = app.layout.rects();
     assert!(
-        rects[0].1.y != rects[1].1.y,
-        "the new pane sits below, not beside: {rects:?}"
+        text_pos(&output, "Split below").is_none(),
+        "the phone menu no longer offers a split button"
     );
+    let close = text_pos(&output, "Close tab").expect("close item");
+    tap_at(&mut app, &ctx, 400.0, close + egui::vec2(4.0, 4.0));
+
+    assert_eq!(app.tabs.len(), 1, "the menu still closes the tab");
+    assert_eq!(app.layout.leaves().len(), 1, "and never splits");
 }
 
 #[test]
