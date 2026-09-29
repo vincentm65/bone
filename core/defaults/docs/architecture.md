@@ -92,7 +92,9 @@ applied. Automatic compaction applies it in the active Driver turn; manual `/com
 returns the same generic action for the frontend to send to the daemon. Success replaces
 model-facing history with a Lua-formatted checkpoint and retained recent turns. The
 effective checkpoint is persisted to SQLite while complete display history remains
-intact. Compaction-specific behavior is not a Rust runtime primitive or public event.
+intact. If persistence is stale or fails, the runtime reloads the durable effective
+transcript and reports the failure instead of keeping an unsaved compacted view.
+Compaction-specific behavior is not a Rust runtime primitive or public event.
 
 `bone run` slash-command expansion intentionally has no private completion access
 because it has no durable conversation or command usage owner. Headless `before_turn`

@@ -490,7 +490,8 @@ fn transcript_replacement_persists_compacted_view_without_losing_history() {
     ];
     let sequence = db
         .append_turn_with_checkpoint(conversation, 0, &prior, &[], None)
-        .unwrap();
+        .unwrap()
+        .0;
     let checkpointed = ChatMessage::new(ChatRole::Assistant, "checkpointed tool request");
     db.append_turn_with_checkpoint(
         conversation,
@@ -566,4 +567,59 @@ fn transcript_replacement_persists_compacted_view_without_losing_history() {
         db.load_messages(conversation).unwrap().len(),
         prior.len() + 2
     );
+}
+
+#[test]
+fn stale_compaction_keeps_runtime_transcript_durable() {
+    let temp = tempfile::tempdir().unwrap();
+    let db = SessionDb::open(&temp.path().join("sessions.db")).unwrap();
+    let conversation = db.create_conversation("test", "model").unwrap();
+    let original = ChatMessage::new(ChatRole::User, "original");
+    let (sequence, _) = db
+        .append_turn_with_checkpoint(conversation, 0, std::slice::from_ref(&original), &[], None)
+        .unwrap();
+    let concurrent = ChatMessage::new(ChatRole::User, "concurrent");
+    db.append_turn_with_checkpoint(
+        conversation,
+        sequence,
+        std::slice::from_ref(&concurrent),
+        &[],
+        None,
+    )
+    .unwrap();
+
+    let mut session = RuntimeSession::new(ToolHandler::new(builtin_tools()));
+    session.session_db = Some(db);
+    session.conversation_id = Some(conversation);
+    session.session_seq = sequence;
+    session.transcript = vec![original.clone()];
+    let current = ChatMessage::new(ChatRole::Assistant, "current");
+    let (result, persistence_error) = session.apply_outcome(DriverOutcome {
+        result: Ok(crate::agent::AgentResponse {
+            content: current.content.clone(),
+            transcript: Vec::new(),
+        }),
+        tools: ToolHandler::new(builtin_tools()),
+        transcript: vec![ChatMessage::new(ChatRole::User, "summary"), current.clone()],
+        token_stats: Default::default(),
+        persist_messages: vec![current],
+        checkpointed_messages: 0,
+        transcript_replaced: true,
+        usage: Vec::new(),
+    });
+
+    result.unwrap();
+    assert!(
+        persistence_error
+            .as_deref()
+            .is_some_and(|message| message.contains("checkpoint was skipped"))
+    );
+    let db = session.session_db.as_ref().unwrap();
+    assert_eq!(
+        session.transcript,
+        db.load_effective_transcript(conversation).unwrap()
+    );
+    assert_eq!(session.transcript[0].content, "original");
+    assert_eq!(session.transcript[1].content, "concurrent");
+    assert_eq!(session.transcript[2].content, "current");
 }

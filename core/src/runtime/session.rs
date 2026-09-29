@@ -485,7 +485,7 @@ impl RuntimeSession {
                 .map_err(|err| format!("failed to create conversation: {err}"))?;
             let next_seq =
                 match db.append_turn_with_checkpoint(conv_id, 0, &self.transcript, &[], None) {
-                    Ok(next_seq) => next_seq,
+                    Ok((next_seq, _)) => next_seq,
                     Err(err) => {
                         let _ = db.end_conversation(conv_id);
                         return Err(format!("failed to persist incognito transcript: {err}"));
@@ -552,11 +552,9 @@ impl RuntimeSession {
 
     /// Fold a completed turn's [`DriverOutcome`] back into the session: adopt the
     /// authoritative transcript/token-stats/tool-state and persist the turn's
-    /// explicit new-message list + usage in one transaction.
-    ///
-    /// Returns the turn's model `result` plus an optional persistence error.
-    /// State adoption happens regardless, so callers can keep the in-memory
-    /// conversation usable while surfacing durable-write failures.
+    /// explicit new-message list + usage in one transaction. A replaced transcript
+    /// is adopted only after its checkpoint is durable; otherwise the durable
+    /// effective transcript is restored.
     pub fn apply_outcome(
         &mut self,
         outcome: DriverOutcome,
@@ -571,7 +569,6 @@ impl RuntimeSession {
             transcript_replaced,
             usage,
         } = outcome;
-        self.transcript = transcript;
         self.token_stats = token_stats;
         // Host tool state: state_map is owned per ToolHandler clone; shared_state
         // is an Arc so the turn already mutated the session map in place. Still
@@ -589,24 +586,54 @@ impl RuntimeSession {
 
         // Persist the turn's new messages + usage in one atomic transaction (a
         // single WAL sync) instead of one commit per row.
-        let persistence_error =
-            if let (Some(db), Some(conv_id)) = (self.session_db.as_ref(), self.conversation_id) {
-                match db.append_turn_with_checkpoint(
-                    conv_id,
-                    self.session_seq,
-                    &persist_messages,
-                    &usage,
-                    transcript_replaced.then_some(self.transcript.as_slice()),
-                ) {
-                    Ok(next) => {
-                        self.session_seq = next;
+        let persistence_error = if let (Some(db), Some(conv_id)) =
+            (self.session_db.as_ref(), self.conversation_id)
+        {
+            let mut reload_durable = false;
+            let mut persistence_error = match db.append_turn_with_checkpoint(
+                conv_id,
+                self.session_seq,
+                &persist_messages,
+                &usage,
+                transcript_replaced.then_some(transcript.as_slice()),
+            ) {
+                Ok((next, checkpoint_written)) => {
+                    self.session_seq = next;
+                    if transcript_replaced && !checkpoint_written {
+                        reload_durable = true;
+                        Some("compaction checkpoint was skipped because the conversation changed; using the durable transcript".to_string())
+                    } else {
                         None
                     }
-                    Err(err) => Some(err.to_string()),
+                }
+                Err(error) => {
+                    reload_durable = transcript_replaced;
+                    Some(if transcript_replaced {
+                        format!("failed to persist compaction: {error}")
+                    } else {
+                        error.to_string()
+                    })
+                }
+            };
+            if reload_durable {
+                match db.load_effective_transcript(conv_id) {
+                    Ok(durable) => self.transcript = durable,
+                    Err(error) => {
+                        if let Some(message) = persistence_error.as_mut() {
+                            message.push_str(&format!(
+                                "; failed to reload durable transcript: {error}"
+                            ));
+                        }
+                    }
                 }
             } else {
-                None
-            };
+                self.transcript = transcript;
+            }
+            persistence_error
+        } else {
+            self.transcript = transcript;
+            None
+        };
         (result, persistence_error)
     }
 

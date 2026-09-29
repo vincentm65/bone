@@ -9,7 +9,8 @@ use crate::tool_display::build_tool_row;
 
 /// Convert a loaded transcript into rows: tool rows are relabelled from the
 /// originating call's arguments via [`build_tool_row`], and `edit_file`
-/// renders its diff preview (embedded in the persisted result content).
+/// renders its diff preview (the persisted `edit_preview`, or for legacy
+/// results the diff embedded in the content).
 /// `display` supplies each tool's registered display config.
 pub fn transcript_rows<'a>(
     transcript: &[ChatMessage],
@@ -43,6 +44,10 @@ pub fn transcript_rows<'a>(
                 }
             }
             ChatRole::Tool => {
+                if let (false, Some(preview)) = (msg.is_error, &msg.edit_preview) {
+                    rows.push(Message::system(preview.clone()));
+                    continue;
+                }
                 if let Some(diff) = edit_diff_message(
                     msg.name.as_deref().unwrap_or_default(),
                     msg.is_error,
@@ -187,3 +192,7 @@ pub fn job_messages<'a>(
     }
     rows
 }
+
+#[cfg(test)]
+#[path = "transcript_tests.rs"]
+mod tests;

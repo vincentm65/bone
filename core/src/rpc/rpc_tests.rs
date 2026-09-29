@@ -2000,6 +2000,39 @@ async fn interactive_command_private_completion_returns_replace_and_accounts_usa
     assert_eq!(effective, replacement);
     drop(session);
 
+    let concurrent = crate::llm::ChatMessage::new(crate::llm::ChatRole::User, "concurrent update");
+    {
+        let session = ctx.session.lock().unwrap();
+        session
+            .session_db
+            .as_ref()
+            .unwrap()
+            .append_chat_message(conversation_id, &concurrent, 1)
+            .unwrap();
+    }
+    let stale_replacement = vec![crate::llm::ChatMessage::new(
+        crate::llm::ChatRole::User,
+        "stale replacement",
+    )];
+    assert!(matches!(
+        ctx.handle_idle_command(
+            RuntimeCommand::ReplaceConversation {
+                messages: stale_replacement,
+            },
+            &mut commands,
+        )
+        .await,
+        Flow::Continue
+    ));
+    let session = ctx.session.lock().unwrap();
+    let contents: Vec<_> = session
+        .transcript
+        .iter()
+        .map(|message| message.content.as_str())
+        .collect();
+    assert_eq!(contents, ["safe checkpoint", "concurrent update"]);
+    drop(session);
+
     let usage = std::iter::from_fn(|| events.try_recv().ok())
         .find(|event| matches!(event, RuntimeEvent::TokenUsage { .. }))
         .expect("private completion did not publish token usage");

@@ -431,7 +431,8 @@ fn append_turn_persists_system_messages() {
 
     assert_eq!(
         db.append_turn_with_checkpoint(conv, 0, &messages, &[], None)
-            .unwrap(),
+            .unwrap()
+            .0,
         1
     );
     let stored = db.load_messages(conv).unwrap();

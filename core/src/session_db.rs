@@ -1115,7 +1115,8 @@ impl SessionDb {
     /// and the whole turn is atomic: a mid-loop failure rolls everything back,
     /// so the DB can never hold a partial turn. When supplied, the resulting
     /// model-facing context checkpoint is persisted atomically at the turn's
-    /// final sequence. `seq` is advanced per written message and returned.
+    /// final sequence. Returns the next sequence and whether the checkpoint was
+    /// written; a stale checkpoint is skipped but the turn is still committed.
     pub(crate) fn append_turn_with_checkpoint(
         &self,
         conversation_id: i64,
@@ -1123,7 +1124,7 @@ impl SessionDb {
         messages: &[ChatMessage],
         usage: &[UsageRecord],
         context_checkpoint: Option<&[ChatMessage]>,
-    ) -> rusqlite::Result<i64> {
+    ) -> rusqlite::Result<(i64, bool)> {
         let tx = Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let db_seq: i64 = tx.query_row(
             "SELECT COALESCE(MAX(seq), 0) FROM messages WHERE conversation_id = ?1",
@@ -1173,7 +1174,10 @@ impl SessionDb {
             )?;
         }
         tx.commit()?;
-        Ok(seq)
+        Ok((
+            seq,
+            context_checkpoint.is_none() || checkpoint_source_is_current,
+        ))
     }
 
     /// Persist an explicit `conversation.replace` performed while idle. The

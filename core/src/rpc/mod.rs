@@ -2553,11 +2553,37 @@ impl DaemonCtx {
                 let settings = self.config.runtime_settings_snapshot();
                 let system_prompt =
                     crate::llm::prompts::system_prompt(settings.resolved().general.system_prompt());
+                let mut replacement_error = None;
                 {
                     let mut s = self.session.lock().unwrap();
-                    s.transcript = messages;
-                    if let (Some(db), Some(conv_id)) = (s.session_db.as_ref(), s.conversation_id) {
-                        let _ = db.save_context_checkpoint(conv_id, s.session_seq, &s.transcript);
+                    let save_error = if let (Some(db), Some(conv_id)) =
+                        (s.session_db.as_ref(), s.conversation_id)
+                    {
+                        match db.save_context_checkpoint(conv_id, s.session_seq, &messages) {
+                            Ok(true) => None,
+                            Ok(false) => Some(
+                                "compaction was not saved because the conversation changed"
+                                    .to_string(),
+                            ),
+                            Err(error) => Some(format!("failed to save compaction: {error}")),
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(mut error) = save_error {
+                        if let (Some(db), Some(conv_id)) =
+                            (s.session_db.as_ref(), s.conversation_id)
+                        {
+                            match db.load_effective_transcript(conv_id) {
+                                Ok(durable) => s.transcript = durable,
+                                Err(reload_error) => error.push_str(&format!(
+                                    "; failed to reload durable transcript: {reload_error}"
+                                )),
+                            }
+                        }
+                        replacement_error = Some(error);
+                    } else {
+                        s.transcript = messages;
                     }
                     let history = crate::chat::build_chat_history(&s.transcript, &system_prompt);
                     let tool_defs_json_chars = serde_json::to_value(s.tools.definitions())
@@ -2566,6 +2592,9 @@ impl DaemonCtx {
                     let prompt_chars =
                         crate::agent::estimate_context_chars(&history, tool_defs_json_chars);
                     s.token_stats.set_context_estimate(prompt_chars);
+                }
+                if let Some(error) = replacement_error {
+                    self.hub.publish(RuntimeEvent::Status { message: error });
                 }
                 self.reset_host_tool_state();
                 self.publish_snapshot();
