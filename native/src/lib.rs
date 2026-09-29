@@ -4084,7 +4084,6 @@ impl Session {
             return;
         }
         if self.menu_open() {
-            ui.weak("Keys go to the menu below.");
             keep_keyboard(ui);
             return;
         }
@@ -4660,11 +4659,18 @@ impl DesktopApp {
                         || self.pane_tab_indices(pane).len() >= 2
                     {
                         let target = Self::zone_rect(rect, zone).shrink(2.0);
-                        painter.rect_filled(target, 4.0, accent.gamma_multiply(0.18));
+                        painter.rect_filled(
+                            target,
+                            4.0,
+                            egui::Color32::from_rgba_unmultiplied(128, 128, 128, 60),
+                        );
                         painter.rect_stroke(
                             target,
                             4.0,
-                            egui::Stroke::new(2.0, accent.gamma_multiply(0.8)),
+                            egui::Stroke::new(
+                                2.0,
+                                egui::Color32::from_rgba_unmultiplied(160, 160, 160, 200),
+                            ),
                             egui::StrokeKind::Inside,
                         );
                     }

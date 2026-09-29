@@ -447,6 +447,16 @@ impl State {
         self.assistant = None;
         self.tools.clear();
         self.shown_tool_rows.clear();
+        // Seed previews persisted with each result so a reloaded conversation
+        // renders exactly like the live one.
+        for message in &messages {
+            if message.role == ChatRole::Tool
+                && !message.is_error
+                && let (Some(id), Some(preview)) = (&message.tool_call_id, &message.edit_preview)
+            {
+                self.edit_previews.insert(id.clone(), preview.clone());
+            }
+        }
         let failed_calls: HashSet<String> = messages
             .iter()
             .filter(|message| message.role == ChatRole::Tool && message.is_error)
