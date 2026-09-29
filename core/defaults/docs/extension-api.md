@@ -59,11 +59,27 @@ and `bone.log.error`.
 
 `lua/core/` is Bone's own built-in package: `init.lua` plus modules under
 `lib/` (for example `banner`, `history`, and `ui.menu`). Bone seeds it from
-the shipped bundle on every boot and runs its `init.lua` before the startup
-`init.lua` and before every user plugin, including in sub-agent VMs. It is not
-a plugin: it never appears in the catalog or the `plugins` enablement setting,
-has no enable/disable row, cannot be removed, and a `plugins.core` entry in
-settings is sanitized away and rejected.
+the shipped bundle on every boot, replacing only an untouched copy of an older
+shipped version. `init.lua` is matched by exact digest; `lib/ui/menu.lua`,
+`lib/ui/spinners.lua`, and `lib/history.lua` are matched by a feature marker —
+either a version sentinel in the file header (for example
+`-- tappable-hints-v1`) or a probe for content the current bundle introduced.
+A copy the user edited is kept as long as it still satisfies the rule, which
+for `init.lua` means any edit at all and for a marker file means an edit that
+leaves its markers intact. A stale `init.lua` the user never touched is the
+case that matters in practice — a phone left running an old seed kept the
+clipped `/config` tab row until the newest pre-picker digests were listed.
+Whenever the bundled `init.lua` changes, its outgoing digest joins the
+superseded list in `core/src/ext/mod.rs`. Whenever a bundled module gains a
+feature marker, the marker rule refreshes the copies that predate it, so prefer
+a unique header sentinel over a probe word that older copies may already
+contain.
+
+It runs its `init.lua` before the startup `init.lua` and before every user
+plugin, including in sub-agent VMs. It is not a plugin: it never appears in the
+catalog or the `plugins` enablement setting, has no enable/disable row, cannot
+be removed, and a `plugins.core` entry in settings is sanitized away and
+rejected.
 
 ## Plugins
 

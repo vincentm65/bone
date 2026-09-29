@@ -1,6 +1,5 @@
 -- ui.menu — interactive select / multi_select / text_input panes.
 -- multi-space-toggle-v2
--- tappable-hints-v1
 --
 -- Built on `ui.pane`: the Pane object owns the channel transport (rendering
 -- even while a tool blocks on `ctx.ui.key`), and the shared helpers (`span`,
@@ -223,35 +222,11 @@ end
 local function append_span(rows, value, text)
     if text == "" then return end
     local last = rows[#rows]
-    if last and last.fg == value.fg and last.modifiers == value.modifiers and last.click == value.click then
+    if last and last.fg == value.fg and last.modifiers == value.modifiers then
         last.text = last.text .. text
     else
         rows[#rows + 1] = span(text, value.fg, value.modifiers)
-        rows[#rows].click = value.click
     end
-end
-
--- A key-hint line. Hints given as `{ text, click }` are tappable: a touch or
--- mouse frontend sends `click` back as a `Click` key (see `tap`).
-local function hint_line(hints)
-    local spans = {}
-    for i, hint in ipairs(hints) do
-        if i > 1 then spans[#spans + 1] = span(" · ", "darkgray") end
-        local text, click = hint, nil
-        if type(hint) == "table" then text, click = hint[1], hint[2] end
-        spans[#spans + 1] = span(text, "darkgray")
-        spans[#spans].click = click
-    end
-    return { spans = spans }
-end
-
--- A `Click` key from a tapped line or span: "enter" and "esc" stand for those
--- keys; anything else (an option index, "custom") is returned as the value.
-local function tap(key)
-    local value = tostring(key.char or "")
-    if value == "enter" then return "Enter" end
-    if value == "esc" then return "Esc" end
-    return "", value
 end
 
 local function wrap_line_spans(value, width)
@@ -327,7 +302,7 @@ local function spans_width(values)
     return width
 end
 
-local function compact_option_lines(state, opt, selected, width, index)
+local function compact_option_lines(state, opt, selected, width)
     local checked = state.checked and state.checked[opt]
     local check = state.multi and (checked and "[x] " or "[ ] ") or ""
     local prefix_width = 3 + #check
@@ -341,7 +316,6 @@ local function compact_option_lines(state, opt, selected, width, index)
             span(label, "white", opt.label_modifiers or (selected and { "bold" } or {}))
         )
         if selected then row.bg = SELECTED_BG end
-        if index then row.click = tostring(index) end
         rows[#rows + 1] = row
     end
     return rows
@@ -358,7 +332,6 @@ local function compact_custom_lines(state, width)
             span(prefix, focused and "cyan" or "darkgray", { "bold" }),
             span(segment, focused and "white" or "darkgray")
         )
-        rows[#rows].click = "custom"
     end
     return rows
 end
@@ -499,8 +472,7 @@ local function option_window(state, width, row_budget, max_items)
             state,
             state.options[i],
             i == state.selected and not state.custom_focused,
-            width,
-            i
+            width
         )
         if used > 0 and used + #option_lines > row_budget then break end
         local remaining = row_budget - used
@@ -539,14 +511,14 @@ local function preview_hints(state)
     if state.preview_focusable then
         hints[#hints + 1] = "Tab switch pane"
     elseif state.allow_custom then
-        hints[#hints + 1] = { "Tab custom", "custom" }
+        hints[#hints + 1] = "Tab custom"
     end
     if state.multi then hints[#hints + 1] = "Space toggle" end
-    hints[#hints + 1] = { state.multi and "Enter submit" or "Enter select", "enter" }
+    hints[#hints + 1] = state.multi and "Enter submit" or "Enter select"
     if state.allow_back then hints[#hints + 1] = "Alt+← back" end
     if state.allow_forward then hints[#hints + 1] = "Alt+→ next" end
-    hints[#hints + 1] = { "Esc cancel", "esc" }
-    return hint_line(hints)
+    hints[#hints + 1] = "Esc cancel"
+    return table.concat(hints, " · ")
 end
 
 local function render_preview_select(p, state)
@@ -564,7 +536,7 @@ local function render_preview_select(p, state)
     local notice_lines = {}
     if state.notice and state.notice ~= "" then append_wrapped(notice_lines, state.notice, width, "#E5C07B") end
     local hint_lines = {}
-    append_line_wrapped(hint_lines, preview_hints(state), width)
+    append_wrapped(hint_lines, preview_hints(state), width, "darkgray")
     local body_rows = target_rows - #lines - #notice_lines - #hint_lines - 1
     if body_rows < 1 then
         target_rows = math.min(MAX_ROWS, target_rows + 1 - body_rows)
@@ -700,13 +672,13 @@ end
 local function select_hints(state)
     local hints = { "↑↓/j/k move" }
     if state.multi then hints[#hints + 1] = "Space toggle" end
-    hints[#hints + 1] = { state.multi and "Enter submit" or "Enter select", "enter" }
+    hints[#hints + 1] = state.multi and "Enter submit" or "Enter select"
     if state.searchable then hints[#hints + 1] = "/ or type filter" end
-    if state.allow_custom then hints[#hints + 1] = { "Tab custom", "custom" } end
+    if state.allow_custom then hints[#hints + 1] = "Tab custom" end
     if state.allow_back then hints[#hints + 1] = "Alt+← back" end
     if state.allow_forward then hints[#hints + 1] = "Alt+→ next" end
-    hints[#hints + 1] = { "Esc cancel", "esc" }
-    return hint_line(hints)
+    hints[#hints + 1] = "Esc cancel"
+    return table.concat(hints, " · ")
 end
 
 local function render_select(p, state)
@@ -738,7 +710,7 @@ local function render_select(p, state)
     local notice_rows = state.notice and state.notice ~= ""
         and #wrap_input(state.notice, width) or 0
     local hint_text = select_hints(state)
-    local hint_rows = #wrap_line_spans(hint_text, width)
+    local hint_rows = #wrap_input(hint_text, width)
     local reserved = 1 + notice_rows + hint_rows + (state.allow_custom and custom_rows or 0)
     local base_available_rows = math.max(1, rows_for(state) - #lines - reserved)
 
@@ -816,7 +788,6 @@ local function render_select(p, state)
                 )
             end
             if selected then option_line.bg = SELECTED_BG end
-            option_line.click = tostring(i)
             lines[#lines + 1] = option_line
         end
         if opt.description and opt.description ~= "" then
@@ -827,7 +798,6 @@ local function render_select(p, state)
                 end
                 local description_line = { spans = description_spans }
                 if selected then description_line.bg = SELECTED_BG end
-                description_line.click = tostring(i)
                 lines[#lines + 1] = description_line
             end
         end
@@ -853,7 +823,6 @@ local function render_select(p, state)
                 span(prefix, cursor_fg, { "bold" }),
                 span(seg, fg, mods)
             )
-            lines[#lines].click = "custom"
         end
     end
     -- Transient warning (e.g. an empty multi-select submit was blocked).
@@ -861,7 +830,7 @@ local function render_select(p, state)
         append_wrapped(lines, state.notice, width, "#E5C07B")
     end
     -- Control legend so the keys aren't a guessing game.
-    append_line_wrapped(lines, hint_text, width)
+    append_wrapped(lines, hint_text, width, "darkgray")
     lines[#lines + 1] = ""
     p:set_lines(lines, math.min(24, math.max(3, #lines)))
 end
@@ -966,23 +935,6 @@ local function select_loop(ctx, spec, multi)
         state.notice = nil -- clear any transient notice on the next keypress
         local code = key_name(key)
         local prev = state.selected
-        -- A tapped or clicked option row (its index): choose it, or toggle it
-        -- in a multi-select. Tapped hints act as their keys.
-        if code == "Click" then
-            local value
-            code, value = tap(key)
-            local index = tonumber(value)
-            if value == "custom" and state.allow_custom then
-                state.custom_focused, state.filter_focused = true, false
-            elseif index and state.options[index] then
-                state.selected, state.custom_focused, state.filter_focused = index, false, false
-                if multi then
-                    state.checked[state.options[index]] = not state.checked[state.options[index]]
-                else
-                    code = "Enter"
-                end
-            end
-        end
         if state.allow_back and key.alt and code == "Left" then
             local result = { back = true, selected = state.selected }
             if multi then
@@ -1149,17 +1101,16 @@ function M.text_input(ctx, spec)
             local prefix = i == 1 and "> " or "  "
             lines[#lines + 1] = line(span(prefix .. segment, "white", { "bold" }))
         end
-        local hints = { "←→ move", "Home/End", { "Enter submit", "enter" } }
+        local hints = { "←→ move", "Home/End", "Enter submit" }
         if spec.allow_back then hints[#hints + 1] = "Alt+← back" end
         if spec.allow_forward then hints[#hints + 1] = "Alt+→ next" end
-        hints[#hints + 1] = { "Esc cancel", "esc" }
-        append_line_wrapped(lines, hint_line(hints), width)
+        hints[#hints + 1] = "Esc cancel"
+        append_wrapped(lines, table.concat(hints, " · "), width, "darkgray")
         lines[#lines + 1] = ""
         p:set_lines(lines, math.min(MAX_ROWS, #lines))
         local key = wait_key(ctx)
         if not key then return { cancelled = true } end
         local code = key_name(key)
-        if code == "Click" then code = tap(key) end
         if spec.allow_back and key.alt and code == "Left" then
             return { back = true, value = input }
         elseif spec.allow_forward and key.alt and code == "Right" then

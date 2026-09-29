@@ -1,4 +1,5 @@
 use super::*;
+use sha2::{Digest, Sha256};
 
 #[test]
 fn canonical_disabled_tools_are_excluded() {
@@ -194,12 +195,36 @@ fn bundled_ui_seeds_refresh_pre_feature_copies() {
         "menus predating content-aware preview sizing should refresh"
     );
 
+    // The pre-feature menu already declared a local `hint_lines` table, so the
+    // content probe that used to stand in for this feature never fired.
     std::fs::write(
         &menu,
-        "require(\"ui.pane\") -- SELECTED_BG description_spans label_modifiers initial_checked preview_row_budget multi-space-toggle-v2\n",
+        "require(\"ui.pane\") -- SELECTED_BG description_spans label_modifiers initial_checked preview_row_budget multi-space-toggle-v2\nlocal hint_lines = {}\n",
+    )
+    .unwrap();
+    assert!(
+        should_refresh_seeded_lua(&menu, "lib/ui/menu.lua").unwrap(),
+        "menus predating tappable key hints should refresh even though they mention hint_lines"
+    );
+
+    // The current bundled menu carries every marker, so a pristine copy of it
+    // is left alone; `bundled_marker_seeds_satisfy_their_own_refresh_rules`
+    // pins this against the real bundled bytes.
+    std::fs::write(
+        &menu,
+        "require(\"ui.pane\") -- SELECTED_BG description_spans label_modifiers initial_checked preview_row_budget multi-space-toggle-v2 tappable-hints-v1\n",
     )
     .unwrap();
     assert!(!should_refresh_seeded_lua(&menu, "lib/ui/menu.lua").unwrap());
+
+    let spinners = dir.join("spinners.lua");
+    std::fs::write(&spinners, "frames = { \"〜(￣▽￣)〜\" }\n").unwrap();
+    assert!(
+        should_refresh_seeded_lua(&spinners, "lib/ui/spinners.lua").unwrap(),
+        "spinner presets predating the redrawn kaomoji frames should refresh"
+    );
+    std::fs::write(&spinners, "-- kaomoji-frames-v1\n").unwrap();
+    assert!(!should_refresh_seeded_lua(&spinners, "lib/ui/spinners.lua").unwrap());
 
     let config = dir.join("config.lua");
     std::fs::write(&config, "-- old config command\n").unwrap();
@@ -233,8 +258,169 @@ fn bundled_ui_seeds_refresh_pre_feature_copies() {
     // (including the current bundled file) never does.
     std::fs::write(&config, "-- canonical-config-v9\n").unwrap();
     assert!(!should_refresh_seeded_lua(&config, "init.lua").unwrap());
+    // v10 follows the same rule: only the pristine pre-picker digests refresh,
+    // never the bare marker (a phone carrying that seed is the bug this
+    // migration fixes). `pristine_superseded_v10_seed_refreshes` covers the
+    // real superseded bytes.
+    std::fs::write(&config, "-- canonical-config-v10\n").unwrap();
+    assert!(!should_refresh_seeded_lua(&config, "init.lua").unwrap());
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The pristine pre-picker v10 seed shipped up to `9df687d` (`af8fb390`), i.e.
+/// the copy that was still live on phones and clipped the `/config` tab row.
+///
+/// The bytes are frozen here on purpose: a superseded digest can only be
+/// reproduced from the exact file, because no synthetic string can be made to
+/// hash to a chosen digest. `superseded_v10_digests_match_documented_hex`
+/// cross-checks the literal against the hex recorded in `mod.rs`.
+const PRISTINE_V10_PRE_PICKER: &str =
+    include_str!("fixtures/legacy-seeds/canonical-config-v10-af8fb390.lua");
+
+fn bundled_core_init_lua() -> &'static str {
+    DEFAULT_LUA_CORE
+        .iter()
+        .find(|(name, _)| *name == "init.lua")
+        .expect("core init.lua is bundled")
+        .1
+}
+
+fn digest_of(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+#[test]
+fn pristine_superseded_v10_seed_refreshes() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = dir.path().join("init.lua");
+
+    // The frozen file is the first superseded digest the rule lists.
+    assert_eq!(
+        digest_of(PRISTINE_V10_PRE_PICKER.as_bytes()),
+        CANONICAL_CONFIG_V10_SUPERSEDED[0],
+        "frozen pre-picker seed drifted from CANONICAL_CONFIG_V10_SUPERSEDED"
+    );
+    assert!(
+        PRISTINE_V10_PRE_PICKER.contains("canonical-config-v10"),
+        "the frozen seed still carries the v10 marker"
+    );
+
+    std::fs::write(&config, PRISTINE_V10_PRE_PICKER).unwrap();
+    assert!(
+        should_refresh_seeded_lua(&config, "init.lua").unwrap(),
+        "a pristine pre-picker v10 seed must be replaced by the bundled one"
+    );
+
+    // The current bundled bytes are not superseded, so re-seeding is a no-op.
+    let bundled = bundled_core_init_lua();
+    std::fs::write(&config, bundled).unwrap();
+    assert!(
+        !should_refresh_seeded_lua(&config, "init.lua").unwrap(),
+        "the current bundled seed must satisfy its own rule"
+    );
+
+    // Purity is the point of the digest list: editing a v10 copy keeps it, even
+    // though it still carries the marker and predates no content probe.
+    std::fs::write(&config, format!("{bundled}\n-- user customization\n")).unwrap();
+    assert!(
+        !should_refresh_seeded_lua(&config, "init.lua").unwrap(),
+        "a user-edited v10 config must be preserved"
+    );
+}
+
+#[test]
+fn superseded_v10_digests_match_documented_hex() {
+    // Each literal must equal the hex recorded in the comment beside it, so a
+    // typo in the byte array cannot silently stop a stale seed from refreshing.
+    let source = include_str!("mod.rs");
+    for digest in CANONICAL_CONFIG_V10_SUPERSEDED {
+        let hex = hex(digest);
+        assert!(
+            source.contains(&format!("// SHA-256 {hex}")),
+            "digest {hex} has no matching `// SHA-256` comment in ext/mod.rs"
+        );
+    }
+
+    let unique: std::collections::HashSet<&[u8; 32]> =
+        CANONICAL_CONFIG_V10_SUPERSEDED.iter().collect();
+    assert_eq!(
+        unique.len(),
+        CANONICAL_CONFIG_V10_SUPERSEDED.len(),
+        "superseded digests must be distinct"
+    );
+
+    let bundled_digest: [u8; 32] = digest_of(bundled_core_init_lua().as_bytes());
+    assert!(
+        !CANONICAL_CONFIG_V10_SUPERSEDED.contains(&bundled_digest),
+        "the current bundled seed must never be listed as superseded"
+    );
+}
+
+/// The pre-`tappable-hints-v1` and pre-`kaomoji-frames-v1` seeds, as shipped by
+/// `af8fb390` and still present in config dirs seeded from it. Their bytes are
+/// frozen because the regression they pin is a false-negative probe: the old
+/// menu already declared `hint_lines`, so no probe for that word could fire.
+const STALE_PRE_TAPPABLE_MENU: &str =
+    include_str!("fixtures/legacy-seeds/ui-menu-pre-tappable-hints.lua");
+const STALE_PRE_KAOMOJI_SPINNERS: &str =
+    include_str!("fixtures/legacy-seeds/ui-spinners-pre-kaomoji-frames.lua");
+
+#[test]
+fn stale_pre_tappable_ui_seeds_refresh() {
+    assert_eq!(
+        hex(&digest_of(STALE_PRE_TAPPABLE_MENU.as_bytes())),
+        "f81080a96f5cd86663bc39dbacf0d73210a5981d43239f3154c5749665a43642",
+        "frozen pre-tappable menu drifted from its documented digest"
+    );
+    assert_eq!(
+        hex(&digest_of(STALE_PRE_KAOMOJI_SPINNERS.as_bytes())),
+        "d65965f5ecc64e6299a847ce2836872d2138a54e47c35a5315c681a680ce5a88",
+        "frozen pre-kaomoji spinners drifted from their documented digest"
+    );
+
+    assert!(STALE_PRE_TAPPABLE_MENU.contains("hint_lines"));
+    assert!(!STALE_PRE_TAPPABLE_MENU.contains("tappable-hints-v1"));
+    assert!(!STALE_PRE_TAPPABLE_MENU.contains("click"));
+    assert!(!STALE_PRE_KAOMOJI_SPINNERS.contains("kaomoji-frames-v1"));
+
+    let dir = tempfile::tempdir().unwrap();
+    let menu = dir.path().join("menu.lua");
+    std::fs::write(&menu, STALE_PRE_TAPPABLE_MENU).unwrap();
+    assert!(
+        should_refresh_seeded_lua(&menu, "lib/ui/menu.lua").unwrap(),
+        "the menu that shipped before tappable hints must be replaced"
+    );
+
+    let spinners = dir.path().join("spinners.lua");
+    std::fs::write(&spinners, STALE_PRE_KAOMOJI_SPINNERS).unwrap();
+    assert!(
+        should_refresh_seeded_lua(&spinners, "lib/ui/spinners.lua").unwrap(),
+        "spinners that shipped before the redrawn kaomoji frames must be replaced"
+    );
+}
+
+#[test]
+fn bundled_marker_seeds_satisfy_their_own_refresh_rules() {
+    // A rule that fired on the bytes it ships would rewrite the seed on every
+    // boot, and a sentinel that older copies already carried could never fire.
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["lib/ui/menu.lua", "lib/ui/spinners.lua", "lib/history.lua"] {
+        let (_, content) = DEFAULT_LUA_CORE
+            .iter()
+            .find(|(bundled, _)| *bundled == name)
+            .unwrap_or_else(|| panic!("bundled core includes {name}"));
+        let path = dir.path().join(name.rsplit('/').next().unwrap());
+        std::fs::write(&path, content).unwrap();
+        assert!(
+            !should_refresh_seeded_lua(&path, name).unwrap(),
+            "bundled {name} must satisfy its own refresh rule"
+        );
+    }
 }
 
 #[test]

@@ -98,6 +98,33 @@ const CANONICAL_CONFIG_V9_CLAUDE_CODE_SHA256: [u8; 32] = [
     146, 172, 91, 36, 235, 154, 160, 235, 126, 249, 203, 163,
 ];
 
+/// `canonical-config-v10` seeds that predate the narrow-pane section picker
+/// (9df687d). A phone renders `/config` in a pane of roughly 41 columns, so an
+/// untouched copy of any of these still clips the tab row instead of collapsing
+/// it into `Section ▾`. Only exact pristine bytes refresh: a copy the user
+/// edited is kept, even when it still carries the marker. Add the outgoing
+/// digest here whenever the bundled `lua/core/init.lua` changes.
+const CANONICAL_CONFIG_V10_SUPERSEDED: &[[u8; 32]] = &[
+    // The first v10 seed (af8fb390): touch-usable `/config` tabs.
+    // SHA-256 e71f8181f99aeceea7ff96c591576f2af862d04198922ad0c57eab15dd0a37fa
+    [
+        231, 31, 129, 129, 249, 154, 236, 238, 167, 255, 150, 197, 145, 87, 111, 42, 248, 98, 208,
+        65, 152, 146, 42, 208, 197, 126, 171, 21, 221, 10, 55, 250,
+    ],
+    // Shipped before the dot-matrix spinner and tab reorder (12bc113e).
+    // SHA-256 0d192307871f7377e12d92046fc523dd4732052d095c34fbb0e611370c900be3
+    [
+        13, 25, 35, 7, 135, 31, 115, 119, 225, 45, 146, 4, 111, 197, 35, 221, 71, 50, 5, 45, 9, 92,
+        52, 251, 176, 230, 17, 55, 12, 144, 11, 227,
+    ],
+    // Shipped before the scrollable live-pane hint (3a6708c); tabs still clip.
+    // SHA-256 5f8216e63987758b8c574f86c0883b5c20682f60ab21951d06464cbab98f765c
+    [
+        95, 130, 22, 230, 57, 135, 117, 139, 140, 87, 79, 134, 192, 136, 59, 92, 32, 104, 47, 96,
+        171, 33, 149, 29, 6, 70, 76, 186, 185, 143, 118, 92,
+    ],
+];
+
 fn is_unmodified_canonical_config(existing: &str) -> bool {
     let digest: [u8; 32] = Sha256::digest(existing.as_bytes()).into();
     (existing.contains("canonical-config-v6") && digest == CANONICAL_CONFIG_V6_SHA256)
@@ -106,6 +133,8 @@ fn is_unmodified_canonical_config(existing: &str) -> bool {
         || (existing.contains("canonical-config-v9")
             && (digest == CANONICAL_CONFIG_V9_SHA256
                 || digest == CANONICAL_CONFIG_V9_CLAUDE_CODE_SHA256))
+        || (existing.contains("canonical-config-v10")
+            && CANONICAL_CONFIG_V10_SUPERSEDED.contains(&digest))
 }
 
 fn is_safe_leaf_name(name: &str) -> bool {
@@ -144,7 +173,15 @@ fn should_refresh_seeded_lua(path: &Path, name: &str) -> std::io::Result<bool> {
                 || !existing.contains("label_modifiers")
                 || !existing.contains("initial_checked")
                 || !existing.contains("preview_row_budget")
-                || !existing.contains("multi-space-toggle-v2")))
+                || !existing.contains("multi-space-toggle-v2")
+                // Tappable key hints (`row.click`) came after the section
+                // picker. Probes such as `hint_line` cannot detect that: the
+                // pre-feature file already declares a local `hint_lines`
+                // table, so only the unique header sentinel is safe.
+                || !existing.contains("tappable-hints-v1")))
+        // Spinner presets predating the redrawn kaomoji frames
+        // (`〜(￣▽￣)〜` became `~(‾▽‾)~`) carry the older header.
+        || (name == "lib/ui/spinners.lua" && !existing.contains("kaomoji-frames-v1"))
         // History now includes aggregate message and token counts/status,
         // and lists via a candidate-first CTE instead of a full messages join.
         || (name == "lib/history.lua"
