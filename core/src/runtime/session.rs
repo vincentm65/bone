@@ -617,7 +617,11 @@ impl RuntimeSession {
             };
             if reload_durable {
                 match db.load_effective_transcript(conv_id) {
-                    Ok(durable) => self.transcript = durable,
+                    Ok(durable) => {
+                        let seq = db.max_message_seq(conv_id).ok();
+                        self.transcript = durable;
+                        self.session_seq = seq.unwrap_or(self.session_seq);
+                    }
                     Err(error) => {
                         if let Some(message) = persistence_error.as_mut() {
                             message.push_str(&format!(

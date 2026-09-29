@@ -2575,7 +2575,11 @@ impl DaemonCtx {
                             (s.session_db.as_ref(), s.conversation_id)
                         {
                             match db.load_effective_transcript(conv_id) {
-                                Ok(durable) => s.transcript = durable,
+                                Ok(durable) => {
+                                    let seq = db.max_message_seq(conv_id).ok();
+                                    s.transcript = durable;
+                                    s.session_seq = seq.unwrap_or(s.session_seq);
+                                }
                                 Err(reload_error) => error.push_str(&format!(
                                     "; failed to reload durable transcript: {reload_error}"
                                 )),
