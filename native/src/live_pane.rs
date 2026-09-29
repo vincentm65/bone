@@ -10,7 +10,8 @@ use bone_protocol::{Component, JobSnapshot, PaneLineSpec, ProcessSnapshot, ViewM
 use bone_render::panes::{self, PanePage};
 use bone_render::theme::Theme;
 use eframe::egui;
-use ratatui::text::Line;
+use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthChar;
 
 use crate::grid;
 
@@ -125,6 +126,8 @@ pub(crate) struct LivePane {
     known: Vec<String>,
     /// Frontend scroll offset (rows) added to each page's own scroll.
     scroll: HashMap<String, i64>,
+    /// Horizontal scroll (cells) per page, for lines wider than the pane.
+    hscroll: HashMap<String, f32>,
     /// Selected agent and process ids and queue index, like the TUI panes.
     pub job: Option<String>,
     pub process: Option<String>,
@@ -242,6 +245,7 @@ impl LivePane {
             self.active = ids.first().cloned();
         }
         self.scroll.retain(|id, _| ids.contains(id));
+        self.hscroll.retain(|id, _| ids.contains(id));
         self.known = ids.clone();
         reconcile(&mut self.job, jobs.iter().map(|job| &job.id));
         reconcile(
@@ -288,6 +292,7 @@ impl LivePane {
         self.active = None;
         self.known.clear();
         self.scroll.clear();
+        self.hscroll.clear();
         self.job = None;
         self.process = None;
         self.queue = 0;
@@ -364,8 +369,39 @@ impl LivePane {
             start as i64 - page.page.scroll as i64,
         );
         let end = (start + rows).min(content.len());
-        let rects = grid::paint_lines(ui, &content[start..end]);
-        let cell = grid::metrics(ui).cell;
+        let metrics = grid::metrics(ui);
+        let cell = metrics.cell;
+        let cols = ((ui.available_width() / cell).floor() as usize).max(1);
+        let widest = content.iter().map(Line::width).max().unwrap_or(0);
+        let max_hscroll = widest.saturating_sub(cols) as f32;
+        let mut hx = self.hscroll.get(&page.page.source).copied().unwrap_or(0.0);
+        let area = egui::Rect::from_min_size(
+            ui.available_rect_before_wrap().min,
+            egui::vec2(
+                ui.available_width(),
+                (end - start) as f32 * metrics.row_height,
+            ),
+        );
+        if max_hscroll > 0.0 {
+            // A one-finger drag pans; rows sit above and keep taps.
+            let pan = ui.interact(
+                area,
+                ui.id().with(("live-pan", page.page.source.as_str())),
+                egui::Sense::drag(),
+            );
+            hx -= pan.drag_delta().x / cell;
+            if ui.rect_contains_pointer(area) {
+                hx -= ui.input(|input| input.smooth_scroll_delta.x) / cell;
+            }
+        }
+        let hx = hx.clamp(0.0, max_hscroll);
+        self.hscroll.insert(page.page.source.clone(), hx);
+        let offset = hx.round() as usize;
+        let shown: Vec<Line<'static>> = content[start..end]
+            .iter()
+            .map(|line| skip_columns(line, offset))
+            .collect();
+        let rects = grid::paint_lines(ui, &shown);
         let mut open = None;
         for (offset, rect) in rects.into_iter().enumerate() {
             let row = start + offset;
@@ -381,7 +417,7 @@ impl LivePane {
                 // A tapped span (one tab on a tab row) wins over its line.
                 let column = response
                     .interact_pointer_pos()
-                    .map(|pos| ((pos.x - rect.left()) / cell).max(0.0) as usize);
+                    .map(|pos| ((pos.x - rect.left()) / cell).max(0.0) as usize + offset);
                 let span = column.and_then(|column| {
                     spans
                         .iter()
@@ -401,6 +437,34 @@ fn reconcile<'a>(selected: &mut Option<String>, ids: impl Iterator<Item = &'a St
     if !selected.as_ref().is_some_and(|id| ids.contains(&id)) {
         *selected = ids.first().map(|id| (*id).clone());
     }
+}
+
+/// Drop the first `skip` display columns of a line, keeping styles. A wide
+/// glyph cut in half becomes a blank cell.
+fn skip_columns(line: &Line<'static>, skip: usize) -> Line<'static> {
+    if skip == 0 {
+        return line.clone();
+    }
+    let mut seen = 0;
+    let mut spans = Vec::new();
+    for span in &line.spans {
+        let mut text = String::new();
+        for ch in span.content.chars() {
+            let width = ch.width().unwrap_or(0);
+            if seen >= skip {
+                text.push(ch);
+            } else if seen + width > skip {
+                text.push(' ');
+            }
+            seen += width;
+        }
+        if !text.is_empty() {
+            spans.push(Span::styled(text, span.style));
+        }
+    }
+    let mut out = line.clone();
+    out.spans = spans;
+    out
 }
 
 #[cfg(test)]
@@ -677,5 +741,15 @@ mod tests {
         output.textures_delta.clear();
 
         assert_eq!(opened, Some(Open::Click("value-3".into())));
+    }
+
+    #[test]
+    fn skip_columns_drops_leading_cells_and_keeps_style() {
+        let style = ratatui::style::Style::default().fg(ratatui::style::Color::Red);
+        let line = Line::from(vec![Span::raw("ab"), Span::styled("cde", style)]);
+        let cut = skip_columns(&line, 3);
+        assert_eq!(cut.to_string(), "de");
+        assert_eq!(cut.spans[0].style, style);
+        assert_eq!(skip_columns(&Line::from("a世b"), 2).to_string(), " b");
     }
 }

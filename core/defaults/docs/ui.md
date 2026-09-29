@@ -121,8 +121,9 @@ cancellation are scoped to the attached conversation.
 - Touch and mouse: pane lines and spans may carry a `click` value (`ui.menu`
   sets option indexes and tappable hints, `/config` its tabs, rows, and provider
   editor action); tapping one answers the pending key request with
-  `KeyEvent { code: "Click", char }`. Desktop clients publish their pane width
-  so narrow clients wrap these controls instead of clipping them.
+  `KeyEvent { code: "Click", char }`. A page line wider than the pane (such as
+  the `/config` tab row, which stays on one line) pans horizontally with the
+  mouse wheel, Shift+wheel, or a touch swipe; taps map through the pan offset.
   Approval choices are tappable. On touch screens a Stop button ends the input
   row while a turn runs, Android Back acts as Esc, and the on-screen keyboard
   stays up while a menu takes keys. The composer frame follows `ui.input.preset`

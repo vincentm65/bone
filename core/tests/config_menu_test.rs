@@ -369,7 +369,9 @@ fn narrow_provider_page_keeps_tabs_and_edit_hint_tappable() {
                   has_span_click = true
                 end
               end
-              if has_span_click then
+              -- The tab row stays on one line and pans horizontally; every
+              -- other tappable row must fit the pane.
+              if has_span_click and not text:find("\u{2502}", 1, true) then
                 assert(utf8.len(text) <= 41, "clipped tap row: " .. text)
               end
             end

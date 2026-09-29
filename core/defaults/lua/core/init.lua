@@ -455,7 +455,8 @@ local function run(ctx, start_ns)
          end
          tspans[#tspans].click = "tab:" .. i
       end
-      append_wrapped_spans(lines, tspans, width)
+      -- One row; the desktop pans it horizontally when it is wider than the pane.
+      lines[#lines + 1] = line_of(tspans)
 
       -- Page subtitle + breathing room.
       lines[#lines + 1] = line_of({ span("  " .. (page.title or ns), COL.dim, { "italic" }) })
