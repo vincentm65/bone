@@ -430,11 +430,12 @@ mod tests {
     /// new preset cannot silently introduce a glyph the desktop cannot draw.
     const SPINNER_PRESETS: &str = include_str!("../../core/defaults/lua/core/lib/ui/spinners.lua");
 
-    /// Symbols the shared renderer draws with the monospace family: collapsed
-    /// markers (`⋮`), live-pane headers (`✻`), job/process states (`⧗ ◑`), the
-    /// block/box/arrow glyphs used by statuses and tool gutters, and the
-    /// `kaomoji` accent glyphs.
-    const CORE_UI_GLYPHS: &str = "⋮ ✻ ⧗ ◑ ◐ ✓ ✗ ✕ ⚠ │ ─ · — … › → ← ↑ ↓ ■ ● ○ ▸ ▲ ▶ ▼ ◀ ▏ ▎ ▍ ▌ ▋ ▊ ▉ ▁ ▃ ▅ ▇ ▂ ▄ ▆ ░ ▒ █ ╰ ╭ ╮ ╯ ├ ┤ ┼ ┏ ┓ ┗ ┛ ┃ ▰ ◕ ‿ ◠ ✿ ▽ ᴗ ~ ‾";
+    /// Symbols the shared renderer draws with the monospace family, plus the
+    /// desktop chrome: collapsed markers (`⋮`), live-pane headers (`✻`),
+    /// job/process states (`⧗ ◑`), the block/box/arrow glyphs used by statuses
+    /// and tool gutters, the sidebar toggle (`☰`), and the `kaomoji` accent
+    /// glyphs.
+    const CORE_UI_GLYPHS: &str = "☰ ⋮ ✻ ⧗ ◑ ◐ ✓ ✗ ✕ ⚠ │ ─ · — … › → ← ↑ ↓ ■ ● ○ ▸ ▲ ▶ ▼ ◀ ▏ ▎ ▍ ▌ ▋ ▊ ▉ ▁ ▃ ▅ ▇ ▂ ▄ ▆ ░ ▒ █ ╰ ╭ ╮ ╯ ├ ┤ ┼ ┏ ┓ ┗ ┛ ┃ ▰ ◕ ‿ ◠ ✿ ▽ ᴗ ~ ‾";
 
     /// Every frame/phrase literal in the bundled spinner presets.
     fn spinner_frames() -> Vec<String> {

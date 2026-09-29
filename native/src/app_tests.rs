@@ -647,6 +647,21 @@ fn text_top(output: &egui::FullOutput, needle: &str) -> Option<f32> {
         .find_map(|shape| visit(&shape.shape, needle))
 }
 
+/// Where the first painted text containing `needle` starts.
+fn text_pos(output: &egui::FullOutput, needle: &str) -> Option<egui::Pos2> {
+    fn visit(shape: &egui::Shape, needle: &str) -> Option<egui::Pos2> {
+        match shape {
+            egui::Shape::Text(text) if text.galley.job.text.contains(needle) => Some(text.pos),
+            egui::Shape::Vec(shapes) => shapes.iter().find_map(|shape| visit(shape, needle)),
+            _ => None,
+        }
+    }
+    output
+        .shapes
+        .iter()
+        .find_map(|shape| visit(&shape.shape, needle))
+}
+
 #[test]
 fn regions_stack_like_the_tui() {
     let ctx = egui::Context::default();
@@ -947,6 +962,24 @@ fn render_at(
     output
 }
 
+/// Tap like a finger would: move to the spot, press, release, settle.
+fn tap_at(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    width: f32,
+    at: egui::Pos2,
+) -> egui::FullOutput {
+    let press = |pressed| egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    render_at(app, ctx, width, vec![egui::Event::PointerMoved(at)]);
+    render_at(app, ctx, width, vec![press(true), press(false)]);
+    render_at(app, ctx, width, Vec::new())
+}
+
 fn with_one_conversation(app: &mut DesktopApp) {
     app.conversations = vec![ConversationMeta {
         id: 41,
@@ -1021,6 +1054,95 @@ fn narrow_windows_start_collapsed_and_open_the_sidebar_full_width() {
     assert!(
         text_top(&output, "Show me a Markdown sample").is_none(),
         "the drawer takes the whole window"
+    );
+}
+
+#[test]
+fn narrow_tab_row_toggles_the_sidebar_without_a_keyboard() {
+    let ctx = egui::Context::default();
+    let mut app = DesktopApp::open(ctx.clone(), true);
+    with_one_conversation(&mut app);
+    render_at(&mut app, &ctx, 400.0, Vec::new());
+    let output = render_at(&mut app, &ctx, 400.0, Vec::new());
+    let toggle = text_pos(&output, "\u{2630}").expect("sidebar toggle in the tab row");
+    assert!(
+        text_top(&output, "sidebar chat").is_none(),
+        "starts collapsed"
+    );
+
+    tap_at(&mut app, &ctx, 400.0, toggle + egui::vec2(4.0, 4.0));
+    let output = render_at(&mut app, &ctx, 400.0, Vec::new());
+    assert!(
+        text_top(&output, "sidebar chat").is_some(),
+        "the toggle opens the drawer"
+    );
+
+    // The drawer covers the tab strip, so the drawer header carries the same
+    // toggle to close it again.
+    let toggle = text_pos(&output, "\u{2630}").expect("drawer toggle");
+    tap_at(&mut app, &ctx, 400.0, toggle + egui::vec2(4.0, 4.0));
+    let output = render_at(&mut app, &ctx, 400.0, Vec::new());
+    assert!(
+        text_top(&output, "sidebar chat").is_none(),
+        "the toggle closes it"
+    );
+    assert!(text_top(&output, "Show me a Markdown sample").is_some());
+}
+
+#[test]
+fn narrow_windows_stack_panes_even_when_a_side_split_is_asked_for() {
+    let ctx = egui::Context::default();
+    let mut app = DesktopApp::open(ctx.clone(), true);
+    render_at(&mut app, &ctx, 400.0, Vec::new());
+    app.split_pane(layout::Axis::Horizontal);
+    assert_eq!(
+        app.layout.leaves().len(),
+        2,
+        "the side request still splits"
+    );
+    let rects = app.layout.rects();
+    let (a, b) = (rects[0].1, rects[1].1);
+    assert_eq!((a.x, a.w), (b.x, b.w), "narrow panes keep the full width");
+    assert!(
+        (a.y - b.y).abs() > 0.1 && (a.h + b.h - 1.0).abs() < 1e-3,
+        "narrow panes stack top to bottom: {a:?} then {b:?}"
+    );
+}
+
+#[test]
+fn narrow_pane_actions_menu_splits_below() {
+    let ctx = egui::Context::default();
+    let mut app = DesktopApp::open(ctx.clone(), true);
+    render_at(&mut app, &ctx, 400.0, Vec::new());
+    let output = render_at(&mut app, &ctx, 400.0, Vec::new());
+    let menu = text_pos(&output, "\u{22ee}").expect("pane actions menu in the tab row");
+    tap_at(&mut app, &ctx, 400.0, menu + egui::vec2(4.0, 4.0));
+
+    let output = render_at(&mut app, &ctx, 400.0, Vec::new());
+    let split = text_pos(&output, "Split below").expect("split item");
+    tap_at(&mut app, &ctx, 400.0, split + egui::vec2(4.0, 4.0));
+
+    assert_eq!(app.layout.leaves().len(), 2, "the menu splits the pane");
+    let rects = app.layout.rects();
+    assert!(
+        rects[0].1.y != rects[1].1.y,
+        "the new pane sits below, not beside: {rects:?}"
+    );
+}
+
+#[test]
+fn wide_windows_still_split_side_by_side() {
+    let ctx = egui::Context::default();
+    let mut app = DesktopApp::open(ctx.clone(), true);
+    render_at(&mut app, &ctx, 1000.0, Vec::new());
+    app.split_pane(layout::Axis::Horizontal);
+    let rects = app.layout.rects();
+    assert_eq!(rects.len(), 2);
+    let (a, b) = (rects[0].1, rects[1].1);
+    assert_eq!((a.y, a.h), (b.y, b.h), "wide panes share the height");
+    assert!(
+        (a.x - b.x).abs() > 0.1 && (a.w + b.w - 1.0).abs() < 1e-3,
+        "wide panes sit side by side: {a:?} then {b:?}"
     );
 }
 

@@ -2010,9 +2010,13 @@ impl DesktopApp {
 
     /// Split the focused pane; the new pane opens with a fresh chat.
     fn split_pane(&mut self, axis: layout::Axis) {
-        if self.narrow {
-            return;
-        }
+        // A narrow window has too few columns for two side-by-side panes, so it
+        // always stacks: one full-width pane above the other.
+        let axis = if self.narrow {
+            layout::Axis::Vertical
+        } else {
+            axis
+        };
         if self
             .layout
             .split(self.layout.focused, axis, false)
@@ -3648,12 +3652,18 @@ impl DesktopApp {
         }
     }
 
-    fn sidebar(&mut self, ui: &mut egui::Ui) {
-        if ui
-            .add(egui::Button::new("+ New chat").frame(false))
-            .on_hover_text("Ctrl+T")
-            .clicked()
-        {
+    fn sidebar(&mut self, ui: &mut egui::Ui, controls: bool) {
+        let new_chat = ui
+            .horizontal(|ui| {
+                if controls {
+                    self.sidebar_button(ui);
+                }
+                ui.add(egui::Button::new("+ New chat").frame(false))
+                    .on_hover_text("Ctrl+T")
+                    .clicked()
+            })
+            .inner;
+        if new_chat {
             self.new_chat_tab(None);
         }
         ui.separator();
@@ -3722,7 +3732,62 @@ impl DesktopApp {
         }
     }
 
-    fn tab_strip(&mut self, ui: &mut egui::Ui, pane: layout::PaneId) {
+    /// The sidebar toggle. It rides the tab strip, plus the narrow drawer's own
+    /// header, so an open drawer can always be closed again — with more than one
+    /// pane the drawer is the only thing on screen.
+    fn sidebar_button(&mut self, ui: &mut egui::Ui) {
+        let muted = ui.visuals().weak_text_color();
+        let tab_height = ui.spacing().interact_size.y + 4.0;
+        if ui
+            .add(
+                egui::Button::new(egui::RichText::new("\u{2630}").color(muted))
+                    .frame(false)
+                    .min_size(egui::vec2(24.0, tab_height)),
+            )
+            .on_hover_text("Conversations (Ctrl+B)")
+            .clicked()
+        {
+            self.toggle_sidebar();
+        }
+    }
+
+    /// A pane's tab strip, preceded by the window controls. The controls ride
+    /// in the first pane's strip so they keep their place as focus moves.
+    fn tab_strip(&mut self, ui: &mut egui::Ui, pane: layout::PaneId, controls: bool) {
+        if !controls {
+            self.tab_strip_body(ui, pane);
+            return;
+        }
+        ui.horizontal(|ui| {
+            self.sidebar_button(ui);
+            if self.narrow {
+                self.actions_menu(ui, pane);
+            }
+            self.tab_strip_body(ui, pane);
+        });
+    }
+
+    /// Narrow windows only: the tab context menu needs a right-click, which a
+    /// touch screen does not have, so the same actions get a ⋮ menu here.
+    fn actions_menu(&mut self, ui: &mut egui::Ui, pane: layout::PaneId) {
+        let muted = ui.visuals().weak_text_color();
+        ui.menu_button(egui::RichText::new("\u{22ee}").color(muted), |ui| {
+            if ui.button("Split below").clicked() {
+                self.split_pane(layout::Axis::Vertical);
+                ui.close();
+            }
+            if ui.button("Close tab").clicked() {
+                if let Some(index) = self.pane_tab_index(pane) {
+                    self.close_tab(index);
+                }
+                ui.close();
+            }
+        })
+        .response
+        .on_hover_text("Pane actions");
+    }
+
+    fn tab_strip_body(&mut self, ui: &mut egui::Ui, pane: layout::PaneId) {
         let pane_sel = self.pane_tab_index(pane);
         let mut split: Option<(usize, layout::Axis)> = None;
         let mut select = None;
@@ -4494,15 +4559,16 @@ impl DesktopApp {
             .inner_margin(egui::Margin::symmetric(12, 4));
 
         let sidebar = self.sidebar_visible();
-        // Narrow (phone) windows stay single-pane and show only the focused one.
-        let multi = !self.narrow && self.layout.leaves().len() > 1;
+        // One leaf fills the window however it was split; more than one draws
+        // the pane grid (narrow windows only ever stack their panes).
+        let multi = self.layout.leaves().len() > 1;
         if !multi {
             egui::Panel::top("tabs")
                 .frame(side)
                 .show_separator_line(false)
                 .show(ui, |ui| {
                     let pane = self.layout.focused;
-                    self.tab_strip(ui, pane);
+                    self.tab_strip(ui, pane, true);
                 });
         }
         let sidebar_frame = egui::Frame::new()
@@ -4511,7 +4577,7 @@ impl DesktopApp {
         if sidebar && self.narrow {
             egui::CentralPanel::default()
                 .frame(sidebar_frame)
-                .show(ui, |ui| self.sidebar(ui));
+                .show(ui, |ui| self.sidebar(ui, true));
             self.sidebar_dialogs(&ctx);
             return;
         }
@@ -4522,7 +4588,7 @@ impl DesktopApp {
                 .default_size(SIDEBAR_WIDTH)
                 .min_size(180.0)
                 .max_size(480.0)
-                .show(ui, |ui| self.sidebar(ui));
+                .show(ui, |ui| self.sidebar(ui, false));
         }
         self.sidebar_dialogs(&ctx);
 
@@ -4556,6 +4622,8 @@ impl DesktopApp {
         } else {
             vec![(self.layout.focused, area)]
         };
+        // The window controls ride in the first pane's strip.
+        let controls = self.layout.leaves().first().copied();
         let accent = ui.visuals().hyperlink_color;
         let separator = ui.visuals().widgets.noninteractive.bg_stroke.color;
         let pressed = ui
@@ -4575,7 +4643,9 @@ impl DesktopApp {
                 egui::Panel::top(egui::Id::new(("pane-strip", pane)))
                     .frame(side)
                     .show_separator_line(false)
-                    .show(&mut child, |ui| self.tab_strip(ui, pane));
+                    .show(&mut child, |ui| {
+                        self.tab_strip(ui, pane, controls == Some(pane))
+                    });
             }
             self.pane_body(&mut child, pane, fill, side);
             if multi {

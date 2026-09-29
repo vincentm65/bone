@@ -17,9 +17,11 @@ one if needed). The daemon never listens beyond loopback.
   `android_main`.
 
 Everything else is `native/`. On narrow screens its sidebar starts collapsed
-and opens full-window from the ☰ button. The app runs full screen (no Android
-status bar). This crate is a workspace member but not a default member, so
-root `cargo build` / `cargo test` skip it.
+and opens full-window from the ☰ button; the tab strip's ⋮ menu splits the pane
+into stacked, full-width panes and closes tabs where a right-click cannot
+reach. The app runs full screen (no Android status bar). This crate is a
+workspace member but not a default member, so root `cargo build` / `cargo test`
+skip it.
 
 ## Toolchain (user-level, in `~/Android`)
 

@@ -51,9 +51,10 @@ cancellation are scoped to the attached conversation.
   description line (`ConversationMeta.status` / `token_count`). A spinner marks
   a chat whose open tab is mid-turn, and a green dot marks one whose turn
   finished while its tab was not in view (cleared when viewed; desktop-local).
-  The ☰ button or Ctrl/Cmd+B collapses the sidebar. Windows narrower than
-  700pt start collapsed and open it full-window, closing it once a chat is
-  picked, so the same UI works on a phone.
+  The ☰ button in the tab strip — and, on narrow windows, in the drawer's own
+  header — toggles the sidebar, as does Ctrl/Cmd+B. Windows narrower than 700pt
+  start collapsed and open it full-window, closing it once a chat is picked, so
+  the same UI works on a phone.
   Ctrl/Cmd+T opens a chat tab, Ctrl/Cmd+W closes a tab (the last chat starts
   over instead), Ctrl/Cmd+Tab or Ctrl/Cmd+PageUp/PageDown cycle, and
   Ctrl/Cmd+1…9 jump. Selecting a history entry focuses the tab showing it,
@@ -64,7 +65,10 @@ cancellation are scoped to the attached conversation.
   right and Ctrl+Shift+\ splits down; Ctrl+Alt+arrows move focus between
   panes. The tab right-click menu offers Split right, Split down and Close.
   Drag a tab to another pane, or onto a pane edge to split, to move it; drag
-  dividers to resize. Narrow windows and Android stay single-pane.
+  dividers to resize. A narrow window has no room for side-by-side panes, so it
+  always stacks: any split becomes a full-width pane above another, and its tab
+  strip's ⋮ menu offers Split below and Close tab, because a touch screen has no
+  right-click.
   A new chat, including one created by `/new`, remains ephemeral until its first
   real prompt is submitted; empty chats are not written to SQLite and do not
   appear in history or the sidebar. Persistence and lifecycle remain daemon-owned.
@@ -128,8 +132,10 @@ cancellation are scoped to the attached conversation.
   Shift+wheel, or a touch swipe; taps map through the pan offset.
   Approval choices are tappable. On touch screens a Stop button ends the input
   row while a turn runs, Android Back acts as Esc, and the on-screen keyboard
-  stays up while a menu takes keys. The composer frame follows `ui.input.preset`
-  (`lines`, `box`, `filled`) with its padding and `fill`.
+  stays up while a menu takes keys. The tab strip's ☰ toggle opens the
+  conversation drawer without a keyboard, and its ⋮ menu splits stacked panes or
+  closes the tab where a right-click cannot reach. The composer frame follows
+  `ui.input.preset` (`lines`, `box`, `filled`) with its padding and `fill`.
 
 ## Command and event boundary
 
