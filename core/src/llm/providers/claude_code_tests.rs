@@ -998,3 +998,10 @@ async fn multi_call_turns_report_the_final_call_as_context() {
         "earlier calls first, then the final call whose prompt is the context"
     );
 }
+
+#[test]
+fn system_prompt_says_bone_tools_go_through_tool_calls() {
+    let prompt = super::SYSTEM_PROMPT_PREAMBLE;
+    assert!(prompt.contains("Bone tools are NOT callable functions"));
+    assert!(prompt.contains("`tool_calls`"));
+}

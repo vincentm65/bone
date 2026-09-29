@@ -7,7 +7,7 @@ fn shipped_prompt_includes_configured_base_and_runtime_context() {
     assert!(prompt.starts_with(base));
     assert!(prompt.contains("Resolved config directory: "));
     let guide = bone_dir().join("AGENTS.md").display().to_string();
-    assert!(prompt.contains(&format!("Bone self-modification guide: {guide}")));
+    assert!(prompt.contains(&format!("Bone guide: {guide}")));
     assert!(prompt.contains("Current working directory: "));
 }
 
@@ -16,8 +16,7 @@ fn configured_prompt_gets_tool_guidance_and_runtime_context_appended() {
     let prompt = system_prompt("Custom main-agent instructions.");
     assert!(prompt.starts_with("Custom main-agent instructions.\n\n"));
     assert!(!prompt.contains("You are bone, a coding assistant"));
-    assert!(prompt.contains("multiple independent tool calls in a single turn"));
-    assert!(prompt.contains("batch related reads/searches"));
+    assert!(prompt.contains("Batch independent tool calls in one turn"));
     assert!(prompt.contains("edit_file replaces lines by `LINE#HASH` anchors shown by read_file"));
     assert!(prompt.contains("Do not re-read a file you just changed"));
     assert!(prompt.contains("Resolved config directory: "));

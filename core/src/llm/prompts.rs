@@ -8,7 +8,7 @@ use crate::config::bone_dir;
 /// installs.
 const TOOL_USAGE_GUIDANCE: &str = "\
 Tool usage:\n\
-- You may issue multiple independent tool calls in a single turn; batch related reads/searches instead of one per turn.\n\
+- Batch independent tool calls in one turn.\n\
 - edit_file replaces lines by `LINE#HASH` anchors shown by read_file; pass several disjoint edits in one call via edits.\n\
 - Do not re-read a file you just changed unless the edit reported the file changed.";
 
@@ -21,7 +21,7 @@ fn runtime_context() -> String {
         .unwrap_or_else(|_| "unknown".to_string());
     let bone = std::env::current_dir().map_or_else(|_| bone_dir(), |cwd| cwd.join(bone_dir()));
     format!(
-        "Resolved config directory: {}\nBone self-modification guide: {} (read it before changing Bone itself; it is not a project AGENTS.md)\nCurrent working directory: {cwd}\n",
+        "Resolved config directory: {}\nBone guide: {} (read before changing Bone itself; not a project AGENTS.md)\nCurrent working directory: {cwd}\n",
         bone.display(),
         bone.join("AGENTS.md").display()
     )
@@ -55,7 +55,7 @@ pub fn headless_agent_system_prompt(persona: Option<&str>) -> String {
         "{persona}\n\n\
          Rules:\n\
          - Use tools for all file and system operations.\n\
-         - For file contents, use read_file to read, create_file only when the path does not exist, and edit_file to modify an existing file. Never delete an existing file merely to make create_file applicable. Prefer these dedicated tools over shell commands such as cat, head, tail, sed, tee, printf, or redirection. Use shell for file contents only when a file tool explicitly recommends it, the operation spans many files, or a dedicated tool cannot perform the operation. If a file tool fails, follow its error instead of immediately retrying the same operation through shell.\n\
+         - For files, use read_file, create_file (only if the path does not exist) and edit_file; never delete a file just to use create_file. Use shell for file contents only when a file tool recommends it, the operation spans many files, or no dedicated tool fits. If a file tool fails, follow its error instead of retrying through shell.\n\
          - Be concise. No emoji, no filler, no preamble.\n\
          - Always work in the current working directory. Do not search or modify files in other projects or directories unless explicitly instructed.\n\
          - Never modify your own `.bone-rust` files unless the user explicitly asks you to.\n\
