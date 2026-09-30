@@ -37,6 +37,16 @@ supported mutations. Typed changes are validated against the current schema
 revision and persist only the affected domain. Depending on the setting, a
 change applies immediately, on the next model turn, or after extensions reload.
 
+## Approval modes
+
+The persisted `general.approval` value is the default for new conversations. `safe`
+auto-approves read-only tool calls; `danger` auto-approves all tool calls. Changing
+`general.approval` from `safe` to `danger` in `/config` asks for explicit
+confirmation. The choice defaults to `Keep asking`, and declining or canceling
+prevents the save. This confirmation concerns the persisted default for new
+conversations; the selected conversation changes mode immediately after an accepted
+save, while other already-running conversation actors are not changed automatically.
+
 Direct YAML edits are read at startup. After directly editing
 `providers.yaml`, `subagents.yaml`, `extensions.yaml`, `config.yaml`, or
 `command-policy.yaml`, tell the user to restart Bone. `command-policy.yaml` is

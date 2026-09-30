@@ -393,3 +393,64 @@ fn narrow_provider_page_keeps_tabs_and_edit_hint_tappable() {
     .exec()
     .unwrap();
 }
+
+#[test]
+fn approval_danger_confirmation_is_scoped_and_defaults_to_keep_asking() {
+    let lua = config_lua();
+    lua.load(
+        r##"
+        local function exercise(current, choice, expected, should_confirm)
+          local saved, confirmations = nil, 0
+          test_menu.clear = function() end
+          test_menu.select = function(_, opts)
+            confirmations = confirmations + 1
+            assert(opts.default == 1, "confirmation must default to the safe choice")
+            assert(opts.options[1] == "Keep asking")
+            assert(opts.options[2] == "Auto-approve")
+            assert(opts.question:find("all tool calls in this conversation", 1, true))
+            assert(opts.question:find("default for new conversations", 1, true))
+            if choice == "Esc" then return { cancelled = true } end
+            return { value = choice, selected = choice == "Auto-approve" and 2 or 1 }
+          end
+          local keys, key_index = { { code = "Enter" }, { code = "Esc" } }, 0
+          local ctx = { renders = {}, ui = {}, config = {} }
+          ctx.ui.key = function()
+            key_index = key_index + 1
+            return keys[key_index]
+          end
+          ctx.ui.notify = function() end
+          ctx.config.get_pages = function()
+            return { {
+              namespace = "general", title = "General", fields = {
+                { key = "approval", label = "Approval mode", type = "enum", value = current },
+              },
+            } }
+          end
+          ctx.config.cycle_field = function(ns, key, value)
+            assert(ns == "general" and key == "approval")
+            return value == "safe" and "danger" or "safe"
+          end
+          ctx.config.set_value = function(ns, key, value)
+            saved = ns .. "." .. key .. "=" .. tostring(value)
+            return true
+          end
+
+          local result = config_handler("", ctx)
+          assert(confirmations == (should_confirm and 1 or 0))
+          assert(saved == expected, tostring(saved))
+          if expected then
+            assert(result and result.action == "config.apply")
+          else
+            assert(result == nil)
+          end
+        end
+
+        exercise("safe", "Auto-approve", "general.approval=danger", true)
+        exercise("safe", "Keep asking", nil, true)
+        exercise("safe", "Esc", nil, true)
+        exercise("danger", "Keep asking", "general.approval=safe", false)
+        "##,
+    )
+    .exec()
+    .unwrap();
+}

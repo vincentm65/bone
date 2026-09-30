@@ -1716,6 +1716,28 @@ pub(crate) fn build_conversation_table(lua: &Lua, cfg: &CtxConfig) -> Result<Tab
                 if !msg.reasoning_items.is_empty() {
                     entry.set("reasoning_items", lua.to_value(&msg.reasoning_items)?)?;
                 }
+                if !msg.images.is_empty() {
+                    let images = lua.create_table()?;
+                    for image in &msg.images {
+                        let image_entry = lua.create_table()?;
+                        image_entry.set("media_type", image.media_type.as_str())?;
+                        image_entry.set("data", image.data.as_str())?;
+                        if let Some(width) = image.width {
+                            image_entry.set("width", width)?;
+                        }
+                        if let Some(height) = image.height {
+                            image_entry.set("height", height)?;
+                        }
+                        if let Some(ref sha256) = image.sha256 {
+                            image_entry.set("sha256", sha256.as_str())?;
+                        }
+                        images.push(image_entry)?;
+                    }
+                    entry.set("images", images)?;
+                }
+                if msg.is_error {
+                    entry.set("is_error", true)?;
+                }
                 tbl.push(entry)?;
             }
             Ok(Value::Table(tbl))

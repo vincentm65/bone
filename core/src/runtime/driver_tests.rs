@@ -90,3 +90,43 @@ fn pending_context_estimate_includes_ephemeral_image_relays() {
     assert!(pending_estimate > durable_estimate);
     assert_eq!(pending_estimate - pending_without_image, 973);
 }
+
+#[test]
+fn ephemeral_image_relay_replacement_preserves_durable_relays() {
+    fn image_relay(label: &str) -> ChatMessage {
+        let mut message = ChatMessage::user_with_images(
+            format!("Image output from {label}:"),
+            vec![crate::llm::ImageData {
+                media_type: "image/png".into(),
+                data: label.into(),
+                ..Default::default()
+            }],
+        );
+        message.synthetic = true;
+        message
+    }
+
+    let durable = image_relay("durable");
+    let old = image_relay("old");
+    let newest = image_relay("newest");
+    let mut request_history = vec![durable.clone(), old.clone()];
+    let mut relays = vec![old];
+    let mut relay_index = Some(1);
+
+    replace_ephemeral_image_relay(
+        &mut request_history,
+        &mut relays,
+        &mut relay_index,
+        newest.clone(),
+    );
+
+    assert_eq!(request_history, vec![durable.clone(), newest.clone()]);
+    assert_eq!(relays, vec![newest.clone()]);
+    assert_eq!(relay_index, Some(1));
+
+    let mut rebuilt = vec![durable.clone()];
+    let restored_index =
+        restore_ephemeral_image_relays(&mut rebuilt, &[image_relay("old"), newest.clone()]);
+    assert_eq!(rebuilt, vec![durable, newest]);
+    assert_eq!(restored_index, Some(1));
+}

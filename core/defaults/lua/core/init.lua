@@ -75,6 +75,19 @@ local function save_value(ctx, namespace, key, value)
    return result == true
 end
 
+-- Danger mode approves every tool call for the current conversation. Keep the
+-- confirmation here, beside the shared save path, so every frontend gets the
+-- same safety check without making a client-side approval policy.
+local function confirm_danger(ctx)
+   local result = ask(ctx, {
+      question = "Auto-approve all tool calls in this conversation?  Saves as the default for new conversations.",
+      type = "single_select",
+      options = { "Keep asking", "Auto-approve" },
+      default = 1,
+   })
+   return result and result.value == "Auto-approve"
+end
+
 local REASONING_EFFORTS = {
    { label = "Low", value = "low" },
    { label = "Med", value = "medium" },
@@ -607,7 +620,12 @@ local function run(ctx, start_ns)
                local f = row.field
                if f.type == "bool" or f.type == "enum" then
                   local nv = ctx.config.cycle_field(ns, f.key, f.value)
-                  if nv ~= nil and save_value(ctx, ns, f.key, nv) then
+                  local needs_confirmation = ns == "general"
+                     and f.key == "approval"
+                     and nv == "danger"
+                     and f.value ~= "danger"
+                  local allowed = not needs_confirmation or confirm_danger(ctx)
+                  if allowed and nv ~= nil and save_value(ctx, ns, f.key, nv) then
                      changed = true
                      restart_required = restart_required or ns == "tools" or ns == "commands" or ns == "plugins"
                   end

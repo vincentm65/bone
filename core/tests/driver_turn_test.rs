@@ -2081,22 +2081,13 @@ async fn driver_preserves_ephemeral_images_in_request_history() {
     );
     assert_eq!(
         images(&captured[2]),
-        vec![
-            bone_core::llm::ImageData {
-                media_type: "image/jpeg".into(),
-                data: "ephemeral-base64-1".into(),
-                width: Some(101),
-                height: Some(201),
-                sha256: Some("sha256-1".into()),
-            },
-            bone_core::llm::ImageData {
-                media_type: "image/jpeg".into(),
-                data: "ephemeral-base64-2".into(),
-                width: Some(102),
-                height: Some(202),
-                sha256: Some("sha256-2".into()),
-            },
-        ]
+        vec![bone_core::llm::ImageData {
+            media_type: "image/jpeg".into(),
+            data: "ephemeral-base64-2".into(),
+            width: Some(102),
+            height: Some(202),
+            sha256: Some("sha256-2".into()),
+        }]
     );
 
     for message in outcome

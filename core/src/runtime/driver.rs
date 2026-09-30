@@ -30,6 +30,7 @@ use crate::tools::{ApprovalGate, ApprovalMode, CallOutcome, ToolCall, ToolResult
 /// breaks the loop with an error. This is a hard backstop against tool-looping;
 /// the top-level agent (depth 0) is uncapped.
 const SUBAGENT_MAX_TURNS: usize = 200;
+const MAX_EPHEMERAL_IMAGE_RELAYS: usize = 1;
 
 fn is_retryable_stream_error(kind: &LlmErrorKind) -> bool {
     matches!(
@@ -63,8 +64,38 @@ fn append_turn_messages(request_history: &mut Vec<ChatMessage>, turn_messages: &
     }
 }
 
-fn restore_ephemeral_image_relays(request_history: &mut Vec<ChatMessage>, relays: &[ChatMessage]) {
-    request_history.extend(relays.iter().cloned());
+/// Restore only the bounded set of request-only image relays after rebuilding
+/// provider history. These relays are not part of the durable transcript.
+fn restore_ephemeral_image_relays(
+    request_history: &mut Vec<ChatMessage>,
+    relays: &[ChatMessage],
+) -> Option<usize> {
+    let first = relays.len().saturating_sub(MAX_EPHEMERAL_IMAGE_RELAYS);
+    if first == relays.len() {
+        return None;
+    }
+    request_history.extend(relays[first..].iter().cloned());
+    Some(request_history.len() - 1)
+}
+
+/// Replace the older request-only screenshot with the newest actionable frame.
+/// The tracked index prevents a matching durable image relay from being pruned.
+fn replace_ephemeral_image_relay(
+    request_history: &mut Vec<ChatMessage>,
+    ephemeral_image_relays: &mut Vec<ChatMessage>,
+    ephemeral_image_relay_index: &mut Option<usize>,
+    relay: ChatMessage,
+) {
+    if let Some(index) = ephemeral_image_relay_index.take()
+        && index < request_history.len()
+    {
+        request_history.remove(index);
+    }
+    request_history.push(relay.clone());
+    ephemeral_image_relays.clear();
+    ephemeral_image_relays.push(relay);
+    debug_assert!(ephemeral_image_relays.len() <= MAX_EPHEMERAL_IMAGE_RELAYS);
+    *ephemeral_image_relay_index = Some(request_history.len() - 1);
 }
 
 fn record_hook_usage(
@@ -899,9 +930,10 @@ impl Driver {
         let mut error_loop_steer: Option<String> = None;
         const MAX_REPEATED_ERROR_ROUNDS: u32 = 3;
         let mut turns: usize = 0;
-        // Request-only relays for ephemeral tool images. Preserve every relay
-        // in insertion order while keeping them out of persistence.
+        // Request-only relays for ephemeral tool images. Keep only the newest
+        // actionable frame; they stay out of persistence and durable history.
         let mut ephemeral_image_relays: Vec<ChatMessage> = Vec::new();
+        let mut ephemeral_image_relay_index: Option<usize> = None;
         let mut last_turn_messages: Vec<String> = Vec::new();
         let result: Result<String, String> = 'turn: loop {
             if is_cancelled() {
@@ -1004,7 +1036,10 @@ impl Driver {
                     transcript_replaced = true;
                     history = build_chat_history(&transcript, &active_system_prompt);
                     request_history = history.clone();
-                    restore_ephemeral_image_relays(&mut request_history, &ephemeral_image_relays);
+                    ephemeral_image_relay_index = restore_ephemeral_image_relays(
+                        &mut request_history,
+                        &ephemeral_image_relays,
+                    );
                     last_turn_messages.clear();
                     token_stats.clear_context_anchor();
                 } else {
@@ -1023,7 +1058,7 @@ impl Driver {
                     if !sys_appends.is_empty() {
                         history = build_chat_history(&transcript, &active_system_prompt);
                         request_history = history.clone();
-                        restore_ephemeral_image_relays(
+                        ephemeral_image_relay_index = restore_ephemeral_image_relays(
                             &mut request_history,
                             &ephemeral_image_relays,
                         );
@@ -1619,8 +1654,12 @@ impl Driver {
             for (relay, ephemeral) in image_relays {
                 let provider_relay = model_facing_message(&relay, None);
                 if ephemeral {
-                    request_history.push(provider_relay.clone());
-                    ephemeral_image_relays.push(provider_relay);
+                    replace_ephemeral_image_relay(
+                        &mut request_history,
+                        &mut ephemeral_image_relays,
+                        &mut ephemeral_image_relay_index,
+                        provider_relay,
+                    );
                 } else {
                     session_seq += 1;
                     session.append_chat_message(&relay, session_seq);

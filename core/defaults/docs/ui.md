@@ -119,9 +119,11 @@ cancellation are scoped to the attached conversation.
   first active agent/process, then plain Up/Down move a clamped selection, and
   Up from the first row returns to empty live input. Enter opens the focused
   agent/process only when `composer.trim().is_empty()`; autocomplete keeps plain
-  Up/Down for its own selection, and ordinary editing clears list focus. `/edit`
-  opens the draft in `$VISUAL`/`$EDITOR` (terminal editors in `$TERMINAL` or a
-  detected terminal). Configured `keymaps.bindings` take precedence.
+  Up/Down for its own selection, and ordinary editing clears list focus. When the
+  list is open, Esc hides autocomplete suggestions without clearing the draft;
+  editing the draft reopens them. `/edit` opens the draft in `$VISUAL`/`$EDITOR`
+  (terminal editors in `$TERMINAL` or a detected terminal). Configured
+  `keymaps.bindings` take precedence.
 - Touch and mouse: pane lines and spans may carry a `click` value (`ui.menu`
   sets option indexes and tappable hints, `/config` its tabs, rows, and provider
   editor action); tapping one answers the pending key request with

@@ -758,6 +758,41 @@ fn message_table_parser_preserves_created_at() {
 }
 
 #[test]
+fn conversation_history_exports_images_and_tool_errors() {
+    let lua = Lua::new();
+    let user = crate::llm::ChatMessage::user_with_images(
+        "look",
+        vec![crate::llm::ImageData {
+            media_type: "image/png".into(),
+            data: "base64-data".into(),
+            width: Some(640),
+            height: Some(480),
+            sha256: Some("digest".into()),
+        }],
+    );
+    let mut tool = crate::llm::ChatMessage::new(crate::llm::ChatRole::Tool, "failed");
+    tool.is_error = true;
+    let mut cfg = test_ctx_config();
+    cfg.conversation_history = Some(vec![user, tool]);
+
+    lua.globals()
+        .set("ctx", create_ctx_table(&lua, &cfg).unwrap())
+        .unwrap();
+    let value: Value = lua
+        .load("return ctx.conversation.history()")
+        .eval()
+        .unwrap();
+    let history: serde_json::Value = lua.from_value(value).unwrap();
+
+    assert_eq!(history[0]["images"][0]["media_type"], "image/png");
+    assert_eq!(history[0]["images"][0]["data"], "base64-data");
+    assert_eq!(history[0]["images"][0]["width"], 640);
+    assert_eq!(history[0]["images"][0]["height"], 480);
+    assert_eq!(history[0]["images"][0]["sha256"], "digest");
+    assert_eq!(history[1]["is_error"], true);
+}
+
+#[test]
 fn agent_opts_use_explicit_model_when_provider_changes() {
     let lua = Lua::new();
     let opts = lua.create_table().unwrap();

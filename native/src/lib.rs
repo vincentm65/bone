@@ -216,6 +216,8 @@ struct Session {
     /// The `/name arg` echo for the in-flight command.
     pending_command_echo: Option<String>,
     autocomplete: Option<commands::AutocompleteState>,
+    /// Keep an explicitly closed picker hidden until the draft changes.
+    autocomplete_dismissed: Option<String>,
     ctx: egui::Context,
     local_tx: std::sync::mpsc::Sender<LocalResult>,
     /// Prompts typed while a turn is busy, drained in order when it finishes.
@@ -286,6 +288,7 @@ impl Session {
             pending_command: None,
             pending_command_echo: None,
             autocomplete: None,
+            autocomplete_dismissed: None,
             ctx: ctx.clone(),
             local_tx,
             queue: std::collections::VecDeque::new(),
@@ -318,6 +321,7 @@ impl Session {
         self.pending_command = None;
         self.pending_command_echo = None;
         self.autocomplete = None;
+        self.autocomplete_dismissed = None;
     }
 
     /// Retry the authoritative load after a conversation-load failure without
@@ -428,6 +432,7 @@ impl Session {
         self.pastes.clear();
         self.attachments.clear();
         self.autocomplete = None;
+        self.autocomplete_dismissed = None;
         self.history_index = None;
     }
 
@@ -800,6 +805,20 @@ impl Session {
     fn reply(&mut self, text: impl Into<String>) {
         self.state.push_row("system", text);
     }
+    /// Request a provider switch only when it differs from the daemon snapshot.
+    /// The reply describes delivery, not success; the next snapshot is authoritative.
+    fn request_provider_switch(&mut self, provider_id: &str) -> String {
+        if self.state.snapshot.provider_id == provider_id {
+            return format!("Already using provider {provider_id}.");
+        }
+        if self.command(RuntimeCommand::SwitchProvider {
+            provider_id: provider_id.to_string(),
+        }) {
+            format!("Requested provider {provider_id}.")
+        } else {
+            "Not connected to the daemon.".to_string()
+        }
+    }
 
     /// Handle a built-in slash command client-side. Returns true when `name` is
     /// a built-in this client owns; unknown names fall through to the daemon.
@@ -836,13 +855,8 @@ impl Session {
             }
             "provider" => {
                 self.clear_input();
-                if self.command(RuntimeCommand::SwitchProvider {
-                    provider_id: arg.to_string(),
-                }) {
-                    self.reply(format!("Switching provider to {arg}…"));
-                } else {
-                    self.reply("Not connected to the daemon.");
-                }
+                let reply = self.request_provider_switch(arg);
+                self.reply(reply);
             }
             "model" => {
                 self.clear_input();
@@ -1002,6 +1016,10 @@ impl Session {
     /// Recompute the `/` autocomplete from the current input, keeping the
     /// selection while the query and command set are unchanged.
     fn refresh_autocomplete(&mut self) {
+        if self.autocomplete_dismissed.as_deref() == Some(self.composer.as_str()) {
+            return;
+        }
+        self.autocomplete_dismissed = None;
         let Some(query) = commands::slash_query(&self.composer) else {
             self.autocomplete = None;
             return;
@@ -1025,6 +1043,11 @@ impl Session {
         }
     }
 
+    fn dismiss_autocomplete(&mut self) {
+        self.autocomplete = None;
+        self.autocomplete_dismissed = Some(self.composer.clone());
+    }
+
     fn autocomplete_open(&self) -> bool {
         self.autocomplete
             .as_ref()
@@ -1042,7 +1065,7 @@ impl Session {
             return false;
         };
         self.composer = format!("/{name}");
-        self.autocomplete = None;
+        self.dismiss_autocomplete();
         true
     }
 
@@ -1142,12 +1165,7 @@ impl Session {
                 self.command(RuntimeCommand::ReloadExtensions);
                 "Reloading tools and Lua extensions…".to_string()
             }
-            ConfigAction::SwitchProvider { id } => {
-                self.command(RuntimeCommand::SwitchProvider {
-                    provider_id: id.clone(),
-                });
-                format!("Switching provider to {id}…")
-            }
+            ConfigAction::SwitchProvider { id } => self.request_provider_switch(&id),
         })
     }
 
@@ -3203,7 +3221,7 @@ impl DesktopApp {
         if autocomplete_open {
             self.session_mut().clear_agent_focus_for_input(ui);
             if consume(ui, egui::Modifiers::NONE, egui::Key::Escape) {
-                self.session_mut().autocomplete = None;
+                self.session_mut().dismiss_autocomplete();
             }
             return;
         }
@@ -4230,7 +4248,7 @@ impl Session {
             }
             if let Some(name) = clicked {
                 self.composer = format!("/{name}");
-                self.autocomplete = None;
+                self.dismiss_autocomplete();
                 editor.request_focus();
             }
         }

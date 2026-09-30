@@ -131,6 +131,12 @@ remains complete. In-memory driver state, live view components, status text,
 cancellation flags, and pending events are ephemeral and must not be treated as
 persisted configuration.
 
+Tool images marked ephemeral (including computer-use screenshots) are request-only
+driver state. During an active turn, request history retains only the newest
+actionable frame; a newer screenshot supersedes older ones. These relays are never
+copied into the durable transcript or session database. Durable image relays remain
+in transcript/history and are not pruned by this bound.
+
 Configuration has a separate authority: the daemon's `ConfigStore` loads and
 validates the canonical YAML domains, produces one revisioned snapshot, and
 broadcasts it to clients. See [Configuration](configuration.md).

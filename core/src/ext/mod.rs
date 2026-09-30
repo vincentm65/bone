@@ -123,6 +123,12 @@ const CANONICAL_CONFIG_V10_SUPERSEDED: &[[u8; 32]] = &[
         95, 130, 22, 230, 57, 135, 117, 139, 140, 87, 79, 134, 192, 136, 59, 92, 32, 104, 47, 96,
         171, 33, 149, 29, 6, 70, 76, 186, 185, 143, 118, 92,
     ],
+    // Outgoing v10 seed before the approval confirmation wording (current bundled init.lua).
+    // SHA-256 c47bb7d01a4ebfbc13800c80a7c9c9605f133c638fbb68fb68d3d561b8e28dde
+    [
+        196, 123, 183, 208, 26, 78, 191, 188, 19, 128, 12, 128, 167, 201, 201, 96, 95, 19, 60, 99,
+        143, 187, 104, 251, 104, 211, 213, 97, 184, 226, 141, 222,
+    ],
 ];
 
 fn is_unmodified_canonical_config(existing: &str) -> bool {

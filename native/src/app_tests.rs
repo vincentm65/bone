@@ -288,6 +288,67 @@ fn autocomplete_has_plain_arrow_precedence_over_agent_navigation() {
 }
 
 #[test]
+fn autocomplete_escape_stays_dismissed_until_the_draft_changes() {
+    for busy in [false, true] {
+        let (mut app, ctx, mut rx) = app();
+        app.session_mut().composer = "/h".into();
+        app.session_mut().state.busy = busy;
+        render_frame(&mut app, &ctx, Vec::new());
+        assert!(app.session().autocomplete_open());
+        assert!(ctx.memory(|memory| memory.has_focus(editor_id(app.session().id))));
+
+        render_frame(
+            &mut app,
+            &ctx,
+            vec![key_event(egui::Key::Escape, egui::Modifiers::NONE)],
+        );
+        assert!(
+            !app.session().autocomplete_open(),
+            "Esc must close this frame"
+        );
+        for _ in 0..3 {
+            render_frame(&mut app, &ctx, Vec::new());
+            assert!(
+                !app.session().autocomplete_open(),
+                "idle refresh must not reopen"
+            );
+        }
+        assert_eq!(app.session().composer, "/h");
+        assert!(ctx.memory(|memory| memory.has_focus(editor_id(app.session().id))));
+        assert!(
+            !sent(&mut rx)
+                .iter()
+                .any(|command| matches!(command, RuntimeCommand::Cancel))
+        );
+
+        render_frame(&mut app, &ctx, vec![egui::Event::Text("e".into())]);
+        assert_eq!(app.session().composer, "/he");
+        assert!(
+            app.session().autocomplete_open(),
+            "editing reopens suggestions"
+        );
+    }
+}
+
+#[test]
+fn autocomplete_tab_acceptance_stays_closed() {
+    let (mut app, ctx, _rx) = app();
+    app.session_mut().composer = "/he".into();
+    render_frame(&mut app, &ctx, Vec::new());
+    render_frame(
+        &mut app,
+        &ctx,
+        vec![key_event(egui::Key::Tab, egui::Modifiers::NONE)],
+    );
+    assert_eq!(app.session().composer, "/help");
+    render_frame(&mut app, &ctx, Vec::new());
+    assert!(
+        !app.session().autocomplete_open(),
+        "Tab acceptance closes the list"
+    );
+}
+
+#[test]
 fn editing_clears_agent_focus_and_only_focused_lists_highlight_selection() {
     let (mut app, ctx, _rx) = app();
     {
@@ -384,6 +445,42 @@ fn config_and_provider_menus_run_the_lua_config_command() {
             ("config".to_string(), String::new()),
             ("config".to_string(), "providers".to_string())
         ]
+    );
+}
+
+#[test]
+fn provider_switch_is_idempotent_and_reports_only_the_request() {
+    let (mut session, mut rx) = session();
+    session.state.snapshot.provider_id = "openai".into();
+
+    run(&mut session, "/provider openai");
+    assert!(sent(&mut rx).is_empty(), "current provider needs no switch");
+    assert_eq!(
+        session.state.rows.last().map(|(_, text)| text.as_str()),
+        Some("Already using provider openai.")
+    );
+
+    run(&mut session, "/provider anthropic");
+    assert!(matches!(
+        sent(&mut rx).as_slice(),
+        [RuntimeCommand::SwitchProvider { provider_id }] if provider_id == "anthropic"
+    ));
+    assert_eq!(
+        session.state.rows.last().map(|(_, text)| text.as_str()),
+        Some("Requested provider anthropic.")
+    );
+
+    session.state.snapshot.provider_id = "anthropic".into();
+    let reply = session.apply_command_action(CommandAction {
+        config_action: Some(ConfigAction::SwitchProvider {
+            id: "anthropic".into(),
+        }),
+        ..Default::default()
+    });
+    assert_eq!(reply.as_deref(), Some("Already using provider anthropic."));
+    assert!(
+        sent(&mut rx).is_empty(),
+        "config action also avoids a duplicate"
     );
 }
 
