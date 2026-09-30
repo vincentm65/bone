@@ -1110,7 +1110,7 @@ fn narrow_windows_stack_panes_even_when_a_side_split_is_asked_for() {
 }
 
 #[test]
-fn narrow_pane_actions_menu_closes_the_tab_without_a_split_item() {
+fn narrow_tab_strip_has_no_actions_menu_and_x_closes_tab() {
     let ctx = egui::Context::default();
     let mut app = DesktopApp::open(ctx.clone(), true);
     render_at(&mut app, &ctx, 400.0, Vec::new());
@@ -1122,18 +1122,14 @@ fn narrow_pane_actions_menu_closes_the_tab_without_a_split_item() {
     );
     assert_eq!(app.tabs.len(), 2, "a second tab to close");
     let output = render_at(&mut app, &ctx, 400.0, Vec::new());
-    let menu = text_pos(&output, "\u{22ee}").expect("pane actions menu in the tab row");
-    tap_at(&mut app, &ctx, 400.0, menu + egui::vec2(4.0, 4.0));
-
-    let output = render_at(&mut app, &ctx, 400.0, Vec::new());
     assert!(
-        text_pos(&output, "Split below").is_none(),
-        "the phone menu no longer offers a split button"
+        text_pos(&output, "\u{22ee}").is_none(),
+        "the phone tab strip has no redundant actions menu"
     );
-    let close = text_pos(&output, "Close tab").expect("close item");
+    let close = text_pos(&output, "×").expect("tab close button");
     tap_at(&mut app, &ctx, 400.0, close + egui::vec2(4.0, 4.0));
 
-    assert_eq!(app.tabs.len(), 1, "the menu still closes the tab");
+    assert_eq!(app.tabs.len(), 1, "the tab close button closes the tab");
     assert_eq!(app.layout.leaves().len(), 1, "and never splits");
 }
 

@@ -3760,27 +3760,8 @@ impl DesktopApp {
         }
         ui.horizontal(|ui| {
             self.sidebar_button(ui);
-            if self.narrow {
-                self.actions_menu(ui, pane);
-            }
             self.tab_strip_body(ui, pane);
         });
-    }
-
-    /// Narrow windows only: the tab context menu needs a right-click, which a
-    /// touch screen does not have, so closing a tab gets a ⋮ menu here.
-    fn actions_menu(&mut self, ui: &mut egui::Ui, pane: layout::PaneId) {
-        let muted = ui.visuals().weak_text_color();
-        ui.menu_button(egui::RichText::new("\u{22ee}").color(muted), |ui| {
-            if ui.button("Close tab").clicked() {
-                if let Some(index) = self.pane_tab_index(pane) {
-                    self.close_tab(index);
-                }
-                ui.close();
-            }
-        })
-        .response
-        .on_hover_text("Pane actions");
     }
 
     fn tab_strip_body(&mut self, ui: &mut egui::Ui, pane: layout::PaneId) {

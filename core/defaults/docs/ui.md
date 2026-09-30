@@ -67,8 +67,8 @@ cancellation are scoped to the attached conversation.
   Drag a tab to another pane, or onto a pane edge to split, to move it; drag
   dividers to resize. A narrow window has no room for side-by-side panes, so it
   always stacks: any split becomes a full-width pane above another, and dragging
-  a tab onto a pane edge splits there too. Its tab strip's ⋮ menu only offers
-  Close tab, because a touch screen has no right-click.
+  a tab onto a pane edge splits there too. Every tab strip keeps its × close
+  control visible, including on touch screens.
   A new chat, including one created by `/new`, remains ephemeral until its first
   real prompt is submitted; empty chats are not written to SQLite and do not
   appear in history or the sidebar. Persistence and lifecycle remain daemon-owned.
@@ -133,8 +133,7 @@ cancellation are scoped to the attached conversation.
   Approval choices are tappable. On touch screens a Stop button ends the input
   row while a turn runs, Android Back acts as Esc, and the on-screen keyboard
   stays up while a menu takes keys. The tab strip's ☰ toggle opens the
-  conversation drawer without a keyboard, and its ⋮ menu closes the tab where a
-  right-click cannot reach. The composer frame follows
+  conversation drawer without a keyboard. The composer frame follows
   `ui.input.preset` (`lines`, `box`, `filled`) with its padding and `fill`.
 
 ## Command and event boundary
