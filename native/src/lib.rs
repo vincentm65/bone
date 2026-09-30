@@ -4557,18 +4557,10 @@ impl DesktopApp {
         // One leaf fills the window however it was split; more than one draws
         // the pane grid (narrow windows only ever stack their panes).
         let multi = self.layout.leaves().len() > 1;
-        if !multi {
-            egui::Panel::top("tabs")
-                .frame(side)
-                .show_separator_line(false)
-                .show(ui, |ui| {
-                    let pane = self.layout.focused;
-                    self.tab_strip(ui, pane, true);
-                });
-        }
         let sidebar_frame = egui::Frame::new()
             .fill(ui.visuals().window_fill)
             .inner_margin(12);
+        // On a narrow window the open drawer replaces the tab strip entirely.
         if sidebar && self.narrow {
             egui::CentralPanel::default()
                 .frame(sidebar_frame)
@@ -4576,6 +4568,8 @@ impl DesktopApp {
             self.sidebar_dialogs(&ctx);
             return;
         }
+        // Lay out the history sidebar before the tab strip so the tabs occupy
+        // only the main content area instead of extending over the sidebar.
         if sidebar {
             egui::Panel::left("history")
                 .frame(sidebar_frame)
@@ -4584,6 +4578,15 @@ impl DesktopApp {
                 .min_size(180.0)
                 .max_size(480.0)
                 .show(ui, |ui| self.sidebar(ui, false));
+        }
+        if !multi {
+            egui::Panel::top("tabs")
+                .frame(side)
+                .show_separator_line(false)
+                .show(ui, |ui| {
+                    let pane = self.layout.focused;
+                    self.tab_strip(ui, pane, true);
+                });
         }
         self.sidebar_dialogs(&ctx);
 

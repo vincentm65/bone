@@ -1103,6 +1103,11 @@ fn ctrl_b_collapses_and_restores_the_sidebar_on_wide_windows() {
         text_top(&output, "sidebar chat").is_some(),
         "wide windows start with the sidebar"
     );
+    let tab = text_pos(&output, "Show me a Markdown sample").expect("chat tab");
+    assert!(
+        tab.x >= SIDEBAR_WIDTH,
+        "tab strip starts after the sidebar: {tab:?}"
+    );
 
     let ctrl_b = key_event(egui::Key::B, egui::Modifiers::COMMAND);
     render_at(&mut app, &ctx, 1000.0, vec![ctrl_b.clone()]);

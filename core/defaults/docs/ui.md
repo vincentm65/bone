@@ -46,6 +46,9 @@ cancellation are scoped to the attached conversation.
 - The desktop mirrors the TUI: a resizable conversation-history sidebar, a tab bar,
   then the transcript, the input, the live pane, and a one-row status bar. Chat
   tabs each own a daemon session; page tabs host the TUI's full-screen pages.
+  The open desktop sidebar reserves its width before the tab strip; on narrow or
+  touch windows, an open conversation drawer replaces the tab strip until it is
+  closed.
   Sidebar rows mirror `/history`: the title, then a relative timestamp with
   message and token counts; the tooltip carries the full `/history`
   description line (`ConversationMeta.status` / `token_count`). A spinner marks
