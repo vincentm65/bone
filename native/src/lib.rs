@@ -4004,6 +4004,12 @@ impl DesktopApp {
         // drag into a tab drag. Click-only on touch keeps taps selecting while
         // dragging the strip scrolls it (see `transcript.rs` for the same gate).
         let touch = self.touch;
+        if touch {
+            // A finger low on a tab lands in the floating bar's full-width hit
+            // strip, which swells the bar and steals the tap. Keep it thin.
+            let scroll = &mut ui.spacing_mut().scroll;
+            scroll.bar_width = scroll.floating_width;
+        }
         let spinner = status_bar::indicator_style(self.settings());
         let titles: Vec<(usize, String, bool, bool)> = self
             .tabs
