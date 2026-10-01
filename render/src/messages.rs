@@ -946,7 +946,7 @@ fn pad_to_terminal_width(line: &str, terminal_width: usize) -> String {
     format!("{line}{}", " ".repeat(pad))
 }
 
-fn truncate_to_display_width(text: &str, max_width: usize) -> String {
+pub(crate) fn truncate_to_display_width(text: &str, max_width: usize) -> String {
     let mut fitted = String::new();
     let mut used = 0;
 

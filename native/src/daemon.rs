@@ -19,6 +19,13 @@ pub const MAX_DAEMON_RETRIES: u32 = 10;
 
 /// Delay between automatic reconnect rounds while the daemon boots.
 pub const DAEMON_RETRY_DELAY_MS: u64 = 600;
+/// Delay between the daemon spawn and the first reconnect round; the daemon
+/// accepts within ~50ms of spawn, so the first retry is nearly immediate.
+pub const DAEMON_FIRST_RETRY_DELAY_MS: u64 = 50;
+
+/// Maximum times a wedged (accepted TCP, never answered) daemon we spawned is
+/// killed and respawned before the coordinator gives up.
+pub const MAX_WEDGED_RESPAWNS: u32 = 3;
 
 /// Maximum automatic reconnect rounds after a mid-session drop before the
 /// coordinator gives up and defers to the Server dialog.
@@ -97,6 +104,13 @@ const REMOTE_DISABLED: &str = "Direct remote connections are disabled: Bone TCP 
 /// only case where auto-starting a local daemon makes sense.
 pub fn is_refused(reason: &str) -> bool {
     reason.contains("refused")
+}
+/// Classify a connect-failure reason string produced by the socket worker.
+/// `true` when the daemon accepted the connection but never sent its first
+/// attach event: it is wedged, and a client that spawned it can kill and
+/// respawn it.
+pub fn is_wedged(reason: &str) -> bool {
+    reason.contains("did not reach the daemon")
 }
 
 /// Classify a `Disconnected` reason: `true` when an already-established session
@@ -257,6 +271,19 @@ mod tests {
             "Connect failed: connection timed out after 10 seconds"
         ));
         assert!(!is_refused("Disconnected"));
+    }
+#[test]
+    fn wedged_classification() {
+        assert!(is_wedged(
+            "Connect failed: 127.0.0.1:7878 did not reach the daemon within 10 seconds"
+        ));
+        assert!(is_wedged(
+            "Connect failed: ssh: devbox did not reach the daemon within 30 seconds"
+        ));
+        assert!(!is_wedged(
+            "Connect failed: Connection refused (os error 111)"
+        ));
+        assert!(!is_wedged("Disconnected"));
     }
 
     #[test]

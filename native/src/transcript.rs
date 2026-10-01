@@ -26,6 +26,9 @@ pub(crate) struct Cache {
     expand_all: bool,
     /// Mouse selection over the flattened lines, for copying.
     selection: Option<Selection>,
+    /// The word a touch long press selected while that finger stays down;
+    /// dragging then extends the selection from it instead of scrolling.
+    touch_anchor: Option<Selection>,
 }
 
 impl Cache {
@@ -36,6 +39,7 @@ impl Cache {
             expanded: Vec::new(),
             expand_all: false,
             selection: None,
+            touch_anchor: None,
         }
     }
 
@@ -94,11 +98,14 @@ impl Cache {
         let metrics = grid::metrics(ui);
         let (row_height, cell) = (metrics.row_height, metrics.cell);
         let scrollbar = ui.spacing().scroll.bar_width + ui.spacing().scroll.bar_inner_margin;
-        let cols = (((ui.available_width() - scrollbar) / cell).floor() as u16).max(20);
+        // No 20-column floor: the ScrollArea is vertical-only, so laying out
+        // wider than the pane would clip text. 1 keeps the buffer non-empty.
+        let cols = (((ui.available_width() - scrollbar) / cell).floor() as u16).max(1);
         if cols != self.cols {
             self.cols = cols;
             self.invalidate();
             self.selection = None;
+            self.touch_anchor = None;
         }
         for i in 0..rows.len() {
             self.layout(i, rows, cards, displays, theme);
@@ -116,138 +123,176 @@ impl Cache {
         let default_fg = ui.visuals().text_color();
         let mut toggled = None;
         let mut selection = self.selection;
+        let mut touch_anchor = self.touch_anchor;
         let cols = self.cols;
-        let mut output = egui::ScrollArea::vertical()
+        let mut area = egui::ScrollArea::vertical()
             .id_salt("transcript")
             .auto_shrink([false, false])
-            .stick_to_bottom(stick_to_bottom)
-            .show_viewport(ui, |ui, viewport| {
-                ui.set_height(total);
-                ui.set_width(ui.available_width());
-                let origin = ui.max_rect().min;
-                let total_lines = (total / row_height).round() as usize;
-                let locate = |pos: egui::Pos2| -> (usize, u16) {
-                    let line = (((pos.y - origin.y) / row_height).floor().max(0.0) as usize)
-                        .min(total_lines.saturating_sub(1));
-                    let col = (((pos.x - origin.x) / cell).round().max(0.0) as u16).min(cols);
-                    (line, col)
-                };
-                let row_at = |line: usize| -> Option<usize> {
-                    let y = line as f32 * row_height + row_height / 2.0;
-                    tops.partition_point(|top| *top <= y).checked_sub(1)
-                };
-                // First flattened line of row `i`.
-                let row_line = |i: usize| (tops[i] / row_height).round() as usize;
-                let tool_row_at = |line: usize| -> Option<usize> {
-                    let i = row_at(line)?;
-                    (rows[i].0.starts_with("tool:") && !self.lines[i].as_deref()?.is_empty())
-                        .then_some(i)
-                };
-                // On a touch screen the viewport only senses clicks: a click
-                // widget that senses drags would win the hit test against the
-                // scroll area below it, turning every touch drag into a
-                // selection. Click-only keeps dragging where it belongs.
-                let touch = ui.input(|input| input.has_touch_screen());
-                let hit = if touch {
-                    egui::Rect::from_min_size(origin, ui.max_rect().size())
-                } else {
-                    egui::Rect::from_min_size(origin, egui::vec2(ui.max_rect().width(), total))
-                };
-                let response = ui.interact(
-                    hit,
-                    ui.id().with("transcript-select"),
-                    if touch {
-                        egui::Sense::click()
-                    } else {
-                        egui::Sense::click_and_drag()
-                    },
-                );
-                if let Some(pos) = response.hover_pos() {
-                    ui.ctx()
-                        .set_cursor_icon(if tool_row_at(locate(pos).0).is_some() {
-                            egui::CursorIcon::PointingHand
-                        } else {
-                            egui::CursorIcon::Text
-                        });
-                }
-                let long_touched = response.long_touched();
-                if long_touched {
-                    // Long press on a touch screen: select the word under the
-                    // finger, and offer Copy in the context menu below.
-                    selection = response.interact_pointer_pos().and_then(|pos| {
-                        let at = locate(pos);
-                        let i = row_at(at.0)?;
-                        let offset = at.0.checked_sub(row_line(i))?;
-                        let line = self.lines[i].as_deref()?.get(offset)?;
-                        let (from, to) = word_span(line, at.1);
-                        (to > from).then_some(((at.0, from), (at.0, to)))
-                    });
-                } else if let Some(pos) = response.interact_pointer_pos() {
-                    if response.drag_started() {
-                        selection = Some((locate(pos), locate(pos)));
-                    } else if response.dragged()
-                        && let Some((anchor, _)) = selection
-                    {
-                        selection = Some((anchor, locate(pos)));
-                    }
-                    if response.clicked() {
-                        selection = None;
-                        toggled = tool_row_at(locate(pos).0);
-                    }
-                }
-                let sel = selection.map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
-                let mut copy = false;
-                if touch {
-                    response.context_menu(|ui| {
-                        if ui.button("Copy").clicked() {
-                            copy = true;
-                            ui.close();
-                        }
-                    });
-                }
-                let shortcut =
-                    ui.input(|input| input.events.iter().any(|e| matches!(e, egui::Event::Copy)));
-                if let Some((start, end)) = sel
-                    && (copy || shortcut)
-                {
-                    let flat: Vec<&TermRow> = self
-                        .lines
-                        .iter()
-                        .flat_map(|lines| lines.as_deref().unwrap_or_default().iter())
-                        .collect();
-                    ui.ctx().copy_text(selected_text(&flat, start, end));
-                    ui.input_mut(|input| input.events.retain(|e| !matches!(e, egui::Event::Copy)));
-                }
-                let first = tops.partition_point(|top| *top + row_height <= viewport.min.y);
-                for (i, &top) in tops.iter().enumerate().skip(first.saturating_sub(1)) {
-                    if top > viewport.max.y {
-                        break;
-                    }
-                    let lines = self.lines[i].as_deref().unwrap_or_default();
-                    for (n, line) in lines.iter().enumerate() {
-                        let y = origin.y + top + n as f32 * row_height;
-                        let rect = egui::Rect::from_min_size(
-                            egui::pos2(origin.x, y),
-                            egui::vec2(ui.max_rect().width(), row_height),
-                        );
-                        let g = (top / row_height).round() as usize + n;
-                        if let Some((start, end)) = sel
-                            && let Some((from, to)) = selected_span(g, start, end, cols)
-                        {
-                            ui.painter().rect_filled(
-                                egui::Rect::from_min_max(
-                                    egui::pos2(origin.x + from as f32 * cell, y),
-                                    egui::pos2(origin.x + to as f32 * cell, y + row_height),
-                                ),
-                                0.0,
-                                ui.visuals().selection.bg_fill,
-                            );
-                        }
-                        grid::paint_row(ui, rect, &metrics, line, default_fg);
-                    }
-                }
+            .stick_to_bottom(stick_to_bottom);
+        if touch_anchor.is_some() {
+            // A finger extending a selection must not also scroll the view.
+            area = area.scroll_source(egui::scroll_area::ScrollSource {
+                drag: egui::scroll_area::ScrollSource::NONE.drag,
+                ..Default::default()
             });
+        }
+        let mut output = area.show_viewport(ui, |ui, viewport| {
+            ui.set_height(total);
+            ui.set_width(ui.available_width());
+            let origin = ui.max_rect().min;
+            let total_lines = (total / row_height).round() as usize;
+            let locate = |pos: egui::Pos2| -> (usize, u16) {
+                let line = (((pos.y - origin.y) / row_height).floor().max(0.0) as usize)
+                    .min(total_lines.saturating_sub(1));
+                let col = (((pos.x - origin.x) / cell).round().max(0.0) as u16).min(cols);
+                (line, col)
+            };
+            // The cell under a point (long press). `locate` instead snaps
+            // to the nearest boundary between cells, which suits dragging.
+            let cell_at = |pos: egui::Pos2| -> (usize, u16) {
+                let col = ((pos.x - origin.x) / cell).floor().max(0.0) as u16;
+                (locate(pos).0, col.min(cols.saturating_sub(1)))
+            };
+            let row_at = |line: usize| -> Option<usize> {
+                let y = line as f32 * row_height + row_height / 2.0;
+                tops.partition_point(|top| *top <= y).checked_sub(1)
+            };
+            // First flattened line of row `i`.
+            let row_line = |i: usize| (tops[i] / row_height).round() as usize;
+            let tool_row_at = |line: usize| -> Option<usize> {
+                let i = row_at(line)?;
+                (rows[i].0.starts_with("tool:") && !self.lines[i].as_deref()?.is_empty())
+                    .then_some(i)
+            };
+            // On a touch screen the viewport only senses clicks: a click
+            // widget that senses drags would win the hit test against the
+            // scroll area below it, turning every touch drag into a
+            // selection. Click-only keeps dragging where it belongs.
+            let touch = ui.input(|input| input.has_touch_screen());
+            let hit = if touch {
+                egui::Rect::from_min_size(origin, ui.max_rect().size())
+            } else {
+                egui::Rect::from_min_size(origin, egui::vec2(ui.max_rect().width(), total))
+            };
+            let response = ui.interact(
+                hit,
+                ui.id().with("transcript-select"),
+                if touch {
+                    egui::Sense::click()
+                } else {
+                    egui::Sense::click_and_drag()
+                },
+            );
+            if let Some(pos) = response.hover_pos() {
+                ui.ctx()
+                    .set_cursor_icon(if tool_row_at(locate(pos).0).is_some() {
+                        egui::CursorIcon::PointingHand
+                    } else {
+                        egui::CursorIcon::Text
+                    });
+            }
+            let long_touched = response.long_touched();
+            if long_touched && touch_anchor.is_none() {
+                // Long press on a touch screen: select the word under the
+                // finger; keep holding and drag to extend it. Copy is
+                // offered in the context menu below.
+                selection = response.interact_pointer_pos().and_then(|pos| {
+                    let at = cell_at(pos);
+                    let i = row_at(at.0)?;
+                    let offset = at.0.checked_sub(row_line(i))?;
+                    let line = self.lines[i].as_deref()?.get(offset)?;
+                    let (from, to) = word_span(line, at.1);
+                    (to > from).then_some(((at.0, from), (at.0, to)))
+                });
+                touch_anchor = selection;
+            } else if let Some((word_start, word_end)) = touch_anchor {
+                let (down, pos) =
+                    ui.input(|input| (input.pointer.primary_down(), input.pointer.interact_pos()));
+                match pos.filter(|_| down) {
+                    Some(pos) => {
+                        let at = locate(pos);
+                        selection = Some(if at < word_start {
+                            (word_end, at)
+                        } else {
+                            (word_start, at.max(word_end))
+                        });
+                    }
+                    None => touch_anchor = None,
+                }
+            } else if let Some(pos) = response.interact_pointer_pos() {
+                if response.drag_started() {
+                    selection = Some((locate(pos), locate(pos)));
+                } else if response.dragged()
+                    && let Some((anchor, _)) = selection
+                {
+                    selection = Some((anchor, locate(pos)));
+                }
+                if response.clicked() {
+                    selection = None;
+                    toggled = tool_row_at(locate(pos).0);
+                }
+            }
+            let sel = selection.map(|(a, b)| if a <= b { (a, b) } else { (b, a) });
+            let mut copy = false;
+            if touch {
+                response.context_menu(|ui| {
+                    if ui.button("Copy").clicked() {
+                        copy = true;
+                        ui.close();
+                    }
+                });
+            }
+            // A focused text field with its own selection (the composer)
+            // copies that on Ctrl+C; copying here too would overwrite it.
+            let field_selection = ui
+                .memory(|memory| memory.focused())
+                .and_then(|id| egui::text_edit::TextEditState::load(ui.ctx(), id))
+                .and_then(|state| state.cursor.char_range())
+                .is_some_and(|range| range.primary.index != range.secondary.index);
+            let shortcut = !field_selection
+                && ui.input(|input| input.events.iter().any(|e| matches!(e, egui::Event::Copy)));
+            if let Some((start, end)) = sel
+                && (copy || shortcut)
+            {
+                let flat: Vec<&TermRow> = self
+                    .lines
+                    .iter()
+                    .flat_map(|lines| lines.as_deref().unwrap_or_default().iter())
+                    .collect();
+                ui.ctx().copy_text(selected_text(&flat, start, end));
+                ui.input_mut(|input| input.events.retain(|e| !matches!(e, egui::Event::Copy)));
+            }
+            let first = tops.partition_point(|top| *top + row_height <= viewport.min.y);
+            for (i, &top) in tops.iter().enumerate().skip(first.saturating_sub(1)) {
+                if top > viewport.max.y {
+                    break;
+                }
+                let lines = self.lines[i].as_deref().unwrap_or_default();
+                for (n, line) in lines.iter().enumerate() {
+                    let y = origin.y + top + n as f32 * row_height;
+                    let rect = egui::Rect::from_min_size(
+                        egui::pos2(origin.x, y),
+                        egui::vec2(ui.max_rect().width(), row_height),
+                    );
+                    let g = (top / row_height).round() as usize + n;
+                    if let Some((start, end)) = sel
+                        && let Some((from, to)) = selected_span(g, start, end, cols)
+                    {
+                        ui.painter().rect_filled(
+                            egui::Rect::from_min_max(
+                                egui::pos2(origin.x + from as f32 * cell, y),
+                                egui::pos2(origin.x + to as f32 * cell, y + row_height),
+                            ),
+                            0.0,
+                            ui.visuals().selection.bg_fill,
+                        );
+                    }
+                    grid::paint_row(ui, rect, &metrics, line, default_fg);
+                }
+            }
+        });
         self.selection = selection;
+        self.touch_anchor = touch_anchor;
         if let Some(i) = toggled {
             self.expanded[i] = !self.expanded[i];
             self.lines[i] = None;
@@ -558,6 +603,38 @@ mod tests {
             .flat_map(|row| row.iter().map(|run| run.text.clone()))
             .collect();
         assert!(text.contains("Title") && text.contains("bold"), "{text}");
+    }
+
+    #[test]
+    fn narrow_panes_lay_out_without_panicking() {
+        let rows = [
+            (
+                "user".to_string(),
+                "hello there, a longish prompt".to_string(),
+            ),
+            (
+                "assistant".to_string(),
+                "# Title\n\n- **bold** `code`\n\n```rs\nfn x() {}\n```".to_string(),
+            ),
+            ("tool: shell".to_string(), "line one\nline two".to_string()),
+            ("system".to_string(), "note".to_string()),
+        ];
+        let shell = card(
+            "shell",
+            serde_json::json!({"command": "ls -la"}),
+            ToolState::Done,
+        );
+        let cards = [None, None, shell, None];
+        let displays = HashMap::new();
+        let theme = Theme::default();
+        for cols in 1..=8u16 {
+            for (i, row) in rows.iter().enumerate() {
+                if let Some(message) = row_message(row, cards[i].as_ref(), &displays) {
+                    let lines = messages::msg_to_lines(&[message], &theme, None, cols, false);
+                    terminal_rows(&lines, cols, &theme);
+                }
+            }
+        }
     }
 
     /// Clicking a tool row must leave the scroll offset valid for the new
@@ -876,6 +953,41 @@ mod tests {
         assert_eq!(start, (line, col), "the word is selected in place");
         assert_eq!(end.0, line);
         assert_eq!(h.selected(), "hello");
+    }
+
+    /// Holding after a long press and dragging extends the selection past
+    /// the first word, and the finger does not scroll meanwhile.
+    #[test]
+    fn a_long_press_then_drag_extends_the_selection() {
+        let mut h = Harness::new(
+            vec![("user".to_string(), "hello brave world".to_string())],
+            vec![None],
+        );
+        h.frame(
+            0.0,
+            touch_events(egui::TouchPhase::Start, egui::pos2(10.0, 10.0)),
+        );
+        let warm = h.frame(
+            0.05,
+            touch_events(egui::TouchPhase::End, egui::pos2(10.0, 10.0)),
+        );
+        let (line, col) = cell_of(&h.cache, "hello");
+        let at = h.cell_pos(&warm, line, col);
+        h.frame(0.1, touch_events(egui::TouchPhase::Start, at));
+        for step in 1..=20 {
+            h.frame(
+                0.1 + 0.05 * f64::from(step),
+                touch_events(egui::TouchPhase::Move, at),
+            );
+        }
+        assert_eq!(h.selected(), "hello");
+        let (_, world) = cell_of(&h.cache, "world");
+        let to = h.cell_pos(&warm, line, world + 4);
+        h.frame(1.2, touch_events(egui::TouchPhase::Move, to));
+        let released = h.frame(1.25, touch_events(egui::TouchPhase::End, to));
+        assert_eq!(h.selected(), "hello brave world");
+        assert_eq!(released.state.offset.y, 0.0, "extending must not scroll");
+        assert!(h.cache.touch_anchor.is_none(), "lifting the finger ends it");
     }
 
     /// Tapping a tool row still expands it on a touch screen.

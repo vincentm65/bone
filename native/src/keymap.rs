@@ -55,14 +55,14 @@ impl Keymap {
         Self { bindings }
     }
 
-    /// First binding whose key string matches `(key, modifiers)`, mirroring the
-    /// TUI's first-match `lookup_keymap` ordering. Test-only helper: the
-    /// desktop client matches bindings via `input.consume_key` in `main.rs`.
+    /// First binding whose key string matches `(key, modifiers)` exactly,
+    /// mirroring the TUI's first-match `lookup_keymap` ordering. Test-only
+    /// helper: the desktop client matches bindings via [`consume_exact`].
     #[cfg(test)]
     pub fn lookup(&self, key: egui::Key, modifiers: egui::Modifiers) -> Option<&str> {
         self.bindings.iter().find_map(|binding| {
             let (expected_mods, expected_key) = parse_key(&binding.key)?;
-            (expected_key == key && modifiers.matches_logically(expected_mods))
+            (expected_key == key && modifiers.matches_exact(expected_mods))
                 .then_some(binding.action.as_str())
         })
     }
@@ -87,13 +87,32 @@ pub fn parse_key(key_str: &str) -> Option<(egui::Modifiers, egui::Key)> {
                 "C" | "Ctrl" | "CTRL" => modifiers.ctrl = true,
                 "S" | "Shift" | "SHIFT" => modifiers.shift = true,
                 "A" | "Alt" | "ALT" => modifiers.alt = true,
-                _ => {}
+                _ => return None,
             }
         }
     }
 
     let key = named_key(key_part).or_else(|| single_char_key(key_part))?;
     Some((modifiers, key))
+}
+
+/// Consume a pressed `key` event whose modifiers match `modifiers` exactly,
+/// like the TUI's `key_matches`. `InputState::consume_key` matches logically,
+/// so `<C-p>` would also swallow Ctrl+Shift+P.
+pub fn consume_exact(
+    input: &mut egui::InputState,
+    modifiers: egui::Modifiers,
+    key: egui::Key,
+) -> bool {
+    let before = input.events.len();
+    input.events.retain(|event| {
+        !matches!(
+            event,
+            egui::Event::Key { key: ev_key, pressed: true, modifiers: ev_mods, .. }
+                if *ev_key == key && ev_mods.matches_exact(modifiers)
+        )
+    });
+    input.events.len() != before
 }
 
 /// Named (multi-character) keys, matching the TUI's `key_matches` table.
@@ -299,6 +318,8 @@ mod tests {
         assert_eq!(key, egui::Key::F5);
 
         assert!(parse_key("<C-NotAKey>").is_none());
+        // Unknown modifiers reject the binding instead of binding a bare key.
+        assert!(parse_key("<X-p>").is_none());
         assert!(parse_key("").is_none());
     }
 
@@ -330,5 +351,22 @@ mod tests {
         );
         // No binding for a bare `p`; the ctrl pattern must not match it.
         assert_eq!(keymap.lookup(egui::Key::P, egui::Modifiers::NONE), None);
+        // Extra modifiers must not trigger a narrower binding.
+        assert_eq!(
+            keymap.lookup(egui::Key::P, egui::Modifiers::CTRL | egui::Modifiers::SHIFT),
+            None
+        );
+        // Linux Ctrl sets both `ctrl` and `command`; that still matches `<C-p>`.
+        assert_eq!(
+            keymap.lookup(
+                egui::Key::P,
+                egui::Modifiers {
+                    ctrl: true,
+                    command: true,
+                    ..egui::Modifiers::NONE
+                }
+            ),
+            Some("toggle_panes")
+        );
     }
 }

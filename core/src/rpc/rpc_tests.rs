@@ -425,6 +425,63 @@ async fn append_message_allocates_and_persists_an_ephemeral_session() {
     assert_eq!(stored[0].content, content);
 }
 
+#[allow(clippy::await_holding_lock)]
+#[tokio::test(flavor = "current_thread")]
+async fn first_prompt_publishes_lazy_conversation_id_before_turn() {
+    let _guard = crate::util::test_env_lock();
+    let temp = tempfile::tempdir().unwrap();
+    let db = crate::session_db::SessionDb::open(&temp.path().join("sessions.db")).unwrap();
+    let mut session = crate::runtime::RuntimeSession::new(
+        crate::tools::registry::ToolHandler::new(crate::tools::builtin_tools()),
+    );
+    session.session_db = Some(db);
+
+    let (mut ctx, hub, mut commands) = test_daemon_ctx(
+        Arc::new(NamedTestProvider {
+            id: "test",
+            model: "test-model",
+        }),
+        crate::ext::ExtensionManager::unloaded(),
+        session,
+    );
+    let mut events = hub.subscribe();
+    let flow = ctx
+        .handle_idle_command(
+            RuntimeCommand::SubmitPrompt {
+                request_id: None,
+                text: "first prompt".into(),
+                images: Vec::new(),
+            },
+            &mut commands,
+        )
+        .await;
+    assert!(matches!(flow, Flow::StartTurn { .. }));
+
+    let RuntimeEvent::StateSnapshot { snapshot } = events.try_recv().unwrap() else {
+        panic!("lazy prompt did not publish its new conversation id");
+    };
+    let conversation_id = snapshot
+        .conversation_id
+        .expect("first prompt should allocate a conversation");
+    assert_eq!(
+        ctx.session.lock().unwrap().conversation_id,
+        Some(conversation_id)
+    );
+    let history = ctx
+        .session
+        .lock()
+        .unwrap()
+        .session_db
+        .as_ref()
+        .unwrap()
+        .recent_conversations(10)
+        .unwrap();
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].id, conversation_id);
+    assert_eq!(history[0].title, "first prompt");
+    assert!(events.try_recv().is_err(), "turn events must start later");
+}
+
 fn test_daemon_ctx(
     llm: Arc<dyn crate::llm::provider::LlmProvider>,
     extensions: crate::ext::ExtensionManager,

@@ -675,6 +675,8 @@ version = "2.4.5"
 dependencies = [
  "bone-desktop",
  "eframe",
+ "jni",
+ "ndk-context",
  "russh",
  "serde_json",
  "tokio",

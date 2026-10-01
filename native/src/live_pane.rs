@@ -208,7 +208,7 @@ impl LivePane {
         let live = sources.thinking.filter(|text| !text.trim().is_empty());
         let held = Some(self.held_thinking.as_str()).filter(|text| !text.trim().is_empty());
         if let Some(text) = live.or(held) {
-            let cols = usize::from(self.cols).max(20);
+            let cols = usize::from(self.cols).max(1);
             pages.push(Page::plain(panes::thinking_fixed(
                 text,
                 cols,
@@ -360,7 +360,15 @@ impl LivePane {
             }
         }
         let content = &page.page.content;
-        let rows = panes::clamped_pane_visible_rows(page.page.visible_rows);
+        let metrics = grid::metrics(ui);
+        let cell = metrics.cell;
+        // Never taller than half the window: a short window (or a phone with
+        // its keyboard up) would otherwise clip the last rows, where menus
+        // keep their footers and hints. The rest scrolls.
+        let fit = (ui.ctx().content_rect().height() * 0.5 / metrics.row_height)
+            .floor()
+            .max(3.0) as usize;
+        let rows = panes::clamped_pane_visible_rows(page.page.visible_rows).min(fit);
         let client = self.scroll.get(&page.page.source).copied().unwrap_or(0);
         let max_start = content.len().saturating_sub(rows);
         let start = ((page.page.scroll as i64 + client).max(0) as usize).min(max_start);
@@ -369,8 +377,6 @@ impl LivePane {
             start as i64 - page.page.scroll as i64,
         );
         let end = (start + rows).min(content.len());
-        let metrics = grid::metrics(ui);
-        let cell = metrics.cell;
         let cols = ((ui.available_width() / cell).floor() as usize).max(1);
         let widest = content.iter().map(Line::width).max().unwrap_or(0);
         let max_hscroll = widest.saturating_sub(cols) as f32;
@@ -382,16 +388,35 @@ impl LivePane {
                 (end - start) as f32 * metrics.row_height,
             ),
         );
-        if max_hscroll > 0.0 {
+        let scrollable = content.len() > rows;
+        if max_hscroll > 0.0 || scrollable {
             // A one-finger drag pans; rows sit above and keep taps.
             let pan = ui.interact(
                 area,
                 ui.id().with(("live-pan", page.page.source.as_str())),
                 egui::Sense::drag(),
             );
-            hx -= pan.drag_delta().x / cell;
-            if ui.rect_contains_pointer(area) {
-                hx -= ui.input(|input| input.smooth_scroll_delta.x) / cell;
+            let wheel = if ui.rect_contains_pointer(area) {
+                ui.input(|input| input.smooth_scroll_delta)
+            } else {
+                egui::Vec2::ZERO
+            };
+            hx -= (pan.drag_delta().x + wheel.x) / cell;
+            if scrollable {
+                // A vertical drag or the wheel moves the rows; the fraction of
+                // a row carries over between frames so slow drags still move.
+                let carry_id = ui.id().with(("live-vscroll", page.page.source.as_str()));
+                let moved = ui.data_mut(|data| {
+                    let carry = data.get_temp_mut_or(carry_id, 0.0_f32);
+                    *carry -= (pan.drag_delta().y + wheel.y) / metrics.row_height;
+                    let whole = carry.trunc();
+                    *carry -= whole;
+                    whole as i64
+                });
+                if moved != 0 {
+                    *self.scroll.entry(page.page.source.clone()).or_insert(0) += moved;
+                    ui.ctx().request_repaint();
+                }
             }
         }
         let hx = hx.clamp(0.0, max_hscroll);
@@ -403,8 +428,8 @@ impl LivePane {
             .collect();
         let rects = grid::paint_lines(ui, &shown);
         let mut open = None;
-        for (offset, rect) in rects.into_iter().enumerate() {
-            let row = start + offset;
+        for (i, rect) in rects.into_iter().enumerate() {
+            let row = start + i;
             let line_target = page.targets.get(row).cloned().flatten();
             let spans = page.spans.get(row).map(Vec::as_slice).unwrap_or_default();
             if line_target.is_none() && spans.is_empty() {

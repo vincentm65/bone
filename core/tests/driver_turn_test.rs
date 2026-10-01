@@ -1014,6 +1014,7 @@ struct CapturingProvider {
     model: String,
     script: Mutex<Vec<Vec<ChatEvent>>>,
     captured: Mutex<Vec<Vec<ChatMessage>>>,
+    context_window_tokens: Option<u64>,
 }
 
 #[async_trait]
@@ -1026,6 +1027,9 @@ impl LlmProvider for CapturingProvider {
     }
     fn model(&self) -> &str {
         &self.model
+    }
+    fn context_window_tokens(&self) -> Option<u64> {
+        self.context_window_tokens
     }
     fn set_model(&mut self, model: String) {
         self.model = model;
@@ -1932,6 +1936,7 @@ end)
         model: "mock-1".into(),
         script: Mutex::new(vec![vec![ChatEvent::TextDelta("done".into())]]),
         captured: Mutex::new(Vec::new()),
+        context_window_tokens: None,
     });
     let driver = Driver {
         llm: llm.clone(),
@@ -2028,6 +2033,7 @@ async fn driver_preserves_ephemeral_images_in_request_history() {
             })],
         ]),
         captured: Mutex::new(Vec::new()),
+        context_window_tokens: None,
     });
     let driver = Driver {
         llm: llm.clone(),
@@ -2146,6 +2152,7 @@ bone.tool.register({
             })],
         ]),
         captured: Mutex::new(Vec::new()),
+        context_window_tokens: None,
     });
     let driver = Driver {
         llm: llm.clone(),
@@ -2243,6 +2250,7 @@ bone.tool.register({
             })],
         ]),
         captured: Mutex::new(Vec::new()),
+        context_window_tokens: None,
     });
     let driver = Driver {
         llm: llm.clone(),
@@ -2311,6 +2319,7 @@ async fn driver_keeps_tool_preamble_as_assistant_content() {
             ],
         ]),
         captured: Mutex::new(Vec::new()),
+        context_window_tokens: None,
     });
 
     let driver = Driver {
@@ -2423,6 +2432,7 @@ end)
             })],
         ]),
         captured: Mutex::new(Vec::new()),
+        context_window_tokens: None,
     });
 
     let driver = Driver {
@@ -2982,6 +2992,7 @@ end, { timeout_ms = 60000 })
         model: "mock-1".into(),
         script: Mutex::new(vec![vec![ChatEvent::TextDelta("unexpected".into())]]),
         captured: Mutex::new(Vec::new()),
+        context_window_tokens: None,
     });
     let cancel = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let cancel_later = cancel.clone();
@@ -3410,6 +3421,7 @@ async fn driver_emits_image_relays_after_the_whole_tool_batch() {
             ],
         ]),
         captured: Mutex::new(Vec::new()),
+        context_window_tokens: None,
     });
     let driver = Driver {
         llm: llm.clone(),
@@ -3525,6 +3537,7 @@ async fn driver_keeps_mixed_image_batch_adjacent_and_ephemeral_out_of_transcript
             ],
         ]),
         captured: Mutex::new(Vec::new()),
+        context_window_tokens: None,
     });
     let driver = Driver {
         llm: llm.clone(),
@@ -3614,4 +3627,287 @@ async fn driver_keeps_mixed_image_batch_adjacent_and_ephemeral_out_of_transcript
                 .all(|image| !image.data.contains("ephemeral"))
         );
     }
+}
+
+/// A screenshot-shaped tool result whose text is large enough to force the
+/// catalog compactor on the following before_turn dispatch. The image itself is
+/// deliberately small and uniquely labelled so request-history pruning is easy
+/// to assert without storing a real capture.
+struct CompoundingScreenshotTool {
+    calls: std::sync::atomic::AtomicUsize,
+}
+
+#[async_trait]
+impl Tool for CompoundingScreenshotTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "compounding_screenshot".into(),
+            description: "returns a large transient screenshot result".into(),
+            input_schema: serde_json::json!({ "type": "object" }),
+        }
+    }
+
+    async fn execute(&self, _arguments: serde_json::Value) -> Result<String, String> {
+        unreachable!("execute_output is used")
+    }
+
+    async fn execute_output(&self, _arguments: serde_json::Value) -> Result<ToolOutput, String> {
+        let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+        Ok(ToolOutput {
+            content: format!("screenshot {call}\n{}", "s".repeat(80_000)),
+            images: vec![bone_core::llm::ImageData {
+                media_type: "image/jpeg".into(),
+                data: format!("ephemeral-frame-{call}"),
+                width: Some(800),
+                height: Some(600),
+                sha256: Some(format!("ephemeral-sha-{call}")),
+            }],
+            ephemeral_images: true,
+            ..Default::default()
+        })
+    }
+}
+
+/// Exercise several real catalog compaction cycles in one tool loop. Each
+/// large screenshot result crosses the trigger on the next round; the catalog
+/// plugin summarizes the durable transcript and the Driver restores only the
+/// newest active-turn screenshot relay into request history.
+#[tokio::test]
+async fn driver_repeated_compaction_keeps_only_latest_ephemeral_frame() {
+    let plugin_path = catalog_dir().join("plugins/compact/init.lua");
+    let Ok(plugin_source) = std::fs::read_to_string(&plugin_path) else {
+        eprintln!(
+            "skipping: {} is not present in this checkout",
+            plugin_path.display()
+        );
+        return;
+    };
+
+    let config_dir = common::temp_dir("driver-repeated-image-compaction");
+    std::fs::create_dir_all(config_dir.join("lua/plugins/compact")).unwrap();
+    std::fs::write(
+        config_dir.join("lua/plugins/compact/init.lua"),
+        plugin_source,
+    )
+    .unwrap();
+    // Loading the plugin requires a startup init script, just as a real
+    // installation has one after onboarding/first boot.
+    std::fs::write(config_dir.join("init.lua"), "-- init\n").unwrap();
+
+    let config = common::config_store();
+    let booted = boot_with_tools(
+        &config_dir,
+        &config_dir,
+        &config,
+        false,
+        BootOptions::default(),
+        "test-model",
+        "TestProvider",
+    );
+
+    let tool_round = |round: usize| {
+        vec![
+            ChatEvent::ToolCall(ToolCall {
+                id: format!("screenshot-{round}"),
+                name: "compounding_screenshot".into(),
+                arguments: serde_json::json!({}),
+            }),
+            ChatEvent::ToolCall(ToolCall {
+                id: format!("durable-{round}"),
+                name: "durable_image".into(),
+                arguments: serde_json::json!({ "label": format!("round-{round}") }),
+            }),
+        ]
+    };
+    // Provider calls are popped from the end. Normal rounds and private
+    // summarizer calls therefore appear in call order as:
+    // round 1, summary 1, round 2, summary 2, round 3, summary 3, final.
+    let llm = Arc::new(CapturingProvider {
+        model: "mock-vision-compaction".into(),
+        script: Mutex::new(vec![
+            vec![ChatEvent::TextDelta("done".into())],
+            vec![ChatEvent::TextDelta("stable capsule".into())],
+            tool_round(3),
+            vec![ChatEvent::TextDelta("stable capsule".into())],
+            tool_round(2),
+            vec![ChatEvent::TextDelta("stable capsule".into())],
+            tool_round(1),
+        ]),
+        captured: Mutex::new(Vec::new()),
+        context_window_tokens: Some(20_000),
+    });
+
+    let prompt = "observe repeatedly";
+    let transcript = vec![ChatMessage::new(ChatRole::User, prompt)];
+    let history = build_chat_history(&transcript, "test system prompt");
+    let driver = Driver {
+        llm: llm.clone(),
+        extensions: booted.manager,
+        tools: ToolHandler::new(
+            builtin_tools()
+                .register(CompoundingScreenshotTool {
+                    calls: std::sync::atomic::AtomicUsize::new(0),
+                })
+                .register(DurableImageTool),
+        ),
+        session: Arc::new(NullSessionSink) as Arc<dyn SessionSink>,
+        gate: Arc::new(AutoApprovalGate),
+        approval_mode: bone_core::tools::SharedApprovalMode::new(ApprovalMode::Danger),
+        agent_depth: 0,
+        activity: None,
+        on_token_usage: None,
+        events: false,
+        event_sender: None,
+        runtime_events: None,
+        key_reply_registry: None,
+        cancel: None,
+        history,
+        transcript,
+        token_stats: TokenStats::new(),
+        system_prompt_override: None,
+        conversation_id: None,
+        background_scope: None,
+        agent_cache_scope: None,
+        config_store: config,
+        turn_nudge: Arc::new(Mutex::new(None)),
+        live_tail: Arc::new(Mutex::new(Vec::new())),
+    };
+
+    let outcome = driver.run_to_outcome(prompt).await;
+    assert_eq!(
+        outcome.result.as_ref().unwrap().content,
+        "done",
+        "the turn must continue after repeated compactions"
+    );
+
+    let captured = llm.captured.lock().unwrap();
+    let is_summary_request = |messages: &[ChatMessage]| {
+        messages.iter().any(|message| {
+            message
+                .content
+                .contains("Create or update a coding-session continuation capsule")
+        })
+    };
+    let summary_requests: Vec<&[ChatMessage]> = captured
+        .iter()
+        .filter(|messages| is_summary_request(messages))
+        .map(|messages| messages.as_slice())
+        .collect();
+    let normal_requests: Vec<&[ChatMessage]> = captured
+        .iter()
+        .filter(|messages| !is_summary_request(messages))
+        .map(|messages| messages.as_slice())
+        .collect();
+    assert_eq!(
+        summary_requests.len(),
+        3,
+        "three compaction cycles expected"
+    );
+    assert_eq!(
+        normal_requests.len(),
+        4,
+        "three tool rounds plus final reply"
+    );
+
+    let image_payloads = |messages: &[ChatMessage]| {
+        messages
+            .iter()
+            .flat_map(|message| message.images.iter().map(|image| image.data.clone()))
+            .collect::<Vec<_>>()
+    };
+    let request_size = |messages: &[ChatMessage]| {
+        messages
+            .iter()
+            .map(|message| {
+                message.content.chars().count()
+                    + message
+                        .images
+                        .iter()
+                        .map(|image| image.data.chars().count())
+                        .sum::<usize>()
+            })
+            .sum::<usize>()
+    };
+    let compacted_sizes: Vec<usize> = normal_requests
+        .iter()
+        .skip(1)
+        .map(|messages| request_size(messages))
+        .collect();
+    let compacted_min = *compacted_sizes.iter().min().unwrap();
+    let compacted_max = *compacted_sizes.iter().max().unwrap();
+    assert!(
+        compacted_max - compacted_min < 500,
+        "post-compaction requests should return to one baseline plus the newest frame; sizes={compacted_sizes:?}"
+    );
+
+    for (cycle, (summary, request)) in summary_requests
+        .iter()
+        .zip(normal_requests.iter().skip(1))
+        .enumerate()
+    {
+        let cycle = cycle + 1;
+        let before = request_size(summary);
+        let after = request_size(request);
+        assert!(
+            before > after * 4,
+            "cycle {cycle}: following request must drop to the compacted baseline (before={before}, after={after})"
+        );
+
+        // The replacement transcript contains no screenshot relay. The only
+        // ephemeral image in the next request is the one-frame restore, and it
+        // is the frame from the immediately preceding tool round.
+        assert_eq!(
+            image_payloads(request),
+            vec![
+                format!("durable-base64-round-{cycle}"),
+                format!("ephemeral-frame-{cycle}"),
+            ],
+            "cycle {cycle}: only the newest screenshot and current durable relay reach the provider"
+        );
+        assert_eq!(
+            request
+                .iter()
+                .filter(|message| message
+                    .images
+                    .iter()
+                    .any(|image| image.data.starts_with("ephemeral-frame-")))
+                .count(),
+            1,
+            "cycle {cycle}: at most one ephemeral image relay"
+        );
+        assert!(
+            request.iter().all(|message| {
+                !message.content.contains("screenshot 1")
+                    && !message.content.contains("screenshot 2")
+                    && !message.content.contains("screenshot 3")
+            }),
+            "cycle {cycle}: screenshot tool payloads must not leak into the replacement transcript"
+        );
+        assert!(
+            image_payloads(summary).contains(&format!("durable-base64-round-{cycle}")),
+            "cycle {cycle}: the deliberately durable relay must remain in compaction input"
+        );
+    }
+
+    assert!(
+        outcome.transcript.iter().all(|message| {
+            !message
+                .images
+                .iter()
+                .any(|image| image.data.starts_with("ephemeral-frame-"))
+                && !message.content.contains("ephemeral-frame-")
+        }),
+        "ephemeral screenshot data must stay out of the replacement transcript"
+    );
+    assert!(
+        outcome.transcript.iter().any(|message| {
+            message
+                .images
+                .iter()
+                .any(|image| image.data == "durable-base64-round-3")
+        }),
+        "the final durable image relay must survive the last replacement"
+    );
+    drop(captured);
+    std::fs::remove_dir_all(&config_dir).ok();
 }

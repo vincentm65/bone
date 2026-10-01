@@ -30,7 +30,16 @@ cancellation are scoped to the attached conversation.
   (`bone_client::ssh`) and speaks the same stream over the child's stdio; SSH
   owns authentication and host verification, and keys or an agent are required.
   A tab counts as connected only once the daemon's first event arrives, so a
-  failed login surfaces ssh's stderr. `BONE_SSH` overrides the `ssh` program and
+  failed login surfaces ssh's stderr. The first event is deadline-bounded:
+  30 seconds for a remote target, 10 seconds for a local one, so a daemon
+  that accepts TCP but never answers is reported as wedged rather than
+  connected. The client retries 50 ms after spawning its own daemon (real
+  boot-to-accept is ~50 ms), and if a daemon it spawned stays wedged it kills
+  and respawns it up to three times. When that budget is exhausted, or when
+  the wedged daemon was not spawned by the client, the app stops with a
+  manual-restart message. The Android app needs no equivalent: its in-app SSH
+  runs `bone stdio`, which auto-spawns its own daemon. `BONE_SSH` overrides
+  the `ssh` program and
   `BONE_SSH_REMOTE_BIN` the remote `bone` path. `native` is also a library: an
   embedder can attach `DesktopApp::remote` to a `connection::Target::Custom`
   connector (the Android app's in-app SSH) and gets the same link
@@ -63,7 +72,11 @@ cancellation are scoped to the attached conversation.
   Ctrl/Cmd+1…9 jump. Selecting a history entry focuses the tab showing it,
   reuses an empty chat, or opens a new tab. Right-click a sidebar row to rename
   it or permanently delete it; delete asks for confirmation and closes open tabs
-  before removing saved history. Nothing is persisted locally.
+  before removing saved history.
+  Conversation contents and lifecycle remain daemon-owned. The desktop keeps tabs
+  in memory; the Android embedder persists its open chat IDs, selected chat, and
+  sidebar preference across relaunch or reconnect. Page tabs, drafts, and pane
+  splits remain transient.
   The main area is a grid of panes, each with its own tab strip. Ctrl+\ splits
   right and Ctrl+Shift+\ splits down; Ctrl+Alt+arrows move focus between
   panes. The tab right-click menu offers Split right, Split down and Close.
@@ -75,6 +88,8 @@ cancellation are scoped to the attached conversation.
   A new chat, including one created by `/new`, remains ephemeral until its first
   real prompt is submitted; empty chats are not written to SQLite and do not
   appear in history or the sidebar. Persistence and lifecycle remain daemon-owned.
+  The daemon publishes the new id before the turn starts, so the sidebar can
+  refresh it while the reply is still running.
   Sidebar actions are limited to `Rename…` and `Delete…`; archive is deferred.
 - Transcript, live pane, status bar, and pages are drawn by the shared
   `bone-render` crate exactly as the TUI draws them, then painted on a character

@@ -1366,6 +1366,33 @@ impl DaemonCtx {
         });
     }
 
+    /// Push `message` to the transcript and persist it via `persist`, which may
+    /// lazily allocate the conversation. A newly created id is published right
+    /// away so clients can refresh history while the reply is still running
+    /// (and persist the id if they are interrupted).
+    fn append_and_persist(
+        &self,
+        what: &str,
+        message: ChatMessage,
+        persist: impl FnOnce(&mut crate::runtime::RuntimeSession) -> Result<(), String>,
+    ) {
+        let (result, created) = {
+            let mut s = self.session.lock().unwrap();
+            let before = s.conversation_id;
+            s.transcript.push(message);
+            let result = persist(&mut *s);
+            (result, s.conversation_id != before)
+        };
+        if created {
+            self.publish_snapshot();
+        }
+        if let Err(error) = result {
+            self.hub.publish(RuntimeEvent::Status {
+                message: format!("failed to persist {what}: {error}"),
+            });
+        }
+    }
+
     /// Replay the daemon's authoritative state to a resynchronizing client.
     /// `live_tail` carries the in-turn driver's uncommitted messages (busy
     /// turns only); when non-empty they are appended to the *full* committed DB
@@ -2472,22 +2499,14 @@ impl DaemonCtx {
                 } else {
                     serde_json::to_string(&images).ok()
                 };
-                let persistence_result = {
-                    let mut s = self.session.lock().unwrap();
-                    if images.is_empty() {
-                        s.transcript
-                            .push(ChatMessage::new(crate::llm::ChatRole::User, &text));
-                    } else {
-                        s.transcript
-                            .push(ChatMessage::user_with_images(&text, images));
-                    }
-                    s.append_user_to_db(self.llm.as_ref(), &text, images_json.as_deref())
+                let message = if images.is_empty() {
+                    ChatMessage::new(crate::llm::ChatRole::User, &text)
+                } else {
+                    ChatMessage::user_with_images(&text, images)
                 };
-                if let Err(error) = persistence_result {
-                    self.hub.publish(RuntimeEvent::Status {
-                        message: format!("failed to persist prompt: {error}"),
-                    });
-                }
+                self.append_and_persist("prompt", message, |s| {
+                    s.append_user_to_db(self.llm.as_ref(), &text, images_json.as_deref())
+                });
                 // The Driver dispatches `message` after recognizing this
                 // already-inserted prompt. Keeping lifecycle dispatch there gives
                 // daemon, headless, and delegated turns one ordered path.
@@ -2553,26 +2572,23 @@ impl DaemonCtx {
                     "system" => crate::llm::ChatRole::System,
                     _ => crate::llm::ChatRole::User,
                 };
-                let persistence_result = {
-                    let mut s = self.session.lock().unwrap();
-                    s.transcript.push(ChatMessage::new(chat_role, &content));
-                    // Persist so the folded context survives a reload / daemon
-                    // restart, like the SubmitPrompt path's `append_user_to_db`.
-                    s.append_db_message_with_lazy_conversation(
-                        self.llm.as_ref(),
-                        &role,
-                        &content,
-                        None,
-                        None,
-                        None,
-                        None,
-                    )
-                };
-                if let Err(error) = persistence_result {
-                    self.hub.publish(RuntimeEvent::Status {
-                        message: format!("failed to persist appended context: {error}"),
-                    });
-                }
+                // Persist so the folded context survives a reload / daemon
+                // restart, like the SubmitPrompt path's `append_user_to_db`.
+                self.append_and_persist(
+                    "appended context",
+                    ChatMessage::new(chat_role, &content),
+                    |s| {
+                        s.append_db_message_with_lazy_conversation(
+                            self.llm.as_ref(),
+                            &role,
+                            &content,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                    },
+                );
                 Flow::Continue
             }
             RuntimeCommand::ClearConversation => {
@@ -3050,17 +3066,11 @@ impl DaemonCtx {
                 if submit && !ret.output.is_empty() {
                     // Submit through the normal turn path. The Driver owns the
                     // lifecycle `message` hook for command-generated prompts too.
-                    let persistence_result = {
-                        let mut s = self.session.lock().unwrap();
-                        s.transcript
-                            .push(ChatMessage::new(crate::llm::ChatRole::User, &ret.output));
-                        s.append_user_to_db(self.llm.as_ref(), &ret.output, None)
-                    };
-                    if let Err(error) = persistence_result {
-                        self.hub.publish(RuntimeEvent::Status {
-                            message: format!("failed to persist prompt: {error}"),
-                        });
-                    }
+                    self.append_and_persist(
+                        "prompt",
+                        ChatMessage::new(crate::llm::ChatRole::User, &ret.output),
+                        |s| s.append_user_to_db(self.llm.as_ref(), &ret.output, None),
+                    );
                     // Same finished-process cleanup as a typed prompt: the
                     // command-submitted prompt is a full user turn too.
                     let scope = crate::processes::conversation_scope(Some(

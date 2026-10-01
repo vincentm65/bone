@@ -8,6 +8,7 @@ use bone_client::SocketConn;
 use bone_client::ssh::SshSession;
 use bone_protocol::{RuntimeCommand, RuntimeEvent};
 use eframe::egui;
+use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -18,6 +19,10 @@ use tokio::sync::mpsc;
 /// How long a remote connect may take, login included, before the daemon's
 /// first event arrives.
 const SSH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long a local connect may wait for the daemon's first event after the
+/// TCP connection opens. A local daemon that accepts TCP but never answers is
+/// wedged; the coordinator respawns one it started itself.
+const LOCAL_FIRST_EVENT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Where a chat's daemon lives.
 #[derive(Clone)]
@@ -62,7 +67,12 @@ pub struct Stream {
     pub read: Reader,
     pub write: Writer,
     pub guard: Box<dyn Send>,
+    /// Why the far end went away (e.g. remote stderr or exit status), asked
+    /// once the stream has closed; `None` when there is nothing to add.
+    pub failure: Option<Failure>,
 }
+
+pub type Failure = Box<dyn Fn() -> Option<String> + Send>;
 
 /// Opens the newline-JSON daemon stream for [`Target::Custom`]. The link
 /// counts as connected once the daemon's first event arrives.
@@ -106,15 +116,51 @@ pub enum Event {
 /// stalled worker cannot service cancellation or disconnect commands, and a
 /// long-running stream can otherwise leave the tab looking busy forever.
 ///
-/// Runtime events are lossy by design: once the local queue is full, we drop
-/// them and enqueue a synthetic `StreamLagged` marker when space becomes
-/// available.  The state reducer responds to that marker with an authoritative
-/// `Synchronize`, so the dropped deltas do not become permanent state loss.
+/// Uncorrelated runtime events are lossy by design: once the local queue is
+/// full, we drop them and enqueue a synthetic `StreamLagged` marker when space
+/// becomes available.  The state reducer responds to that marker with an
+/// authoritative `Synchronize`, so the dropped deltas do not become permanent
+/// state loss.  Replies correlated with a request (see [`is_correlated`]) are
+/// never repaired by a resync, so they are held and delivered in order ahead
+/// of the marker and any later runtime event instead of being dropped.
 /// One queue slot is reserved for lifecycle events (`Connected` and
 /// `Disconnected`) so those events remain deliverable during a flood.
 struct EventSink {
     events: mpsc::Sender<Event>,
     dropped_runtime: u64,
+    /// Correlated replies that arrived while the queue was full.
+    deferred: VecDeque<RuntimeEvent>,
+}
+
+/// Replies a client waits on by request id; `Synchronize` cannot replay them.
+fn is_correlated(event: &RuntimeEvent) -> bool {
+    matches!(
+        event,
+        RuntimeEvent::StateSynchronized { .. }
+            | RuntimeEvent::HostResponse { .. }
+            | RuntimeEvent::OlderMessagesLoaded { .. }
+            | RuntimeEvent::TurnCompleted { .. }
+            | RuntimeEvent::Started {
+                request_id: Some(_),
+                ..
+            }
+            | RuntimeEvent::CommandComplete {
+                request_id: Some(_),
+                ..
+            }
+            | RuntimeEvent::KeymapDispatched {
+                request_id: Some(_),
+                ..
+            }
+            | RuntimeEvent::ConfigChanged {
+                request_id: Some(_),
+                ..
+            }
+            | RuntimeEvent::ConfigMutationRejected {
+                request_id: Some(_),
+                ..
+            }
+    )
 }
 
 impl EventSink {
@@ -124,6 +170,7 @@ impl EventSink {
         Self {
             events,
             dropped_runtime: 0,
+            deferred: VecDeque::new(),
         }
     }
 
@@ -138,26 +185,56 @@ impl EventSink {
             return false;
         }
 
-        if self.events.capacity() <= Self::CONTROL_RESERVE {
-            self.dropped_runtime = self.dropped_runtime.saturating_add(1);
+        // Held replies go first, so later events queue behind them.
+        if !self.deferred.is_empty() || self.events.capacity() <= Self::CONTROL_RESERVE {
+            self.hold(event);
             return true;
         }
 
         match self.events.try_send(Event::Runtime(event)) {
             Ok(()) => true,
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                self.dropped_runtime = self.dropped_runtime.saturating_add(1);
+            Err(mpsc::error::TrySendError::Full(event)) => {
+                if let Event::Runtime(event) = event {
+                    self.hold(event);
+                }
                 true
             }
             Err(mpsc::error::TrySendError::Closed(_)) => false,
         }
     }
 
-    fn flush_lag(&mut self) -> bool {
-        if self.dropped_runtime == 0 {
-            return true;
+    /// Keep a correlated reply for later delivery; drop anything else as lag.
+    /// Replies are never dropped: each answers one request, so the backlog
+    /// stays small, and a lost reply would leave its waiter hanging.
+    fn hold(&mut self, event: RuntimeEvent) {
+        if is_correlated(&event) {
+            self.deferred.push_back(event);
+        } else {
+            self.dropped_runtime = self.dropped_runtime.saturating_add(1);
         }
-        if self.events.capacity() <= Self::CONTROL_RESERVE {
+    }
+
+    /// Deliver held replies, then the lag marker, as space allows.
+    fn flush_lag(&mut self) -> bool {
+        while self.events.capacity() > Self::CONTROL_RESERVE {
+            let Some(event) = self.deferred.pop_front() else {
+                break;
+            };
+            match self.events.try_send(Event::Runtime(event)) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(event)) => {
+                    if let Event::Runtime(event) = event {
+                        self.deferred.push_front(event);
+                    }
+                    return true;
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => return false,
+            }
+        }
+        if !self.deferred.is_empty()
+            || self.dropped_runtime == 0
+            || self.events.capacity() <= Self::CONTROL_RESERVE
+        {
             return true;
         }
         let marker = Event::Runtime(RuntimeEvent::StreamLagged {
@@ -196,6 +273,43 @@ pub fn spawn(ctx: egui::Context) -> (mpsc::UnboundedSender<Command>, mpsc::Recei
     (commands, events)
 }
 
+/// Outcome of waiting for the daemon's first attach event.
+enum FirstEvent {
+    /// The daemon's first event (sent unprompted on attach).
+    Event(RuntimeEvent),
+    /// The stream closed before the daemon answered.
+    Closed,
+    /// The first-event deadline elapsed: the daemon is wedged.
+    TimedOut,
+    /// A connect command arrived: cancel this attempt.
+    Cancelled,
+    /// The command channel closed: the tab is gone.
+    Stopped,
+}
+
+/// Wait for the daemon's first event within `timeout`. Every target uses this:
+/// the ssh child starts instantly even when its login will fail, a remote
+/// `bone stdio` may be missing, and a local daemon that accepts TCP but never
+/// answers is wedged.
+async fn wait_first_event<R>(
+    conn: &mut SocketConn<R>,
+    commands: &mut mpsc::UnboundedReceiver<Command>,
+    timeout: Duration,
+) -> FirstEvent
+where
+    R: AsyncRead + Unpin,
+{
+    tokio::select! {
+        result = tokio::time::timeout(timeout, conn.next_event()) => match result {
+            Ok(Some(event)) => FirstEvent::Event(event),
+            Ok(None) => FirstEvent::Closed,
+            Err(_) => FirstEvent::TimedOut,
+        },
+        command = commands.recv() => {
+            if command.is_none() { FirstEvent::Stopped } else { FirstEvent::Cancelled }
+        }
+    }
+}
 async fn worker(
     mut commands: mpsc::UnboundedReceiver<Command>,
     events: mpsc::Sender<Event>,
@@ -206,17 +320,21 @@ async fn worker(
         let Command::Connect(target) = command else {
             continue;
         };
+        let mut custom_failure: Option<Failure> = None;
         let opened = match &target {
             Target::Local(address) => open_tcp(address, &mut commands).await,
             Target::Ssh(host) => open_ssh(host),
             Target::Custom(connector) => tokio::select! {
                 result = connector.connect() => match result {
-                    Ok(stream) => Opened::Ready {
-                        read: stream.read,
-                        write: stream.write,
-                        ssh: None,
-                        guard: Some(stream.guard),
-                    },
+                    Ok(stream) => {
+                        custom_failure = stream.failure;
+                        Opened::Ready {
+                            read: stream.read,
+                            write: stream.write,
+                            ssh: None,
+                            guard: Some(stream.guard),
+                        }
+                    }
                     Err(reason) => Opened::Failed(reason),
                 },
                 command = commands.recv() => {
@@ -249,56 +367,59 @@ async fn worker(
         };
         let mut conn = SocketConn::new(read, write);
         let sender = conn.command_sender();
-        // A remote link counts as connected only once the daemon's first event
-        // (sent unprompted on attach) arrives: the ssh child starts instantly
-        // even when its login will fail, and a remote `bone stdio` may be
-        // missing. Otherwise report the reason.
-        let mut first = None;
-        if target.is_remote() {
-            let result = tokio::select! {
-                result = tokio::time::timeout(SSH_CONNECT_TIMEOUT, conn.next_event()) => result,
-                command = commands.recv() => {
-                    if command.is_none() { return; }
-                    if !sink.send_control(Event::Disconnected("Connection cancelled".into())) {
-                        return;
-                    }
-                    ctx.request_repaint();
-                    continue;
+        let first_timeout = if target.is_remote() {
+            SSH_CONNECT_TIMEOUT
+        } else {
+            LOCAL_FIRST_EVENT_TIMEOUT
+        };
+        let first = match wait_first_event(&mut conn, &mut commands, first_timeout).await {
+            FirstEvent::Event(event) => event,
+            FirstEvent::Cancelled => {
+                if !sink.send_control(Event::Disconnected("Connection cancelled".into())) {
+                    return;
                 }
-            };
-            let failure = match result {
-                Ok(Some(event)) => {
-                    first = Some(event);
-                    None
-                }
-                // EOF before the daemon answered.
-                Ok(None) => Some(match ssh.take() {
+                ctx.request_repaint();
+                continue;
+            }
+            FirstEvent::Stopped => return,
+            FirstEvent::Closed => {
+                let reason = match ssh.take() {
                     Some(session) => session.failure().await,
-                    None => format!(
-                        "{} closed before the daemon answered; is `bone stdio` available there?",
-                        target.label()
-                    ),
-                }),
-                Err(_) => Some(format!(
-                    "{} did not reach the daemon within {} seconds",
-                    target.label(),
-                    SSH_CONNECT_TIMEOUT.as_secs()
-                )),
-            };
-            if let Some(reason) = failure {
+                    None => {
+                        let closed =
+                            format!("{} closed before the daemon answered", target.label());
+                        match custom_failure.as_ref().and_then(|failure| failure()) {
+                            Some(detail) => format!("{closed}: {detail}"),
+                            None if target.is_remote() => {
+                                format!("{closed}; is `bone stdio` available there?")
+                            }
+                            None => closed,
+                        }
+                    }
+                };
                 if !sink.send_control(Event::Disconnected(format!("Connect failed: {reason}"))) {
                     return;
                 }
                 ctx.request_repaint();
                 continue;
             }
-        }
+            FirstEvent::TimedOut => {
+                let reason = format!(
+                    "{} did not reach the daemon within {} seconds",
+                    target.label(),
+                    first_timeout.as_secs()
+                );
+                if !sink.send_control(Event::Disconnected(format!("Connect failed: {reason}"))) {
+                    return;
+                }
+                ctx.request_repaint();
+                continue;
+            }
+        };
         if !sink.send_control(Event::Connected) {
             return;
         }
-        if let Some(event) = first
-            && !sink.send_runtime(event)
-        {
+        if !sink.send_runtime(first) {
             return;
         }
         ctx.request_repaint();
@@ -324,9 +445,11 @@ async fn worker(
             }
         };
         drop(conn);
-        let reason = match ssh.take() {
-            Some(session) => format!("{reason} ({})", session.failure().await),
-            None => reason.into(),
+        let detail = custom_failure.as_ref().and_then(|failure| failure());
+        let reason = match (ssh.take(), detail) {
+            (Some(session), _) => format!("{reason} ({})", session.failure().await),
+            (None, Some(detail)) => format!("{reason} ({detail})"),
+            (None, None) => reason.into(),
         };
         if !sink.send_control(Event::Disconnected(reason)) {
             return;
@@ -415,6 +538,64 @@ mod tests {
         assert!(matches!(received.try_recv(), Ok(Event::Disconnected(_))));
     }
 
+    #[test]
+    fn correlated_replies_survive_a_full_queue() {
+        let (events, mut received) = mpsc::channel(3);
+        let mut sink = EventSink::new(events);
+
+        assert!(sink.send_runtime(RuntimeEvent::TextDelta { text: "one".into() }));
+        assert!(sink.send_runtime(RuntimeEvent::TextDelta { text: "two".into() }));
+        assert!(sink.send_runtime(RuntimeEvent::TurnCompleted { request_id: 7 }));
+        assert!(sink.send_runtime(RuntimeEvent::TextDelta {
+            text: "dropped".into(),
+        }));
+        assert_eq!(received.len(), 2);
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Event::Runtime(RuntimeEvent::TextDelta { text })) if text == "one"
+        ));
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Event::Runtime(RuntimeEvent::TextDelta { text })) if text == "two"
+        ));
+
+        // The held reply is delivered first; the lag marker follows as space
+        // allows, never consuming the lifecycle slot.
+        assert!(sink.flush_lag());
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Event::Runtime(RuntimeEvent::TurnCompleted {
+                request_id: 7
+            }))
+        ));
+        assert!(sink.flush_lag());
+        assert!(matches!(
+            received.try_recv(),
+            Ok(Event::Runtime(RuntimeEvent::StreamLagged { skipped: 1 }))
+        ));
+        assert!(received.try_recv().is_err());
+    }
+
+    #[test]
+    fn a_long_burst_of_replies_is_never_dropped() {
+        let (events, mut received) = mpsc::channel(3);
+        let mut sink = EventSink::new(events);
+        for request_id in 0..200 {
+            assert!(sink.send_runtime(RuntimeEvent::TurnCompleted { request_id }));
+        }
+        let mut delivered = Vec::new();
+        while delivered.len() < 200 {
+            assert!(sink.flush_lag());
+            while let Ok(Event::Runtime(RuntimeEvent::TurnCompleted { request_id })) =
+                received.try_recv()
+            {
+                delivered.push(request_id);
+            }
+        }
+        assert_eq!(delivered, (0..200).collect::<Vec<_>>());
+        assert!(received.try_recv().is_err());
+    }
+
     #[tokio::test]
     async fn loopback_commands_events_and_disconnect() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -425,7 +606,8 @@ mod tests {
         tx.send(Command::Connect(Target::Local(address))).unwrap();
         let (stream, _) = listener.accept().await.unwrap();
         let (read, mut write) = stream.into_split();
-        assert!(matches!(received.recv().await, Some(Event::Connected)));
+        // The worker confirms the link on the daemon's first event, so the
+        // fake daemon must speak before `Connected` is expected.
         bone_client::write_message(
             &mut write,
             &RuntimeEvent::TextDelta {
@@ -434,6 +616,7 @@ mod tests {
         )
         .await
         .unwrap();
+        assert!(matches!(received.recv().await, Some(Event::Connected)));
         assert!(
             matches!(received.recv().await, Some(Event::Runtime(RuntimeEvent::TextDelta { text })) if text == "hello")
         );
@@ -547,6 +730,9 @@ mod tests {
                     read: Box::new(read),
                     write: Box::new(write),
                     guard: Box::new(()),
+                    failure: Some(Box::new(|| {
+                        Some("remote bone exited with status 127".into())
+                    })),
                 })
             })
         }
@@ -593,7 +779,8 @@ mod tests {
         match next(&mut received).await {
             Some(Event::Disconnected(reason)) => assert!(
                 reason.starts_with(
-                    "Connect failed: ssh: phone-test closed before the daemon answered"
+                    "Connect failed: ssh: phone-test closed before the daemon answered: \
+                     remote bone exited with status 127"
                 ),
                 "{reason}"
             ),
@@ -601,5 +788,49 @@ mod tests {
         }
         drop(tx);
         task.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn wait_first_event_times_out_against_a_silent_peer() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let (tx, mut commands) = mpsc::unbounded_channel();
+        let (stream, _server) = tokio::join!(
+            tokio::net::TcpStream::connect(&address),
+            listener.accept()
+        );
+        let (read, write) = stream.unwrap().into_split();
+        let read: Reader = Box::new(read);
+        let write: Writer = Box::new(write);
+        let mut conn = SocketConn::new(read, write);
+        let first =
+            wait_first_event(&mut conn, &mut commands, Duration::from_secs(2)).await;
+        assert!(matches!(first, FirstEvent::TimedOut));
+        drop(tx);
+    }
+
+    #[tokio::test]
+    async fn wait_first_event_cancels_when_a_new_connect_arrives() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let (tx, mut commands) = mpsc::unbounded_channel();
+        let (stream, _server) = tokio::join!(
+            tokio::net::TcpStream::connect(&address),
+            listener.accept()
+        );
+        let (read, write) = stream.unwrap().into_split();
+        let read: Reader = Box::new(read);
+        let write: Writer = Box::new(write);
+        let mut conn = SocketConn::new(read, write);
+        let notifier = tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            notifier
+                .send(Command::Connect(Target::Local(address)))
+                .unwrap();
+        });
+        let first =
+            wait_first_event(&mut conn, &mut commands, Duration::from_secs(5)).await;
+        assert!(matches!(first, FirstEvent::Cancelled));
     }
 }

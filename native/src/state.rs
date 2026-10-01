@@ -47,6 +47,8 @@ pub struct InputStyle {
 }
 
 const MAX_INPUT_PADDING: u16 = 8;
+/// A `Synchronize` reply older than this is presumed lost and may be re-sent.
+const SYNC_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl Default for InputStyle {
     fn default() -> Self {
@@ -215,6 +217,11 @@ pub struct State {
     // Key and approval registries allocate IDs independently, both starting at 0.
     answered_keys: HashSet<u64>,
     sync_id: Option<u64>,
+    /// When the outstanding `Synchronize` was sent; see [`Self::sync_in_flight`].
+    sync_sent: Option<std::time::Instant>,
+    /// A lag arrived while a sync was in flight: resync once its reply lands
+    /// instead of orphaning it with a new request id.
+    resync_pending: bool,
     next_id: u64,
 }
 
@@ -331,6 +338,8 @@ impl State {
     pub fn synchronize(&mut self) -> RuntimeCommand {
         let request_id = self.next_id();
         self.sync_id = Some(request_id);
+        self.sync_sent = Some(std::time::Instant::now());
+        self.resync_pending = false;
         RuntimeCommand::Synchronize {
             request_id,
             include_messages: true,
@@ -347,6 +356,16 @@ impl State {
                 None
             },
         }
+    }
+
+    /// True while a `Synchronize` reply is outstanding and not yet stale.
+    /// Re-requesting sooner would give `sync_id` a new id and discard the
+    /// in-flight reply, so repeated lag could keep repair from converging.
+    pub fn sync_in_flight(&self) -> bool {
+        self.sync_id.is_some()
+            && self
+                .sync_sent
+                .is_some_and(|sent| sent.elapsed() < SYNC_STALE_AFTER)
     }
 
     /// Request the next page of older messages before the currently loaded
@@ -783,6 +802,9 @@ impl State {
                 if !busy {
                     self.status = "Ready".into();
                 }
+                if std::mem::take(&mut self.resync_pending) {
+                    return Some(self.synchronize());
+                }
             }
             RuntimeEvent::OlderMessagesLoaded {
                 request_id,
@@ -949,7 +971,15 @@ impl State {
             RuntimeEvent::StreamLagged { .. } => {
                 self.repairing = true;
                 self.status = "Repairing missed events…".into();
-                self.push_row("system", "Repairing missed events…");
+                // One notice per repair: repeat lags while a resync is
+                // already queued stay silent instead of spamming rows.
+                if !self.resync_pending {
+                    self.push_row("system", "Repairing missed events…");
+                }
+                if self.sync_in_flight() {
+                    self.resync_pending = true;
+                    return None;
+                }
                 return Some(self.synchronize());
             }
             RuntimeEvent::Status { message } | RuntimeEvent::Notice { message } => {
@@ -1269,6 +1299,47 @@ mod tests {
             s.rows.last().unwrap(),
             &("system".to_string(), "Repairing missed events…".to_string())
         );
+    }
+
+    #[test]
+    fn lag_during_an_inflight_sync_defers_one_resync() {
+        let mut s = loaded();
+        let first = s.sync_id.expect("load requests a sync");
+        // Lag while the reply is outstanding must not orphan it with a new id.
+        assert!(
+            s.reduce(RuntimeEvent::StreamLagged { skipped: 1 })
+                .is_none()
+        );
+        assert!(
+            s.reduce(RuntimeEvent::StreamLagged { skipped: 1 })
+                .is_none()
+        );
+        assert_eq!(s.sync_id, Some(first));
+        let lag_rows = s
+            .rows
+            .iter()
+            .filter(|(_, text)| text == "Repairing missed events…")
+            .count();
+        assert_eq!(lag_rows, 1);
+
+        let synced = |request_id| RuntimeEvent::StateSynchronized {
+            request_id,
+            busy: false,
+            snapshot: SessionSnapshot::default(),
+            view: None,
+            messages: None,
+            theme: None,
+        };
+        let Some(RuntimeCommand::Synchronize {
+            request_id: second, ..
+        }) = s.reduce(synced(first))
+        else {
+            panic!("expected one follow-up synchronization");
+        };
+        assert_ne!(second, first);
+        assert!(s.reduce(synced(second)).is_none());
+        assert!(!s.repairing);
+        assert!(!s.sync_in_flight());
     }
 
     #[test]

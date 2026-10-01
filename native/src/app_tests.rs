@@ -25,6 +25,72 @@ fn app() -> (DesktopApp, egui::Context, mpsc::UnboundedReceiver<Command>) {
     (app, ctx, rx)
 }
 
+#[test]
+fn workspace_state_restores_open_conversations_and_selection() {
+    let ctx = egui::Context::default();
+    let mut app = DesktopApp::open(ctx, false);
+    let expected = WorkspaceState {
+        chats: vec![Some(17), Some(23)],
+        active_chat: 1,
+        sidebar_open: Some(false),
+    };
+
+    app.restore_workspace(expected.clone());
+
+    assert_eq!(app.workspace_state(), expected);
+    assert_eq!(app.tabs.len(), 2);
+    assert_eq!(app.session().conversation_id, Some(23));
+}
+
+#[test]
+fn restoring_onto_the_first_tab_focuses_its_composer() {
+    let ctx = egui::Context::default();
+    let mut app = DesktopApp::open(ctx.clone(), false);
+    ctx.memory_mut(|memory| memory.request_focus(egui::Id::new("elsewhere")));
+
+    app.restore_workspace(WorkspaceState {
+        chats: vec![Some(17), Some(23)],
+        active_chat: 0,
+        sidebar_open: None,
+    });
+
+    let active = app.active_chat;
+    assert_eq!(
+        ctx.memory(|memory| memory.focused()),
+        Some(editor_id(active))
+    );
+}
+
+#[test]
+fn conversation_identity_ignores_default_replay_but_accepts_detachment() {
+    let (mut session, _rx) = session();
+    assert!(session.load_conversation(41));
+    session.handle_event(Event::Runtime(RuntimeEvent::StateSnapshot {
+        snapshot: bone_protocol::SessionSnapshot::default(),
+    }));
+    assert_eq!(session.conversation_id, Some(41));
+    assert!(!session.state.ready);
+
+    session.handle_event(Event::Runtime(RuntimeEvent::ConversationLoaded {
+        messages: Vec::new(),
+        snapshot: bone_protocol::SessionSnapshot {
+            conversation_id: Some(41),
+            ..Default::default()
+        },
+        busy: false,
+    }));
+    assert!(session.state.ready);
+    assert!(
+        session.handle_event(Event::Runtime(RuntimeEvent::StateSnapshot {
+            snapshot: bone_protocol::SessionSnapshot {
+                incognito: true,
+                ..Default::default()
+            },
+        }))
+    );
+    assert_eq!(session.conversation_id, None);
+}
+
 fn sent(rx: &mut mpsc::UnboundedReceiver<Command>) -> Vec<RuntimeCommand> {
     std::iter::from_fn(|| rx.try_recv().ok())
         .filter_map(|command| match command {
@@ -688,6 +754,25 @@ fn busy_enter_queues_and_idle_drains_in_order() {
 }
 
 #[test]
+fn queued_prompts_wait_for_an_explicit_send_after_a_disconnect() {
+    let (mut session, mut rx) = session();
+    session.state.busy = true;
+    session.composer = "queued".into();
+    session.enqueue_composer();
+    session.handle_event(Event::Disconnected("lost link".into()));
+    session.connected = true;
+    session.state.ready = true;
+    session.drain_queue();
+    assert!(sent(&mut rx).is_empty());
+    assert_eq!(session.queue.len(), 1);
+    session.submit_composer_in_order();
+    assert!(matches!(
+        sent(&mut rx).as_slice(),
+        [RuntimeCommand::SubmitPrompt { text, .. }] if text == "queued"
+    ));
+}
+
+#[test]
 fn pending_key_requests_receive_escape_and_tab() {
     let (mut app, ctx, mut rx) = app();
     let session = app.session_mut();
@@ -1090,6 +1175,88 @@ fn with_one_conversation(app: &mut DesktopApp) {
         token_count: 0,
         status: Default::default(),
     }];
+}
+
+#[test]
+fn new_chat_refreshes_phone_sidebar_during_a_turn_and_can_be_reopened() {
+    let (mut app, ctx, mut rx) = app();
+    let (events_tx, events_rx) = mpsc::channel(16);
+    app.session_mut().events = events_rx;
+    app.conversations_stale = false;
+    render_at(&mut app, &ctx, 400.0, Vec::new());
+    sent(&mut rx);
+
+    run(app.session_mut(), "new sidebar chat");
+    assert!(app.session().state.busy);
+    assert!(matches!(
+        sent(&mut rx).as_slice(),
+        [RuntimeCommand::SubmitPrompt { .. }]
+    ));
+    events_tx
+        .try_send(Event::Runtime(RuntimeEvent::StateSnapshot {
+            snapshot: bone_protocol::SessionSnapshot {
+                conversation_id: Some(41),
+                ..Default::default()
+            },
+        }))
+        .unwrap();
+    render_at(&mut app, &ctx, 400.0, Vec::new());
+    assert_eq!(app.workspace_state().chats, vec![Some(41)]);
+    let request_id = app
+        .conversations_request
+        .expect("history refresh while busy")
+        .1;
+    assert!(sent(&mut rx).iter().any(|command| matches!(
+        command,
+        RuntimeCommand::HostRequest {
+            request: HostRequest::Conversations { .. },
+            ..
+        }
+    )));
+
+    with_one_conversation(&mut app);
+    app.conversations[0].title = "new sidebar chat".into();
+    let conversations = std::mem::take(&mut app.conversations);
+    events_tx
+        .try_send(Event::Runtime(RuntimeEvent::HostResponse {
+            request_id,
+            response: HostResponse::Conversations(conversations),
+        }))
+        .unwrap();
+    app.sidebar_open = Some(true);
+    let output = render_at(&mut app, &ctx, 400.0, Vec::new());
+    assert!(text_top(&output, "new sidebar chat").is_some());
+    assert!(app.session().state.busy, "no turn completion needed");
+
+    app.close_tab(0);
+    events_tx
+        .try_send(Event::Runtime(RuntimeEvent::StateSnapshot {
+            snapshot: bone_protocol::SessionSnapshot {
+                conversation_id: Some(41),
+                ..Default::default()
+            },
+        }))
+        .unwrap();
+    events_tx
+        .try_send(Event::Runtime(RuntimeEvent::ConversationLoaded {
+            messages: Vec::new(),
+            snapshot: bone_protocol::SessionSnapshot::default(),
+            busy: false,
+        }))
+        .unwrap();
+    let output = render_at(&mut app, &ctx, 400.0, Vec::new());
+    assert!(
+        app.session().conversation_id.is_none(),
+        "closed chat must detach"
+    );
+    let at = text_pos(&output, "new sidebar chat").expect("saved row stays after close");
+    tap_at(&mut app, &ctx, 400.0, at + egui::vec2(4.0, 4.0));
+    assert!(
+        sent(&mut rx)
+            .iter()
+            .any(|command| matches!(command, RuntimeCommand::LoadConversation { id: 41, .. }))
+    );
+    assert_eq!(app.session().conversation_id, Some(41));
 }
 
 #[test]

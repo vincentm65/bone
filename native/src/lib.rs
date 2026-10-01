@@ -36,6 +36,7 @@ use bone_protocol::{
 use connection::{Command, Event};
 use eframe::egui;
 use local::LocalResult;
+use serde::{Deserialize, Serialize};
 use state::{State, ToolCard, ToolState};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
@@ -181,6 +182,10 @@ struct Session {
     connect_failed_refused: bool,
     /// The most recent connect attempt failed for another reason.
     connect_failed_other: bool,
+    /// The daemon generation (`DesktopApp::daemon_gen`) active when this
+    /// session's current connect was sent; a wedged report from an older
+    /// generation describes a replaced daemon and is stale.
+    forced_gen: u64,
     /// An established socket dropped; drives a bounded reconnect.
     mid_drop: bool,
     /// `host_api_version` from the daemon's `frontend_state`, 0 until observed.
@@ -222,6 +227,9 @@ struct Session {
     local_tx: std::sync::mpsc::Sender<LocalResult>,
     /// Prompts typed while a turn is busy, drained in order when it finishes.
     queue: std::collections::VecDeque<String>,
+    /// Set when the connection drops with prompts queued: they wait for an
+    /// explicit send instead of going out automatically after reconnect.
+    queue_held: bool,
     /// Submitted prompt history for Ctrl+Up/Down recall (oldest first).
     history: Vec<String>,
     history_index: Option<usize>,
@@ -263,6 +271,7 @@ impl Session {
             connecting: false,
             connect_failed_refused: false,
             connect_failed_other: false,
+            forced_gen: 0,
             mid_drop: false,
             host_api_version: 0,
             workspace: String::new(),
@@ -292,6 +301,7 @@ impl Session {
             ctx: ctx.clone(),
             local_tx,
             queue: std::collections::VecDeque::new(),
+            queue_held: false,
             history: Vec::new(),
             history_index: None,
             turn_started: None,
@@ -567,6 +577,7 @@ impl Session {
                 self.live_pane.queue = index + 1;
             }
             live_pane::QueueAction::Send => {
+                self.queue_held = false;
                 if let Some(text) = self.queue.remove(index) {
                     self.queue.push_front(text);
                     self.live_pane.queue = 0;
@@ -1069,6 +1080,19 @@ impl Session {
         true
     }
 
+    /// Put the composer cursor after its last character, e.g. once a
+    /// suggestion has replaced the text under it.
+    fn cursor_to_composer_end(&self, ctx: &egui::Context) {
+        let id = editor_id(self.id);
+        let mut state = egui::text_edit::TextEditState::load(ctx, id).unwrap_or_default();
+        state
+            .cursor
+            .set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(self.composer.chars().count()),
+            )));
+        state.store(ctx, id);
+    }
+
     fn send_prompt(&mut self) {
         if !self.can_send() {
             return;
@@ -1184,8 +1208,13 @@ impl Session {
         // Only repair a busy/lagged attachment. No idle polling.
         if self.connected && self.state.repairing {
             if Instant::now() >= self.repair_at {
-                let command = self.state.synchronize();
-                self.command(command);
+                // Never re-request while a reply is outstanding: a new request
+                // id would orphan it, so sustained lag could keep repair from
+                // ever landing.
+                if !self.state.sync_in_flight() {
+                    let command = self.state.synchronize();
+                    self.command(command);
+                }
                 self.repair_at = Instant::now() + Duration::from_millis(500);
             }
             ctx.request_repaint_after(self.repair_at.saturating_duration_since(Instant::now()));
@@ -1216,6 +1245,7 @@ impl Session {
                 false
             }
             Event::Disconnected(reason) => {
+                let was_connecting = self.connecting;
                 self.mid_drop = self.connected && daemon::is_mid_session_drop(&reason);
                 self.connected = false;
                 self.connecting = false;
@@ -1226,8 +1256,14 @@ impl Session {
                 self.state.pending_key = None;
                 self.state.busy = false;
                 self.connection_status = reason.clone();
+                self.queue_held |= !self.queue.is_empty();
                 if reason.starts_with("Connect failed") {
-                    if daemon::is_refused(&reason) {
+                    if !was_connecting && daemon::is_wedged(&reason) {
+                        // A wedged report that landed after its daemon was
+                        // already replaced: the socket it describes is gone, so
+                        // it must not re-trigger the respawn path.
+                        self.connect_failed_other = false;
+                    } else if daemon::is_refused(&reason) {
                         self.connect_failed_refused = true;
                     } else {
                         self.connect_failed_other = true;
@@ -1296,8 +1332,11 @@ impl Session {
                 if let Some((request_id, output, submit, display_role, action)) = command_complete {
                     self.apply_command_complete(request_id, output, submit, display_role, action);
                 }
-                if let Some(id) = self.state.snapshot.conversation_id {
-                    self.conversation_id = Some(id);
+                if self.state.ready {
+                    // `None` is authoritative too: `/new` and incognito detach
+                    // the old durable id. Before attachment, keep the target id
+                    // until the reducer accepts its load (not the default replay).
+                    self.conversation_id = self.state.snapshot.conversation_id;
                 }
                 before != self.conversation_id
             }
@@ -1338,6 +1377,7 @@ impl Session {
             self.queue.push_back(text);
             self.clear_input();
         }
+        self.queue_held = false;
         self.drain_queue();
     }
 
@@ -1357,7 +1397,11 @@ impl Session {
     /// Send the next queued prompt once idle with an empty input, mirroring the
     /// TUI's `drain_queue_when_input_empty`.
     fn drain_queue(&mut self) {
-        if self.queue.is_empty()
+        if self.queue.is_empty() {
+            self.queue_held = false;
+            return;
+        }
+        if self.queue_held
             || self.state.busy
             || !self.composer.is_empty()
             || !self.attachments.is_empty()
@@ -1673,6 +1717,27 @@ struct Tab {
     kind: TabKind,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkspaceState {
+    /// Open chat tabs, in tab order. `None` is an unsaved new chat.
+    pub chats: Vec<Option<i64>>,
+    /// Index of the selected chat in `chats`.
+    pub active_chat: usize,
+    /// Explicit sidebar preference, or `None` to follow the window width.
+    pub sidebar_open: Option<bool>,
+}
+
+impl Default for WorkspaceState {
+    fn default() -> Self {
+        Self {
+            chats: vec![None],
+            active_chat: 0,
+            sidebar_open: None,
+        }
+    }
+}
+
 /// The desktop UI. `bone-desktop` runs it via [`main`]; the Android app embeds
 /// it with [`DesktopApp::remote`].
 pub struct DesktopApp {
@@ -1719,6 +1784,11 @@ pub struct DesktopApp {
     daemon_notice: String,
     /// Remaining reconnect rounds: None before recovery, Some(0) when exhausted.
     reconnect_budget: Option<u32>,
+    /// Generation of the local daemon we spawned; bumped on every wedged
+    /// respawn so stale reports from a replaced daemon can be recognised.
+    daemon_gen: u64,
+    /// Wedged respawns performed since the last attach or manual retry.
+    wedged_respawns: u32,
     /// Most recent daemon conversation list for the history sidebar.
     conversations: Vec<ConversationMeta>,
     /// (chat tab id, request id, send time) of the in-flight `Conversations`
@@ -1769,10 +1839,81 @@ impl DesktopApp {
 
     /// The app attached to a remote daemon, for embedding (the Android app).
     pub fn remote(ctx: egui::Context, target: connection::Target) -> Self {
+        Self::remote_with_workspace(ctx, target, WorkspaceState::default())
+    }
+
+    /// The remote app with its frontend-owned chat workspace restored.
+    pub fn remote_with_workspace(
+        ctx: egui::Context,
+        target: connection::Target,
+        workspace: WorkspaceState,
+    ) -> Self {
         let mut app = Self::open(ctx, false);
         app.remote = Some(target);
+        app.restore_workspace(workspace);
         app.connect_all();
         app
+    }
+
+    /// Snapshot the chat tabs and small layout preferences that an embedder can
+    /// persist across a process restart. Conversation contents remain daemon-owned.
+    pub fn workspace_state(&self) -> WorkspaceState {
+        let chats = self
+            .tabs
+            .iter()
+            .filter_map(|tab| match &tab.kind {
+                TabKind::Chat(session) => Some(session.conversation_id),
+                TabKind::Page(_) => None,
+            })
+            .collect();
+        let active_chat = self
+            .tabs
+            .iter()
+            .filter(|tab| matches!(&tab.kind, TabKind::Chat(_)))
+            .position(|tab| tab.id == self.active_chat)
+            .unwrap_or(0);
+        WorkspaceState {
+            chats,
+            active_chat,
+            sidebar_open: self.sidebar_open,
+        }
+    }
+
+    fn restore_workspace(&mut self, workspace: WorkspaceState) {
+        let chats = if workspace.chats.is_empty() {
+            vec![None]
+        } else {
+            workspace.chats
+        };
+        if let Some(Tab {
+            kind: TabKind::Chat(session),
+            ..
+        }) = self.tabs.first_mut()
+        {
+            session.conversation_id = chats[0];
+            session.reset_for_attach();
+        }
+        for conversation in chats.iter().skip(1).copied() {
+            let id = self.next_tab_id;
+            self.next_tab_id += 1;
+            let session = Session::new(id, conversation, &self.ctx, self.local_tx.clone());
+            self.tabs.push(Tab {
+                id,
+                pane: 0,
+                kind: TabKind::Chat(Box::new(session)),
+            });
+        }
+        self.selected = 0;
+        self.active_chat = self.tabs[0].id;
+        self.pane_selected = HashMap::from([(0, self.active_chat)]);
+        self.sidebar_open = workspace.sidebar_open;
+        self.select(workspace.active_chat.min(chats.len() - 1));
+        // `select` only moves focus when the tab changes, and restoring onto
+        // tab 0 does not count, so focus the restored composer explicitly:
+        // keystrokes typed right after a restart must land in the draft.
+        let active = self.active_chat;
+        self.ctx
+            .memory_mut(|memory| memory.request_focus(editor_id(active)));
     }
 
     fn sidebar_visible(&self) -> bool {
@@ -1825,6 +1966,8 @@ impl DesktopApp {
             daemon_child: None,
             daemon_notice: String::new(),
             reconnect_budget: None,
+            daemon_gen: 0,
+            wedged_respawns: 0,
             conversations: Vec::new(),
             conversations_request: None,
             conversations_stale: true,
@@ -2426,11 +2569,13 @@ impl DesktopApp {
             return;
         }
         let target = self.target();
+        let forced_gen = self.daemon_gen;
         for session in self.sessions_mut() {
             if session.connected || session.connecting {
                 continue;
             }
             session.connecting = true;
+            session.forced_gen = forced_gen;
             session.connect_failed_refused = false;
             session.connect_failed_other = false;
             session.connection_status = "Connecting…".into();
@@ -3010,26 +3155,27 @@ impl DesktopApp {
         }
     }
 
-    /// Approve non-blocked calls already waiting when the mode is Danger.
+    /// Approve the active tab's non-blocked calls already waiting when the mode
+    /// is Danger. Background tabs are left alone so toggling the mode never
+    /// approves calls the user cannot see; they resolve once focused.
     fn resolve_danger_approvals(&mut self) {
         if self.approval_mode() != "danger" {
             return;
         }
-        for session in self.sessions_mut() {
-            let pending: Vec<u64> = session
-                .state
-                .approvals
-                .iter()
-                .filter(|approval| approval.blocked.is_none())
-                .map(|approval| approval.id)
-                .collect();
-            for id in pending {
-                if session.command(RuntimeCommand::ApprovalReply {
-                    id,
-                    outcome: CallOutcome::Approve,
-                }) {
-                    session.state.answered(id);
-                }
+        let session = self.session_mut();
+        let pending: Vec<u64> = session
+            .state
+            .approvals
+            .iter()
+            .filter(|approval| approval.blocked.is_none())
+            .map(|approval| approval.id)
+            .collect();
+        for id in pending {
+            if session.command(RuntimeCommand::ApprovalReply {
+                id,
+                outcome: CallOutcome::Approve,
+            }) {
+                session.state.answered(id);
             }
         }
     }
@@ -3045,7 +3191,7 @@ impl DesktopApp {
                 let Some((modifiers, key)) = keymap::parse_key(&binding.key) else {
                     continue;
                 };
-                if input.consume_key(modifiers, key) {
+                if keymap::consume_exact(input, modifiers, key) {
                     matched = Some(binding.action.clone());
                     break;
                 }
@@ -3481,7 +3627,7 @@ impl DesktopApp {
                 self.daemon_child = Some(child);
                 self.daemon_phase = daemon::Phase::Starting { attempts: 0 };
                 self.daemon_notice.clear();
-                self.schedule_retry(ctx, Duration::from_millis(daemon::DAEMON_RETRY_DELAY_MS));
+                self.schedule_retry(ctx, Duration::from_millis(daemon::DAEMON_FIRST_RETRY_DELAY_MS));
                 true
             }
             Err(error) => {
@@ -3501,6 +3647,7 @@ impl DesktopApp {
         self.daemon_phase = daemon::Phase::Probe;
         self.daemon_notice.clear();
         self.reconnect_budget = None;
+        self.wedged_respawns = 0;
         self.retry_at = None;
         self.connect_all();
     }
@@ -3534,9 +3681,17 @@ impl DesktopApp {
         let (mut refused, mut other_failure, mut mid_drop) = (false, false, false);
         let (mut any_connected, mut unresolved, mut connecting) = (false, false, false);
         let mut failure = None;
+        let mut wedged = Vec::new();
+        let daemon_gen = self.daemon_gen;
         for session in self.sessions_mut() {
             if session.connect_failed_refused || session.connect_failed_other {
                 failure.get_or_insert_with(|| session.connection_status.clone());
+            }
+            if session.connect_failed_other
+                && daemon::is_wedged(&session.connection_status)
+                && session.forced_gen == daemon_gen
+            {
+                wedged.push(session.id);
             }
             refused |= std::mem::take(&mut session.connect_failed_refused);
             other_failure |= std::mem::take(&mut session.connect_failed_other);
@@ -3548,12 +3703,51 @@ impl DesktopApp {
         if any_connected {
             self.daemon_phase = daemon::Phase::Ready;
             self.daemon_notice.clear();
+            self.wedged_respawns = 0;
         }
         if !unresolved {
             if !connecting {
                 self.retry_at = None;
                 self.reconnect_budget = None;
             }
+            return;
+        }
+        // A daemon that accepts TCP but never sends its first event is wedged.
+        // Kill and respawn one we spawned (bounded); a foreign one we can only
+        // report. Skipped while Ready (a live tab proves the daemon answers),
+        // Stopped (the coordinator already gave up), and for remote targets
+        // (the Server-dialog path reports those).
+        if !wedged.is_empty()
+            && self.remote.is_none()
+            && matches!(
+                self.daemon_phase,
+                daemon::Phase::Probe | daemon::Phase::Starting { .. }
+            )
+        {
+            self.conversations_stale = true;
+            if self.daemon_child.is_some() {
+                self.wedged_respawns += 1;
+                if self.wedged_respawns < daemon::MAX_WEDGED_RESPAWNS {
+                    self.daemon_gen += 1;
+                    if let Some(mut child) = self.daemon_child.take() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                    if self.start_local_daemon(ctx) {
+                        self.connect_all();
+                    }
+                    return;
+                }
+                self.stop(format!(
+                    "The local daemon accepted connections but never answered; tried {} times. Restart it manually.",
+                    self.wedged_respawns
+                ));
+                return;
+            }
+            let address = self.effective_address();
+            self.stop(format!(
+                "The daemon at {address} accepted the connection but never answered; restart it manually."
+            ));
             return;
         }
         if let Some(at) = self.retry_at
@@ -4174,7 +4368,9 @@ impl Session {
                     ac.up();
                 }
             } else if key(ui, egui::Key::Tab) {
-                self.accept_autocomplete();
+                if self.accept_autocomplete() {
+                    self.cursor_to_composer_end(ui.ctx());
+                }
             } else if plain_enter(ui) {
                 autocomplete_submit = self.accept_autocomplete();
             }
@@ -4218,6 +4414,65 @@ impl Session {
         if editor.changed() {
             self.refresh_autocomplete();
         }
+        // Touch keyboards send no Copy or Cut, so a long press on the input
+        // opens its own menu.
+        if ui.input(|input| input.has_touch_screen()) {
+            let id = editor_id(self.id);
+            let len = self.composer.chars().count();
+            let picked = egui::text_edit::TextEditState::load(ui.ctx(), id)
+                .and_then(|state| state.cursor.char_range())
+                .map(|range| {
+                    let (a, b) = (range.primary.index.0, range.secondary.index.0);
+                    (a.min(b).min(len), a.max(b).min(len))
+                })
+                .filter(|(from, to)| from < to);
+            let (from, to) = picked.unwrap_or((0, len));
+            let byte =
+                |text: &str, i: usize| text.char_indices().nth(i).map_or(text.len(), |(b, _)| b);
+            let bytes = byte(&self.composer, from)..byte(&self.composer, to);
+            let (mut cut, mut select_all) = (false, false);
+            editor.context_menu(|ui| {
+                if ui
+                    .add_enabled(from < to, egui::Button::new("Copy"))
+                    .clicked()
+                {
+                    ui.ctx().copy_text(self.composer[bytes.clone()].to_owned());
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(picked.is_some(), egui::Button::new("Cut"))
+                    .clicked()
+                {
+                    ui.ctx().copy_text(self.composer[bytes.clone()].to_owned());
+                    cut = true;
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(len > 0, egui::Button::new("Select all"))
+                    .clicked()
+                {
+                    select_all = true;
+                    ui.close();
+                }
+            });
+            if cut || select_all {
+                let range = if cut {
+                    self.composer.replace_range(bytes, "");
+                    self.refresh_autocomplete();
+                    egui::text::CCursorRange::one(egui::text::CCursor::new(from))
+                } else {
+                    egui::text::CCursorRange::two(
+                        egui::text::CCursor::new(0),
+                        egui::text::CCursor::new(len),
+                    )
+                };
+                let mut state =
+                    egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
+                state.cursor.set_char_range(Some(range));
+                state.store(ui.ctx(), id);
+                editor.request_focus();
+            }
+        }
         if focus && ui.memory(|memory| memory.focused().is_none()) {
             editor.request_focus();
         }
@@ -4249,6 +4504,7 @@ impl Session {
             if let Some(name) = clicked {
                 self.composer = format!("/{name}");
                 self.dismiss_autocomplete();
+                self.cursor_to_composer_end(ui.ctx());
                 editor.request_focus();
             }
         }
@@ -4344,7 +4600,7 @@ impl Session {
                 &[bone_render::Message::system(banner.clone())],
                 theme,
                 None,
-                cols.max(20),
+                cols.max(1),
                 false,
             );
             crate::grid::paint_lines(ui, &lines);

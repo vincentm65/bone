@@ -46,6 +46,11 @@ adb install -r target/release/apk/bone.apk
 
 Updates signed with the same key keep the app's SSH key and pinned hosts.
 
+The app stores the open chat workspace in its private data directory. On a
+relaunch or reconnect it restores the open conversation tabs, selected chat, and
+sidebar preference, then reloads their contents from the daemon. Page tabs and
+unsent drafts remain transient.
+
 ## First connection
 
 1. Open Bone. The connect screen shows this app's public key; tap **Copy key**

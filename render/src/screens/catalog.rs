@@ -642,7 +642,10 @@ fn draw_header(frame: &mut ratatui::Frame, area: Rect, theme: &Theme) {
             Span::styled("catalog", Style::default().fg(p.muted)),
         ]),
         Line::from(Span::styled(
-            "Optional tools, commands, plugins & themes — download on demand",
+            super::picker::fit_width(
+                "Optional tools, commands, plugins & themes — download on demand",
+                area.width.saturating_sub(2) as usize,
+            ),
             Style::default().fg(p.subtle),
         )),
     ];

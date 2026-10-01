@@ -151,7 +151,7 @@ pub fn draw_list(
     );
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            hint,
+            fit_width(hint, area.width as usize),
             Style::default().fg(p.subtle),
         ))),
         rows[1],
@@ -276,6 +276,34 @@ pub fn draw_list(
     );
 }
 
+/// Fit `text` in `width` terminal columns, ending with `…` when it had to be
+/// cut, so a one-row line never stops silently mid-word.
+pub(crate) fn fit_width(text: &str, width: usize) -> std::borrow::Cow<'_, str> {
+    if unicode_width::UnicodeWidthStr::width(text) <= width {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    if width == 0 {
+        return std::borrow::Cow::Borrowed("");
+    }
+    std::borrow::Cow::Owned(format!(
+        "{}…",
+        crate::messages::truncate_to_display_width(text, width - 1)
+    ))
+}
+
+#[cfg(test)]
+mod fit_width_tests {
+    use super::fit_width;
+
+    #[test]
+    fn long_lines_end_with_an_ellipsis_within_the_width() {
+        assert_eq!(fit_width("short", 10), "short");
+        assert_eq!(fit_width("exactly10!", 10), "exactly10!");
+        assert_eq!(fit_width("a longer hint line", 8), "a longe…");
+        assert_eq!(fit_width("日本語テキスト", 5), "日本…");
+        assert_eq!(fit_width("anything", 0), "");
+    }
+}
 /// Render a one-line key-bindings footer under a top border. Each `(key, label)`
 /// pair is shown as a highlighted key token followed by its label. Shared by the
 /// onboarding wizard and `/catalog` so both screens share an identical footer.

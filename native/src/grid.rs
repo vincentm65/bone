@@ -222,19 +222,49 @@ pub(crate) fn paint_row(
         if style.add_modifier.contains(Modifier::CROSSED_OUT) {
             format.strikethrough = egui::Stroke::new(1.0, fg);
         }
-        let mut job = egui::text::LayoutJob::single_section(run.text.clone(), format);
+        let mut job = egui::text::LayoutJob::single_section(run.text.clone(), format.clone());
         job.wrap.max_width = f32::INFINITY;
         let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
-        // A wide glyph from a fallback font may not be exactly two cells:
-        // center it in its cells instead of letting it push the row.
-        let x = if run.cells > 1 && run.text.chars().count() == 1 {
-            span.center().x - galley.size().x / 2.0
-        } else {
-            left
-        };
-        ui.painter()
-            .galley(egui::pos2(x, rect.top()), galley, default_fg);
+        if (galley.size().x - span.width()).abs() <= 0.5 {
+            ui.painter()
+                .galley(egui::pos2(left, rect.top()), galley, default_fg);
+            continue;
+        }
+        // Some glyph's advance is not a whole number of cells (a fallback
+        // font, say): laid out as one galley it would drift the rest of the
+        // run off the grid, so place each cell's glyph centered in its cells.
+        for (offset, cells, glyph) in cell_clusters(&run.text) {
+            let mut job = egui::text::LayoutJob::single_section(glyph.to_string(), format.clone());
+            job.wrap.max_width = f32::INFINITY;
+            let galley = ui.fonts_mut(|fonts| fonts.layout_job(job));
+            let x = left + offset as f32 * cell + (cells as f32 * cell - galley.size().x) / 2.0;
+            ui.painter()
+                .galley(egui::pos2(x, rect.top()), galley, default_fg);
+        }
     }
+}
+
+/// Split a run's text into its terminal cells as (cell offset, cell width,
+/// text), keeping zero-width combining marks with the glyph before them.
+fn cell_clusters(text: &str) -> Vec<(u16, u16, &str)> {
+    let mut spans: Vec<(u16, u16, usize, usize)> = Vec::new();
+    let mut offset = 0;
+    for (start, ch) in text.char_indices() {
+        let width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0) as u16;
+        let end = start + ch.len_utf8();
+        match spans.last_mut() {
+            Some(last) if width == 0 => last.3 = end,
+            _ => {
+                let width = width.max(1);
+                spans.push((offset, width, start, end));
+                offset += width;
+            }
+        }
+    }
+    spans
+        .into_iter()
+        .map(|(offset, width, start, end)| (offset, width, &text[start..end]))
+        .collect()
 }
 
 /// Terminal color to egui. `Reset` means "the terminal default" and keeps the
@@ -287,6 +317,20 @@ mod tests {
     use super::*;
     use ratatui::text::Line;
     use ratatui::widgets::Paragraph;
+
+    #[test]
+    fn cell_clusters_follow_terminal_cells() {
+        assert_eq!(
+            cell_clusters("ae\u{301}✓中x"),
+            vec![
+                (0, 1, "a"),
+                (1, 1, "e\u{301}"),
+                (2, 1, "✓"),
+                (3, 2, "中"),
+                (5, 1, "x"),
+            ]
+        );
+    }
 
     #[test]
     fn screen_geometry_maps_painted_rows_and_cells() {

@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
-use bone_desktop::DesktopApp;
 use bone_desktop::connection::{Connector, Stream, Target};
+use bone_desktop::{DesktopApp, WorkspaceState};
 use eframe::egui;
 
 use crate::ssh::{Destination, Identity};
@@ -25,6 +25,8 @@ const SETTINGS_FILE: &str = "connection";
 /// The daemon's last theme payload, applied at startup so the default theme
 /// never flashes before the daemon's arrives.
 const THEME_FILE: &str = "theme.json";
+/// The frontend-owned open-chat workspace, restored after Android restarts.
+const WORKSPACE_FILE: &str = "workspace.json";
 /// With no cached theme, how long to wait for the daemon's before showing the
 /// UI anyway.
 const THEME_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
@@ -46,12 +48,13 @@ impl Connector for SshConnector {
         let destination = self.destination.clone();
         let bone = self.bone.clone();
         Box::pin(async move {
-            let (stream, session) = ssh::open(&identity, &destination, &bone).await?;
+            let (stream, session, exit) = ssh::open(&identity, &destination, &bone).await?;
             let (read, write) = tokio::io::split(stream);
             Ok(Stream {
                 read: Box::new(read),
                 write: Box::new(write),
                 guard: Box::new(session),
+                failure: Some(Box::new(move || exit.describe())),
             })
         })
     }
@@ -81,6 +84,8 @@ pub struct Launcher {
     error: String,
     /// The last theme payload seen, cached in [`THEME_FILE`].
     theme: Option<serde_json::Value>,
+    /// Open chat tabs and selection restored from [`WORKSPACE_FILE`].
+    workspace: WorkspaceState,
     /// The copy button gives explicit feedback instead of silently relying on
     /// the platform clipboard.
     key_copied: bool,
@@ -102,6 +107,10 @@ impl Launcher {
             .map(Arc::new)
             .map_err(|error| format!("could not create this app's SSH key: {error}"));
         let saved = std::fs::read_to_string(data_dir.join(SETTINGS_FILE)).unwrap_or_default();
+        let workspace: WorkspaceState = std::fs::read(data_dir.join(WORKSPACE_FILE))
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
         let mut lines = saved.lines();
         Self {
             visible_area,
@@ -116,6 +125,7 @@ impl Launcher {
             identity,
             error: String::new(),
             theme,
+            workspace,
             connecting_since: None,
             app: None,
         }
@@ -140,9 +150,9 @@ impl Launcher {
             "" => "bone".to_string(),
             path => path.to_string(),
         };
-        let _ = std::fs::write(
-            self.data_dir.join(SETTINGS_FILE),
-            format!("{}\n{bone}\n", self.destination.trim()),
+        let _ = ssh::write_atomic(
+            &self.data_dir.join(SETTINGS_FILE),
+            format!("{}\n{bone}\n", self.destination.trim()).as_bytes(),
         );
         self.error.clear();
         self.forget_host_pending = None;
@@ -151,12 +161,28 @@ impl Launcher {
             destination,
             bone,
         };
-        let mut app = DesktopApp::remote(ctx.clone(), Target::Custom(Arc::new(connector)));
+        let mut app = DesktopApp::remote_with_workspace(
+            ctx.clone(),
+            Target::Custom(Arc::new(connector)),
+            self.workspace.clone(),
+        );
         if let Some(theme) = &self.theme {
             app.set_theme(ctx, theme.clone());
         }
         self.app = Some(app);
         self.connecting_since = Some(std::time::Instant::now());
+    }
+
+    fn persist_workspace(&mut self, workspace: WorkspaceState) {
+        if workspace == self.workspace {
+            return;
+        }
+        let Ok(bytes) = serde_json::to_vec(&workspace) else {
+            return;
+        };
+        if ssh::write_atomic(&self.data_dir.join(WORKSPACE_FILE), &bytes).is_ok() {
+            self.workspace = workspace;
+        }
     }
 
     fn connect_screen(&mut self, ui: &mut egui::Ui) {
@@ -349,49 +375,54 @@ impl Launcher {
     }
 
     fn content(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        if let Some(app) = &mut self.app {
-            match app.connection_failure() {
-                // Back to the connect screen, with the reason.
-                Some(reason) => {
-                    self.error = reason.to_string();
-                    self.app = None;
-                    self.last_ime = None;
-                    self.last_ime_focus = None;
-                    restyle(ui.ctx(), self.theme.as_ref());
-                }
-                None => {
-                    let waited = self
-                        .connecting_since
-                        .is_some_and(|since| since.elapsed() >= THEME_WAIT);
-                    if app.theme().is_some() || waited {
-                        eframe::App::ui(app, ui, frame);
-                    } else {
-                        // First launch, nothing cached: connect unseen so the
-                        // default theme never shows.
-                        ui.scope_builder(egui::UiBuilder::new().invisible(), |ui| {
-                            eframe::App::ui(app, ui, frame)
-                        });
-                        ui.painter().text(
-                            ui.max_rect().center(),
-                            egui::Align2::CENTER_CENTER,
-                            "Connecting…",
-                            egui::TextStyle::Body.resolve(ui.style()),
-                            ui.visuals().weak_text_color(),
-                        );
-                        ui.ctx()
-                            .request_repaint_after(std::time::Duration::from_millis(100));
-                    }
-                    if let Some(theme) = app.theme()
-                        && self.theme.as_ref() != Some(theme)
-                    {
-                        let _ = std::fs::write(self.data_dir.join(THEME_FILE), theme.to_string());
-                        self.theme = Some(theme.clone());
-                    }
-                    return;
-                }
-            }
+        let Some(app) = self.app.as_mut() else {
+            self.connect_screen(ui);
+            return;
+        };
+        if let Some(reason) = app.connection_failure().map(str::to_owned) {
+            // Back to the connect screen, with the reason.
+            let workspace = app.workspace_state();
+            self.error = reason;
+            self.persist_workspace(workspace);
+            self.app = None;
+            self.last_ime = None;
+            self.last_ime_focus = None;
+            restyle(ui.ctx(), self.theme.as_ref());
+            self.connect_screen(ui);
+            return;
         }
-        self.connect_screen(ui);
+        let waited = self
+            .connecting_since
+            .is_some_and(|since| since.elapsed() >= THEME_WAIT);
+        if app.theme().is_some() || waited {
+            eframe::App::ui(app, ui, frame);
+        } else {
+            // First launch, nothing cached: connect unseen so the default
+            // theme never shows.
+            ui.scope_builder(egui::UiBuilder::new().invisible(), |ui| {
+                eframe::App::ui(app, ui, frame)
+            });
+            ui.painter().text(
+                ui.max_rect().center(),
+                egui::Align2::CENTER_CENTER,
+                "Connecting…",
+                egui::TextStyle::Body.resolve(ui.style()),
+                ui.visuals().weak_text_color(),
+            );
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        if let Some(theme) = app.theme()
+            && self.theme.as_ref() != Some(theme)
+        {
+            let _ = ssh::write_atomic(
+                &self.data_dir.join(THEME_FILE),
+                theme.to_string().as_bytes(),
+            );
+            self.theme = Some(theme.clone());
+        }
+        let workspace = app.workspace_state();
+        self.persist_workspace(workspace);
     }
     fn sync_ime(&mut self, ctx: &egui::Context) {
         let focused = ctx.memory(|memory| memory.focused());
@@ -451,6 +482,8 @@ impl eframe::App for Launcher {
         // input out of view for one frame, Android would hide and reshow the
         // keyboard; keep the request while a field still has focus.
         self.sync_ime(ui.ctx());
+        #[cfg(target_os = "android")]
+        copy_to_clipboard(ui.ctx());
     }
 }
 
@@ -466,6 +499,71 @@ pub fn run_preview(data_dir: PathBuf) -> eframe::Result {
         },
         Box::new(move |cc| Ok(Box::new(Launcher::new(&cc.egui_ctx, data_dir, None)))),
     )
+}
+
+/// egui's Android backend drops `CopyText`, so hand copied text to the
+/// system `ClipboardManager` over JNI.
+#[cfg(target_os = "android")]
+fn copy_to_clipboard(ctx: &egui::Context) {
+    let texts: Vec<String> = ctx.output_mut(|output| {
+        let mut texts = Vec::new();
+        output.commands.retain(|command| match command {
+            egui::OutputCommand::CopyText(text) => {
+                texts.push(text.clone());
+                false
+            }
+            _ => true,
+        });
+        texts
+    });
+    for text in texts {
+        if let Err(err) = set_clipboard(&text) {
+            eprintln!("bone: clipboard copy failed: {err}");
+        }
+    }
+}
+
+#[cfg(target_os = "android")]
+fn set_clipboard(text: &str) -> jni::errors::Result<()> {
+    use jni::objects::{JObject, JValue};
+    use jni::{jni_sig, jni_str};
+
+    let android = ndk_context::android_context();
+    // SAFETY: android-activity initialises the context with the live VM and a
+    // global reference to the activity, both valid for the process lifetime.
+    let vm = unsafe { jni::JavaVM::from_raw(android.vm().cast()) };
+    vm.attach_current_thread(|env| {
+        // SAFETY: see above; `JObject` does not delete the reference on drop.
+        let activity = unsafe { JObject::from_raw(env, android.context().cast()) };
+        let service = env.new_string("clipboard")?;
+        let clipboard = env
+            .call_method(
+                &activity,
+                jni_str!("getSystemService"),
+                jni_sig!("(Ljava/lang/String;)Ljava/lang/Object;"),
+                &[JValue::Object(&service)],
+            )?
+            .l()?;
+        let label = env.new_string("bone")?;
+        let body = env.new_string(text)?;
+        let clip = env
+            .call_static_method(
+                jni_str!("android/content/ClipData"),
+                jni_str!("newPlainText"),
+                jni_sig!(
+                    "(Ljava/lang/CharSequence;Ljava/lang/CharSequence;)Landroid/content/ClipData;"
+                ),
+                &[JValue::Object(&label), JValue::Object(&body)],
+            )?
+            .l()?;
+        env.call_method(
+            &clipboard,
+            jni_str!("setPrimaryClip"),
+            jni_sig!("(Landroid/content/ClipData;)V"),
+            &[JValue::Object(&clip)],
+        )?;
+        Ok(())
+    })
 }
 
 /// Android entry point, called by the NativeActivity glue.
@@ -697,6 +795,75 @@ mod tests {
         assert_eq!(
             ctx.style_of(ctx.theme()).visuals.panel_fill,
             egui::Color32::from_rgb(0x10, 0x20, 0x30)
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+    #[test]
+    fn workspace_state_persists_between_launchers() {
+        let dir = std::env::temp_dir().join(format!(
+            "bone-android-workspace-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let first_ctx = egui::Context::default();
+        let mut first = Launcher::new(&first_ctx, dir.clone(), None);
+        let expected = WorkspaceState {
+            chats: vec![Some(17), None, Some(23)],
+            active_chat: 2,
+            sidebar_open: Some(false),
+        };
+        first.persist_workspace(expected.clone());
+
+        let second_ctx = egui::Context::default();
+        let second = Launcher::new(&second_ctx, dir.clone(), None);
+        assert_eq!(second.workspace, expected);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn workspace_write_replaces_file_and_keeps_state_on_failure() {
+        let dir = std::env::temp_dir().join(format!(
+            "bone-android-workspace-atomic-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ctx = egui::Context::default();
+        let mut launcher = Launcher::new(&ctx, dir.clone(), None);
+        let path = dir.join(WORKSPACE_FILE);
+        let temporary = dir.join(format!("{WORKSPACE_FILE}.tmp"));
+        let first = WorkspaceState {
+            chats: vec![Some(7)],
+            active_chat: 0,
+            sidebar_open: Some(true),
+        };
+        launcher.persist_workspace(first.clone());
+
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            serde_json::to_vec(&first).unwrap()
+        );
+        assert!(!temporary.exists());
+
+        std::fs::create_dir(&temporary).unwrap();
+        let second = WorkspaceState {
+            chats: vec![Some(8)],
+            active_chat: 0,
+            sidebar_open: Some(false),
+        };
+        launcher.persist_workspace(second);
+
+        assert_eq!(launcher.workspace, first);
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            serde_json::to_vec(&first).unwrap()
         );
         let _ = std::fs::remove_dir_all(dir);
     }
