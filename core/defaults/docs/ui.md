@@ -26,7 +26,7 @@ cancellation are scoped to the attached conversation.
   nothing listening it can autostart its own daemon, but custom ports and remote
   addresses never do. Connections are restricted to loopback because the daemon
   protocol has no encryption or authentication. For a remote daemon,
-  `bone-desktop --ssh <host>` runs `ssh -T -o BatchMode=yes <host> -- bone stdio`
+  `bone-desktop --ssh <host[:port]>` runs `ssh -T -o BatchMode=yes <host> -- bone stdio`
   (`bone_client::ssh`) and speaks the same stream over the child's stdio; SSH
   owns authentication and host verification, and keys or an agent are required.
   A tab counts as connected only once the daemon's first event arrives, so a

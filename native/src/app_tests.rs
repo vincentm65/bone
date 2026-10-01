@@ -1162,6 +1162,53 @@ fn tap_at(
     render_at(app, ctx, width, Vec::new())
 }
 
+/// Registers a touch device with egui, so later frames take the phone paths.
+fn touch_device() -> Vec<egui::Event> {
+    let at = egui::pos2(2.0, 2.0);
+    let touch = |phase| egui::Event::Touch {
+        device_id: egui::TouchDeviceId(1),
+        id: egui::TouchId(1),
+        phase,
+        pos: at,
+        force: None,
+    };
+    vec![touch(egui::TouchPhase::Start), touch(egui::TouchPhase::End)]
+}
+
+/// A finger tap: press, a little drift, release. Three frames, the way real
+/// touch arrives, so egui sees the click a finger expects.
+fn touch_tap_at(
+    app: &mut DesktopApp,
+    ctx: &egui::Context,
+    width: f32,
+    at: egui::Pos2,
+    drift: egui::Vec2,
+) {
+    let button = |pos: egui::Pos2, pressed: bool| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let moved = at + drift;
+    render_at(app, ctx, width, vec![egui::Event::PointerMoved(at)]);
+    render_at(app, ctx, width, vec![button(at, true)]);
+    render_at(app, ctx, width, vec![egui::Event::PointerMoved(moved)]);
+    render_at(app, ctx, width, vec![button(moved, false)]);
+    render_at(app, ctx, width, Vec::new());
+}
+
+/// Names the tab at `index` directly, so a title cannot land on the wrong tab
+/// while the app is still settling which tab a shortcut opened.
+fn title_tab_at(app: &mut DesktopApp, index: usize, title: &str) {
+    if let TabKind::Chat(session) = &mut app.tabs[index].kind {
+        session
+            .state
+            .rows
+            .push(("user".to_owned(), title.to_owned()));
+    }
+}
+
 fn with_one_conversation(app: &mut DesktopApp) {
     app.conversations = vec![ConversationMeta {
         id: 41,
@@ -1400,6 +1447,158 @@ fn narrow_tab_strip_has_no_actions_menu_and_x_closes_tab() {
 
     assert_eq!(app.tabs.len(), 1, "the tab close button closes the tab");
     assert_eq!(app.layout.leaves().len(), 1, "and never splits");
+}
+
+#[test]
+fn narrow_touch_taps_select_and_close_tabs() {
+    let (mut app, ctx, _rx) = app();
+    render_at(&mut app, &ctx, 400.0, touch_device());
+    render_at(
+        &mut app,
+        &ctx,
+        400.0,
+        vec![key_event(egui::Key::T, egui::Modifiers::COMMAND)],
+    );
+    assert_eq!(app.tabs.len(), 2, "a second tab to select");
+    let (first, second) = (app.tabs[0].id, app.tabs[1].id);
+    assert_eq!(app.active_chat, second, "a new tab starts selected");
+
+    let output = render_at(&mut app, &ctx, 400.0, Vec::new());
+    let label = text_pos(&output, "new chat").expect("the first tab's label");
+    touch_tap_at(
+        &mut app,
+        &ctx,
+        400.0,
+        label + egui::vec2(4.0, 4.0),
+        egui::vec2(2.0, 1.0),
+    );
+    assert_eq!(
+        app.active_chat, first,
+        "a finger tap selects the tab it lands on"
+    );
+
+    let output = render_at(&mut app, &ctx, 400.0, Vec::new());
+    let close = text_pos(&output, "×").expect("the first tab's close button");
+    touch_tap_at(
+        &mut app,
+        &ctx,
+        400.0,
+        close + egui::vec2(4.0, 4.0),
+        egui::vec2(2.0, 1.0),
+    );
+    assert_eq!(app.tabs.len(), 1, "a finger tap on × closes that tab");
+    assert_eq!(app.active_chat, second, "and leaves the other one selected");
+}
+
+#[test]
+fn narrow_touch_taps_tolerate_a_finger_drift() {
+    let (mut app, ctx, _rx) = app();
+    render_at(&mut app, &ctx, 400.0, touch_device());
+    render_at(
+        &mut app,
+        &ctx,
+        400.0,
+        vec![key_event(egui::Key::T, egui::Modifiers::COMMAND)],
+    );
+    assert_eq!(app.tabs.len(), 2, "a tab to leave and a tab to tap");
+    // Name the tab once both exist: opening a tab reconnects the chats, and a
+    // title written between two openings can be dropped by the next one.
+    title_tab_at(&mut app, 0, "/alpha");
+    let first = app.tabs[0].id;
+    assert_eq!(
+        app.active_chat, app.tabs[1].id,
+        "the new tab starts selected"
+    );
+
+    let output = render_at(&mut app, &ctx, 400.0, Vec::new());
+    let label = text_pos(&output, "/alpha").expect("the first tab's label");
+    // 7.6 pt of drift: further than a mouse click may wander, closer than the
+    // finger-sized window, so this still has to select the tab.
+    touch_tap_at(
+        &mut app,
+        &ctx,
+        400.0,
+        label + egui::vec2(4.0, 4.0),
+        egui::vec2(7.0, 3.0),
+    );
+    assert_eq!(
+        app.active_chat, first,
+        "a finger that drifts a little still taps"
+    );
+}
+
+#[test]
+fn narrow_touch_drag_scrolls_the_tab_strip_without_reordering() {
+    let (mut app, ctx, _rx) = app();
+    render_at(&mut app, &ctx, 400.0, touch_device());
+    let titles = [
+        "/alpha", "/bravo", "/charlie", "/delta", "/echo", "/foxtrot", "/golf", "/hotel", "/india",
+        "/juliet",
+    ];
+    for _ in 1..titles.len() {
+        render_at(
+            &mut app,
+            &ctx,
+            400.0,
+            vec![key_event(egui::Key::T, egui::Modifiers::COMMAND)],
+        );
+    }
+    assert_eq!(
+        app.tabs.len(),
+        titles.len(),
+        "more tabs than the phone strip can show"
+    );
+    for (index, title) in titles.iter().enumerate() {
+        title_tab_at(&mut app, index, title);
+    }
+    let order: Vec<u64> = app.tabs.iter().map(|tab| tab.id).collect();
+    let output = render_at(&mut app, &ctx, 400.0, Vec::new());
+    let start = text_pos(&output, "/bravo").expect("the second tab's label");
+
+    let button = |pos: egui::Pos2, pressed: bool| egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let from = start + egui::vec2(4.0, 4.0);
+    let moved = |dx: f32| from - egui::vec2(dx, 0.0);
+    render_at(&mut app, &ctx, 400.0, vec![egui::Event::PointerMoved(from)]);
+    render_at(&mut app, &ctx, 400.0, vec![button(from, true)]);
+    render_at(
+        &mut app,
+        &ctx,
+        400.0,
+        vec![egui::Event::PointerMoved(moved(10.0))],
+    );
+    let moved_output = render_at(
+        &mut app,
+        &ctx,
+        400.0,
+        vec![egui::Event::PointerMoved(moved(30.0))],
+    );
+    assert!(
+        app.tab_dragging.is_none(),
+        "a finger drag on a tab scrolls the strip instead of picking the tab up"
+    );
+    // The scroll offset is eased after the pointer moves; inspect this frame
+    // before the strip can settle far enough to cull the target label.
+    let scrolled = text_pos(&moved_output, "/bravo").expect("the second tab's label");
+    assert!(
+        scrolled.x < start.x - 5.0,
+        "the finger drag scrolled the strip: {:?} to {:?}",
+        start,
+        scrolled
+    );
+    render_at(&mut app, &ctx, 400.0, vec![button(moved(30.0), false)]);
+    render_at(&mut app, &ctx, 400.0, Vec::new());
+
+    assert!(app.tab_drop.is_none(), "and drops no tab");
+    assert_eq!(
+        app.tabs.iter().map(|tab| tab.id).collect::<Vec<_>>(),
+        order,
+        "the tab order is untouched"
+    );
 }
 
 #[test]

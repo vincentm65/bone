@@ -64,6 +64,35 @@ impl Connector for SshConnector {
 /// `[left, top, right, bottom]` (on Android: above the on-screen keyboard).
 pub type VisibleArea = Box<dyn Fn() -> [i32; 4]>;
 
+/// Turn connection failures into a short next step while retaining the
+/// original error for diagnostics and security details.
+fn friendly_connection_error(error: &str) -> String {
+    let lower = error.to_ascii_lowercase();
+    let guidance = if lower.contains("host key") && lower.contains("changed") {
+        "The computer's SSH host key changed. Verify the computer before forgetting its pinned key."
+    } else if lower.contains("rejected this app's key")
+        || lower.contains("login failed")
+        || lower.contains("authentication")
+    {
+        "SSH reached the computer, but it did not accept Bone's key. Add the full one-time public key to ~/.ssh/authorized_keys there."
+    } else if lower.contains("could not reach")
+        || lower.contains("timed out")
+        || lower.contains("connection refused")
+        || lower.contains("no route")
+    {
+        "Bone could not reach the computer. Check that it is awake, the address and port are correct, and SSH is reachable."
+    } else if lower.contains("could not run")
+        || lower.contains("command not found")
+        || lower.contains("remote bone")
+        || lower.contains("remote stderr")
+    {
+        "SSH connected, but Bone did not start on the computer. Check the Bone path under Advanced connection settings."
+    } else {
+        "Could not connect to the computer."
+    };
+    format!("{guidance}\n\nDetails: {error}")
+}
+
 /// The connect screen until a link is up, then the desktop UI, both laid out
 /// inside the window's visible area.
 pub struct Launcher {
@@ -81,6 +110,10 @@ pub struct Launcher {
     identity: Result<Arc<Identity>, String>,
     destination: String,
     bone: String,
+    /// Start the first frame by trying the saved computer.
+    auto_connect: bool,
+    /// Whether to show the optional remote Bone path.
+    show_advanced: bool,
     error: String,
     /// The last theme payload seen, cached in [`THEME_FILE`].
     theme: Option<serde_json::Value>,
@@ -112,6 +145,9 @@ impl Launcher {
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
         let mut lines = saved.lines();
+        let destination = lines.next().unwrap_or_default().to_string();
+        let bone = lines.next().unwrap_or("bone").to_string();
+        let auto_connect = !destination.trim().is_empty();
         Self {
             visible_area,
             last_area: egui::Rect::NOTHING,
@@ -119,8 +155,10 @@ impl Launcher {
             last_ime_focus: None,
             key_copied: false,
             forget_host_pending: None,
-            destination: lines.next().unwrap_or_default().to_string(),
-            bone: lines.next().unwrap_or("bone").to_string(),
+            destination,
+            bone,
+            auto_connect,
+            show_advanced: false,
             data_dir,
             identity,
             error: String::new(),
@@ -132,6 +170,7 @@ impl Launcher {
     }
 
     fn connect(&mut self, ctx: &egui::Context) {
+        self.auto_connect = false;
         let identity = match &self.identity {
             Ok(identity) => identity.clone(),
             Err(error) => {
@@ -171,6 +210,13 @@ impl Launcher {
         }
         self.app = Some(app);
         self.connecting_since = Some(std::time::Instant::now());
+    }
+
+    fn start_saved_connection(&mut self, ctx: &egui::Context) {
+        if self.app.is_none() && self.auto_connect {
+            self.auto_connect = false;
+            self.connect(ctx);
+        }
     }
 
     fn persist_workspace(&mut self, workspace: WorkspaceState) {
@@ -216,9 +262,9 @@ impl Launcher {
         egui::CentralPanel::default().frame(frame).show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 let width = ui.available_width();
-                ui.heading("bone");
+                ui.heading("Connect to your computer");
                 ui.add_space(12.0);
-                ui.weak("Computer (user@host or user@host:port)");
+                ui.weak("Computer address (user@host or user@host:port)");
                 let destination = ui.add(
                     egui::TextEdit::singleline(&mut self.destination)
                         .id(egui::Id::new("android-destination"))
@@ -231,30 +277,41 @@ impl Launcher {
                         )),
                 );
                 ui.add_space(8.0);
-                ui.weak("Path to bone on the computer");
-                let bone = ui.add(
-                    egui::TextEdit::singleline(&mut self.bone)
-                        .id(egui::Id::new("android-bone-path"))
-                        .hint_text("bone")
-                        .font(egui::TextStyle::Monospace)
-                        .desired_width(f32::INFINITY)
-                        .min_size(egui::vec2(0.0, 36.0))
-                        .return_key(egui::KeyboardShortcut::new(
-                            egui::Modifiers::NONE,
-                            egui::Key::Enter,
-                        )),
-                );
+                ui.checkbox(&mut self.show_advanced, "Advanced connection settings");
+                let mut bone_lost_focus = false;
+                if self.show_advanced {
+                    ui.weak("Only change this if `bone` is not on the SSH PATH.");
+                    ui.weak("Path to Bone on the computer");
+                    let bone = ui.add(
+                        egui::TextEdit::singleline(&mut self.bone)
+                            .id(egui::Id::new("android-bone-path"))
+                            .hint_text("bone")
+                            .font(egui::TextStyle::Monospace)
+                            .desired_width(f32::INFINITY)
+                            .min_size(egui::vec2(0.0, 36.0))
+                            .return_key(egui::KeyboardShortcut::new(
+                                egui::Modifiers::NONE,
+                                egui::Key::Enter,
+                            )),
+                    );
+                    bone_lost_focus = bone.lost_focus();
+                }
                 ui.add_space(10.0);
                 let can_connect = !self.destination.trim().is_empty();
+                let label = if self.error.is_empty() {
+                    "Connect to computer"
+                } else {
+                    "Try again"
+                };
                 let button = ui
                     .add_enabled_ui(can_connect, |ui| {
-                        ui.add_sized([width, 40.0], egui::Button::new("Connect"))
+                        ui.add_sized([width, 40.0], egui::Button::new(label))
                     })
                     .inner;
                 connect = can_connect
                     && (button.clicked()
                         || (ui.input(|input| input.key_pressed(egui::Key::Enter))
-                            && (destination.lost_focus() || bone.lost_focus())));
+                            && (destination.lost_focus() || bone_lost_focus)));
 
                 let parsed = ssh::Destination::parse(&self.destination).ok();
                 let pinned = match (self.identity.as_ref(), parsed.as_ref()) {
@@ -309,7 +366,8 @@ impl Launcher {
                 }
                 if let Ok(identity) = &self.identity {
                     ui.add_space(20.0);
-                    ui.weak("Add this key to ~/.ssh/authorized_keys on the computer:");
+                    ui.heading("One-time setup");
+                    ui.weak("Add this app's key to ~/.ssh/authorized_keys on your computer. You only need to do this once for this computer:");
                     let mut line = identity.public_line();
                     ui.add(
                         egui::TextEdit::multiline(&mut line)
@@ -375,6 +433,7 @@ impl Launcher {
     }
 
     fn content(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        self.start_saved_connection(ui.ctx());
         let Some(app) = self.app.as_mut() else {
             self.connect_screen(ui);
             return;
@@ -382,7 +441,7 @@ impl Launcher {
         if let Some(reason) = app.connection_failure().map(str::to_owned) {
             // Back to the connect screen, with the reason.
             let workspace = app.workspace_state();
-            self.error = reason;
+            self.error = friendly_connection_error(&reason);
             self.persist_workspace(workspace);
             self.app = None;
             self.last_ime = None;
@@ -647,11 +706,69 @@ mod tests {
         }
     }
 
+    fn test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "bone-android-{name}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
     #[test]
-    fn enter_on_the_destination_field_starts_connecting() {
-        let dir = std::env::temp_dir().join(format!("bone-android-enter-{}", std::process::id()));
+    fn saved_destination_starts_auto_connecting() {
+        let dir = test_dir("saved");
+        std::fs::write(dir.join(SETTINGS_FILE), "me@example.test\nbone\n").unwrap();
         let ctx = egui::Context::default();
         let mut launcher = Launcher::new(&ctx, dir.clone(), None);
+
+        assert!(launcher.auto_connect);
+        launcher.start_saved_connection(&ctx);
+        assert!(launcher.app.is_some());
+        assert!(!launcher.auto_connect);
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn empty_destination_keeps_manual_setup() {
+        let dir = test_dir("manual");
+        let ctx = egui::Context::default();
+        let mut launcher = Launcher::new(&ctx, dir.clone(), None);
+
+        assert!(!launcher.auto_connect);
+        launcher.start_saved_connection(&ctx);
+        assert!(launcher.app.is_none());
+        let output = connect_frame(&mut launcher, &ctx, Vec::new());
+        assert!(text_top(&output, "Connect to computer").is_some());
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn connection_errors_keep_details_with_friendly_guidance() {
+        let refused = friendly_connection_error("could not reach devbox:22: Connection refused");
+        assert!(refused.contains("Bone could not reach the computer."));
+        assert!(refused.contains("Connection refused"));
+
+        let changed = friendly_connection_error(
+            "the host key for devbox changed; if expected, clear the app's known hosts",
+        );
+        assert!(changed.contains("Verify the computer"));
+        assert!(changed.contains("clear the app's known hosts"));
+    }
+
+    #[test]
+    fn enter_on_the_destination_field_starts_connecting() {
+        let dir = test_dir("enter");
+        let ctx = egui::Context::default();
+        let mut launcher = Launcher::new(&ctx, dir.clone(), None);
+        assert!(!launcher.auto_connect);
         launcher.destination = "me@example.test".into();
         launcher.bone = "bone".into();
         let _ = connect_frame(&mut launcher, &ctx, Vec::new());
@@ -779,7 +896,7 @@ mod tests {
         }
         let mut output = output.unwrap();
         output.textures_delta.clear();
-        let top = text_top(&output, "Computer").expect("connect screen");
+        let top = text_top(&output, "Connect to your computer").expect("connect screen");
         assert!((300.0..500.0).contains(&top), "laid out at {top}");
         let _ = std::fs::remove_dir_all(dir);
     }

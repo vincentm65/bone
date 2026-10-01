@@ -53,13 +53,19 @@ unsent drafts remain transient.
 
 ## First connection
 
-1. Open Bone. The connect screen shows this app's public key; tap **Copy key**
-   and append it to `~/.ssh/authorized_keys` on the computer.
-2. Enter `user@host` (the computer's LAN or Tailscale address) and the path to
-   `bone` there if it is not on the PATH that SSH commands see (for example
-   `/home/you/.local/bin/bone`).
-3. Tap **Connect**. The computer's host key is pinned on first use; a changed
-   key is refused.
+1. Open Bone. The connect screen shows this app's public key; tap **Copy key** and
+   append it to `~/.ssh/authorized_keys` on the computer. This is one-time setup
+   for that computer.
+2. Enter `user@host` (the computer's LAN or Tailscale address). Bone uses the
+   `bone` command on the computer by default. If it is installed somewhere else,
+   open **Advanced connection settings** and enter its path there.
+3. Tap **Connect to computer**. The computer's host key is pinned on first use;
+   a changed key is refused and must be verified before using **Forget pinned host key**.
+
+The destination and Bone path are saved privately on the phone. After a successful
+setup, reopening Bone automatically tries the saved computer; there is no account,
+QR code, or cloud relay. If it cannot connect, the screen explains the next step
+and offers **Try again**.
 
 ## Desktop preview
 

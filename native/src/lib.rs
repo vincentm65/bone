@@ -71,6 +71,10 @@ const SIDEBAR_WIDTH: f32 = 240.0;
 const NARROW_WIDTH: f32 = 700.0;
 /// Room kept at the end of the input row for the touch Stop button.
 const STOP_BUTTON_WIDTH: f32 = 72.0;
+/// How far a finger may wander and still count as a tap. egui's own window is
+/// sized for a mouse (6 pt), which is narrower than Android's 8 dp touch slop,
+/// so phone taps below that drift were read as drags instead of clicks.
+const TOUCH_TAP_SLOP: f32 = 10.0;
 
 fn brief_error(error: &str) -> &'static str {
     if error.to_ascii_lowercase().contains("conversation") {
@@ -3610,7 +3614,7 @@ impl DesktopApp {
         };
         let Some(bin) = self.daemon_bin.clone().or_else(daemon::resolve_binary) else {
             self.stop(
-                "Could not find the `bone` daemon binary (set BONE_DESKTOP_DAEMON or install bone)."
+                "Bone is not installed yet. Install the `bone` command, or set BONE_DESKTOP_DAEMON to its path."
                     .into(),
             );
             return false;
@@ -3634,7 +3638,7 @@ impl DesktopApp {
                 true
             }
             Err(error) => {
-                self.stop(format!("Could not start the local daemon: {error}"));
+                self.stop(format!("Bone could not start: {error}"));
                 false
             }
         }
@@ -3819,7 +3823,7 @@ impl DesktopApp {
                         self.start_local_daemon(ctx);
                     } else {
                         self.stop(format!(
-                            "No daemon responding at {address}. Custom ports never auto-start a daemon."
+                            "No Bone service is running at {address}. Start `bone serve --listen {address}` or use the default port 7878."
                         ));
                     }
                 }
@@ -3995,6 +3999,11 @@ impl DesktopApp {
         let accent = visuals.hyperlink_color;
         let separator = visuals.widgets.noninteractive.bg_stroke.color;
         let tab_height = ui.spacing().interact_size.y + 4.0;
+        // A finger tap must beat the strip's own drag: a tab that senses drags
+        // wins the hit test against the scroll area below it and turns a touch
+        // drag into a tab drag. Click-only on touch keeps taps selecting while
+        // dragging the strip scrolls it (see `transcript.rs` for the same gate).
+        let touch = self.touch;
         let spinner = status_bar::indicator_style(self.settings());
         let titles: Vec<(usize, String, bool, bool)> = self
             .tabs
@@ -4043,7 +4052,11 @@ impl DesktopApp {
                             .selected(selected)
                             .frame(false)
                             .min_size(egui::vec2(0.0, tab_height))
-                            .sense(egui::Sense::click_and_drag()),
+                            .sense(if touch {
+                                egui::Sense::click()
+                            } else {
+                                egui::Sense::click_and_drag()
+                            }),
                         );
                         if response.dragged() {
                             ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
@@ -4224,7 +4237,8 @@ impl DesktopApp {
         }
         if !self.demo && !(session.connected && state.ready) {
             let connection = match &self.daemon_phase {
-                daemon::Phase::Stopped(_) => "daemon offline",
+                daemon::Phase::Stopped(_) => "Bone offline",
+                daemon::Phase::Starting { .. } => "starting Bone…",
                 _ if !session.connected => "connecting…",
                 _ => "loading…",
             };
@@ -4807,6 +4821,14 @@ impl DesktopApp {
         // touch gate from this frame's actual available width first.
         self.narrow = ui.available_width() < NARROW_WIDTH;
         self.touch = self.narrow && ui.input(|input| input.has_touch_screen());
+        let max_click_dist = if self.touch {
+            TOUCH_TAP_SLOP
+        } else {
+            egui::InputOptions::default().max_click_dist
+        };
+        ui.ctx().options_mut(|options| {
+            options.input_options.max_click_dist = max_click_dist;
+        });
         self.handle_keys(ui);
         let dropped = ui.input(|i| i.raw.dropped_files.clone());
         if !dropped.is_empty() {

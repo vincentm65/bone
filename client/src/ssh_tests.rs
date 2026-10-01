@@ -14,6 +14,19 @@ fn ssh_args_run_bone_stdio_in_batch_mode() {
 }
 
 #[test]
+fn ssh_args_accept_a_copyable_host_and_port() {
+    let args = ssh_args("me@office.example:2222", "bone").unwrap();
+    assert!(args.windows(2).any(|pair| pair == ["-p", "2222"]));
+    assert_eq!(
+        &args[args.len() - 4..],
+        ["me@office.example", "--", "bone", "stdio"]
+    );
+
+    let ipv6 = ssh_args("me@[2001:db8::1]:2222", "bone").unwrap();
+    assert!(ipv6.windows(2).any(|pair| pair == ["-p", "2222"]));
+}
+
+#[test]
 fn ssh_args_reject_hosts_that_could_be_options() {
     for host in ["", "  ", "-oProxyCommand=touch /tmp/x", "-p22", "a b"] {
         assert!(ssh_args(host, "bone").is_err(), "{host:?}");

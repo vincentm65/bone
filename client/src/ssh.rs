@@ -81,7 +81,8 @@ fn spawn_ssh(
 }
 
 /// Arguments after the program name. The host is validated so a value such as
-/// `-oProxyCommand=…` can never be read as an ssh option.
+/// `-oProxyCommand=…` can never be read as an ssh option. A trailing `:port`
+/// is accepted for the same copy-and-paste connection format used by Android.
 pub fn ssh_args(host: &str, remote_bin: &str) -> std::io::Result<Vec<String>> {
     let host = host.trim();
     if host.is_empty() || host.starts_with('-') || host.chars().any(char::is_whitespace) {
@@ -90,21 +91,56 @@ pub fn ssh_args(host: &str, remote_bin: &str) -> std::io::Result<Vec<String>> {
             format!("invalid ssh host {host:?}"),
         ));
     }
-    Ok([
-        "-T",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "ServerAliveInterval=15",
-        "-o",
-        "ServerAliveCountMax=3",
-        host,
-        "--",
-        remote_bin,
-        "stdio",
-    ]
-    .map(String::from)
-    .to_vec())
+    let (destination, port) = match host.rsplit_once(':') {
+        Some((prefix, suffix))
+            if !prefix.is_empty()
+                && suffix.chars().all(|ch| ch.is_ascii_digit())
+                && (prefix.ends_with(']') || !prefix.contains(':')) =>
+        {
+            let port = suffix.parse::<u16>().map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("invalid ssh port {suffix:?}"),
+                )
+            })?;
+            if port == 0 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "ssh port must be between 1 and 65535",
+                ));
+            }
+            (prefix, Some(port))
+        }
+        _ => (host, None),
+    };
+    if destination.is_empty()
+        || destination.starts_with('-')
+        || destination.chars().any(char::is_whitespace)
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("invalid ssh host {host:?}"),
+        ));
+    }
+    let mut args = vec![
+        "-T".to_string(),
+        "-o".to_string(),
+        "BatchMode=yes".to_string(),
+        "-o".to_string(),
+        "ServerAliveInterval=15".to_string(),
+        "-o".to_string(),
+        "ServerAliveCountMax=3".to_string(),
+    ];
+    if let Some(port) = port {
+        args.extend(["-p".to_string(), port.to_string()]);
+    }
+    args.extend([
+        destination.to_string(),
+        "--".to_string(),
+        remote_bin.to_string(),
+        "stdio".to_string(),
+    ]);
+    Ok(args)
 }
 
 impl SshSession {

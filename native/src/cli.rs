@@ -27,7 +27,7 @@ pub struct Cli {
     /// `--connect <addr>` / `connect --listen <addr>`: daemon address to open
     /// tabs against (loopback only; remote access must tunnel to loopback).
     pub address: Option<String>,
-    /// `--ssh <host>`: reach the daemon via `ssh <host> -- bone stdio`.
+    /// `--ssh <host[:port]>`: reach the daemon via SSH and `bone stdio`.
     pub ssh_host: Option<String>,
     pub command: Command,
 }
@@ -88,14 +88,14 @@ pub fn version() -> String {
 }
 
 pub fn usage() -> String {
-    "Usage: bone-desktop [--connect <addr> | --ssh <host>]
+    "Usage: bone-desktop [--connect <addr> | --ssh <host[:port]>]
 
 Options:
-  --connect <addr>   Daemon address (default 127.0.0.1:7878; loopback only)
-  --ssh <host>       Use the daemon on <host> via `ssh <host> -- bone stdio`
-                     (keys or an agent required; `bone` must be on its PATH)
-  -V, --version      Print version and exit
-  -h, --help         Print this help and exit
+  --connect <addr>       Daemon address (default 127.0.0.1:7878; loopback only)
+  --ssh <host[:port]>    Use SSH and `bone stdio` for a remote computer
+                         (keys or an agent required; `bone` must be on its PATH)
+  -V, --version          Print version and exit
+  -h, --help             Print this help and exit
 
 bone-desktop is a pure client. Daemon-side commands (serve, web, run, install,
 update) live in the `bone` binary."
@@ -147,6 +147,8 @@ mod tests {
     fn ssh_flag_takes_a_host_and_rejects_option_like_values() {
         let cli = parse(&args(&["--ssh", "devbox"])).unwrap();
         assert_eq!(cli.ssh_host.as_deref(), Some("devbox"));
+        let cli = parse(&args(&["--ssh", "me@devbox:2222"])).unwrap();
+        assert_eq!(cli.ssh_host.as_deref(), Some("me@devbox:2222"));
         assert!(parse(&args(&["--ssh"])).is_err());
         assert!(parse(&args(&["--ssh", "-oProxyCommand=x"])).is_err());
         assert!(parse(&args(&["--ssh", "devbox", "--connect", "127.0.0.1"])).is_err());
