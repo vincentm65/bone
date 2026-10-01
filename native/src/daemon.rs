@@ -272,7 +272,7 @@ mod tests {
         ));
         assert!(!is_refused("Disconnected"));
     }
-#[test]
+    #[test]
     fn wedged_classification() {
         assert!(is_wedged(
             "Connect failed: 127.0.0.1:7878 did not reach the daemon within 10 seconds"

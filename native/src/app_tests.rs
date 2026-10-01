@@ -1707,3 +1707,142 @@ fn desktop_republishes_chat_pane_width_after_local_conversation_attachments() {
         RuntimeCommand::SetTerminalWidth { width: next } if Some(next) == width
     )));
 }
+
+#[cfg(unix)]
+fn recovery_test_child() -> std::process::Child {
+    std::process::Command::new("sh")
+        .args(["-c", "exec sleep 60"])
+        .spawn()
+        .expect("spawn recovery test child")
+}
+
+#[cfg(unix)]
+fn recovery_process_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn mark_wedged(app: &mut DesktopApp, generation: u64) {
+    let session = app.session_mut();
+    session.connected = false;
+    session.connecting = false;
+    session.connect_failed_refused = false;
+    session.connect_failed_other = true;
+    session.forced_gen = generation;
+    session.state.ready = false;
+    session.connection_status =
+        "Connect failed: 127.0.0.1:7878 did not reach the daemon within 10 seconds".into();
+}
+
+#[cfg(unix)]
+#[test]
+fn wedged_owned_daemon_is_killed_and_replaced() {
+    let (mut app, ctx, _rx) = app();
+    app.daemon_phase = daemon::Phase::Starting { attempts: 0 };
+    app.daemon_bin = Some("true".into());
+    let child = recovery_test_child();
+    let old_pid = child.id();
+    app.daemon_child = Some(child);
+    let generation = app.daemon_gen;
+    mark_wedged(&mut app, generation);
+
+    app.pump_daemon(&ctx);
+
+    assert_eq!(app.wedged_respawns, 1);
+    assert_eq!(app.daemon_gen, generation + 1);
+    let new_pid = app
+        .daemon_child
+        .as_ref()
+        .expect("respawned daemon child")
+        .id();
+    assert_ne!(new_pid, old_pid);
+    assert!(
+        !recovery_process_alive(old_pid),
+        "old daemon was not killed"
+    );
+    assert!(matches!(app.daemon_phase, daemon::Phase::Starting { .. }));
+    if let Some(mut child) = app.daemon_child.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn wedged_owned_daemon_is_killed_when_respawn_budget_is_exhausted() {
+    let (mut app, ctx, _rx) = app();
+    app.daemon_phase = daemon::Phase::Starting { attempts: 0 };
+    app.wedged_respawns = daemon::MAX_WEDGED_RESPAWNS;
+    let child = recovery_test_child();
+    let pid = child.id();
+    app.daemon_child = Some(child);
+    let generation = app.daemon_gen;
+    mark_wedged(&mut app, generation);
+
+    app.pump_daemon(&ctx);
+
+    assert!(app.daemon_child.is_none());
+    let failure = app.connection_failure().expect("exhaustion failure");
+    assert!(failure.contains("tried 4 times (3 respawns)"), "{failure}");
+    assert!(
+        !recovery_process_alive(pid),
+        "exhausted daemon was not killed"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn wedged_foreign_daemon_is_reported_without_being_killed() {
+    let (mut app, ctx, _rx) = app();
+    app.daemon_phase = daemon::Phase::Probe;
+    let mut foreign = recovery_test_child();
+    let pid = foreign.id();
+    let generation = app.daemon_gen;
+    mark_wedged(&mut app, generation);
+
+    app.pump_daemon(&ctx);
+
+    assert!(app.daemon_child.is_none());
+    assert!(matches!(app.daemon_phase, daemon::Phase::Stopped(_)));
+    assert!(recovery_process_alive(pid), "foreign daemon was killed");
+    let _ = foreign.kill();
+    let _ = foreign.wait();
+}
+
+#[cfg(unix)]
+#[test]
+fn stale_wedged_generation_does_not_trigger_another_respawn() {
+    let (mut app, ctx, _rx) = app();
+    app.daemon_phase = daemon::Phase::Starting { attempts: 0 };
+    app.daemon_gen = 1;
+    let child = recovery_test_child();
+    let pid = child.id();
+    app.daemon_child = Some(child);
+    mark_wedged(&mut app, 0);
+
+    app.pump_daemon(&ctx);
+
+    assert_eq!(app.daemon_gen, 1);
+    assert_eq!(app.wedged_respawns, 0);
+    assert_eq!(
+        app.daemon_child
+            .as_ref()
+            .expect("original daemon child")
+            .id(),
+        pid
+    );
+    assert!(
+        recovery_process_alive(pid),
+        "stale report killed the daemon"
+    );
+    assert_eq!(app.daemon_phase, daemon::Phase::Starting { attempts: 0 });
+    if let Some(mut child) = app.daemon_child.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}

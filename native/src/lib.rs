@@ -3627,7 +3627,10 @@ impl DesktopApp {
                 self.daemon_child = Some(child);
                 self.daemon_phase = daemon::Phase::Starting { attempts: 0 };
                 self.daemon_notice.clear();
-                self.schedule_retry(ctx, Duration::from_millis(daemon::DAEMON_FIRST_RETRY_DELAY_MS));
+                self.schedule_retry(
+                    ctx,
+                    Duration::from_millis(daemon::DAEMON_FIRST_RETRY_DELAY_MS),
+                );
                 true
             }
             Err(error) => {
@@ -3726,8 +3729,8 @@ impl DesktopApp {
         {
             self.conversations_stale = true;
             if self.daemon_child.is_some() {
-                self.wedged_respawns += 1;
                 if self.wedged_respawns < daemon::MAX_WEDGED_RESPAWNS {
+                    self.wedged_respawns += 1;
                     self.daemon_gen += 1;
                     if let Some(mut child) = self.daemon_child.take() {
                         let _ = child.kill();
@@ -3738,8 +3741,13 @@ impl DesktopApp {
                     }
                     return;
                 }
+                let attempts = self.wedged_respawns + 1;
+                if let Some(mut child) = self.daemon_child.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
                 self.stop(format!(
-                    "The local daemon accepted connections but never answered; tried {} times. Restart it manually.",
+                    "The local daemon accepted connections but never answered; tried {attempts} times ({} respawns). Restart it manually.",
                     self.wedged_respawns
                 ));
                 return;

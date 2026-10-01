@@ -795,16 +795,13 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap().to_string();
         let (tx, mut commands) = mpsc::unbounded_channel();
-        let (stream, _server) = tokio::join!(
-            tokio::net::TcpStream::connect(&address),
-            listener.accept()
-        );
+        let (stream, _server) =
+            tokio::join!(tokio::net::TcpStream::connect(&address), listener.accept());
         let (read, write) = stream.unwrap().into_split();
         let read: Reader = Box::new(read);
         let write: Writer = Box::new(write);
         let mut conn = SocketConn::new(read, write);
-        let first =
-            wait_first_event(&mut conn, &mut commands, Duration::from_secs(2)).await;
+        let first = wait_first_event(&mut conn, &mut commands, Duration::from_secs(2)).await;
         assert!(matches!(first, FirstEvent::TimedOut));
         drop(tx);
     }
@@ -814,10 +811,8 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap().to_string();
         let (tx, mut commands) = mpsc::unbounded_channel();
-        let (stream, _server) = tokio::join!(
-            tokio::net::TcpStream::connect(&address),
-            listener.accept()
-        );
+        let (stream, _server) =
+            tokio::join!(tokio::net::TcpStream::connect(&address), listener.accept());
         let (read, write) = stream.unwrap().into_split();
         let read: Reader = Box::new(read);
         let write: Writer = Box::new(write);
@@ -829,8 +824,7 @@ mod tests {
                 .send(Command::Connect(Target::Local(address)))
                 .unwrap();
         });
-        let first =
-            wait_first_event(&mut conn, &mut commands, Duration::from_secs(5)).await;
+        let first = wait_first_event(&mut conn, &mut commands, Duration::from_secs(5)).await;
         assert!(matches!(first, FirstEvent::Cancelled));
     }
 }
