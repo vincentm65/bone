@@ -218,6 +218,14 @@ pub enum RuntimeEvent {
         /// Whether this conversation's actor currently has an active turn.
         #[serde(default)]
         busy: bool,
+        /// The daemon's authoritative elapsed work time for the in-flight turn,
+        /// in milliseconds, excluding time spent paused for approvals. A
+        /// frontend that attaches mid-turn anchors its own elapsed counter to
+        /// this, instead of counting from zero and misreporting the turn as
+        /// just started. `None` while idle, and for daemons that predate this
+        /// field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_elapsed_ms: Option<u64>,
     },
     /// Correlated failure response for `LoadConversation`; lets a waiting
     /// frontend return to input instead of hanging after a database error.

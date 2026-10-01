@@ -413,9 +413,7 @@ impl App {
         self.streaming_assistant_idx = None;
         self.shown_tool_rows.clear();
         self.stream_estimated_received = Some(self.view.received);
-        self.turn_start = Some(std::time::Instant::now());
-        self.turn_paused_duration = std::time::Duration::ZERO;
-        self.turn_pause_start = None;
+        self.anchor_turn_start(None);
     }
 
     /// Adopt an automated turn started by the daemon while the frontend is idle.
@@ -440,6 +438,9 @@ impl App {
     /// Join an already-active turn, then repair its missed head by synchronization.
     pub(super) async fn join_daemon_turn(&mut self, term: &mut BoneTerminal) -> io::Result<()> {
         self.begin_streaming();
+        // Anchor to the daemon's elapsed time so the status bar doesn't restart at zero.
+        let elapsed = self.pending_turn_elapsed_ms.take();
+        self.anchor_turn_start(elapsed);
         self.run_event_pump_inner(None, term, true).await
     }
 

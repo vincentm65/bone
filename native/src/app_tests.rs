@@ -78,6 +78,7 @@ fn conversation_identity_ignores_default_replay_but_accepts_detachment() {
             ..Default::default()
         },
         busy: false,
+        turn_elapsed_ms: None,
     }));
     assert!(session.state.ready);
     assert!(
@@ -1289,6 +1290,7 @@ fn new_chat_refreshes_phone_sidebar_during_a_turn_and_can_be_reopened() {
             messages: Vec::new(),
             snapshot: bone_protocol::SessionSnapshot::default(),
             busy: false,
+            turn_elapsed_ms: None,
         }))
         .unwrap();
     let output = render_at(&mut app, &ctx, 400.0, Vec::new());

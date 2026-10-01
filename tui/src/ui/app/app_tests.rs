@@ -336,6 +336,7 @@ fn view_snapshot_replaces_only_daemon_owned_components_and_highlights() {
         messages: Vec::new(),
         snapshot: app.view.clone(),
         busy: false,
+        turn_elapsed_ms: None,
     });
     assert!(app.lua_status.is_empty());
     assert!(app.pages.is_empty());

@@ -1625,7 +1625,7 @@ fn managed_projection_late_attach_uses_actor_runtime_replacements() {
     // ManagedRuntime attachment.
     ctx.publish_snapshot();
 
-    let initial = projection.initial_events(false, None);
+    let initial = projection.initial_events(None, None);
     assert!(matches!(
         initial.get(2),
         Some(RuntimeEvent::ConversationLoaded { .. })
@@ -4732,18 +4732,10 @@ fn initial_attach_bounds_oversized_conversation_loaded_frame() {
     );
 
     let loaded = projection
-        .initial_events(false, None)
+        .initial_events(None, None)
         .into_iter()
         .find_map(|event| match event {
-            RuntimeEvent::ConversationLoaded {
-                messages,
-                snapshot,
-                busy,
-            } => Some(RuntimeEvent::ConversationLoaded {
-                messages,
-                snapshot,
-                busy,
-            }),
+            loaded @ RuntimeEvent::ConversationLoaded { .. } => Some(loaded),
             _ => None,
         })
         .expect("attach replay omitted ConversationLoaded");
@@ -4779,7 +4771,7 @@ fn initial_attach_replays_a_bounded_tail_of_a_long_conversation() {
     );
 
     let messages = projection
-        .initial_events(false, None)
+        .initial_events(None, None)
         .into_iter()
         .find_map(|event| match event {
             RuntimeEvent::ConversationLoaded { messages, .. } => Some(messages),
@@ -4795,7 +4787,7 @@ fn initial_attach_replays_a_bounded_tail_of_a_long_conversation() {
     assert_eq!(session.lock().unwrap().transcript.len(), 1_000);
     // A client that names its own window still gets exactly that.
     let windowed = projection
-        .initial_events(false, Some(3))
+        .initial_events(None, Some(3))
         .into_iter()
         .find_map(|event| match event {
             RuntimeEvent::ConversationLoaded { messages, .. } => Some(messages),
@@ -4942,6 +4934,7 @@ fn oversized_conversation_load_drops_oldest_messages_to_fit() {
             messages: msgs.to_vec(),
             snapshot: snapshot.clone(),
             busy: false,
+            turn_elapsed_ms: None,
         })
         .unwrap()
         .len()
@@ -4962,19 +4955,20 @@ fn oversized_conversation_load_drops_oldest_messages_to_fit() {
 }
 
 #[test]
-fn bounded_conversation_loaded_preserves_snapshot_and_busy() {
+fn bounded_conversation_loaded_preserves_snapshot_and_turn_state() {
     let snapshot = crate::runtime::SessionSnapshot::default();
     let messages = vec![ChatMessage::new(crate::llm::ChatRole::User, "hi")];
     let event = super::bounded_conversation_loaded(
         messages.clone(),
         snapshot.clone(),
-        true,
+        Some(1_234),
         crate::rpc::codec::MAX_LINE_BYTES,
     );
     let RuntimeEvent::ConversationLoaded {
         messages: got,
         snapshot: got_snapshot,
         busy,
+        turn_elapsed_ms,
     } = event
     else {
         panic!("expected ConversationLoaded");
@@ -4982,6 +4976,7 @@ fn bounded_conversation_loaded_preserves_snapshot_and_busy() {
     assert_eq!(got, messages);
     assert_eq!(got_snapshot, snapshot);
     assert!(busy);
+    assert_eq!(turn_elapsed_ms, Some(1_234));
 }
 
 /// Scripted provider: call 1 replies with a text delta plus a Danger

@@ -711,6 +711,10 @@ pub struct App {
     turn_paused_duration: std::time::Duration,
     /// Instant when the current approval pause started.
     turn_pause_start: Option<Instant>,
+    /// Elapsed work time of a daemon-side turn this client is about to join,
+    /// taken from the attach reply. `begin_streaming` consumes it so a mid-turn
+    /// attach shows the turn's true elapsed time instead of starting at zero.
+    pending_turn_elapsed_ms: Option<u64>,
     /// Active autocomplete state (shown when typing `/`).
     autocomplete: Option<AutocompleteState>,
     /// Resolved key bindings supplied by the daemon's `FrontendState`.
@@ -865,6 +869,7 @@ impl App {
             turn_start: None,
             turn_paused_duration: std::time::Duration::ZERO,
             turn_pause_start: None,
+            pending_turn_elapsed_ms: None,
             autocomplete: None,
             keymaps: crate::config::settings::KeymapSettings::default(),
             lua_input_style: crate::ext::snapshots::InputStyleSnapshot::default(),
@@ -966,7 +971,9 @@ impl App {
                 messages,
                 snapshot,
                 busy: _,
+                turn_elapsed_ms,
             } => {
+                self.pending_turn_elapsed_ms = turn_elapsed_ms;
                 self.reset_transient_ui_state(true);
                 self.cancel_streaming = false;
                 self.apply_snapshot(snapshot);
@@ -1763,11 +1770,13 @@ impl App {
                     messages,
                     snapshot,
                     busy,
+                    turn_elapsed_ms,
                 }) if snapshot.conversation_id == Some(id) => {
                     self.apply_idle_event(crate::runtime::RuntimeEvent::ConversationLoaded {
                         messages,
                         snapshot,
                         busy,
+                        turn_elapsed_ms,
                     });
                     Renderer::hard_reset_viewport(term, self.renderer.viewport_height)?;
                     self.renderer.reset_scrollback_state();
@@ -1805,6 +1814,7 @@ impl App {
                             messages,
                             snapshot,
                             busy: false,
+                            turn_elapsed_ms: None,
                         });
                         if let Some(view) = view {
                             self.apply_view_snapshot(view);
@@ -2121,11 +2131,13 @@ impl App {
                         messages,
                         snapshot,
                         busy,
+                        turn_elapsed_ms,
                     } => {
                         self.apply_idle_event(crate::runtime::RuntimeEvent::ConversationLoaded {
                             messages,
                             snapshot,
                             busy,
+                            turn_elapsed_ms,
                         });
                         if busy {
                             self.join_daemon_turn(&mut terminal).await?;
@@ -2453,6 +2465,21 @@ impl App {
         let height = self.renderer.viewport_height;
         Renderer::resize_viewport(terminal, height, height)?;
         self.force_redraw(terminal)
+    }
+    /// Start the turn timer at `elapsed_ms` of work the daemon already did, so
+    /// a client joining an in-flight turn reports true elapsed time instead of
+    /// restarting from zero. `None` starts a fresh count at zero.
+    fn anchor_turn_start(&mut self, elapsed_ms: Option<u64>) {
+        let offset = std::time::Duration::from_millis(elapsed_ms.unwrap_or(0));
+        // An `Instant` cannot always be moved back by an arbitrary amount; fall
+        // back to an unanchored start rather than panicking on a bogus value.
+        self.turn_start = Some(
+            Instant::now()
+                .checked_sub(offset)
+                .unwrap_or_else(Instant::now),
+        );
+        self.turn_paused_duration = std::time::Duration::ZERO;
+        self.turn_pause_start = None;
     }
 
     /// Pause the turn timer (call before entering approval prompt).

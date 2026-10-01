@@ -174,6 +174,7 @@ fn every_runtime_event_variant_round_trips() {
             messages: vec![ChatMessage::new(ChatRole::User, "hi")],
             snapshot: SessionSnapshot::default(),
             busy: true,
+            turn_elapsed_ms: Some(42_000),
         },
         RuntimeEvent::ConversationLoadFailed {
             id: 7,

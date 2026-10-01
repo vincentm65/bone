@@ -741,6 +741,7 @@ impl State {
                 messages,
                 snapshot,
                 busy,
+                ..
             } => {
                 // The daemon returns `min(total, window)` newest messages, so a
                 // full page at the window size means older messages remain. (A
@@ -1061,6 +1062,7 @@ mod tests {
             messages: vec![ChatMessage::new(ChatRole::User, "old")],
             snapshot: SessionSnapshot::default(),
             busy: false,
+            turn_elapsed_ms: None,
         });
         state
     }
@@ -1079,6 +1081,7 @@ mod tests {
             ],
             snapshot: SessionSnapshot::default(),
             busy: false,
+            turn_elapsed_ms: None,
         });
         assert!(s.has_older);
         assert_eq!(s.loaded_messages.len(), 2);
@@ -1140,6 +1143,7 @@ mod tests {
             ],
             snapshot: SessionSnapshot::default(),
             busy: false,
+            turn_elapsed_ms: None,
         });
         assert!(s.has_older);
         assert_eq!(s.rows.len(), 2);
@@ -1180,6 +1184,7 @@ mod tests {
             messages: vec![ChatMessage::new(ChatRole::User, "only")],
             snapshot: SessionSnapshot::default(),
             busy: false,
+            turn_elapsed_ms: None,
         });
         assert!(!s.has_older);
         assert!(s.load_older().is_none());
@@ -1203,6 +1208,7 @@ mod tests {
             messages: vec![],
             snapshot: SessionSnapshot::default(),
             busy: false,
+            turn_elapsed_ms: None,
         });
         assert_eq!(s.theme.as_ref(), Some(&theme));
     }
@@ -1427,6 +1433,7 @@ mod tests {
             messages: vec![],
             snapshot: SessionSnapshot::default(),
             busy: false,
+            turn_elapsed_ms: None,
         });
         assert!(!s.ready);
         s.reduce(RuntimeEvent::ConversationLoaded {
@@ -1436,6 +1443,7 @@ mod tests {
                 ..Default::default()
             },
             busy: true,
+            turn_elapsed_ms: None,
         });
         assert!(s.ready && s.repairing && s.busy);
     }
@@ -1473,6 +1481,7 @@ mod tests {
                 ..Default::default()
             },
             busy: false,
+            turn_elapsed_ms: None,
         });
         assert!(!s.ready);
         assert!(s.rows.is_empty());
@@ -1485,6 +1494,7 @@ mod tests {
                 ..Default::default()
             },
             busy: false,
+            turn_elapsed_ms: None,
         });
         assert!(s.ready);
         assert_eq!(s.expected_id, Some(4));
@@ -1494,6 +1504,7 @@ mod tests {
             messages: vec![],
             snapshot: SessionSnapshot::default(),
             busy: false,
+            turn_elapsed_ms: None,
         });
         assert!(!s.ready);
     }
@@ -1550,6 +1561,7 @@ mod tests {
             messages: vec![message],
             snapshot: SessionSnapshot::default(),
             busy: false,
+            turn_elapsed_ms: None,
         });
         let i = state.rows.len() - 1;
         assert_eq!(state.rows[i].0, "tool: edit_file");
@@ -1583,6 +1595,7 @@ mod tests {
             messages: messages.clone(),
             snapshot: SessionSnapshot::default(),
             busy: false,
+            turn_elapsed_ms: None,
         });
         assert_eq!(s.rows.len(), 3, "results belong inside the original cards");
         assert_eq!(s.tool_display["shell"].show_result, Some(true));
@@ -1640,6 +1653,7 @@ mod tests {
             ],
             snapshot: SessionSnapshot::default(),
             busy: false,
+            turn_elapsed_ms: None,
         });
         assert_eq!(s.rows.len(), 4);
         assert!(s.rows[0].1.is_empty());
@@ -1667,6 +1681,7 @@ mod tests {
             )],
             snapshot: SessionSnapshot::default(),
             busy: true,
+            turn_elapsed_ms: None,
         });
         assert_eq!(s.rows.len(), 1);
         assert!(s.rows[0].1.is_empty(), "arguments are not result output");
@@ -1758,6 +1773,7 @@ mod tests {
             messages: vec![with_reasoning.clone()],
             snapshot: SessionSnapshot::default(),
             busy: false,
+            turn_elapsed_ms: None,
         });
         assert!(
             s.thinking.iter().all(Option::is_none),
@@ -1781,6 +1797,7 @@ mod tests {
             messages: vec![with_reasoning],
             snapshot: SessionSnapshot::default(),
             busy: false,
+            turn_elapsed_ms: None,
         });
         // Historical reasoning attaches to the row its message produced.
         let answer = s
@@ -1861,6 +1878,7 @@ mod tests {
             )],
             snapshot: SessionSnapshot::default(),
             busy: false,
+            turn_elapsed_ms: None,
         });
         assert_eq!(state.images, vec![image]);
         assert_eq!(state.rows.last().unwrap().1, "1 image(s)");
@@ -2377,6 +2395,7 @@ mod tests {
                     messages: Vec::new(),
                     snapshot: s.snapshot.clone(),
                     busy: false,
+                    turn_elapsed_ms: None,
                 });
             }
             assert!(s.pending_key.is_none());

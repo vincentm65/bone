@@ -36,6 +36,8 @@ pub struct Hub {
     commands_tx: mpsc::UnboundedSender<RuntimeCommand>,
     group: Option<HubGroup>,
     busy: Arc<std::sync::atomic::AtomicBool>,
+    /// Timer of the in-flight turn, reported to attaching clients.
+    turn_timer: SharedTurnTimer,
 }
 
 /// Event fan-out and host-control plane shared by all conversation actors in
@@ -103,6 +105,9 @@ impl HubGroup {
     }
 }
 
+/// The in-flight turn's timer, shared by the runtime and attach paths.
+type SharedTurnTimer = Arc<std::sync::Mutex<Option<crate::runtime::timer::WorkTimer>>>;
+
 /// Runtime-side half of a [`Hub`]. It can publish events but deliberately does
 /// not retain a command sender, so dropping every client closes the command
 /// receiver and lets an in-process daemon terminate naturally.
@@ -111,6 +116,7 @@ pub struct HubPublisher {
     events_tx: Arc<broadcast::Sender<RuntimeEvent>>,
     group: Option<HubGroup>,
     busy: Arc<std::sync::atomic::AtomicBool>,
+    turn_timer: SharedTurnTimer,
 }
 
 struct TurnGuard(Arc<std::sync::atomic::AtomicBool>);
@@ -123,8 +129,15 @@ impl Drop for TurnGuard {
 
 impl HubPublisher {
     fn begin_turn(&self) -> TurnGuard {
+        // Drop any stale timer; `run_turn` installs this turn's own.
+        self.set_turn_timer(None);
         self.busy.store(true, std::sync::atomic::Ordering::SeqCst);
         TurnGuard(self.busy.clone())
+    }
+
+    /// Install (or clear) the timer reported by [`Hub::turn_elapsed_ms`].
+    fn set_turn_timer(&self, timer: Option<crate::runtime::timer::WorkTimer>) {
+        *self.turn_timer.lock().unwrap_or_else(|e| e.into_inner()) = timer;
     }
 
     /// Broadcast an event to every attached client.
@@ -165,6 +178,7 @@ impl From<Hub> for HubPublisher {
             events_tx: hub.events_tx,
             group: hub.group,
             busy: hub.busy,
+            turn_timer: hub.turn_timer,
         }
     }
 }
@@ -197,6 +211,7 @@ impl Hub {
                 commands_tx,
                 group,
                 busy: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                turn_timer: Arc::new(std::sync::Mutex::new(None)),
             },
             commands_rx,
         )
@@ -215,6 +230,7 @@ impl Hub {
             events_tx: self.events_tx.clone(),
             group: self.group.clone(),
             busy: self.busy.clone(),
+            turn_timer: self.turn_timer.clone(),
         }
     }
 
@@ -236,6 +252,19 @@ impl Hub {
     /// Whether this conversation actor currently has an active turn.
     pub fn is_busy(&self) -> bool {
         self.busy.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Elapsed work time of the in-flight turn (approval pauses excluded), or
+    /// `None` when idle. A busy actor without a timer yet reports 0, so `Some`
+    /// always agrees with [`Hub::is_busy`].
+    pub fn turn_elapsed_ms(&self) -> Option<u64> {
+        self.is_busy().then(|| {
+            self.turn_timer
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .as_ref()
+                .map_or(0, |timer| timer.elapsed_ms())
+        })
     }
 }
 
@@ -307,7 +336,12 @@ impl RuntimeProjection {
     /// further to [`ATTACH_REPLAY_BYTES`]. The session keeps the complete
     /// transcript either way, and a client that wants more asks for it with
     /// `LoadConversation { window }` (or synchronizes with its own window).
-    pub fn initial_events(&self, busy: bool, window: Option<u32>) -> Vec<RuntimeEvent> {
+    /// `turn_elapsed_ms` is `Some` exactly when the actor is busy.
+    pub fn initial_events(
+        &self,
+        turn_elapsed_ms: Option<u64>,
+        window: Option<u32>,
+    ) -> Vec<RuntimeEvent> {
         let (llm, extensions) = {
             let runtime = self.runtime.lock().unwrap_or_else(|e| e.into_inner());
             (runtime.llm.clone(), runtime.extensions.clone())
@@ -322,7 +356,7 @@ impl RuntimeProjection {
             },
             // Always send this, including for an empty new conversation, so
             // switching actors clears stale frontend scrollback.
-            bounded_conversation_loaded(messages, snapshot, busy, ATTACH_REPLAY_BYTES),
+            bounded_conversation_loaded(messages, snapshot, turn_elapsed_ms, ATTACH_REPLAY_BYTES),
             // Apply the full view after ConversationLoaded resets transient
             // client state; otherwise the reset can immediately discard panes
             // from this authoritative projection.
@@ -356,7 +390,9 @@ impl ManagedEntry {
             actor_id,
             commands: self.hub.command_sender(),
             events: self.hub.subscribe(),
-            initial: self.projection.initial_events(self.hub.is_busy(), window),
+            initial: self
+                .projection
+                .initial_events(self.hub.turn_elapsed_ms(), window),
             group: self.hub.group.clone(),
         }
     }
@@ -1065,14 +1101,16 @@ fn bound_transcript(
 fn bounded_conversation_loaded(
     messages: Vec<ChatMessage>,
     snapshot: crate::runtime::SessionSnapshot,
-    busy: bool,
+    turn_elapsed_ms: Option<u64>,
     max_bytes: usize,
 ) -> RuntimeEvent {
+    let busy = turn_elapsed_ms.is_some();
     let messages = bound_transcript(messages, max_bytes, |msgs| {
         serde_json::to_vec(&RuntimeEvent::ConversationLoaded {
             messages: msgs.to_vec(),
             snapshot: snapshot.clone(),
             busy,
+            turn_elapsed_ms,
         })
         .expect("conversation loaded is serializable")
         .len()
@@ -1081,6 +1119,7 @@ fn bounded_conversation_loaded(
         messages,
         snapshot,
         busy,
+        turn_elapsed_ms,
     }
 }
 
@@ -2146,7 +2185,9 @@ impl DaemonCtx {
                 self.hub.publish(bounded_conversation_loaded(
                     messages,
                     snapshot,
-                    false,
+                    // Switching conversations reports the target actor as idle: a
+                    // turn in flight belongs to the conversation being left.
+                    None,
                     crate::rpc::codec::MAX_LINE_BYTES,
                 ));
                 // ConversationLoaded resets client-owned transient UI state. Reapply
@@ -3198,6 +3239,7 @@ impl DaemonCtx {
         let bg_tx = self.background_events_tx.clone();
         let cancel = Arc::new(AtomicBool::new(false));
         let work_timer = crate::runtime::timer::WorkTimer::start();
+        self.hub.set_turn_timer(Some(work_timer.clone()));
         self.key_registry.set_timer(Some(work_timer.clone()));
         let (working_dir, snapshots) = {
             let s = self.session.lock().unwrap();
@@ -3410,6 +3452,7 @@ impl DaemonCtx {
         }
         // Publish the post-turn state so clients can sync their view-model.
         self.key_registry.set_timer(None);
+        self.hub.set_turn_timer(None);
         self.publish_snapshot();
         self.hub.publish(RuntimeEvent::WorkElapsed {
             elapsed_ms: work_timer.elapsed_ms(),
