@@ -794,16 +794,40 @@ impl super::Renderer {
                 if layout.content_rows > 0 {
                     let page = &pages[page_idx];
                     let scroll = page.scroll.min(page.content.len());
-
-                    for (py, line) in (page_start + 1..).zip(
+                    let content_rows = layout.content_rows as usize;
+                    // The fixed thinking page reserves blank rows below its
+                    // newest text. When a very short terminal clips that page,
+                    // keep the header and newest body rows rather than showing
+                    // only the reserved padding.
+                    let clip_thinking_tail = page.source == "thinking"
+                        && scroll == 0
+                        && content_rows < page.content.len();
+                    let thinking_body_end = if clip_thinking_tail {
                         page.content
                             .iter()
-                            .skip(scroll)
-                            .take(layout.content_rows as usize),
-                    ) {
+                            .rposition(|line| {
+                                line.spans.iter().any(|span| !span.content.is_empty())
+                            })
+                            .map_or(1, |index| index + 1)
+                    } else {
+                        page.content.len()
+                    };
+                    let thinking_body_start = thinking_body_end
+                        .saturating_sub(content_rows.saturating_sub(1))
+                        .max(1);
+
+                    for (offset, py) in (page_start + 1..).take(content_rows).enumerate() {
                         if py >= bottom_sep_row {
                             break;
                         }
+                        let index = if clip_thinking_tail && offset > 0 {
+                            thinking_body_start + offset - 1
+                        } else {
+                            scroll + offset
+                        };
+                        let Some(line) = page.content.get(index) else {
+                            break;
+                        };
                         // Carry a line-level background to the paragraph so it
                         // fills the full row width (edge-to-edge highlight, e.g.
                         // the selected row in /config).

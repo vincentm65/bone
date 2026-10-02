@@ -70,7 +70,9 @@ impl App {
                     self.redraw(term)?;
                     return Ok(());
                 }
-                Ok(event) => self.apply_idle_event(event),
+                Ok(event) => {
+                    self.apply_idle_event(event);
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     return Err(io::Error::new(
                         io::ErrorKind::BrokenPipe,

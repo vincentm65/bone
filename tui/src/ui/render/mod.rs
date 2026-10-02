@@ -198,10 +198,16 @@ impl Renderer {
     /// the old viewport into an unknown number of rows, so the only reliable way
     /// to clear it is a hard reset followed by re-flushing history from scratch.
     ///
-    /// `\x1b[2J` clears the screen, `\x1b[3J` clears the scrollback buffer, and
-    /// `\x1b[H` homes the cursor so the rebuilt viewport starts at the top and
-    /// is pushed down to the bottom as history is re-flushed (mirroring startup).
+    /// `\x1b[r` restores the default scrolling region before the clear. This is
+    /// necessary when a tool or external terminal state left DECSTBM restricted;
+    /// otherwise the home cursor position can keep inline allocation from
+    /// scrolling the transcript out of the way. `\x1b[2J` clears the screen,
+    /// `\x1b[3J` clears the scrollback buffer, and `\x1b[H` homes the cursor so
+    /// the rebuilt viewport starts at the top and is pushed down to the bottom
+    /// as history is re-flushed (mirroring startup).
     pub fn hard_reset_viewport(term: &mut BoneTerminal, height: u16) -> io::Result<()> {
+        #[cfg(not(windows))]
+        crossterm::queue!(term.backend_mut(), crossterm::style::Print("\x1b[r"))?;
         crossterm::queue!(
             term.backend_mut(),
             crossterm::style::Print("\x1b[2J\x1b[3J\x1b[H"),

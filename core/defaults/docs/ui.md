@@ -118,9 +118,9 @@ cancellation are scoped to the attached conversation.
   cancels the process.
 - The live pane shows one page at a time: daemon panes (Lua panes and menus such
   as `/config` and `/provider`), the approval prompt, agents, processes, the
-  queue, and live reasoning when `general.show_reasoning` is on. The desktop's
-  reasoning page is a fixed 10 rows (wrapped, newest text at the bottom) and stays
-  up between segments until the turn ends. A newly arrived
+  queue, and live reasoning when `general.show_reasoning` is on. The TUI and desktop
+  reasoning pages use a fixed 10-row layout (wrapped, newest text at the bottom) and
+  stay up between segments until the turn ends. A newly arrived
   page becomes active, Tab cycles pages, and PageUp/PageDown scroll. The queue
   page takes ↑/↓, Shift+↑/↓ to reorder, Enter to send next, F2 to edit, and Del
   to remove. While a `ctx.ui.key()` request is pending every key, including Esc

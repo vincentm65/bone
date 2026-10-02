@@ -581,6 +581,28 @@ fn pane_page_honors_visible_rows() {
 }
 
 #[test]
+fn clipped_fixed_thinking_page_keeps_newest_rows_visible() {
+    let input = InputState::default();
+    let theme = bone::ui::theme::Theme::default();
+    let text = (0..30)
+        .map(|i| format!("reasoning line {i}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let pages = vec![bone_render::panes::thinking_fixed(&text, 40, 10, &theme)];
+    let status = status_info();
+    let args = pane_args(&input, &status, &pages, 0, None);
+    let mut terminal = Terminal::new(TestBackend::new(40, 8)).unwrap();
+
+    terminal
+        .draw(|frame| Renderer::new().draw_bottom_pane(frame, &args, None))
+        .unwrap();
+
+    let screen = screen_text(&terminal, 40, 8);
+    assert!(screen.contains("reasoning line 29"), "screen: {screen:?}");
+    assert!(!screen.contains("reasoning line 0"), "screen: {screen:?}");
+}
+
+#[test]
 fn pane_page_with_two_pages_renders_content() {
     let input = InputState::default();
     let pages = vec![

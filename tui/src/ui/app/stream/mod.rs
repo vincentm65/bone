@@ -1433,9 +1433,11 @@ impl App {
     /// reasoning burst doesn't flash away the instant the answer starts.
     const THINKING_RETAIN: Duration = Duration::from_secs(1);
 
-    /// Append reasoning text to the bounded live-pane buffer and refresh the
-    /// "thinking" pane. Front-truncates to [`THINKING_TAIL_CAP`] on a char
-    /// boundary so multi-byte graphemes never split.
+    /// Append reasoning text to the bounded live-pane buffer. The page is
+    /// rebuilt from the tail during the render tick, where the current terminal
+    /// width is available for fixed-height wrapping.
+    /// Front-truncates to [`THINKING_TAIL_CAP`] on a char boundary so
+    /// multi-byte graphemes never split.
     fn push_thinking(&mut self, text: &str) {
         self.thinking_tail.push_str(text);
         let len = self.thinking_tail.len();
@@ -1446,12 +1448,23 @@ impl App {
             }
             self.thinking_tail.drain(..cut);
         }
-        // Fresh reasoning cancels any pending teardown and starts the clock.
+        // Fresh reasoning cancels any pending teardown. Start the clock (and so
+        // show the fixed-height page) only once there is visible text, so
+        // whitespace-only deltas never open an empty box.
         self.thinking_clear_at = None;
-        self.thinking_first_shown.get_or_insert_with(Instant::now);
+        if !self.thinking_tail.trim().is_empty() {
+            self.thinking_first_shown.get_or_insert_with(Instant::now);
+        }
+    }
 
-        let page = bone_render::panes::thinking(
+    /// Rebuild the live reasoning page at a stable height. Keeping the page
+    /// height fixed lets Ratatui retain its diff buffers while new reasoning
+    /// replaces the tail, instead of rebuilding the inline terminal for every
+    /// newly visible line.
+    fn refresh_thinking_pane(&mut self, cols: u16) {
+        let page = bone_render::panes::thinking_fixed(
             &self.thinking_tail,
+            cols as usize,
             Self::THINKING_MAX_ROWS,
             &self.renderer.theme,
         );
@@ -1588,6 +1601,9 @@ impl App {
         // duplicate input borders/fields. Use the same hard-reset path as idle
         // redraws before repainting.
         let size = crossterm::terminal::size()?;
+        if self.thinking_first_shown.is_some() {
+            self.refresh_thinking_pane(size.0);
+        }
         if self.renderer.last_size.is_some_and(|last| last != size) {
             return self.force_redraw(term);
         }

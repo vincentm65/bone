@@ -1121,8 +1121,9 @@ fn config_rejection_message_includes_pending_path_when_known() {
 
 #[test]
 fn idle_config_revision_change_requests_redraw_without_new_messages() {
-    assert!(idle_state_needs_redraw(false, 4, 4, 7, 8));
-    assert!(!idle_state_needs_redraw(false, 4, 4, 7, 7));
+    assert!(idle_state_needs_redraw(false, 4, 4, 7, 8, false));
+    assert!(idle_state_needs_redraw(false, 4, 4, 7, 7, true));
+    assert!(!idle_state_needs_redraw(false, 4, 4, 7, 7, false));
 }
 
 #[test]

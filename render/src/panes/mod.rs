@@ -132,14 +132,6 @@ impl PanePage {
     }
 }
 
-/// The live reasoning page: a pinned header and the latest `max_rows - 1`
-/// lines of the reasoning tail.
-pub fn thinking(tail: &str, max_rows: usize, theme: &Theme) -> PanePage {
-    let mut lines: Vec<&str> = tail.rsplit('\n').take(max_rows - 1).collect();
-    lines.reverse();
-    thinking_page(lines.into_iter().map(str::to_string), 0, theme)
-}
-
 /// A "✻ Thinking" header over `body`, padded with blank rows to `min_rows`.
 fn thinking_page(body: impl Iterator<Item = String>, min_rows: usize, theme: &Theme) -> PanePage {
     let header_style = Style::default()

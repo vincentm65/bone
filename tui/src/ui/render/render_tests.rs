@@ -100,6 +100,35 @@ fn desired_viewport_height_tracks_input_panes_completion_and_running_rows() {
 }
 
 #[test]
+fn fixed_thinking_deltas_keep_viewport_height_constant() {
+    let renderer = Renderer::new();
+    let input = crate::ui::input::InputState::default();
+    let tails = [
+        "first line".to_string(),
+        "first line\nsecond line\nthird line".to_string(),
+        "wrapped ".to_string() + &"text ".repeat(80),
+        (0..30)
+            .map(|i| format!("reasoning line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    ];
+    let mut expected = None;
+
+    for tail in tails {
+        let page = bone_render::panes::thinking_fixed(&tail, 40, 10, &renderer.theme);
+        assert_eq!(page.content.len(), 10);
+        assert_eq!(page.visible_rows, 10);
+
+        let height = desired_height(&renderer, &input, &[page], None, 0);
+        if let Some(expected) = expected {
+            assert_eq!(height, expected, "tail changed the pane height");
+        } else {
+            expected = Some(height);
+        }
+    }
+}
+
+#[test]
 fn consecutive_scrollback_separators_are_deduplicated() {
     let mut renderer = Renderer::new();
     let blank = [Line::raw("")];

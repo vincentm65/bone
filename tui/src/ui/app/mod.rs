@@ -563,10 +563,12 @@ fn idle_state_needs_redraw(
     messages_after: usize,
     config_revision_before: u64,
     config_revision_after: u64,
+    view_changed: bool,
 ) -> bool {
     replaced_scrollback
         || messages_after != messages_before
         || config_revision_after != config_revision_before
+        || view_changed
 }
 
 fn render_config_page(view: &ConfigView, requested: Option<&str>) -> Result<String, String> {
@@ -938,12 +940,14 @@ impl App {
     }
 
     /// Drain daemon events during the idle loop (between turns). Updates local
-    /// view-model fields from authoritative daemon snapshots.
-    fn apply_idle_event(&mut self, ev: crate::runtime::RuntimeEvent) {
+    /// view-model fields from authoritative daemon snapshots and reports whether
+    /// the visible UI changed.
+    fn apply_idle_event(&mut self, ev: crate::runtime::RuntimeEvent) -> bool {
         use crate::runtime::RuntimeEvent;
         match ev {
             RuntimeEvent::StateSnapshot { snapshot } => {
                 self.apply_snapshot(snapshot);
+                true
             }
             RuntimeEvent::StateSynchronized {
                 request_id,
@@ -953,15 +957,18 @@ impl App {
                 messages,
                 theme: _,
             } => {
-                if self.apply_synchronized_projection(request_id, snapshot, view)
+                let changed = self.apply_synchronized_projection(request_id, snapshot, view);
+                if changed
                     && !busy
                     && let Some(messages) = messages
                 {
                     self.replace_transcript(messages);
                 }
+                changed
             }
             RuntimeEvent::StreamLagged { .. } => {
                 self.recover_from_event_lag();
+                false
             }
             RuntimeEvent::ProcessesSnapshot { version, processes } => {
                 self.apply_processes_snapshot(version, processes)
@@ -984,15 +991,18 @@ impl App {
                     .command_tx
                     .send(crate::runtime::RuntimeCommand::GetJobs);
                 self.replace_transcript(messages);
+                true
             }
             RuntimeEvent::Status { message }
             | RuntimeEvent::ConversationLoadFailed { message, .. } => {
                 self.messages.push(Message::system(message));
+                true
             }
             // Persistent notice from Lua (e.g. an auto-recap after idle): keep
             // it in scrollback, mirroring the turn pump's Notice handling.
             RuntimeEvent::Notice { message } => {
                 self.messages.push(Message::system(message));
+                true
             }
             // The daemon's boot-time display state. Adopt it so the frontend
             // renders the daemon's theme/keymap/config/commands. Sent on attach
@@ -1017,9 +1027,11 @@ impl App {
                     host_api_version,
                     catalog_updates,
                 );
+                true
             }
             RuntimeEvent::ConfigSnapshot { schema, snapshot } => {
                 self.apply_config_snapshot(schema, snapshot);
+                true
             }
             RuntimeEvent::ConfigChanged {
                 schema,
@@ -1038,6 +1050,7 @@ impl App {
                         "Configuration saved. Restart required to apply this change.",
                     ));
                 }
+                true
             }
             RuntimeEvent::ConfigMutationRejected {
                 current_revision,
@@ -1047,18 +1060,15 @@ impl App {
                 let path = self.reject_config_change(current_revision, request_id);
                 self.messages
                     .push(Message::system(config_rejection_message(path, &error)));
+                true
             }
-            RuntimeEvent::ViewSnapshot { view } => {
-                self.apply_view_snapshot(view);
-            }
+            RuntimeEvent::ViewSnapshot { view } => self.apply_view_snapshot(view),
             // Pane/UI diff from the daemon (e.g. a command's pane between turns).
             // Both in-process and remote clients receive these via the event bus
             // when `forward_view_diffs` is enabled.
-            RuntimeEvent::ViewDiff { diff } => {
-                self.apply_view_diff(diff);
-            }
+            RuntimeEvent::ViewDiff { diff } => self.apply_view_diff(diff),
             // All other events are turn-scoped and ignored in idle.
-            _ => {}
+            _ => false,
         }
     }
 
@@ -1645,7 +1655,9 @@ impl App {
                     self.apply_snapshot(snapshot);
                     legacy_snapshot_seen = true;
                 }
-                Ok(other) => self.apply_idle_event(other),
+                Ok(other) => {
+                    self.apply_idle_event(other);
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     let _ = self
                         .command_tx
@@ -1698,7 +1710,9 @@ impl App {
                             .await;
                     }
                 }
-                Ok(other) => self.apply_idle_event(other),
+                Ok(other) => {
+                    self.apply_idle_event(other);
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                     self.messages
@@ -1854,7 +1868,9 @@ impl App {
                 Ok(crate::runtime::RuntimeEvent::StreamLagged { .. }) => {
                     recovery_request = Some(self.recover_from_event_lag());
                 }
-                Ok(other) => self.apply_idle_event(other),
+                Ok(other) => {
+                    self.apply_idle_event(other);
+                }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
                     recovery_request = Some(self.recover_from_event_lag());
                     continue;
@@ -2106,6 +2122,7 @@ impl App {
             let before = self.messages.len();
             let before_config_revision = self.config_view.revision();
             let mut replaced_scrollback = false;
+            let mut view_changed = false;
             loop {
                 let ev = match self.events_rx.try_recv() {
                     Ok(ev) => ev,
@@ -2116,6 +2133,14 @@ impl App {
                     Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
                     Err(tokio::sync::broadcast::error::TryRecvError::Closed) => break,
                 };
+                view_changed |= matches!(
+                    &ev,
+                    crate::runtime::RuntimeEvent::ViewSnapshot { .. }
+                        | crate::runtime::RuntimeEvent::ViewDiff { .. }
+                        | crate::runtime::RuntimeEvent::ProcessesSnapshot { .. }
+                        | crate::runtime::RuntimeEvent::JobsSnapshot { .. }
+                        | crate::runtime::RuntimeEvent::StateSynchronized { view: Some(_), .. }
+                );
                 replaced_scrollback |= match &ev {
                     crate::runtime::RuntimeEvent::ConversationLoaded { .. } => true,
                     crate::runtime::RuntimeEvent::StateSynchronized {
@@ -2133,12 +2158,14 @@ impl App {
                         busy,
                         turn_elapsed_ms,
                     } => {
-                        self.apply_idle_event(crate::runtime::RuntimeEvent::ConversationLoaded {
-                            messages,
-                            snapshot,
-                            busy,
-                            turn_elapsed_ms,
-                        });
+                        view_changed |= self.apply_idle_event(
+                            crate::runtime::RuntimeEvent::ConversationLoaded {
+                                messages,
+                                snapshot,
+                                busy,
+                                turn_elapsed_ms,
+                            },
+                        );
                         if busy {
                             self.join_daemon_turn(&mut terminal).await?;
                         }
@@ -2175,7 +2202,7 @@ impl App {
                             &mut terminal,
                         )?;
                     }
-                    ev => self.apply_idle_event(ev),
+                    ev => view_changed |= self.apply_idle_event(ev),
                 }
             }
             // Loading a conversation replaces native terminal scrollback; a
@@ -2185,19 +2212,22 @@ impl App {
                 Renderer::hard_reset_viewport(&mut terminal, self.renderer.viewport_height)?;
                 self.renderer.reset_scrollback_state();
             }
-            // Commit any scrollback an idle event added or replaced so it
-            // renders promptly rather than waiting for the next keystroke.
-            // Also redraw when the config_view changed (e.g. from a remote
-            // client's mutation) even if no message was appended, so the
-            // status bar and config page update without keyboard input.
-            if idle_state_needs_redraw(
+            let messages_changed = self.messages.len() != before;
+            let redraw = idle_state_needs_redraw(
                 replaced_scrollback,
                 before,
                 self.messages.len(),
                 before_config_revision,
                 self.config_view.revision(),
-            ) {
+                view_changed,
+            );
+            // Commit new or replaced scrollback before the redraw. Pane-only and
+            // other visual changes need only the final draw; running insertion
+            // for them would paint the same frame twice.
+            if replaced_scrollback || messages_changed {
                 self.flush_new_messages_to_scrollback(&mut terminal)?;
+            }
+            if redraw {
                 self.redraw(&mut terminal)?;
             }
             self.trim_history();
@@ -2597,9 +2627,9 @@ impl App {
         Ok(())
     }
 
-    fn apply_jobs_snapshot(&mut self, version: u64, jobs: Vec<bone_protocol::JobSnapshot>) {
+    fn apply_jobs_snapshot(&mut self, version: u64, jobs: Vec<bone_protocol::JobSnapshot>) -> bool {
         if version < self.jobs_version {
-            return;
+            return false;
         }
         let had_jobs = !self.jobs.is_empty();
         self.jobs_version = version;
@@ -2610,17 +2640,19 @@ impl App {
         self.refresh_jobs_pane();
         self.jobs_seen_version = version;
         self.jobs_last_refresh = std::time::Instant::now();
+        true
     }
 
     fn apply_processes_snapshot(
         &mut self,
         version: u64,
         processes: Vec<bone_protocol::ProcessSnapshot>,
-    ) {
+    ) -> bool {
         self.processes_version = version;
         self.processes = processes;
         self.refresh_jobs_pane();
         self.processes_seen_version = version;
+        true
     }
 
     fn request_full_synchronization(&mut self) -> u64 {
