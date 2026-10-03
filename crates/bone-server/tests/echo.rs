@@ -12,13 +12,17 @@ use bone_server::Server;
 use tokio::time::timeout;
 
 fn server() -> Server {
+    server_at("http://127.0.0.1:9")
+}
+
+fn server_at(base_url: &str) -> Server {
     // Leaked so the directory outlives the server task.
     let data = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     Server::new(Arc::new(Core::new(CoreConfig {
         provider: ProviderConfig {
             kind: None,
             options: serde_json::Value::Null,
-            base_url: "http://127.0.0.1:9".into(),
+            base_url: base_url.into(),
             model: "m".into(),
             api_key: None,
             reasoning_effort: None,
@@ -162,4 +166,39 @@ async fn every_protocol_method_is_handled() {
         .unwrap_err();
     assert_eq!(rpc_code(err), RpcError::METHOD_NOT_FOUND);
     client.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_slow_request_does_not_hold_up_others() {
+    use bone_proto::methods::{Empty, HealthCheck};
+    // A provider address that accepts connections and never answers, so the
+    // health check waits for its timeout.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        while let Ok((sock, _)) = listener.accept().await {
+            held.push(sock);
+        }
+    });
+    let (client, _events) =
+        Client::new(server_at(&format!("http://{addr}/v1")).connect_in_process());
+    client.initialize("test").await.unwrap();
+    let client = Arc::new(client);
+    let slow = tokio::spawn({
+        let c = client.clone();
+        async move { c.request::<HealthCheck>(Empty {}).await }
+    });
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let reply = timeout(
+        Duration::from_secs(1),
+        client.request::<Echo>(EchoParams {
+            text: "quick".into(),
+        }),
+    )
+    .await
+    .expect("echo answers while the health check waits")
+    .unwrap();
+    assert_eq!(reply.text, "quick");
+    assert!(!slow.is_finished());
 }

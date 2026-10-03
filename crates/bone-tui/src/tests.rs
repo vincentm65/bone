@@ -2654,3 +2654,37 @@ async fn example_agent_extension_plugins_in_the_tui() {
     .await;
     assert!(h.screen(100, 20).contains("It means: be careful."));
 }
+
+#[tokio::test]
+async fn model_events_before_the_reply_are_kept() {
+    let mut h = Harness::blank().await;
+    // The server runs requests concurrently, so a call's events can beat
+    // its reply.
+    h.emit::<ModelDeltaEvent>(ModelDeltaParams {
+        request_id: 41,
+        kind: DeltaKind::Text,
+        text: "early ".into(),
+    })
+    .await;
+    h.emit::<ModelCompleted>(ModelCompletedParams {
+        request_id: 41,
+        message: Some(ChatMessage::Assistant {
+            content: "early answer".into(),
+            reasoning: String::new(),
+            tool_calls: vec![],
+        }),
+        usage: None,
+        error: None,
+    })
+    .await;
+    h.lua(
+        r#"parts = {}
+           bone.model.complete({ prompt = "x" }, function(d) parts[#parts + 1] = d.text end,
+             function(r) got = r.content end)"#,
+    )
+    .await;
+    assert_eq!(
+        h.lua("=got .. '|' .. table.concat(parts)").await,
+        "\"early answer|early \""
+    );
+}

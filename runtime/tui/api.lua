@@ -127,7 +127,9 @@ end
 ---     on_done(result, err): result = { content, reasoning, tool_calls, usage }
 ---   handle:cancel()
 ---   bone.model.list(function(list, err) ... end): { name, model, type, current }
-local model_calls, model_done_early = {}, {}
+-- Events can arrive before the reply that says which call they belong to;
+-- they wait here until it does.
+local model_calls, model_done_early, model_deltas_early = {}, {}, {}
 
 local function model_finish(call, ev)
   if ev.error then
@@ -170,6 +172,12 @@ bone.model = {
       end
       handle.id = r.request_id
       local call = { on_delta = on_delta, on_done = on_done }
+      for _, d in ipairs(model_deltas_early[r.request_id] or {}) do
+        if on_delta then
+          on_delta(d)
+        end
+      end
+      model_deltas_early[r.request_id] = nil
       local early = model_done_early[r.request_id]
       if early then
         model_done_early[r.request_id] = nil
@@ -189,8 +197,14 @@ bone.model = {
 
 bone.on("model/delta", function(ev)
   local call = model_calls[ev.request_id]
-  if call and call.on_delta then
-    call.on_delta({ [ev.kind] = ev.text })
+  if call then
+    if call.on_delta then
+      call.on_delta({ [ev.kind] = ev.text })
+    end
+  else
+    local early = model_deltas_early[ev.request_id] or {}
+    early[#early + 1] = { [ev.kind] = ev.text }
+    model_deltas_early[ev.request_id] = early
   end
 end)
 
@@ -202,6 +216,15 @@ bone.on("model/completed", function(ev)
   else
     model_done_early[ev.request_id] = ev
   end
+end)
+
+-- Another client's model calls never get a reply here; forget their events
+-- after a while.
+bone.on("model/completed", function(ev)
+  bone.defer(60000, function()
+    model_done_early[ev.request_id] = nil
+    model_deltas_early[ev.request_id] = nil
+  end)
 end)
 
 --- Skills and prompt templates the core has (registered in core Lua). The

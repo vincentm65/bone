@@ -1,7 +1,10 @@
 //! Hosts a [`Core`] and serves it to clients over any [`Connection`].
 //!
 //! Per connection the server enforces the `initialize` handshake, routes
-//! requests to the core, and forwards core events as notifications.
+//! requests to the core, and forwards core events as notifications. After the
+//! handshake each request runs on its own task, so a slow one (a health check
+//! waiting on the network) never holds up the others; replies carry their
+//! request's id and may come back in any order.
 //! Connections come from [`Server::connect_in_process`], [`Server::serve_stdio`]
 //! or a Unix socket [`Listener`].
 
@@ -98,7 +101,15 @@ impl Server {
                     let _ = respond(&tx, id, result).await;
                     return;
                 }
-                _ => self.core.handle(&method, params).await,
+                _ => {
+                    let core = self.core.clone();
+                    let tx = tx.clone();
+                    tokio::spawn(async move {
+                        let result = core.handle(&method, params).await;
+                        let _ = respond(&tx, id, result).await;
+                    });
+                    continue;
+                }
             };
 
             if respond(&tx, id, result).await.is_err() {

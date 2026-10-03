@@ -32,6 +32,8 @@ Events are only sent to connections that have completed the handshake.
 
 ## Methods
 
+After `initialize`, the server runs each request on its own task: replies carry their request's `id` and can arrive in any order, and a request's events (for example `model/delta`) can arrive before its reply.
+
 | Method | Params | Result |
 |---|---|---|
 | `initialize` | `{ protocol_version, client_name }` | `{ protocol_version, server_name, server_version }` |
