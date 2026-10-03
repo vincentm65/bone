@@ -37,7 +37,7 @@ the other.
 
 The current capability names include `core.config`, `core.tools`,
 `core.hooks`, `core.providers`, `core.jobs`, `core.http_stream`, `core.ask`,
-`core.health`, `core.ready`, `core.reload`, `core.hooks.system`, `core.hooks.context`, `core.hooks.errors`, `core.hooks.stream`, `core.hooks.session`, `core.session_write`, `core.model`, `core.mcp`, `core.rpc`, `plugins.state` (both sides), and, in the TUI, `plugins.lifecycle`, `tui.project`, `tui.model`, `tui.rpc`, `tui.keymaps`, `tui.input`, `tui.events`,
+`core.health`, `core.ready`, `core.reload`, `core.hooks.system`, `core.hooks.context`, `core.hooks.errors`, `core.hooks.stream`, `core.hooks.session`, `core.session_write`, `core.queue`, `core.model`, `core.mcp`, `core.rpc`, `plugins.state` (both sides), and, in the TUI, `plugins.lifecycle`, `tui.project`, `tui.model`, `tui.rpc`, `tui.keymaps`, `tui.input`, `tui.events`,
 `tui.local_events`, `tui.commands`, `tui.command_specs`, `tui.options`,
 `tui.dynamic_options`, `tui.request`, `tui.prompt`, `tui.prompt_edit`, `tui.chat`, `tui.chat_data`, `tui.windows`,
 `tui.panels`, `tui.regions`, `tui.views`, `tui.pickers`, `tui.themes`, `tui.jobs`, `jobs.streaming` and
@@ -188,6 +188,7 @@ A hook runs at a point in the core with an event table. It returns `nil` (no cha
 | `request_error` | `{ session_id, error, attempt, model }`, when a model call fails before any output arrived; return `{ retry = ms }` to try again after `ms` (at most 5 retries per call), or `{ retry = ms, provider = "name" }` to send the rest of this call to another `bone.config.providers` entry. Without a retry the turn fails as before | the turn fails |
 | `stream` | `{ session_id, turn_id, text, reasoning }`: output as it streams, collected into batches; results are ignored and the stream never waits for it | (ignored) |
 | `session_start` | `{ session_id, cwd, new }`, the first time this core uses a session (`new` when it was just created) | (ignored) |
+| `queue_add` | `{ session_id, text, mode }`, a message about to be sent or queued (`queue/add`); return `{ text = ..., mode = ... }` to change it | it is refused with "why" |
 | `message` | `{ session_id, content, reasoning, tool_calls, usage }`, the model's reply before it is saved | the turn fails |
 | `tool_call` | `{ session_id, cwd, id, name, arguments }` | the call is refused; the model sees "why" |
 | `tool_result` | `{ session_id, id, name, arguments, output, is_error }` | the model sees "why" as an error |
@@ -218,6 +219,8 @@ bone.session.messages(id)                 -- the messages, as providers see them
 bone.session.append(id, { role = "user", content = "Remember: be brief." })
 bone.session.compact(id, { { role = "user", content = "Summary of earlier work: ..." } })
 ```
+
+The message queue is open to Lua too: `bone.queue.add(id, text, mode)` (`"steer"` or `"next"`; an idle session starts a turn), `bone.queue.list(id)`, `bone.queue.remove(id, queue_id)` and `bone.queue.clear(id)`, with the same effects (and `queue/changed` events) as the protocol's `queue/*` methods.
 
 `append` adds a message the model sees from the next call on. `compact` replaces the transcript: the session file keeps every earlier record behind a checkpoint, the session loads from the newest checkpoint, and turn ids keep counting. While a turn runs, the transcript can only change between model calls: in `turn_start`, `system`, `context`, `request` and `request_error` hooks, or after the turn (`turn_end`); elsewhere (a tool, a `tool_call` hook) the call fails, so a message never lands between tool calls and their results. Clients get a `session/updated` event and load the session again. Compacting itself (deciding what to keep, writing a summary) is up to a plugin.
 
@@ -406,7 +409,9 @@ independent of popups, but a focused popup always has precedence.
 
 Key names: `ctrl+`, `alt+` and `shift+` combined with `enter`, `esc`, `tab`, `backspace`, `delete`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `space`, `f1`–`f24`, `wheelup`, `wheeldown` (the mouse wheel) or a single character (`"?"`, `"G"`). Whitespace separates members of a sequence. Keys without a mapping type text.
 
-Builtin actions: `submit newline left right up down word_left word_right line_start line_end backspace delete delete_word delete_to_start delete_to_end scroll_up scroll_down page_up page_down scroll_top scroll_bottom complete dismiss interrupt quit quit_if_empty new_session sessions focus_next focus_prev focus_prompt`.
+Builtin actions: `submit queue_steer queue_next newline left right up down word_left word_right line_start line_end backspace delete delete_word delete_to_start delete_to_end scroll_up scroll_down page_up page_down scroll_top scroll_bottom complete dismiss interrupt quit quit_if_empty new_session sessions focus_next focus_prev focus_prompt`.
+
+`submit` during a turn queues the message in the core with `bone.o.queue_mode` (`"steer"`, the default, or `"next"`); `queue_steer` and `queue_next` pick the mode regardless. Up on an empty prompt takes the last queued message back to edit (`runtime/tui/defaults.lua`).
 
 While a panel has the keyboard, `up`/`down` (one row), `scroll_up`/`scroll_down`, `page_up`/`page_down` and `scroll_top`/`scroll_bottom` scroll the panel, and `dismiss` gives the keyboard back to the prompt. `focus_next`/`focus_prev` cycle through the prompt and the focusable panels; `focus_prompt` returns to the prompt.
 
@@ -712,6 +717,7 @@ end
 | `reasoning`, `assistant` | `text`, `streaming` |
 | `tool` | `id`, `name`, `arguments` (decoded), `raw_arguments`, `output` (nil while running), `is_error`, `done` |
 | `notice` | `text`, `error` |
+| `queued` | `id`, `text`, `mode` (`"steer"` joins the running turn, `"next"` waits for its own), `position` (1 first); messages waiting in the session's queue, after the transcript. Plain text: `(queued) text` |
 
 Every item also has `kind` and `index`. `ctx` is `{ width, region, prev = { kind } }`: `region` is `"chat"` in the transcript, and `prev` lets a view decide spacing (the style plugin adds a blank line except between a message and its tool calls). Assigning a view redraws the chat; a view that errors is reported once and its items fall back to plain text until it is redefined. Call `bone.ui.refresh()` if a view depends on something else you changed.
 

@@ -713,7 +713,9 @@ impl App {
             return;
         }
         match b {
-            Submit => self.submit(),
+            Submit => self.submit(None),
+            QueueSteer => self.submit(Some(QueueMode::Steer)),
+            QueueNext => self.submit(Some(QueueMode::Next)),
             Newline => self.prompt.newline(),
             Left => self.edit(|t| t.left()),
             Right => self.edit(|t| t.right()),
@@ -866,7 +868,9 @@ impl App {
 
     // ---- turns ---------------------------------------------------------------
 
-    fn submit(&mut self) {
+    /// Send the prompt: a new turn when idle; while a turn runs, queued with
+    /// `mode` (default: the `queue_mode` option, else steer).
+    fn submit(&mut self, mode: Option<QueueMode>) {
         let mut text = self.prompt.text();
         if text.trim().is_empty() {
             return;
@@ -887,27 +891,25 @@ impl App {
         }
         let buf = self.current;
         let chat = &mut self.chats[buf];
-        // While a turn runs, the message joins it at its next step.
+        // While a turn runs, the core queues it.
         if chat.turn.is_some()
             && let Some(session_id) = chat.session_id().map(str::to_owned)
         {
-            chat.queued.push(text.clone());
+            let mode = mode.unwrap_or_else(|| self.queue_mode());
             self.prompt.clear();
-            self.prompt_history_pos = None;
-            if self.prompt_history.last() != Some(&text) {
-                self.prompt_history.push(text.clone());
-            }
-            let params = TurnSteerParams {
+            self.history_add(&text);
+            let params = QueueAddParams {
                 session_id,
                 text: text.clone(),
+                mode,
             };
-            self.request::<TurnSteer>(params, move |app, r| {
+            self.request::<QueueAdd>(params, move |app, r| {
                 if let Err(e) = r {
-                    app.unqueue(buf, &text);
+                    app.unqueue_text(buf, text);
                     app.error(format!("not sent ({e}); it is back in the prompt"));
                 }
             });
-            return self.info("queued for the turn's next step");
+            return;
         }
         if chat.starting {
             return self.error("A turn is still starting");
@@ -982,6 +984,7 @@ impl App {
             Ok(r) => {
                 if let Some(c) = app.chat_mut(buf) {
                     c.load(r.info, &r.messages, r.active_turn);
+                    c.set_queue(r.queue);
                 }
             }
             Err(e) => {
@@ -1230,35 +1233,20 @@ impl App {
             .with_chat(&p.session_id, |c| c.tool_finished(&p)));
         on!(TurnSteered, |p| self
             .with_chat(&p.session_id, |c| c.steered(&p.text)));
-        on!(TurnFinished, |p| {
-            self.with_chat(&p.session_id, |c| c.turn_finished(&p));
-            self.give_back_queued(&p.session_id);
-        });
+        on!(TurnFinished, |p| self
+            .with_chat(&p.session_id, |c| c.turn_finished(&p)));
+        on!(QueueChanged, |p| self
+            .with_chat(&p.session_id, |c| c.set_queue(p.items)));
         on!(SessionUpdated, |p| self.reload_chat(p.session_id));
         on!(SessionDeleted, |p| self.session_deleted(&p.session_id));
     }
 
-    /// Messages that never joined a turn go back to the prompt.
-    fn give_back_queued(&mut self, session_id: &str) {
-        let Some(buf) = self.chat_by_session(session_id) else {
-            return;
-        };
-        let left = std::mem::take(&mut self.chats[buf].queued);
-        if left.is_empty() {
-            return;
-        }
-        for text in left {
-            self.unqueue_text(buf, text);
-        }
-        self.info("the turn ended before your message joined it; it is back in the prompt");
-    }
-
-    fn unqueue(&mut self, buf: BufferId, text: &str) {
-        if let Some(c) = self.chat_mut(buf)
-            && let Some(i) = c.queued.iter().position(|q| q == text)
-        {
-            c.queued.remove(i);
-            self.unqueue_text(buf, text.to_owned());
+    /// The default mode for messages sent during a turn: the `queue_mode`
+    /// option ("steer" or "next"), else steer.
+    fn queue_mode(&self) -> QueueMode {
+        match self.dynamic_options.get("queue_mode").map(|o| &o.value) {
+            Some(crate::options::DynamicValue::String(m)) if m == "next" => QueueMode::Next,
+            _ => QueueMode::Steer,
         }
     }
 
@@ -1299,6 +1287,7 @@ impl App {
             Ok(r) => {
                 if let Some(c) = app.chat_mut(buf) {
                     c.load(r.info, &r.messages, r.active_turn);
+                    c.set_queue(r.queue);
                 }
             }
             Err(e) => app.error(format!("cannot reload session: {e}")),

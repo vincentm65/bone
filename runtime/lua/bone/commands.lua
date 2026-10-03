@@ -139,6 +139,55 @@ cmd("source", function(c)
   bone.api.source(c.args)
 end, { desc = "run a Lua file" })
 
+local function session_id()
+  local s = bone.chat.session()
+  return s and s.session_id
+end
+
+cmd("queue", function(c)
+  local id = session_id()
+  if not id then
+    return bone.notify("queue is empty")
+  end
+  if c.args == "clear" or c.args == "resume" then
+    return bone.request("queue/" .. c.args, { session_id = id }, function(_, err)
+      if err then
+        bone.notify(tostring(err), "error")
+      end
+    end)
+  end
+  if c.args ~= "" then
+    return bone.notify("usage: /queue [clear|resume]", "error")
+  end
+  local items = bone.chat.items({ kind = "queued" })
+  if #items == 0 then
+    return bone.notify("queue is empty")
+  end
+  local rows = {}
+  for i, q in ipairs(items) do
+    rows[i] = ("%d. [%s] %s"):format(i, q.mode, q.text)
+  end
+  bone.notify(table.concat(rows, "\n"))
+end, {
+  desc = "queued messages; /queue clear, /queue resume",
+  complete = function()
+    return { { value = "clear", desc = "empty the queue" }, { value = "resume", desc = "let a paused queue go on" } }
+  end,
+})
+
+cmd("unqueue", function(c)
+  local n = tonumber(c.args)
+  local item = n and bone.chat.items({ kind = "queued" })[n]
+  if not item then
+    return bone.notify("usage: /unqueue N (see /queue)", "error")
+  end
+  bone.request("queue/remove", { session_id = session_id(), id = item.id }, function(_, err)
+    if err then
+      bone.notify(tostring(err), "error")
+    end
+  end)
+end, { desc = "take message N out of the queue" })
+
 cmd("messages", function()
   bone.api.show(table.concat(bone.api.log(20), "\n"))
 end, { desc = "recent messages and full Lua errors" })

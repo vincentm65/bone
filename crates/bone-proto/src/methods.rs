@@ -65,6 +65,12 @@ pub const METHODS: &[&str] = &[
     TurnStart::METHOD,
     TurnCancel::METHOD,
     TurnSteer::METHOD,
+    QueueAdd::METHOD,
+    QueueRemove::METHOD,
+    QueueUpdate::METHOD,
+    QueueMove::METHOD,
+    QueueClear::METHOD,
+    QueueResume::METHOD,
     AskRespond::METHOD,
     HealthCheck::METHOD,
     CoreReload::METHOD,
@@ -91,6 +97,7 @@ pub const NOTIFICATIONS: &[&str] = &[
     AskResolved::METHOD,
     TurnFinished::METHOD,
     TurnSteered::METHOD,
+    QueueChanged::METHOD,
     CoreReloaded::METHOD,
     SessionUpdated::METHOD,
     SessionDeleted::METHOD,
@@ -169,6 +176,12 @@ pub struct SessionMessagesResult {
     /// The turn currently running, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_turn: Option<TurnId>,
+    /// Messages waiting to be sent (see `queue/add`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queue: Vec<QueuedMessage>,
+    /// The queue waits for `queue/resume` or a new message.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub queue_paused: bool,
 }
 
 method!(
@@ -217,6 +230,105 @@ method!(
     /// no turn is running; use `turn/start` then.
     TurnSteer, "turn/steer", TurnSteerParams => ()
 );
+// ---- the message queue ---------------------------------------------------
+
+method!(
+    /// Send a message, queueing it while a turn runs. Idle: it starts a turn
+    /// at once (`turn_id`). Running: `steer` joins that turn at its next
+    /// step, `next` starts its own turn after it (`id`). Queued messages are
+    /// kept with the session, across restarts.
+    QueueAdd, "queue/add", QueueAddParams => QueueAddResult
+);
+method!(
+    /// Take a message out of the queue.
+    QueueRemove, "queue/remove", QueueItemRef => ()
+);
+method!(
+    /// Change a queued message's text or mode.
+    QueueUpdate, "queue/update", QueueUpdateParams => ()
+);
+method!(
+    /// Move a queued message to position `to` (0 is first).
+    QueueMove, "queue/move", QueueMoveParams => ()
+);
+method!(
+    /// Empty the queue.
+    QueueClear, "queue/clear", SessionRef => ()
+);
+method!(
+    /// Let a paused queue go on (after a cancelled turn or a restart): if
+    /// the session is idle, the first message starts a turn.
+    QueueResume, "queue/resume", SessionRef => ()
+);
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum QueueMode {
+    /// Joins the running turn before its next model call.
+    #[default]
+    Steer,
+    /// Starts its own turn once the running one ends.
+    Next,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedMessage {
+    pub id: u64,
+    pub text: String,
+    pub mode: QueueMode,
+    /// Unix seconds.
+    pub created_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueAddParams {
+    pub session_id: SessionId,
+    pub text: String,
+    #[serde(default)]
+    pub mode: QueueMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueAddResult {
+    /// It was queued under this id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<u64>,
+    /// It started this turn straight away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub turn_id: Option<TurnId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueItemRef {
+    pub session_id: SessionId,
+    pub id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueUpdateParams {
+    pub session_id: SessionId,
+    pub id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<QueueMode>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueMoveParams {
+    pub session_id: SessionId,
+    pub id: u64,
+    pub to: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueChangedParams {
+    pub session_id: SessionId,
+    pub items: Vec<QueuedMessage>,
+    #[serde(default)]
+    pub paused: bool,
+}
+
 method!(
     /// Answer an [`AskRequested`] event.
     AskRespond, "ask/respond", AskRespondParams => ()
@@ -434,6 +546,10 @@ notification!(
     AskResolved, "ask/resolved", AskResolvedParams
 );
 notification!(TurnFinished, "turn/finished", TurnFinishedParams);
+notification!(
+    /// A session's queue changed: all of it, as it is now.
+    QueueChanged, "queue/changed", QueueChangedParams
+);
 notification!(
     /// A `turn/steer` message joined the running turn's transcript.
     TurnSteered, "turn/steered", TurnStartedParams

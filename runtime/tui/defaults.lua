@@ -6,6 +6,31 @@
 require("bone.commands")
 require("bone.menu")
 
+-- Enter during a turn queues the message in the core: "steer" joins the
+-- running turn at its next step, "next" waits for a turn of its own. The
+-- actions queue_steer and queue_next do one or the other whatever this says.
+bone.o.define("queue_mode", "steer", { desc = "what enter does during a turn: steer or next" })
+
+-- Up on an empty prompt takes the last queued message back to edit.
+local menu_up = bone.ui.actions.up
+bone.ui.actions.up = function()
+  if menu_up and menu_up() then
+    return true
+  end
+  local s = bone.chat.session()
+  if bone.prompt.get() ~= "" or not s or not s.session_id then
+    return false
+  end
+  local queued = bone.chat.items({ kind = "queued" })
+  local last = queued[#queued]
+  if not last then
+    return false
+  end
+  bone.prompt.set(last.text)
+  bone.request("queue/remove", { session_id = s.session_id, id = last.id })
+  return true
+end
+
 local function map(keys, context)
   for key, action in pairs(keys) do
     bone.keymap.set(key, action, { context = context })

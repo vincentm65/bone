@@ -7,6 +7,7 @@
 --       { kind, index, text, error }                notice
 --       { kind, index, id, name, arguments, raw_arguments,
 --         output, is_error, done }                   tool
+--       { kind, index, id, text, mode, position }  queued (mode: "steer" or "next")
 -- ctx:  { width, region, prev = { kind } }
 -- Returns a list of lines; each line is a list of { "text", "Group" }.
 
@@ -154,6 +155,17 @@ end
 function views.notice(item, ctx)
   local hl = item.error and "ErrorMsg" or "Notice"
   return append(starts("notice", ctx), wrap({ { item.text, hl } }, ctx.width, { first = { { "  ! ", hl } } }))
+end
+
+function views.queued(item, ctx)
+  local note = item.mode == "steer" and "joins this turn" or "next turn"
+  local out = starts("queued", ctx)
+  for i, line in ipairs(lines(item.text)) do
+    local first = i == 1 and { { "◦ ", "Dim" } } or { { "  ", "Dim" } }
+    append(out, wrap({ { line, "Dim" } }, ctx.width, { first = first }))
+  end
+  out[#out + 1] = { { "  " .. note, "StatusLineDim" } }
+  return out
 end
 
 -- ---- tools ----------------------------------------------------------------

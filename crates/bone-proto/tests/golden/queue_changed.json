@@ -1,0 +1,24 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "queue/changed",
+    "params": {
+      "items": [
+        {
+          "created_at": 1790000100,
+          "id": 3,
+          "mode": "steer",
+          "text": "also check the tests"
+        },
+        {
+          "created_at": 1790000100,
+          "id": 4,
+          "mode": "next",
+          "text": "then update the README"
+        }
+      ],
+      "paused": false,
+      "session_id": "01a0fe5e-0000-7000-8000-000000000001"
+    }
+  }
+]

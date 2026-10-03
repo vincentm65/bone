@@ -110,11 +110,14 @@ pub(crate) async fn run_turn(
     }
     let ev = json!({ "session_id": turn.session_id, "turn_id": turn_id, "outcome": outcome });
     let _ = turn.hooks("turn_end", ev).await;
+    let cancelled = matches!(outcome, TurnOutcome::Cancelled);
     inner.emit::<TurnFinished>(TurnFinishedParams {
         session_id: turn.session_id,
         turn_id,
         outcome,
     });
+    // Then the next queued message, if any.
+    inner.after_turn(&session, cancelled);
 }
 
 impl Turn<'_> {
@@ -336,10 +339,11 @@ impl Turn<'_> {
                 // A message steered in meanwhile gets an answer before the
                 // turn ends; otherwise no more are accepted.
                 let mut s = self.session.lock().unwrap();
-                match &mut s.active {
-                    Some(a) if !a.steer.is_empty() => continue,
-                    Some(a) => a.closing = true,
-                    None => {}
+                if s.has_steer() {
+                    continue;
+                }
+                if let Some(a) = &mut s.active {
+                    a.closing = true;
                 }
                 return Ok(());
             }
@@ -403,12 +407,13 @@ impl Turn<'_> {
 
     /// Add the waiting `turn/steer` messages to the transcript.
     fn take_steer(&self) -> Result<(), Stop> {
-        let texts = {
+        let texts: Vec<String> = {
             let mut s = self.session.lock().unwrap();
-            match &mut s.active {
-                Some(a) => std::mem::take(&mut a.steer),
-                None => Vec::new(),
+            let steer = s.take_steer();
+            if !steer.is_empty() {
+                self.inner.emit_queue(&s);
             }
+            steer.into_iter().map(|q| q.text).collect()
         };
         for text in texts {
             self.record(ChatMessage::User {

@@ -1852,3 +1852,211 @@ async fn a_message_steered_during_the_last_answer_still_gets_one() {
         .unwrap_err();
     assert!(e.message.contains("no turn is running"), "{e:?}");
 }
+
+// ---- the message queue ------------------------------------------------------------
+
+impl Harness {
+    async fn queue(&self, text: &str, mode: QueueMode) -> QueueAddResult {
+        self.call::<QueueAdd>(QueueAddParams {
+            session_id: self.session_id.clone(),
+            text: text.into(),
+            mode,
+        })
+        .await
+        .unwrap()
+    }
+
+    fn queued_texts(&self) -> Vec<String> {
+        let s = self.core.inner.sessions.get(&self.session_id).unwrap();
+        let s = s.lock().unwrap();
+        s.queue.iter().map(|q| q.text.clone()).collect()
+    }
+
+    /// The text of each turn that starts, until `n` have finished.
+    async fn turns(&mut self, n: usize) -> Vec<(String, TurnOutcome)> {
+        let mut out = Vec::new();
+        let mut text = String::new();
+        while out.len() < n {
+            let e = self.next().await;
+            if let Some(Ok(p)) = e.parse_as::<TurnStarted>() {
+                text = p.text;
+            } else if let Some(Ok(p)) = e.parse_as::<TurnFinished>() {
+                out.push((text.clone(), p.outcome));
+            }
+        }
+        out
+    }
+}
+
+#[tokio::test]
+async fn queued_messages_run_one_turn_each_in_order() {
+    let mut h = Harness::new(vec![
+        later(200, "a1"),
+        text("a2"),
+        Step::Fail("boom".into()),
+        text("a4"),
+    ])
+    .await;
+    // Idle: it starts a turn right away.
+    let first = h.queue("one", QueueMode::Next).await;
+    assert!(first.turn_id.is_some() && first.id.is_none());
+    // Busy: queued, in order. A failed turn does not stop the queue.
+    let second = h.queue("two", QueueMode::Next).await;
+    assert!(second.id.is_some());
+    h.queue("three", QueueMode::Next).await;
+    h.queue("four", QueueMode::Next).await;
+    let changed = h.until::<QueueChanged>().await;
+    assert_eq!(changed.items.len(), 1);
+    let turns = h.turns(4).await;
+    let texts: Vec<&str> = turns.iter().map(|(t, _)| t.as_str()).collect();
+    assert_eq!(texts, ["one", "two", "three", "four"]);
+    assert!(matches!(turns[2].1, TurnOutcome::Failed { .. }));
+    assert!(h.queued_texts().is_empty());
+}
+
+#[tokio::test]
+async fn a_cancelled_turn_pauses_the_queue_until_resumed() {
+    let mut h = Harness::new(vec![Step::Hang("…".into()), text("after")]).await;
+    h.queue("first", QueueMode::Next).await;
+    h.until::<MessageDelta>().await;
+    // A steer message that never joins the turn waits for the next one.
+    h.queue("steered", QueueMode::Steer).await;
+    h.queue("second", QueueMode::Next).await;
+    h.cancel().await;
+    h.until::<TurnFinished>().await;
+    let state = h
+        .call::<SessionMessages>(SessionRef {
+            session_id: h.session_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(state.queue_paused);
+    assert_eq!(
+        state
+            .queue
+            .iter()
+            .map(|q| (q.text.as_str(), q.mode))
+            .collect::<Vec<_>>(),
+        [("steered", QueueMode::Next), ("second", QueueMode::Next)]
+    );
+    // Edit it while paused.
+    let second = state.queue[1].id;
+    let steered = state.queue[0].id;
+    let r = |id| QueueItemRef {
+        session_id: h.session_id.clone(),
+        id,
+    };
+    h.call::<QueueUpdate>(QueueUpdateParams {
+        session_id: h.session_id.clone(),
+        id: second,
+        text: Some("second, edited".into()),
+        mode: None,
+    })
+    .await
+    .unwrap();
+    h.call::<QueueMove>(QueueMoveParams {
+        session_id: h.session_id.clone(),
+        id: second,
+        to: 0,
+    })
+    .await
+    .unwrap();
+    h.call::<QueueRemove>(r(steered)).await.unwrap();
+    assert!(h.call::<QueueRemove>(r(99)).await.is_err());
+    assert_eq!(h.queued_texts(), ["second, edited"]);
+    // Resume: it runs.
+    h.call::<QueueResume>(SessionRef {
+        session_id: h.session_id.clone(),
+    })
+    .await
+    .unwrap();
+    let turns = h.turns(1).await;
+    assert_eq!(turns[0].0, "second, edited");
+    assert!(h.queued_texts().is_empty());
+}
+
+#[tokio::test]
+async fn the_queue_survives_a_restart() {
+    let mut h = Harness::new(vec![Step::Hang("…".into())]).await;
+    h.queue("running", QueueMode::Next).await;
+    h.until::<MessageDelta>().await;
+    h.queue("later", QueueMode::Next).await;
+    let path = h
+        ._data
+        .path()
+        .join(format!("sessions/{}.queue.json", h.session_id));
+    assert!(path.is_file());
+    // A fresh core finds it, waiting.
+    let store = crate::session::SessionStore::new(h._data.path());
+    {
+        let s = store.get(&h.session_id).unwrap();
+        let s = s.lock().unwrap();
+        assert_eq!(s.queue[0].text, "later");
+        assert!(s.queue_paused);
+    }
+    h.call::<QueueClear>(SessionRef {
+        session_id: h.session_id.clone(),
+    })
+    .await
+    .unwrap();
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn queue_add_hooks_rewrite_or_refuse() {
+    let mut h = Harness::with_lua(
+        r#"bone.hook("queue_add", function(ev)
+             if ev.text == "no" then return { deny = "not that" } end
+             return { text = ev.text .. "!", mode = "next" }
+           end)"#,
+        vec![Step::Hang("…".into())],
+    )
+    .await;
+    h.queue("go", QueueMode::Steer).await;
+    h.until::<TurnStarted>().await;
+    h.queue("more", QueueMode::Steer).await;
+    let state = h
+        .call::<SessionMessages>(SessionRef {
+            session_id: h.session_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        (state.queue[0].text.as_str(), state.queue[0].mode),
+        ("more!", QueueMode::Next)
+    );
+    let e = h
+        .call::<QueueAdd>(QueueAddParams {
+            session_id: h.session_id.clone(),
+            text: "no".into(),
+            mode: QueueMode::Next,
+        })
+        .await
+        .unwrap_err();
+    assert!(e.message.contains("not that"));
+}
+
+#[tokio::test]
+async fn core_lua_can_queue_messages() {
+    let mut h = Harness::with_lua(
+        r#"bone.hook("turn_end", function(ev)
+             if not queued then
+               queued = true
+               bone.queue.add(ev.session_id, "follow up", "next")
+             end
+           end)
+           bone.tool.register { name = "peek", run = function(_, ctx)
+             return #bone.queue.list(ctx.session_id)
+           end }"#,
+        vec![
+            text("first"),
+            calls(&[("c1", "peek", json!({}))]),
+            text("second"),
+        ],
+    )
+    .await;
+    h.start("go").await;
+    let turns = h.turns(2).await;
+    assert_eq!(turns[1].0, "follow up");
+    assert_eq!(tool_result(&h.transcript().await[4]).0, "0");
+}

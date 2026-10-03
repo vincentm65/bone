@@ -25,7 +25,8 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 
 | Key | Does |
 |---|---|
-| `enter` | send (or run a `/command`). While a turn runs, the message joins it at its next step (it shows once it has); if the turn ends first, it comes back to the prompt |
+| `enter` | send (or run a `/command`). While a turn runs, the message is queued: by default it joins that turn at its next step; with `/set queue_mode=next` it waits for a turn of its own. Queued messages show at the end of the chat |
+| `up` on an empty prompt | take the last queued message back to edit |
 | `alt+enter`, `shift+enter`, `ctrl+j` | new line |
 | `ctrl+c` | cancel the running turn; else clear the prompt; else press twice to quit |
 | `ctrl+d` | quit (on an empty prompt) |
@@ -62,6 +63,7 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `/rename {title}` | give this session a title |
 | `/fork`, `/fork {N}` | continue in a copy of this session; with N, from before turn N (to try that turn again differently). The original stays as it was |
 | `/delete yes` | delete this session and its file (`/delete` alone asks) |
+| `/queue`, `/queue clear`, `/queue resume`, `/unqueue {N}` | list the queued messages, empty the queue, let a paused queue go on (after a cancel or a restart), take one out |
 | `/cancel` | cancel the running turn |
 | `/quit`, `/exit`, `/q` | quit |
 | `/set opt`, `/set noopt`, `/set opt!`, `/set opt=N`, `/set opt?` | options |

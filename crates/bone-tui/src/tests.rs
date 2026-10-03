@@ -110,6 +110,7 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
             }
         },
         "model/complete" => json!({ "request_id": 41 }),
+        "queue/add" => json!({ "id": 1 }),
         "plugin/list" => json!([{ "name": "corepart", "core": true, "loaded": true }]),
         "core/reload" => json!({ "plugins": [], "warnings": ["data_dir changed"] }),
         "initialize" => {
@@ -2748,36 +2749,86 @@ async fn session_commands_rename_fork_and_delete() {
 }
 
 #[tokio::test]
-async fn typing_during_a_turn_steers_it() {
+async fn typing_during_a_turn_queues_it() {
     let mut h = Harness::new().await;
+    let queued = |id: u64, text: &str, mode: QueueMode| QueuedMessage {
+        id,
+        text: text.into(),
+        mode,
+        created_at: 0,
+    };
+    let changed = |items: Vec<QueuedMessage>| QueueChangedParams {
+        session_id: "s-new".into(),
+        items,
+        paused: false,
+    };
     h.input("go{enter}").await;
     h.emit::<TurnStarted>(started("s-new", "go")).await;
     h.input("also the README{enter}").await;
     assert_eq!(
-        h.requests("turn/steer"),
-        vec![json!({ "session_id": "s-new", "text": "also the README" })]
+        h.requests("queue/add"),
+        vec![json!({ "session_id": "s-new", "text": "also the README", "mode": "steer" })]
     );
     assert_eq!(h.prompt(), "");
-    assert_eq!(h.message(), "queued for the turn's next step");
+    // The core's queue shows at the end of the chat, through a Lua view.
+    h.emit::<QueueChanged>(changed(vec![queued(
+        1,
+        "also the README",
+        QueueMode::Steer,
+    )]))
+    .await;
+    let screen = h.screen(80, 20);
+    assert!(
+        screen.contains("◦ also the README") && screen.contains("joins this turn"),
+        "{screen}"
+    );
+    assert_eq!(
+        h.lua("=bone.chat.items({ kind = 'queued' })[1].mode").await,
+        "\"steer\""
+    );
+    // It joins: a user message, and the queue is empty again.
     h.emit::<TurnSteered>(started("s-new", "also the README"))
         .await;
+    h.emit::<QueueChanged>(changed(vec![])).await;
+    let screen = h.screen(80, 20);
     assert!(
-        h.screen(80, 20).contains("› also the README"),
-        "{}",
-        h.screen(80, 20)
+        screen.contains("› also the README") && !screen.contains("joins this turn"),
+        "{screen}"
     );
 
-    // One that never joins comes back when the turn ends.
-    h.input("too late{enter}").await;
-    h.emit::<TurnFinished>(finished("s-new", TurnOutcome::Cancelled))
+    // queue_mode, and the actions that pick a mode.
+    h.lua("bone.o.queue_mode = 'next'").await;
+    h.input("later{enter}").await;
+    h.lua("bone.prompt.set('now'); bone.action('queue_steer')")
         .await;
-    assert_eq!(h.prompt(), "too late");
-    assert!(h.message().contains("back in the prompt"));
+    let modes: Vec<Value> = h
+        .requests("queue/add")
+        .iter()
+        .map(|r| r["mode"].clone())
+        .collect();
+    assert_eq!(modes, [json!("steer"), json!("next"), json!("steer")]);
+
+    // Up on an empty prompt takes the last queued message back.
+    h.emit::<QueueChanged>(changed(vec![
+        queued(6, "first", QueueMode::Next),
+        queued(7, "edit me", QueueMode::Next),
+    ]))
+    .await;
+    h.input("/queue{enter}").await;
+    assert_eq!(h.message(), "1. [next] first\n2. [next] edit me");
+    h.input("{up}").await;
+    assert_eq!(h.prompt(), "edit me");
+    assert_eq!(
+        h.requests("queue/remove")[0],
+        json!({ "session_id": "s-new", "id": 7 })
+    );
+    h.input("{ctrl+u}/unqueue 1{enter}").await;
+    assert_eq!(h.requests("queue/remove")[1]["id"], 6);
+    h.input("/queue clear{enter}").await;
+    assert_eq!(h.requests("queue/clear").len(), 1);
 
     // One the core refuses comes back at once.
-    h.input("{ctrl+u}").await;
-    h.emit::<TurnStarted>(started("s-new", "again")).await;
-    *h.fail.lock().unwrap() = Some("turn/steer".into());
+    *h.fail.lock().unwrap() = Some("queue/add".into());
     h.input("refused{enter}").await;
     assert_eq!(h.prompt(), "refused");
     assert!(h.message().starts_with("not sent"), "{}", h.message());

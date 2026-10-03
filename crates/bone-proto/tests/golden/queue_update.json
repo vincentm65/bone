@@ -1,0 +1,18 @@
+[
+  {
+    "id": 32,
+    "jsonrpc": "2.0",
+    "method": "queue/update",
+    "params": {
+      "id": 4,
+      "mode": "steer",
+      "session_id": "01a0fe5e-0000-7000-8000-000000000001",
+      "text": "then update the docs"
+    }
+  },
+  {
+    "id": 32,
+    "jsonrpc": "2.0",
+    "result": null
+  }
+]

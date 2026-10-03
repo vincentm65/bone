@@ -1,0 +1,19 @@
+[
+  {
+    "id": 30,
+    "jsonrpc": "2.0",
+    "method": "queue/add",
+    "params": {
+      "mode": "next",
+      "session_id": "01a0fe5e-0000-7000-8000-000000000001",
+      "text": "then update the README"
+    }
+  },
+  {
+    "id": 30,
+    "jsonrpc": "2.0",
+    "result": {
+      "id": 4
+    }
+  }
+]

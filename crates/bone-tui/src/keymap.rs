@@ -106,6 +106,8 @@ builtins! {
     FocusNext = "focus_next",
     FocusPrev = "focus_prev",
     FocusPrompt = "focus_prompt",
+    QueueSteer = "queue_steer",
+    QueueNext = "queue_next",
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

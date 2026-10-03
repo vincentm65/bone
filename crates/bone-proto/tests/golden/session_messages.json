@@ -42,6 +42,14 @@
           "content": "All tests pass.",
           "role": "assistant"
         }
+      ],
+      "queue": [
+        {
+          "created_at": 1790000100,
+          "id": 4,
+          "mode": "next",
+          "text": "then update the README"
+        }
       ]
     }
   }

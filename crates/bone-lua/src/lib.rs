@@ -76,6 +76,7 @@ static CORE_CAPABILITIES: &[&str] = &[
     "core.hooks.stream",
     "core.hooks.session",
     "core.session_write",
+    "core.queue",
     "core.model",
     "core.mcp",
     "core.rpc",

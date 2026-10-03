@@ -411,6 +411,50 @@ impl Host {
         let id = spec["id"].as_str().ok_or("a session id is needed")?;
         let session = inner.sessions.get(id).map_err(|e| e.to_string())?;
         let op = spec["op"].as_str().unwrap_or_default();
+        // The queue (bone.queue): no turn restrictions, and its own event.
+        match op {
+            "queue_list" => {
+                let s = session.lock().unwrap();
+                return serde_json::to_value(&s.queue).map_err(|e| e.to_string());
+            }
+            "queue_add" => {
+                let text = spec["text"].as_str().unwrap_or_default().to_owned();
+                if text.trim().is_empty() {
+                    return Err("bone.queue.add needs text".into());
+                }
+                let mut mode: bone_proto::methods::QueueMode =
+                    serde_json::from_value(spec["mode"].clone()).unwrap_or_default();
+                if session.lock().unwrap().active.is_none()
+                    && let Ok(turn_id) = inner.begin_turn(session.clone(), text.clone())
+                {
+                    return Ok(json!({ "turn_id": turn_id }));
+                }
+                let mut s = session.lock().unwrap();
+                let ending = s
+                    .active
+                    .as_ref()
+                    .is_none_or(|a| a.closing || a.cancel.is_cancelled());
+                if ending {
+                    mode = bone_proto::methods::QueueMode::Next;
+                }
+                let qid = s.enqueue(text, mode);
+                inner.emit_queue(&s);
+                return Ok(json!({ "id": qid }));
+            }
+            "queue_remove" | "queue_clear" => {
+                {
+                    let mut s = session.lock().unwrap();
+                    match spec["queue_id"].as_u64() {
+                        Some(qid) if op == "queue_remove" => s.queue.retain(|q| q.id != qid),
+                        _ => s.queue.clear(),
+                    }
+                    s.save_queue();
+                    inner.emit_queue(&s);
+                }
+                return Ok(json!(true));
+            }
+            _ => {}
+        }
         let reason = match op {
             "messages" => {
                 let s = session.lock().unwrap();

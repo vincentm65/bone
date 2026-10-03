@@ -453,3 +453,16 @@ Moved out of the core after review, to keep the default harness minimal:
   the command registry and gained `bone.ui.actions` (Lua handlers for builtin
   actions) plus small read APIs (`bone.cmd.list/find/complete`,
   `bone.o.apply/list`, `bone.api.log/show/...`).
+
+## Message queue
+
+Each session has a queue in the core (`queue/add|remove|update|move|clear|
+resume`, `queue/changed`, `bone.queue` in core Lua, a `queue_add` hook),
+saved in `<id>.queue.json`. `steer` messages join the running turn at its
+next step (`turn/steer` is now shorthand for this); `next` messages start
+their own turns in order after it, also after failed turns. A cancelled turn
+or a restart pauses the queue until `queue/resume` or a new message. The TUI
+draws queued messages as `queued` chat items through `bone.ui.views.queued`
+(the style plugin has one), queues with `bone.o.queue_mode` (default steer)
+or the `queue_steer`/`queue_next` actions, takes the last one back with up
+on an empty prompt, and has `/queue` and `/unqueue`.

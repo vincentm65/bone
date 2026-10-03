@@ -9,8 +9,8 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use bone_proto::methods::{
-    MessageCompletedParams, MessageDeltaParams, ToolFinishedParams, ToolStartedParams,
-    TurnFinishedParams,
+    MessageCompletedParams, MessageDeltaParams, QueueMode, QueuedMessage, ToolFinishedParams,
+    ToolStartedParams, TurnFinishedParams,
 };
 use bone_proto::types::{
     ChatMessage, DeltaKind, SessionInfo, ToolCall, TurnId, TurnOutcome, Usage,
@@ -47,6 +47,8 @@ pub enum Part {
     Assistant,
     Tool,
     Notice,
+    /// A message waiting in the session's queue (after the transcript).
+    Queued,
 }
 
 impl Part {
@@ -57,6 +59,7 @@ impl Part {
             Part::Assistant => "assistant",
             Part::Tool => "tool",
             Part::Notice => "notice",
+            Part::Queued => "queued",
         }
     }
 }
@@ -93,9 +96,10 @@ pub struct ChatBuffer {
     pub usage: Option<Usage>,
     /// A prompt was sent and the turn has not started yet.
     pub starting: bool,
-    /// Messages sent to the running turn (`turn/steer`) that have not joined
-    /// it yet.
-    pub queued: Vec<String>,
+    /// The session's queue, as the core last said (`queue/changed`).
+    pub queue: Vec<QueuedMessage>,
+    /// Bumped when the queue changes; the cache key of queued items.
+    queue_rev: u64,
     /// How finished turns ended, by the entry index of their user message.
     /// Only turns seen finishing here; loaded history has none.
     pub outcomes: HashMap<usize, TurnOutcome>,
@@ -326,10 +330,16 @@ impl ChatBuffer {
 
     /// A steered message joined the running turn.
     pub fn steered(&mut self, text: &str) {
-        if let Some(i) = self.queued.iter().position(|q| q == text) {
-            self.queued.remove(i);
-        }
         self.push(Entry::User(text.to_owned()));
+    }
+
+    /// The core's queue for this session changed.
+    pub fn set_queue(&mut self, queue: Vec<QueuedMessage>) {
+        if queue != self.queue {
+            self.queue = queue;
+            self.next_rev += 1;
+            self.queue_rev = self.next_rev;
+        }
     }
 
     pub fn notice(&mut self, text: String, error: bool) {
@@ -362,6 +372,12 @@ impl ChatBuffer {
                 Entry::Notice { .. } => add(Part::Notice),
             }
         }
+        // Queued messages come last; their "entries" count on past the end.
+        let n = self.entries.len();
+        out.extend((0..self.queue.len()).map(|i| Item {
+            entry: n + i,
+            part: Part::Queued,
+        }));
         out
     }
 
@@ -369,6 +385,15 @@ impl ChatBuffer {
     /// message text loses blank lines at its edges (models often send them).
     pub fn item_data(&self, item: Item, index: usize) -> Value {
         let kind = item.part.name();
+        if item.part == Part::Queued {
+            let position = item.entry - self.entries.len();
+            let q = &self.queue[position];
+            let mode = match q.mode {
+                QueueMode::Steer => "steer",
+                QueueMode::Next => "next",
+            };
+            return json!({ "kind": kind, "index": index, "id": q.id, "text": edges(&q.text), "mode": mode, "position": position + 1 });
+        }
         match (&self.entries[item.entry], item.part) {
             (Entry::User(text), _) => json!({ "kind": kind, "index": index, "text": edges(text) }),
             (
@@ -420,7 +445,7 @@ impl ChatBuffer {
             .filter_map(|(i, item)| {
                 let key = RenderKey {
                     width,
-                    rev: self.revs[item.entry],
+                    rev: self.revs.get(item.entry).copied().unwrap_or(self.queue_rev),
                     generation,
                     prev: i.checked_sub(1).map(|p| items[p].part),
                 };
@@ -482,6 +507,7 @@ pub fn bare(data: &Value, width: usize, first: bool) -> Vec<Line<'static>> {
             t
         }
         "notice" => format!("! {}", s("text")),
+        "queued" => format!("(queued) {}", s("text")),
         _ => s("text"),
     };
     if text.is_empty() {

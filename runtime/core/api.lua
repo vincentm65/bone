@@ -164,6 +164,27 @@ function bone.session.compact(id, messages)
   return session_op("compact", id, { messages = messages })
 end
 
+--- A session's message queue (as queue/add and friends; clients see the
+--- changes). In hooks, tools and providers:
+---   bone.queue.add(id, text, mode)   mode "steer" (default) or "next";
+---                                     idle sessions start a turn: { turn_id }, else { id }
+---   bone.queue.list(id)              { { id, text, mode, created_at } }
+---   bone.queue.remove(id, queue_id), bone.queue.clear(id)
+bone.queue = {
+  add = function(id, text, mode)
+    return session_op("queue_add", id, { text = text, mode = mode })
+  end,
+  list = function(id)
+    return session_op("queue_list", id)
+  end,
+  remove = function(id, queue_id)
+    return session_op("queue_remove", id, { queue_id = queue_id })
+  end,
+  clear = function(id)
+    return session_op("queue_clear", id)
+  end,
+}
+
 --- Call a model from hooks, tools and providers (they wait without
 --- blocking; a cancelled turn stops the call). req:
 ---   provider  a key of bone.config.providers (default: the one turns use)

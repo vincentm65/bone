@@ -21,10 +21,12 @@ use bone_proto::methods::{
     AskRespond, AskRespondParams, CoreReload, Echo, EchoParams, Echoed, HealthCheck, LuaCall,
     LuaCallParams, McpList, ModelCancel, ModelComplete, ModelCompleteParams, ModelCompleted,
     ModelCompletedParams, ModelDeltaEvent, ModelDeltaParams, ModelList, ModelRequest, PluginList,
-    PluginLoad, PluginRef, PluginReload, PluginUnload, SessionCreate, SessionCreateParams,
-    SessionDelete, SessionDeleted, SessionFork, SessionForkParams, SessionList, SessionMessages,
-    SessionMessagesResult, SessionRef, SessionRename, SessionRenameParams, SessionUpdated,
-    SessionUpdatedParams, TurnCancel, TurnStart, TurnStartParams, TurnStartResult, TurnSteer,
+    PluginLoad, PluginRef, PluginReload, PluginUnload, QueueAdd, QueueAddParams, QueueAddResult,
+    QueueChanged, QueueChangedParams, QueueClear, QueueMode, QueueMove, QueueRemove, QueueResume,
+    QueueUpdate, SessionCreate, SessionCreateParams, SessionDelete, SessionDeleted, SessionFork,
+    SessionForkParams, SessionList, SessionMessages, SessionMessagesResult, SessionRef,
+    SessionRename, SessionRenameParams, SessionUpdated, SessionUpdatedParams, TurnCancel,
+    TurnStart, TurnStartParams, TurnStartResult, TurnSteer, TurnSteerParams,
 };
 use bone_proto::types::SessionInfo;
 use bone_proto::{Method, Notification, RpcError};
@@ -75,6 +77,9 @@ pub(crate) struct Inner {
     reloading: tokio::sync::Mutex<()>,
     /// Sessions `session_start` hooks have seen.
     started: Mutex<std::collections::HashSet<String>>,
+    /// Where turns run, so they can start from any thread (core Lua's
+    /// `bone.queue.add` runs on the Lua thread).
+    tokio: Option<tokio::runtime::Handle>,
     /// MCP servers; they outlive reloads.
     mcp: mcp::McpManager,
     /// Running `model/complete` calls, to cancel them.
@@ -97,6 +102,95 @@ impl Inner {
         let cwd = s.lock().unwrap().info.cwd.clone();
         self.started_session(id, &cwd, false);
         Ok(s)
+    }
+
+    /// Start a turn on an idle session (an error if one is running).
+    pub(crate) fn begin_turn(
+        self: &Arc<Self>,
+        session: session::SessionHandle,
+        text: String,
+    ) -> Result<bone_proto::types::TurnId, RpcError> {
+        let (turn_id, cancel) = {
+            let mut s = session.lock().unwrap();
+            if let Some(active) = &s.active {
+                return Err(RpcError::new(
+                    RpcError::BUSY,
+                    format!("turn {} is still running", active.turn_id),
+                ));
+            }
+            let turn_id = s.next_turn_id();
+            let cancel = CancellationToken::new();
+            s.active = Some(ActiveTurn {
+                turn_id,
+                cancel: cancel.clone(),
+                closing: false,
+            });
+            (turn_id, cancel)
+        };
+        // The turn saves the message and announces itself after its
+        // `turn_start` hooks have run.
+        let turn = agent::run_turn(self.clone(), session, turn_id, text, cancel);
+        match &self.tokio {
+            Some(rt) => drop(rt.spawn(turn)),
+            None => drop(tokio::spawn(turn)),
+        }
+        Ok(turn_id)
+    }
+
+    /// Tell clients what a session's queue holds now.
+    pub(crate) fn emit_queue(&self, s: &session::Session) {
+        self.emit::<QueueChanged>(QueueChangedParams {
+            session_id: s.info.session_id.clone(),
+            items: s.queue.clone(),
+            paused: s.queue_paused,
+        });
+    }
+
+    /// If the session is idle and its queue may go on, start the first
+    /// queued message as a turn.
+    pub(crate) fn start_next(self: &Arc<Self>, session: &session::SessionHandle) {
+        let next = {
+            let mut s = session.lock().unwrap();
+            if s.active.is_some() || s.queue_paused || s.queue.is_empty() {
+                return;
+            }
+            let q = s.queue.remove(0);
+            s.save_queue();
+            self.emit_queue(&s);
+            q
+        };
+        if self.begin_turn(session.clone(), next.text.clone()).is_err() {
+            // Raced with another turn: put it back in front.
+            let mut s = session.lock().unwrap();
+            s.queue.insert(0, next);
+            s.save_queue();
+            self.emit_queue(&s);
+        }
+    }
+
+    /// A turn ended: steer messages that never joined it wait for the next
+    /// one; a cancelled turn pauses the queue, any other goes on to the next
+    /// queued message.
+    pub(crate) fn after_turn(self: &Arc<Self>, session: &session::SessionHandle, cancelled: bool) {
+        {
+            let mut s = session.lock().unwrap();
+            let mut changed = false;
+            for q in s.queue.iter_mut() {
+                if q.mode == QueueMode::Steer {
+                    q.mode = QueueMode::Next;
+                    changed = true;
+                }
+            }
+            if cancelled && !s.queue.is_empty() && !s.queue_paused {
+                s.queue_paused = true;
+                changed = true;
+            }
+            if changed {
+                s.save_queue();
+                self.emit_queue(&s);
+            }
+        }
+        self.start_next(session);
     }
 
     fn started_session(&self, id: &str, cwd: &str, new: bool) {
@@ -156,6 +250,7 @@ impl Core {
                 retired: Mutex::new(Vec::new()),
                 reloading: tokio::sync::Mutex::new(()),
                 started: Mutex::new(Default::default()),
+                tokio: tokio::runtime::Handle::try_current().ok(),
                 mcp: Default::default(),
                 model_requests: Mutex::new(Default::default()),
                 next_model_request: Default::default(),
@@ -206,21 +301,81 @@ impl Core {
             }
             TurnStart::METHOD => dispatch::<TurnStart, _>(params, |p| self.turn_start(p)),
             TurnCancel::METHOD => dispatch::<TurnCancel, _>(params, |p| self.turn_cancel(p)),
-            TurnSteer::METHOD => dispatch::<TurnSteer, _>(params, |p| {
-                if p.text.trim().is_empty() {
-                    return Err(RpcError::invalid_params("text is empty"));
-                }
+            TurnSteer::METHOD => {
+                let p: TurnSteerParams = decode::<TurnSteer>(params)?;
                 let session = self.inner.session(&p.session_id).map_err(session_error)?;
-                let mut s = session.lock().unwrap();
-                match &mut s.active {
-                    Some(a) if !a.closing && !a.cancel.is_cancelled() => {
-                        a.steer.push(p.text);
-                        Ok(())
-                    }
-                    _ => Err(RpcError::invalid_params(
+                if session.lock().unwrap().active.is_none() {
+                    return Err(RpcError::invalid_params(
                         "no turn is running; start one with turn/start",
-                    )),
+                    ));
                 }
+                self.queue_add(QueueAddParams {
+                    session_id: p.session_id,
+                    text: p.text,
+                    mode: QueueMode::Steer,
+                })
+                .await?;
+                Ok(Value::Null)
+            }
+            QueueAdd::METHOD => {
+                let p: QueueAddParams = decode::<QueueAdd>(params)?;
+                let r = self.queue_add(p).await?;
+                Ok(serde_json::to_value(r).unwrap_or_default())
+            }
+            QueueRemove::METHOD => dispatch::<QueueRemove, _>(params, |p| {
+                self.queue_edit(&p.session_id, |s| {
+                    let before = s.queue.len();
+                    s.queue.retain(|q| q.id != p.id);
+                    if s.queue.len() == before {
+                        return Err(no_item(p.id));
+                    }
+                    Ok(())
+                })
+            }),
+            QueueUpdate::METHOD => dispatch::<QueueUpdate, _>(params, |p| {
+                self.queue_edit(&p.session_id, |s| {
+                    let q = s
+                        .queue
+                        .iter_mut()
+                        .find(|q| q.id == p.id)
+                        .ok_or_else(|| no_item(p.id))?;
+                    if let Some(t) = p.text {
+                        if t.trim().is_empty() {
+                            return Err(RpcError::invalid_params("text is empty"));
+                        }
+                        q.text = t;
+                    }
+                    if let Some(m) = p.mode {
+                        q.mode = m;
+                    }
+                    Ok(())
+                })
+            }),
+            QueueMove::METHOD => dispatch::<QueueMove, _>(params, |p| {
+                self.queue_edit(&p.session_id, |s| {
+                    let i = s
+                        .queue
+                        .iter()
+                        .position(|q| q.id == p.id)
+                        .ok_or_else(|| no_item(p.id))?;
+                    let q = s.queue.remove(i);
+                    let to = p.to.min(s.queue.len());
+                    s.queue.insert(to, q);
+                    Ok(())
+                })
+            }),
+            QueueClear::METHOD => dispatch::<QueueClear, _>(params, |p| {
+                self.queue_edit(&p.session_id, |s| {
+                    s.queue.clear();
+                    s.queue_paused = false;
+                    Ok(())
+                })
+            }),
+            QueueResume::METHOD => dispatch::<QueueResume, _>(params, |p| {
+                self.queue_edit(&p.session_id, |s| {
+                    s.queue_paused = false;
+                    Ok(())
+                })
             }),
             HealthCheck::METHOD => {
                 decode::<HealthCheck>(params)?;
@@ -469,6 +624,8 @@ impl Core {
             .map_err(session_error)?;
         let s = session.lock().unwrap();
         Ok(SessionMessagesResult {
+            queue: s.queue.clone(),
+            queue_paused: s.queue_paused,
             info: s.info.clone(),
             messages: s.messages.clone(),
             active_turn: s.active.as_ref().map(|a| a.turn_id),
@@ -483,34 +640,90 @@ impl Core {
             .inner
             .session(&params.session_id)
             .map_err(session_error)?;
-        let (turn_id, cancel) = {
-            let mut s = session.lock().unwrap();
-            if let Some(active) = &s.active {
-                return Err(RpcError::new(
-                    RpcError::BUSY,
-                    format!("turn {} is still running", active.turn_id),
-                ));
-            }
-            let turn_id = s.next_turn_id();
-            let cancel = CancellationToken::new();
-            s.active = Some(ActiveTurn {
-                turn_id,
-                cancel: cancel.clone(),
-                steer: Vec::new(),
-                closing: false,
-            });
-            (turn_id, cancel)
-        };
-        // The turn saves the message and announces itself after its
-        // `turn_start` hooks have run.
-        tokio::spawn(agent::run_turn(
-            self.inner.clone(),
-            session,
-            turn_id,
-            params.text,
-            cancel,
-        ));
+        let turn_id = self.inner.begin_turn(session, params.text)?;
         Ok(TurnStartResult { turn_id })
+    }
+
+    /// `queue/add`: start a turn when idle, else queue the message.
+    async fn queue_add(&self, p: QueueAddParams) -> Result<QueueAddResult, RpcError> {
+        if p.text.trim().is_empty() {
+            return Err(RpcError::invalid_params("text is empty"));
+        }
+        let (mut text, mut mode) = (p.text, p.mode);
+        // queue_add hooks may rewrite the message or refuse it.
+        if let Some(s) = self
+            .inner
+            .runtime()
+            .scripting
+            .clone()
+            .filter(|s| s.has_hook("queue_add"))
+        {
+            let ev = serde_json::json!({ "session_id": p.session_id, "text": text, "mode": mode });
+            let out = s.hooks("queue_add", ev).await;
+            if let Some(why) = out.deny {
+                return Err(RpcError::invalid_params(why));
+            }
+            if let Some(t) = out.event["text"].as_str() {
+                text = t.to_owned();
+            }
+            if let Ok(m) = serde_json::from_value(out.event["mode"].clone()) {
+                mode = m;
+            }
+        }
+        let session = self.inner.session(&p.session_id).map_err(session_error)?;
+        let idle = session.lock().unwrap().active.is_none();
+        if idle {
+            // A new message also lets a paused queue go on afterwards.
+            {
+                let mut s = session.lock().unwrap();
+                if s.queue_paused {
+                    s.queue_paused = false;
+                    self.inner.emit_queue(&s);
+                }
+            }
+            match self.inner.begin_turn(session.clone(), text.clone()) {
+                Ok(turn_id) => {
+                    return Ok(QueueAddResult {
+                        id: None,
+                        turn_id: Some(turn_id),
+                    });
+                }
+                // Another client started one meanwhile: queue it after all.
+                Err(e) if e.code == RpcError::BUSY => {}
+                Err(e) => return Err(e),
+            }
+        }
+        let mut s = session.lock().unwrap();
+        let ending = s
+            .active
+            .as_ref()
+            .is_none_or(|a| a.closing || a.cancel.is_cancelled());
+        if mode == QueueMode::Steer && ending {
+            mode = QueueMode::Next;
+        }
+        let id = s.enqueue(text, mode);
+        self.inner.emit_queue(&s);
+        Ok(QueueAddResult {
+            id: Some(id),
+            turn_id: None,
+        })
+    }
+
+    /// The other `queue/*` methods: change the queue, then tell clients.
+    fn queue_edit(
+        &self,
+        session_id: &str,
+        edit: impl FnOnce(&mut session::Session) -> Result<(), RpcError>,
+    ) -> Result<(), RpcError> {
+        let session = self.inner.session(session_id).map_err(session_error)?;
+        {
+            let mut s = session.lock().unwrap();
+            edit(&mut s)?;
+            s.save_queue();
+            self.inner.emit_queue(&s);
+        }
+        self.inner.start_next(&session);
+        Ok(())
     }
 
     fn turn_cancel(&self, params: SessionRef) -> Result<(), RpcError> {
@@ -530,6 +743,10 @@ fn reloaded(r: Result<bone_proto::methods::ReloadResult, String>) -> Result<Valu
         Ok(r) => Ok(serde_json::to_value(r).unwrap_or_default()),
         Err(e) => Err(RpcError::new(RpcError::INVALID_PARAMS, e)),
     }
+}
+
+fn no_item(id: u64) -> RpcError {
+    RpcError::invalid_params(format!("no queued message {id}"))
 }
 
 fn session_error(e: SessionError) -> RpcError {

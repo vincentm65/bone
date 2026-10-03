@@ -1,7 +1,8 @@
 //! Sessions: transcripts kept in memory and appended to JSONL files.
 //!
 //! File layout: `<data_dir>/sessions/<session_id>.jsonl`, plus
-//! `<session_id>.title` when it was renamed. The first record is
+//! `<session_id>.title` when it was renamed and `<session_id>.queue.json`
+//! while messages are queued. The first record is
 //! the session header; every later record is one transcript message, or a
 //! compaction checkpoint that replaces the transcript before it (the earlier
 //! records stay in the file).
@@ -13,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use bone_proto::methods::{QueueMode, QueuedMessage};
 use bone_proto::types::{ChatMessage, SessionId, SessionInfo, TurnId};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -45,16 +47,26 @@ pub struct Session {
     /// The running turn is between model calls, where Lua may add to the
     /// transcript or compact it (never between tool calls and results).
     pub safe_point: bool,
+    /// Messages waiting to be sent: steered into the running turn, or turns
+    /// of their own after it.
+    pub queue: Vec<QueuedMessage>,
+    /// The queue waits (after a cancelled turn, or a restart).
+    pub queue_paused: bool,
     next_turn: TurnId,
     file: File,
+    /// Where the queue is kept.
+    queue_path: PathBuf,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedQueue {
+    items: Vec<QueuedMessage>,
 }
 
 pub struct ActiveTurn {
     pub turn_id: TurnId,
     pub cancel: CancellationToken,
-    /// `turn/steer` messages waiting for the turn's next model call.
-    pub steer: Vec<String>,
-    /// The turn has decided to end; new steer messages are refused.
+    /// The turn has decided to end; steer messages wait for the next one.
     pub closing: bool,
 }
 
@@ -68,6 +80,52 @@ impl Session {
         let written = write_record(&mut self.file, &Record::Message(msg.clone()));
         self.messages.push(msg);
         written
+    }
+
+    /// Add to the queue; returns the message's id.
+    pub fn enqueue(&mut self, text: String, mode: QueueMode) -> u64 {
+        let id = self.queue.iter().map(|q| q.id).max().unwrap_or(0) + 1;
+        self.queue.push(QueuedMessage {
+            id,
+            text,
+            mode,
+            created_at: now(),
+        });
+        self.save_queue();
+        id
+    }
+
+    /// Take the steer messages out of the queue (in order).
+    pub fn take_steer(&mut self) -> Vec<QueuedMessage> {
+        let (steer, rest) = std::mem::take(&mut self.queue)
+            .into_iter()
+            .partition(|q| q.mode == QueueMode::Steer);
+        self.queue = rest;
+        if !steer.is_empty() {
+            self.save_queue();
+        }
+        steer
+    }
+
+    pub fn has_steer(&self) -> bool {
+        self.queue.iter().any(|q| q.mode == QueueMode::Steer)
+    }
+
+    /// Keep the queue on disk (or remove the file when it is empty).
+    pub fn save_queue(&self) {
+        if self.queue.is_empty() {
+            let _ = std::fs::remove_file(&self.queue_path);
+            return;
+        }
+        let saved = SavedQueue {
+            items: self.queue.clone(),
+        };
+        if let Ok(text) = serde_json::to_string(&saved) {
+            let tmp = self.queue_path.with_extension("json.tmp");
+            if std::fs::write(&tmp, text).is_ok() {
+                let _ = std::fs::rename(&tmp, &self.queue_path);
+            }
+        }
     }
 
     /// Replace the transcript with `messages`, keeping the old records in
@@ -130,9 +188,7 @@ impl SessionStore {
         let header = Header {
             session_id: uuid::Uuid::now_v7().to_string(),
             cwd,
-            created_at: SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .map_or(0, |d| d.as_secs()),
+            created_at: now(),
             parent,
         };
         let path = self.path(&header.session_id);
@@ -156,10 +212,13 @@ impl SessionStore {
             .filter(|m| matches!(m, ChatMessage::User { .. }))
             .count();
         let session = Arc::new(Mutex::new(Session {
+            queue_path: self.queue_path(&info.session_id),
             info: info.clone(),
             messages: messages.to_vec(),
             active: None,
             safe_point: false,
+            queue: Vec::new(),
+            queue_paused: false,
             next_turn: users as TurnId,
             file,
         }));
@@ -203,7 +262,16 @@ impl SessionStore {
         // Turn ids count every user message ever written (compacted ones
         // too), so they stay unique across reloads.
         let next_turn = users as TurnId;
+        // A queue left from before waits until resumed or added to.
+        let queue: Vec<QueuedMessage> = std::fs::read_to_string(self.queue_path(id))
+            .ok()
+            .and_then(|t| serde_json::from_str::<SavedQueue>(&t).ok())
+            .map(|q| q.items)
+            .unwrap_or_default();
         let session = Arc::new(Mutex::new(Session {
+            queue_path: self.queue_path(id),
+            queue_paused: !queue.is_empty(),
+            queue,
             info,
             messages,
             active: None,
@@ -255,7 +323,12 @@ impl SessionStore {
         self.loaded.lock().unwrap().remove(id);
         std::fs::remove_file(self.path(id))?;
         let _ = std::fs::remove_file(self.title_path(id));
+        let _ = std::fs::remove_file(self.queue_path(id));
         Ok(())
+    }
+
+    fn queue_path(&self, id: &str) -> PathBuf {
+        self.dir.join(format!("{id}.queue.json"))
     }
 
     fn title_path(&self, id: &str) -> PathBuf {
@@ -367,6 +440,12 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
         }
     }
     Ok(loaded)
+}
+
+fn now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 fn write_record(file: &mut File, record: &Record) -> std::io::Result<()> {

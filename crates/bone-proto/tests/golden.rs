@@ -117,6 +117,15 @@ fn info() -> SessionInfo {
     }
 }
 
+fn queued(id: u64, mode: QueueMode, text: &str) -> QueuedMessage {
+    QueuedMessage {
+        id,
+        text: text.into(),
+        mode,
+        created_at: 1_790_000_100,
+    }
+}
+
 fn call() -> ToolCall {
     ToolCall {
         id: "call_1".into(),
@@ -190,6 +199,8 @@ fn requests() {
                 },
             ],
             active_turn: None,
+            queue: vec![queued(4, QueueMode::Next, "then update the README")],
+            queue_paused: false,
         },
     );
     exchange::<TurnStart>(
@@ -304,6 +315,47 @@ fn requests() {
         },
         (),
     );
+    exchange::<QueueAdd>(
+        30,
+        QueueAddParams {
+            session_id: SID.into(),
+            text: "then update the README".into(),
+            mode: QueueMode::Next,
+        },
+        QueueAddResult {
+            id: Some(4),
+            turn_id: None,
+        },
+    );
+    let item = || QueueItemRef {
+        session_id: SID.into(),
+        id: 4,
+    };
+    exchange::<QueueRemove>(31, item(), ());
+    exchange::<QueueUpdate>(
+        32,
+        QueueUpdateParams {
+            session_id: SID.into(),
+            id: 4,
+            text: Some("then update the docs".into()),
+            mode: Some(QueueMode::Steer),
+        },
+        (),
+    );
+    exchange::<QueueMove>(
+        33,
+        QueueMoveParams {
+            session_id: SID.into(),
+            id: 4,
+            to: 0,
+        },
+        (),
+    );
+    let sref = || SessionRef {
+        session_id: SID.into(),
+    };
+    exchange::<QueueClear>(34, sref(), ());
+    exchange::<QueueResume>(35, sref(), ());
     exchange::<SessionRename>(
         26,
         SessionRenameParams {
@@ -443,6 +495,14 @@ fn events() {
             output_tokens: 4,
         }),
         error: None,
+    });
+    event::<QueueChanged>(QueueChangedParams {
+        session_id: SID.into(),
+        items: vec![
+            queued(3, QueueMode::Steer, "also check the tests"),
+            queued(4, QueueMode::Next, "then update the README"),
+        ],
+        paused: false,
     });
     event::<TurnSteered>(TurnStartedParams {
         session_id: SID.into(),
