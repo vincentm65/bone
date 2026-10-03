@@ -33,7 +33,11 @@ mod ui;
 #[cfg(test)]
 mod tests;
 
+use std::collections::hash_map::DefaultHasher;
+use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -51,6 +55,7 @@ pub use crate::headless::Headless;
 const FRAME: Duration = Duration::from_millis(16);
 /// Redraw rate for spinners and elapsed time.
 const ANIMATION: Duration = Duration::from_millis(100);
+const LUA_RELOAD_POLL: Duration = Duration::from_millis(250);
 
 pub struct RunOptions {
     /// Working directory for new sessions.
@@ -72,6 +77,7 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut app = App::new(Arc::new(client), tx, opts.cwd, opts.config_dir);
     app.load_user_config();
+    let mut lua_state = lua_snapshot(app.config_dir.as_deref());
     if let Some(id) = opts.resume {
         app.resume(id);
     }
@@ -127,11 +133,52 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
                 }
                 last_draw = Instant::now();
             }
+            _ = tokio::time::sleep(LUA_RELOAD_POLL), if app.config_dir.is_some() => {
+                let next = lua_snapshot(app.config_dir.as_deref());
+                if next != lua_state {
+                    lua_state = next;
+                    app.reload_user_config();
+                }
+            }
         }
     }
     app.shutdown();
     drop(term);
     Ok(app.quit.flatten())
+}
+
+/// A deliberately small, dependency-free watcher. Editors commonly save by
+/// replacing files, so we hash paths and metadata instead of holding file
+/// handles open. Reloading is handled on the TUI task, keeping Lua callbacks
+/// single-threaded and preserving the active session.
+fn lua_snapshot(dir: Option<&Path>) -> u64 {
+    let Some(dir) = dir else { return 0 };
+    let mut files = Vec::new();
+    collect_lua_files(dir, &mut files);
+    files.sort();
+    let mut h = DefaultHasher::new();
+    for path in files {
+        path.hash(&mut h);
+        if let Ok(meta) = fs::metadata(&path) {
+            meta.len().hash(&mut h);
+            meta.modified().ok().hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
+fn collect_lua_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_lua_files(&path, out);
+        } else if path.extension().is_some_and(|ext| ext == "lua") {
+            out.push(path);
+        }
+    }
 }
 
 fn handle_terminal(app: &mut App, ev: Event) {

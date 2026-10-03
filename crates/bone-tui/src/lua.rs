@@ -641,6 +641,15 @@ impl App {
         self.fire("ready", serde_json::Value::Null);
     }
 
+    /// Re-source Lua customization after a file change. This intentionally
+    /// keeps the Lua state and Rust session alive, matching Vim's `:source`
+    /// model; a later cleanup API can make plugin reloads fully idempotent.
+    pub fn reload_user_config(&mut self) {
+        self.load_user_config();
+        self.dirty = true;
+        self.info("Lua configuration reloaded");
+    }
+
     /// Load a colorscheme: `<config dir>/colors/<name>.lua`, a plugin's
     /// `colors/<name>.lua`, or the runtime's.
     pub fn colorscheme(&mut self, name: &str) -> Result<(), String> {
