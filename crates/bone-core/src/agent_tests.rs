@@ -1384,3 +1384,136 @@ async fn templates_expand_with_arguments() {
         .unwrap_err();
     assert!(e.message.contains("no template named nope"), "{e:?}");
 }
+
+// ---- the example plugins (core halves) -------------------------------------------
+
+#[tokio::test]
+async fn example_compact_plugin_summarizes_older_turns() {
+    let mut h = Harness::with_plugins(
+        &["compact"],
+        "bone.config.compact.keep = 1",
+        vec![text("a1"), text("a2"), text("SUMMARY")],
+    )
+    .await;
+    for q in ["q1", "q2"] {
+        h.start(q).await;
+        h.until::<TurnFinished>().await;
+    }
+    let r = h
+        .call::<TemplateExpand>(TemplateExpandParams {
+            name: "compact".into(),
+            args: String::new(),
+            session_id: Some(h.session_id.clone()),
+            cwd: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        r.text,
+        "compacted 2 messages into a summary; kept the last 1 turns"
+    );
+    let t = h.transcript().await;
+    assert_eq!(
+        t[0],
+        ChatMessage::User {
+            content: "Summary of the earlier conversation:\n\nSUMMARY".into()
+        }
+    );
+    assert_eq!(t.len(), 3, "{t:#?}");
+    let seen = h.provider.seen.lock().unwrap().clone();
+    assert!(matches!(&seen[2][0], ChatMessage::User { content } if content.contains("USER: q1")));
+}
+
+#[tokio::test]
+async fn example_compact_plugin_retries_when_the_context_is_full() {
+    let mut h = Harness::with_plugins(
+        &["compact"],
+        "bone.config.compact.keep = 1",
+        vec![
+            text("a1"),
+            Step::Fail("HTTP 400: maximum context length exceeded".into()),
+            text("SUM"),
+            text("a2"),
+        ],
+    )
+    .await;
+    h.start("q1").await;
+    h.until::<TurnFinished>().await;
+    h.start("q2").await;
+    let finished = h.until::<TurnFinished>().await;
+    assert_eq!(finished.outcome, TurnOutcome::Completed);
+    let t = h.transcript().await;
+    assert_eq!(t.len(), 3, "{t:#?}");
+    assert!(matches!(&t[0], ChatMessage::User { content } if content.ends_with("SUM")));
+}
+
+#[tokio::test]
+async fn example_retry_plugin_retries_passing_errors_only() {
+    let mut h = Harness::with_plugins(
+        &["retry"],
+        "bone.config.retry.delay = 1",
+        vec![
+            Step::Fail("HTTP 503 Service Unavailable".into()),
+            Step::Fail("overloaded".into()),
+            text("ok"),
+            Step::Fail("HTTP 400: bad request".into()),
+        ],
+    )
+    .await;
+    h.start("one").await;
+    assert_eq!(
+        h.until::<TurnFinished>().await.outcome,
+        TurnOutcome::Completed
+    );
+    h.start("two").await;
+    assert_eq!(
+        h.until::<TurnFinished>().await.outcome,
+        TurnOutcome::Failed {
+            message: "HTTP 400: bad request".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn example_folder_plugins_load_mcp_skills_and_templates() {
+    let files = tempfile::tempdir().unwrap();
+    let script = files.path().join("server.sh");
+    std::fs::write(&script, crate::mcp::tests::BASH_SERVER).unwrap();
+    std::fs::write(
+        files.path().join("mcp.json"),
+        json!({ "mcpServers": { "sh": { "command": "bash", "args": [script.to_string_lossy()] } } })
+            .to_string(),
+    )
+    .unwrap();
+    std::fs::create_dir_all(files.path().join("skills/release")).unwrap();
+    std::fs::write(
+        files.path().join("skills/release/SKILL.md"),
+        "---\ndescription: cut a release\n---\nsteps",
+    )
+    .unwrap();
+    std::fs::create_dir_all(files.path().join("prompts")).unwrap();
+    std::fs::write(files.path().join("prompts/review.md"), "Review $1").unwrap();
+    let h = Harness::with_plugins(
+        &["mcp", "skills", "templates"],
+        &format!(
+            r#"
+            bone.config.mcp_files = {{ "{dir}/mcp.json" }}
+            bone.config.mcp_options = {{ lazy = true }}
+            bone.config.skill_dirs = {{ "{dir}/skills" }}
+            bone.config.template_dirs = {{ "{dir}/prompts" }}
+            "#,
+            dir = files.path().display()
+        ),
+        vec![],
+    )
+    .await;
+    let servers = h.call::<McpList>(Empty {}).await.unwrap();
+    assert_eq!(
+        (servers[0].name.as_str(), servers[0].state.as_str()),
+        ("sh", "idle")
+    );
+    let skills = h.call::<SkillList>(Empty {}).await.unwrap();
+    assert_eq!(skills[0].name, "release");
+    let templates = h.call::<TemplateList>(Empty {}).await.unwrap();
+    assert_eq!(templates[0].name, "review");
+}

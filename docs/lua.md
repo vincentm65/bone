@@ -96,7 +96,7 @@ A plugin is a folder in `~/.bone/plugins/`:
   colors/      colorschemes
 ```
 
-The repo's examples show most of the API at work: `style` (a complete look), `approve` (asking before tools run), `git` and `anthropic` (tools and a provider), `switch` (pick the provider from the TUI), `tasks` (a persistent task panel), `review` (the files a session changed, and review prompts) and `testrun` (tests streamed into a panel).
+The repo's examples show most of the API at work: `style` (a complete look), `approve` (asking before tools run), `git` and `anthropic` (tools and a provider), `switch` (pick the provider from the TUI), `tasks` (a persistent task panel), `review` (the files a session changed, and review prompts), `testrun` (tests streamed into a panel), `compact` (summarize long sessions, by hand or when the context is full), `retry` (back off and fall back on passing errors), `mcp` (MCP servers from JSON files, and a status panel), `skills` and `templates` (load folders of them, with TUI commands) and `ask-model` (a side question to a model). None is installed by default.
 
 Every part is optional. Plugins load in name order, after the runtime defaults and before your own `core.lua` / `tui.lua`, so your config can change anything a plugin set up. Rename a folder to start with `_` or `.` to disable it. `bone.plugins` lists the loaded names. Installing is just copying or `git clone`-ing into `~/.bone/plugins/`; see `examples/plugins/` in the repo (`git`, `approve`, `style`).
 

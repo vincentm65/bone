@@ -370,6 +370,16 @@ Lua bodies that wait; changes reaching clients.
 
 ### Phase 13: example plugins and validation
 
+Status: done (branch `agent-ext`). `ask-model`'s `/ask` explains the latest
+answer when given no question (a selection in the prompt cannot survive
+typing the command). `compact` reaches core Lua from the TUI by expanding a
+template with a Lua body, so no new protocol was needed. Each plugin has a
+README and tests (core halves against the scripted provider, TUI halves
+against the fake core). Validation: fmt, clippy (no warnings), the
+workspace suite, the release build and `git diff --check`.
+
+All phases of the agent-side roadmap are done.
+
 Lua-only examples that prove the mechanisms, none installed by default:
 
 - `compact`: summarises old turns with `bone.model.complete` and

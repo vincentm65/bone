@@ -76,6 +76,10 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
         );
     }
     Ok(match method {
+        "mcp/list" => json!([
+            { "name": "gh", "state": "ready", "tools": ["gh_search"] },
+            { "name": "db", "state": "failed", "error": "cannot run db-mcp", "tools": [] },
+        ]),
         "skill/list" => json!([{ "name": "release", "description": "cut a release" }]),
         "template/list" => json!([{ "name": "review", "description": "review", "args": ["path"] }]),
         "template/expand" => {
@@ -2556,4 +2560,97 @@ async fn tui_lua_reads_skills_and_expands_templates() {
         (req["name"].as_str(), req["args"].as_str()),
         (Some("review"), Some("src/x.rs"))
     );
+}
+
+#[tokio::test]
+async fn example_agent_extension_plugins_in_the_tui() {
+    let (mut h, dir) = Harness::with_config("").await;
+    for name in ["compact", "mcp", "skills", "templates", "ask-model"] {
+        install_example(dir.path(), name);
+        h.input(&format!("/plugin load {name}{{enter}}")).await;
+        assert!(
+            h.app
+                .plugin(name)
+                .is_some_and(|p| p.loaded && p.error.is_none()),
+            "{name}: {}",
+            h.message()
+        );
+    }
+
+    // compact: nothing before a session; then the core's template does it.
+    h.input("/compact{enter}").await;
+    assert_eq!(h.message(), "nothing to compact yet");
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    h.emit::<MessageCompleted>(MessageCompletedParams {
+        session_id: "s-new".into(),
+        turn_id: 1,
+        message: ChatMessage::Assistant {
+            content: "a long answer".into(),
+            reasoning: String::new(),
+            tool_calls: vec![],
+        },
+        usage: None,
+    })
+    .await;
+    h.emit::<TurnFinished>(finished("s-new", TurnOutcome::Completed))
+        .await;
+    h.input("/compact{enter}").await;
+    let req = h.requests("template/expand").last().unwrap().clone();
+    assert_eq!(
+        (req["name"].as_str(), req["session_id"].as_str()),
+        (Some("compact"), Some("s-new"))
+    );
+
+    // mcp: a panel of servers.
+    h.input("/mcp{enter}").await;
+    let screen = h.screen(120, 20);
+    assert!(
+        screen.contains("gh  ready  1 tools")
+            && screen.contains("gh_search")
+            && screen.contains("cannot run db-mcp"),
+        "{screen}"
+    );
+    h.input("{esc}").await;
+
+    // skills: names complete, and /skill writes the request.
+    h.input("/skill release do it now{enter}").await;
+    assert_eq!(h.prompt(), "Use the release skill: do it now");
+    h.lua("bone.prompt.set('')").await;
+
+    // templates: each one is a command that fills the prompt.
+    assert!(h.app.user_commands.contains_key("review"));
+    assert!(h.app.user_commands["review"].desc.ends_with("<path>"));
+    h.input("/review src/x.rs{enter}").await;
+    assert_eq!(h.prompt(), "Review src/x.rs");
+    h.lua("bone.prompt.set('')").await;
+
+    // ask-model: /ask alone explains the latest answer, in a pager.
+    h.input("/ask{enter}").await;
+    let req = h.requests("model/complete").last().unwrap().clone();
+    assert!(
+        req["messages"][1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("a long answer")
+    );
+    h.emit::<ModelDeltaEvent>(ModelDeltaParams {
+        request_id: 41,
+        kind: DeltaKind::Text,
+        text: "It means".into(),
+    })
+    .await;
+    assert!(h.screen(100, 20).contains("It means"));
+    h.emit::<ModelCompleted>(ModelCompletedParams {
+        request_id: 41,
+        message: Some(ChatMessage::Assistant {
+            content: "It means: be careful.".into(),
+            reasoning: String::new(),
+            tool_calls: vec![],
+        }),
+        usage: None,
+        error: None,
+    })
+    .await;
+    assert!(h.screen(100, 20).contains("It means: be careful."));
 }
