@@ -6,6 +6,7 @@
 
 mod agent;
 pub mod config;
+mod health;
 pub mod provider;
 pub mod scripting;
 pub mod session;
@@ -15,7 +16,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use bone_proto::methods::{
-    AskRequested, AskResolved, AskRespond, AskRespondParams, Echo, EchoParams, Echoed,
+    AskRequested, AskResolved, AskRespond, AskRespondParams, Echo, EchoParams, Echoed, HealthCheck,
     SessionCreate, SessionCreateParams, SessionList, SessionMessages, SessionMessagesResult,
     SessionRef, TurnCancel, TurnStart, TurnStartParams, TurnStartResult,
 };
@@ -150,6 +151,10 @@ impl Core {
             }
             TurnStart::METHOD => dispatch::<TurnStart, _>(params, |p| self.turn_start(p)),
             TurnCancel::METHOD => dispatch::<TurnCancel, _>(params, |p| self.turn_cancel(p)),
+            HealthCheck::METHOD => {
+                decode::<HealthCheck>(params)?;
+                Ok(serde_json::to_value(health::check(&self.inner).await).unwrap_or_default())
+            }
             AskRespond::METHOD => {
                 let p: AskRespondParams = decode::<AskRespond>(params)?;
                 let answered = match &self.inner.scripting {

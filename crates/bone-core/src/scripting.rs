@@ -90,6 +90,8 @@ enum Done {
         event: Json,
     },
     Prompt(oneshot::Sender<Result<String, String>>),
+    /// The result as JSON (health checks).
+    Json(oneshot::Sender<Result<Json, String>>),
 }
 
 /// Everything read out of `bone.config` and `bone._tools`.
@@ -263,6 +265,28 @@ impl Scripting {
             event,
             deny: Some("the Lua thread stopped".into()),
         })
+    }
+
+    /// Run the checks core Lua registered with `bone.health`.
+    pub async fn health(&self) -> Vec<bone_proto::methods::HealthItem> {
+        use bone_proto::methods::{HealthItem, HealthStatus};
+        let (reply, rx) = oneshot::channel();
+        let failed = |e: String| {
+            vec![HealthItem {
+                name: "lua checks".into(),
+                status: HealthStatus::Error,
+                message: e,
+            }]
+        };
+        if let Err(e) = self.run("_health_entry", vec![], None, Done::Json(reply)) {
+            return failed(e);
+        }
+        match rx.await {
+            Ok(Ok(v)) => serde_json::from_value(crate::agent::list(&v))
+                .unwrap_or_else(|e| failed(e.to_string())),
+            Ok(Err(e)) => failed(e),
+            Err(_) => failed("the Lua thread stopped".into()),
+        }
     }
 
     /// Answer a pending question. False if there is no such question.
@@ -574,6 +598,12 @@ impl State {
                     event,
                     deny: Some(format!("{name} hook failed: {}", short_error(&e))),
                 }));
+            }
+            Done::Json(reply) => {
+                let v = r
+                    .and_then(|v| Value::from_lua_multi(v, lua))
+                    .and_then(|v| from_lua(&v));
+                let _ = reply.send(v.map_err(|e| short_error(&e)));
             }
             Done::Prompt(reply) => {
                 let s = r.and_then(|v| String::from_lua_multi(v, lua));

@@ -1,0 +1,24 @@
+[
+  {
+    "id": 10,
+    "jsonrpc": "2.0",
+    "method": "health/check",
+    "params": {}
+  },
+  {
+    "id": 10,
+    "jsonrpc": "2.0",
+    "result": [
+      {
+        "message": "deepseek-chat at https://api.deepseek.com/v1",
+        "name": "provider",
+        "status": "ok"
+      },
+      {
+        "message": "no API key set",
+        "name": "api key",
+        "status": "warn"
+      }
+    ]
+  }
+]

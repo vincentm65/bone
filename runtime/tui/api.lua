@@ -112,6 +112,10 @@ bone.api = {
     api("prompt_set", text)
   end,
   --- The session on screen, or nil: { session_id, cwd, title, running }
+  --- The TUI's own checks for /health: a list of { name, status, message }.
+  health = function()
+    return api("health")
+  end,
   --- Show a session (loading it if needed).
   open_session = function(id)
     api("open_session", id)
@@ -413,6 +417,124 @@ function bone.ui.select(items, opts)
 
   function handle:set_items(new)
     st.items, st.loading = new or {}, false
+    bone.ui.update(id, {})
+  end
+  function handle:close()
+    bone.ui.close(id)
+  end
+  return handle
+end
+
+bone._health = {}
+
+--- Add a check to /health. fn() returns a status ("ok", "warn", "error",
+--- or true/false) and a message.
+function bone.health(name, fn)
+  assert(type(name) == "string" and type(fn) == "function", "bone.health(name, fn)")
+  bone._health[#bone._health + 1] = { name = name, fn = fn }
+end
+
+--- Run the TUI checks registered with bone.health.
+function bone._run_health()
+  local out = {}
+  for _, c in ipairs(bone._health) do
+    local ok, status, message = pcall(c.fn)
+    if not ok then
+      status, message = "error", "check failed: " .. tostring(status)
+    elseif status == true or status == nil then
+      status = "ok"
+    elseif status == false then
+      status = "error"
+    end
+    out[#out + 1] = { name = c.name, status = status, message = message ~= nil and tostring(message) or "" }
+  end
+  return out
+end
+
+--- Show text in a scrollable focused window.
+---   content: a string (wrapped to fit; lines starting with # are headings)
+---            or a list of lines
+---   opts: { title, width = 100, height (fit, at most the screen) }
+--- Returns a handle: handle:set(content), handle:close().
+--- Keys: up/down/the wheel scroll, pageup/pagedown/space page, home/end,
+--- esc or q close.
+function bone.ui.pager(content, opts)
+  opts = opts or {}
+  local top, rows, total = 0, 1, 0
+  local id
+
+  local function body_lines(width)
+    if type(content) ~= "string" then
+      return content
+    end
+    local out, code = {}, false
+    for line in (content .. "\n"):gmatch("(.-)\n") do
+      local hl = "Normal"
+      if line:match("^```") then
+        code = not code
+        hl = "Dim"
+      elseif code then
+        hl = "Dim"
+      elseif line:match("^#+%s") then
+        hl = "Accent"
+      end
+      if line == "" then
+        out[#out + 1] = {}
+      else
+        for _, l in ipairs(bone.text.wrap({ { line, hl } }, width)) do
+          out[#out + 1] = l
+        end
+      end
+    end
+    return out
+  end
+
+  local function render(ctx)
+    local w = math.max(math.min(opts.width or 100, ctx.width - 2), 10)
+    local inner = w - 4
+    local lines = body_lines(inner)
+    total = #lines
+    local h = math.min(opts.height or (total + 3), ctx.height - 2)
+    rows = math.max(h - 3, 1)
+    top = math.max(0, math.min(top, total - rows))
+    local body = {}
+    for i = top + 1, math.min(total, top + rows) do
+      body[#body + 1] = lines[i]
+    end
+    while #body < rows do
+      body[#body + 1] = {}
+    end
+    local pos = total <= rows and "all" or string.format("%d-%d of %d", top + 1, math.min(total, top + rows), total)
+    body[#body + 1] = { { pos .. " · ↑↓ scroll · esc close", "Dim" } }
+    return bone.ui.box(body, { title = opts.title, width = w })
+  end
+
+  local function on_key(k)
+    if k == "up" or k == "wheelup" or k == "k" then
+      top = top - 1
+    elseif k == "down" or k == "wheeldown" or k == "j" then
+      top = top + 1
+    elseif k == "pageup" then
+      top = top - rows
+    elseif k == "pagedown" or k == "space" then
+      top = top + rows
+    elseif k == "home" or k == "g" then
+      top = 0
+    elseif k == "end" or k == "G" then
+      top = total
+    elseif k == "esc" or k == "q" or k == "ctrl+c" then
+      bone.ui.close(id)
+    else
+      return false
+    end
+    top = math.max(0, math.min(top, total - rows))
+    return true
+  end
+
+  id = bone.ui.popup({ lines = render, on_key = on_key })
+  local handle = {}
+  function handle:set(new)
+    content, top = new, 0
     bone.ui.update(id, {})
   end
   function handle:close()

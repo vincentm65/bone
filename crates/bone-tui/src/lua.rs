@@ -79,8 +79,28 @@ fn setup(config_dir: Option<PathBuf>) -> mlua::Result<Lua> {
         lua.create_function(|_, s: String| Ok(crate::text::width(&s)))?,
     )?;
     install_text(&lua, &bone)?;
+    // The docs, for /help.
+    let docs = lua.create_table()?;
+    for (name, text) in DOCS {
+        let d = lua.create_table()?;
+        d.set("name", *name)?;
+        d.set("text", *text)?;
+        docs.push(d)?;
+    }
+    bone.set("_docs", docs)?;
     Ok(lua)
 }
+
+/// The user docs, embedded for `/help <topic>`.
+const DOCS: &[(&str, &str)] = &[
+    ("usage", include_str!("../../../docs/usage.md")),
+    ("lua", include_str!("../../../docs/lua.md")),
+    ("protocol", include_str!("../../../docs/protocol.md")),
+    (
+        "architecture",
+        include_str!("../../../docs/architecture.md"),
+    ),
+];
 
 /// Spans from Lua: a string, or a list of strings / `{ text, hl }`.
 fn spans_arg(v: Value) -> mlua::Result<Vec<(String, String)>> {
@@ -661,6 +681,10 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             t.set("running", c.turn.is_some())?;
             ret(lua, t)
         }
+        "health" => ret(
+            lua,
+            to_lua(lua, &serde_json::Value::Array(app.tui_health()))?,
+        ),
         "open_session" => {
             let id: String = args(lua, a)?;
             app.open_session(id);

@@ -52,6 +52,8 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | Command | Does |
 |---|---|
 | `/help`, `/?` | commands and keys |
+| `/help {topic}` | the matching section of these docs in a scrollable window (`/help hooks`, `/help windows`, `/help lua` for a whole file) |
+| `/health`, `/checkhealth` | check the setup: provider address and key, sessions folder, terminal, mouse, clipboard route, Lua errors, plus plugins' own checks |
 | `/new` | start a new session |
 | `/sessions`, `/resume` | pick a session to open |
 | `/open {id-prefix}` | open a session by id |

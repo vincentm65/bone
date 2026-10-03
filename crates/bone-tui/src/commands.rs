@@ -17,7 +17,12 @@ pub const COMMANDS: &[Command] = &[
     Command {
         name: "help",
         aliases: &["?"],
-        help: "commands and keys",
+        help: "commands and keys; /help topic searches the docs",
+    },
+    Command {
+        name: "health",
+        aliases: &["checkhealth"],
+        help: "check the setup: provider, terminal, clipboard, Lua",
     },
     Command {
         name: "new",
@@ -113,6 +118,8 @@ impl App {
 
     fn command(&mut self, name: &str, args: &str) -> Result<(), String> {
         match name {
+            "help" if !args.is_empty() => self.call_ui("help", Some(args)),
+            "health" => self.call_ui("health", None),
             "help" => {
                 let mut rows: Vec<String> = COMMANDS
                     .iter()
@@ -127,6 +134,9 @@ impl App {
                 rows.extend(user);
                 rows.push(String::new());
                 rows.push(KEYS_HELP.to_owned());
+                rows.push(
+                    "Docs: /help topic (e.g. /help hooks, /help windows, /help keys)".to_owned(),
+                );
                 self.info(rows.join("\n"));
             }
             "new" => self.new_session(),

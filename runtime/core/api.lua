@@ -133,6 +133,39 @@ function bone.http(req)
   return wait({ http = req })
 end
 
+bone._health = {}
+
+--- Add a check to /health (and the `health/check` method). fn() returns a
+--- status ("ok", "warn", "error", or true/false) and a message. It runs as a
+--- job, so it may use bone.system and bone.http.
+---   bone.health("my server", function()
+---     local r = bone.http({ url = "http://localhost:8080/health", timeout = 2000 })
+---     return r.status == 200, "status " .. r.status
+---   end)
+function bone.health(name, fn)
+  assert(type(name) == "string" and type(fn) == "function", "bone.health(name, fn)")
+  bone._health[#bone._health + 1] = { name = name, fn = fn }
+end
+
+--- Run every check: a list of { name, status, message }.
+function bone._run_health()
+  local out = {}
+  for _, c in ipairs(bone._health) do
+    local ok, status, message = pcall(c.fn)
+    if not ok then
+      status, message = "error", "check failed: " .. tostring(status)
+    elseif status == true or status == nil then
+      status = "ok"
+    elseif status == false then
+      status = "error"
+    elseif status ~= "ok" and status ~= "warn" and status ~= "error" then
+      status, message = "warn", "bad status " .. tostring(status) .. ": " .. tostring(message)
+    end
+    out[#out + 1] = { name = c.name, status = status, message = message ~= nil and tostring(message) or "" }
+  end
+  return out
+end
+
 -- Entry points the core calls (each in its own coroutine) --------------------
 
 function bone._run_tool(name, args, ctx)
@@ -146,6 +179,10 @@ end
 function bone._hooks_entry(name, ev)
   local out, deny = bone.run_hooks(name, ev)
   return { event = out, deny = deny }
+end
+
+function bone._health_entry()
+  return bone._run_health()
 end
 
 function bone._system_prompt(ctx)

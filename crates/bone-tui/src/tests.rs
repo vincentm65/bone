@@ -68,6 +68,9 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
         "session/create" => info("s-new", None),
         "turn/start" => json!({ "turn_id": 1 }),
         "session/list" => json!([info("s-two", Some("second")), info("s-one", Some("first"))]),
+        "health/check" => {
+            json!([{ "name": "provider", "status": "ok", "message": "m at http://x" }])
+        }
         "session/messages" => json!({
             "info": info(params["session_id"].as_str().unwrap(), Some("loaded")),
             "messages": [
@@ -490,7 +493,7 @@ async fn slash_commands_suggest_complete_and_run() {
     assert_eq!(h.prompt(), "");
 
     // Enter on a partial name runs the selected suggestion.
-    h.input("/he{enter}").await;
+    h.input("/hel{enter}").await;
     assert!(
         h.message().contains("/sessions") && h.message().contains("ctrl+r sessions"),
         "{}",
@@ -1381,4 +1384,38 @@ async fn select_and_suggestions_are_lua() {
     );
     h.lua("bone.ui.suggestions = nil").await;
     assert_eq!(h.screen(40, 6), "\n\n\n\n\n/ne");
+}
+
+#[tokio::test]
+async fn help_topics_and_health_in_a_pager() {
+    let mut h = Harness::blank().await;
+    h.input("/help hooks{enter}").await;
+    assert_eq!(h.app.context(), Context::Popup);
+    let screen = h.screen(80, 24);
+    assert!(
+        screen.contains("lua.md: Hooks") && screen.contains("### Hooks"),
+        "{screen}"
+    );
+    // It scrolls, and esc closes it.
+    assert!(screen.contains("1-"), "{screen}");
+    h.input("{pagedown}").await;
+    assert!(!h.screen(80, 24).contains("### Hooks"));
+    h.input("{esc}").await;
+    assert_eq!(h.app.context(), Context::Main);
+    h.input("/help no-such-thing-anywhere{enter}").await;
+    assert!(h.message().contains("no help for"), "{}", h.message());
+
+    // /health: the TUI's checks, Lua checks, then the core's answer.
+    h.lua("bone.health('mine', function() return 'warn', 'look here' end)")
+        .await;
+    h.input("/health{enter}").await;
+    let screen = h.screen(100, 24);
+    assert!(
+        screen.contains("✓ terminal: TERM=")
+            && screen.contains("clipboard:")
+            && screen.contains("! mine: look here")
+            && screen.contains("✓ provider: m at http://x"),
+        "{screen}"
+    );
+    assert_eq!(h.requests("health/check").len(), 1);
 }

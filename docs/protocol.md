@@ -43,6 +43,7 @@ Events are only sent to connections that have completed the handshake.
 | `turn/start` | `{ session_id, text }` | `{ turn_id }`, returned at once; the turn runs in the background |
 | `turn/cancel` | `{ session_id }` | `null` (no-op if nothing is running) |
 | `ask/respond` | `{ ask_id, answer }` | `null`; error if no question with that id is open |
+| `health/check` | `{}` | `[{ name, status: "ok" \| "warn" \| "error", message }]`: the core's checks (provider, API key, reachability, sessions folder, Lua) and core Lua's `bone.health` checks |
 
 `SessionInfo` is `{ session_id, cwd, created_at, title? }`. `ChatMessage` is tagged by `role`:
 

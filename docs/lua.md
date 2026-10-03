@@ -140,6 +140,20 @@ end
 
 `BONE_APPROVAL=auto` turns it off for one run. It is about 60 lines of core Lua plus a popup; copy and change it to build your own rules.
 
+### Health checks
+
+`bone.health(name, fn)` adds a check to `/health` (and the `health/check` method). `fn()` returns a status (`"ok"`, `"warn"`, `"error"`, or `true`/`false`) and a message. Core checks run as jobs, so they may use `bone.system` and `bone.http`:
+
+```lua
+bone.health("local model", function()
+  local ok, r = pcall(bone.http, { url = "http://localhost:8080/health", timeout = 2000 })
+  if not ok then return "error", "not running" end
+  return r.status == 200, "status " .. r.status
+end)
+```
+
+The TUI has its own `bone.health(name, fn)` for TUI-side checks (plain functions; no waiting).
+
 ### Environment overrides
 
 For one-off runs, these override `core.lua`: `BONE_BASE_URL` + `BONE_MODEL` (use this endpoint), `BONE_MODEL` alone (another model on the configured provider), `BONE_API_KEY`, `BONE_REASONING_EFFORT`, `BONE_SYSTEM_PROMPT`, `BONE_DATA_DIR`, and `BONE_APPROVAL=auto` (the approve plugin, if installed, never asks).
@@ -232,6 +246,8 @@ Any protocol method works (see `crates/bone-proto/src/methods.rs`).
 - `bone.ui.sessions()`: the session picker (`ctrl+r`, `/sessions`), defined in `runtime/tui/defaults.lua` with `bone.ui.select`. Replace it to change how sessions are listed.
 - `bone.ui.suggestions(ctx)` → lines: draws the matching commands while you type `/…`, right above the prompt. `ctx = { items = { { name, desc } }, selected, width, height }`; Rust keeps the matching, `up`/`down` selection and `tab` completion. Set it to `nil` for no list.
 - `bone.api.open_session(id)`: show a session.
+- `bone.ui.pager(content, { title, width, height })` → handle: scrollable text in a focused window. `content` is a string (wrapped; `#` lines are headings) or a list of lines. `up`/`down`/wheel, `pageup`/`pagedown`, `home`/`end`, `esc` or `q` closes. `handle:set(content)`, `handle:close()`.
+- `bone.ui.help(topic)` and `bone.ui.health()`: what `/help {topic}` and `/health` call (in `runtime/tui/defaults.lua`). The docs are in `bone._docs`; the TUI's built-in checks come from `bone.api.health()`.
 - `bone.ui.box(lines, { title, title_hl, border_hl, width, pad, chars })` → the lines inside a rounded border (`PopupBorder`/`PopupTitle` by default). Only used if you call it.
 
 ### Colors

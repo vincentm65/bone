@@ -214,6 +214,22 @@ fn requests() {
         },
         (),
     );
+    exchange::<HealthCheck>(
+        10,
+        Empty {},
+        vec![
+            HealthItem {
+                name: "provider".into(),
+                status: HealthStatus::Ok,
+                message: "deepseek-chat at https://api.deepseek.com/v1".into(),
+            },
+            HealthItem {
+                name: "api key".into(),
+                status: HealthStatus::Warn,
+                message: "no API key set".into(),
+            },
+        ],
+    );
 }
 
 #[test]

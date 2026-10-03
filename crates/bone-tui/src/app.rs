@@ -663,18 +663,101 @@ impl App {
     /// The session picker is Lua: `bone.ui.sessions()` (the default is in
     /// runtime/tui/defaults.lua).
     pub fn open_picker(&mut self) {
+        self.call_ui("sessions", None);
+    }
+
+    /// Call `bone.ui[name](arg)`, a Lua part of the UI (session picker,
+    /// help, health).
+    pub fn call_ui(&mut self, name: &str, arg: Option<&str>) {
         let r = self.with_api(|lua| {
             let ui: mlua::Table = lua.globals().get::<mlua::Table>("bone")?.get("ui")?;
-            match ui.get::<Option<mlua::Function>>("sessions")? {
-                Some(f) => f.call::<()>(()).map(|_| true),
+            match ui.get::<Option<mlua::Function>>(name)? {
+                Some(f) => f.call::<()>(arg).map(|_| true),
                 None => Ok(false),
             }
         });
         match r {
             Ok(true) => {}
-            Ok(false) => self.error("no session picker: bone.ui.sessions is not defined"),
-            Err(e) => self.lua_error("bone.ui.sessions", &e),
+            Ok(false) => self.error(format!("bone.ui.{name} is not defined")),
+            Err(e) => self.lua_error(&format!("bone.ui.{name}"), &e),
         }
+    }
+
+    /// The TUI's own checks for /health: terminal, mouse, clipboard, Lua.
+    pub fn tui_health(&self) -> Vec<serde_json::Value> {
+        let env = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        let item = |name: &str, status: &str, message: String| serde_json::json!({ "name": name, "status": status, "message": message });
+        let on_path = |bin: &str| {
+            env("PATH").is_some_and(|p| {
+                p.split(':')
+                    .any(|d| std::path::Path::new(d).join(bin).is_file())
+            })
+        };
+        let mut out = Vec::new();
+        let term = env("TERM").unwrap_or_else(|| "unset".into());
+        let tmux = env("TMUX").is_some();
+        out.push(item(
+            "terminal",
+            "ok",
+            format!("TERM={term}{}", if tmux { ", inside tmux" } else { "" }),
+        ));
+        out.push(item(
+            "mouse",
+            "ok",
+            if self.options.mouse {
+                "on: the wheel scrolls, dragging copies (/set nomouse for the terminal's own selection)".into()
+            } else {
+                "off: the terminal selects text; the wheel does not scroll".into()
+            },
+        ));
+        let ssh = env("SSH_CONNECTION").is_some();
+        let (status, route) = if tmux {
+            (
+                "ok",
+                "tmux load-buffer -w (tmux passes it to your terminal)".to_owned(),
+            )
+        } else if !ssh && env("WAYLAND_DISPLAY").is_some() {
+            if on_path("wl-copy") {
+                ("ok", "wl-copy and OSC 52".into())
+            } else {
+                (
+                    "warn",
+                    "OSC 52 only; install wl-clipboard for wl-copy".into(),
+                )
+            }
+        } else if !ssh && env("DISPLAY").is_some() {
+            if on_path("xclip") {
+                ("ok", "xclip and OSC 52".into())
+            } else {
+                ("warn", "OSC 52 only; install xclip".into())
+            }
+        } else {
+            (
+                "ok",
+                "OSC 52 (your terminal must allow clipboard writes)".into(),
+            )
+        };
+        out.push(item("clipboard", status, route));
+        if self.ui_broken.is_empty() {
+            out.push(item(
+                "tui lua",
+                "ok",
+                "no errors in views, regions or windows".into(),
+            ));
+        } else {
+            let mut names: Vec<&String> = self.ui_broken.iter().collect();
+            names.sort();
+            let names: Vec<&str> = names.iter().map(|s| s.as_str()).collect();
+            out.push(item(
+                "tui lua",
+                "error",
+                format!(
+                    "switched off after errors: {} (see /messages)",
+                    names.join(", ")
+                ),
+            ));
+        }
+        out
     }
 
     /// Resume a session at startup: `None` for the newest one.

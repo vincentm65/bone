@@ -106,5 +106,99 @@ function bone.ui.suggestions(ctx)
   return bone.ui.box(lines, { border_hl = "WinSeparator", width = math.min(name_w + desc_w + 5, ctx.width) })
 end
 
+-- /help topic: the best matching section of the docs, in a pager.
+local function doc_sections()
+  local out = {}
+  for _, d in ipairs(bone._docs) do
+    local code = false
+    for line in (d.text .. "\n"):gmatch("(.-)\n") do
+      if line:match("^```") then
+        code = not code
+      end
+      local hashes, title = line:match("^(#+)%s+(.*)$")
+      if hashes and not code then
+        out[#out + 1] = { doc = d.name, level = #hashes, title = title, lines = {} }
+      end
+      if #out > 0 and out[#out].doc == d.name then
+        table.insert(out[#out].lines, line)
+      end
+    end
+  end
+  return out
+end
+
+function bone.ui.help(topic)
+  local t = topic:lower()
+  for _, d in ipairs(bone._docs) do
+    if d.name == t then
+      return bone.ui.pager(d.text, { title = d.name .. ".md" })
+    end
+  end
+  local secs = doc_sections()
+  local best, score = nil, 0
+  for i, s in ipairs(secs) do
+    local title = s.title:lower():gsub("`", "")
+    local sc = 0
+    if title == t then
+      sc = 4
+    elseif (" " .. title .. " "):find("[^%w_]" .. t:gsub("%p", "%%%0") .. "[^%w_]") then
+      sc = 3
+    elseif title:find(t, 1, true) then
+      sc = 2
+    elseif table.concat(s.lines, "\n"):lower():find(t, 1, true) then
+      sc = 1
+    end
+    if sc > score then
+      best, score = i, sc
+    end
+  end
+  if not best then
+    return bone.notify("no help for " .. topic .. " (try /help lua or /help usage)", "error")
+  end
+  -- The section with its subsections.
+  local s = secs[best]
+  local lines = {}
+  for i = best, #secs do
+    if i > best and (secs[i].doc ~= s.doc or secs[i].level <= s.level) then
+      break
+    end
+    for _, l in ipairs(secs[i].lines) do
+      lines[#lines + 1] = l
+    end
+  end
+  bone.ui.pager(table.concat(lines, "\n"), { title = s.doc .. ".md: " .. s.title })
+end
+
+-- /health: the TUI's checks, then the core's (over the protocol).
+local MARK = { ok = { "✓ ", "DiffAdd" }, warn = { "! ", "WarningMsg" }, error = { "✗ ", "ErrorMsg" } }
+
+local function health_lines(title, items, out)
+  out[#out + 1] = { { title, "Accent" } }
+  for _, it in ipairs(items) do
+    local m = MARK[it.status] or MARK.warn
+    out[#out + 1] = { m, { it.name .. ": ", "Normal" }, { it.message, "Dim" } }
+  end
+  out[#out + 1] = {}
+end
+
+function bone.ui.health()
+  local tui = bone.api.health()
+  for _, it in ipairs(bone._run_health()) do
+    tui[#tui + 1] = it
+  end
+  local lines = {}
+  health_lines("TUI", tui, lines)
+  local pager = bone.ui.pager({ unpack(lines), { { "Core: checking…", "Dim" } } }, { title = "Health" })
+  bone.request("health/check", {}, function(core, err)
+    local all = { unpack(lines) }
+    if err then
+      health_lines("Core", { { name = "core", status = "error", message = err } }, all)
+    else
+      health_lines("Core", core or {}, all)
+    end
+    pager:set(all)
+  end)
+end
+
 -- Colors (see runtime/colors/).
 bone.colorscheme("black")

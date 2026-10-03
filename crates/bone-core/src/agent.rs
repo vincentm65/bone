@@ -390,7 +390,7 @@ impl Turn<'_> {
 }
 
 /// Lua has one kind of table: an empty list comes back from a hook as `{}`.
-fn list(v: &Value) -> Value {
+pub(crate) fn list(v: &Value) -> Value {
     match v {
         Value::Object(o) if o.is_empty() => Value::Array(Vec::new()),
         v => v.clone(),

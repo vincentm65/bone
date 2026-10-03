@@ -575,3 +575,39 @@ async fn tools_run_without_asking_by_default() {
         }
     }
 }
+
+#[tokio::test]
+async fn health_check_reports_core_and_lua_checks() {
+    let h = Harness::with_lua(
+        r#"
+        bone.tool.register { name = "mine", run = function() return "" end }
+        bone.health("echo", function()
+          local r = bone.system("printf fine")
+          return r.code == 0, r.stdout
+        end)
+        bone.health("warns", function() return "warn", "careful" end)
+        bone.health("breaks", function() error("oops") end)
+        "#,
+        vec![],
+    )
+    .await;
+    let items = h.call::<HealthCheck>(Empty {}).await.unwrap();
+    let get = |n: &str| {
+        let i = items
+            .iter()
+            .find(|i| i.name == n)
+            .unwrap_or_else(|| panic!("{n}: {items:?}"));
+        (i.status, i.message.clone())
+    };
+    use bone_proto::methods::HealthStatus::*;
+    assert_eq!(get("provider").0, Ok);
+    // "http://unused" is remote and has no key, and nothing answers there.
+    assert_eq!(get("api key").0, Warn);
+    assert_eq!(get("reachable").0, Error);
+    assert_eq!(get("sessions").0, Ok);
+    assert_eq!(get("core lua"), (Ok, "loaded; Lua tools: mine".into()));
+    assert_eq!(get("echo"), (Ok, "fine".into()));
+    assert_eq!(get("warns"), (Warn, "careful".into()));
+    let (status, msg) = get("breaks");
+    assert!(status == Error && msg.contains("oops"), "{msg}");
+}

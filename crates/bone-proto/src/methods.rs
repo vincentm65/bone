@@ -62,6 +62,7 @@ pub const METHODS: &[&str] = &[
     TurnStart::METHOD,
     TurnCancel::METHOD,
     AskRespond::METHOD,
+    HealthCheck::METHOD,
 ];
 
 /// Every server-to-client event.
@@ -183,6 +184,29 @@ pub struct AskRespondParams {
     /// Any JSON; its meaning is agreed between the asking Lua code and the
     /// client (e.g. "allow" / "deny" for the approval plugin).
     pub answer: serde_json::Value,
+}
+
+// ---- health --------------------------------------------------------------
+
+method!(
+    /// Run the core's checks (configuration, provider, storage, Lua) and
+    /// those core Lua registers with `bone.health`.
+    HealthCheck, "health/check", Empty => Vec<HealthItem>
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HealthItem {
+    pub name: String,
+    pub status: HealthStatus,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HealthStatus {
+    Ok,
+    Warn,
+    Error,
 }
 
 // ---- events --------------------------------------------------------------
