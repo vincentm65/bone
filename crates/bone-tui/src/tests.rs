@@ -606,6 +606,10 @@ async fn tui_lua_keys_commands_options_and_events() {
     .await;
     assert_eq!(h.message(), "ready! 3");
     assert_eq!(h.app.options.tool_preview_lines, 3);
+    assert_eq!(h.lua("=bone.api_version").await, "1");
+    assert_eq!(h.lua("=bone.api_info().side").await, "\"tui\"");
+    assert_eq!(h.lua("=bone.has_capability('tui.keymaps')").await, "true");
+    assert_eq!(h.lua("=bone.has_capability('tui.panels')").await, "false");
 
     // A Lua keymap calling a user command (nested Lua calls).
     h.input("{ctrl+g}").await;

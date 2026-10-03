@@ -47,6 +47,62 @@ impl Side {
     }
 }
 
+/// Compatibility version of the Lua extension contract.
+///
+/// This changes only when an existing API meaning or call shape is broken;
+/// additive capabilities do not require a new version.
+pub const API_VERSION: u32 = 1;
+
+static CORE_CAPABILITIES: &[&str] = &[
+    "lua",
+    "json",
+    "modules",
+    "core.config",
+    "core.tools",
+    "core.hooks",
+    "core.providers",
+    "core.jobs",
+    "core.http_stream",
+    "core.ask",
+    "core.health",
+];
+
+static TUI_CAPABILITIES: &[&str] = &[
+    "lua",
+    "json",
+    "modules",
+    "tui.keymaps",
+    "tui.commands",
+    "tui.events",
+    "tui.options",
+    "tui.request",
+    "tui.prompt",
+    "tui.chat",
+    "tui.windows",
+    "tui.regions",
+    "tui.views",
+    "tui.pickers",
+    "tui.themes",
+    "tui.jobs",
+    "tui.session",
+];
+
+/// Capabilities implemented by a Lua state on this side of bone.
+pub fn capabilities(side: Side) -> &'static [&'static str] {
+    match side {
+        Side::Core => CORE_CAPABILITIES,
+        Side::Tui => TUI_CAPABILITIES,
+    }
+}
+
+fn capability_table(lua: &Lua, side: Side) -> mlua::Result<Table> {
+    let table = lua.create_table_with_capacity(0, capabilities(side).len())?;
+    for name in capabilities(side) {
+        table.set(*name, true)?;
+    }
+    Ok(table)
+}
+
 /// `$BONE_CONFIG_DIR`, else `~/.bone`.
 pub fn config_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("BONE_CONFIG_DIR").filter(|d| !d.is_empty()) {
@@ -97,6 +153,24 @@ pub fn new_state(side: Side, config_dir: Option<&Path>) -> mlua::Result<Lua> {
     let bone = lua.create_table()?;
     bone.set("side", side.name())?;
     bone.set("version", env!("CARGO_PKG_VERSION"))?;
+    bone.set("api_version", API_VERSION)?;
+    bone.set("capabilities", capability_table(&lua, side)?)?;
+    bone.set(
+        "has_capability",
+        lua.create_function(
+            move |_, name: String| Ok(capabilities(side).contains(&name.as_str())),
+        )?,
+    )?;
+    bone.set(
+        "api_info",
+        lua.create_function(move |lua, ()| {
+            let info = lua.create_table()?;
+            info.set("version", API_VERSION)?;
+            info.set("side", side.name())?;
+            info.set("capabilities", capability_table(lua, side)?)?;
+            Ok(info)
+        })?,
+    )?;
     if let Some(dir) = config_dir {
         bone.set("config_dir", dir.to_string_lossy().as_ref())?;
     }
@@ -334,6 +408,43 @@ mod tests {
             lua.load("return bone.side").eval::<String>().unwrap(),
             "tui"
         );
+    }
+
+    #[test]
+    fn api_contract_reports_version_and_capabilities() {
+        for (side, present, absent) in [
+            (Side::Core, "core.tools", "tui.keymaps"),
+            (Side::Tui, "tui.keymaps", "core.tools"),
+        ] {
+            let lua = new_state(side, None).unwrap();
+            let bone: Table = lua.globals().get("bone").unwrap();
+            assert_eq!(bone.get::<u32>("api_version").unwrap(), API_VERSION);
+
+            let capabilities: Table = bone.get("capabilities").unwrap();
+            assert_eq!(capabilities.get::<bool>(present).unwrap(), true);
+            assert_eq!(capabilities.get::<Option<bool>>(absent).unwrap(), None);
+
+            let info: Table = lua.load("return bone.api_info()").eval().unwrap();
+            assert_eq!(info.get::<u32>("version").unwrap(), API_VERSION);
+            assert_eq!(info.get::<String>("side").unwrap(), side.name());
+            assert!(
+                info.get::<Table>("capabilities")
+                    .unwrap()
+                    .get::<bool>(present)
+                    .unwrap()
+            );
+
+            let has: bool = lua
+                .load(format!("return bone.has_capability({present:?})"))
+                .eval()
+                .unwrap();
+            assert!(has);
+            let has: bool = lua
+                .load(format!("return bone.has_capability({absent:?})"))
+                .eval()
+                .unwrap();
+            assert!(!has);
+        }
     }
 
     #[test]

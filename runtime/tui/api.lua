@@ -9,8 +9,9 @@ bone.keymap = {}
 --- Map a key ("ctrl+s", "alt+enter", "shift+tab", "pageup", "f5", "?") to an
 --- action: a builtin name ("submit", "page_up", ...), a slash command
 --- ("/sessions"), or a Lua function.
---- opts.context: "main" (default, the prompt), "popup" (while a Lua popup is
---- open, after the popup's own keys) or "picker" (the session list).
+--- opts.context: "main" (default, the prompt) or "popup" (while a focused
+--- Lua window is open, after that window's own keys). Pickers are Lua windows;
+--- they do not add a separate keymap context.
 function bone.keymap.set(key, action, opts)
   api("keymap_set", key, action, opts or {})
 end

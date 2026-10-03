@@ -66,3 +66,39 @@ All seven are done (see README.md and docs/). What is left is in Open Questions 
 - **Hooks and approval:** the core has no approval logic. Generic hooks run at every step of a turn (`turn_start`, `request`, `message`, `tool_call`, `tool_result`, `turn_end`, plus custom points via `bone.run_hooks`); any hook or Lua tool can wait on the user with `bone.ask` (`ask/requested` / `ask/respond` / `ask/resolved`), and TUI Lua shows questions with `bone.ui.popup`. Approval is an opt-in plugin (`examples/plugins/approve`); by default every tool call runs. Nothing ships as a built-in plugin.
 - **Blank slate:** the TUI has no built-in look. Rust draws the chat as plain text and the bare prompt; the statusline and divider rows exist only when Lua defines them, `bone.ui.prompt` sets the prompt prefix/placeholder, and Lua popups are drawn entirely by Lua (Rust places and clears them). The previous default look lives in `examples/plugins/style`, the start of a styles package that may later ship as the default.
 - **Neovim-level customization (after milestone 7):** Lua waits without blocking (`bone.system`/`sleep`/`http`/`http_stream` in core jobs, callbacks in the TUI); windows (`bone.ui.win`: focus, anchor, z, update) and a Lua `bone.ui.layout`; the session picker (`bone.ui.select`) and `/` suggestions are Lua; `/help {topic}` over the embedded docs and `/health` (`health/check` + `bone.health`); model providers can be written in Lua (`bone.provider.register`, `type = ...`).
+
+## Extensibility roadmap (Lua API v1)
+
+The customization work is additive and is delivered in small phases. The
+core and protocol remain the authority for sessions and turns; TUI Lua owns
+presentation, input and client-side workflows. Each phase keeps the v1
+compatibility wrappers documented in `docs/lua.md` and reports new behavior
+through `bone.has_capability`.
+
+1. **Extension contract and compatibility** — publish `bone.api_version`,
+   capability reporting, ownership rules, and the baseline contracts for
+   contexts, events, commands, options, panels, jobs and plugin state.
+2. **Dynamic contexts and input** — add named contexts, fallback/priority,
+   key sequences, consumption/pass-through, raw interception and real
+   `timeoutlen` handling while retaining modeless `main`/`popup` behavior.
+3. **Events, commands and options** — add local UI events, command aliases and
+   completion/structured arguments, and dynamic typed options with callbacks.
+4. **Stateful panels** — add persistent plugin panels with IDs, rendering and
+   key callbacks, focus, lifecycle, docking, sizing and scrolling. Keep
+   `bone.ui.win` as the overlay compatibility API.
+5. **Prompt and chat data** — expose cursor/selection/range prompt edits and
+   structured read-only session/turn/message/tool data without becoming a
+   general file editor.
+6. **Cancellable streaming jobs** — add process handles, streamed output,
+   cancellation, timeouts, completion/error callbacks and status reporting.
+7. **Plugin state and lifecycle** — add init/shutdown/cleanup, persistent
+   per-plugin state and explicit project configuration while retaining folder
+   loading.
+8. **Representative plugins and validation** — build Lua-only task, review,
+   provider-switching and streaming-test workflows; then run focused tests,
+   formatting, clippy, the release build and the full workspace suite.
+
+Features are intentionally capability-gated until their phase is complete.
+Vim modes, full editor buffers, LSP/syntax infrastructure, arbitrary cell
+drawing and a plugin manager remain out of scope unless a representative
+workflow demonstrates that one is necessary.

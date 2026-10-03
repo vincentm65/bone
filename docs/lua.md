@@ -13,6 +13,75 @@ Load order on each side: `runtime/<side>/api.lua`, then `runtime/<side>/defaults
 
 `require("x.y")` finds `~/.bone/lua/x/y.lua` (or `x/y/init.lua`), then each plugin's `lua/`, then the runtime's `lua/` modules.
 
+## Extension contract (API v1)
+
+`bone.version` is the binary/package version. It is not an extension
+compatibility check. Every Lua state also reports the version of the Lua
+contract and the features implemented by that state:
+
+```lua
+bone.api_version                  -- integer; currently 1
+bone.capabilities["tui.keymaps"]  -- true when this feature exists
+bone.has_capability("tui.panels") -- false for an unknown/unavailable feature
+
+local info = bone.api_info()
+-- { version = 1, side = "tui", capabilities = { ... } }
+```
+
+`bone.api_version` changes only for a breaking change to an existing API
+meaning or call shape. New functions, fields, events and capabilities are
+additive. Plugins should test `bone.has_capability(name)` before using a
+newer extension point rather than comparing `bone.version`. The core and TUI
+states are separate; a capability in one state does not make it available in
+the other.
+
+The current capability names are `core.config`, `core.tools`,
+`core.hooks`, `core.providers`, `core.jobs`, `core.http_stream`, `core.ask`,
+`core.health`, and, in the TUI, `tui.keymaps`, `tui.commands`, `tui.events`,
+`tui.options`, `tui.request`, `tui.prompt`, `tui.chat`, `tui.windows`,
+`tui.regions`, `tui.views`, `tui.pickers`, `tui.themes`, `tui.jobs`, and
+`tui.session`. Both sides also report `lua`, `json`, and `modules`.
+Capability names describe the contract, not the internal Rust module layout.
+
+### Ownership and compatibility
+
+The core remains the authority for sessions, turns, providers, tools and
+protocol state. TUI Lua can render, handle input, and make protocol requests,
+but it cannot become a second session authority. A Lua error is reported to
+the user and does not crash the process.
+
+The following v1 entry points are compatibility APIs and will keep working as
+newer, more structured APIs are added around them:
+
+- `bone.keymap.set` / `bone.keymap.del`
+- callable `bone.cmd`, `bone.cmd.create` / `bone.cmd.del`
+- `bone.o` option reads and writes
+- `bone.on` / `bone.off`
+- `bone.ui.win`, including its `bone.ui.popup` and update/close helpers
+
+Their current argument and return behavior is documented below. New APIs must
+not silently change an existing wrapper's meaning; a wrapper may delegate to
+the newer implementation internally.
+
+### TUI extension points at the v1 baseline
+
+The following table is the compatibility boundary for the first extension
+phase. The last column names work planned as additive capabilities; those
+capabilities are not available until reported by `bone.has_capability`.
+
+| Extension point | v1 behavior | Planned additive extension |
+|---|---|---|
+| Input contexts | `main` is the prompt context and `popup` is the fallback context for a focused Lua window. A picker is a Lua window, not a third keymap context. Unmapped main text enters the prompt. | Named contexts, priority/fallback, key sequences, raw interception and real sequence timeouts (`tui.input`). |
+| Events | `bone.on` receives server notifications by method plus `ready` and `submit`. Server callbacks run after the TUI applies the notification; `submit` can cancel or replace text. | Local prompt/focus/resize/key/panel events and a richer registry (`tui.local_events`). |
+| Commands | Built-ins and user commands are slash commands. `bone.cmd.create` receives one raw `{ args = "..." }` string and `{ desc }`; built-ins cannot be replaced. | Aliases, completion and structured argument metadata (`tui.command_specs`). |
+| Options | `bone.o` exposes the fixed, typed Rust options. v1 values are booleans or non-negative numbers; unknown names and wrong types are errors. | Dynamic typed options, defaults, validation and change callbacks (`tui.dynamic_options`). |
+| Panels | `bone.ui.win` is a Lua-drawn overlay, and regions/views customize the existing chat layout. These are not persistent plugin-owned buffers or panels. | Stateful panels with IDs, lifecycle, focus, docking, scrolling and render/key callbacks (`tui.panels`). |
+| Jobs | TUI `bone.system`, `bone.http` and `bone.defer` run one background operation and invoke a callback. Core waits are coroutine-based and turn cancellation stops them. v1 has no general process handle or streamed TUI job. | Cancellable, timeout-aware streaming jobs with stdout/stderr and progress (`jobs.streaming`). |
+| Plugin state | Folder plugins load in name order between runtime defaults and the user's config; `bone.plugins` reports names and `.`/`_` folders are disabled. There is no persistent state store, reload hook or automatic resource cleanup yet. | Init/shutdown, persistent per-plugin state, project configuration and cleanup of owned resources (`plugins.lifecycle`). |
+
+The existing detailed sections describe the v1 calls. A plugin may use a
+compatibility API today and opt into each later capability independently.
+
 ## Plugins
 
 A plugin is a folder in `~/.bone/plugins/`:
