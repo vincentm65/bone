@@ -39,6 +39,8 @@ const CANCELLED: &str = "Cancelled by the user before this tool call ran.";
 
 /// How long a turn waits for MCP servers that are still starting.
 const MCP_WAIT: Duration = Duration::from_secs(10);
+/// Most tool calls that run at the same time.
+const MAX_PARALLEL: usize = 8;
 /// Retries `request_error` hooks may ask for, per model call.
 const MAX_RETRIES: u32 = 5;
 /// How long `stream` hooks' input collects before they run.
@@ -333,7 +335,8 @@ impl Turn<'_> {
                 return Ok(());
             }
 
-            for (i, call) in calls.iter().enumerate() {
+            let mut i = 0;
+            while i < calls.len() {
                 if self.cancel.is_cancelled() {
                     for skipped in &calls[i..] {
                         self.record(ChatMessage::Tool {
@@ -344,24 +347,45 @@ impl Turn<'_> {
                     }
                     return Err(Stop::Cancelled);
                 }
-                self.inner.emit::<ToolStarted>(ToolStartedParams {
-                    session_id: self.session_id.clone(),
-                    turn_id: self.turn_id,
-                    call: call.clone(),
-                });
-                let (output, is_error) = self.run_tool(call).await;
-                self.record(ChatMessage::Tool {
-                    call_id: call.id.clone(),
-                    content: output.clone(),
-                    is_error,
-                })?;
-                self.inner.emit::<ToolFinished>(ToolFinishedParams {
-                    session_id: self.session_id.clone(),
-                    turn_id: self.turn_id,
-                    call_id: call.id.clone(),
-                    output,
-                    is_error,
-                });
+                // A run of calls that only read goes together; any other
+                // call runs on its own, in order.
+                let mut end = i + 1;
+                if self.rt.config.parallel_tools && self.parallel(&calls[i]) {
+                    while end < calls.len() && end - i < MAX_PARALLEL && self.parallel(&calls[end])
+                    {
+                        end += 1;
+                    }
+                }
+                let batch = &calls[i..end];
+                for call in batch {
+                    self.inner.emit::<ToolStarted>(ToolStartedParams {
+                        session_id: self.session_id.clone(),
+                        turn_id: self.turn_id,
+                        call: call.clone(),
+                    });
+                }
+                let results = futures_util::future::join_all(batch.iter().map(|call| async move {
+                    let (output, is_error) = self.run_tool(call).await;
+                    let output = self.cap(output);
+                    self.inner.emit::<ToolFinished>(ToolFinishedParams {
+                        session_id: self.session_id.clone(),
+                        turn_id: self.turn_id,
+                        call_id: call.id.clone(),
+                        output: output.clone(),
+                        is_error,
+                    });
+                    (output, is_error)
+                }))
+                .await;
+                // The transcript keeps the calls' order.
+                for (call, (output, is_error)) in batch.iter().zip(results) {
+                    self.record(ChatMessage::Tool {
+                        call_id: call.id.clone(),
+                        content: output,
+                        is_error,
+                    })?;
+                }
+                i = end;
             }
             if self.cancel.is_cancelled() {
                 return Err(Stop::Cancelled);
@@ -397,6 +421,28 @@ impl Turn<'_> {
             .unwrap()
             .push(msg)
             .map_err(|e| Stop::Failed(format!("cannot save session: {e}")))
+    }
+
+    /// Whether a call may run alongside others: its tool only reads.
+    fn parallel(&self, call: &ToolCall) -> bool {
+        match self.rt.tools.get(&call.name) {
+            Some(t) => t.parallel(),
+            None => self
+                .inner
+                .mcp
+                .tool(&call.name)
+                .is_some_and(|t| t.parallel()),
+        }
+    }
+
+    /// A tool result no longer than `max_tool_output` bytes: the start and
+    /// the end, with a note of what was left out.
+    fn cap(&self, output: String) -> String {
+        let max = self.rt.config.max_tool_output;
+        if output.len() <= max {
+            return output;
+        }
+        crate::tools::truncate_middle(&output, max * 3 / 4, max / 4)
     }
 
     /// Run one call. Returns the text for the model and whether it is an error.

@@ -121,6 +121,8 @@ impl Harness {
             },
             system_prompt: None,
             data_dir: data.path().to_owned(),
+            parallel_tools: true,
+            max_tool_output: crate::config::DEFAULT_MAX_TOOL_OUTPUT,
         };
         let provider = Arc::new(Scripted {
             steps: Mutex::new(steps.into()),
@@ -1516,4 +1518,97 @@ async fn example_folder_plugins_load_mcp_skills_and_templates() {
     assert_eq!(skills[0].name, "release");
     let templates = h.call::<TemplateList>(Empty {}).await.unwrap();
     assert_eq!(templates[0].name, "review");
+}
+
+// ---- parallel tool calls and output limits --------------------------------------
+
+const PARALLEL_TOOLS: &str = r#"
+log = {}
+local function slow(name, parallel)
+  bone.tool.register { name = name, parallel = parallel, run = function()
+    log[#log + 1] = "start " .. name
+    bone.sleep(100)
+    log[#log + 1] = "end " .. name
+    return name .. " done"
+  end }
+end
+slow("p1", true)
+slow("p2", true)
+slow("p3", true)
+slow("w", false)
+bone.tool.register { name = "log", run = function() return table.concat(log, ", ") end }
+"#;
+
+fn parallel_steps() -> Vec<Step> {
+    vec![
+        calls(&[
+            ("c1", "p1", json!({})),
+            ("c2", "p2", json!({})),
+            ("c3", "w", json!({})),
+            ("c4", "p3", json!({})),
+        ]),
+        calls(&[("c5", "log", json!({}))]),
+        text("done"),
+    ]
+}
+
+#[tokio::test]
+async fn read_only_calls_run_together_in_order() {
+    let mut h = Harness::with_lua(PARALLEL_TOOLS, parallel_steps()).await;
+    h.start("go").await;
+    // Both parallel calls start before either finishes.
+    let mut seen = Vec::new();
+    while seen.len() < 3 {
+        let e = h.next().await;
+        if e.method == ToolStarted::METHOD {
+            seen.push(format!(
+                "start {}",
+                e.params["call"]["name"].as_str().unwrap()
+            ));
+        } else if e.method == ToolFinished::METHOD {
+            seen.push(format!("end {}", e.params["call_id"].as_str().unwrap()));
+        }
+    }
+    assert_eq!(seen[..2], ["start p1", "start p2"]);
+    h.until::<TurnFinished>().await;
+    let t = h.transcript().await;
+    let results: Vec<&str> = t[2..6].iter().map(|m| tool_result(m).0).collect();
+    assert_eq!(results, ["p1 done", "p2 done", "w done", "p3 done"]);
+    let log = tool_result(&t[7]).0;
+    assert!(log.starts_with("start p1, start p2, "), "{log}");
+    assert!(log.ends_with("start w, end w, start p3, end p3"), "{log}");
+}
+
+#[tokio::test]
+async fn parallel_calls_can_be_switched_off() {
+    let mut h = Harness::with_lua(
+        &format!("{PARALLEL_TOOLS}\nbone.config.parallel_tools = false"),
+        parallel_steps(),
+    )
+    .await;
+    h.start("go").await;
+    h.until::<TurnFinished>().await;
+    let t = h.transcript().await;
+    assert_eq!(
+        tool_result(&t[7]).0,
+        "start p1, end p1, start p2, end p2, start w, end w, start p3, end p3"
+    );
+}
+
+#[tokio::test]
+async fn long_tool_results_are_cut() {
+    let mut h = Harness::with_lua(
+        r#"bone.config.max_tool_output = 200
+           bone.tool.register { name = "big", run = function() return "A" .. string.rep("x", 5000) .. "Z" end }"#,
+        vec![calls(&[("c1", "big", json!({}))]), text("ok")],
+    )
+    .await;
+    h.start("go").await;
+    let finished = h.until::<ToolFinished>().await;
+    h.until::<TurnFinished>().await;
+    let out = tool_result(&h.transcript().await[2]).0.to_owned();
+    assert!(out.len() < 400, "{}", out.len());
+    assert!(out.starts_with('A') && out.ends_with('Z') && out.contains("bytes omitted"));
+    // Clients see what the model sees.
+    assert_eq!(finished.output, out);
 }

@@ -147,6 +147,8 @@ bone.config.providers.qwen = {
 bone.config.provider = "qwen"      -- which entry to use (optional if there is one)
 bone.config.system_prompt = "..."  -- or function(ctx) return "..." end; ctx = { cwd, session_id }
 bone.config.data_dir = "~/somewhere"  -- sessions; default is the config dir
+bone.config.parallel_tools = true  -- run a reply's read-only tool calls at the same time (default)
+bone.config.max_tool_output = 100000  -- longest tool result the model gets, in bytes (start and end kept)
 ```
 
 The working directory is always appended to the system prompt.
@@ -159,6 +161,7 @@ bone.tool.register {
   description = "Show recent commits.",
   parameters = { type = "object", properties = { n = { type = "integer" } } },  -- JSON Schema
   needs_approval = false,   -- read by the approve plugin (default: ask)
+  parallel = true,          -- only reads: may run alongside other such calls (default false)
   run = function(args, ctx)  -- ctx = { cwd, session_id }
     local r = bone.system("git log --oneline -n " .. (args.n or 10), { cwd = ctx.cwd })
     if r.code ~= 0 then return nil, r.stderr end   -- an error result
@@ -168,6 +171,8 @@ bone.tool.register {
 ```
 
 A Lua tool with the same name as a built-in (`read_file`, `write_file`, `edit_file`, `shell`) replaces it. `error()` inside `run` becomes an error result for the model.
+
+When a reply asks for several tools, consecutive calls of tools that only read run at the same time (up to 8): `read_file`, Lua tools registered with `parallel = true`, and MCP tools their server marks `readOnlyHint`. Any other call runs on its own, after the ones before it and before the ones after it, so writes and shell commands keep their order. Results reach the transcript in the order of the calls. Every result, from any tool, is cut to `bone.config.max_tool_output` bytes (its start and end kept).
 
 - `print(...)` appends to `~/.bone/core.log` (the core may share the terminal with the TUI).
 

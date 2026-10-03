@@ -35,6 +35,8 @@ pub struct Loaded {
     pub config: CoreConfig,
     pub scripting: Arc<Scripting>,
     pub tools: Vec<ToolSpec>,
+    /// Lua tools registered with `parallel = true`.
+    pub parallel_tools: HashSet<String>,
     /// Questions asked by Lua, for the core to broadcast.
     pub events: tokio_mpsc::UnboundedReceiver<AskEvent>,
     /// Where it was loaded from, and how, so the core can load it again.
@@ -135,6 +137,7 @@ struct Extracted {
     system_prompt_fn: bool,
     data_dir: Option<String>,
     tools: Vec<ToolSpec>,
+    parallel_tools: HashSet<String>,
     hooks: HashSet<String>,
     /// Names registered with `bone.provider.register`.
     lua_providers: HashSet<String>,
@@ -142,6 +145,9 @@ struct Extracted {
     hook_set: Arc<Mutex<HashSet<String>>>,
     /// `bone.mcp.add` servers.
     mcp: Vec<crate::mcp::ServerConfig>,
+    /// `bone.config.parallel_tools` and `max_tool_output`.
+    parallel: bool,
+    max_tool_output: usize,
 }
 
 /// Run the runtime, plugins and `<config_dir>/core.lua`, then apply `BONE_*`
@@ -191,6 +197,7 @@ pub fn load_with_options(
         config,
         scripting,
         tools: ex.tools,
+        parallel_tools: ex.parallel_tools,
         events,
         config_dir: config_dir.to_owned(),
         options: options.clone(),
@@ -276,6 +283,8 @@ fn resolve(
         .map(|d| expand_home(&d))
         .unwrap_or_else(|| config_dir.to_owned());
     Ok(CoreConfig {
+        parallel_tools: ex.parallel,
+        max_tool_output: ex.max_tool_output,
         provider,
         system_prompt: env("BONE_SYSTEM_PROMPT").or_else(|| ex.system_prompt.clone()),
         data_dir,
@@ -463,17 +472,27 @@ impl Scripting {
 pub struct LuaTool {
     spec: ToolSpec,
     scripting: Arc<Scripting>,
+    /// Registered with `parallel = true`.
+    parallel: bool,
 }
 
 impl LuaTool {
-    pub fn new(spec: ToolSpec, scripting: Arc<Scripting>) -> Self {
-        LuaTool { spec, scripting }
+    pub fn new(spec: ToolSpec, scripting: Arc<Scripting>, parallel: bool) -> Self {
+        LuaTool {
+            spec,
+            scripting,
+            parallel,
+        }
     }
 }
 
 impl Tool for LuaTool {
     fn spec(&self) -> &ToolSpec {
         &self.spec
+    }
+
+    fn parallel(&self) -> bool {
+        self.parallel
     }
 
     fn call<'a>(&'a self, args: Json, ctx: &'a ToolContext) -> BoxFuture<'a, ToolResult> {
@@ -1250,12 +1269,16 @@ fn extract(lua: &Lua) -> mlua::Result<Extracted> {
     };
 
     let mut tools = Vec::new();
+    let mut parallel_tools = HashSet::new();
     for pair in bone.get::<Table>("_tools")?.pairs::<String, Table>() {
         let (name, t) = pair?;
         let parameters = match t.get::<Value>("parameters")? {
             Value::Nil => json!({ "type": "object", "properties": {} }),
             v => from_lua(&v)?,
         };
+        if t.get::<Option<bool>>("parallel")? == Some(true) {
+            parallel_tools.insert(name.clone());
+        }
         tools.push(ToolSpec {
             description: t.get::<Option<String>>("description")?.unwrap_or_default(),
             parameters,
@@ -1290,9 +1313,16 @@ fn extract(lua: &Lua) -> mlua::Result<Extracted> {
         system_prompt_fn,
         data_dir: config.get("data_dir")?,
         tools,
+        parallel_tools,
         hooks,
         hook_set: Default::default(),
         mcp,
+        parallel: config
+            .get::<Option<bool>>("parallel_tools")?
+            .unwrap_or(true),
+        max_tool_output: config
+            .get::<Option<usize>>("max_tool_output")?
+            .unwrap_or(crate::config::DEFAULT_MAX_TOOL_OUTPUT),
     })
 }
 

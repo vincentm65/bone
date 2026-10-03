@@ -14,6 +14,19 @@ pub struct CoreConfig {
     pub system_prompt: Option<String>,
     /// Where sessions are stored.
     pub data_dir: PathBuf,
+    /// Run a reply's parallel-safe tool calls at the same time.
+    #[serde(default = "default_true")]
+    pub parallel_tools: bool,
+    /// Longest tool result the model gets, in bytes; longer ones keep their
+    /// start and end.
+    #[serde(default = "default_max_tool_output")]
+    pub max_tool_output: usize,
+}
+
+pub const DEFAULT_MAX_TOOL_OUTPUT: usize = 100_000;
+
+fn default_max_tool_output() -> usize {
+    DEFAULT_MAX_TOOL_OUTPUT
 }
 
 /// A model provider: an OpenAI-compatible `/chat/completions` endpoint, or

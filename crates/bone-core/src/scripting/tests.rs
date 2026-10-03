@@ -166,6 +166,7 @@ async fn hooks_tools_and_system_prompt() {
                 .unwrap()
                 .clone(),
             s.clone(),
+            false,
         )
     };
     let ctx = ToolContext {
@@ -260,7 +261,7 @@ async fn ask_waits_for_an_answer_or_a_cancel() {
         .find(|t| t.name == "pick")
         .unwrap()
         .clone();
-    let tool = std::sync::Arc::new(LuaTool::new(spec, s.clone()));
+    let tool = std::sync::Arc::new(LuaTool::new(spec, s.clone(), false));
 
     let call = |session: &str| {
         let tool = tool.clone();
@@ -409,7 +410,7 @@ async fn plugins_run_before_user_config() {
     };
     git(&["init", "-q", "-b", "main"]);
     std::fs::write(repo.path().join("new.txt"), "x").unwrap();
-    let tool = LuaTool::new(spec, loaded.scripting.clone());
+    let tool = LuaTool::new(spec, loaded.scripting.clone(), false);
     let ctx = ToolContext {
         cwd: repo.path().to_owned(),
         session_id: "s".into(),
@@ -429,7 +430,7 @@ fn lua_tool(loaded: &Loaded, name: &str) -> std::sync::Arc<LuaTool> {
         .find(|t| t.name == name)
         .unwrap()
         .clone();
-    std::sync::Arc::new(LuaTool::new(spec, loaded.scripting.clone()))
+    std::sync::Arc::new(LuaTool::new(spec, loaded.scripting.clone(), false))
 }
 
 fn ctx(session: &str) -> ToolContext {

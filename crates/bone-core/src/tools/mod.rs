@@ -49,6 +49,10 @@ pub type ToolResult = Result<String, String>;
 pub trait Tool: Send + Sync {
     fn spec(&self) -> &ToolSpec;
     fn call<'a>(&'a self, args: Value, ctx: &'a ToolContext) -> BoxFuture<'a, ToolResult>;
+    /// Safe to run at the same time as other such calls (it only reads).
+    fn parallel(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Clone)]
@@ -109,7 +113,7 @@ fn typed_args<T: DeserializeOwned>(args: Value) -> Result<T, String> {
 }
 
 /// Keep the head and tail of long output, cut on char boundaries.
-fn truncate_middle(s: &str, head: usize, tail: usize) -> String {
+pub(crate) fn truncate_middle(s: &str, head: usize, tail: usize) -> String {
     if s.len() <= head + tail {
         return s.to_owned();
     }

@@ -43,6 +43,10 @@ impl Tool for ReadFile {
         &self.0
     }
 
+    fn parallel(&self) -> bool {
+        true
+    }
+
     fn call<'a>(&'a self, args: Value, ctx: &'a ToolContext) -> BoxFuture<'a, ToolResult> {
         Box::pin(async move {
             let args: Args = typed_args(args)?;

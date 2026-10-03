@@ -137,7 +137,12 @@ impl Runtime {
         });
         let mut tools = Registry::builtin();
         for spec in loaded.tools {
-            tools.register(Arc::new(LuaTool::new(spec, loaded.scripting.clone())));
+            let parallel = loaded.parallel_tools.contains(&spec.name);
+            tools.register(Arc::new(LuaTool::new(
+                spec,
+                loaded.scripting.clone(),
+                parallel,
+            )));
         }
         let events = events.clone();
         let mut asks = loaded.events;

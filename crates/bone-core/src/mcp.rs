@@ -833,6 +833,7 @@ impl McpManager {
                 continue;
             };
             return Some(Arc::new(McpTool {
+                read_only: t.annotations["readOnlyHint"] == true,
                 spec: ToolSpec {
                     name: name.to_owned(),
                     description: t.description.clone(),
@@ -939,6 +940,8 @@ async fn call_on(server: &Server, tool: &str, args: Value) -> Result<(String, bo
 /// An MCP tool in the agent's hands.
 struct McpTool {
     spec: ToolSpec,
+    /// The server says it only reads, so it may run alongside others.
+    read_only: bool,
     remote: String,
     server: Arc<Server>,
 }
@@ -946,6 +949,10 @@ struct McpTool {
 impl Tool for McpTool {
     fn spec(&self) -> &ToolSpec {
         &self.spec
+    }
+
+    fn parallel(&self) -> bool {
+        self.read_only
     }
 
     fn call<'a>(&'a self, args: Value, ctx: &'a ToolContext) -> BoxFuture<'a, ToolResult> {
