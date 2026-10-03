@@ -25,9 +25,9 @@ end
 
 bone.cmd.create("git", function()
   local s = bone.api.session()
-  local dir = s and s.cwd or "."
-  local p = io.popen("git -C '" .. dir:gsub("'", "'\\''") .. "' status --short --branch 2>&1")
-  local out = p:read("*a")
-  p:close()
-  bone.notify(out ~= "" and out:gsub("\n$", "") or "clean")
+  -- In the background, so a slow repository never freezes the UI.
+  bone.system("git status --short --branch 2>&1", { cwd = s and s.cwd or "." }, function(r, err)
+    local out = r and r.stdout or err
+    bone.notify(out ~= "" and out:gsub("\n$", "") or "clean")
+  end)
 end, { desc = "git status of the session's directory" })

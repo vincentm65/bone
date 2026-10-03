@@ -74,15 +74,63 @@ function bone.run_hooks(name, ev)
   return ev, nil
 end
 
+-- Coroutines the core runs jobs in (hooks, tools, system_prompt). Only
+-- these may wait; other code (core.lua while it loads, your own coroutines)
+-- runs the blocking versions.
+bone._jobs = setmetatable({}, { __mode = "k" })
+
+local function in_job()
+  local co = coroutine.running()
+  return co ~= nil and bone._jobs[co] == true
+end
+
+local function wait(spec)
+  local r, err = coroutine.yield({ wait = spec })
+  if err then
+    error(err, 3)
+  end
+  return r
+end
+
 --- Ask the user something and wait for the answer. Works in hooks, tools
 --- and a system_prompt function. `question` is any table; clients receive
 --- it in an `ask/requested` event and reply with `ask/respond`. Returns the
 --- answer, or nil if the turn was cancelled first.
 function bone.ask(question)
-  if not coroutine.running() then
+  if not in_job() then
     error("bone.ask only works inside hooks, tools and system_prompt", 2)
   end
   return coroutine.yield({ ask = question })
+end
+
+--- Run a shell command: { code, stdout, stderr } (or { timed_out = true }).
+--- opts: { cwd, stdin, timeout = ms }. In hooks and tools this waits without
+--- blocking anything else, and a cancelled turn kills the command (the call
+--- returns nil).
+function bone.system(cmd, opts)
+  opts = opts or {}
+  if in_job() then
+    return wait({ system = cmd, cwd = opts.cwd, stdin = opts.stdin, timeout = opts.timeout })
+  end
+  return bone._system_sync(cmd, opts)
+end
+
+--- Wait `ms` milliseconds (without blocking in hooks and tools).
+function bone.sleep(ms)
+  if in_job() then
+    return wait({ sleep = ms })
+  end
+  return bone._sleep_sync(ms)
+end
+
+--- An HTTP request: { url, method = "GET", headers = {}, body = string or
+--- table (sent as JSON), timeout = ms } -> { status, headers, body }.
+--- Only in hooks and tools. Connection errors raise; HTTP errors don't.
+function bone.http(req)
+  if not in_job() then
+    error("bone.http only works inside hooks, tools and system_prompt", 2)
+  end
+  return wait({ http = req })
 end
 
 -- Entry points the core calls (each in its own coroutine) --------------------
@@ -108,5 +156,4 @@ function bone._system_prompt(ctx)
   return p or ""
 end
 
--- bone.system(cmd, { cwd = dir }) -> { code, stdout, stderr } is provided by
--- the core. print() writes to <config dir>/core.log.
+-- print() writes to <config dir>/core.log.

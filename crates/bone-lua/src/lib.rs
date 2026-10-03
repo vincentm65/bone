@@ -9,6 +9,8 @@
 //!   `bone.config_dir`, `bone.json`, `bone.util` and `bone.inspect`; each side
 //!   adds its own API on top.
 
+pub mod wait;
+
 use std::path::{Path, PathBuf};
 
 use mlua::{Function, Lua, LuaSerdeExt, Table, Value};

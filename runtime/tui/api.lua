@@ -64,6 +64,32 @@ function bone.request(method, params, callback)
 end
 
 --- Show a message. level: "info" (default) or "error".
+--- Run a shell command in the background. on_exit(result) runs when it
+--- ends with { code, stdout, stderr } (or { timed_out = true }), or
+--- (nil, error). opts: { cwd, stdin, timeout = ms }. The UI never waits.
+---   bone.system("git status --short", { cwd = dir }, function(r) ... end)
+function bone.system(cmd, opts, on_exit)
+  if type(opts) == "function" then
+    opts, on_exit = nil, opts
+  end
+  opts = opts or {}
+  api("wait", { system = cmd, cwd = opts.cwd, stdin = opts.stdin, timeout = opts.timeout }, on_exit)
+end
+
+--- An HTTP request in the background: { url, method, headers, body,
+--- timeout = ms }; callback(res) with { status, headers, body }, or
+--- (nil, error).
+function bone.http(req, callback)
+  api("wait", { http = req }, callback)
+end
+
+--- Run fn after `ms` milliseconds.
+function bone.defer(ms, fn)
+  api("wait", { sleep = ms }, function()
+    fn()
+  end)
+end
+
 function bone.notify(msg, level)
   api("notify", tostring(msg), level or "info")
 end

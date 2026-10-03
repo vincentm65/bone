@@ -104,7 +104,7 @@ impl Turn<'_> {
         let out = tokio::select! {
             out = s.hooks(name, event) => out,
             _ = self.cancel.cancelled() => {
-                s.cancel_asks(&self.session_id);
+                s.cancel_session(&self.session_id);
                 return Err(Refused::Cancelled);
             }
         };
@@ -365,7 +365,7 @@ impl Turn<'_> {
             },
             _ = grace => {
                 if let Some(s) = self.inner.scripting.as_deref() {
-                    s.cancel_asks(&self.session_id);
+                    s.cancel_session(&self.session_id);
                 }
                 return ("Cancelled by the user while running.".into(), true);
             }

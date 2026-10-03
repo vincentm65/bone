@@ -15,7 +15,7 @@ reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "time"] }
+tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "time", "rt-multi-thread"] }
 tokio-util.workspace = true
 uuid.workspace = true
 

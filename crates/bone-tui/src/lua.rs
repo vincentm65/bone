@@ -509,6 +509,34 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             });
             ret(lua, ())
         }
+        "wait" => {
+            // Background work (bone.system, bone.http, bone.defer), then the
+            // callback with the result, or (nil, error).
+            let (spec, f): (Value, Option<Function>) = args(lua, a)?;
+            let spec = from_lua(&spec)?;
+            let cb = f.map(|f| app.store_callback(lua, f)).transpose()?;
+            app.spawn(bone_lua::wait::run(spec), move |app, r| {
+                let Some(cb) = cb else {
+                    if let Err(e) = r {
+                        app.error(e);
+                    }
+                    return;
+                };
+                let called = app.with_api(|lua| {
+                    let cbs: Table = lua.named_registry_value(CALLBACKS)?;
+                    let f: Function = cbs.get(cb)?;
+                    cbs.set(cb, Value::Nil)?;
+                    match r {
+                        Ok(v) => f.call::<()>(to_lua(lua, &v)?),
+                        Err(e) => f.call::<()>((Value::Nil, e)),
+                    }
+                });
+                if let Err(e) = called {
+                    app.lua_error("callback", &e);
+                }
+            });
+            ret(lua, ())
+        }
         "notify" => {
             let (msg, level): (String, Option<String>) = args(lua, a)?;
             if level.as_deref() == Some("error") {

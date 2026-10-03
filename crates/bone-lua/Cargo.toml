@@ -7,7 +7,9 @@ rust-version.workspace = true
 
 [dependencies]
 mlua.workspace = true
+reqwest.workspace = true
 serde_json.workspace = true
+tokio = { workspace = true, features = ["io-util", "process", "time"] }
 
 [dev-dependencies]
 tempfile.workspace = true

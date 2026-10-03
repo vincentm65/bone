@@ -1264,3 +1264,29 @@ async fn drag_selects_and_copies_text() {
     h.screen(30, 6);
     assert!(h.app.selection.is_none() && h.app.clipboard.is_none());
 }
+
+#[tokio::test]
+async fn system_http_and_defer_run_in_the_background() {
+    let mut h = Harness::blank().await;
+    h.app.exec_lua(
+        "order = {} \
+         bone.system('sleep 0.2; printf slow', function(r) order[#order + 1] = r.stdout end) \
+         bone.system('tr a-z A-Z', { stdin = 'fast' }, function(r) order[#order + 1] = r.stdout end) \
+         bone.defer(50, function() order[#order + 1] = 'timer' end) \
+         bone.http({ url = 'http://127.0.0.1:1/' }, function(r, err) failed = err ~= nil end)",
+    );
+    // Nothing waited; results arrive as they finish.
+    h.app.exec_lua("=#order");
+    assert_eq!(h.message(), "0");
+    for _ in 0..50 {
+        if h.lua("=#order").await == "3" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        h.lua("=table.concat(order, ',')").await,
+        "\"FAST,timer,slow\""
+    );
+    assert_eq!(h.lua("=failed").await, "true");
+}

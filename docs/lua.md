@@ -71,7 +71,6 @@ bone.tool.register {
 
 A Lua tool with the same name as a built-in (`read_file`, `write_file`, `edit_file`, `shell`) replaces it. `error()` inside `run` becomes an error result for the model.
 
-- `bone.system(cmd, { cwd = dir })` runs `bash -c cmd` and returns `{ code, stdout, stderr }`.
 - `print(...)` appends to `~/.bone/core.log` (the core may share the terminal with the TUI).
 
 ### Hooks
@@ -102,6 +101,16 @@ end)
 ```
 
 Any other name is a custom point: plugins can define their own with `bone.hook("my_point", fn)` and run them with `local ev, denied = bone.run_hooks("my_point", ev)`.
+
+### Waiting without blocking
+
+Hooks, tools and a `system_prompt` function run as coroutines, so these wait without holding up anything else (other sessions, other hooks):
+
+- `bone.system(cmd, { cwd, stdin, timeout = ms })` runs `bash -c cmd` → `{ code, stdout, stderr }`, or `{ timed_out = true }`.
+- `bone.sleep(ms)`.
+- `bone.http({ url, method, headers, body, timeout = ms })` → `{ status, headers, body }`. A table `body` is sent as JSON. Connection errors raise; HTTP error statuses don't.
+
+If the turn is cancelled meanwhile, the command or request is stopped and the call returns `nil`. While `core.lua` loads (and inside coroutines of your own) `bone.system` and `bone.sleep` block instead, and `bone.http` is unavailable.
 
 ### Asking the user
 
@@ -201,6 +210,9 @@ Any protocol method works (see `crates/bone-proto/src/methods.rs`).
 
 ### UI API
 
+- `bone.system(cmd, { cwd, stdin, timeout }, function(r, err) ... end)`: run a command in the background; the callback gets `{ code, stdout, stderr }` (or `{ timed_out = true }`), or `nil, err`. The UI never waits.
+- `bone.http(req, function(res, err) ... end)`: an HTTP request in the background (same fields as the core's).
+- `bone.defer(ms, fn)`: run `fn` later.
 - `bone.notify(msg, level)`: `level` is `"info"` (default) or `"error"`. `print(...)` is `bone.notify`.
 - `bone.press("ctrl+c")`: press a key. `bone.action("scroll_top")`: run a builtin action.
 - `bone.api.prompt_get()`, `bone.api.prompt_set(text)`

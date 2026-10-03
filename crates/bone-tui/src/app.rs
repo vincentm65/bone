@@ -219,6 +219,19 @@ impl App {
         });
     }
 
+    /// Run `fut` in the background, then `then` on the UI thread.
+    pub fn spawn<T: Send + 'static>(
+        &self,
+        fut: impl std::future::Future<Output = T> + Send + 'static,
+        then: impl FnOnce(&mut App, T) + Send + 'static,
+    ) {
+        let tx = self.tx.clone();
+        tokio::spawn(async move {
+            let r = fut.await;
+            let _ = tx.send(AppEvent(Box::new(move |app| then(app, r))));
+        });
+    }
+
     pub fn apply(&mut self, ev: AppEvent) {
         (ev.0)(self);
         self.dirty = true;

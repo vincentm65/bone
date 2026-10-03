@@ -267,7 +267,7 @@ async fn ask_waits_for_an_answer_or_a_cancel() {
     assert_eq!(second.await.unwrap().unwrap(), "picked blue");
 
     // Cancelling the session resumes its question with nil.
-    s.cancel_asks("s1");
+    s.cancel_session("s1");
     assert!(
         matches!(next_event(&mut loaded.events).await, AskEvent::Resolved(r) if r.answer.is_null())
     );
@@ -395,4 +395,126 @@ async fn plugins_run_before_user_config() {
         tool.call(json!({}), &ctx).await.unwrap(),
         "## No commits yet on main\n?? new.txt\n"
     );
+}
+
+/// A Lua tool by name, ready to call.
+fn lua_tool(loaded: &Loaded, name: &str) -> std::sync::Arc<LuaTool> {
+    let spec = loaded
+        .tools
+        .iter()
+        .find(|t| t.name == name)
+        .unwrap()
+        .clone();
+    std::sync::Arc::new(LuaTool::new(spec, loaded.scripting.clone()))
+}
+
+fn ctx(session: &str) -> ToolContext {
+    ToolContext {
+        cwd: "/".into(),
+        session_id: session.into(),
+        cancel: Default::default(),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn system_sleep_and_http_wait_without_blocking() {
+    // A tiny HTTP server for bone.http.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/x", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 4096];
+        let n = sock.read(&mut buf).await.unwrap();
+        let req = String::from_utf8_lossy(&buf[..n]).to_string();
+        let body = if req.contains("x-test: yes") {
+            "hello"
+        } else {
+            "no header"
+        };
+        let resp = format!(
+            "HTTP/1.1 201 Created\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        sock.write_all(resp.as_bytes()).await.unwrap();
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &format!(
+            r#"
+            {PROVIDER}
+            -- Blocking fallback while core.lua loads.
+            assert(bone.system("echo loading").stdout == "loading\n")
+            bone.tool.register {{ name = "slow", run = function(args)
+              bone.sleep(100)
+              local r = bone.system("sleep 0.3; printf %s " .. args.tag)
+              if r == nil then return "cancelled" end
+              return r.stdout .. " " .. r.code
+            end }}
+            bone.tool.register {{ name = "fetch", run = function(args)
+              local r = bone.http({{ url = args.url, headers = {{ ["x-test"] = "yes" }} }})
+              return r.status .. " " .. r.body
+            end }}
+            bone.tool.register {{ name = "stdin", run = function()
+              local r = bone.system("tr a-z A-Z", {{ stdin = "abc" }})
+              local t = bone.system("sleep 5", {{ timeout = 50 }})
+              return r.stdout .. " " .. tostring(t.timed_out)
+            end }}
+            bone.tool.register {{ name = "bad", run = function()
+              return bone.http({{ url = "http://127.0.0.1:1/" }})
+            end }}
+            "#
+        ),
+    );
+    let loaded = load(dir.path()).unwrap();
+    let slow = lua_tool(&loaded, "slow");
+
+    // Two slow calls overlap: about 0.4s in all, not 0.8s.
+    let started = std::time::Instant::now();
+    let (c1, c2) = (ctx("s1"), ctx("s2"));
+    let (a, b) = tokio::join!(
+        slow.call(json!({"tag": "a"}), &c1),
+        slow.call(json!({"tag": "b"}), &c2)
+    );
+    assert_eq!((a.unwrap(), b.unwrap()), ("a 0".into(), "b 0".into()));
+    assert!(
+        started.elapsed() < Duration::from_millis(700),
+        "{:?}",
+        started.elapsed()
+    );
+
+    let fetch = lua_tool(&loaded, "fetch");
+    assert_eq!(
+        fetch.call(json!({"url": url}), &ctx("s")).await.unwrap(),
+        "201 hello"
+    );
+    let stdin = lua_tool(&loaded, "stdin");
+    assert_eq!(stdin.call(json!({}), &ctx("s")).await.unwrap(), "ABC true");
+    // Connection errors raise in Lua, which the tool reports.
+    let bad = lua_tool(&loaded, "bad");
+    assert!(
+        bad.call(json!({}), &ctx("s"))
+            .await
+            .unwrap_err()
+            .contains("127.0.0.1:1")
+    );
+
+    // Cancelling the session stops its command at once; others carry on.
+    let started = std::time::Instant::now();
+    let s = loaded.scripting.clone();
+    let cancelled = tokio::spawn({
+        let slow = slow.clone();
+        async move { slow.call(json!({"tag": "c"}), &ctx("s3")).await }
+    });
+    let other = tokio::spawn({
+        let slow = slow.clone();
+        async move { slow.call(json!({"tag": "d"}), &ctx("s4")).await }
+    });
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    s.cancel_session("s3");
+    assert_eq!(cancelled.await.unwrap().unwrap(), "cancelled");
+    assert!(started.elapsed() < Duration::from_millis(300));
+    assert_eq!(other.await.unwrap().unwrap(), "d 0");
 }

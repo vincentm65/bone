@@ -7,6 +7,11 @@
 //! goes out to clients, and the coroutine resumes with whatever a client
 //! answers (`ask/respond`), or `nil` if its turn is cancelled. Other jobs keep
 //! running meanwhile.
+//!
+//! Slow work waits the same way: `bone.system`, `bone.sleep` and `bone.http`
+//! called from a job yield `{ wait = spec }`; the work runs on a small async
+//! runtime owned by the Lua thread and the coroutine resumes with the result.
+//! Cancelling a session's turn kills its processes and resumes with `nil`.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
@@ -66,6 +71,11 @@ enum Job {
         answer: Json,
         reply: oneshot::Sender<bool>,
     },
+    /// Background work for a waiting coroutine finished.
+    Resume {
+        wait_id: u64,
+        result: Result<Json, String>,
+    },
     Cancel {
         session_id: String,
     },
@@ -110,9 +120,10 @@ pub fn load_with(
     let (jobs, job_rx) = mpsc::channel();
     let (events_tx, events) = tokio_mpsc::unbounded_channel();
     let dir = config_dir.to_owned();
+    let jobs_tx = jobs.clone();
     std::thread::Builder::new()
         .name("bone-lua".into())
-        .spawn(move || lua_thread(dir, init_tx, job_rx, events_tx))
+        .spawn(move || lua_thread(dir, init_tx, job_rx, jobs_tx, events_tx))
         .map_err(|e| format!("cannot start the Lua thread: {e}"))?;
     let ex = init_rx
         .recv()
@@ -271,9 +282,10 @@ impl Scripting {
         rx.await.unwrap_or(false)
     }
 
-    /// Drop a session's open questions (its turn was cancelled); the waiting
-    /// Lua code gets `nil`.
-    pub fn cancel_asks(&self, session_id: &str) {
+    /// A session's turn was cancelled: its open questions are dropped and
+    /// its background work (processes, timers, requests) stopped. The
+    /// waiting Lua code gets `nil`.
+    pub fn cancel_session(&self, session_id: &str) {
         let _ = self.jobs.send(Job::Cancel {
             session_id: session_id.to_owned(),
         });
@@ -311,7 +323,7 @@ impl Tool for LuaTool {
 
 // ---- the Lua thread ------------------------------------------------------
 
-/// A coroutine waiting for an answer.
+/// A coroutine waiting for an answer or for background work.
 struct Waiting {
     thread: Thread,
     session_id: Option<String>,
@@ -320,17 +332,37 @@ struct Waiting {
 
 struct State {
     lua: Lua,
+    /// Coroutines waiting for an answer, by question.
     waiting: HashMap<AskId, Waiting>,
     next_ask: AskId,
+    /// Coroutines waiting for background work, with a handle to stop it.
+    pending: HashMap<u64, (Waiting, tokio::task::AbortHandle)>,
+    next_wait: u64,
     events: tokio_mpsc::UnboundedSender<AskEvent>,
+    jobs: mpsc::Sender<Job>,
+    /// Runs background work for `bone.system`, `bone.sleep`, `bone.http`.
+    rt: tokio::runtime::Runtime,
 }
 
 fn lua_thread(
     dir: PathBuf,
     init: mpsc::Sender<Result<Extracted, String>>,
     jobs: mpsc::Receiver<Job>,
+    jobs_tx: mpsc::Sender<Job>,
     events: tokio_mpsc::UnboundedSender<AskEvent>,
 ) {
+    let rt = match tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .thread_name("bone-lua-io")
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            let _ = init.send(Err(format!("cannot start the Lua runtime: {e}")));
+            return;
+        }
+    };
     let lua = match setup(&dir) {
         Ok(lua) => lua,
         Err(e) => {
@@ -348,7 +380,11 @@ fn lua_thread(
         lua,
         waiting: HashMap::new(),
         next_ask: 0,
+        pending: HashMap::new(),
+        next_wait: 0,
         events,
+        jobs: jobs_tx,
+        rt,
     };
     for job in jobs {
         match job {
@@ -359,12 +395,11 @@ fn lua_thread(
                 done,
             } => {
                 let started = (|| -> mlua::Result<(Thread, MultiValue)> {
-                    let f = st
-                        .lua
-                        .globals()
-                        .get::<Table>("bone")?
-                        .get::<mlua::Function>(function)?;
+                    let bone = st.lua.globals().get::<Table>("bone")?;
+                    let f = bone.get::<mlua::Function>(function)?;
                     let thread = st.lua.create_thread(f)?;
+                    // So bone.system & co. know they may yield here.
+                    bone.get::<Table>("_jobs")?.set(&thread, true)?;
                     let args = args
                         .iter()
                         .map(|a| to_lua(&st.lua, a))
@@ -396,7 +431,39 @@ fn lua_thread(
                     Err(e) => st.finish(w.done, Err(e)),
                 }
             }
+            Job::Resume { wait_id, result } => {
+                let Some((w, _)) = st.pending.remove(&wait_id) else {
+                    continue;
+                };
+                let args = match result {
+                    Ok(v) => to_lua(&st.lua, &v).map(|v| MultiValue::from_iter([v])),
+                    Err(e) => st
+                        .lua
+                        .create_string(&e)
+                        .map(|e| MultiValue::from_iter([Value::Nil, Value::String(e)])),
+                };
+                match args {
+                    Ok(args) => st.step(w.thread, args, w.session_id, w.done),
+                    Err(e) => st.finish(w.done, Err(e)),
+                }
+            }
             Job::Cancel { session_id } => {
+                let ids: Vec<u64> = st
+                    .pending
+                    .iter()
+                    .filter(|(_, (w, _))| w.session_id.as_deref() == Some(session_id.as_str()))
+                    .map(|(id, _)| *id)
+                    .collect();
+                for id in ids {
+                    let (w, abort) = st.pending.remove(&id).unwrap();
+                    abort.abort();
+                    st.step(
+                        w.thread,
+                        MultiValue::from_iter([Value::Nil]),
+                        w.session_id,
+                        w.done,
+                    );
+                }
                 let ids: Vec<AskId> = st
                     .waiting
                     .iter()
@@ -422,14 +489,33 @@ fn lua_thread(
 }
 
 impl State {
-    /// Resume a coroutine. A yield is a question (`bone.ask`): park it and
-    /// tell clients. Otherwise it finished.
+    /// Resume a coroutine. A yield is either background work
+    /// (`{ wait = spec }`: start it and park the coroutine) or a question
+    /// (`bone.ask`: park it and tell clients). Otherwise it finished.
     fn step(&mut self, thread: Thread, args: MultiValue, session_id: Option<String>, done: Done) {
         let r = thread.resume::<MultiValue>(args);
         if r.is_ok() && thread.status() == ThreadStatus::Resumable {
-            let question = r
-                .ok()
-                .and_then(|v| v.into_iter().next())
+            let yielded = r.ok().and_then(|v| v.into_iter().next());
+            if let Some(Value::Table(t)) = &yielded
+                && let Ok(spec @ Value::Table(_)) = t.get::<Value>("wait")
+            {
+                let spec = from_lua(&spec).unwrap_or(Json::Null);
+                self.next_wait += 1;
+                let wait_id = self.next_wait;
+                let jobs = self.jobs.clone();
+                let task = self.rt.spawn(async move {
+                    let result = bone_lua::wait::run(spec).await;
+                    let _ = jobs.send(Job::Resume { wait_id, result });
+                });
+                let w = Waiting {
+                    thread,
+                    session_id,
+                    done,
+                };
+                self.pending.insert(wait_id, (w, task.abort_handle()));
+                return;
+            }
+            let question = yielded
                 .and_then(|v| match v {
                     Value::Table(t) => t.get::<Value>("ask").ok(),
                     other => Some(other),
@@ -512,8 +598,17 @@ fn setup(dir: &Path) -> Result<Lua, String> {
 
 fn install_helpers(lua: &Lua, dir: &Path) -> mlua::Result<()> {
     let bone: Table = lua.globals().get("bone")?;
+    // Blocking versions, for code that runs outside a job (while core.lua
+    // loads). Inside hooks and tools bone.system & co. wait without blocking.
     bone.set(
-        "system",
+        "_sleep_sync",
+        lua.create_function(|_, ms: u64| {
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+            Ok(())
+        })?,
+    )?;
+    bone.set(
+        "_system_sync",
         lua.create_function(|lua, (cmd, opts): (String, Option<Table>)| {
             let mut c = std::process::Command::new("bash");
             c.arg("-c").arg(&cmd).stdin(std::process::Stdio::null());
