@@ -2,6 +2,7 @@ use futures_util::future::BoxFuture;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
+use super::hashline::{Lines, render_line};
 use super::{Tool, ToolContext, ToolResult, ToolSpec, typed_args};
 
 const DEFAULT_LIMIT: usize = 2000;
@@ -13,8 +14,9 @@ impl ReadFile {
     pub fn new() -> Self {
         ReadFile(ToolSpec {
             name: "read_file".into(),
-            description: "Read a text file. Returns lines prefixed with their 1-based line \
-                          number and a tab. Use offset/limit for large files."
+            description: "Read a text file. Each line is shown as LINE#HASH|content, e.g. \
+                          `12#k3|    let x = 1;`; edit_file uses those lines as anchors. Use \
+                          offset/limit for large files."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -58,11 +60,14 @@ impl Tool for ReadFile {
                 return Err(format!("{} looks like a binary file", path.display()));
             }
             let text = String::from_utf8_lossy(&bytes);
-            if text.is_empty() {
+            let lines = Lines::parse(&text).lines;
+            if lines.is_empty() {
+                ctx.views
+                    .record(&ctx.session_id, &path, &lines, Default::default());
                 return Ok("(empty file)".into());
             }
 
-            let total = text.lines().count();
+            let total = lines.len();
             let start = args.offset.unwrap_or(1).max(1);
             let limit = args.limit.unwrap_or(DEFAULT_LIMIT).max(1);
             if start > total {
@@ -70,20 +75,25 @@ impl Tool for ReadFile {
                     "offset {start} is past the end of the file ({total} lines)"
                 ));
             }
-            let mut out = String::new();
-            for (i, line) in text.lines().enumerate().skip(start - 1).take(limit) {
-                let line = match line.char_indices().nth(MAX_LINE_CHARS) {
-                    Some((cut, _)) => format!("{} [line truncated]", &line[..cut]),
-                    None => line.to_owned(),
-                };
-                out.push_str(&format!("{:>6}\t{line}\n", i + 1));
-            }
             let end = (start - 1 + limit).min(total);
+            let mut out = String::new();
+            for (i, line) in lines.iter().enumerate().take(end).skip(start - 1) {
+                // The hash is of the whole line, even when it is cut short.
+                let mut shown = render_line(i + 1, line);
+                if let Some((cut, _)) = line.char_indices().nth(MAX_LINE_CHARS) {
+                    shown.truncate(shown.len() - (line.len() - cut));
+                    shown.push_str(" [line truncated]");
+                }
+                out.push_str(&shown);
+                out.push('\n');
+            }
             if end < total {
                 out.push_str(&format!(
                     "\n[showing lines {start}-{end} of {total}; use offset to read more]\n"
                 ));
             }
+            ctx.views
+                .record(&ctx.session_id, &path, &lines, (start..=end).collect());
             Ok(out)
         })
     }

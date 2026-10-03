@@ -522,6 +522,7 @@ impl Turn<'_> {
             cwd: self.cwd.clone(),
             session_id: self.session_id.clone(),
             cancel: self.cancel.clone(),
+            views: self.inner.views.clone(),
         };
         let hook_args = args.clone();
         let grace = async {

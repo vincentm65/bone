@@ -105,6 +105,7 @@ fn ctx() -> ToolContext {
         cwd: ".".into(),
         session_id: "s".into(),
         cancel: Default::default(),
+        views: Default::default(),
     }
 }
 

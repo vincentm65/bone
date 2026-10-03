@@ -45,11 +45,31 @@ local function details(q)
   elseif q.tool == "edit_file" then
     out[#out + 1] = { { args.path or "", "ToolPath" } }
     out[#out + 1] = {}
-    for _, l in ipairs(first(lines(args.old_string), 6)) do
-      out[#out + 1] = { { "- " .. l, "DiffDelete" } }
-    end
-    for _, l in ipairs(first(lines(args.new_string), 6)) do
-      out[#out + 1] = { { "+ " .. l, "DiffAdd" } }
+    if args.old_string then
+      for _, l in ipairs(first(lines(args.old_string), 6)) do
+        out[#out + 1] = { { "- " .. l, "DiffDelete" } }
+      end
+      for _, l in ipairs(first(lines(args.new_string), 6)) do
+        out[#out + 1] = { { "+ " .. l, "DiffAdd" } }
+      end
+    else
+      -- Anchored edits: where each goes, then its new lines.
+      local edits = type(args.edits) == "table" and args.edits or { args }
+      for _, e in ipairs(edits) do
+        if type(e) == "table" then
+          local where = e.at and ("at " .. tostring(e.at) .. (e["end"] and (" .. " .. tostring(e["end"])) or ""))
+            or e.after and ("after " .. tostring(e.after))
+            or ("before " .. tostring(e.before))
+          out[#out + 1] = { { where, "ToolSummary" } }
+          local new = lines(type(e.text) == "string" and e.text or "")
+          if #new == 0 then
+            out[#out + 1] = { { "- (delete)", "DiffDelete" } }
+          end
+          for _, l in ipairs(first(new, 4)) do
+            out[#out + 1] = { { "+ " .. l, "DiffAdd" } }
+          end
+        end
+      end
     end
   elseif q.tool == "write_file" then
     local content = lines(args.content)

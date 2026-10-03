@@ -4,11 +4,12 @@
 //! is dynamic so core-side Lua can add tools later.
 
 mod edit_file;
+pub mod hashline;
 mod read_file;
 mod shell;
 mod write_file;
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, PathBuf};
 use std::sync::Arc;
 
 use futures_util::future::BoxFuture;
@@ -30,16 +31,25 @@ pub struct ToolContext {
     /// Cancelled when the turn is. Long-running tools should watch it; the
     /// agent also drops the call future on cancel.
     pub cancel: CancellationToken,
+    /// What the session's model has seen of each file (see `hashline`).
+    pub views: Arc<hashline::Views>,
 }
 
 impl ToolContext {
+    /// An absolute path, with `.` and `..` worked out so one file has one
+    /// name.
     pub fn resolve(&self, path: &str) -> PathBuf {
-        let path = Path::new(path);
-        if path.is_absolute() {
-            path.to_owned()
-        } else {
-            self.cwd.join(path)
+        let mut out = PathBuf::new();
+        for part in self.cwd.join(path).components() {
+            match part {
+                Component::CurDir => {}
+                Component::ParentDir => {
+                    out.pop();
+                }
+                part => out.push(part),
+            }
         }
+        out
     }
 }
 
@@ -105,7 +115,20 @@ pub fn parse_args(raw: &str) -> Result<Value, String> {
     if raw.trim().is_empty() {
         return Ok(Value::Object(Default::default()));
     }
-    serde_json::from_str(raw).map_err(|e| format!("arguments are not valid JSON: {e}"))
+    serde_json::from_str(raw).map_err(|e| {
+        if e.is_eof() {
+            format!(
+                "the arguments were cut off after {} bytes, likely at the output token limit; \
+                 send less at once, e.g. fewer or smaller edits",
+                raw.len()
+            )
+        } else {
+            format!(
+                "the arguments are not valid JSON ({e}); inside strings, write newlines as \\n \
+                 and escape quotes"
+            )
+        }
+    })
 }
 
 fn typed_args<T: DeserializeOwned>(args: Value) -> Result<T, String> {

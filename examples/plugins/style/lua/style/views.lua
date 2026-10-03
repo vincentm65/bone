@@ -279,6 +279,40 @@ local function diff_lines(old, new)
   return removed, added
 end
 
+--- Lines an anchored edit removed and added: from the diff in its result
+--- (`-text`, `+LINE#HASH|text`), or from its arguments while it runs.
+local function anchored_diff(args, out)
+  local removed, added = {}, {}
+  if out then
+    for _, l in ipairs(lines(out)) do
+      local text = l:match("^%+%d+#%w%w|(.*)$")
+      if text then
+        added[#added + 1] = text
+      elseif l:sub(1, 1) == "-" then
+        removed[#removed + 1] = l:sub(2)
+      end
+    end
+    return removed, added
+  end
+  local edits = args.edits
+  if type(edits) ~= "table" then
+    edits = { args }
+  end
+  for _, e in ipairs(edits) do
+    if type(e) == "table" then
+      for _, l in ipairs(type(e.text) == "string" and lines(e.text) or {}) do
+        added[#added + 1] = l
+      end
+      local from = tonumber(tostring(e.at or ""):match("^%s*(%d+)"))
+      local to = tonumber(tostring(e["end"] or ""):match("^%s*(%d+)")) or from
+      for _ = 1, from and to and math.max(to - from + 1, 0) or 0 do
+        removed[#removed + 1] = "…"
+      end
+    end
+  end
+  return removed, added
+end
+
 local function diff_rows(removed, added, max, width)
   local room = math.max(width - 6, 1)
   local rows = {}
@@ -329,7 +363,12 @@ function bone.ui.tool_content(item, ctx)
     local n = #lines(args.content or "")
     return { title = file_header(name, args.path, n .. " line" .. (n == 1 and "" or "s")), lines = {} }
   elseif name == "edit_file" then
-    local removed, added = diff_lines(args.old_string or "", args.new_string or "")
+    local removed, added
+    if args.old_string then
+      removed, added = diff_lines(args.old_string or "", args.new_string or "")
+    else
+      removed, added = anchored_diff(args, item.done and not item.is_error and out)
+    end
     local summary = "+" .. #added .. " −" .. #removed
     local times = tonumber((out or ""):match("^Replaced (%d+) "))
     if times and times > 1 then

@@ -1244,6 +1244,21 @@ async fn default_tool_views() {
             "    ╰ +     more();"
         ]
     );
+    let edit = json!({"path": "a.rs", "edits": [{"at": "2#aa|    old();", "text": "    new();\n    more();"}]});
+    assert_eq!(
+        tool_rows("edit_file", edit.clone(), None, 30).await,
+        ["  ◌ edit_file a.rs (+2 −1)"]
+    );
+    let out = "Edited a.rs (-1 +2)\n1#xx|fn a() {\n-    old();\n+2#yy|    new();\n+3#zz|    more();\n4#ww|}";
+    assert_eq!(
+        tool_rows("edit_file", edit, Some((out, false)), 30).await,
+        [
+            "    edit_file a.rs (+2 −1)",
+            "    │ -     old();",
+            "    │ +     new();",
+            "    ╰ +     more();"
+        ]
+    );
     assert_eq!(
         tool_rows("word_count", json!({"text": "a b"}), Some(("2", false)), 60).await,
         ["    word_count {\"text\":\"a b\"}", "    ╰ 2"]

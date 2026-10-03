@@ -301,7 +301,7 @@ async fn runs_tools_until_the_model_answers() {
     assert!(
         tool_result(&t[5])
             .0
-            .starts_with("arguments are not valid JSON")
+            .starts_with("the arguments are not valid JSON")
     );
     assert_eq!(
         t[6],
