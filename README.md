@@ -6,7 +6,7 @@ want to change.
 
 - **One API.** The core speaks JSON-RPC 2.0 over stdio or a Unix socket. The TUI is just a client; scripts and editors can be too.
 - **A simple TUI.** Type and press enter. `/` commands with suggestions, streaming output, and a session picker. Tool calls run without asking; `examples/plugins/approve` adds a y/n prompt before anything changes your files.
-- **Lua all the way down.** `~/.bone/core.lua` sets up providers, tools and hooks; `~/.bone/tui.lua` keys, commands, colors, the statusline and how tool calls look. The screen starts as a blank slate (plain text); `examples/plugins/style` is a complete look to install or copy from.
+- **Lua all the way down.** `~/.bone/core.lua` sets up providers (or writes new ones in Lua: see `examples/plugins/anthropic`), tools and hooks; `~/.bone/tui.lua` keys, commands, colors, the statusline and how tool calls look. The screen starts as a blank slate (plain text); `examples/plugins/style` is a complete look to install or copy from.
 
 ```text
 › fix the typo in main.rs

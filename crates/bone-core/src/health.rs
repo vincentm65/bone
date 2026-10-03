@@ -37,7 +37,16 @@ pub(crate) async fn check(inner: &Inner) -> Vec<HealthItem> {
             "none set; a remote provider usually needs one (api_key in core.lua or BONE_API_KEY)",
         ),
     });
-    out.push(reachable(p).await);
+    out.push(match &p.kind {
+        Some(kind) => item(
+            "reachable",
+            Ok,
+            format!(
+                "not checked: the {kind} provider is Lua (a plugin can add a bone.health check)"
+            ),
+        ),
+        None => reachable(p).await,
+    });
 
     let dir = &inner.config.data_dir;
     let probe = dir.join(".bone-health");

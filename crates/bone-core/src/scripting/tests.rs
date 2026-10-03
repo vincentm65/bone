@@ -31,7 +31,7 @@ fn config_and_env_overrides() {
         bone.config.data_dir = "~/somewhere"
         "#,
     );
-    let lua = setup(dir.path()).unwrap();
+    let lua = setup(dir.path(), &Default::default()).unwrap();
     let ex = extract(&lua).unwrap();
     let c = resolve(dir.path(), &ex, &no_env).unwrap();
     assert_eq!(
@@ -65,7 +65,7 @@ fn config_and_env_overrides() {
 #[test]
 fn missing_or_bad_config_is_explained() {
     let dir = tempfile::tempdir().unwrap();
-    let ex = extract(&setup(dir.path()).unwrap()).unwrap();
+    let ex = extract(&setup(dir.path(), &Default::default()).unwrap()).unwrap();
     let err = resolve(dir.path(), &ex, &no_env).unwrap_err();
     assert!(err.contains("no model provider configured"), "{err}");
     let env = |k: &str| match k {
@@ -76,7 +76,7 @@ fn missing_or_bad_config_is_explained() {
     assert_eq!(resolve(dir.path(), &ex, &env).unwrap().data_dir, dir.path());
 
     write(dir.path(), r#"bone.config.provider = "nope""#);
-    let ex = extract(&setup(dir.path()).unwrap()).unwrap();
+    let ex = extract(&setup(dir.path(), &Default::default()).unwrap()).unwrap();
     assert!(
         resolve(dir.path(), &ex, &no_env)
             .unwrap_err()
@@ -517,4 +517,255 @@ async fn system_sleep_and_http_wait_without_blocking() {
     assert_eq!(cancelled.await.unwrap().unwrap(), "cancelled");
     assert!(started.elapsed() < Duration::from_millis(300));
     assert_eq!(other.await.unwrap().unwrap(), "d 0");
+}
+
+/// Serve canned SSE bodies, one per request, recording request bodies.
+async fn fake_sse(bodies: Vec<String>) -> (String, Arc<std::sync::Mutex<Vec<Json>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let seen: Arc<std::sync::Mutex<Vec<Json>>> = Default::default();
+    let seen2 = seen.clone();
+    tokio::spawn(async move {
+        for body in bodies {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                let n = sock.read(&mut chunk).await.unwrap();
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&buf[..i]).to_lowercase();
+                    let len: usize = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .map(|v| v.trim().parse().unwrap())
+                        .unwrap_or(0);
+                    while buf.len() < i + 4 + len {
+                        let n = sock.read(&mut chunk).await.unwrap();
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    assert!(head.contains("x-api-key: k"), "{head}");
+                    seen2
+                        .lock()
+                        .unwrap()
+                        .push(serde_json::from_slice(&buf[i + 4..i + 4 + len]).unwrap());
+                    break;
+                }
+            }
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}"
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.shutdown().await.unwrap();
+        }
+    });
+    (url, seen)
+}
+
+fn anthropic_sse(events: &[Json]) -> String {
+    events
+        .iter()
+        .map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap()))
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lua_provider_streams_and_calls_tools() {
+    use crate::Core;
+    use bone_proto::methods::*;
+    let (url, seen) = fake_sse(vec![
+        anthropic_sse(&[
+            json!({"type":"message_start","message":{"usage":{"input_tokens":12}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"stamp it"}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu_1","name":"stamp"}}),
+            json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"word\":"}}),
+            json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"hi\"}"}}),
+            json!({"type":"content_block_stop","index":1}),
+            json!({"type":"message_delta","usage":{"output_tokens":7}}),
+            json!({"type":"message_stop"}),
+        ]),
+        anthropic_sse(&[
+            json!({"type":"message_start","message":{"usage":{"input_tokens":30}}}),
+            json!({"type":"content_block_start","index":0,"content_block":{"type":"text"}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Stamped "}}),
+            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"HI."}}),
+            json!({"type":"content_block_stop","index":0}),
+            json!({"type":"message_delta","usage":{"output_tokens":3}}),
+        ]),
+    ])
+    .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let plugin = dir.path().join("plugins/anthropic");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/anthropic/core.lua"),
+        plugin.join("core.lua"),
+    )
+    .unwrap();
+    write(
+        dir.path(),
+        &format!(
+            r#"
+            bone.config.providers.claude = {{ type = "anthropic", model = "claude-test", api_key = "k", base_url = "{url}" }}
+            bone.config.system_prompt = "Be brief."
+            bone.tool.register {{ name = "stamp", run = function(a) return a.word:upper() end }}
+            "#
+        ),
+    );
+    let loaded = load(dir.path()).unwrap();
+    assert_eq!(loaded.config.provider.kind.as_deref(), Some("anthropic"));
+    let core = Core::from_loaded(loaded);
+    let mut events = core.subscribe();
+    let call = |m: &'static str, p: Json| {
+        let core = &core;
+        async move { core.handle(m, Some(p)).await.unwrap() }
+    };
+    let work = tempfile::tempdir().unwrap();
+    let info = call(SessionCreate::METHOD, json!({ "cwd": work.path() })).await;
+    let sid = info["session_id"].as_str().unwrap().to_owned();
+    call(
+        TurnStart::METHOD,
+        json!({ "session_id": sid, "text": "stamp hi" }),
+    )
+    .await;
+
+    let mut deltas = String::new();
+    let outcome = loop {
+        let e = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("event")
+            .unwrap();
+        if e.method == MessageDelta::METHOD {
+            deltas.push_str(e.params["text"].as_str().unwrap());
+        }
+        if e.method == TurnFinished::METHOD {
+            break e.params["outcome"].clone();
+        }
+    };
+    assert_eq!(outcome["status"], "completed", "{outcome}");
+    assert_eq!(deltas, "stamp itStamped HI.");
+
+    let msgs = call(SessionMessages::METHOD, json!({ "session_id": sid })).await;
+    let msgs = msgs["messages"].as_array().unwrap();
+    assert_eq!(msgs[1]["tool_calls"][0]["arguments"], r#"{"word":"hi"}"#);
+    assert_eq!(msgs[1]["reasoning"], "stamp it");
+    assert_eq!(msgs[2]["content"], "HI");
+    assert_eq!(msgs[3]["content"], "Stamped HI.");
+
+    // What the API received: the system prompt apart, the tool round trip
+    // as tool_use and tool_result blocks.
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen[0]["model"], "claude-test");
+    assert!(seen[0]["system"].as_str().unwrap().starts_with("Be brief."));
+    assert_eq!(seen[0]["messages"][0]["content"][0]["text"], "stamp hi");
+    assert_eq!(
+        seen[0]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|t| t["name"] == "stamp")
+            .count(),
+        1
+    );
+    let m = &seen[1]["messages"];
+    assert_eq!(m[1]["role"], "assistant");
+    assert_eq!(m[1]["content"][0]["type"], "tool_use");
+    assert_eq!(m[1]["content"][0]["input"]["word"], "hi");
+    assert_eq!(m[2]["content"][0]["type"], "tool_result");
+    assert_eq!(m[2]["content"][0]["content"], "HI");
+}
+
+#[test]
+fn unknown_lua_provider_type_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        r#"bone.config.providers.x = { type = "nope", model = "m" }"#,
+    );
+    let e = load(dir.path()).err().unwrap();
+    assert!(e.contains("no Lua provider of type \"nope\""), "{e}");
+}
+
+async fn next_core_event(
+    events: &mut tokio::sync::broadcast::Receiver<crate::Event>,
+) -> crate::Event {
+    tokio::time::timeout(Duration::from_secs(5), events.recv())
+        .await
+        .expect("event")
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelling_stops_a_lua_provider_mid_stream() {
+    use crate::Core;
+    use bone_proto::methods::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    // A server that sends one event and then hangs.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 8192];
+        let _ = sock.read(&mut buf).await;
+        sock.write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\n\r\ndata: one\n\n")
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &format!(
+            r#"
+            bone.provider.register("hang", {{ complete = function(req, emit)
+              local s = bone.http_stream({{ url = "{url}" }})
+              for data in s:events() do emit({{ text = data }}) end
+              return {{ content = "never" }}
+            end }})
+            bone.config.providers.h = {{ type = "hang", model = "m" }}
+            "#
+        ),
+    );
+    let core = Core::from_loaded(load(dir.path()).unwrap());
+    let mut events = core.subscribe();
+    let info = core
+        .handle(SessionCreate::METHOD, Some(json!({ "cwd": "/" })))
+        .await
+        .unwrap();
+    let sid = info["session_id"].clone();
+    core.handle(
+        TurnStart::METHOD,
+        Some(json!({ "session_id": sid, "text": "go" })),
+    )
+    .await
+    .unwrap();
+    loop {
+        let e = next_core_event(&mut events).await;
+        if e.method == MessageDelta::METHOD {
+            assert_eq!(e.params["text"], "one");
+            break;
+        }
+    }
+    let started = std::time::Instant::now();
+    core.handle(TurnCancel::METHOD, Some(json!({ "session_id": sid })))
+        .await
+        .unwrap();
+    loop {
+        let e = next_core_event(&mut events).await;
+        if e.method == TurnFinished::METHOD {
+            assert_eq!(e.params["outcome"]["status"], "cancelled");
+            break;
+        }
+    }
+    assert!(started.elapsed() < Duration::from_secs(2));
+    // The Lua thread is free: another job runs at once.
+    let s = core.inner.scripting.clone().unwrap();
+    let out = tokio::time::timeout(Duration::from_secs(2), s.hooks("x", json!({})))
+        .await
+        .expect("Lua thread free");
+    assert_eq!(out.deny, None);
 }

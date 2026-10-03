@@ -133,6 +133,58 @@ function bone.http(req)
   return wait({ http = req })
 end
 
+--- Read a streaming HTTP response one server-sent event at a time (for
+--- providers). Same request fields as bone.http. Returns
+--- { status, headers } with methods:
+---   s:next()   the next event's data (a string), or nil at the end
+---   s:events() an iterator over the rest: for data in s:events() do ... end
+---   s:text()   the rest of the body (e.g. an error message)
+---   s:close()
+--- Only in hooks, tools and providers; each read waits without blocking.
+function bone.http_stream(req)
+  if not in_job() then
+    error("bone.http_stream only works inside hooks, tools and providers", 2)
+  end
+  local r = wait({ http_stream = req })
+  local id = r.stream
+  local s = { status = r.status, headers = r.headers, _handle = bone._stream_handle(id) }
+  function s:next()
+    return wait({ stream_next = id })
+  end
+  function s:events()
+    return function()
+      return s:next()
+    end
+  end
+  function s:text()
+    return wait({ stream_text = id })
+  end
+  function s:close()
+    bone._stream_close(id)
+  end
+  return s
+end
+
+bone.provider = {}
+bone._providers = {}
+
+--- Add a model provider. Use it with `type = name` in a providers entry:
+---   bone.config.providers.claude = { type = "anthropic", model = "...", api_key = ... }
+--- spec.complete(req, emit) runs as a job (bone.http_stream etc. wait):
+---   req = { messages, tools = { { name, description, parameters } },
+---           options (the providers entry), session_id }
+---   messages as in the protocol: { role = "system" | "user", content },
+---     { role = "assistant", content, reasoning, tool_calls = { { id, name, arguments (JSON string) } } },
+---     { role = "tool", call_id, content, is_error }
+---   emit({ text = "..." }) or emit({ reasoning = "..." }) streams output
+---   return { content, reasoning, tool_calls = { { id, name, arguments } },
+---            usage = { input_tokens, output_tokens } }
+function bone.provider.register(name, spec)
+  assert(type(name) == "string" and type(spec) == "table" and type(spec.complete) == "function",
+    "bone.provider.register(name, { complete = function(req, emit) ... end })")
+  bone._providers[name] = spec
+end
+
 bone._health = {}
 
 --- Add a check to /health (and the `health/check` method). fn() returns a
@@ -179,6 +231,14 @@ end
 function bone._hooks_entry(name, ev)
   local out, deny = bone.run_hooks(name, ev)
   return { event = out, deny = deny }
+end
+
+function bone._provider_entry(name, req, emit)
+  local p = bone._providers[name]
+  if not p then
+    error("no Lua provider named " .. name)
+  end
+  return p.complete(req, emit)
 end
 
 function bone._health_entry()

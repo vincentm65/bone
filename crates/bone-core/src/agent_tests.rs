@@ -106,6 +106,8 @@ impl Harness {
         let work = tempfile::tempdir().unwrap();
         let config = CoreConfig {
             provider: ProviderConfig {
+                kind: None,
+                options: serde_json::Value::Null,
                 base_url: "http://unused".into(),
                 model: "m".into(),
                 api_key: None,

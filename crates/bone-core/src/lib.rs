@@ -87,7 +87,14 @@ impl Core {
     /// A core configured by `core.lua` (see [`scripting::load`]): its
     /// provider, the built-in tools plus Lua tools, and its hooks.
     pub fn from_loaded(loaded: Loaded) -> Self {
-        let provider = Arc::new(OpenAiProvider::new(loaded.config.provider.clone()));
+        let p = &loaded.config.provider;
+        let provider: Arc<dyn Provider> = match &p.kind {
+            Some(_) => Arc::new(crate::scripting::LuaProvider::new(
+                p,
+                loaded.scripting.clone(),
+            )),
+            None => Arc::new(OpenAiProvider::new(p.clone())),
+        };
         Self::with_lua(loaded, provider)
     }
 

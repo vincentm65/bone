@@ -16,11 +16,21 @@ pub struct CoreConfig {
     pub data_dir: PathBuf,
 }
 
-/// An OpenAI-compatible `/chat/completions` endpoint.
+/// A model provider: an OpenAI-compatible `/chat/completions` endpoint, or
+/// (with `type`) one written in Lua.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderConfig {
     /// e.g. `https://api.deepseek.com/v1` or `http://localhost:8081/v1`.
+    /// Required for the built-in provider; a Lua provider may default it.
+    #[serde(default)]
     pub base_url: String,
+    /// A provider registered with `bone.provider.register`; `None` for the
+    /// built-in OpenAI-compatible one.
+    #[serde(default, rename = "type")]
+    pub kind: Option<String>,
+    /// The whole table from `core.lua`, handed to a Lua provider.
+    #[serde(skip)]
+    pub options: serde_json::Value,
     pub model: String,
     #[serde(default)]
     pub api_key: Option<String>,

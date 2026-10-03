@@ -92,6 +92,8 @@ async fn turn_with_tool_call_over_http() {
     let work = tempfile::tempdir().unwrap();
     let core = Core::new(CoreConfig {
         provider: ProviderConfig {
+            kind: None,
+            options: serde_json::Value::Null,
             base_url: url,
             model: "test-model".into(),
             api_key: Some("sk-test".into()),

@@ -16,6 +16,8 @@ fn server() -> Server {
     let data = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     Server::new(Arc::new(Core::new(CoreConfig {
         provider: ProviderConfig {
+            kind: None,
+            options: serde_json::Value::Null,
             base_url: "http://127.0.0.1:9".into(),
             model: "m".into(),
             api_key: None,

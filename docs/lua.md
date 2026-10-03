@@ -140,6 +140,36 @@ end
 
 `BONE_APPROVAL=auto` turns it off for one run. It is about 60 lines of core Lua plus a popup; copy and change it to build your own rules.
 
+### Providers in Lua
+
+Any API can be a model provider. Register one, then pick it with `type` in a providers entry (every field of that entry reaches the provider as `req.options`):
+
+```lua
+bone.provider.register("myapi", {
+  complete = function(req, emit)
+    -- req = { messages, tools = { { name, description, parameters } }, options, session_id }
+    local s = bone.http_stream({ url = req.options.base_url .. "/chat", method = "POST", body = { ... } })
+    if s.status ~= 200 then error("HTTP " .. s.status .. ": " .. s:text()) end
+    local text = ""
+    for data in s:events() do            -- each server-sent event's data, as it arrives
+      local chunk = bone.json.decode(data).text
+      text = text .. chunk
+      emit({ text = chunk })             -- or emit({ reasoning = ... })
+    end
+    return { content = text, tool_calls = {}, usage = { input_tokens = 0, output_tokens = 0 } }
+  end,
+})
+bone.config.providers.mine = { type = "myapi", model = "m", base_url = "https://example.com" }
+bone.config.provider = "mine"
+```
+
+- `messages` are as in the protocol: `{ role = "system" | "user", content }`, `{ role = "assistant", content, reasoning, tool_calls = { { id, name, arguments } } }` (arguments is a JSON string), `{ role = "tool", call_id, content, is_error }`.
+- Return `{ content, reasoning, tool_calls = { { id, name, arguments } }, usage }`; `arguments` may be a string or a table.
+- `bone.http_stream(req)` takes the same fields as `bone.http` and returns `{ status, headers }` with `:next()` (the next event's data, `nil` at the end), `:events()` (an iterator), `:text()` (the rest of the body) and `:close()`.
+- `complete` runs as a job: it waits without blocking, and a cancelled turn stops it.
+
+`examples/plugins/anthropic` is a complete provider for the Anthropic Messages API (streaming, thinking, tools) in about 140 lines.
+
 ### Health checks
 
 `bone.health(name, fn)` adds a check to `/health` (and the `health/check` method). `fn()` returns a status (`"ok"`, `"warn"`, `"error"`, or `true`/`false`) and a message. Core checks run as jobs, so they may use `bone.system` and `bone.http`:

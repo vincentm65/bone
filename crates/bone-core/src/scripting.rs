@@ -92,6 +92,11 @@ enum Done {
     Prompt(oneshot::Sender<Result<String, String>>),
     /// The result as JSON (health checks).
     Json(oneshot::Sender<Result<Json, String>>),
+    /// A Lua provider: its `emit` calls go to `deltas`, its result to `reply`.
+    Provider {
+        reply: oneshot::Sender<Result<Json, String>>,
+        deltas: tokio_mpsc::UnboundedSender<Json>,
+    },
 }
 
 /// Everything read out of `bone.config` and `bone._tools`.
@@ -103,6 +108,8 @@ struct Extracted {
     data_dir: Option<String>,
     tools: Vec<ToolSpec>,
     hooks: HashSet<String>,
+    /// Names registered with `bone.provider.register`.
+    lua_providers: HashSet<String>,
 }
 
 /// Run the runtime, plugins and `<config_dir>/core.lua`, then apply `BONE_*`
@@ -151,6 +158,30 @@ fn resolve(
     ex: &Extracted,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<CoreConfig, String> {
+    for (name, p) in &ex.providers {
+        match &p.kind {
+            Some(kind) if !ex.lua_providers.contains(kind) => {
+                let mut known: Vec<&String> = ex.lua_providers.iter().collect();
+                known.sort();
+                return Err(format!(
+                    "bone.config.providers.{name}: no Lua provider of type {kind:?} (registered: {})",
+                    if known.is_empty() {
+                        "none; install its plugin".to_owned()
+                    } else {
+                        known
+                            .iter()
+                            .map(|k| k.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    }
+                ));
+            }
+            None if p.base_url.is_empty() => {
+                return Err(format!("bone.config.providers.{name}: base_url is missing"));
+            }
+            _ => {}
+        }
+    }
     let mut provider = match &ex.provider {
         Some(name) => Some(ex.providers.get(name).cloned().ok_or_else(|| {
             format!("bone.config.provider is {name:?}, but bone.config.providers has no such entry")
@@ -162,6 +193,8 @@ fn resolve(
         let model = env("BONE_MODEL").or_else(|| provider.as_ref().map(|p| p.model.clone()));
         let model = model.ok_or("BONE_BASE_URL is set but BONE_MODEL is not")?;
         provider = Some(ProviderConfig {
+            kind: None,
+            options: serde_json::Value::Null,
             base_url,
             model,
             api_key: None,
@@ -345,6 +378,285 @@ impl Tool for LuaTool {
     }
 }
 
+// ---- Lua providers ---------------------------------------------------------
+
+/// A model provider written in Lua (`bone.provider.register`), selected by
+/// `type` in a `bone.config.providers` entry.
+pub struct LuaProvider {
+    kind: String,
+    options: Json,
+    scripting: Arc<Scripting>,
+}
+
+impl LuaProvider {
+    pub fn new(config: &ProviderConfig, scripting: Arc<Scripting>) -> Self {
+        LuaProvider {
+            kind: config.kind.clone().unwrap_or_default(),
+            options: config.options.clone(),
+            scripting,
+        }
+    }
+}
+
+/// Cancels the session's Lua work if the completion is dropped (the turn
+/// was cancelled) before it finished.
+struct CancelGuard<'a> {
+    scripting: &'a Scripting,
+    session_id: &'a str,
+    armed: bool,
+}
+
+impl Drop for CancelGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.scripting.cancel_session(self.session_id);
+        }
+    }
+}
+
+impl crate::provider::Provider for LuaProvider {
+    fn complete<'a>(
+        &'a self,
+        req: crate::provider::CompletionRequest<'a>,
+        on_delta: crate::provider::DeltaSink<'a>,
+    ) -> BoxFuture<'a, Result<crate::provider::Completion, crate::provider::ProviderError>> {
+        use crate::provider::{Delta, ProviderError};
+        Box::pin(async move {
+            let err = |e: String| ProviderError(format!("{} provider: {e}", self.kind));
+            let tools: Vec<Json> = req
+                .tools
+                .iter()
+                .map(|t| json!({ "name": t.name, "description": t.description, "parameters": t.parameters }))
+                .collect();
+            let request = json!({
+                "messages": req.messages,
+                "tools": tools,
+                "options": self.options,
+                "session_id": req.session_id,
+            });
+            let (reply, mut rx) = oneshot::channel();
+            let (deltas, mut drx) = tokio_mpsc::unbounded_channel();
+            self.scripting
+                .run(
+                    "_provider_entry",
+                    vec![json!(self.kind), request],
+                    Some(req.session_id),
+                    Done::Provider { reply, deltas },
+                )
+                .map_err(err)?;
+            let mut guard = CancelGuard {
+                scripting: &self.scripting,
+                session_id: req.session_id,
+                armed: true,
+            };
+            let send = |d: Json, on_delta: &mut crate::provider::DeltaSink<'a>| match d {
+                Json::String(t) => on_delta(Delta::Text(t)),
+                d => {
+                    if let Some(t) = d["text"].as_str() {
+                        on_delta(Delta::Text(t.to_owned()));
+                    }
+                    if let Some(t) = d["reasoning"].as_str() {
+                        on_delta(Delta::Reasoning(t.to_owned()));
+                    }
+                }
+            };
+            let mut on_delta = on_delta;
+            let result = loop {
+                tokio::select! {
+                    biased;
+                    Some(d) = drx.recv() => send(d, &mut on_delta),
+                    r = &mut rx => break r,
+                }
+            };
+            while let Ok(d) = drx.try_recv() {
+                send(d, &mut on_delta);
+            }
+            guard.armed = false;
+            let v = result
+                .map_err(|_| err("the Lua thread stopped".into()))?
+                .map_err(err)?;
+            completion(&v).map_err(err)
+        })
+    }
+}
+
+/// What a Lua provider returns: `{ content, reasoning, tool_calls = { { id,
+/// name, arguments (string or table) } }, usage = { input_tokens,
+/// output_tokens } }`.
+fn completion(v: &Json) -> Result<crate::provider::Completion, String> {
+    use bone_proto::types::{ToolCall, Usage};
+    if !v.is_object() {
+        return Err(format!("complete() must return a table, not {v}"));
+    }
+    let text = |k: &str| v[k].as_str().unwrap_or_default().to_owned();
+    let calls = match &v["tool_calls"] {
+        Json::Array(a) => a.clone(),
+        _ => Vec::new(),
+    };
+    let tool_calls = calls
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let name = c["name"]
+                .as_str()
+                .ok_or("a tool call has no name")?
+                .to_owned();
+            let arguments = match &c["arguments"] {
+                Json::String(s) => s.clone(),
+                Json::Null => "{}".to_owned(),
+                other => crate::agent::list(other).to_string(),
+            };
+            let id = c["id"]
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("call_{i}"));
+            Ok(ToolCall {
+                id,
+                name,
+                arguments,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let usage = v["usage"].as_object().map(|u| Usage {
+        input_tokens: u.get("input_tokens").and_then(Json::as_u64).unwrap_or(0),
+        output_tokens: u.get("output_tokens").and_then(Json::as_u64).unwrap_or(0),
+    });
+    Ok(crate::provider::Completion {
+        content: text("content"),
+        reasoning: text("reasoning"),
+        tool_calls,
+        usage,
+    })
+}
+
+// ---- HTTP streams (bone.http_stream) --------------------------------------
+
+/// Open streaming responses by id. Each is read one server-sent event at a
+/// time by a waiting coroutine.
+#[derive(Default)]
+pub(crate) struct Streams {
+    next: std::sync::atomic::AtomicU64,
+    open: std::sync::Mutex<HashMap<u64, Arc<tokio::sync::Mutex<HttpStream>>>>,
+}
+
+struct HttpStream {
+    res: reqwest::Response,
+    sse: crate::provider::sse::SseParser,
+    queue: std::collections::VecDeque<String>,
+    done: bool,
+}
+
+impl Streams {
+    fn close(&self, id: u64) {
+        self.open.lock().unwrap().remove(&id);
+    }
+
+    fn get(&self, id: u64) -> Result<Arc<tokio::sync::Mutex<HttpStream>>, String> {
+        self.open
+            .lock()
+            .unwrap()
+            .get(&id)
+            .cloned()
+            .ok_or_else(|| "this stream is closed".to_string())
+    }
+
+    /// Stream waits: `{ http_stream = req }` opens one, `{ stream_next = id }`
+    /// is its next event's data (nil at the end), `{ stream_text = id }` the
+    /// rest of the body. `None` for other waits.
+    async fn wait(&self, spec: &Json) -> Option<Result<Json, String>> {
+        if spec["http_stream"].is_object() {
+            return Some(self.open_stream(&spec["http_stream"]).await);
+        }
+        if let Some(id) = spec["stream_next"].as_u64() {
+            return Some(match self.get(id) {
+                Ok(s) => s
+                    .lock()
+                    .await
+                    .next()
+                    .await
+                    .map(|e| e.map_or(Json::Null, Json::String)),
+                Err(e) => Err(e),
+            });
+        }
+        if let Some(id) = spec["stream_text"].as_u64() {
+            return Some(match self.get(id) {
+                Ok(s) => s.lock().await.rest().await.map(Json::String),
+                Err(e) => Err(e),
+            });
+        }
+        None
+    }
+
+    async fn open_stream(&self, req: &Json) -> Result<Json, String> {
+        let url = req["url"].as_str().unwrap_or_default().to_owned();
+        let res = bone_lua::wait::request(req)?
+            .send()
+            .await
+            .map_err(|e| format!("{url}: {e}"))?;
+        let status = res.status().as_u16();
+        let headers: serde_json::Map<String, Json> = res
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.to_string(), json!(v.to_str().unwrap_or_default())))
+            .collect();
+        let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let stream = HttpStream {
+            res,
+            sse: Default::default(),
+            queue: Default::default(),
+            done: false,
+        };
+        self.open
+            .lock()
+            .unwrap()
+            .insert(id, Arc::new(tokio::sync::Mutex::new(stream)));
+        Ok(json!({ "status": status, "headers": headers, "stream": id }))
+    }
+}
+
+impl HttpStream {
+    async fn next(&mut self) -> Result<Option<String>, String> {
+        loop {
+            if let Some(ev) = self.queue.pop_front() {
+                return Ok(Some(ev));
+            }
+            if self.done {
+                return Ok(None);
+            }
+            match self.res.chunk().await.map_err(|e| e.to_string())? {
+                Some(bytes) => self.queue.extend(self.sse.push(&bytes)),
+                None => {
+                    self.done = true;
+                    self.queue.extend(self.sse.finish());
+                }
+            }
+        }
+    }
+
+    async fn rest(&mut self) -> Result<String, String> {
+        let mut out = String::new();
+        while let Some(bytes) = self.res.chunk().await.map_err(|e| e.to_string())? {
+            out.push_str(&String::from_utf8_lossy(&bytes));
+        }
+        self.done = true;
+        Ok(out)
+    }
+}
+
+/// The Lua side of an open stream; dropping it closes the stream.
+struct StreamHandle {
+    id: u64,
+    streams: Arc<Streams>,
+}
+
+impl mlua::UserData for StreamHandle {}
+
+impl Drop for StreamHandle {
+    fn drop(&mut self) {
+        self.streams.close(self.id);
+    }
+}
+
 // ---- the Lua thread ------------------------------------------------------
 
 /// A coroutine waiting for an answer or for background work.
@@ -366,6 +678,8 @@ struct State {
     jobs: mpsc::Sender<Job>,
     /// Runs background work for `bone.system`, `bone.sleep`, `bone.http`.
     rt: tokio::runtime::Runtime,
+    /// Open `bone.http_stream` responses.
+    streams: Arc<Streams>,
 }
 
 fn lua_thread(
@@ -387,7 +701,8 @@ fn lua_thread(
             return;
         }
     };
-    let lua = match setup(&dir) {
+    let streams = Arc::new(Streams::default());
+    let lua = match setup(&dir, &streams) {
         Ok(lua) => lua,
         Err(e) => {
             let _ = init.send(Err(e));
@@ -409,6 +724,7 @@ fn lua_thread(
         events,
         jobs: jobs_tx,
         rt,
+        streams,
     };
     for job in jobs {
         match job {
@@ -430,6 +746,18 @@ fn lua_thread(
                         .collect::<mlua::Result<Vec<_>>>()?;
                     Ok((thread, MultiValue::from_iter(args)))
                 })();
+                // A provider's emit(delta) goes straight to its caller.
+                let started = started.and_then(|(thread, mut args)| {
+                    if let Done::Provider { deltas, .. } = &done {
+                        let deltas = deltas.clone();
+                        let emit = st.lua.create_function(move |_, d: Value| {
+                            let _ = deltas.send(from_lua(&d)?);
+                            Ok(())
+                        })?;
+                        args.push_back(Value::Function(emit));
+                    }
+                    Ok((thread, args))
+                });
                 match started {
                     Ok((thread, args)) => st.step(thread, args, session_id, done),
                     Err(e) => st.finish(done, Err(e)),
@@ -527,8 +855,12 @@ impl State {
                 self.next_wait += 1;
                 let wait_id = self.next_wait;
                 let jobs = self.jobs.clone();
+                let streams = self.streams.clone();
                 let task = self.rt.spawn(async move {
-                    let result = bone_lua::wait::run(spec).await;
+                    let result = match streams.wait(&spec).await {
+                        Some(r) => r,
+                        None => bone_lua::wait::run(spec).await,
+                    };
                     let _ = jobs.send(Job::Resume { wait_id, result });
                 });
                 let w = Waiting {
@@ -599,6 +931,12 @@ impl State {
                     deny: Some(format!("{name} hook failed: {}", short_error(&e))),
                 }));
             }
+            Done::Provider { reply, .. } => {
+                let v = r
+                    .and_then(|v| Value::from_lua_multi(v, lua))
+                    .and_then(|v| from_lua(&v));
+                let _ = reply.send(v.map_err(|e| short_error(&e)));
+            }
             Done::Json(reply) => {
                 let v = r
                     .and_then(|v| Value::from_lua_multi(v, lua))
@@ -613,21 +951,40 @@ impl State {
     }
 }
 
-fn setup(dir: &Path) -> Result<Lua, String> {
+fn setup(dir: &Path, streams: &Arc<Streams>) -> Result<Lua, String> {
     let lua = bone_lua::new_state(Side::Core, Some(dir)).map_err(|e| e.to_string())?;
     let run = |rel: &str| {
         bone_lua::run_runtime(&lua, Some(dir), rel).map_err(|e| format!("runtime/{rel}: {e}"))
     };
     run("core/api.lua")?;
-    install_helpers(&lua, dir).map_err(|e| e.to_string())?;
+    install_helpers(&lua, dir, streams).map_err(|e| e.to_string())?;
     run("core/defaults.lua")?;
     bone_lua::run_user_plugins(&lua, dir, "core.lua").map_err(|e| e.to_string())?;
     bone_lua::run_file(&lua, &dir.join("core.lua")).map_err(|e| e.to_string())?;
     Ok(lua)
 }
 
-fn install_helpers(lua: &Lua, dir: &Path) -> mlua::Result<()> {
+fn install_helpers(lua: &Lua, dir: &Path, streams: &Arc<Streams>) -> mlua::Result<()> {
     let bone: Table = lua.globals().get("bone")?;
+    // Ties an open stream to a Lua value: when Lua drops it, it closes.
+    let st = streams.clone();
+    bone.set(
+        "_stream_handle",
+        lua.create_function(move |lua, id: u64| {
+            lua.create_userdata(StreamHandle {
+                id,
+                streams: st.clone(),
+            })
+        })?,
+    )?;
+    let st = streams.clone();
+    bone.set(
+        "_stream_close",
+        lua.create_function(move |_, id: u64| {
+            st.close(id);
+            Ok(())
+        })?,
+    )?;
     // Blocking versions, for code that runs outside a job (while core.lua
     // loads). Inside hooks and tools bone.system & co. wait without blocking.
     bone.set(
@@ -689,8 +1046,10 @@ fn extract(lua: &Lua) -> mlua::Result<Extracted> {
     if let Some(t) = config.get::<Option<Table>>("providers")? {
         for pair in t.pairs::<String, Value>() {
             let (name, v) = pair?;
-            let p: ProviderConfig = serde_json::from_value(from_lua(&v)?)
+            let json = from_lua(&v)?;
+            let mut p: ProviderConfig = serde_json::from_value(json.clone())
                 .map_err(|e| mlua::Error::runtime(format!("bone.config.providers.{name}: {e}")))?;
+            p.options = json;
             providers.insert(name, p);
         }
     }
@@ -727,6 +1086,11 @@ fn extract(lua: &Lua) -> mlua::Result<Extracted> {
         .filter_map(|p| p.ok().map(|(k, _)| k))
         .collect();
     Ok(Extracted {
+        lua_providers: bone
+            .get::<Table>("_providers")?
+            .pairs::<String, Value>()
+            .map(|p| p.map(|(k, _)| k))
+            .collect::<mlua::Result<_>>()?,
         providers,
         provider: config.get("provider")?,
         system_prompt,

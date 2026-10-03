@@ -65,8 +65,10 @@ async fn system(cmd: &str, spec: &Json) -> Result<Json, String> {
 
 /// `{ status, headers, body }`. Errors (no connection, timeout) are
 /// returned to Lua as errors; HTTP error statuses are not.
-async fn http(req: &Json) -> Result<Json, String> {
-    let url = req["url"].as_str().ok_or("bone.http needs a url")?;
+/// Build a request from `{ url, method?, headers?, body?, timeout? }`. A
+/// table body is sent as JSON.
+pub fn request(req: &Json) -> Result<reqwest::RequestBuilder, String> {
+    let url = req["url"].as_str().ok_or("an HTTP request needs a url")?;
     let method = req["method"].as_str().unwrap_or("GET");
     let method = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
         .map_err(|_| format!("bad HTTP method {method:?}"))?;
@@ -84,7 +86,15 @@ async fn http(req: &Json) -> Result<Json, String> {
     if let Some(ms) = req["timeout"].as_u64() {
         b = b.timeout(Duration::from_millis(ms));
     }
-    let res = b.send().await.map_err(|e| format!("{url}: {e}"))?;
+    Ok(b)
+}
+
+async fn http(req: &Json) -> Result<Json, String> {
+    let url = req["url"].as_str().unwrap_or_default();
+    let res = request(req)?
+        .send()
+        .await
+        .map_err(|e| format!("{url}: {e}"))?;
     let status = res.status().as_u16();
     let headers: serde_json::Map<String, Json> = res
         .headers()

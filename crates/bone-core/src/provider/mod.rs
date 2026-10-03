@@ -1,7 +1,7 @@
 //! Model providers.
 
 mod openai;
-mod sse;
+pub(crate) mod sse;
 
 pub use openai::OpenAiProvider;
 
@@ -11,6 +11,7 @@ use futures_util::future::BoxFuture;
 use crate::tools::ToolSpec;
 
 pub struct CompletionRequest<'a> {
+    pub session_id: &'a str,
     pub messages: &'a [ChatMessage],
     pub tools: &'a [ToolSpec],
 }

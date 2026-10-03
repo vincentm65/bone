@@ -203,6 +203,7 @@ impl Turn<'_> {
                     });
                 };
                 let req = CompletionRequest {
+                    session_id: &self.session_id,
                     messages: &messages,
                     tools: &tools,
                 };
