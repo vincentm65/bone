@@ -76,6 +76,7 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
         );
     }
     Ok(match method {
+        "model/complete" => json!({ "request_id": 41 }),
         "plugin/list" => json!([{ "name": "corepart", "core": true, "loaded": true }]),
         "core/reload" => json!({ "plugins": [], "warnings": ["data_dir changed"] }),
         "initialize" => {
@@ -2478,4 +2479,53 @@ async fn a_session_changed_by_core_lua_is_reloaded() {
     })
     .await;
     assert_eq!(h.requests("session/messages").len(), 1);
+}
+
+#[tokio::test]
+async fn tui_lua_calls_the_model_through_the_core() {
+    let mut h = Harness::blank().await;
+    assert_eq!(h.lua("=bone.has_capability('tui.model')").await, "true");
+    h.lua(
+        r#"
+        got, parts = nil, {}
+        call = bone.model.complete({ prompt = "name it", system = "short", provider = "cheap" },
+          function(d) parts[#parts + 1] = d.text end,
+          function(r, err) got = r and r.content or err end)
+        "#,
+    )
+    .await;
+    let req = h.requests("model/complete")[0].clone();
+    assert_eq!(req["provider"], "cheap");
+    assert_eq!(req["stream"], true);
+    assert_eq!(req["messages"][0]["role"], "system");
+    assert_eq!(req["messages"][1]["content"], "name it");
+    h.emit::<ModelDeltaEvent>(ModelDeltaParams {
+        request_id: 41,
+        kind: DeltaKind::Text,
+        text: "Fix ".into(),
+    })
+    .await;
+    h.emit::<ModelDeltaEvent>(ModelDeltaParams {
+        request_id: 99,
+        kind: DeltaKind::Text,
+        text: "someone else's".into(),
+    })
+    .await;
+    h.emit::<ModelCompleted>(ModelCompletedParams {
+        request_id: 41,
+        message: Some(ChatMessage::Assistant {
+            content: "Fix typo".into(),
+            reasoning: String::new(),
+            tool_calls: vec![],
+        }),
+        usage: None,
+        error: None,
+    })
+    .await;
+    assert_eq!(
+        h.lua("=got .. '/' .. table.concat(parts)").await,
+        "\"Fix typo/Fix \""
+    );
+    h.lua("call:cancel()").await;
+    assert_eq!(h.requests("model/cancel")[0]["request_id"], 41);
 }

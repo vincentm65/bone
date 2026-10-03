@@ -1,0 +1,27 @@
+[
+  {
+    "id": 20,
+    "jsonrpc": "2.0",
+    "method": "model/complete",
+    "params": {
+      "messages": [
+        {
+          "content": "Name this session in three words.",
+          "role": "user"
+        }
+      ],
+      "options": {
+        "max_tokens": 50
+      },
+      "provider": "claude",
+      "stream": true
+    }
+  },
+  {
+    "id": 20,
+    "jsonrpc": "2.0",
+    "result": {
+      "request_id": 7
+    }
+  }
+]

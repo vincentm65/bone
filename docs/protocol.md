@@ -46,6 +46,9 @@ Events are only sent to connections that have completed the handshake.
 | `health/check` | `{}` | `[{ name, status: "ok" \| "warn" \| "error", message }]`: the core's checks (provider, API key, reachability, sessions folder, Lua) and core Lua's `bone.health` checks |
 | `core/reload` | `{}` | `ReloadResult`. Loads the Lua configuration again (runtime, enabled plugins, `core.lua`) and switches to it; running turns finish on the previous one. An error (and no change) if loading fails |
 | `plugin/list` | `{}` | `[{ name, core, loaded }]`: the plugins folder; `core` if it has a `core.lua`, `loaded` if that runs |
+| `model/list` | `{}` | `[{ name, model, type?, current }]`: the `bone.config.providers` entries; `current` is the one turns use |
+| `model/complete` | `{ provider?, messages, tools?, options?, stream? }` | `{ request_id }`, returned at once. One model call outside any session: `provider` is an entry name (default: the current one), `tools` are offered but never run, `options` override `model`, `reasoning_effort` or a Lua provider's options. With `stream`, `model/delta` events follow; `model/completed` always ends it |
+| `model/cancel` | `{ request_id }` | `null`; the call ends with `model/completed` and the error `"cancelled"` |
 | `plugin/load`, `plugin/unload`, `plugin/reload` | `{ name }` | `ReloadResult`: enable, disable, or keep the plugin, then reload as `core/reload` does. An error for a plugin that is not there or has no `core.lua` |
 
 `ReloadResult` is `{ plugins: [{ name, core, loaded }], warnings? }`; `warnings` lists settings that cannot change while running (`data_dir`) and errors from `bone.on_shutdown`. Disabling a plugin lasts until the server restarts; rename its folder to disable it for good.
@@ -63,7 +66,7 @@ Empty `content`/`reasoning`/`tool_calls` and a false `is_error` are omitted. A t
 
 ## Events
 
-Every event carries `session_id` (except `echoed`, `ask/resolved` and `core/reloaded`) and, for turns, `turn_id`.
+Every event carries `session_id` (except `echoed`, `ask/resolved`, `core/reloaded` and the `model/*` events) and, for turns, `turn_id`.
 
 | Event | Params | Meaning |
 |---|---|---|
@@ -76,6 +79,8 @@ Every event carries `session_id` (except `echoed`, `ask/resolved` and `core/relo
 | `ask/resolved` | `{ ask_id, answer }` | answered by some client, or `answer: null` if the turn was cancelled first |
 | `turn/finished` | `{ outcome: { status: "completed" \| "cancelled" \| "failed", message? } }` | the turn is over |
 | `core/reloaded` | `ReloadResult` | the core switched to a newly loaded Lua configuration (no `session_id`) |
+| `model/delta` | `{ request_id, kind, text }` | streamed output of a `model/complete` call (no `session_id`) |
+| `model/completed` | `{ request_id, message?, usage?, error? }` | a `model/complete` call ended: the assistant `message`, or an `error` (no `session_id`) |
 | `session/updated` | `{ reason: "append" \| "compact" }` | core Lua changed the session's transcript (`bone.session`); load it again with `session/messages` |
 
 A typical turn: `turn/started`, then `message/delta`…, `message/completed` (with `tool_calls`), and for each call `tool/started`, then `ask/requested` → `ask/resolved` if a hook asks the user (the approve plugin does for tools that change things), then `tool/finished`. That repeats until a `message/completed` arrives without tool calls, then `turn/finished`.

@@ -120,6 +120,90 @@ function bone.request(method, params, callback)
   api("request", method, params or {}, callback)
 end
 
+--- Call a model through the core (no session, no tools run):
+---   bone.model.complete(req, on_delta, on_done) -> handle
+---     req: { provider, messages or prompt (+ system), tools, options }
+---     on_delta({ text = ... } or { reasoning = ... }) as it streams (may be nil)
+---     on_done(result, err): result = { content, reasoning, tool_calls, usage }
+---   handle:cancel()
+---   bone.model.list(function(list, err) ... end): { name, model, type, current }
+local model_calls, model_done_early = {}, {}
+
+local function model_finish(call, ev)
+  if ev.error then
+    call.on_done(nil, ev.error)
+  else
+    local m = ev.message or {}
+    call.on_done({ content = m.content or "", reasoning = m.reasoning or "", tool_calls = m.tool_calls or {}, usage = ev.usage })
+  end
+end
+
+bone.model = {
+  complete = function(req, on_delta, on_done)
+    assert(type(req) == "table", "bone.model.complete(req, on_delta, on_done)")
+    on_done = on_done or function() end
+    local messages = req.messages
+    if not messages then
+      assert(type(req.prompt) == "string", "a model call needs messages or a prompt")
+      messages = {}
+      if req.system then
+        messages[1] = { role = "system", content = req.system }
+      end
+      messages[#messages + 1] = { role = "user", content = req.prompt }
+    end
+    local handle = { id = nil, cancelled = false }
+    function handle:cancel()
+      self.cancelled = true
+      if self.id then
+        bone.request("model/cancel", { request_id = self.id })
+      end
+    end
+    bone.request("model/complete", {
+      provider = req.provider,
+      messages = messages,
+      tools = req.tools,
+      options = req.options,
+      stream = on_delta ~= nil,
+    }, function(r, err)
+      if err then
+        return on_done(nil, err)
+      end
+      handle.id = r.request_id
+      local call = { on_delta = on_delta, on_done = on_done }
+      local early = model_done_early[r.request_id]
+      if early then
+        model_done_early[r.request_id] = nil
+        return model_finish(call, early)
+      end
+      model_calls[r.request_id] = call
+      if handle.cancelled then
+        bone.request("model/cancel", { request_id = r.request_id })
+      end
+    end)
+    return handle
+  end,
+  list = function(callback)
+    bone.request("model/list", {}, callback)
+  end,
+}
+
+bone.on("model/delta", function(ev)
+  local call = model_calls[ev.request_id]
+  if call and call.on_delta then
+    call.on_delta({ [ev.kind] = ev.text })
+  end
+end)
+
+bone.on("model/completed", function(ev)
+  local call = model_calls[ev.request_id]
+  if call then
+    model_calls[ev.request_id] = nil
+    model_finish(call, ev)
+  else
+    model_done_early[ev.request_id] = ev
+  end
+end)
+
 --- Show a message. level: "info" (default) or "error".
 --- Run a shell command in the background. on_exit(result) runs when it
 --- ends with { code, stdout, stderr } (or { timed_out = true }), or

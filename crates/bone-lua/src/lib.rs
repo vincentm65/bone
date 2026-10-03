@@ -73,6 +73,7 @@ static CORE_CAPABILITIES: &[&str] = &[
     "core.hooks.stream",
     "core.hooks.session",
     "core.session_write",
+    "core.model",
     "plugins.state",
 ];
 
@@ -101,6 +102,7 @@ static TUI_CAPABILITIES: &[&str] = &[
     "tui.themes",
     "tui.jobs",
     "jobs.streaming",
+    "tui.model",
     "plugins.state",
     "plugins.lifecycle",
     "tui.project",

@@ -37,7 +37,7 @@ the other.
 
 The current capability names include `core.config`, `core.tools`,
 `core.hooks`, `core.providers`, `core.jobs`, `core.http_stream`, `core.ask`,
-`core.health`, `core.ready`, `core.reload`, `core.hooks.system`, `core.hooks.context`, `core.hooks.errors`, `core.hooks.stream`, `core.hooks.session`, `core.session_write`, `plugins.state` (both sides), and, in the TUI, `plugins.lifecycle`, `tui.project`, `tui.keymaps`, `tui.input`, `tui.events`,
+`core.health`, `core.ready`, `core.reload`, `core.hooks.system`, `core.hooks.context`, `core.hooks.errors`, `core.hooks.stream`, `core.hooks.session`, `core.session_write`, `core.model`, `plugins.state` (both sides), and, in the TUI, `plugins.lifecycle`, `tui.project`, `tui.model`, `tui.keymaps`, `tui.input`, `tui.events`,
 `tui.local_events`, `tui.commands`, `tui.command_specs`, `tui.options`,
 `tui.dynamic_options`, `tui.request`, `tui.prompt`, `tui.prompt_edit`, `tui.chat`, `tui.chat_data`, `tui.windows`,
 `tui.panels`, `tui.regions`, `tui.views`, `tui.pickers`, `tui.themes`, `tui.jobs`, `jobs.streaming` and
@@ -180,7 +180,7 @@ A hook runs at a point in the core with an event table. It returns `nil` (no cha
 | `system` | `{ session_id, cwd, prompt }`, once per turn: the system prompt (after `bone.config.system_prompt` and the working directory); return `{ prompt = ... }` to change it | the turn fails |
 | `context` | `{ session_id, messages }`, before each model call: the messages it will send (system prompt first); return `{ messages = ... }` to send different ones. The stored transcript is not changed | the turn fails |
 | `request` | `{ session_id, messages, tools }`, before each call to the model, after `context` | the turn fails |
-| `request_error` | `{ session_id, error, attempt, model }`, when a model call fails before any output arrived; return `{ retry = ms }` to try again after `ms` (at most 5 retries per call). Without a retry the turn fails as before | the turn fails |
+| `request_error` | `{ session_id, error, attempt, model }`, when a model call fails before any output arrived; return `{ retry = ms }` to try again after `ms` (at most 5 retries per call), or `{ retry = ms, provider = "name" }` to send the rest of this call to another `bone.config.providers` entry. Without a retry the turn fails as before | the turn fails |
 | `stream` | `{ session_id, turn_id, text, reasoning }`: output as it streams, collected into batches; results are ignored and the stream never waits for it | (ignored) |
 | `session_start` | `{ session_id, cwd, new }`, the first time this core uses a session (`new` when it was just created) | (ignored) |
 | `message` | `{ session_id, content, reasoning, tool_calls, usage }`, the model's reply before it is saved | the turn fails |
@@ -283,6 +283,25 @@ bone.config.provider = "mine"
 - `complete` runs as a job: it waits without blocking, and a cancelled turn stops it.
 
 `examples/plugins/anthropic` is a complete provider for the Anthropic Messages API (streaming, thinking, tools) in about 140 lines.
+
+### Calling a model
+
+Hooks, tools and providers can call a model themselves (they wait without blocking, and a cancelled turn stops the call):
+
+```lua
+local r, err = bone.model.complete({
+  provider = "cheap",                    -- a bone.config.providers key; default: the one turns use
+  system = "Answer in three words.",     -- with prompt, or messages = { { role, content }, ... }
+  prompt = "Name this session: " .. text,
+  options = { model = "small-model" },   -- overrides: model, reasoning_effort, a Lua provider's options
+  on_delta = function(d) end,            -- { text = ... } or { reasoning = ... } as it streams
+})
+-- r = { content, reasoning, tool_calls, usage }, or nil and an error
+```
+
+`tools = { { name, description, parameters } }` offers tools: the model may ask for them, and you get `tool_calls` back; nothing runs them. `bone.model.stream(req)` returns a handle instead, read with `h:next()` (the next delta, `nil` at the end), `h:events()`, `h:result()` and `h:close()`. `bone.model.list()` returns `{ name, model, type, current }` for each provider entry. A model call made inside a Lua provider counts as nested; calls nest at most 4 deep, so a provider that ends up calling itself fails instead of looping.
+
+Clients use the same through the protocol (`model/list`, `model/complete`, `model/cancel`); in the TUI that is `bone.model` (see the UI API).
 
 ### Health checks
 
@@ -534,6 +553,7 @@ bone.chat.messages(function(messages, err) ... end)  -- from the core
 - `bone.system(cmd, { cwd, stdin, timeout }, function(r, err) ... end)`: run a command in the background; the callback gets `{ code, stdout, stderr }` (or `{ timed_out = true }`), or `nil, err`. The UI never waits.
 - `bone.http(req, function(res, err) ... end)`: an HTTP request in the background (same fields as the core's).
 - `bone.defer(ms, fn)`: run `fn` later.
+- `bone.model.complete(req, on_delta, on_done)` → handle: a model call through the core, outside any session (`req` as the core's `bone.model.complete`, without `on_delta`). `on_delta(d)` gets output as it streams (pass `nil` for none), `on_done(result, err)` the end; `handle:cancel()`. `bone.model.list(function(list, err) end)`.
 - `bone.job.start(cmd, opts)` → job: a streaming job (below).
 - `bone.notify(msg, level)`: `level` is `"info"` (default) or `"error"`. `print(...)` is `bone.notify`.
 - `bone.press("ctrl+c")`: press a key. `bone.action("scroll_top")`: run a builtin action.

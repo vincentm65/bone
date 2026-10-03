@@ -1004,3 +1004,153 @@ async fn hooks_can_add_to_and_compact_the_transcript() {
         }
     );
 }
+
+// ---- model calls ------------------------------------------------------------
+
+#[tokio::test]
+async fn lua_tools_call_the_model() {
+    let mut h = Harness::with_lua(
+        r#"
+        bone.tool.register { name = "ask_model", run = function()
+          local parts = {}
+          local r = assert(bone.model.complete({
+            prompt = "say hi", system = "be brief",
+            on_delta = function(d) parts[#parts + 1] = d.text end,
+          }))
+          return r.content .. "|" .. table.concat(parts) .. "|" .. #bone.model.list()
+        end }
+        "#,
+        vec![
+            calls(&[("c1", "ask_model", json!({}))]),
+            text("inner answer"),
+            text("outer"),
+        ],
+    )
+    .await;
+    h.start("go").await;
+    h.until::<TurnFinished>().await;
+    let t = h.transcript().await;
+    assert_eq!(tool_result(&t[2]).0, "inner answer|inner answer|1");
+    assert_eq!(
+        h.provider.seen.lock().unwrap()[1],
+        vec![ChatMessage::User {
+            content: "say hi".into()
+        }]
+    );
+    assert_eq!(h.provider.systems.lock().unwrap()[1], "be brief");
+}
+
+#[tokio::test]
+async fn nested_model_calls_stop_at_the_limit() {
+    let mut h = Harness::with_lua(
+        r#"
+        bone.provider.register("loop", { complete = function(req)
+          return assert(bone.model.complete({ provider = "loopy", prompt = "again" }))
+        end })
+        bone.config.providers.loopy = { type = "loop", model = "l" }
+        bone.config.provider = "x"
+        bone.tool.register { name = "spin", run = function()
+          local r, err = bone.model.complete({ provider = "loopy", prompt = "go" })
+          return tostring(r) .. " " .. tostring(err)
+        end }
+        "#,
+        vec![calls(&[("c1", "spin", json!({}))]), text("done")],
+    )
+    .await;
+    h.start("go").await;
+    h.until::<TurnFinished>().await;
+    let t = h.transcript().await;
+    assert!(
+        tool_result(&t[2]).0.contains("nested more than 4 deep"),
+        "{}",
+        tool_result(&t[2]).0
+    );
+}
+
+#[tokio::test]
+async fn cancelling_a_turn_stops_its_model_calls() {
+    let mut h = Harness::with_lua(
+        r#"bone.tool.register { name = "slow", run = function()
+             local r, err = bone.model.complete({ prompt = "think" })
+             return tostring(err)
+           end }"#,
+        vec![
+            calls(&[("c1", "slow", json!({}))]),
+            Step::Hang("partial".into()),
+        ],
+    )
+    .await;
+    h.start("go").await;
+    h.until::<ToolStarted>().await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    h.cancel().await;
+    let finished = tokio::time::timeout(Duration::from_secs(3), h.until::<TurnFinished>())
+        .await
+        .expect("the turn ends promptly");
+    assert_eq!(finished.outcome, TurnOutcome::Cancelled);
+}
+
+#[tokio::test]
+async fn clients_call_the_model_over_the_protocol() {
+    let mut h = Harness::with_lua(
+        "",
+        vec![text("streamed answer"), Step::Hang("never ends".into())],
+    )
+    .await;
+    let list = h.call::<ModelList>(Empty {}).await.unwrap();
+    assert_eq!(list.len(), 1);
+    assert!(list[0].current && list[0].name == "x");
+    let req = h
+        .call::<ModelComplete>(ModelCompleteParams {
+            provider: None,
+            messages: vec![ChatMessage::User {
+                content: "hi".into(),
+            }],
+            tools: vec![],
+            options: Value::Null,
+            stream: true,
+        })
+        .await
+        .unwrap();
+    let delta = h.until::<ModelDeltaEvent>().await;
+    assert_eq!(
+        (delta.request_id, delta.text.as_str()),
+        (req.request_id, "streamed answer")
+    );
+    let done = h.until::<ModelCompleted>().await;
+    assert_eq!(done.request_id, req.request_id);
+    assert!(matches!(
+        done.message,
+        Some(ChatMessage::Assistant { ref content, .. }) if content == "streamed answer"
+    ));
+
+    // A call that hangs can be cancelled.
+    let req = h
+        .call::<ModelComplete>(ModelCompleteParams {
+            provider: None,
+            messages: vec![ChatMessage::User {
+                content: "again".into(),
+            }],
+            tools: vec![],
+            options: Value::Null,
+            stream: false,
+        })
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    h.call::<ModelCancel>(req).await.unwrap();
+    let done = h.until::<ModelCompleted>().await;
+    assert_eq!(done.error.as_deref(), Some("cancelled"));
+    // An unknown provider is an error result, not a hang.
+    h.call::<ModelComplete>(ModelCompleteParams {
+        provider: Some("nope".into()),
+        messages: vec![],
+        tools: vec![],
+        options: Value::Null,
+        stream: false,
+    })
+    .await
+    .unwrap();
+    let done = h.until::<ModelCompleted>().await;
+    assert!(done.error.unwrap().contains("no provider \"nope\""));
+}

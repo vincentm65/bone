@@ -40,6 +40,9 @@ pub struct Loaded {
     /// Where it was loaded from, and how, so the core can load it again.
     pub config_dir: PathBuf,
     pub options: LoadOptions,
+    /// Every `bone.config.providers` entry, and the one turns use.
+    pub providers: HashMap<String, ProviderConfig>,
+    pub provider_name: Option<String>,
 }
 
 /// How to load: which plugins to leave out, and the question ids shared by
@@ -187,6 +190,11 @@ pub fn load_with_options(
         events,
         config_dir: config_dir.to_owned(),
         options: options.clone(),
+        provider_name: ex
+            .provider
+            .clone()
+            .or_else(|| (ex.providers.len() == 1).then(|| ex.providers.keys().next().cloned())?),
+        providers: ex.providers,
     })
 }
 
@@ -518,6 +526,7 @@ impl crate::provider::Provider for LuaProvider {
                 "tools": tools,
                 "options": self.options,
                 "session_id": req.session_id,
+                "depth": req.depth,
             });
             let (reply, mut rx) = oneshot::channel();
             let (deltas, mut drx) = tokio_mpsc::unbounded_channel();
@@ -791,7 +800,7 @@ fn lua_thread(
     };
     let streams = Arc::new(Streams::default());
     let hook_set: Arc<Mutex<HashSet<String>>> = Default::default();
-    let lua = match setup(&dir, &streams, &opts.disabled, &hook_set) {
+    let lua = match setup(&dir, &streams, &opts, &hook_set) {
         Ok(lua) => lua,
         Err(e) => {
             let _ = init.send(Err(e));
@@ -895,6 +904,7 @@ fn lua_thread(
             }
             Job::Stop => break,
             Job::Cancel { session_id } => {
+                st.host.cancel_models(&session_id);
                 let ids: Vec<u64> = st
                     .pending
                     .iter()
@@ -966,10 +976,15 @@ impl State {
                 let wait_id = self.next_wait;
                 let jobs = self.jobs.clone();
                 let streams = self.streams.clone();
+                let host = self.host.clone();
+                let calling = session_id.clone();
                 let task = self.rt.spawn(async move {
-                    let result = match streams.wait(&spec).await {
-                        Some(r) => r,
-                        None => bone_lua::wait::run(spec).await,
+                    let result = if let Some(r) = host.model_wait(&spec, calling).await {
+                        r
+                    } else if let Some(r) = streams.wait(&spec).await {
+                        r
+                    } else {
+                        bone_lua::wait::run(spec).await
                     };
                     let _ = jobs.send(Job::Resume { wait_id, result });
                 });
@@ -1063,9 +1078,10 @@ impl State {
 fn setup(
     dir: &Path,
     streams: &Arc<Streams>,
-    disabled: &HashSet<String>,
+    opts: &LoadOptions,
     hook_set: &Arc<Mutex<HashSet<String>>>,
 ) -> Result<Lua, String> {
+    let disabled = &opts.disabled;
     let lua = bone_lua::new_state(Side::Core, Some(dir)).map_err(|e| e.to_string())?;
     let run = |rel: &str| {
         bone_lua::run_runtime(&lua, Some(dir), rel).map_err(|e| format!("runtime/{rel}: {e}"))
@@ -1084,6 +1100,15 @@ fn setup(
         .map_err(|e| e.to_string())?;
     run("core/api.lua")?;
     install_helpers(&lua, dir, streams).map_err(|e| e.to_string())?;
+    // bone.model.list(): the providers of the configuration in use.
+    let host = opts.host.clone();
+    let models = lua
+        .create_function(move |lua, ()| to_lua(lua, &host.model_list()?))
+        .map_err(|e| e.to_string())?;
+    lua.globals()
+        .get::<Table>("bone")
+        .and_then(|b| b.set("_models", models))
+        .map_err(|e| e.to_string())?;
     run("core/defaults.lua")?;
     bone_lua::run_user_plugins_except(&lua, dir, "core.lua", &|name| disabled.contains(name))
         .map_err(|e| e.to_string())?;

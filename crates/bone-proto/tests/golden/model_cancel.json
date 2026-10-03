@@ -1,0 +1,15 @@
+[
+  {
+    "id": 21,
+    "jsonrpc": "2.0",
+    "method": "model/cancel",
+    "params": {
+      "request_id": 7
+    }
+  },
+  {
+    "id": 21,
+    "jsonrpc": "2.0",
+    "result": null
+  }
+]

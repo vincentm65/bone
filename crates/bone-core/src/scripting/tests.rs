@@ -963,3 +963,101 @@ async fn switch_plugin_routes_to_the_chosen_provider() {
     assert_eq!(seen[2].1["model"], "m2");
     assert!(seen[2].1.get("stream_options").is_none());
 }
+
+/// `model/complete` against a named OpenAI-compatible entry, with options.
+#[tokio::test(flavor = "multi_thread")]
+async fn model_calls_reach_named_providers_with_options() {
+    use crate::Core;
+    use bone_proto::methods::*;
+    let delta = |d: Json| json!({ "choices": [{ "index": 0, "delta": d }] });
+    let (url, seen) = fake_openai(vec![openai_sse(&[delta(json!({ "content": "titled" }))])]).await;
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &format!(
+            r#"
+            bone.config.providers.main = {{ base_url = "{url}", model = "big" }}
+            bone.config.providers.cheap = {{ base_url = "{url}", model = "small", api_key = "kc" }}
+            bone.config.provider = "main"
+            "#
+        ),
+    );
+    let core = Core::from_loaded(load(dir.path()).unwrap());
+    let mut events = core.subscribe();
+    let list = core.handle(ModelList::METHOD, None).await.unwrap();
+    assert_eq!(list[0]["name"], "cheap");
+    assert_eq!(list[1]["current"], true);
+    let req = core
+        .handle(
+            ModelComplete::METHOD,
+            Some(json!({
+                "provider": "cheap",
+                "messages": [{ "role": "user", "content": "title this" }],
+                "options": { "model": "tiny" },
+            })),
+        )
+        .await
+        .unwrap();
+    let done = loop {
+        let e = next_core_event(&mut events).await;
+        if e.method == ModelCompleted::METHOD {
+            break e.params;
+        }
+    };
+    assert_eq!(done["request_id"], req["request_id"]);
+    assert_eq!(done["message"]["content"], "titled");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen[0].0, "bearer kc");
+    assert_eq!(seen[0].1["model"], "tiny");
+}
+
+/// A request_error hook moving a failed call to another provider.
+#[tokio::test(flavor = "multi_thread")]
+async fn request_error_hooks_can_fall_back_to_another_provider() {
+    use crate::Core;
+    use bone_proto::methods::*;
+    let delta = |d: Json| json!({ "choices": [{ "index": 0, "delta": d }] });
+    let (url, seen) = fake_openai(vec![openai_sse(&[delta(
+        json!({ "content": "from backup" }),
+    )])])
+    .await;
+    let dir = tempfile::tempdir().unwrap();
+    write(
+        dir.path(),
+        &format!(
+            r#"
+            -- Nothing listens here, so every call to main fails at once.
+            bone.config.providers.main = {{ base_url = "http://127.0.0.1:9/v1", model = "big" }}
+            bone.config.providers.backup = {{ base_url = "{url}", model = "spare" }}
+            bone.config.provider = "main"
+            bone.hook("request_error", function(ev)
+              if ev.attempt == 1 then return {{ retry = 1, provider = "backup" }} end
+            end)
+            "#
+        ),
+    );
+    let core = Core::from_loaded(load(dir.path()).unwrap());
+    let mut events = core.subscribe();
+    let work = tempfile::tempdir().unwrap();
+    let info = core
+        .handle(SessionCreate::METHOD, Some(json!({ "cwd": work.path() })))
+        .await
+        .unwrap();
+    core.handle(
+        TurnStart::METHOD,
+        Some(json!({ "session_id": info["session_id"], "text": "hi" })),
+    )
+    .await
+    .unwrap();
+    let outcome = loop {
+        let e = tokio::time::timeout(Duration::from_secs(20), events.recv())
+            .await
+            .expect("event")
+            .unwrap();
+        if e.method == TurnFinished::METHOD {
+            break e.params["outcome"].clone();
+        }
+    };
+    assert_eq!(outcome["status"], "completed", "{outcome}");
+    assert_eq!(seen.lock().unwrap()[0].1["model"], "spare");
+}

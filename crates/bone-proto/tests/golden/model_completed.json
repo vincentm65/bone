@@ -1,0 +1,17 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "model/completed",
+    "params": {
+      "message": {
+        "content": "Fix main typo",
+        "role": "assistant"
+      },
+      "request_id": 7,
+      "usage": {
+        "input_tokens": 30,
+        "output_tokens": 4
+      }
+    }
+  }
+]

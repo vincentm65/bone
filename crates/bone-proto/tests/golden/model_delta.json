@@ -1,0 +1,11 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "model/delta",
+    "params": {
+      "kind": "text",
+      "request_id": 7,
+      "text": "Fix "
+    }
+  }
+]

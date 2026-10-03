@@ -164,6 +164,80 @@ function bone.session.compact(id, messages)
   return session_op("compact", id, { messages = messages })
 end
 
+--- Call a model from hooks, tools and providers (they wait without
+--- blocking; a cancelled turn stops the call). req:
+---   provider  a key of bone.config.providers (default: the one turns use)
+---   messages  { { role, content }, ... }, or prompt = "..." (and system = "...")
+---   tools     { { name, description, parameters } } the model may ask for
+---             (nothing runs them; you get tool_calls back)
+---   options   overrides: model, reasoning_effort, a Lua provider's options
+---   on_delta  function({ text = ... } or { reasoning = ... }) as it streams
+--- Returns { content, reasoning, tool_calls, usage }, or nil and an error.
+--- bone.model.stream(req) returns a handle instead: h:next() (the next
+--- delta, nil at the end), h:events(), h:result(), h:close().
+--- bone.model.list() -> { { name, model, type, current } }.
+bone.model = {}
+bone._depth = setmetatable({}, { __mode = "k" })
+
+local ModelStream = {}
+ModelStream.__index = ModelStream
+function ModelStream:next()
+  return wait({ model_next = self.id })
+end
+function ModelStream:events()
+  return function()
+    return self:next()
+  end
+end
+function ModelStream:result()
+  local ok, r = pcall(wait, { model_result = self.id })
+  if not ok then
+    return nil, tostring(r)
+  end
+  return r
+end
+function ModelStream:close()
+  wait({ model_close = self.id })
+end
+
+function bone.model.stream(req)
+  if not in_job() then
+    error("bone.model only works inside hooks, tools and providers", 2)
+  end
+  assert(type(req) == "table", "bone.model.stream(req)")
+  local messages = req.messages
+  if not messages then
+    assert(type(req.prompt) == "string", "a model call needs messages or a prompt")
+    messages = {}
+    if req.system then
+      messages[1] = { role = "system", content = req.system }
+    end
+    messages[#messages + 1] = { role = "user", content = req.prompt }
+  end
+  local r = wait({ model_open = {
+    provider = req.provider,
+    messages = messages,
+    tools = req.tools,
+    options = req.options,
+    depth = (bone._depth[coroutine.running()] or 0) + 1,
+  } })
+  return setmetatable({ id = r.stream }, ModelStream)
+end
+
+function bone.model.complete(req)
+  local s = bone.model.stream(req)
+  for d in s:events() do
+    if req.on_delta then
+      req.on_delta(d)
+    end
+  end
+  return s:result()
+end
+
+function bone.model.list()
+  return bone._models()
+end
+
 --- Wait `ms` milliseconds (without blocking in hooks and tools).
 function bone.sleep(ms)
   if in_job() then
@@ -287,6 +361,8 @@ function bone._provider_entry(name, req, emit)
   if not p then
     error("no Lua provider named " .. name)
   end
+  -- Model calls this provider makes are nested one deeper.
+  bone._depth[coroutine.running()] = req.depth or 0
   return p.complete(req, emit)
 end
 

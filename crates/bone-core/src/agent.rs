@@ -223,6 +223,8 @@ impl Turn<'_> {
             }
 
             let mut attempt = 0;
+            // A request_error hook may move the rest of this call elsewhere.
+            let mut provider = self.rt.provider.clone();
             let completion = loop {
                 attempt += 1;
                 let mut text = String::new();
@@ -253,10 +255,11 @@ impl Turn<'_> {
                         session_id: &self.session_id,
                         messages: &messages,
                         tools: &tools,
+                        depth: 0,
                     };
                     tokio::select! {
                         _ = self.cancel.cancelled() => None,
-                        r = self.rt.provider.complete(req, &mut on_delta) => Some(r),
+                        r = provider.complete(req, &mut on_delta) => Some(r),
                     }
                 };
                 match result {
@@ -271,13 +274,18 @@ impl Turn<'_> {
                             "attempt": attempt,
                             "model": self.rt.config.provider.model,
                         });
-                        let retry = self
-                            .safe_hooks("request_error", ev)
-                            .await?
-                            .and_then(|ev| ev["retry"].as_u64());
-                        let Some(ms) = retry else {
+                        let ev = self.safe_hooks("request_error", ev).await?;
+                        let Some(ms) = ev.as_ref().and_then(|ev| ev["retry"].as_u64()) else {
                             return Err(Stop::Failed(e.0));
                         };
+                        if let Some(name) = ev.as_ref().and_then(|ev| ev["provider"].as_str()) {
+                            provider =
+                                self.rt
+                                    .provider_for(Some(name), &Value::Null)
+                                    .map_err(|why| {
+                                        Stop::Failed(format!("request_error hook: {why}"))
+                                    })?;
+                        }
                         tokio::select! {
                             _ = self.cancel.cancelled() => return Err(Stop::Cancelled),
                             _ = tokio::time::sleep(Duration::from_millis(ms)) => {}

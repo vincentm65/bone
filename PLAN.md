@@ -253,6 +253,12 @@ hook set is checked first).
 
 ### Phase 10: Lua can call a model (gap 2)
 
+Status: done (branch `agent-ext`). `model/complete` returns a `request_id`
+at once and reports through `model/delta`/`model/completed` events, like
+turns, because the server handles one request at a time per connection;
+the events go to every client, which match them by id. `request_error`'s
+`provider` fallback from phase 9 is included.
+
 - The runtime builds every `bone.config.providers` entry into a provider (a
   model registry), not only the selected one. The selected entry stays the
   agent's default.

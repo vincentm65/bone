@@ -1,0 +1,25 @@
+[
+  {
+    "id": 19,
+    "jsonrpc": "2.0",
+    "method": "model/list",
+    "params": {}
+  },
+  {
+    "id": 19,
+    "jsonrpc": "2.0",
+    "result": [
+      {
+        "current": true,
+        "model": "qwen",
+        "name": "qwen"
+      },
+      {
+        "current": false,
+        "model": "claude-sonnet-5-5",
+        "name": "claude",
+        "type": "anthropic"
+      }
+    ]
+  }
+]

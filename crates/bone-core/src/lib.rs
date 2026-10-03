@@ -17,10 +17,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use bone_proto::methods::{
-    AskRespond, AskRespondParams, CoreReload, Echo, EchoParams, Echoed, HealthCheck, PluginList,
-    PluginLoad, PluginRef, PluginReload, PluginUnload, SessionCreate, SessionCreateParams,
-    SessionList, SessionMessages, SessionMessagesResult, SessionRef, TurnCancel, TurnStart,
-    TurnStartParams, TurnStartResult,
+    AskRespond, AskRespondParams, CoreReload, Echo, EchoParams, Echoed, HealthCheck, ModelCancel,
+    ModelComplete, ModelCompleteParams, ModelCompleted, ModelCompletedParams, ModelDeltaEvent,
+    ModelDeltaParams, ModelList, ModelRequest, PluginList, PluginLoad, PluginRef, PluginReload,
+    PluginUnload, SessionCreate, SessionCreateParams, SessionList, SessionMessages,
+    SessionMessagesResult, SessionRef, TurnCancel, TurnStart, TurnStartParams, TurnStartResult,
 };
 use bone_proto::types::SessionInfo;
 use bone_proto::{Method, Notification, RpcError};
@@ -71,6 +72,9 @@ pub(crate) struct Inner {
     reloading: tokio::sync::Mutex<()>,
     /// Sessions `session_start` hooks have seen.
     started: Mutex<std::collections::HashSet<String>>,
+    /// Running `model/complete` calls, to cancel them.
+    model_requests: Mutex<std::collections::HashMap<u64, tokio::task::AbortHandle>>,
+    next_model_request: std::sync::atomic::AtomicU64,
     sessions: SessionStore,
     events: broadcast::Sender<Event>,
 }
@@ -147,6 +151,8 @@ impl Core {
                 retired: Mutex::new(Vec::new()),
                 reloading: tokio::sync::Mutex::new(()),
                 started: Mutex::new(Default::default()),
+                model_requests: Mutex::new(Default::default()),
+                next_model_request: Default::default(),
                 events,
             }),
         };
@@ -225,8 +231,96 @@ impl Core {
                 let p: PluginRef = decode::<PluginUnload>(params)?;
                 reloaded(self.inner.reload(Change::Disable(p.name)).await)
             }
+            ModelList::METHOD => {
+                decode::<ModelList>(params)?;
+                Ok(serde_json::to_value(self.inner.runtime().model_list()).unwrap_or_default())
+            }
+            ModelComplete::METHOD => {
+                dispatch::<ModelComplete, _>(params, |p| self.model_complete(p))
+            }
+            ModelCancel::METHOD => dispatch::<ModelCancel, _>(params, |p| {
+                let task = self
+                    .inner
+                    .model_requests
+                    .lock()
+                    .unwrap()
+                    .remove(&p.request_id);
+                if let Some(task) = task {
+                    task.abort();
+                    self.inner.emit::<ModelCompleted>(ModelCompletedParams {
+                        request_id: p.request_id,
+                        message: None,
+                        usage: None,
+                        error: Some("cancelled".into()),
+                    });
+                }
+                Ok(())
+            }),
             _ => Err(RpcError::method_not_found(method)),
         }
+    }
+
+    /// Start a model call; it reports through `model/delta` and
+    /// `model/completed`.
+    fn model_complete(&self, p: ModelCompleteParams) -> Result<ModelRequest, RpcError> {
+        use std::sync::atomic::Ordering;
+        let request_id = self
+            .inner
+            .next_model_request
+            .fetch_add(1, Ordering::Relaxed)
+            + 1;
+        let inner = self.inner.clone();
+        let call = runtime::ModelCall {
+            provider: p.provider,
+            options: p.options,
+            messages: p.messages,
+            tools: p.tools,
+            depth: 0,
+            session_id: None,
+        };
+        let stream = p.stream;
+        // Registered before it can finish, so it is always removed after.
+        let mut requests = self.inner.model_requests.lock().unwrap();
+        let task = tokio::spawn(async move {
+            let events = inner.clone();
+            let mut on_delta = |d: provider::Delta| {
+                if !stream {
+                    return;
+                }
+                let (kind, text) = match d {
+                    provider::Delta::Text(t) => (bone_proto::types::DeltaKind::Text, t),
+                    provider::Delta::Reasoning(t) => (bone_proto::types::DeltaKind::Reasoning, t),
+                };
+                events.emit::<ModelDeltaEvent>(ModelDeltaParams {
+                    request_id,
+                    kind,
+                    text,
+                });
+            };
+            let r = inner.model_call(call, &mut on_delta).await;
+            inner.model_requests.lock().unwrap().remove(&request_id);
+            let done = match r {
+                Ok(c) => ModelCompletedParams {
+                    request_id,
+                    message: Some(bone_proto::types::ChatMessage::Assistant {
+                        content: c.content,
+                        reasoning: c.reasoning,
+                        tool_calls: c.tool_calls,
+                    }),
+                    usage: c.usage,
+                    error: None,
+                },
+                Err(e) => ModelCompletedParams {
+                    request_id,
+                    message: None,
+                    usage: None,
+                    error: Some(e),
+                },
+            };
+            inner.emit::<ModelCompleted>(done);
+        });
+        requests.insert(request_id, task.abort_handle());
+        Ok(ModelRequest { request_id })
     }
 
     fn echo(&self, params: EchoParams) -> Result<EchoParams, RpcError> {

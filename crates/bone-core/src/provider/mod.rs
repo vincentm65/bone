@@ -14,6 +14,9 @@ pub struct CompletionRequest<'a> {
     pub session_id: &'a str,
     pub messages: &'a [ChatMessage],
     pub tools: &'a [ToolSpec],
+    /// How many model calls this one is nested in (a Lua provider or tool
+    /// calling `bone.model`); 0 for the agent's own calls.
+    pub depth: u32,
 }
 
 /// Incremental output while a completion streams.

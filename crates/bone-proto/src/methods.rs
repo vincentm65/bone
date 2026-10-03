@@ -68,6 +68,9 @@ pub const METHODS: &[&str] = &[
     PluginLoad::METHOD,
     PluginUnload::METHOD,
     PluginReload::METHOD,
+    ModelList::METHOD,
+    ModelComplete::METHOD,
+    ModelCancel::METHOD,
 ];
 
 /// Every server-to-client event.
@@ -83,6 +86,8 @@ pub const NOTIFICATIONS: &[&str] = &[
     TurnFinished::METHOD,
     CoreReloaded::METHOD,
     SessionUpdated::METHOD,
+    ModelDeltaEvent::METHOD,
+    ModelCompleted::METHOD,
 ];
 
 // ---- connection ----------------------------------------------------------
@@ -263,6 +268,58 @@ pub struct ReloadResult {
     pub warnings: Vec<String>,
 }
 
+// ---- model calls ----------------------------------------------------------
+
+method!(
+    /// The configured providers (`bone.config.providers`).
+    ModelList, "model/list", Empty => Vec<ModelInfo>
+);
+method!(
+    /// One model call outside any session (no tools are run). Returns at
+    /// once; the answer arrives as [`ModelCompleted`], with
+    /// [`ModelDeltaEvent`]s before it when `stream` is set.
+    ModelComplete, "model/complete", ModelCompleteParams => ModelRequest
+);
+method!(
+    /// Stop a model call; it completes with the error "cancelled".
+    ModelCancel, "model/cancel", ModelRequest => ()
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelInfo {
+    /// The key in `bone.config.providers`.
+    pub name: String,
+    pub model: String,
+    /// The Lua provider type, if it is one.
+    #[serde(default, rename = "type", skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The provider turns use.
+    pub current: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelCompleteParams {
+    /// A key of `bone.config.providers`; default: the one turns use.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    pub messages: Vec<ChatMessage>,
+    /// Tools to offer, as `{ name, description, parameters }`. The model may
+    /// ask for them; nothing runs them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<serde_json::Value>,
+    /// Overrides for this call: `model`, `reasoning_effort`, and for Lua
+    /// providers any of their options.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub options: serde_json::Value,
+    #[serde(default)]
+    pub stream: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRequest {
+    pub request_id: u64,
+}
+
 // ---- events --------------------------------------------------------------
 
 notification!(TurnStarted, "turn/started", TurnStartedParams);
@@ -292,6 +349,34 @@ notification!(
     /// The core switched to a newly loaded Lua configuration.
     CoreReloaded, "core/reloaded", ReloadResult
 );
+notification!(
+    /// Streamed output of a `model/complete` call with `stream` set.
+    ModelDeltaEvent, "model/delta", ModelDeltaParams
+);
+notification!(
+    /// A `model/complete` call finished: its assistant `message` and `usage`,
+    /// or an `error`.
+    ModelCompleted, "model/completed", ModelCompletedParams
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelDeltaParams {
+    pub request_id: u64,
+    pub kind: DeltaKind,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelCompletedParams {
+    pub request_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<ChatMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<Usage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 notification!(
     /// Core Lua changed a session's transcript outside a turn's own
     /// messages (`bone.session.append` or `compact`). Clients should load

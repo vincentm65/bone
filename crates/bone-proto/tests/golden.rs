@@ -263,6 +263,38 @@ fn requests() {
     exchange::<PluginLoad>(16, approve(), reloaded());
     exchange::<PluginUnload>(17, approve(), reloaded());
     exchange::<PluginReload>(18, approve(), reloaded());
+    exchange::<ModelList>(
+        19,
+        Empty {},
+        vec![
+            ModelInfo {
+                name: "qwen".into(),
+                model: "qwen".into(),
+                kind: None,
+                current: true,
+            },
+            ModelInfo {
+                name: "claude".into(),
+                model: "claude-sonnet-5-5".into(),
+                kind: Some("anthropic".into()),
+                current: false,
+            },
+        ],
+    );
+    exchange::<ModelComplete>(
+        20,
+        ModelCompleteParams {
+            provider: Some("claude".into()),
+            messages: vec![ChatMessage::User {
+                content: "Name this session in three words.".into(),
+            }],
+            tools: vec![],
+            options: json!({ "max_tokens": 50 }),
+            stream: true,
+        },
+        ModelRequest { request_id: 7 },
+    );
+    exchange::<ModelCancel>(21, ModelRequest { request_id: 7 }, ());
 }
 
 #[test]
@@ -326,6 +358,24 @@ fn events() {
         outcome: TurnOutcome::Failed {
             message: "HTTP 500: overloaded".into(),
         },
+    });
+    event::<ModelDeltaEvent>(ModelDeltaParams {
+        request_id: 7,
+        kind: DeltaKind::Text,
+        text: "Fix ".into(),
+    });
+    event::<ModelCompleted>(ModelCompletedParams {
+        request_id: 7,
+        message: Some(ChatMessage::Assistant {
+            content: "Fix main typo".into(),
+            reasoning: String::new(),
+            tool_calls: vec![],
+        }),
+        usage: Some(Usage {
+            input_tokens: 30,
+            output_tokens: 4,
+        }),
+        error: None,
     });
     event::<SessionUpdated>(SessionUpdatedParams {
         session_id: SID.into(),
