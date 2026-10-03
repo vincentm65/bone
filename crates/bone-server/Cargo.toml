@@ -1,0 +1,18 @@
+[package]
+name = "bone-server"
+description = "Hosts bone-core and speaks bone-proto over a transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bone-core.workspace = true
+bone-proto.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["net", "io-std"] }
+
+[dev-dependencies]
+bone-lua.workspace = true
+bone-client.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "net", "io-util"] }

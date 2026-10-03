@@ -1,0 +1,15 @@
+[
+  {
+    "id": 8,
+    "jsonrpc": "2.0",
+    "method": "turn/cancel",
+    "params": {
+      "session_id": "01a0fe5e-0000-7000-8000-000000000001"
+    }
+  },
+  {
+    "id": 8,
+    "jsonrpc": "2.0",
+    "result": null
+  }
+]

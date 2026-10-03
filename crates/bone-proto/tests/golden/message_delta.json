@@ -1,0 +1,12 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "message/delta",
+    "params": {
+      "kind": "text",
+      "session_id": "01a0fe5e-0000-7000-8000-000000000001",
+      "text": "All tests",
+      "turn_id": 1
+    }
+  }
+]

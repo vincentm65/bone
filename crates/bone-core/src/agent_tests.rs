@@ -1,0 +1,577 @@
+//! Agent loop tests against a scripted provider.
+
+use std::collections::VecDeque;
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use bone_proto::methods::*;
+use bone_proto::types::*;
+use bone_proto::{Method, Notification, RpcError};
+use futures_util::future::BoxFuture;
+use serde_json::{Value, json};
+use tokio::sync::broadcast;
+
+use crate::config::{CoreConfig, ProviderConfig};
+use crate::provider::{Completion, CompletionRequest, Delta, DeltaSink, Provider, ProviderError};
+use crate::tools::Registry;
+use crate::{Core, Event};
+
+enum Step {
+    Reply(Completion),
+    /// Stream this text, then hang until cancelled.
+    Hang(String),
+    Fail(String),
+}
+
+#[derive(Default)]
+struct Scripted {
+    steps: Mutex<VecDeque<Step>>,
+    /// Messages sent on each request (system prompt excluded).
+    seen: Mutex<Vec<Vec<ChatMessage>>>,
+    /// Tool names offered on each request.
+    tools: Mutex<Vec<Vec<String>>>,
+}
+
+impl Provider for Scripted {
+    fn complete<'a>(
+        &'a self,
+        req: CompletionRequest<'a>,
+        on_delta: DeltaSink<'a>,
+    ) -> BoxFuture<'a, Result<Completion, ProviderError>> {
+        self.seen.lock().unwrap().push(req.messages[1..].to_vec());
+        self.tools
+            .lock()
+            .unwrap()
+            .push(req.tools.iter().map(|t| t.name.clone()).collect());
+        let step = self
+            .steps
+            .lock()
+            .unwrap()
+            .pop_front()
+            .expect("unscripted request");
+        Box::pin(async move {
+            match step {
+                Step::Reply(c) => {
+                    if !c.content.is_empty() {
+                        on_delta(Delta::Text(c.content.clone()));
+                    }
+                    Ok(c)
+                }
+                Step::Hang(text) => {
+                    on_delta(Delta::Text(text));
+                    std::future::pending().await
+                }
+                Step::Fail(msg) => Err(ProviderError(msg)),
+            }
+        })
+    }
+}
+
+fn text(s: &str) -> Step {
+    Step::Reply(Completion {
+        content: s.into(),
+        ..Default::default()
+    })
+}
+
+fn calls(calls: &[(&str, &str, Value)]) -> Step {
+    Step::Reply(Completion {
+        tool_calls: calls
+            .iter()
+            .map(|(id, name, args)| ToolCall {
+                id: (*id).into(),
+                name: (*name).into(),
+                // A JSON string stands for raw (possibly invalid) argument text.
+                arguments: args
+                    .as_str()
+                    .map_or_else(|| args.to_string(), str::to_owned),
+            })
+            .collect(),
+        ..Default::default()
+    })
+}
+
+struct Harness {
+    core: Core,
+    provider: Arc<Scripted>,
+    events: broadcast::Receiver<Event>,
+    session_id: String,
+    work: tempfile::TempDir,
+    _data: tempfile::TempDir,
+}
+
+impl Harness {
+    async fn new(steps: Vec<Step>) -> Self {
+        let data = tempfile::tempdir().unwrap();
+        let work = tempfile::tempdir().unwrap();
+        let config = CoreConfig {
+            provider: ProviderConfig {
+                base_url: "http://unused".into(),
+                model: "m".into(),
+                api_key: None,
+                reasoning_effort: None,
+                stream_usage: true,
+            },
+            system_prompt: None,
+            data_dir: data.path().to_owned(),
+        };
+        let provider = Arc::new(Scripted {
+            steps: Mutex::new(steps.into()),
+            ..Default::default()
+        });
+        let core = Core::with_parts(config, provider.clone(), Registry::builtin());
+        Self::finish(core, provider, work, data).await
+    }
+
+    /// A core running `core_lua` (plus the runtime and built-in plugins).
+    async fn with_lua(core_lua: &str, steps: Vec<Step>) -> Self {
+        Self::with_plugins(&[], core_lua, steps).await
+    }
+
+    /// With plugins from `examples/plugins/` installed.
+    async fn with_plugins(plugins: &[&str], core_lua: &str, steps: Vec<Step>) -> Self {
+        let data = tempfile::tempdir().unwrap();
+        for name in plugins {
+            let dir = data.path().join("plugins").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../examples/plugins")
+                .join(name)
+                .join("core.lua");
+            std::fs::copy(example, dir.join("core.lua")).unwrap();
+        }
+        let work = tempfile::tempdir().unwrap();
+        let lua = format!(
+            "bone.config.providers.x = {{ base_url = \"http://unused\", model = \"m\" }}
+{core_lua}"
+        );
+        std::fs::write(data.path().join("core.lua"), lua).unwrap();
+        let loaded = crate::scripting::load_with(data.path(), &|_| None).unwrap();
+        let provider = Arc::new(Scripted {
+            steps: Mutex::new(steps.into()),
+            ..Default::default()
+        });
+        let core = Core::with_lua(loaded, provider.clone());
+        Self::finish(core, provider, work, data).await
+    }
+
+    async fn finish(
+        core: Core,
+        provider: Arc<Scripted>,
+        work: tempfile::TempDir,
+        data: tempfile::TempDir,
+    ) -> Self {
+        let events = core.subscribe();
+        let mut h = Harness {
+            core,
+            provider,
+            events,
+            session_id: String::new(),
+            work,
+            _data: data,
+        };
+        let info: SessionInfo = h
+            .call::<SessionCreate>(SessionCreateParams {
+                cwd: Some(h.work.path().to_string_lossy().into()),
+            })
+            .await
+            .unwrap();
+        h.session_id = info.session_id;
+        h
+    }
+
+    async fn call<M: Method>(&self, params: M::Params) -> Result<M::Result, RpcError> {
+        let v = self
+            .core
+            .handle(M::METHOD, Some(serde_json::to_value(params).unwrap()))
+            .await?;
+        Ok(serde_json::from_value(v).unwrap())
+    }
+
+    async fn start(&self, text: &str) -> TurnId {
+        self.call::<TurnStart>(TurnStartParams {
+            session_id: self.session_id.clone(),
+            text: text.into(),
+        })
+        .await
+        .unwrap()
+        .turn_id
+    }
+
+    async fn next(&mut self) -> Event {
+        tokio::time::timeout(Duration::from_secs(5), self.events.recv())
+            .await
+            .expect("event")
+            .unwrap()
+    }
+
+    /// Skip events until one of type `N`.
+    async fn until<N: Notification>(&mut self) -> N::Params {
+        loop {
+            let e = self.next().await;
+            if e.method == N::METHOD {
+                return serde_json::from_value(e.params).unwrap();
+            }
+        }
+    }
+
+    async fn transcript(&self) -> Vec<ChatMessage> {
+        self.call::<SessionMessages>(SessionRef {
+            session_id: self.session_id.clone(),
+        })
+        .await
+        .unwrap()
+        .messages
+    }
+
+    async fn cancel(&self) {
+        self.call::<TurnCancel>(SessionRef {
+            session_id: self.session_id.clone(),
+        })
+        .await
+        .unwrap();
+    }
+}
+
+impl Event {
+    fn parse_as<N: Notification>(&self) -> Option<serde_json::Result<N::Params>> {
+        (self.method == N::METHOD).then(|| serde_json::from_value(self.params.clone()))
+    }
+}
+
+fn tool_result(m: &ChatMessage) -> (&str, bool) {
+    match m {
+        ChatMessage::Tool {
+            content, is_error, ..
+        } => (content, *is_error),
+        other => panic!("expected tool message, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn runs_tools_until_the_model_answers() {
+    let mut h = Harness::new(vec![
+        calls(&[
+            (
+                "c1",
+                "write_file",
+                json!({"path": "a.txt", "content": "hi"}),
+            ),
+            ("c2", "nope", json!({})),
+        ]),
+        calls(&[("c3", "read_file", Value::String("{broken".into()))]),
+        text("all done"),
+    ])
+    .await;
+    let turn_id = h.start("make a.txt").await;
+
+    let started = h.until::<ToolStarted>().await;
+    assert_eq!(
+        (started.turn_id, started.call.name.as_str()),
+        (turn_id, "write_file")
+    );
+    let finished = h.until::<TurnFinished>().await;
+    assert_eq!(finished.outcome, TurnOutcome::Completed);
+
+    assert_eq!(
+        std::fs::read_to_string(h.work.path().join("a.txt")).unwrap(),
+        "hi"
+    );
+    let t = h.transcript().await;
+    assert_eq!(t.len(), 7, "{t:#?}"); // user, asst, tool, tool, asst, tool, asst
+    assert!(!tool_result(&t[2]).1);
+    assert!(tool_result(&t[3]).0.starts_with("Unknown tool \"nope\""));
+    assert!(
+        tool_result(&t[5])
+            .0
+            .starts_with("arguments are not valid JSON")
+    );
+    assert_eq!(
+        t[6],
+        ChatMessage::Assistant {
+            content: "all done".into(),
+            reasoning: String::new(),
+            tool_calls: vec![]
+        }
+    );
+
+    // The model saw every tool result before answering.
+    assert_eq!(h.provider.seen.lock().unwrap()[2].len(), 6);
+}
+
+#[tokio::test]
+async fn hooks_run_at_every_step() {
+    let mut h = Harness::with_lua(
+        r#"
+        bone.hook("turn_start", function(ev) return { text = ev.text .. " (via hook)" } end)
+        bone.hook("request", function(ev)
+          local keep = {}
+          for _, t in ipairs(ev.tools) do if t.name ~= "shell" then keep[#keep + 1] = t end end
+          table.insert(ev.messages, 2, { role = "system", content = "extra context" })
+          return { tools = keep, messages = ev.messages }
+        end)
+        bone.hook("message", function(ev)
+          if ev.content ~= "" then return { content = ev.content .. "!" } end
+        end)
+        bone.hook("tool_call", function(ev)
+          if ev.name == "write_file" then
+            local answer = bone.ask({ kind = "confirm", path = ev.arguments.path })
+            if answer ~= "yes" then return { deny = "not confirmed" } end
+            return { arguments = { path = ev.arguments.path, content = "from hook" } }
+          end
+        end)
+        bone.hook("tool_result", function(ev) return { output = "seen: " .. ev.output } end)
+        bone.hook("turn_end", function(ev) print("ended " .. ev.outcome.status) end)
+        "#,
+        vec![
+            calls(&[
+                (
+                    "c1",
+                    "write_file",
+                    json!({"path": "a.txt", "content": "hi"}),
+                ),
+                (
+                    "c2",
+                    "write_file",
+                    json!({"path": "b.txt", "content": "hi"}),
+                ),
+            ]),
+            text("done"),
+        ],
+    )
+    .await;
+    h.start("go").await;
+    let started = h.until::<TurnStarted>().await;
+    assert_eq!(started.text, "go (via hook)");
+
+    let q = h.until::<AskRequested>().await;
+    assert_eq!(
+        (q.session_id.as_deref(), q.question["path"].as_str()),
+        (Some(h.session_id.as_str()), Some("a.txt"))
+    );
+    h.call::<AskRespond>(AskRespondParams {
+        ask_id: q.ask_id,
+        answer: json!("yes"),
+    })
+    .await
+    .unwrap();
+    assert_eq!(h.until::<AskResolved>().await.answer, "yes");
+    let q = h.until::<AskRequested>().await;
+    h.call::<AskRespond>(AskRespondParams {
+        ask_id: q.ask_id,
+        answer: json!("no"),
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        h.until::<TurnFinished>().await.outcome,
+        TurnOutcome::Completed
+    );
+    // Answering twice is an error.
+    let err = h
+        .call::<AskRespond>(AskRespondParams {
+            ask_id: q.ask_id,
+            answer: json!("no"),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, RpcError::INVALID_PARAMS);
+
+    assert_eq!(
+        std::fs::read_to_string(h.work.path().join("a.txt")).unwrap(),
+        "from hook"
+    );
+    assert!(!h.work.path().join("b.txt").exists());
+    let t = h.transcript().await;
+    assert_eq!(
+        t[0],
+        ChatMessage::User {
+            content: "go (via hook)".into()
+        }
+    );
+    assert!(tool_result(&t[2]).0.starts_with("seen: Created"), "{t:#?}");
+    assert_eq!(tool_result(&t[3]), ("not confirmed", true));
+    assert_eq!(
+        t[4],
+        ChatMessage::Assistant {
+            content: "done!".into(),
+            reasoning: String::new(),
+            tool_calls: vec![]
+        }
+    );
+    // The request hook removed a tool and added a message.
+    assert!(!h.provider.tools.lock().unwrap()[0].contains(&"shell".to_owned()));
+    assert_eq!(
+        h.provider.seen.lock().unwrap()[0][0],
+        ChatMessage::System {
+            content: "extra context".into()
+        }
+    );
+    let log = std::fs::read_to_string(h._data.path().join("core.log")).unwrap();
+    assert_eq!(
+        log,
+        "ended completed
+"
+    );
+}
+
+#[tokio::test]
+async fn turn_start_hooks_can_refuse() {
+    let mut h = Harness::with_lua(
+        r#"bone.hook("turn_start", function(ev) return { deny = "quiet hours" } end)"#,
+        vec![],
+    )
+    .await;
+    h.start("go").await;
+    assert_eq!(
+        h.until::<TurnFinished>().await.outcome,
+        TurnOutcome::Failed {
+            message: "quiet hours".into()
+        }
+    );
+    assert!(h.transcript().await.is_empty());
+}
+
+#[tokio::test]
+async fn cancel_while_streaming_keeps_partial_text() {
+    let mut h = Harness::new(vec![Step::Hang("partial".into()), text("next")]).await;
+    h.start("one").await;
+    let delta = h.until::<MessageDelta>().await;
+    assert_eq!(delta.text, "partial");
+
+    // A second turn on a busy session is refused.
+    let err = h
+        .call::<TurnStart>(TurnStartParams {
+            session_id: h.session_id.clone(),
+            text: "x".into(),
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, RpcError::BUSY);
+
+    h.cancel().await;
+    assert_eq!(
+        h.until::<TurnFinished>().await.outcome,
+        TurnOutcome::Cancelled
+    );
+    let t = h.transcript().await;
+    assert_eq!(
+        t[1],
+        ChatMessage::Assistant {
+            content: "partial".into(),
+            reasoning: String::new(),
+            tool_calls: vec![]
+        }
+    );
+
+    // The session is usable again.
+    let turn = h.start("two").await;
+    assert_eq!(turn, 2);
+    assert_eq!(
+        h.until::<TurnFinished>().await.outcome,
+        TurnOutcome::Completed
+    );
+}
+
+#[tokio::test]
+async fn cancel_while_asking_closes_every_tool_call() {
+    // The approve plugin asks before shell commands.
+    let mut h = Harness::with_plugins(
+        &["approve"],
+        "",
+        vec![
+            calls(&[
+                ("c1", "shell", json!({"command": "true"})),
+                ("c2", "shell", json!({"command": "true"})),
+            ]),
+            text("after"),
+        ],
+    )
+    .await;
+    h.start("go").await;
+    let q = h.until::<AskRequested>().await;
+    assert_eq!(
+        (q.question["kind"].as_str(), q.question["tool"].as_str()),
+        (Some("approval"), Some("shell"))
+    );
+    h.cancel().await;
+    // The question is dropped (answer null) and the turn ends, in either order.
+    let (mut resolved, mut outcome) = (None, None);
+    while resolved.is_none() || outcome.is_none() {
+        let e = h.next().await;
+        if let Some(Ok(r)) = Event::parse_as::<AskResolved>(&e) {
+            resolved = Some(r);
+        } else if let Some(Ok(f)) = Event::parse_as::<TurnFinished>(&e) {
+            outcome = Some(f.outcome);
+        }
+    }
+    let resolved = resolved.unwrap();
+    assert_eq!((resolved.ask_id, resolved.answer), (q.ask_id, Value::Null));
+    assert_eq!(outcome, Some(TurnOutcome::Cancelled));
+
+    // Every tool call has a result, so the next request is well-formed.
+    let t = h.transcript().await;
+    assert_eq!(t.len(), 4, "{t:#?}");
+    assert!(tool_result(&t[2]).1 && tool_result(&t[3]).1);
+}
+
+#[tokio::test]
+async fn provider_errors_fail_the_turn() {
+    let mut h = Harness::new(vec![Step::Fail("HTTP 500: boom".into())]).await;
+    h.start("go").await;
+    assert_eq!(
+        h.until::<TurnFinished>().await.outcome,
+        TurnOutcome::Failed {
+            message: "HTTP 500: boom".into()
+        }
+    );
+}
+
+#[tokio::test]
+async fn sessions_reload_from_disk() {
+    let mut h = Harness::new(vec![text("hello")]).await;
+    h.start("hi there").await;
+    h.until::<TurnFinished>().await;
+
+    let config = h.core.inner.config.clone();
+    let fresh = Core::with_parts(config, h.provider.clone(), Registry::builtin());
+    let list: Vec<SessionInfo> =
+        serde_json::from_value(fresh.handle(SessionList::METHOD, None).await.unwrap()).unwrap();
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].title.as_deref(), Some("hi there"));
+    let msgs: SessionMessagesResult = serde_json::from_value(
+        fresh
+            .handle(
+                SessionMessages::METHOD,
+                Some(json!({"session_id": h.session_id})),
+            )
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(msgs.messages, h.transcript().await);
+}
+
+#[tokio::test]
+async fn tools_run_without_asking_by_default() {
+    let mut h = Harness::with_lua(
+        "",
+        vec![
+            calls(&[("c1", "shell", json!({"command": "echo ran"}))]),
+            text("done"),
+        ],
+    )
+    .await;
+    h.start("go").await;
+    loop {
+        let e = h.next().await;
+        assert!(e.parse_as::<AskRequested>().is_none(), "nothing should ask");
+        if let Some(f) = e.parse_as::<ToolFinished>() {
+            assert!(f.unwrap().output.starts_with("ran\n"));
+        }
+        if let Some(f) = e.parse_as::<TurnFinished>() {
+            assert_eq!(f.unwrap().outcome, TurnOutcome::Completed);
+            break;
+        }
+    }
+}

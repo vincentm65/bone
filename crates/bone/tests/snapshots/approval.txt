@@ -1,0 +1,24 @@
+› run it
+
+  I'll run it.
+  ◌ $ echo hello && seq 1 9
+
+
+
+
+
+  ╭ Allow shell? ────────────────────────────────────────────────────────────╮
+  │ $ echo hello && seq 1 9                                                  │
+  │                                                                          │
+  │ y allow   a always   n deny   esc deny                                   │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+
+
+
+
+
+
+
+── * working <t>  ctrl+c to cancel ──────────────────────────────────────────────
+› Message bone… (enter sends, alt+enter for a new line, / for commands)
+ run it                                     900 in · 30 out  │  <cwd>

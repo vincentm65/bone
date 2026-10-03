@@ -1,0 +1,35 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+
+[workspace.dependencies]
+bone-proto = { path = "crates/bone-proto" }
+bone-core = { path = "crates/bone-core" }
+bone-server = { path = "crates/bone-server" }
+bone-client = { path = "crates/bone-client" }
+bone-lua = { path = "crates/bone-lua" }
+bone-tui = { path = "crates/bone-tui" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
+futures-util = "0.3"
+crossterm = { version = "0.28", features = ["event-stream"] }
+ratatui = "0.29"
+unicode-width = "0.2"
+libc = "0.2"
+mlua = { version = "0.11", features = ["luajit", "vendored", "serialize"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+tempfile = "3"
+tokio-util = "0.7"
+uuid = { version = "1", features = ["v7"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

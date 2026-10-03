@@ -1,0 +1,48 @@
+[
+  {
+    "id": 6,
+    "jsonrpc": "2.0",
+    "method": "session/messages",
+    "params": {
+      "session_id": "01a0fe5e-0000-7000-8000-000000000001"
+    }
+  },
+  {
+    "id": 6,
+    "jsonrpc": "2.0",
+    "result": {
+      "info": {
+        "created_at": 1790000000,
+        "cwd": "/home/me/project",
+        "session_id": "01a0fe5e-0000-7000-8000-000000000001",
+        "title": "Fix the typo in main.rs"
+      },
+      "messages": [
+        {
+          "content": "run the tests",
+          "role": "user"
+        },
+        {
+          "reasoning": "Run cargo test.",
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "arguments": "{\"command\":\"cargo test\"}",
+              "id": "call_1",
+              "name": "shell"
+            }
+          ]
+        },
+        {
+          "call_id": "call_1",
+          "content": "ok\n[exit code: 0]",
+          "role": "tool"
+        },
+        {
+          "content": "All tests pass.",
+          "role": "assistant"
+        }
+      ]
+    }
+  }
+]

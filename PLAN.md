@@ -1,0 +1,67 @@
+# bone3 - High-Level Plan
+
+Ground-up rebuild of bone. Rust + Lua.
+
+## Goals
+1. **One way to call and connect to the core** - a single, stable API/protocol.
+2. **Minimal, fullscreen TUI** - modeless and simple to use; everything is configurable and scriptable from Lua.
+
+## Architecture
+
+```
+bone3/
+  crates/
+    bone-core/     agent loop, providers, tools, sessions, config (no UI)
+    bone-proto/    the single API: typed messages (requests, events), serde
+    bone-server/   hosts core, speaks bone-proto over a transport
+    bone-client/   client lib: connect (in-process or socket), send/receive
+    bone-tui/      fullscreen TUI (ratatui/crossterm) + embedded Lua (mlua, LuaJIT)
+    bone-lua/      Lua API bindings
+  runtime/         default Lua: keymaps, options, default UI, themes
+  docs/
+```
+
+## Part 1: Core + single connection point
+- Core is UI-agnostic: takes `Request`s, emits a stream of `Event`s.
+- `bone-proto`: one versioned message schema, the only contract.
+- One `Client` interface with interchangeable transports: in-process channel, Unix socket, stdio. TUI, CLI, scripts and editors all use it.
+- Headless mode: `bone --headless` / `--listen <sock>` (like nvim).
+- Core owns sessions, providers, tools, hooks, subagents.
+
+## Part 2: TUI
+- One view: the session above, the prompt below, a statusline. No modes; `/` commands with suggestions; popups (from Lua, e.g. approvals) and the session picker.
+- Lua API (`bone.*`): options, keys, highlights/themes, event subscriptions, core requests, slash commands, statusline/divider and tool views.
+- Config: `~/.bone/tui.lua`, modules and plugins; defaults ship in `runtime/` as plain Lua so users can replace any of it.
+- Diff-based async rendering that never blocks on the core.
+
+## Milestones
+All seven are done (see README.md and docs/). What is left is in Open Questions below.
+
+1. Skeleton: cargo workspace, draft `bone-proto`, echo server + client over in-process transport.
+2. Core port: agent loop, one provider, core tools, sessions behind the proto API.
+3. Transports: socket + stdio, headless mode, version handshake.
+4. TUI base: fullscreen render loop, buffers/windows, modes, streaming chat.
+5. Lua layer: embed mlua (LuaJIT) in both core and TUI, `bone.*` API per side, load init.lua, move defaults into `runtime/`.
+6. Customization: themes, statusline, layouts, commands, autocmds, plugins.
+7. Polish: docs, tests (proto golden tests, headless TUI tests), packaging.
+
+## Decisions
+- **Wire format:** JSON-RPC 2.0, newline-delimited JSON. serde types in `bone-proto` are the source of truth.
+- **Lua scope:** Lua runs in both the core and the TUI. Core-side Lua can add tools, providers and hooks; TUI-side Lua controls the UI. Core-side scripts run with full trust (see below).
+- **Existing code:** fully fresh design. Old bone is only a UX reference, not a code source.
+- **Lua flavor:** LuaJIT (5.1 dialect) via `mlua`. Avoid LuaJIT-only features so 5.4 stays a fallback.
+- **Lua runtimes:** separate Lua states for core and TUI, with a small shared pure-Lua utility layer. The sides talk only through the protocol.
+- **Lua trust:** full trust, like Neovim. No Lua sandbox. Tool calls run without asking by default; asking first is a plugin (`examples/plugins/approve`).
+- **Config files:** everything lives in `~/.bone/` (override with `$BONE_CONFIG_DIR`): `core.lua` (providers, tools, hooks, permissions, prompts), `tui.lua` (options, keymaps, theme, layout, commands, renderers), `lua/` for shared modules, `runtime/` for overriding built-in runtime files, and `sessions/`. Plugins can ship `core/` and `tui/` parts. `BONE_*` env vars override `core.lua` for one-off runs.
+- **Tool formatting:** the protocol carries structured tool calls/results plus an optional `display` hint (`kind`, `data`). TUI Lua registers renderers by tool name or display kind. Core Lua hooks transform what the model sees.
+
+## Resolved
+- **No Vim modes (decided after milestone 7):** the TUI was first built Neovim-style (modes, `:` commands, splits, `<C-w>` keys). It is now modeless: one chat plus the prompt, `/` commands with suggestions, popups and the session picker, and keys written as `"ctrl+s"` with per-popup contexts instead of modes. The architecture (core/protocol/clients, two Lua states, runtime defaults, plugins) is unchanged.
+- **Tool display:** no display hint in the protocol for now. The TUI renders built-in tools from their call and result (condensed headers, previews, diffs) and Lua replaces any tool's view by name with `bone.ui.tool_views[name]`, returning a title and rows of `{text, highlight group}`.
+- **Plugin layout:** `~/.bone/plugins/<name>/{core.lua,tui.lua,lua/,colors/}`, loaded in name order after the runtime and before the user's files; `_`/`.` prefixes disable. Installing is copying or cloning; no plugin manager yet.
+
+## Open Questions
+- Hook set for core Lua beyond `tool_call` / `tool_result` (message, session events).
+- A plugin manager (install/update from git) if copying folders gets tedious.
+- **Hooks and approval:** the core has no approval logic. Generic hooks run at every step of a turn (`turn_start`, `request`, `message`, `tool_call`, `tool_result`, `turn_end`, plus custom points via `bone.run_hooks`); any hook or Lua tool can wait on the user with `bone.ask` (`ask/requested` / `ask/respond` / `ask/resolved`), and TUI Lua shows questions with `bone.ui.popup`. Approval is an opt-in plugin (`examples/plugins/approve`); by default every tool call runs. Nothing ships as a built-in plugin.
+- **Blank slate:** the TUI has no built-in look. Rust draws the chat as plain text and the bare prompt; the statusline and divider rows exist only when Lua defines them, `bone.ui.prompt` sets the prompt prefix/placeholder, and Lua popups are drawn entirely by Lua (Rust places and clears them). The previous default look lives in `examples/plugins/style`, the start of a styles package that may later ship as the default.

@@ -1,0 +1,28 @@
+-- style: a look for bone, built only from the Lua API. Without it the TUI
+-- is a blank slate: plain text, no statusline, no divider, no prompt prefix.
+-- Install: cp -r examples/plugins/style ~/.bone/plugins/
+
+require("style.views") -- how each chat item looks (user, reasoning, assistant, tools, notices)
+require("style.ui") -- statusline and divider
+
+bone.ui.prompt = {
+  prefix = { { "› ", "UserPrompt" } },
+  placeholder = { { "Message bone… (enter sends, alt+enter for a new line, / for commands)", "Placeholder" } },
+}
+
+-- What an empty session shows, above the prompt.
+bone.ui.regions.top = {
+  size = "auto",
+  max = 3,
+  render = function()
+    local s = bone.api.session()
+    if s or #bone.chat.items({}) > 0 then
+      return {}
+    end
+    return {
+      "",
+      { { "  New session. Type a message and press enter.", "Dim" } },
+      { { "  /help lists commands · ctrl+r opens an earlier session", "Dim" } },
+    }
+  end,
+}

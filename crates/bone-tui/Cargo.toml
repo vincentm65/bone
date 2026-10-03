@@ -1,0 +1,22 @@
+[package]
+name = "bone-tui"
+description = "Fullscreen bone TUI: buffers, windows, modes, keymaps"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bone-client.workspace = true
+bone-proto.workspace = true
+crossterm.workspace = true
+futures-util.workspace = true
+mlua.workspace = true
+bone-lua.workspace = true
+ratatui.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["time"] }
+unicode-width.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }

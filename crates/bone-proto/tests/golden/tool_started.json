@@ -1,0 +1,15 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "tool/started",
+    "params": {
+      "call": {
+        "arguments": "{\"command\":\"cargo test\"}",
+        "id": "call_1",
+        "name": "shell"
+      },
+      "session_id": "01a0fe5e-0000-7000-8000-000000000001",
+      "turn_id": 1
+    }
+  }
+]

@@ -1,0 +1,15 @@
+[package]
+name = "bone-proto"
+description = "The bone API: JSON-RPC 2.0 message types, codec and transports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["io-util"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["io-util", "rt-multi-thread", "time"] }

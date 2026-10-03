@@ -1,0 +1,19 @@
+[
+  {
+    "id": 4,
+    "jsonrpc": "2.0",
+    "method": "session/create",
+    "params": {
+      "cwd": "/home/me/project"
+    }
+  },
+  {
+    "id": 4,
+    "jsonrpc": "2.0",
+    "result": {
+      "created_at": 1790000000,
+      "cwd": "/home/me/project",
+      "session_id": "01a0fe5e-0000-7000-8000-000000000001"
+    }
+  }
+]

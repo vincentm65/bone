@@ -1,0 +1,18 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "ask/requested",
+    "params": {
+      "ask_id": 1,
+      "question": {
+        "arguments": {
+          "command": "cargo test"
+        },
+        "kind": "approval",
+        "title": "Allow shell?",
+        "tool": "shell"
+      },
+      "session_id": "01a0fe5e-0000-7000-8000-000000000001"
+    }
+  }
+]

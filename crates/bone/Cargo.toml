@@ -1,0 +1,21 @@
+[package]
+name = "bone"
+description = "The bone command: headless server today, TUI later"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bone-core.workspace = true
+bone-lua.workspace = true
+bone-proto.workspace = true
+bone-server.workspace = true
+bone-client.workspace = true
+bone-tui.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
+
+[dev-dependencies]
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "time", "net", "io-util"] }
+libc.workspace = true

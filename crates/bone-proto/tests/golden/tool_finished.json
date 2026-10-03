@@ -1,0 +1,13 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "tool/finished",
+    "params": {
+      "call_id": "call_1",
+      "is_error": false,
+      "output": "ok\n[exit code: 0]",
+      "session_id": "01a0fe5e-0000-7000-8000-000000000001",
+      "turn_id": 1
+    }
+  }
+]

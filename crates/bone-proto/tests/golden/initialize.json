@@ -1,0 +1,20 @@
+[
+  {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "method": "initialize",
+    "params": {
+      "client_name": "bone-tui",
+      "protocol_version": 0
+    }
+  },
+  {
+    "id": 1,
+    "jsonrpc": "2.0",
+    "result": {
+      "protocol_version": 0,
+      "server_name": "bone",
+      "server_version": "0.1.0"
+    }
+  }
+]

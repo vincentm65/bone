@@ -1,0 +1,17 @@
+[
+  {
+    "id": 3,
+    "jsonrpc": "2.0",
+    "method": "echo",
+    "params": {
+      "text": "ping"
+    }
+  },
+  {
+    "id": 3,
+    "jsonrpc": "2.0",
+    "result": {
+      "text": "ping"
+    }
+  }
+]

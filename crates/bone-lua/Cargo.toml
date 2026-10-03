@@ -1,0 +1,13 @@
+[package]
+name = "bone-lua"
+description = "Shared Lua setup for bone: runtime files, require paths, helpers"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+mlua.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

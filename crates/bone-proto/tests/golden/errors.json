@@ -1,0 +1,45 @@
+[
+  {
+    "error": {
+      "code": -32700,
+      "message": "parse error: expected value at line 1 column 1"
+    },
+    "id": null,
+    "jsonrpc": "2.0"
+  },
+  {
+    "error": {
+      "code": -32002,
+      "message": "first request must be initialize"
+    },
+    "id": 1,
+    "jsonrpc": "2.0"
+  },
+  {
+    "error": {
+      "code": -32003,
+      "data": {
+        "server_protocol_version": 0
+      },
+      "message": "protocol version mismatch: client 1, server 0"
+    },
+    "id": 2,
+    "jsonrpc": "2.0"
+  },
+  {
+    "error": {
+      "code": -32601,
+      "message": "method not found: nope"
+    },
+    "id": 3,
+    "jsonrpc": "2.0"
+  },
+  {
+    "error": {
+      "code": -32004,
+      "message": "turn 1 is still running"
+    },
+    "id": 4,
+    "jsonrpc": "2.0"
+  }
+]

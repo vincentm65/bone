@@ -1,0 +1,25 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "message/completed",
+    "params": {
+      "message": {
+        "reasoning": "Run cargo test.",
+        "role": "assistant",
+        "tool_calls": [
+          {
+            "arguments": "{\"command\":\"cargo test\"}",
+            "id": "call_1",
+            "name": "shell"
+          }
+        ]
+      },
+      "session_id": "01a0fe5e-0000-7000-8000-000000000001",
+      "turn_id": 1,
+      "usage": {
+        "input_tokens": 1200,
+        "output_tokens": 40
+      }
+    }
+  }
+]

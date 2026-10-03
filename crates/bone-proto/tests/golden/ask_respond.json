@@ -1,0 +1,16 @@
+[
+  {
+    "id": 9,
+    "jsonrpc": "2.0",
+    "method": "ask/respond",
+    "params": {
+      "answer": "allow",
+      "ask_id": 1
+    }
+  },
+  {
+    "id": 9,
+    "jsonrpc": "2.0",
+    "result": null
+  }
+]
