@@ -56,6 +56,12 @@ map({
   ["ctrl+c"] = "interrupt",
 }, "popup")
 
+-- One blank row between the chat and the prompt, so text never touches
+-- what you type. Replace it (a spinner line, a rule) or set it to nil.
+function bone.ui.divider()
+  return {}
+end
+
 -- The session picker (ctrl+r, /sessions), built on bone.ui.select.
 function bone.ui.sessions()
   local home = os.getenv("HOME")

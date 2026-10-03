@@ -298,7 +298,7 @@ Groups: `Normal Dim Accent UserPrompt UserMessage Reasoning ToolName ToolArgs To
 
 ### Drawing the screen
 
-Rust keeps the session data, wraps text, caches, scrolls and paints. Everything about how things look is Lua, and **by default there is none**: the screen is the chat as plain text (`> ` before your messages, one blank line between items, tool calls as name, arguments and output, reasoning hidden) and the prompt below it. Message text reaches views without blank lines at its edges. No statusline, divider, prompt prefix, colors or spacing until Lua adds them.
+Rust keeps the session data, wraps text, caches, scrolls and paints. Everything about how things look is Lua, and **by default there is none**: the screen is the chat as plain text (`> ` before your messages, one blank line between items, tool calls as name, arguments and output, reasoning hidden) and the prompt below it. Message text reaches views without blank lines at its edges. No statusline, prompt prefix, colors or spacing until Lua adds them; the one default is a blank divider row between the chat and the prompt (`bone.ui.divider` in `runtime/tui/defaults.lua`; set it to `nil` to remove it).
 
 `examples/plugins/style/` is a complete look built only from this API (views, tool calls, statusline, divider, prompt prefix, the empty-session hint). Install it with `cp -r examples/plugins/style ~/.bone/plugins/`, or copy the parts you want.
 

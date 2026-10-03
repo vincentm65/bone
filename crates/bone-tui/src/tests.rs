@@ -1419,3 +1419,27 @@ async fn help_topics_and_health_in_a_pager() {
     );
     assert_eq!(h.requests("health/check").len(), 1);
 }
+
+#[tokio::test]
+async fn a_blank_row_separates_the_chat_from_the_prompt() {
+    let mut h = Harness::blank().await;
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    let text: Vec<String> = (1..=20).map(|i| format!("line {i}")).collect();
+    h.emit::<MessageDelta>(MessageDeltaParams {
+        session_id: "s-new".into(),
+        turn_id: 1,
+        kind: DeltaKind::Text,
+        text: text.join("\n"),
+    })
+    .await;
+    h.input("typing").await;
+    assert!(
+        h.screen(30, 6).ends_with("line 19\nline 20\n\ntyping"),
+        "{}",
+        h.screen(30, 6)
+    );
+    // It is just Lua: remove it and the text sits on the prompt.
+    h.lua("bone.ui.divider = nil").await;
+    assert!(h.screen(30, 6).ends_with("line 20\ntyping"));
+}
