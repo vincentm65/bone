@@ -52,9 +52,7 @@ After `initialize`, the server runs each request on its own task: replies carry 
 | `health/check` | `{}` | `[{ name, status: "ok" \| "warn" \| "error", message }]`: the core's checks (provider, API key, reachability, sessions folder, Lua) and core Lua's `bone.health` checks |
 | `core/reload` | `{}` | `ReloadResult`. Loads the Lua configuration again (runtime, enabled plugins, `core.lua`) and switches to it; running turns finish on the previous one. An error (and no change) if loading fails |
 | `plugin/list` | `{}` | `[{ name, core, loaded }]`: the plugins folder; `core` if it has a `core.lua`, `loaded` if that runs |
-| `skill/list` | `{}` | `[{ name, description, path? }]`: the skills core Lua registered |
-| `template/list` | `{}` | `[{ name, description, args }]`: the prompt templates core Lua registered |
-| `template/expand` | `{ name, args, session_id?, cwd? }` | `{ text }`: the template with `args` (the argument text as typed) filled in; an error for an unknown template |
+| `lua/call` | `{ name, args?, session_id?, cwd? }` | whatever the function core Lua registered as `name` (`bone.rpc.register`) returns; it gets `args` and `{ session_id, cwd }`. An error for an unknown name or a failing function |
 | `mcp/list` | `{}` | `[{ name, state, error?, tools }]`: the MCP servers core Lua configured; `state` is `"idle"`, `"starting"`, `"ready"` or `"failed"`, `tools` their tools by the names the model sees |
 | `model/list` | `{}` | `[{ name, model, type?, current }]`: the `bone.config.providers` entries; `current` is the one turns use |
 | `model/complete` | `{ provider?, messages, tools?, options?, stream? }` | `{ request_id }`, returned at once. One model call outside any session: `provider` is an entry name (default: the current one), `tools` are offered but never run, `options` override `model`, `reasoning_effort` or a Lua provider's options. With `stream`, `model/delta` events follow; `model/completed` always ends it |

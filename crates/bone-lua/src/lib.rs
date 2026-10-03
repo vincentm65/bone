@@ -76,8 +76,7 @@ static CORE_CAPABILITIES: &[&str] = &[
     "core.session_write",
     "core.model",
     "core.mcp",
-    "core.skills",
-    "core.templates",
+    "core.rpc",
     "plugins.state",
 ];
 
@@ -108,8 +107,7 @@ static TUI_CAPABILITIES: &[&str] = &[
     "tui.jobs",
     "jobs.streaming",
     "tui.model",
-    "tui.skills",
-    "tui.templates",
+    "tui.rpc",
     "plugins.state",
     "plugins.lifecycle",
     "tui.project",

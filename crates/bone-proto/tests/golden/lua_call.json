@@ -1,0 +1,21 @@
+[
+  {
+    "id": 23,
+    "jsonrpc": "2.0",
+    "method": "lua/call",
+    "params": {
+      "args": {
+        "args": "src/main.rs",
+        "name": "review"
+      },
+      "cwd": "/home/me/project",
+      "name": "templates.expand",
+      "session_id": "01a0fe5e-0000-7000-8000-000000000001"
+    }
+  },
+  {
+    "id": 23,
+    "jsonrpc": "2.0",
+    "result": "Review src/main.rs for bugs."
+  }
+]

@@ -96,4 +96,29 @@ function M.extend(...)
   return out
 end
 
+--- Split a Markdown file's front matter from its body:
+--- "---\nname: x\ndescription: y\n---\nbody" -> { name = "x", ... }, "body".
+--- Only simple `key: value` lines; quotes around a value are dropped.
+function M.front_matter(text)
+  local meta = {}
+  text = text:gsub("\r\n", "\n")
+  if text:sub(1, 4) ~= "---\n" then
+    return meta, text
+  end
+  local close_start, close_end = text:find("\n%-%-%-[ \t]*\n", 4)
+  if not close_start then
+    close_start, close_end = text:find("\n%-%-%-[ \t]*$", 4)
+  end
+  if not close_start then
+    return meta, text
+  end
+  for line in text:sub(5, close_start):gmatch("[^\n]+") do
+    local k, v = line:match("^([%w_%-]+):%s*(.-)%s*$")
+    if k then
+      meta[k] = v:match('^"(.*)"$') or v:match("^'(.*)'$") or v
+    end
+  end
+  return meta, text:sub(close_end + 1)
+end
+
 return M

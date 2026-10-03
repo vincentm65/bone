@@ -1,7 +1,7 @@
 -- compact, core side: replace a long transcript's older part with a summary
 -- written by a model. Two ways in:
---   /compact in the TUI (it expands the "compact" template, whose Lua body
---   does the work in the core), and
+--   /compact in the TUI (it calls the "compact" function registered here
+--   with bone.rpc), and
 --   automatically, when a model call fails because the context is too long
 --   (a request_error hook compacts, then retries).
 --
@@ -67,17 +67,14 @@ function bone.compact(session_id)
   return ("compacted %d messages into a summary; kept the last %d turns"):format(#old, keep)
 end
 
-bone.template.register({
-  name = "compact",
-  description = "summarize older turns of this session (used by /compact)",
-  body = function(_, ctx)
-    if not ctx.session_id then
-      return "no session to compact"
-    end
-    local report, why = bone.compact(ctx.session_id)
-    return report or why
-  end,
-})
+-- What /compact calls (lua/call "compact").
+bone.rpc.register("compact", function(_, ctx)
+  if not ctx.session_id then
+    return "no session to compact"
+  end
+  local report, why = bone.compact(ctx.session_id)
+  return report or why
+end)
 
 local CONTEXT_FULL = { "context length", "context window", "maximum context", "too many tokens", "prompt is too long" }
 

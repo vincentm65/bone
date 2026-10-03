@@ -1241,7 +1241,25 @@ async fn mcp_tools_reach_the_model_and_survive_reloads() {
     assert!(h.call::<McpList>(Empty {}).await.unwrap().is_empty());
 }
 
-// ---- skills and prompt templates ---------------------------------------------
+// ---- skills and prompt templates (plugins), lua/call ----------------------------
+
+impl Harness {
+    /// `lua/call` for this session.
+    async fn lua_call(
+        &self,
+        name: &str,
+        args: Value,
+        cwd: Option<&str>,
+    ) -> Result<Value, RpcError> {
+        self.call::<LuaCall>(LuaCallParams {
+            name: name.into(),
+            args,
+            session_id: Some(self.session_id.clone()),
+            cwd: cwd.map(str::to_owned),
+        })
+        .await
+    }
+}
 
 #[tokio::test]
 async fn nothing_changes_without_skills() {
@@ -1250,8 +1268,35 @@ async fn nothing_changes_without_skills() {
     h.until::<TurnFinished>().await;
     assert!(!h.provider.systems.lock().unwrap()[0].contains("## Skills"));
     assert!(!h.provider.tools.lock().unwrap()[0].contains(&"skill".to_owned()));
-    assert!(h.call::<SkillList>(Empty {}).await.unwrap().is_empty());
-    assert!(h.call::<TemplateList>(Empty {}).await.unwrap().is_empty());
+    // The core has no skills or templates of its own.
+    let e = h
+        .lua_call("skills.list", json!({}), None)
+        .await
+        .unwrap_err();
+    assert!(e.message.contains("no function skills.list"), "{e:?}");
+}
+
+#[tokio::test]
+async fn clients_call_functions_core_lua_registered() {
+    let h = Harness::with_lua(
+        r#"bone.rpc.register("demo.echo", function(args, ctx)
+             bone.sleep(1)
+             return { said = args.word, session = ctx.session_id, cwd = ctx.cwd }
+           end)
+           bone.rpc.register("demo.fail", function() error("nope") end)"#,
+        vec![],
+    )
+    .await;
+    let r = h
+        .lua_call("demo.echo", json!({ "word": "hi" }), Some("/proj"))
+        .await
+        .unwrap();
+    assert_eq!(
+        r,
+        json!({ "said": "hi", "session": h.session_id, "cwd": "/proj" })
+    );
+    let e = h.lua_call("demo.fail", json!({}), None).await.unwrap_err();
+    assert!(e.message.contains("nope"), "{e:?}");
 }
 
 #[tokio::test]
@@ -1266,7 +1311,8 @@ async fn registered_skills_are_listed_and_loaded_on_demand() {
     .unwrap();
     std::fs::write(release.join("checklist.md"), "- [ ] tag").unwrap();
     std::fs::create_dir_all(skills.path().join("not-a-skill")).unwrap();
-    let mut h = Harness::with_lua(
+    let mut h = Harness::with_plugins(
+        &["skills"],
         &format!(
             r#"
             assert(bone.skill.load_dir("{dir}") == 1)
@@ -1309,13 +1355,17 @@ async fn registered_skills_are_listed_and_loaded_on_demand() {
     assert_eq!(tool_result(&t[3]), ("no skill named hidden", true));
     assert!(tool_result(&t[4]).0.contains("Use tabs."));
 
-    let list = h.call::<SkillList>(Empty {}).await.unwrap();
-    let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
+    let list = h.lua_call("skills.list", json!({}), None).await.unwrap();
+    let names: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
     assert_eq!(names, ["hidden", "release", "style"]);
     assert!(
-        list[1]
-            .path
-            .as_deref()
+        list[1]["path"]
+            .as_str()
             .unwrap()
             .ends_with("release/SKILL.md")
     );
@@ -1323,7 +1373,8 @@ async fn registered_skills_are_listed_and_loaded_on_demand() {
 
 #[tokio::test]
 async fn the_skills_prompt_can_be_left_to_plugins() {
-    let mut h = Harness::with_lua(
+    let mut h = Harness::with_plugins(
+        &["skills"],
         r#"bone.skill.register { name = "a", description = "b", content = "c" }
            bone.config.skills.prompt = false"#,
         vec![text("ok")],
@@ -1344,7 +1395,8 @@ async fn templates_expand_with_arguments() {
     )
     .unwrap();
     std::fs::write(prompts.path().join("notes.txt"), "not a template").unwrap();
-    let h = Harness::with_lua(
+    let h = Harness::with_plugins(
+        &["templates"],
         &format!(
             r#"
             bone.template.load_dir("{dir}")
@@ -1360,39 +1412,33 @@ async fn templates_expand_with_arguments() {
         vec![],
     )
     .await;
-    let list = h.call::<TemplateList>(Empty {}).await.unwrap();
+    let list = h.lua_call("templates.list", json!({}), None).await.unwrap();
+    let names: Vec<&str> = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, ["fix", "review", "status"]);
+    assert_eq!(list[1]["args"], json!(["path", "focus"]));
+    assert_eq!(list[1]["description"], "Review a file");
+    let expand = |name: &str, args: &str| json!({ "name": name, "args": args });
+    let call = |args: Value| h.lua_call("templates.expand", args, Some("/proj"));
     assert_eq!(
-        list.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
-        ["fix", "review", "status"]
-    );
-    assert_eq!(list[1].args, ["path", "focus"]);
-    assert_eq!(list[1].description, "Review a file");
-    let expand = |name: &str, args: &str| TemplateExpandParams {
-        name: name.into(),
-        args: args.into(),
-        session_id: None,
-        cwd: Some("/proj".into()),
-    };
-    let text = |r: Result<TemplateExpandResult, RpcError>| r.unwrap().text;
-    assert_eq!(
-        text(
-            h.call::<TemplateExpand>(expand("review", r#"src/main.rs "error handling""#))
-                .await
-        ),
+        call(expand("review", r#"src/main.rs "error handling""#))
+            .await
+            .unwrap(),
         "Review src/main.rs for error handling.\n"
     );
     assert_eq!(
-        text(h.call::<TemplateExpand>(expand("fix", "42 crash")).await),
+        call(expand("fix", "42 crash")).await.unwrap(),
         "Fix issue 42 (42 crash) in 100% of cases"
     );
     assert_eq!(
-        text(h.call::<TemplateExpand>(expand("status", "main")).await),
+        call(expand("status", "main")).await.unwrap(),
         "git says clean for main in /proj"
     );
-    let e = h
-        .call::<TemplateExpand>(expand("nope", ""))
-        .await
-        .unwrap_err();
+    let e = call(expand("nope", "")).await.unwrap_err();
     assert!(e.message.contains("no template named nope"), "{e:?}");
 }
 
@@ -1410,17 +1456,9 @@ async fn example_compact_plugin_summarizes_older_turns() {
         h.start(q).await;
         h.until::<TurnFinished>().await;
     }
-    let r = h
-        .call::<TemplateExpand>(TemplateExpandParams {
-            name: "compact".into(),
-            args: String::new(),
-            session_id: Some(h.session_id.clone()),
-            cwd: None,
-        })
-        .await
-        .unwrap();
+    let r = h.lua_call("compact", json!({}), None).await.unwrap();
     assert_eq!(
-        r.text,
+        r,
         "compacted 2 messages into a summary; kept the last 1 turns"
     );
     let t = h.transcript().await;
@@ -1523,10 +1561,10 @@ async fn example_folder_plugins_load_mcp_skills_and_templates() {
         (servers[0].name.as_str(), servers[0].state.as_str()),
         ("sh", "idle")
     );
-    let skills = h.call::<SkillList>(Empty {}).await.unwrap();
-    assert_eq!(skills[0].name, "release");
-    let templates = h.call::<TemplateList>(Empty {}).await.unwrap();
-    assert_eq!(templates[0].name, "review");
+    let skills = h.lua_call("skills.list", json!({}), None).await.unwrap();
+    assert_eq!(skills[0]["name"], "release");
+    let templates = h.lua_call("templates.list", json!({}), None).await.unwrap();
+    assert_eq!(templates[0]["name"], "review");
 }
 
 // ---- parallel tool calls and output limits --------------------------------------

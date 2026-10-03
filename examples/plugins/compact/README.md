@@ -16,5 +16,5 @@ cp -r examples/plugins/compact ~/.bone/plugins/
 
 The session file keeps everything (compaction writes a checkpoint), so the
 full history is still on disk. It uses `bone.session` (messages, compact),
-`bone.model`, a `request_error` hook, and a template with a Lua body as the
-way for the TUI to run core code (`/compact` expands it).
+`bone.model`, a `request_error` hook, and `bone.rpc` (the TUI's `/compact`
+calls the core half's `compact` function).

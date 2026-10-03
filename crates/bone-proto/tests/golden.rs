@@ -334,35 +334,15 @@ fn requests() {
         },
         (),
     );
-    exchange::<SkillList>(
+    exchange::<LuaCall>(
         23,
-        Empty {},
-        vec![SkillInfo {
-            name: "release".into(),
-            description: "Cut a release: changelog, tag, publish".into(),
-            path: Some("/home/me/skills/release/SKILL.md".into()),
-        }],
-    );
-    exchange::<TemplateList>(
-        24,
-        Empty {},
-        vec![TemplateInfo {
-            name: "review".into(),
-            description: "Review a file".into(),
-            args: vec!["path".into()],
-        }],
-    );
-    exchange::<TemplateExpand>(
-        25,
-        TemplateExpandParams {
-            name: "review".into(),
-            args: "src/main.rs".into(),
+        LuaCallParams {
+            name: "templates.expand".into(),
+            args: json!({ "name": "review", "args": "src/main.rs" }),
             session_id: Some(SID.into()),
             cwd: Some("/home/me/project".into()),
         },
-        TemplateExpandResult {
-            text: "Review src/main.rs for bugs.".into(),
-        },
+        json!("Review src/main.rs for bugs."),
     );
     exchange::<McpList>(
         22,

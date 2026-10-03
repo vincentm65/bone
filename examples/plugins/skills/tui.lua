@@ -5,7 +5,7 @@
 local names = {}
 
 local function fetch(then_)
-  bone.skills.list(function(list, err)
+  bone.rpc.call("skills.list", {}, function(list, err)
     if err then
       return bone.notify("skills: " .. tostring(err), "error")
     end

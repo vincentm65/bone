@@ -432,3 +432,14 @@ Core features that cannot be plugins, added after the agent-side roadmap:
   messages that never joined.
 
 Not done: built-in search tools (fine as Lua or MCP tools) and images.
+
+## Keeping the core bare
+
+Moved out of the core after review, to keep the default harness minimal:
+
+- Skills and prompt templates are plugins (`examples/plugins/skills`,
+  `templates`); the core keeps no registries. `skill/list`, `template/list`
+  and `template/expand` are replaced by one generic `lua/call`, served by
+  functions plugins register with `bone.rpc.register` (`core.rpc`,
+  `tui.rpc` for `bone.rpc.call`).
+

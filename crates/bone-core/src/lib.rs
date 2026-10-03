@@ -18,14 +18,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use bone_proto::methods::{
-    AskRespond, AskRespondParams, CoreReload, Echo, EchoParams, Echoed, HealthCheck, McpList,
-    ModelCancel, ModelComplete, ModelCompleteParams, ModelCompleted, ModelCompletedParams,
-    ModelDeltaEvent, ModelDeltaParams, ModelList, ModelRequest, PluginList, PluginLoad, PluginRef,
-    PluginReload, PluginUnload, SessionCreate, SessionCreateParams, SessionDelete, SessionDeleted,
-    SessionFork, SessionForkParams, SessionList, SessionMessages, SessionMessagesResult,
-    SessionRef, SessionRename, SessionRenameParams, SessionUpdated, SessionUpdatedParams,
-    SkillList, TemplateExpand, TemplateExpandParams, TemplateExpandResult, TemplateList,
-    TurnCancel, TurnStart, TurnStartParams, TurnStartResult, TurnSteer,
+    AskRespond, AskRespondParams, CoreReload, Echo, EchoParams, Echoed, HealthCheck, LuaCall,
+    LuaCallParams, McpList, ModelCancel, ModelComplete, ModelCompleteParams, ModelCompleted,
+    ModelCompletedParams, ModelDeltaEvent, ModelDeltaParams, ModelList, ModelRequest, PluginList,
+    PluginLoad, PluginRef, PluginReload, PluginUnload, SessionCreate, SessionCreateParams,
+    SessionDelete, SessionDeleted, SessionFork, SessionForkParams, SessionList, SessionMessages,
+    SessionMessagesResult, SessionRef, SessionRename, SessionRenameParams, SessionUpdated,
+    SessionUpdatedParams, TurnCancel, TurnStart, TurnStartParams, TurnStartResult, TurnSteer,
 };
 use bone_proto::types::SessionInfo;
 use bone_proto::{Method, Notification, RpcError};
@@ -267,30 +266,24 @@ impl Core {
                 let p: PluginRef = decode::<PluginUnload>(params)?;
                 reloaded(self.inner.reload(Change::Disable(p.name)).await)
             }
-            SkillList::METHOD => {
-                decode::<SkillList>(params)?;
-                self.lua_list("_skill_list").await
-            }
-            TemplateList::METHOD => {
-                decode::<TemplateList>(params)?;
-                self.lua_list("_template_list").await
-            }
-            TemplateExpand::METHOD => {
-                let p: TemplateExpandParams = decode::<TemplateExpand>(params)?;
+            LuaCall::METHOD => {
+                let p: LuaCallParams = decode::<LuaCall>(params)?;
                 let Some(s) = self.inner.runtime().scripting.clone() else {
-                    return Err(RpcError::invalid_params("no templates without core Lua"));
+                    return Err(RpcError::invalid_params("there is no core Lua to call"));
                 };
                 let ctx = serde_json::json!({ "session_id": p.session_id, "cwd": p.cwd });
-                let text = s
-                    .call(
-                        "_template_expand",
-                        vec![serde_json::json!(p.name), serde_json::json!(p.args), ctx],
-                        p.session_id.as_deref(),
-                    )
-                    .await
-                    .map_err(|e| RpcError::new(RpcError::INVALID_PARAMS, e))?;
-                let text = text.as_str().unwrap_or_default().to_owned();
-                Ok(serde_json::to_value(TemplateExpandResult { text }).unwrap_or_default())
+                let args = if p.args.is_null() {
+                    serde_json::json!({})
+                } else {
+                    p.args
+                };
+                s.call(
+                    "_rpc_entry",
+                    vec![serde_json::json!(p.name), args, ctx],
+                    p.session_id.as_deref(),
+                )
+                .await
+                .map_err(|e| RpcError::new(RpcError::INVALID_PARAMS, e))
             }
             McpList::METHOD => {
                 decode::<McpList>(params)?;
@@ -323,25 +316,6 @@ impl Core {
             }),
             _ => Err(RpcError::method_not_found(method)),
         }
-    }
-
-    /// A list from a core Lua function (empty without core Lua).
-    async fn lua_list(&self, function: &'static str) -> Result<Value, RpcError> {
-        let Some(s) = self.inner.runtime().scripting.clone() else {
-            return Ok(Value::Array(Vec::new()));
-        };
-        let v = s
-            .call(function, vec![], None)
-            .await
-            .map_err(RpcError::internal)?;
-        // Lua's empty lists come back as `{}`, at the top and in `args`.
-        let mut v = agent::list(&v);
-        for item in v.as_array_mut().into_iter().flatten() {
-            if let Some(args) = item.get("args") {
-                item["args"] = agent::list(args);
-            }
-        }
-        Ok(v)
     }
 
     /// Start a model call; it reports through `model/delta` and

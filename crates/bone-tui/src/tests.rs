@@ -91,11 +91,24 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
             { "name": "gh", "state": "ready", "tools": ["gh_search"] },
             { "name": "db", "state": "failed", "error": "cannot run db-mcp", "tools": [] },
         ]),
-        "skill/list" => json!([{ "name": "release", "description": "cut a release" }]),
-        "template/list" => json!([{ "name": "review", "description": "review", "args": ["path"] }]),
-        "template/expand" => {
-            json!({ "text": format!("Review {}", params["args"].as_str().unwrap_or("")) })
-        }
+        // The example plugins' core halves, as a core would answer for them.
+        "lua/call" => match params["name"].as_str().unwrap_or_default() {
+            "skills.list" => json!([{ "name": "release", "description": "cut a release" }]),
+            "templates.list" => {
+                json!([{ "name": "review", "description": "review", "args": ["path"] }])
+            }
+            "templates.expand" => json!(format!(
+                "Review {}",
+                params["args"]["args"].as_str().unwrap_or("")
+            )),
+            "compact" => json!("compacted"),
+            other => {
+                return Err(RpcError::new(
+                    RpcError::INVALID_PARAMS,
+                    format!("no function {other} registered with bone.rpc"),
+                ));
+            }
+        },
         "model/complete" => json!({ "request_id": 41 }),
         "plugin/list" => json!([{ "name": "corepart", "core": true, "loaded": true }]),
         "core/reload" => json!({ "plugins": [], "warnings": ["data_dir changed"] }),
@@ -2551,26 +2564,21 @@ async fn tui_lua_calls_the_model_through_the_core() {
 }
 
 #[tokio::test]
-async fn tui_lua_reads_skills_and_expands_templates() {
+async fn tui_lua_calls_core_lua_functions() {
     let mut h = Harness::blank().await;
+    assert_eq!(h.lua("=bone.has_capability('tui.rpc')").await, "true");
     h.lua(
         r#"
-        bone.skills.list(function(l) skills = l end)
-        bone.templates.list(function(l) templates = l end)
-        bone.templates.expand("review", "src/x.rs", function(text) expanded = text end)
+        bone.rpc.call("templates.expand", { name = "review", args = "src/x.rs" }, function(text) expanded = text end)
+        bone.rpc.call("nothing.here", {}, function(r, err) failed = err end)
         "#,
     )
     .await;
-    assert_eq!(
-        h.lua("=skills[1].name .. templates[1].args[1]").await,
-        "\"releasepath\""
-    );
     assert_eq!(h.lua("=expanded").await, "\"Review src/x.rs\"");
-    let req = h.requests("template/expand")[0].clone();
-    assert_eq!(
-        (req["name"].as_str(), req["args"].as_str()),
-        (Some("review"), Some("src/x.rs"))
-    );
+    assert!(h.lua("=failed").await.contains("no function nothing.here"));
+    let req = h.requests("lua/call")[0].clone();
+    assert_eq!(req["name"], "templates.expand");
+    assert_eq!(req["args"]["args"], "src/x.rs");
 }
 
 #[tokio::test]
@@ -2607,11 +2615,12 @@ async fn example_agent_extension_plugins_in_the_tui() {
     h.emit::<TurnFinished>(finished("s-new", TurnOutcome::Completed))
         .await;
     h.input("/compact{enter}").await;
-    let req = h.requests("template/expand").last().unwrap().clone();
+    let req = h.requests("lua/call").last().unwrap().clone();
     assert_eq!(
         (req["name"].as_str(), req["session_id"].as_str()),
         (Some("compact"), Some("s-new"))
     );
+    assert_eq!(h.message(), "compacted");
 
     // mcp: a panel of servers.
     h.input("/mcp{enter}").await;

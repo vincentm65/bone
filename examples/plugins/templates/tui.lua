@@ -5,7 +5,7 @@
 local made = {}
 
 local function sync()
-  bone.templates.list(function(list, err)
+  bone.rpc.call("templates.list", {}, function(list, err)
     if err then
       return bone.notify("templates: " .. tostring(err), "error")
     end
@@ -16,7 +16,7 @@ local function sync()
     for _, t in ipairs(list) do
       local name = t.name:lower():gsub("[^%w_%-]", "-")
       local ok = pcall(bone.cmd.create, name, function(c)
-        bone.templates.expand(t.name, c.args, function(text, e)
+        bone.rpc.call("templates.expand", { name = t.name, args = c.args }, function(text, e)
           if text then
             bone.prompt.set(text)
           else

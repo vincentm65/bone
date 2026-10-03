@@ -9,7 +9,7 @@ bone.cmd.create("compact", function()
     return bone.notify("wait for the turn to finish", "error")
   end
   bone.notify("compacting…")
-  bone.templates.expand("compact", "", function(report, err)
+  bone.rpc.call("compact", {}, function(report, err)
     bone.notify(report or ("compact: " .. tostring(err)), report and "info" or "error")
   end)
 end, { desc = "summarize the older part of this session (compact plugin)" })
