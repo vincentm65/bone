@@ -218,13 +218,16 @@ Any protocol method works (see `crates/bone-proto/src/methods.rs`).
 - `bone.api.prompt_get()`, `bone.api.prompt_set(text)`
 - `bone.api.session()` → `{ session_id, cwd, title, running }` or `nil`
 - `bone.strwidth(s)`: display width in columns.
-- `bone.ui.popup{ lines, width, height, row, col, keys, on_key, guard }` → id: something drawn over the screen that takes the keyboard (the newest popup gets the keys). Lua draws every cell; Rust only places it and clears what is behind it.
-  - `lines`: a list of lines, or `function(ctx)` returning one, with `ctx = { width, height }` the most room it has.
+- `bone.ui.win{ lines, width, height, anchor, row, col, z, focus, keys, on_key, guard }` → id: a window drawn over the screen. Lua draws every cell; Rust only places it and clears what is behind it.
+  - `lines`: a list of lines, or `function(ctx)` returning one (called every frame), with `ctx = { width, height }` the most room it has.
   - `width`, `height`: default to fitting the lines (give a `width` if a line uses `{ fill = ... }`).
-  - `row`, `col`: default centered; `0` is the top/left edge, negative counts from the bottom/right (`-1` touches it).
-  - `keys`: key name → function. `on_key(name)` gets the other keys; return `true` if it handled one. Anything left goes to the `popup` keymap context (`ctrl+c` cancels the turn) or is ignored.
-  - `guard`: ms to ignore keys after opening, so typing can't hit it.
-- `bone.ui.close(id)`: close a popup.
+  - `anchor`: `"screen"` (default), `"chat"` (the chat area) or `"prompt"` (the space above the prompt; the window sits right on the prompt unless `row` says otherwise).
+  - `row`, `col`: in the anchor; default centered, `0` is the top/left edge, negative counts from the bottom/right (`-1` touches it).
+  - `z`: stacking order (default 0, newer on top among equals).
+  - `focus`: take the keyboard (default `false`). A focused window gets keys first: `keys` maps key names to functions, `on_key(name)` gets the others (return `true` if handled), and the rest go to the `popup` keymap context (`ctrl+c` cancels the turn) or are ignored. `guard`: ms to ignore keys after opening, so typing can't hit it.
+- `bone.ui.popup{ ... }`: `bone.ui.win` with `focus = true`.
+- `bone.ui.update(id, { ... })`: change any of those fields in place (`false` makes a size or position automatic again). Returns `false` if the window is closed.
+- `bone.ui.close(id)`, `bone.ui.is_open(id)`.
 - `bone.ui.box(lines, { title, title_hl, border_hl, width, pad, chars })` → the lines inside a rounded border (`PopupBorder`/`PopupTitle` by default). Only used if you call it.
 
 ### Colors
@@ -303,7 +306,15 @@ bone.ui.regions.above_prompt = {
 bone.ui.regions.right = { size = 30, render = function(ctx) return { "notes" } end }
 ```
 
-Regions are `top` and `above_prompt` (sized in rows) and `left` and `right` (columns, beside the chat). `size` is a number or `"auto"` (fit the content, up to `max`, default 10); a bare function means `size = "auto"`. `render(ctx)` gets `{ region, width, height, spinner, popup, session }` and returns lines, or `nil` to hide the region. Regions are redrawn every frame, so keep them light.
+Regions `left` and `right` sit beside the chat (sized in columns). Every other region is a row band placed by `bone.ui.layout`, which lists the screen's rows from top to bottom:
+
+```lua
+bone.ui.layout = { "top", "chat", "divider", "above_prompt", "prompt", "statusline" }  -- the default
+bone.ui.layout = { "statusline", "chat", "mybar", "prompt" }  -- statusline on top, a custom band
+bone.ui.regions.mybar = { size = 1, render = function(ctx) return { "hello" } end }
+```
+
+`chat`, `prompt`, `divider` and `statusline` are built in; leave one out and it is not shown. Row regions are sized in rows. `size` is a number or `"auto"` (fit the content, up to `max`, default 10); a bare function means `size = "auto"`. `render(ctx)` gets `{ region, width, height, spinner, popup, session }` and returns lines, or `nil` to hide the region. Regions are redrawn every frame, so keep them light.
 
 - `bone.chat.items({ kind = "tool", last = 3 })` returns items of the session on screen, as views receive them.
 - `bone.ui.render(item, width, region)` renders an item with the current views.

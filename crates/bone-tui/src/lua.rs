@@ -100,6 +100,89 @@ fn spans_out(lua: &Lua, spans: Vec<(String, String)>) -> mlua::Result<Table> {
     Ok(t)
 }
 
+/// Set the fields of a window that `spec` names (for opening and
+/// `bone.ui.update`). Replaced callbacks are released.
+fn apply_win_spec(
+    app: &mut App,
+    lua: &Lua,
+    p: &mut crate::app::Popup,
+    spec: &Table,
+) -> mlua::Result<()> {
+    fn err(m: impl std::fmt::Display) -> mlua::Error {
+        mlua::Error::runtime(m)
+    }
+    match spec.get::<Value>("lines")? {
+        Value::Nil => {}
+        v @ (Value::Function(_) | Value::Table(_)) => {
+            if p.lines != 0 {
+                App::drop_callback(lua, p.lines)?;
+            }
+            app.next_callback += 1;
+            p.lines = app.next_callback;
+            lua.named_registry_value::<Table>(CALLBACKS)?
+                .set(p.lines, v)?;
+        }
+        _ => return Err(err("window lines must be a list or a function")),
+    }
+    if let Some(t) = spec.get::<Option<Table>>("keys")? {
+        for (_, cb) in p.keys.drain(..) {
+            App::drop_callback(lua, cb)?;
+        }
+        for pair in t.pairs::<String, Function>() {
+            let (name, f) = pair?;
+            let key = keys::parse(&name).map_err(err)?;
+            p.keys.push((key, app.store_callback(lua, f)?));
+        }
+    }
+    if let Some(f) = spec.get::<Option<Function>>("on_key")? {
+        if let Some(cb) = p.on_key.take() {
+            App::drop_callback(lua, cb)?;
+        }
+        p.on_key = Some(app.store_callback(lua, f)?);
+    }
+    if let Some(focus) = spec.get::<Option<bool>>("focus")? {
+        p.focus = focus;
+    }
+    if let Some(anchor) = spec.get::<Option<String>>("anchor")? {
+        if !matches!(anchor.as_str(), "screen" | "chat" | "prompt") {
+            return Err(err(format!(
+                "unknown anchor {anchor:?} (screen, chat or prompt)"
+            )));
+        }
+        p.anchor = anchor;
+    }
+    if let Some(z) = spec.get::<Option<i32>>("z")? {
+        p.z = z;
+    }
+    if let Some(ms) = spec.get::<Option<u64>>("guard")? {
+        p.guard = std::time::Duration::from_millis(ms);
+    }
+    // Size and position: a number sets, false goes back to automatic.
+    let num = |k: &str| -> mlua::Result<Option<Option<i64>>> {
+        Ok(match spec.get::<Value>(k)? {
+            Value::Nil => None,
+            Value::Boolean(false) => Some(None),
+            Value::Integer(n) => Some(Some(n)),
+            Value::Number(n) => Some(Some(n as i64)),
+            _ => return Err(err(format!("window {k} must be a number or false"))),
+        })
+    };
+    if let Some(v) = num("width")? {
+        p.width = v.map(|n| n.clamp(0, u16::MAX as i64) as u16);
+    }
+    if let Some(v) = num("height")? {
+        p.height = v.map(|n| n.clamp(0, u16::MAX as i64) as u16);
+    }
+    if let Some(v) = num("row")? {
+        p.row = v.map(|n| n as i32);
+    }
+    if let Some(v) = num("col")? {
+        p.col = v.map(|n| n as i32);
+    }
+    app.dirty = true;
+    Ok(())
+}
+
 /// `bone.markdown` and `bone.text`: pure helpers for views.
 fn install_text(lua: &Lua, bone: &Table) -> mlua::Result<()> {
     let md = lua.create_table()?;
@@ -580,46 +663,49 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
         }
         "popup_open" => {
             let spec: Table = args(lua, a)?;
-            let lines = match spec.get::<Value>("lines")? {
-                Value::Function(f) => app.store_callback(lua, f)?,
-                v @ Value::Table(_) => {
-                    app.next_callback += 1;
-                    let id = app.next_callback;
-                    lua.named_registry_value::<Table>(CALLBACKS)?.set(id, v)?;
-                    id
-                }
-                _ => return Err(err("popup lines must be a list or a function")),
-            };
-            let mut keys = Vec::new();
-            if let Some(t) = spec.get::<Option<Table>>("keys")? {
-                for pair in t.pairs::<String, Function>() {
-                    let (name, f) = pair?;
-                    let key = keys::parse(&name).map_err(err)?;
-                    keys.push((key, app.store_callback(lua, f)?));
-                }
-            }
-            let on_key = match spec.get::<Option<Function>>("on_key")? {
-                Some(f) => Some(app.store_callback(lua, f)?),
-                None => None,
-            };
             app.next_callback += 1;
-            let id = app.next_callback;
-            app.popups.push(crate::app::Popup {
-                id,
-                lines,
-                keys,
-                on_key,
-                width: spec.get("width")?,
-                height: spec.get("height")?,
-                row: spec.get("row")?,
-                col: spec.get("col")?,
+            let mut p = crate::app::Popup {
+                id: app.next_callback,
+                focus: false,
+                anchor: "screen".into(),
+                z: 0,
+                lines: 0,
+                keys: Vec::new(),
+                on_key: None,
+                width: None,
+                height: None,
+                row: None,
+                col: None,
                 opened: std::time::Instant::now(),
-                guard: std::time::Duration::from_millis(
-                    spec.get::<Option<u64>>("guard")?.unwrap_or(0),
-                ),
-            });
+                guard: std::time::Duration::ZERO,
+            };
+            if !matches!(
+                spec.get::<Value>("lines")?,
+                Value::Function(_) | Value::Table(_)
+            ) {
+                return Err(err("a window needs lines: a list or a function"));
+            }
+            apply_win_spec(app, lua, &mut p, &spec)?;
+            let id = p.id;
+            app.popups.push(p);
             app.dirty = true;
             ret(lua, id)
+        }
+        "popup_update" => {
+            let (id, spec): (u64, Table) = args(lua, a)?;
+            let Some(i) = app.popups.iter().position(|p| p.id == id) else {
+                return ret(lua, false);
+            };
+            let mut p = app.popups.remove(i);
+            let r = apply_win_spec(app, lua, &mut p, &spec);
+            app.popups.insert(i, p);
+            r?;
+            app.dirty = true;
+            ret(lua, true)
+        }
+        "popup_is_open" => {
+            let id: u64 = args(lua, a)?;
+            ret(lua, app.popups.iter().any(|p| p.id == id))
         }
         "popup_close" => {
             let id: u64 = args(lua, a)?;

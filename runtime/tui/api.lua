@@ -153,6 +153,9 @@ end
 ---       name: "top", "above_prompt" (rows), "left", "right" (columns).
 ---   bone.ui.statusline(ctx), bone.ui.divider(ctx): one row each, only
 ---       while defined.
+---   bone.ui.layout = { "top", "chat", "divider", "above_prompt", "prompt",
+---       "statusline" }: the rows, top to bottom (this is the default); any
+---       other name is a region.
 ---   bone.ui.prompt = { prefix = line, placeholder = line }
 ---
 --- Changing views or tool_views redraws the chat. Call bone.ui.refresh()
@@ -185,25 +188,47 @@ function bone.ui.render(item, width, region)
   return view(item, { width = width, region = region or "region", prev = nil }) or {}
 end
 
---- Open a popup over the screen; the newest popup has the keyboard. Lua
---- draws every cell of it (Rust only places it and clears behind it):
+--- Open a window over the screen. Lua draws every cell of it (Rust only
+--- places it and clears behind it):
 ---   lines: a list of lines, or function(ctx) -> lines, ctx = { width, height }
----          (the most room it can have)
+---          (the most room it can have); a function is called every frame
 ---   width, height: size in cells; default: fit the lines (set width if a
 ---          line uses { fill = ... })
----   row, col: position; default centered, negative counts from the
----          bottom/right (-1 = touching the edge)
+---   anchor: "screen" (default), "chat" (the chat area) or "prompt" (the
+---          space above the prompt; the window sits right on the prompt)
+---   row, col: position in the anchor; default centered, negative counts
+---          from the bottom/right (-1 = touching the edge)
+---   z: stacking order (default 0; ties go to the newer window)
+---   focus: take the keyboard (default false for win, true for popup)
 ---   keys: { y = function() ... end, esc = ... }
 ---   on_key: function(key_name) for other keys; return true if handled
 ---   guard: ms to ignore keys after opening (so typing can't hit them)
---- Unhandled keys go to the "popup" keymaps (ctrl+c cancels the turn).
---- Returns an id for bone.ui.close. bone.ui.box draws a border if you want one.
-function bone.ui.popup(spec)
+--- Unhandled keys in a focused window go to the "popup" keymaps (ctrl+c
+--- cancels the turn). Returns an id. bone.ui.box draws a border if you want.
+function bone.ui.win(spec)
   return api("popup_open", spec)
+end
+
+--- A window that takes the keyboard (bone.ui.win with focus = true).
+function bone.ui.popup(spec)
+  if spec.focus == nil then
+    spec.focus = true
+  end
+  return api("popup_open", spec)
+end
+
+--- Change fields of an open window (same fields as bone.ui.win; false
+--- resets width/height/row/col to automatic). Returns false if it is closed.
+function bone.ui.update(id, spec)
+  return api("popup_update", id, spec)
 end
 
 function bone.ui.close(id)
   api("popup_close", id)
+end
+
+function bone.ui.is_open(id)
+  return api("popup_is_open", id)
 end
 
 local function spans(line)

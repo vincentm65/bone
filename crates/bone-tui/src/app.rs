@@ -58,11 +58,20 @@ impl SessionPicker {
     }
 }
 
-/// A popup opened from Lua (`bone.ui.popup`). The newest one has the
-/// keyboard: its own keys first, then the `popup` keymaps.
-/// Lua draws everything inside it; Rust only places it and clears behind it.
+/// A window opened from Lua (`bone.ui.win`, `bone.ui.popup`). Lua draws
+/// everything inside it; Rust only places it and clears behind it. The
+/// topmost focused one has the keyboard: its own keys first, then the
+/// `popup` keymaps.
+#[derive(Clone)]
 pub struct Popup {
     pub id: u64,
+    /// Takes the keyboard while open.
+    pub focus: bool,
+    /// What `row`/`col` are relative to: "screen", "chat" or "prompt" (the
+    /// space above the prompt, so row -1 sits right on it).
+    pub anchor: String,
+    /// Higher is drawn on top; ties go to the newer one.
+    pub z: i32,
     /// Callback id of the lines: a function(ctx) or a fixed list.
     pub lines: u64,
     pub keys: Vec<(Key, u64)>,
@@ -304,7 +313,7 @@ impl App {
 
     /// Which keymaps apply right now.
     pub fn context(&self) -> Context {
-        if !self.popups.is_empty() {
+        if self.focused_popup().is_some() {
             Context::Popup
         } else if self.picker.is_some() {
             Context::Picker
@@ -551,7 +560,7 @@ impl App {
 
     /// Matching commands while the prompt holds a partial `/name`.
     pub fn suggestions(&self) -> Vec<(String, String)> {
-        if self.picker.is_some() || !self.popups.is_empty() {
+        if self.picker.is_some() || self.focused_popup().is_some() {
             return Vec::new();
         }
         let text = self.prompt.text();
@@ -792,8 +801,20 @@ impl App {
 
     // ---- popups --------------------------------------------------------------
 
+    /// Windows in drawing order, bottom first.
+    pub fn popups_in_order(&self) -> Vec<&Popup> {
+        let mut v: Vec<&Popup> = self.popups.iter().collect();
+        v.sort_by_key(|p| (p.z, p.id));
+        v
+    }
+
+    /// The topmost window that takes the keyboard.
+    pub fn focused_popup(&self) -> Option<&Popup> {
+        self.popups_in_order().into_iter().rev().find(|p| p.focus)
+    }
+
     fn popup_key(&mut self, key: Key) {
-        let Some(top) = self.popups.last() else {
+        let Some(top) = self.focused_popup() else {
             return;
         };
         if top.opened.elapsed() < top.guard {

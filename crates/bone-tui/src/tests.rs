@@ -1290,3 +1290,54 @@ async fn system_http_and_defer_run_in_the_background() {
     );
     assert_eq!(h.lua("=failed").await, "true");
 }
+
+#[tokio::test]
+async fn windows_without_focus_anchors_z_and_updates() {
+    let mut h = Harness::blank().await;
+    // A display-only window above the prompt: typing still reaches the prompt.
+    h.lua("info = bone.ui.win({ anchor = 'prompt', lines = { 'INFO' } })")
+        .await;
+    assert_eq!(h.app.context(), Context::Main);
+    h.input("hi").await;
+    assert_eq!(h.prompt(), "hi");
+    assert_eq!(h.screen(20, 5), "\n\n\nINFO\nhi");
+
+    // Updating changes it in place; another window with a higher z covers it.
+    h.lua("bone.ui.update(info, { lines = { 'INFO 2' }, col = -1 })")
+        .await;
+    assert_eq!(h.screen(20, 5), "\n\n\n              INFO 2\nhi");
+    h.lua("top = bone.ui.win({ anchor = 'prompt', z = 5, col = -1, lines = { 'OVER' } })")
+        .await;
+    assert_eq!(h.screen(20, 5), "\n\n\n              INOVER\nhi");
+    h.lua("bone.ui.update(top, { z = -1 })").await;
+    assert_eq!(h.screen(20, 5), "\n\n\n              INFO 2\nhi");
+    assert_eq!(h.lua("=bone.ui.is_open(top)").await, "true");
+    h.lua("bone.ui.close(top); bone.ui.close(info)").await;
+    assert_eq!(h.lua("=bone.ui.is_open(top)").await, "false");
+    assert_eq!(h.lua("=bone.ui.update(top, {})").await, "false");
+
+    // A window anchored in the chat area, at its top left.
+    h.lua("bone.ui.win({ anchor = 'chat', row = 0, col = 0, lines = { 'C' } })")
+        .await;
+    assert!(h.screen(20, 5).starts_with("C\n"));
+    let err = h
+        .lua("bone.ui.win({ anchor = 'nowhere', lines = {} })")
+        .await;
+    assert!(err.contains("unknown anchor"), "{err}");
+}
+
+#[tokio::test]
+async fn layout_orders_rows_and_takes_any_region() {
+    let mut h = Harness::blank().await;
+    h.lua(
+        "bone.ui.statusline = function() return 'STATUS' end \
+         bone.ui.regions.bar = { size = 1, render = function() return { 'BAR' } end } \
+         bone.ui.layout = { 'statusline', 'bar', 'prompt', 'chat' }",
+    )
+    .await;
+    h.input("typed").await;
+    assert_eq!(h.screen(20, 7), "STATUS\nBAR\ntyped\n\n\n\n");
+    // Without "prompt" in the layout there is no prompt row.
+    h.lua("bone.ui.layout = { 'chat', 'statusline' }").await;
+    assert_eq!(h.screen(20, 3), "\n\nSTATUS");
+}

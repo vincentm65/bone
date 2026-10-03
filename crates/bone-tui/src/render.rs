@@ -1,12 +1,16 @@
 //! Drawing. Reads the app state and paints a frame; ratatui diffs frames so
 //! only changed cells reach the terminal.
 //!
+//! Rows come from `bone.ui.layout` (default below); a message line goes
+//! under them while there is one.
+//!
 //! ```text
-//! chat            the current session
+//! top             region, if defined
+//! chat            the current session ("left"/"right" regions beside it)
 //! divider         only if bone.ui.divider is defined
+//! above_prompt    region, if defined
 //! prompt          grows with its text; bone.ui.prompt adds a prefix
 //! statusline      only if bone.ui.statusline is defined
-//! message         only while there is one
 //! ```
 //! Slash-command suggestions, the session picker and Lua popups are drawn
 //! on top.
@@ -32,8 +36,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     frame.render_widget(Block::default().style(app.theme.hl("Normal")), area);
 
     let msg_rows = message_rows(app, area);
-    let status_h = u16::from(app.ui_defined("statusline"));
-    let divider_h = u16::from(app.ui_defined("divider"));
+    let layout = app.layout();
+    let has = |n: &str| layout.iter().any(|l| l == n);
+    let status_h = u16::from(has("statusline") && app.ui_defined("statusline"));
+    let divider_h = u16::from(has("divider") && app.ui_defined("divider"));
     let (prefix, placeholder) = app.prompt_decor();
     let gutter = prefix
         .iter()
@@ -43,54 +49,69 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         })
         .sum::<usize>();
     let main = Rect {
-        height: area.height.saturating_sub(status_h + msg_rows),
-        ..area
-    };
-    let status = Rect {
-        y: main.bottom(),
-        height: status_h.min(area.height),
+        height: area.height.saturating_sub(msg_rows),
         ..area
     };
     let message = Rect {
-        y: status.bottom(),
-        height: msg_rows.min(area.height.saturating_sub(status.bottom() - area.y)),
+        y: main.bottom(),
+        height: msg_rows.min(area.height),
         ..area
     };
 
-    // Top to bottom: region "top", the chat (with "left"/"right" beside it),
-    // the divider, region "above_prompt", the prompt.
-    let prompt_h = {
+    // Rows in `bone.ui.layout` order. Fixed rows first, then regions (never
+    // squeezing the chat below a few rows), then the chat takes the rest.
+    let prompt_h = if has("prompt") {
         let rows = prompt_rows(&app.prompt, (main.width as usize).saturating_sub(gutter))
             .0
             .len();
         (rows.clamp(1, app.options.prompt_max_height) as u16)
-            .min(main.height.saturating_sub(1 + divider_h))
+            .min(main.height.saturating_sub(1 + divider_h + status_h))
+    } else {
+        0
     };
-    // Regions never squeeze the chat below a few rows.
-    let spare = main.height.saturating_sub(prompt_h + divider_h + 3);
-    let top = app.region("top", main.width, spare / 2);
-    let top_h = top.as_ref().map_or(0, |t| t.0);
-    let above = app.region("above_prompt", main.width, spare.saturating_sub(top_h));
-    let above_h = above.as_ref().map_or(0, |t| t.0);
-    let chat_h = main
+    let mut spare = main
         .height
-        .saturating_sub(top_h + above_h + prompt_h + divider_h);
-
-    let mut y = main.y;
-    let mut take = |h: u16| {
-        let r = Rect {
-            y,
-            height: h,
-            ..main
+        .saturating_sub(prompt_h + divider_h + status_h + 3);
+    let mut regions: HashMap<String, Vec<Line<'static>>> = HashMap::new();
+    let mut heights: Vec<u16> = Vec::new();
+    for name in &layout {
+        let h = match name.as_str() {
+            "chat" => 0,
+            "prompt" => prompt_h,
+            "divider" => divider_h,
+            "statusline" => status_h,
+            region => match app.region(region, main.width, spare) {
+                Some((h, lines)) => {
+                    spare = spare.saturating_sub(h);
+                    regions.insert(region.to_owned(), lines);
+                    h
+                }
+                None => 0,
+            },
         };
+        heights.push(h);
+    }
+    let chat_h = main.height.saturating_sub(heights.iter().sum());
+    let mut y = main.y;
+    let mut rects: HashMap<&str, Rect> = HashMap::new();
+    for (name, h) in layout.iter().zip(heights) {
+        let h = if name == "chat" { chat_h } else { h };
+        let h = h.min(main.bottom().saturating_sub(y));
+        rects.insert(
+            name.as_str(),
+            Rect {
+                y,
+                height: h,
+                ..main
+            },
+        );
         y += h;
-        r
-    };
-    let top_rect = take(top_h);
-    let middle = take(chat_h);
-    let divider = take(divider_h.min(main.height));
-    let above_rect = take(above_h);
-    let prompt_area = take(prompt_h);
+    }
+    let none = Rect { height: 0, ..main };
+    let middle = rects.get("chat").copied().unwrap_or(none);
+    let divider = rects.get("divider").copied().unwrap_or(none);
+    let prompt_area = rects.get("prompt").copied().unwrap_or(none);
+    let status = rects.get("statusline").copied().unwrap_or(none);
 
     let mut chat_area = middle;
     if middle.width >= 40 {
@@ -112,11 +133,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             chat_area.width = chat_area.width.saturating_sub(w + 1);
         }
     }
-    if let Some((_, lines)) = top {
-        frame.render_widget(Paragraph::new(lines), top_rect);
-    }
-    if let Some((_, lines)) = above {
-        frame.render_widget(Paragraph::new(lines), above_rect);
+    for (name, lines) in regions {
+        if let Some(r) = rects.get(name.as_str()) {
+            frame.render_widget(Paragraph::new(lines), *r);
+        }
     }
 
     app.placed = HashMap::from([
@@ -134,7 +154,11 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             divider,
         );
     }
-    let mut cursor = draw_prompt(frame, app, prompt_area, &prefix, &placeholder);
+    let mut cursor = if prompt_area.height > 0 {
+        draw_prompt(frame, app, prompt_area, &prefix, &placeholder)
+    } else {
+        None
+    };
     draw_status(frame, app, status);
     draw_message(frame, app, message);
 
@@ -146,8 +170,24 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         cursor = draw_picker(frame, app, main);
     }
     if !app.popups.is_empty() {
-        draw_popups(frame, app, area);
-        cursor = None;
+        let prompt_top = if prompt_area.height > 0 {
+            prompt_area.y
+        } else {
+            main.bottom()
+        };
+        let anchors = Anchors {
+            screen: area,
+            chat: chat_area,
+            prompt: Rect {
+                y: area.y,
+                height: prompt_top.saturating_sub(area.y),
+                ..area
+            },
+        };
+        draw_popups(frame, app, &anchors);
+        if app.focused_popup().is_some() {
+            cursor = None;
+        }
     }
     if let Some(c) = cursor {
         frame.set_cursor_position(c);
@@ -445,21 +485,40 @@ fn draw_picker(frame: &mut Frame<'_>, app: &App, main: Rect) -> Option<Position>
     })
 }
 
-/// Lua popups, oldest first (the newest is on top and has the keyboard).
-/// Lua draws every cell inside; Rust sizes, places and clears behind them.
-fn draw_popups(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let ids: Vec<u64> = app.popups.iter().map(|p| p.id).collect();
-    for id in ids {
-        let Some(p) = app.popups.iter().find(|p| p.id == id) else {
-            continue;
+/// The areas windows can be placed in.
+struct Anchors {
+    screen: Rect,
+    chat: Rect,
+    /// Everything above the prompt.
+    prompt: Rect,
+}
+
+/// Lua windows, bottom first. Lua draws every cell inside; Rust sizes,
+/// places and clears behind them.
+fn draw_popups(frame: &mut Frame<'_>, app: &mut App, anchors: &Anchors) {
+    let order: Vec<crate::app::Popup> = app.popups_in_order().into_iter().cloned().collect();
+    for p in order {
+        let (id, lines_cb, width, height, row, col, anchor) =
+            (p.id, p.lines, p.width, p.height, p.row, p.col, p.anchor);
+        let area = match anchor.as_str() {
+            "chat" => anchors.chat,
+            "prompt" => anchors.prompt,
+            _ => anchors.screen,
         };
-        let (lines_cb, width, height, row, col) = (p.lines, p.width, p.height, p.row, p.col);
+        if area.width == 0 || area.height == 0 {
+            continue;
+        }
+        // Above the prompt, windows sit right on it unless told otherwise.
+        let row = row.or((anchor == "prompt").then_some(-1));
         let avail_w = width.unwrap_or(area.width).min(area.width);
         let avail_h = height.unwrap_or(area.height).min(area.height);
         let lines = app.popup_lines(id, lines_cb, avail_w, avail_h);
         let w = width.unwrap_or_else(|| lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16);
         let h = height.unwrap_or(lines.len() as u16);
         let (w, h) = (w.min(area.width), h.min(area.height));
+        if w == 0 || h == 0 {
+            continue;
+        }
         let place = |at: Option<i32>, size: u16, total: u16| -> u16 {
             let free = total - size;
             match at {
@@ -469,7 +528,7 @@ fn draw_popups(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             }
         };
         let rect = Rect {
-            x: area.x + place(col, w, area.width),
+            x: area.x + place(col.or((anchor == "prompt").then_some(0)), w, area.width),
             y: area.y + place(row, h, area.height),
             width: w,
             height: h,

@@ -191,6 +191,28 @@ impl App {
         })
     }
 
+    /// `bone.ui.layout`: the rows of the screen, top to bottom. `chat`,
+    /// `prompt`, `divider` and `statusline` are built in; any other name is
+    /// a region from `bone.ui.regions`.
+    pub fn layout(&mut self) -> Vec<String> {
+        const DEFAULT: [&str; 6] = [
+            "top",
+            "chat",
+            "divider",
+            "above_prompt",
+            "prompt",
+            "statusline",
+        ];
+        self.guarded("layout", |lua| {
+            let ui: Table = lua.globals().get::<Table>("bone")?.get("ui")?;
+            match ui.get::<Option<Vec<String>>>("layout")? {
+                Some(l) => Ok(l),
+                None => Ok(DEFAULT.iter().map(|s| s.to_string()).collect()),
+            }
+        })
+        .unwrap_or_else(|| DEFAULT.iter().map(|s| s.to_string()).collect())
+    }
+
     /// Whether `bone.ui[name]` is a function (the statusline and divider
     /// rows only exist when Lua defines them).
     pub fn ui_defined(&self, name: &str) -> bool {
@@ -314,7 +336,7 @@ impl App {
         width_cols: u16,
         height: u16,
     ) -> Option<(u16, Vec<Line<'static>>)> {
-        let rows = matches!(name, "top" | "above_prompt");
+        let rows = !matches!(name, "left" | "right");
         let base = json!({
             "region": name,
             "spinner": spinner().to_string(),
