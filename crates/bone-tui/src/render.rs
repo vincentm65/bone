@@ -258,7 +258,9 @@ fn draw_prompt(
     let gutter = prefix.width();
     let indent = Span::raw(" ".repeat(gutter));
     let w = (area.width as usize).saturating_sub(gutter).max(1);
-    let (rows, (crow, ccol)) = prompt_rows(&app.prompt, w);
+    let (rows, (crow, ccol)) = prompt_layout(&app.prompt, w);
+    let selection = app.prompt.selection();
+    let selected = theme.hl("Selection");
     let win = app.windows.get_mut(&PROMPT_WIN).unwrap();
     // Keep the cursor row visible.
     if crow < win.top {
@@ -282,7 +284,28 @@ fn draw_prompt(
                 } else {
                     vec![indent.clone()]
                 };
-                spans.push(Span::raw(r.clone()));
+                let (text, line, start) = r;
+                // The selected chars of this row, if any.
+                let range = selection.map(|(a, b)| {
+                    let n = text.chars().count();
+                    let at = |p: (usize, usize)| match p.0.cmp(line) {
+                        std::cmp::Ordering::Less => 0,
+                        std::cmp::Ordering::Greater => n,
+                        std::cmp::Ordering::Equal => p.1.saturating_sub(*start).min(n),
+                    };
+                    (at(a), at(b))
+                });
+                match range {
+                    Some((lo, hi)) if lo < hi => {
+                        let part = |from: usize, to: usize| -> String {
+                            text.chars().skip(from).take(to - from).collect()
+                        };
+                        spans.push(Span::raw(part(0, lo)));
+                        spans.push(Span::styled(part(lo, hi), selected));
+                        spans.push(Span::raw(part(hi, text.chars().count())));
+                    }
+                    _ => spans.push(Span::raw(text.clone())),
+                }
                 Line::from(spans)
             })
             .collect()
@@ -297,17 +320,28 @@ fn draw_prompt(
 /// Char-wrap prompt text (so cursor mapping stays exact). Returns the rows and
 /// the cursor's (row, column).
 pub fn prompt_rows(t: &TextBuffer, width: usize) -> (Vec<String>, (usize, usize)) {
+    let (rows, cursor) = prompt_layout(t, width);
+    (rows.into_iter().map(|r| r.0).collect(), cursor)
+}
+
+/// A wrapped prompt row: its text, and the line and column it starts at.
+type PromptRow = (String, usize, usize);
+
+/// `prompt_rows`, with where each row starts in the text.
+fn prompt_layout(t: &TextBuffer, width: usize) -> (Vec<PromptRow>, (usize, usize)) {
     let width = width.max(1);
     let (crow, ccol) = t.cursor();
     let mut rows = Vec::new();
     let mut cursor = (0, 0);
     for (li, line) in t.lines().iter().enumerate() {
         let mut row = String::new();
+        let mut start = 0;
         let mut w = 0;
         for (ci, c) in line.chars().enumerate() {
             let cw = c.width().unwrap_or(0);
             if w + cw > width {
-                rows.push(std::mem::take(&mut row));
+                rows.push((std::mem::take(&mut row), li, start));
+                start = ci;
                 w = 0;
             }
             if li == crow && ci == ccol {
@@ -319,12 +353,13 @@ pub fn prompt_rows(t: &TextBuffer, width: usize) -> (Vec<String>, (usize, usize)
         if li == crow && ccol >= line.chars().count() {
             // Cursor after the last char; wrap if the row is full.
             if w >= width {
-                rows.push(std::mem::take(&mut row));
+                rows.push((std::mem::take(&mut row), li, start));
+                start = line.chars().count();
                 w = 0;
             }
             cursor = (rows.len(), w);
         }
-        rows.push(row);
+        rows.push((row, li, start));
     }
     (rows, cursor)
 }

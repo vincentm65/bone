@@ -451,12 +451,120 @@ function bone.ui.box(lines, opts)
   return out
 end
 
+--- The prompt as data. Positions are { row, col } (lines and chars, from
+--- 0) or a char offset from 0; anything past the end is clamped. Edits run
+--- prompt/changed handlers and never send anything.
+bone.prompt = {
+  get = function()
+    return api("prompt_get")
+  end,
+  set = function(text)
+    api("prompt_set", text)
+  end,
+  --- { text, lines, cursor, selection = { start, end, text } or nil }
+  info = function()
+    return api("prompt_info")
+  end,
+  lines = function()
+    return api("prompt_info").lines
+  end,
+  cursor = function()
+    return api("prompt_info").cursor
+  end,
+  set_cursor = function(pos)
+    api("prompt_edit", "cursor", pos)
+  end,
+  --- Insert at the cursor, replacing the selection.
+  insert = function(text)
+    api("prompt_edit", "insert", nil, nil, text)
+  end,
+  get_range = function(from, to)
+    return api("prompt_get_range", from, to)
+  end,
+  --- Replace the text between two positions; the cursor goes after it.
+  set_range = function(from, to, text)
+    api("prompt_edit", "range", from, to, text)
+  end,
+  --- Select from `from` to `to` (default: the cursor); the cursor moves to
+  --- `to`. Typing replaces the selection, deleting removes it.
+  select = function(from, to)
+    api("prompt_edit", "select", from, to)
+  end,
+  --- { start, end, text } or nil.
+  selection = function()
+    return api("prompt_info").selection
+  end,
+  clear_selection = function()
+    api("prompt_edit", "unselect")
+  end,
+  offset = function(pos)
+    return api("prompt_offset", pos)
+  end,
+  position = function(offset)
+    return api("prompt_position", offset)
+  end,
+}
+
+--- The chats as read-only data (fresh copies). opts.session picks another
+--- open chat by session id; the default is the one on screen.
 bone.chat = {}
 
---- Items of the session on screen, as views receive them.
---- opts: { kind = "reasoning", last = 1 }
+--- Items as views receive them, plus `turn` (0 before the first message).
+--- opts: { kind, name (tool), turn, running, error, from, to (indexes),
+--- first, last (keep N), session }
 function bone.chat.items(opts)
   return api("chat_items", opts or {})
+end
+
+--- The item at `index`, or nil.
+function bone.chat.item(index, opts)
+  return api("chat_items", { from = index, to = index, session = opts and opts.session })[1]
+end
+
+function bone.chat.count(opts)
+  return #api("chat_items", opts or {})
+end
+
+--- Each turn: { index, text, first, last, items, tools, tool_errors,
+--- running, outcome ("completed", "cancelled", "failed" or nil), error }.
+function bone.chat.turns(opts)
+  return api("chat_turns", opts or {})
+end
+
+--- { session_id, cwd, created_at, title, new, current, running, starting,
+--- turn = { id, elapsed_ms }, usage = { input, output }, items, turns }, or
+--- nil when no open chat has that session.
+function bone.chat.session(opts)
+  return api("chat_session", opts or {})
+end
+
+--- Every open chat: { session_id, title, new, current, running }.
+function bone.chat.sessions()
+  return api("chat_sessions")
+end
+
+--- The stored transcript from the core (the authority), as protocol
+--- messages: callback(messages, err, result). session_id defaults to the
+--- chat on screen; a new chat has none ({}).
+function bone.chat.messages(session_id, callback)
+  if type(session_id) == "function" then
+    session_id, callback = nil, session_id
+  end
+  if not session_id then
+    local s = bone.chat.session()
+    session_id = s and s.session_id
+  end
+  if not session_id then
+    callback({}, nil, nil)
+    return
+  end
+  bone.request("session/messages", { session_id = session_id }, function(r, err)
+    if err then
+      callback(nil, err)
+    else
+      callback(r.messages, nil, r)
+    end
+  end)
 end
 
 print = function(...)

@@ -77,6 +77,13 @@ pub enum Level {
     Error,
 }
 
+/// What `prompt/changed` reports: text, cursor and selection.
+type PromptState = (
+    String,
+    crate::editor::Pos,
+    Option<(crate::editor::Pos, crate::editor::Pos)>,
+);
+
 /// Work to apply on the UI thread, e.g. a request reply.
 pub struct AppEvent(pub(crate) Box<dyn FnOnce(&mut App) + Send>);
 
@@ -129,7 +136,7 @@ pub struct App {
     pub clipboard: Option<String>,
     prompt_history: Vec<String>,
     prompt_history_pos: Option<usize>,
-    last_prompt_state: (String, (usize, usize)),
+    last_prompt_state: PromptState,
     quit_armed: Option<Instant>,
     pub dirty: bool,
     pub quit: Option<Option<String>>,
@@ -188,7 +195,7 @@ impl App {
             selection: None,
             clipboard: None,
             prompt_history: Vec::new(),
-            last_prompt_state: (String::new(), (0, 0)),
+            last_prompt_state: (String::new(), (0, 0), None),
             prompt_history_pos: None,
             quit_armed: None,
             dirty: true,
@@ -282,7 +289,7 @@ impl App {
         Some(self.current)
     }
 
-    fn chat_by_session(&self, session_id: &str) -> Option<BufferId> {
+    pub(crate) fn chat_by_session(&self, session_id: &str) -> Option<BufferId> {
         self.chats
             .iter()
             .position(|c| c.session_id() == Some(session_id))
@@ -317,17 +324,23 @@ impl App {
         self.dirty = true;
     }
 
-    fn emit_prompt_changed(&mut self) {
-        let state = (self.prompt.text(), self.prompt.cursor());
+    pub(crate) fn emit_prompt_changed(&mut self) {
+        let state = (
+            self.prompt.text(),
+            self.prompt.cursor(),
+            self.prompt.selection(),
+        );
         if self.last_prompt_state == state {
             return;
         }
         self.last_prompt_state = state.clone();
+        let pos = |(row, col): crate::editor::Pos| serde_json::json!({ "row": row, "col": col });
         self.fire(
             "prompt/changed",
             serde_json::json!({
                 "text": state.0,
-                "cursor": { "row": state.1.0, "col": state.1.1 },
+                "cursor": pos(state.1),
+                "selection": state.2.map(|(a, b)| serde_json::json!({ "start": pos(a), "end": pos(b) })),
             }),
         );
     }
@@ -662,6 +675,18 @@ impl App {
         // Scrolling and dismiss act on a focused panel.
         if self.panel_builtin(b) {
             return;
+        }
+        // Deleting removes a prompt selection; moving drops it.
+        if self.prompt.selection().is_some() {
+            match b {
+                Backspace | Delete | DeleteWord | DeleteToStart | DeleteToEnd => {
+                    self.prompt.delete_selection();
+                    return;
+                }
+                Left | Right | Up | Down | WordLeft | WordRight | LineStart | LineEnd
+                | Complete | Dismiss => self.prompt.clear_selection(),
+                _ => {}
+            }
         }
         match b {
             Submit => self.submit_or_command(),

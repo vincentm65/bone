@@ -81,6 +81,8 @@ static TUI_CAPABILITIES: &[&str] = &[
     "tui.options",
     "tui.request",
     "tui.prompt",
+    "tui.prompt_edit",
+    "tui.chat_data",
     "tui.chat",
     "tui.windows",
     "tui.panels",

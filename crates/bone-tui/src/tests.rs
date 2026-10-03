@@ -1819,3 +1819,182 @@ async fn panel_errors_and_following_content() {
     h.lua("f:scroll('bottom'); log[7] = 'entry 7'").await;
     assert!(h.screen(40, 12).starts_with("entry 5\nentry 6\nentry 7"));
 }
+
+#[tokio::test]
+async fn lua_edits_the_prompt_by_position_range_and_selection() {
+    let mut h = Harness::blank().await;
+    h.input("hello world").await;
+    h.lua(r#"events = {}; bone.on("prompt", function(ev) events[#events + 1] = ev end)"#)
+        .await;
+    assert_eq!(
+        h.lua("=bone.has_capability('tui.prompt_edit')").await,
+        "true"
+    );
+    h.lua("bone.prompt.set_cursor({ row = 0, col = 5 }); bone.prompt.insert(',')")
+        .await;
+    assert_eq!(h.prompt(), "hello, world");
+    assert_eq!(h.lua("=bone.prompt.cursor().col").await, "6");
+
+    // A selection is drawn, reported, and replaced by typing.
+    h.lua("bone.prompt.select(7, 12)").await;
+    assert_eq!(h.lua("=bone.prompt.selection().text").await, "\"world\"");
+    assert_eq!(h.lua("=events[#events].selection.start.col").await, "7");
+    {
+        let sel = h.app.theme.hl("Selection");
+        let mut term = Terminal::new(TestBackend::new(30, 4)).unwrap();
+        term.draw(|f| render::draw(f, &mut h.app)).unwrap();
+        let buf = term.backend().buffer();
+        let row = (0..4)
+            .find(|&y| buf[(0, y)].symbol() == "h")
+            .expect("prompt row");
+        let selected = |x| {
+            let st = buf[(x, row)].style();
+            st.bg == sel.bg && st.add_modifier.contains(sel.add_modifier)
+        };
+        assert!(sel != ratatui::style::Style::default());
+        assert!(!selected(6) && selected(7) && selected(11) && !selected(12));
+    }
+    h.input("there").await;
+    assert_eq!(h.prompt(), "hello, there");
+    assert_eq!(h.lua("=bone.prompt.selection()").await, "nil");
+
+    h.lua(r#"bone.prompt.set_range({ row = 0, col = 0 }, { row = 0, col = 5 }, "hi\nyou")"#)
+        .await;
+    assert_eq!(h.prompt(), "hi\nyou, there");
+    assert_eq!(h.lua("=bone.prompt.cursor().row").await, "1");
+    assert_eq!(h.lua("=bone.prompt.get_range(0, 2)").await, "\"hi\"");
+    assert_eq!(
+        h.lua("=bone.prompt.offset({ row = 1, col = 0 })").await,
+        "3"
+    );
+    assert_eq!(h.lua("=bone.prompt.position(4).col").await, "1");
+    assert_eq!(h.lua("=#bone.prompt.lines()").await, "2");
+
+    // Deleting removes the selection; moving drops it.
+    h.lua("bone.prompt.select({ row = 1, col = 3 }, { row = 1, col = 10 })")
+        .await;
+    h.input("{backspace}").await;
+    assert_eq!(h.prompt(), "hi\nyou");
+    h.lua("bone.prompt.select(0, 2)").await;
+    h.input("{left}").await;
+    assert_eq!(h.prompt(), "hi\nyou");
+    assert_eq!(h.lua("=bone.prompt.selection()").await, "nil");
+
+    h.lua("bone.prompt.set_cursor('x')").await;
+    assert!(h.message().contains("prompt position"), "{}", h.message());
+    // The compatibility calls still work.
+    h.lua("bone.api.prompt_set('again')").await;
+    assert_eq!(h.lua("=bone.prompt.get()").await, "\"again\"");
+}
+
+#[tokio::test]
+async fn lua_reads_turns_items_and_sessions() {
+    let mut h = Harness::blank().await;
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    let call = |id: &str, name: &str| ToolCall {
+        id: id.into(),
+        name: name.into(),
+        arguments: r#"{"path":"a"}"#.into(),
+    };
+    h.emit::<MessageCompleted>(tool_calls(
+        "s-new",
+        vec![call("c1", "shell"), call("c2", "read_file")],
+    ))
+    .await;
+    assert_eq!(h.lua("=bone.chat.count({ running = true })").await, "2");
+    for (id, is_error) in [("c1", false), ("c2", true)] {
+        h.emit::<ToolFinished>(ToolFinishedParams {
+            session_id: "s-new".into(),
+            turn_id: 1,
+            call_id: id.into(),
+            output: "out".into(),
+            is_error,
+        })
+        .await;
+    }
+    h.emit::<MessageCompleted>(MessageCompletedParams {
+        session_id: "s-new".into(),
+        turn_id: 1,
+        message: ChatMessage::Assistant {
+            content: "done".into(),
+            reasoning: String::new(),
+            tool_calls: vec![],
+        },
+        usage: None,
+    })
+    .await;
+    h.emit::<TurnFinished>(finished("s-new", TurnOutcome::Completed))
+        .await;
+    h.input("again{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "again")).await;
+    assert_eq!(h.lua("=bone.chat.turns()[2].running").await, "true");
+    h.emit::<TurnFinished>(finished(
+        "s-new",
+        TurnOutcome::Failed {
+            message: "boom".into(),
+        },
+    ))
+    .await;
+
+    let lua = |code: &'static str| code;
+    for (code, want) in [
+        (lua("=bone.has_capability('tui.chat_data')"), "true"),
+        ("=bone.chat.count()", "6"),
+        ("=bone.chat.count({ kind = 'tool', running = true })", "0"),
+        (
+            "=bone.chat.items({ name = 'read_file' })[1].is_error",
+            "true",
+        ),
+        ("=bone.chat.count({ error = true })", "2"),
+        ("=bone.chat.count({ turn = 2 })", "2"),
+        ("=bone.chat.items({ last = 1 })[1].kind", "\"notice\""),
+        (
+            "=bone.chat.items({ from = 2, to = 3, first = 1 })[1].name",
+            "\"shell\"",
+        ),
+        (
+            "=bone.chat.item(4).text .. bone.chat.item(4).turn",
+            "\"done1\"",
+        ),
+        ("=bone.chat.item(99)", "nil"),
+        ("=#bone.chat.turns()", "2"),
+        (
+            "=bone.chat.turns()[1].tools .. bone.chat.turns()[1].tool_errors",
+            "\"21\"",
+        ),
+        ("=bone.chat.turns()[1].outcome", "\"completed\""),
+        (
+            "=bone.chat.turns()[2].outcome .. ':' .. bone.chat.turns()[2].error",
+            "\"failed:boom\"",
+        ),
+        (
+            "=bone.chat.turns()[2].first .. '-' .. bone.chat.turns()[2].last",
+            "\"5-6\"",
+        ),
+        ("=bone.chat.turns()[2].running", "false"),
+        ("=bone.chat.session().session_id", "\"s-new\""),
+        (
+            "=bone.chat.session().cwd .. bone.chat.session().turns",
+            "\"/work2\"",
+        ),
+        ("=bone.chat.session().current", "true"),
+        ("=bone.chat.session({ session = 'nope' })", "nil"),
+        ("=bone.chat.count({ session = 'nope' })", "0"),
+        ("=bone.chat.count({ session = 's-new' })", "6"),
+        ("=#bone.chat.sessions()", "1"),
+    ] {
+        assert_eq!(h.lua(code).await, want, "{code}");
+    }
+    // Copies: changing them changes nothing.
+    h.lua("bone.chat.items()[1].text = 'changed'").await;
+    assert_eq!(h.lua("=bone.chat.item(1).text").await, "\"go\"");
+
+    // The stored transcript comes from the core.
+    h.lua("bone.chat.messages(function(m) got = #m end)").await;
+    assert_eq!(h.lua("=got").await, "2");
+    assert_eq!(
+        h.requests("session/messages"),
+        vec![json!({ "session_id": "s-new" })]
+    );
+}

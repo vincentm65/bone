@@ -481,24 +481,6 @@ impl App {
             .map(|l| render_items(l, width_cols as usize, &self.theme))
             .collect()
     }
-
-    /// Items as data, for `bone.chat.items`. `kind` filters; `last` keeps
-    /// the last N.
-    pub fn chat_items(&self, kind: Option<&str>, last: Option<usize>) -> Vec<Json> {
-        let chat = &self.chats[self.current];
-        let picked: Vec<(usize, ChatItem)> = chat
-            .items()
-            .into_iter()
-            .enumerate()
-            .filter(|(_, i)| kind.is_none_or(|k| i.part.name() == k))
-            .collect();
-        let skip = picked.len().saturating_sub(last.unwrap_or(usize::MAX));
-        picked
-            .into_iter()
-            .skip(skip)
-            .map(|(n, i)| chat.item_data(i, n + 1))
-            .collect()
-    }
 }
 
 #[cfg(test)]

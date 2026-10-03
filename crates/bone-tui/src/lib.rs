@@ -10,6 +10,7 @@
 mod app;
 mod chat;
 mod commands;
+mod data;
 mod editor;
 mod headless;
 mod keymap;

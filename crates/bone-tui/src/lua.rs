@@ -249,6 +249,60 @@ pub fn panel_handle(lua: &Lua, id: &str) -> mlua::Result<Value> {
     }
 }
 
+/// A prompt position from Lua: `{ row, col }` (from 0) or a char offset.
+fn pos_arg(app: &App, v: Value) -> mlua::Result<crate::editor::Pos> {
+    let n = |v: Value, what: &str| -> mlua::Result<usize> {
+        match v {
+            Value::Integer(n) if n >= 0 => Ok(n as usize),
+            Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => Ok(n as usize),
+            _ => Err(err(format!("a prompt {what} is a non-negative integer"))),
+        }
+    };
+    match v {
+        Value::Table(t) => Ok(app
+            .prompt
+            .clamp((n(t.get("row")?, "row")?, n(t.get("col")?, "col")?))),
+        v @ (Value::Integer(_) | Value::Number(_)) => Ok(app.prompt.position(n(v, "offset")?)),
+        other => Err(err(format!(
+            "a prompt position is {{ row, col }} or an offset, not {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn pos_out(lua: &Lua, (row, col): crate::editor::Pos) -> mlua::Result<Table> {
+    let t = lua.create_table()?;
+    t.set("row", row)?;
+    t.set("col", col)?;
+    Ok(t)
+}
+
+/// `bone.chat.items` options.
+fn item_filter(opts: &Option<Table>) -> mlua::Result<crate::data::ItemFilter> {
+    let Some(o) = opts else {
+        return Ok(Default::default());
+    };
+    Ok(crate::data::ItemFilter {
+        kind: o.get("kind")?,
+        name: o.get("name")?,
+        turn: o.get("turn")?,
+        running: o.get("running")?,
+        error: o.get("error")?,
+        from: o.get("from")?,
+        to: o.get("to")?,
+        first: o.get("first")?,
+        last: o.get("last")?,
+        session: o.get("session")?,
+    })
+}
+
+fn session_opt(opts: &Option<Table>) -> mlua::Result<Option<String>> {
+    match opts {
+        Some(o) => o.get("session"),
+        None => Ok(None),
+    }
+}
+
 fn valid_panel_id(id: &str) -> bool {
     !id.is_empty()
         && id
@@ -1617,10 +1671,88 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
         }
         "chat_items" => {
             let opts: Option<Table> = args(lua, a)?;
-            let kind: Option<String> = opts.as_ref().map(|o| o.get("kind")).transpose()?.flatten();
-            let last: Option<usize> = opts.as_ref().map(|o| o.get("last")).transpose()?.flatten();
-            let items = app.chat_items(kind.as_deref(), last);
+            let items = app.chat_query(&item_filter(&opts)?);
             ret(lua, to_lua(lua, &serde_json::Value::Array(items))?)
+        }
+        "chat_turns" => {
+            let opts: Option<Table> = args(lua, a)?;
+            let turns = app.chat_turns(session_opt(&opts)?.as_deref());
+            ret(lua, to_lua(lua, &serde_json::Value::Array(turns))?)
+        }
+        "chat_session" => {
+            let opts: Option<Table> = args(lua, a)?;
+            ret(
+                lua,
+                to_lua(lua, &app.chat_session(session_opt(&opts)?.as_deref()))?,
+            )
+        }
+        "chat_sessions" => ret(
+            lua,
+            to_lua(lua, &serde_json::Value::Array(app.chat_sessions()))?,
+        ),
+        "prompt_info" => {
+            let t = lua.create_table()?;
+            t.set("text", app.prompt.text())?;
+            t.set("lines", app.prompt.lines().to_vec())?;
+            t.set("cursor", pos_out(lua, app.prompt.cursor())?)?;
+            if let Some((a, b)) = app.prompt.selection() {
+                let sel = lua.create_table()?;
+                sel.set("start", pos_out(lua, a)?)?;
+                sel.set("end", pos_out(lua, b)?)?;
+                sel.set("text", app.prompt.range_text(a, b))?;
+                t.set("selection", sel)?;
+            }
+            ret(lua, t)
+        }
+        "prompt_offset" => {
+            let pos: Value = args(lua, a)?;
+            let pos = pos_arg(app, pos)?;
+            ret(lua, app.prompt.offset(pos))
+        }
+        "prompt_position" => {
+            let pos: Value = args(lua, a)?;
+            let pos = pos_arg(app, pos)?;
+            ret(lua, pos_out(lua, pos)?)
+        }
+        "prompt_get_range" => {
+            let (from, to): (Value, Value) = args(lua, a)?;
+            let (from, to) = (pos_arg(app, from)?, pos_arg(app, to)?);
+            ret(lua, app.prompt.range_text(from, to))
+        }
+        "prompt_edit" => {
+            // Every prompt change from Lua: then the event and a redraw.
+            let (op, x, y, text): (String, Value, Value, Option<String>) = args(lua, a)?;
+            match op.as_str() {
+                "cursor" => {
+                    let pos = pos_arg(app, x)?;
+                    app.prompt.clear_selection();
+                    app.prompt.set_cursor(pos);
+                }
+                "insert" => {
+                    let text = text.ok_or_else(|| err("insert needs text"))?;
+                    app.prompt.delete_selection();
+                    let at = app.prompt.cursor();
+                    app.prompt.replace_range(at, at, &text);
+                }
+                "range" => {
+                    let (from, to) = (pos_arg(app, x)?, pos_arg(app, y)?);
+                    let text = text.ok_or_else(|| err("set_range needs text"))?;
+                    app.prompt.replace_range(from, to, &text);
+                }
+                "select" => {
+                    let from = pos_arg(app, x)?;
+                    let to = match y {
+                        Value::Nil => app.prompt.cursor(),
+                        y => pos_arg(app, y)?,
+                    };
+                    app.prompt.select(from, to);
+                }
+                "unselect" => app.prompt.clear_selection(),
+                other => return Err(err(format!("unknown prompt edit {other}"))),
+            }
+            app.emit_prompt_changed();
+            app.dirty = true;
+            ret(lua, ())
         }
         "hl_set" => {
             let (name, spec): (String, Table) = args(lua, a)?;

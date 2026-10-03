@@ -93,6 +93,9 @@ pub struct ChatBuffer {
     pub usage: Option<Usage>,
     /// A prompt was sent and the turn has not started yet.
     pub starting: bool,
+    /// How finished turns ended, by the entry index of their user message.
+    /// Only turns seen finishing here; loaded history has none.
+    pub outcomes: HashMap<usize, TurnOutcome>,
     /// Bumped on every change to an entry; part of each cache key.
     revs: Vec<u64>,
     next_rev: u64,
@@ -149,6 +152,7 @@ impl ChatBuffer {
         self.entries.clear();
         self.revs.clear();
         self.cache.clear();
+        self.outcomes.clear();
         for m in messages {
             match m {
                 ChatMessage::System { .. } => {}
@@ -296,6 +300,13 @@ impl ChatBuffer {
                 *streaming = false;
             }
             self.touch(i);
+        }
+        if let Some(user) = self
+            .entries
+            .iter()
+            .rposition(|e| matches!(e, Entry::User(_)))
+        {
+            self.outcomes.insert(user, t.outcome.clone());
         }
         match &t.outcome {
             TurnOutcome::Completed => {}

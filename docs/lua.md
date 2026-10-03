@@ -39,7 +39,7 @@ The current capability names include `core.config`, `core.tools`,
 `core.hooks`, `core.providers`, `core.jobs`, `core.http_stream`, `core.ask`,
 `core.health`, and, in the TUI, `tui.keymaps`, `tui.input`, `tui.events`,
 `tui.local_events`, `tui.commands`, `tui.command_specs`, `tui.options`,
-`tui.dynamic_options`, `tui.request`, `tui.prompt`, `tui.chat`, `tui.windows`,
+`tui.dynamic_options`, `tui.request`, `tui.prompt`, `tui.prompt_edit`, `tui.chat`, `tui.chat_data`, `tui.windows`,
 `tui.panels`, `tui.regions`, `tui.views`, `tui.pickers`, `tui.themes`, `tui.jobs`, and
 `tui.session`. Both sides also report `lua`, `json`, and `modules`.
 Capability names describe the contract, not the internal Rust module layout.
@@ -76,6 +76,7 @@ planned; those capabilities are not available until reported by
 | Commands | Built-ins and user commands are slash commands. `bone.cmd.create` accepts one raw `{ args = "..." }` string and `{ desc }`; built-ins cannot be replaced. | Canonical names, aliases, alias-aware completion/execution/deletion, completion callbacks and typed argument metadata are available through `tui.command_specs`. |
 | Options | `bone.o` exposes the fixed, typed Rust options. v1 values are booleans or non-negative numbers; unknown names and wrong types are errors. | Dynamic boolean, integer, number and string options, defaults, metadata, deletion and change callbacks are available through `tui.dynamic_options`. |
 | Panels | `bone.ui.win` is a Lua-drawn overlay, and regions/views customize the existing chat layout. Both keep working unchanged. | Persistent panels with IDs, docking, sizing, scrolling, focus, render/key callbacks and lifecycle events are available through `tui.panels` (`bone.ui.panel`). |
+| Prompt and chat | `bone.api.prompt_get`/`prompt_set` read and replace the whole prompt; `bone.chat.items({ kind, last })` lists the on-screen chat's items. | Cursor, range and selection edits (`tui.prompt_edit`, `bone.prompt`) and structured read-only items, turns and sessions with filters (`tui.chat_data`) are available. The TUI stays a prompt, not a file editor. |
 | Jobs | TUI `bone.system`, `bone.http` and `bone.defer` run one background operation and invoke a callback. Core waits are coroutine-based and turn cancellation stops them. v1 has no general process handle or streamed TUI job. | Cancellable, timeout-aware streaming jobs with stdout/stderr and progress (`jobs.streaming`) remain planned. |
 | Plugin state | Folder plugins load in name order between runtime defaults and the user's config; `bone.plugins` reports names and `.`/`_` folders are disabled. There is no persistent state store, reload hook or automatic resource cleanup yet. | Init/shutdown, persistent per-plugin state, project configuration and cleanup of owned resources (`plugins.lifecycle`) remain planned. |
 
@@ -399,7 +400,7 @@ Registration aliases normalize to these canonical names:
 
 | Canonical event | Registration aliases | Payload |
 |---|---|---|
-| `prompt/changed` | `prompt`, `prompt_changed`, `prompt/changed` | `{ text, cursor = { row, col } }` |
+| `prompt/changed` | `prompt`, `prompt_changed`, `prompt/changed` | `{ text, cursor = { row, col }, selection = { start, end } or nil }` |
 | `focus/changed` | `focus`, `focus_changed`, `focus/changed` | `{ context, popup, panel }` (`panel`: the focused panel's id or nil) |
 | `resize` | `ui/resize`, `resize` | `{ width, height }` |
 | `key` | `key/pressed`, `key` | `{ key, context }` |
@@ -408,7 +409,7 @@ Registration aliases normalize to these canonical names:
 | `panel/updated` | `panel/updated`, `popup/updated` | a window or a panel |
 | `panel/closed` | `panel/closed`, `popup/closed` | a window or a panel |
 
-Prompt events are deduplicated, so unchanged text/cursor state is not emitted.
+Prompt events are deduplicated, so unchanged text/cursor/selection state is not emitted.
 `resize` is emitted when terminal dimensions change (and by `Headless:resize`);
 `paste` is emitted for bracketed paste with the active context. Popup lifecycle
 events are emitted when a `bone.ui.win`/`bone.ui.popup` window or a `bone.ui.panel` opens, updates or closes.
@@ -426,6 +427,48 @@ end)
 ```
 
 Any protocol method works (see `crates/bone-proto/src/methods.rs`).
+
+### The prompt
+
+`bone.prompt` reads and edits the prompt by position. A position is `{ row, col }` (line and character, both from 0, as in `prompt/changed`) or a character offset from 0 (a line break counts as one); positions past the end are clamped. Edits run `prompt/changed` handlers; nothing is sent until the user submits.
+
+```lua
+bone.prompt.get()                      -- the text; bone.prompt.set(text) replaces it
+bone.prompt.info()                     -- { text, lines, cursor, selection = { start, end, text } or nil }
+bone.prompt.lines()
+bone.prompt.cursor()                   -- { row, col }
+bone.prompt.set_cursor({ row = 0, col = 5 })
+bone.prompt.insert(", ")               -- at the cursor, replacing the selection
+bone.prompt.get_range(0, 5)            -- text between two positions (either order)
+bone.prompt.set_range(0, 5, "hi")      -- replace it; the cursor goes after "hi"
+bone.prompt.select(7, 12)              -- select; the cursor moves to the second position (default: where it is)
+bone.prompt.selection()                -- { start, end, text } or nil
+bone.prompt.clear_selection()
+bone.prompt.offset({ row = 1, col = 0 })  -- position -> offset
+bone.prompt.position(4)                -- offset -> { row, col }
+```
+
+The selection is drawn with the `Selection` group. Typing or pasting replaces it, `backspace`/`delete` and the other delete actions remove it, and cursor movement drops it. `bone.api.prompt_get`/`prompt_set` keep working.
+
+### Chat data
+
+`bone.chat` reads the chats this TUI has open as data. Every call returns fresh copies; changing them changes nothing. `opts.session` picks another open chat by session id (the default is the one on screen; an unknown id gives nothing). The core remains the authority: the TUI's copy is built from protocol events, and `bone.chat.messages` asks the core for the stored transcript.
+
+```lua
+bone.chat.items({ kind = "tool", name = "shell", turn = 2 })  -- items as views see them, plus `turn`
+bone.chat.item(4)                       -- by index, or nil
+bone.chat.count({ running = true })     -- tools still running, text still streaming
+bone.chat.turns()                       -- one entry per user message
+bone.chat.session()                     -- the chat on screen
+bone.chat.sessions()                    -- every open chat
+bone.chat.messages(function(messages, err) ... end)  -- from the core
+```
+
+- `items(opts)` filters: `kind`, `name` (tool name), `turn`, `running`, `error` (failed tools and error notices), `from`/`to` (item indexes, inclusive), then `first`/`last` keep the first or last N matches. Items have the fields in the views table plus `turn` (0 for items before the first message).
+- `turns(opts)` entries: `{ index, text, first, last (item indexes), items, tools, tool_errors, running, outcome, error }`. `outcome` is `"completed"`, `"cancelled"` or `"failed"` (with `error`) for turns that finished while the TUI watched, else nil.
+- `session(opts)`: `{ session_id, cwd, created_at, title, new, current, running, starting, turn = { id, elapsed_ms }, usage = { input, output }, items, turns }`, or nil. A chat with no messages yet has `new = true` and no `session_id`.
+- `sessions()`: `{ session_id, title, new, current, running }` for each open chat.
+- `messages([session_id,] callback)`: `callback(messages, err, result)` with protocol messages (`{ role, content, ... }`, see the Providers section) for that session, default the one on screen (`{}` for a new chat).
 
 ### UI API
 
@@ -541,7 +584,7 @@ bone.ui.regions.mybar = { size = 1, render = function(ctx) return { "hello" } en
 
 `chat`, `prompt`, `divider` and `statusline` are built in; leave one out and it is not shown. Row regions are sized in rows. `size` is a number or `"auto"` (fit the content, up to `max`, default 10); a bare function means `size = "auto"`. `render(ctx)` gets `{ region, width, height, spinner, popup, session }` and returns lines, or `nil` to hide the region. Regions are redrawn every frame, so keep them light.
 
-- `bone.chat.items({ kind = "tool", last = 3 })` returns items of the session on screen, as views receive them.
+- `bone.chat.items({ kind = "tool", last = 3 })` returns items of the session on screen, as views receive them (more filters under Chat data).
 - `bone.ui.render(item, width, region)` renders an item with the current views.
 
 #### Panels: docked areas you own
