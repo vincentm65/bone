@@ -112,6 +112,10 @@ bone.api = {
     api("prompt_set", text)
   end,
   --- The session on screen, or nil: { session_id, cwd, title, running }
+  --- Show a session (loading it if needed).
+  open_session = function(id)
+    api("open_session", id)
+  end,
   session = function()
     return api("session")
   end,
@@ -301,3 +305,119 @@ print = function(...)
   end
   bone.notify(table.concat(parts, " "))
 end
+
+-- One UTF-8 character.
+local CHAR = "^[%z\1-\127\194-\244][\128-\191]*$"
+
+--- Pick one of `items` in a focused window; typing filters.
+---   opts.prompt: text before the filter ("")
+---   opts.format: function(item) -> string (default tostring)
+---   opts.on_choice: function(item, index), with nil if cancelled
+---   opts.loading: show "loading…" until :set_items is called
+---   opts.empty: what to show for an empty list
+---   opts.footer: the hint line (false for none)
+---   opts.width, opts.height: the most room to take (100, 20)
+--- Returns a handle: handle:set_items(items), handle:close().
+--- Keys: up/down (ctrl+p/n, the wheel) move, enter picks, esc/ctrl+c cancel,
+--- backspace/ctrl+u edit the filter, other characters type into it.
+function bone.ui.select(items, opts)
+  opts = opts or {}
+  local format = opts.format or tostring
+  local st = { query = "", sel = 1, items = items or {}, loading = opts.loading }
+  local handle = {}
+
+  local function matches()
+    local q = st.query:lower()
+    local out = {}
+    for i, it in ipairs(st.items) do
+      local text = format(it)
+      if q == "" or text:lower():find(q, 1, true) then
+        out[#out + 1] = { item = it, index = i, text = text }
+      end
+    end
+    return out
+  end
+
+  local id
+  local function finish(choice)
+    bone.ui.close(id)
+    if opts.on_choice then
+      if choice then
+        opts.on_choice(choice.item, choice.index)
+      else
+        opts.on_choice(nil)
+      end
+    end
+  end
+
+  local function render(ctx)
+    local w = math.max(math.min(opts.width or 100, ctx.width - 4), 10)
+    local h = math.max(math.min(opts.height or 20, ctx.height - 2), 5)
+    local inner = w - 4
+    local list = matches()
+    st.sel = math.max(1, math.min(st.sel, #list))
+    local body = {
+      { { opts.prompt and (opts.prompt .. "  ") or "", "Accent" }, { st.query .. "▏", "Normal" } },
+      {},
+    }
+    local footer = opts.footer == nil and "type to filter · ↑↓ move · enter open · esc close" or opts.footer
+    local rows = h - 2 - #body - (footer and 1 or 0)
+    if st.loading then
+      body[#body + 1] = { { "loading…", "Dim" } }
+    elseif #list == 0 then
+      body[#body + 1] = { { #st.items == 0 and (opts.empty or "nothing to pick") or "no matches", "Dim" } }
+    end
+    local first = math.max(1, st.sel - rows + 1)
+    for i = first, math.min(#list, first + rows - 1) do
+      local t = bone.text.truncate(list[i].text, inner)
+      local hl = i == st.sel and "Selection" or "Normal"
+      body[#body + 1] = { { t .. string.rep(" ", inner - bone.text.width(t)), hl } }
+    end
+    while #body < h - 2 - (footer and 1 or 0) do
+      body[#body + 1] = {}
+    end
+    if footer then
+      body[#body + 1] = { { footer, "Dim" } }
+    end
+    return bone.ui.box(body, { width = w })
+  end
+
+  local function on_key(k)
+    local list = matches()
+    if k == "up" or k == "ctrl+p" or k == "wheelup" then
+      st.sel = math.max(1, st.sel - 1)
+    elseif k == "down" or k == "ctrl+n" or k == "wheeldown" then
+      st.sel = math.min(math.max(#list, 1), st.sel + 1)
+    elseif k == "enter" then
+      if list[st.sel] then
+        finish(list[st.sel])
+      end
+    elseif k == "esc" or k == "ctrl+c" then
+      finish(nil)
+    elseif k == "backspace" then
+      st.query = st.query:gsub("[%z\1-\127\194-\244][\128-\191]*$", "")
+      st.sel = 1
+    elseif k == "ctrl+u" then
+      st.query, st.sel = "", 1
+    elseif k == "space" then
+      st.query, st.sel = st.query .. " ", 1
+    elseif k:match(CHAR) then
+      st.query, st.sel = st.query .. k, 1
+    else
+      return false
+    end
+    return true
+  end
+
+  id = bone.ui.popup({ lines = render, on_key = on_key })
+
+  function handle:set_items(new)
+    st.items, st.loading = new or {}, false
+    bone.ui.update(id, {})
+  end
+  function handle:close()
+    bone.ui.close(id)
+  end
+  return handle
+end
+

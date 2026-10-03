@@ -13,7 +13,6 @@ use std::time::{Duration, Instant};
 use bone_client::{Client, ClientError, Event as ServerEvent};
 use bone_proto::Method;
 use bone_proto::methods::*;
-use bone_proto::types::SessionInfo;
 use mlua::Lua;
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
@@ -33,30 +32,6 @@ const MAX_SUGGESTIONS: usize = 8;
 
 pub const CHAT_WIN: WindowId = 0;
 pub const PROMPT_WIN: WindowId = 1;
-
-#[derive(Default)]
-pub struct SessionPicker {
-    pub items: Vec<SessionInfo>,
-    pub query: TextBuffer,
-    pub selected: usize,
-    pub loading: bool,
-}
-
-impl SessionPicker {
-    /// Items matching the query (title, id or directory), in list order.
-    pub fn filtered(&self) -> Vec<&SessionInfo> {
-        let q = self.query.text().to_lowercase();
-        self.items
-            .iter()
-            .filter(|s| {
-                q.is_empty()
-                    || s.session_id.to_lowercase().contains(&q)
-                    || s.cwd.to_lowercase().contains(&q)
-                    || s.title.as_deref().unwrap_or("").to_lowercase().contains(&q)
-            })
-            .collect()
-    }
-}
 
 /// A window opened from Lua (`bone.ui.win`, `bone.ui.popup`). Lua draws
 /// everything inside it; Rust only places it and clears behind it. The
@@ -110,7 +85,6 @@ pub struct App {
     pub placed: HashMap<WindowId, Placed>,
     pub screen: Rect,
     pub keymaps: Keymaps,
-    pub picker: Option<SessionPicker>,
     /// Selected row of the slash-command suggestions.
     pub suggestion: usize,
     /// Suggestions are hidden (Esc) until the prompt text changes.
@@ -167,7 +141,6 @@ impl App {
             placed: HashMap::new(),
             screen: Rect::default(),
             keymaps: Keymaps::default(),
-            picker: None,
             suggestion: 0,
             suggestions_hidden_for: None,
             message: None,
@@ -315,8 +288,6 @@ impl App {
     pub fn context(&self) -> Context {
         if self.focused_popup().is_some() {
             Context::Popup
-        } else if self.picker.is_some() {
-            Context::Picker
         } else {
             Context::Main
         }
@@ -345,12 +316,6 @@ impl App {
                 self.prompt_history_pos = None;
                 self.prompt.insert_char(c);
             }
-            Context::Picker => {
-                if let Some(p) = &mut self.picker {
-                    p.query.insert_char(c);
-                    p.selected = 0;
-                }
-            }
             Context::Popup => {}
         }
     }
@@ -359,12 +324,6 @@ impl App {
         self.dirty = true;
         match self.context() {
             Context::Main => self.prompt.insert_str(text),
-            Context::Picker => {
-                if let Some(p) = &mut self.picker {
-                    p.query.insert_str(&text.replace(['\n', '\r'], " "));
-                    p.selected = 0;
-                }
-            }
             Context::Popup => {}
         }
     }
@@ -380,20 +339,8 @@ impl App {
         }
     }
 
-    /// The text being edited: the picker's filter while it is open, else
-    /// the prompt.
-    fn text_target(&mut self) -> &mut TextBuffer {
-        match &mut self.picker {
-            Some(p) => &mut p.query,
-            None => &mut self.prompt,
-        }
-    }
-
     fn edit(&mut self, f: impl FnOnce(&mut TextBuffer)) {
-        f(self.text_target());
-        if let Some(p) = &mut self.picker {
-            p.selected = 0;
-        }
+        f(&mut self.prompt);
     }
 
     fn builtin(&mut self, b: Builtin) {
@@ -433,9 +380,7 @@ impl App {
                 }
             }
             Dismiss => {
-                if self.picker.is_some() {
-                    self.picker = None;
-                } else if !self.suggestions().is_empty() {
+                if !self.suggestions().is_empty() {
                     self.suggestions_hidden_for = Some(self.prompt.text());
                 } else {
                     self.message = None;
@@ -452,29 +397,6 @@ impl App {
             }
             NewSession => self.new_session(),
             Sessions => self.open_picker(),
-            PickerUp | PickerDown => {
-                if let Some(p) = &mut self.picker {
-                    let n = p.filtered().len();
-                    if n > 0 {
-                        p.selected = if b == PickerDown {
-                            (p.selected + 1).min(n - 1)
-                        } else {
-                            p.selected.saturating_sub(1)
-                        };
-                    }
-                }
-            }
-            PickerOpen => {
-                let picked = self
-                    .picker
-                    .as_ref()
-                    .and_then(|p| p.filtered().get(p.selected).map(|s| s.session_id.clone()));
-                if let Some(id) = picked {
-                    self.picker = None;
-                    self.open_session(id);
-                }
-            }
-            PickerClose => self.picker = None,
         }
     }
 
@@ -540,10 +462,6 @@ impl App {
             });
             return self.info("cancelling…");
         }
-        if self.picker.is_some() {
-            self.picker = None;
-            return;
-        }
         if !self.prompt.is_empty() {
             self.prompt.clear();
             return;
@@ -560,7 +478,7 @@ impl App {
 
     /// Matching commands while the prompt holds a partial `/name`.
     pub fn suggestions(&self) -> Vec<(String, String)> {
-        if self.picker.is_some() || self.focused_popup().is_some() {
+        if self.focused_popup().is_some() {
             return Vec::new();
         }
         let text = self.prompt.text();
@@ -742,20 +660,21 @@ impl App {
         });
     }
 
-    /// Open the session picker and load the list.
+    /// The session picker is Lua: `bone.ui.sessions()` (the default is in
+    /// runtime/tui/defaults.lua).
     pub fn open_picker(&mut self) {
-        self.picker = Some(SessionPicker {
-            loading: true,
-            ..Default::default()
-        });
-        self.request::<SessionList>(Empty {}, move |app, r| {
-            let Some(p) = &mut app.picker else { return };
-            p.loading = false;
-            match r {
-                Ok(items) => p.items = items,
-                Err(e) => app.error(format!("cannot list sessions: {e}")),
+        let r = self.with_api(|lua| {
+            let ui: mlua::Table = lua.globals().get::<mlua::Table>("bone")?.get("ui")?;
+            match ui.get::<Option<mlua::Function>>("sessions")? {
+                Some(f) => f.call::<()>(()).map(|_| true),
+                None => Ok(false),
             }
         });
+        match r {
+            Ok(true) => {}
+            Ok(false) => self.error("no session picker: bone.ui.sessions is not defined"),
+            Err(e) => self.lua_error("bone.ui.sessions", &e),
+        }
     }
 
     /// Resume a session at startup: `None` for the newest one.

@@ -446,7 +446,7 @@ fn context_arg(opts: &Option<Table>) -> mlua::Result<Context> {
     {
         None => Ok(Context::Main),
         Some(c) => Context::from_name(&c).ok_or_else(|| {
-            mlua::Error::runtime(format!("unknown context {c:?} (use main, popup or picker)"))
+            mlua::Error::runtime(format!("unknown context {c:?} (use main or popup)"))
         }),
     }
 }
@@ -660,6 +660,11 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             t.set("title", s.title.clone())?;
             t.set("running", c.turn.is_some())?;
             ret(lua, t)
+        }
+        "open_session" => {
+            let id: String = args(lua, a)?;
+            app.open_session(id);
+            ret(lua, ())
         }
         "popup_open" => {
             let spec: Table = args(lua, a)?;

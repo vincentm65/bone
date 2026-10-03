@@ -56,23 +56,55 @@ map({
   ["ctrl+c"] = "interrupt",
 }, "popup")
 
--- The session picker (ctrl+r, /sessions). Typing filters the list.
-map({
-  ["up"] = "picker_up",
-  ["down"] = "picker_down",
-  ["ctrl+p"] = "picker_up",
-  ["ctrl+n"] = "picker_down",
-  wheelup = "picker_up",
-  wheeldown = "picker_down",
-  ["enter"] = "picker_open",
-  ["esc"] = "picker_close",
-  ["ctrl+c"] = "picker_close",
-  ["backspace"] = "backspace",
-  ["ctrl+w"] = "delete_word",
-  ["ctrl+u"] = "delete_to_start",
-  ["left"] = "left",
-  ["right"] = "right",
-}, "picker")
+-- The session picker (ctrl+r, /sessions), built on bone.ui.select.
+function bone.ui.sessions()
+  local home = os.getenv("HOME")
+  local picker = bone.ui.select({}, {
+    prompt = "Sessions",
+    loading = true,
+    empty = "no sessions yet",
+    format = function(s)
+      local dir = s.cwd
+      if home and dir:sub(1, #home) == home then
+        dir = "~" .. dir:sub(#home + 1)
+      end
+      return (s.title or "[untitled]") .. "  " .. dir
+    end,
+    on_choice = function(s)
+      if s then
+        bone.api.open_session(s.session_id)
+      end
+    end,
+  })
+  bone.request("session/list", {}, function(list, err)
+    if err then
+      picker:close()
+      bone.notify("cannot list sessions: " .. err, "error")
+      return
+    end
+    picker:set_items(list)
+  end)
+end
+
+-- Matching slash commands while typing "/…", right above the prompt.
+-- ctx = { items = { { name, desc } }, selected, width, height }.
+function bone.ui.suggestions(ctx)
+  local name_w, desc_w = 0, 0
+  for _, it in ipairs(ctx.items) do
+    name_w = math.max(name_w, bone.text.width(it.name) + 1)
+    desc_w = math.max(desc_w, bone.text.width(it.desc))
+  end
+  local lines = {}
+  for i, it in ipairs(ctx.items) do
+    local hl = i == ctx.selected and "Selection" or "Normal"
+    local name = "/" .. it.name
+    lines[i] = {
+      { name .. string.rep(" ", name_w + 1 - bone.text.width(name)), hl },
+      { it.desc .. string.rep(" ", desc_w - bone.text.width(it.desc)), hl },
+    }
+  end
+  return bone.ui.box(lines, { border_hl = "WinSeparator", width = math.min(name_w + desc_w + 5, ctx.width) })
+end
 
 -- Colors (see runtime/colors/).
 bone.colorscheme("black")

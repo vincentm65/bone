@@ -146,7 +146,7 @@ For one-off runs, these override `core.lua`: `BONE_BASE_URL` + `BONE_MODEL` (use
 
 ## TUI (`tui.lua`)
 
-The TUI has no modes: keys go to the prompt, and while a popup is open (a Lua popup or the session picker) its own keys apply. These are the three keymap *contexts*: `main`, `popup` and `picker`.
+The TUI has no modes: keys go to the prompt, and while a focused window is open (a popup, the session picker, any `bone.ui.select`) its own keys apply first. The keymap *contexts* are `main` and `popup` (keys a focused window doesn't handle itself).
 
 ### Keys
 
@@ -160,7 +160,7 @@ bone.keymap.del("ctrl+n")
 
 Key names: `ctrl+`, `alt+` and `shift+` combined with `enter`, `esc`, `tab`, `backspace`, `delete`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `space`, `f1`–`f24`, `wheelup`, `wheeldown` (the mouse wheel) or a single character (`"?"`, `"G"`). Keys without a mapping type text.
 
-Builtin actions: `submit newline left right up down word_left word_right line_start line_end backspace delete delete_word delete_to_start delete_to_end scroll_up scroll_down page_up page_down scroll_top scroll_bottom complete dismiss interrupt quit quit_if_empty new_session sessions picker_up picker_down picker_open picker_close`.
+Builtin actions: `submit newline left right up down word_left word_right line_start line_end backspace delete delete_word delete_to_start delete_to_end scroll_up scroll_down page_up page_down scroll_top scroll_bottom complete dismiss interrupt quit quit_if_empty new_session sessions`.
 
 The defaults are in `runtime/tui/defaults.lua`.
 
@@ -228,6 +228,10 @@ Any protocol method works (see `crates/bone-proto/src/methods.rs`).
 - `bone.ui.popup{ ... }`: `bone.ui.win` with `focus = true`.
 - `bone.ui.update(id, { ... })`: change any of those fields in place (`false` makes a size or position automatic again). Returns `false` if the window is closed.
 - `bone.ui.close(id)`, `bone.ui.is_open(id)`.
+- `bone.ui.select(items, { prompt, format, on_choice, loading, empty, footer, width, height })` → handle: a picker in a focused window. Typing filters (matching `format(item)`), `up`/`down` (or `ctrl+p`/`ctrl+n`, the wheel) move, `enter` calls `on_choice(item, index)`, `esc` calls `on_choice(nil)`. `handle:set_items(items)` fills it later (with `loading = true` it shows "loading…" until then); `handle:close()`.
+- `bone.ui.sessions()`: the session picker (`ctrl+r`, `/sessions`), defined in `runtime/tui/defaults.lua` with `bone.ui.select`. Replace it to change how sessions are listed.
+- `bone.ui.suggestions(ctx)` → lines: draws the matching commands while you type `/…`, right above the prompt. `ctx = { items = { { name, desc } }, selected, width, height }`; Rust keeps the matching, `up`/`down` selection and `tab` completion. Set it to `nil` for no list.
+- `bone.api.open_session(id)`: show a session.
 - `bone.ui.box(lines, { title, title_hl, border_hl, width, pad, chars })` → the lines inside a rounded border (`PopupBorder`/`PopupTitle` by default). Only used if you call it.
 
 ### Colors
@@ -330,7 +334,7 @@ bone.ui.divider = function(ctx)   -- the line between the chat and the prompt
 end
 ```
 
-Each returns one line (`"%="` is a blank stretch); the row exists only while the function is defined. The statusline context has `title`, `popup` (`"popup"`, `"picker"` or nil), `spinner`, `width` and `session` (`{ title, cwd, running, elapsed, usage = { input, output } }` or nil); the divider context has `spinner`, `width` and `session`. If one errors, its row is blank until it is redefined.
+Each returns one line (`"%="` is a blank stretch); the row exists only while the function is defined. The statusline context has `title`, `popup` (`"popup"` while a focused window is open, else nil), `spinner`, `width` and `session` (`{ title, cwd, running, elapsed, usage = { input, output } }` or nil); the divider context has `spinner`, `width` and `session`. If one errors, its row is blank until it is redefined.
 
 #### Helpers
 

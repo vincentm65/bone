@@ -440,6 +440,36 @@ impl App {
             .collect()
     }
 
+    /// `bone.ui.suggestions(ctx)` for the matching slash commands, with
+    /// ctx = { items = { { name, desc } }, selected, width, height }.
+    pub fn suggestion_lines(
+        &mut self,
+        items: &[(String, String)],
+        width_cols: u16,
+        height: u16,
+    ) -> Vec<Line<'static>> {
+        let ctx = json!({
+            "items": items.iter().map(|(n, d)| json!({ "name": n, "desc": d })).collect::<Vec<_>>(),
+            "selected": self.suggestion + 1,
+            "width": width_cols,
+            "height": height,
+        });
+        let lines = self
+            .guarded("suggestions", |lua| {
+                let ui: Table = lua.globals().get::<Table>("bone")?.get("ui")?;
+                let Some(f) = ui.get::<Option<Function>>("suggestions")? else {
+                    return Ok(None);
+                };
+                parse_lines(f.call::<Value>(to_lua(lua, &ctx)?)?)
+            })
+            .flatten()
+            .unwrap_or_default();
+        lines
+            .iter()
+            .map(|l| render_items(l, width_cols as usize, &self.theme))
+            .collect()
+    }
+
     /// Items as data, for `bone.chat.items`. `kind` filters; `last` keeps
     /// the last N.
     pub fn chat_items(&self, kind: Option<&str>, last: Option<usize>) -> Vec<Json> {

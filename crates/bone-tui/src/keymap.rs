@@ -1,7 +1,7 @@
 //! Keymaps: a key, in a context, runs an [`Action`].
 //!
 //! There are no modes. Keys normally go to the prompt (`main`); while a popup
-//! has the keyboard its own context is used: `popup` (a Lua popup) or `picker` (the session list). Unmapped keys type text.
+//! has the keyboard its own context is used: `popup` (a focused Lua window). Unmapped keys type text.
 
 use std::collections::HashMap;
 
@@ -11,7 +11,6 @@ use crate::keys::{self, Key};
 pub enum Context {
     Main,
     Popup,
-    Picker,
 }
 
 impl Context {
@@ -19,12 +18,11 @@ impl Context {
         match self {
             Context::Main => "main",
             Context::Popup => "popup",
-            Context::Picker => "picker",
         }
     }
 
     pub fn from_name(s: &str) -> Option<Self> {
-        [Context::Main, Context::Popup, Context::Picker]
+        [Context::Main, Context::Popup]
             .into_iter()
             .find(|c| c.name() == s)
     }
@@ -81,10 +79,6 @@ builtins! {
     QuitIfEmpty = "quit_if_empty",
     NewSession = "new_session",
     Sessions = "sessions",
-    PickerUp = "picker_up",
-    PickerDown = "picker_down",
-    PickerOpen = "picker_open",
-    PickerClose = "picker_close",
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -158,6 +152,6 @@ mod tests {
         for b in Builtin::ALL {
             assert_eq!(Builtin::from_name(b.name()), Some(*b));
         }
-        assert_eq!(Context::from_name("picker"), Some(Context::Picker));
+        assert_eq!(Context::from_name("picker"), None);
     }
 }

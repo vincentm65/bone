@@ -523,7 +523,8 @@ async fn slash_commands_suggest_complete_and_run() {
 async fn session_picker_filters_and_opens() {
     let mut h = Harness::new().await;
     h.input("{ctrl+r}").await;
-    assert_eq!(h.app.context(), Context::Picker);
+    // The picker is a Lua window (bone.ui.select), so the popup context.
+    assert_eq!(h.app.context(), Context::Popup);
     let screen = h.screen(80, 24);
     assert!(
         screen.contains("second") && screen.contains("first"),
@@ -716,7 +717,7 @@ async fn lua_statusline_divider_and_broken_ui() {
     );
     assert!(screen.contains("[40]====="), "{screen}");
     h.input("{ctrl+r}").await;
-    assert!(h.screen(40, 10).contains("picker"));
+    assert!(h.screen(40, 10).contains("popup"));
     h.input("{esc}").await;
 
     // A failing statusline is reported once and leaves its row blank.
@@ -1340,4 +1341,44 @@ async fn layout_orders_rows_and_takes_any_region() {
     // Without "prompt" in the layout there is no prompt row.
     h.lua("bone.ui.layout = { 'chat', 'statusline' }").await;
     assert_eq!(h.screen(20, 3), "\n\nSTATUS");
+}
+
+#[tokio::test]
+async fn select_and_suggestions_are_lua() {
+    let mut h = Harness::blank().await;
+    h.lua(
+        "pick = bone.ui.select({ 'apple', 'banana', 'cherry' }, { prompt = 'Fruit', \
+           on_choice = function(item, i) chosen = tostring(item) .. ':' .. tostring(i) end })",
+    )
+    .await;
+    assert_eq!(h.app.context(), Context::Popup);
+    let screen = h.screen(40, 12);
+    assert!(
+        screen.contains("│ Fruit  ▏") && screen.contains("│ banana"),
+        "{screen}"
+    );
+    // Filter, move with the wheel, pick.
+    h.input("an{wheeldown}{enter}").await;
+    assert_eq!(h.lua("=chosen").await, "\"banana:2\"");
+    assert_eq!(h.app.context(), Context::Main);
+    // Esc cancels with nil; items can arrive later.
+    h.lua("pick = bone.ui.select({}, { loading = true, on_choice = function(x) chosen = tostring(x) end })")
+        .await;
+    assert!(h.screen(40, 12).contains("loading…"));
+    h.lua("pick:set_items({ 'later' })").await;
+    assert!(h.screen(40, 12).contains("│ later"));
+    h.input("{esc}").await;
+    assert_eq!(h.lua("=chosen").await, "\"nil\"");
+
+    // The slash-command list is drawn by bone.ui.suggestions.
+    h.lua("bone.ui.suggestions = function(ctx) return { '#' .. #ctx.items .. ' ' .. ctx.items[ctx.selected].name } end")
+        .await;
+    h.input("/ne").await;
+    assert!(
+        h.screen(40, 6).ends_with("#1 new\n/ne"),
+        "{}",
+        h.screen(40, 6)
+    );
+    h.lua("bone.ui.suggestions = nil").await;
+    assert_eq!(h.screen(40, 6), "\n\n\n\n\n/ne");
 }

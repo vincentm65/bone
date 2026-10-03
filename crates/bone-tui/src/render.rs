@@ -12,21 +12,21 @@
 //! prompt          grows with its text; bone.ui.prompt adds a prefix
 //! statusline      only if bone.ui.statusline is defined
 //! ```
-//! Slash-command suggestions, the session picker and Lua popups are drawn
-//! on top.
+//! Slash-command suggestions (`bone.ui.suggestions`) and Lua windows are
+//! drawn on top.
 
 use std::collections::HashMap;
 
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Padding, Paragraph};
+use ratatui::widgets::{Block, Clear, Paragraph};
 use unicode_width::UnicodeWidthChar;
 
 use crate::app::{App, CHAT_WIN, Level, PROMPT_WIN};
 use crate::editor::TextBuffer;
 use crate::layout::Placed;
-use crate::text::{sanitize, truncate, width};
+use crate::text::{sanitize, width};
 use crate::ui::{Item, render_items};
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
@@ -163,11 +163,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     draw_message(frame, app, message);
 
     let suggestions = app.suggestions();
-    if !suggestions.is_empty() {
+    if !suggestions.is_empty() && prompt_area.height > 0 {
         draw_suggestions(frame, app, &suggestions, prompt_area);
-    }
-    if app.picker.is_some() {
-        cursor = draw_picker(frame, app, main);
     }
     if !app.popups.is_empty() {
         let prompt_top = if prompt_area.height > 0 {
@@ -356,133 +353,37 @@ fn draw_message(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 }
 
-/// A bordered popup of `w`×`h` centered in `area`.
-fn popup(
+/// Matching slash commands, drawn by `bone.ui.suggestions` right above the
+/// prompt (nothing if it is not defined).
+fn draw_suggestions(
     frame: &mut Frame<'_>,
-    app: &App,
-    area: Rect,
-    w: u16,
-    h: u16,
-    border: &str,
-) -> (Rect, Block<'static>) {
-    let w = w.min(area.width);
-    let h = h.min(area.height);
+    app: &mut App,
+    items: &[(String, String)],
+    prompt: Rect,
+) {
+    let room = Rect {
+        x: prompt.x,
+        y: frame.area().y,
+        width: prompt.width,
+        height: prompt.y.saturating_sub(frame.area().y),
+    };
+    if room.height == 0 {
+        return;
+    }
+    let lines = app.suggestion_lines(items, room.width, room.height);
+    let w = lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16;
+    let h = (lines.len() as u16).min(room.height);
+    if w == 0 || h == 0 {
+        return;
+    }
     let rect = Rect {
-        x: area.x + (area.width - w) / 2,
-        y: area.y + (area.height - h) / 2,
-        width: w,
+        x: room.x,
+        y: room.bottom() - h,
+        width: w.min(room.width),
         height: h,
     };
     frame.render_widget(Clear, rect);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(app.theme.hl(border))
-        .style(app.theme.hl("Normal"))
-        .padding(Padding::horizontal(1));
-    (rect, block)
-}
-
-/// Matching slash commands, just above the prompt.
-fn draw_suggestions(frame: &mut Frame<'_>, app: &App, items: &[(String, String)], prompt: Rect) {
-    let name_w = items.iter().map(|(n, _)| width(n) + 1).max().unwrap_or(0);
-    let w = (items.iter().map(|(_, d)| width(d)).max().unwrap_or(0) + name_w + 6)
-        .min(prompt.width as usize) as u16;
-    let h = items.len() as u16 + 2;
-    let y = prompt.y.saturating_sub(h + 1);
-    let rect = Rect {
-        x: prompt.x,
-        y,
-        width: w,
-        height: h.min(prompt.y),
-    };
-    frame.render_widget(Clear, rect);
-    let t = &app.theme;
-    let lines: Vec<Line> = items
-        .iter()
-        .enumerate()
-        .map(|(i, (name, desc))| {
-            let style = if i == app.suggestion {
-                t.hl("Selection")
-            } else {
-                t.hl("Normal")
-            };
-            let pad = (w as usize).saturating_sub(4 + name_w + width(desc));
-            Line::from(vec![
-                Span::styled(format!("/{name:<0$}", name_w), style.patch(t.hl("Accent"))),
-                Span::styled(format!(" {desc}{}", " ".repeat(pad)), style),
-            ])
-        })
-        .collect();
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .border_type(BorderType::Rounded)
-        .border_style(t.hl("WinSeparator"))
-        .style(t.hl("Normal"));
-    frame.render_widget(Paragraph::new(lines).block(block), rect);
-}
-
-/// The session picker; returns the cursor position in its filter line.
-fn draw_picker(frame: &mut Frame<'_>, app: &App, main: Rect) -> Option<Position> {
-    let p = app.picker.as_ref()?;
-    let t = &app.theme;
-    let w = main.width.saturating_sub(4).min(100);
-    let h = main.height.saturating_sub(2).min(20);
-    let (rect, block) = popup(frame, app, main, w, h, "WinSeparator");
-    let inner_w = w.saturating_sub(4) as usize;
-    let body = h.saturating_sub(5) as usize;
-    let items = p.filtered();
-    let query = p.query.text();
-    let mut lines = vec![
-        Line::from(vec![
-            Span::styled("Sessions  ", t.hl("Accent")),
-            Span::raw(query.clone()),
-        ]),
-        Line::default(),
-    ];
-    if p.loading {
-        lines.push(Line::styled("loading…", t.hl("Dim")));
-    } else if items.is_empty() {
-        lines.push(Line::styled(
-            if p.items.is_empty() {
-                "no sessions yet"
-            } else {
-                "no matches"
-            },
-            t.hl("Dim"),
-        ));
-    }
-    let start = p.selected.saturating_sub(body.saturating_sub(1));
-    for (i, s) in items.iter().enumerate().skip(start).take(body) {
-        let title = sanitize(s.title.as_deref().unwrap_or("[untitled]"));
-        let dir = s.cwd.replacen(
-            &std::env::var("HOME").unwrap_or_else(|_| "\0".into()),
-            "~",
-            1,
-        );
-        let row = truncate(&format!("{title}  {dir}"), inner_w);
-        let pad = inner_w.saturating_sub(width(&row));
-        let style = if i == p.selected {
-            t.hl("Selection")
-        } else {
-            t.hl("Normal")
-        };
-        lines.push(Line::styled(format!("{row}{}", " ".repeat(pad)), style));
-    }
-    while lines.len() < h.saturating_sub(3) as usize {
-        lines.push(Line::default());
-    }
-    lines.push(Line::styled(
-        "type to filter · ↑↓ move · enter open · esc close",
-        t.hl("Dim"),
-    ));
-    frame.render_widget(Paragraph::new(lines).block(block), rect);
-    let (_, col) = p.query.cursor();
-    let before: String = query.chars().take(col).collect();
-    Some(Position {
-        x: rect.x + 2 + 10 + width(&before) as u16,
-        y: rect.y + 1,
-    })
+    frame.render_widget(Paragraph::new(lines).style(app.theme.hl("Normal")), rect);
 }
 
 /// The areas windows can be placed in.

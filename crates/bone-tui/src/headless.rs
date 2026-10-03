@@ -133,7 +133,7 @@ impl Headless {
             .join("\n")
     }
 
-    /// Which keymaps apply: `"main"`, `"popup"` or `"picker"`.
+    /// Which keymaps apply: `"main"` or `"popup"`.
     pub fn context(&self) -> &'static str {
         self.app.context().name()
     }
