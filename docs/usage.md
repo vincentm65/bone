@@ -43,6 +43,8 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `ctrl+u` / `ctrl+k` | delete to the start / end of the line |
 | paste | goes into the prompt |
 
+**Panels.** Plugins can dock panels beside, above or below the session (`bone.ui.panel`). Click one (or use the key its plugin gives) to give it the keyboard: the arrows, `pageup`/`pagedown`, `home`/`end` and the wheel scroll it, `tab`/`shift+tab` move to the next/previous panel and back to the prompt, `esc` returns to the prompt. The wheel over a panel always scrolls that panel.
+
 **Approval popup.** By default tool calls run without asking. With the approve plugin installed (`cp -r examples/plugins/approve ~/.bone/plugins/`), a tool that wants to change something asks first: `y` allows, `a` always allows that tool for this session, `n` or `esc` denies, `ctrl+c` cancels the turn. Keys typed in the first 300 ms after it appears are ignored, so text you were typing can't answer it.
 
 **Session picker** (`ctrl+r`, `/sessions`): type to filter, `up`/`down` to move, `enter` to open, `esc` to close.

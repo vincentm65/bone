@@ -40,7 +40,7 @@ The current capability names include `core.config`, `core.tools`,
 `core.health`, and, in the TUI, `tui.keymaps`, `tui.input`, `tui.events`,
 `tui.local_events`, `tui.commands`, `tui.command_specs`, `tui.options`,
 `tui.dynamic_options`, `tui.request`, `tui.prompt`, `tui.chat`, `tui.windows`,
-`tui.regions`, `tui.views`, `tui.pickers`, `tui.themes`, `tui.jobs`, and
+`tui.panels`, `tui.regions`, `tui.views`, `tui.pickers`, `tui.themes`, `tui.jobs`, and
 `tui.session`. Both sides also report `lua`, `json`, and `modules`.
 Capability names describe the contract, not the internal Rust module layout.
 
@@ -75,7 +75,7 @@ planned; those capabilities are not available until reported by
 | Events | `bone.on` receives server notifications by method plus `ready` and `submit`. Server callbacks run after the TUI applies the notification; `submit` can cancel or replace text. | Local prompt/focus/resize/key/paste and panel lifecycle events are available through `tui.local_events`. |
 | Commands | Built-ins and user commands are slash commands. `bone.cmd.create` accepts one raw `{ args = "..." }` string and `{ desc }`; built-ins cannot be replaced. | Canonical names, aliases, alias-aware completion/execution/deletion, completion callbacks and typed argument metadata are available through `tui.command_specs`. |
 | Options | `bone.o` exposes the fixed, typed Rust options. v1 values are booleans or non-negative numbers; unknown names and wrong types are errors. | Dynamic boolean, integer, number and string options, defaults, metadata, deletion and change callbacks are available through `tui.dynamic_options`. |
-| Panels | `bone.ui.win` is a Lua-drawn overlay, and regions/views customize the existing chat layout. These are not persistent plugin-owned buffers or panels. | Stateful panels with IDs, lifecycle, focus, docking, scrolling and render/key callbacks (`tui.panels`) remain planned. |
+| Panels | `bone.ui.win` is a Lua-drawn overlay, and regions/views customize the existing chat layout. Both keep working unchanged. | Persistent panels with IDs, docking, sizing, scrolling, focus, render/key callbacks and lifecycle events are available through `tui.panels` (`bone.ui.panel`). |
 | Jobs | TUI `bone.system`, `bone.http` and `bone.defer` run one background operation and invoke a callback. Core waits are coroutine-based and turn cancellation stops them. v1 has no general process handle or streamed TUI job. | Cancellable, timeout-aware streaming jobs with stdout/stderr and progress (`jobs.streaming`) remain planned. |
 | Plugin state | Folder plugins load in name order between runtime defaults and the user's config; `bone.plugins` reports names and `.`/`_` folders are disabled. There is no persistent state store, reload hook or automatic resource cleanup yet. | Init/shutdown, persistent per-plugin state, project configuration and cleanup of owned resources (`plugins.lifecycle`) remain planned. |
 
@@ -260,7 +260,7 @@ For one-off runs, these override `core.lua`: `BONE_BASE_URL` + `BONE_MODEL` (use
 
 ## TUI (`tui.lua`)
 
-The TUI has no modes: keys go to the prompt, and while a focused window is open (a popup, the session picker, any `bone.ui.select`) its own keys apply first. The built-in contexts are `main` and `popup`; Lua can define and focus named contexts without changing modeless text entry.
+The TUI has no modes: keys go to the prompt, and while a focused window is open (a popup, the session picker, any `bone.ui.select`) its own keys apply first. The built-in contexts are `main`, `popup` and `panel` (while a panel has the keyboard); Lua can define and focus named contexts without changing modeless text entry. Precedence: a focused popup, then a focused panel, then a focused named context, then `main`.
 
 ### Keys
 
@@ -289,7 +289,9 @@ independent of popups, but a focused popup always has precedence.
 
 Key names: `ctrl+`, `alt+` and `shift+` combined with `enter`, `esc`, `tab`, `backspace`, `delete`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `space`, `f1`–`f24`, `wheelup`, `wheeldown` (the mouse wheel) or a single character (`"?"`, `"G"`). Whitespace separates members of a sequence. Keys without a mapping type text.
 
-Builtin actions: `submit newline left right up down word_left word_right line_start line_end backspace delete delete_word delete_to_start delete_to_end scroll_up scroll_down page_up page_down scroll_top scroll_bottom complete dismiss interrupt quit quit_if_empty new_session sessions`.
+Builtin actions: `submit newline left right up down word_left word_right line_start line_end backspace delete delete_word delete_to_start delete_to_end scroll_up scroll_down page_up page_down scroll_top scroll_bottom complete dismiss interrupt quit quit_if_empty new_session sessions focus_next focus_prev focus_prompt`.
+
+While a panel has the keyboard, `up`/`down` (one row), `scroll_up`/`scroll_down`, `page_up`/`page_down` and `scroll_top`/`scroll_bottom` scroll the panel, and `dismiss` gives the keyboard back to the prompt. `focus_next`/`focus_prev` cycle through the prompt and the focusable panels; `focus_prompt` returns to the prompt.
 
 The defaults are in `runtime/tui/defaults.lua`.
 
@@ -398,19 +400,21 @@ Registration aliases normalize to these canonical names:
 | Canonical event | Registration aliases | Payload |
 |---|---|---|
 | `prompt/changed` | `prompt`, `prompt_changed`, `prompt/changed` | `{ text, cursor = { row, col } }` |
-| `focus/changed` | `focus`, `focus_changed`, `focus/changed` | `{ context, popup }` |
+| `focus/changed` | `focus`, `focus_changed`, `focus/changed` | `{ context, popup, panel }` (`panel`: the focused panel's id or nil) |
 | `resize` | `ui/resize`, `resize` | `{ width, height }` |
 | `key` | `key/pressed`, `key` | `{ key, context }` |
 | `paste` | `paste`, `text/pasted` | `{ text, context }` |
-| `panel/opened` | `panel`, `panel/opened`, `popup`, `popup/opened` | `{ id, kind, focus, anchor, z, width, height, row, col }` |
-| `panel/updated` | `panel/updated`, `popup/updated` | `{ id, kind, focus, anchor, z, width, height, row, col }` |
-| `panel/closed` | `panel/closed`, `popup/closed` | `{ id, kind, focus, anchor, z, width, height, row, col }` |
+| `panel/opened` | `panel`, `panel/opened`, `popup`, `popup/opened` | a window or a panel (see below) |
+| `panel/updated` | `panel/updated`, `popup/updated` | a window or a panel |
+| `panel/closed` | `panel/closed`, `popup/closed` | a window or a panel |
 
 Prompt events are deduplicated, so unchanged text/cursor state is not emitted.
 `resize` is emitted when terminal dimensions change (and by `Headless:resize`);
 `paste` is emitted for bracketed paste with the active context. Popup lifecycle
-events are emitted when a `bone.ui.win`/`bone.ui.popup` panel opens, updates or closes and
-include its current placement and geometry. Local event callbacks are UI-side
+events are emitted when a `bone.ui.win`/`bone.ui.popup` window or a `bone.ui.panel` opens, updates or closes.
+A window's payload is `{ id, kind = "popup", focus, anchor, z, width, height, row, col }`;
+a panel's is its `info()` (`kind = "panel"`, see Panels). `panel:set_lines` and scrolling
+do not emit `panel/updated`. Local event callbacks are UI-side
 callbacks; they do not change core/session ownership.
 ### Talking to the core
 
@@ -465,7 +469,7 @@ bone.hl.names()
 
 `/hi Group fg=#ff0000 bold` sets one from the prompt; `/hi` lists the groups.
 
-Groups: `Normal Dim Accent UserPrompt UserMessage Reasoning ToolName ToolArgs ToolPath ToolSummary ToolOutput ToolGutter ToolRunning ToolError DiffAdd DiffDelete ShellProgram ShellPath ShellFlag ShellString ShellVariable ShellComment ShellOperator MdHeading MdBold MdItalic MdCode MdCodeBlock MdQuote MdBullet MdLink Notice ErrorMsg WarningMsg WinSeparator StatusLine StatusLineDim Selection Placeholder PopupBorder PopupTitle`.
+Groups: `Normal Dim Accent UserPrompt UserMessage Reasoning ToolName ToolArgs ToolPath ToolSummary ToolOutput ToolGutter ToolRunning ToolError DiffAdd DiffDelete ShellProgram ShellPath ShellFlag ShellString ShellVariable ShellComment ShellOperator MdHeading MdBold MdItalic MdCode MdCodeBlock MdQuote MdBullet MdLink Notice ErrorMsg WarningMsg WinSeparator StatusLine StatusLineDim Selection Placeholder PopupBorder PopupTitle PanelTitle PanelTitleFocus`.
 
 ### Drawing the screen
 
@@ -540,6 +544,52 @@ bone.ui.regions.mybar = { size = 1, render = function(ctx) return { "hello" } en
 - `bone.chat.items({ kind = "tool", last = 3 })` returns items of the session on screen, as views receive them.
 - `bone.ui.render(item, width, region)` renders an item with the current views.
 
+#### Panels: docked areas you own
+
+A panel is a persistent area beside, above or below the chat. It takes room from the chat (unlike `bone.ui.win`, which floats over it), keeps its scroll position while you do other things, can be hidden and shown again, and can take the keyboard. Lua supplies all of its content; Rust sizes and places it, scrolls it, and routes keys and the mouse wheel to it.
+
+```lua
+local todo = { "write tests", "update docs" }
+local p = bone.ui.panel.open({
+  id = "todo",                  -- default "panel<N>"; letters, digits, _ - .
+  dock = "right",               -- "right" (default), "left", "top", "bottom"
+  size = 32,                    -- see below
+  title = "Todo",               -- a row above the content that does not scroll
+  render = function(ctx)        -- every frame; or lines = { ... }
+    local out = {}
+    for i, t in ipairs(todo) do
+      out[i] = { { (ctx.focused and "• " or "  ") .. t, "Normal" } }
+    end
+    return out
+  end,
+  keys = {
+    d = function(panel) table.remove(todo, 1) end,  -- done with the first
+  },
+  on_key = function(key, panel) return false end,  -- true if handled
+  on_close = function(panel) bone.notify("bye") end,
+})
+bone.keymap.set("f3", function() p:focus() end)
+```
+
+- `size`: columns for `left`/`right`, rows for `top`/`bottom`. A number of cells, a fraction of the room (`0.3`), or `"auto"` to fit the content up to `max` (default 40 columns or 10 rows). The default is 30 columns beside the chat and `"auto"` above or below it. The chat always keeps 20 columns and 3 rows; a panel that would get less than `min` (default 1) is not drawn that frame (`info().visible` is false).
+- Placement: `left` and `right` panels take full-height columns (after any `left`/`right` regions), then `top` and `bottom` panels split the chat column. Among panels on the same side, lower `order` (default 0) is placed nearer the edge, then older first. Side panels get a `WinSeparator` bar next to the chat.
+- Content: `render(ctx)` returns every line (or nil for none), with `ctx = { id, dock, width, height, focused, top, title }`; for `"auto"` it gets the most room it could have. `lines` is a fixed list instead (a table you keep changing is fine, it is read every frame). Rust shows the rows from `top`; `follow = true` keeps the end in view as content grows, until it is scrolled away from it. A render error is reported once and leaves the panel empty until `update`/`set_lines` gives it new content.
+- The keyboard: `focus = true` (or `p:focus()`, `bone.ui.panel.focus(id)`, a click on it, `focus_next`) gives a `focusable` panel the keyboard. Its `keys` run first, then `on_key(key, panel)`, then the `panel` keymap context (or the panel's own `context`, a named context; give it `fallback = "panel"` to keep the scroll keys). The defaults map the arrows, page keys, `home`/`end` and the wheel to scrolling, `esc` back to the prompt, `tab`/`shift+tab` to the next/previous panel and `ctrl+c` to `interrupt`. Text that is not mapped is ignored. The wheel over any panel scrolls that panel.
+- Lifecycle: `panel/opened`, `panel/updated` and `panel/closed` events (`kind = "panel"`), and `on_close(panel)` when it closes. Hiding or closing the focused panel gives the keyboard back to the prompt. Panels stay open across sessions until closed.
+
+`bone.ui.panel.open(spec)` (or `bone.ui.panel(spec)`) returns a handle:
+
+| Call | Does |
+|---|---|
+| `p:update(spec)` | change any field above (`false` resets `size`, `max`, `title`, `context`); `focus = true/false`. Returns `false` if it is closed |
+| `p:set_lines(lines)` | replace the content (a list, or a render function) |
+| `p:scroll(n)`, `p:scroll("top")`, `p:scroll("bottom")` | scroll by rows or to an end |
+| `p:hide()`, `p:show()`, `p:toggle()` | take it off the screen and back, keeping its state |
+| `p:focus()`, `p:close()`, `p:is_open()` | |
+| `p:info()` | `{ id, kind, dock, size, order, title, hidden, focusable, focus, follow, top, rows, visible, width, height, row, col }` (the last four from the last frame, while visible) |
+
+`bone.ui.panel.get(id)` returns a handle or nil, `bone.ui.panel.list()` every panel's info in placement order, `bone.ui.panel.focused()` the focused panel's id, and `bone.ui.panel.update(id, spec)`, `close(id)` and `focus(id)` (nil for the prompt) work by id.
+
 #### Statusline and divider
 
 ```lua
@@ -551,7 +601,7 @@ bone.ui.divider = function(ctx)   -- the line between the chat and the prompt
 end
 ```
 
-Each returns one line (`"%="` is a blank stretch); the row exists only while the function is defined. The statusline context has `title`, `popup` (`"popup"` while a focused window is open, else nil), `spinner`, `width` and `session` (`{ title, cwd, running, elapsed, usage = { input, output } }` or nil); the divider context has `spinner`, `width` and `session`. If one errors, its row is blank until it is redefined.
+Each returns one line (`"%="` is a blank stretch); the row exists only while the function is defined. The statusline context has `title`, `popup` (the active keymap context unless it is `main`: `"popup"` while a focused window is open), `panel` (the focused panel's id, else nil), `spinner`, `width` and `session` (`{ title, cwd, running, elapsed, usage = { input, output } }` or nil); the divider context has `spinner`, `width` and `session`. If one errors, its row is blank until it is redefined.
 
 #### Helpers
 

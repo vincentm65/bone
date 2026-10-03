@@ -609,7 +609,10 @@ async fn tui_lua_keys_commands_options_and_events() {
     assert_eq!(h.lua("=bone.api_version").await, "1");
     assert_eq!(h.lua("=bone.api_info().side").await, "\"tui\"");
     assert_eq!(h.lua("=bone.has_capability('tui.keymaps')").await, "true");
-    assert_eq!(h.lua("=bone.has_capability('tui.panels')").await, "false");
+    assert_eq!(
+        h.lua("=bone.has_capability('plugins.lifecycle')").await,
+        "false"
+    );
 
     // A Lua keymap calling a user command (nested Lua calls).
     h.input("{ctrl+g}").await;
@@ -1599,4 +1602,220 @@ async fn a_blank_row_separates_the_chat_from_the_prompt() {
     // It is just Lua: remove it and the text sits on the prompt.
     h.lua("bone.ui.divider = nil").await;
     assert!(h.screen(30, 6).ends_with("line 20\ntyping"));
+}
+
+#[tokio::test]
+async fn panels_dock_beside_and_above_the_chat() {
+    let mut h = Harness::blank().await;
+    h.lua(
+        r#"
+        local rows = {}
+        for i = 1, 20 do rows[i] = "row " .. i end
+        p = bone.ui.panel.open({ id = "notes", size = 12, title = "Notes", lines = rows })
+        t = bone.ui.panel.open({ dock = "top", render = function(ctx) return { "top " .. ctx.width } end })
+        "#,
+    )
+    .await;
+    assert_eq!(h.message(), "");
+    assert_eq!(h.lua("=bone.has_capability('tui.panels')").await, "true");
+    h.app.message = None;
+    // 60 columns: the right panel takes 12 and a separator; the top panel
+    // fits its one row over the chat column.
+    let screen = h.screen(60, 10);
+    let rows: Vec<&str> = screen.lines().collect();
+    assert_eq!(rows[0], format!("{:<47}│Notes", "top 47"), "{screen}");
+    assert_eq!(rows[1], format!("{:<47}│row 1", ""), "{screen}");
+    assert_eq!(rows[7], format!("{:<47}│row 7", ""), "{screen}");
+    assert_eq!(h.lua("=p:info().width").await, "12");
+    assert_eq!(h.lua("=p:info().rows").await, "20");
+
+    // Hidden panels give their room back and keep their state.
+    h.lua("p:scroll(5); p:hide()").await;
+    let screen = h.screen(60, 10);
+    assert!(
+        !screen.contains("Notes") && screen.starts_with("top 60"),
+        "{screen}"
+    );
+    assert_eq!(h.lua("=p:info().visible").await, "false");
+    h.lua("p:toggle()").await;
+    assert!(h.screen(60, 10).lines().nth(1).unwrap().ends_with("│row 6"));
+
+    // Too narrow: the chat keeps 20 columns and a panel below `min` is not drawn.
+    h.lua("p:update({ min = 10 })").await;
+    assert!(!h.screen(30, 10).contains("Notes"));
+    assert_eq!(h.lua("=p:info().visible").await, "false");
+    h.lua("p:update({ min = 1, size = 0.5, dock = 'left', title = false })")
+        .await;
+    let screen = h.screen(60, 10);
+    assert!(
+        screen.lines().next().unwrap().starts_with("row 6"),
+        "{screen}"
+    );
+    assert_eq!(h.lua("=p:info().width").await, "30");
+    assert_eq!(
+        h.lua("=#bone.ui.panel.list() .. bone.ui.panel.list()[1].id")
+            .await,
+        "\"2notes\""
+    );
+}
+
+#[tokio::test]
+async fn panels_take_the_keyboard_and_scroll() {
+    let mut h = Harness::blank().await;
+    h.lua(
+        r#"
+        events, hits = {}, {}
+        bone.on("panel/opened", function(ev) events[#events + 1] = "open:" .. ev.id .. ":" .. ev.kind end)
+        bone.on("panel/closed", function(ev) events[#events + 1] = "close:" .. ev.id end)
+        bone.on("focus/changed", function(ev) events[#events + 1] = "focus:" .. tostring(ev.panel) .. ":" .. ev.context end)
+        local rows = {}
+        for i = 1, 20 do rows[i] = "row " .. i end
+        p = bone.ui.panel.open({
+          id = "notes", size = 12, lines = rows,
+          keys = { x = function(panel) hits[#hits + 1] = "x:" .. panel.id end },
+          on_key = function(key, panel)
+            if key == "y" then hits[#hits + 1] = "y:" .. panel.id; return true end
+          end,
+          on_close = function(panel) hits[#hits + 1] = "closed:" .. panel.id end,
+        })
+        other = bone.ui.panel.open({ id = "other", dock = "left", size = 10, lines = { "o" } })
+        "#,
+    )
+    .await;
+    h.screen(60, 10);
+    h.lua("p:focus()").await;
+    assert_eq!(h.app.context().name(), "panel");
+    assert_eq!(h.lua("=bone.ui.panel.focused()").await, "\"notes\"");
+    // Its own keys, then on_key; unmapped text is not typed anywhere.
+    h.input("xyz").await;
+    assert_eq!(
+        h.lua("=table.concat(hits, ',')").await,
+        "\"x:notes,y:notes\""
+    );
+    assert_eq!(h.prompt(), "");
+    // The panel keymaps scroll the panel, not the chat. 8 rows show.
+    h.input("{pagedown}").await;
+    assert_eq!(h.lua("=p:info().top").await, "7");
+    h.input("{end}").await;
+    assert!(
+        h.screen(60, 10)
+            .lines()
+            .next()
+            .unwrap()
+            .ends_with("│row 13")
+    );
+    h.input("{home}{down}").await;
+    assert_eq!(h.lua("=p:info().top").await, "1");
+    // The wheel over a panel scrolls it, wherever the keyboard is.
+    assert!(h.app.panel_wheel((55, 2), false));
+    assert_eq!(h.lua("=p:info().top").await, "4");
+    assert!(!h.app.panel_wheel((30, 2), false));
+
+    // tab cycles the panels in placement order, then the prompt.
+    h.input("{tab}").await;
+    assert_eq!(h.lua("=bone.ui.panel.focused()").await, "nil");
+    h.input("a").await;
+    assert_eq!(h.prompt(), "a");
+    h.lua("bone.action('focus_next')").await;
+    assert_eq!(h.lua("=bone.ui.panel.focused()").await, "\"other\"");
+    h.input("{esc}").await;
+    assert_eq!(h.app.context().name(), "main");
+
+    // A panel can bring its own context; a click focuses it.
+    h.lua(
+        r#"
+        bone.keymap.context("review", { fallback = "panel" })
+        bone.keymap.set("r", function() hits[#hits + 1] = "review" end, { context = "review" })
+        p:update({ context = "review" })
+        "#,
+    )
+    .await;
+    h.app.mouse_down((55, 3));
+    h.app.mouse_up((55, 3));
+    assert_eq!(h.lua("=bone.keymap.current()").await, "\"review\"");
+    h.input("rq{down}").await;
+    assert_eq!(h.lua("=hits[#hits]").await, "\"review\"");
+    assert_eq!(h.prompt(), "a");
+    assert_eq!(h.lua("=p:info().top").await, "5");
+
+    // Hiding or closing a focused panel gives the keyboard back.
+    h.lua("p:hide()").await;
+    assert_eq!(h.app.context().name(), "main");
+    h.lua("p:show(); p:focus(); p:close()").await;
+    assert_eq!(h.app.context().name(), "main");
+    assert_eq!(h.lua("=bone.ui.panel.get('notes')").await, "nil");
+    assert_eq!(h.lua("=hits[#hits]").await, "\"closed:notes\"");
+    assert_eq!(
+        h.lua("=table.concat(events, ',')").await,
+        "\"open:notes:panel,open:other:panel,focus:notes:panel,focus:nil:main,\
+          focus:other:panel,focus:nil:main,focus:notes:review,focus:nil:main,\
+          focus:notes:review,focus:nil:main,close:notes\""
+    );
+    // Unknown ids are not errors for update/close.
+    assert_eq!(h.lua("=p:close()").await, "false");
+    assert_eq!(h.lua("=p:update({})").await, "false");
+}
+
+#[tokio::test]
+async fn panel_errors_and_following_content() {
+    let mut h = Harness::blank().await;
+    for (code, want) in [
+        ("bone.ui.panel.open({})", "needs render"),
+        (
+            "bone.ui.panel.open({ lines = {}, dock = 'middle' })",
+            "unknown dock",
+        ),
+        (
+            "bone.ui.panel.open({ lines = {}, size = -2 })",
+            "panel size",
+        ),
+        (
+            "bone.ui.panel.open({ lines = {}, id = 'a b' })",
+            "invalid panel id",
+        ),
+        (
+            "bone.ui.panel.open({ lines = {}, context = 'popup' })",
+            "context cannot be popup",
+        ),
+        ("bone.ui.panel.focus('nope')", "no panel nope"),
+    ] {
+        h.lua(code).await;
+        assert!(h.message().contains(want), "{code}: {}", h.message());
+    }
+    h.lua("bone.ui.panel.open({ id = 'a', lines = {}, focusable = false })")
+        .await;
+    h.lua("bone.ui.panel.open({ id = 'a', lines = {} })").await;
+    assert!(h.message().contains("already open"), "{}", h.message());
+    h.lua("bone.ui.panel.focus('a')").await;
+    assert!(h.message().contains("not focusable"), "{}", h.message());
+    assert_eq!(h.lua("=#bone.ui.panel.list()").await, "1");
+
+    // A render error is reported once; the panel stays, empty, until fixed.
+    h.lua("b = bone.ui.panel.open({ id = 'b', dock = 'bottom', size = 2, render = function() error('boom') end })")
+        .await;
+    h.screen(40, 10);
+    assert!(
+        h.message().contains("bone.ui.panel.b failed"),
+        "{}",
+        h.message()
+    );
+    h.lua("b:set_lines({ 'fixed' })").await;
+    assert!(h.screen(40, 10).contains("fixed"));
+
+    // follow keeps the end in view until scrolled away from it.
+    h.lua(
+        r#"
+        bone.ui.panel.close('a')
+        log = {}
+        f = bone.ui.panel.open({ id = 'log', dock = 'top', size = 3, follow = true, lines = log })
+        for i = 1, 5 do log[i] = "entry " .. i end
+        "#,
+    )
+    .await;
+    let screen = h.screen(40, 12);
+    assert!(screen.starts_with("entry 3\nentry 4\nentry 5"), "{screen}");
+    h.lua("f:scroll(-1); log[6] = 'entry 6'").await;
+    assert!(h.screen(40, 12).starts_with("entry 2"));
+    h.lua("f:scroll('bottom'); log[7] = 'entry 7'").await;
+    assert!(h.screen(40, 12).starts_with("entry 5\nentry 6\nentry 7"));
 }

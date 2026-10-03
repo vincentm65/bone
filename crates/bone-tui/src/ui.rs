@@ -131,8 +131,19 @@ pub fn parse_items(v: Value, default_hl: &str) -> mlua::Result<Vec<Item>> {
     Ok(out)
 }
 
-/// A list of lines, as views and regions return.
-fn parse_lines(v: Value) -> mlua::Result<Option<Vec<Vec<Item>>>> {
+/// Display width of a line's text (fills count as nothing).
+pub fn items_width(items: &[Item]) -> usize {
+    items
+        .iter()
+        .map(|i| match i {
+            Item::Text(t, _) => width(t),
+            Item::Fill(..) => 0,
+        })
+        .sum()
+}
+
+/// A list of lines, as views, regions and panels return.
+pub(crate) fn parse_lines(v: Value) -> mlua::Result<Option<Vec<Vec<Item>>>> {
     match v {
         Value::Nil => Ok(None),
         Value::Table(t) => t
@@ -176,6 +187,7 @@ impl App {
         json!({
             "title": self.chats[self.current].title(),
             "popup": self.popup_name(),
+            "panel": self.focused_panel().map(|p| p.id.clone()),
             "spinner": spinner().to_string(),
             "width": width_cols,
             "session": self.session_ctx(Some(self.current)),
@@ -243,7 +255,7 @@ impl App {
 
     /// Run Lua that may fail; a failure is reported once and `name` is
     /// skipped until the UI is refreshed (`bone.ui.refresh`, or redefining it).
-    fn guarded<R>(
+    pub(crate) fn guarded<R>(
         &mut self,
         name: &str,
         body: impl FnOnce(&mlua::Lua) -> mlua::Result<R>,

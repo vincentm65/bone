@@ -1,8 +1,9 @@
 //! Keymaps: keys and key sequences in named contexts.
 //!
 //! There are no modes. Keys normally go to the prompt (`main`); while a popup
-//! has the keyboard its own context is used: `popup`. Plugins may define named
-//! contexts with fallback contexts and priorities.
+//! has the keyboard its own context is used: `popup`, and while a panel has
+//! it, `panel`. Plugins may define named contexts with fallback contexts and
+//! priorities.
 
 use std::collections::HashMap;
 
@@ -12,6 +13,7 @@ use crate::keys::{self, Key};
 pub enum Context {
     Main,
     Popup,
+    Panel,
     Named(String),
 }
 
@@ -20,6 +22,7 @@ impl Context {
         match self {
             Context::Main => "main",
             Context::Popup => "popup",
+            Context::Panel => "panel",
             Context::Named(name) => name,
         }
     }
@@ -29,6 +32,8 @@ impl Context {
             Some(Context::Main)
         } else if s == "popup" {
             Some(Context::Popup)
+        } else if s == "panel" {
+            Some(Context::Panel)
         } else if valid_name(s) {
             Some(Context::Named(s.to_owned()))
         } else {
@@ -37,7 +42,7 @@ impl Context {
     }
 
     pub fn is_builtin(&self) -> bool {
-        matches!(self, Context::Main | Context::Popup)
+        matches!(self, Context::Main | Context::Popup | Context::Panel)
     }
 }
 
@@ -99,6 +104,9 @@ builtins! {
     QuitIfEmpty = "quit_if_empty",
     NewSession = "new_session",
     Sessions = "sessions",
+    FocusNext = "focus_next",
+    FocusPrev = "focus_prev",
+    FocusPrompt = "focus_prompt",
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -150,13 +158,15 @@ impl Default for Keymaps {
                 priority: 0,
             },
         );
-        contexts.insert(
-            Context::Popup,
-            ContextSpec {
-                fallbacks: Vec::new(),
-                priority: 0,
-            },
-        );
+        for builtin in [Context::Popup, Context::Panel] {
+            contexts.insert(
+                builtin,
+                ContextSpec {
+                    fallbacks: Vec::new(),
+                    priority: 0,
+                },
+            );
+        }
         Self {
             maps: HashMap::new(),
             contexts,

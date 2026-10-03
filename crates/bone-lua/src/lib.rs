@@ -83,6 +83,7 @@ static TUI_CAPABILITIES: &[&str] = &[
     "tui.prompt",
     "tui.chat",
     "tui.windows",
+    "tui.panels",
     "tui.regions",
     "tui.views",
     "tui.pickers",

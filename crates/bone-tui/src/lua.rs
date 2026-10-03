@@ -235,6 +235,169 @@ fn apply_win_spec(
     Ok(())
 }
 
+/// The Lua handle of panel `id` (`bone.ui.panel._handle`), passed to its
+/// key and close callbacks.
+pub fn panel_handle(lua: &Lua, id: &str) -> mlua::Result<Value> {
+    let panel: Table = lua
+        .globals()
+        .get::<Table>("bone")?
+        .get::<Table>("ui")?
+        .get("panel")?;
+    match panel.get::<Option<Function>>("_handle")? {
+        Some(f) => f.call(id),
+        None => Ok(Value::String(lua.create_string(id)?)),
+    }
+}
+
+fn valid_panel_id(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
+/// Set the fields of a panel that `spec` names (for opening and
+/// `update`). Replaced callbacks are released. `focus` is handled by the
+/// caller once the panel is in place.
+fn apply_panel_spec(
+    app: &mut App,
+    lua: &Lua,
+    p: &mut crate::panel::Panel,
+    spec: &Table,
+) -> mlua::Result<()> {
+    use crate::panel::{Dock, Size};
+    let content = match (spec.get::<Value>("render")?, spec.get::<Value>("lines")?) {
+        (Value::Nil, Value::Nil) => None,
+        (f @ Value::Function(_), Value::Nil) => Some(f),
+        (Value::Nil, v @ (Value::Function(_) | Value::Table(_))) => Some(v),
+        (Value::Nil, _) => return Err(err("panel lines must be a list or a function")),
+        (_, Value::Nil) => return Err(err("panel render must be a function")),
+        _ => return Err(err("give a panel render or lines, not both")),
+    };
+    if let Some(v) = content {
+        if p.content != 0 {
+            App::drop_callback(lua, p.content)?;
+        }
+        app.next_callback += 1;
+        p.content = app.next_callback;
+        lua.named_registry_value::<Table>(CALLBACKS)?
+            .set(p.content, v)?;
+        app.ui_broken.remove(&format!("panel.{}", p.id));
+    }
+    if let Some(dock) = spec.get::<Option<String>>("dock")? {
+        p.dock = Dock::parse(&dock).ok_or_else(|| {
+            err(format!(
+                "unknown dock {dock:?} (left, right, top or bottom)"
+            ))
+        })?;
+    }
+    match spec.get::<Value>("size")? {
+        Value::Nil => {}
+        Value::Boolean(false) => p.size = None,
+        Value::String(s) if s.to_str()?.as_ref() == "auto" => p.size = Some(Size::Auto),
+        Value::Integer(n) if n >= 1 => p.size = Some(Size::Cells(n.min(u16::MAX as i64) as u16)),
+        Value::Number(f) if f > 0.0 && f < 1.0 => p.size = Some(Size::Fraction(f)),
+        Value::Number(f) if f >= 1.0 => p.size = Some(Size::Cells(f.min(u16::MAX as f64) as u16)),
+        _ => {
+            return Err(err(
+                "panel size is a number of cells, a fraction between 0 and 1, \"auto\" or false",
+            ));
+        }
+    }
+    match spec.get::<Value>("max")? {
+        Value::Nil => {}
+        Value::Boolean(false) => p.max = None,
+        Value::Integer(n) if n >= 1 => p.max = Some(n.min(u16::MAX as i64) as u16),
+        _ => return Err(err("panel max must be a positive integer or false")),
+    }
+    if let Some(min) = spec.get::<Option<u16>>("min")? {
+        p.min = min;
+    }
+    if let Some(order) = spec.get::<Option<i32>>("order")? {
+        p.order = order;
+    }
+    match spec.get::<Value>("title")? {
+        Value::Nil => {}
+        Value::Boolean(false) => p.title = None,
+        Value::String(t) => p.title = Some(crate::text::sanitize(&t.to_str()?).replace('\n', " ")),
+        _ => return Err(err("panel title must be a string or false")),
+    }
+    if let Some(t) = spec.get::<Option<Table>>("keys")? {
+        let mut keys = Vec::new();
+        for pair in t.pairs::<String, Function>() {
+            let (name, f) = pair?;
+            keys.push((keys::parse(&name).map_err(err)?, f));
+        }
+        for (_, cb) in p.keys.drain(..) {
+            App::drop_callback(lua, cb)?;
+        }
+        for (key, f) in keys {
+            p.keys.push((key, app.store_callback(lua, f)?));
+        }
+    }
+    for (field, slot) in [("on_key", &mut p.on_key), ("on_close", &mut p.on_close)] {
+        if let Some(f) = spec.get::<Option<Function>>(field)? {
+            if let Some(cb) = slot.take() {
+                App::drop_callback(lua, cb)?;
+            }
+            *slot = Some(app.store_callback(lua, f)?);
+        }
+    }
+    match spec.get::<Value>("context")? {
+        Value::Nil => {}
+        Value::Boolean(false) => p.context = None,
+        Value::String(name) => {
+            let ctx = context_from_name(name.to_str()?.to_owned())?;
+            if matches!(ctx, Context::Main | Context::Popup) {
+                return Err(err(format!(
+                    "a panel's context cannot be {} (use panel or a named context)",
+                    ctx.name()
+                )));
+            }
+            p.context = Some(ctx);
+        }
+        _ => return Err(err("panel context must be a name or false")),
+    }
+    if let Some(v) = spec.get::<Option<bool>>("focusable")? {
+        p.focusable = v;
+    }
+    if let Some(v) = spec.get::<Option<bool>>("hidden")? {
+        p.hidden = v;
+    }
+    if let Some(v) = spec.get::<Option<bool>>("follow")? {
+        p.follow = v;
+        p.at_end = v;
+    }
+    app.dirty = true;
+    Ok(())
+}
+
+/// Close panel `id`: release its callbacks, then run `on_close(panel)` and
+/// the `panel/closed` event. Returns whether it was open.
+fn close_panel(app: &mut App, lua: &Lua, id: &str) -> mlua::Result<bool> {
+    let Some(i) = app.panels.iter().position(|p| p.id == id) else {
+        return Ok(false);
+    };
+    let event = app.panel_info(&app.panels[i]);
+    let p = app.panels.remove(i);
+    App::drop_callback(lua, p.content)?;
+    for (_, cb) in p.keys {
+        App::drop_callback(lua, cb)?;
+    }
+    if let Some(cb) = p.on_key {
+        App::drop_callback(lua, cb)?;
+    }
+    app.check_panel_focus();
+    if let Some(cb) = p.on_close {
+        let id = id.to_owned();
+        app.call_callback(cb, "panel on_close", |lua| panel_handle(lua, &id));
+        App::drop_callback(lua, cb)?;
+    }
+    app.fire("panel/closed", event);
+    app.dirty = true;
+    Ok(true)
+}
+
 /// `bone.markdown` and `bone.text`: pure helpers for views.
 fn install_text(lua: &Lua, bone: &Table) -> mlua::Result<()> {
     let md = lua.create_table()?;
@@ -1306,6 +1469,145 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 app.dirty = true;
             }
             ret(lua, ())
+        }
+        "panel_open" => {
+            let spec: Table = args(lua, a)?;
+            app.next_callback += 1;
+            let seq = app.next_callback;
+            let id = match spec.get::<Option<String>>("id")? {
+                Some(id) if !valid_panel_id(&id) => {
+                    return Err(err(format!(
+                        "invalid panel id {id:?} (letters, digits, _, - and .)"
+                    )));
+                }
+                Some(id) if app.panel(&id).is_some() => {
+                    return Err(err(format!("panel {id} is already open")));
+                }
+                Some(id) => id,
+                None => {
+                    let mut n = seq;
+                    while app.panel(&format!("panel{n}")).is_some() {
+                        n += 1;
+                    }
+                    format!("panel{n}")
+                }
+            };
+            if matches!(
+                (spec.get::<Value>("render")?, spec.get::<Value>("lines")?),
+                (Value::Nil, Value::Nil)
+            ) {
+                return Err(err("a panel needs render (a function) or lines"));
+            }
+            let focus = spec.get::<Option<bool>>("focus")? == Some(true);
+            let mut p = crate::panel::Panel::new(id.clone(), seq);
+            let applied = apply_panel_spec(app, lua, &mut p, &spec).and_then(|()| {
+                if focus && (p.hidden || !p.focusable) {
+                    return Err(err("a hidden or unfocusable panel cannot open focused"));
+                }
+                Ok(())
+            });
+            if let Err(e) = applied {
+                // Release whatever was stored before the bad field.
+                for cb in [p.content]
+                    .into_iter()
+                    .chain(p.keys.iter().map(|(_, cb)| *cb))
+                    .chain(p.on_key)
+                    .chain(p.on_close)
+                    .filter(|cb| *cb != 0)
+                {
+                    App::drop_callback(lua, cb)?;
+                }
+                return Err(e);
+            }
+            let event = app.panel_info(&p);
+            app.panels.push(p);
+            app.fire("panel/opened", event);
+            if focus {
+                // An opened callback may have closed or hidden it again.
+                let _ = app.focus_panel(Some(&id));
+            }
+            ret(lua, id)
+        }
+        "panel_update" => {
+            let (id, spec): (String, Table) = args(lua, a)?;
+            let Some(i) = app.panels.iter().position(|p| p.id == id) else {
+                return ret(lua, false);
+            };
+            let mut p = app.panels.remove(i);
+            let applied = apply_panel_spec(app, lua, &mut p, &spec);
+            app.panels.insert(i, p);
+            applied?;
+            app.check_panel_focus();
+            match spec.get::<Option<bool>>("focus")? {
+                Some(true) => app.focus_panel(Some(&id)).map_err(err)?,
+                Some(false) if app.focused_panel().is_some_and(|p| p.id == id) => {
+                    app.focus_panel(None).map_err(err)?
+                }
+                _ => {}
+            }
+            if let Some(p) = app.panel(&id) {
+                let event = app.panel_info(p);
+                app.fire("panel/updated", event);
+            }
+            ret(lua, true)
+        }
+        "panel_set_lines" => {
+            let (id, lines): (String, Value) = args(lua, a)?;
+            if !matches!(lines, Value::Table(_) | Value::Function(_)) {
+                return Err(err("panel lines must be a list or a function"));
+            }
+            let Some(content) = app.panel(&id).map(|p| p.content) else {
+                return ret(lua, false);
+            };
+            lua.named_registry_value::<Table>(CALLBACKS)?
+                .set(content, lines)?;
+            app.ui_broken.remove(&format!("panel.{id}"));
+            app.dirty = true;
+            ret(lua, true)
+        }
+        "panel_close" => {
+            let id: String = args(lua, a)?;
+            ret(lua, close_panel(app, lua, &id)?)
+        }
+        "panel_info" => {
+            let id: String = args(lua, a)?;
+            match app.panel(&id) {
+                Some(p) => ret(lua, to_lua(lua, &app.panel_info(p))?),
+                None => ret(lua, Value::Nil),
+            }
+        }
+        "panel_list" => {
+            let list: Vec<serde_json::Value> = app
+                .panels_in_order()
+                .into_iter()
+                .map(|p| app.panel_info(p))
+                .collect();
+            ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
+        }
+        "panel_focus" => {
+            let id: Option<String> = args(lua, a)?;
+            app.focus_panel(id.as_deref()).map_err(err)?;
+            ret(lua, ())
+        }
+        "panel_focused" => ret(lua, app.focused_panel().map(|p| p.id.clone())),
+        "panel_scroll" => {
+            let (id, to): (String, Value) = args(lua, a)?;
+            let Some(p) = app.panel_mut(&id) else {
+                return ret(lua, false);
+            };
+            match to {
+                Value::Integer(n) => p.scroll_by(n),
+                Value::Number(n) => p.scroll_by(n as i64),
+                Value::String(s) if s.to_str()?.as_ref() == "top" => p.scroll_to(false),
+                Value::String(s) if s.to_str()?.as_ref() == "bottom" => p.scroll_to(true),
+                _ => {
+                    return Err(err(
+                        "scroll by a number of rows, or to \"top\" or \"bottom\"",
+                    ));
+                }
+            }
+            app.dirty = true;
+            ret(lua, true)
         }
         "ui_refresh" => {
             app.views_rev += 1;

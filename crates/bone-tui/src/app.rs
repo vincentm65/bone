@@ -3,7 +3,7 @@
 //!
 //! One view: the current chat above, the prompt below. You always type into
 //! the prompt; `/` starts a command. Popups (from Lua, or the session picker)
-//! take the keyboard while they are open.
+//! take the keyboard while they are open; a Lua panel takes it while focused.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -24,6 +24,7 @@ use crate::keys::Key;
 use crate::layout::{BufferId, Placed, Window, WindowId};
 use crate::lua::{Autocmd, UserCommand};
 use crate::options::{DynamicOption, Options};
+use crate::panel::Panel;
 use crate::theme::Theme;
 
 /// A second ctrl+c within this long quits.
@@ -118,6 +119,10 @@ pub struct App {
     /// `bone.ui` functions that errored; skipped until restart.
     pub ui_broken: HashSet<String>,
     pub popups: Vec<Popup>,
+    /// Docked Lua panels (`bone.ui.panel`), in opening order.
+    pub panels: Vec<Panel>,
+    /// The panel with the keyboard (see `focused_panel`).
+    pub panel_focus: Option<String>,
     /// Text highlighted with the mouse.
     pub selection: Option<crate::selection::Selection>,
     /// Text to put on the system clipboard after the next draw.
@@ -178,6 +183,8 @@ impl App {
             colors_name: None,
             ui_broken: HashSet::new(),
             popups: Vec::new(),
+            panels: Vec::new(),
+            panel_focus: None,
             selection: None,
             clipboard: None,
             prompt_history: Vec::new(),
@@ -331,6 +338,7 @@ impl App {
             serde_json::json!({
                 "context": self.context().name(),
                 "popup": self.focused_popup().is_some(),
+                "panel": self.focused_panel().map(|p| p.id.clone()),
             }),
         );
     }
@@ -351,11 +359,14 @@ impl App {
 
     // ---- keys ----------------------------------------------------------------
 
-    /// Which keymaps apply right now. A focused popup always wins over a
-    /// named context selected by Lua.
+    /// Which keymaps apply right now: a focused popup's, then a focused
+    /// panel's (`panel` or its own context), then a named context selected
+    /// by Lua, then `main`.
     pub fn context(&self) -> Context {
         if self.focused_popup().is_some() {
             Context::Popup
+        } else if let Some(p) = self.focused_panel() {
+            p.context.clone().unwrap_or(Context::Panel)
         } else {
             self.focused_context.clone().unwrap_or(Context::Main)
         }
@@ -365,6 +376,7 @@ impl App {
         match &ctx {
             Context::Main => return self.clear_context(),
             Context::Popup => return Err("popup context is controlled by focused windows".into()),
+            Context::Panel => return Err("panel context is controlled by focused panels".into()),
             Context::Named(_) if !self.keymaps.has_context(&ctx) => {
                 return Err(format!("unknown context {}", ctx.name()));
             }
@@ -450,6 +462,19 @@ impl App {
         if self.message.is_some() {
             self.message = None;
         }
+        // A focused panel's own keys come first (not in the middle of a
+        // key sequence).
+        if self.pending_keys.is_empty()
+            && let Some(id) = self.focused_panel().map(|p| p.id.clone())
+            && self.panel_key(&id, key)
+        {
+            return;
+        }
+        let ctx = self.context();
+        if ctx == Context::Popup {
+            // A panel key opened a popup; the key was used.
+            return;
+        }
         if allow_raw && self.raw_intercepts(&ctx, key) {
             self.discard_pending();
             return;
@@ -503,12 +528,13 @@ impl App {
 
     fn unmapped_in_context(&mut self, ctx: &Context, key: Key) {
         let Some(c) = key.text() else { return };
+        // Text goes to the prompt only while it has the keyboard.
         match ctx {
-            Context::Main | Context::Named(_) => {
+            Context::Main | Context::Named(_) if self.focused_panel().is_none() => {
                 self.prompt_history_pos = None;
                 self.prompt.insert_char(c);
             }
-            Context::Popup => {}
+            _ => {}
         }
     }
 
@@ -521,8 +547,10 @@ impl App {
             serde_json::json!({ "text": text, "context": context }),
         );
         match self.context() {
-            Context::Main | Context::Named(_) => self.prompt.insert_str(text),
-            Context::Popup => {}
+            Context::Main | Context::Named(_) if self.focused_panel().is_none() => {
+                self.prompt.insert_str(text)
+            }
+            _ => {}
         }
         self.emit_prompt_changed();
     }
@@ -573,7 +601,7 @@ impl App {
         self.pending_since = None;
     }
 
-    fn flush_pending(&mut self) {
+    pub(crate) fn flush_pending(&mut self) {
         if self.pending_keys.is_empty() {
             self.discard_pending();
             return;
@@ -630,6 +658,10 @@ impl App {
         use Builtin::*;
         if b != Interrupt {
             self.quit_armed = None;
+        }
+        // Scrolling and dismiss act on a focused panel.
+        if self.panel_builtin(b) {
+            return;
         }
         match b {
             Submit => self.submit_or_command(),
@@ -691,6 +723,11 @@ impl App {
             }
             NewSession => self.new_session(),
             Sessions => self.open_picker(),
+            FocusNext => self.cycle_focus(true),
+            FocusPrev => self.cycle_focus(false),
+            FocusPrompt => {
+                let _ = self.focus_panel(None);
+            }
         }
     }
 
@@ -776,7 +813,7 @@ impl App {
     /// `/name` or `/name args`.
     pub fn suggestions(&mut self) -> Vec<(String, String)> {
         self.suggestion_argument = false;
-        if self.focused_popup().is_some() {
+        if self.focused_popup().is_some() || self.focused_panel().is_some() {
             return Vec::new();
         }
         let text = self.prompt.text();
@@ -1142,6 +1179,7 @@ impl App {
     // ---- mouse selection -----------------------------------------------------
 
     pub fn mouse_down(&mut self, at: (u16, u16)) {
+        self.panel_click(at);
         self.selection = Some(crate::selection::Selection::new(at));
         self.dirty = true;
     }

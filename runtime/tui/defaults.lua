@@ -56,6 +56,23 @@ map({
   ["ctrl+c"] = "interrupt",
 }, "popup")
 
+-- While a panel has the keyboard (after the panel's own keys). Scrolling and
+-- dismiss act on the panel; text that is not mapped is ignored.
+map({
+  ["esc"] = "dismiss",
+  ["ctrl+c"] = "interrupt",
+  ["tab"] = "focus_next",
+  ["shift+tab"] = "focus_prev",
+  ["up"] = "up",
+  ["down"] = "down",
+  ["pageup"] = "page_up",
+  ["pagedown"] = "page_down",
+  ["home"] = "scroll_top",
+  ["end"] = "scroll_bottom",
+  wheelup = "scroll_up",
+  wheeldown = "scroll_down",
+}, "panel")
+
 -- One blank row between the chat and the prompt, so text never touches
 -- what you type. Replace it (a spinner line, a rule) or set it to nil.
 function bone.ui.divider()

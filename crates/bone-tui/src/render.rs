@@ -6,7 +6,8 @@
 //!
 //! ```text
 //! top             region, if defined
-//! chat            the current session ("left"/"right" regions beside it)
+//! chat            the current session ("left"/"right" regions beside it,
+//!                 then docked Lua panels: bone.ui.panel)
 //! divider         only if bone.ui.divider is defined
 //! above_prompt    region, if defined
 //! prompt          grows with its text; bone.ui.prompt adds a prefix
@@ -133,6 +134,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             chat_area.width = chat_area.width.saturating_sub(w + 1);
         }
     }
+    let chat_area = app.draw_panels(frame, chat_area);
     for (name, lines) in regions {
         if let Some(r) = rects.get(name.as_str()) {
             frame.render_widget(Paragraph::new(lines), *r);
@@ -185,6 +187,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         if app.focused_popup().is_some() {
             cursor = None;
         }
+    }
+    if app.focused_panel().is_some() {
+        cursor = None;
     }
     if let Some(c) = cursor {
         frame.set_cursor_position(c);

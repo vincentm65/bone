@@ -69,6 +69,11 @@ fn fallback() -> Vec<(&'static str, Style)> {
         ("Placeholder", fg(Color::DarkGray)),
         ("PopupBorder", fg(Color::Yellow)),
         ("PopupTitle", fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        ("PanelTitle", bold),
+        (
+            "PanelTitleFocus",
+            Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
+        ),
     ]
 }
 

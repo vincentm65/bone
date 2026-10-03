@@ -18,6 +18,7 @@ mod layout;
 mod lua;
 mod markdown;
 mod options;
+mod panel;
 mod render;
 mod selection;
 mod shellhl;
@@ -136,6 +137,11 @@ fn handle_terminal(app: &mut App, ev: Event) {
         Event::Mouse(m) => {
             let at = (m.column, m.row);
             let code = match m.kind {
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
+                    if app.panel_wheel(at, m.kind == MouseEventKind::ScrollUp) =>
+                {
+                    return;
+                }
                 MouseEventKind::ScrollUp => crate::keys::WHEEL_UP,
                 MouseEventKind::ScrollDown => crate::keys::WHEEL_DOWN,
                 MouseEventKind::Down(MouseButton::Left) => return app.mouse_down(at),

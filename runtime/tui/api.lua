@@ -296,6 +296,106 @@ function bone.ui.is_open(id)
   return api("popup_is_open", id)
 end
 
+--- Panels: persistent areas docked beside, above or below the chat. They
+--- take room from the chat, keep their scroll position, can be hidden and
+--- shown again, and can take the keyboard. Lua gives all of the content;
+--- Rust scrolls it.
+---   id: a name (letters, digits, _ - .); default "panel<N>"
+---   dock: "right" (default), "left", "top" or "bottom"
+---   size: columns (left/right) or rows (top/bottom), a fraction of the
+---         room (0.3), or "auto" to fit the content up to `max`
+---         (default: 30 columns beside the chat, "auto" above/below it)
+---   max: the cap for "auto" (40 columns, 10 rows); min: hide below this
+---   order: lower is placed nearer the screen edge (default 0)
+---   render: function(ctx) -> lines, ctx = { id, dock, width, height,
+---         focused, top, title }, called every frame; or lines: a list
+---   title: a row above the content that does not scroll
+---   follow: keep the end in view as content grows
+---   focusable (default true), focus: take the keyboard now
+---   keys: { enter = function(panel) ... end }, on_key(key, panel): return
+---         true if handled; other keys go to the "panel" keymap context
+---         (or `context`, a named context)
+---   on_close(panel), hidden
+--- Returns a handle: panel:update(spec), :set_lines(lines), :close(),
+--- :focus(), :hide(), :show(), :toggle(), :scroll(n | "top" | "bottom"),
+--- :info(), :is_open().
+local Panel = {}
+Panel.__index = Panel
+
+local function panel_handle(id)
+  return setmetatable({ id = id }, Panel)
+end
+
+function Panel:update(spec)
+  return api("panel_update", self.id, spec or {})
+end
+function Panel:set_lines(lines)
+  return api("panel_set_lines", self.id, lines)
+end
+function Panel:close()
+  return api("panel_close", self.id)
+end
+function Panel:focus()
+  api("panel_focus", self.id)
+end
+function Panel:hide()
+  return api("panel_update", self.id, { hidden = true })
+end
+function Panel:show()
+  return api("panel_update", self.id, { hidden = false })
+end
+function Panel:toggle()
+  local info = api("panel_info", self.id)
+  if not info then
+    return false
+  end
+  return api("panel_update", self.id, { hidden = not info.hidden })
+end
+function Panel:scroll(to)
+  return api("panel_scroll", self.id, to)
+end
+function Panel:info()
+  return api("panel_info", self.id)
+end
+function Panel:is_open()
+  return api("panel_info", self.id) ~= nil
+end
+
+bone.ui.panel = setmetatable({
+  _handle = panel_handle,
+  open = function(spec)
+    return panel_handle(api("panel_open", spec))
+  end,
+  --- The handle of an open panel, or nil.
+  get = function(id)
+    if api("panel_info", id) then
+      return panel_handle(id)
+    end
+  end,
+  --- Every panel's info, in placement order.
+  list = function()
+    return api("panel_list")
+  end,
+  update = function(id, spec)
+    return api("panel_update", id, spec or {})
+  end,
+  close = function(id)
+    return api("panel_close", id)
+  end,
+  --- Give a panel the keyboard; nil gives it back to the prompt.
+  focus = function(id)
+    api("panel_focus", id)
+  end,
+  --- The id of the panel with the keyboard, or nil.
+  focused = function()
+    return api("panel_focused")
+  end,
+}, {
+  __call = function(self, spec)
+    return self.open(spec)
+  end,
+})
+
 local function spans(line)
   if type(line) == "string" then
     return { { line, "Normal" } }
