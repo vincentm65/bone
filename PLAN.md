@@ -145,3 +145,228 @@ Features are intentionally capability-gated until their phase is complete.
 Vim modes, full editor buffers, LSP/syntax infrastructure, arbitrary cell
 drawing and a plugin manager remain out of scope unless a representative
 workflow demonstrates that one is necessary.
+
+## Agent-side extensibility roadmap (Lua API v1, part 2)
+
+Goal: close the gaps with agents such as pi on the core side, as mechanisms
+only. Everything below is opt-in: the core gains the machinery (registries,
+hook points, protocol methods), but a fresh install registers no skills,
+templates, MCP servers or extra hooks, and its behaviour is unchanged until
+`core.lua` or a plugin turns something on. Each mechanism reports a
+capability, and the core keeps working when it is unused.
+
+What exists today and shapes the order: the core reads its provider, tool
+registry and hook set once at load (`Inner.provider`, `Inner.tools`,
+`Scripting.hooks`), only the selected provider entry is ever built, and all
+core Lua runs on one Lua thread through jobs. The existing `request` hook
+already rewrites messages and tools per model call; what is missing is
+persistent context changes, composable system prompts, error recovery and
+stream observation.
+
+### Phase 8: a swappable core runtime, and core plugin reload (gap 5)
+
+Everything after this needs registries that can change while the core runs,
+so this comes first.
+
+- Move what core Lua produces into one immutable `Runtime` snapshot: the
+  Lua thread (`Scripting`), the provider set, the tool registry, the hook
+  set and the derived config. `Inner` holds `RwLock<Arc<Runtime>>`. Each turn
+  takes the current `Arc<Runtime>` when it starts and keeps it until it
+  ends, so a reload never changes a running turn.
+- Reload rebuilds instead of patching: start a new Lua thread, load the
+  runtime, then the plugins that are enabled, then `core.lua`, then run
+  `on_ready`. Only if that succeeds is the new snapshot swapped in. The old
+  one keeps serving its in-flight turns and pending `bone.ask` questions,
+  and drops once they finish. A failed reload keeps the old runtime and
+  reports the error.
+- Unloading or loading a single plugin is a rebuild with that plugin left
+  out of, or added to, the enabled set. Disabled names live in memory and,
+  if asked, in `state/core/plugins.json`. Lua globals do not survive a
+  reload, so plugins keep anything that must persist in `bone.state`.
+  `bone.on_shutdown(fn)` runs on the outgoing runtime before the swap.
+- Settings that cannot change live (`data_dir`) are ignored on reload, with
+  a warning.
+- The hook set becomes dynamic: `bone.hook` calls into Rust when it
+  registers, instead of being read once by `extract`.
+- Protocol: `core/reload`, `plugin/list` (core side), and
+  `plugin/load|unload|reload` (each a rebuild), plus a `core/reloaded`
+  event. The TUI's `/plugin` command lists and reloads both halves of a
+  plugin. Capability `core.reload`.
+- Tests: reload while a turn runs (the turn finishes on the old runtime and
+  the next one uses the new); a failed reload keeps the old runtime;
+  unloading a plugin drops its tools and hooks; state survives through
+  `bone.state`.
+
+### Phase 9: more core hook points (gap 1)
+
+New points, all opt-in. A point with no hooks costs nothing (the dynamic
+hook set is checked first).
+
+- `system` `{ session_id, cwd, prompt }` composes the system prompt. Every
+  plugin can append to or replace it. `bone.config.system_prompt` remains
+  the base.
+- `context` `{ session_id, messages }` runs before every model call, after
+  `system` and before `request`. It is the documented place to rewrite
+  history for that call. `request` keeps its meaning.
+- `request_error` `{ session_id, error, attempt, provider }` runs when a
+  model call fails. It may return `{ retry = ms }` or
+  `{ retry = ms, provider = name }` (which needs phase 10's provider set),
+  or nothing to fail the turn. The core caps attempts.
+- `stream` `{ session_id, kind, text }` lets hooks watch deltas. Its results
+  are ignored, and it runs as a batched, fire-and-forget job so it never
+  slows the stream. It is only active while registered.
+- `session_start` `{ session_id, cwd, new }` and `session_end`
+  `{ session_id }` (closed or evicted) are lifecycle hooks; their results
+  are ignored.
+- `message` also gets `usage`.
+- Hook options: `bone.hook(name, fn, { priority = n })` controls the order
+  hooks run in (the default 0 keeps registration order).
+- Session writes for hooks and tools (core-side Lua, only between model
+  calls):
+  - `bone.session.messages(id)`;
+  - `bone.session.append(id, message)` injects a message the model will
+    see;
+  - `bone.session.compact(id, messages)` stores a compaction checkpoint
+    record in the session file. Loading uses the newest checkpoint, the full
+    history stays on disk, and clients get a `session/compacted` event and
+    reload the transcript.
+
+  Compaction itself is a plugin (built on phase 10's model calls), not a
+  default.
+- Capabilities: `core.hooks.system`, `core.hooks.context`,
+  `core.hooks.errors`, `core.hooks.stream`, `core.hooks.session`,
+  `core.session_write`.
+- Tests: for each point, the order across priorities, a retry that switches
+  provider, compaction surviving a restart, and the `stream` hook not
+  blocking deltas.
+
+### Phase 10: Lua can call a model (gap 2)
+
+- The runtime builds every `bone.config.providers` entry into a provider (a
+  model registry), not only the selected one. The selected entry stays the
+  agent's default.
+- Core Lua: `bone.model.complete(req)` is a job wait. `req` takes:
+  - `provider` (default: the current provider);
+  - `messages`, or `prompt` with an optional `system`;
+  - `tools` (specs only; nothing is run);
+  - `options` (overrides such as `model`, `max_tokens`,
+    `reasoning_effort`);
+  - `on_delta(d)`.
+
+  It returns `{ content, reasoning, tool_calls, usage }`. Called inside a
+  turn, it is cancelled with that turn.
+- `bone.model.list()` returns `{ name, model, type, current }`. Calls nest
+  at most 4 deep, so a Lua provider cannot recurse forever.
+- Protocol, so TUI Lua and other clients can use it:
+  - `model/list`;
+  - `model/complete { provider?, messages, tools?, options?, stream? }`;
+    with `stream = true` the core sends `model/delta { request_id, kind,
+    text }` notifications to that connection only;
+  - `model/cancel`.
+
+  The TUI exposes these as `bone.model.complete(req, on_delta, on_done)`.
+- Capabilities `core.model` and `tui.model`.
+- Tests: calls against a fake SSE server, through a Lua provider, with
+  cancellation, the nesting limit, and the streaming protocol.
+
+### Phase 11: MCP client (gap 3)
+
+- A Rust `mcp` module in bone-core: a JSON-RPC client over a generic
+  transport, so tests can run in memory. It covers stdio (spawned process)
+  and, after that, Streamable HTTP; the `initialize` handshake; `tools/list`
+  with `list_changed`; `tools/call`; and timeouts and cancellation that
+  follow the turn.
+- Opt-in only: no servers are configured by default.
+  `bone.mcp.add(name, { command, args, env, cwd } | { url, headers },
+  { tools = { allow, deny }, lazy = true, timeout })` registers one server.
+  `bone.mcp.load(path)` imports the common `mcpServers` JSON format, and only
+  when called. `bone.mcp.remove(name)`.
+- Server lifecycle lives outside the Lua runtime (an `McpManager` in
+  `Inner`). A reload compares the configured servers with the running ones,
+  so servers that did not change keep running. A server that crashes
+  restarts with backoff, and its status shows in `/health`.
+- MCP tools join the dynamic registry as `<server>_<tool>`, with their
+  annotations kept (a `readOnlyHint` server tool skips the approve plugin).
+  They pass through the `tool_call`/`tool_result` hooks like any tool.
+- `bone.mcp.call(server, tool, args)` is a job wait, for plugins.
+  `bone.mcp.list()`. Resources and prompts come later; MCP prompts can feed
+  phase 12's template registry.
+- Protocol: `mcp/list` (servers, state, tools). Capability `core.mcp`.
+- Tests:
+  - an in-memory fake server for handshake, list, call, errors and
+    `list_changed`;
+  - one stdio test against a small fixture binary;
+  - reload keeping unchanged servers alive;
+  - cancellation during a call.
+
+### Phase 12: skills and prompt templates (gap 4)
+
+Registries in the core, empty by default.
+
+Skills:
+
+- `bone.skill.register { name, description, content | path }` (a file, or a
+  folder with `SKILL.md`), with an optional `enabled(ctx)` predicate (for
+  example, only in some projects). `bone.skill.load_dir(dir)` registers each
+  `*/SKILL.md` it finds (front matter: `name`, `description`), and only when
+  called. Also `bone.skill.unregister` and `bone.skill.list`.
+- While at least one skill is enabled for a session, the core:
+  1. adds a short "available skills" section (name and description) through
+     the `system` hook point;
+  2. registers a `skill` tool that returns a skill's full content and the
+     paths of its bundled files.
+
+  With no skills there is no section and no tool. Both can be switched off
+  (`bone.config.skills = { prompt = false, tool = false }`) so a plugin can
+  present skills its own way.
+- Protocol: `skill/list`. Capability `core.skills`.
+
+Prompt templates:
+
+- `bone.template.register { name, description, args, body }`, where `body`
+  is a string with `$1`, `$@` and `{{name}}` placeholders, or
+  `function(args, ctx)` run as a job (so it can use `bone.system` and
+  friends). `bone.template.load_dir(dir)` registers markdown files with
+  front matter, when called. Also `unregister` and `list`.
+- Protocol: `template/list`, `template/expand { name, args, session_id? }`
+  returning the text, and a `template/changed` event. Expansion happens in
+  the core, so every client gets the same text. Capability
+  `core.templates`.
+- The TUI gets `bone.skills.list()`, `bone.templates.list()` and
+  `bone.templates.expand(name, args, cb)`. The TUI ships no default
+  commands for them.
+
+Tests: no skills means an unchanged prompt and tool list; an enabled skill
+adds both; `enabled(ctx)`; `load_dir` parsing; placeholder substitution;
+Lua bodies that wait; changes reaching clients.
+
+### Phase 13: example plugins and validation
+
+Lua-only examples that prove the mechanisms, none installed by default:
+
+- `compact`: summarises old turns with `bone.model.complete` and
+  `bone.session.compact`; a `/compact` command; optional automatic
+  compaction from `request_error` when the context is too long.
+- `retry`: backs off and retries, or falls back to another provider
+  (`request_error`).
+- `mcp`: loads an `mcpServers` file named in `core.lua`; its TUI half adds a
+  server status panel.
+- `skills`: `load_dir` on chosen folders; its TUI half adds `/skills` and
+  `/skill name` (which asks the model to use that skill).
+- `templates`: `load_dir`; its TUI half turns every template into a `/name`
+  command with argument completion that expands into the prompt.
+- `ask-model`: a TUI command that sends the selection to a side model with
+  `bone.model.complete` and shows the answer in a pager.
+
+Then the full validation run, as in phase 7.
+
+Order and size: 8 is the foundation, a refactor of `Inner`, of how turns
+pick up the runtime, and of the scripting loader. 9 and 10 can follow in
+either order (10's provider fallback inside `request_error` needs both). 11
+and 12 are independent of each other. 13 comes last. Rough size: 8 and 11
+are the largest; 9, 10 and 12 are medium each.
+
+Protocol: every addition is a new method or event. Existing methods keep
+their shapes, and each addition gets golden tests and `docs/protocol.md`
+entries. The protocol version stays the same, and clients check the
+`core.*` capabilities, which the handshake will report.
