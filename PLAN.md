@@ -87,27 +87,33 @@ committed as `e13978c`.
 Phase 4, prompt and chat data (`tui.prompt_edit`, `tui.chat_data`), is
 committed as `0462c61`.
 
-Phase 5, **cancellable streaming jobs** (`jobs.streaming`, TUI side), is
-complete in the current worktree. It adds:
+Phase 5, cancellable streaming jobs (`jobs.streaming`), is committed as
+`9f439dd`.
 
-- `bone.job.start(cmd, opts)` with shell or argv commands, `cwd`, `env`,
-  `stdin` (text, or open for `job:write`/`close_stdin`), timeouts, and
-  `on_stdout`/`on_stderr` callbacks in chunk or line mode with UTF-8-safe
-  decoding;
-- cancellation and timeouts that stop the job's whole process group
-  (SIGTERM, then SIGKILL after a grace period), and group cleanup when the
-  TUI quits;
-- exit results (state, code, signal, duration, optional kept output),
-  `job:status()`, `bone.job.list()`/`get`/`cancel_all`, `job/started` and
-  `job/finished` events and a `jobs` count in the statusline context; and
-- unit tests for decoding, line splitting and output limits, and
-  integration tests with real processes for streaming, stdin, env/cwd,
-  cancellation of grandchildren, timeouts, spawn failures and errors.
+Phase 6, **plugin state and lifecycle**, is complete in the current
+worktree. It adds:
 
-`bone.system`, `bone.http` and `bone.defer` keep their v1 behavior, and
-core-side waits are unchanged. Remaining phases cover plugin
-lifecycle/state and representative plugins plus final validation. The
-out-of-scope boundaries below continue to apply.
+- `bone.state.load/save` on both sides (JSON under `state/<side>/`, written
+  atomically) and `bone.plugin.current()` while plugin files load
+  (`plugins.state`);
+- TUI ownership of keymaps, commands, event handlers, panels, windows,
+  jobs, dynamic options, raw interceptors and contexts created while a
+  plugin's file or callbacks run, with identity checks so user overrides
+  survive (`plugins.lifecycle`);
+- `bone.plugin.on_shutdown`, `load`/`unload`/`reload` (also `/plugin`),
+  module cache invalidation on unload, auto-saved `bone.plugin.state`,
+  `plugin/loaded`/`plugin/unloaded` events, and shutdown hooks plus state
+  saving when the TUI quits;
+- explicit project configuration: `<project>/.bone/tui.lua` found from the
+  working directory upward, run only after `/project trust` (remembered in
+  TUI state), unloadable with `/project untrust` (`tui.project`); and
+- tests for the state store, plugin loading markers, ownership cleanup,
+  reload with changed modules, persisted state and project trust.
+
+Core-side plugin unload/reload is not included: the core Lua state lives
+for the whole server and hooks/tools are not owner-tracked. Folder loading
+is unchanged. The remaining phase covers representative plugins plus final
+validation. The out-of-scope boundaries below continue to apply.
 
 1. **Extension contract and compatibility** — publish `bone.api_version`,
    capability reporting, ownership rules, and the baseline contracts for

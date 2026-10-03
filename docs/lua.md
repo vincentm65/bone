@@ -37,7 +37,7 @@ the other.
 
 The current capability names include `core.config`, `core.tools`,
 `core.hooks`, `core.providers`, `core.jobs`, `core.http_stream`, `core.ask`,
-`core.health`, and, in the TUI, `tui.keymaps`, `tui.input`, `tui.events`,
+`core.health`, `plugins.state` (both sides), and, in the TUI, `plugins.lifecycle`, `tui.project`, `tui.keymaps`, `tui.input`, `tui.events`,
 `tui.local_events`, `tui.commands`, `tui.command_specs`, `tui.options`,
 `tui.dynamic_options`, `tui.request`, `tui.prompt`, `tui.prompt_edit`, `tui.chat`, `tui.chat_data`, `tui.windows`,
 `tui.panels`, `tui.regions`, `tui.views`, `tui.pickers`, `tui.themes`, `tui.jobs`, `jobs.streaming` and
@@ -78,7 +78,7 @@ planned; those capabilities are not available until reported by
 | Panels | `bone.ui.win` is a Lua-drawn overlay, and regions/views customize the existing chat layout. Both keep working unchanged. | Persistent panels with IDs, docking, sizing, scrolling, focus, render/key callbacks and lifecycle events are available through `tui.panels` (`bone.ui.panel`). |
 | Prompt and chat | `bone.api.prompt_get`/`prompt_set` read and replace the whole prompt; `bone.chat.items({ kind, last })` lists the on-screen chat's items. | Cursor, range and selection edits (`tui.prompt_edit`, `bone.prompt`) and structured read-only items, turns and sessions with filters (`tui.chat_data`) are available. The TUI stays a prompt, not a file editor. |
 | Jobs | TUI `bone.system`, `bone.http` and `bone.defer` run one background operation and invoke a callback. Core waits are coroutine-based and turn cancellation stops them. v1 has no general process handle or streamed TUI job. | Streaming jobs with handles, stdout/stderr callbacks (chunks or lines), stdin writes, cancellation of the whole process group, timeouts, exit results, status and `job/*` events are available in the TUI through `jobs.streaming` (`bone.job`). |
-| Plugin state | Folder plugins load in name order between runtime defaults and the user's config; `bone.plugins` reports names and `.`/`_` folders are disabled. There is no persistent state store, reload hook or automatic resource cleanup yet. | Init/shutdown, persistent per-plugin state, project configuration and cleanup of owned resources (`plugins.lifecycle`) remain planned. |
+| Plugin state | Folder plugins load in name order between runtime defaults and the user's config; `bone.plugins` reports names and `.`/`_` folders are disabled. There is no persistent state store, reload hook or automatic resource cleanup yet. | In the TUI, plugins own what they create; `bone.plugin.on_shutdown`, load/unload/reload (`/plugin`), auto-saved `bone.plugin.state` and trusted project config (`/project`) are available through `plugins.lifecycle` and `tui.project`. Both sides have `bone.state` and `bone.plugin.current()` (`plugins.state`). |
 
 The existing detailed sections describe both the compatibility calls and the
 new additive APIs. A plugin may use a compatibility API today and opt into
@@ -97,6 +97,30 @@ A plugin is a folder in `~/.bone/plugins/`:
 ```
 
 Every part is optional. Plugins load in name order, after the runtime defaults and before your own `core.lua` / `tui.lua`, so your config can change anything a plugin set up. Rename a folder to start with `_` or `.` to disable it. `bone.plugins` lists the loaded names. Installing is just copying or `git clone`-ing into `~/.bone/plugins/`; see `examples/plugins/` in the repo (`git`, `approve`, `style`).
+
+### Plugin lifecycle and state
+
+`bone.plugin.current()` is `{ name, dir, kind }` while a plugin's file runs (on both sides; in the TUI also while any of its callbacks run), else nil.
+
+`bone.state.load(name)` returns the table saved under `name` (empty if none) and `bone.state.save(name, value)` saves one, as JSON in `~/.bone/state/<side>/<name>.json`. Names are letters, digits, `_`, `-` and `.`. Both sides have it; each side has its own files.
+
+In the TUI a plugin owns what it creates while its `tui.lua` or one of its callbacks runs: keymaps, user commands, `bone.on` handlers, panels, windows, jobs, dynamic options, raw key interceptors and new keymap contexts. Unloading it removes all of that (a key or command the user has since redefined is left alone), cancels its running jobs without calling back, and forgets the modules it `require`d, so loading it again runs fresh code. Anything else it changed (views, highlights, `bone.ui` fields) is for its shutdown hook to undo.
+
+```lua
+-- in plugins/todo/tui.lua
+local st = bone.plugin.state()            -- ~/.bone/state/tui/todo.json, saved on unload and quit
+st.items = st.items or {}
+bone.plugin.on_shutdown(function() ... end)  -- unload, reload and quit
+```
+
+- `bone.plugin.list()`: `{ name, dir, kind, loaded, error }` for each plugin seen this session.
+- `bone.plugin.load(name)` (a folder in `plugins/`, even one added after startup or disabled with `_`), `bone.plugin.unload(name)`, `bone.plugin.reload(name)`; also `/plugin load|unload|reload name`. A plugin cannot unload itself from its own code.
+- `bone.plugin.state(name)` returns a table that is loaded once and saved when its plugin unloads and when bone quits; `bone.plugin.save_state(name)` saves it now. `name` defaults to the current plugin.
+- Events: `plugin/loaded` and `plugin/unloaded` with the plugin's info.
+
+### Project config
+
+A project can carry TUI config in `.bone/tui.lua` (and modules in `.bone/lua/`). bone looks for it in the working directory and its parents, but Lua has full trust, so it only runs after you trust that directory: `/project trust` runs it now and on later starts there, `/project untrust` unloads it and forgets the trust, and `/project` shows the state. Until then bone says that there is one. It loads after your own `tui.lua`, as a plugin named `project`, so it can be unloaded like any other. `bone.project.info()` returns `{ root, file, trusted, loaded }` or nil.
 
 ## Shared
 
@@ -409,6 +433,7 @@ Registration aliases normalize to these canonical names:
 | `panel/updated` | `panel/updated`, `popup/updated` | a window or a panel |
 | `panel/closed` | `panel/closed`, `popup/closed` | a window or a panel |
 
+| `plugin/loaded`, `plugin/unloaded` | same | `{ name, dir, kind, loaded, error }` |
 | `job/started` | `job/started` | `{ id, name, cmd, pid }` |
 | `job/finished` | `job/finished` | the job's exit result (see `bone.job`) |
 

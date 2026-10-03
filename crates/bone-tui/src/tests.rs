@@ -610,7 +610,7 @@ async fn tui_lua_keys_commands_options_and_events() {
     assert_eq!(h.lua("=bone.api_info().side").await, "\"tui\"");
     assert_eq!(h.lua("=bone.has_capability('tui.keymaps')").await, "true");
     assert_eq!(
-        h.lua("=bone.has_capability('plugins.lifecycle')").await,
+        h.lua("=bone.has_capability('tui.no_such_feature')").await,
         "false"
     );
 
@@ -2112,4 +2112,144 @@ async fn jobs_cancel_time_out_and_fail() {
         h.lua(code).await;
         assert!(h.message().contains(want), "{code}: {}", h.message());
     }
+}
+
+#[tokio::test]
+async fn plugins_own_what_they_create_and_unload_cleanly() {
+    let (mut h, dir) = Harness::with_config(
+        r#"
+        bone.keymap.set("f8", function() bone.notify("user f8") end)
+        unloaded = {}
+        bone.on("plugin/unloaded", function(ev) unloaded[#unloaded + 1] = ev.name end)
+        "#,
+    )
+    .await;
+    let demo = dir.path().join("plugins/demo");
+    std::fs::create_dir_all(demo.join("lua/demo")).unwrap();
+    std::fs::write(demo.join("lua/demo/mod.lua"), "return { v = 1 }").unwrap();
+    std::fs::write(
+        demo.join("tui.lua"),
+        r#"
+        local m = require("demo.mod")
+        loads = (loads or 0) + 1
+        cur = bone.plugin.current().name
+        bone.keymap.set("f5", function() bone.notify("demo f5 " .. m.v) end)
+        bone.keymap.set("f6", function() bone.ui.panel.open({ id = "late", lines = { "late" } }) end)
+        bone.cmd.create("demo", function() end, { desc = "demo" })
+        bone.on("prompt", function() demo_prompt = (demo_prompt or 0) + 1 end)
+        bone.o.define("demo_level", 1)
+        bone.keymap.context("demo-ctx")
+        bone.ui.panel.open({ id = "demo", lines = { "demo panel" } })
+        bone.job.start("sleep 30", { on_exit = function() demo_job_exit = true end })
+        local st = bone.plugin.state()
+        st.count = (st.count or 0) + 1
+        bone.plugin.on_shutdown(function() shutdowns = (shutdowns or 0) + 1 end)
+        "#,
+    )
+    .unwrap();
+    h.input("/plugin load demo{enter}").await;
+    assert_eq!(h.lua("=cur .. loads").await, "\"demo1\"");
+    assert_eq!(
+        h.lua("=bone.has_capability('plugins.lifecycle')").await,
+        "true"
+    );
+    h.input("{f6}{f5}").await;
+    assert_eq!(h.message(), "demo f5 1");
+    assert_eq!(h.lua("=#bone.ui.panel.list()").await, "2");
+    assert!(h.app.user_commands.contains_key("demo"));
+
+    h.input("/plugin unload demo{enter}").await;
+    assert_eq!(h.lua("=shutdowns").await, "1");
+    assert_eq!(h.lua("=#bone.ui.panel.list()").await, "0");
+    assert!(!h.app.user_commands.contains_key("demo"));
+    assert_eq!(h.lua("=pcall(bone.o.get, 'demo_level')").await, "false");
+    assert_eq!(
+        h.lua("=pcall(bone.keymap.focus, 'demo-ctx')").await,
+        "false"
+    );
+    assert_eq!(h.lua("=package.loaded['demo.mod']").await, "nil");
+    assert_eq!(h.lua("=unloaded[1]").await, "\"demo\"");
+    assert_eq!(h.lua("=bone.job.list()[1].running").await, "false");
+    assert_eq!(h.lua("=demo_job_exit").await, "nil");
+    // Its prompt handler is gone; the user's own key is not.
+    h.lua("demo_prompt = 0").await;
+    h.input("x{backspace}").await;
+    assert_eq!(h.lua("=demo_prompt").await, "0");
+    h.input("{f5}").await;
+    assert_ne!(h.message(), "demo f5 1");
+    h.input("{f8}").await;
+    assert_eq!(h.message(), "user f8");
+    let saved = std::fs::read_to_string(dir.path().join("state/tui/demo.json")).unwrap();
+    assert!(saved.contains("\"count\": 1"), "{saved}");
+
+    // Loading again re-reads its modules and its state.
+    std::fs::write(demo.join("lua/demo/mod.lua"), "return { v = 2 }").unwrap();
+    h.input("/plugin reload demo{enter}").await;
+    assert!(h.message().contains("not loaded"), "{}", h.message());
+    h.input("/plugin load demo{enter}").await;
+    h.input("{f5}").await;
+    assert_eq!(h.message(), "demo f5 2");
+    h.input("/plugin reload demo{enter}").await;
+    assert_eq!(h.lua("=shutdowns .. ':' .. loads").await, "\"2:3\"");
+    assert!(
+        h.lua("=bone.inspect(bone.plugin.list())")
+            .await
+            .contains("demo")
+    );
+    h.app.shutdown();
+    assert_eq!(h.lua("=shutdowns").await, "3");
+    let saved = std::fs::read_to_string(dir.path().join("state/tui/demo.json")).unwrap();
+    assert!(saved.contains("\"count\": 3"), "{saved}");
+    h.input("/plugin unload nope{enter}").await;
+    assert!(h.message().contains("not loaded"), "{}", h.message());
+}
+
+#[tokio::test]
+async fn a_project_config_runs_only_when_trusted() {
+    let (mut h, dir) = Harness::with_config("").await;
+    let project = tempfile::tempdir().unwrap();
+    let work = project.path().join("src/deep");
+    std::fs::create_dir_all(&work).unwrap();
+    std::fs::create_dir_all(project.path().join(".bone")).unwrap();
+    std::fs::write(
+        project.path().join(".bone/tui.lua"),
+        r#"
+        project_loads = (project_loads or 0) + 1
+        bone.keymap.set("f9", function() bone.notify("project f9") end)
+        "#,
+    )
+    .unwrap();
+    h.app.cwd = work.to_string_lossy().into_owned();
+    h.app.load_project();
+    assert!(h.message().contains("/project trust"), "{}", h.message());
+    assert_eq!(h.lua("=project_loads").await, "nil");
+    assert_eq!(h.lua("=bone.project.info().trusted").await, "false");
+
+    h.input("/project trust{enter}").await;
+    assert_eq!(h.lua("=project_loads").await, "1");
+    h.input("{f9}").await;
+    assert_eq!(h.message(), "project f9");
+    let trusted =
+        std::fs::read_to_string(dir.path().join("state/tui/trusted-projects.json")).unwrap();
+    assert!(
+        trusted.contains(
+            &std::fs::canonicalize(project.path())
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        ),
+        "{trusted}"
+    );
+    // Trust is remembered: the next start loads it.
+    h.app.unload_plugin("project").unwrap();
+    h.app.load_project();
+    assert_eq!(h.lua("=project_loads").await, "2");
+
+    h.input("/project untrust{enter}").await;
+    h.input("{f9}").await;
+    assert_ne!(h.message(), "project f9");
+    assert_eq!(h.lua("=bone.project.info().trusted").await, "false");
+    h.app.cwd = "/".into();
+    h.input("/project{enter}").await;
+    assert!(h.message().contains("no .bone/tui.lua"), "{}", h.message());
 }

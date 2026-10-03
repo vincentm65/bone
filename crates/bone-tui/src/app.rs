@@ -147,6 +147,18 @@ pub struct App {
     pub next_callback: u64,
     pub user_commands: HashMap<String, UserCommand>,
     pub autocmds: Vec<Autocmd>,
+    /// The plugin whose code is running (loading, or one of its callbacks);
+    /// `None` for the runtime and the user's config.
+    pub owner: Option<String>,
+    /// The plugin each stored callback belongs to.
+    pub callback_owner: HashMap<u64, String>,
+    /// What each plugin created (see `plugins.rs`).
+    pub owned: HashMap<String, Vec<crate::plugins::Owned>>,
+    /// Which plugin last mapped each key.
+    pub keymap_owner: HashMap<(Context, Vec<Key>), String>,
+    pub plugins: Vec<crate::plugins::Plugin>,
+    /// `bone.plugin.on_shutdown` callbacks, by owner.
+    pub shutdown_hooks: Vec<(Option<String>, u64)>,
 }
 
 impl App {
@@ -208,6 +220,12 @@ impl App {
             next_callback: 0,
             user_commands: HashMap::new(),
             autocmds: Vec::new(),
+            owner: None,
+            callback_owner: HashMap::new(),
+            owned: HashMap::new(),
+            keymap_owner: HashMap::new(),
+            plugins: Vec::new(),
+            shutdown_hooks: Vec::new(),
         };
         crate::lua::init(&mut app, config_dir);
         app.dirty = true;

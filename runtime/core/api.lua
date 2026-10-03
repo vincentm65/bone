@@ -254,3 +254,12 @@ function bone._system_prompt(ctx)
 end
 
 -- print() writes to <config dir>/core.log.
+
+--- Plugins. bone.plugin.current() is { name, dir, kind } while a plugin's
+--- core.lua runs, else nil. bone.state.load(name) / bone.state.save(name,
+--- value) keep JSON in ~/.bone/state/core/<name>.json.
+bone.plugin = {
+  current = function()
+    return bone._loading
+  end,
+}

@@ -76,6 +76,16 @@ pub const COMMANDS: &[Command] = &[
         help: "run a Lua file",
     },
     Command {
+        name: "plugin",
+        aliases: &["plugins"],
+        help: "plugins: list, or load/unload/reload name",
+    },
+    Command {
+        name: "project",
+        aliases: &[],
+        help: "this project's .bone/tui.lua: show, trust, untrust",
+    },
+    Command {
         name: "messages",
         aliases: &[],
         help: "recent messages and full Lua errors",
@@ -364,6 +374,8 @@ impl App {
         match name {
             "help" if !args.is_empty() => self.call_ui("help", Some(args)),
             "health" => self.call_ui("health", None),
+            "plugin" => self.plugin_command(args)?,
+            "project" => self.project_command(args)?,
             "help" => {
                 let mut rows: Vec<String> = COMMANDS
                     .iter()

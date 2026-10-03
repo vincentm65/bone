@@ -231,6 +231,18 @@ impl Jobs {
         self.list.iter_mut().find(|j| j.id == id)
     }
 
+    /// Drop a job's callbacks (its plugin unloaded); returns them to release.
+    pub fn forget_callbacks(&mut self, id: u64) -> Vec<u64> {
+        let Some(j) = self.get_mut(id) else {
+            return Vec::new();
+        };
+        let cbs = j.callbacks().collect();
+        j.on_stdout = None;
+        j.on_stderr = None;
+        j.on_exit = None;
+        cbs
+    }
+
     pub fn running(&self) -> usize {
         self.list.iter().filter(|j| j.running()).count()
     }

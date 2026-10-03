@@ -21,6 +21,7 @@ mod lua;
 mod markdown;
 mod options;
 mod panel;
+mod plugins;
 mod render;
 mod selection;
 mod shellhl;
@@ -128,6 +129,7 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
             }
         }
     }
+    app.shutdown();
     drop(term);
     Ok(app.quit.flatten())
 }

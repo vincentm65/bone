@@ -65,6 +65,7 @@ static CORE_CAPABILITIES: &[&str] = &[
     "core.http_stream",
     "core.ask",
     "core.health",
+    "plugins.state",
 ];
 
 static TUI_CAPABILITIES: &[&str] = &[
@@ -92,6 +93,9 @@ static TUI_CAPABILITIES: &[&str] = &[
     "tui.themes",
     "tui.jobs",
     "jobs.streaming",
+    "plugins.state",
+    "plugins.lifecycle",
+    "tui.project",
     "tui.session",
 ];
 
@@ -147,11 +151,122 @@ pub fn plugins(config_dir: &Path) -> Vec<PathBuf> {
 }
 
 /// Run `file` of each plugin in `<config dir>/plugins/`, in name order.
+/// While one runs, `bone.plugin.current()` describes it.
 pub fn run_user_plugins(lua: &Lua, config_dir: &Path, file: &str) -> mlua::Result<()> {
     for plugin in plugins(config_dir) {
-        run_file(lua, &plugin.join(file))?;
+        set_loading(lua, Some(&plugin))?;
+        let r = run_file(lua, &plugin.join(file));
+        set_loading(lua, None)?;
+        r?;
     }
     Ok(())
+}
+
+/// A plugin's name: its folder's name.
+pub fn plugin_name(dir: &Path) -> String {
+    dir.file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Set `bone._loading` to `{ name, dir }` of the plugin being loaded.
+pub fn set_loading(lua: &Lua, plugin: Option<&Path>) -> mlua::Result<()> {
+    let bone: Table = lua.globals().get("bone")?;
+    match plugin {
+        Some(dir) => {
+            let t = lua.create_table()?;
+            t.set("name", plugin_name(dir))?;
+            t.set("dir", dir.to_string_lossy().as_ref())?;
+            t.set("kind", "plugin")?;
+            bone.set("_loading", t)
+        }
+        None => bone.set("_loading", Value::Nil),
+    }
+}
+
+/// A state name: letters, digits, `_`, `-` and `.`, not starting with `.`.
+fn valid_state_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+}
+
+/// Where `bone.state` keeps `name` on this side.
+pub fn state_path(config_dir: &Path, side: Side, name: &str) -> PathBuf {
+    config_dir
+        .join("state")
+        .join(side.name())
+        .join(format!("{name}.json"))
+}
+
+/// `bone.state.load(name)` and `bone.state.save(name, value)`: JSON files
+/// in `<config dir>/state/<side>/`, or memory without a config dir.
+fn install_state(
+    lua: &Lua,
+    bone: &Table,
+    side: Side,
+    config_dir: Option<&Path>,
+) -> mlua::Result<()> {
+    let state = lua.create_table()?;
+    let memory = lua.create_table()?;
+    let check = |name: &str| -> mlua::Result<()> {
+        if valid_state_name(name) {
+            Ok(())
+        } else {
+            Err(mlua::Error::runtime(format!(
+                "invalid state name {name:?} (letters, digits, _, - and .)"
+            )))
+        }
+    };
+    let dir = config_dir.map(Path::to_owned);
+    let mem = memory.clone();
+    state.set(
+        "load",
+        lua.create_function(move |lua, name: String| {
+            check(&name)?;
+            let text: Option<String> = match &dir {
+                None => mem.get(name.as_str())?,
+                Some(d) => match std::fs::read_to_string(state_path(d, side, &name)) {
+                    Ok(t) => Some(t),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(e) => return Err(mlua::Error::runtime(format!("state {name}: {e}"))),
+                },
+            };
+            match text {
+                None => Ok(Value::Table(lua.create_table()?)),
+                Some(t) => {
+                    let v: serde_json::Value = serde_json::from_str(&t)
+                        .map_err(|e| mlua::Error::runtime(format!("state {name}: {e}")))?;
+                    to_lua(lua, &v)
+                }
+            }
+        })?,
+    )?;
+    let dir = config_dir.map(Path::to_owned);
+    state.set(
+        "save",
+        lua.create_function(move |_, (name, value): (String, Value)| {
+            check(&name)?;
+            let text =
+                serde_json::to_string_pretty(&from_lua(&value)?).map_err(mlua::Error::external)?;
+            let Some(d) = &dir else {
+                return memory.set(name, text);
+            };
+            let path = state_path(d, side, &name);
+            let write = || -> std::io::Result<()> {
+                std::fs::create_dir_all(path.parent().expect("state dir"))?;
+                // Write then rename, so a crash never leaves half a file.
+                let tmp = path.with_extension("json.tmp");
+                std::fs::write(&tmp, text)?;
+                std::fs::rename(&tmp, &path)
+            };
+            write().map_err(|e| mlua::Error::runtime(format!("state {name}: {e}")))
+        })?,
+    )?;
+    bone.set("state", state)
 }
 
 /// A fresh state with the shared `bone` table and module search set up.
@@ -183,6 +298,7 @@ pub fn new_state(side: Side, config_dir: Option<&Path>) -> mlua::Result<Lua> {
         bone.set("config_dir", dir.to_string_lossy().as_ref())?;
     }
     lua.globals().set("bone", &bone)?;
+    install_state(&lua, &bone, side, config_dir)?;
 
     let json = lua.create_table()?;
     json.set(
@@ -416,6 +532,44 @@ mod tests {
             lua.load("return bone.side").eval::<String>().unwrap(),
             "tui"
         );
+    }
+
+    #[test]
+    fn state_persists_per_side_and_plugins_know_their_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let lua = new_state(Side::Core, Some(dir.path())).unwrap();
+        lua.load(r#"bone.state.save("x", { a = 1, list = { "b" } })"#)
+            .exec()
+            .unwrap();
+        let text = std::fs::read_to_string(dir.path().join("state/core/x.json")).unwrap();
+        assert!(text.contains("\"a\": 1"), "{text}");
+        let a: i64 = lua.load("return bone.state.load('x').a").eval().unwrap();
+        assert_eq!(a, 1);
+        let empty: bool = lua
+            .load("return next(bone.state.load('missing')) == nil")
+            .eval()
+            .unwrap();
+        assert!(empty);
+        assert!(lua.load("bone.state.save('../x', {})").exec().is_err());
+        // Without a config dir, state lives in memory.
+        let mem = new_state(Side::Tui, None).unwrap();
+        let v: i64 = mem
+            .load("bone.state.save('y', { n = 3 }); return bone.state.load('y').n")
+            .eval()
+            .unwrap();
+        assert_eq!(v, 3);
+
+        std::fs::create_dir_all(dir.path().join("plugins/p1")).unwrap();
+        std::fs::write(
+            dir.path().join("plugins/p1/core.lua"),
+            "seen = bone._loading.name",
+        )
+        .unwrap();
+        run_user_plugins(&lua, dir.path(), "core.lua").unwrap();
+        let seen: String = lua.load("return seen").eval().unwrap();
+        assert_eq!(seen, "p1");
+        let after: Value = lua.load("return bone._loading").eval().unwrap();
+        assert!(after.is_nil());
     }
 
     #[test]

@@ -753,6 +753,83 @@ function bone.ui.select(items, opts)
   return handle
 end
 
+--- Plugins: what loaded, their lifecycle, and state that persists.
+--- What a plugin creates while its tui.lua or its callbacks run (keymaps,
+--- commands, bone.on handlers, panels, windows, jobs, options, raw key
+--- interceptors, contexts) is its own and goes away when it unloads.
+local open_states = {}
+
+bone.plugin = {
+  --- { name, dir, kind = "plugin" | "project", loaded, error } of the
+  --- plugin whose code is running, or nil (the runtime, your tui.lua).
+  current = function()
+    return api("plugin_current")
+  end,
+  --- Every plugin seen this session, in load order.
+  list = function()
+    return api("plugin_list")
+  end,
+  load = function(name)
+    api("plugin_load", name)
+  end,
+  unload = function(name)
+    api("plugin_unload", name)
+  end,
+  reload = function(name)
+    api("plugin_reload", name)
+  end,
+  --- fn() runs when the plugin unloads or reloads, and when bone quits.
+  on_shutdown = function(fn)
+    assert(type(fn) == "function", "bone.plugin.on_shutdown(fn)")
+    api("plugin_on_shutdown", fn)
+  end,
+  --- A table kept in ~/.bone/state/tui/<name>.json (default: the current
+  --- plugin's name). Change it freely: it is saved when the plugin
+  --- unloads and when bone quits, or now with bone.plugin.save_state().
+  state = function(name)
+    local cur = api("plugin_current")
+    name = name or (cur and cur.name)
+    assert(name, "bone.plugin.state(name): name it outside a plugin")
+    if not open_states[name] then
+      open_states[name] = { owner = cur and cur.name or false, value = bone.state.load(name) }
+    end
+    return open_states[name].value
+  end,
+  save_state = function(name)
+    local cur = api("plugin_current")
+    name = name or (cur and cur.name)
+    local s = name and open_states[name]
+    if s then
+      bone.state.save(name, s.value)
+    end
+  end,
+}
+
+-- Save open state tables: those of `owner` (forgetting them, it is
+-- unloading), or all of them (quitting). Called from Rust.
+function bone._save_states(owner)
+  for name, s in pairs(open_states) do
+    if owner == nil or s.owner == owner then
+      local ok, e = pcall(bone.state.save, name, s.value)
+      if not ok then
+        bone.notify("state " .. name .. ": " .. tostring(e), "error")
+      end
+      if owner ~= nil then
+        open_states[name] = nil
+      end
+    end
+  end
+end
+
+--- This directory's project config: { root, file, trusted, loaded } when a
+--- .bone/tui.lua is here or above, else nil. It runs only after
+--- /project trust (remembered per directory).
+bone.project = {
+  info = function()
+    return api("project_info")
+  end,
+}
+
 bone._health = {}
 
 --- Add a check to /health. fn() returns a status ("ok", "warn", "error",

@@ -623,20 +623,20 @@ impl App {
         self.error(format!("{context}: {}", short_error(e)));
     }
 
-    /// Load each plugin's `tui.lua`, then `<config dir>/tui.lua`, then fire
-    /// `ready`.
+    /// Load each plugin's `tui.lua` (as that plugin), then
+    /// `<config dir>/tui.lua`, then a trusted project's `.bone/tui.lua`, then
+    /// fire `ready`.
     pub fn load_user_config(&mut self) {
         if let Some(dir) = self.config_dir.clone() {
             for plugin in bone_lua::plugins(&dir) {
-                let path = plugin.join("tui.lua");
-                if let Err(e) = self.with_api(|lua| bone_lua::run_file(lua, &path)) {
-                    self.lua_error(&path.display().to_string(), &e);
-                }
+                let name = bone_lua::plugin_name(&plugin);
+                self.load_plugin(&name, &plugin, crate::plugins::Kind::Plugin);
             }
             let path = dir.join("tui.lua");
             if let Err(e) = self.with_api(|lua| bone_lua::run_file(lua, &path)) {
                 self.lua_error(&path.display().to_string(), &e);
             }
+            self.load_project();
         }
         self.fire("ready", serde_json::Value::Null);
     }
@@ -672,11 +672,25 @@ impl App {
         Ok(())
     }
 
+    /// Keep `f` for later; it runs as the plugin that stored it.
     fn store_callback(&mut self, lua: &Lua, f: Function) -> mlua::Result<u64> {
         self.next_callback += 1;
         let id = self.next_callback;
         lua.named_registry_value::<Table>(CALLBACKS)?.set(id, f)?;
+        if let Some(owner) = &self.owner {
+            self.callback_owner.insert(id, owner.clone());
+        }
         Ok(id)
+    }
+
+    /// Run `f` as the plugin that owns callback `cb` (or as the user's
+    /// config), so what it creates belongs to that plugin.
+    pub fn as_owner_of<R>(&mut self, cb: u64, f: impl FnOnce(&mut App) -> R) -> R {
+        let owner = self.callback_owner.get(&cb).cloned();
+        let prev = std::mem::replace(&mut self.owner, owner);
+        let r = f(self);
+        self.owner = prev;
+        r
     }
 
     /// Forget stored callbacks (outside a Lua call).
@@ -704,9 +718,11 @@ impl App {
         context: &str,
         arg: impl FnOnce(&Lua) -> mlua::Result<Value>,
     ) -> Option<Value> {
-        let r = self.with_api(|lua| {
-            let f: Function = lua.named_registry_value::<Table>(CALLBACKS)?.get(id)?;
-            f.call::<Value>(arg(lua)?)
+        let r = self.as_owner_of(id, |app| {
+            app.with_api(|lua| {
+                let f: Function = lua.named_registry_value::<Table>(CALLBACKS)?.get(id)?;
+                f.call::<Value>(arg(lua)?)
+            })
         });
         match r {
             Ok(v) => Some(v),
@@ -723,9 +739,11 @@ impl App {
         context: &str,
         args: impl FnOnce(&Lua) -> mlua::Result<MultiValue>,
     ) -> Option<MultiValue> {
-        let r = self.with_api(|lua| {
-            let f: Function = lua.named_registry_value::<Table>(CALLBACKS)?.get(id)?;
-            f.call::<MultiValue>(args(lua)?)
+        let r = self.as_owner_of(id, |app| {
+            app.with_api(|lua| {
+                let f: Function = lua.named_registry_value::<Table>(CALLBACKS)?.get(id)?;
+                f.call::<MultiValue>(args(lua)?)
+            })
         });
         match r {
             Ok(v) => Some(v),
@@ -1056,17 +1074,32 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                     )));
                 }
             };
-            app.keymaps.set(ctx, &key, action).map_err(err)?;
+            let seq = keys::parse_sequence(&key).map_err(err)?;
+            app.keymaps.set(ctx.clone(), &key, action).map_err(err)?;
+            match app.owner.clone() {
+                Some(owner) => {
+                    app.keymap_owner.insert((ctx, seq), owner);
+                }
+                None => {
+                    app.keymap_owner.remove(&(ctx, seq));
+                }
+            }
             ret(lua, ())
         }
         "keymap_del" => {
             let (key, opts): (String, Option<Table>) = args(lua, a)?;
-            app.keymaps.del(context_arg(&opts)?, &key).map_err(err)?;
+            let ctx = context_arg(&opts)?;
+            app.keymaps.del(ctx.clone(), &key).map_err(err)?;
+            app.keymap_owner
+                .remove(&(ctx, keys::parse_sequence(&key).map_err(err)?));
             ret(lua, ())
         }
         "keymap_context" => {
             let (name, opts): (String, Option<Table>) = args(lua, a)?;
             let ctx = context_from_name(name)?;
+            if !app.keymaps.has_context(&ctx) {
+                app.own(crate::plugins::Owned::Context(ctx.clone()));
+            }
             let fallback = fallback_arg(&opts)?;
             let priority = opts
                 .as_ref()
@@ -1101,6 +1134,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             let context = raw_context_arg(&opts)?;
             let callback = app.store_callback(lua, f)?;
             let id = app.add_raw_interceptor(callback, context);
+            app.own(crate::plugins::Owned::Raw(id));
             ret(lua, id)
         }
         "keymap_raw_del" => {
@@ -1208,6 +1242,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 .map(|f| app.store_callback(lua, f))
                 .transpose()?;
             let callback = app.store_callback(lua, f)?;
+            app.own(crate::plugins::Owned::Command(name.clone(), callback));
             if let Some(old) = app.user_commands.insert(
                 name,
                 UserCommand {
@@ -1337,6 +1372,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 .flatten()
                 .map(|f| app.store_callback(lua, f))
                 .transpose()?;
+            app.own(crate::plugins::Owned::Option(name.clone()));
             app.dynamic_options.insert(
                 name,
                 DynamicOption {
@@ -1345,6 +1381,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                     kind,
                     desc,
                     on_change: callback,
+                    owner: app.owner.clone(),
                 },
             );
             app.opts_rev += 1;
@@ -1403,6 +1440,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 event,
                 callback,
             });
+            app.own(crate::plugins::Owned::Autocmd(id));
             ret(lua, id)
         }
         "off" => {
@@ -1424,15 +1462,18 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                     }
                     return;
                 };
-                let called = app.with_api(|lua| {
-                    let cbs: Table = lua.named_registry_value(CALLBACKS)?;
-                    let f: Function = cbs.get(cb)?;
-                    cbs.set(cb, Value::Nil)?;
-                    match r {
-                        Ok(v) => f.call::<()>(to_lua(lua, &v)?),
-                        Err(e) => f.call::<()>((Value::Nil, e.to_string())),
-                    }
+                let called = app.as_owner_of(cb, |app| {
+                    app.with_api(|lua| {
+                        let cbs: Table = lua.named_registry_value(CALLBACKS)?;
+                        let f: Function = cbs.get(cb)?;
+                        cbs.set(cb, Value::Nil)?;
+                        match r {
+                            Ok(v) => f.call::<()>(to_lua(lua, &v)?),
+                            Err(e) => f.call::<()>((Value::Nil, e.to_string())),
+                        }
+                    })
                 });
+                app.callback_owner.remove(&cb);
                 if let Err(e) = called {
                     app.lua_error(&format!("{method} callback"), &e);
                 }
@@ -1452,15 +1493,18 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                     }
                     return;
                 };
-                let called = app.with_api(|lua| {
-                    let cbs: Table = lua.named_registry_value(CALLBACKS)?;
-                    let f: Function = cbs.get(cb)?;
-                    cbs.set(cb, Value::Nil)?;
-                    match r {
-                        Ok(v) => f.call::<()>(to_lua(lua, &v)?),
-                        Err(e) => f.call::<()>((Value::Nil, e)),
-                    }
+                let called = app.as_owner_of(cb, |app| {
+                    app.with_api(|lua| {
+                        let cbs: Table = lua.named_registry_value(CALLBACKS)?;
+                        let f: Function = cbs.get(cb)?;
+                        cbs.set(cb, Value::Nil)?;
+                        match r {
+                            Ok(v) => f.call::<()>(to_lua(lua, &v)?),
+                            Err(e) => f.call::<()>((Value::Nil, e)),
+                        }
+                    })
                 });
+                app.callback_owner.remove(&cb);
                 if let Err(e) = called {
                     app.lua_error("callback", &e);
                 }
@@ -1545,6 +1589,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             apply_win_spec(app, lua, &mut p, &spec)?;
             let id = p.id;
             let event = popup_event(&p);
+            app.own(crate::plugins::Owned::Popup(id));
             app.popups.push(p);
             app.fire("panel/opened", event);
             if old_focus != app.focused_popup().map(|p| p.id) {
@@ -1651,6 +1696,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                     on_exit,
                 },
             );
+            app.own(crate::plugins::Owned::Job(id));
             ret(lua, id)
         }
         "job_cancel" => {
@@ -1676,6 +1722,45 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             let list: Vec<serde_json::Value> = app.jobs.list.iter().map(|j| j.status()).collect();
             ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
         }
+        "plugin_current" => {
+            let Some(name) = app.owner.clone() else {
+                return ret(lua, Value::Nil);
+            };
+            let info = app
+                .plugin(&name)
+                .map(|p| p.info())
+                .unwrap_or_else(|| serde_json::json!({ "name": name }));
+            ret(lua, to_lua(lua, &info)?)
+        }
+        "plugin_list" => {
+            let list: Vec<serde_json::Value> = app.plugins.iter().map(|p| p.info()).collect();
+            ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
+        }
+        "plugin_load" | "plugin_unload" | "plugin_reload" => {
+            let name: String = args(lua, a)?;
+            if app.owner.as_deref() == Some(name.as_str()) && op != "plugin_load" {
+                return Err(err(format!(
+                    "plugin {name} cannot unload itself while it runs"
+                )));
+            }
+            match op {
+                "plugin_load" => app.load_plugin_by_name(&name),
+                "plugin_unload" => app.unload_plugin(&name),
+                _ => app.reload_plugin(&name),
+            }
+            .map_err(err)?;
+            ret(lua, ())
+        }
+        "plugin_on_shutdown" => {
+            let f: Function = args(lua, a)?;
+            let cb = app.store_callback(lua, f)?;
+            app.shutdown_hooks.push((app.owner.clone(), cb));
+            ret(lua, ())
+        }
+        "project_info" => match app.project_info() {
+            Some(info) => ret(lua, to_lua(lua, &info)?),
+            None => ret(lua, Value::Nil),
+        },
         "panel_open" => {
             let spec: Table = args(lua, a)?;
             app.next_callback += 1;
@@ -1726,6 +1811,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 return Err(e);
             }
             let event = app.panel_info(&p);
+            app.own(crate::plugins::Owned::Panel(id.clone(), seq));
             app.panels.push(p);
             app.fire("panel/opened", event);
             if focus {

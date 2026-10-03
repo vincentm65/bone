@@ -106,6 +106,8 @@ pub struct DynamicOption {
     pub kind: DynamicKind,
     pub desc: String,
     pub on_change: Option<u64>,
+    /// The plugin that defined it.
+    pub owner: Option<String>,
 }
 
 impl std::fmt::Display for Value {
