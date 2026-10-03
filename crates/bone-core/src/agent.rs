@@ -2,8 +2,10 @@
 //! model answers without tools.
 //!
 //! Core-side Lua hooks (`bone.hook`) run at each step: `turn_start`,
-//! `request`, `message`, `tool_call`, `tool_result` and `turn_end`. A hook
-//! can change the step's data or refuse it, and may wait on the user.
+//! `system`, `context`, `request`, `request_error`, `message`, `tool_call`,
+//! `tool_result` and `turn_end`, plus `stream` (watching output) and
+//! `session_start`. A hook can change the step's data or refuse it, and may
+//! wait on the user.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -35,6 +37,11 @@ before editing them. Keep changes minimal and focused, and keep answers concise.
 
 const CANCELLED: &str = "Cancelled by the user before this tool call ran.";
 
+/// Retries `request_error` hooks may ask for, per model call.
+const MAX_RETRIES: u32 = 5;
+/// How long `stream` hooks' input collects before they run.
+const STREAM_BATCH: Duration = Duration::from_millis(50);
+
 enum Stop {
     Cancelled,
     Failed(String),
@@ -55,6 +62,8 @@ struct Turn<'a> {
     turn_id: TurnId,
     cwd: PathBuf,
     cancel: &'a CancellationToken,
+    /// Output for `stream` hooks, when there are any.
+    stream: Option<tokio::sync::mpsc::UnboundedSender<(DeltaKind, String)>>,
 }
 
 pub(crate) async fn run_turn(
@@ -68,14 +77,21 @@ pub(crate) async fn run_turn(
         let s = session.lock().unwrap();
         (s.info.session_id.clone(), PathBuf::from(&s.info.cwd))
     };
+    let rt = inner.runtime();
+    let stream = rt
+        .scripting
+        .clone()
+        .filter(|s| s.has_hook("stream"))
+        .map(|s| stream_hooks(s, session_id.clone(), turn_id));
     let turn = Turn {
-        rt: inner.runtime(),
+        rt,
         inner: &inner,
         session: &session,
         session_id,
         turn_id,
         cwd,
         cancel: &cancel,
+        stream,
     };
     let outcome = match turn.drive(text).await {
         Ok(()) => TurnOutcome::Completed,
@@ -118,6 +134,15 @@ impl Turn<'_> {
         }
     }
 
+    /// [`turn_hooks`](Self::turn_hooks) at a safe point: between model
+    /// calls, where Lua may change the transcript (`bone.session`).
+    async fn safe_hooks(&self, name: &str, event: Value) -> Result<Option<Value>, Stop> {
+        self.session.lock().unwrap().safe_point = true;
+        let r = self.turn_hooks(name, event).await;
+        self.session.lock().unwrap().safe_point = false;
+        r
+    }
+
     /// A hook point that stops the turn when refused.
     async fn turn_hooks(&self, name: &str, event: Value) -> Result<Option<Value>, Stop> {
         self.hooks(name, event).await.map_err(|r| match r {
@@ -128,7 +153,7 @@ impl Turn<'_> {
 
     async fn drive(&self, text: String) -> Result<(), Stop> {
         let ev = json!({ "session_id": self.session_id, "cwd": self.cwd.to_string_lossy(), "text": text });
-        let text = match self.turn_hooks("turn_start", ev).await? {
+        let text = match self.safe_hooks("turn_start", ev).await? {
             Some(ev) => ev["text"].as_str().map(str::to_owned).unwrap_or(text),
             None => text,
         };
@@ -152,19 +177,31 @@ impl Turn<'_> {
             }
             _ => None,
         };
-        let system = system_prompt(&self.rt.config, dynamic.as_deref(), &self.cwd);
+        let mut system = system_prompt(&self.rt.config, dynamic.as_deref(), &self.cwd);
+        let ev = json!({ "session_id": self.session_id, "cwd": self.cwd.to_string_lossy(), "prompt": system });
+        if let Some(ev) = self.safe_hooks("system", ev).await?
+            && let Some(p) = ev["prompt"].as_str()
+        {
+            system = p.to_owned();
+        }
         loop {
             let mut messages = vec![ChatMessage::System {
                 content: system.clone(),
             }];
             messages.extend(self.session.lock().unwrap().messages.iter().cloned());
+            let ev = json!({ "session_id": self.session_id, "messages": messages });
+            if let Some(ev) = self.safe_hooks("context", ev).await? {
+                messages = serde_json::from_value(list(&ev["messages"])).map_err(|e| {
+                    Stop::Failed(format!("context hook returned bad messages: {e}"))
+                })?;
+            }
             let mut tools: Vec<ToolSpec> = self.rt.tools.specs().to_vec();
             let ev = json!({
                 "session_id": self.session_id,
                 "messages": messages,
                 "tools": tools.iter().map(|t| json!({ "name": t.name, "description": t.description, "parameters": t.parameters })).collect::<Vec<_>>(),
             });
-            if let Some(ev) = self.turn_hooks("request", ev).await? {
+            if let Some(ev) = self.safe_hooks("request", ev).await? {
                 messages = serde_json::from_value(list(&ev["messages"])).map_err(|e| {
                     Stop::Failed(format!("request hook returned bad messages: {e}"))
                 })?;
@@ -185,49 +222,77 @@ impl Turn<'_> {
                     .unwrap_or_default();
             }
 
-            let mut text = String::new();
-            let mut reasoning = String::new();
-            let result = {
-                let mut on_delta = |d: Delta| {
-                    let (kind, chunk) = match d {
-                        Delta::Text(t) => {
-                            text.push_str(&t);
-                            (DeltaKind::Text, t)
+            let mut attempt = 0;
+            let completion = loop {
+                attempt += 1;
+                let mut text = String::new();
+                let mut reasoning = String::new();
+                let result = {
+                    let mut on_delta = |d: Delta| {
+                        let (kind, chunk) = match d {
+                            Delta::Text(t) => {
+                                text.push_str(&t);
+                                (DeltaKind::Text, t)
+                            }
+                            Delta::Reasoning(t) => {
+                                reasoning.push_str(&t);
+                                (DeltaKind::Reasoning, t)
+                            }
+                        };
+                        if let Some(tx) = &self.stream {
+                            let _ = tx.send((kind, chunk.clone()));
                         }
-                        Delta::Reasoning(t) => {
-                            reasoning.push_str(&t);
-                            (DeltaKind::Reasoning, t)
-                        }
+                        self.inner.emit::<MessageDelta>(MessageDeltaParams {
+                            session_id: self.session_id.clone(),
+                            turn_id: self.turn_id,
+                            kind,
+                            text: chunk,
+                        });
                     };
-                    self.inner.emit::<MessageDelta>(MessageDeltaParams {
-                        session_id: self.session_id.clone(),
-                        turn_id: self.turn_id,
-                        kind,
-                        text: chunk,
-                    });
-                };
-                let req = CompletionRequest {
-                    session_id: &self.session_id,
-                    messages: &messages,
-                    tools: &tools,
-                };
-                tokio::select! {
-                    _ = self.cancel.cancelled() => None,
-                    r = self.rt.provider.complete(req, &mut on_delta) => Some(r),
-                }
-            };
-
-            let completion = match result {
-                Some(Ok(c)) => c,
-                interrupted => {
-                    // Keep what the user already saw stream in.
-                    if !text.is_empty() || !reasoning.is_empty() {
-                        self.complete_message(text, reasoning, Vec::new(), None)?;
+                    let req = CompletionRequest {
+                        session_id: &self.session_id,
+                        messages: &messages,
+                        tools: &tools,
+                    };
+                    tokio::select! {
+                        _ = self.cancel.cancelled() => None,
+                        r = self.rt.provider.complete(req, &mut on_delta) => Some(r),
                     }
-                    return Err(match interrupted {
-                        Some(Err(e)) => Stop::Failed(e.0),
-                        _ => Stop::Cancelled,
-                    });
+                };
+                match result {
+                    Some(Ok(c)) => break c,
+                    // Nothing streamed yet: `request_error` hooks may retry.
+                    Some(Err(e))
+                        if text.is_empty() && reasoning.is_empty() && attempt <= MAX_RETRIES =>
+                    {
+                        let ev = json!({
+                            "session_id": self.session_id,
+                            "error": e.0,
+                            "attempt": attempt,
+                            "model": self.rt.config.provider.model,
+                        });
+                        let retry = self
+                            .safe_hooks("request_error", ev)
+                            .await?
+                            .and_then(|ev| ev["retry"].as_u64());
+                        let Some(ms) = retry else {
+                            return Err(Stop::Failed(e.0));
+                        };
+                        tokio::select! {
+                            _ = self.cancel.cancelled() => return Err(Stop::Cancelled),
+                            _ = tokio::time::sleep(Duration::from_millis(ms)) => {}
+                        }
+                    }
+                    interrupted => {
+                        // Keep what the user already saw stream in.
+                        if !text.is_empty() || !reasoning.is_empty() {
+                            self.complete_message(text, reasoning, Vec::new(), None)?;
+                        }
+                        return Err(match interrupted {
+                            Some(Err(e)) => Stop::Failed(e.0),
+                            _ => Stop::Cancelled,
+                        });
+                    }
                 }
             };
 
@@ -236,7 +301,7 @@ impl Turn<'_> {
                 completion.reasoning,
                 completion.tool_calls,
             );
-            let ev = json!({ "session_id": self.session_id, "content": content, "reasoning": reasoning, "tool_calls": calls });
+            let ev = json!({ "session_id": self.session_id, "content": content, "reasoning": reasoning, "tool_calls": calls, "usage": completion.usage });
             if let Some(ev) = self.turn_hooks("message", ev).await? {
                 content = ev["content"].as_str().unwrap_or_default().to_owned();
                 reasoning = ev["reasoning"].as_str().unwrap_or_default().to_owned();
@@ -392,6 +457,33 @@ impl Turn<'_> {
             Err(Refused::Denied(why)) => (why, true),
         }
     }
+}
+
+/// Feed `stream` hooks: output is collected for a moment and handed over in
+/// order, one batch at a time, without ever holding up the stream itself.
+fn stream_hooks(
+    scripting: Arc<crate::scripting::Scripting>,
+    session_id: String,
+    turn_id: TurnId,
+) -> tokio::sync::mpsc::UnboundedSender<(DeltaKind, String)> {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(DeltaKind, String)>();
+    tokio::spawn(async move {
+        while let Some(first) = rx.recv().await {
+            let (mut text, mut reasoning) = (String::new(), String::new());
+            let mut add = |(kind, chunk): (DeltaKind, String)| match kind {
+                DeltaKind::Text => text.push_str(&chunk),
+                DeltaKind::Reasoning => reasoning.push_str(&chunk),
+            };
+            add(first);
+            tokio::time::sleep(STREAM_BATCH).await;
+            while let Ok(d) = rx.try_recv() {
+                add(d);
+            }
+            let ev = json!({ "session_id": session_id, "turn_id": turn_id, "text": text, "reasoning": reasoning });
+            let _ = scripting.hooks("stream", ev).await;
+        }
+    });
+    tx
 }
 
 /// Lua has one kind of table: an empty list comes back from a hook as `{}`.

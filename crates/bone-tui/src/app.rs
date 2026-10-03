@@ -1351,6 +1351,23 @@ impl App {
             .with_chat(&p.session_id, |c| c.tool_finished(&p)));
         on!(TurnFinished, |p| self
             .with_chat(&p.session_id, |c| c.turn_finished(&p)));
+        on!(SessionUpdated, |p| self.reload_chat(p.session_id));
+    }
+
+    /// Core Lua changed a session's transcript: load it again if a chat
+    /// shows it.
+    fn reload_chat(&mut self, session_id: String) {
+        let Some(buf) = self.chat_by_session(&session_id) else {
+            return;
+        };
+        self.request::<SessionMessages>(SessionRef { session_id }, move |app, r| match r {
+            Ok(r) => {
+                if let Some(c) = app.chat_mut(buf) {
+                    c.load(r.info, &r.messages, r.active_turn);
+                }
+            }
+            Err(e) => app.error(format!("cannot reload session: {e}")),
+        });
     }
 
     fn with_chat(&mut self, session_id: &str, f: impl FnOnce(&mut ChatBuffer)) {

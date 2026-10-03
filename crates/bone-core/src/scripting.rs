@@ -48,6 +48,8 @@ pub struct Loaded {
 pub struct LoadOptions {
     pub disabled: HashSet<String>,
     pub ask_ids: Arc<AtomicU64>,
+    /// How Lua reaches the core (sessions).
+    pub(crate) host: Arc<crate::runtime::Host>,
 }
 
 pub enum AskEvent {
@@ -277,6 +279,27 @@ fn expand_home(p: &str) -> PathBuf {
 impl Scripting {
     pub fn has_hook(&self, event: &str) -> bool {
         self.hooks.lock().unwrap().contains(event)
+    }
+
+    /// Run the hooks for `name` without waiting for them (their results are
+    /// ignored). Queued in order with everything else sent to Lua.
+    pub fn fire(&self, name: &str, event: Json) {
+        if !self.has_hook(name) {
+            return;
+        }
+        let (reply, _) = oneshot::channel();
+        let session = event["session_id"].as_str().map(str::to_owned);
+        let done = Done::Hooks {
+            reply,
+            name: name.to_owned(),
+            event: event.clone(),
+        };
+        let _ = self.run(
+            "_hooks_entry",
+            vec![json!(name), event],
+            session.as_deref(),
+            done,
+        );
     }
 
     /// Run the `bone.on_shutdown` functions before this runtime is
@@ -743,6 +766,7 @@ struct State {
     rt: tokio::runtime::Runtime,
     /// Open `bone.http_stream` responses.
     streams: Arc<Streams>,
+    host: Arc<crate::runtime::Host>,
 }
 
 fn lua_thread(
@@ -794,6 +818,7 @@ fn lua_thread(
         jobs: jobs_tx,
         rt,
         streams,
+        host: opts.host.clone(),
     };
     for job in jobs {
         match job {
@@ -922,6 +947,21 @@ impl State {
                 && let Ok(spec @ Value::Table(_)) = t.get::<Value>("wait")
             {
                 let spec = from_lua(&spec).unwrap_or(Json::Null);
+                // Session reads and writes are quick and answered here.
+                if spec["session"].is_object() {
+                    let args = match self.host.session_op(&spec["session"]) {
+                        Ok(v) => to_lua(&self.lua, &v).map(|v| MultiValue::from_iter([v])),
+                        Err(e) => self
+                            .lua
+                            .create_string(&e)
+                            .map(|e| MultiValue::from_iter([Value::Nil, Value::String(e)])),
+                    };
+                    match args {
+                        Ok(args) => self.step(thread, args, session_id, done),
+                        Err(e) => self.finish(done, Err(e)),
+                    }
+                    return;
+                }
                 self.next_wait += 1;
                 let wait_id = self.next_wait;
                 let jobs = self.jobs.clone();

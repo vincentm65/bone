@@ -203,6 +203,13 @@ so this comes first.
 
 ### Phase 9: more core hook points (gap 1)
 
+Status: done (branch `agent-ext`), with two changes to the plan below:
+`session_end` is not implemented, because sessions have no end the core can
+observe (no close method; nothing evicts them), and `request_error`'s
+`provider` switch waits for phase 10's provider set (it retries the same
+provider for now). Session writes are allowed while idle, in `turn_start`,
+`system`, `context`, `request` and `request_error` hooks, and in `turn_end`.
+
 New points, all opt-in. A point with no hooks costs nothing (the dynamic
 hook set is checked first).
 

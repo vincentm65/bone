@@ -1,7 +1,9 @@
 //! Sessions: transcripts kept in memory and appended to JSONL files.
 //!
 //! File layout: `<data_dir>/sessions/<session_id>.jsonl`. The first record is
-//! the session header; every later record is one transcript message.
+//! the session header; every later record is one transcript message, or a
+//! compaction checkpoint that replaces the transcript before it (the earlier
+//! records stay in the file).
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -21,6 +23,8 @@ const TITLE_CHARS: usize = 80;
 enum Record {
     Session(Header),
     Message(ChatMessage),
+    /// The transcript from here on starts as these messages.
+    Compact(Vec<ChatMessage>),
 }
 
 #[derive(Serialize, Deserialize)]
@@ -34,6 +38,9 @@ pub struct Session {
     pub info: SessionInfo,
     pub messages: Vec<ChatMessage>,
     pub active: Option<ActiveTurn>,
+    /// The running turn is between model calls, where Lua may add to the
+    /// transcript or compact it (never between tool calls and results).
+    pub safe_point: bool,
     next_turn: TurnId,
     file: File,
 }
@@ -53,6 +60,20 @@ impl Session {
         let written = write_record(&mut self.file, &Record::Message(msg.clone()));
         self.messages.push(msg);
         written
+    }
+
+    /// Replace the transcript with `messages`, keeping the old records in
+    /// the file behind a checkpoint.
+    pub fn compact(&mut self, messages: Vec<ChatMessage>) -> std::io::Result<()> {
+        let written = write_record(&mut self.file, &Record::Compact(messages.clone()));
+        self.messages = messages;
+        written
+    }
+
+    /// Whether Lua may change the transcript now: no turn, or a turn at a
+    /// safe point.
+    pub fn writable(&self) -> bool {
+        self.active.is_none() || self.safe_point
     }
 
     pub fn next_turn_id(&mut self) -> TurnId {
@@ -111,6 +132,7 @@ impl SessionStore {
             info: info.clone(),
             messages: Vec::new(),
             active: None,
+            safe_point: false,
             next_turn: 0,
             file,
         }));
@@ -135,6 +157,7 @@ impl SessionStore {
             info,
             messages,
             good_len,
+            users,
         } = match read_file(&path, usize::MAX) {
             Ok(r) => r,
             Err(SessionError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -147,15 +170,14 @@ impl SessionStore {
         if file.metadata()?.len() > good_len {
             file.set_len(good_len)?;
         }
-        // Turn ids count user messages, so they stay unique across reloads.
-        let next_turn = messages
-            .iter()
-            .filter(|m| matches!(m, ChatMessage::User { .. }))
-            .count() as TurnId;
+        // Turn ids count every user message ever written (compacted ones
+        // too), so they stay unique across reloads.
+        let next_turn = users as TurnId;
         let session = Arc::new(Mutex::new(Session {
             info,
             messages,
             active: None,
+            safe_point: false,
             next_turn,
             file,
         }));
@@ -201,6 +223,8 @@ struct Loaded {
     /// Length of the file up to the last complete record. Shorter than the
     /// file when a crash left a torn final line.
     good_len: u64,
+    /// User messages in the whole file, before checkpoints too.
+    users: usize,
 }
 
 /// Read a session file, stopping after `max_user` user messages (enough to
@@ -223,8 +247,8 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
         },
         messages: Vec::new(),
         good_len: line.len() as u64,
+        users: 0,
     };
-    let mut users = 0;
     for n in 2.. {
         line.clear();
         if reader.read_line(&mut line)? == 0 {
@@ -239,11 +263,15 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
                 loaded.messages.push(msg);
                 loaded.good_len += line.len() as u64;
                 if is_user {
-                    users += 1;
-                    if users >= max_user {
+                    loaded.users += 1;
+                    if loaded.users >= max_user {
                         break;
                     }
                 }
+            }
+            Ok(Record::Compact(messages)) => {
+                loaded.messages = messages;
+                loaded.good_len += line.len() as u64;
             }
             Ok(Record::Session(_)) => return Err(corrupt(format!("second header at line {n}"))),
             // A torn final write (crash mid-append) should not lose the session.

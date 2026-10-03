@@ -76,6 +76,7 @@ Every event carries `session_id` (except `echoed`, `ask/resolved` and `core/relo
 | `ask/resolved` | `{ ask_id, answer }` | answered by some client, or `answer: null` if the turn was cancelled first |
 | `turn/finished` | `{ outcome: { status: "completed" \| "cancelled" \| "failed", message? } }` | the turn is over |
 | `core/reloaded` | `ReloadResult` | the core switched to a newly loaded Lua configuration (no `session_id`) |
+| `session/updated` | `{ reason: "append" \| "compact" }` | core Lua changed the session's transcript (`bone.session`); load it again with `session/messages` |
 
 A typical turn: `turn/started`, then `message/delta`…, `message/completed` (with `tool_calls`), and for each call `tool/started`, then `ask/requested` → `ask/resolved` if a hook asks the user (the approve plugin does for tools that change things), then `tool/finished`. That repeats until a `message/completed` arrives without tool calls, then `turn/finished`.
 

@@ -35,8 +35,16 @@ bone._hooks = {}
 
 --- Run fn(ev) at a point in the core. Built-in points:
 ---   "turn_start"  { session_id, cwd, text }           before the user's message is saved
+---   "system"      { session_id, cwd, prompt }         once per turn: the system prompt
+---   "context"     { session_id, messages }            before each model call: rewrite history for it
 ---   "request"     { session_id, messages, tools }     before each call to the model
----   "message"     { session_id, content, reasoning, tool_calls }
+---   "request_error" { session_id, error, attempt, model }
+---                                                     a model call failed before any output;
+---                                                     return { retry = ms } to try again
+---   "stream"      { session_id, turn_id, text, reasoning }
+---                                                     output so far, in batches (results ignored)
+---   "session_start" { session_id, cwd, new }          first use of a session (results ignored)
+---   "message"     { session_id, content, reasoning, tool_calls, usage }
 ---                                                     the model's reply, before it is saved
 ---   "tool_call"   { session_id, cwd, id, name, arguments }
 ---   "tool_result" { session_id, id, name, arguments, output, is_error }
@@ -44,13 +52,24 @@ bone._hooks = {}
 --- A hook returns nil (no change), a table of fields to change in `ev`
 --- (later hooks see the changes), or { deny = "why" } to stop that step: the
 --- turn, the model call, or the tool call (the model sees "why"). Hooks run
---- in registration order (plugins first, then core.lua) and may wait on the
+--- by priority (opts.priority, higher first, default 0), then in
+--- registration order (plugins first, then core.lua), and may wait on the
 --- user with bone.ask. Any other name is a custom point for bone.run_hooks.
-function bone.hook(name, fn)
+bone._hook_seq = 0
+function bone.hook(name, fn, opts)
   assert(type(name) == "string" and name ~= "", "hook name must be a string")
   assert(type(fn) == "function", "hook needs a function")
+  local priority = opts and opts.priority or 0
+  assert(type(priority) == "number", "hook priority must be a number")
   local list = bone._hooks[name] or {}
-  list[#list + 1] = fn
+  bone._hook_seq = bone._hook_seq + 1
+  list[#list + 1] = { fn = fn, priority = priority, seq = bone._hook_seq }
+  table.sort(list, function(a, b)
+    if a.priority ~= b.priority then
+      return a.priority > b.priority
+    end
+    return a.seq < b.seq
+  end)
   bone._hooks[name] = list
   if bone._hook_added then
     bone._hook_added(name)
@@ -60,8 +79,8 @@ end
 --- Run the hooks for `name` on `ev`. Returns ev (as changed) and, if a hook
 --- refused, the reason.
 function bone.run_hooks(name, ev)
-  for _, f in ipairs(bone._hooks[name] or {}) do
-    local ok, r = pcall(f, ev)
+  for _, h in ipairs(bone._hooks[name] or {}) do
+    local ok, r = pcall(h.fn, ev)
     if not ok then
       return ev, name .. " hook failed: " .. tostring(r)
     end
@@ -116,6 +135,33 @@ function bone.system(cmd, opts)
     return wait({ system = cmd, cwd = opts.cwd, stdin = opts.stdin, timeout = opts.timeout })
   end
   return bone._system_sync(cmd, opts)
+end
+
+--- A session's transcript, for hooks and tools (they wait without blocking):
+---   bone.session.messages(id)          -> the messages, as providers see them
+---   bone.session.append(id, message)   add a message the model will see next
+---   bone.session.compact(id, messages) replace the transcript (the file keeps
+---                                      the old one behind a checkpoint)
+--- During a turn the last two only work between model calls (system,
+--- context, request and request_error hooks, and turn_start) or after it
+--- (turn_end); clients get a session/updated event.
+bone.session = {}
+local function session_op(op, id, extra)
+  if not in_job() then
+    error("bone.session only works inside hooks, tools and providers", 3)
+  end
+  local spec = extra or {}
+  spec.op, spec.id = op, id
+  return wait({ session = spec })
+end
+function bone.session.messages(id)
+  return session_op("messages", id)
+end
+function bone.session.append(id, message)
+  return session_op("append", id, { message = message })
+end
+function bone.session.compact(id, messages)
+  return session_op("compact", id, { messages = messages })
 end
 
 --- Wait `ms` milliseconds (without blocking in hooks and tools).

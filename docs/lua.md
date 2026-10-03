@@ -37,7 +37,7 @@ the other.
 
 The current capability names include `core.config`, `core.tools`,
 `core.hooks`, `core.providers`, `core.jobs`, `core.http_stream`, `core.ask`,
-`core.health`, `core.ready`, `core.reload`, `plugins.state` (both sides), and, in the TUI, `plugins.lifecycle`, `tui.project`, `tui.keymaps`, `tui.input`, `tui.events`,
+`core.health`, `core.ready`, `core.reload`, `core.hooks.system`, `core.hooks.context`, `core.hooks.errors`, `core.hooks.stream`, `core.hooks.session`, `core.session_write`, `plugins.state` (both sides), and, in the TUI, `plugins.lifecycle`, `tui.project`, `tui.keymaps`, `tui.input`, `tui.events`,
 `tui.local_events`, `tui.commands`, `tui.command_specs`, `tui.options`,
 `tui.dynamic_options`, `tui.request`, `tui.prompt`, `tui.prompt_edit`, `tui.chat`, `tui.chat_data`, `tui.windows`,
 `tui.panels`, `tui.regions`, `tui.views`, `tui.pickers`, `tui.themes`, `tui.jobs`, `jobs.streaming` and
@@ -172,13 +172,18 @@ A Lua tool with the same name as a built-in (`read_file`, `write_file`, `edit_fi
 
 ### Hooks
 
-A hook runs at a point in the core with an event table. It returns `nil` (no change), a table of fields to change (later hooks and the core see them), or `{ deny = "why" }` to stop that step. Hooks run in registration order: plugins, then `core.lua`. A hook that errors counts as a refusal.
+A hook runs at a point in the core with an event table. It returns `nil` (no change), a table of fields to change (later hooks and the core see them), or `{ deny = "why" }` to stop that step. Hooks run by priority (`bone.hook(name, fn, { priority = 10 })`, higher first, default 0), then in registration order: plugins, then `core.lua`. A hook that errors counts as a refusal. Points nobody hooks cost nothing.
 
 | Point | Event | `deny` means |
 |---|---|---|
 | `turn_start` | `{ session_id, cwd, text }`, before the user's message is saved | the turn fails with "why" |
-| `request` | `{ session_id, messages, tools }`, before each call to the model | the turn fails |
-| `message` | `{ session_id, content, reasoning, tool_calls }`, the model's reply before it is saved | the turn fails |
+| `system` | `{ session_id, cwd, prompt }`, once per turn: the system prompt (after `bone.config.system_prompt` and the working directory); return `{ prompt = ... }` to change it | the turn fails |
+| `context` | `{ session_id, messages }`, before each model call: the messages it will send (system prompt first); return `{ messages = ... }` to send different ones. The stored transcript is not changed | the turn fails |
+| `request` | `{ session_id, messages, tools }`, before each call to the model, after `context` | the turn fails |
+| `request_error` | `{ session_id, error, attempt, model }`, when a model call fails before any output arrived; return `{ retry = ms }` to try again after `ms` (at most 5 retries per call). Without a retry the turn fails as before | the turn fails |
+| `stream` | `{ session_id, turn_id, text, reasoning }`: output as it streams, collected into batches; results are ignored and the stream never waits for it | (ignored) |
+| `session_start` | `{ session_id, cwd, new }`, the first time this core uses a session (`new` when it was just created) | (ignored) |
+| `message` | `{ session_id, content, reasoning, tool_calls, usage }`, the model's reply before it is saved | the turn fails |
 | `tool_call` | `{ session_id, cwd, id, name, arguments }` | the call is refused; the model sees "why" |
 | `tool_result` | `{ session_id, id, name, arguments, output, is_error }` | the model sees "why" as an error |
 | `turn_end` | `{ session_id, turn_id, outcome }` | (changes are ignored) |
@@ -198,6 +203,18 @@ end)
 ```
 
 Any other name is a custom point: plugins can define their own with `bone.hook("my_point", fn)` and run them with `local ev, denied = bone.run_hooks("my_point", ev)`.
+
+### Session transcripts
+
+Hooks and tools can read and change a session's stored transcript (they wait without blocking):
+
+```lua
+bone.session.messages(id)                 -- the messages, as providers see them
+bone.session.append(id, { role = "user", content = "Remember: be brief." })
+bone.session.compact(id, { { role = "user", content = "Summary of earlier work: ..." } })
+```
+
+`append` adds a message the model sees from the next call on. `compact` replaces the transcript: the session file keeps every earlier record behind a checkpoint, the session loads from the newest checkpoint, and turn ids keep counting. While a turn runs, the transcript can only change between model calls: in `turn_start`, `system`, `context`, `request` and `request_error` hooks, or after the turn (`turn_end`); elsewhere (a tool, a `tool_call` hook) the call fails, so a message never lands between tool calls and their results. Clients get a `session/updated` event and load the session again. Compacting itself (deciding what to keep, writing a summary) is up to a plugin.
 
 ### Waiting without blocking
 

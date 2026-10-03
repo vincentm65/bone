@@ -67,6 +67,12 @@ static CORE_CAPABILITIES: &[&str] = &[
     "core.health",
     "core.ready",
     "core.reload",
+    "core.hooks.system",
+    "core.hooks.context",
+    "core.hooks.errors",
+    "core.hooks.stream",
+    "core.hooks.session",
+    "core.session_write",
     "plugins.state",
 ];
 

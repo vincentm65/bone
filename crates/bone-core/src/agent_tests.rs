@@ -30,6 +30,8 @@ struct Scripted {
     seen: Mutex<Vec<Vec<ChatMessage>>>,
     /// Tool names offered on each request.
     tools: Mutex<Vec<Vec<String>>>,
+    /// The system prompt of each request.
+    systems: Mutex<Vec<String>>,
 }
 
 impl Provider for Scripted {
@@ -39,6 +41,9 @@ impl Provider for Scripted {
         on_delta: DeltaSink<'a>,
     ) -> BoxFuture<'a, Result<Completion, ProviderError>> {
         self.seen.lock().unwrap().push(req.messages[1..].to_vec());
+        if let ChatMessage::System { content } = &req.messages[0] {
+            self.systems.lock().unwrap().push(content.clone());
+        }
         self.tools
             .lock()
             .unwrap()
@@ -825,4 +830,177 @@ async fn questions_survive_a_reload_and_ids_stay_unique() {
     let t = h.transcript().await;
     assert_eq!(tool_result(&t[2]).0, "yes");
     assert_eq!(tool_result(&t[6]).0, "again");
+}
+
+// ---- more hook points and session writes ------------------------------------
+
+/// Wait until `path` exists and return its text.
+async fn file_text(path: &std::path::Path) -> String {
+    for _ in 0..200 {
+        if let Ok(t) = std::fs::read_to_string(path) {
+            return t;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{} never appeared", path.display());
+}
+
+#[tokio::test]
+async fn system_and_context_hooks_shape_each_request() {
+    let mut h = Harness::with_lua(
+        r#"
+        bone.hook("system", function(ev) return { prompt = ev.prompt .. "\nB" } end)
+        bone.hook("system", function(ev) return { prompt = ev.prompt .. "\nA" } end, { priority = 5 })
+        -- Only the latest user message reaches the model.
+        bone.hook("context", function(ev)
+          local keep = { ev.messages[1] }
+          keep[2] = ev.messages[#ev.messages]
+          return { messages = keep }
+        end)
+        bone.hook("message", function(ev) seen_usage = ev.usage and ev.usage.output_tokens end)
+        "#,
+        vec![text("one"), text("two")],
+    )
+    .await;
+    h.start("first").await;
+    h.until::<TurnFinished>().await;
+    h.start("second").await;
+    h.until::<TurnFinished>().await;
+    let systems = h.provider.systems.lock().unwrap().clone();
+    assert!(systems[0].ends_with("\nA\nB"), "{:?}", systems[0]);
+    let seen = h.provider.seen.lock().unwrap().clone();
+    assert_eq!(
+        seen[1],
+        vec![ChatMessage::User {
+            content: "second".into()
+        }]
+    );
+    // The stored transcript is untouched.
+    assert_eq!(h.transcript().await.len(), 4);
+}
+
+#[tokio::test]
+async fn request_error_hooks_can_retry() {
+    let mut h = Harness::with_lua(
+        r#"
+        tries = {}
+        bone.hook("request_error", function(ev)
+          tries[#tries + 1] = ev.attempt .. ":" .. ev.error
+          if ev.attempt < 3 then return { retry = 1 } end
+        end)
+        bone.tool.register { name = "tries", run = function() return table.concat(tries, ",") end }
+        "#,
+        vec![
+            Step::Fail("overloaded".into()),
+            Step::Fail("still overloaded".into()),
+            calls(&[("c1", "tries", json!({}))]),
+            Step::Fail("a".into()),
+            Step::Fail("b".into()),
+            Step::Fail("c".into()),
+        ],
+    )
+    .await;
+    h.start("go").await;
+    let finished = h.until::<TurnFinished>().await;
+    // The third failure of the second call is not retried.
+    assert_eq!(
+        finished.outcome,
+        TurnOutcome::Failed {
+            message: "c".into()
+        }
+    );
+    let t = h.transcript().await;
+    assert_eq!(tool_result(&t[2]).0, "1:overloaded,2:still overloaded");
+}
+
+#[tokio::test]
+async fn stream_and_session_start_hooks_watch_without_blocking() {
+    let mut h = Harness::with_lua(
+        r#"
+        local text = ""
+        bone.hook("stream", function(ev)
+          text = text .. ev.text
+          if text == "Hello there" then bone.state.save("streamed", { text = text }) end
+        end)
+        bone.hook("session_start", function(ev)
+          bone.state.save("started", { new = ev.new, cwd = ev.cwd })
+        end)
+        "#,
+        vec![text("Hello there")],
+    )
+    .await;
+    let started = file_text(&h._data.path().join("state/core/started.json")).await;
+    assert!(started.contains("\"new\": true"), "{started}");
+    h.start("hi").await;
+    h.until::<TurnFinished>().await;
+    let streamed = file_text(&h._data.path().join("state/core/streamed.json")).await;
+    assert!(streamed.contains("Hello there"), "{streamed}");
+}
+
+#[tokio::test]
+async fn hooks_can_add_to_and_compact_the_transcript() {
+    let mut h = Harness::with_lua(
+        r#"
+        bone.hook("context", function(ev)
+          if not injected then
+            injected = true
+            bone.session.append(ev.session_id, { role = "user", content = "remember: be brief" })
+          end
+        end)
+        bone.tool.register { name = "poke", run = function(_, ctx)
+          local ok, err = pcall(bone.session.append, ctx.session_id, { role = "user", content = "x" })
+          return tostring(ok) .. ": " .. tostring(err)
+        end }
+        bone.hook("turn_end", function(ev)
+          local before = #bone.session.messages(ev.session_id)
+          bone.session.compact(ev.session_id, {
+            { role = "user", content = "summary of " .. before .. " messages" },
+          })
+        end)
+        "#,
+        vec![calls(&[("c1", "poke", json!({}))]), text("done"), text("again")],
+    )
+    .await;
+    let first = h.start("go").await;
+    // The injection, then the compaction (turn_end runs before turn/finished).
+    assert_eq!(h.until::<SessionUpdated>().await.reason, "append");
+    assert_eq!(h.until::<SessionUpdated>().await.reason, "compact");
+    h.until::<TurnFinished>().await;
+    // Mid tool calls the transcript cannot change.
+    let seen = h.provider.seen.lock().unwrap().clone();
+    let poke = seen[1].iter().find_map(|m| match m {
+        ChatMessage::Tool { content, .. } => Some(content.clone()),
+        _ => None,
+    });
+    assert!(
+        poke.as_deref().is_some_and(|p| p.starts_with("false: ")
+            && p.contains("a running turn's transcript can only change between model calls")),
+        "{seen:#?}"
+    );
+    // The injected message reached the model on the next call.
+    assert!(seen[1].contains(&ChatMessage::User {
+        content: "remember: be brief".into()
+    }));
+    // go, injected, assistant(poke), tool, done = 5 before compaction.
+    let t = h.transcript().await;
+    assert_eq!(
+        t,
+        vec![ChatMessage::User {
+            content: "summary of 5 messages".into()
+        }]
+    );
+    // Turn ids keep counting, and the checkpoint survives a restart.
+    let second = h.start("next").await;
+    assert!(second > first);
+    h.until::<TurnFinished>().await;
+    let store = crate::session::SessionStore::new(h._data.path());
+    let reloaded = store.get(&h.session_id).unwrap();
+    let s = reloaded.lock().unwrap();
+    assert_eq!(s.messages.len(), 1);
+    assert_eq!(
+        s.messages[0],
+        ChatMessage::User {
+            content: "summary of 3 messages".into()
+        }
+    );
 }

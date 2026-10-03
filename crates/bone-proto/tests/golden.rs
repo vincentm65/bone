@@ -327,6 +327,10 @@ fn events() {
             message: "HTTP 500: overloaded".into(),
         },
     });
+    event::<SessionUpdated>(SessionUpdatedParams {
+        session_id: SID.into(),
+        reason: "compact".into(),
+    });
     event::<CoreReloaded>(ReloadResult {
         plugins: vec![PluginInfo {
             name: "approve".into(),

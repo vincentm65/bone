@@ -69,6 +69,8 @@ pub(crate) struct Inner {
     /// Replaced Lua threads that may still have open questions.
     retired: Mutex<Vec<Weak<Scripting>>>,
     reloading: tokio::sync::Mutex<()>,
+    /// Sessions `session_start` hooks have seen.
+    started: Mutex<std::collections::HashSet<String>>,
     sessions: SessionStore,
     events: broadcast::Sender<Event>,
 }
@@ -77,6 +79,27 @@ impl Inner {
     fn emit<N: Notification>(&self, params: N::Params) {
         // No subscribers is not an error.
         let _ = self.events.send(Event::new::<N>(params));
+    }
+
+    /// A session from the store; the first time this core uses it,
+    /// `session_start` hooks hear about it.
+    fn session(&self, id: &str) -> Result<session::SessionHandle, SessionError> {
+        let s = self.sessions.get(id)?;
+        let cwd = s.lock().unwrap().info.cwd.clone();
+        self.started_session(id, &cwd, false);
+        Ok(s)
+    }
+
+    fn started_session(&self, id: &str, cwd: &str, new: bool) {
+        if !self.started.lock().unwrap().insert(id.to_owned()) {
+            return;
+        }
+        if let Some(s) = &self.runtime().scripting {
+            s.fire(
+                "session_start",
+                serde_json::json!({ "session_id": id, "cwd": cwd, "new": new }),
+            );
+        }
     }
 }
 
@@ -115,7 +138,7 @@ impl Core {
     }
 
     fn build(runtime: Runtime, source: Option<Source>, events: broadcast::Sender<Event>) -> Self {
-        Core {
+        let core = Core {
             inner: Arc::new(Inner {
                 sessions: SessionStore::new(&runtime.config.data_dir),
                 data_dir: runtime.config.data_dir.clone(),
@@ -123,9 +146,14 @@ impl Core {
                 source,
                 retired: Mutex::new(Vec::new()),
                 reloading: tokio::sync::Mutex::new(()),
+                started: Mutex::new(Default::default()),
                 events,
             }),
+        };
+        if let Some(source) = &core.inner.source {
+            source.options.lock().unwrap().host.set(&core.inner);
         }
+        core
     }
 
     /// Load the Lua configuration again and switch to it; see
@@ -223,6 +251,8 @@ impl Core {
             .create(cwd.to_string_lossy().into_owned())
             .map_err(session_error)?;
         let info = session.lock().unwrap().info.clone();
+        self.inner
+            .started_session(&info.session_id, &info.cwd, true);
         Ok(info)
     }
 
@@ -233,8 +263,7 @@ impl Core {
     fn session_messages(&self, params: SessionRef) -> Result<SessionMessagesResult, RpcError> {
         let session = self
             .inner
-            .sessions
-            .get(&params.session_id)
+            .session(&params.session_id)
             .map_err(session_error)?;
         let s = session.lock().unwrap();
         Ok(SessionMessagesResult {
@@ -250,8 +279,7 @@ impl Core {
         }
         let session = self
             .inner
-            .sessions
-            .get(&params.session_id)
+            .session(&params.session_id)
             .map_err(session_error)?;
         let (turn_id, cancel) = {
             let mut s = session.lock().unwrap();
@@ -284,8 +312,7 @@ impl Core {
     fn turn_cancel(&self, params: SessionRef) -> Result<(), RpcError> {
         let session = self
             .inner
-            .sessions
-            .get(&params.session_id)
+            .session(&params.session_id)
             .map_err(session_error)?;
         if let Some(active) = &session.lock().unwrap().active {
             active.cancel.cancel();

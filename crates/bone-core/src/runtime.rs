@@ -6,10 +6,14 @@
 //! switches only if that worked; the old one stops once nothing uses it.
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::Duration;
 
-use bone_proto::methods::{AskRequested, AskResolved, PluginInfo, ReloadResult};
+use bone_proto::methods::{
+    AskRequested, AskResolved, PluginInfo, ReloadResult, SessionUpdated, SessionUpdatedParams,
+};
+use bone_proto::types::ChatMessage;
+use serde_json::{Value as Json, json};
 use tokio::sync::broadcast;
 
 use crate::config::CoreConfig;
@@ -74,6 +78,84 @@ impl Runtime {
             scripting: Some(loaded.scripting),
         }
     }
+}
+
+/// The core, as core Lua reaches it (`bone.session` now). Shared by every
+/// runtime of one core; set once the core exists.
+#[derive(Default)]
+pub struct Host {
+    inner: OnceLock<Weak<Inner>>,
+}
+
+impl Host {
+    pub(crate) fn set(&self, inner: &Arc<Inner>) {
+        let _ = self.inner.set(Arc::downgrade(inner));
+    }
+
+    fn inner(&self) -> Result<Arc<Inner>, String> {
+        self.inner
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or_else(|| "the core is not running".to_string())
+    }
+
+    /// `bone.session.*`: `{ op = "messages" | "append" | "compact", id,
+    /// message?, messages? }`.
+    pub(crate) fn session_op(&self, spec: &Json) -> Result<Json, String> {
+        let inner = self.inner()?;
+        let id = spec["id"].as_str().ok_or("a session id is needed")?;
+        let session = inner.sessions.get(id).map_err(|e| e.to_string())?;
+        let op = spec["op"].as_str().unwrap_or_default();
+        let reason = match op {
+            "messages" => {
+                let s = session.lock().unwrap();
+                return serde_json::to_value(&s.messages).map_err(|e| e.to_string());
+            }
+            "append" => {
+                let msg = message(&spec["message"])?;
+                let mut s = session.lock().unwrap();
+                if !s.writable() {
+                    return Err(NOT_NOW.into());
+                }
+                s.push(msg)
+                    .map_err(|e| format!("cannot save session: {e}"))?;
+                "append"
+            }
+            "compact" => {
+                let msgs = crate::agent::list(&spec["messages"])
+                    .as_array()
+                    .ok_or("compact needs a list of messages")?
+                    .iter()
+                    .map(message)
+                    .collect::<Result<Vec<_>, _>>()?;
+                let mut s = session.lock().unwrap();
+                if !s.writable() {
+                    return Err(NOT_NOW.into());
+                }
+                s.compact(msgs)
+                    .map_err(|e| format!("cannot save session: {e}"))?;
+                "compact"
+            }
+            other => return Err(format!("unknown session operation {other:?}")),
+        };
+        inner.emit::<SessionUpdated>(SessionUpdatedParams {
+            session_id: id.to_owned(),
+            reason: reason.into(),
+        });
+        Ok(json!(true))
+    }
+}
+
+const NOT_NOW: &str = "a running turn's transcript can only change between model calls \
+(in system, context, request or request_error hooks), or after the turn";
+
+/// A message from Lua, where an empty list may have arrived as `{}`.
+fn message(v: &Json) -> Result<ChatMessage, String> {
+    let mut v = v.clone();
+    if let Some(calls) = v.get("tool_calls") {
+        v["tool_calls"] = crate::agent::list(calls);
+    }
+    serde_json::from_value(v).map_err(|e| format!("bad message: {e}"))
 }
 
 /// Looks up an environment variable (tests use a fixed set).

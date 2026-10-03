@@ -82,6 +82,7 @@ pub const NOTIFICATIONS: &[&str] = &[
     AskResolved::METHOD,
     TurnFinished::METHOD,
     CoreReloaded::METHOD,
+    SessionUpdated::METHOD,
 ];
 
 // ---- connection ----------------------------------------------------------
@@ -291,6 +292,19 @@ notification!(
     /// The core switched to a newly loaded Lua configuration.
     CoreReloaded, "core/reloaded", ReloadResult
 );
+notification!(
+    /// Core Lua changed a session's transcript outside a turn's own
+    /// messages (`bone.session.append` or `compact`). Clients should load
+    /// it again with `session/messages`.
+    SessionUpdated, "session/updated", SessionUpdatedParams
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionUpdatedParams {
+    pub session_id: SessionId,
+    /// `"append"` or `"compact"`.
+    pub reason: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnStartedParams {

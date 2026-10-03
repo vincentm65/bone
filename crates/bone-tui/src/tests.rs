@@ -2452,3 +2452,30 @@ async fn example_switch_plugin_tui_side() {
     h.input("{up}{enter}").await;
     assert_eq!(h.lua("=bone.switch.current()").await, "\"a\"");
 }
+
+#[tokio::test]
+async fn a_session_changed_by_core_lua_is_reloaded() {
+    let mut h = Harness::blank().await;
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    h.emit::<TurnFinished>(finished("s-new", TurnOutcome::Completed))
+        .await;
+    h.emit::<SessionUpdated>(SessionUpdatedParams {
+        session_id: "s-new".into(),
+        reason: "compact".into(),
+    })
+    .await;
+    assert_eq!(h.requests("session/messages").len(), 1);
+    let screen = h.screen(60, 10);
+    assert!(
+        screen.contains("old question") && !screen.contains("> go"),
+        "{screen}"
+    );
+    // Other sessions are not this TUI's business.
+    h.emit::<SessionUpdated>(SessionUpdatedParams {
+        session_id: "elsewhere".into(),
+        reason: "append".into(),
+    })
+    .await;
+    assert_eq!(h.requests("session/messages").len(), 1);
+}
