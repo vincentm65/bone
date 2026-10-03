@@ -1766,6 +1766,11 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             app.shutdown_hooks.push((app.owner.clone(), cb));
             ret(lua, ())
         }
+        "project_trust" => {
+            let on: bool = args(lua, a)?;
+            app.set_project_trust(on).map_err(err)?;
+            ret(lua, ())
+        }
         "project_info" => match app.project_info() {
             Some(info) => ret(lua, to_lua(lua, &info)?),
             None => ret(lua, Value::Nil),

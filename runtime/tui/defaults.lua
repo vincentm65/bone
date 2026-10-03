@@ -225,3 +225,183 @@ end
 
 -- Colors (see runtime/colors/).
 bone.colorscheme("black")
+
+-- Commands for sessions, plugins and the project config. They are plain Lua:
+-- replace them, or remove them with bone.cmd.del.
+
+local function current_session()
+  local s = bone.chat.session()
+  if not s or not s.session_id then
+    bone.notify("this session has no messages yet", "error")
+    return nil
+  end
+  return s.session_id
+end
+
+bone.cmd.create("rename", function(c)
+  local id = current_session()
+  if not id then
+    return
+  end
+  if c.args == "" then
+    return bone.notify("usage: /rename title", "error")
+  end
+  bone.request("session/rename", { session_id = id, title = c.args }, function(info, err)
+    if err then
+      return bone.notify("rename failed: " .. tostring(err), "error")
+    end
+    bone.notify("renamed to " .. (info.title or ""))
+  end)
+end, { desc = "give this session a title" })
+
+bone.cmd.create("fork", function(c)
+  local id = current_session()
+  if not id then
+    return
+  end
+  local n
+  if c.args ~= "" then
+    n = tonumber(c.args)
+    if not n or n < 1 or n % 1 ~= 0 then
+      return bone.notify("usage: /fork [turn number]", "error")
+    end
+  end
+  bone.request("session/fork", { session_id = id, before_turn = n }, function(info, err)
+    if err then
+      return bone.notify("fork failed: " .. tostring(err), "error")
+    end
+    bone.api.open_session(info.session_id)
+    bone.notify(n and ("forked from before turn " .. n) or "forked")
+  end)
+end, { desc = "copy this session to try something else; /fork N starts before turn N" })
+
+bone.cmd.create("delete", function(c)
+  local id = current_session()
+  if not id then
+    return
+  end
+  if c.args ~= "yes" then
+    return bone.notify("Delete this session and its file? /delete yes")
+  end
+  bone.request("session/delete", { session_id = id }, function(_, err)
+    if err then
+      bone.notify("delete failed: " .. tostring(err), "error")
+    end
+  end)
+end, { desc = "delete this session (/delete yes)" })
+
+local function message(e)
+  return (tostring(e):gsub("^runtime error: ", ""):gsub("\nstack traceback:.*$", ""))
+end
+
+-- /plugin lists both halves of every plugin; /plugin load|unload|reload name
+-- acts on its TUI half here and its core half in the core; /plugin reload
+-- reloads the core's whole configuration.
+bone.cmd.create("plugin", function(c)
+  local op, name = c.args:match("^(%S+)%s*(%S*)$")
+  if not op then
+    local tui = bone.plugin.list()
+    bone.request("plugin/list", {}, function(core)
+      core = core or {}
+      local seen, names = {}, {}
+      local function add(n)
+        if not seen[n] then
+          seen[n] = true
+          names[#names + 1] = n
+        end
+      end
+      for _, p in ipairs(tui) do
+        add(p.name)
+      end
+      for _, p in ipairs(core) do
+        if p.core then
+          add(p.name)
+        end
+      end
+      table.sort(names)
+      local rows = {}
+      for _, n in ipairs(names) do
+        local parts = {}
+        for _, p in ipairs(tui) do
+          if p.name == n then
+            local state = p.loaded and "loaded" or "unloaded"
+            parts[#parts + 1] = p.error and ("tui " .. state .. ": " .. p.error) or ("tui " .. state)
+          end
+        end
+        for _, p in ipairs(core) do
+          if p.name == n and p.core then
+            parts[#parts + 1] = p.loaded and "core loaded" or "core unloaded"
+          end
+        end
+        rows[#rows + 1] = n .. " (" .. table.concat(parts, ", ") .. ")"
+      end
+      bone.notify(#rows > 0 and table.concat(rows, "\n") or "no plugins")
+    end)
+    return
+  end
+  if op == "reload" and name == "" then
+    bone.request("core/reload", {}, function(r, err)
+      if err then
+        return bone.notify("core reload failed: " .. tostring(err), "error")
+      end
+      local warnings = r.warnings or {}
+      bone.notify("core configuration reloaded" .. (#warnings > 0 and (": " .. table.concat(warnings, "; ")) or ""))
+    end)
+    return
+  end
+  if (op ~= "load" and op ~= "unload" and op ~= "reload") or name == "" then
+    return bone.notify("usage: /plugin [reload] [load|unload|reload name]", "error")
+  end
+  local has_tui = false
+  for _, p in ipairs(bone.plugin.list()) do
+    has_tui = has_tui or p.name == name
+  end
+  if not has_tui and bone.config_dir then
+    local f = io.open(bone.config_dir .. "/plugins/" .. name .. "/tui.lua")
+    if f then
+      f:close()
+      has_tui = true
+    end
+  end
+  local tui_ok, tui_err = true, nil
+  if has_tui then
+    tui_ok, tui_err = pcall(bone.plugin[op], name)
+  end
+  local done = op .. "ed"
+  -- The core decides whether it has a core half.
+  bone.request("plugin/" .. op, { name = name }, function(_, err)
+    if not tui_ok then
+      return bone.notify(message(tui_err), "error")
+    end
+    if err then
+      err = tostring(err)
+      if not has_tui then
+        return bone.notify(err, "error")
+      elseif err:find("no core.lua", 1, true) or err:find("no plugin", 1, true) then
+        return bone.notify(name .. ": tui " .. done)
+      end
+      return bone.notify(name .. ": tui " .. done .. ", but the core: " .. err, "error")
+    end
+    bone.notify(name .. (has_tui and ": tui and core " or ": core ") .. done)
+  end)
+end, {
+  desc = "plugins: list, load/unload/reload name; /plugin reload reloads the core's config",
+  aliases = { "plugins" },
+})
+
+bone.cmd.create("project", function(c)
+  local info = bone.project.info()
+  if not info then
+    return bone.notify("no .bone/tui.lua here or in a parent directory", "error")
+  end
+  if c.args == "" then
+    bone.notify(info.file .. ": " .. (info.trusted and "trusted" or "not trusted") .. (info.loaded and ", loaded" or ""))
+  elseif c.args == "trust" then
+    bone.project.trust(true)
+  elseif c.args == "untrust" then
+    bone.project.trust(false)
+    bone.notify("project config unloaded and no longer trusted")
+  else
+    bone.notify('unknown /project argument "' .. c.args .. '" (trust, untrust)', "error")
+  end
+end, { desc = "this project's .bone/tui.lua: show, trust, untrust" })

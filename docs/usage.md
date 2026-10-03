@@ -73,6 +73,8 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `/plugin`, `/plugins` | list plugins (TUI and core halves); `/plugin load name`, `/plugin unload name`, `/plugin reload name` act on both halves (picking up edits to their files); `/plugin reload` reloads the core's whole Lua configuration (`core.lua` and core plugins) |
 | `/project`, `/project trust`, `/project untrust` | this directory's `.bone/tui.lua`: show it, trust it (runs it now and on later starts here), stop trusting it (unloads it) |
 
+`/rename`, `/fork`, `/delete`, `/plugin` and `/project` are Lua commands from `runtime/tui/defaults.lua`: change or remove them like any other (`bone.cmd.del("delete")`).
+
 Enter on a partial name runs the highlighted suggestion (`/ses` + enter opens the picker). A message that really starts with `/` can be sent as `//like this`; paths such as `/etc/hosts …` are sent as messages anyway. Commands from Lua or plugins show up in the suggestions too.
 
 ## Options

@@ -950,6 +950,11 @@ bone.project = {
   info = function()
     return api("project_info")
   end,
+  --- Trust it (and run it now and on later starts here), or not (and
+  --- unload it).
+  trust = function(on)
+    api("project_trust", on ~= false)
+  end,
 }
 
 bone._health = {}

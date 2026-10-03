@@ -443,3 +443,6 @@ Moved out of the core after review, to keep the default harness minimal:
   `tui.rpc` for `bone.rpc.call`).
 - The tool output cap is a plugin (`examples/plugins/output-cap`, one
   `tool_result` hook); the core no longer has `max_tool_output`.
+- The TUI's `/rename`, `/fork`, `/delete`, `/plugin` and `/project` are Lua
+  commands in `runtime/tui/defaults.lua` (built on `bone.request`,
+  `bone.plugin` and the new `bone.project.trust`), not Rust built-ins.
