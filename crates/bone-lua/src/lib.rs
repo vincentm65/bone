@@ -65,6 +65,7 @@ static CORE_CAPABILITIES: &[&str] = &[
     "core.http_stream",
     "core.ask",
     "core.health",
+    "core.ready",
     "plugins.state",
 ];
 
@@ -196,10 +197,24 @@ fn valid_state_name(name: &str) -> bool {
 
 /// Where `bone.state` keeps `name` on this side.
 pub fn state_path(config_dir: &Path, side: Side, name: &str) -> PathBuf {
+    state_file(config_dir, side.name(), name)
+}
+
+fn state_file(config_dir: &Path, scope: &str, name: &str) -> PathBuf {
     config_dir
         .join("state")
-        .join(side.name())
+        .join(scope)
         .join(format!("{name}.json"))
+}
+
+/// `opts.shared`: the store both sides read (`state/shared/`), for a
+/// plugin's core and TUI halves.
+fn state_scope(side: Side, opts: &Option<Table>) -> mlua::Result<&'static str> {
+    let shared = match opts {
+        Some(o) => o.get::<Option<bool>>("shared")?.unwrap_or(false),
+        None => false,
+    };
+    Ok(if shared { "shared" } else { side.name() })
 }
 
 /// `bone.state.load(name)` and `bone.state.save(name, value)`: JSON files
@@ -225,11 +240,12 @@ fn install_state(
     let mem = memory.clone();
     state.set(
         "load",
-        lua.create_function(move |lua, name: String| {
+        lua.create_function(move |lua, (name, opts): (String, Option<Table>)| {
             check(&name)?;
+            let scope = state_scope(side, &opts)?;
             let text: Option<String> = match &dir {
-                None => mem.get(name.as_str())?,
-                Some(d) => match std::fs::read_to_string(state_path(d, side, &name)) {
+                None => mem.get(format!("{scope}/{name}"))?,
+                Some(d) => match std::fs::read_to_string(state_file(d, scope, &name)) {
                     Ok(t) => Some(t),
                     Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                     Err(e) => return Err(mlua::Error::runtime(format!("state {name}: {e}"))),
@@ -248,23 +264,26 @@ fn install_state(
     let dir = config_dir.map(Path::to_owned);
     state.set(
         "save",
-        lua.create_function(move |_, (name, value): (String, Value)| {
-            check(&name)?;
-            let text =
-                serde_json::to_string_pretty(&from_lua(&value)?).map_err(mlua::Error::external)?;
-            let Some(d) = &dir else {
-                return memory.set(name, text);
-            };
-            let path = state_path(d, side, &name);
-            let write = || -> std::io::Result<()> {
-                std::fs::create_dir_all(path.parent().expect("state dir"))?;
-                // Write then rename, so a crash never leaves half a file.
-                let tmp = path.with_extension("json.tmp");
-                std::fs::write(&tmp, text)?;
-                std::fs::rename(&tmp, &path)
-            };
-            write().map_err(|e| mlua::Error::runtime(format!("state {name}: {e}")))
-        })?,
+        lua.create_function(
+            move |_, (name, value, opts): (String, Value, Option<Table>)| {
+                check(&name)?;
+                let scope = state_scope(side, &opts)?;
+                let text = serde_json::to_string_pretty(&from_lua(&value)?)
+                    .map_err(mlua::Error::external)?;
+                let Some(d) = &dir else {
+                    return memory.set(format!("{scope}/{name}"), text);
+                };
+                let path = state_file(d, scope, &name);
+                let write = || -> std::io::Result<()> {
+                    std::fs::create_dir_all(path.parent().expect("state dir"))?;
+                    // Write then rename, so a crash never leaves half a file.
+                    let tmp = path.with_extension("json.tmp");
+                    std::fs::write(&tmp, text)?;
+                    std::fs::rename(&tmp, &path)
+                };
+                write().map_err(|e| mlua::Error::runtime(format!("state {name}: {e}")))
+            },
+        )?,
     )?;
     bone.set("state", state)
 }
@@ -551,6 +570,17 @@ mod tests {
             .unwrap();
         assert!(empty);
         assert!(lua.load("bone.state.save('../x', {})").exec().is_err());
+        lua.load("bone.state.save('x', { s = 1 }, { shared = true })")
+            .exec()
+            .unwrap();
+        assert!(dir.path().join("state/shared/x.json").is_file());
+        let tui = new_state(Side::Tui, Some(dir.path())).unwrap();
+        let (own, shared): (Value, i64) = tui
+            .load("return bone.state.load('x').a, bone.state.load('x', { shared = true }).s")
+            .eval()
+            .unwrap();
+        assert!(own.is_nil());
+        assert_eq!(shared, 1);
         // Without a config dir, state lives in memory.
         let mem = new_state(Side::Tui, None).unwrap();
         let v: i64 = mem

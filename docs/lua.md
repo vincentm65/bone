@@ -37,7 +37,7 @@ the other.
 
 The current capability names include `core.config`, `core.tools`,
 `core.hooks`, `core.providers`, `core.jobs`, `core.http_stream`, `core.ask`,
-`core.health`, `plugins.state` (both sides), and, in the TUI, `plugins.lifecycle`, `tui.project`, `tui.keymaps`, `tui.input`, `tui.events`,
+`core.health`, `core.ready`, `plugins.state` (both sides), and, in the TUI, `plugins.lifecycle`, `tui.project`, `tui.keymaps`, `tui.input`, `tui.events`,
 `tui.local_events`, `tui.commands`, `tui.command_specs`, `tui.options`,
 `tui.dynamic_options`, `tui.request`, `tui.prompt`, `tui.prompt_edit`, `tui.chat`, `tui.chat_data`, `tui.windows`,
 `tui.panels`, `tui.regions`, `tui.views`, `tui.pickers`, `tui.themes`, `tui.jobs`, `jobs.streaming` and
@@ -96,13 +96,15 @@ A plugin is a folder in `~/.bone/plugins/`:
   colors/      colorschemes
 ```
 
+The repo's examples show most of the API at work: `style` (a complete look), `approve` (asking before tools run), `git` and `anthropic` (tools and a provider), `switch` (pick the provider from the TUI), `tasks` (a persistent task panel), `review` (the files a session changed, and review prompts) and `testrun` (tests streamed into a panel).
+
 Every part is optional. Plugins load in name order, after the runtime defaults and before your own `core.lua` / `tui.lua`, so your config can change anything a plugin set up. Rename a folder to start with `_` or `.` to disable it. `bone.plugins` lists the loaded names. Installing is just copying or `git clone`-ing into `~/.bone/plugins/`; see `examples/plugins/` in the repo (`git`, `approve`, `style`).
 
 ### Plugin lifecycle and state
 
 `bone.plugin.current()` is `{ name, dir, kind }` while a plugin's file runs (on both sides; in the TUI also while any of its callbacks run), else nil.
 
-`bone.state.load(name)` returns the table saved under `name` (empty if none) and `bone.state.save(name, value)` saves one, as JSON in `~/.bone/state/<side>/<name>.json`. Names are letters, digits, `_`, `-` and `.`. Both sides have it; each side has its own files.
+`bone.state.load(name)` returns the table saved under `name` (empty if none) and `bone.state.save(name, value)` saves one, as JSON in `~/.bone/state/<side>/<name>.json`. Names are letters, digits, `_`, `-` and `.`. Both sides have it; each side has its own files. With `{ shared = true }` as the last argument both sides use `~/.bone/state/shared/<name>.json`, which is how a plugin's core and TUI halves can share settings (a save replaces the file atomically; the last writer wins).
 
 In the TUI a plugin owns what it creates while its `tui.lua` or one of its callbacks runs: keymaps, user commands, `bone.on` handlers, panels, windows, jobs, dynamic options, raw key interceptors and new keymap contexts. Unloading it removes all of that (a key or command the user has since redefined is left alone), cancels its running jobs without calling back, and forgets the modules it `require`d, so loading it again runs fresh code. Anything else it changed (views, highlights, `bone.ui` fields) is for its shutdown hook to undo.
 
@@ -278,6 +280,10 @@ end)
 ```
 
 The TUI has its own `bone.health(name, fn)` for TUI-side checks (plain functions; no waiting).
+
+### After loading
+
+`bone.on_ready(fn)` runs `fn()` once after every `core.lua` (the plugins' and yours) has run, before the core serves anything. A plugin's `core.lua` runs before yours, so this is where it can read the final `bone.config` (the `switch` example publishes the provider list from here). An error stops the core from starting, like an error in `core.lua`.
 
 ### Environment overrides
 

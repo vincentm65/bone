@@ -263,3 +263,11 @@ bone.plugin = {
     return bone._loading
   end,
 }
+
+--- fn() runs once after every core.lua (plugins' and yours) has run, before
+--- the core serves anything: the place to read the final bone.config.
+bone._ready = {}
+function bone.on_ready(fn)
+  assert(type(fn) == "function", "bone.on_ready(fn)")
+  bone._ready[#bone._ready + 1] = fn
+end

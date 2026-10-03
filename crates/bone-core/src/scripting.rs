@@ -961,6 +961,10 @@ fn setup(dir: &Path, streams: &Arc<Streams>) -> Result<Lua, String> {
     run("core/defaults.lua")?;
     bone_lua::run_user_plugins(&lua, dir, "core.lua").map_err(|e| e.to_string())?;
     bone_lua::run_file(&lua, &dir.join("core.lua")).map_err(|e| e.to_string())?;
+    lua.load("for _, f in ipairs(bone._ready) do f() end")
+        .set_name("=bone.on_ready")
+        .exec()
+        .map_err(|e| format!("bone.on_ready: {e}"))?;
     Ok(lua)
 }
 

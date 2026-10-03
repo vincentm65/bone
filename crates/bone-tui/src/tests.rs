@@ -2253,3 +2253,160 @@ async fn a_project_config_runs_only_when_trusted() {
     h.input("/project{enter}").await;
     assert!(h.message().contains("no .bone/tui.lua"), "{}", h.message());
 }
+
+/// A harness with the style plugin plus `examples/plugins/<name>` loaded.
+async fn with_example(name: &str) -> (Harness, tempfile::TempDir) {
+    let (mut h, dir) = Harness::with_config("").await;
+    install_example(dir.path(), name);
+    h.input(&format!("/plugin load {name}{{enter}}")).await;
+    assert!(
+        h.app
+            .plugin(name)
+            .is_some_and(|p| p.loaded && p.error.is_none()),
+        "{}",
+        h.message()
+    );
+    h.app.message = None;
+    (h, dir)
+}
+
+#[tokio::test]
+async fn example_tasks_plugin() {
+    let (mut h, dir) = with_example("tasks").await;
+    h.input("/task write docs{enter}/task ship it{enter}").await;
+    let screen = h.screen(80, 12);
+    assert!(
+        screen.contains("Tasks 2/2")
+            && screen.contains("· write docs")
+            && screen.contains("· ship it"),
+        "{screen}"
+    );
+    h.input("/task{enter}").await;
+    assert_eq!(h.app.context().name(), "panel");
+    h.input("{up}{enter}").await;
+    assert!(h.screen(80, 12).contains("Tasks 1/2"));
+    let saved = std::fs::read_to_string(dir.path().join("state/tui/tasks.json")).unwrap();
+    assert!(
+        saved.contains("\"done\": true") && saved.contains("\"open\": true"),
+        "{saved}"
+    );
+    h.input("{down}s").await;
+    assert_eq!(h.prompt(), "ship it");
+    assert_eq!(h.app.context().name(), "main");
+    h.input("{ctrl+u}/tasks{enter}").await;
+    assert!(!h.screen(80, 12).contains("Tasks"));
+    // Reloading reads the saved list back.
+    h.input("/tasks{enter}/plugin reload tasks{enter}").await;
+    assert!(h.screen(80, 12).contains("✓ write docs"));
+}
+
+#[tokio::test]
+async fn example_review_plugin() {
+    let (mut h, _dir) = with_example("review").await;
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    let call = |id: &str, name: &str, path: &str| ToolCall {
+        id: id.into(),
+        name: name.into(),
+        arguments: json!({ "path": path }).to_string(),
+    };
+    h.emit::<MessageCompleted>(tool_calls(
+        "s-new",
+        vec![
+            call("1", "edit_file", "src/a.rs"),
+            call("2", "edit_file", "src/a.rs"),
+            call("3", "write_file", "b.md"),
+            call("4", "read_file", "c.rs"),
+        ],
+    ))
+    .await;
+    for (id, is_error) in [("1", false), ("2", false), ("3", true), ("4", false)] {
+        h.emit::<ToolFinished>(ToolFinishedParams {
+            session_id: "s-new".into(),
+            turn_id: 1,
+            call_id: id.into(),
+            output: "ok".into(),
+            is_error,
+        })
+        .await;
+    }
+    h.emit::<TurnFinished>(finished("s-new", TurnOutcome::Completed))
+        .await;
+    h.input("/review{enter}").await;
+    let screen = h.screen(100, 24);
+    assert!(
+        screen.contains("Changed files")
+            && screen.contains("src/a.rs  2 edits, turn 1")
+            && screen.contains("b.md  1 edit, turn 1, 1 failed")
+            && !screen.contains("c.rs  "),
+        "{screen}"
+    );
+    h.lua("bone.ui.panel.focus('review')").await;
+    h.input("{down}{enter}").await;
+    assert!(
+        h.prompt().starts_with("Review your changes to b.md:"),
+        "{}",
+        h.prompt()
+    );
+    assert_eq!(h.lua("=bone.prompt.selection().start.col").await, "0");
+    h.input("/review all{enter}").await;
+    assert!(h.prompt().contains("src/a.rs, b.md"), "{}", h.prompt());
+}
+
+#[tokio::test]
+async fn example_testrun_plugin() {
+    let (mut h, _dir) = with_example("testrun").await;
+    assert_eq!(h.lua("=bone.o.test_command").await, "\"cargo test\"");
+    h.input("/test printf 'ok 1\\nFAILED tests::x\\n'; exit 1{enter}")
+        .await;
+    h.until("bone.ui.panel.get('testrun'):info().title:find('failed') ~= nil")
+        .await;
+    let screen = h.screen(80, 20);
+    assert!(
+        screen.contains("Tests: failed (exit 1) · 1 failing lines")
+            && screen.contains("FAILED tests::x")
+            && screen.contains("ok 1"),
+        "{screen}"
+    );
+    h.lua("bone.ui.panel.focus('testrun')").await;
+    h.input("f").await;
+    assert!(
+        h.prompt().contains("These tests fail:\n\nFAILED tests::x"),
+        "{}",
+        h.prompt()
+    );
+    h.lua("bone.prompt.set('')").await;
+    h.input("/test sleep 30{enter}").await;
+    h.until("bone.ui.panel.get('testrun'):info().title:find('running') ~= nil")
+        .await;
+    h.input("/test cancel{enter}").await;
+    h.until("bone.ui.panel.get('testrun'):info().title:find('cancelled') ~= nil")
+        .await;
+}
+
+#[tokio::test]
+async fn example_switch_plugin_tui_side() {
+    let (mut h, dir) = with_example("switch").await;
+    h.lua(
+        r#"bone.state.save("switch-providers", { default = "a", providers = {
+          { name = "a", model = "m1", type = "openai" },
+          { name = "b", model = "m2", type = "anthropic" },
+        } }, { shared = true })"#,
+    )
+    .await;
+    assert_eq!(h.lua("=bone.switch.current()").await, "\"a\"");
+    h.input("/provider b{enter}").await;
+    assert_eq!(h.message(), "provider: b (m2)");
+    let saved = std::fs::read_to_string(dir.path().join("state/shared/switch.json")).unwrap();
+    assert!(saved.contains("\"current\": \"b\""), "{saved}");
+    h.input("/provider zzz{enter}").await;
+    assert!(h.message().contains("no provider zzz"), "{}", h.message());
+    h.input("/provider{enter}").await;
+    let screen = h.screen(100, 20);
+    assert!(
+        screen.contains("● b  m2  anthropic") && screen.contains("  a  m1  openai"),
+        "{screen}"
+    );
+    h.input("{up}{enter}").await;
+    assert_eq!(h.lua("=bone.switch.current()").await, "\"a\"");
+}

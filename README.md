@@ -68,6 +68,7 @@ bone3 --connect                  # a TUI on that server; run several, they stay 
 - [docs/protocol.md](docs/protocol.md): the JSON-RPC API for writing clients.
 - [docs/architecture.md](docs/architecture.md): how the pieces fit together.
 - [examples/plugins/git](examples/plugins/git): a small plugin with a tool, a tool view and a command.
+- More examples in [examples/plugins](examples/plugins): `switch` (change provider from the TUI), `tasks` (a task panel), `review` (changed files and review prompts), `testrun` (tests streamed into a panel), `approve`, `style` and `anthropic`.
 
 ## Development
 

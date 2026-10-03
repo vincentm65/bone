@@ -90,30 +90,33 @@ committed as `0462c61`.
 Phase 5, cancellable streaming jobs (`jobs.streaming`), is committed as
 `9f439dd`.
 
-Phase 6, **plugin state and lifecycle**, is complete in the current
-worktree. It adds:
+Phase 6, plugin state and lifecycle (`plugins.state`,
+`plugins.lifecycle`, `tui.project`), is committed as `37d0c59`.
 
-- `bone.state.load/save` on both sides (JSON under `state/<side>/`, written
-  atomically) and `bone.plugin.current()` while plugin files load
-  (`plugins.state`);
-- TUI ownership of keymaps, commands, event handlers, panels, windows,
-  jobs, dynamic options, raw interceptors and contexts created while a
-  plugin's file or callbacks run, with identity checks so user overrides
-  survive (`plugins.lifecycle`);
-- `bone.plugin.on_shutdown`, `load`/`unload`/`reload` (also `/plugin`),
-  module cache invalidation on unload, auto-saved `bone.plugin.state`,
-  `plugin/loaded`/`plugin/unloaded` events, and shutdown hooks plus state
-  saving when the TUI quits;
-- explicit project configuration: `<project>/.bone/tui.lua` found from the
-  working directory upward, run only after `/project trust` (remembered in
-  TUI state), unloadable with `/project untrust` (`tui.project`); and
-- tests for the state store, plugin loading markers, ownership cleanup,
-  reload with changed modules, persisted state and project trust.
+Phase 7, **representative plugins and validation**, is complete in the
+current worktree. Four Lua-only plugins in `examples/plugins/` exercise the
+new APIs end to end, each with tests:
 
-Core-side plugin unload/reload is not included: the core Lua state lives
-for the whole server and hooks/tools are not owner-tracked. Folder loading
-is unchanged. The remaining phase covers representative plugins plus final
-validation. The out-of-scope boundaries below continue to apply.
+- `tasks`: a persistent task panel (panels with keys, `bone.plugin.state`,
+  `bone.prompt`);
+- `review`: the files the session changed, git diffs and review prompts
+  (`bone.chat` data, panels, `bone.prompt` selection, `bone.job`);
+- `switch`: provider switching from the TUI through a Lua router provider
+  (OpenAI-compatible client in Lua, delegation to Lua provider types); and
+- `testrun`: tests streamed into a following panel with cancel and "send
+  failures to the model" (`bone.job` lines, panels, dynamic options).
+
+Building them exposed two gaps, filled additively: `bone.state` gained a
+`{ shared = true }` scope for a plugin's core and TUI halves, and the core
+gained `bone.on_ready` (`core.ready`) so a plugin can read the final
+`bone.config` after the user's `core.lua`. It also caught a `testrun` bug
+(the echoed command counted as a failure). Validation: `cargo fmt --all --
+--check`, `cargo clippy --workspace --all-targets` (no warnings),
+`cargo test --workspace`, `cargo build --release` and `git diff --check`.
+
+All phases of the extensibility roadmap are done. The out-of-scope
+boundaries below continue to apply; core-side plugin unload/reload remains
+a possible follow-up.
 
 1. **Extension contract and compatibility** — publish `bone.api_version`,
    capability reporting, ownership rules, and the baseline contracts for

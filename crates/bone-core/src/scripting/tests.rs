@@ -769,3 +769,173 @@ async fn cancelling_stops_a_lua_provider_mid_stream() {
         .expect("Lua thread free");
     assert_eq!(out.deny, None);
 }
+
+/// Serve canned OpenAI SSE bodies, one per request, recording the
+/// authorization header and request body of each.
+async fn fake_openai(bodies: Vec<String>) -> (String, Arc<std::sync::Mutex<Vec<(String, Json)>>>) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let seen: Arc<std::sync::Mutex<Vec<(String, Json)>>> = Default::default();
+    let seen2 = seen.clone();
+    tokio::spawn(async move {
+        for body in bodies {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = Vec::new();
+            let mut chunk = [0u8; 8192];
+            loop {
+                let n = sock.read(&mut chunk).await.unwrap();
+                buf.extend_from_slice(&chunk[..n]);
+                if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                    let head = String::from_utf8_lossy(&buf[..i]).to_lowercase();
+                    assert!(head.starts_with("post /v1/chat/completions"), "{head}");
+                    let len: usize = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("content-length:"))
+                        .map(|v| v.trim().parse().unwrap())
+                        .unwrap_or(0);
+                    while buf.len() < i + 4 + len {
+                        let n = sock.read(&mut chunk).await.unwrap();
+                        buf.extend_from_slice(&chunk[..n]);
+                    }
+                    let auth = head
+                        .lines()
+                        .find_map(|l| l.strip_prefix("authorization:"))
+                        .unwrap_or("")
+                        .trim()
+                        .to_owned();
+                    seen2.lock().unwrap().push((
+                        auth,
+                        serde_json::from_slice(&buf[i + 4..i + 4 + len]).unwrap(),
+                    ));
+                    break;
+                }
+            }
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}"
+            );
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.shutdown().await.unwrap();
+        }
+    });
+    (url, seen)
+}
+
+fn openai_sse(chunks: &[Json]) -> String {
+    let mut s: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect();
+    s.push_str("data: [DONE]\n\n");
+    s
+}
+
+/// examples/plugins/switch: a Lua router over OpenAI-compatible entries,
+/// switched through the shared state between turns.
+#[tokio::test(flavor = "multi_thread")]
+async fn switch_plugin_routes_to_the_chosen_provider() {
+    use crate::Core;
+    use bone_proto::methods::*;
+    let delta = |d: Json| json!({ "choices": [{ "index": 0, "delta": d }] });
+    let (url, seen) = fake_openai(vec![
+        openai_sse(&[
+            delta(json!({ "reasoning_content": "use the tool" })),
+            delta(json!({ "tool_calls": [{ "index": 0, "id": "c1", "function": { "name": "stamp", "arguments": "{\"word\":" } }] })),
+            delta(json!({ "tool_calls": [{ "index": 0, "function": { "arguments": "\"hi\"}" } }] })),
+            json!({ "choices": [], "usage": { "prompt_tokens": 9, "completion_tokens": 4 } }),
+        ]),
+        openai_sse(&[delta(json!({ "content": "Stamped " })), delta(json!({ "content": "HI." }))]),
+        openai_sse(&[delta(json!({ "content": "from b" }))]),
+    ])
+    .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let plugin = dir.path().join("plugins/switch");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/switch/core.lua"),
+        plugin.join("core.lua"),
+    )
+    .unwrap();
+    write(
+        dir.path(),
+        &format!(
+            r#"
+            bone.config.providers.a = {{ base_url = "{url}", model = "m1", api_key = "ka", stream_usage = true }}
+            bone.config.providers.b = {{ base_url = "{url}/", model = "m2", api_key = "kb" }}
+            bone.config.providers.switch = {{ type = "switch", model = "switch", default = "a" }}
+            bone.config.provider = "switch"
+            bone.tool.register {{ name = "stamp", run = function(a) return a.word:upper() end }}
+            "#
+        ),
+    );
+    let loaded = load(dir.path()).unwrap();
+    // on_ready published the choices for the TUI half.
+    let published =
+        std::fs::read_to_string(dir.path().join("state/shared/switch-providers.json")).unwrap();
+    let published: Json = serde_json::from_str(&published).unwrap();
+    assert_eq!(published["default"], "a");
+    assert_eq!(published["providers"][1]["name"], "b");
+    assert_eq!(published["providers"][1]["model"], "m2");
+
+    let core = Core::from_loaded(loaded);
+    let mut events = core.subscribe();
+    let call = |m: &'static str, p: Json| {
+        let core = &core;
+        async move { core.handle(m, Some(p)).await.unwrap() }
+    };
+    let work = tempfile::tempdir().unwrap();
+    let info = call(SessionCreate::METHOD, json!({ "cwd": work.path() })).await;
+    let sid = info["session_id"].as_str().unwrap().to_owned();
+    let mut turn = async |text: &str| {
+        call(
+            TurnStart::METHOD,
+            json!({ "session_id": sid, "text": text }),
+        )
+        .await;
+        let mut deltas = String::new();
+        loop {
+            let e = next_core_event(&mut events).await;
+            if e.method == MessageDelta::METHOD {
+                deltas.push_str(e.params["text"].as_str().unwrap());
+            }
+            if e.method == TurnFinished::METHOD {
+                assert_eq!(e.params["outcome"]["status"], "completed", "{}", e.params);
+                return deltas;
+            }
+        }
+    };
+    assert_eq!(turn("stamp hi").await, "use the toolStamped HI.");
+    std::fs::write(
+        dir.path().join("state/shared/switch.json"),
+        r#"{ "current": "b" }"#,
+    )
+    .unwrap();
+    assert_eq!(turn("again").await, "from b");
+
+    let msgs = call(SessionMessages::METHOD, json!({ "session_id": sid })).await;
+    let msgs = msgs["messages"].as_array().unwrap();
+    assert_eq!(msgs[1]["tool_calls"][0]["arguments"], r#"{"word":"hi"}"#);
+    assert_eq!(msgs[2]["content"], "HI");
+
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 3);
+    assert_eq!(seen[0].0, "bearer ka");
+    assert_eq!(seen[0].1["model"], "m1");
+    assert_eq!(seen[0].1["stream_options"]["include_usage"], true);
+    assert!(
+        seen[0].1["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["function"]["name"] == "stamp")
+    );
+    // The tool round trip in OpenAI's shape.
+    let m = &seen[1].1["messages"];
+    let n = m.as_array().unwrap().len();
+    assert_eq!(m[n - 2]["tool_calls"][0]["function"]["name"], "stamp");
+    assert_eq!(m[n - 1]["role"], "tool");
+    assert_eq!(m[n - 1]["tool_call_id"], "c1");
+    assert_eq!(m[n - 1]["content"], "HI");
+    // Switched: the other entry, its own key, no usage option.
+    assert_eq!(seen[2].0, "bearer kb");
+    assert_eq!(seen[2].1["model"], "m2");
+    assert!(seen[2].1.get("stream_options").is_none());
+}
