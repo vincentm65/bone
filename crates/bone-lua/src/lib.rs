@@ -91,6 +91,7 @@ static TUI_CAPABILITIES: &[&str] = &[
     "tui.pickers",
     "tui.themes",
     "tui.jobs",
+    "jobs.streaming",
     "tui.session",
 ];
 

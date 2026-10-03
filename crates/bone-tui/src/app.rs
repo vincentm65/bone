@@ -130,6 +130,8 @@ pub struct App {
     pub panels: Vec<Panel>,
     /// The panel with the keyboard (see `focused_panel`).
     pub panel_focus: Option<String>,
+    /// Streaming jobs from Lua (`bone.job`).
+    pub jobs: crate::jobs::Jobs,
     /// Text highlighted with the mouse.
     pub selection: Option<crate::selection::Selection>,
     /// Text to put on the system clipboard after the next draw.
@@ -192,6 +194,7 @@ impl App {
             popups: Vec::new(),
             panels: Vec::new(),
             panel_focus: None,
+            jobs: Default::default(),
             selection: None,
             clipboard: None,
             prompt_history: Vec::new(),
@@ -253,6 +256,11 @@ impl App {
             let r = fut.await;
             let _ = tx.send(AppEvent(Box::new(move |app| then(app, r))));
         });
+    }
+
+    /// Where background tasks send work for the UI thread.
+    pub fn event_sender(&self) -> mpsc::UnboundedSender<AppEvent> {
+        self.tx.clone()
     }
 
     pub fn apply(&mut self, ev: AppEvent) {

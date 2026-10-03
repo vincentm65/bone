@@ -126,6 +126,7 @@ dependencies = [
  "bone-proto",
  "crossterm",
  "futures-util",
+ "libc",
  "mlua",
  "ratatui",
  "serde_json",

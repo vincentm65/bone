@@ -140,6 +140,69 @@ function bone.http(req, callback)
   api("wait", { http = req }, callback)
 end
 
+--- A streaming job: a process with a handle. Output reaches the callbacks as
+--- it arrives; the UI never waits.
+---   cmd: a shell command (bash -c) or an argv list { "git", "status" }
+---   opts: { name, cwd, env = { K = "v" }, stdin = "text" or true (keep it
+---     open for job:write), timeout = ms, lines = true (whole lines instead
+---     of chunks), buffer (keep output for on_exit; default when there are
+---     no output callbacks), on_stdout(data, job), on_stderr(data, job),
+---     on_exit(result, job) }
+--- result: job:status() plus { cancelled, timed_out, duration_ms } and,
+--- when buffering, { stdout, stderr, truncated }.
+--- Returns a handle: job.id, job:cancel(), job:write(data),
+--- job:close_stdin(), job:status(), job:running().
+local Job = {}
+Job.__index = Job
+
+local function job_handle(id)
+  return setmetatable({ id = id }, Job)
+end
+
+function Job:cancel()
+  return api("job_cancel", self.id)
+end
+function Job:write(data)
+  return api("job_write", self.id, data)
+end
+function Job:close_stdin()
+  return api("job_close_stdin", self.id)
+end
+--- { id, name, cmd, pid, state, running, elapsed_ms, stdout_bytes,
+--- stderr_bytes, code, signal, error }, or nil once forgotten.
+function Job:status()
+  return api("job_status", self.id)
+end
+function Job:running()
+  local s = api("job_status", self.id)
+  return s ~= nil and s.running
+end
+
+bone.job = {
+  _handle = job_handle,
+  start = function(cmd, opts)
+    return job_handle(api("job_start", cmd, opts or {}))
+  end,
+  --- The handle of a known job, or nil.
+  get = function(id)
+    if api("job_status", id) then
+      return job_handle(id)
+    end
+  end,
+  --- Running jobs and the last few finished ones, oldest first.
+  list = function()
+    return api("job_list")
+  end,
+  --- Cancel every running job.
+  cancel_all = function()
+    for _, s in ipairs(api("job_list")) do
+      if s.running then
+        api("job_cancel", s.id)
+      end
+    end
+  end,
+}
+
 --- Run fn after `ms` milliseconds.
 function bone.defer(ms, fn)
   api("wait", { sleep = ms }, function()

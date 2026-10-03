@@ -188,6 +188,7 @@ impl App {
             "title": self.chats[self.current].title(),
             "popup": self.popup_name(),
             "panel": self.focused_panel().map(|p| p.id.clone()),
+            "jobs": self.jobs.running(),
             "spinner": spinner().to_string(),
             "width": width_cols,
             "session": self.session_ctx(Some(self.current)),

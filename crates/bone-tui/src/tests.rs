@@ -1998,3 +1998,118 @@ async fn lua_reads_turns_items_and_sessions() {
         vec![json!({ "session_id": "s-new" })]
     );
 }
+
+impl Harness {
+    /// Keep handling events until the Lua expression `cond` is true.
+    async fn until(&mut self, cond: &str) {
+        let code = format!("={cond}");
+        for _ in 0..200 {
+            if self.lua(&code).await == "true" {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("timed out waiting for {cond}: {}", self.message());
+    }
+}
+
+#[tokio::test]
+async fn jobs_stream_output_and_report_how_they_end() {
+    let mut h = Harness::blank().await;
+    assert_eq!(
+        h.lua("=bone.has_capability('jobs.streaming')").await,
+        "true"
+    );
+    h.app.message = None;
+    h.lua(
+        r#"
+        events = {}
+        bone.on("job/started", function(ev) events[#events + 1] = "start:" .. ev.name end)
+        bone.on("job/finished", function(ev) events[#events + 1] = "end:" .. ev.name .. ":" .. ev.state end)
+        out, err = {}, {}
+        j = bone.job.start("printf 'a\\nb\\303'; sleep 0.1; printf 'c\\n' >&2; printf '\\251'; exit 3", {
+          name = "t", lines = true,
+          on_stdout = function(l, job) out[#out + 1] = l; seen_id = job.id end,
+          on_stderr = function(l) err[#err + 1] = l end,
+          on_exit = function(r, job) res = r end,
+        })
+        "#,
+    )
+    .await;
+    assert_eq!(h.message(), "");
+    h.until("res ~= nil").await;
+    for (code, want) in [
+        ("=table.concat(out, '|')", "\"a|bé\""),
+        ("=table.concat(err, '|')", "\"c\""),
+        ("=res.code .. res.state", "\"3exited\""),
+        ("=res.stdout", "nil"),
+        ("=res.stdout_bytes", "5"),
+        ("=seen_id == j.id", "true"),
+        ("=j:running()", "false"),
+        ("=j:status().state", "\"exited\""),
+        ("=table.concat(events, ',')", "\"start:t,end:t:exited\""),
+    ] {
+        assert_eq!(h.lua(code).await, want, "{code}");
+    }
+
+    // Without output callbacks the output is kept; stdin, env and cwd.
+    h.lua(
+        r#"
+        k = bone.job.start({ "cat" }, { stdin = true, on_exit = function(r) kept = r end })
+        k:write("hi\n")
+        k:close_stdin()
+        bone.job.start("cat; echo $FOO; pwd", { stdin = "xyz\n", env = { FOO = "bar" }, cwd = "/",
+          on_exit = function(r) piped = r.stdout end })
+        "#,
+    )
+    .await;
+    h.until("kept ~= nil and piped ~= nil").await;
+    assert_eq!(h.lua("=kept.stdout == 'hi\\n' and kept.code").await, "0");
+    assert_eq!(h.lua("=piped == 'xyz\\nbar\\n/\\n'").await, "true");
+}
+
+#[tokio::test]
+async fn jobs_cancel_time_out_and_fail() {
+    let mut h = Harness::blank().await;
+    // The sleep holds stdout open: cancelling must stop the whole group.
+    h.lua(
+        r#"
+        c = bone.job.start("sleep 30; echo late", { on_exit = function(r) cancelled = r end })
+        t = bone.job.start("sleep 30", { timeout = 100, on_exit = function(r) timed = r end })
+        f = bone.job.start({ "/nonexistent/bone-test" }, { on_exit = function(r) failed = r end })
+        "#,
+    )
+    .await;
+    assert_eq!(
+        h.lua("=#bone.job.list() .. ':' .. c:status().state").await,
+        "\"3:running\""
+    );
+    h.until("c:status().pid ~= nil").await;
+    assert_eq!(h.lua("=c:cancel()").await, "true");
+    h.until("cancelled ~= nil and timed ~= nil and failed ~= nil")
+        .await;
+    for (code, want) in [
+        ("=cancelled.cancelled and cancelled.state", "\"cancelled\""),
+        ("=cancelled.stdout", "\"\""),
+        ("=cancelled.duration_ms < 1900", "true"),
+        ("=timed.timed_out and timed.state", "\"timed_out\""),
+        ("=failed.state", "\"failed\""),
+        ("=c:cancel()", "false"),
+    ] {
+        assert_eq!(h.lua(code).await, want, "{code}");
+    }
+    assert!(h.lua("=failed.error").await.contains("cannot run"));
+
+    for (code, want) in [
+        ("bone.job.start(42)", "shell command or an argv list"),
+        ("bone.job.start({})", "argv list is empty"),
+        ("bone.job.start('true', { timeout = -1 })", "timeout"),
+        (
+            "bone.job.start('true', { on_exit = 1 })",
+            "must be a function",
+        ),
+    ] {
+        h.lua(code).await;
+        assert!(h.message().contains(want), "{code}: {}", h.message());
+    }
+}

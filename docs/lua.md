@@ -40,7 +40,7 @@ The current capability names include `core.config`, `core.tools`,
 `core.health`, and, in the TUI, `tui.keymaps`, `tui.input`, `tui.events`,
 `tui.local_events`, `tui.commands`, `tui.command_specs`, `tui.options`,
 `tui.dynamic_options`, `tui.request`, `tui.prompt`, `tui.prompt_edit`, `tui.chat`, `tui.chat_data`, `tui.windows`,
-`tui.panels`, `tui.regions`, `tui.views`, `tui.pickers`, `tui.themes`, `tui.jobs`, and
+`tui.panels`, `tui.regions`, `tui.views`, `tui.pickers`, `tui.themes`, `tui.jobs`, `jobs.streaming` and
 `tui.session`. Both sides also report `lua`, `json`, and `modules`.
 Capability names describe the contract, not the internal Rust module layout.
 
@@ -77,7 +77,7 @@ planned; those capabilities are not available until reported by
 | Options | `bone.o` exposes the fixed, typed Rust options. v1 values are booleans or non-negative numbers; unknown names and wrong types are errors. | Dynamic boolean, integer, number and string options, defaults, metadata, deletion and change callbacks are available through `tui.dynamic_options`. |
 | Panels | `bone.ui.win` is a Lua-drawn overlay, and regions/views customize the existing chat layout. Both keep working unchanged. | Persistent panels with IDs, docking, sizing, scrolling, focus, render/key callbacks and lifecycle events are available through `tui.panels` (`bone.ui.panel`). |
 | Prompt and chat | `bone.api.prompt_get`/`prompt_set` read and replace the whole prompt; `bone.chat.items({ kind, last })` lists the on-screen chat's items. | Cursor, range and selection edits (`tui.prompt_edit`, `bone.prompt`) and structured read-only items, turns and sessions with filters (`tui.chat_data`) are available. The TUI stays a prompt, not a file editor. |
-| Jobs | TUI `bone.system`, `bone.http` and `bone.defer` run one background operation and invoke a callback. Core waits are coroutine-based and turn cancellation stops them. v1 has no general process handle or streamed TUI job. | Cancellable, timeout-aware streaming jobs with stdout/stderr and progress (`jobs.streaming`) remain planned. |
+| Jobs | TUI `bone.system`, `bone.http` and `bone.defer` run one background operation and invoke a callback. Core waits are coroutine-based and turn cancellation stops them. v1 has no general process handle or streamed TUI job. | Streaming jobs with handles, stdout/stderr callbacks (chunks or lines), stdin writes, cancellation of the whole process group, timeouts, exit results, status and `job/*` events are available in the TUI through `jobs.streaming` (`bone.job`). |
 | Plugin state | Folder plugins load in name order between runtime defaults and the user's config; `bone.plugins` reports names and `.`/`_` folders are disabled. There is no persistent state store, reload hook or automatic resource cleanup yet. | Init/shutdown, persistent per-plugin state, project configuration and cleanup of owned resources (`plugins.lifecycle`) remain planned. |
 
 The existing detailed sections describe both the compatibility calls and the
@@ -409,6 +409,9 @@ Registration aliases normalize to these canonical names:
 | `panel/updated` | `panel/updated`, `popup/updated` | a window or a panel |
 | `panel/closed` | `panel/closed`, `popup/closed` | a window or a panel |
 
+| `job/started` | `job/started` | `{ id, name, cmd, pid }` |
+| `job/finished` | `job/finished` | the job's exit result (see `bone.job`) |
+
 Prompt events are deduplicated, so unchanged text/cursor/selection state is not emitted.
 `resize` is emitted when terminal dimensions change (and by `Headless:resize`);
 `paste` is emitted for bracketed paste with the active context. Popup lifecycle
@@ -475,6 +478,7 @@ bone.chat.messages(function(messages, err) ... end)  -- from the core
 - `bone.system(cmd, { cwd, stdin, timeout }, function(r, err) ... end)`: run a command in the background; the callback gets `{ code, stdout, stderr }` (or `{ timed_out = true }`), or `nil, err`. The UI never waits.
 - `bone.http(req, function(res, err) ... end)`: an HTTP request in the background (same fields as the core's).
 - `bone.defer(ms, fn)`: run `fn` later.
+- `bone.job.start(cmd, opts)` → job: a streaming job (below).
 - `bone.notify(msg, level)`: `level` is `"info"` (default) or `"error"`. `print(...)` is `bone.notify`.
 - `bone.press("ctrl+c")`: press a key. `bone.action("scroll_top")`: run a builtin action.
 - `bone.api.prompt_get()`, `bone.api.prompt_set(text)`
@@ -497,6 +501,32 @@ bone.chat.messages(function(messages, err) ... end)  -- from the core
 - `bone.ui.pager(content, { title, width, height })` → handle: scrollable text in a focused window. `content` is a string (wrapped; `#` lines are headings) or a list of lines. `up`/`down`/wheel, `pageup`/`pagedown`, `home`/`end`, `esc` or `q` closes. `handle:set(content)`, `handle:close()`.
 - `bone.ui.help(topic)` and `bone.ui.health()`: what `/help {topic}` and `/health` call (in `runtime/tui/defaults.lua`). The docs are in `bone._docs`; the TUI's built-in checks come from `bone.api.health()`.
 - `bone.ui.box(lines, { title, title_hl, border_hl, width, pad, chars })` → the lines inside a rounded border (`PopupBorder`/`PopupTitle` by default). Only used if you call it.
+
+### Jobs
+
+`bone.system` runs a command and calls back once with all of its output. `bone.job.start` gives a handle to a running process instead: output reaches Lua as it arrives, you can write to it, cancel it, give it a timeout and ask how it is doing. The UI never waits for a job.
+
+```lua
+local job = bone.job.start("cargo build --color=never", {
+  name = "build",
+  lines = true,                               -- whole lines instead of chunks
+  on_stdout = function(line, job) ... end,
+  on_stderr = function(line, job) progress = line end,
+  on_exit = function(r, job)
+    bone.notify(r.state == "exited" and ("build: exit " .. r.code) or ("build " .. r.state))
+  end,
+  timeout = 10 * 60 * 1000,
+})
+bone.keymap.set("ctrl+x", function() job:cancel() end)
+```
+
+- `cmd`: a shell command (run with `bash -c`) or an argv list such as `{ "git", "status", "--short" }`.
+- `opts`: `name`; `cwd`; `env` (variables added to the TUI's environment); `stdin` (a string to feed and close, or `true` to keep it open for `job:write(data)` / `job:close_stdin()`); `timeout` (ms); `lines`; `buffer` (keep the output for `on_exit`; the default when neither output callback is given); `on_stdout(data, job)`, `on_stderr(data, job)` and `on_exit(result, job)`.
+- Output is text: a character split between two reads is held back until it is complete, and invalid UTF-8 becomes `�`. In line mode `\r\n` and `\n` end lines and a last line without one arrives before `on_exit`.
+- `job:cancel()` sends SIGTERM to the job's process group (everything it started), then SIGKILL two seconds later. A timeout does the same. Quitting the TUI kills running jobs.
+- `job:status()` (and each entry of `bone.job.list()`): `{ id, name, cmd, pid, state, running, elapsed_ms, stdout_bytes, stderr_bytes }`, plus `code`, `signal` and `error` once it has ended. `state` is `"running"`, `"exited"`, `"cancelled"`, `"timed_out"` or `"failed"` (it could not start; see `error`).
+- `on_exit` and the `job/finished` event get the status plus `cancelled`, `timed_out`, `duration_ms` and, when buffering, `stdout`, `stderr` and `truncated` (only the last 4 MiB of each stream are kept).
+- `bone.job.list()` has running jobs and the last 32 finished ones; `bone.job.get(id)` returns a handle; `bone.job.cancel_all()`. `job:running()` is a shortcut. The statusline context's `jobs` is the number running.
 
 ### Colors
 
@@ -644,7 +674,7 @@ bone.ui.divider = function(ctx)   -- the line between the chat and the prompt
 end
 ```
 
-Each returns one line (`"%="` is a blank stretch); the row exists only while the function is defined. The statusline context has `title`, `popup` (the active keymap context unless it is `main`: `"popup"` while a focused window is open), `panel` (the focused panel's id, else nil), `spinner`, `width` and `session` (`{ title, cwd, running, elapsed, usage = { input, output } }` or nil); the divider context has `spinner`, `width` and `session`. If one errors, its row is blank until it is redefined.
+Each returns one line (`"%="` is a blank stretch); the row exists only while the function is defined. The statusline context has `title`, `popup` (the active keymap context unless it is `main`: `"popup"` while a focused window is open), `panel` (the focused panel's id, else nil), `jobs` (running jobs), `spinner`, `width` and `session` (`{ title, cwd, running, elapsed, usage = { input, output } }` or nil); the divider context has `spinner`, `width` and `session`. If one errors, its row is blank until it is redefined.
 
 #### Helpers
 

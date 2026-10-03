@@ -13,6 +13,7 @@ mod commands;
 mod data;
 mod editor;
 mod headless;
+mod jobs;
 mod keymap;
 mod keys;
 mod layout;

@@ -84,23 +84,30 @@ extension contract plus dynamic contexts and input, is committed as
 committed as `11dd866`. Phase 3, stateful panels (`tui.panels`), is
 committed as `e13978c`.
 
-Phase 4, **prompt and chat data**, is complete in the current worktree. It
-adds:
+Phase 4, prompt and chat data (`tui.prompt_edit`, `tui.chat_data`), is
+committed as `0462c61`.
 
-- `bone.prompt` (`tui.prompt_edit`): `{ row, col }` or offset positions,
-  cursor moves, insertion, range reads and replacements, and a drawn
-  selection that typing replaces, deleting removes and motion drops;
-  `prompt/changed` reports the selection;
-- `bone.chat` (`tui.chat_data`): read-only item queries with kind, tool name,
-  turn, running, error, index-range and first/last filters; per-turn
-  summaries with outcomes; session and open-chat info; and
-  `bone.chat.messages` for the core's stored transcript; and
-- unit tests for positions/ranges/selection and turn numbering, plus
-  integration tests for prompt edits, selection drawing and chat queries.
+Phase 5, **cancellable streaming jobs** (`jobs.streaming`, TUI side), is
+complete in the current worktree. It adds:
 
-Remaining phases cover cancellable streaming jobs, plugin lifecycle/state,
-and representative plugins plus final validation. The out-of-scope
-boundaries below continue to apply.
+- `bone.job.start(cmd, opts)` with shell or argv commands, `cwd`, `env`,
+  `stdin` (text, or open for `job:write`/`close_stdin`), timeouts, and
+  `on_stdout`/`on_stderr` callbacks in chunk or line mode with UTF-8-safe
+  decoding;
+- cancellation and timeouts that stop the job's whole process group
+  (SIGTERM, then SIGKILL after a grace period), and group cleanup when the
+  TUI quits;
+- exit results (state, code, signal, duration, optional kept output),
+  `job:status()`, `bone.job.list()`/`get`/`cancel_all`, `job/started` and
+  `job/finished` events and a `jobs` count in the statusline context; and
+- unit tests for decoding, line splitting and output limits, and
+  integration tests with real processes for streaming, stdin, env/cwd,
+  cancellation of grandchildren, timeouts, spawn failures and errors.
+
+`bone.system`, `bone.http` and `bone.defer` keep their v1 behavior, and
+core-side waits are unchanged. Remaining phases cover plugin
+lifecycle/state and representative plugins plus final validation. The
+out-of-scope boundaries below continue to apply.
 
 1. **Extension contract and compatibility** — publish `bone.api_version`,
    capability reporting, ownership rules, and the baseline contracts for
