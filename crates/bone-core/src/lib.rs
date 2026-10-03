@@ -25,7 +25,7 @@ use bone_proto::methods::{
     SessionFork, SessionForkParams, SessionList, SessionMessages, SessionMessagesResult,
     SessionRef, SessionRename, SessionRenameParams, SessionUpdated, SessionUpdatedParams,
     SkillList, TemplateExpand, TemplateExpandParams, TemplateExpandResult, TemplateList,
-    TurnCancel, TurnStart, TurnStartParams, TurnStartResult,
+    TurnCancel, TurnStart, TurnStartParams, TurnStartResult, TurnSteer,
 };
 use bone_proto::types::SessionInfo;
 use bone_proto::{Method, Notification, RpcError};
@@ -207,6 +207,22 @@ impl Core {
             }
             TurnStart::METHOD => dispatch::<TurnStart, _>(params, |p| self.turn_start(p)),
             TurnCancel::METHOD => dispatch::<TurnCancel, _>(params, |p| self.turn_cancel(p)),
+            TurnSteer::METHOD => dispatch::<TurnSteer, _>(params, |p| {
+                if p.text.trim().is_empty() {
+                    return Err(RpcError::invalid_params("text is empty"));
+                }
+                let session = self.inner.session(&p.session_id).map_err(session_error)?;
+                let mut s = session.lock().unwrap();
+                match &mut s.active {
+                    Some(a) if !a.closing && !a.cancel.is_cancelled() => {
+                        a.steer.push(p.text);
+                        Ok(())
+                    }
+                    _ => Err(RpcError::invalid_params(
+                        "no turn is running; start one with turn/start",
+                    )),
+                }
+            }),
             HealthCheck::METHOD => {
                 decode::<HealthCheck>(params)?;
                 Ok(serde_json::to_value(health::check(&self.inner).await).unwrap_or_default())
@@ -506,6 +522,8 @@ impl Core {
             s.active = Some(ActiveTurn {
                 turn_id,
                 cancel: cancel.clone(),
+                steer: Vec::new(),
+                closing: false,
             });
             (turn_id, cancel)
         };

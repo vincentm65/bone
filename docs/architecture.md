@@ -40,7 +40,7 @@
 1. The TUI sends `turn/start`. The core marks the session busy and returns; the agent task runs `turn_start` hooks, saves the user message and emits `turn/started`.
 2. It builds the request: the system prompt (Lua may supply it), then the transcript, passed through `request` hooks. It streams the completion, emitting `message/delta`, runs `message` hooks on the reply and saves it as the assistant message (`message/completed`).
 3. For each tool call, in order (consecutive read-only calls run at the same time; their results are still saved in order): `tool_call` hooks (which may deny or rewrite the call, or ask the user; asking for approval is just the opt-in `approve` plugin doing that), the tool itself (built-in or Lua), then `tool_result` hooks. Each result is saved and emitted (`tool/finished`).
-4. The loop goes back to step 2 until the model answers without tools. Cancellation can land at any point: partial text is kept, and every unanswered tool call gets a "cancelled" result so the transcript stays valid, and any open `bone.ask` gets `nil`. `turn_end` hooks run last.
+4. The loop goes back to step 2 until the model answers without tools. Messages a client steers into the running turn (`turn/steer`) are added before the next model call, and one that arrives during the final answer gets its own step. Cancellation can land at any point: partial text is kept, and every unanswered tool call gets a "cancelled" result so the transcript stays valid, and any open `bone.ask` gets `nil`. `turn_end` hooks run last.
 
 ## Storage
 

@@ -25,7 +25,7 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 
 | Key | Does |
 |---|---|
-| `enter` | send (or run a `/command`) |
+| `enter` | send (or run a `/command`). While a turn runs, the message joins it at its next step (it shows once it has); if the turn ends first, it comes back to the prompt |
 | `alt+enter`, `shift+enter`, `ctrl+j` | new line |
 | `ctrl+c` | cancel the running turn; else clear the prompt; else press twice to quit |
 | `ctrl+d` | quit (on an empty prompt) |

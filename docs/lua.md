@@ -516,7 +516,7 @@ local id = bone.on("turn/finished", function(ev) ... end)
 bone.off(id)
 ```
 
-- Every server notification, by method, with its params: `turn/started`, `message/delta`, `message/completed`, `tool/started`, `tool/finished`, `ask/requested`, `ask/resolved`, `turn/finished`.
+- Every server notification, by method, with its params: `turn/started`, `turn/steered`, `message/delta`, `message/completed`, `tool/started`, `tool/finished`, `ask/requested`, `ask/resolved`, `turn/finished`.
 - `ready`: after `tui.lua` has run.
 - `submit`: `{ text }` before a message is sent. Return `false` to cancel, or a string to send instead.
 

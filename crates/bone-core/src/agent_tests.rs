@@ -18,6 +18,8 @@ use crate::{Core, Event};
 
 enum Step {
     Reply(Completion),
+    /// Reply after this many milliseconds.
+    Delay(u64, Completion),
     /// Stream this text, then hang until cancelled.
     Hang(String),
     Fail(String),
@@ -57,6 +59,13 @@ impl Provider for Scripted {
         Box::pin(async move {
             match step {
                 Step::Reply(c) => {
+                    if !c.content.is_empty() {
+                        on_delta(Delta::Text(c.content.clone()));
+                    }
+                    Ok(c)
+                }
+                Step::Delay(ms, c) => {
+                    tokio::time::sleep(Duration::from_millis(ms)).await;
                     if !c.content.is_empty() {
                         on_delta(Delta::Text(c.content.clone()));
                     }
@@ -1722,4 +1731,86 @@ async fn sessions_can_be_renamed_forked_and_deleted() {
         .map(|s| s.session_id)
         .collect();
     assert!(!left.contains(&sid) && left.len() == 2);
+}
+
+// ---- steering a running turn ------------------------------------------------------
+
+fn later(ms: u64, s: &str) -> Step {
+    Step::Delay(
+        ms,
+        Completion {
+            content: s.into(),
+            ..Default::default()
+        },
+    )
+}
+
+#[tokio::test]
+async fn steered_messages_join_before_the_next_model_call() {
+    let mut h = Harness::with_lua(
+        r#"bone.tool.register { name = "slow", run = function() bone.sleep(200) return "slow done" end }"#,
+        vec![calls(&[("c1", "slow", json!({}))]), text("done")],
+    )
+    .await;
+    h.start("go").await;
+    h.until::<ToolStarted>().await;
+    h.call::<TurnSteer>(TurnSteerParams {
+        session_id: h.session_id.clone(),
+        text: "also check the README".into(),
+    })
+    .await
+    .unwrap();
+    let steered = h.until::<TurnSteered>().await;
+    assert_eq!(steered.text, "also check the README");
+    h.until::<TurnFinished>().await;
+    let t = h.transcript().await;
+    assert_eq!(
+        t[3],
+        ChatMessage::User {
+            content: "also check the README".into()
+        }
+    );
+    // The model saw it on its next call.
+    assert_eq!(h.provider.seen.lock().unwrap()[1].last(), Some(&t[3]));
+}
+
+#[tokio::test]
+async fn a_message_steered_during_the_last_answer_still_gets_one() {
+    let mut h = Harness::new(vec![later(200, "first answer"), text("second answer")]).await;
+    h.start("go").await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    h.call::<TurnSteer>(TurnSteerParams {
+        session_id: h.session_id.clone(),
+        text: "and one more thing".into(),
+    })
+    .await
+    .unwrap();
+    h.until::<TurnFinished>().await;
+    let t = h.transcript().await;
+    let texts: Vec<String> = t
+        .iter()
+        .map(|m| match m {
+            ChatMessage::User { content } => format!("user: {content}"),
+            ChatMessage::Assistant { content, .. } => format!("assistant: {content}"),
+            other => format!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        texts,
+        [
+            "user: go",
+            "assistant: first answer",
+            "user: and one more thing",
+            "assistant: second answer"
+        ]
+    );
+    // With no turn running there is nothing to steer.
+    let e = h
+        .call::<TurnSteer>(TurnSteerParams {
+            session_id: h.session_id.clone(),
+            text: "late".into(),
+        })
+        .await
+        .unwrap_err();
+    assert!(e.message.contains("no turn is running"), "{e:?}");
 }

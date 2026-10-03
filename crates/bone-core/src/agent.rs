@@ -14,7 +14,7 @@ use std::time::Duration;
 use bone_proto::methods::{
     MessageCompleted, MessageCompletedParams, MessageDelta, MessageDeltaParams, ToolFinished,
     ToolFinishedParams, ToolStarted, ToolStartedParams, TurnFinished, TurnFinishedParams,
-    TurnStarted, TurnStartedParams,
+    TurnStarted, TurnStartedParams, TurnSteered,
 };
 use bone_proto::types::{ChatMessage, DeltaKind, ToolCall, TurnId, TurnOutcome, Usage};
 use serde_json::{Value, json};
@@ -192,6 +192,7 @@ impl Turn<'_> {
             system = p.to_owned();
         }
         loop {
+            self.take_steer()?;
             let mut messages = vec![ChatMessage::System {
                 content: system.clone(),
             }];
@@ -332,6 +333,14 @@ impl Turn<'_> {
             }
             self.complete_message(content, reasoning, calls.clone(), completion.usage)?;
             if calls.is_empty() {
+                // A message steered in meanwhile gets an answer before the
+                // turn ends; otherwise no more are accepted.
+                let mut s = self.session.lock().unwrap();
+                match &mut s.active {
+                    Some(a) if !a.steer.is_empty() => continue,
+                    Some(a) => a.closing = true,
+                    None => {}
+                }
                 return Ok(());
             }
 
@@ -391,6 +400,28 @@ impl Turn<'_> {
                 return Err(Stop::Cancelled);
             }
         }
+    }
+
+    /// Add the waiting `turn/steer` messages to the transcript.
+    fn take_steer(&self) -> Result<(), Stop> {
+        let texts = {
+            let mut s = self.session.lock().unwrap();
+            match &mut s.active {
+                Some(a) => std::mem::take(&mut a.steer),
+                None => Vec::new(),
+            }
+        };
+        for text in texts {
+            self.record(ChatMessage::User {
+                content: text.clone(),
+            })?;
+            self.inner.emit::<TurnSteered>(TurnStartedParams {
+                session_id: self.session_id.clone(),
+                turn_id: self.turn_id,
+                text,
+            });
+        }
+        Ok(())
     }
 
     fn complete_message(

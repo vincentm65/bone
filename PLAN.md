@@ -408,3 +408,27 @@ Protocol: every addition is a new method or event. Existing methods keep
 their shapes, and each addition gets golden tests and `docs/protocol.md`
 entries. The protocol version stays the same, and clients check the
 `core.*` capabilities, which the handshake will report.
+
+## Harness essentials
+
+Core features that cannot be plugins, added after the agent-side roadmap:
+
+- **Parallel tool calls**: consecutive calls of read-only tools (`read_file`,
+  Lua tools with `parallel = true`, MCP tools marked `readOnlyHint`) run
+  together, up to 8; other calls run alone and in order; results are saved
+  in call order. `bone.config.parallel_tools = false` turns it off.
+- **Tool output cap**: every result is cut to `bone.config.max_tool_output`
+  bytes (default 100000), start and end kept.
+- **Concurrent requests**: after the handshake each request runs on its own
+  task; replies come back by id, and a request's events may precede its
+  reply (the TUI's `bone.model` handles that).
+- **Session management**: `session/rename` (a title kept in a sidecar file),
+  `session/fork` (a copy, optionally from before turn N, recording its
+  parent) and `session/delete` (not while a turn runs; `session/deleted`);
+  `/rename`, `/fork [N]` and `/delete yes` in the TUI.
+- **Steering**: `turn/steer` adds a message to the running turn before its
+  next model call (`turn/steered`); one arriving during the final answer gets
+  another step. The TUI sends typing during a turn this way and gives back
+  messages that never joined.
+
+Not done: built-in search tools (fine as Lua or MCP tools) and images.

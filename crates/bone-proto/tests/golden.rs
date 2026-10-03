@@ -296,6 +296,14 @@ fn requests() {
         ModelRequest { request_id: 7 },
     );
     exchange::<ModelCancel>(21, ModelRequest { request_id: 7 }, ());
+    exchange::<TurnSteer>(
+        29,
+        TurnSteerParams {
+            session_id: SID.into(),
+            text: "also update the README".into(),
+        },
+        (),
+    );
     exchange::<SessionRename>(
         26,
         SessionRenameParams {
@@ -455,6 +463,11 @@ fn events() {
             output_tokens: 4,
         }),
         error: None,
+    });
+    event::<TurnSteered>(TurnStartedParams {
+        session_id: SID.into(),
+        turn_id: 1,
+        text: "also update the README".into(),
     });
     event::<SessionDeleted>(SessionRef {
         session_id: SID.into(),

@@ -1030,8 +1030,30 @@ impl App {
         }
         let buf = self.current;
         let chat = &mut self.chats[buf];
-        if chat.turn.is_some() || chat.starting {
-            return self.error("A turn is still running (ctrl+c cancels it)");
+        // While a turn runs, the message joins it at its next step.
+        if chat.turn.is_some()
+            && let Some(session_id) = chat.session_id().map(str::to_owned)
+        {
+            chat.queued.push(text.clone());
+            self.prompt.clear();
+            self.prompt_history_pos = None;
+            if self.prompt_history.last() != Some(&text) {
+                self.prompt_history.push(text.clone());
+            }
+            let params = TurnSteerParams {
+                session_id,
+                text: text.clone(),
+            };
+            self.request::<TurnSteer>(params, move |app, r| {
+                if let Err(e) = r {
+                    app.unqueue(buf, &text);
+                    app.error(format!("not sent ({e}); it is back in the prompt"));
+                }
+            });
+            return self.info("queued for the turn's next step");
+        }
+        if chat.starting {
+            return self.error("A turn is still starting");
         }
         chat.starting = true;
         self.prompt.clear();
@@ -1349,10 +1371,52 @@ impl App {
             .with_chat(&p.session_id, |c| c.tool_started(&p)));
         on!(ToolFinished, |p| self
             .with_chat(&p.session_id, |c| c.tool_finished(&p)));
-        on!(TurnFinished, |p| self
-            .with_chat(&p.session_id, |c| c.turn_finished(&p)));
+        on!(TurnSteered, |p| self
+            .with_chat(&p.session_id, |c| c.steered(&p.text)));
+        on!(TurnFinished, |p| {
+            self.with_chat(&p.session_id, |c| c.turn_finished(&p));
+            self.give_back_queued(&p.session_id);
+        });
         on!(SessionUpdated, |p| self.reload_chat(p.session_id));
         on!(SessionDeleted, |p| self.session_deleted(&p.session_id));
+    }
+
+    /// Messages that never joined a turn go back to the prompt.
+    fn give_back_queued(&mut self, session_id: &str) {
+        let Some(buf) = self.chat_by_session(session_id) else {
+            return;
+        };
+        let left = std::mem::take(&mut self.chats[buf].queued);
+        if left.is_empty() {
+            return;
+        }
+        for text in left {
+            self.unqueue_text(buf, text);
+        }
+        self.info("the turn ended before your message joined it; it is back in the prompt");
+    }
+
+    fn unqueue(&mut self, buf: BufferId, text: &str) {
+        if let Some(c) = self.chat_mut(buf)
+            && let Some(i) = c.queued.iter().position(|q| q == text)
+        {
+            c.queued.remove(i);
+            self.unqueue_text(buf, text.to_owned());
+        }
+    }
+
+    /// Put an unsent message back in the prompt (after what is there).
+    fn unqueue_text(&mut self, buf: BufferId, text: String) {
+        if buf != self.current {
+            return;
+        }
+        let now = self.prompt.text();
+        let joined = if now.trim().is_empty() {
+            text
+        } else {
+            format!("{now}\n{text}")
+        };
+        self.set_prompt_text(&joined);
     }
 
     /// A session was deleted: its chat becomes a fresh one (chats keep their

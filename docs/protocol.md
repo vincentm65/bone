@@ -46,6 +46,7 @@ After `initialize`, the server runs each request on its own task: replies carry 
 | `session/fork` | `{ session_id, before_turn? }` | `SessionInfo` of a new session holding a copy of the transcript (with `before_turn = N`, only what came before the Nth user message), its `parent` set. The original is untouched |
 | `session/delete` | `{ session_id }` | `null`; the session and its file are gone and `session/deleted` goes to every client. An error while a turn runs |
 | `turn/start` | `{ session_id, text }` | `{ turn_id }`, returned at once; the turn runs in the background |
+| `turn/steer` | `{ session_id, text }` | `null`; the message joins the running turn before its next model call (`turn/steered` says when; if it arrives while the model gives its final answer, the turn takes one more step). An error when no turn is running or it is ending. Steered messages skip `turn_start` hooks |
 | `turn/cancel` | `{ session_id }` | `null` (no-op if nothing is running) |
 | `ask/respond` | `{ ask_id, answer }` | `null`; error if no question with that id is open |
 | `health/check` | `{}` | `[{ name, status: "ok" \| "warn" \| "error", message }]`: the core's checks (provider, API key, reachability, sessions folder, Lua) and core Lua's `bone.health` checks |
@@ -86,6 +87,7 @@ Every event carries `session_id` (except `echoed`, `ask/resolved`, `core/reloade
 | `tool/finished` | `{ call_id, output, is_error }` | its result, as the model will see it |
 | `ask/requested` | `{ ask_id, question }` | core Lua (a hook or tool) called `bone.ask(question)` and waits; answer with `ask/respond`. `question` is whatever the Lua passed, e.g. the approve plugin's `{ kind: "approval", title, tool, arguments }` |
 | `ask/resolved` | `{ ask_id, answer }` | answered by some client, or `answer: null` if the turn was cancelled first |
+| `turn/steered` | `{ text }` | a `turn/steer` message joined the running turn's transcript (show it as a user message) |
 | `turn/finished` | `{ outcome: { status: "completed" \| "cancelled" \| "failed", message? } }` | the turn is over |
 | `core/reloaded` | `ReloadResult` | the core switched to a newly loaded Lua configuration (no `session_id`) |
 | `model/delta` | `{ request_id, kind, text }` | streamed output of a `model/complete` call (no `session_id`) |

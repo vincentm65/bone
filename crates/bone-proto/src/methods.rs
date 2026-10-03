@@ -64,6 +64,7 @@ pub const METHODS: &[&str] = &[
     SessionDelete::METHOD,
     TurnStart::METHOD,
     TurnCancel::METHOD,
+    TurnSteer::METHOD,
     AskRespond::METHOD,
     HealthCheck::METHOD,
     CoreReload::METHOD,
@@ -91,6 +92,7 @@ pub const NOTIFICATIONS: &[&str] = &[
     AskRequested::METHOD,
     AskResolved::METHOD,
     TurnFinished::METHOD,
+    TurnSteered::METHOD,
     CoreReloaded::METHOD,
     SessionUpdated::METHOD,
     SessionDeleted::METHOD,
@@ -212,12 +214,24 @@ method!(
     TurnCancel, "turn/cancel", SessionRef => ()
 );
 method!(
+    /// Add a user message to the session's running turn: it joins before
+    /// the turn's next model call ([`TurnSteered`] says when). An error if
+    /// no turn is running; use `turn/start` then.
+    TurnSteer, "turn/steer", TurnSteerParams => ()
+);
+method!(
     /// Answer an [`AskRequested`] event.
     AskRespond, "ask/respond", AskRespondParams => ()
 );
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnStartParams {
+    pub session_id: SessionId,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TurnSteerParams {
     pub session_id: SessionId,
     pub text: String,
 }
@@ -457,6 +471,10 @@ notification!(
     AskResolved, "ask/resolved", AskResolvedParams
 );
 notification!(TurnFinished, "turn/finished", TurnFinishedParams);
+notification!(
+    /// A `turn/steer` message joined the running turn's transcript.
+    TurnSteered, "turn/steered", TurnStartedParams
+);
 notification!(
     /// The core switched to a newly loaded Lua configuration.
     CoreReloaded, "core/reloaded", ReloadResult

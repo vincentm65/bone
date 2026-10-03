@@ -2738,3 +2738,39 @@ async fn session_commands_rename_fork_and_delete() {
     assert_eq!(h.message(), "session deleted");
     assert_eq!(h.lua("=bone.chat.session().new").await, "true");
 }
+
+#[tokio::test]
+async fn typing_during_a_turn_steers_it() {
+    let mut h = Harness::new().await;
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    h.input("also the README{enter}").await;
+    assert_eq!(
+        h.requests("turn/steer"),
+        vec![json!({ "session_id": "s-new", "text": "also the README" })]
+    );
+    assert_eq!(h.prompt(), "");
+    assert_eq!(h.message(), "queued for the turn's next step");
+    h.emit::<TurnSteered>(started("s-new", "also the README"))
+        .await;
+    assert!(
+        h.screen(80, 20).contains("› also the README"),
+        "{}",
+        h.screen(80, 20)
+    );
+
+    // One that never joins comes back when the turn ends.
+    h.input("too late{enter}").await;
+    h.emit::<TurnFinished>(finished("s-new", TurnOutcome::Cancelled))
+        .await;
+    assert_eq!(h.prompt(), "too late");
+    assert!(h.message().contains("back in the prompt"));
+
+    // One the core refuses comes back at once.
+    h.input("{ctrl+u}").await;
+    h.emit::<TurnStarted>(started("s-new", "again")).await;
+    *h.fail.lock().unwrap() = Some("turn/steer".into());
+    h.input("refused{enter}").await;
+    assert_eq!(h.prompt(), "refused");
+    assert!(h.message().starts_with("not sent"), "{}", h.message());
+}

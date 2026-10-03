@@ -93,6 +93,9 @@ pub struct ChatBuffer {
     pub usage: Option<Usage>,
     /// A prompt was sent and the turn has not started yet.
     pub starting: bool,
+    /// Messages sent to the running turn (`turn/steer`) that have not joined
+    /// it yet.
+    pub queued: Vec<String>,
     /// How finished turns ended, by the entry index of their user message.
     /// Only turns seen finishing here; loaded history has none.
     pub outcomes: HashMap<usize, TurnOutcome>,
@@ -319,6 +322,14 @@ impl ChatBuffer {
                 error: true,
             }),
         }
+    }
+
+    /// A steered message joined the running turn.
+    pub fn steered(&mut self, text: &str) {
+        if let Some(i) = self.queued.iter().position(|q| q == text) {
+            self.queued.remove(i);
+        }
+        self.push(Entry::User(text.to_owned()));
     }
 
     pub fn notice(&mut self, text: String, error: bool) {

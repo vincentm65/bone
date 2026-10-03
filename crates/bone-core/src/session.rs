@@ -52,6 +52,10 @@ pub struct Session {
 pub struct ActiveTurn {
     pub turn_id: TurnId,
     pub cancel: CancellationToken,
+    /// `turn/steer` messages waiting for the turn's next model call.
+    pub steer: Vec<String>,
+    /// The turn has decided to end; new steer messages are refused.
+    pub closing: bool,
 }
 
 impl Session {
