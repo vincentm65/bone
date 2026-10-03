@@ -77,7 +77,7 @@ impl Headless {
 
     pub fn resize(&mut self, width: u16, height: u16) {
         self.terminal.backend_mut().resize(width, height);
-        self.app.dirty = true;
+        self.app.resize(width, height);
     }
 
     /// Handle replies, server events and key timeouts until nothing has

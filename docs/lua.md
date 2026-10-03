@@ -35,10 +35,11 @@ newer extension point rather than comparing `bone.version`. The core and TUI
 states are separate; a capability in one state does not make it available in
 the other.
 
-The current capability names are `core.config`, `core.tools`,
+The current capability names include `core.config`, `core.tools`,
 `core.hooks`, `core.providers`, `core.jobs`, `core.http_stream`, `core.ask`,
-`core.health`, and, in the TUI, `tui.keymaps`, `tui.input`, `tui.commands`,
-`tui.options`, `tui.request`, `tui.prompt`, `tui.chat`, `tui.windows`,
+`core.health`, and, in the TUI, `tui.keymaps`, `tui.input`, `tui.events`,
+`tui.local_events`, `tui.commands`, `tui.command_specs`, `tui.options`,
+`tui.dynamic_options`, `tui.request`, `tui.prompt`, `tui.chat`, `tui.windows`,
 `tui.regions`, `tui.views`, `tui.pickers`, `tui.themes`, `tui.jobs`, and
 `tui.session`. Both sides also report `lua`, `json`, and `modules`.
 Capability names describe the contract, not the internal Rust module layout.
@@ -63,24 +64,24 @@ Their current argument and return behavior is documented below. New APIs must
 not silently change an existing wrapper's meaning; a wrapper may delegate to
 the newer implementation internally.
 
-### TUI extension points at the v1 baseline
-
-The following table is the compatibility boundary for the first extension
-phase. The last column names work planned as additive capabilities; those
-capabilities are not available until reported by `bone.has_capability`.
-
-| Extension point | v1 behavior | Planned additive extension |
+### TUI extension points (API v1)
+The following table records the compatibility boundary and the additive
+capabilities currently implemented. The last column names work that remains
+planned; those capabilities are not available until reported by
+`bone.has_capability`.
+| Extension point | Compatibility behavior | Current additive extension / planned work |
 |---|---|---|
 | Input contexts | `main` is the prompt context and `popup` is the fallback context for a focused Lua window. A picker is a Lua window, not a third keymap context. Unmapped main text enters the prompt. | Named contexts, priority/fallback, key sequences, raw interception and real sequence timeouts are available through `tui.input`. |
-| Events | `bone.on` receives server notifications by method plus `ready` and `submit`. Server callbacks run after the TUI applies the notification; `submit` can cancel or replace text. | Local prompt/focus/resize/key/panel events and a richer registry (`tui.local_events`). |
-| Commands | Built-ins and user commands are slash commands. `bone.cmd.create` receives one raw `{ args = "..." }` string and `{ desc }`; built-ins cannot be replaced. | Aliases, completion and structured argument metadata (`tui.command_specs`). |
-| Options | `bone.o` exposes the fixed, typed Rust options. v1 values are booleans or non-negative numbers; unknown names and wrong types are errors. | Dynamic typed options, defaults, validation and change callbacks (`tui.dynamic_options`). |
-| Panels | `bone.ui.win` is a Lua-drawn overlay, and regions/views customize the existing chat layout. These are not persistent plugin-owned buffers or panels. | Stateful panels with IDs, lifecycle, focus, docking, scrolling and render/key callbacks (`tui.panels`). |
-| Jobs | TUI `bone.system`, `bone.http` and `bone.defer` run one background operation and invoke a callback. Core waits are coroutine-based and turn cancellation stops them. v1 has no general process handle or streamed TUI job. | Cancellable, timeout-aware streaming jobs with stdout/stderr and progress (`jobs.streaming`). |
-| Plugin state | Folder plugins load in name order between runtime defaults and the user's config; `bone.plugins` reports names and `.`/`_` folders are disabled. There is no persistent state store, reload hook or automatic resource cleanup yet. | Init/shutdown, persistent per-plugin state, project configuration and cleanup of owned resources (`plugins.lifecycle`). |
+| Events | `bone.on` receives server notifications by method plus `ready` and `submit`. Server callbacks run after the TUI applies the notification; `submit` can cancel or replace text. | Local prompt/focus/resize/key/paste and panel lifecycle events are available through `tui.local_events`. |
+| Commands | Built-ins and user commands are slash commands. `bone.cmd.create` accepts one raw `{ args = "..." }` string and `{ desc }`; built-ins cannot be replaced. | Canonical names, aliases, alias-aware completion/execution/deletion, completion callbacks and typed argument metadata are available through `tui.command_specs`. |
+| Options | `bone.o` exposes the fixed, typed Rust options. v1 values are booleans or non-negative numbers; unknown names and wrong types are errors. | Dynamic boolean, integer, number and string options, defaults, metadata, deletion and change callbacks are available through `tui.dynamic_options`. |
+| Panels | `bone.ui.win` is a Lua-drawn overlay, and regions/views customize the existing chat layout. These are not persistent plugin-owned buffers or panels. | Stateful panels with IDs, lifecycle, focus, docking, scrolling and render/key callbacks (`tui.panels`) remain planned. |
+| Jobs | TUI `bone.system`, `bone.http` and `bone.defer` run one background operation and invoke a callback. Core waits are coroutine-based and turn cancellation stops them. v1 has no general process handle or streamed TUI job. | Cancellable, timeout-aware streaming jobs with stdout/stderr and progress (`jobs.streaming`) remain planned. |
+| Plugin state | Folder plugins load in name order between runtime defaults and the user's config; `bone.plugins` reports names and `.`/`_` folders are disabled. There is no persistent state store, reload hook or automatic resource cleanup yet. | Init/shutdown, persistent per-plugin state, project configuration and cleanup of owned resources (`plugins.lifecycle`) remain planned. |
 
-The existing detailed sections describe the v1 calls. A plugin may use a
-compatibility API today and opt into each later capability independently.
+The existing detailed sections describe both the compatibility calls and the
+new additive APIs. A plugin may use a compatibility API today and opt into
+each later capability independently.
 
 ## Plugins
 
@@ -302,6 +303,37 @@ bone.o.prompt_max_height = 10
 bone.o.mouse = false           -- leave the mouse to the terminal (its own selection, no wheel)
 ```
 
+#### Dynamic options
+
+The compatibility `bone.o.name` read/write syntax remains available. Dynamic
+options are registered only in the TUI and are separate from the fixed Rust
+options:
+
+```lua
+bone.o.define("review_limit", 10, {
+  type = "integer", desc = "Lines to show in review",
+  on_change = function(new, old)
+    bone.notify("limit: " .. old .. " -> " .. new)
+  end,
+})
+local value = bone.o.get("review_limit")
+local info = bone.o.info("review_limit")
+```
+
+Dynamic options support `boolean`, `integer`, `number` and `string`. The
+default value is required; its type is inferred unless `type` is supplied, and
+an explicit type and default are validated. Unknown names and duplicate
+definitions are errors.
+`on_change` receives `(new, old)` only when the value changes, and is
+removed with the option. `bone.o.names()` lists names.
+`bone.o.del(name)` returns whether a dynamic option was removed;
+`bone.o.delete(name)` is an alias, and deletion permits defining the name
+again. `bone.o.info(name)` returns `{ type, value }` for a fixed
+option, and adds `{ default, desc }` for a dynamic option.
+
+Dynamic options also participate in `/set`: querying, assigning, enabling,
+disabling, toggling booleans and listing options use the same validation and
+callbacks as the Lua API.
 ### Commands
 
 ```lua
@@ -312,6 +344,40 @@ end, { desc = "say hi" })                 -- /hello world
 bone.cmd.del("hello")
 ```
 
+
+User commands may add aliases and completion/argument specifications:
+
+```lua
+bone.cmd.create("greet", function(c)
+  -- c.args is the raw argument string; c.argv is its whitespace-split form.
+  -- c.arguments and c.parsed contain typed values when args is specified.
+  bone.notify(c.arguments.word)
+end, {
+  desc = "greet someone", aliases = { "hello" },
+  args = {
+    { name = "count", type = "integer", default = 1 },
+    { name = "word", type = "string", required = true },
+    { name = "rest", type = "string", variadic = true }, -- must be final
+  },
+  complete = function(ctx)
+    -- ctx = { command, text, args, token, argv }
+    return { { value = "world", desc = "the default greeting" }, "there" }
+  end,
+})
+```
+
+`opts.completion` is an alias for `opts.complete`. The command callback gets
+`command` as the canonical command name, the raw `args` string, whitespace-split
+`argv`, and (when `opts.args` is present) typed `arguments`/`parsed` values.
+Arguments can be `string`, `integer`, `number` or `boolean`; defaults are
+validated at registration, required arguments must be supplied, and a
+variadic argument must be final. Extra or malformed arguments are rejected.
+Completion receives the command, full prompt text, raw argument text, current
+token and raw `argv`; it may return strings or `{ value, desc }` entries, and
+only the current argument token is replaced. Names and aliases are accepted
+for lookup, completion and execution. Aliases must not collide with built-in
+names or aliases, other user commands/aliases, or the command's own name;
+`bone.cmd.del` accepts either the canonical name or an alias.
 User commands appear in the `/` suggestions with their `desc`, and in `/help`. They can't replace built-in commands. Built-in commands related to Lua: `/lua code`, `/lua =expr` (show a value), `/source file`, `/messages` (recent messages, full Lua errors).
 
 ### Events
@@ -325,6 +391,27 @@ bone.off(id)
 - `ready`: after `tui.lua` has run.
 - `submit`: `{ text }` before a message is sent. Return `false` to cancel, or a string to send instead.
 
+
+When `tui.local_events` is available, `bone.on` also accepts local UI events.
+Registration aliases normalize to these canonical names:
+
+| Canonical event | Registration aliases | Payload |
+|---|---|---|
+| `prompt/changed` | `prompt`, `prompt_changed`, `prompt/changed` | `{ text, cursor = { row, col } }` |
+| `focus/changed` | `focus`, `focus_changed`, `focus/changed` | `{ context, popup }` |
+| `resize` | `ui/resize`, `resize` | `{ width, height }` |
+| `key` | `key/pressed`, `key` | `{ key, context }` |
+| `paste` | `paste`, `text/pasted` | `{ text, context }` |
+| `panel/opened` | `panel`, `panel/opened`, `popup`, `popup/opened` | `{ id, kind, focus, anchor, z, width, height, row, col }` |
+| `panel/updated` | `panel/updated`, `popup/updated` | `{ id, kind, focus, anchor, z, width, height, row, col }` |
+| `panel/closed` | `panel/closed`, `popup/closed` | `{ id, kind, focus, anchor, z, width, height, row, col }` |
+
+Prompt events are deduplicated, so unchanged text/cursor state is not emitted.
+`resize` is emitted when terminal dimensions change (and by `Headless:resize`);
+`paste` is emitted for bracketed paste with the active context. Popup lifecycle
+events are emitted when a `bone.ui.win`/`bone.ui.popup` panel opens, updates or closes and
+include its current placement and geometry. Local event callbacks are UI-side
+callbacks; they do not change core/session ownership.
 ### Talking to the core
 
 ```lua

@@ -63,7 +63,9 @@ bone.cmd = setmetatable({}, {
 })
 
 --- Define /name. Names are lowercase letters, digits, - and _.
---- fn receives { args = "..." }.
+--- fn receives { args = "...", argv = { ... } }. With opts.args, it also
+--- receives typed `arguments` (and the same table as `parsed`). opts.complete
+--- returns strings or { value, desc } entries for argument completion.
 function bone.cmd.create(name, fn, opts)
   api("command_create", name, fn, opts or {})
 end
@@ -73,7 +75,26 @@ function bone.cmd.del(name)
 end
 
 --- Options: bone.o.show_reasoning = false; print(bone.o.tool_preview_lines)
-bone.o = setmetatable({}, {
+--- Dynamic options: bone.o.define("name", default, { type, desc, on_change }),
+--- bone.o.del("name"), bone.o.names(), and bone.o.info("name").
+local option_api = {}
+function option_api.get(name)
+  return api("opt_get", name)
+end
+function option_api.define(name, default, opts)
+  api("opt_define", name, default, opts or {})
+end
+function option_api.del(name)
+  return api("opt_del", name)
+end
+option_api.delete = option_api.del
+function option_api.names()
+  return api("opt_names")
+end
+function option_api.info(name)
+  return api("opt_info", name)
+end
+bone.o = setmetatable(option_api, {
   __index = function(_, name)
     return api("opt_get", name)
   end,

@@ -642,6 +642,159 @@ async fn tui_lua_keys_commands_options_and_events() {
 }
 
 #[tokio::test]
+async fn lua_phase2_commands_options_and_local_events() {
+    let (mut h, _dir) = Harness::with_config(
+        r#"
+        events = {}
+        local function mark(name)
+          return function(ev) events[#events + 1] = name end
+        end
+        bone.on("prompt", function(ev) prompt_event = ev; mark("prompt")(ev) end)
+        bone.on("focus_changed", function(ev) focus_event = ev; mark("focus")(ev) end)
+        bone.on("ui/resize", function(ev) resize_event = ev; mark("resize")(ev) end)
+        bone.on("key/pressed", function(ev) key_event = ev; mark("key")(ev) end)
+        bone.on("text/pasted", function(ev) paste_event = ev; mark("paste")(ev) end)
+        bone.on("popup/opened", function(ev) opened_event = ev; mark("opened")(ev) end)
+        bone.on("popup/updated", function(ev) updated_event = ev; mark("updated")(ev) end)
+        bone.on("panel/closed", function(ev) closed_event = ev; mark("closed")(ev) end)
+        changes = {}
+        bone.o.define("plugin_limit", 2, {
+          type = "integer",
+          desc = "limit for the plugin",
+          on_change = function(new, old) changes[#changes + 1] = new .. ":" .. old end,
+        })
+        bone.cmd.create("greet", function(ctx)
+          seen = {
+            raw = ctx.args,
+            command = ctx.command,
+            argv = #ctx.argv,
+            name = ctx.arguments.name,
+            count = ctx.arguments.count,
+            enabled = ctx.arguments.enabled,
+          }
+        end, {
+          aliases = { "greetme" },
+          args = {
+            { name = "name", required = true },
+            { name = "count", type = "integer", default = 2 },
+            { name = "enabled", type = "boolean", default = false },
+          },
+          complete = function(ctx)
+            return { { value = ctx.token .. "x", desc = "example" } }
+          end,
+        })
+        local noop = function() end
+        collision_alias = not pcall(function()
+          bone.cmd.create("other", noop, { aliases = { "greetme" } })
+        end)
+        collision_name = not pcall(function()
+          bone.cmd.create("greetme", noop)
+        end)
+        bone.cmd.create("gone", noop, { aliases = { "goneby" } })
+        local deleted_once = pcall(function() bone.cmd.del("goneby") end)
+        deleted_alias = deleted_once and not pcall(function() bone.cmd.del("goneby") end)
+        bad_default = not pcall(function()
+          bone.o.define("bad_default", "x", { type = "integer" })
+        end)
+        wrong_type = not pcall(function() bone.o.plugin_limit = "x" end)
+        old_changes, new_changes = 0, 0
+        bone.o.define("drop_probe", 1, {
+          type = "integer",
+          on_change = function() old_changes = old_changes + 1 end,
+        })
+        bone.o.del("drop_probe")
+        bone.o.define("drop_probe", 1, {
+          type = "integer",
+          on_change = function() new_changes = new_changes + 1 end,
+        })
+        "#,
+    )
+    .await;
+
+    assert_eq!(
+        h.lua("=bone.has_capability('tui.local_events')").await,
+        "true"
+    );
+    assert_eq!(
+        h.lua("=bone.has_capability('tui.command_specs')").await,
+        "true"
+    );
+    assert_eq!(
+        h.lua("=bone.has_capability('tui.dynamic_options')").await,
+        "true"
+    );
+    assert_eq!(h.lua("=bone.o.plugin_limit").await, "2");
+    h.lua("bone.o.plugin_limit = 5").await;
+    assert_eq!(h.lua("=changes[1]").await, "\"5:2\"");
+    h.lua("bone.o.plugin_limit = 5").await;
+    assert_eq!(h.lua("=#changes").await, "1");
+    assert_eq!(
+        h.lua("=bone.o.info('plugin_limit').type").await,
+        "\"integer\""
+    );
+    assert!(
+        h.lua("=table.concat(bone.o.names(), ',')")
+            .await
+            .contains("plugin_limit")
+    );
+    assert_eq!(
+        h.lua(
+            "=collision_alias and collision_name and deleted_alias and bad_default and wrong_type"
+        )
+        .await,
+        "true"
+    );
+    h.lua("bone.o.drop_probe = 2").await;
+    assert_eq!(h.lua("=old_changes .. ':' .. new_changes").await, "\"0:1\"");
+    h.input("/set plugin_limit=8{enter}").await;
+    assert_eq!(h.lua("=changes[2]").await, "\"8:5\"");
+    h.input("/set plugin_limit?{enter}").await;
+    assert_eq!(h.message(), "plugin_limit=8");
+
+    assert!(h.app.user_commands.contains_key("greet"), "{}", h.message());
+    assert!(h.app.user_commands["greet"].completion.is_some());
+    assert_eq!(h.app.user_commands["greet"].aliases, vec!["greetme"]);
+    h.input("/greetme b{tab}").await;
+    assert_eq!(
+        h.prompt(),
+        "/greetme bx ",
+        "message={} suggestions={:?}",
+        h.message(),
+        h.app.suggestions()
+    );
+    h.input("{ctrl+u}/greetme bob 7 true{enter}").await;
+    assert_eq!(
+        h.lua("=seen.raw .. '|' .. seen.command .. '|' .. seen.name .. '|' .. seen.count .. '|' .. tostring(seen.enabled)").await,
+        "\"bob 7 true|greet|bob|7|true\"",
+    );
+    h.input("/help{enter}").await;
+    assert!(h.message().contains("aliases: greetme"), "{}", h.message());
+
+    h.lua("bone.keymap.context('phase2'); bone.keymap.focus('phase2')")
+        .await;
+    h.input("z").await;
+    h.app.paste("pasted");
+    h.app.resize(100, 30);
+    h.lua(
+        "w = bone.ui.win{ lines = {'one'} }; bone.ui.update(w, { width = 12 }); bone.ui.close(w)",
+    )
+    .await;
+    assert!(h.lua("=prompt_event.text").await.contains("pasted"));
+    assert_eq!(h.lua("=key_event.context").await, "\"phase2\"");
+    assert_eq!(h.prompt(), "zpasted");
+    assert_eq!(h.lua("=resize_event.width").await, "100");
+    assert_eq!(h.lua("=opened_event.kind").await, "\"popup\"");
+    assert_eq!(h.lua("=updated_event.id == opened_event.id").await, "true");
+    assert_eq!(h.lua("=closed_event.id == opened_event.id").await, "true");
+    let events = h.lua("=table.concat(events, ',')").await;
+    for name in [
+        "prompt", "focus", "key", "paste", "resize", "opened", "updated", "closed",
+    ] {
+        assert!(events.contains(name), "{name} missing from {events}");
+    }
+}
+
+#[tokio::test]
 async fn lua_api_and_errors() {
     let mut h = Harness::new().await;
     assert_eq!(h.lua("=1 + 1").await, "2");

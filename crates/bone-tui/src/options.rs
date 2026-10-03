@@ -36,6 +36,78 @@ pub enum Value {
     Number(u64),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DynamicKind {
+    Boolean,
+    Integer,
+    Number,
+    String,
+}
+
+impl DynamicKind {
+    pub fn parse(name: &str) -> Option<Self> {
+        match name {
+            "bool" | "boolean" => Some(Self::Boolean),
+            "int" | "integer" => Some(Self::Integer),
+            "number" | "float" => Some(Self::Number),
+            "string" | "str" => Some(Self::String),
+            _ => None,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Boolean => "boolean",
+            Self::Integer => "integer",
+            Self::Number => "number",
+            Self::String => "string",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DynamicValue {
+    Boolean(bool),
+    Integer(i64),
+    Number(f64),
+    String(String),
+}
+
+impl DynamicValue {
+    pub fn kind(&self) -> DynamicKind {
+        match self {
+            Self::Boolean(_) => DynamicKind::Boolean,
+            Self::Integer(_) => DynamicKind::Integer,
+            Self::Number(_) => DynamicKind::Number,
+            Self::String(_) => DynamicKind::String,
+        }
+    }
+
+    pub fn type_name(&self) -> &'static str {
+        self.kind().name()
+    }
+}
+
+impl std::fmt::Display for DynamicValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Boolean(value) => write!(f, "{value}"),
+            Self::Integer(value) => write!(f, "{value}"),
+            Self::Number(value) => write!(f, "{value}"),
+            Self::String(value) => write!(f, "{value}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DynamicOption {
+    pub value: DynamicValue,
+    pub default: DynamicValue,
+    pub kind: DynamicKind,
+    pub desc: String,
+    pub on_change: Option<u64>,
+}
+
 impl std::fmt::Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

@@ -14,7 +14,7 @@ use mlua::{FromLuaMulti, Function, IntoLuaMulti, Lua, MultiValue, Table, Value};
 use crate::app::App;
 use crate::keymap::{Action, Builtin, Context};
 use crate::keys;
-use crate::options;
+use crate::options::{self, DynamicKind, DynamicOption, DynamicValue};
 use crate::theme::StyleSpec;
 use ratatui::style::{Color, Modifier};
 
@@ -31,15 +31,47 @@ const DISPATCH: &str = "bone.dispatch";
 const CALLBACKS: &str = "bone.callbacks";
 
 /// A user command defined from Lua.
+#[derive(Clone)]
 pub struct UserCommand {
     pub callback: u64,
     pub desc: String,
+    pub aliases: Vec<String>,
+    pub completion: Option<u64>,
+    pub args: Option<serde_json::Value>,
 }
 
 pub struct Autocmd {
     pub id: u64,
     pub event: String,
     pub callback: u64,
+}
+
+fn canonical_event(name: &str) -> &str {
+    match name {
+        "prompt" | "prompt_changed" | "prompt/changed" => "prompt/changed",
+        "focus" | "focus_changed" | "focus/changed" => "focus/changed",
+        "ui/resize" | "resize" => "resize",
+        "key/pressed" | "key" => "key",
+        "paste" | "text/pasted" => "paste",
+        "panel" | "panel/opened" | "popup" | "popup/opened" => "panel/opened",
+        "panel/closed" | "popup/closed" => "panel/closed",
+        "panel/updated" | "popup/updated" => "panel/updated",
+        other => other,
+    }
+}
+
+fn popup_event(p: &crate::app::Popup) -> serde_json::Value {
+    serde_json::json!({
+        "id": p.id,
+        "kind": "popup",
+        "focus": p.focus,
+        "anchor": p.anchor,
+        "z": p.z,
+        "width": p.width,
+        "height": p.height,
+        "row": p.row,
+        "col": p.col,
+    })
 }
 
 /// Create the TUI Lua state with the runtime API and default keymaps.
@@ -394,8 +426,28 @@ impl App {
         }
     }
 
+    pub fn call_callback_multi(
+        &mut self,
+        id: u64,
+        context: &str,
+        args: impl FnOnce(&Lua) -> mlua::Result<MultiValue>,
+    ) -> Option<MultiValue> {
+        let r = self.with_api(|lua| {
+            let f: Function = lua.named_registry_value::<Table>(CALLBACKS)?.get(id)?;
+            f.call::<MultiValue>(args(lua)?)
+        });
+        match r {
+            Ok(v) => Some(v),
+            Err(e) => {
+                self.lua_error(context, &e);
+                None
+            }
+        }
+    }
+
     /// Run `event` autocommands with `data`. Returns their results in order.
     pub fn fire(&mut self, event: &str, data: serde_json::Value) -> Vec<Value> {
+        let event = canonical_event(event);
         let cbs: Vec<u64> = self
             .autocmds
             .iter()
@@ -415,6 +467,7 @@ impl App {
     }
 
     pub fn has_autocmd(&self, event: &str) -> bool {
+        let event = canonical_event(event);
         self.autocmds.iter().any(|a| a.event == event)
     }
 
@@ -511,6 +564,192 @@ fn err(msg: impl Into<String>) -> mlua::Error {
     mlua::Error::runtime(msg.into())
 }
 
+fn dynamic_from_lua(
+    value: Value,
+    expected: Option<DynamicKind>,
+) -> mlua::Result<(DynamicKind, DynamicValue)> {
+    let inferred = match value {
+        Value::Boolean(value) => (DynamicKind::Boolean, DynamicValue::Boolean(value)),
+        Value::Integer(value) => (DynamicKind::Integer, DynamicValue::Integer(value)),
+        Value::Number(value) if value.is_finite() => {
+            (DynamicKind::Number, DynamicValue::Number(value))
+        }
+        Value::String(value) => (
+            DynamicKind::String,
+            DynamicValue::String(value.to_str()?.to_owned()),
+        ),
+        other => {
+            return Err(err(format!(
+                "option values must be boolean, number or string, not {}",
+                other.type_name()
+            )));
+        }
+    };
+    let Some(expected) = expected else {
+        return Ok(inferred);
+    };
+    let value = match (expected, inferred.1) {
+        (DynamicKind::Boolean, DynamicValue::Boolean(value)) => DynamicValue::Boolean(value),
+        (DynamicKind::Integer, DynamicValue::Integer(value)) => DynamicValue::Integer(value),
+        (DynamicKind::Integer, DynamicValue::Number(value))
+            if value.fract() == 0.0 && value >= i64::MIN as f64 && value <= i64::MAX as f64 =>
+        {
+            DynamicValue::Integer(value as i64)
+        }
+        (DynamicKind::Number, DynamicValue::Integer(value)) => DynamicValue::Number(value as f64),
+        (DynamicKind::Number, DynamicValue::Number(value)) => DynamicValue::Number(value),
+        (DynamicKind::String, DynamicValue::String(value)) => DynamicValue::String(value),
+        (expected, actual) => {
+            return Err(err(format!(
+                "option expects {}, got {}",
+                expected.name(),
+                actual.type_name()
+            )));
+        }
+    };
+    Ok((expected, value))
+}
+
+fn dynamic_to_lua(lua: &Lua, value: &DynamicValue) -> mlua::Result<Value> {
+    Ok(match value {
+        DynamicValue::Boolean(value) => Value::Boolean(*value),
+        DynamicValue::Integer(value) => Value::Integer(*value),
+        DynamicValue::Number(value) => Value::Number(*value),
+        DynamicValue::String(value) => Value::String(lua.create_string(value)?),
+    })
+}
+
+fn dynamic_from_text(text: &str, kind: DynamicKind, name: &str) -> Result<DynamicValue, String> {
+    match kind {
+        DynamicKind::Boolean => match text {
+            "true" | "on" | "yes" | "1" => Ok(DynamicValue::Boolean(true)),
+            "false" | "off" | "no" | "0" => Ok(DynamicValue::Boolean(false)),
+            _ => Err(format!("{name} takes true or false")),
+        },
+        DynamicKind::Integer => text
+            .parse::<i64>()
+            .map(DynamicValue::Integer)
+            .map_err(|_| format!("{name} takes an integer")),
+        DynamicKind::Number => text
+            .parse::<f64>()
+            .ok()
+            .filter(|value| value.is_finite())
+            .map(DynamicValue::Number)
+            .ok_or_else(|| format!("{name} takes a finite number")),
+        DynamicKind::String => Ok(DynamicValue::String(text.to_owned())),
+    }
+}
+
+enum DynamicOptionArg<'a> {
+    Query(&'a str),
+    Set(&'a str, &'a str),
+    Enable(&'a str),
+    Disable(&'a str),
+    Toggle(&'a str),
+}
+
+fn dynamic_option_arg<'a>(app: &App, arg: &'a str) -> Option<DynamicOptionArg<'a>> {
+    if let Some(name) = arg.strip_suffix('?')
+        && app.dynamic_options.contains_key(name)
+    {
+        return Some(DynamicOptionArg::Query(name));
+    }
+    if let Some((name, value)) = arg.split_once('=')
+        && app.dynamic_options.contains_key(name)
+    {
+        return Some(DynamicOptionArg::Set(name, value));
+    }
+    if app.dynamic_options.contains_key(arg) {
+        return Some(DynamicOptionArg::Enable(arg));
+    }
+    if let Some(name) = arg.strip_prefix("no")
+        && app.dynamic_options.contains_key(name)
+    {
+        return Some(DynamicOptionArg::Disable(name));
+    }
+    if let Some(name) = arg.strip_prefix("inv")
+        && app.dynamic_options.contains_key(name)
+    {
+        return Some(DynamicOptionArg::Toggle(name));
+    }
+    if let Some(name) = arg.strip_suffix('!')
+        && app.dynamic_options.contains_key(name)
+    {
+        return Some(DynamicOptionArg::Toggle(name));
+    }
+    None
+}
+
+/// Apply one `/set` argument to a dynamic option. `None` means the argument
+/// belongs to the fixed Rust options instead.
+pub(crate) fn apply_dynamic_option(
+    app: &mut App,
+    arg: &str,
+) -> Option<Result<Option<String>, String>> {
+    let operation = dynamic_option_arg(app, arg)?;
+    Some((|| {
+        let (name, kind, current) = match &operation {
+            DynamicOptionArg::Query(name)
+            | DynamicOptionArg::Set(name, _)
+            | DynamicOptionArg::Enable(name)
+            | DynamicOptionArg::Disable(name)
+            | DynamicOptionArg::Toggle(name) => {
+                let option = app
+                    .dynamic_options
+                    .get(*name)
+                    .expect("dynamic option found");
+                ((*name).to_owned(), option.kind, option.value.clone())
+            }
+        };
+        let new = match operation {
+            DynamicOptionArg::Query(_) => return Ok(Some(format!("{name}={current}"))),
+            DynamicOptionArg::Set(_, value) => dynamic_from_text(value, kind, &name)?,
+            DynamicOptionArg::Enable(_) => {
+                if kind != DynamicKind::Boolean {
+                    return Err(format!("{name} is not a boolean; use {name}=VALUE"));
+                }
+                DynamicValue::Boolean(true)
+            }
+            DynamicOptionArg::Disable(_) => {
+                if kind != DynamicKind::Boolean {
+                    return Err(format!("{name} is not a boolean; use {name}=VALUE"));
+                }
+                DynamicValue::Boolean(false)
+            }
+            DynamicOptionArg::Toggle(_) => {
+                let DynamicValue::Boolean(value) = current else {
+                    return Err(format!("{name} is not a boolean; use {name}=VALUE"));
+                };
+                DynamicValue::Boolean(!value)
+            }
+        };
+        if current == new {
+            return Ok(None);
+        }
+        let callback = {
+            let option = app
+                .dynamic_options
+                .get_mut(name.as_str())
+                .expect("dynamic option found");
+            option.value = new.clone();
+            option.on_change
+        };
+        if let Some(callback) = callback {
+            app.call_callback_multi(callback, &format!("option {name}"), |lua| {
+                Ok(vec![dynamic_to_lua(lua, &new)?, dynamic_to_lua(lua, &current)?].into())
+            });
+        }
+        Ok(None)
+    })())
+}
+
+fn valid_dynamic_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
 fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<MultiValue> {
     match op {
         "keymap_set" => {
@@ -602,60 +841,272 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             if crate::commands::resolve(&name).is_some() {
                 return Err(err(format!("/{name} is a built-in command")));
             }
+            let aliases = match opts.as_ref().map(|o| o.get::<Value>("aliases")) {
+                None | Some(Ok(Value::Nil)) => Vec::new(),
+                Some(Ok(Value::String(alias))) => vec![alias.to_str()?.to_owned()],
+                Some(Ok(Value::Table(aliases))) => aliases
+                    .sequence_values::<String>()
+                    .collect::<mlua::Result<Vec<_>>>()?,
+                Some(Ok(other)) => {
+                    return Err(err(format!(
+                        "command aliases must be a string or list, not {}",
+                        other.type_name()
+                    )));
+                }
+                Some(Err(e)) => return Err(e),
+            };
+            if app.user_commands.iter().any(|(old_name, old)| {
+                old_name != &name && old.aliases.iter().any(|alias| alias == &name)
+            }) {
+                return Err(err(format!("/{name} is already a user command")));
+            }
+            for (index, alias) in aliases.iter().enumerate() {
+                let valid = alias.starts_with(|c: char| c.is_ascii_lowercase())
+                    && alias.chars().all(|c| {
+                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'
+                    });
+                if !valid {
+                    return Err(err(format!("invalid command alias {alias:?}")));
+                }
+                if alias == &name || aliases[..index].contains(alias) {
+                    return Err(err(format!("/{alias} is already a command")));
+                }
+                if crate::commands::resolve(alias).is_some() {
+                    return Err(err(format!("/{alias} is already a command")));
+                }
+                if app.user_commands.iter().any(|(old_name, old)| {
+                    old_name != &name
+                        && (old_name == alias || old.aliases.iter().any(|a| a == alias))
+                }) {
+                    return Err(err(format!("/{alias} is already a user command")));
+                }
+            }
+            let args_spec = match opts.as_ref().map(|o| o.get::<Value>("args")) {
+                None | Some(Ok(Value::Nil)) => None,
+                Some(Ok(Value::Table(spec))) => {
+                    let value = from_lua(&Value::Table(spec))?;
+                    crate::commands::validate_argument_specs(&value).map_err(err)?;
+                    Some(value)
+                }
+                Some(Ok(other)) => {
+                    return Err(err(format!(
+                        "command args must be a table, not {}",
+                        other.type_name()
+                    )));
+                }
+                Some(Err(e)) => return Err(e),
+            };
             let desc = opts
+                .as_ref()
                 .map(|o| o.get::<Option<String>>("desc"))
                 .transpose()?
                 .flatten()
                 .unwrap_or_default();
+            let completion = opts
+                .as_ref()
+                .map(|o| {
+                    let complete: Option<Function> = o.get("complete")?;
+                    if complete.is_some() {
+                        Ok(complete)
+                    } else {
+                        o.get("completion")
+                    }
+                })
+                .transpose()?
+                .flatten()
+                .map(|f| app.store_callback(lua, f))
+                .transpose()?;
             let callback = app.store_callback(lua, f)?;
-            if let Some(old) = app
-                .user_commands
-                .insert(name, UserCommand { callback, desc })
-            {
+            if let Some(old) = app.user_commands.insert(
+                name,
+                UserCommand {
+                    callback,
+                    desc,
+                    aliases,
+                    completion,
+                    args: args_spec,
+                },
+            ) {
                 App::drop_callback(lua, old.callback)?;
+                if let Some(completion) = old.completion {
+                    App::drop_callback(lua, completion)?;
+                }
             }
             ret(lua, ())
         }
         "command_del" => {
             let name: String = args(lua, a)?;
-            let old = app
+            let canonical = app
                 .user_commands
-                .remove(&name)
+                .iter()
+                .find(|(canonical, command)| {
+                    canonical.as_str() == name || command.aliases.iter().any(|alias| alias == &name)
+                })
+                .map(|(canonical, _)| canonical.clone())
                 .ok_or_else(|| err(format!("no user command {name}")))?;
+            let old = app.user_commands.remove(&canonical).expect("command found");
             App::drop_callback(lua, old.callback)?;
+            if let Some(completion) = old.completion {
+                App::drop_callback(lua, completion)?;
+            }
             ret(lua, ())
         }
         "opt_get" => {
             let name: String = args(lua, a)?;
-            match app
-                .options
+            if let Some(value) = app.options.get(&name) {
+                return match value {
+                    options::Value::Bool(b) => ret(lua, b),
+                    options::Value::Number(n) => ret(lua, n),
+                };
+            }
+            let value = app
+                .dynamic_options
                 .get(&name)
                 .ok_or_else(|| err(format!("unknown option: {name}")))?
-            {
-                options::Value::Bool(b) => ret(lua, b),
-                options::Value::Number(n) => ret(lua, n),
-            }
+                .value
+                .clone();
+            ret(lua, dynamic_to_lua(lua, &value)?)
         }
         "opt_set" => {
             let (name, value): (String, Value) = args(lua, a)?;
-            let value = match value {
-                Value::Boolean(b) => options::Value::Bool(b),
-                Value::Integer(i) if i >= 0 => options::Value::Number(i as u64),
-                Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => {
-                    options::Value::Number(n as u64)
+            if app.options.get(&name).is_some() {
+                let value = match value {
+                    Value::Boolean(b) => options::Value::Bool(b),
+                    Value::Integer(i) if i >= 0 => options::Value::Number(i as u64),
+                    Value::Number(n) if n >= 0.0 && n.fract() == 0.0 => {
+                        options::Value::Number(n as u64)
+                    }
+                    other => {
+                        return Err(err(format!("bad value for {name}: {}", other.type_name())));
+                    }
+                };
+                app.options.set(&name, value).map_err(err)?;
+            } else {
+                let kind = app
+                    .dynamic_options
+                    .get(&name)
+                    .ok_or_else(|| err(format!("unknown option: {name}")))?
+                    .kind;
+                let (_, new_value) = dynamic_from_lua(value, Some(kind))?;
+                let (old_value, callback) = {
+                    let option = app.dynamic_options.get_mut(&name).expect("option found");
+                    let old = option.value.clone();
+                    option.value = new_value.clone();
+                    (old, option.on_change)
+                };
+                if old_value != new_value
+                    && let Some(callback) = callback
+                {
+                    let new_value = new_value.clone();
+                    app.call_callback_multi(callback, &format!("option {name}"), |lua| {
+                        Ok(vec![
+                            dynamic_to_lua(lua, &new_value)?,
+                            dynamic_to_lua(lua, &old_value)?,
+                        ]
+                        .into())
+                    });
                 }
-                other => return Err(err(format!("bad value for {name}: {}", other.type_name()))),
-            };
-            app.options.set(&name, value).map_err(err)?;
+            }
             app.opts_rev += 1;
             app.dirty = true;
             ret(lua, ())
+        }
+        "opt_define" => {
+            let (name, default, opts): (String, Value, Option<Table>) = args(lua, a)?;
+            if !valid_dynamic_name(&name) {
+                return Err(err(format!("invalid option name {name:?}")));
+            }
+            if options::NAMES.contains(&name.as_str()) {
+                return Err(err(format!("{name} is a built-in option")));
+            }
+            if app.dynamic_options.contains_key(&name) {
+                return Err(err(format!("option already defined: {name}")));
+            }
+            let requested = opts
+                .as_ref()
+                .map(|o| o.get::<Option<String>>("type"))
+                .transpose()?
+                .flatten()
+                .map(|name| {
+                    DynamicKind::parse(&name)
+                        .ok_or_else(|| err(format!("unknown option type {name:?}")))
+                })
+                .transpose()?;
+            let (kind, value) = dynamic_from_lua(default, requested)?;
+            let desc = opts
+                .as_ref()
+                .map(|o| o.get::<Option<String>>("desc"))
+                .transpose()?
+                .flatten()
+                .unwrap_or_default();
+            let callback = opts
+                .as_ref()
+                .map(|o| o.get::<Option<Function>>("on_change"))
+                .transpose()?
+                .flatten()
+                .map(|f| app.store_callback(lua, f))
+                .transpose()?;
+            app.dynamic_options.insert(
+                name,
+                DynamicOption {
+                    value: value.clone(),
+                    default: value,
+                    kind,
+                    desc,
+                    on_change: callback,
+                },
+            );
+            app.opts_rev += 1;
+            app.dirty = true;
+            ret(lua, ())
+        }
+        "opt_del" => {
+            let name: String = args(lua, a)?;
+            let Some(option) = app.dynamic_options.remove(&name) else {
+                return ret(lua, false);
+            };
+            if let Some(callback) = option.on_change {
+                App::drop_callback(lua, callback)?;
+            }
+            app.opts_rev += 1;
+            app.dirty = true;
+            ret(lua, true)
+        }
+        "opt_names" => {
+            let mut names: Vec<String> = options::NAMES
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect();
+            names.extend(app.dynamic_options.keys().cloned());
+            names.sort();
+            ret(lua, names)
+        }
+        "opt_info" => {
+            let name: String = args(lua, a)?;
+            let table = lua.create_table()?;
+            if let Some(value) = app.options.get(&name) {
+                let (kind, value) = match value {
+                    options::Value::Bool(value) => ("boolean", Value::Boolean(value)),
+                    options::Value::Number(value) => ("integer", Value::Integer(value as i64)),
+                };
+                table.set("type", kind)?;
+                table.set("value", value)?;
+            } else if let Some(option) = app.dynamic_options.get(&name) {
+                table.set("type", option.kind.name())?;
+                table.set("value", dynamic_to_lua(lua, &option.value)?)?;
+                table.set("default", dynamic_to_lua(lua, &option.default)?)?;
+                table.set("desc", option.desc.as_str())?;
+            } else {
+                return Err(err(format!("unknown option: {name}")));
+            }
+            ret(lua, table)
         }
         "on" => {
             let (event, f): (String, Function) = args(lua, a)?;
             let callback = app.store_callback(lua, f)?;
             app.next_callback += 1;
             let id = app.next_callback;
+            let event = canonical_event(&event).to_owned();
             app.autocmds.push(Autocmd {
                 id,
                 event,
@@ -777,6 +1228,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
         }
         "popup_open" => {
             let spec: Table = args(lua, a)?;
+            let old_focus = app.focused_popup().map(|p| p.id);
             app.next_callback += 1;
             let mut p = crate::app::Popup {
                 id: app.next_callback,
@@ -801,7 +1253,12 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             }
             apply_win_spec(app, lua, &mut p, &spec)?;
             let id = p.id;
+            let event = popup_event(&p);
             app.popups.push(p);
+            app.fire("panel/opened", event);
+            if old_focus != app.focused_popup().map(|p| p.id) {
+                app.emit_focus_changed();
+            }
             app.dirty = true;
             ret(lua, id)
         }
@@ -810,10 +1267,18 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             let Some(i) = app.popups.iter().position(|p| p.id == id) else {
                 return ret(lua, false);
             };
+            let old_focus = app.focused_popup().map(|p| p.id);
             let mut p = app.popups.remove(i);
-            let r = apply_win_spec(app, lua, &mut p, &spec);
+            if let Err(error) = apply_win_spec(app, lua, &mut p, &spec) {
+                app.popups.insert(i, p);
+                return Err(error);
+            }
+            let event = popup_event(&p);
             app.popups.insert(i, p);
-            r?;
+            app.fire("panel/updated", event);
+            if old_focus != app.focused_popup().map(|p| p.id) {
+                app.emit_focus_changed();
+            }
             app.dirty = true;
             ret(lua, true)
         }
@@ -824,13 +1289,19 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
         "popup_close" => {
             let id: u64 = args(lua, a)?;
             if let Some(i) = app.popups.iter().position(|p| p.id == id) {
+                let old_focus = app.focused_popup().map(|p| p.id);
                 let p = app.popups.remove(i);
+                let event = popup_event(&p);
                 App::drop_callback(lua, p.lines)?;
                 if let Some(cb) = p.on_key {
                     App::drop_callback(lua, cb)?;
                 }
                 for (_, cb) in p.keys {
                     App::drop_callback(lua, cb)?;
+                }
+                app.fire("panel/closed", event);
+                if old_focus != app.focused_popup().map(|p| p.id) {
+                    app.emit_focus_changed();
                 }
                 app.dirty = true;
             }

@@ -75,6 +75,35 @@ presentation, input and client-side workflows. Each phase keeps the v1
 compatibility wrappers documented in `docs/lua.md` and reports new behavior
 through `bone.has_capability`.
 
+## Current execution status
+
+The work is being tracked as phases 0–8 (the roadmap entries below begin at
+phase 1). Phase 0, the baseline, is committed as `b783dbd`. Phase 1, the
+extension contract plus dynamic contexts and input, is committed as
+`4514d1f` and `a55c154`.
+
+Phase 2, **events, commands and options**, is complete and committed in this
+phase commit. It adds:
+
+- local prompt, focus, resize, key, paste and panel lifecycle events;
+- command aliases, alias-aware lookup/completion/deletion, completion callbacks,
+  raw `ctx.args`/`ctx.argv`, and typed `args`/`arguments`/`parsed` values;
+- dynamic boolean, integer, number and string options with metadata, defaults,
+  `(new, old)` callbacks, deletion/redefinition, and `/set` integration;
+- callback cleanup for replaced/deleted commands and options; and
+- integration coverage in `bone-tui` for the Phase 2 APIs.
+
+All focused and full Phase 2 checks pass: `cargo fmt --all -- --check`,
+`cargo test -p bone-tui`, `cargo test -p bone-lua`, `cargo test -p bone`,
+`cargo test --workspace`, `cargo clippy --workspace --all-targets`, and
+`cargo build --release`, plus `git diff --check`. There are no remaining Phase 2
+closeout items.
+
+
+Subsequent phases cover stateful panels, prompt/chat data, cancellable
+streaming jobs, plugin lifecycle/state, and representative plugins plus final
+validation. The out-of-scope boundaries below continue to apply.
+
 1. **Extension contract and compatibility** — publish `bone.api_version`,
    capability reporting, ownership rules, and the baseline contracts for
    contexts, events, commands, options, panels, jobs and plugin state.

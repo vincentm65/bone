@@ -23,7 +23,7 @@ use crate::keymap::{Action, Builtin, Context, Keymaps};
 use crate::keys::Key;
 use crate::layout::{BufferId, Placed, Window, WindowId};
 use crate::lua::{Autocmd, UserCommand};
-use crate::options::Options;
+use crate::options::{DynamicOption, Options};
 use crate::theme::Theme;
 
 /// A second ctrl+c within this long quits.
@@ -101,12 +101,15 @@ pub struct App {
     raw_interceptors: Vec<RawInterceptor>,
     /// Selected row of the slash-command suggestions.
     pub suggestion: usize,
+    /// Whether the suggestions are arguments for a user command.
+    pub suggestion_argument: bool,
     /// Suggestions are hidden (Esc) until the prompt text changes.
     suggestions_hidden_for: Option<String>,
     pub message: Option<(String, Level)>,
     /// Every message shown, for `/messages`.
     pub log: Vec<String>,
     pub options: Options,
+    pub dynamic_options: HashMap<String, DynamicOption>,
     pub opts_rev: u64,
     /// Bumped when Lua changes views; part of every render cache key.
     pub views_rev: u64,
@@ -121,6 +124,7 @@ pub struct App {
     pub clipboard: Option<String>,
     prompt_history: Vec<String>,
     prompt_history_pos: Option<usize>,
+    last_prompt_state: (String, (usize, usize)),
     quit_armed: Option<Instant>,
     pub dirty: bool,
     pub quit: Option<Option<String>>,
@@ -162,10 +166,12 @@ impl App {
             pending_since: None,
             raw_interceptors: Vec::new(),
             suggestion: 0,
+            suggestion_argument: false,
             suggestions_hidden_for: None,
             message: None,
             log: Vec::new(),
             options: Options::default(),
+            dynamic_options: HashMap::new(),
             opts_rev: 0,
             views_rev: 0,
             theme: Theme::default(),
@@ -175,6 +181,7 @@ impl App {
             selection: None,
             clipboard: None,
             prompt_history: Vec::new(),
+            last_prompt_state: (String::new(), (0, 0)),
             prompt_history_pos: None,
             quit_armed: None,
             dirty: true,
@@ -299,6 +306,46 @@ impl App {
 
     pub fn set_prompt_text(&mut self, text: &str) {
         self.prompt.set_text(text);
+        self.emit_prompt_changed();
+        self.dirty = true;
+    }
+
+    fn emit_prompt_changed(&mut self) {
+        let state = (self.prompt.text(), self.prompt.cursor());
+        if self.last_prompt_state == state {
+            return;
+        }
+        self.last_prompt_state = state.clone();
+        self.fire(
+            "prompt/changed",
+            serde_json::json!({
+                "text": state.0,
+                "cursor": { "row": state.1.0, "col": state.1.1 },
+            }),
+        );
+    }
+
+    pub(crate) fn emit_focus_changed(&mut self) {
+        self.fire(
+            "focus/changed",
+            serde_json::json!({
+                "context": self.context().name(),
+                "popup": self.focused_popup().is_some(),
+            }),
+        );
+    }
+
+    pub fn resize(&mut self, width: u16, height: u16) {
+        if self.screen.width == width && self.screen.height == height {
+            self.dirty = true;
+            return;
+        }
+        self.screen.width = width;
+        self.screen.height = height;
+        self.fire(
+            "resize",
+            serde_json::json!({ "width": width, "height": height }),
+        );
         self.dirty = true;
     }
 
@@ -325,6 +372,7 @@ impl App {
         }
         self.flush_pending();
         self.focused_context = Some(ctx);
+        self.emit_focus_changed();
         self.dirty = true;
         Ok(())
     }
@@ -332,6 +380,7 @@ impl App {
     pub fn clear_context(&mut self) -> Result<(), String> {
         self.flush_pending();
         self.focused_context = None;
+        self.emit_focus_changed();
         self.dirty = true;
         Ok(())
     }
@@ -343,6 +392,7 @@ impl App {
         if self.focused_context.as_ref() == Some(ctx) {
             self.flush_pending();
             self.focused_context = None;
+            self.emit_focus_changed();
         }
         self.keymaps.remove_context(ctx)?;
         self.dirty = true;
@@ -374,6 +424,13 @@ impl App {
         self.dirty = true;
         self.selection = None;
         let ctx = self.context();
+        self.fire(
+            "key",
+            serde_json::json!({
+                "key": crate::keys::format(&key),
+                "context": ctx.name(),
+            }),
+        );
         if self
             .pending_context
             .as_ref()
@@ -382,6 +439,7 @@ impl App {
             self.flush_pending();
         }
         self.dispatch_key(key, true);
+        self.emit_prompt_changed();
     }
 
     fn dispatch_key(&mut self, key: Key, allow_raw: bool) {
@@ -457,15 +515,22 @@ impl App {
     pub fn paste(&mut self, text: &str) {
         self.dirty = true;
         self.flush_pending();
+        let context = self.context().name().to_owned();
+        self.fire(
+            "paste",
+            serde_json::json!({ "text": text, "context": context }),
+        );
         match self.context() {
             Context::Main | Context::Named(_) => self.prompt.insert_str(text),
             Context::Popup => {}
         }
+        self.emit_prompt_changed();
     }
 
     pub fn run(&mut self, action: Action) {
         self.dirty = true;
         let _ = self.dispatch_action(action);
+        self.emit_prompt_changed();
     }
 
     fn dispatch_action(&mut self, action: Action) -> bool {
@@ -520,6 +585,7 @@ impl App {
         {
             self.replay_literal(&ctx, &keys);
         }
+        self.emit_prompt_changed();
     }
 
     pub fn add_raw_interceptor(&mut self, callback: u64, context: Option<Context>) -> u64 {
@@ -591,9 +657,20 @@ impl App {
             }
             ScrollBottom => self.windows.get_mut(&CHAT_WIN).unwrap().follow = true,
             Complete => {
-                if let Some((name, _)) = self.suggestions().get(self.suggestion) {
-                    let text = format!("/{name} ");
-                    self.prompt.set_text(&text);
+                let suggestions = self.suggestions();
+                if let Some((name, _)) = suggestions.get(self.suggestion) {
+                    if self.suggestion_argument {
+                        let text = self.prompt.text();
+                        let split = text
+                            .char_indices()
+                            .rev()
+                            .find(|(_, c)| c.is_whitespace())
+                            .map(|(i, _)| i + 1)
+                            .unwrap_or(0);
+                        self.set_prompt_text(&format!("{}{} ", &text[..split], name));
+                    } else {
+                        self.set_prompt_text(&format!("/{name} "));
+                    }
                 }
             }
             Dismiss => {
@@ -650,6 +727,7 @@ impl App {
             .map(|p| self.prompt_history[p].clone())
             .unwrap_or_default();
         self.prompt.set_text(&text);
+        self.emit_prompt_changed();
     }
 
     fn page(&self) -> i64 {
@@ -694,18 +772,75 @@ impl App {
     // ---- slash commands ------------------------------------------------------
 
     /// Matching commands while the prompt holds a partial `/name`.
-    pub fn suggestions(&self) -> Vec<(String, String)> {
+    /// Matching commands or command arguments while the prompt holds a partial
+    /// `/name` or `/name args`.
+    pub fn suggestions(&mut self) -> Vec<(String, String)> {
+        self.suggestion_argument = false;
         if self.focused_popup().is_some() {
             return Vec::new();
         }
         let text = self.prompt.text();
-        let Some(word) = text.strip_prefix('/') else {
+        let Some(rest) = text.strip_prefix('/') else {
             return Vec::new();
         };
-        if word.starts_with('/')
-            || word.contains(char::is_whitespace)
-            || self.suggestions_hidden_for.as_ref() == Some(&text)
-        {
+        if rest.starts_with('/') || self.suggestions_hidden_for.as_ref() == Some(&text) {
+            return Vec::new();
+        }
+        if let Some((word, args)) = rest.split_once(char::is_whitespace) {
+            let Some((command, user)) = self.user_command(word) else {
+                return Vec::new();
+            };
+            let Some(callback) = user.completion else {
+                return Vec::new();
+            };
+            self.suggestion_argument = true;
+            let args = args.trim_start();
+            let token = args
+                .rsplit(|c: char| c.is_whitespace())
+                .next()
+                .unwrap_or("");
+            let result = self.call_callback(callback, "command completion", |lua| {
+                let ctx = lua.create_table()?;
+                ctx.set("command", command.as_str())?;
+                ctx.set("text", text.as_str())?;
+                ctx.set("args", args)?;
+                ctx.set("token", token)?;
+                ctx.set(
+                    "argv",
+                    lua.create_sequence_from(args.split_whitespace().map(str::to_owned))?,
+                )?;
+                Ok(mlua::Value::Table(ctx))
+            });
+            return match result {
+                Some(mlua::Value::Table(items)) => items
+                    .sequence_values::<mlua::Value>()
+                    .flatten()
+                    .filter_map(|item| match item {
+                        mlua::Value::String(value) => {
+                            Some((value.to_string_lossy(), String::new()))
+                        }
+                        mlua::Value::Table(item) => {
+                            let value =
+                                item.get::<Option<String>>("value").ok().flatten().or_else(
+                                    || item.get::<Option<String>>("name").ok().flatten(),
+                                )?;
+                            let desc = item
+                                .get::<Option<String>>("desc")
+                                .ok()
+                                .flatten()
+                                .unwrap_or_default();
+                            Some((value, desc))
+                        }
+                        _ => None,
+                    })
+                    .filter(|(name, _)| name.starts_with(token))
+                    .take(MAX_SUGGESTIONS)
+                    .collect(),
+                _ => Vec::new(),
+            };
+        }
+        let word = rest;
+        if word.contains(char::is_whitespace) {
             return Vec::new();
         }
         let mut out: Vec<(String, String)> = crate::commands::COMMANDS
@@ -717,17 +852,30 @@ impl App {
             })
             .filter(|(n, _)| n.starts_with(word))
             .map(|(n, c)| (n.to_owned(), c.help.to_owned()))
-            .chain(
-                self.user_commands
-                    .iter()
-                    .filter(|(n, _)| n.starts_with(word))
-                    .map(|(n, c)| (n.clone(), c.desc.clone())),
-            )
+            .chain(self.user_commands.iter().flat_map(|(name, command)| {
+                std::iter::once((name.clone(), command.desc.clone())).chain(
+                    command
+                        .aliases
+                        .iter()
+                        .cloned()
+                        .map(|alias| (alias, command.desc.clone())),
+                )
+            }))
+            .filter(|(n, _)| n.starts_with(word))
             .collect();
         out.sort();
         out.dedup_by(|a, b| a.0 == b.0);
         out.truncate(MAX_SUGGESTIONS);
         out
+    }
+
+    fn user_command(&self, word: &str) -> Option<(String, UserCommand)> {
+        self.user_commands
+            .iter()
+            .find(|(name, command)| {
+                name.as_str() == word || command.aliases.iter().any(|alias| alias == word)
+            })
+            .map(|(name, command)| (name.clone(), command.clone()))
     }
 
     /// Enter: run a `/command`, or send the prompt as a message. `//text`
@@ -739,7 +887,7 @@ impl App {
             return self.submit();
         };
         if rest.starts_with('/') {
-            self.prompt.set_text(&text.replacen("//", "/", 1));
+            self.set_prompt_text(&text.replacen("//", "/", 1));
             return self.submit();
         }
         let word = rest.split_whitespace().next().unwrap_or("");
@@ -768,7 +916,7 @@ impl App {
     }
 
     fn is_command(&self, word: &str) -> bool {
-        crate::commands::resolve(word).is_some() || self.user_commands.contains_key(word)
+        crate::commands::resolve(word).is_some() || self.user_command(word).is_some()
     }
 
     // ---- turns ---------------------------------------------------------------
@@ -844,7 +992,7 @@ impl App {
         }
         // Give the text back rather than losing it.
         if self.prompt.is_empty() {
-            self.prompt.set_text(&text);
+            self.set_prompt_text(&text);
         }
         self.error(why);
     }

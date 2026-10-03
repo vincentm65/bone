@@ -145,7 +145,7 @@ fn handle_terminal(app: &mut App, ev: Event) {
             };
             app.handle_key(crate::keys::Key::new(code, m.modifiers));
         }
-        Event::Resize(..) => app.dirty = true,
+        Event::Resize(width, height) => app.resize(width, height),
         _ => {}
     }
 }

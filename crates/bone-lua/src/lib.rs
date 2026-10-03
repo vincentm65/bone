@@ -75,6 +75,9 @@ static TUI_CAPABILITIES: &[&str] = &[
     "tui.input",
     "tui.commands",
     "tui.events",
+    "tui.local_events",
+    "tui.command_specs",
+    "tui.dynamic_options",
     "tui.options",
     "tui.request",
     "tui.prompt",
@@ -422,7 +425,7 @@ mod tests {
             assert_eq!(bone.get::<u32>("api_version").unwrap(), API_VERSION);
 
             let capabilities: Table = bone.get("capabilities").unwrap();
-            assert_eq!(capabilities.get::<bool>(present).unwrap(), true);
+            assert!(capabilities.get::<bool>(present).unwrap());
             assert_eq!(capabilities.get::<Option<bool>>(absent).unwrap(), None);
 
             let info: Table = lua.load("return bone.api_info()").eval().unwrap();
