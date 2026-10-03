@@ -6,15 +6,50 @@ local api = bone._api
 
 bone.keymap = {}
 
---- Map a key ("ctrl+s", "alt+enter", "shift+tab", "pageup", "f5", "?") to an
---- action: a builtin name ("submit", "page_up", ...), a slash command
---- ("/sessions"), or a Lua function.
---- opts.context: "main" (default, the prompt) or "popup" (while a focused
---- Lua window is open, after that window's own keys). Pickers are Lua windows;
---- they do not add a separate keymap context.
+--- Map a key or whitespace-separated key sequence (`"g g"`, `"ctrl+x enter"`) to an
+--- action: a builtin name (`"submit"`, `"page_up"`, ...), a slash command
+--- (`"/sessions"`), or a Lua function.
+--- opts.context: `"main"` (default), `"popup"`, or a named context. A focused
+--- Lua window gets its own keys first, then the `popup` context. Unmapped text
+--- in `main` and named contexts enters the prompt.
 function bone.keymap.set(key, action, opts)
   api("keymap_set", key, action, opts or {})
 end
+
+--- Define or update a named context. `opts.fallback` is a context name or
+--- list of names (default: `main`); `opts.priority` orders fallback lookup.
+function bone.keymap.context(name, opts)
+  api("keymap_context", name, opts or {})
+end
+bone.keymap.define = bone.keymap.context
+bone.keymap.set_context = bone.keymap.context
+
+--- Focus a named context. Pass nil, or call clear(), to return to `main`.
+function bone.keymap.focus(name)
+  api("keymap_focus", name)
+end
+function bone.keymap.clear()
+  api("keymap_clear")
+end
+function bone.keymap.current()
+  return api("keymap_current")
+end
+
+function bone.keymap.del_context(name)
+  api("keymap_context_del", name)
+end
+bone.keymap.delete_context = bone.keymap.del_context
+
+--- Intercept raw key names before keymaps. Return true to consume; any other
+--- return value passes the key to normal popup/keymap handling.
+function bone.keymap.raw(fn, opts)
+  return api("keymap_raw", fn, opts or {})
+end
+bone.keymap.intercept = bone.keymap.raw
+function bone.keymap.raw_del(id)
+  return api("keymap_raw_del", id)
+end
+bone.keymap.remove_raw = bone.keymap.raw_del
 
 function bone.keymap.del(key, opts)
   api("keymap_del", key, opts or {})

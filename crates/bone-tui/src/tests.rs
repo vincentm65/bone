@@ -678,8 +678,8 @@ async fn lua_api_and_errors() {
     for (code, want) in [
         ("bone.keymap.set('hyper+x', 'submit')", "unknown modifier"),
         (
-            "bone.keymap.set('x', 'submit', { context = 'nope' })",
-            "unknown context",
+            "bone.keymap.set('x', 'submit', { context = 'nope context' })",
+            "invalid context",
         ),
         ("bone.keymap.set('x', 'nope')", "unknown action"),
         ("bone.o.nope = 1", "unknown option"),

@@ -91,6 +91,7 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
         } else {
             None
         };
+        let timeout_at = app.key_sequence_deadline();
         tokio::select! {
             biased;
             ev = rx.recv() => {
@@ -107,6 +108,9 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
                 Some(ev) => app.handle_server(ev),
                 None => app.server_closed(),
             },
+            _ = sleep_until(timeout_at.unwrap_or_else(Instant::now).into()), if timeout_at.is_some() => {
+                app.expire_key_sequence();
+            }
             _ = sleep_until(draw_at.unwrap_or_else(Instant::now).into()), if draw_at.is_some() => {
                 term.draw(|f| render::draw(f, &mut app))?;
                 app.dirty = false;

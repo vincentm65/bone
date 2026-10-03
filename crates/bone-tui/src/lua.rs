@@ -466,8 +466,44 @@ fn context_arg(opts: &Option<Table>) -> mlua::Result<Context> {
     {
         None => Ok(Context::Main),
         Some(c) => Context::from_name(&c).ok_or_else(|| {
-            mlua::Error::runtime(format!("unknown context {c:?} (use main or popup)"))
+            mlua::Error::runtime(format!(
+                "invalid context {c:?} (use main, popup, or letters, digits, _, - and .)"
+            ))
         }),
+    }
+}
+
+fn context_from_name(name: String) -> mlua::Result<Context> {
+    Context::from_name(&name)
+        .ok_or_else(|| err(format!("invalid context {name:?} (bad context name)")))
+}
+
+fn fallback_arg(opts: &Option<Table>) -> mlua::Result<Option<Vec<Context>>> {
+    let Some(opts) = opts else { return Ok(None) };
+    let value = match opts.get::<Value>("fallback")? {
+        Value::Nil => opts.get::<Value>("fallbacks")?,
+        value => value,
+    };
+    match value {
+        Value::Nil => Ok(None),
+        Value::String(name) => Ok(Some(vec![context_from_name(name.to_str()?.to_owned())?])),
+        Value::Table(table) => table
+            .sequence_values::<String>()
+            .map(|name| name.and_then(context_from_name))
+            .collect::<mlua::Result<Vec<_>>>()
+            .map(Some),
+        other => Err(err(format!(
+            "context fallback must be a name or list, not {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn raw_context_arg(opts: &Option<Table>) -> mlua::Result<Option<Context>> {
+    let Some(opts) = opts else { return Ok(None) };
+    match opts.get::<Option<String>>("context")? {
+        Some(name) => context_from_name(name).map(Some),
+        None => Ok(None),
     }
 }
 
@@ -497,6 +533,55 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             let (key, opts): (String, Option<Table>) = args(lua, a)?;
             app.keymaps.del(context_arg(&opts)?, &key).map_err(err)?;
             ret(lua, ())
+        }
+        "keymap_context" => {
+            let (name, opts): (String, Option<Table>) = args(lua, a)?;
+            let ctx = context_from_name(name)?;
+            let fallback = fallback_arg(&opts)?;
+            let priority = opts
+                .as_ref()
+                .map(|o| o.get::<Option<i32>>("priority"))
+                .transpose()?
+                .flatten();
+            app.keymaps.define(ctx, fallback, priority).map_err(err)?;
+            ret(lua, ())
+        }
+        "keymap_focus" => {
+            let name: Option<String> = args(lua, a)?;
+            match name {
+                Some(name) => app.focus_context(context_from_name(name)?).map_err(err)?,
+                None => app.clear_context().map_err(err)?,
+            }
+            ret(lua, ())
+        }
+        "keymap_clear" => {
+            let _: () = args(lua, a)?;
+            app.clear_context().map_err(err)?;
+            ret(lua, ())
+        }
+        "keymap_current" => ret(lua, app.context().name().to_owned()),
+        "keymap_context_del" => {
+            let name: String = args(lua, a)?;
+            let ctx = context_from_name(name)?;
+            app.delete_context(&ctx).map_err(err)?;
+            ret(lua, ())
+        }
+        "keymap_raw" => {
+            let (f, opts): (Function, Option<Table>) = args(lua, a)?;
+            let context = raw_context_arg(&opts)?;
+            let callback = app.store_callback(lua, f)?;
+            let id = app.add_raw_interceptor(callback, context);
+            ret(lua, id)
+        }
+        "keymap_raw_del" => {
+            let id: u64 = args(lua, a)?;
+            match app.remove_raw_interceptor(id) {
+                Some(callback) => {
+                    App::drop_callback(lua, callback)?;
+                    ret(lua, true)
+                }
+                None => ret(lua, false),
+            }
         }
         "cmd" => {
             let line: String = args(lua, a)?;

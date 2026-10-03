@@ -37,7 +37,7 @@ the other.
 
 The current capability names are `core.config`, `core.tools`,
 `core.hooks`, `core.providers`, `core.jobs`, `core.http_stream`, `core.ask`,
-`core.health`, and, in the TUI, `tui.keymaps`, `tui.commands`, `tui.events`,
+`core.health`, and, in the TUI, `tui.keymaps`, `tui.input`, `tui.commands`,
 `tui.options`, `tui.request`, `tui.prompt`, `tui.chat`, `tui.windows`,
 `tui.regions`, `tui.views`, `tui.pickers`, `tui.themes`, `tui.jobs`, and
 `tui.session`. Both sides also report `lua`, `json`, and `modules`.
@@ -71,7 +71,7 @@ capabilities are not available until reported by `bone.has_capability`.
 
 | Extension point | v1 behavior | Planned additive extension |
 |---|---|---|
-| Input contexts | `main` is the prompt context and `popup` is the fallback context for a focused Lua window. A picker is a Lua window, not a third keymap context. Unmapped main text enters the prompt. | Named contexts, priority/fallback, key sequences, raw interception and real sequence timeouts (`tui.input`). |
+| Input contexts | `main` is the prompt context and `popup` is the fallback context for a focused Lua window. A picker is a Lua window, not a third keymap context. Unmapped main text enters the prompt. | Named contexts, priority/fallback, key sequences, raw interception and real sequence timeouts are available through `tui.input`. |
 | Events | `bone.on` receives server notifications by method plus `ready` and `submit`. Server callbacks run after the TUI applies the notification; `submit` can cancel or replace text. | Local prompt/focus/resize/key/panel events and a richer registry (`tui.local_events`). |
 | Commands | Built-ins and user commands are slash commands. `bone.cmd.create` receives one raw `{ args = "..." }` string and `{ desc }`; built-ins cannot be replaced. | Aliases, completion and structured argument metadata (`tui.command_specs`). |
 | Options | `bone.o` exposes the fixed, typed Rust options. v1 values are booleans or non-negative numbers; unknown names and wrong types are errors. | Dynamic typed options, defaults, validation and change callbacks (`tui.dynamic_options`). |
@@ -259,7 +259,7 @@ For one-off runs, these override `core.lua`: `BONE_BASE_URL` + `BONE_MODEL` (use
 
 ## TUI (`tui.lua`)
 
-The TUI has no modes: keys go to the prompt, and while a focused window is open (a popup, the session picker, any `bone.ui.select`) its own keys apply first. The keymap *contexts* are `main` and `popup` (keys a focused window doesn't handle itself).
+The TUI has no modes: keys go to the prompt, and while a focused window is open (a popup, the session picker, any `bone.ui.select`) its own keys apply first. The built-in contexts are `main` and `popup`; Lua can define and focus named contexts without changing modeless text entry.
 
 ### Keys
 
@@ -268,10 +268,25 @@ bone.keymap.set("f2", "/sessions")                            -- a slash command
 bone.keymap.set("ctrl+l", "new_session")                      -- a builtin action
 bone.keymap.set("alt+s", function() bone.cmd("set noshow_reasoning") end)
 bone.keymap.set("ctrl+q", "interrupt", { context = "popup" })  -- while a popup is open
+bone.keymap.set("g g", "/messages")                            -- a key sequence
+bone.keymap.context("review", { fallback = { "main" }, priority = 10 })
+bone.keymap.set("r", function() return false end, { context = "review" })
+bone.keymap.focus("review")
+bone.keymap.clear()                                               -- back to main
+local raw = bone.keymap.raw(function(key) return key == "f1" end)
+bone.keymap.raw_del(raw)
 bone.keymap.del("ctrl+n")
 ```
 
-Key names: `ctrl+`, `alt+` and `shift+` combined with `enter`, `esc`, `tab`, `backspace`, `delete`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `space`, `f1`–`f24`, `wheelup`, `wheeldown` (the mouse wheel) or a single character (`"?"`, `"G"`). Keys without a mapping type text.
+A named context defaults to falling back to `main`; `fallback` may be a name or
+list and `priority` chooses among fallback branches. An exact mapping that is
+also a prefix waits for `bone.o.timeoutlen` milliseconds (default `1000`) before
+running the exact mapping. On a mismatch, an exact fallback runs first and the
+new key is retried. Lua keymap callbacks consume the key unless they return
+`false`; raw interceptors consume only when they return `true`. Context focus is
+independent of popups, but a focused popup always has precedence.
+
+Key names: `ctrl+`, `alt+` and `shift+` combined with `enter`, `esc`, `tab`, `backspace`, `delete`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `space`, `f1`–`f24`, `wheelup`, `wheeldown` (the mouse wheel) or a single character (`"?"`, `"G"`). Whitespace separates members of a sequence. Keys without a mapping type text.
 
 Builtin actions: `submit newline left right up down word_left word_right line_start line_end backspace delete delete_word delete_to_start delete_to_end scroll_up scroll_down page_up page_down scroll_top scroll_bottom complete dismiss interrupt quit quit_if_empty new_session sessions`.
 

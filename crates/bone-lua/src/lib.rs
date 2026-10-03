@@ -72,6 +72,7 @@ static TUI_CAPABILITIES: &[&str] = &[
     "json",
     "modules",
     "tui.keymaps",
+    "tui.input",
     "tui.commands",
     "tui.events",
     "tui.options",

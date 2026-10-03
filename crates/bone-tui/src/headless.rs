@@ -84,9 +84,13 @@ impl Headless {
     /// happened for `quiet`.
     pub async fn settle(&mut self, quiet: Duration) {
         loop {
+            let timeout_at = self.app.key_sequence_deadline();
             tokio::select! {
                 Some(ev) = self.rx.recv() => self.app.apply(ev),
                 Some(ev) = self.events.recv() => self.app.handle_server(ev),
+                _ = tokio::time::sleep_until(timeout_at.unwrap_or_else(Instant::now).into()), if timeout_at.is_some() => {
+                    self.app.expire_key_sequence();
+                }
                 _ = tokio::time::sleep(quiet) => return,
             }
         }
@@ -133,9 +137,9 @@ impl Headless {
             .join("\n")
     }
 
-    /// Which keymaps apply: `"main"` or `"popup"`.
-    pub fn context(&self) -> &'static str {
-        self.app.context().name()
+    /// Which keymap context is active: `main`, `popup`, or a named context.
+    pub fn context(&self) -> String {
+        self.app.context().name().to_owned()
     }
 
     /// Set once `/quit` ran or the server went away; `Some(reason)` for the latter.

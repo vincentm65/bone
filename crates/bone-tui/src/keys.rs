@@ -130,6 +130,16 @@ pub fn parse(s: &str) -> Result<Key, String> {
     Ok(Key::new(code, mods))
 }
 
+/// Parse a whitespace-separated key sequence, such as `"g g"` or
+/// `"ctrl+x enter"`.
+pub fn parse_sequence(s: &str) -> Result<Vec<Key>, String> {
+    let sequence: Vec<Key> = s.split_whitespace().map(parse).collect::<Result<_, _>>()?;
+    if sequence.is_empty() {
+        return Err("empty key sequence".into());
+    }
+    Ok(sequence)
+}
+
 /// The name of a key, as `parse` reads it.
 pub fn format(k: &Key) -> String {
     let name = match k.code {
@@ -154,6 +164,12 @@ pub fn format(k: &Key) -> String {
         out.push_str("shift+");
     }
     out + &name
+}
+
+#[cfg(test)]
+/// Format a key sequence using the canonical names accepted by `parse_sequence`.
+pub fn format_sequence(sequence: &[Key]) -> String {
+    sequence.iter().map(format).collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -182,6 +198,19 @@ mod tests {
         assert_eq!(parse("return").unwrap(), parse("enter").unwrap());
         assert_eq!(parse("+").unwrap(), Key::char('+'));
         assert!(parse("hyper+x").is_err() && parse("nope").is_err() && parse("").is_err());
+    }
+
+    #[test]
+    fn parse_sequences_and_format() {
+        let sequence = parse_sequence("  ctrl+x enter  space ").unwrap();
+        assert_eq!(format_sequence(&sequence), "ctrl+x enter space");
+        assert_eq!(
+            parse_sequence("ctrl+x enter"),
+            Ok(vec![parse("ctrl+x").unwrap(), parse("enter").unwrap()])
+        );
+        assert!(parse_sequence("").is_err());
+        assert!(parse_sequence("   ").is_err());
+        assert!(parse_sequence("ctrl+x nope").is_err());
     }
 
     #[test]

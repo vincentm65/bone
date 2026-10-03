@@ -63,6 +63,13 @@ pub struct Popup {
     pub guard: Duration,
 }
 
+#[derive(Debug, Clone)]
+struct RawInterceptor {
+    id: u64,
+    callback: u64,
+    context: Option<Context>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
     Info,
@@ -85,6 +92,13 @@ pub struct App {
     pub placed: HashMap<WindowId, Placed>,
     pub screen: Rect,
     pub keymaps: Keymaps,
+    /// The explicitly focused named context (popup focus still takes precedence).
+    focused_context: Option<Context>,
+    pending_keys: Vec<Key>,
+    pending_action: Option<Action>,
+    pending_context: Option<Context>,
+    pending_since: Option<Instant>,
+    raw_interceptors: Vec<RawInterceptor>,
     /// Selected row of the slash-command suggestions.
     pub suggestion: usize,
     /// Suggestions are hidden (Esc) until the prompt text changes.
@@ -141,6 +155,12 @@ impl App {
             placed: HashMap::new(),
             screen: Rect::default(),
             keymaps: Keymaps::default(),
+            focused_context: None,
+            pending_keys: Vec::new(),
+            pending_action: None,
+            pending_context: None,
+            pending_since: None,
+            raw_interceptors: Vec::new(),
             suggestion: 0,
             suggestions_hidden_for: None,
             message: None,
@@ -284,12 +304,69 @@ impl App {
 
     // ---- keys ----------------------------------------------------------------
 
-    /// Which keymaps apply right now.
+    /// Which keymaps apply right now. A focused popup always wins over a
+    /// named context selected by Lua.
     pub fn context(&self) -> Context {
         if self.focused_popup().is_some() {
             Context::Popup
         } else {
-            Context::Main
+            self.focused_context.clone().unwrap_or(Context::Main)
+        }
+    }
+
+    pub fn focus_context(&mut self, ctx: Context) -> Result<(), String> {
+        match &ctx {
+            Context::Main => return self.clear_context(),
+            Context::Popup => return Err("popup context is controlled by focused windows".into()),
+            Context::Named(_) if !self.keymaps.has_context(&ctx) => {
+                return Err(format!("unknown context {}", ctx.name()));
+            }
+            Context::Named(_) => {}
+        }
+        self.flush_pending();
+        self.focused_context = Some(ctx);
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn clear_context(&mut self) -> Result<(), String> {
+        self.flush_pending();
+        self.focused_context = None;
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn delete_context(&mut self, ctx: &Context) -> Result<(), String> {
+        if !self.keymaps.has_context(ctx) {
+            return Err(format!("unknown context {}", ctx.name()));
+        }
+        if self.focused_context.as_ref() == Some(ctx) {
+            self.flush_pending();
+            self.focused_context = None;
+        }
+        self.keymaps.remove_context(ctx)?;
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn key_sequence_deadline(&self) -> Option<Instant> {
+        self.pending_since
+            .map(|since| since + Duration::from_millis(self.options.timeoutlen))
+    }
+
+    /// Expire a pending key sequence when its current `timeoutlen` deadline
+    /// has passed. This is called by the terminal loop even when nothing is
+    /// being redrawn.
+    pub fn expire_key_sequence(&mut self) -> bool {
+        if self
+            .key_sequence_deadline()
+            .is_some_and(|deadline| Instant::now() >= deadline)
+        {
+            self.flush_pending();
+            self.dirty = true;
+            true
+        } else {
+            false
         }
     }
 
@@ -297,22 +374,79 @@ impl App {
         self.dirty = true;
         self.selection = None;
         let ctx = self.context();
-        if ctx == Context::Popup {
-            return self.popup_key(key);
+        if self
+            .pending_context
+            .as_ref()
+            .is_some_and(|pending| pending != &ctx)
+        {
+            self.flush_pending();
         }
-        if ctx == Context::Main && self.message.is_some() {
+        self.dispatch_key(key, true);
+    }
+
+    fn dispatch_key(&mut self, key: Key, allow_raw: bool) {
+        let ctx = self.context();
+        if ctx == Context::Popup {
+            return self.popup_key(key, allow_raw);
+        }
+        if self.message.is_some() {
             self.message = None;
         }
-        match self.keymaps.get(ctx, key).cloned() {
-            Some(action) => self.run(action),
-            None => self.unmapped(key),
+        if allow_raw && self.raw_intercepts(&ctx, key) {
+            self.discard_pending();
+            return;
+        }
+        self.keymap_key(ctx, key);
+    }
+
+    fn keymap_key(&mut self, ctx: Context, key: Key) {
+        let had_pending = !self.pending_keys.is_empty();
+        let mut sequence = self.pending_keys.clone();
+        sequence.push(key);
+        let lookup = self.keymaps.lookup(&ctx, &sequence);
+
+        if lookup.prefix {
+            self.set_pending(sequence, lookup.action, ctx);
+            return;
+        }
+
+        if let Some(action) = lookup.action {
+            self.discard_pending();
+            if !self.dispatch_action(action) {
+                self.replay_literal(&ctx, &sequence);
+            }
+            return;
+        }
+
+        if !had_pending {
+            self.unmapped_in_context(&ctx, key);
+            return;
+        }
+
+        let (pending, fallback, pending_ctx) = self.take_pending();
+        if let Some(action) = fallback {
+            if !self.dispatch_action(action) && self.context() == pending_ctx {
+                self.replay_literal(&pending_ctx, &pending);
+            }
+        } else if self.context() == pending_ctx {
+            // A prefix with no exact fallback is literal when the next key
+            // proves it was not a sequence.
+            self.replay_literal(&pending_ctx, &pending);
+        }
+        // The mismatching key was not consumed by the failed sequence.
+        self.dispatch_key(key, false);
+    }
+
+    fn replay_literal(&mut self, ctx: &Context, keys: &[Key]) {
+        for &key in keys {
+            self.unmapped_in_context(ctx, key);
         }
     }
 
-    fn unmapped(&mut self, key: Key) {
+    fn unmapped_in_context(&mut self, ctx: &Context, key: Key) {
         let Some(c) = key.text() else { return };
-        match self.context() {
-            Context::Main => {
+        match ctx {
+            Context::Main | Context::Named(_) => {
                 self.prompt_history_pos = None;
                 self.prompt.insert_char(c);
             }
@@ -322,21 +456,104 @@ impl App {
 
     pub fn paste(&mut self, text: &str) {
         self.dirty = true;
+        self.flush_pending();
         match self.context() {
-            Context::Main => self.prompt.insert_str(text),
+            Context::Main | Context::Named(_) => self.prompt.insert_str(text),
             Context::Popup => {}
         }
     }
 
     pub fn run(&mut self, action: Action) {
         self.dirty = true;
+        let _ = self.dispatch_action(action);
+    }
+
+    fn dispatch_action(&mut self, action: Action) -> bool {
+        self.dirty = true;
         match action {
-            Action::Builtin(b) => self.builtin(b),
-            Action::Command(cmd) => self.execute(&cmd),
-            Action::Lua(id) => {
-                self.call_callback(id, "keymap", |_| Ok(mlua::Value::Nil));
+            Action::Builtin(b) => {
+                self.builtin(b);
+                true
             }
+            Action::Command(cmd) => {
+                self.execute(&cmd);
+                true
+            }
+            Action::Lua(id) => !matches!(
+                self.call_callback(id, "keymap", |_| Ok(mlua::Value::Nil)),
+                Some(mlua::Value::Boolean(false))
+            ),
         }
+    }
+
+    fn set_pending(&mut self, keys: Vec<Key>, action: Option<Action>, ctx: Context) {
+        self.pending_keys = keys;
+        self.pending_action = action;
+        self.pending_context = Some(ctx);
+        self.pending_since = Some(Instant::now());
+    }
+
+    fn take_pending(&mut self) -> (Vec<Key>, Option<Action>, Context) {
+        let keys = std::mem::take(&mut self.pending_keys);
+        let action = self.pending_action.take();
+        let ctx = self.pending_context.take().unwrap_or(Context::Main);
+        self.pending_since = None;
+        (keys, action, ctx)
+    }
+
+    fn discard_pending(&mut self) {
+        self.pending_keys.clear();
+        self.pending_action = None;
+        self.pending_context = None;
+        self.pending_since = None;
+    }
+
+    fn flush_pending(&mut self) {
+        if self.pending_keys.is_empty() {
+            self.discard_pending();
+            return;
+        }
+        let (keys, action, ctx) = self.take_pending();
+        if let Some(action) = action
+            && !self.dispatch_action(action)
+            && self.context() == ctx
+        {
+            self.replay_literal(&ctx, &keys);
+        }
+    }
+
+    pub fn add_raw_interceptor(&mut self, callback: u64, context: Option<Context>) -> u64 {
+        self.next_callback += 1;
+        let id = self.next_callback;
+        self.raw_interceptors.push(RawInterceptor {
+            id,
+            callback,
+            context,
+        });
+        id
+    }
+
+    pub fn remove_raw_interceptor(&mut self, id: u64) -> Option<u64> {
+        let i = self.raw_interceptors.iter().position(|raw| raw.id == id)?;
+        Some(self.raw_interceptors.remove(i).callback)
+    }
+
+    fn raw_intercepts(&mut self, ctx: &Context, key: Key) -> bool {
+        let name = crate::keys::format(&key);
+        let callbacks: Vec<u64> = self
+            .raw_interceptors
+            .iter()
+            .filter(|raw| raw.context.as_ref().is_none_or(|wanted| wanted == ctx))
+            .map(|raw| raw.callback)
+            .collect();
+        callbacks.into_iter().any(|callback| {
+            matches!(
+                self.call_callback(callback, "raw key", |lua| {
+                    Ok(mlua::Value::String(lua.create_string(&name)?))
+                }),
+                Some(mlua::Value::Boolean(true))
+            )
+        })
     }
 
     fn edit(&mut self, f: impl FnOnce(&mut TextBuffer)) {
@@ -815,19 +1032,29 @@ impl App {
         self.popups_in_order().into_iter().rev().find(|p| p.focus)
     }
 
-    fn popup_key(&mut self, key: Key) {
-        let Some(top) = self.focused_popup() else {
+    fn popup_key(&mut self, key: Key, allow_raw: bool) {
+        let Some((guard, own, on_key)) = self.focused_popup().map(|top| {
+            (
+                top.opened.elapsed() < top.guard,
+                top.keys
+                    .iter()
+                    .find(|(mapped, _)| *mapped == key)
+                    .map(|(_, cb)| *cb),
+                top.on_key,
+            )
+        }) else {
             return;
         };
-        if top.opened.elapsed() < top.guard {
+        if guard {
+            self.discard_pending();
             return;
         }
-        if let Some((_, cb)) = top.keys.iter().find(|(k, _)| *k == key) {
-            let cb = *cb;
+        if let Some(cb) = own {
+            self.discard_pending();
             self.call_callback(cb, "popup key", |_| Ok(mlua::Value::Nil));
             return;
         }
-        if let Some(cb) = top.on_key {
+        if let Some(cb) = on_key {
             let name = crate::keys::format(&key);
             let r = self.call_callback(cb, "popup on_key", |lua| {
                 Ok(mlua::Value::String(lua.create_string(&name)?))
@@ -838,12 +1065,19 @@ impl App {
                 r,
                 None | Some(mlua::Value::Nil | mlua::Value::Boolean(false))
             ) {
+                self.discard_pending();
                 return;
             }
         }
-        if let Some(action) = self.keymaps.get(Context::Popup, key).cloned() {
-            self.run(action);
+        let ctx = self.context();
+        if ctx != Context::Popup {
+            return self.dispatch_key(key, false);
         }
+        if allow_raw && self.raw_intercepts(&ctx, key) {
+            self.discard_pending();
+            return;
+        }
+        self.keymap_key(ctx, key);
     }
 
     // ---- server events -------------------------------------------------------
