@@ -645,6 +645,29 @@ impl App {
     /// keeps the Lua state and Rust session alive, matching Vim's `:source`
     /// model; a later cleanup API can make plugin reloads fully idempotent.
     pub fn reload_user_config(&mut self) {
+        // `tui.lua` is sourced repeatedly. Clear mutable UI customization
+        // first so deleting a line really removes its previous definition.
+        // The API tables are intentionally kept alive; Rust still owns the
+        // session and the Lua callbacks are replaced by the next source.
+        let reset = self.with_api(|lua| {
+            lua.load(
+                r#"
+                bone.ui.statusline = nil
+                bone.ui.divider = nil
+                bone.ui.prompt = nil
+                bone.ui.layout = nil
+                for k in pairs(bone.ui.views) do bone.ui.views[k] = nil end
+                for k in pairs(bone.ui.tool_views) do bone.ui.tool_views[k] = nil end
+                for k in pairs(bone.ui.regions) do bone.ui.regions[k] = nil end
+                "#,
+            )
+            .exec()
+        });
+        if let Err(e) = reset {
+            self.lua_error("resetting Lua UI", &e);
+            return;
+        }
+        self.ui_broken.clear();
         self.load_user_config();
         self.dirty = true;
         self.info("Lua configuration reloaded");
