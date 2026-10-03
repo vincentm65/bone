@@ -375,7 +375,6 @@ impl Turn<'_> {
                 }
                 let results = futures_util::future::join_all(batch.iter().map(|call| async move {
                     let (output, is_error) = self.run_tool(call).await;
-                    let output = self.cap(output);
                     self.inner.emit::<ToolFinished>(ToolFinishedParams {
                         session_id: self.session_id.clone(),
                         turn_id: self.turn_id,
@@ -464,16 +463,6 @@ impl Turn<'_> {
                 .tool(&call.name)
                 .is_some_and(|t| t.parallel()),
         }
-    }
-
-    /// A tool result no longer than `max_tool_output` bytes: the start and
-    /// the end, with a note of what was left out.
-    fn cap(&self, output: String) -> String {
-        let max = self.rt.config.max_tool_output;
-        if output.len() <= max {
-            return output;
-        }
-        crate::tools::truncate_middle(&output, max * 3 / 4, max / 4)
     }
 
     /// Run one call. Returns the text for the model and whether it is an error.

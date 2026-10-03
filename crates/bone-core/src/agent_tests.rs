@@ -131,7 +131,6 @@ impl Harness {
             system_prompt: None,
             data_dir: data.path().to_owned(),
             parallel_tools: true,
-            max_tool_output: crate::config::DEFAULT_MAX_TOOL_OUTPUT,
         };
         let provider = Arc::new(Scripted {
             steps: Mutex::new(steps.into()),
@@ -1643,9 +1642,10 @@ async fn parallel_calls_can_be_switched_off() {
 }
 
 #[tokio::test]
-async fn long_tool_results_are_cut() {
-    let mut h = Harness::with_lua(
-        r#"bone.config.max_tool_output = 200
+async fn example_output_cap_plugin_cuts_long_results() {
+    let mut h = Harness::with_plugins(
+        &["output-cap"],
+        r#"bone.config.output_cap.max = 200
            bone.tool.register { name = "big", run = function() return "A" .. string.rep("x", 5000) .. "Z" end }"#,
         vec![calls(&[("c1", "big", json!({}))]), text("ok")],
     )

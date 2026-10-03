@@ -145,9 +145,8 @@ struct Extracted {
     hook_set: Arc<Mutex<HashSet<String>>>,
     /// `bone.mcp.add` servers.
     mcp: Vec<crate::mcp::ServerConfig>,
-    /// `bone.config.parallel_tools` and `max_tool_output`.
+    /// `bone.config.parallel_tools`.
     parallel: bool,
-    max_tool_output: usize,
 }
 
 /// Run the runtime, plugins and `<config_dir>/core.lua`, then apply `BONE_*`
@@ -284,7 +283,6 @@ fn resolve(
         .unwrap_or_else(|| config_dir.to_owned());
     Ok(CoreConfig {
         parallel_tools: ex.parallel,
-        max_tool_output: ex.max_tool_output,
         provider,
         system_prompt: env("BONE_SYSTEM_PROMPT").or_else(|| ex.system_prompt.clone()),
         data_dir,
@@ -1320,9 +1318,6 @@ fn extract(lua: &Lua) -> mlua::Result<Extracted> {
         parallel: config
             .get::<Option<bool>>("parallel_tools")?
             .unwrap_or(true),
-        max_tool_output: config
-            .get::<Option<usize>>("max_tool_output")?
-            .unwrap_or(crate::config::DEFAULT_MAX_TOOL_OUTPUT),
     })
 }
 

@@ -31,7 +31,6 @@ fn server_at(base_url: &str) -> Server {
         system_prompt: None,
         data_dir: data.path().to_owned(),
         parallel_tools: true,
-        max_tool_output: bone_core::config::DEFAULT_MAX_TOOL_OUTPUT,
     })))
 }
 

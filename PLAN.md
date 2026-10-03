@@ -417,8 +417,7 @@ Core features that cannot be plugins, added after the agent-side roadmap:
   Lua tools with `parallel = true`, MCP tools marked `readOnlyHint`) run
   together, up to 8; other calls run alone and in order; results are saved
   in call order. `bone.config.parallel_tools = false` turns it off.
-- **Tool output cap**: every result is cut to `bone.config.max_tool_output`
-  bytes (default 100000), start and end kept.
+- **Tool output cap**: later moved to the `output-cap` plugin (see below).
 - **Concurrent requests**: after the handshake each request runs on its own
   task; replies come back by id, and a request's events may precede its
   reply (the TUI's `bone.model` handles that).
@@ -442,4 +441,5 @@ Moved out of the core after review, to keep the default harness minimal:
   and `template/expand` are replaced by one generic `lua/call`, served by
   functions plugins register with `bone.rpc.register` (`core.rpc`,
   `tui.rpc` for `bone.rpc.call`).
-
+- The tool output cap is a plugin (`examples/plugins/output-cap`, one
+  `tool_result` hook); the core no longer has `max_tool_output`.

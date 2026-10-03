@@ -44,4 +44,3 @@ the word in that position of `args`. A function body gets `{ raw, argv,
 <name> = ... }` and `ctx = { session_id, cwd }`, and may wait. Also
 `bone.template.expand(name, text, ctx)`, `list()` and `unregister(name)`. The
 TUI half uses `bone.rpc.call("templates.list")` and `"templates.expand"`.
-

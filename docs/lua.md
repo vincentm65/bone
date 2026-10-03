@@ -96,7 +96,7 @@ A plugin is a folder in `~/.bone/plugins/`:
   colors/      colorschemes
 ```
 
-The repo's examples show most of the API at work: `style` (a complete look), `approve` (asking before tools run), `git` and `anthropic` (tools and a provider), `switch` (pick the provider from the TUI), `tasks` (a persistent task panel), `review` (the files a session changed, and review prompts), `testrun` (tests streamed into a panel), `compact` (summarize long sessions, by hand or when the context is full), `retry` (back off and fall back on passing errors), `mcp` (MCP servers from JSON files, and a status panel), `skills` and `templates` (load folders of them, with TUI commands) and `ask-model` (a side question to a model). None is installed by default.
+The repo's examples show most of the API at work: `style` (a complete look), `approve` (asking before tools run), `git` and `anthropic` (tools and a provider), `switch` (pick the provider from the TUI), `tasks` (a persistent task panel), `review` (the files a session changed, and review prompts), `testrun` (tests streamed into a panel), `compact` (summarize long sessions, by hand or when the context is full), `output-cap` (limit any tool result's size), `retry` (back off and fall back on passing errors), `mcp` (MCP servers from JSON files, and a status panel), `skills` and `templates` (load folders of them, with TUI commands) and `ask-model` (a side question to a model). None is installed by default.
 
 Every part is optional. Plugins load in name order, after the runtime defaults and before your own `core.lua` / `tui.lua`, so your config can change anything a plugin set up. Rename a folder to start with `_` or `.` to disable it. `bone.plugins` lists the loaded names. Installing is just copying or `git clone`-ing into `~/.bone/plugins/`; see `examples/plugins/` in the repo (`git`, `approve`, `style`).
 
@@ -148,7 +148,6 @@ bone.config.provider = "qwen"      -- which entry to use (optional if there is o
 bone.config.system_prompt = "..."  -- or function(ctx) return "..." end; ctx = { cwd, session_id }
 bone.config.data_dir = "~/somewhere"  -- sessions; default is the config dir
 bone.config.parallel_tools = true  -- run a reply's read-only tool calls at the same time (default)
-bone.config.max_tool_output = 100000  -- longest tool result the model gets, in bytes (start and end kept)
 ```
 
 The working directory is always appended to the system prompt.
@@ -172,7 +171,7 @@ bone.tool.register {
 
 A Lua tool with the same name as a built-in (`read_file`, `write_file`, `edit_file`, `shell`) replaces it. `error()` inside `run` becomes an error result for the model.
 
-When a reply asks for several tools, consecutive calls of tools that only read run at the same time (up to 8): `read_file`, Lua tools registered with `parallel = true`, and MCP tools their server marks `readOnlyHint`. Any other call runs on its own, after the ones before it and before the ones after it, so writes and shell commands keep their order. Results reach the transcript in the order of the calls. Every result, from any tool, is cut to `bone.config.max_tool_output` bytes (its start and end kept).
+When a reply asks for several tools, consecutive calls of tools that only read run at the same time (up to 8): `read_file`, Lua tools registered with `parallel = true`, and MCP tools their server marks `readOnlyHint`. Any other call runs on its own, after the ones before it and before the ones after it, so writes and shell commands keep their order. Results reach the transcript in the order of the calls. Results are not cut (only `shell` limits its own output); the `output-cap` example plugin limits every tool's.
 
 - `print(...)` appends to `~/.bone/core.log` (the core may share the terminal with the TUI).
 

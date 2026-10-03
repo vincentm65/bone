@@ -103,7 +103,6 @@ async fn turn_with_tool_call_over_http() {
         system_prompt: Some("SYSTEM".into()),
         data_dir: data.path().to_owned(),
         parallel_tools: true,
-        max_tool_output: bone_core::config::DEFAULT_MAX_TOOL_OUTPUT,
     });
     let server = Server::new(Arc::new(core));
     let (client, mut events) = Client::new(server.connect_in_process());

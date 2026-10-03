@@ -68,7 +68,7 @@ bone3 --connect                  # a TUI on that server; run several, they stay 
 - [docs/protocol.md](docs/protocol.md): the JSON-RPC API for writing clients.
 - [docs/architecture.md](docs/architecture.md): how the pieces fit together.
 - [examples/plugins/git](examples/plugins/git): a small plugin with a tool, a tool view and a command.
-- More examples in [examples/plugins](examples/plugins): `switch` (change provider from the TUI), `tasks` (a task panel), `review` (changed files and review prompts), `testrun` (tests streamed into a panel), `compact` (summarize long sessions), `retry` (backoff and provider fallback), `mcp` (MCP servers from JSON files), `skills` and `templates` (folders of them, with TUI commands), `ask-model` (side questions), `approve`, `style` and `anthropic`. None is installed by default.
+- More examples in [examples/plugins](examples/plugins): `switch` (change provider from the TUI), `tasks` (a task panel), `review` (changed files and review prompts), `testrun` (tests streamed into a panel), `compact` (summarize long sessions), `output-cap` (limit tool result sizes), `retry` (backoff and provider fallback), `mcp` (MCP servers from JSON files), `skills` and `templates` (folders of them, with TUI commands), `ask-model` (side questions), `approve`, `style` and `anthropic`. None is installed by default.
 
 ## Development
 

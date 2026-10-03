@@ -113,7 +113,7 @@ fn typed_args<T: DeserializeOwned>(args: Value) -> Result<T, String> {
 }
 
 /// Keep the head and tail of long output, cut on char boundaries.
-pub(crate) fn truncate_middle(s: &str, head: usize, tail: usize) -> String {
+fn truncate_middle(s: &str, head: usize, tail: usize) -> String {
     if s.len() <= head + tail {
         return s.to_owned();
     }
