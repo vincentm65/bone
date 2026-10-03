@@ -24,6 +24,8 @@ macro_rules! runtime_files {
 
 pub const RUNTIME: &[(&str, &str)] = runtime_files![
     "lua/bone/util.lua",
+    "lua/bone/menu.lua",
+    "lua/bone/commands.lua",
     "tui/api.lua",
     "tui/defaults.lua",
     "core/api.lua",

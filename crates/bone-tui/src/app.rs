@@ -29,7 +29,6 @@ use crate::theme::Theme;
 
 /// A second ctrl+c within this long quits.
 const QUIT_WINDOW: Duration = Duration::from_secs(2);
-const MAX_SUGGESTIONS: usize = 8;
 
 pub const CHAT_WIN: WindowId = 0;
 pub const PROMPT_WIN: WindowId = 1;
@@ -107,12 +106,6 @@ pub struct App {
     pending_context: Option<Context>,
     pending_since: Option<Instant>,
     raw_interceptors: Vec<RawInterceptor>,
-    /// Selected row of the slash-command suggestions.
-    pub suggestion: usize,
-    /// Whether the suggestions are arguments for a user command.
-    pub suggestion_argument: bool,
-    /// Suggestions are hidden (Esc) until the prompt text changes.
-    suggestions_hidden_for: Option<String>,
     pub message: Option<(String, Level)>,
     /// Every message shown, for `/messages`.
     pub log: Vec<String>,
@@ -147,6 +140,9 @@ pub struct App {
     pub next_callback: u64,
     pub user_commands: HashMap<String, UserCommand>,
     pub autocmds: Vec<Autocmd>,
+    /// Builtin actions whose `bone.ui.actions` handler is running (so a
+    /// handler that runs its own action gets the built-in one).
+    in_actions: Vec<Builtin>,
     /// The plugin whose code is running (loading, or one of its callbacks);
     /// `None` for the runtime and the user's config.
     pub owner: Option<String>,
@@ -191,9 +187,6 @@ impl App {
             pending_context: None,
             pending_since: None,
             raw_interceptors: Vec::new(),
-            suggestion: 0,
-            suggestion_argument: false,
-            suggestions_hidden_for: None,
             message: None,
             log: Vec::new(),
             options: Options::default(),
@@ -220,6 +213,7 @@ impl App {
             next_callback: 0,
             user_commands: HashMap::new(),
             autocmds: Vec::new(),
+            in_actions: Vec::new(),
             owner: None,
             callback_owner: HashMap::new(),
             owned: HashMap::new(),
@@ -714,8 +708,12 @@ impl App {
                 _ => {}
             }
         }
+        // Lua may handle it (bone.ui.actions[name]; the / command menu does).
+        if self.lua_action(b) {
+            return;
+        }
         match b {
-            Submit => self.submit_or_command(),
+            Submit => self.submit(),
             Newline => self.prompt.newline(),
             Left => self.edit(|t| t.left()),
             Right => self.edit(|t| t.right()),
@@ -739,30 +737,9 @@ impl App {
                 w.follow = false;
             }
             ScrollBottom => self.windows.get_mut(&CHAT_WIN).unwrap().follow = true,
-            Complete => {
-                let suggestions = self.suggestions();
-                if let Some((name, _)) = suggestions.get(self.suggestion) {
-                    if self.suggestion_argument {
-                        let text = self.prompt.text();
-                        let split = text
-                            .char_indices()
-                            .rev()
-                            .find(|(_, c)| c.is_whitespace())
-                            .map(|(i, _)| i + 1)
-                            .unwrap_or(0);
-                        self.set_prompt_text(&format!("{}{} ", &text[..split], name));
-                    } else {
-                        self.set_prompt_text(&format!("/{name} "));
-                    }
-                }
-            }
-            Dismiss => {
-                if !self.suggestions().is_empty() {
-                    self.suggestions_hidden_for = Some(self.prompt.text());
-                } else {
-                    self.message = None;
-                }
-            }
+            // Without Lua: nothing to complete; esc clears the message.
+            Complete => {}
+            Dismiss => self.message = None,
             Interrupt => self.interrupt(),
             Quit => self.quit = Some(None),
             QuitIfEmpty => {
@@ -782,18 +759,48 @@ impl App {
         }
     }
 
-    /// Up/Down: move through suggestions when they are showing; else move
-    /// between prompt lines, and past the first/last line through history.
-    fn vertical(&mut self, up: bool) {
-        let n = self.suggestions().len();
-        if n > 0 {
-            self.suggestion = if up {
-                (self.suggestion + n - 1) % n
-            } else {
-                (self.suggestion + 1) % n
-            };
-            return;
+    /// Run `bone.ui.actions[name]` for a builtin action, if Lua set one.
+    /// Returns whether it handled the action (it returned true).
+    fn lua_action(&mut self, b: Builtin) -> bool {
+        if self.lua.is_none() || self.in_actions.contains(&b) {
+            return false;
         }
+        self.in_actions.push(b);
+        let name = b.name();
+        let r = self.with_api(|lua| {
+            let ui: mlua::Table = lua.globals().get::<mlua::Table>("bone")?.get("ui")?;
+            let Some(actions) = ui.get::<Option<mlua::Table>>("actions")? else {
+                return Ok(false);
+            };
+            let Some(f) = actions.get::<Option<mlua::Function>>(name)? else {
+                return Ok(false);
+            };
+            Ok(matches!(
+                f.call::<mlua::Value>(())?,
+                mlua::Value::Boolean(true)
+            ))
+        });
+        self.in_actions.retain(|x| *x != b);
+        match r {
+            Ok(handled) => handled,
+            Err(e) => {
+                self.lua_error(&format!("bone.ui.actions.{name}"), &e);
+                false
+            }
+        }
+    }
+
+    /// Remember a sent prompt or command for up/down recall.
+    pub fn history_add(&mut self, text: &str) {
+        if self.prompt_history.last().map(String::as_str) != Some(text) {
+            self.prompt_history.push(text.to_owned());
+        }
+        self.prompt_history_pos = None;
+    }
+
+    /// Up/Down: move between prompt lines, and past the first/last line
+    /// through history.
+    fn vertical(&mut self, up: bool) {
         let moved = if up {
             self.prompt.up()
         } else {
@@ -855,156 +862,6 @@ impl App {
         }
         self.quit_armed = Some(Instant::now());
         self.info("Press ctrl+c again to quit");
-    }
-
-    // ---- slash commands ------------------------------------------------------
-
-    /// Matching commands while the prompt holds a partial `/name`.
-    /// Matching commands or command arguments while the prompt holds a partial
-    /// `/name` or `/name args`.
-    pub fn suggestions(&mut self) -> Vec<(String, String)> {
-        self.suggestion_argument = false;
-        if self.focused_popup().is_some() || self.focused_panel().is_some() {
-            return Vec::new();
-        }
-        let text = self.prompt.text();
-        let Some(rest) = text.strip_prefix('/') else {
-            return Vec::new();
-        };
-        if rest.starts_with('/') || self.suggestions_hidden_for.as_ref() == Some(&text) {
-            return Vec::new();
-        }
-        if let Some((word, args)) = rest.split_once(char::is_whitespace) {
-            let Some((command, user)) = self.user_command(word) else {
-                return Vec::new();
-            };
-            let Some(callback) = user.completion else {
-                return Vec::new();
-            };
-            self.suggestion_argument = true;
-            let args = args.trim_start();
-            let token = args
-                .rsplit(|c: char| c.is_whitespace())
-                .next()
-                .unwrap_or("");
-            let result = self.call_callback(callback, "command completion", |lua| {
-                let ctx = lua.create_table()?;
-                ctx.set("command", command.as_str())?;
-                ctx.set("text", text.as_str())?;
-                ctx.set("args", args)?;
-                ctx.set("token", token)?;
-                ctx.set(
-                    "argv",
-                    lua.create_sequence_from(args.split_whitespace().map(str::to_owned))?,
-                )?;
-                Ok(mlua::Value::Table(ctx))
-            });
-            return match result {
-                Some(mlua::Value::Table(items)) => items
-                    .sequence_values::<mlua::Value>()
-                    .flatten()
-                    .filter_map(|item| match item {
-                        mlua::Value::String(value) => {
-                            Some((value.to_string_lossy(), String::new()))
-                        }
-                        mlua::Value::Table(item) => {
-                            let value =
-                                item.get::<Option<String>>("value").ok().flatten().or_else(
-                                    || item.get::<Option<String>>("name").ok().flatten(),
-                                )?;
-                            let desc = item
-                                .get::<Option<String>>("desc")
-                                .ok()
-                                .flatten()
-                                .unwrap_or_default();
-                            Some((value, desc))
-                        }
-                        _ => None,
-                    })
-                    .filter(|(name, _)| name.starts_with(token))
-                    .take(MAX_SUGGESTIONS)
-                    .collect(),
-                _ => Vec::new(),
-            };
-        }
-        let word = rest;
-        if word.contains(char::is_whitespace) {
-            return Vec::new();
-        }
-        let mut out: Vec<(String, String)> = crate::commands::COMMANDS
-            .iter()
-            .flat_map(|c| {
-                std::iter::once(c.name)
-                    .chain(c.aliases.iter().copied())
-                    .map(move |n| (n, c))
-            })
-            .filter(|(n, _)| n.starts_with(word))
-            .map(|(n, c)| (n.to_owned(), c.help.to_owned()))
-            .chain(self.user_commands.iter().flat_map(|(name, command)| {
-                std::iter::once((name.clone(), command.desc.clone())).chain(
-                    command
-                        .aliases
-                        .iter()
-                        .cloned()
-                        .map(|alias| (alias, command.desc.clone())),
-                )
-            }))
-            .filter(|(n, _)| n.starts_with(word))
-            .collect();
-        out.sort();
-        out.dedup_by(|a, b| a.0 == b.0);
-        out.truncate(MAX_SUGGESTIONS);
-        out
-    }
-
-    fn user_command(&self, word: &str) -> Option<(String, UserCommand)> {
-        self.user_commands
-            .iter()
-            .find(|(name, command)| {
-                name.as_str() == word || command.aliases.iter().any(|alias| alias == word)
-            })
-            .map(|(name, command)| (name.clone(), command.clone()))
-    }
-
-    /// Enter: run a `/command`, or send the prompt as a message. `//text`
-    /// sends `/text`.
-    fn submit_or_command(&mut self) {
-        let text = self.prompt.text();
-        let trimmed = text.trim_start();
-        let Some(rest) = trimmed.strip_prefix('/') else {
-            return self.submit();
-        };
-        if rest.starts_with('/') {
-            self.set_prompt_text(&text.replacen("//", "/", 1));
-            return self.submit();
-        }
-        let word = rest.split_whitespace().next().unwrap_or("");
-        // Paths like /etc/hosts are messages, not commands.
-        if word.contains('/') {
-            return self.submit();
-        }
-        let mut line = rest.to_owned();
-        if !self.is_command(word) {
-            match self.suggestions().get(self.suggestion) {
-                Some((name, _)) => line = format!("{name}{}", &rest[word.len()..]),
-                None => {
-                    return self.error(format!(
-                        "Unknown command /{word} (start with // to send it as a message)"
-                    ));
-                }
-            }
-        }
-        if self.prompt_history.last() != Some(&text) {
-            self.prompt_history.push(text);
-        }
-        self.prompt_history_pos = None;
-        self.prompt.clear();
-        self.suggestion = 0;
-        self.execute(&line);
-    }
-
-    fn is_command(&self, word: &str) -> bool {
-        crate::commands::resolve(word).is_some() || self.user_command(word).is_some()
     }
 
     // ---- turns ---------------------------------------------------------------

@@ -429,6 +429,8 @@ options are registered only in the TUI and are separate from the fixed Rust
 options:
 
 ```lua
+bone.o.apply("show_reasoning!")   -- a /set argument; returns what "name?" shows
+bone.o.list()                     -- every option as "name=value"
 bone.o.define("review_limit", 10, {
   type = "integer", desc = "Lines to show in review",
   on_change = function(new, old)
@@ -497,7 +499,17 @@ only the current argument token is replaced. Names and aliases are accepted
 for lookup, completion and execution. Aliases must not collide with built-in
 names or aliases, other user commands/aliases, or the command's own name;
 `bone.cmd.del` accepts either the canonical name or an alias.
-User commands appear in the `/` suggestions with their `desc`, and in `/help`. They can't replace built-in commands. Built-in commands related to Lua: `/lua code`, `/lua =expr` (show a value), `/source file`, `/messages` (recent messages, full Lua errors).
+User commands appear in the `/` suggestions with their `desc`, and in `/help`. Every command is one of these, the defaults included: `/help`, `/set`, `/lua` and the rest are defined in `runtime/lua/bone/commands.lua`, so `bone.cmd.create` replaces any of them and `bone.cmd.del` removes it. Commands related to Lua: `/lua code`, `/lua =expr` (show a value), `/source file`, `/messages` (recent messages, full Lua errors).
+
+`bone.cmd.list()` returns `{ { name, desc, aliases, complete } }`, `bone.cmd.find(word)` the command a name or alias means, and `bone.cmd.complete(name, ctx)` runs a command's completion function. Aliases may be any word without spaces or `/` (`/?` is `/help`).
+
+#### The `/` menu
+
+The menu is the Lua module `bone.menu` (`runtime/lua/bone/menu.lua`): it matches what you type against command names and aliases (by prefix, sorted, at most `max = 8`), or asks a command's completion function for its arguments, and keeps the selection. It is drawn by `bone.ui.suggestions(ctx)` in a window resting on the prompt. It takes part in keys through `bone.ui.actions`: `submit` runs `/commands` (the selected match for a partial name; `//text` sends `/text`; `/etc/hosts …` is a message), `complete` (tab) fills in the selection, `dismiss` (esc) hides the menu until the text changes, and `up`/`down` move through it. `require("bone.menu")` gives the module (`matches(text)`, `complete()`, `move(by)`, `max`); replace the file under `~/.bone/runtime/lua/bone/menu.lua` for different matching.
+
+#### Actions in Lua
+
+`bone.ui.actions[name] = function() ... end` takes over a builtin action wherever it is used (keymaps, `bone.action`): return `true` when it handled the action, anything else to let the built-in run. Inside its own handler, the action runs the built-in, so a handler can fall back to it.
 
 ### Events
 
@@ -600,7 +612,8 @@ bone.chat.messages(function(messages, err) ... end)  -- from the core
 - `bone.job.start(cmd, opts)` → job: a streaming job (below).
 - `bone.notify(msg, level)`: `level` is `"info"` (default) or `"error"`. `print(...)` is `bone.notify`.
 - `bone.press("ctrl+c")`: press a key. `bone.action("scroll_top")`: run a builtin action.
-- `bone.api.prompt_get()`, `bone.api.prompt_set(text)`
+- `bone.api.prompt_get()`, `bone.api.prompt_set(text)`, `bone.prompt.history_add(text)` (for up/down recall)
+- `bone.api.log(n)` (the last n messages), `bone.api.show(text)` (show without logging), `bone.api.colors_name()`, `bone.api.exec_lua(code)` and `bone.api.source(path)` (what `/lua` and `/source` do)
 - `bone.api.session()` → `{ session_id, cwd, title, running }` or `nil`
 - `bone.strwidth(s)`: display width in columns.
 - `bone.ui.win{ lines, width, height, anchor, row, col, z, focus, keys, on_key, guard }` → id: a window drawn over the screen. Lua draws every cell; Rust only places it and clears what is behind it.
@@ -615,7 +628,7 @@ bone.chat.messages(function(messages, err) ... end)  -- from the core
 - `bone.ui.close(id)`, `bone.ui.is_open(id)`.
 - `bone.ui.select(items, { prompt, format, on_choice, loading, empty, footer, width, height })` → handle: a picker in a focused window. Typing filters (matching `format(item)`), `up`/`down` (or `ctrl+p`/`ctrl+n`, the wheel) move, `enter` calls `on_choice(item, index)`, `esc` calls `on_choice(nil)`. `handle:set_items(items)` fills it later (with `loading = true` it shows "loading…" until then); `handle:close()`.
 - `bone.ui.sessions()`: the session picker (`ctrl+r`, `/sessions`), defined in `runtime/tui/defaults.lua` with `bone.ui.select`. Replace it to change how sessions are listed.
-- `bone.ui.suggestions(ctx)` → lines: draws the matching commands while you type `/…`, right above the prompt. `ctx = { items = { { name, desc } }, selected, width, height }`; Rust keeps the matching, `up`/`down` selection and `tab` completion. Set it to `nil` for no list.
+- `bone.ui.suggestions(ctx)` → lines: draws the `/` menu (see Commands) right above the prompt. `ctx = { items = { { name, desc } }, selected, width, height }`. Set it to `nil` for no list (tab still completes).
 - `bone.api.open_session(id)`: show a session.
 - `bone.ui.pager(content, { title, width, height })` → handle: scrollable text in a focused window. `content` is a string (wrapped; `#` lines are headings) or a list of lines. `up`/`down`/wheel, `pageup`/`pagedown`, `home`/`end`, `esc` or `q` closes. `handle:set(content)`, `handle:close()`.
 - `bone.ui.help(topic)` and `bone.ui.health()`: what `/help {topic}` and `/health` call (in `runtime/tui/defaults.lua`). The docs are in `bone._docs`; the TUI's built-in checks come from `bone.api.health()`.

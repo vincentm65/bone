@@ -808,13 +808,7 @@ async fn lua_phase2_commands_options_and_local_events() {
     assert!(h.app.user_commands["greet"].completion.is_some());
     assert_eq!(h.app.user_commands["greet"].aliases, vec!["greetme"]);
     h.input("/greetme b{tab}").await;
-    assert_eq!(
-        h.prompt(),
-        "/greetme bx ",
-        "message={} suggestions={:?}",
-        h.message(),
-        h.app.suggestions()
-    );
+    assert_eq!(h.prompt(), "/greetme bx ", "message={}", h.message());
     h.input("{ctrl+u}/greetme bob 7 true{enter}").await;
     assert_eq!(
         h.lua("=seen.raw .. '|' .. seen.command .. '|' .. seen.name .. '|' .. seen.count .. '|' .. tostring(seen.enabled)").await,
@@ -880,6 +874,12 @@ async fn lua_api_and_errors() {
         .await;
     assert_eq!(h.prompt(), "from lua!");
 
+    // The default commands are Lua too, so they can be replaced.
+    h.lua("bone.cmd.create('new', function() bone.notify('my new') end); bone.prompt.set('')")
+        .await;
+    h.input("/new{enter}").await;
+    assert_eq!(h.message(), "my new");
+
     // Bad arguments are Lua errors, not crashes.
     for (code, want) in [
         ("bone.keymap.set('hyper+x', 'submit')", "unknown modifier"),
@@ -890,7 +890,6 @@ async fn lua_api_and_errors() {
         ("bone.keymap.set('x', 'nope')", "unknown action"),
         ("bone.o.nope = 1", "unknown option"),
         ("bone.cmd.create('Upper', function() end)", "lowercase"),
-        ("bone.cmd.create('new', function() end)", "built-in"),
     ] {
         let msg = h.lua(code).await;
         assert!(msg.contains(want), "{code}: {msg}");
@@ -2782,4 +2781,31 @@ async fn typing_during_a_turn_steers_it() {
     h.input("refused{enter}").await;
     assert_eq!(h.prompt(), "refused");
     assert!(h.message().starts_with("not sent"), "{}", h.message());
+}
+
+#[tokio::test]
+async fn the_command_menu_and_actions_are_lua() {
+    let mut h = Harness::new().await;
+    // Matching is the bone.menu module: fewer rows.
+    h.lua("require('bone.menu').max = 2").await;
+    h.input("/s").await;
+    let screen = h.screen(80, 24);
+    assert!(
+        screen.contains("/sessions") && screen.contains("/set") && !screen.contains("/source"),
+        "{screen}"
+    );
+    h.input("{ctrl+u}").await;
+    // A builtin action can be taken over; returning false lets it run.
+    h.lua(
+        r#"bone.ui.actions.submit = function()
+             if bone.prompt.get() == "shout" then bone.notify("HEY") bone.prompt.set("") return true end
+             return false
+           end"#,
+    )
+    .await;
+    h.input("shout{enter}").await;
+    assert_eq!(h.message(), "HEY");
+    assert!(h.requests("turn/start").is_empty());
+    h.input("hello{enter}").await;
+    assert_eq!(h.requests("turn/start")[0]["text"], "hello");
 }

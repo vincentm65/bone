@@ -446,3 +446,10 @@ Moved out of the core after review, to keep the default harness minimal:
 - The TUI's `/rename`, `/fork`, `/delete`, `/plugin` and `/project` are Lua
   commands in `runtime/tui/defaults.lua` (built on `bone.request`,
   `bone.plugin` and the new `bone.project.trust`), not Rust built-ins.
+- Every slash command and the `/` menu are Lua: `runtime/lua/bone/commands.lua`
+  (help, health, new, sessions, open, cancel, quit, set, colorscheme,
+  highlight, lua, source, messages) and `runtime/lua/bone/menu.lua`
+  (matching, selection, tab/esc/up/down/enter, drawn as a window). Rust keeps
+  the command registry and gained `bone.ui.actions` (Lua handlers for builtin
+  actions) plus small read APIs (`bone.cmd.list/find/complete`,
+  `bone.o.apply/list`, `bone.api.log/show/...`).

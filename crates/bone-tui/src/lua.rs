@@ -1172,9 +1172,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                     "command names are lowercase letters, digits, - and _: {name:?}"
                 )));
             }
-            if crate::commands::resolve(&name).is_some() {
-                return Err(err(format!("/{name} is a built-in command")));
-            }
             let aliases = match opts.as_ref().map(|o| o.get::<Value>("aliases")) {
                 None | Some(Ok(Value::Nil)) => Vec::new(),
                 Some(Ok(Value::String(alias))) => vec![alias.to_str()?.to_owned()],
@@ -1195,17 +1192,14 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 return Err(err(format!("/{name} is already a user command")));
             }
             for (index, alias) in aliases.iter().enumerate() {
-                let valid = alias.starts_with(|c: char| c.is_ascii_lowercase())
-                    && alias.chars().all(|c| {
-                        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_'
-                    });
+                // Any word without spaces or "/" (so "?" can be /help's).
+                let valid = !alias.is_empty()
+                    && !alias.contains(char::is_whitespace)
+                    && !alias.contains('/');
                 if !valid {
                     return Err(err(format!("invalid command alias {alias:?}")));
                 }
                 if alias == &name || aliases[..index].contains(alias) {
-                    return Err(err(format!("/{alias} is already a command")));
-                }
-                if crate::commands::resolve(alias).is_some() {
                     return Err(err(format!("/{alias} is already a command")));
                 }
                 if app.user_commands.iter().any(|(old_name, old)| {
@@ -1764,6 +1758,93 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             let f: Function = args(lua, a)?;
             let cb = app.store_callback(lua, f)?;
             app.shutdown_hooks.push((app.owner.clone(), cb));
+            ret(lua, ())
+        }
+        // The command registry, for the Lua `/` menu and commands.
+        "command_list" => {
+            let mut list: Vec<serde_json::Value> = app
+                .user_commands
+                .iter()
+                .map(|(name, c)| {
+                    serde_json::json!({
+                        "name": name,
+                        "desc": c.desc,
+                        "aliases": c.aliases,
+                        "complete": c.completion.is_some(),
+                    })
+                })
+                .collect();
+            list.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+            ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
+        }
+        "command_find" => {
+            let word: String = args(lua, a)?;
+            let found = app
+                .user_commands
+                .iter()
+                .find(|(n, c)| n.as_str() == word || c.aliases.iter().any(|x| x == &word))
+                .map(|(n, _)| n.clone());
+            ret(lua, found)
+        }
+        "command_complete" => {
+            let (name, ctx): (String, Value) = args(lua, a)?;
+            let Some(cb) = app.user_commands.get(&name).and_then(|c| c.completion) else {
+                return ret(lua, Value::Nil);
+            };
+            // Errors are reported like any callback's; the menu shows nothing.
+            let r = app.call_callback(cb, "command completion", |_| Ok(ctx));
+            ret(lua, r.unwrap_or(Value::Nil))
+        }
+        "history_add" => {
+            let text: String = args(lua, a)?;
+            app.history_add(&text);
+            ret(lua, ())
+        }
+        "opt_apply" => {
+            let arg: String = args(lua, a)?;
+            let r = match apply_dynamic_option(app, &arg) {
+                Some(r) => r,
+                None => app.options.apply(&arg),
+            };
+            app.opts_rev += 1;
+            app.dirty = true;
+            ret(lua, r.map_err(err)?)
+        }
+        "opt_list" => {
+            let mut all: Vec<String> = options::NAMES
+                .iter()
+                .filter_map(|n| app.options.get(n).map(|v| format!("{n}={v}")))
+                .collect();
+            let mut dynamic: Vec<String> = app
+                .dynamic_options
+                .iter()
+                .map(|(name, o)| format!("{name}={}", o.value))
+                .collect();
+            dynamic.sort();
+            all.extend(dynamic);
+            ret(lua, all)
+        }
+        "colors_name" => ret(lua, app.colors_name.clone()),
+        "log_tail" => {
+            let n: usize = args(lua, a)?;
+            let start = app.log.len().saturating_sub(n);
+            ret(lua, app.log[start..].to_vec())
+        }
+        "show_message" => {
+            // Shown without adding to the log (for /messages itself).
+            let text: String = args(lua, a)?;
+            app.message = (!text.is_empty()).then_some((text, crate::app::Level::Info));
+            app.dirty = true;
+            ret(lua, ())
+        }
+        "exec_lua" => {
+            let code: String = args(lua, a)?;
+            app.exec_lua(&code);
+            ret(lua, ())
+        }
+        "source_file" => {
+            let path: String = args(lua, a)?;
+            app.source(&path);
             ret(lua, ())
         }
         "project_trust" => {

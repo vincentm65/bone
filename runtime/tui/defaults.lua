@@ -2,6 +2,10 @@
 -- any of them; ~/.bone/runtime/tui/defaults.lua replaces this file.
 -- Keys without a mapping type text into the prompt.
 
+-- The slash commands and the / menu are Lua modules (runtime/lua/bone/).
+require("bone.commands")
+require("bone.menu")
+
 local function map(keys, context)
   for key, action in pairs(keys) do
     bone.keymap.set(key, action, { context = context })

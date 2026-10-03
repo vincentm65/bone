@@ -13,8 +13,7 @@
 //! prompt          grows with its text; bone.ui.prompt adds a prefix
 //! statusline      only if bone.ui.statusline is defined
 //! ```
-//! Slash-command suggestions (`bone.ui.suggestions`) and Lua windows are
-//! drawn on top.
+//! Lua windows (the `/` command menu is one) are drawn on top.
 
 use std::collections::HashMap;
 
@@ -164,10 +163,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     draw_status(frame, app, status);
     draw_message(frame, app, message);
 
-    let suggestions = app.suggestions();
-    if !suggestions.is_empty() && prompt_area.height > 0 {
-        draw_suggestions(frame, app, &suggestions, prompt_area);
-    }
     if !app.popups.is_empty() {
         let prompt_top = if prompt_area.height > 0 {
             prompt_area.y
@@ -391,39 +386,6 @@ fn draw_message(frame: &mut Frame<'_>, app: &App, area: Rect) {
             .collect();
         frame.render_widget(Paragraph::new(lines), area);
     }
-}
-
-/// Matching slash commands, drawn by `bone.ui.suggestions` right above the
-/// prompt (nothing if it is not defined).
-fn draw_suggestions(
-    frame: &mut Frame<'_>,
-    app: &mut App,
-    items: &[(String, String)],
-    prompt: Rect,
-) {
-    let room = Rect {
-        x: prompt.x,
-        y: frame.area().y,
-        width: prompt.width,
-        height: prompt.y.saturating_sub(frame.area().y),
-    };
-    if room.height == 0 {
-        return;
-    }
-    let lines = app.suggestion_lines(items, room.width, room.height);
-    let w = lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16;
-    let h = (lines.len() as u16).min(room.height);
-    if w == 0 || h == 0 {
-        return;
-    }
-    let rect = Rect {
-        x: room.x,
-        y: room.bottom() - h,
-        width: w.min(room.width),
-        height: h,
-    };
-    frame.render_widget(Clear, rect);
-    frame.render_widget(Paragraph::new(lines).style(app.theme.hl("Normal")), rect);
 }
 
 /// The areas windows can be placed in.

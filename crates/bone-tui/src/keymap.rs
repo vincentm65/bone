@@ -63,7 +63,6 @@ macro_rules! builtins {
             #[cfg(test)]
             pub const ALL: &[Builtin] = &[$(Builtin::$variant,)*];
 
-            #[cfg(test)]
             pub fn name(self) -> &'static str {
                 match self { $(Builtin::$variant => $name,)* }
             }

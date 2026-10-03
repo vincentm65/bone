@@ -74,6 +74,22 @@ function bone.cmd.del(name)
   api("command_del", name)
 end
 
+--- Every command: { { name, desc, aliases, complete } }, sorted by name.
+function bone.cmd.list()
+  return api("command_list")
+end
+
+--- The command a name or alias refers to, or nil.
+function bone.cmd.find(word)
+  return api("command_find", word)
+end
+
+--- Run a command's completion function with ctx = { command, text, args,
+--- token, argv }; nil when it has none.
+function bone.cmd.complete(name, ctx)
+  return api("command_complete", name, ctx)
+end
+
 --- Options: bone.o.show_reasoning = false; print(bone.o.tool_preview_lines)
 --- Dynamic options: bone.o.define("name", default, { type, desc, on_change }),
 --- bone.o.del("name"), bone.o.names(), and bone.o.info("name").
@@ -93,6 +109,15 @@ function option_api.names()
 end
 function option_api.info(name)
   return api("opt_info", name)
+end
+--- One /set argument: "name", "noname", "name!", "name=value", "name?".
+--- Returns what to show (for "name?"), or nil; errors on a bad argument.
+function option_api.apply(arg)
+  return api("opt_apply", arg)
+end
+--- Every option as "name=value".
+function option_api.list()
+  return api("opt_list")
 end
 bone.o = setmetatable(option_api, {
   __index = function(_, name)
@@ -347,6 +372,25 @@ function bone.action(name)
 end
 
 bone.api = {
+  --- The colorscheme loaded with bone.colorscheme, or nil.
+  colors_name = function()
+    return api("colors_name")
+  end,
+  --- The last n messages shown (for /messages).
+  log = function(n)
+    return api("log_tail", n or 20)
+  end,
+  --- Show text in the message area without adding it to the log.
+  show = function(text)
+    api("show_message", text)
+  end,
+  --- Run Lua as /lua does ("=expr" shows a value) and /source runs a file.
+  exec_lua = function(code)
+    api("exec_lua", code)
+  end,
+  source = function(path)
+    api("source_file", path)
+  end,
   prompt_get = function()
     return api("prompt_get")
   end,
@@ -424,6 +468,12 @@ local function watched()
 end
 
 bone.ui = { views = watched(), tool_views = watched(), regions = {} }
+
+--- Lua handlers for builtin actions: bone.ui.actions[name] = function()
+--- return true end handles the action; returning anything else lets the
+--- built-in run. The / command menu (runtime/lua/bone/menu.lua) handles
+--- submit, complete, dismiss, up and down this way.
+bone.ui.actions = {}
 
 function bone.ui.refresh()
   api("ui_refresh")
@@ -662,6 +712,10 @@ bone.prompt = {
   --- Insert at the cursor, replacing the selection.
   insert = function(text)
     api("prompt_edit", "insert", nil, nil, text)
+  end,
+  --- Remember text for up/down recall (as sending it does).
+  history_add = function(text)
+    api("history_add", text)
   end,
   get_range = function(from, to)
     return api("prompt_get_range", from, to)
