@@ -71,6 +71,7 @@ pub const METHODS: &[&str] = &[
     ModelList::METHOD,
     ModelComplete::METHOD,
     ModelCancel::METHOD,
+    McpList::METHOD,
 ];
 
 /// Every server-to-client event.
@@ -318,6 +319,25 @@ pub struct ModelCompleteParams {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelRequest {
     pub request_id: u64,
+}
+
+// ---- MCP -------------------------------------------------------------------
+
+method!(
+    /// The MCP servers core Lua configured (`bone.mcp.add`).
+    McpList, "mcp/list", Empty => Vec<McpServerInfo>
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpServerInfo {
+    pub name: String,
+    /// `"idle"` (lazy, not started), `"starting"`, `"ready"` or `"failed"`.
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// Its tools, by the names the model sees.
+    #[serde(default)]
+    pub tools: Vec<String>,
 }
 
 // ---- events --------------------------------------------------------------

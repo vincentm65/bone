@@ -37,7 +37,7 @@ the other.
 
 The current capability names include `core.config`, `core.tools`,
 `core.hooks`, `core.providers`, `core.jobs`, `core.http_stream`, `core.ask`,
-`core.health`, `core.ready`, `core.reload`, `core.hooks.system`, `core.hooks.context`, `core.hooks.errors`, `core.hooks.stream`, `core.hooks.session`, `core.session_write`, `core.model`, `plugins.state` (both sides), and, in the TUI, `plugins.lifecycle`, `tui.project`, `tui.model`, `tui.keymaps`, `tui.input`, `tui.events`,
+`core.health`, `core.ready`, `core.reload`, `core.hooks.system`, `core.hooks.context`, `core.hooks.errors`, `core.hooks.stream`, `core.hooks.session`, `core.session_write`, `core.model`, `core.mcp`, `plugins.state` (both sides), and, in the TUI, `plugins.lifecycle`, `tui.project`, `tui.model`, `tui.keymaps`, `tui.input`, `tui.events`,
 `tui.local_events`, `tui.commands`, `tui.command_specs`, `tui.options`,
 `tui.dynamic_options`, `tui.request`, `tui.prompt`, `tui.prompt_edit`, `tui.chat`, `tui.chat_data`, `tui.windows`,
 `tui.panels`, `tui.regions`, `tui.views`, `tui.pickers`, `tui.themes`, `tui.jobs`, `jobs.streaming` and
@@ -283,6 +283,24 @@ bone.config.provider = "mine"
 - `complete` runs as a job: it waits without blocking, and a cancelled turn stops it.
 
 `examples/plugins/anthropic` is a complete provider for the Anthropic Messages API (streaming, thinking, tools) in about 140 lines.
+
+### MCP servers
+
+bone can use the tools of [MCP](https://modelcontextprotocol.io) servers. None run unless `core.lua` (or a plugin) adds them:
+
+```lua
+bone.mcp.add("github", { command = "github-mcp-server", args = { "stdio" }, env = { GITHUB_TOKEN = os.getenv("GITHUB_TOKEN") } })
+bone.mcp.add("docs", { url = "https://example.com/mcp", headers = { authorization = "Bearer " .. token } },
+  { tools = { allow = { "search" } }, lazy = true, timeout = 60000 })
+bone.mcp.load("~/.config/mcp.json")   -- every server in an { "mcpServers": { ... } } file
+```
+
+- A server is a program speaking MCP on stdio (`command`, `args`, `env`, `cwd`) or an endpoint speaking Streamable HTTP (`url`, `headers`). Options: `tools = { allow, deny }` (by the server's tool names), `lazy` (start on first use instead of at once) and `timeout` (ms per call, default 120000).
+- Its tools reach the model as `<server>_<tool>` (a built-in or Lua tool with the same name wins). They run through the `tool_call` and `tool_result` hooks like any tool; `tool_call` events for them carry `mcp = { server, tool, annotations }`, so a hook can tell (the approve plugin asks for MCP tools unless the server marks them `readOnlyHint`).
+- Servers run for as long as the core. A reload restarts only the servers whose settings changed (and stops removed ones). A server that exits is restarted after 1, 2, 4, 8 and 16 seconds, then given up on until the next reload; a turn waits up to 10 seconds for servers starting the first time, never for one that is restarting. `/health` shows each server; `mcp/list` gives the same to clients.
+- In hooks and tools: `bone.mcp.call(server, tool, args)` → `{ text, is_error }` (by the server's own tool name), and `bone.mcp.list()` → `{ { name, state, error, tools } }`, `state` being `"idle"`, `"starting"`, `"ready"` or `"failed"`. `bone.mcp.remove(name)` takes a server out of the configuration (it stops at the next reload).
+
+Results are text for the model: text parts as they are, a note such as `[image image/png]` for other parts, or the structured content when there is no text.
 
 ### Calling a model
 

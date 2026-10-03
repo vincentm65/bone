@@ -74,6 +74,7 @@ static CORE_CAPABILITIES: &[&str] = &[
     "core.hooks.session",
     "core.session_write",
     "core.model",
+    "core.mcp",
     "plugins.state",
 ];
 

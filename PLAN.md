@@ -288,6 +288,11 @@ the events go to every client, which match them by id. `request_error`'s
 
 ### Phase 11: MCP client (gap 3)
 
+Status: done (branch `agent-ext`): stdio and Streamable HTTP (without the
+server-to-client GET stream, so HTTP servers' tool lists refresh on
+reload). Turns wait only for servers starting for the first time, never
+for one in restart backoff. Resources and prompts are not used yet.
+
 - A Rust `mcp` module in bone-core: a JSON-RPC client over a generic
   transport, so tests can run in memory. It covers stdio (spawned process)
   and, after that, Streamable HTTP; the `initialize` handshake; `tools/list`

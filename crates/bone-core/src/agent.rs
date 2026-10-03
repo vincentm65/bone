@@ -37,6 +37,8 @@ before editing them. Keep changes minimal and focused, and keep answers concise.
 
 const CANCELLED: &str = "Cancelled by the user before this tool call ran.";
 
+/// How long a turn waits for MCP servers that are still starting.
+const MCP_WAIT: Duration = Duration::from_secs(10);
 /// Retries `request_error` hooks may ask for, per model call.
 const MAX_RETRIES: u32 = 5;
 /// How long `stream` hooks' input collects before they run.
@@ -160,6 +162,9 @@ impl Turn<'_> {
         self.record(ChatMessage::User {
             content: text.clone(),
         })?;
+        if !self.inner.mcp.is_empty() {
+            self.inner.mcp.ensure_ready(MCP_WAIT).await;
+        }
         self.inner.emit::<TurnStarted>(TurnStartedParams {
             session_id: self.session_id.clone(),
             turn_id: self.turn_id,
@@ -196,6 +201,12 @@ impl Turn<'_> {
                 })?;
             }
             let mut tools: Vec<ToolSpec> = self.rt.tools.specs().to_vec();
+            // MCP tools, unless a built-in or Lua tool has the name.
+            for t in self.inner.mcp.tool_specs() {
+                if !tools.iter().any(|have| have.name == t.name) {
+                    tools.push(t);
+                }
+            }
             let ev = json!({
                 "session_id": self.session_id,
                 "messages": messages,
@@ -390,7 +401,13 @@ impl Turn<'_> {
 
     /// Run one call. Returns the text for the model and whether it is an error.
     async fn run_tool(&self, call: &ToolCall) -> (String, bool) {
-        let Some(tool) = self.rt.tools.get(&call.name) else {
+        let tool = self
+            .rt
+            .tools
+            .get(&call.name)
+            .cloned()
+            .or_else(|| self.inner.mcp.tool(&call.name));
+        let Some(tool) = tool else {
             let names: Vec<_> = self
                 .rt
                 .tools
@@ -411,13 +428,18 @@ impl Turn<'_> {
             Ok(a) => a,
             Err(e) => return (e, true),
         };
-        let ev = json!({
+        let mut ev = json!({
             "session_id": self.session_id,
             "cwd": self.cwd.to_string_lossy(),
             "id": call.id,
             "name": call.name,
             "arguments": args,
         });
+        if self.rt.tools.get(&call.name).is_none()
+            && let Some(mcp) = self.inner.mcp.describe(&call.name)
+        {
+            ev["mcp"] = mcp;
+        }
         match self.hooks("tool_call", ev).await {
             Ok(Some(ev)) => args = ev["arguments"].clone(),
             Ok(None) => {}

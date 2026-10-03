@@ -238,6 +238,66 @@ function bone.model.list()
   return bone._models()
 end
 
+--- MCP servers. None run unless you add them:
+---   bone.mcp.add("github", { command = "github-mcp", args = { "stdio" }, env = { TOKEN = ... } })
+---   bone.mcp.add("docs", { url = "https://example.com/mcp", headers = { authorization = ... } },
+---                { tools = { allow = { "search" } }, lazy = true, timeout = 60000 })
+---   bone.mcp.load(path)        add every server of an mcpServers JSON file
+---   bone.mcp.remove(name)
+--- Their tools reach the model as <server>_<tool>. In hooks and tools:
+---   bone.mcp.call(server, tool, args) -> { text, is_error }
+---   bone.mcp.list() -> { { name, state, error, tools } }
+bone.mcp = {}
+bone._mcp = {}
+
+function bone.mcp.add(name, spec, opts)
+  assert(type(name) == "string" and name:match("^[%w_%-]+$"), "MCP server names are [A-Za-z0-9_-]+")
+  assert(type(spec) == "table" and (spec.command or spec.url), "bone.mcp.add(name, { command, args } or { url })")
+  opts = opts or {}
+  local tools = opts.tools or {}
+  bone._mcp[name] = {
+    command = spec.command,
+    args = spec.args,
+    env = spec.env,
+    cwd = spec.cwd,
+    url = spec.url,
+    headers = spec.headers,
+    allow = tools.allow,
+    deny = tools.deny,
+    lazy = opts.lazy,
+    timeout = opts.timeout,
+  }
+end
+
+function bone.mcp.remove(name)
+  bone._mcp[name] = nil
+end
+
+--- Add the servers of a JSON file in the common format:
+--- { "mcpServers": { "name": { "command", "args", "env" } | { "url", "headers" } } }
+function bone.mcp.load(path, opts)
+  local f = assert(io.open((path:gsub("^~", os.getenv("HOME") or "~")), "r"))
+  local data = bone.json.decode(f:read("*a"))
+  f:close()
+  local servers = data.mcpServers or data.servers or {}
+  for name, spec in pairs(servers) do
+    if not spec.disabled then
+      bone.mcp.add(name, spec, opts)
+    end
+  end
+end
+
+function bone.mcp.list()
+  return bone._mcp_list()
+end
+
+function bone.mcp.call(server, tool, args)
+  if not in_job() then
+    error("bone.mcp.call only works inside hooks, tools and providers", 2)
+  end
+  return wait({ mcp_call = { server = server, tool = tool, arguments = args } })
+end
+
 --- Wait `ms` milliseconds (without blocking in hooks and tools).
 function bone.sleep(ms)
   if in_job() then

@@ -7,6 +7,7 @@
 mod agent;
 pub mod config;
 mod health;
+pub mod mcp;
 pub mod provider;
 mod runtime;
 pub mod scripting;
@@ -17,10 +18,10 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use bone_proto::methods::{
-    AskRespond, AskRespondParams, CoreReload, Echo, EchoParams, Echoed, HealthCheck, ModelCancel,
-    ModelComplete, ModelCompleteParams, ModelCompleted, ModelCompletedParams, ModelDeltaEvent,
-    ModelDeltaParams, ModelList, ModelRequest, PluginList, PluginLoad, PluginRef, PluginReload,
-    PluginUnload, SessionCreate, SessionCreateParams, SessionList, SessionMessages,
+    AskRespond, AskRespondParams, CoreReload, Echo, EchoParams, Echoed, HealthCheck, McpList,
+    ModelCancel, ModelComplete, ModelCompleteParams, ModelCompleted, ModelCompletedParams,
+    ModelDeltaEvent, ModelDeltaParams, ModelList, ModelRequest, PluginList, PluginLoad, PluginRef,
+    PluginReload, PluginUnload, SessionCreate, SessionCreateParams, SessionList, SessionMessages,
     SessionMessagesResult, SessionRef, TurnCancel, TurnStart, TurnStartParams, TurnStartResult,
 };
 use bone_proto::types::SessionInfo;
@@ -72,6 +73,8 @@ pub(crate) struct Inner {
     reloading: tokio::sync::Mutex<()>,
     /// Sessions `session_start` hooks have seen.
     started: Mutex<std::collections::HashSet<String>>,
+    /// MCP servers; they outlive reloads.
+    mcp: mcp::McpManager,
     /// Running `model/complete` calls, to cancel them.
     model_requests: Mutex<std::collections::HashMap<u64, tokio::task::AbortHandle>>,
     next_model_request: std::sync::atomic::AtomicU64,
@@ -151,6 +154,7 @@ impl Core {
                 retired: Mutex::new(Vec::new()),
                 reloading: tokio::sync::Mutex::new(()),
                 started: Mutex::new(Default::default()),
+                mcp: Default::default(),
                 model_requests: Mutex::new(Default::default()),
                 next_model_request: Default::default(),
                 events,
@@ -159,7 +163,13 @@ impl Core {
         if let Some(source) = &core.inner.source {
             source.options.lock().unwrap().host.set(&core.inner);
         }
+        core.inner.mcp.apply(core.inner.runtime().mcp.clone());
         core
+    }
+
+    /// The MCP servers (tests swap how they connect).
+    pub fn mcp(&self) -> &mcp::McpManager {
+        &self.inner.mcp
     }
 
     /// Load the Lua configuration again and switch to it; see
@@ -230,6 +240,10 @@ impl Core {
             PluginUnload::METHOD => {
                 let p: PluginRef = decode::<PluginUnload>(params)?;
                 reloaded(self.inner.reload(Change::Disable(p.name)).await)
+            }
+            McpList::METHOD => {
+                decode::<McpList>(params)?;
+                Ok(serde_json::to_value(self.inner.mcp.list()).unwrap_or_default())
             }
             ModelList::METHOD => {
                 decode::<ModelList>(params)?;

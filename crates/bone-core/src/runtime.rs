@@ -41,6 +41,8 @@ pub(crate) struct Runtime {
     /// `model/complete`, and the name of the one turns use.
     pub models: HashMap<String, ProviderConfig>,
     pub selected: Option<String>,
+    /// MCP servers this configuration asks for.
+    pub mcp: Vec<crate::mcp::ServerConfig>,
 }
 
 impl Runtime {
@@ -53,6 +55,7 @@ impl Runtime {
             scripting: None,
             models: HashMap::new(),
             selected: None,
+            mcp: Vec::new(),
         }
     }
 
@@ -154,6 +157,7 @@ impl Runtime {
             scripting: Some(loaded.scripting),
             models: loaded.providers,
             selected: loaded.provider_name,
+            mcp: loaded.mcp,
         }
     }
 }
@@ -252,6 +256,32 @@ impl Host {
             .get()
             .and_then(Weak::upgrade)
             .ok_or_else(|| "the core is not running".to_string())
+    }
+
+    /// `bone.mcp.list()`.
+    pub(crate) fn mcp_list(&self) -> mlua::Result<Json> {
+        let inner = self.inner().map_err(mlua::Error::runtime)?;
+        serde_json::to_value(inner.mcp.list()).map_err(mlua::Error::external)
+    }
+
+    /// `{ mcp_call = { server, tool, arguments } }` from core Lua: `{ text,
+    /// is_error }`. `None` for other waits.
+    pub(crate) async fn mcp_wait(&self, spec: &Json) -> Option<Result<Json, String>> {
+        let call = spec.get("mcp_call")?;
+        let r = async {
+            let inner = self.inner()?;
+            let server = call["server"]
+                .as_str()
+                .ok_or("bone.mcp.call needs a server")?;
+            let tool = call["tool"].as_str().ok_or("bone.mcp.call needs a tool")?;
+            let args = match &call["arguments"] {
+                Json::Null => json!({}),
+                a => a.clone(),
+            };
+            let (text, is_error) = inner.mcp.call(server, tool, args).await?;
+            Ok(json!({ "text": text, "is_error": is_error }))
+        };
+        Some(r.await)
     }
 
     /// `bone.model.list()`.
@@ -541,6 +571,7 @@ impl Inner {
             retired.retain(|w| w.strong_count() > 0);
             retired.push(Arc::downgrade(s));
         }
+        self.mcp.apply(next.mcp.clone());
         *self.runtime.write().unwrap() = next;
         *source.options.lock().unwrap() = options;
         let result = ReloadResult {

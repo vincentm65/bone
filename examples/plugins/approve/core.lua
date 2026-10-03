@@ -23,10 +23,16 @@ bone.config.approve = {
 
 local always = {} -- session id -> { tool name = true }
 
-local function needs_approval(cfg, name)
+local function needs_approval(cfg, ev)
+  local name = ev.name
   local want = cfg.tools[name]
   if want ~= nil then
     return want
+  end
+  -- MCP tools ask unless their server marks them read-only.
+  if ev.mcp then
+    local hints = ev.mcp.annotations or {}
+    return hints.readOnlyHint ~= true
   end
   local spec = bone._tools[name]
   return spec ~= nil and spec.needs_approval ~= false
@@ -37,7 +43,7 @@ bone.hook("tool_call", function(ev)
   if not cfg or not cfg.enabled or os.getenv("BONE_APPROVAL") == "auto" then
     return
   end
-  if not needs_approval(cfg, ev.name) then
+  if not needs_approval(cfg, ev) then
     return
   end
   local session = always[ev.session_id]

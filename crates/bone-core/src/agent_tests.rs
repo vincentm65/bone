@@ -1154,3 +1154,78 @@ async fn clients_call_the_model_over_the_protocol() {
     let done = h.until::<ModelCompleted>().await;
     assert!(done.error.unwrap().contains("no provider \"nope\""));
 }
+
+// ---- MCP ----------------------------------------------------------------------
+
+#[tokio::test]
+async fn mcp_tools_reach_the_model_and_survive_reloads() {
+    let fixtures = tempfile::tempdir().unwrap();
+    let script = fixtures.path().join("server.sh");
+    std::fs::write(&script, crate::mcp::tests::BASH_SERVER).unwrap();
+    let starts = fixtures.path().join("starts");
+    let mcp_json = fixtures.path().join("mcp.json");
+    std::fs::write(
+        &mcp_json,
+        json!({ "mcpServers": {
+            "fromfile": { "command": "bash", "args": [script.to_string_lossy()] },
+            "off": { "command": "nope", "disabled": true },
+        } })
+        .to_string(),
+    )
+    .unwrap();
+    let mcp = |extra: &str| {
+        format!(
+            r#"
+            bone.mcp.add("sh", {{ command = "bash", args = {{ "{script}"{extra} }}, env = {{ STARTS = "{starts}" }} }})
+            bone.mcp.load("{json}")
+            bone.hook("tool_call", function(ev)
+              if ev.mcp then seen = ev.mcp.server .. "/" .. ev.mcp.tool end
+            end)
+            bone.tool.register {{ name = "probe", run = function()
+              local r = bone.mcp.call("sh", "hello", {{}})
+              return seen .. " " .. r.text .. " " .. #bone.mcp.list()
+            end }}
+            "#,
+            script = script.display(),
+            starts = starts.display(),
+            json = mcp_json.display(),
+        )
+    };
+    let mut h = Harness::with_lua(
+        &mcp(""),
+        vec![
+            calls(&[("c1", "sh_hello", json!({}))]),
+            calls(&[("c2", "probe", json!({}))]),
+            text("done"),
+        ],
+    )
+    .await;
+    h.start("go").await;
+    h.until::<TurnFinished>().await;
+    let t = h.transcript().await;
+    assert_eq!(tool_result(&t[2]).0, "hi from bash", "{t:#?}");
+    assert_eq!(tool_result(&t[4]).0, "sh/hello hi from bash 2");
+    assert!(h.provider.tools.lock().unwrap()[0].contains(&"sh_hello".to_owned()));
+
+    let list = h.call::<McpList>(Empty {}).await.unwrap();
+    let names: Vec<(&str, &str)> = list
+        .iter()
+        .map(|s| (s.name.as_str(), s.state.as_str()))
+        .collect();
+    assert_eq!(names, [("fromfile", "ready"), ("sh", "ready")]);
+
+    // Reloading with the same server keeps its process; changing it restarts it.
+    let started = || std::fs::read_to_string(&starts).unwrap().lines().count();
+    assert_eq!(started(), 1);
+    h.write_core_lua(&(mcp("") + "\n-- something else changed"));
+    h.core.reload().await.unwrap();
+    assert_eq!(started(), 1);
+    h.write_core_lua(&mcp(r#", "--again""#));
+    h.core.reload().await.unwrap();
+    h.core.mcp().ensure_ready(Duration::from_secs(10)).await;
+    assert_eq!(started(), 2);
+    // And removing it stops it.
+    h.write_core_lua("");
+    h.core.reload().await.unwrap();
+    assert!(h.call::<McpList>(Empty {}).await.unwrap().is_empty());
+}

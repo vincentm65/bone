@@ -295,6 +295,24 @@ fn requests() {
         ModelRequest { request_id: 7 },
     );
     exchange::<ModelCancel>(21, ModelRequest { request_id: 7 }, ());
+    exchange::<McpList>(
+        22,
+        Empty {},
+        vec![
+            McpServerInfo {
+                name: "github".into(),
+                state: "ready".into(),
+                error: None,
+                tools: vec!["github_search_issues".into()],
+            },
+            McpServerInfo {
+                name: "db".into(),
+                state: "failed".into(),
+                error: Some("cannot run postgres-mcp: No such file or directory".into()),
+                tools: vec![],
+            },
+        ],
+    );
 }
 
 #[test]

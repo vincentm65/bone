@@ -25,3 +25,5 @@ end
 ```
 
 `BONE_APPROVAL=auto` turns it off for one run.
+
+Tools from MCP servers ask too, unless their server marks them read-only (`readOnlyHint`); `bone.config.approve.tools["server_tool"] = false` stops asking for one.

@@ -43,6 +43,8 @@ pub struct Loaded {
     /// Every `bone.config.providers` entry, and the one turns use.
     pub providers: HashMap<String, ProviderConfig>,
     pub provider_name: Option<String>,
+    /// MCP servers to run.
+    pub mcp: Vec<crate::mcp::ServerConfig>,
 }
 
 /// How to load: which plugins to leave out, and the question ids shared by
@@ -138,6 +140,8 @@ struct Extracted {
     lua_providers: HashSet<String>,
     /// Shared with the Lua thread, which adds to it.
     hook_set: Arc<Mutex<HashSet<String>>>,
+    /// `bone.mcp.add` servers.
+    mcp: Vec<crate::mcp::ServerConfig>,
 }
 
 /// Run the runtime, plugins and `<config_dir>/core.lua`, then apply `BONE_*`
@@ -195,6 +199,7 @@ pub fn load_with_options(
             .clone()
             .or_else(|| (ex.providers.len() == 1).then(|| ex.providers.keys().next().cloned())?),
         providers: ex.providers,
+        mcp: ex.mcp,
     })
 }
 
@@ -979,7 +984,9 @@ impl State {
                 let host = self.host.clone();
                 let calling = session_id.clone();
                 let task = self.rt.spawn(async move {
-                    let result = if let Some(r) = host.model_wait(&spec, calling).await {
+                    let result = if let Some(r) = host.mcp_wait(&spec).await {
+                        r
+                    } else if let Some(r) = host.model_wait(&spec, calling).await {
                         r
                     } else if let Some(r) = streams.wait(&spec).await {
                         r
@@ -1100,6 +1107,15 @@ fn setup(
         .map_err(|e| e.to_string())?;
     run("core/api.lua")?;
     install_helpers(&lua, dir, streams).map_err(|e| e.to_string())?;
+    // bone.mcp.list(): the MCP servers and their state.
+    let host = opts.host.clone();
+    let servers = lua
+        .create_function(move |lua, ()| to_lua(lua, &host.mcp_list()?))
+        .map_err(|e| e.to_string())?;
+    lua.globals()
+        .get::<Table>("bone")
+        .and_then(|b| b.set("_mcp_list", servers))
+        .map_err(|e| e.to_string())?;
     // bone.model.list(): the providers of the configuration in use.
     let host = opts.host.clone();
     let models = lua
@@ -1236,6 +1252,15 @@ fn extract(lua: &Lua) -> mlua::Result<Extracted> {
     }
     tools.sort_by(|a, b| a.name.cmp(&b.name));
 
+    let mut mcp = Vec::new();
+    for pair in bone.get::<Table>("_mcp")?.pairs::<String, Value>() {
+        let (name, spec) = pair?;
+        let mut json = from_lua(&spec)?;
+        json["name"] = json!(name);
+        mcp.push(crate::mcp::ServerConfig::from_lua_json(json).map_err(mlua::Error::runtime)?);
+    }
+    mcp.sort_by(|a, b| a.name.cmp(&b.name));
+
     let hooks = bone
         .get::<Table>("_hooks")?
         .pairs::<String, Value>()
@@ -1255,6 +1280,7 @@ fn extract(lua: &Lua) -> mlua::Result<Extracted> {
         tools,
         hooks,
         hook_set: Default::default(),
+        mcp,
     })
 }
 
