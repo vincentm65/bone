@@ -1,0 +1,22 @@
+[
+  {
+    "id": 27,
+    "jsonrpc": "2.0",
+    "method": "session/fork",
+    "params": {
+      "before_turn": 3,
+      "session_id": "01a0fe5e-0000-7000-8000-000000000001"
+    }
+  },
+  {
+    "id": 27,
+    "jsonrpc": "2.0",
+    "result": {
+      "created_at": 1790000000,
+      "cwd": "/home/me/project",
+      "parent": "01a0fe5e-0000-7000-8000-000000000001",
+      "session_id": "01a0fe5e-0000-7000-8000-000000000002",
+      "title": "Fix the typo in main.rs"
+    }
+  }
+]

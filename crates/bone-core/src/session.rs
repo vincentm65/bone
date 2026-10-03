@@ -1,6 +1,7 @@
 //! Sessions: transcripts kept in memory and appended to JSONL files.
 //!
-//! File layout: `<data_dir>/sessions/<session_id>.jsonl`. The first record is
+//! File layout: `<data_dir>/sessions/<session_id>.jsonl`, plus
+//! `<session_id>.title` when it was renamed. The first record is
 //! the session header; every later record is one transcript message, or a
 //! compaction checkpoint that replaces the transcript before it (the earlier
 //! records stay in the file).
@@ -32,6 +33,9 @@ struct Header {
     session_id: SessionId,
     cwd: String,
     created_at: u64,
+    /// The session it was forked from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent: Option<SessionId>,
 }
 
 pub struct Session {
@@ -108,6 +112,16 @@ impl SessionStore {
     }
 
     pub fn create(&self, cwd: String) -> Result<SessionHandle, SessionError> {
+        self.create_with(cwd, None, &[])
+    }
+
+    /// A new session, maybe forked from another, starting with `messages`.
+    fn create_with(
+        &self,
+        cwd: String,
+        parent: Option<SessionId>,
+        messages: &[ChatMessage],
+    ) -> Result<SessionHandle, SessionError> {
         std::fs::create_dir_all(&self.dir)?;
         let header = Header {
             session_id: uuid::Uuid::now_v7().to_string(),
@@ -115,6 +129,7 @@ impl SessionStore {
             created_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0, |d| d.as_secs()),
+            parent,
         };
         let path = self.path(&header.session_id);
         let mut file = OpenOptions::new()
@@ -125,15 +140,23 @@ impl SessionStore {
             session_id: header.session_id.clone(),
             cwd: header.cwd.clone(),
             created_at: header.created_at,
-            title: None,
+            title: messages.iter().find_map(title_of),
+            parent: header.parent.clone(),
         };
         write_record(&mut file, &Record::Session(header))?;
+        for m in messages {
+            write_record(&mut file, &Record::Message(m.clone()))?;
+        }
+        let users = messages
+            .iter()
+            .filter(|m| matches!(m, ChatMessage::User { .. }))
+            .count();
         let session = Arc::new(Mutex::new(Session {
             info: info.clone(),
-            messages: Vec::new(),
+            messages: messages.to_vec(),
             active: None,
             safe_point: false,
-            next_turn: 0,
+            next_turn: users as TurnId,
             file,
         }));
         self.loaded
@@ -154,7 +177,7 @@ impl SessionStore {
         }
         let path = self.path(id);
         let Loaded {
-            info,
+            mut info,
             messages,
             good_len,
             users,
@@ -170,6 +193,9 @@ impl SessionStore {
         if file.metadata()?.len() > good_len {
             file.set_len(good_len)?;
         }
+        if let Some(t) = self.saved_title(id) {
+            info.title = Some(t);
+        }
         // Turn ids count every user message ever written (compacted ones
         // too), so they stay unique across reloads.
         let next_turn = users as TurnId;
@@ -184,6 +210,59 @@ impl SessionStore {
         // Another caller may have loaded it meanwhile; keep the first.
         let mut loaded = self.loaded.lock().unwrap();
         Ok(loaded.entry(id.to_owned()).or_insert(session).clone())
+    }
+
+    /// A copy of a session's transcript (all of it, or what came before
+    /// user message `before_turn`, counting from 1) as a new session.
+    pub fn fork(&self, id: &str, before_turn: Option<u32>) -> Result<SessionHandle, SessionError> {
+        let source = self.get(id)?;
+        let (cwd, messages) = {
+            let s = source.lock().unwrap();
+            let mut end = s.messages.len();
+            if let Some(n) = before_turn {
+                // Cut at a user message, so no tool call loses its result.
+                if let Some((i, _)) = s
+                    .messages
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, m)| matches!(m, ChatMessage::User { .. }))
+                    .nth((n.max(1) - 1) as usize)
+                {
+                    end = i;
+                }
+            }
+            (s.info.cwd.clone(), s.messages[..end].to_vec())
+        };
+        self.create_with(cwd, Some(id.to_owned()), &messages)
+    }
+
+    /// Give a session a title that stays (kept next to its file).
+    pub fn rename(&self, id: &str, title: &str) -> Result<SessionInfo, SessionError> {
+        let session = self.get(id)?;
+        std::fs::write(self.title_path(id), title)?;
+        let mut s = session.lock().unwrap();
+        s.info.title = Some(title.to_owned());
+        Ok(s.info.clone())
+    }
+
+    /// Remove a session from memory and disk.
+    pub fn delete(&self, id: &str) -> Result<(), SessionError> {
+        self.get(id)?;
+        self.loaded.lock().unwrap().remove(id);
+        std::fs::remove_file(self.path(id))?;
+        let _ = std::fs::remove_file(self.title_path(id));
+        Ok(())
+    }
+
+    fn title_path(&self, id: &str) -> PathBuf {
+        self.dir.join(format!("{id}.title"))
+    }
+
+    /// The title a rename gave, if any.
+    fn saved_title(&self, id: &str) -> Option<String> {
+        std::fs::read_to_string(self.title_path(id))
+            .ok()
+            .filter(|t| !t.trim().is_empty())
     }
 
     /// Every session on disk, newest first. Unreadable files are skipped.
@@ -203,7 +282,10 @@ impl SessionStore {
             let id = path.file_stem().unwrap_or_default().to_string_lossy();
             if let Some(s) = loaded.get(id.as_ref()) {
                 out.push(s.lock().unwrap().info.clone());
-            } else if let Ok(l) = read_file(&path, 1) {
+            } else if let Ok(mut l) = read_file(&path, 1) {
+                if let Some(t) = self.saved_title(&id) {
+                    l.info.title = Some(t);
+                }
                 out.push(l.info);
             }
         }
@@ -244,6 +326,7 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
             cwd: header.cwd,
             created_at: header.created_at,
             title: None,
+            parent: header.parent,
         },
         messages: Vec::new(),
         good_len: line.len() as u64,

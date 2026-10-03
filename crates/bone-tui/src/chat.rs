@@ -593,6 +593,7 @@ mod tests {
             cwd: "/".into(),
             created_at: 0,
             title: Some("t".into()),
+            parent: None,
         };
         c.load(
             info,

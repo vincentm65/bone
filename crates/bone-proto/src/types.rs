@@ -55,9 +55,13 @@ pub struct SessionInfo {
     pub cwd: String,
     /// Unix seconds.
     pub created_at: u64,
-    /// First user message, truncated; `None` until there is one.
+    /// Set with `session/rename`, else the first user message, truncated;
+    /// `None` until there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// The session this one was forked from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<SessionId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -63,6 +63,17 @@ fn info(id: &str, title: Option<&str>) -> Value {
 fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
     // The fake core has one core plugin, `corepart`; any other name is a
     // TUI-only plugin to it.
+    if method == "session/fork" {
+        let mut i = info("s-fork", Some("forked"));
+        i["parent"] = params["session_id"].clone();
+        return Ok(i);
+    }
+    if method == "session/rename" {
+        return Ok(info(
+            params["session_id"].as_str().unwrap(),
+            params["title"].as_str(),
+        ));
+    }
     if let "plugin/load" | "plugin/unload" | "plugin/reload" = method {
         let name = params["name"].as_str().unwrap_or_default();
         if name != "corepart" {
@@ -2687,4 +2698,43 @@ async fn model_events_before_the_reply_are_kept() {
         h.lua("=got .. '|' .. table.concat(parts)").await,
         "\"early answer|early \""
     );
+}
+
+#[tokio::test]
+async fn session_commands_rename_fork_and_delete() {
+    let mut h = Harness::new().await;
+    h.input("/rename x{enter}").await;
+    assert!(h.message().contains("no messages yet"), "{}", h.message());
+    h.input("hello{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "hello")).await;
+    h.emit::<TurnFinished>(finished("s-new", TurnOutcome::Completed))
+        .await;
+
+    h.input("/rename Typo hunt{enter}").await;
+    assert_eq!(h.message(), "renamed to Typo hunt");
+    assert_eq!(h.requests("session/rename")[0]["title"], "Typo hunt");
+    assert!(h.screen(80, 24).contains("Typo hunt"));
+
+    h.input("/fork 2{enter}").await;
+    assert_eq!(
+        h.requests("session/fork")[0],
+        json!({ "session_id": "s-new", "before_turn": 2 })
+    );
+    assert_eq!(h.message(), "forked from before turn 2");
+    assert_eq!(h.lua("=bone.chat.session().session_id").await, "\"s-fork\"");
+    h.input("/fork two{enter}").await;
+    assert!(h.message().contains("usage"));
+
+    h.input("/delete{enter}").await;
+    assert!(h.message().contains("/delete yes"));
+    assert!(h.requests("session/delete").is_empty());
+    h.input("/delete yes{enter}").await;
+    assert_eq!(h.requests("session/delete")[0]["session_id"], "s-fork");
+    // Any client's delete clears the chat that shows it.
+    h.emit::<SessionDeleted>(SessionRef {
+        session_id: "s-fork".into(),
+    })
+    .await;
+    assert_eq!(h.message(), "session deleted");
+    assert_eq!(h.lua("=bone.chat.session().new").await, "true");
 }

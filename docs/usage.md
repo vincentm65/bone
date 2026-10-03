@@ -59,6 +59,9 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `/new` | start a new session |
 | `/sessions`, `/resume` | pick a session to open |
 | `/open {id-prefix}` | open a session by id |
+| `/rename {title}` | give this session a title |
+| `/fork`, `/fork {N}` | continue in a copy of this session; with N, from before turn N (to try that turn again differently). The original stays as it was |
+| `/delete yes` | delete this session and its file (`/delete` alone asks) |
 | `/cancel` | cancel the running turn |
 | `/quit`, `/exit`, `/q` | quit |
 | `/set opt`, `/set noopt`, `/set opt!`, `/set opt=N`, `/set opt?` | options |

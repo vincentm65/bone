@@ -1352,6 +1352,20 @@ impl App {
         on!(TurnFinished, |p| self
             .with_chat(&p.session_id, |c| c.turn_finished(&p)));
         on!(SessionUpdated, |p| self.reload_chat(p.session_id));
+        on!(SessionDeleted, |p| self.session_deleted(&p.session_id));
+    }
+
+    /// A session was deleted: its chat becomes a fresh one (chats keep their
+    /// places, which pending replies rely on).
+    fn session_deleted(&mut self, session_id: &str) {
+        let Some(buf) = self.chat_by_session(session_id) else {
+            return;
+        };
+        self.chats[buf] = ChatBuffer::new(None);
+        if buf == self.current {
+            self.show_chat(buf);
+            self.info("session deleted");
+        }
     }
 
     /// Core Lua changed a session's transcript: load it again if a chat

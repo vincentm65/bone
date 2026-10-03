@@ -41,6 +41,21 @@ pub const COMMANDS: &[Command] = &[
         help: "open a session by id or id prefix",
     },
     Command {
+        name: "rename",
+        aliases: &[],
+        help: "give this session a title",
+    },
+    Command {
+        name: "fork",
+        aliases: &[],
+        help: "copy this session to try something else; /fork N starts before turn N",
+    },
+    Command {
+        name: "delete",
+        aliases: &[],
+        help: "delete this session (/delete yes)",
+    },
+    Command {
         name: "cancel",
         aliases: &[],
         help: "cancel the running turn",
@@ -91,6 +106,77 @@ pub const COMMANDS: &[Command] = &[
         help: "recent messages and full Lua errors",
     },
 ];
+
+impl App {
+    /// `/rename title`, `/fork [turn]`, `/delete yes` on the session on
+    /// screen.
+    fn session_command(
+        &mut self,
+        name: &str,
+        session_id: String,
+        args: &str,
+    ) -> Result<(), String> {
+        use bone_proto::methods::{
+            SessionDelete, SessionFork, SessionForkParams, SessionRef, SessionRename,
+            SessionRenameParams,
+        };
+        match name {
+            "rename" => {
+                if args.is_empty() {
+                    return Err("usage: /rename title".into());
+                }
+                let p = SessionRenameParams {
+                    session_id,
+                    title: args.to_owned(),
+                };
+                self.request::<SessionRename>(p, |app, r| match r {
+                    Ok(info) => {
+                        let title = info.title.clone().unwrap_or_default();
+                        if let Some(buf) = app.chat_by_session(&info.session_id)
+                            && let Some(c) = app.chat_mut(buf)
+                        {
+                            c.session = Some(info);
+                        }
+                        app.info(format!("renamed to {title}"));
+                    }
+                    Err(e) => app.error(format!("rename failed: {e}")),
+                });
+            }
+            "fork" => {
+                let before_turn = match args {
+                    "" => None,
+                    n => Some(n.parse::<u32>().map_err(|_| "usage: /fork [turn number]")?),
+                };
+                let p = SessionForkParams {
+                    session_id,
+                    before_turn,
+                };
+                self.request::<SessionFork>(p, move |app, r| match r {
+                    Ok(info) => {
+                        app.open_session(info.session_id);
+                        app.info(match before_turn {
+                            Some(n) => format!("forked from before turn {n}"),
+                            None => "forked".to_owned(),
+                        });
+                    }
+                    Err(e) => app.error(format!("fork failed: {e}")),
+                });
+            }
+            _ => {
+                if args != "yes" {
+                    self.info("Delete this session and its file? /delete yes");
+                    return Ok(());
+                }
+                self.request::<SessionDelete>(SessionRef { session_id }, |app, r| {
+                    if let Err(e) = r {
+                        app.error(format!("delete failed: {e}"));
+                    }
+                });
+            }
+        }
+        Ok(())
+    }
+}
 
 /// The command a name or alias refers to.
 pub fn resolve(word: &str) -> Option<&'static str> {
@@ -404,6 +490,13 @@ impl App {
             }
             "new" => self.new_session(),
             "sessions" => self.open_picker(),
+            "rename" | "fork" | "delete" => {
+                let session_id = self.chats[self.current]
+                    .session_id()
+                    .map(str::to_owned)
+                    .ok_or("this session has no messages yet")?;
+                self.session_command(name, session_id, args)?;
+            }
             "open" => {
                 if args.is_empty() {
                     return Err("usage: /open {session id or prefix}".into());

@@ -1612,3 +1612,114 @@ async fn long_tool_results_are_cut() {
     // Clients see what the model sees.
     assert_eq!(finished.output, out);
 }
+
+// ---- session management --------------------------------------------------------
+
+#[tokio::test]
+async fn sessions_can_be_renamed_forked_and_deleted() {
+    let mut h = Harness::new(vec![
+        text("a1"),
+        text("a2"),
+        text("in fork"),
+        Step::Hang("…".into()),
+    ])
+    .await;
+    for q in ["q1", "q2"] {
+        h.start(q).await;
+        h.until::<TurnFinished>().await;
+    }
+    let sid = h.session_id.clone();
+
+    let info = h
+        .call::<SessionRename>(SessionRenameParams {
+            session_id: sid.clone(),
+            title: "  Typo hunt ".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(info.title.as_deref(), Some("Typo hunt"));
+    assert_eq!(h.until::<SessionUpdated>().await.reason, "rename");
+    // The title survives a restart, and shows in the list.
+    let store = crate::session::SessionStore::new(h._data.path());
+    assert_eq!(store.list().unwrap()[0].title.as_deref(), Some("Typo hunt"));
+
+    // Fork from before the second turn: the first exchange only.
+    let fork = h
+        .call::<SessionFork>(SessionForkParams {
+            session_id: sid.clone(),
+            before_turn: Some(2),
+        })
+        .await
+        .unwrap();
+    assert_eq!(fork.parent.as_deref(), Some(sid.as_str()));
+    assert_ne!(fork.session_id, sid);
+    let msgs = |id: &str| SessionRef {
+        session_id: id.to_owned(),
+    };
+    let forked = h
+        .call::<SessionMessages>(msgs(&fork.session_id))
+        .await
+        .unwrap();
+    assert_eq!(forked.messages.len(), 2);
+    assert_eq!(forked.info.title.as_deref(), Some("q1"));
+    // It goes its own way; the original is untouched.
+    let turn = h
+        .call::<TurnStart>(TurnStartParams {
+            session_id: fork.session_id.clone(),
+            text: "other way".into(),
+        })
+        .await
+        .unwrap()
+        .turn_id;
+    assert_eq!(turn, 2);
+    h.until::<TurnFinished>().await;
+    assert_eq!(
+        h.call::<SessionMessages>(msgs(&fork.session_id))
+            .await
+            .unwrap()
+            .messages
+            .len(),
+        4
+    );
+    assert_eq!(h.transcript().await.len(), 4);
+    let whole = h
+        .call::<SessionFork>(SessionForkParams {
+            session_id: sid.clone(),
+            before_turn: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        h.call::<SessionMessages>(msgs(&whole.session_id))
+            .await
+            .unwrap()
+            .messages
+            .len(),
+        4
+    );
+
+    // Not while a turn runs; then it is gone.
+    h.start("busy").await;
+    h.until::<MessageDelta>().await;
+    let e = h.call::<SessionDelete>(msgs(&sid)).await.unwrap_err();
+    assert_eq!(e.code, RpcError::BUSY);
+    h.cancel().await;
+    h.until::<TurnFinished>().await;
+    h.call::<SessionDelete>(msgs(&sid)).await.unwrap();
+    assert_eq!(h.until::<SessionDeleted>().await.session_id, sid);
+    assert!(h.call::<SessionMessages>(msgs(&sid)).await.is_err());
+    assert!(
+        !h._data
+            .path()
+            .join(format!("sessions/{sid}.jsonl"))
+            .exists()
+    );
+    let left: Vec<String> = h
+        .call::<SessionList>(Empty {})
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|s| s.session_id)
+        .collect();
+    assert!(!left.contains(&sid) && left.len() == 2);
+}

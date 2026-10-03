@@ -113,6 +113,7 @@ fn info() -> SessionInfo {
         cwd: "/home/me/project".into(),
         created_at: 1_790_000_000,
         title: Some("Fix the typo in main.rs".into()),
+        parent: None,
     }
 }
 
@@ -295,6 +296,36 @@ fn requests() {
         ModelRequest { request_id: 7 },
     );
     exchange::<ModelCancel>(21, ModelRequest { request_id: 7 }, ());
+    exchange::<SessionRename>(
+        26,
+        SessionRenameParams {
+            session_id: SID.into(),
+            title: "Typo hunt".into(),
+        },
+        SessionInfo {
+            title: Some("Typo hunt".into()),
+            ..info()
+        },
+    );
+    exchange::<SessionFork>(
+        27,
+        SessionForkParams {
+            session_id: SID.into(),
+            before_turn: Some(3),
+        },
+        SessionInfo {
+            session_id: "01a0fe5e-0000-7000-8000-000000000002".into(),
+            parent: Some(SID.into()),
+            ..info()
+        },
+    );
+    exchange::<SessionDelete>(
+        28,
+        SessionRef {
+            session_id: SID.into(),
+        },
+        (),
+    );
     exchange::<SkillList>(
         23,
         Empty {},
@@ -424,6 +455,9 @@ fn events() {
             output_tokens: 4,
         }),
         error: None,
+    });
+    event::<SessionDeleted>(SessionRef {
+        session_id: SID.into(),
     });
     event::<SessionUpdated>(SessionUpdatedParams {
         session_id: SID.into(),

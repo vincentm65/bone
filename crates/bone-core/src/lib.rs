@@ -21,9 +21,11 @@ use bone_proto::methods::{
     AskRespond, AskRespondParams, CoreReload, Echo, EchoParams, Echoed, HealthCheck, McpList,
     ModelCancel, ModelComplete, ModelCompleteParams, ModelCompleted, ModelCompletedParams,
     ModelDeltaEvent, ModelDeltaParams, ModelList, ModelRequest, PluginList, PluginLoad, PluginRef,
-    PluginReload, PluginUnload, SessionCreate, SessionCreateParams, SessionList, SessionMessages,
-    SessionMessagesResult, SessionRef, SkillList, TemplateExpand, TemplateExpandParams,
-    TemplateExpandResult, TemplateList, TurnCancel, TurnStart, TurnStartParams, TurnStartResult,
+    PluginReload, PluginUnload, SessionCreate, SessionCreateParams, SessionDelete, SessionDeleted,
+    SessionFork, SessionForkParams, SessionList, SessionMessages, SessionMessagesResult,
+    SessionRef, SessionRename, SessionRenameParams, SessionUpdated, SessionUpdatedParams,
+    SkillList, TemplateExpand, TemplateExpandParams, TemplateExpandResult, TemplateList,
+    TurnCancel, TurnStart, TurnStartParams, TurnStartResult,
 };
 use bone_proto::types::SessionInfo;
 use bone_proto::{Method, Notification, RpcError};
@@ -195,6 +197,13 @@ impl Core {
             SessionList::METHOD => dispatch::<SessionList, _>(params, |_| self.session_list()),
             SessionMessages::METHOD => {
                 dispatch::<SessionMessages, _>(params, |p| self.session_messages(p))
+            }
+            SessionRename::METHOD => {
+                dispatch::<SessionRename, _>(params, |p| self.session_rename(p))
+            }
+            SessionFork::METHOD => dispatch::<SessionFork, _>(params, |p| self.session_fork(p)),
+            SessionDelete::METHOD => {
+                dispatch::<SessionDelete, _>(params, |p| self.session_delete(p))
             }
             TurnStart::METHOD => dispatch::<TurnStart, _>(params, |p| self.turn_start(p)),
             TurnCancel::METHOD => dispatch::<TurnCancel, _>(params, |p| self.turn_cancel(p)),
@@ -407,6 +416,56 @@ impl Core {
         self.inner
             .started_session(&info.session_id, &info.cwd, true);
         Ok(info)
+    }
+
+    fn session_rename(&self, p: SessionRenameParams) -> Result<SessionInfo, RpcError> {
+        let title = p.title.trim();
+        if title.is_empty() {
+            return Err(RpcError::invalid_params("the title is empty"));
+        }
+        let info = self
+            .inner
+            .sessions
+            .rename(&p.session_id, title)
+            .map_err(session_error)?;
+        self.inner.emit::<SessionUpdated>(SessionUpdatedParams {
+            session_id: p.session_id,
+            reason: "rename".into(),
+        });
+        Ok(info)
+    }
+
+    fn session_fork(&self, p: SessionForkParams) -> Result<SessionInfo, RpcError> {
+        let session = self
+            .inner
+            .sessions
+            .fork(&p.session_id, p.before_turn)
+            .map_err(session_error)?;
+        let info = session.lock().unwrap().info.clone();
+        self.inner
+            .started_session(&info.session_id, &info.cwd, true);
+        Ok(info)
+    }
+
+    fn session_delete(&self, p: SessionRef) -> Result<(), RpcError> {
+        let session = self
+            .inner
+            .sessions
+            .get(&p.session_id)
+            .map_err(session_error)?;
+        if let Some(active) = &session.lock().unwrap().active {
+            return Err(RpcError::new(
+                RpcError::BUSY,
+                format!("turn {} is still running", active.turn_id),
+            ));
+        }
+        self.inner
+            .sessions
+            .delete(&p.session_id)
+            .map_err(session_error)?;
+        self.inner.started.lock().unwrap().remove(&p.session_id);
+        self.inner.emit::<SessionDeleted>(p);
+        Ok(())
     }
 
     fn session_list(&self) -> Result<Vec<SessionInfo>, RpcError> {
