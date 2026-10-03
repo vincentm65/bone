@@ -398,6 +398,18 @@ impl Scripting {
         })
     }
 
+    /// Run `bone[function](args...)` as a job and return its result as JSON.
+    pub async fn call(
+        &self,
+        function: &'static str,
+        args: Vec<Json>,
+        session_id: Option<&str>,
+    ) -> Result<Json, String> {
+        let (reply, rx) = oneshot::channel();
+        self.run(function, args, session_id, Done::Json(reply))?;
+        rx.await.map_err(|_| "the Lua thread stopped".to_string())?
+    }
+
     /// Run the checks core Lua registered with `bone.health`.
     pub async fn health(&self) -> Vec<bone_proto::methods::HealthItem> {
         use bone_proto::methods::{HealthItem, HealthStatus};

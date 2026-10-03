@@ -1,0 +1,20 @@
+[
+  {
+    "id": 25,
+    "jsonrpc": "2.0",
+    "method": "template/expand",
+    "params": {
+      "args": "src/main.rs",
+      "cwd": "/home/me/project",
+      "name": "review",
+      "session_id": "01a0fe5e-0000-7000-8000-000000000001"
+    }
+  },
+  {
+    "id": 25,
+    "jsonrpc": "2.0",
+    "result": {
+      "text": "Review src/main.rs for bugs."
+    }
+  }
+]

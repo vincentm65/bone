@@ -37,11 +37,11 @@ the other.
 
 The current capability names include `core.config`, `core.tools`,
 `core.hooks`, `core.providers`, `core.jobs`, `core.http_stream`, `core.ask`,
-`core.health`, `core.ready`, `core.reload`, `core.hooks.system`, `core.hooks.context`, `core.hooks.errors`, `core.hooks.stream`, `core.hooks.session`, `core.session_write`, `core.model`, `core.mcp`, `plugins.state` (both sides), and, in the TUI, `plugins.lifecycle`, `tui.project`, `tui.model`, `tui.keymaps`, `tui.input`, `tui.events`,
+`core.health`, `core.ready`, `core.reload`, `core.hooks.system`, `core.hooks.context`, `core.hooks.errors`, `core.hooks.stream`, `core.hooks.session`, `core.session_write`, `core.model`, `core.mcp`, `core.skills`, `core.templates`, `plugins.state` (both sides), and, in the TUI, `plugins.lifecycle`, `tui.project`, `tui.model`, `tui.skills`, `tui.templates`, `tui.keymaps`, `tui.input`, `tui.events`,
 `tui.local_events`, `tui.commands`, `tui.command_specs`, `tui.options`,
 `tui.dynamic_options`, `tui.request`, `tui.prompt`, `tui.prompt_edit`, `tui.chat`, `tui.chat_data`, `tui.windows`,
 `tui.panels`, `tui.regions`, `tui.views`, `tui.pickers`, `tui.themes`, `tui.jobs`, `jobs.streaming` and
-`tui.session`. Both sides also report `lua`, `json`, and `modules`.
+`tui.session`. Both sides also report `lua`, `json`, `modules` and `fs`.
 Capability names describe the contract, not the internal Rust module layout.
 
 ### Ownership and compatibility
@@ -130,6 +130,7 @@ A project can carry TUI config in `.bone/tui.lua` (and modules in `.bone/lua/`).
 - `bone.json.encode(value)`, `bone.json.decode(string)`
 - `bone.inspect(value)`: readable dump of any value.
 - `bone.util`: `split(s, sep)`, `trim(s)`, `startswith(s, prefix)`, `extend(t1, t2, ...)`.
+- `bone.fs.list(dir)` → `{ { name, type = "file" | "dir" } }`, sorted (`~/` works), or `nil` and an error.
 
 ## Core (`core.lua`)
 
@@ -301,6 +302,34 @@ bone.mcp.load("~/.config/mcp.json")   -- every server in an { "mcpServers": { ..
 - In hooks and tools: `bone.mcp.call(server, tool, args)` → `{ text, is_error }` (by the server's own tool name), and `bone.mcp.list()` → `{ { name, state, error, tools } }`, `state` being `"idle"`, `"starting"`, `"ready"` or `"failed"`. `bone.mcp.remove(name)` takes a server out of the configuration (it stops at the next reload).
 
 Results are text for the model: text parts as they are, a note such as `[image image/png]` for other parts, or the structured content when there is no text.
+
+### Skills
+
+A skill is a set of instructions for one kind of work (cutting a release, writing a migration) that the model loads only when a task calls for it. bone has none until you register them:
+
+```lua
+bone.skill.load_dir("~/skills")    -- each ~/skills/<name>/SKILL.md, with "name" and "description" front matter
+bone.skill.register { name = "style", description = "Our code style", content = "Use tabs. ..." }
+bone.skill.register { name = "deploy", path = "~/work/deploy",                    -- a folder with SKILL.md, or a .md file
+                      enabled = function(ctx) return ctx.cwd:find("/work/") ~= nil end }
+```
+
+While a session has at least one skill (`enabled(ctx)` decides per session, `ctx = { session_id, cwd }`), the system prompt gets a short "Skills" section listing each name and description, and a `skill` tool returns a skill's full text plus the paths of the other files in its folder, for the model to read when the steps need them. With no skills, the prompt and the tools are exactly as before. `bone.config.skills = { prompt = false }` drops the section and `{ tool = false }` the tool, for plugins that present skills their own way. The section comes from a `system` hook with priority 1000, so your own `system` hooks run after it. `bone.skill.unregister(name)` and `bone.skill.list()`; clients use `skill/list`.
+
+### Prompt templates
+
+Templates are prompts with arguments, expanded by the core so every client gets the same text. None exist until registered:
+
+```lua
+bone.template.load_dir("~/prompts")   -- each *.md file; front matter: name (default: the file name), description, args
+bone.template.register { name = "fix", description = "Fix an issue", args = { "issue" },
+                         body = "Fix issue $1. Notes: $@" }
+bone.template.register { name = "status", body = function(args, ctx)
+  return "The working tree:\n" .. bone.system("git status --short", { cwd = ctx.cwd }).stdout
+end }
+```
+
+In a string body `$1`…`$9` are the words of the argument text (`"double quotes"` keep words together), `$@` and `$ARGUMENTS` all of it, and `{{name}}` the word in that position of `args`. A function body gets `{ raw, argv, <name> = ... }` and `ctx = { session_id, cwd }`, and may wait (`bone.system`, `bone.http`, `bone.model`). `bone.template.expand(name, text, ctx)`, `bone.template.list()` and `bone.template.unregister(name)`; clients use `template/list` and `template/expand`. The TUI has `bone.templates.list(cb)` and `bone.templates.expand(name, args, cb)` but adds no commands: a plugin decides how templates are offered.
 
 ### Calling a model
 
@@ -571,6 +600,7 @@ bone.chat.messages(function(messages, err) ... end)  -- from the core
 - `bone.system(cmd, { cwd, stdin, timeout }, function(r, err) ... end)`: run a command in the background; the callback gets `{ code, stdout, stderr }` (or `{ timed_out = true }`), or `nil, err`. The UI never waits.
 - `bone.http(req, function(res, err) ... end)`: an HTTP request in the background (same fields as the core's).
 - `bone.defer(ms, fn)`: run `fn` later.
+- `bone.skills.list(function(list, err) end)`, `bone.templates.list(function(list, err) end)` and `bone.templates.expand(name, args, function(text, err) end)` (for the session on screen): what the core has registered.
 - `bone.model.complete(req, on_delta, on_done)` → handle: a model call through the core, outside any session (`req` as the core's `bone.model.complete`, without `on_delta`). `on_delta(d)` gets output as it streams (pass `nil` for none), `on_done(result, err)` the end; `handle:cancel()`. `bone.model.list(function(list, err) end)`.
 - `bone.job.start(cmd, opts)` → job: a streaming job (below).
 - `bone.notify(msg, level)`: `level` is `"info"` (default) or `"error"`. `print(...)` is `bone.notify`.

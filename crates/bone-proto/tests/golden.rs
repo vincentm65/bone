@@ -295,6 +295,36 @@ fn requests() {
         ModelRequest { request_id: 7 },
     );
     exchange::<ModelCancel>(21, ModelRequest { request_id: 7 }, ());
+    exchange::<SkillList>(
+        23,
+        Empty {},
+        vec![SkillInfo {
+            name: "release".into(),
+            description: "Cut a release: changelog, tag, publish".into(),
+            path: Some("/home/me/skills/release/SKILL.md".into()),
+        }],
+    );
+    exchange::<TemplateList>(
+        24,
+        Empty {},
+        vec![TemplateInfo {
+            name: "review".into(),
+            description: "Review a file".into(),
+            args: vec!["path".into()],
+        }],
+    );
+    exchange::<TemplateExpand>(
+        25,
+        TemplateExpandParams {
+            name: "review".into(),
+            args: "src/main.rs".into(),
+            session_id: Some(SID.into()),
+            cwd: Some("/home/me/project".into()),
+        },
+        TemplateExpandResult {
+            text: "Review src/main.rs for bugs.".into(),
+        },
+    );
     exchange::<McpList>(
         22,
         Empty {},

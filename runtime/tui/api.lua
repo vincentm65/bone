@@ -204,6 +204,34 @@ bone.on("model/completed", function(ev)
   end
 end)
 
+--- Skills and prompt templates the core has (registered in core Lua). The
+--- TUI adds no commands for them; a plugin can.
+---   bone.skills.list(function(list, err) end)       { name, description, path }
+---   bone.templates.list(function(list, err) end)    { name, description, args }
+---   bone.templates.expand(name, "args", function(text, err) end)
+---     (for the session on screen and its working directory)
+bone.skills = {
+  list = function(callback)
+    bone.request("skill/list", {}, callback)
+  end,
+}
+bone.templates = {
+  list = function(callback)
+    bone.request("template/list", {}, callback)
+  end,
+  expand = function(name, args, callback)
+    local s = bone.chat.session()
+    bone.request("template/expand", {
+      name = name,
+      args = args or "",
+      session_id = s and s.session_id or nil,
+      cwd = s and s.cwd or nil,
+    }, function(r, err)
+      callback(r and r.text, err)
+    end)
+  end,
+}
+
 --- Show a message. level: "info" (default) or "error".
 --- Run a shell command in the background. on_exit(result) runs when it
 --- ends with { code, stdout, stderr } (or { timed_out = true }), or

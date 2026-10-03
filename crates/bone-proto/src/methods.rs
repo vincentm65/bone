@@ -72,6 +72,9 @@ pub const METHODS: &[&str] = &[
     ModelComplete::METHOD,
     ModelCancel::METHOD,
     McpList::METHOD,
+    SkillList::METHOD,
+    TemplateList::METHOD,
+    TemplateExpand::METHOD,
 ];
 
 /// Every server-to-client event.
@@ -338,6 +341,62 @@ pub struct McpServerInfo {
     /// Its tools, by the names the model sees.
     #[serde(default)]
     pub tools: Vec<String>,
+}
+
+// ---- skills and prompt templates ------------------------------------------
+
+method!(
+    /// The skills core Lua registered (`bone.skill`).
+    SkillList, "skill/list", Empty => Vec<SkillInfo>
+);
+method!(
+    /// The prompt templates core Lua registered (`bone.template`).
+    TemplateList, "template/list", Empty => Vec<TemplateInfo>
+);
+method!(
+    /// A template's text with `args` filled in, for a client to put in its
+    /// prompt or send.
+    TemplateExpand, "template/expand", TemplateExpandParams => TemplateExpandResult
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillInfo {
+    pub name: String,
+    pub description: String,
+    /// Where it came from: a `SKILL.md` path, or absent when registered
+    /// with inline content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplateInfo {
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// Names of its arguments, in order (for completion and `{{name}}`).
+    #[serde(default)]
+    pub args: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplateExpandParams {
+    pub name: String,
+    /// The argument text as typed (`$@`); split on spaces, with double
+    /// quotes keeping words together, for `$1`, `$2`, ….
+    #[serde(default)]
+    pub args: String,
+    /// The session it is for, if any (`ctx.session_id` in Lua bodies).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+    /// The working directory (`ctx.cwd`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplateExpandResult {
+    pub text: String,
 }
 
 // ---- events --------------------------------------------------------------

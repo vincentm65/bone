@@ -57,6 +57,7 @@ static CORE_CAPABILITIES: &[&str] = &[
     "lua",
     "json",
     "modules",
+    "fs",
     "core.config",
     "core.tools",
     "core.hooks",
@@ -75,6 +76,8 @@ static CORE_CAPABILITIES: &[&str] = &[
     "core.session_write",
     "core.model",
     "core.mcp",
+    "core.skills",
+    "core.templates",
     "plugins.state",
 ];
 
@@ -82,6 +85,7 @@ static TUI_CAPABILITIES: &[&str] = &[
     "lua",
     "json",
     "modules",
+    "fs",
     "tui.keymaps",
     "tui.input",
     "tui.commands",
@@ -104,6 +108,8 @@ static TUI_CAPABILITIES: &[&str] = &[
     "tui.jobs",
     "jobs.streaming",
     "tui.model",
+    "tui.skills",
+    "tui.templates",
     "plugins.state",
     "plugins.lifecycle",
     "tui.project",
@@ -341,6 +347,48 @@ pub fn new_state(side: Side, config_dir: Option<&Path>) -> mlua::Result<Lua> {
     }
     lua.globals().set("bone", &bone)?;
     install_state(&lua, &bone, side, config_dir)?;
+    // bone.fs.list(dir): { { name, type = "file" | "dir" } }, sorted; nil and
+    // an error if it cannot be read.
+    let fs = lua.create_table()?;
+    fs.set(
+        "list",
+        lua.create_function(|lua, dir: String| {
+            let dir = match dir.strip_prefix("~/") {
+                Some(rest) => std::env::var_os("HOME")
+                    .map(|h| PathBuf::from(h).join(rest))
+                    .unwrap_or_else(|| PathBuf::from(&dir)),
+                None => PathBuf::from(&dir),
+            };
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(e) => {
+                    return mlua::IntoLuaMulti::into_lua_multi(
+                        (Value::Nil, format!("{}: {e}", dir.display())),
+                        lua,
+                    );
+                }
+            };
+            let mut list: Vec<(String, bool)> = entries
+                .flatten()
+                .map(|e| {
+                    (
+                        e.file_name().to_string_lossy().into_owned(),
+                        e.path().is_dir(),
+                    )
+                })
+                .collect();
+            list.sort();
+            let out = lua.create_table()?;
+            for (name, is_dir) in list {
+                let t = lua.create_table()?;
+                t.set("name", name)?;
+                t.set("type", if is_dir { "dir" } else { "file" })?;
+                out.push(t)?;
+            }
+            mlua::IntoLuaMulti::into_lua_multi(out, lua)
+        })?,
+    )?;
+    bone.set("fs", fs)?;
 
     let json = lua.create_table()?;
     json.set(

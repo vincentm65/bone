@@ -76,6 +76,11 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
         );
     }
     Ok(match method {
+        "skill/list" => json!([{ "name": "release", "description": "cut a release" }]),
+        "template/list" => json!([{ "name": "review", "description": "review", "args": ["path"] }]),
+        "template/expand" => {
+            json!({ "text": format!("Review {}", params["args"].as_str().unwrap_or("")) })
+        }
         "model/complete" => json!({ "request_id": 41 }),
         "plugin/list" => json!([{ "name": "corepart", "core": true, "loaded": true }]),
         "core/reload" => json!({ "plugins": [], "warnings": ["data_dir changed"] }),
@@ -2528,4 +2533,27 @@ async fn tui_lua_calls_the_model_through_the_core() {
     );
     h.lua("call:cancel()").await;
     assert_eq!(h.requests("model/cancel")[0]["request_id"], 41);
+}
+
+#[tokio::test]
+async fn tui_lua_reads_skills_and_expands_templates() {
+    let mut h = Harness::blank().await;
+    h.lua(
+        r#"
+        bone.skills.list(function(l) skills = l end)
+        bone.templates.list(function(l) templates = l end)
+        bone.templates.expand("review", "src/x.rs", function(text) expanded = text end)
+        "#,
+    )
+    .await;
+    assert_eq!(
+        h.lua("=skills[1].name .. templates[1].args[1]").await,
+        "\"releasepath\""
+    );
+    assert_eq!(h.lua("=expanded").await, "\"Review src/x.rs\"");
+    let req = h.requests("template/expand")[0].clone();
+    assert_eq!(
+        (req["name"].as_str(), req["args"].as_str()),
+        (Some("review"), Some("src/x.rs"))
+    );
 }

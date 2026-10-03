@@ -1229,3 +1229,158 @@ async fn mcp_tools_reach_the_model_and_survive_reloads() {
     h.core.reload().await.unwrap();
     assert!(h.call::<McpList>(Empty {}).await.unwrap().is_empty());
 }
+
+// ---- skills and prompt templates ---------------------------------------------
+
+#[tokio::test]
+async fn nothing_changes_without_skills() {
+    let mut h = Harness::with_lua("", vec![text("plain")]).await;
+    h.start("hi").await;
+    h.until::<TurnFinished>().await;
+    assert!(!h.provider.systems.lock().unwrap()[0].contains("## Skills"));
+    assert!(!h.provider.tools.lock().unwrap()[0].contains(&"skill".to_owned()));
+    assert!(h.call::<SkillList>(Empty {}).await.unwrap().is_empty());
+    assert!(h.call::<TemplateList>(Empty {}).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn registered_skills_are_listed_and_loaded_on_demand() {
+    let skills = tempfile::tempdir().unwrap();
+    let release = skills.path().join("release");
+    std::fs::create_dir_all(&release).unwrap();
+    std::fs::write(
+        release.join("SKILL.md"),
+        "---\nname: release\ndescription: \"Cut a release: changelog, tag, publish\"\n---\nStep 1: update CHANGELOG.md\n",
+    )
+    .unwrap();
+    std::fs::write(release.join("checklist.md"), "- [ ] tag").unwrap();
+    std::fs::create_dir_all(skills.path().join("not-a-skill")).unwrap();
+    let mut h = Harness::with_lua(
+        &format!(
+            r#"
+            assert(bone.skill.load_dir("{dir}") == 1)
+            bone.skill.register {{ name = "style", description = "house style", content = "Use tabs." }}
+            bone.skill.register {{ name = "hidden", description = "never shown", content = "x",
+              enabled = function(ctx) return false end }}
+            "#,
+            dir = skills.path().display()
+        ),
+        vec![
+            calls(&[
+                ("c1", "skill", json!({ "name": "release" })),
+                ("c2", "skill", json!({ "name": "hidden" })),
+                ("c3", "skill", json!({ "name": "style" })),
+            ]),
+            text("done"),
+        ],
+    )
+    .await;
+    h.start("ship it").await;
+    h.until::<TurnFinished>().await;
+    let system = h.provider.systems.lock().unwrap()[0].clone();
+    assert!(
+        system.contains("## Skills")
+            && system.contains("- release: Cut a release: changelog, tag, publish")
+            && system.contains("- style: house style")
+            && !system.contains("hidden"),
+        "{system}"
+    );
+    assert!(h.provider.tools.lock().unwrap()[0].contains(&"skill".to_owned()));
+    let t = h.transcript().await;
+    let release_text = tool_result(&t[2]).0;
+    assert!(
+        release_text.starts_with("# Skill: release")
+            && release_text.contains("Step 1: update CHANGELOG.md")
+            && !release_text.contains("description:")
+            && release_text.contains("release/checklist.md"),
+        "{release_text}"
+    );
+    assert_eq!(tool_result(&t[3]), ("no skill named hidden", true));
+    assert!(tool_result(&t[4]).0.contains("Use tabs."));
+
+    let list = h.call::<SkillList>(Empty {}).await.unwrap();
+    let names: Vec<&str> = list.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["hidden", "release", "style"]);
+    assert!(
+        list[1]
+            .path
+            .as_deref()
+            .unwrap()
+            .ends_with("release/SKILL.md")
+    );
+}
+
+#[tokio::test]
+async fn the_skills_prompt_can_be_left_to_plugins() {
+    let mut h = Harness::with_lua(
+        r#"bone.skill.register { name = "a", description = "b", content = "c" }
+           bone.config.skills.prompt = false"#,
+        vec![text("ok")],
+    )
+    .await;
+    h.start("hi").await;
+    h.until::<TurnFinished>().await;
+    assert!(!h.provider.systems.lock().unwrap()[0].contains("## Skills"));
+    assert!(h.provider.tools.lock().unwrap()[0].contains(&"skill".to_owned()));
+}
+
+#[tokio::test]
+async fn templates_expand_with_arguments() {
+    let prompts = tempfile::tempdir().unwrap();
+    std::fs::write(
+        prompts.path().join("review.md"),
+        "---\ndescription: Review a file\nargs: path, focus\n---\nReview {{path}} for {{focus}}.\n",
+    )
+    .unwrap();
+    std::fs::write(prompts.path().join("notes.txt"), "not a template").unwrap();
+    let h = Harness::with_lua(
+        &format!(
+            r#"
+            bone.template.load_dir("{dir}")
+            bone.template.register {{ name = "fix", description = "fix an issue", args = {{ "issue" }},
+              body = "Fix issue $1 ($@) in 100% of cases" }}
+            bone.template.register {{ name = "status", body = function(args, ctx)
+              local r = bone.system("printf clean")
+              return "git says " .. r.stdout .. " for " .. (args.argv[1] or "?") .. " in " .. tostring(ctx.cwd)
+            end }}
+            "#,
+            dir = prompts.path().display()
+        ),
+        vec![],
+    )
+    .await;
+    let list = h.call::<TemplateList>(Empty {}).await.unwrap();
+    assert_eq!(
+        list.iter().map(|t| t.name.as_str()).collect::<Vec<_>>(),
+        ["fix", "review", "status"]
+    );
+    assert_eq!(list[1].args, ["path", "focus"]);
+    assert_eq!(list[1].description, "Review a file");
+    let expand = |name: &str, args: &str| TemplateExpandParams {
+        name: name.into(),
+        args: args.into(),
+        session_id: None,
+        cwd: Some("/proj".into()),
+    };
+    let text = |r: Result<TemplateExpandResult, RpcError>| r.unwrap().text;
+    assert_eq!(
+        text(
+            h.call::<TemplateExpand>(expand("review", r#"src/main.rs "error handling""#))
+                .await
+        ),
+        "Review src/main.rs for error handling.\n"
+    );
+    assert_eq!(
+        text(h.call::<TemplateExpand>(expand("fix", "42 crash")).await),
+        "Fix issue 42 (42 crash) in 100% of cases"
+    );
+    assert_eq!(
+        text(h.call::<TemplateExpand>(expand("status", "main")).await),
+        "git says clean for main in /proj"
+    );
+    let e = h
+        .call::<TemplateExpand>(expand("nope", ""))
+        .await
+        .unwrap_err();
+    assert!(e.message.contains("no template named nope"), "{e:?}");
+}

@@ -323,6 +323,12 @@ for one in restart backoff. Resources and prompts are not used yet.
 
 ### Phase 12: skills and prompt templates (gap 4)
 
+Status: done (branch `agent-ext`). Both registries live in the core runtime
+Lua (empty by default); the skills section is a priority-1000 `system`
+hook and the `skill` tool is added in `on_ready` only when skills exist.
+There is no `template/changed` event: templates only change on a reload,
+so clients refetch on `core/reloaded`. Adds `bone.fs.list` (both sides).
+
 Registries in the core, empty by default.
 
 Skills:
