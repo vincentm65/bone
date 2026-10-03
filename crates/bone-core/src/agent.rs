@@ -21,6 +21,7 @@ use tokio_util::sync::CancellationToken;
 use crate::Inner;
 use crate::config::CoreConfig;
 use crate::provider::{CompletionRequest, Delta};
+use crate::runtime::Runtime;
 use crate::session::SessionHandle;
 use crate::tools::{ToolContext, ToolSpec, parse_args};
 
@@ -47,6 +48,8 @@ enum Refused {
 
 struct Turn<'a> {
     inner: &'a Inner,
+    /// The configuration this turn runs with, start to end.
+    rt: Arc<Runtime>,
     session: &'a SessionHandle,
     session_id: String,
     turn_id: TurnId,
@@ -66,6 +69,7 @@ pub(crate) async fn run_turn(
         (s.info.session_id.clone(), PathBuf::from(&s.info.cwd))
     };
     let turn = Turn {
+        rt: inner.runtime(),
         inner: &inner,
         session: &session,
         session_id,
@@ -97,7 +101,7 @@ impl Turn<'_> {
     /// Run the hooks for `name`. `Ok(None)` when none are registered;
     /// otherwise the event as the hooks left it.
     async fn hooks(&self, name: &str, event: Value) -> Result<Option<Value>, Refused> {
-        let Some(s) = self.inner.scripting.as_deref().filter(|s| s.has_hook(name)) else {
+        let Some(s) = self.rt.scripting.as_deref().filter(|s| s.has_hook(name)) else {
             return Ok(None);
         };
         // Hooks may wait on the user (bone.ask); a cancel drops the question.
@@ -137,7 +141,7 @@ impl Turn<'_> {
             text,
         });
 
-        let dynamic = match &self.inner.scripting {
+        let dynamic = match &self.rt.scripting {
             Some(s) if s.has_system_prompt_fn() => {
                 let cwd = self.cwd.to_string_lossy();
                 Some(
@@ -148,13 +152,13 @@ impl Turn<'_> {
             }
             _ => None,
         };
-        let system = system_prompt(&self.inner.config, dynamic.as_deref(), &self.cwd);
+        let system = system_prompt(&self.rt.config, dynamic.as_deref(), &self.cwd);
         loop {
             let mut messages = vec![ChatMessage::System {
                 content: system.clone(),
             }];
             messages.extend(self.session.lock().unwrap().messages.iter().cloned());
-            let mut tools: Vec<ToolSpec> = self.inner.tools.specs().to_vec();
+            let mut tools: Vec<ToolSpec> = self.rt.tools.specs().to_vec();
             let ev = json!({
                 "session_id": self.session_id,
                 "messages": messages,
@@ -209,7 +213,7 @@ impl Turn<'_> {
                 };
                 tokio::select! {
                     _ = self.cancel.cancelled() => None,
-                    r = self.inner.provider.complete(req, &mut on_delta) => Some(r),
+                    r = self.rt.provider.complete(req, &mut on_delta) => Some(r),
                 }
             };
 
@@ -313,9 +317,9 @@ impl Turn<'_> {
 
     /// Run one call. Returns the text for the model and whether it is an error.
     async fn run_tool(&self, call: &ToolCall) -> (String, bool) {
-        let Some(tool) = self.inner.tools.get(&call.name) else {
+        let Some(tool) = self.rt.tools.get(&call.name) else {
             let names: Vec<_> = self
-                .inner
+                .rt
                 .tools
                 .specs()
                 .iter()
@@ -365,7 +369,7 @@ impl Turn<'_> {
                 Err(out) => (out, true),
             },
             _ = grace => {
-                if let Some(s) = self.inner.scripting.as_deref() {
+                if let Some(s) = self.rt.scripting.as_deref() {
                     s.cancel_session(&self.session_id);
                 }
                 return ("Cancelled by the user while running.".into(), true);

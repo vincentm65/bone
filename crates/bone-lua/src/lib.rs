@@ -66,6 +66,7 @@ static CORE_CAPABILITIES: &[&str] = &[
     "core.ask",
     "core.health",
     "core.ready",
+    "core.reload",
     "plugins.state",
 ];
 
@@ -154,7 +155,20 @@ pub fn plugins(config_dir: &Path) -> Vec<PathBuf> {
 /// Run `file` of each plugin in `<config dir>/plugins/`, in name order.
 /// While one runs, `bone.plugin.current()` describes it.
 pub fn run_user_plugins(lua: &Lua, config_dir: &Path, file: &str) -> mlua::Result<()> {
+    run_user_plugins_except(lua, config_dir, file, &|_| false)
+}
+
+/// [`run_user_plugins`], leaving out the plugins `skip` names.
+pub fn run_user_plugins_except(
+    lua: &Lua,
+    config_dir: &Path,
+    file: &str,
+    skip: &dyn Fn(&str) -> bool,
+) -> mlua::Result<()> {
     for plugin in plugins(config_dir) {
+        if skip(&plugin_name(&plugin)) {
+            continue;
+        }
         set_loading(lua, Some(&plugin))?;
         let r = run_file(lua, &plugin.join(file));
         set_loading(lua, None)?;

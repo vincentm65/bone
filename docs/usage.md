@@ -67,7 +67,7 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `/lua {code}`, `/lua ={expr}` | run Lua / show a value |
 | `/source {file}` | run a Lua file |
 | `/messages` | recent messages and full Lua errors |
-| `/plugin`, `/plugins` | list plugins; `/plugin load name`, `/plugin unload name`, `/plugin reload name` (picks up edits to its `tui.lua` and modules) |
+| `/plugin`, `/plugins` | list plugins (TUI and core halves); `/plugin load name`, `/plugin unload name`, `/plugin reload name` act on both halves (picking up edits to their files); `/plugin reload` reloads the core's whole Lua configuration (`core.lua` and core plugins) |
 | `/project`, `/project trust`, `/project untrust` | this directory's `.bone/tui.lua`: show it, trust it (runs it now and on later starts here), stop trusting it (unloads it) |
 
 Enter on a partial name runs the highlighted suggestion (`/ses` + enter opens the picker). A message that really starts with `/` can be sent as `//like this`; paths such as `/etc/hosts …` are sent as messages anyway. Commands from Lua or plugins show up in the suggestions too.

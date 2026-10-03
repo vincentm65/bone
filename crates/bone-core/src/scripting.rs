@@ -16,7 +16,8 @@
 use std::collections::{HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, mpsc};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 
 use bone_lua::{Side, from_lua, short_error, to_lua};
 use bone_proto::methods::{AskRequestedParams, AskResolvedParams};
@@ -36,6 +37,17 @@ pub struct Loaded {
     pub tools: Vec<ToolSpec>,
     /// Questions asked by Lua, for the core to broadcast.
     pub events: tokio_mpsc::UnboundedReceiver<AskEvent>,
+    /// Where it was loaded from, and how, so the core can load it again.
+    pub config_dir: PathBuf,
+    pub options: LoadOptions,
+}
+
+/// How to load: which plugins to leave out, and the question ids shared by
+/// every load of one core (so ids stay unique across reloads).
+#[derive(Clone, Default)]
+pub struct LoadOptions {
+    pub disabled: HashSet<String>,
+    pub ask_ids: Arc<AtomicU64>,
 }
 
 pub enum AskEvent {
@@ -43,11 +55,18 @@ pub enum AskEvent {
     Resolved(AskResolvedParams),
 }
 
-/// Handle to the Lua thread.
+/// Handle to the Lua thread. Dropping the last handle stops the thread.
 pub struct Scripting {
     jobs: mpsc::Sender<Job>,
-    hooks: HashSet<String>,
+    /// Hook points with at least one hook (`bone.hook` adds to it).
+    hooks: Arc<Mutex<HashSet<String>>>,
     system_prompt_fn: bool,
+}
+
+impl Drop for Scripting {
+    fn drop(&mut self) {
+        let _ = self.jobs.send(Job::Stop);
+    }
 }
 
 /// What hooks did to an event (see `bone.hook`).
@@ -79,6 +98,8 @@ enum Job {
     Cancel {
         session_id: String,
     },
+    /// The runtime was replaced and nothing refers to it any more.
+    Stop,
 }
 
 /// Where a coroutine's result goes once it finishes.
@@ -110,6 +131,8 @@ struct Extracted {
     hooks: HashSet<String>,
     /// Names registered with `bone.provider.register`.
     lua_providers: HashSet<String>,
+    /// Shared with the Lua thread, which adds to it.
+    hook_set: Arc<Mutex<HashSet<String>>>,
 }
 
 /// Run the runtime, plugins and `<config_dir>/core.lua`, then apply `BONE_*`
@@ -125,23 +148,34 @@ pub fn load_with(
     config_dir: &Path,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Loaded, String> {
+    load_with_options(config_dir, env, &LoadOptions::default())
+}
+
+/// [`load_with`], leaving out disabled plugins.
+pub fn load_with_options(
+    config_dir: &Path,
+    env: &dyn Fn(&str) -> Option<String>,
+    options: &LoadOptions,
+) -> Result<Loaded, String> {
     let (init_tx, init_rx) = mpsc::channel();
     let (jobs, job_rx) = mpsc::channel();
     let (events_tx, events) = tokio_mpsc::unbounded_channel();
     let dir = config_dir.to_owned();
     let jobs_tx = jobs.clone();
+    let opts = options.clone();
     std::thread::Builder::new()
         .name("bone-lua".into())
-        .spawn(move || lua_thread(dir, init_tx, job_rx, jobs_tx, events_tx))
+        .spawn(move || lua_thread(dir, opts, init_tx, job_rx, jobs_tx, events_tx))
         .map_err(|e| format!("cannot start the Lua thread: {e}"))?;
     let ex = init_rx
         .recv()
         .map_err(|_| "the Lua thread died while loading core.lua".to_string())??;
 
     let config = resolve(config_dir, &ex, env)?;
+    ex.hook_set.lock().unwrap().extend(ex.hooks.iter().cloned());
     let scripting = Arc::new(Scripting {
         jobs,
-        hooks: ex.hooks,
+        hooks: ex.hook_set.clone(),
         system_prompt_fn: ex.system_prompt_fn,
     });
     Ok(Loaded {
@@ -149,6 +183,8 @@ pub fn load_with(
         scripting,
         tools: ex.tools,
         events,
+        config_dir: config_dir.to_owned(),
+        options: options.clone(),
     })
 }
 
@@ -240,7 +276,33 @@ fn expand_home(p: &str) -> PathBuf {
 
 impl Scripting {
     pub fn has_hook(&self, event: &str) -> bool {
-        self.hooks.contains(event)
+        self.hooks.lock().unwrap().contains(event)
+    }
+
+    /// Run the `bone.on_shutdown` functions before this runtime is
+    /// replaced. Errors are returned as text; a stuck function is abandoned
+    /// after `limit`.
+    pub async fn shutdown(&self, limit: std::time::Duration) -> Vec<String> {
+        if !self.has_hook("_shutdown") {
+            return Vec::new();
+        }
+        let (reply, rx) = oneshot::channel();
+        if let Err(e) = self.run("_shutdown_entry", vec![], None, Done::Json(reply)) {
+            return vec![e];
+        }
+        match tokio::time::timeout(limit, rx).await {
+            Ok(Ok(Ok(v))) => crate::agent::list(&v)
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|e| e.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default(),
+            Ok(Ok(Err(e))) => vec![e],
+            Ok(Err(_)) => vec!["the Lua thread stopped".into()],
+            Err(_) => vec!["bone.on_shutdown did not finish in time".into()],
+        }
     }
 
     pub fn has_system_prompt_fn(&self) -> bool {
@@ -670,7 +732,8 @@ struct State {
     lua: Lua,
     /// Coroutines waiting for an answer, by question.
     waiting: HashMap<AskId, Waiting>,
-    next_ask: AskId,
+    /// Shared by every runtime of one core, so ids never repeat.
+    ask_ids: Arc<AtomicU64>,
     /// Coroutines waiting for background work, with a handle to stop it.
     pending: HashMap<u64, (Waiting, tokio::task::AbortHandle)>,
     next_wait: u64,
@@ -684,6 +747,7 @@ struct State {
 
 fn lua_thread(
     dir: PathBuf,
+    opts: LoadOptions,
     init: mpsc::Sender<Result<Extracted, String>>,
     jobs: mpsc::Receiver<Job>,
     jobs_tx: mpsc::Sender<Job>,
@@ -702,15 +766,20 @@ fn lua_thread(
         }
     };
     let streams = Arc::new(Streams::default());
-    let lua = match setup(&dir, &streams) {
+    let hook_set: Arc<Mutex<HashSet<String>>> = Default::default();
+    let lua = match setup(&dir, &streams, &opts.disabled, &hook_set) {
         Ok(lua) => lua,
         Err(e) => {
             let _ = init.send(Err(e));
             return;
         }
     };
+    let extracted = extract(&lua).map(|mut ex| {
+        ex.hook_set = hook_set;
+        ex
+    });
     if init
-        .send(extract(&lua).map_err(|e| format!("core.lua: {e}")))
+        .send(extracted.map_err(|e| format!("core.lua: {e}")))
         .is_err()
     {
         return;
@@ -718,7 +787,7 @@ fn lua_thread(
     let mut st = State {
         lua,
         waiting: HashMap::new(),
-        next_ask: 0,
+        ask_ids: opts.ask_ids.clone(),
         pending: HashMap::new(),
         next_wait: 0,
         events,
@@ -799,6 +868,7 @@ fn lua_thread(
                     Err(e) => st.finish(w.done, Err(e)),
                 }
             }
+            Job::Stop => break,
             Job::Cancel { session_id } => {
                 let ids: Vec<u64> = st
                     .pending
@@ -878,8 +948,7 @@ impl State {
                 })
                 .and_then(|v| from_lua(&v).ok())
                 .unwrap_or(Json::Null);
-            self.next_ask += 1;
-            let ask_id = self.next_ask;
+            let ask_id = self.ask_ids.fetch_add(1, Ordering::Relaxed) + 1;
             let params = AskRequestedParams {
                 ask_id,
                 session_id: session_id.clone(),
@@ -951,15 +1020,33 @@ impl State {
     }
 }
 
-fn setup(dir: &Path, streams: &Arc<Streams>) -> Result<Lua, String> {
+fn setup(
+    dir: &Path,
+    streams: &Arc<Streams>,
+    disabled: &HashSet<String>,
+    hook_set: &Arc<Mutex<HashSet<String>>>,
+) -> Result<Lua, String> {
     let lua = bone_lua::new_state(Side::Core, Some(dir)).map_err(|e| e.to_string())?;
     let run = |rel: &str| {
         bone_lua::run_runtime(&lua, Some(dir), rel).map_err(|e| format!("runtime/{rel}: {e}"))
     };
+    // Hooks added at any time count (the core skips points with none).
+    let hooks = hook_set.clone();
+    let added = lua
+        .create_function(move |_, name: String| {
+            hooks.lock().unwrap().insert(name);
+            Ok(())
+        })
+        .map_err(|e| e.to_string())?;
+    lua.globals()
+        .get::<Table>("bone")
+        .and_then(|b| b.set("_hook_added", added))
+        .map_err(|e| e.to_string())?;
     run("core/api.lua")?;
     install_helpers(&lua, dir, streams).map_err(|e| e.to_string())?;
     run("core/defaults.lua")?;
-    bone_lua::run_user_plugins(&lua, dir, "core.lua").map_err(|e| e.to_string())?;
+    bone_lua::run_user_plugins_except(&lua, dir, "core.lua", &|name| disabled.contains(name))
+        .map_err(|e| e.to_string())?;
     bone_lua::run_file(&lua, &dir.join("core.lua")).map_err(|e| e.to_string())?;
     lua.load("for _, f in ipairs(bone._ready) do f() end")
         .set_name("=bone.on_ready")
@@ -1102,6 +1189,7 @@ fn extract(lua: &Lua) -> mlua::Result<Extracted> {
         data_dir: config.get("data_dir")?,
         tools,
         hooks,
+        hook_set: Default::default(),
     })
 }
 

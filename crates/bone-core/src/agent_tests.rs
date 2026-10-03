@@ -535,7 +535,7 @@ async fn sessions_reload_from_disk() {
     h.start("hi there").await;
     h.until::<TurnFinished>().await;
 
-    let config = h.core.inner.config.clone();
+    let config = h.core.inner.runtime().config.clone();
     let fresh = Core::with_parts(config, h.provider.clone(), Registry::builtin());
     let list: Vec<SessionInfo> =
         serde_json::from_value(fresh.handle(SessionList::METHOD, None).await.unwrap()).unwrap();
@@ -612,4 +612,217 @@ async fn health_check_reports_core_and_lua_checks() {
     assert_eq!(get("warns"), (Warn, "careful".into()));
     let (status, msg) = get("breaks");
     assert!(status == Error && msg.contains("oops"), "{msg}");
+}
+
+// ---- reloading the Lua configuration ----------------------------------------
+
+impl Harness {
+    /// Replace `core.lua` (with the test provider entry in front).
+    fn write_core_lua(&self, core_lua: &str) {
+        std::fs::write(
+            self._data.path().join("core.lua"),
+            format!("bone.config.providers.x = {{ base_url = \"http://unused\", model = \"m\" }}\n{core_lua}"),
+        )
+        .unwrap();
+    }
+
+    fn tool_names(&self) -> Vec<String> {
+        self.core
+            .inner
+            .runtime()
+            .tools
+            .specs()
+            .iter()
+            .map(|s| s.name.clone())
+            .collect()
+    }
+}
+
+#[tokio::test]
+async fn reload_switches_config_but_running_turns_keep_theirs() {
+    let mut h = Harness::with_lua(
+        r#"bone.tool.register { name = "probe", run = function() bone.sleep(300) return "old" end }"#,
+        vec![
+            calls(&[("c1", "probe", json!({}))]),
+            text("one"),
+            calls(&[("c2", "probe", json!({}))]),
+            text("two"),
+        ],
+    )
+    .await;
+    h.start("first").await;
+    h.until::<ToolStarted>().await;
+    // Reload while the old probe is still sleeping.
+    h.write_core_lua(
+        r#"bone.tool.register { name = "probe", run = function() return "new" end }
+           bone.tool.register { name = "extra", run = function() return "" end }"#,
+    );
+    let r = h.core.reload().await.unwrap();
+    assert!(r.warnings.is_empty(), "{:?}", r.warnings);
+    assert!(h.tool_names().contains(&"extra".to_owned()));
+    let reloaded = h.until::<CoreReloaded>().await;
+    assert_eq!(reloaded, r);
+    h.until::<TurnFinished>().await;
+    h.start("second").await;
+    h.until::<TurnFinished>().await;
+    let t = h.transcript().await;
+    assert_eq!(tool_result(&t[2]).0, "old", "{t:#?}");
+    assert_eq!(tool_result(&t[6]).0, "new", "{t:#?}");
+    // The old Lua thread is gone once its turn is.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        h.core
+            .inner
+            .retired
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|w| w.strong_count() == 0)
+    );
+}
+
+#[tokio::test]
+async fn a_failed_reload_changes_nothing() {
+    let h = Harness::with_lua(
+        r#"bone.tool.register { name = "probe", run = function() return "kept" end }"#,
+        vec![],
+    )
+    .await;
+    h.write_core_lua("error('broken config')");
+    let e = h.core.reload().await.unwrap_err();
+    assert!(e.contains("broken config"), "{e}");
+    assert!(h.tool_names().contains(&"probe".to_owned()));
+    let e = h.core.handle(CoreReload::METHOD, None).await.unwrap_err();
+    assert!(e.message.contains("broken config"), "{e:?}");
+}
+
+#[tokio::test]
+async fn core_plugins_load_and_unload_by_reloading() {
+    let h = Harness::with_lua("", vec![]).await;
+    let plugins = h._data.path().join("plugins");
+    std::fs::create_dir_all(plugins.join("p")).unwrap();
+    std::fs::create_dir_all(plugins.join("ui_only")).unwrap();
+    std::fs::write(
+        plugins.join("p/core.lua"),
+        r#"bone.tool.register { name = "p_tool", run = function() return bone.plugin.current() and "" or "ok" end }
+           bone.on_shutdown(function() bone.state.save("p-bye", { at = "shutdown" }) end)"#,
+    )
+    .unwrap();
+    std::fs::write(plugins.join("ui_only/tui.lua"), "").unwrap();
+
+    let list = h.call::<PluginList>(Empty {}).await.unwrap();
+    assert_eq!(
+        list,
+        vec![
+            PluginInfo {
+                name: "p".into(),
+                core: true,
+                loaded: true
+            },
+            PluginInfo {
+                name: "ui_only".into(),
+                core: false,
+                loaded: false
+            },
+        ]
+    );
+    // Installed after startup: a reload picks it up.
+    assert!(!h.tool_names().contains(&"p_tool".to_owned()));
+    h.call::<CoreReload>(Empty {}).await.unwrap();
+    assert!(h.tool_names().contains(&"p_tool".to_owned()));
+
+    let name = || PluginRef { name: "p".into() };
+    let r = h.call::<PluginUnload>(name()).await.unwrap();
+    assert!(!r.plugins[0].loaded);
+    assert!(!h.tool_names().contains(&"p_tool".to_owned()));
+    // Its shutdown hook ran on the outgoing configuration.
+    assert!(h._data.path().join("state/core/p-bye.json").is_file());
+    let r = h.call::<PluginLoad>(name()).await.unwrap();
+    assert!(r.plugins[0].loaded);
+    assert!(h.tool_names().contains(&"p_tool".to_owned()));
+    h.call::<PluginReload>(name()).await.unwrap();
+    assert!(h.tool_names().contains(&"p_tool".to_owned()));
+
+    for (method, name, want) in [
+        (PluginLoad::METHOD, "nope", "no plugin nope"),
+        (PluginUnload::METHOD, "ui_only", "has no core.lua"),
+    ] {
+        let e = h
+            .core
+            .handle(method, Some(json!({ "name": name })))
+            .await
+            .unwrap_err();
+        assert!(e.message.contains(want), "{e:?}");
+    }
+}
+
+#[tokio::test]
+async fn shutdown_errors_are_warnings_and_hooks_can_be_added_later() {
+    let mut h = Harness::with_lua(
+        r#"bone.on_shutdown(function() error("cleanup failed") end)
+           bone.tool.register { name = "late", run = function()
+             if not added then
+               added = true
+               bone.hook("tool_result", function(ev) return { output = ev.output .. " (seen)" } end)
+             end
+             return "result"
+           end }"#,
+        vec![
+            calls(&[("c1", "late", json!({}))]),
+            calls(&[("c2", "late", json!({}))]),
+            text("done"),
+        ],
+    )
+    .await;
+    h.start("go").await;
+    h.until::<TurnFinished>().await;
+    let t = h.transcript().await;
+    // Registered while the first call ran, the hook already sees its result.
+    assert_eq!(tool_result(&t[2]).0, "result (seen)");
+    assert_eq!(tool_result(&t[4]).0, "result (seen)");
+
+    let r = h.core.reload().await.unwrap();
+    assert!(
+        r.warnings.iter().any(|w| w.contains("cleanup failed")),
+        "{:?}",
+        r.warnings
+    );
+}
+
+#[tokio::test]
+async fn questions_survive_a_reload_and_ids_stay_unique() {
+    let mut h = Harness::with_lua(
+        r#"bone.tool.register { name = "ask", run = function() return tostring(bone.ask({ q = "?" })) end }"#,
+        vec![
+            calls(&[("c1", "ask", json!({}))]),
+            text("one"),
+            calls(&[("c2", "ask", json!({}))]),
+            text("two"),
+        ],
+    )
+    .await;
+    h.start("first").await;
+    let q1 = h.until::<AskRequested>().await;
+    h.core.reload().await.unwrap();
+    // The old configuration still answers its own question.
+    h.call::<AskRespond>(AskRespondParams {
+        ask_id: q1.ask_id,
+        answer: json!("yes"),
+    })
+    .await
+    .unwrap();
+    h.until::<TurnFinished>().await;
+    h.start("second").await;
+    let q2 = h.until::<AskRequested>().await;
+    assert!(q2.ask_id > q1.ask_id);
+    h.call::<AskRespond>(AskRespondParams {
+        ask_id: q2.ask_id,
+        answer: json!("again"),
+    })
+    .await
+    .unwrap();
+    h.until::<TurnFinished>().await;
+    let t = h.transcript().await;
+    assert_eq!(tool_result(&t[2]).0, "yes");
+    assert_eq!(tool_result(&t[6]).0, "again");
 }

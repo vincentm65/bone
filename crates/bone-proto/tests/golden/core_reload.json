@@ -1,0 +1,29 @@
+[
+  {
+    "id": 14,
+    "jsonrpc": "2.0",
+    "method": "core/reload",
+    "params": {}
+  },
+  {
+    "id": 14,
+    "jsonrpc": "2.0",
+    "result": {
+      "plugins": [
+        {
+          "core": true,
+          "loaded": true,
+          "name": "approve"
+        },
+        {
+          "core": false,
+          "loaded": false,
+          "name": "style"
+        }
+      ],
+      "warnings": [
+        "data_dir changed; restart bone to use the new one"
+      ]
+    }
+  }
+]

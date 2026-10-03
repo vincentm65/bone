@@ -230,6 +230,39 @@ fn requests() {
             },
         ],
     );
+    let plugins = || {
+        vec![
+            PluginInfo {
+                name: "approve".into(),
+                core: true,
+                loaded: true,
+            },
+            PluginInfo {
+                name: "style".into(),
+                core: false,
+                loaded: false,
+            },
+        ]
+    };
+    let reloaded = || ReloadResult {
+        plugins: plugins(),
+        warnings: vec![],
+    };
+    exchange::<CoreReload>(
+        14,
+        Empty {},
+        ReloadResult {
+            plugins: plugins(),
+            warnings: vec!["data_dir changed; restart bone to use the new one".into()],
+        },
+    );
+    exchange::<PluginList>(15, Empty {}, plugins());
+    let approve = || PluginRef {
+        name: "approve".into(),
+    };
+    exchange::<PluginLoad>(16, approve(), reloaded());
+    exchange::<PluginUnload>(17, approve(), reloaded());
+    exchange::<PluginReload>(18, approve(), reloaded());
 }
 
 #[test]
@@ -293,6 +326,14 @@ fn events() {
         outcome: TurnOutcome::Failed {
             message: "HTTP 500: overloaded".into(),
         },
+    });
+    event::<CoreReloaded>(ReloadResult {
+        plugins: vec![PluginInfo {
+            name: "approve".into(),
+            core: true,
+            loaded: true,
+        }],
+        warnings: vec![],
     });
 }
 

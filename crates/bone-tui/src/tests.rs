@@ -61,7 +61,23 @@ fn info(id: &str, title: Option<&str>) -> Value {
 
 /// Canned replies by method.
 fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
+    // The fake core has one core plugin, `corepart`; any other name is a
+    // TUI-only plugin to it.
+    if let "plugin/load" | "plugin/unload" | "plugin/reload" = method {
+        let name = params["name"].as_str().unwrap_or_default();
+        if name != "corepart" {
+            return Err(RpcError::new(
+                RpcError::INVALID_PARAMS,
+                format!("plugin {name} has no core.lua"),
+            ));
+        }
+        return Ok(
+            json!({ "plugins": [{ "name": "corepart", "core": true, "loaded": method != "plugin/unload" }] }),
+        );
+    }
     Ok(match method {
+        "plugin/list" => json!([{ "name": "corepart", "core": true, "loaded": true }]),
+        "core/reload" => json!({ "plugins": [], "warnings": ["data_dir changed"] }),
         "initialize" => {
             json!({ "protocol_version": 0, "server_name": "fake", "server_version": "0" })
         }
@@ -2201,7 +2217,33 @@ async fn plugins_own_what_they_create_and_unload_cleanly() {
     let saved = std::fs::read_to_string(dir.path().join("state/tui/demo.json")).unwrap();
     assert!(saved.contains("\"count\": 3"), "{saved}");
     h.input("/plugin unload nope{enter}").await;
-    assert!(h.message().contains("not loaded"), "{}", h.message());
+    assert!(
+        h.message().contains("plugin nope has no core.lua"),
+        "{}",
+        h.message()
+    );
+
+    // Both halves: the list merges the core's plugins in, and a name that
+    // only the core has goes to the core.
+    h.input("/plugin{enter}").await;
+    assert!(
+        h.message().contains("corepart (core loaded)")
+            && h.message().contains("demo (tui loaded)")
+            && h.message().contains("style (tui loaded)"),
+        "{}",
+        h.message()
+    );
+    h.input("/plugin reload corepart{enter}").await;
+    assert_eq!(h.message(), "corepart: core reloaded");
+    assert_eq!(
+        h.requests("plugin/reload").last().unwrap()["name"],
+        "corepart"
+    );
+    h.input("/plugin reload demo{enter}").await;
+    assert_eq!(h.message(), "demo: tui reloaded");
+    h.input("/plugin reload{enter}").await;
+    assert_eq!(h.message(), "core configuration reloaded: data_dir changed");
+    assert_eq!(h.requests("core/reload").len(), 1);
 }
 
 #[tokio::test]

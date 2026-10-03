@@ -52,6 +52,9 @@ function bone.hook(name, fn)
   local list = bone._hooks[name] or {}
   list[#list + 1] = fn
   bone._hooks[name] = list
+  if bone._hook_added then
+    bone._hook_added(name)
+  end
 end
 
 --- Run the hooks for `name` on `ev`. Returns ev (as changed) and, if a hook
@@ -263,6 +266,29 @@ bone.plugin = {
     return bone._loading
   end,
 }
+
+--- fn() runs when this configuration is replaced (core/reload, a core
+--- plugin loaded, unloaded or reloaded). Lua values do not survive a reload:
+--- keep what must last with bone.state. Errors are reported, not fatal.
+bone._shutdown = {}
+function bone.on_shutdown(fn)
+  assert(type(fn) == "function", "bone.on_shutdown(fn)")
+  bone._shutdown[#bone._shutdown + 1] = fn
+  bone._hook_added("_shutdown")
+end
+
+-- Called by the core before it switches to a new configuration. Returns
+-- the errors.
+function bone._shutdown_entry()
+  local errors = {}
+  for _, fn in ipairs(bone._shutdown) do
+    local ok, e = pcall(fn)
+    if not ok then
+      errors[#errors + 1] = "on_shutdown: " .. tostring(e)
+    end
+  end
+  return errors
+end
 
 --- fn() runs once after every core.lua (plugins' and yours) has run, before
 --- the core serves anything: the place to read the final bone.config.

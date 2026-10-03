@@ -1,0 +1,15 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "core/reloaded",
+    "params": {
+      "plugins": [
+        {
+          "core": true,
+          "loaded": true,
+          "name": "approve"
+        }
+      ]
+    }
+  }
+]

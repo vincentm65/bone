@@ -44,6 +44,11 @@ Events are only sent to connections that have completed the handshake.
 | `turn/cancel` | `{ session_id }` | `null` (no-op if nothing is running) |
 | `ask/respond` | `{ ask_id, answer }` | `null`; error if no question with that id is open |
 | `health/check` | `{}` | `[{ name, status: "ok" \| "warn" \| "error", message }]`: the core's checks (provider, API key, reachability, sessions folder, Lua) and core Lua's `bone.health` checks |
+| `core/reload` | `{}` | `ReloadResult`. Loads the Lua configuration again (runtime, enabled plugins, `core.lua`) and switches to it; running turns finish on the previous one. An error (and no change) if loading fails |
+| `plugin/list` | `{}` | `[{ name, core, loaded }]`: the plugins folder; `core` if it has a `core.lua`, `loaded` if that runs |
+| `plugin/load`, `plugin/unload`, `plugin/reload` | `{ name }` | `ReloadResult`: enable, disable, or keep the plugin, then reload as `core/reload` does. An error for a plugin that is not there or has no `core.lua` |
+
+`ReloadResult` is `{ plugins: [{ name, core, loaded }], warnings? }`; `warnings` lists settings that cannot change while running (`data_dir`) and errors from `bone.on_shutdown`. Disabling a plugin lasts until the server restarts; rename its folder to disable it for good.
 
 `SessionInfo` is `{ session_id, cwd, created_at, title? }`. `ChatMessage` is tagged by `role`:
 
@@ -58,7 +63,7 @@ Empty `content`/`reasoning`/`tool_calls` and a false `is_error` are omitted. A t
 
 ## Events
 
-Every event carries `session_id` (except `echoed` and `ask/resolved`) and, for turns, `turn_id`.
+Every event carries `session_id` (except `echoed`, `ask/resolved` and `core/reloaded`) and, for turns, `turn_id`.
 
 | Event | Params | Meaning |
 |---|---|---|
@@ -70,6 +75,7 @@ Every event carries `session_id` (except `echoed` and `ask/resolved`) and, for t
 | `ask/requested` | `{ ask_id, question }` | core Lua (a hook or tool) called `bone.ask(question)` and waits; answer with `ask/respond`. `question` is whatever the Lua passed, e.g. the approve plugin's `{ kind: "approval", title, tool, arguments }` |
 | `ask/resolved` | `{ ask_id, answer }` | answered by some client, or `answer: null` if the turn was cancelled first |
 | `turn/finished` | `{ outcome: { status: "completed" \| "cancelled" \| "failed", message? } }` | the turn is over |
+| `core/reloaded` | `ReloadResult` | the core switched to a newly loaded Lua configuration (no `session_id`) |
 
 A typical turn: `turn/started`, then `message/delta`…, `message/completed` (with `tool_calls`), and for each call `tool/started`, then `ask/requested` → `ask/resolved` if a hook asks the user (the approve plugin does for tools that change things), then `tool/finished`. That repeats until a `message/completed` arrives without tool calls, then `turn/finished`.
 

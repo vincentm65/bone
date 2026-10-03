@@ -8,17 +8,19 @@ mod agent;
 pub mod config;
 mod health;
 pub mod provider;
+mod runtime;
 pub mod scripting;
 pub mod session;
 pub mod tools;
 
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use bone_proto::methods::{
-    AskRequested, AskResolved, AskRespond, AskRespondParams, Echo, EchoParams, Echoed, HealthCheck,
-    SessionCreate, SessionCreateParams, SessionList, SessionMessages, SessionMessagesResult,
-    SessionRef, TurnCancel, TurnStart, TurnStartParams, TurnStartResult,
+    AskRespond, AskRespondParams, CoreReload, Echo, EchoParams, Echoed, HealthCheck, PluginList,
+    PluginLoad, PluginRef, PluginReload, PluginUnload, SessionCreate, SessionCreateParams,
+    SessionList, SessionMessages, SessionMessagesResult, SessionRef, TurnCancel, TurnStart,
+    TurnStartParams, TurnStartResult,
 };
 use bone_proto::types::SessionInfo;
 use bone_proto::{Method, Notification, RpcError};
@@ -28,7 +30,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::CoreConfig;
 use crate::provider::{OpenAiProvider, Provider};
-use crate::scripting::{AskEvent, Loaded, LuaTool, Scripting};
+use crate::runtime::{Change, Runtime, Source};
+use crate::scripting::{Loaded, Scripting};
 use crate::session::{ActiveTurn, SessionError, SessionStore};
 use crate::tools::Registry;
 
@@ -57,12 +60,17 @@ pub struct Core {
 }
 
 pub(crate) struct Inner {
-    config: CoreConfig,
-    provider: Arc<dyn Provider>,
-    tools: Registry,
+    /// Where sessions live; fixed for the core's lifetime.
+    data_dir: PathBuf,
+    /// The current configuration (see `runtime.rs`).
+    runtime: RwLock<Arc<Runtime>>,
+    /// How to load it again, when it came from a config dir.
+    source: Option<Source>,
+    /// Replaced Lua threads that may still have open questions.
+    retired: Mutex<Vec<Weak<Scripting>>>,
+    reloading: tokio::sync::Mutex<()>,
     sessions: SessionStore,
     events: broadcast::Sender<Event>,
-    scripting: Option<Arc<Scripting>>,
 }
 
 impl Inner {
@@ -81,62 +89,49 @@ impl Core {
     }
 
     pub fn with_parts(config: CoreConfig, provider: Arc<dyn Provider>, tools: Registry) -> Self {
-        Self::build(config, provider, tools, None)
+        let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        Self::build(Runtime::plain(config, provider, tools), None, events)
     }
 
     /// A core configured by `core.lua` (see [`scripting::load`]): its
-    /// provider, the built-in tools plus Lua tools, and its hooks.
-    pub fn from_loaded(loaded: Loaded) -> Self {
-        let p = &loaded.config.provider;
-        let provider: Arc<dyn Provider> = match &p.kind {
-            Some(_) => Arc::new(crate::scripting::LuaProvider::new(
-                p,
-                loaded.scripting.clone(),
-            )),
-            None => Arc::new(OpenAiProvider::new(p.clone())),
-        };
-        Self::with_lua(loaded, provider)
-    }
-
-    /// [`from_loaded`](Self::from_loaded) with a given provider (tests).
+    /// provider, the built-in tools plus Lua tools, and its hooks. It can
+    /// reload that configuration (`core/reload`).
     /// Needs a tokio runtime: questions from Lua are forwarded as events.
-    pub fn with_lua(loaded: Loaded, provider: Arc<dyn Provider>) -> Self {
-        let mut tools = Registry::builtin();
-        for spec in loaded.tools {
-            tools.register(Arc::new(LuaTool::new(spec, loaded.scripting.clone())));
-        }
-        let core = Self::build(loaded.config, provider, tools, Some(loaded.scripting));
-        let events = core.inner.events.clone();
-        let mut asks = loaded.events;
-        tokio::spawn(async move {
-            while let Some(ev) = asks.recv().await {
-                let ev = match ev {
-                    AskEvent::Requested(p) => Event::new::<AskRequested>(p),
-                    AskEvent::Resolved(p) => Event::new::<AskResolved>(p),
-                };
-                let _ = events.send(ev);
-            }
-        });
-        core
+    pub fn from_loaded(loaded: Loaded) -> Self {
+        Self::loaded(loaded, None)
     }
 
-    fn build(
-        config: CoreConfig,
-        provider: Arc<dyn Provider>,
-        tools: Registry,
-        scripting: Option<Arc<Scripting>>,
-    ) -> Self {
+    /// [`from_loaded`](Self::from_loaded) with a given provider, kept
+    /// across reloads (tests).
+    pub fn with_lua(loaded: Loaded, provider: Arc<dyn Provider>) -> Self {
+        Self::loaded(loaded, Some(provider))
+    }
+
+    fn loaded(loaded: Loaded, provider: Option<Arc<dyn Provider>>) -> Self {
         let (events, _) = broadcast::channel(EVENT_CAPACITY);
+        let source = Source::new(&loaded, provider.clone());
+        let runtime = Runtime::from_loaded(loaded, provider, &events);
+        Self::build(runtime, Some(source), events)
+    }
+
+    fn build(runtime: Runtime, source: Option<Source>, events: broadcast::Sender<Event>) -> Self {
         Core {
             inner: Arc::new(Inner {
-                sessions: SessionStore::new(&config.data_dir),
-                config,
-                provider,
-                tools,
+                sessions: SessionStore::new(&runtime.config.data_dir),
+                data_dir: runtime.config.data_dir.clone(),
+                runtime: RwLock::new(Arc::new(runtime)),
+                source,
+                retired: Mutex::new(Vec::new()),
+                reloading: tokio::sync::Mutex::new(()),
                 events,
-                scripting,
             }),
         }
+    }
+
+    /// Load the Lua configuration again and switch to it; see
+    /// [`CoreReload`].
+    pub async fn reload(&self) -> Result<bone_proto::methods::ReloadResult, String> {
+        self.inner.reload(Change::Same).await
     }
 
     /// Subscribe to every event emitted from now on.
@@ -164,10 +159,13 @@ impl Core {
             }
             AskRespond::METHOD => {
                 let p: AskRespondParams = decode::<AskRespond>(params)?;
-                let answered = match &self.inner.scripting {
-                    Some(s) => s.answer(p.ask_id, p.answer).await,
-                    None => false,
-                };
+                let mut answered = false;
+                for s in self.inner.all_scripting() {
+                    if s.answer(p.ask_id, p.answer.clone()).await {
+                        answered = true;
+                        break;
+                    }
+                }
                 if !answered {
                     return Err(RpcError::invalid_params(format!(
                         "no open question {}",
@@ -175,6 +173,29 @@ impl Core {
                     )));
                 }
                 Ok(Value::Null)
+            }
+            CoreReload::METHOD => {
+                decode::<CoreReload>(params)?;
+                let r = self.inner.reload(Change::Same).await;
+                reloaded(r)
+            }
+            PluginList::METHOD => {
+                decode::<PluginList>(params)?;
+                let list = self
+                    .inner
+                    .source
+                    .as_ref()
+                    .map(Source::plugins)
+                    .unwrap_or_default();
+                Ok(serde_json::to_value(list).unwrap_or_default())
+            }
+            PluginLoad::METHOD | PluginReload::METHOD => {
+                let p: PluginRef = decode::<PluginLoad>(params)?;
+                reloaded(self.inner.reload(Change::Enable(p.name)).await)
+            }
+            PluginUnload::METHOD => {
+                let p: PluginRef = decode::<PluginUnload>(params)?;
+                reloaded(self.inner.reload(Change::Disable(p.name)).await)
             }
             _ => Err(RpcError::method_not_found(method)),
         }
@@ -270,6 +291,13 @@ impl Core {
             active.cancel.cancel();
         }
         Ok(())
+    }
+}
+
+fn reloaded(r: Result<bone_proto::methods::ReloadResult, String>) -> Result<Value, RpcError> {
+    match r {
+        Ok(r) => Ok(serde_json::to_value(r).unwrap_or_default()),
+        Err(e) => Err(RpcError::new(RpcError::INVALID_PARAMS, e)),
     }
 }
 

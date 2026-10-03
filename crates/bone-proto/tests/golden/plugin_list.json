@@ -1,0 +1,24 @@
+[
+  {
+    "id": 15,
+    "jsonrpc": "2.0",
+    "method": "plugin/list",
+    "params": {}
+  },
+  {
+    "id": 15,
+    "jsonrpc": "2.0",
+    "result": [
+      {
+        "core": true,
+        "loaded": true,
+        "name": "approve"
+      },
+      {
+        "core": false,
+        "loaded": false,
+        "name": "style"
+      }
+    ]
+  }
+]

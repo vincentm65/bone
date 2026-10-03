@@ -476,37 +476,110 @@ impl App {
         }
     }
 
-    /// `/plugin`, `/plugin load|unload|reload name`.
+    /// `/plugin` lists both halves of every plugin; `/plugin
+    /// load|unload|reload name` acts on its TUI half here and its core half
+    /// in the core; `/plugin reload` reloads the core's whole configuration.
     pub fn plugin_command(&mut self, args: &str) -> Result<(), String> {
+        use bone_proto::methods::{
+            CoreReload, Empty, PluginList, PluginLoad, PluginRef, PluginReload, PluginUnload,
+        };
         let mut words = args.split_whitespace();
         match (words.next(), words.next()) {
             (None, _) => {
-                let mut rows: Vec<String> = self
-                    .plugins
-                    .iter()
-                    .map(|p| {
-                        format!(
-                            "{} ({}{}){}",
-                            p.name,
-                            p.kind.name(),
-                            if p.loaded { ", loaded" } else { "" },
-                            p.error
-                                .as_ref()
-                                .map(|e| format!(": {e}"))
-                                .unwrap_or_default()
-                        )
-                    })
-                    .collect();
-                if rows.is_empty() {
-                    rows.push("no plugins".into());
-                }
-                self.info(rows.join("\n"));
+                let tui: Vec<Plugin> = self.plugins.clone();
+                self.request::<PluginList>(Empty {}, move |app, r| {
+                    let core = r.unwrap_or_default();
+                    let mut names: Vec<String> = tui
+                        .iter()
+                        .map(|p| p.name.clone())
+                        .chain(core.iter().filter(|p| p.core).map(|p| p.name.clone()))
+                        .collect();
+                    names.sort();
+                    names.dedup();
+                    let rows: Vec<String> = names
+                        .iter()
+                        .map(|name| {
+                            let mut parts = Vec::new();
+                            if let Some(p) = tui.iter().find(|p| &p.name == name) {
+                                let state = if p.loaded { "loaded" } else { "unloaded" };
+                                parts.push(match &p.error {
+                                    Some(e) => format!("tui {state}: {e}"),
+                                    None => format!("tui {state}"),
+                                });
+                            }
+                            if let Some(p) = core.iter().find(|p| &p.name == name && p.core) {
+                                parts.push(
+                                    if p.loaded {
+                                        "core loaded"
+                                    } else {
+                                        "core unloaded"
+                                    }
+                                    .into(),
+                                );
+                            }
+                            format!("{name} ({})", parts.join(", "))
+                        })
+                        .collect();
+                    app.info(if rows.is_empty() {
+                        "no plugins".to_owned()
+                    } else {
+                        rows.join("\n")
+                    });
+                });
                 Ok(())
             }
-            (Some("load"), Some(name)) => self.load_plugin_by_name(name),
-            (Some("unload"), Some(name)) => self.unload_plugin(name),
-            (Some("reload"), Some(name)) => self.reload_plugin(name),
-            _ => Err("usage: /plugin [load|unload|reload name]".into()),
+            (Some("reload"), None) => {
+                self.request::<CoreReload>(Empty {}, |app, r| match r {
+                    Ok(r) if r.warnings.is_empty() => app.info("core configuration reloaded"),
+                    Ok(r) => app.info(format!(
+                        "core configuration reloaded: {}",
+                        r.warnings.join("; ")
+                    )),
+                    Err(e) => app.error(format!("core reload failed: {e}")),
+                });
+                Ok(())
+            }
+            (Some(op @ ("load" | "unload" | "reload")), Some(name)) => {
+                let has_tui = self.plugin(name).is_some()
+                    || self
+                        .plugin_dir(name)
+                        .is_some_and(|d| d.join("tui.lua").is_file());
+                let tui = has_tui.then(|| match op {
+                    "load" => self.load_plugin_by_name(name),
+                    "unload" => self.unload_plugin(name),
+                    _ => self.reload_plugin(name),
+                });
+                // The core decides whether it has a core half.
+                let then = {
+                    let name = name.to_owned();
+                    let op = op.to_owned();
+                    move |app: &mut App, r: Result<(), String>| match (tui, r) {
+                        (Some(Err(e)), _) | (None, Err(e)) => app.error(e),
+                        (Some(Ok(())), Err(e))
+                            if !e.contains("no core.lua") && !e.contains("no plugin") =>
+                        {
+                            app.error(format!("{name}: tui {op}ed, but the core: {e}"))
+                        }
+                        (Some(Ok(())), Err(_)) => app.info(format!("{name}: tui {op}ed")),
+                        (Some(Ok(())), Ok(())) => app.info(format!("{name}: tui and core {op}ed")),
+                        (None, Ok(())) => app.info(format!("{name}: core {op}ed")),
+                    }
+                };
+                let p = PluginRef {
+                    name: name.to_owned(),
+                };
+                let done = |r: Result<
+                    bone_proto::methods::ReloadResult,
+                    bone_client::ClientError,
+                >| { r.map(drop).map_err(|e| e.to_string()) };
+                match op {
+                    "load" => self.request::<PluginLoad>(p, move |app, r| then(app, done(r))),
+                    "unload" => self.request::<PluginUnload>(p, move |app, r| then(app, done(r))),
+                    _ => self.request::<PluginReload>(p, move |app, r| then(app, done(r))),
+                }
+                Ok(())
+            }
+            _ => Err("usage: /plugin [reload] [load|unload|reload name]".into()),
         }
     }
 }

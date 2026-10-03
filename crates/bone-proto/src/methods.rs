@@ -63,6 +63,11 @@ pub const METHODS: &[&str] = &[
     TurnCancel::METHOD,
     AskRespond::METHOD,
     HealthCheck::METHOD,
+    CoreReload::METHOD,
+    PluginList::METHOD,
+    PluginLoad::METHOD,
+    PluginUnload::METHOD,
+    PluginReload::METHOD,
 ];
 
 /// Every server-to-client event.
@@ -76,6 +81,7 @@ pub const NOTIFICATIONS: &[&str] = &[
     AskRequested::METHOD,
     AskResolved::METHOD,
     TurnFinished::METHOD,
+    CoreReloaded::METHOD,
 ];
 
 // ---- connection ----------------------------------------------------------
@@ -209,6 +215,53 @@ pub enum HealthStatus {
     Error,
 }
 
+// ---- core runtime and plugins ------------------------------------------
+
+method!(
+    /// Load the core's Lua configuration again (runtime, plugins, `core.lua`)
+    /// and switch to it. Running turns finish on the previous one. Fails, and
+    /// changes nothing, if loading fails.
+    CoreReload, "core/reload", Empty => ReloadResult
+);
+method!(
+    /// The plugins in the core's plugins folder.
+    PluginList, "plugin/list", Empty => Vec<PluginInfo>
+);
+method!(
+    /// Enable a core plugin and reload.
+    PluginLoad, "plugin/load", PluginRef => ReloadResult
+);
+method!(
+    /// Disable a core plugin and reload.
+    PluginUnload, "plugin/unload", PluginRef => ReloadResult
+);
+method!(
+    /// Reload with a plugin enabled (picks up changes to its files).
+    PluginReload, "plugin/reload", PluginRef => ReloadResult
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginRef {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginInfo {
+    pub name: String,
+    /// It has a `core.lua`.
+    pub core: bool,
+    /// Its `core.lua` is part of the running configuration.
+    pub loaded: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReloadResult {
+    pub plugins: Vec<PluginInfo>,
+    /// Settings that cannot change while running, and were kept.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+}
+
 // ---- events --------------------------------------------------------------
 
 notification!(TurnStarted, "turn/started", TurnStartedParams);
@@ -234,6 +287,10 @@ notification!(
     AskResolved, "ask/resolved", AskResolvedParams
 );
 notification!(TurnFinished, "turn/finished", TurnFinishedParams);
+notification!(
+    /// The core switched to a newly loaded Lua configuration.
+    CoreReloaded, "core/reloaded", ReloadResult
+);
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnStartedParams {

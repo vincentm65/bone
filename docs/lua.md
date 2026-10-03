@@ -37,7 +37,7 @@ the other.
 
 The current capability names include `core.config`, `core.tools`,
 `core.hooks`, `core.providers`, `core.jobs`, `core.http_stream`, `core.ask`,
-`core.health`, `core.ready`, `plugins.state` (both sides), and, in the TUI, `plugins.lifecycle`, `tui.project`, `tui.keymaps`, `tui.input`, `tui.events`,
+`core.health`, `core.ready`, `core.reload`, `plugins.state` (both sides), and, in the TUI, `plugins.lifecycle`, `tui.project`, `tui.keymaps`, `tui.input`, `tui.events`,
 `tui.local_events`, `tui.commands`, `tui.command_specs`, `tui.options`,
 `tui.dynamic_options`, `tui.request`, `tui.prompt`, `tui.prompt_edit`, `tui.chat`, `tui.chat_data`, `tui.windows`,
 `tui.panels`, `tui.regions`, `tui.views`, `tui.pickers`, `tui.themes`, `tui.jobs`, `jobs.streaming` and
@@ -284,6 +284,14 @@ The TUI has its own `bone.health(name, fn)` for TUI-side checks (plain functions
 ### After loading
 
 `bone.on_ready(fn)` runs `fn()` once after every `core.lua` (the plugins' and yours) has run, before the core serves anything. A plugin's `core.lua` runs before yours, so this is where it can read the final `bone.config` (the `switch` example publishes the provider list from here). An error stops the core from starting, like an error in `core.lua`.
+
+### Reloading
+
+The core can load its Lua configuration again without restarting: `/plugin reload` in the TUI, or the `core/reload` method. It starts a fresh Lua state, runs the runtime, the enabled plugins and `core.lua`, and switches only if that worked; if loading fails, the old configuration stays. A turn that is running when this happens finishes with the configuration it started with, and questions it asked can still be answered. The provider, tools, hooks and system prompt all come from the new configuration from the next turn on. `data_dir` cannot change while running (a warning says so).
+
+Lua values do not survive a reload, so keep what must last in `bone.state`. `bone.on_shutdown(fn)` runs `fn()` on the outgoing configuration just before the switch (errors come back as warnings; it gets five seconds).
+
+Core plugins can be switched off and on the same way: `plugin/unload`, `plugin/load` and `plugin/reload` (also `/plugin unload|load|reload name` in the TUI, which handles the plugin's TUI half too). Each is a reload with that plugin left out or put back; the choice lasts until the server restarts. A plugin installed while bone runs is picked up by any reload.
 
 ### Environment overrides
 

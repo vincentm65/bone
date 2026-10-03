@@ -165,6 +165,10 @@ stream observation.
 
 ### Phase 8: a swappable core runtime, and core plugin reload (gap 5)
 
+Status: done (branch `agent-ext`). Implemented as planned. `bone.state`
+persistence of disabled plugins was left out: disabling lasts until the
+server restarts, and renaming the folder disables a plugin for good.
+
 Everything after this needs registries that can change while the core runs,
 so this comes first.
 

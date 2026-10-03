@@ -31,7 +31,13 @@ fn config_and_env_overrides() {
         bone.config.data_dir = "~/somewhere"
         "#,
     );
-    let lua = setup(dir.path(), &Default::default()).unwrap();
+    let lua = setup(
+        dir.path(),
+        &Default::default(),
+        &Default::default(),
+        &Default::default(),
+    )
+    .unwrap();
     let ex = extract(&lua).unwrap();
     let c = resolve(dir.path(), &ex, &no_env).unwrap();
     assert_eq!(
@@ -65,7 +71,16 @@ fn config_and_env_overrides() {
 #[test]
 fn missing_or_bad_config_is_explained() {
     let dir = tempfile::tempdir().unwrap();
-    let ex = extract(&setup(dir.path(), &Default::default()).unwrap()).unwrap();
+    let ex = extract(
+        &setup(
+            dir.path(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     let err = resolve(dir.path(), &ex, &no_env).unwrap_err();
     assert!(err.contains("no model provider configured"), "{err}");
     let env = |k: &str| match k {
@@ -76,7 +91,16 @@ fn missing_or_bad_config_is_explained() {
     assert_eq!(resolve(dir.path(), &ex, &env).unwrap().data_dir, dir.path());
 
     write(dir.path(), r#"bone.config.provider = "nope""#);
-    let ex = extract(&setup(dir.path(), &Default::default()).unwrap()).unwrap();
+    let ex = extract(
+        &setup(
+            dir.path(),
+            &Default::default(),
+            &Default::default(),
+            &Default::default(),
+        )
+        .unwrap(),
+    )
+    .unwrap();
     assert!(
         resolve(dir.path(), &ex, &no_env)
             .unwrap_err()
@@ -763,7 +787,7 @@ async fn cancelling_stops_a_lua_provider_mid_stream() {
     }
     assert!(started.elapsed() < Duration::from_secs(2));
     // The Lua thread is free: another job runs at once.
-    let s = core.inner.scripting.clone().unwrap();
+    let s = core.inner.runtime().scripting.clone().unwrap();
     let out = tokio::time::timeout(Duration::from_secs(2), s.hooks("x", json!({})))
         .await
         .expect("Lua thread free");

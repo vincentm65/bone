@@ -18,7 +18,8 @@ fn item(name: &str, status: HealthStatus, message: impl Into<String>) -> HealthI
 
 pub(crate) async fn check(inner: &Inner) -> Vec<HealthItem> {
     use HealthStatus::*;
-    let p = &inner.config.provider;
+    let rt = inner.runtime();
+    let p = &rt.config.provider;
     let mut out = vec![item(
         "provider",
         Ok,
@@ -48,7 +49,7 @@ pub(crate) async fn check(inner: &Inner) -> Vec<HealthItem> {
         None => reachable(p).await,
     });
 
-    let dir = &inner.config.data_dir;
+    let dir = &inner.data_dir;
     let probe = dir.join(".bone-health");
     out.push(
         match std::fs::create_dir_all(dir).and_then(|_| std::fs::write(&probe, b"")) {
@@ -64,14 +65,14 @@ pub(crate) async fn check(inner: &Inner) -> Vec<HealthItem> {
         },
     );
 
-    let lua_tools: Vec<&str> = inner
+    let lua_tools: Vec<&str> = rt
         .tools
         .specs()
         .iter()
         .filter(|s| Registry::builtin().get(&s.name).is_none())
         .map(|s| s.name.as_str())
         .collect();
-    match &inner.scripting {
+    match &rt.scripting {
         Some(s) => {
             let tools = if lua_tools.is_empty() {
                 "no Lua tools".to_owned()
