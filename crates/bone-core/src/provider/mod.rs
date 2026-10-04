@@ -50,3 +50,27 @@ pub trait Provider: Send + Sync {
         on_delta: DeltaSink<'a>,
     ) -> BoxFuture<'a, Result<Completion, ProviderError>>;
 }
+
+/// What turns use when no provider is configured (a first run, before
+/// /setup): every call fails with how to set one up.
+pub struct Unconfigured;
+
+impl Provider for Unconfigured {
+    fn complete<'a>(
+        &'a self,
+        _req: CompletionRequest<'a>,
+        _on_delta: DeltaSink<'a>,
+    ) -> BoxFuture<'a, Result<Completion, ProviderError>> {
+        Box::pin(async {
+            Err(ProviderError(
+                "no model provider is configured: run /setup (or add one to core.lua)".into(),
+            ))
+        })
+    }
+}
+
+/// The provider for a config: Lua (with a type), none (no URL), else
+/// OpenAI-compatible.
+pub fn unconfigured(p: &crate::config::ProviderConfig) -> bool {
+    p.kind.is_none() && p.base_url.is_empty()
+}

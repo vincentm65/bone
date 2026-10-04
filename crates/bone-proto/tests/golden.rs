@@ -438,6 +438,15 @@ fn requests() {
         },
         settings.clone(),
     );
+    exchange::<SecretsSet>(
+        28,
+        SecretSet {
+            provider: "deepseek".into(),
+            key: Some("sk-…".into()),
+        },
+        vec!["deepseek".into()],
+    );
+    exchange::<SecretsList>(29, Empty {}, vec!["deepseek".into()]);
     exchange::<SettingsReset>(
         27,
         SettingPath {

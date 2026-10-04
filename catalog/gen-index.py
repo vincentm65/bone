@@ -18,7 +18,7 @@ def main() -> None:
         manifest_path = package / "manifest.json"
         manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
         files = []
-        for path in sorted(p for p in package.rglob("*") if p.is_file() and p.name != "manifest.json"):
+        for path in sorted(p for p in package.rglob("*") if p.is_file()):
             files.append({"path": path.relative_to(package).as_posix(), "sha256": sha256(path)})
         entry = {
             "name": package.name,

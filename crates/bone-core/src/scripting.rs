@@ -234,6 +234,48 @@ pub fn load_with_options(
     })
 }
 
+/// Providers defined in settings.json (by /setup or /config) go into
+/// bone.config.providers before plugins and core.lua, which may still
+/// replace them. A provider's key is the one in secrets.json, else its
+/// `api_key_env` variable.
+fn add_saved_providers(lua: &Lua, dir: &Path) -> mlua::Result<()> {
+    let settings = saved_settings(dir);
+    let Some(saved) = settings.get("providers").and_then(|p| p.as_object()) else {
+        return Ok(());
+    };
+    let secrets = crate::settings::load_secrets(dir).unwrap_or_else(|e| {
+        eprintln!("bone: ignoring secrets: {e}");
+        serde_json::json!({})
+    });
+    let providers: Table = lua
+        .globals()
+        .get::<Table>("bone")?
+        .get::<Table>("config")?
+        .get("providers")?;
+    for (name, spec) in saved {
+        let Value::Table(t) = to_lua(lua, spec)? else {
+            continue;
+        };
+        let key = secrets
+            .get("providers")
+            .and_then(|p| p.get(name))
+            .and_then(|k| k.as_str())
+            .map(str::to_owned)
+            .or_else(|| {
+                spec.get("api_key_env")
+                    .and_then(|v| v.as_str())
+                    .and_then(|var| std::env::var(var).ok())
+                    .filter(|v| !v.is_empty())
+            });
+        if let Some(key) = key {
+            t.set("api_key", key)?;
+        }
+        t.set("api_key_env", Value::Nil)?;
+        providers.set(name.as_str(), t)?;
+    }
+    Ok(())
+}
+
 /// settings.json, or nothing (with a warning) when it cannot be read.
 fn saved_settings(config_dir: &Path) -> serde_json::Value {
     crate::settings::load(config_dir).unwrap_or_else(|e| {
@@ -310,13 +352,30 @@ fn resolve(
             .ok_or("BONE_MODEL is set but no provider is configured")?;
         p.model = model;
     }
-    let mut provider = provider.ok_or_else(|| {
-        format!(
-            "no model provider configured. Set bone.config.providers and bone.config.provider in {}, \
-             or BONE_BASE_URL and BONE_MODEL",
+    if provider.is_none() && ex.providers.len() > 1 {
+        let mut names: Vec<&String> = ex.providers.keys().collect();
+        names.sort();
+        return Err(format!(
+            "several providers ({}) and none chosen: set bone.config.provider in {}, or pick one in /config",
+            names
+                .iter()
+                .map(|n| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
             config_dir.join("core.lua").display()
-        )
-    })?;
+        ));
+    }
+    // No provider at all (a first run): the core still starts, so /setup
+    // can add one; turns say how until then.
+    let mut provider = provider.unwrap_or(ProviderConfig {
+        kind: None,
+        options: serde_json::Value::Null,
+        base_url: String::new(),
+        model: String::new(),
+        api_key: None,
+        reasoning_effort: None,
+        stream_usage: true,
+    });
     if let Some(key) = env("BONE_API_KEY") {
         provider.api_key = Some(key);
     }
@@ -1214,6 +1273,7 @@ fn setup(
         .and_then(|b| b.set("_settings", settings))
         .map_err(|e| e.to_string())?;
     run("core/defaults.lua")?;
+    add_saved_providers(&lua, dir).map_err(|e| format!("settings.json providers: {e}"))?;
     bone_lua::run_user_plugins_except(&lua, dir, "core.lua", &|name| disabled.contains(name))
         .map_err(|e| e.to_string())?;
     bone_lua::run_file(&lua, &dir.join("core.lua")).map_err(|e| e.to_string())?;

@@ -26,12 +26,12 @@ use bone_proto::methods::{
     ModelCompletedParams, ModelDeltaEvent, ModelDeltaParams, ModelList, ModelRequest, PluginList,
     PluginLoad, PluginRef, PluginReload, PluginUnload, QueueAdd, QueueAddParams, QueueAddResult,
     QueueChanged, QueueChangedParams, QueueClear, QueueMode, QueueMove, QueueRemove, QueueResume,
-    QueueUpdate, SessionCreate, SessionCreateParams, SessionDelete, SessionDeleted, SessionFork,
-    SessionForkParams, SessionList, SessionMessages, SessionMessagesResult, SessionRef,
-    SessionRename, SessionRenameParams, SessionUpdated, SessionUpdatedParams, SettingPath,
-    SettingSet, SettingsChanged, SettingsChangedParams, SettingsGet, SettingsReset, SettingsSet,
-    StoreQuery, StoreQueryParams, TurnCancel, TurnStart, TurnStartParams, TurnStartResult,
-    TurnSteer, TurnSteerParams,
+    QueueUpdate, SecretSet, SecretsList, SecretsSet, SessionCreate, SessionCreateParams,
+    SessionDelete, SessionDeleted, SessionFork, SessionForkParams, SessionList, SessionMessages,
+    SessionMessagesResult, SessionRef, SessionRename, SessionRenameParams, SessionUpdated,
+    SessionUpdatedParams, SettingPath, SettingSet, SettingsChanged, SettingsChangedParams,
+    SettingsGet, SettingsReset, SettingsSet, StoreQuery, StoreQueryParams, TurnCancel, TurnStart,
+    TurnStartParams, TurnStartResult, TurnSteer, TurnSteerParams,
 };
 use bone_proto::types::SessionInfo;
 use bone_proto::{Method, Notification, RpcError};
@@ -324,10 +324,18 @@ impl Core {
             })?;
             let before = current.clone();
             settings::set(current, &path, value.clone()).map_err(RpcError::invalid_params)?;
+            // A provider added while none is chosen in settings is chosen.
+            if let Some(name) = path.strip_prefix("providers.")
+                && value.is_object()
+                && settings::get(current, "provider").is_none()
+            {
+                settings::set(current, "provider", Value::String(name.to_owned()))
+                    .map_err(RpcError::invalid_params)?;
+            }
             settings::save(&source.config_dir, current).map_err(RpcError::internal)?;
             before
         };
-        if (path == "provider" || path.starts_with("models."))
+        if (path == "provider" || path.starts_with("models.") || path.starts_with("providers."))
             && let Err(e) = self.inner.reload(Change::Same).await
         {
             let mut guard = self.inner.settings.lock().unwrap();
@@ -487,6 +495,31 @@ impl Core {
             SettingsReset::METHOD => {
                 let p: SettingPath = decode::<SettingsReset>(params)?;
                 self.set_setting(p.path, Value::Null).await
+            }
+            SecretsSet::METHOD => {
+                let p: SecretSet = decode::<SecretsSet>(params)?;
+                let source = self.inner.source.as_ref().ok_or_else(|| {
+                    RpcError::invalid_params("this core has no config dir to save keys in")
+                })?;
+                let names = settings::set_secret(&source.config_dir, &p.provider, p.key.as_deref())
+                    .map_err(RpcError::invalid_params)?;
+                // The key is used from now on (a reload reads it).
+                if let Err(e) = self.inner.reload(Change::Same).await {
+                    return Err(RpcError::invalid_params(format!(
+                        "saved, but the reload failed: {e}"
+                    )));
+                }
+                Ok(serde_json::to_value(names).unwrap_or_default())
+            }
+            SecretsList::METHOD => {
+                decode::<SecretsList>(params)?;
+                let names = match &self.inner.source {
+                    Some(s) => settings::load_secrets(&s.config_dir)
+                        .map(|v| settings::secret_names(&v))
+                        .map_err(RpcError::invalid_params)?,
+                    None => Vec::new(),
+                };
+                Ok(serde_json::to_value(names).unwrap_or_default())
             }
             CoreReload::METHOD => {
                 decode::<CoreReload>(params)?;

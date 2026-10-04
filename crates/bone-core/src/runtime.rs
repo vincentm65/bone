@@ -147,6 +147,7 @@ impl Runtime {
         let p = &loaded.config.provider;
         let provider = provider.unwrap_or_else(|| match &p.kind {
             Some(_) => Arc::new(LuaProvider::new(p, loaded.scripting.clone())),
+            None if crate::provider::unconfigured(p) => Arc::new(crate::provider::Unconfigured),
             None => Arc::new(OpenAiProvider::new(p.clone())),
         });
         let mut tools = Registry::builtin();

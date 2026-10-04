@@ -20,6 +20,13 @@ pub(crate) async fn check(inner: &Inner) -> Vec<HealthItem> {
     use HealthStatus::*;
     let rt = inner.runtime();
     let p = &rt.config.provider;
+    if crate::provider::unconfigured(p) {
+        return vec![item(
+            "provider",
+            Error,
+            "none configured: run /setup, or add one to core.lua",
+        )];
+    }
     let mut out = vec![item(
         "provider",
         Ok,

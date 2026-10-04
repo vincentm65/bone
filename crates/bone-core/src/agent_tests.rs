@@ -2390,3 +2390,88 @@ async fn core_plugins_switched_off_in_settings_stay_off() {
     assert!(!loaded.tools.iter().any(|t| t.name == "quiet_tool"));
     assert!(loaded.options.disabled.contains("quiet"));
 }
+
+#[tokio::test]
+async fn providers_and_keys_from_settings_and_secrets() {
+    let h = Harness::with_lua("", vec![]).await;
+    async fn set_on(core: &Core, path: &str, value: Value) -> Result<Value, RpcError> {
+        core.handle(
+            SettingsSet::METHOD,
+            Some(json!({ "path": path, "value": value })),
+        )
+        .await
+    }
+    // A provider defined in settings (as /setup does), then chosen.
+    set_on(
+        &h.core,
+        "providers.local",
+        json!({ "base_url": "http://localhost:8080/v1", "model": "small" }),
+    )
+    .await
+    .unwrap();
+    set_on(&h.core, "provider", json!("local")).await.unwrap();
+    let models = h.core.inner.runtime().model_list();
+    let local = models.iter().find(|m| m.name == "local").unwrap();
+    assert!(local.current && local.model == "small");
+    // Bad entries are refused; keys never go in settings.json.
+    for (v, want) in [
+        (json!({ "base_url": "http://x" }), "needs a model"),
+        (json!({ "model": "m" }), "needs a base_url"),
+        (
+            json!({ "base_url": "http://x", "model": "m", "api_key": "k" }),
+            "secrets.json",
+        ),
+    ] {
+        let e = set_on(&h.core, "providers.bad", v).await.unwrap_err();
+        assert!(e.message.contains(want), "{want}: {e:?}");
+    }
+
+    // A key: saved owner-only, used by the provider, never sent back.
+    let names = h
+        .core
+        .handle(
+            SecretsSet::METHOD,
+            Some(json!({ "provider": "local", "key": "sk-1" })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(names, json!(["local"]));
+    let path = h._data.path().join("secrets.json");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+    assert_eq!(
+        h.core.inner.runtime().models["local"].api_key.as_deref(),
+        Some("sk-1")
+    );
+    let list = h.core.handle(SecretsList::METHOD, None).await.unwrap();
+    assert_eq!(list, json!(["local"]));
+    assert!(
+        !h.core
+            .handle(SettingsGet::METHOD, None)
+            .await
+            .unwrap()
+            .to_string()
+            .contains("sk-1")
+    );
+    h.core
+        .handle(
+            SecretsSet::METHOD,
+            Some(json!({ "provider": "local", "key": null })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(h.core.inner.runtime().models["local"].api_key, None);
+
+    // core.lua still wins for a provider of the same name.
+    h.write_core_lua(
+        r#"bone.config.providers["local"] = { base_url = "http://mine", model = "mine" }"#,
+    );
+    h.core.reload().await.unwrap();
+    assert_eq!(h.core.inner.runtime().models["local"].model, "mine");
+}

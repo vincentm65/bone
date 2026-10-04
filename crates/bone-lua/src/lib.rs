@@ -27,6 +27,8 @@ pub const RUNTIME: &[(&str, &str)] = runtime_files![
     "lua/bone/menu.lua",
     "lua/bone/commands.lua",
     "lua/bone/config.lua",
+    "lua/bone/catalog.lua",
+    "lua/bone/setup.lua",
     "lua/bone/ui.lua",
     "lua/bone/ui/layout.lua",
     "lua/bone/ui/statusline.lua",
@@ -394,7 +396,44 @@ pub fn new_state(side: Side, config_dir: Option<&Path>) -> mlua::Result<Lua> {
             mlua::IntoLuaMulti::into_lua_multi(out, lua)
         })?,
     )?;
+    // bone.fs.mkdir(dir): make it and its parents. bone.fs.write(path, text):
+    // replace a file whole (a temporary renamed over it), making its folder.
+    // Both return true, or nil and an error.
+    fs.set(
+        "mkdir",
+        lua.create_function(|lua, dir: String| {
+            let r = std::fs::create_dir_all(expand_home(&dir));
+            fs_result(lua, r.map_err(|e| format!("{dir}: {e}")))
+        })?,
+    )?;
+    fs.set(
+        "write",
+        lua.create_function(|lua, (path, text): (String, mlua::String)| {
+            let target = expand_home(&path);
+            let r = (|| {
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                let name = target.file_name().unwrap_or_default().to_string_lossy();
+                let tmp = target.with_file_name(format!(".{name}.tmp"));
+                std::fs::write(&tmp, text.as_bytes())?;
+                std::fs::rename(&tmp, &target)
+            })();
+            fs_result(lua, r.map_err(|e| format!("{path}: {e}")))
+        })?,
+    )?;
     bone.set("fs", fs)?;
+    // bone.sha256(text): the hex SHA-256 of a string (e.g. to check a file).
+    bone.set(
+        "sha256",
+        lua.create_function(|_, text: mlua::String| {
+            use sha2::{Digest, Sha256};
+            Ok(Sha256::digest(text.as_bytes())
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>())
+        })?,
+    )?;
 
     let json = lua.create_table()?;
     json.set(
@@ -512,6 +551,24 @@ pub fn runtime_source(config_dir: Option<&Path>, rel: &str) -> Option<(String, S
         .iter()
         .find(|(p, _)| *p == rel)
         .map(|(_, src)| ((*src).to_owned(), format!("runtime/{rel}")))
+}
+
+/// `~/x` as a path under $HOME.
+fn expand_home(path: &str) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => std::env::var_os("HOME")
+            .map(|h| PathBuf::from(h).join(rest))
+            .unwrap_or_else(|| PathBuf::from(path)),
+        None => PathBuf::from(path),
+    }
+}
+
+/// true, or nil and the error, for Lua.
+fn fs_result(lua: &Lua, r: Result<(), String>) -> mlua::Result<mlua::MultiValue> {
+    match r {
+        Ok(()) => mlua::IntoLuaMulti::into_lua_multi(true, lua),
+        Err(e) => mlua::IntoLuaMulti::into_lua_multi((Value::Nil, e), lua),
+    }
 }
 
 /// The built-in runtime file at `rel`, ignoring any override.

@@ -147,4 +147,13 @@ end, {
   aliases = { "settings" },
 })
 
+
+cmd("catalog", function()
+  require("bone.catalog").open()
+end, { desc = "browse, install, update and remove plugins from the catalog" })
+
+cmd("setup", function()
+  require("bone.setup").open()
+end, { desc = "add a model provider (and catalog plugins)" })
+
 return true

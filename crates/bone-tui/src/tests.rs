@@ -609,7 +609,7 @@ async fn slash_commands_suggest_complete_and_run() {
 #[tokio::test]
 async fn slash_menu_scrolls_when_it_overflows() {
     let mut h = Harness::new().await;
-    // 32 extra commands overflow the window (the 19 builtin names/aliases
+    // 32 extra commands overflow the window (the 21 builtin names/aliases
     // alone do not).
     h.lua(
         "for i = 1, 32 do bone.cmd.create('zz' .. i, function() end, { desc = 'generated ' .. i }) end",
@@ -617,16 +617,16 @@ async fn slash_menu_scrolls_when_it_overflows() {
     .await;
     h.input("/").await;
     let screen = h.screen(80, 24);
-    // 51 = the 19 builtin names/aliases plus the 32 created above.
+    // 53 = the 21 builtin names/aliases plus the 32 created above.
     assert!(
-        screen.contains("/?") && screen.contains("of 51"),
+        screen.contains("/?") && screen.contains("of 53"),
         "{screen}"
     );
     // The wheel and pages scroll the menu to the end.
     h.input("{wheeldown}").await;
     let screen = h.screen(80, 24);
     // One wheel down moves the selection to row 4, still in the first window.
-    assert!(screen.contains("1–8 of 51"), "{screen}");
+    assert!(screen.contains("1–8 of 53"), "{screen}");
     for _ in 0..10 {
         h.input("{pagedown}").await;
     }
@@ -4477,4 +4477,144 @@ async fn options_with_choices_take_only_those() {
     )
     .unwrap_err();
     assert!(e.contains("not one of its choices"), "{e}");
+}
+
+/// A local catalog with one package, `demo`, in `dir/catalog`, its hashes
+/// computed with bone.sha256; settings point /catalog at it.
+async fn local_catalog(h: &mut Harness, dir: &std::path::Path) -> std::path::PathBuf {
+    let src = dir.join("catalog");
+    let pkg = src.join("plugins/demo");
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(pkg.join("tui.lua"), "demo_loaded = (demo_loaded or 0) + 1").unwrap();
+    std::fs::write(
+        pkg.join("manifest.json"),
+        r#"{ "version": "1.0.0", "description": "a demo" }"#,
+    )
+    .unwrap();
+    h.lua(&format!(
+        r#"local function file(p) local f = io.open("{src}/plugins/demo/" .. p, "rb") local t = f:read("*a") f:close() return t end
+           local files = {{}}
+           for _, p in ipairs({{ "manifest.json", "tui.lua" }}) do files[#files + 1] = {{ path = p, sha256 = bone.sha256(file(p)) }} end
+           bone.fs.write("{src}/catalog.json", bone.json.encode({{ {{ name = "demo", version = "1.0.0", description = "a demo", files = files }} }}))"#,
+        src = src.display()
+    ))
+    .await;
+    h.app.settings = json!({ "catalog": { "url": src.to_string_lossy() } });
+    src
+}
+
+#[tokio::test]
+async fn catalog_installs_updates_and_removes_packages() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::build(Some(dir.path().to_owned())).await;
+    let src = local_catalog(&mut h, dir.path()).await;
+    h.input("/catalog{enter}").await;
+    let screen = h.screen(100, 30);
+    assert!(
+        screen.contains("Available") && screen.contains("demo"),
+        "{screen}"
+    );
+
+    // Enter asks first; y installs (checked against the hashes) and loads it.
+    h.input("{enter}").await;
+    assert!(
+        h.screen(100, 30)
+            .contains("install demo? Its Lua runs with your permissions.")
+    );
+    h.input("y").await;
+    let installed = dir.path().join("plugins/demo");
+    assert!(installed.join("tui.lua").is_file() && installed.join("manifest.json").is_file());
+    assert_eq!(h.lua("=demo_loaded").await, "1");
+    let screen = h.screen(100, 30);
+    assert!(
+        screen.contains("Installed") && screen.contains("demo installed"),
+        "{screen}"
+    );
+
+    // A changed installed file shows as an update.
+    std::fs::write(installed.join("tui.lua"), "-- edited").unwrap();
+    h.input("r").await;
+    assert!(
+        h.screen(100, 30).contains("Updates"),
+        "{}",
+        h.screen(100, 30)
+    );
+
+    // A source file that does not match the catalog is refused.
+    std::fs::write(src.join("plugins/demo/tui.lua"), "tampered = true").unwrap();
+    h.input("{enter}y").await;
+    assert!(
+        h.screen(100, 30).contains("does not match the catalog"),
+        "{}",
+        h.screen(100, 30)
+    );
+    assert_eq!(
+        std::fs::read_to_string(installed.join("tui.lua")).unwrap(),
+        "-- edited"
+    );
+
+    // Remove: moved aside, not deleted.
+    h.input("x").await;
+    assert!(h.screen(100, 30).contains("remove demo?"));
+    h.input("y").await;
+    assert!(!installed.exists());
+    let backups: Vec<_> = std::fs::read_dir(dir.path().join("plugins-backup"))
+        .unwrap()
+        .collect();
+    assert_eq!(backups.len(), 1);
+    h.input("{esc}").await;
+}
+
+#[tokio::test]
+async fn setup_adds_a_provider_its_key_and_packages() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::build(Some(dir.path().to_owned())).await;
+    local_catalog(&mut h, dir.path()).await;
+    h.lua("require('bone.setup').open()").await;
+    assert!(h.screen(100, 30).contains("Welcome to bone"));
+    h.input("{enter}").await; // to the providers
+    h.input("{enter}").await; // a server on this machine
+    let screen = h.screen(100, 30);
+    assert!(
+        screen.contains("http://localhost:8080/v1") && screen.contains("› Model"),
+        "{screen}"
+    );
+    // Continue without a model is refused.
+    h.input("{down}{down}{down}{enter}").await;
+    assert!(h.screen(100, 30).contains("the model is needed"));
+    h.input("{up}{up}{up}{enter}qwen{enter}").await; // Model
+    h.input("{down}{enter}sk-1{enter}").await; // API key
+    let screen = h.screen(100, 30);
+    assert!(
+        screen.contains("••••") && !screen.contains("sk-1"),
+        "{screen}"
+    );
+    h.input("{down}{down}{enter}").await; // Continue
+    let screen = h.screen(100, 30);
+    assert!(
+        screen.contains("3/3 packages") && screen.contains("demo"),
+        "{screen}"
+    );
+    h.input("{space}{down}{enter}").await; // pick demo, Continue
+
+    assert_eq!(
+        h.requests("settings/set")[0],
+        json!({ "path": "providers.local", "value": { "base_url": "http://localhost:8080/v1", "model": "qwen" } })
+    );
+    assert_eq!(
+        h.requests("secrets/set")[0],
+        json!({ "provider": "local", "key": "sk-1" })
+    );
+    assert_eq!(
+        h.requests("settings/set")[1],
+        json!({ "path": "provider", "value": "local" })
+    );
+    assert!(dir.path().join("plugins/demo/tui.lua").is_file());
+    let screen = h.screen(100, 30);
+    assert!(
+        screen.contains("installed demo") && screen.contains("Done."),
+        "{screen}"
+    );
+    h.input("{enter}").await;
+    assert!(!h.screen(100, 30).contains("Done."));
 }

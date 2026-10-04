@@ -386,3 +386,88 @@ async fn settings_survive_a_restart() {
         .await
         .unwrap();
 }
+
+/// No provider at all: setup opens by itself, adds one (its key in
+/// secrets.json), and the next message goes to it.
+#[tokio::test(flavor = "multi_thread")]
+async fn first_run_setup_adds_a_provider() {
+    let url = fake_model(vec![sse(&[
+        json!({"choices":[{"delta":{"content":"hello from fake"}}]}),
+    ])])
+    .await;
+    let config = tempfile::tempdir().unwrap();
+    std::fs::write(config.path().join("core.lua"), "-- nothing yet\n").unwrap();
+    // The catalog step finds no catalog (no network in tests) and moves on.
+    std::fs::write(
+        config.path().join("settings.json"),
+        r#"{ "catalog": { "url": "/nonexistent/catalog" } }"#,
+    )
+    .unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let loaded = scripting::load_with(config.path(), &|_| None).unwrap();
+    let server = Server::new(Arc::new(Core::from_loaded(loaded)));
+    let e = Env {
+        config,
+        work,
+        server,
+    };
+
+    let mut tui = e.tui(None).await;
+    tui.wait_for(WAIT, |s| s.contains("Welcome to bone"))
+        .await
+        .unwrap();
+    tui.press("enter").unwrap(); // to the providers
+    tui.press("enter").unwrap(); // a server on this machine
+    tui.wait_for(WAIT, |s| s.contains("› Model")).await.unwrap();
+    tui.press("up").unwrap(); // URL
+    tui.press("enter").unwrap();
+    tui.press("ctrl+u").unwrap();
+    tui.type_text(&url);
+    tui.press("enter").unwrap();
+    tui.press("down").unwrap(); // Model
+    tui.press("enter").unwrap();
+    tui.type_text("fake");
+    tui.press("enter").unwrap();
+    tui.press("down").unwrap(); // API key
+    tui.press("enter").unwrap();
+    tui.type_text("sk-test");
+    tui.press("enter").unwrap();
+    tui.press("down").unwrap();
+    tui.press("down").unwrap(); // Continue
+    tui.press("enter").unwrap();
+    tui.wait_for(WAIT, |s| s.contains("not reachable"))
+        .await
+        .unwrap();
+    tui.press("enter").unwrap(); // Continue (no packages)
+    tui.wait_for(WAIT, |s| s.contains("Done.")).await.unwrap();
+    tui.press("enter").unwrap();
+
+    let settings: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(e.config.path().join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(settings["provider"], "local");
+    assert_eq!(settings["providers"]["local"]["model"], "fake");
+    let secrets = std::fs::read_to_string(e.config.path().join("secrets.json")).unwrap();
+    assert!(secrets.contains("sk-test"));
+    assert!(
+        !std::fs::read_to_string(e.config.path().join("settings.json"))
+            .unwrap()
+            .contains("sk-test")
+    );
+
+    // The provider is in use: a message gets the fake model's reply.
+    tui.type_text("hi\n");
+    tui.wait_for(WAIT, |s| s.contains("hello from fake"))
+        .await
+        .unwrap();
+
+    // With a provider now, a new TUI does not open setup.
+    let mut again = e.tui(None).await;
+    again.settle(Duration::from_millis(200)).await;
+    assert!(
+        !again.screen().contains("Welcome to bone"),
+        "{}",
+        again.screen()
+    );
+}

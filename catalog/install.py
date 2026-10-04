@@ -38,12 +38,9 @@ def main() -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = Path(tempfile.mkdtemp(prefix=f".{args.name}.", dir=str(destination.parent)))
     try:
-        # Only what the index lists (and was just verified), plus the manifest.
+        # Only what the index lists (and was just verified).
         staged = temporary / args.name
-        listed = [item["path"] for item in entry.get("files", [])]
-        if (source / "manifest.json").is_file():
-            listed.append("manifest.json")
-        for rel in listed:
+        for rel in [item["path"] for item in entry.get("files", [])]:
             target = staged / rel
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source / rel, target)

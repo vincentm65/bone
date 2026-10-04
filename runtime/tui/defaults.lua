@@ -449,3 +449,24 @@ end, {
   desc = "plugins: list, load/unload/reload name; /plugin reload reloads the core's config; /plugin trust runs this project's .bone/tui.lua",
   aliases = { "plugins" },
 })
+
+-- First run: with no model provider at all, /setup opens by itself (unless
+-- it was dismissed before; /setup is always there). An empty provider list
+-- can still mean one from BONE_BASE_URL, so the core's health check decides.
+bone.on("ready", function()
+  if bone.settings.get("setup.skipped") then
+    return
+  end
+  bone.model.list(function(list)
+    if not list or #list > 0 then
+      return
+    end
+    bone.request("health/check", {}, function(items)
+      for _, it in ipairs(items or {}) do
+        if it.name == "provider" and it.status == "error" then
+          return require("bone.setup").open({ first_run = true })
+        end
+      end
+    end)
+  end)
+end)

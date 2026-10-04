@@ -20,6 +20,10 @@
         "sha256": "dbbb97ef709df3b780356dd7e99e7942f5c2ab359d0ac05cd9662953755fece6"
       },
       {
+        "path": "manifest.json",
+        "sha256": "443d4de1e6fd6146d6cd8f3e285de20833405b52220fad101e0c3cc48ff8e813"
+      },
+      {
         "path": "tui.lua",
         "sha256": "9643160f5c32b1d845c68fbc68de11e5a00d8bdff14c93d21d1d90328e6f4a0f"
       }
@@ -46,6 +50,10 @@
         "sha256": "127e7345755ea2e293a0ece3b9eea9d35aa82469b90251223742e714fd1f8345"
       },
       {
+        "path": "manifest.json",
+        "sha256": "be4c7dcc91e773d15ac074ba7371b14c7fb1a7c00f11bddc92affaf948f1ac50"
+      },
+      {
         "path": "tui.lua",
         "sha256": "d3393c15bcb3b81edc50ebfa1e0379798dae80ee7c89c0a3140a1e7df5c9a887"
       }
@@ -70,6 +78,10 @@
       {
         "path": "core.lua",
         "sha256": "f20de09169512e7ac6fc18c953a7a1fa02cfbaed48a5df23940c6421586bd5d6"
+      },
+      {
+        "path": "manifest.json",
+        "sha256": "a9f680ec304fffe89732131eba42b33f2d2c773a4a104fb5b930491c99e87eeb"
       }
     ]
   },
@@ -95,6 +107,10 @@
         "sha256": "8a5bda60534116e2b61d3f655c7d23837cbca3aeac3e76aa24f65ec4f6b97acd"
       },
       {
+        "path": "manifest.json",
+        "sha256": "1d0f67b665e55aa72e1103f750dff891be43c0abe95736b81cf957cac7499494"
+      },
+      {
         "path": "tui.lua",
         "sha256": "29b52088104a3caac2ffd1f1b4b3cf5f0421ae8c9b86ae81eee05d375111e42d"
       }
@@ -114,6 +130,10 @@
       {
         "path": "README.md",
         "sha256": "919dd4d0b7d0614c3ce062467ec273f965b6bf1a0f1e5d1d4f3d1fdec92d27ff"
+      },
+      {
+        "path": "manifest.json",
+        "sha256": "275a2b610d81e68cbd14639886dfda4712e30a3dd0933b7f490903d42b41b4d4"
       },
       {
         "path": "tui.lua",
@@ -141,6 +161,10 @@
         "sha256": "7abe5a2004cc4fc847c6983c968dc550bcb83209391d491d630a1184ffdc5d7b"
       },
       {
+        "path": "manifest.json",
+        "sha256": "8348827b395577ea0a64db45a7b8e6b569c26bdb721106de1633bdafc7312a35"
+      },
+      {
         "path": "tui.lua",
         "sha256": "ea4c627e90c9ea2e4131cd26e31fa21c33edf051f3de47b529e625e0719ade2d"
       }
@@ -160,6 +184,10 @@
       {
         "path": "README.md",
         "sha256": "6586c81f7975b0d1c5575da02ec973f6da4ce67f125db95bd09cd5d2c92358b6"
+      },
+      {
+        "path": "manifest.json",
+        "sha256": "344b795ba095d80ec39792697ba8952884b5547f62f8a3b08bad613ad6e9ac40"
       },
       {
         "path": "tui.lua",
@@ -184,6 +212,10 @@
         "sha256": "97f86263b0147f57f9f3fd1fbac2b0af387f09c53dcccc74aee6ada1ac6553ea"
       },
       {
+        "path": "manifest.json",
+        "sha256": "4ca0491a8de0c8526b2999c8f237cfea839a7ec0c6010f5b5e8fcb8629ea74e3"
+      },
+      {
         "path": "tui.lua",
         "sha256": "e88d1f195cb0970c2419145b4ea03e7a0695c6e131edb016707519d1cd61c258"
       }
@@ -203,6 +235,10 @@
       {
         "path": "README.md",
         "sha256": "dfe4bbcf5e9dd657b6f77ee7a33b5efbaa20afb9c43492d33e49950f1edf40ae"
+      },
+      {
+        "path": "manifest.json",
+        "sha256": "1dab8a004d1247d24fef7ec148a568548b3921a896181bbed3392d4f699aa4a1"
       },
       {
         "path": "tui.lua",
@@ -231,6 +267,10 @@
         "sha256": "755ad2b8a43962291c02214494cb860f594bf0ab93c52d92a421d8a6b9920ec8"
       },
       {
+        "path": "manifest.json",
+        "sha256": "a833b8128404456127ee6de6e328ce637007419cfe54e7af5434de7b2d16d30e"
+      },
+      {
         "path": "tui.lua",
         "sha256": "bf66e66e41eb93c78de381ac7b13e5fcc6552ea48707866b14ee2531046f3c4d"
       }
@@ -254,6 +294,10 @@
       {
         "path": "core.lua",
         "sha256": "21936f2592ef32809bf24bb49fa6acaa130aa1e0d1085e789ae85c8fded1dce1"
+      },
+      {
+        "path": "manifest.json",
+        "sha256": "b1f69acc71ecaab6872e2068ffdc48e5aec7b4d7dcb5bc6c1bf75c02e3e98d33"
       },
       {
         "path": "tui.lua",
@@ -282,6 +326,10 @@
       {
         "path": "core.lua",
         "sha256": "dee6d016517548731a3e458d322836bf5271c2fa1b3b31aa3918d538415c64a8"
+      },
+      {
+        "path": "manifest.json",
+        "sha256": "22d8b84aa8b2aab98a2e9b4556bec13355d30e0040d45e53f9672c1f86900370"
       },
       {
         "path": "tui.lua",
@@ -349,6 +397,10 @@
         "sha256": "da6b28d3a5d30837eb66ea283d6e2c85f5d2f6becf666f2038d04fb927a5998e"
       },
       {
+        "path": "manifest.json",
+        "sha256": "d2f00b0fe587bf985ee3cb8c6e8481f49eaa6d0fafc9c24742e4c738cbb5a9cb"
+      },
+      {
         "path": "tui.lua",
         "sha256": "2dab9af5a54a05bd5293285608a8bdd09c99d957fbb9fd92babe48c80c6b97bd"
       }
@@ -368,6 +420,10 @@
       {
         "path": "README.md",
         "sha256": "3b876371f5d22617fa923553ee8f264dacab45acea420b83db9d7d1ef2255bc9"
+      },
+      {
+        "path": "manifest.json",
+        "sha256": "f30ea9f40c81f60127901bda7755eba90d159f4bf914d238dc437ca6c6ee7010"
       },
       {
         "path": "tui.lua",
@@ -394,6 +450,10 @@
       {
         "path": "core.lua",
         "sha256": "3be9eb5460b7395fc3be0eb5f96059d828e6c1eeb822c042376d549d9a502a30"
+      },
+      {
+        "path": "manifest.json",
+        "sha256": "03b8a9e52d15d601d15159d9da96278624de082f46348edca595911131206d16"
       }
     ]
   }

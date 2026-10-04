@@ -88,6 +88,32 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
         ["provider"] => string_or_null("provider"),
         ["models", _] => string_or_null(path),
         ["models"] => Err("set one provider's model: models.<provider>".into()),
+        ["providers"] => Err("set one provider: providers.<name>".into()),
+        ["providers", _] => match value {
+            Value::Null => Ok(()),
+            Value::Object(p) => {
+                let s = |k: &str| p.get(k).is_none_or(Value::is_string);
+                if !(s("base_url") && s("model") && s("type") && s("api_key_env")) {
+                    Err(format!(
+                        "{path}: base_url, model, type and api_key_env are strings"
+                    ))
+                } else if p.get("model").is_none() {
+                    Err(format!("{path}: a provider needs a model"))
+                } else if p.get("base_url").is_none() && p.get("type").is_none() {
+                    Err(format!(
+                        "{path}: a provider needs a base_url (or a Lua provider type)"
+                    ))
+                } else if p.contains_key("api_key") {
+                    Err(format!(
+                        "{path}: keys go in secrets.json (secrets/set), not settings"
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            _ => Err(format!("{path} is an object")),
+        },
+        ["providers", _, _] => Err("set a whole provider: providers.<name>".into()),
         _ => Ok(()),
     }
 }
@@ -125,6 +151,84 @@ pub fn set(settings: &mut Value, path: &str, value: Value) -> Result<(), String>
     }
     put(settings, &keys, value);
     Ok(())
+}
+
+/// `secrets.json` next to it: API keys entered in the app, readable only
+/// by the owner, never sent back to clients. `{ "providers": { name: key } }`.
+pub fn secrets_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("secrets.json")
+}
+
+pub fn load_secrets(config_dir: &Path) -> Result<Value, String> {
+    match std::fs::read_to_string(secrets_path(config_dir)) {
+        Ok(text) => serde_json::from_str::<Value>(&text)
+            .ok()
+            .filter(Value::is_object)
+            .ok_or_else(|| {
+                format!(
+                    "{} is not a JSON object",
+                    secrets_path(config_dir).display()
+                )
+            }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Value::Object(Map::new())),
+        Err(e) => Err(format!(
+            "cannot read {}: {e}",
+            secrets_path(config_dir).display()
+        )),
+    }
+}
+
+/// Save a provider's key (None removes it); the file is mode 0600.
+pub fn set_secret(
+    config_dir: &Path,
+    provider: &str,
+    key: Option<&str>,
+) -> Result<Vec<String>, String> {
+    keys(provider)?;
+    let mut secrets = load_secrets(config_dir)?;
+    let map = secrets
+        .as_object_mut()
+        .expect("an object")
+        .entry("providers")
+        .or_insert_with(|| Value::Object(Map::new()));
+    if let Value::Object(m) = map {
+        match key {
+            Some(k) => {
+                m.insert(provider.to_owned(), Value::String(k.to_owned()));
+            }
+            None => {
+                m.remove(provider);
+            }
+        }
+    }
+    let path = secrets_path(config_dir);
+    let tmp = config_dir.join(".secrets.json.tmp");
+    let text = serde_json::to_string_pretty(&secrets).map_err(|e| e.to_string())? + "\n";
+    let write = || -> std::io::Result<()> {
+        use std::io::Write;
+        #[cfg(unix)]
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true);
+        #[cfg(unix)]
+        opts.mode(0o600);
+        let mut f = opts.open(&tmp)?;
+        f.write_all(text.as_bytes())?;
+        std::fs::rename(&tmp, &path)
+    };
+    write().map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+    Ok(secret_names(&secrets))
+}
+
+/// Which providers have a saved key.
+pub fn secret_names(secrets: &Value) -> Vec<String> {
+    let mut names: Vec<String> = secrets
+        .get("providers")
+        .and_then(Value::as_object)
+        .map(|m| m.keys().cloned().collect())
+        .unwrap_or_default();
+    names.sort();
+    names
 }
 
 /// Which configured provider to use: the saved choice when it names one,

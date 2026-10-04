@@ -18,6 +18,8 @@ only contributes files under `colors/`.
 
 A package can declare settings in its `manifest.json` (`"settings": [ { "key", "label", "type", "default", "min", "max", "choices", "desc" } ]`); they get a tab in `/config` and are read with `bone.settings.get("<package>.<key>")`.
 
+In bone, `/catalog` browses and installs packages; it reads `catalog.json` and `plugins/<name>/…` from settings' `catalog.url`, by default `https://raw.githubusercontent.com/vincentm65/bone-catalog/bone3`. To publish, put this folder's contents (after `gen-index.py`) at the root of the `bone3` branch of that repository. Until then, point it at this folder: `"catalog": { "url": "~/projects/bone3/catalog" }` in `~/.bone/settings.json`.
+
 Generate the index with:
 
 ```sh

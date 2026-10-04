@@ -81,8 +81,9 @@ fn missing_or_bad_config_is_explained() {
         .unwrap(),
     )
     .unwrap();
-    let err = resolve(dir.path(), &ex, &no_env).unwrap_err();
-    assert!(err.contains("no model provider configured"), "{err}");
+    // No provider: the core starts anyway, with none (turns say to run /setup).
+    let none = resolve(dir.path(), &ex, &no_env).unwrap();
+    assert!(crate::provider::unconfigured(&none.provider));
     let env = |k: &str| match k {
         "BONE_BASE_URL" => Some("http://x".into()),
         "BONE_MODEL" => Some("m".into()),

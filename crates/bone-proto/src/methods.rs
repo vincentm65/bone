@@ -87,6 +87,8 @@ pub const METHODS: &[&str] = &[
     SettingsGet::METHOD,
     SettingsSet::METHOD,
     SettingsReset::METHOD,
+    SecretsSet::METHOD,
+    SecretsList::METHOD,
 ];
 
 /// Every server-to-client event.
@@ -405,6 +407,24 @@ method!(
     /// Remove one setting (back to its default); as `settings/set` with null.
     SettingsReset, "settings/reset", SettingPath => serde_json::Value
 );
+
+method!(
+    /// Save (or with `key: null` remove) a provider's API key in
+    /// `secrets.json` (readable only by the owner) and reload. Keys are never
+    /// sent back: returns the names of the providers that have one.
+    SecretsSet, "secrets/set", SecretSet => Vec<String>
+);
+method!(
+    /// The names of the providers with a key in `secrets.json`.
+    SecretsList, "secrets/list", Empty => Vec<String>
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretSet {
+    pub provider: String,
+    #[serde(default)]
+    pub key: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SettingSet {
