@@ -109,6 +109,22 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
                 ));
             }
         },
+        // What the session index would hold, for the stats plugin.
+        "store/query" => {
+            let sql = params["sql"].as_str().unwrap_or_default();
+            let rows = if sql.contains("FROM tool_calls") {
+                json!([["edit_file", 10, 2, 300.0], ["shell", 4, 0, 1200.0]])
+            } else if sql.contains("JOIN sessions") {
+                json!([["Walrus hunt", 12000, 800, 3]])
+            } else if sql.contains("GROUP BY model") {
+                json!([["gpt-5", 3, 12000, 800]])
+            } else if sql.contains("GROUP BY day") {
+                json!([["2026-10-03", 3, 12000, 800]])
+            } else {
+                json!([[3, 12000, 800, 1]])
+            };
+            json!({ "columns": [], "rows": rows, "truncated": false })
+        }
         "model/complete" => json!({ "request_id": 41 }),
         "queue/add" => json!({ "id": 1 }),
         "plugin/list" => json!([{ "name": "corepart", "core": true, "loaded": true }]),
@@ -2389,6 +2405,30 @@ async fn example_tasks_plugin() {
     // Reloading reads the saved list back.
     h.input("/tasks{enter}/plugin reload tasks{enter}").await;
     assert!(h.screen(80, 12).contains("✓ write docs"));
+}
+
+#[tokio::test]
+async fn example_stats_plugin() {
+    let (mut h, _dir) = with_example("stats").await;
+    h.input("/stats{enter}").await;
+    let screen = h.screen(100, 40);
+    for want in [
+        "Usage, the last 30 days",
+        "3 model calls in 1 sessions: 12k tokens in, 800 out.",
+        "gpt-5",
+        "2026-10-03",
+        "Walrus hunt",
+        "edit_file",
+        "20.0%",
+    ] {
+        assert!(screen.contains(want), "{want}:\n{screen}");
+    }
+    h.input("q/stats year{enter}").await;
+    assert!(
+        h.message().contains("use today, week, month or all"),
+        "{}",
+        h.message()
+    );
 }
 
 #[tokio::test]

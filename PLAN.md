@@ -101,6 +101,8 @@ new APIs end to end, each with tests:
   `bone.prompt`);
 - `review`: the files the session changed, git diffs and review prompts
   (`bone.chat` data, panels, `bone.prompt` selection, `bone.job`);
+- `stats`: tokens by model and day, busiest sessions and tool failure
+  rates, all through `store/query`;
 - `switch`: provider switching from the TUI through a Lua router provider
   (OpenAI-compatible client in Lua, delegation to Lua provider types); and
 - `testrun`: tests streamed into a following panel with cancel and "send
