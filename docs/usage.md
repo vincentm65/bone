@@ -96,4 +96,4 @@ bone --headless [--listen [PATH]]   core only, on stdio or a socket
 bone --init                         starter ~/.bone/core.lua and tui.lua
 ```
 
-Configuration lives in `~/.bone/` (or `$BONE_CONFIG_DIR`); sessions are saved in `~/.bone/sessions/`. `BONE_BASE_URL`, `BONE_MODEL`, `BONE_API_KEY`, `BONE_REASONING_EFFORT`, `BONE_SYSTEM_PROMPT`, and `BONE_DATA_DIR` override `core.lua` for one run; `BONE_APPROVAL=auto` stops the approve plugin (if installed) from asking.
+Configuration lives in `~/.bone/` (or `$BONE_CONFIG_DIR`); sessions are saved in `~/.bone/sessions/`. `bone --import-bone [DB]` brings in the first bone's conversations (default `~/.bone-rust/data/conversations.db`) as sessions, with their usage and latest checkpoint; run it again to pick up newer ones, and sessions you continued here are never overwritten. `BONE_BASE_URL`, `BONE_MODEL`, `BONE_API_KEY`, `BONE_REASONING_EFFORT`, `BONE_SYSTEM_PROMPT`, and `BONE_DATA_DIR` override `core.lua` for one run; `BONE_APPROVAL=auto` stops the approve plugin (if installed) from asking.

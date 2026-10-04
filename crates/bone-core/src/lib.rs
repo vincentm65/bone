@@ -7,6 +7,7 @@
 mod agent;
 pub mod config;
 mod health;
+pub mod import;
 mod index;
 pub mod mcp;
 pub mod provider;

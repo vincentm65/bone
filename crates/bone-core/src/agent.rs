@@ -354,6 +354,7 @@ impl Turn<'_> {
                     model: served.1.clone(),
                     input_tokens: u.input_tokens,
                     output_tokens: u.output_tokens,
+                    cached_tokens: None,
                     source: None,
                 };
                 // Losing a usage record is not worth failing the turn.

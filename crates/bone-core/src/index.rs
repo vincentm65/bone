@@ -20,7 +20,7 @@ use serde_json::{Value as Json, json};
 use crate::session::{Line, Record, title_of};
 
 /// Bump when the tables change; an index of another version is rebuilt.
-const VERSION: i64 = 2;
+const VERSION: i64 = 3;
 
 const SCHEMA: &str = "
 CREATE TABLE sessions (
@@ -61,7 +61,8 @@ CREATE TABLE usage (
     provider      TEXT,
     model         TEXT NOT NULL,
     input_tokens  INTEGER NOT NULL,
-    output_tokens INTEGER NOT NULL
+    output_tokens INTEGER NOT NULL,
+    cached_tokens INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX usage_at ON usage(at);
 CREATE INDEX usage_session ON usage(session_id);
@@ -318,8 +319,9 @@ fn index_record(tx: &Transaction, id: &str, record: Record, at: u64, seq: &mut u
         ),
         Record::Compact(_) => Ok(()),
         Record::Usage(u) => run(
-            "INSERT INTO usage (session_id, turn_id, source, at, provider, model, input_tokens, output_tokens)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            "INSERT INTO usage (session_id, turn_id, source, at, provider, model,
+                                input_tokens, output_tokens, cached_tokens)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 id,
                 u.turn_id,
@@ -328,7 +330,8 @@ fn index_record(tx: &Transaction, id: &str, record: Record, at: u64, seq: &mut u
                 u.provider,
                 u.model,
                 u.input_tokens,
-                u.output_tokens
+                u.output_tokens,
+                u.cached_tokens.unwrap_or(0)
             ],
         ),
         Record::Message(m) => {

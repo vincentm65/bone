@@ -53,6 +53,9 @@ pub struct UsageRecord {
     pub model: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Input tokens served from the provider's cache, when it says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u64>,
     /// `None` for a turn; `"lua"` or `"client"` for a call made outside one
     /// (then `turn_id` is 0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -588,7 +591,7 @@ fn now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-fn write_record(file: &mut File, record: Record) -> std::io::Result<()> {
+pub(crate) fn write_record(file: &mut File, record: Record) -> std::io::Result<()> {
     let line = Line {
         record,
         at: Some(now()),
@@ -740,6 +743,7 @@ mod tests {
                 model: "m1".into(),
                 input_tokens: 100,
                 output_tokens: 7,
+                cached_tokens: None,
                 source: None,
             })
             .unwrap();
