@@ -4334,7 +4334,7 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
     h.app.load_user_config();
     h.input("/config{enter}").await;
     let screen = h.screen(100, 34);
-    for tab in [" General ", " Providers ", " Plugins ", " Webby "] {
+    for tab in ["[General]", " Providers ", " Plugins ", " Webby"] {
         assert!(screen.contains(tab), "{tab} in {screen}");
     }
     let last_set = |h: &Harness| {
@@ -4346,7 +4346,7 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
     // Move to the row whose label starts with `label`.
     async fn select(h: &mut Harness, label: &str) {
         for _ in 0..30 {
-            if h.screen(100, 34).contains(&format!("▌ {label}")) {
+            if h.screen(100, 34).contains(&format!("› {label}")) {
                 return;
             }
             h.input("{down}").await;
@@ -4385,7 +4385,7 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
     h.input("{tab}").await;
     let screen = h.screen(100, 34);
     assert!(
-        screen.contains("● q1") && screen.contains("○ d1"),
+        screen.contains("q1") && screen.contains("in use") && screen.contains("d1"),
         "{screen}"
     );
     h.input("{enter}").await; // ds is first

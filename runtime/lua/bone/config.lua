@@ -358,106 +358,99 @@ function M.open(want)
     save(row, value)
   end
 
-  local function value_spans(row, selected)
+  -- A row's value as plain text.
+  local function value_text(row)
     if row.kind == "provider" then
-      return {
-        { row.current and "● " or "○ ", row.current and "DiffAdd" or "Dim" },
-        { pad(row.model or "", 28), selected and "Accent" or "Normal" },
-        { row.ptype and ("  " .. row.ptype) or "", "Dim" },
-      }
+      return pad(row.model or "", 30) .. (row.current and "in use" or "")
     elseif row.kind == "plugin" then
-      local halves = (row.tui and "tui" or "") .. (row.tui and row.core and "+" or "") .. (row.core and "core" or "")
-      local out = {
-        { row.on and "● on " or "○ off", row.on and "Accent" or "Dim" },
-        { "  " .. halves, "Dim" },
-      }
-      if row.error then
-        out[#out + 1] = { "  " .. row.error, "ErrorMsg" }
-      end
-      return out
+      local halves = (row.tui and "tui" or "") .. (row.tui and row.core and " + " or "") .. (row.core and "core" or "")
+      return pad(row.on and "on" or "off", 6) .. halves .. (row.error and ("  " .. row.error) or "")
     elseif row.type == "boolean" then
-      return { { row.value and "● on" or "○ off", row.value and "Accent" or "Dim" } }
+      return row.value and "on" or "off"
     elseif row.choices and #row.choices > 0 then
-      return { { "[ ", "Dim" }, { tostring(row.value), "Accent" }, { " ]", "Dim" } }
+      -- Every choice, the current one in brackets.
+      local out = {}
+      for _, c in ipairs(row.choices) do
+        out[#out + 1] = c == row.value and ("[" .. c .. "]") or c
+      end
+      return table.concat(out, " ")
     end
-    local v = row.value == nil and "(unset)" or tostring(row.value)
-    return { { v, "Accent" } }
+    return row.value == nil and "(unset)" or tostring(row.value)
   end
 
+  -- Plain text only: a full-width pane resting on the prompt.
   local function render(ctx)
-    local w = math.max(math.min(100, ctx.width - 4), 30)
-    local h = math.max(math.min(30, ctx.height - 2), 10)
-    local inner = w - 4
+    local w = math.max(ctx.width, 30)
     local t = st.tabs[st.tab]
     local list = rows()
     st.sel = math.max(1, math.min(st.sel, math.max(#list, 1)))
 
-    local body = {}
-    -- The tabs, wrapped to the width.
-    local line, used = {}, 0
+    local out = { { { fill = "─", hl = "Normal" } } }
+    -- The tabs, the current one in brackets, wrapped to the width.
+    local line = " Settings  "
     for i, tab in ipairs(st.tabs) do
-      local label = " " .. tab.title .. " "
-      if used + text_width(label) > inner and #line > 0 then
-        body[#body + 1] = line
-        line, used = {}, 0
+      local label = i == st.tab and ("[" .. tab.title .. "]") or (" " .. tab.title .. " ")
+      if text_width(line) + text_width(label) + 1 > w then
+        out[#out + 1] = line
+        line = "           "
       end
-      line[#line + 1] = { label, i == st.tab and "Selection" or "Dim" }
-      used = used + text_width(label)
+      line = line .. label .. " "
     end
-    body[#body + 1] = line
-    body[#body + 1] = {}
+    out[#out + 1] = line
+    out[#out + 1] = ""
 
     local label_w = 0
     for _, r in ipairs(list) do
       label_w = math.max(label_w, text_width(r.label))
     end
-    label_w = math.min(label_w + 2, math.floor(inner / 2))
+    label_w = math.min(label_w + 3, math.floor(w / 2))
 
-    local room = h - 2 - #body - 3
+    -- At most this many rows; the list scrolls with the selection.
+    local room = math.max(math.min(14, (ctx.height or 24) - 9), 3)
     if t.name == "providers" and not st.providers then
-      body[#body + 1] = { { "loading…", "Dim" } }
+      out[#out + 1] = "   loading…"
     elseif #list == 0 then
-      body[#body + 1] = { { t.name == "plugins" and "no plugins in ~/.bone/plugins" or "nothing to set here", "Dim" } }
+      out[#out + 1] = "   " .. (t.name == "plugins" and "no plugins in ~/.bone/plugins" or "nothing to set here")
     end
     local first = math.max(1, st.sel - room + 1)
     for i = first, math.min(#list, first + room - 1) do
       local r = list[i]
-      local selected = i == st.sel
-      local row = { { selected and "▌ " or "  ", "Accent" }, { pad(r.label, label_w), selected and "Normal" or "Dim" } }
-      if selected and st.edit then
-        row[#row + 1] = { st.edit .. "▏", "Normal" }
+      local text = (i == st.sel and " › " or "   ") .. pad(r.label, label_w)
+      if i == st.sel and st.edit then
+        text = text .. st.edit .. "▏"
       else
-        for _, s in ipairs(value_spans(r, selected)) do
-          row[#row + 1] = s
-        end
+        text = text .. value_text(r)
         -- tui.lua runs last; say so when it overrides the saved value.
         if r.kind == "option" then
           local saved = bone.settings.get(r.path)
           if saved ~= nil and saved ~= r.value then
-            row[#row + 1] = { "  (tui.lua sets " .. tostring(r.value) .. ")", "WarningMsg" }
+            text = text .. "   (tui.lua sets " .. tostring(r.value) .. ")"
           end
         end
       end
-      body[#body + 1] = row
+      out[#out + 1] = bone.text.truncate(text, w)
     end
-    while #body < h - 5 do
-      body[#body + 1] = {}
+    if #list > room then
+      out[#out + 1] = ("   %d–%d of %d"):format(first, math.min(#list, first + room - 1), #list)
     end
+
+    out[#out + 1] = ""
     local current = list[st.sel]
-    body[#body + 1] = { { st.note and st.note[1] or (current and current.desc or ""), st.note and st.note[2] or "Dim" } }
-    body[#body + 1] = {}
+    local note = st.note and ((st.note[2] == "ErrorMsg" and "error: " or "") .. st.note[1])
+      or (current and current.desc or "")
+    out[#out + 1] = bone.text.truncate("   " .. note, w)
     local hint
     if st.edit then
       hint = "enter save · esc cancel"
     elseif t.name == "providers" then
-      hint = "enter use · e model · tab section · esc close"
+      hint = "↑↓ move · enter use · e model · tab section · esc close"
     elseif t.name == "plugins" then
-      hint = "space on/off · tab section · esc close"
+      hint = "↑↓ move · space on/off · tab section · esc close"
     else
-      hint = "enter change · r reset · tab section · esc close"
+      hint = "↑↓ move · enter change · r reset · tab section · esc close"
     end
-    body[#body + 1] = { { hint, "Dim" } }
-    return bone.ui.box(body, { title = "Settings", width = w })
+    out[#out + 1] = bone.text.truncate("   " .. hint, w)
+    return out
   end
 
   local function switch_tab(by)
@@ -515,7 +508,7 @@ function M.open(want)
 
   load_providers()
   load_plugins()
-  id = bone.ui.popup({ lines = render, on_key = on_key })
+  id = bone.ui.popup({ lines = render, on_key = on_key, anchor = "prompt", width = false })
   return id
 end
 
