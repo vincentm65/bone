@@ -1,6 +1,6 @@
 -- The plugin catalog: packages to install into ~/.bone/plugins, from
--- settings "catalog.url" (default: the bone3 branch of the bone-catalog
--- repository on GitHub) or a local folder ("~/projects/bone3/catalog").
+-- settings "catalog.url" (default: the main branch of the bone-catalog
+-- repository on GitHub) or a local folder ("~/projects/bone-catalog").
 -- The source holds catalog.json and plugins/<name>/<files>; every file is
 -- checked against catalog.json's SHA-256 before anything is installed.
 --
@@ -12,7 +12,7 @@
 
 local M = {}
 
-M.DEFAULT_URL = "https://raw.githubusercontent.com/vincentm65/bone-catalog/bone3"
+M.DEFAULT_URL = "https://raw.githubusercontent.com/vincentm65/bone-catalog/refs/heads/main"
 
 local function home(path)
   if path:sub(1, 2) == "~/" then

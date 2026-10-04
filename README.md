@@ -67,7 +67,8 @@ bone3 --connect                  # a TUI on that server; run several, they stay 
 - [docs/lua.md](docs/lua.md): configuring and extending with Lua (core and TUI), colors, plugins.
 - [docs/protocol.md](docs/protocol.md): the JSON-RPC API for writing clients.
 - [docs/architecture.md](docs/architecture.md): how the pieces fit together.
-- [catalog/README.md](catalog/README.md): the native Bone 3 catalog and installer.
+- [Bone catalog](https://github.com/vincentm65/bone-catalog): the main catalog
+  of installable Bone 3 plugins and its verified installer.
 - [examples/plugins/git](examples/plugins/git): a small plugin with a tool, a tool view and a command.
 - More examples in [examples/plugins](examples/plugins): `switch` (change provider from the TUI), `tasks` (a task panel), `review` (changed files and review prompts), `stats` (tokens, sessions and tool failure rates from the session index), `testrun` (tests streamed into a panel), `compact` (summarize long sessions), `output-cap` (limit tool result sizes), `retry` (backoff and provider fallback), `mcp` (MCP servers from JSON files), `skills` and `templates` (folders of them, with TUI commands), `ask-model` (side questions), `approve`, `style` and `anthropic`. None is installed by default.
 

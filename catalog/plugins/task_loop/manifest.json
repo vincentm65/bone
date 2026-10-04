@@ -1,1 +1,0 @@
-{"version":"1.0.0","description":"Maintain a visible autonomous checklist and continue it between turns","capabilities":["tool","hooks","queue","state","ui"]}
