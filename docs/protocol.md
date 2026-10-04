@@ -90,8 +90,9 @@ Every event carries `session_id` (except `echoed`, `ask/resolved`, `core/reloade
 | `turn/started` | `{ text }` | a user message started a turn (from any client) |
 | `message/delta` | `{ kind: "text" \| "reasoning", text }` | streamed model output |
 | `message/completed` | `{ message, usage? }` | the final assistant message as saved; replaces whatever streamed |
-| `tool/started` | `{ call }` | the core is handling a tool call (`tool_call` hooks run next) |
-| `tool/finished` | `{ call_id, output, is_error }` | its result, as the model will see it |
+| `tool/started` | `{ call, started_at? }` | the core is handling a tool call (`tool_call` hooks run next); `started_at` is milliseconds since the Unix epoch |
+| `tool/output` | `{ call_id, text }` | output a running tool produced, in order, as it comes (the shell tool sends its output this way); `tool/finished` still carries the whole result |
+| `tool/finished` | `{ call_id, output, is_error, duration_ms? }` | its result, as the model will see it, and how long it ran |
 | `ask/requested` | `{ ask_id, question }` | core Lua (a hook or tool) called `bone.ask(question)` and waits; answer with `ask/respond`. `question` is whatever the Lua passed, e.g. the approve plugin's `{ kind: "approval", title, tool, arguments }` |
 | `ask/resolved` | `{ ask_id, answer }` | answered by some client, or `answer: null` if the turn was cancelled first |
 | `turn/steered` | `{ text }` | a steer message from the queue joined the running turn's transcript (show it as a user message) |

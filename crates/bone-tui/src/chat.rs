@@ -14,7 +14,7 @@ use crate::data::Dep;
 
 use bone_proto::methods::{
     MessageCompletedParams, MessageDeltaParams, QueueMode, QueuedMessage, ToolFinishedParams,
-    ToolStartedParams, TurnFinishedParams,
+    ToolOutputParams, ToolStartedParams, TurnFinishedParams,
 };
 use bone_proto::types::{
     ChatMessage, DeltaKind, SessionInfo, ToolCall, TurnId, TurnOutcome, Usage,
@@ -138,6 +138,21 @@ pub struct ChatBuffer {
     cache: HashMap<Item, Cached>,
     /// Items Lua added, by slot (`None` once removed).
     lua_items: Vec<Option<LuaItem>>,
+    /// Timing and live output of tool calls, by call id.
+    tool_meta: HashMap<String, ToolMeta>,
+    /// Token usage of a model message, by the entry it starts at.
+    message_usage: HashMap<usize, Usage>,
+}
+
+/// Live output keeps at most this many bytes, the latest.
+const LIVE_MAX: usize = 64 * 1024;
+
+#[derive(Debug, Default, Clone)]
+struct ToolMeta {
+    started_at: Option<u64>,
+    duration_ms: Option<u64>,
+    /// What `tool/output` sent while it ran.
+    live: String,
 }
 
 /// One item's rendered lines and what they were made from.
@@ -203,6 +218,8 @@ impl ChatBuffer {
         self.revs.clear();
         self.cache.clear();
         self.lua_items.clear();
+        self.tool_meta.clear();
+        self.message_usage.clear();
         self.outcomes.clear();
         for m in messages {
             match m {
@@ -273,7 +290,13 @@ impl ChatBuffer {
         {
             self.pop();
         }
+        let first = self.entries.len();
         self.add_assistant_message(&m.message);
+        if let Some(u) = m.usage
+            && first < self.entries.len()
+        {
+            self.message_usage.insert(first, u);
+        }
         if m.usage.is_some() {
             self.usage = m.usage;
         }
@@ -304,6 +327,13 @@ impl ChatBuffer {
     }
 
     pub fn tool_started(&mut self, t: &ToolStartedParams) {
+        if t.started_at.is_some() {
+            self.tool_meta
+                .entry(t.call.id.clone())
+                .or_default()
+                .started_at = t.started_at;
+            self.touch_tool(&t.call.id);
+        }
         let known = self
             .entries
             .iter()
@@ -316,7 +346,37 @@ impl ChatBuffer {
         }
     }
 
+    /// Output a running tool sent (`tool/output`).
+    pub fn tool_output(&mut self, t: &ToolOutputParams) {
+        let live = &mut self.tool_meta.entry(t.call_id.clone()).or_default().live;
+        live.push_str(&t.text);
+        if live.len() > LIVE_MAX {
+            let mut cut = live.len() - LIVE_MAX;
+            while !live.is_char_boundary(cut) {
+                cut += 1;
+            }
+            live.drain(..cut);
+        }
+        self.touch_tool(&t.call_id);
+    }
+
+    fn touch_tool(&mut self, call_id: &str) {
+        if let Some(i) = self
+            .entries
+            .iter()
+            .rposition(|e| matches!(e, Entry::Tool { call, .. } if call.id == call_id))
+        {
+            self.touch(i);
+        }
+    }
+
     pub fn tool_finished(&mut self, t: &ToolFinishedParams) {
+        if t.duration_ms.is_some() {
+            self.tool_meta
+                .entry(t.call_id.clone())
+                .or_default()
+                .duration_ms = t.duration_ms;
+        }
         self.set_tool_output(&t.call_id, t.output.clone(), t.is_error);
     }
 
@@ -486,11 +546,16 @@ impl ChatBuffer {
                 },
                 _,
             ) => {
-                json!({ "kind": kind, "index": index, "text": edges(text), "streaming": streaming })
+                let mut d = json!({ "kind": kind, "index": index, "text": edges(text), "streaming": streaming });
+                if let Some(u) = self.message_usage.get(&item.entry) {
+                    d["usage"] = json!({ "input": u.input_tokens, "output": u.output_tokens });
+                }
+                d
             }
             (Entry::Tool { call, output }, _) => {
                 let args: Value = serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
-                json!({
+                let meta = self.tool_meta.get(&call.id);
+                let mut d = json!({
                     "kind": kind,
                     "index": index,
                     "id": call.id,
@@ -500,7 +565,14 @@ impl ChatBuffer {
                     "output": output.as_ref().map(|o| clean(&o.0)),
                     "is_error": output.as_ref().is_some_and(|o| o.1),
                     "done": output.is_some(),
-                })
+                    "started_at": meta.and_then(|m| m.started_at),
+                    "duration_ms": meta.and_then(|m| m.duration_ms),
+                    "live": meta.map(|m| clean(&m.live)).filter(|l| !l.is_empty()),
+                });
+                if let Some(u) = self.message_usage.get(&item.entry) {
+                    d["usage"] = json!({ "input": u.input_tokens, "output": u.output_tokens });
+                }
+                d
             }
             (Entry::Notice { text, error }, _) => {
                 json!({ "kind": kind, "index": index, "text": edges(text), "error": error })
@@ -859,6 +931,7 @@ mod tests {
             call_id: "c1".into(),
             output: "a\x1b[31mb\x1b[0m\tc".into(),
             is_error: false,
+            duration_ms: None,
         });
         assert_eq!(c.item_data(items[3], 4)["output"], "ab\tc");
         assert_eq!(c.usage.unwrap().input_tokens, 5);

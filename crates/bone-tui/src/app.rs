@@ -1355,6 +1355,8 @@ impl App {
             .with_chat(&p.session_id, |c| c.tool_started(&p)));
         on!(ToolFinished, |p| self
             .with_chat(&p.session_id, |c| c.tool_finished(&p)));
+        on!(ToolOutput, |p| self
+            .with_chat(&p.session_id, |c| c.tool_output(&p)));
         on!(TurnSteered, |p| self
             .with_chat(&p.session_id, |c| c.steered(&p.text)));
         on!(TurnFinished, |p| self

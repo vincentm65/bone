@@ -12,6 +12,7 @@ fn ctx(dir: &tempfile::TempDir) -> ToolContext {
         session_id: "test".into(),
         cancel: CancellationToken::new(),
         views: Default::default(),
+        output: None,
     }
 }
 
@@ -417,4 +418,31 @@ fn truncate_middle_respects_char_boundaries() {
     let t = truncate_middle(s, 3, 3);
     assert!(t.starts_with("é\n") && t.ends_with("\né"), "{t}");
     assert_eq!(truncate_middle("short", 3, 3), "short");
+}
+
+#[tokio::test]
+async fn shell_streams_output_while_it_runs() {
+    let dir = tempfile::tempdir().unwrap();
+    let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let sink = got.clone();
+    let mut ctx = ctx(&dir);
+    ctx.output = Some(std::sync::Arc::new(move |t: &str| {
+        sink.lock().unwrap().push(t.to_owned())
+    }));
+    let out = call(
+        &ctx,
+        "shell",
+        json!({"command": "printf 'a\\n'; sleep 0.2; printf 'b é\\n'"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out, "a\nb é\n[exit code: 0]");
+    let chunks = got.lock().unwrap().clone();
+    // The first line came on its own, before the sleep ended.
+    assert_eq!(
+        chunks.first().map(String::as_str),
+        Some("a\n"),
+        "{chunks:?}"
+    );
+    assert_eq!(chunks.concat(), "a\nb é\n");
 }

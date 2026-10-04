@@ -463,6 +463,7 @@ fn events() {
         session_id: SID.into(),
         turn_id: 1,
         call: call(),
+        started_at: Some(1_767_225_600_000),
     });
     event::<ToolFinished>(ToolFinishedParams {
         session_id: SID.into(),
@@ -470,6 +471,13 @@ fn events() {
         call_id: "call_1".into(),
         output: "ok\n[exit code: 0]".into(),
         is_error: false,
+        duration_ms: Some(42),
+    });
+    event::<ToolOutput>(ToolOutputParams {
+        session_id: SID.into(),
+        turn_id: 1,
+        call_id: "call_1".into(),
+        text: "hello\n".into(),
     });
     event::<AskRequested>(AskRequestedParams {
         ask_id: 1,

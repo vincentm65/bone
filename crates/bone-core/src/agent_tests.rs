@@ -2199,3 +2199,39 @@ async fn core_lua_can_queue_messages() {
     assert_eq!(turns[1].0, "follow up");
     assert_eq!(tool_result(&h.transcript().await[4]).0, "0");
 }
+
+#[tokio::test]
+async fn tool_events_carry_timing_and_live_output() {
+    let mut h = Harness::with_lua(
+        "",
+        vec![
+            calls(&[(
+                "c1",
+                "shell",
+                json!({"command": "printf 'a\\n'; sleep 0.2; printf 'b\\n'"}),
+            )]),
+            text("done"),
+        ],
+    )
+    .await;
+    h.start("go").await;
+    let started = h.until::<ToolStarted>().await;
+    assert!(started.started_at.is_some_and(|t| t > 1_700_000_000_000));
+    let mut live = String::new();
+    let finished = loop {
+        let e = h.next().await;
+        if let Some(Ok(o)) = Event::parse_as::<ToolOutput>(&e) {
+            assert_eq!(o.call_id, "c1");
+            live.push_str(&o.text);
+        } else if let Some(Ok(f)) = Event::parse_as::<ToolFinished>(&e) {
+            break f;
+        }
+    };
+    assert_eq!(live, "a\nb\n");
+    assert!(
+        finished.duration_ms.is_some_and(|d| d >= 150),
+        "{:?}",
+        finished.duration_ms
+    );
+    h.until::<TurnFinished>().await;
+}

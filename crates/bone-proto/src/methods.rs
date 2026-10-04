@@ -94,6 +94,7 @@ pub const NOTIFICATIONS: &[&str] = &[
     MessageCompleted::METHOD,
     ToolStarted::METHOD,
     ToolFinished::METHOD,
+    ToolOutput::METHOD,
     AskRequested::METHOD,
     AskResolved::METHOD,
     TurnFinished::METHOD,
@@ -536,6 +537,7 @@ notification!(
 );
 notification!(ToolStarted, "tool/started", ToolStartedParams);
 notification!(ToolFinished, "tool/finished", ToolFinishedParams);
+notification!(ToolOutput, "tool/output", ToolOutputParams);
 notification!(
     /// Core-side Lua asked the user something (`bone.ask`); answer with
     /// [`AskRespond`].
@@ -636,6 +638,9 @@ pub struct ToolStartedParams {
     pub session_id: SessionId,
     pub turn_id: TurnId,
     pub call: ToolCall,
+    /// When it started, in milliseconds since the Unix epoch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -645,6 +650,20 @@ pub struct ToolFinishedParams {
     pub call_id: String,
     pub output: String,
     pub is_error: bool,
+    /// How long it ran, in milliseconds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<u64>,
+}
+
+/// Output a running tool has produced so far, in order, as it comes (the
+/// shell tool sends its output this way). `tool/finished` still carries the
+/// whole result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolOutputParams {
+    pub session_id: SessionId,
+    pub turn_id: TurnId,
+    pub call_id: String,
+    pub text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

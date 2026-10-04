@@ -447,9 +447,13 @@ function bone.ui.tool_content(item, ctx)
   if name == "shell" then
     local body, code = split_exit_code(out)
     local failed = item.is_error or (code ~= nil and code ~= 0)
+    if not done then
+      -- What it has printed so far (tool/output).
+      return { title = shell_label(args), body = gutter(item.live or "", width, "ToolOutput", "ToolGutter") }
+    end
     return {
       title = shell_label(args),
-      body = done and gutter(body, width, "ToolOutput", failed and "ToolError" or "ToolGutter") or {},
+      body = gutter(body, width, "ToolOutput", failed and "ToolError" or "ToolGutter"),
     }
   elseif name == "read_file" then
     local summary = ok and (trim(out) == "(empty file)" and "0 lines" or read_summary(out)) or nil

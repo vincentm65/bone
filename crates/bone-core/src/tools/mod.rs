@@ -33,7 +33,13 @@ pub struct ToolContext {
     pub cancel: CancellationToken,
     /// What the session's model has seen of each file (see `hashline`).
     pub views: Arc<hashline::Views>,
+    /// Where a tool can send output while it runs (`tool/output`), if anyone
+    /// listens. The result still carries all of it.
+    pub output: Option<OutputSink>,
 }
+
+/// Takes a running tool's output as it comes.
+pub type OutputSink = Arc<dyn Fn(&str) + Send + Sync>;
 
 impl ToolContext {
     /// An absolute path, with `.` and `..` worked out so one file has one

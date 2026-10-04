@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use bone_proto::methods::{
     MessageCompleted, MessageCompletedParams, MessageDelta, MessageDeltaParams, ToolFinished,
-    ToolFinishedParams, ToolStarted, ToolStartedParams, TurnFinished, TurnFinishedParams,
-    TurnStarted, TurnStartedParams, TurnSteered,
+    ToolFinishedParams, ToolOutput, ToolOutputParams, ToolStarted, ToolStartedParams, TurnFinished,
+    TurnFinishedParams, TurnStarted, TurnStartedParams, TurnSteered,
 };
 use bone_proto::types::{ChatMessage, DeltaKind, ToolCall, TurnId, TurnOutcome, Usage};
 use serde_json::{Value, json};
@@ -401,9 +401,11 @@ impl Turn<'_> {
                         session_id: self.session_id.clone(),
                         turn_id: self.turn_id,
                         call: call.clone(),
+                        started_at: Some(unix_ms()),
                     });
                 }
                 let results = futures_util::future::join_all(batch.iter().map(|call| async move {
+                    let began = std::time::Instant::now();
                     let (output, is_error) = self.run_tool(call).await;
                     self.inner.emit::<ToolFinished>(ToolFinishedParams {
                         session_id: self.session_id.clone(),
@@ -411,6 +413,7 @@ impl Turn<'_> {
                         call_id: call.id.clone(),
                         output: output.clone(),
                         is_error,
+                        duration_ms: Some(began.elapsed().as_millis() as u64),
                     });
                     (output, is_error)
                 }))
@@ -544,11 +547,26 @@ impl Turn<'_> {
             Err(Refused::Cancelled) => return (CANCELLED.into(), true),
         }
 
+        let output: crate::tools::OutputSink = {
+            let events = self.inner.events.clone();
+            let (session_id, turn_id, call_id) =
+                (self.session_id.clone(), self.turn_id, call.id.clone());
+            Arc::new(move |text: &str| {
+                // No subscribers is not an error.
+                let _ = events.send(crate::Event::new::<ToolOutput>(ToolOutputParams {
+                    session_id: session_id.clone(),
+                    turn_id,
+                    call_id: call_id.clone(),
+                    text: text.to_owned(),
+                }));
+            })
+        };
         let ctx = ToolContext {
             cwd: self.cwd.clone(),
             session_id: self.session_id.clone(),
             cancel: self.cancel.clone(),
             views: self.inner.views.clone(),
+            output: Some(output),
         };
         let hook_args = args.clone();
         let grace = async {
@@ -627,4 +645,11 @@ fn system_prompt(config: &CoreConfig, dynamic: Option<&str>, cwd: &Path) -> Stri
         .or(config.system_prompt.as_deref())
         .unwrap_or(DEFAULT_SYSTEM_PROMPT);
     format!("{base}\n\nWorking directory: {cwd}", cwd = cwd.display())
+}
+
+/// Milliseconds since the Unix epoch.
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
 }

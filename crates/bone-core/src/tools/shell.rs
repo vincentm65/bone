@@ -92,6 +92,8 @@ async fn run(command: &str, timeout: Duration, ctx: &ToolContext) -> std::io::Re
     let mut buf = vec![0u8; 16 * 1024];
     let mut status = None;
     let mut grace_until: Option<Instant> = None;
+    // Bytes of a char split across reads, held for the next one.
+    let mut partial: Vec<u8> = Vec::new();
 
     let killed = loop {
         tokio::select! {
@@ -100,6 +102,20 @@ async fn run(command: &str, timeout: Duration, ctx: &ToolContext) -> std::io::Re
                 Ok(n) => {
                     let room = MAX_CAPTURE.saturating_sub(out.len());
                     out.extend_from_slice(&buf[..n.min(room)]);
+                    if let Some(sink) = &ctx.output {
+                        partial.extend_from_slice(&buf[..n]);
+                        let valid = match std::str::from_utf8(&partial) {
+                            Ok(_) => partial.len(),
+                            // Invalid bytes (not just a split char) go out as they are.
+                            Err(e) if e.error_len().is_some() => partial.len(),
+                            Err(e) => e.valid_up_to(),
+                        };
+                        let text = String::from_utf8_lossy(&partial[..valid]).into_owned();
+                        partial.drain(..valid);
+                        if !text.is_empty() {
+                            sink(&text);
+                        }
+                    }
                 }
             },
             s = child.wait(), if status.is_none() => {

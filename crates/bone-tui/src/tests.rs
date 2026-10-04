@@ -1033,6 +1033,7 @@ async fn lua_tool_views_highlights_and_colorschemes() {
         call_id: "c1".into(),
         output: "a.txt".into(),
         is_error: false,
+        duration_ms: None,
     })
     .await;
     let screen = h.screen(60, 14);
@@ -1117,6 +1118,7 @@ async fn plugins_load_with_modules_and_colors() {
         call_id: "g".into(),
         output: "## main...origin/main\n M src/lib.rs\n?? notes.md\n".into(),
         is_error: false,
+        duration_ms: None,
     })
     .await;
     let screen = h.screen(60, 14);
@@ -1162,6 +1164,7 @@ async fn tool_rows(
             call_id: "c".into(),
             output: text.into(),
             is_error,
+            duration_ms: None,
         })
         .await;
     }
@@ -2128,6 +2131,7 @@ async fn lua_reads_turns_items_and_sessions() {
             call_id: id.into(),
             output: "out".into(),
             is_error,
+            duration_ms: None,
         })
         .await;
     }
@@ -2595,6 +2599,7 @@ async fn example_review_plugin() {
             call_id: id.into(),
             output: "ok".into(),
             is_error,
+            duration_ms: None,
         })
         .await;
     }
@@ -3226,6 +3231,7 @@ async fn std_tool_screen(
             call_id: format!("c{i}"),
             output: (*output).into(),
             is_error: *is_error,
+            duration_ms: None,
         })
         .await;
     }
@@ -3381,6 +3387,7 @@ async fn tool_summary_follows_a_running_turn() {
         call_id: id.into(),
         output: output.into(),
         is_error: false,
+        duration_ms: None,
     };
     let chat = |h: &mut Harness| -> String {
         h.screen(60, 20)
@@ -3778,4 +3785,80 @@ async fn lua_styles_the_prompt_text_and_shows_ghost_text() {
     let buf = draw(&mut h);
     assert_ne!(buf[(1, y)].fg, red);
     assert_eq!(buf[(2, y)].fg, red);
+}
+
+#[tokio::test]
+async fn tool_items_carry_live_output_timing_and_usage() {
+    let mut h = Harness::build(None).await;
+    h.input("{ctrl+t}").await; // rows: one call per row
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    let call = ToolCall {
+        id: "c".into(),
+        name: "shell".into(),
+        arguments: json!({"command": "make"}).to_string(),
+    };
+    h.emit::<MessageCompleted>(MessageCompletedParams {
+        session_id: "s-new".into(),
+        turn_id: 1,
+        message: ChatMessage::Assistant {
+            content: String::new(),
+            reasoning: String::new(),
+            tool_calls: vec![call.clone()],
+        },
+        usage: Some(Usage {
+            input_tokens: 1200,
+            output_tokens: 30,
+        }),
+    })
+    .await;
+    h.emit::<ToolStarted>(ToolStartedParams {
+        session_id: "s-new".into(),
+        turn_id: 1,
+        call,
+        started_at: Some(1_000),
+    })
+    .await;
+    for text in ["compiling a\n", "compiling b\n"] {
+        h.emit::<ToolOutput>(ToolOutputParams {
+            session_id: "s-new".into(),
+            turn_id: 1,
+            call_id: "c".into(),
+            text: text.into(),
+        })
+        .await;
+    }
+    let screen = h.screen(50, 20);
+    assert!(
+        screen.contains("  ◌ shell make\n      │ compiling a\n      ╰ compiling b"),
+        "{screen}"
+    );
+    let item = |h: &mut Harness| -> Value {
+        let v: mlua::Value = h
+            .app
+            .with_api(|lua| {
+                lua.load(r#"return bone.chat.items({ kind = "tool" })[1]"#)
+                    .eval()
+            })
+            .unwrap();
+        serde_json::to_value(&v).unwrap()
+    };
+    let i = item(&mut h);
+    assert_eq!(i["live"], json!("compiling a\ncompiling b\n"));
+    assert_eq!(i["started_at"], json!(1000));
+    assert_eq!(i["usage"], json!({"input": 1200, "output": 30}));
+    h.emit::<ToolFinished>(ToolFinishedParams {
+        session_id: "s-new".into(),
+        turn_id: 1,
+        call_id: "c".into(),
+        output: "compiling a\ncompiling b\n[exit code: 0]".into(),
+        is_error: false,
+        duration_ms: Some(1500),
+    })
+    .await;
+    assert_eq!(item(&mut h)["duration_ms"], json!(1500));
+    assert!(
+        h.screen(50, 20)
+            .contains("    shell make\n      │ compiling a\n      ╰ compiling b")
+    );
 }

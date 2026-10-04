@@ -524,7 +524,7 @@ local id = bone.on("turn/finished", function(ev) ... end)
 bone.off(id)
 ```
 
-- Every server notification, by method, with its params: `turn/started`, `turn/steered`, `message/delta`, `message/completed`, `tool/started`, `tool/finished`, `ask/requested`, `ask/resolved`, `turn/finished`.
+- Every server notification, by method, with its params: `turn/started`, `turn/steered`, `message/delta`, `message/completed`, `tool/started`, `tool/output`, `tool/finished`, `ask/requested`, `ask/resolved`, `turn/finished`.
 - `ready`: after `tui.lua` has run.
 - `submit`: `{ text }` before a message is sent. Return `false` to cancel, or a string to send instead.
 
@@ -770,8 +770,8 @@ end
 | Kind | Item fields |
 |---|---|
 | `user` | `text` |
-| `reasoning`, `assistant` | `text`, `streaming` |
-| `tool` | `id`, `name`, `arguments` (decoded), `raw_arguments`, `output` (nil while running), `is_error`, `done` |
+| `reasoning`, `assistant` | `text`, `streaming`; `assistant` also `usage = { input, output }` (tokens of that model message, when the core sent them) |
+| `tool` | `id`, `name`, `arguments` (decoded), `raw_arguments`, `output` (nil while running), `is_error`, `done`, `live` (output so far while it runs, from `tool/output`; the last 64 KB), `started_at` (ms since the epoch), `duration_ms`, and `usage` when it is the first call of a message without text |
 | `notice` | `text`, `error` |
 | `queued` | `id`, `text`, `mode` (`"steer"` joins the running turn, `"next"` waits for its own), `position` (1 first); messages waiting in the session's queue, after the transcript. Plain text: `(queued) text` |
 
