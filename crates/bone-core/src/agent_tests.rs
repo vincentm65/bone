@@ -2262,15 +2262,15 @@ async fn settings_choose_the_model_and_are_saved_for_every_client() {
         .core
         .handle(
             SettingsSet::METHOD,
-            Some(json!({ "path": "models.x", "value": "m2" })),
+            Some(json!({ "path": "providers.x.model", "value": "m2" })),
         )
         .await
         .unwrap();
-    assert_eq!(all, json!({ "models": { "x": "m2" } }));
+    assert_eq!(all, json!({ "providers": { "x": { "model": "m2" } } }));
     let changed = h.until::<SettingsChanged>().await;
     assert_eq!(
         (changed.path.as_str(), &changed.value),
-        ("models.x", &json!("m2"))
+        ("providers.x.model", &json!("m2"))
     );
     assert_eq!(current(&h), ("x".into(), "m2".into()));
     // The saved provider wins over core.lua's bone.config.provider.
@@ -2286,7 +2286,10 @@ async fn settings_choose_the_model_and_are_saved_for_every_client() {
         &std::fs::read_to_string(h._data.path().join("settings.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(file, json!({ "provider": "y", "models": { "x": "m2" } }));
+    assert_eq!(
+        file,
+        json!({ "provider": "y", "providers": { "x": { "model": "m2" } } })
+    );
 
     // Unknown providers are refused; a change that breaks the reload is undone.
     let e = h
@@ -2412,7 +2415,7 @@ async fn providers_and_keys_from_settings_and_secrets() {
     set_on(&h.core, "provider", json!("local")).await.unwrap();
     let models = h.core.inner.runtime().model_list();
     let local = models.iter().find(|m| m.name == "local").unwrap();
-    assert!(local.current && local.model == "small");
+    assert!(local.current && local.model == "small" && local.added);
     // Bad entries are refused; keys never go in settings.json.
     for (v, want) in [
         (json!({ "base_url": "http://x" }), "needs a model"),
@@ -2468,10 +2471,49 @@ async fn providers_and_keys_from_settings_and_secrets() {
         .unwrap();
     assert_eq!(h.core.inner.runtime().models["local"].api_key, None);
 
-    // core.lua still wins for a provider of the same name.
+    // When core.lua defines it too, settings change its fields; resetting
+    // them goes back to core.lua's, and it is no longer an added provider.
     h.write_core_lua(
         r#"bone.config.providers["local"] = { base_url = "http://mine", model = "mine" }"#,
     );
     h.core.reload().await.unwrap();
+    {
+        let rt = h.core.inner.runtime();
+        let p = &rt.models["local"];
+        assert_eq!(
+            (p.model.as_str(), p.base_url.as_str()),
+            ("small", "http://localhost:8080/v1")
+        );
+        assert!(!rt.settings_providers.contains("local"));
+    }
+    h.core
+        .handle(
+            SettingsReset::METHOD,
+            Some(json!({ "path": "providers.local" })),
+        )
+        .await
+        .unwrap();
     assert_eq!(h.core.inner.runtime().models["local"].model, "mine");
+    // One field at a time, as /config edits.
+    set_on(&h.core, "providers.local.reasoning_effort", json!("high"))
+        .await
+        .unwrap();
+    set_on(&h.core, "providers.local.stream_usage", json!(false))
+        .await
+        .unwrap();
+    let info = h.core.inner.runtime().model_list();
+    let local = info.iter().find(|m| m.name == "local").unwrap();
+    assert_eq!(
+        (
+            local.reasoning_effort.as_deref(),
+            local.stream_usage,
+            local.added
+        ),
+        (Some("high"), false, false)
+    );
+    assert!(
+        set_on(&h.core, "providers.local.colour", json!("red"))
+            .await
+            .is_err()
+    );
 }

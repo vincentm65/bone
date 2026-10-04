@@ -138,6 +138,9 @@ function M.open(want)
     edit = nil, -- the text being typed into a field
     note = nil, -- a line under the rows: what happened, or an error
     providers = nil, -- from model/list, nil while loading
+    prov = nil, -- the provider being edited: { name, new, draft }
+    keys = {}, -- providers with a key in secrets.json
+    ask = nil, -- a yes/no question: { text, action }
     core_plugins = nil, -- from plugin/list
   }
   if want and want ~= "" then
@@ -155,6 +158,7 @@ function M.open(want)
     end
   end
 
+  local save_provider_field
   local function load_providers()
     bone.model.list(function(list, err)
       st.providers = list or {}
@@ -163,6 +167,70 @@ function M.open(want)
       end
       redraw()
     end)
+    bone.request("secrets/list", {}, function(names)
+      st.keys = {}
+      for _, n in ipairs(names or {}) do
+        st.keys[n] = true
+      end
+      redraw()
+    end)
+  end
+
+  local function provider_info(name)
+    for _, p in ipairs(st.providers or {}) do
+      if p.name == name then
+        return p
+      end
+    end
+  end
+
+  local EFFORTS = { "default", "low", "medium", "high" }
+
+  -- The editor's rows for one provider (or a new one's draft).
+  local function provider_rows()
+    local pv = st.prov
+    if pv.new then
+      local d = pv.draft
+      return {
+        { kind = "pfield", key = "name", label = "Name", type = "string", value = d.name, desc = "letters, digits, _ and -" },
+        { kind = "pfield", key = "base_url", label = "URL", type = "string", value = d.base_url, desc = "the OpenAI-compatible endpoint, ending in /v1" },
+        { kind = "pfield", key = "model", label = "Model", type = "string", value = d.model, desc = "the model name the server knows" },
+        { kind = "pfield", key = "type", label = "Type", type = "string", value = d.type, desc = "a Lua provider type (from a plugin); empty: OpenAI-compatible" },
+        { kind = "pfield", key = "key", label = "API key", type = "secret", value = d.key, desc = "saved in ~/.bone/secrets.json, readable only by you" },
+        { kind = "pfield", key = "api_key_env", label = "Key variable", type = "string", value = d.api_key_env, desc = "or an environment variable that holds the key" },
+        { kind = "paction", action = "save", label = "Save" },
+      }
+    end
+    local p = provider_info(pv.name) or {}
+    local base = "providers." .. pv.name
+    local function changed(key)
+      return not p.added and bone.settings.get(base .. "." .. key) ~= nil
+    end
+    local env = bone.settings.get(base .. ".api_key_env") or ""
+    local key_text = st.keys[pv.name] and "saved" or (env ~= "" and ("from $" .. env)) or (p.has_key and "set in core.lua") or "none"
+    local out = {
+      { kind = "pfield", key = "model", label = "Model", type = "string", value = p.model, changed = changed("model") },
+      { kind = "pfield", key = "base_url", label = "URL", type = "string", value = p.base_url, changed = changed("base_url") },
+      { kind = "pfield", key = "type", label = "Type", type = "string", value = p.type or "", changed = changed("type"),
+        desc = "a Lua provider type (from a plugin); empty: OpenAI-compatible" },
+      { kind = "pfield", key = "reasoning_effort", label = "Reasoning effort", type = "choice", choices = EFFORTS,
+        value = p.reasoning_effort or "default", changed = changed("reasoning_effort") },
+      { kind = "pfield", key = "stream_usage", label = "Stream usage", type = "boolean", value = p.stream_usage ~= false,
+        changed = changed("stream_usage"), desc = "ask for token usage while streaming (some servers refuse it)" },
+      { kind = "pfield", key = "key", label = "API key", type = "secret", value = key_text,
+        desc = "enter types a new key (saved in ~/.bone/secrets.json, readable only by you); empty removes the saved one" },
+      { kind = "pfield", key = "api_key_env", label = "Key variable", type = "string", value = env,
+        desc = "an environment variable that holds the key" },
+    }
+    if not p.current then
+      out[#out + 1] = { kind = "paction", action = "use", label = "Use this provider" }
+    end
+    if p.added then
+      out[#out + 1] = { kind = "paction", action = "delete", label = "Delete this provider" }
+    elseif bone.settings.get(base) ~= nil then
+      out[#out + 1] = { kind = "paction", action = "undo", label = "Undo changes (back to core.lua)" }
+    end
+    return out
   end
 
   local function load_plugins()
@@ -216,9 +284,16 @@ function M.open(want)
     if t.name == "general" then
       return option_rows()
     elseif t.name == "providers" then
+      if st.prov then
+        return provider_rows()
+      end
       local out = {}
       for _, p in ipairs(st.providers or {}) do
-        out[#out + 1] = { kind = "provider", name = p.name, label = p.name, model = p.model, current = p.current, ptype = p.type }
+        out[#out + 1] = {
+          kind = "provider", name = p.name, label = p.name, model = p.model, url = p.base_url,
+          current = p.current, added = p.added,
+          desc = p.added and "added in /config (or /setup)" or "from core.lua",
+        }
       end
       return out
     elseif t.name == "plugins" then
@@ -298,6 +373,34 @@ function M.open(want)
     end
   end
 
+  -- One field of the provider being edited (or of a new one's draft).
+  -- An empty text, or "default", goes back to core.lua's value.
+  function save_provider_field(row, value)
+    local pv = st.prov
+    if pv.new then
+      pv.draft[row.key] = value
+      return redraw()
+    end
+    local name = pv.name
+    if row.key == "key" then
+      local key = value ~= "" and value or nil
+      return bone.request("secrets/set", { provider = name, key = key }, function(_, err)
+        load_providers()
+        saved_note(err, value ~= "" and ("saved the key for " .. name) or ("removed the saved key for " .. name))
+      end)
+    end
+    local path = "providers." .. name .. "." .. row.key
+    local function after(_, err)
+      load_providers()
+      saved_note(err, "saved " .. row.label:lower())
+    end
+    if value == "" or value == "default" then
+      bone.settings.reset(path, after)
+    else
+      bone.settings.set(path, value, after)
+    end
+  end
+
   -- Enter / space on a row.
   local function activate(row, space)
     if not row then
@@ -311,6 +414,87 @@ function M.open(want)
         load_providers()
         saved_note(err, "using " .. row.name)
       end)
+    elseif row.kind == "paction" then
+      if space then
+        return
+      end
+      local name = st.prov.name
+      if row.action == "save" then
+        local d = st.prov.draft
+        if not d.name:match("^[%w_%-]+$") then
+          return saved_note("the name is letters, digits, _ and -")
+        elseif provider_info(d.name) then
+          return saved_note("there is already a provider " .. d.name)
+        elseif d.model == "" or (d.base_url == "" and d.type == "") then
+          return saved_note("a provider needs a model and a URL (or a type)")
+        end
+        local spec = { model = d.model }
+        for _, k in ipairs({ "base_url", "type", "api_key_env" }) do
+          if d[k] ~= "" then
+            spec[k] = d[k]
+          end
+        end
+        bone.settings.set("providers." .. d.name, spec, function(_, err)
+          if err then
+            return saved_note(err)
+          end
+          local function done()
+            st.prov = { name = d.name }
+            st.sel = 1
+            load_providers()
+            saved_note(nil, "added " .. d.name)
+          end
+          if d.key ~= "" then
+            bone.request("secrets/set", { provider = d.name, key = d.key }, function(_, kerr)
+              if kerr then
+                return saved_note("added, but the key was not saved: " .. tostring(kerr))
+              end
+              done()
+            end)
+          else
+            done()
+          end
+        end)
+      elseif row.action == "use" then
+        bone.settings.set("provider", name, function(_, err)
+          load_providers()
+          saved_note(err, "using " .. name)
+        end)
+      elseif row.action == "undo" then
+        st.ask = { text = "undo your changes to " .. name .. "? (back to core.lua)", action = function()
+          bone.settings.reset("providers." .. name, function(_, err)
+            load_providers()
+            saved_note(err, name .. " is as core.lua has it")
+          end)
+        end }
+      elseif row.action == "delete" then
+        st.ask = { text = "delete " .. name .. " and its saved key?", action = function()
+          bone.settings.reset("providers." .. name, function(_, err)
+            if err then
+              return saved_note(err)
+            end
+            bone.request("secrets/set", { provider = name, key = nil }, function()
+              st.prov, st.sel = nil, 1
+              load_providers()
+              saved_note(nil, "deleted " .. name)
+            end)
+          end)
+        end }
+      end
+    elseif row.kind == "pfield" then
+      if row.type == "boolean" then
+        return save_provider_field(row, not row.value)
+      elseif row.type == "choice" then
+        local i = 1
+        for k, c in ipairs(row.choices) do
+          if c == row.value then
+            i = k
+          end
+        end
+        return save_provider_field(row, row.choices[i % #row.choices + 1])
+      elseif not space then
+        st.edit = (row.type == "secret" and "") or (row.value == nil and "" or tostring(row.value))
+      end
     elseif row.kind == "plugin" then
       toggle_plugin(row)
     elseif row.type == "boolean" then
@@ -332,17 +516,8 @@ function M.open(want)
     local text = st.edit
     st.edit = nil
     local value = text
-    if row.kind == "provider" then
-      if text == "" then
-        return bone.settings.reset("models." .. row.name, function(_, err)
-          load_providers()
-          saved_note(err, row.name .. ": the model from core.lua")
-        end)
-      end
-      return bone.settings.set("models." .. row.name, text, function(_, err)
-        load_providers()
-        saved_note(err, row.name .. " uses " .. text)
-      end)
+    if row.kind == "pfield" then
+      return save_provider_field(row, text)
     end
     if row.type == "integer" or row.type == "number" then
       value = tonumber(text)
@@ -361,7 +536,34 @@ function M.open(want)
   -- A row's value as plain text.
   local function value_text(row)
     if row.kind == "provider" then
-      return pad(row.model or "", 30) .. (row.current and "in use" or "")
+      local tags = {}
+      if row.current then
+        tags[#tags + 1] = "in use"
+      end
+      if row.added then
+        tags[#tags + 1] = "added"
+      end
+      return pad(row.model or "", 26) .. pad(row.url or "", 34) .. table.concat(tags, ", ")
+    elseif row.kind == "paction" then
+      return ""
+    elseif row.kind == "pfield" then
+      local v
+      if row.type == "boolean" then
+        v = row.value and "on" or "off"
+      elseif row.type == "choice" then
+        local out = {}
+        for _, c in ipairs(row.choices) do
+          out[#out + 1] = c == row.value and ("[" .. c .. "]") or c
+        end
+        v = table.concat(out, " ")
+      elseif row.type == "secret" and st.prov and st.prov.new then
+        v = row.value ~= "" and string.rep("•", math.min(#row.value, 24)) or "(none)"
+      elseif row.key == "type" and (row.value == nil or row.value == "") then
+        v = "OpenAI-compatible"
+      else
+        v = (row.value == nil or row.value == "") and "(none)" or tostring(row.value)
+      end
+      return v .. (row.changed and "   (changed)" or "")
     elseif row.kind == "plugin" then
       local halves = (row.tui and "tui" or "") .. (row.tui and row.core and " + " or "") .. (row.core and "core" or "")
       return pad(row.on and "on" or "off", 6) .. halves .. (row.error and ("  " .. row.error) or "")
@@ -396,6 +598,9 @@ function M.open(want)
       end
       line = line .. label .. " "
     end
+    if st.prov then
+      line = line .. "› " .. (st.prov.new and "new provider" or st.prov.name)
+    end
     out[#out + 1] = line
     out[#out + 1] = ""
 
@@ -417,7 +622,8 @@ function M.open(want)
       local r = list[i]
       local text = (i == st.sel and " › " or "   ") .. pad(r.label, label_w)
       if i == st.sel and st.edit then
-        text = text .. st.edit .. "▏"
+        local shown = r.type == "secret" and string.rep("•", #st.edit) or st.edit
+        text = text .. shown .. "▏"
       else
         text = text .. value_text(r)
         -- tui.lua runs last; say so when it overrides the saved value.
@@ -436,14 +642,19 @@ function M.open(want)
 
     out[#out + 1] = ""
     local current = list[st.sel]
-    local note = st.note and ((st.note[2] == "ErrorMsg" and "error: " or "") .. st.note[1])
+    local note = (st.ask and st.ask.text)
+      or (st.note and ((st.note[2] == "ErrorMsg" and "error: " or "") .. st.note[1]))
       or (current and current.desc or "")
     out[#out + 1] = bone.text.truncate("   " .. note, w)
     local hint
-    if st.edit then
+    if st.ask then
+      hint = "y yes · n no"
+    elseif st.edit then
       hint = "enter save · esc cancel"
+    elseif t.name == "providers" and st.prov then
+      hint = "↑↓ move · enter change · r reset to core.lua · esc back"
     elseif t.name == "providers" then
-      hint = "↑↓ move · enter use · e model · tab section · esc close"
+      hint = "↑↓ move · enter use · e edit · a add · d delete · tab section · esc close"
     elseif t.name == "plugins" then
       hint = "↑↓ move · space on/off · tab section · esc close"
     else
@@ -477,8 +688,20 @@ function M.open(want)
       end
       return true
     end
+    if st.ask then
+      if k == "y" then
+        local action = st.ask.action
+        st.ask = nil
+        action()
+      elseif k == "n" or k == "esc" then
+        st.ask = nil
+      end
+      return true
+    end
     st.note = nil
-    if k == "esc" or k == "ctrl+c" or k == "q" then
+    if st.prov and (k == "esc" or k == "q") then
+      st.prov, st.sel = nil, 1
+    elseif k == "esc" or k == "ctrl+c" or k == "q" then
       bone.ui.close(id)
     elseif k == "up" or k == "wheelup" or k == "k" then
       st.sel = math.max(1, st.sel - 1)
@@ -488,18 +711,40 @@ function M.open(want)
       st.sel = math.max(1, st.sel - 10)
     elseif k == "pagedown" then
       st.sel = math.min(math.max(#list, 1), st.sel + 10)
-    elseif k == "tab" or k == "right" then
+    elseif (k == "tab" or k == "right") and not st.prov then
       switch_tab(1)
-    elseif k == "shift+tab" or k == "backtab" or k == "left" then
+    elseif (k == "shift+tab" or k == "backtab" or k == "left") and not st.prov then
       switch_tab(-1)
     elseif k == "enter" then
       activate(row, false)
     elseif k == "space" then
       activate(row, true)
+    elseif k == "r" and row and row.kind == "pfield" and st.prov and not st.prov.new then
+      save_provider_field(row, "")
     elseif k == "r" and row and row.path then
       reset(row)
     elseif k == "e" and row and row.kind == "provider" then
-      st.edit = row.model or ""
+      st.prov, st.sel = { name = row.name }, 1
+    elseif k == "a" and st.tabs[st.tab].name == "providers" and not st.prov then
+      st.prov = { new = true, draft = { name = "", base_url = "", model = "", type = "", key = "", api_key_env = "" } }
+      st.sel = 1
+    elseif k == "d" and row and row.kind == "provider" then
+      if not row.added then
+        st.note = { row.name .. " is defined in core.lua; e edits it, and core.lua is where to remove it", "ErrorMsg" }
+      else
+        local name = row.name
+        st.ask = { text = "delete " .. name .. " and its saved key?", action = function()
+          bone.settings.reset("providers." .. name, function(_, err)
+            if err then
+              return saved_note(err)
+            end
+            bone.request("secrets/set", { provider = name }, function()
+              load_providers()
+              saved_note(nil, "deleted " .. name)
+            end)
+          end)
+        end }
+      end
     else
       return true
     end

@@ -44,6 +44,8 @@ pub struct Loaded {
     pub options: LoadOptions,
     /// Every `bone.config.providers` entry, and the one turns use.
     pub providers: HashMap<String, ProviderConfig>,
+    /// Those that exist only in settings.json (added in the app).
+    pub settings_providers: HashSet<String>,
     pub provider_name: Option<String>,
     /// MCP servers to run.
     pub mcp: Vec<crate::mcp::ServerConfig>,
@@ -132,6 +134,8 @@ enum Done {
 /// Everything read out of `bone.config` and `bone._tools`.
 struct Extracted {
     providers: HashMap<String, ProviderConfig>,
+    /// Providers that exist only in settings.json (added in the app).
+    settings_providers: HashSet<String>,
     provider: Option<String>,
     system_prompt: Option<String>,
     system_prompt_fn: bool,
@@ -219,60 +223,73 @@ pub fn load_with_options(
         )
         .map(str::to_owned)
         .or_else(|| (ex.providers.len() == 1).then(|| ex.providers.keys().next().cloned())?),
-        // Each provider with its saved model, if one was chosen.
-        providers: {
-            let settings = saved_settings(config_dir);
-            let mut providers = ex.providers;
-            for (name, p) in providers.iter_mut() {
-                if let Some(model) = crate::settings::chosen_model(&settings, name) {
-                    p.model = model.to_owned();
-                }
-            }
-            providers
-        },
+        settings_providers: ex.settings_providers,
+        providers: ex.providers,
         mcp: ex.mcp,
     })
 }
 
-/// Providers defined in settings.json (by /setup or /config) go into
-/// bone.config.providers before plugins and core.lua, which may still
-/// replace them. A provider's key is the one in secrets.json, else its
-/// `api_key_env` variable.
-fn add_saved_providers(lua: &Lua, dir: &Path) -> mlua::Result<()> {
+/// After core.lua: settings.json's `providers` change those it defined
+/// (field by field, as /config edits them) and add those /setup or /config
+/// created (whole), and saved keys go in. A provider's key is the one in
+/// secrets.json, else its `api_key_env` variable, else core.lua's. The names
+/// that exist only in settings are left in `bone._settings_providers`.
+fn apply_saved_providers(lua: &Lua, dir: &Path) -> mlua::Result<()> {
     let settings = saved_settings(dir);
-    let Some(saved) = settings.get("providers").and_then(|p| p.as_object()) else {
-        return Ok(());
-    };
     let secrets = crate::settings::load_secrets(dir).unwrap_or_else(|e| {
         eprintln!("bone: ignoring secrets: {e}");
         serde_json::json!({})
     });
-    let providers: Table = lua
-        .globals()
-        .get::<Table>("bone")?
-        .get::<Table>("config")?
-        .get("providers")?;
-    for (name, spec) in saved {
-        let Value::Table(t) = to_lua(lua, spec)? else {
-            continue;
-        };
-        let key = secrets
-            .get("providers")
-            .and_then(|p| p.get(name))
-            .and_then(|k| k.as_str())
-            .map(str::to_owned)
-            .or_else(|| {
-                spec.get("api_key_env")
-                    .and_then(|v| v.as_str())
-                    .and_then(|var| std::env::var(var).ok())
-                    .filter(|v| !v.is_empty())
-            });
-        if let Some(key) = key {
-            t.set("api_key", key)?;
+    let bone: Table = lua.globals().get("bone")?;
+    let providers: Table = bone.get::<Table>("config")?.get("providers")?;
+    let added = lua.create_table()?;
+    if let Some(saved) = settings.get("providers").and_then(|p| p.as_object()) {
+        for (name, spec) in saved {
+            let Some(fields) = spec.as_object() else {
+                continue;
+            };
+            let t = match providers.get::<Option<Table>>(name.as_str())? {
+                Some(t) => t,
+                None => {
+                    let whole = fields.contains_key("model")
+                        && (fields.contains_key("base_url") || fields.contains_key("type"));
+                    if !whole {
+                        eprintln!(
+                            "bone: settings.json providers.{name}: not in core.lua, and no model and base_url of its own"
+                        );
+                        continue;
+                    }
+                    added.push(name.as_str())?;
+                    let t = lua.create_table()?;
+                    providers.set(name.as_str(), &t)?;
+                    t
+                }
+            };
+            for (k, v) in fields {
+                if k != "api_key_env" {
+                    t.set(k.as_str(), to_lua(lua, v)?)?;
+                }
+            }
+            if let Some(key) = fields
+                .get("api_key_env")
+                .and_then(|v| v.as_str())
+                .and_then(|var| std::env::var(var).ok())
+                .filter(|v| !v.is_empty())
+            {
+                t.set("api_key", key)?;
+            }
         }
-        t.set("api_key_env", Value::Nil)?;
-        providers.set(name.as_str(), t)?;
     }
+    if let Some(keys) = secrets.get("providers").and_then(|p| p.as_object()) {
+        for (name, key) in keys {
+            if let (Some(t), Some(key)) =
+                (providers.get::<Option<Table>>(name.as_str())?, key.as_str())
+            {
+                t.set("api_key", key)?;
+            }
+        }
+    }
+    bone.set("_settings_providers", added)?;
     Ok(())
 }
 
@@ -325,15 +342,6 @@ fn resolve(
         None if ex.providers.len() == 1 => ex.providers.values().next().cloned(),
         None => None,
     };
-    if let (Some(p), Some(name)) = (
-        provider.as_mut(),
-        chosen.or_else(|| {
-            (ex.providers.len() == 1).then(|| ex.providers.keys().next().map(String::as_str))?
-        }),
-    ) && let Some(model) = crate::settings::chosen_model(&settings, name)
-    {
-        p.model = model.to_owned();
-    }
     if let Some(base_url) = env("BONE_BASE_URL") {
         let model = env("BONE_MODEL").or_else(|| provider.as_ref().map(|p| p.model.clone()));
         let model = model.ok_or("BONE_BASE_URL is set but BONE_MODEL is not")?;
@@ -1273,10 +1281,10 @@ fn setup(
         .and_then(|b| b.set("_settings", settings))
         .map_err(|e| e.to_string())?;
     run("core/defaults.lua")?;
-    add_saved_providers(&lua, dir).map_err(|e| format!("settings.json providers: {e}"))?;
     bone_lua::run_user_plugins_except(&lua, dir, "core.lua", &|name| disabled.contains(name))
         .map_err(|e| e.to_string())?;
     bone_lua::run_file(&lua, &dir.join("core.lua")).map_err(|e| e.to_string())?;
+    apply_saved_providers(&lua, dir).map_err(|e| format!("settings.json providers: {e}"))?;
     lua.load("for _, f in ipairs(bone._ready) do f() end")
         .set_name("=bone.on_ready")
         .exec()
@@ -1418,7 +1426,12 @@ fn extract(lua: &Lua) -> mlua::Result<Extracted> {
         .pairs::<String, Value>()
         .filter_map(|p| p.ok().map(|(k, _)| k))
         .collect();
+    let settings_providers = match bone.get::<Option<Table>>("_settings_providers")? {
+        Some(t) => t.sequence_values::<String>().collect::<mlua::Result<_>>()?,
+        None => HashSet::new(),
+    };
     Ok(Extracted {
+        settings_providers,
         lua_providers: bone
             .get::<Table>("_providers")?
             .pairs::<String, Value>()

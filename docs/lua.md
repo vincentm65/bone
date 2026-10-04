@@ -154,13 +154,14 @@ A project can carry TUI config in `.bone/tui.lua` (and modules in `.bone/lua/`).
 ```json
 {
   "provider": "qwen",
-  "models": { "qwen": "Qwen3.8-27B-exl3-3.8bpw" },
+  "providers": { "qwen": { "model": "Qwen3.8-27B-exl3-3.8bpw" },
+                 "work": { "base_url": "https://api.example.com/v1", "model": "big", "api_key_env": "WORK_KEY" } },
   "tui": { "tool_detail": "rows", "show_reasoning": true },
   "web_search": { "num_results": 5 }
 }
 ```
 
-- `provider` picks which of `core.lua`'s `bone.config.providers` turns use, over `core.lua`'s own `bone.config.provider`; `models.<name>` picks that provider's model, over the one `core.lua` gives it. `core.lua` defines the providers; settings choose among them; `BONE_*` environment variables override both for one run. Changing either reloads the core's configuration at once, and is undone if that fails (an unknown provider is refused).
+- `provider` picks which provider turns use, over `core.lua`'s own `bone.config.provider`. `providers.<name>.<field>` changes one field of a provider (`model`, `base_url`, `type`, `reasoning_effort`, `stream_usage`, `api_key_env`), over what `core.lua` gives it; `providers.<name>` as a whole (`{ base_url, model, … }`) adds a provider that `core.lua` does not have, as `/setup` and `/config` do. So `core.lua` defines providers and their defaults, settings change and add them, and `BONE_*` environment variables override both for one run. Changing any of this reloads the core's configuration at once, and is undone if that fails (an unknown provider is refused). A provider's key is the one saved in `~/.bone/secrets.json` (`secrets/set`; readable only by you, never sent back to clients, never in `settings.json`), else its `api_key_env` variable, else `core.lua`'s. Adding a provider while `settings.json` names none also chooses it. With no provider at all the core still starts, and turns say to run `/setup`; with several and none chosen it asks you to choose.
 - `tui.<option>` sets a TUI option after the defaults and plugins, before your `tui.lua`, which runs last and wins. `ctrl+t` and `ctrl+r` save their choice here.
 - `providers.<name>` defines a provider (`{ base_url, model, type, api_key_env }`), as `/setup` does; it goes into `bone.config.providers` before plugins and `core.lua`, which may replace it. Its key is the one saved in `~/.bone/secrets.json` (`secrets/set`; readable only by you, never sent back to clients, never in `settings.json`), else the `api_key_env` variable. Adding a provider while `settings.json` names none also chooses it. With no provider at all the core still starts, and turns say to run `/setup`; with several and none chosen it asks you to choose.
 - `catalog.url` is where `/catalog` gets packages (below).
@@ -170,7 +171,7 @@ A project can carry TUI config in `.bone/tui.lua` (and modules in `.bone/lua/`).
 
 `/catalog` lists the catalog's packages as Updates (an installed file differs), Installed and Available. Enter installs or updates one, `x` removes it (moved to `~/.bone/plugins-backup/`), `r` refreshes; both ask first, since a package's Lua runs with your permissions. Packages come from `catalog.url`: a URL (by default `https://raw.githubusercontent.com/vincentm65/bone-catalog/bone3`) or a local folder (`~/projects/bone3/catalog`), holding `catalog.json` and `plugins/<name>/…` as the repository's `catalog/` folder does. Every file is checked against the SHA-256 in `catalog.json` before anything is installed, and a new package loads at once. In Lua: `require("bone.catalog")` has `index(cb)`, `install(entry, cb)`, `remove(name, cb)` and `open()`. Both sides also have `bone.sha256(text)`, `bone.fs.mkdir(dir)` and `bone.fs.write(path, text)` (whole, atomically).
 
-`/config` (or `/settings`) is the page for all of this: a **General** tab with every TUI option (space or enter toggles a boolean or cycles a choice, enter edits a number or text, `r` resets to the default; an option your `tui.lua` sets anyway is marked), **Providers** (enter uses one, `e` sets its model; an empty model goes back to `core.lua`'s), **Plugins** (space switches one off or on, both halves, and it stays that way: `plugins.disabled`), and a tab for each plugin that declares settings. A plugin declares them in its `manifest.json`, which also works for a core-only plugin:
+`/config` (or `/settings`) is the page for all of this: a **General** tab with every TUI option (space or enter toggles a boolean or cycles a choice, enter edits a number or text, `r` resets to the default; an option your `tui.lua` sets anyway is marked), **Providers** (enter uses one; `e` edits one: model, URL, type, reasoning effort, stream usage, API key and key variable, each saved at once, `r` resetting a field to `core.lua`'s and "Undo changes" all of them; `a` adds a provider, `d` deletes one you added), **Plugins** (space switches one off or on, both halves, and it stays that way: `plugins.disabled`), and a tab for each plugin that declares settings. A plugin declares them in its `manifest.json`, which also works for a core-only plugin:
 
 ```json
 { "title": "Web search", "settings": [

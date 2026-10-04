@@ -85,7 +85,7 @@ Enter on a partial name runs the highlighted suggestion (`/ses` + enter opens th
 | `diff_preview_lines` | 8 | rows of diff under each edit (style plugin) |
 | `prompt_max_height` | 10 | prompt height limit |
 
-Options are set in `~/.bone/tui.lua` (`bone.o.tool_detail = "rows"`). What you choose with `ctrl+t` and `ctrl+r` is remembered in `~/.bone/settings.json`, which bone writes for you; `tui.lua` still wins when it sets the same option. The same file remembers which provider and model to use (`"provider"`, `"models": { "<provider>": "<model>" }`), chosen among those `core.lua` defines.
+Options are set in `~/.bone/tui.lua` (`bone.o.tool_detail = "rows"`). What you choose with `ctrl+t` and `ctrl+r` is remembered in `~/.bone/settings.json`, which bone writes for you; `tui.lua` still wins when it sets the same option. The same file remembers which provider to use and your changes to providers (`"provider"`, `"providers": { "<name>": { "model": … } }`): `/config` edits every provider's settings there, over what `core.lua` gives them, and adds new ones.
 
 ## Command line
 

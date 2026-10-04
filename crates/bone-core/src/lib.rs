@@ -304,7 +304,6 @@ impl Core {
         // The provider choices must name a configured provider.
         let provider_named = match path.split_once('.') {
             None if path == "provider" => value.as_str().map(str::to_owned),
-            Some(("models", name)) => Some(name.to_owned()),
             _ => None,
         };
         if let Some(name) = provider_named {
@@ -335,7 +334,7 @@ impl Core {
             settings::save(&source.config_dir, current).map_err(RpcError::internal)?;
             before
         };
-        if (path == "provider" || path.starts_with("models.") || path.starts_with("providers."))
+        if (path == "provider" || path.starts_with("providers."))
             && let Err(e) = self.inner.reload(Change::Same).await
         {
             let mut guard = self.inner.settings.lock().unwrap();

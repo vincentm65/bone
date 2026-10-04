@@ -40,6 +40,8 @@ pub(crate) struct Runtime {
     /// Every `bone.config.providers` entry, for `bone.model` and
     /// `model/complete`, and the name of the one turns use.
     pub models: HashMap<String, ProviderConfig>,
+    /// Providers that exist only in settings.json (added in the app).
+    pub settings_providers: std::collections::HashSet<String>,
     pub selected: Option<String>,
     /// MCP servers this configuration asks for.
     pub mcp: Vec<crate::mcp::ServerConfig>,
@@ -54,6 +56,7 @@ impl Runtime {
             tools,
             scripting: None,
             models: HashMap::new(),
+            settings_providers: Default::default(),
             selected: None,
             mcp: Vec::new(),
         }
@@ -83,6 +86,11 @@ impl Runtime {
                 model: p.model.clone(),
                 kind: p.kind.clone(),
                 current: self.selected.as_ref() == Some(name),
+                base_url: p.base_url.clone(),
+                reasoning_effort: p.reasoning_effort.clone(),
+                stream_usage: p.stream_usage,
+                has_key: p.api_key.is_some(),
+                added: self.settings_providers.contains(name),
             })
             .collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
@@ -176,6 +184,7 @@ impl Runtime {
             tools,
             scripting: Some(loaded.scripting),
             models: loaded.providers,
+            settings_providers: loaded.settings_providers,
             selected: loaded.provider_name,
             mcp: loaded.mcp,
         }

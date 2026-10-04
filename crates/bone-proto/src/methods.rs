@@ -520,6 +520,22 @@ pub struct ModelInfo {
     pub kind: Option<String>,
     /// The provider turns use.
     pub current: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub base_url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default = "yes")]
+    pub stream_usage: bool,
+    /// It has an API key (never sent).
+    #[serde(default)]
+    pub has_key: bool,
+    /// It exists only in settings.json (added in the app), not in core.lua.
+    #[serde(default)]
+    pub added: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

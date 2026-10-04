@@ -6,11 +6,12 @@
 //! `settings/reset`, the core checks the change, writes the file whole (a
 //! temporary file renamed over it) and tells every client
 //! (`settings/changed`). Paths are dotted keys, e.g. `tui.tool_detail`,
-//! `models.qwen`, `web_search.num_results`.
+//! `providers.qwen.model`, `web_search.num_results`.
 //!
-//! Precedence: `core.lua` defines the providers and their default models;
-//! `provider` and `models.<name>` here choose among them; `BONE_*`
-//! environment variables override both for one run. TUI settings apply
+//! Precedence: `core.lua` defines providers; `providers.<name>.<field>`
+//! here changes their fields (and `providers.<name>` adds new ones), and
+//! `provider` chooses which is used; `BONE_*` environment variables
+//! override both for one run. TUI settings apply
 //! before `tui.lua`, which runs last.
 
 use std::path::{Path, PathBuf};
@@ -86,8 +87,7 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
     };
     match keys.as_slice() {
         ["provider"] => string_or_null("provider"),
-        ["models", _] => string_or_null(path),
-        ["models"] => Err("set one provider's model: models.<provider>".into()),
+        ["models", ..] => Err("a provider's model is providers.<name>.model".into()),
         ["providers"] => Err("set one provider: providers.<name>".into()),
         ["providers", _] => match value {
             Value::Null => Ok(()),
@@ -113,7 +113,22 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
             }
             _ => Err(format!("{path} is an object")),
         },
-        ["providers", _, _] => Err("set a whole provider: providers.<name>".into()),
+        ["providers", _, field] => match (*field, value) {
+            (_, Value::Null) => Ok(()),
+            (
+                "base_url" | "model" | "type" | "api_key_env" | "reasoning_effort",
+                Value::String(_),
+            ) => Ok(()),
+            ("stream_usage", Value::Bool(_)) => Ok(()),
+            ("api_key", _) => Err("keys go in secrets.json (secrets/set), not settings".into()),
+            (
+                "base_url" | "model" | "type" | "api_key_env" | "reasoning_effort" | "stream_usage",
+                _,
+            ) => Err(format!("{path} has the wrong type")),
+            _ => Err(format!(
+                "{path}: a provider's settings are base_url, model, type, api_key_env, reasoning_effort and stream_usage"
+            )),
+        },
         _ => Ok(()),
     }
 }
@@ -244,11 +259,6 @@ pub fn chosen_provider<'a>(
         .or(configured)
 }
 
-/// The saved model for `provider`, if any.
-pub fn chosen_model<'a>(settings: &'a Value, provider: &str) -> Option<&'a str> {
-    settings.get("models")?.get(provider)?.as_str()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -258,14 +268,20 @@ mod tests {
     fn set_get_reset_and_save() {
         let mut s = json!({});
         set(&mut s, "tui.tool_detail", json!("rows")).unwrap();
-        set(&mut s, "models.qwen", json!("big")).unwrap();
+        set(&mut s, "providers.qwen.model", json!("big")).unwrap();
         assert_eq!(get(&s, "tui.tool_detail"), Some(&json!("rows")));
-        assert_eq!(chosen_model(&s, "qwen"), Some("big"));
+        assert_eq!(get(&s, "providers.qwen.model"), Some(&json!("big")));
         set(&mut s, "tui.tool_detail", Value::Null).unwrap();
-        assert_eq!(s, json!({ "models": { "qwen": "big" } }), "empty tables go");
+        assert_eq!(
+            s,
+            json!({ "providers": { "qwen": { "model": "big" } } }),
+            "empty tables go"
+        );
         assert!(set(&mut s, "provider", json!(3)).is_err());
         assert!(set(&mut s, "bad path!", json!(1)).is_err());
-        assert!(set(&mut s, "models", json!({})).is_err());
+        assert!(set(&mut s, "models.qwen", json!("x")).is_err());
+        assert!(set(&mut s, "providers.qwen.api_key", json!("k")).is_err());
+        assert!(set(&mut s, "providers.qwen.stream_usage", json!("yes")).is_err());
 
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load(dir.path()).unwrap(), json!({}));

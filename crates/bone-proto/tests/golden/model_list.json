@@ -10,14 +10,22 @@
     "jsonrpc": "2.0",
     "result": [
       {
+        "added": false,
+        "base_url": "http://localhost:8081/v1",
         "current": true,
+        "has_key": false,
         "model": "qwen",
-        "name": "qwen"
+        "name": "qwen",
+        "stream_usage": true
       },
       {
+        "added": true,
         "current": false,
+        "has_key": true,
         "model": "claude-sonnet-5-5",
         "name": "claude",
+        "reasoning_effort": "high",
+        "stream_usage": true,
         "type": "anthropic"
       }
     ]

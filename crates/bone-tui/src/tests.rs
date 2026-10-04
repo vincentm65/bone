@@ -130,7 +130,8 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
         "plugin/list" => json!([{ "name": "corepart", "core": true, "loaded": true }]),
         "model/list" => json!([
             { "name": "ds", "model": "d1", "current": false },
-            { "name": "qwen", "model": "q1", "current": true },
+            { "name": "qwen", "model": "q1", "current": true, "base_url": "http://localhost:8081/v1" },
+            { "name": "extra", "model": "e1", "current": false, "base_url": "http://e/v1", "added": true },
         ]),
         "core/reload" => json!({ "plugins": [], "warnings": ["data_dir changed"] }),
         "initialize" => {
@@ -4390,8 +4391,84 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
     );
     h.input("{enter}").await; // ds is first
     assert_eq!(last_set(&h), json!({ "path": "provider", "value": "ds" }));
-    h.input("e{ctrl+u}d2{enter}").await;
-    assert_eq!(last_set(&h), json!({ "path": "models.ds", "value": "d2" }));
+    // e opens the editor; every field saves at once, as an override.
+    h.input("e").await;
+    let screen = h.screen(100, 34);
+    for row in [
+        "› Model",
+        "URL",
+        "Type",
+        "Reasoning effort",
+        "Stream usage",
+        "API key",
+        "Key variable",
+    ] {
+        assert!(screen.contains(row), "{row} in {screen}");
+    }
+    h.input("{enter}{ctrl+u}d2{enter}").await; // Model
+    assert_eq!(
+        last_set(&h),
+        json!({ "path": "providers.ds.model", "value": "d2" })
+    );
+    h.input("{down}{down}{down}{enter}").await; // Reasoning effort: default -> low
+    assert_eq!(
+        last_set(&h),
+        json!({ "path": "providers.ds.reasoning_effort", "value": "low" })
+    );
+    h.input("{down}{enter}").await; // Stream usage: on -> off
+    assert_eq!(
+        last_set(&h),
+        json!({ "path": "providers.ds.stream_usage", "value": false })
+    );
+    h.input("{down}{enter}sk-9{enter}").await; // API key
+    assert!(!h.screen(100, 34).contains("sk-9"));
+    assert_eq!(
+        h.requests("secrets/set").last().unwrap(),
+        &json!({ "provider": "ds", "key": "sk-9" })
+    );
+    h.input("{up}{up}{up}{up}{up}r").await; // reset the model to core.lua's
+    assert_eq!(
+        h.requests("settings/reset").last().unwrap(),
+        &json!({ "path": "providers.ds.model" })
+    );
+    h.input("{esc}").await; // back to the list
+    // A provider from core.lua cannot be deleted here.
+    h.input("d").await;
+    assert!(h.screen(100, 34).contains("is defined in core.lua"));
+
+    // a adds one: saved whole, its key in secrets.json.
+    h.input("a").await;
+    assert!(h.screen(100, 34).contains("› new provider"));
+    h.input("{enter}mine{enter}{down}{enter}http://h/v1{enter}{down}{enter}m1{enter}")
+        .await;
+    h.input("{down}{down}{enter}sk-new{enter}{down}{down}{enter}")
+        .await; // key, then Save
+    assert_eq!(
+        last_set(&h),
+        json!({ "path": "providers.mine", "value": { "base_url": "http://h/v1", "model": "m1" } })
+    );
+    assert_eq!(
+        h.requests("secrets/set").last().unwrap(),
+        &json!({ "provider": "mine", "key": "sk-new" })
+    );
+    h.input("{esc}").await;
+    // An added provider can be deleted (and its saved key with it).
+    h.input("{down}{down}d").await;
+    assert!(
+        h.screen(100, 34)
+            .contains("delete extra and its saved key?"),
+        "{}",
+        h.screen(100, 34)
+    );
+    h.input("y").await;
+    assert_eq!(
+        h.requests("settings/reset").last().unwrap(),
+        &json!({ "path": "providers.extra" })
+    );
+    assert_eq!(
+        h.requests("secrets/set").last().unwrap(),
+        &json!({ "provider": "extra" })
+    );
 
     // Plugins: space switches one off, saved and unloaded on both sides.
     h.input("{tab}").await;

@@ -57,7 +57,7 @@ After `initialize`, the server runs each request on its own task: replies carry 
 | `ask/respond` | `{ ask_id, answer }` | `null`; error if no question with that id is open |
 | `health/check` | `{}` | `[{ name, status: "ok" \| "warn" \| "error", message }]`: the core's checks (provider, API key, reachability, sessions folder, Lua) and core Lua's `bone.health` checks |
 | `settings/get` | `{}` | the saved settings (`settings.json` in the config dir), a JSON object |
-| `settings/set` | `{ path, value }` | every setting after the change. `path` is dotted (`tui.tool_detail`, `models.qwen`); `null` removes it. `provider` and `models.<name>` must name a configured provider; changing them reloads the configuration, and the change is undone if that fails. Every client hears `settings/changed` |
+| `settings/set` | `{ path, value }` | every setting after the change. `path` is dotted (`tui.tool_detail`, `providers.qwen.model`); `null` removes it. `provider` must name a configured provider; `providers.<name>` adds a provider (`{ base_url, model, type, api_key_env }`) and `providers.<name>.<field>` changes one field of any provider; changing either reloads the configuration, and the change is undone if that fails. Every client hears `settings/changed` |
 | `secrets/set` | `{ provider, key }` | the names of the providers with a key. Saves (or with `key: null` removes) a provider's API key in `secrets.json` (mode 0600) and reloads. Keys are never sent to clients |
 | `secrets/list` | `{}` | the names of the providers with a saved key |
 | `settings/reset` | `{ path }` | as `settings/set` with `null` |
