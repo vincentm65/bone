@@ -298,7 +298,7 @@ function M.open()
 
   local function render(ctx)
     local w = math.max(ctx.width, 30)
-    local out = { { { fill = "─", hl = "Normal" } } }
+    local out = { { { fill = "─", hl = "WinSeparator" } } }
     local list = rows()
     local selected = selected_rows(list)
     local updates = 0
@@ -307,16 +307,22 @@ function M.open()
         updates = updates + 1
       end
     end
-    out[#out + 1] = " Catalog   " .. bone.text.truncate(M.source(), w - 12)
-    out[#out + 1] = (" Updates: %d · Selected: %d"):format(updates, #selected)
+    out[#out + 1] = {
+      { " Catalog  ", "Accent" },
+      { bone.text.truncate(M.source(), w - 11), "Dim" },
+    }
+    out[#out + 1] = {
+      { (" Updates: %d"):format(updates), "Accent" },
+      { (" · Selected: %d"):format(#selected), "Dim" },
+    }
     out[#out + 1] = ""
     st.sel = math.max(1, math.min(st.sel, math.max(#list, 1)))
     if st.err then
-      out[#out + 1] = "   error: " .. st.err
+      out[#out + 1] = { { "   error: " .. st.err, "ErrorMsg" } }
     elseif not st.entries then
-      out[#out + 1] = "   loading…"
+      out[#out + 1] = { { "   loading…", "Dim" } }
     elseif #list == 0 then
-      out[#out + 1] = "   the catalog is empty"
+      out[#out + 1] = { { "   the catalog is empty", "Dim" } }
     end
     local name_w = 0
     for _, e in ipairs(list) do
@@ -329,14 +335,20 @@ function M.open()
     for i = first, math.min(#list, first + room - 1) do
       local e = list[i]
       if e.state ~= last_state then
-        out[#out + 1] = "   " .. HEAD[e.state]
+        out[#out + 1] = { { "   " .. HEAD[e.state], "MdHeading" } }
         last_state = e.state
       end
       local cursor = i == st.sel and "›" or " "
       local check = st.selected[e.name] and "x" or " "
-      local mark = cursor .. "[" .. check .. "] "
-      local text = mark .. pad(e.name, name_w) .. pad(e.version or "", 8) .. (e.description or "")
-      out[#out + 1] = bone.text.truncate(text, w)
+      local row_hl = i == st.sel and "Selection" or "Normal"
+      local muted_hl = i == st.sel and "Selection" or "Dim"
+      local prefix = { { cursor, i == st.sel and "Accent" or "Dim" }, { "[", "Dim" } }
+      prefix[#prefix + 1] = { check, st.selected[e.name] and "Accent" or "Dim" }
+      prefix[#prefix + 1] = { "] ", "Dim" }
+      prefix[#prefix + 1] = { pad(e.name, name_w), row_hl }
+      prefix[#prefix + 1] = { pad(e.version or "", 8), muted_hl }
+      prefix[#prefix + 1] = { bone.text.truncate(e.description or "", math.max(w - name_w - 13, 1)), muted_hl }
+      out[#out + 1] = prefix
     end
     out[#out + 1] = ""
     local e = list[st.sel]
@@ -345,7 +357,7 @@ function M.open()
       or (st.progress and ("installing %d/%d…"):format(st.progress.done, st.progress.total))
       or (st.busy and "working…")
       or ""
-    out[#out + 1] = bone.text.truncate("   " .. note, w)
+    out[#out + 1] = { { bone.text.truncate("   " .. note, w), st.ask and "Accent" or "Dim" } }
     local hint
     if st.ask then
       hint = "y yes · n no"
@@ -360,7 +372,7 @@ function M.open()
     else
       hint = "r refresh · esc close"
     end
-    out[#out + 1] = "   " .. hint
+    out[#out + 1] = { { "   " .. hint, "Dim" } }
     return out
   end
 
