@@ -533,134 +533,219 @@ function M.open(want)
     save(row, value)
   end
 
-  -- A row's value as plain text.
-  local function value_text(row)
-    if row.kind == "provider" then
-      local tags = {}
-      if row.current then
-        tags[#tags + 1] = "in use"
+  -- Text attributes only (bold, dim, underline), no colors; the groups are
+  -- in theme.rs and a colorscheme can restyle them.
+  local MUTED, KEY, NOTE = "SettingsMuted", "SettingsKey", "SettingsNote"
+
+  -- A line of { text, group } items, cut to the width as it grows.
+  local function line(w)
+    local items, used = {}, 0
+    local function add(text, hl)
+      text = tostring(text)
+      if used >= w or text == "" then
+        return
       end
-      if row.added then
-        tags[#tags + 1] = "added"
+      if used + text_width(text) > w then
+        text = bone.text.truncate(text, w - used)
       end
-      return pad(row.model or "", 26) .. pad(row.url or "", 34) .. table.concat(tags, ", ")
-    elseif row.kind == "paction" then
-      return ""
-    elseif row.kind == "pfield" then
-      local v
-      if row.type == "boolean" then
-        v = row.value and "on" or "off"
-      elseif row.type == "choice" then
-        local out = {}
-        for _, c in ipairs(row.choices) do
-          out[#out + 1] = c == row.value and ("[" .. c .. "]") or c
-        end
-        v = table.concat(out, " ")
-      elseif row.type == "secret" and st.prov and st.prov.new then
-        v = row.value ~= "" and string.rep("•", math.min(#row.value, 24)) or "(none)"
-      elseif row.key == "type" and (row.value == nil or row.value == "") then
-        v = "OpenAI-compatible"
-      else
-        v = (row.value == nil or row.value == "") and "(none)" or tostring(row.value)
-      end
-      return v .. (row.changed and "   (changed)" or "")
-    elseif row.kind == "plugin" then
-      local halves = (row.tui and "tui" or "") .. (row.tui and row.core and " + " or "") .. (row.core and "core" or "")
-      return pad(row.on and "on" or "off", 6) .. halves .. (row.error and ("  " .. row.error) or "")
-    elseif row.type == "boolean" then
-      return row.value and "on" or "off"
-    elseif row.choices and #row.choices > 0 then
-      -- Every choice, the current one in brackets.
-      local out = {}
-      for _, c in ipairs(row.choices) do
-        out[#out + 1] = c == row.value and ("[" .. c .. "]") or c
-      end
-      return table.concat(out, " ")
+      items[#items + 1] = { text, hl or "Normal" }
+      used = used + text_width(text)
     end
-    return row.value == nil and "(unset)" or tostring(row.value)
+    return items, add
   end
 
-  -- Plain text only: a full-width pane resting on the prompt.
+  -- The choices side by side, the current one bold and the rest dim.
+  local function choices_into(add, list, value)
+    for i, c in ipairs(list) do
+      if i > 1 then
+        add(" · ", MUTED)
+      end
+      add(c, c == value and KEY or MUTED)
+    end
+  end
+
+  local function switch_into(add, on)
+    if on then
+      add("● on", KEY)
+    else
+      add("○ off", MUTED)
+    end
+  end
+
+  -- A row's value, added to a line.
+  local function value_into(add, row)
+    if row.kind == "provider" then
+      add(pad(row.model or "", 26))
+      add(pad(row.url or "", 34), MUTED)
+      if row.current then
+        add("● in use  ", KEY)
+      end
+      if row.added then
+        add("added", MUTED)
+      end
+    elseif row.kind == "paction" then
+      return
+    elseif row.kind == "pfield" then
+      if row.type == "boolean" then
+        switch_into(add, row.value)
+      elseif row.type == "choice" then
+        choices_into(add, row.choices, row.value)
+      elseif row.type == "secret" and st.prov and st.prov.new then
+        if row.value ~= "" then
+          add(string.rep("•", math.min(#row.value, 24)))
+        else
+          add("none", MUTED)
+        end
+      elseif row.key == "type" and (row.value == nil or row.value == "") then
+        add("OpenAI-compatible")
+      elseif row.value == nil or row.value == "" then
+        add("none", MUTED)
+      else
+        add(tostring(row.value))
+      end
+      if row.changed then
+        add("   changed", NOTE)
+      end
+    elseif row.kind == "plugin" then
+      switch_into(add, row.on)
+      add(row.on and "    " or "   ")
+      add((row.tui and "tui" or "") .. (row.tui and row.core and " + " or "") .. (row.core and "core" or ""), MUTED)
+      if row.error then
+        add("  " .. row.error, "ErrorMsg")
+      end
+    elseif row.type == "boolean" then
+      switch_into(add, row.value)
+    elseif row.choices and #row.choices > 0 then
+      choices_into(add, row.choices, row.value)
+    elseif row.value == nil then
+      add("unset", MUTED)
+    else
+      add(tostring(row.value))
+    end
+  end
+
+  -- Key hints: the key bold, what it does dim.
+  local function hints_into(add, pairs_)
+    add("   ")
+    for i, h in ipairs(pairs_) do
+      if i > 1 then
+        add("   ")
+      end
+      add(h[1], KEY)
+      add(" " .. h[2], MUTED)
+    end
+  end
+
+  -- A full-width pane resting on the prompt.
   local function render(ctx)
     local w = math.max(ctx.width, 30)
     local t = st.tabs[st.tab]
     local list = rows()
     st.sel = math.max(1, math.min(st.sel, math.max(#list, 1)))
 
-    local out = { { { fill = "─", hl = "Normal" } } }
-    -- The tabs, the current one in brackets, wrapped to the width.
-    local line = " Settings  "
-    for i, tab in ipairs(st.tabs) do
-      local label = i == st.tab and ("[" .. tab.title .. "]") or (" " .. tab.title .. " ")
-      if text_width(line) + text_width(label) + 1 > w then
-        out[#out + 1] = line
-        line = "           "
+    local out = {}
+    -- The title in the top rule.
+    local title = st.prov and (st.prov.new and "new provider" or st.prov.name)
+    local top = { { "── ", MUTED }, { "Settings", "SettingsTitle" } }
+    if title then
+      top[#top + 1] = { " › ", MUTED }
+      top[#top + 1] = { title, "SettingsTitle" }
+    end
+    top[#top + 1] = { " ", MUTED }
+    top[#top + 1] = { fill = "─", hl = MUTED }
+    out[1] = top
+
+    -- The tabs, the current one bold and underlined, wrapped to the width.
+    if #st.tabs > 1 then
+      local items, used = { { "  " } }, 2
+      for i, tab in ipairs(st.tabs) do
+        local n = text_width(tab.title) + 3
+        if used + n > w then
+          out[#out + 1] = items
+          items, used = { { "  " } }, 2
+        end
+        items[#items + 1] = { " " }
+        items[#items + 1] = { tab.title, i == st.tab and "SettingsTabCurrent" or "SettingsTab" }
+        items[#items + 1] = { "  " }
+        used = used + n
       end
-      line = line .. label .. " "
+      out[#out + 1] = items
     end
-    if st.prov then
-      line = line .. "› " .. (st.prov.new and "new provider" or st.prov.name)
-    end
-    out[#out + 1] = line
     out[#out + 1] = ""
 
     local label_w = 0
     for _, r in ipairs(list) do
       label_w = math.max(label_w, text_width(r.label))
     end
-    label_w = math.min(label_w + 3, math.floor(w / 2))
+    label_w = math.min(label_w + 4, math.floor(w / 2))
 
     -- At most this many rows; the list scrolls with the selection.
     local room = math.max(math.min(14, (ctx.height or 24) - 9), 3)
     if t.name == "providers" and not st.providers then
-      out[#out + 1] = "   loading…"
+      out[#out + 1] = { { "    loading…", MUTED } }
     elseif #list == 0 then
-      out[#out + 1] = "   " .. (t.name == "plugins" and "no plugins in ~/.bone/plugins" or "nothing to set here")
+      out[#out + 1] = { { "    " .. (t.name == "plugins" and "no plugins in ~/.bone/plugins" or "nothing to set here"), MUTED } }
     end
     local first = math.max(1, st.sel - room + 1)
     for i = first, math.min(#list, first + room - 1) do
       local r = list[i]
-      local text = (i == st.sel and " › " or "   ") .. pad(r.label, label_w)
-      if i == st.sel and st.edit then
-        local shown = r.type == "secret" and string.rep("•", #st.edit) or st.edit
-        text = text .. shown .. "▏"
+      local items, add = line(w)
+      if i == st.sel then
+        add("  › ", KEY)
+        add(pad(r.label, label_w), "SettingsSelected")
       else
-        text = text .. value_text(r)
+        add("    " .. pad(r.label, label_w))
+      end
+      if i == st.sel and st.edit then
+        add(r.type == "secret" and string.rep("•", #st.edit) or st.edit, "SettingsSelected")
+        add("▏")
+      else
+        value_into(add, r)
         -- tui.lua runs last; say so when it overrides the saved value.
         if r.kind == "option" then
           local saved = bone.settings.get(r.path)
           if saved ~= nil and saved ~= r.value then
-            text = text .. "   (tui.lua sets " .. tostring(r.value) .. ")"
+            add("   tui.lua sets " .. tostring(r.value), NOTE)
           end
         end
       end
-      out[#out + 1] = bone.text.truncate(text, w)
+      out[#out + 1] = items
     end
     if #list > room then
-      out[#out + 1] = ("   %d–%d of %d"):format(first, math.min(#list, first + room - 1), #list)
+      out[#out + 1] = { { ("    %d–%d of %d"):format(first, math.min(#list, first + room - 1), #list), MUTED } }
     end
 
     out[#out + 1] = ""
     local current = list[st.sel]
-    local note = (st.ask and st.ask.text)
-      or (st.note and ((st.note[2] == "ErrorMsg" and "error: " or "") .. st.note[1]))
-      or (current and current.desc or "")
-    out[#out + 1] = bone.text.truncate("   " .. note, w)
+    local items, add = line(w)
+    if st.ask then
+      add("    " .. st.ask.text, KEY)
+    elseif st.note and st.note[2] == "ErrorMsg" then
+      add("    error: " .. st.note[1], "ErrorMsg")
+    elseif st.note then
+      add("    " .. st.note[1])
+    else
+      add("    " .. (current and current.desc or ""), NOTE)
+    end
+    out[#out + 1] = items
+    out[#out + 1] = ""
     local hint
     if st.ask then
-      hint = "y yes · n no"
+      hint = { { "y", "yes" }, { "n", "no" } }
     elseif st.edit then
-      hint = "enter save · esc cancel"
+      hint = { { "enter", "save" }, { "esc", "cancel" } }
     elseif t.name == "providers" and st.prov then
-      hint = "↑↓ move · enter change · r reset to core.lua · esc back"
+      hint = { { "↑↓", "move" }, { "enter", "change" }, { "r", "reset to core.lua" }, { "esc", "back" } }
     elseif t.name == "providers" then
-      hint = "↑↓ move · enter use · e edit · a add · d delete · tab section · esc close"
+      hint = { { "↑↓", "move" }, { "enter", "use" }, { "e", "edit" }, { "a", "add" }, { "d", "delete" }, { "tab", "section" }, { "esc", "close" } }
     elseif t.name == "plugins" then
-      hint = "↑↓ move · space on/off · tab section · esc close"
+      hint = { { "↑↓", "move" }, { "space", "on/off" }, { "tab", "section" }, { "esc", "close" } }
     else
-      hint = "↑↓ move · enter change · r reset · tab section · esc close"
+      hint = { { "↑↓", "move" }, { "enter", "change" }, { "r", "reset" }, { "tab", "section" }, { "esc", "close" } }
     end
-    out[#out + 1] = bone.text.truncate("   " .. hint, w)
+    items, add = line(w)
+    hints_into(add, hint)
+    out[#out + 1] = items
     return out
   end
 

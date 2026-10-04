@@ -4335,7 +4335,7 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
     h.app.load_user_config();
     h.input("/config{enter}").await;
     let screen = h.screen(100, 34);
-    for tab in ["[General]", " Providers ", " Plugins ", " Webby"] {
+    for tab in [" General ", " Providers ", " Plugins ", " Webby"] {
         assert!(screen.contains(tab), "{tab} in {screen}");
     }
     let last_set = |h: &Harness| {

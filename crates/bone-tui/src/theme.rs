@@ -70,6 +70,24 @@ fn fallback() -> Vec<(&'static str, Style)> {
         ("PopupBorder", fg(Color::Yellow)),
         ("PopupTitle", fg(Color::Yellow).add_modifier(Modifier::BOLD)),
         ("PanelTitle", bold),
+        // The settings pages (/config, /catalog, /setup): attributes only,
+        // so they follow the terminal's own colors.
+        ("SettingsTitle", bold),
+        ("SettingsTab", Style::default().add_modifier(Modifier::DIM)),
+        (
+            "SettingsTabCurrent",
+            Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+        ),
+        ("SettingsSelected", bold),
+        (
+            "SettingsMuted",
+            Style::default().add_modifier(Modifier::DIM),
+        ),
+        ("SettingsKey", bold),
+        (
+            "SettingsNote",
+            Style::default().add_modifier(Modifier::DIM | Modifier::ITALIC),
+        ),
         (
             "PanelTitleFocus",
             Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
