@@ -117,6 +117,22 @@ fn line_of(lua: &mlua::Lua, v: Value, ctx: &Json, hl: &str) -> mlua::Result<Vec<
     }
 }
 
+/// A styled range of the prompt: 0-based row, chars `from..to`.
+#[derive(Debug, Clone)]
+pub struct Mark {
+    pub row: usize,
+    pub from: usize,
+    pub to: usize,
+    pub hl: String,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PromptMarks {
+    pub ranges: Vec<Mark>,
+    pub ghost: Option<String>,
+    pub ghost_hl: String,
+}
+
 /// How much room a layout node takes along its split.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Size {
@@ -534,6 +550,39 @@ impl App {
     /// What `bone.ui.prompt` functions get: the box and its state. Layout
     /// fields (`rows`, `height`, `text_width`, `cursor.screen`) only reach
     /// `top` and `bottom`, which are drawn after the text is laid out.
+    /// `bone.ui.prompt_highlight(ctx)`: styles for ranges of the prompt's
+    /// text, and ghost text to show after the cursor.
+    pub fn prompt_highlight(&mut self, ctx: &Json) -> PromptMarks {
+        self.guarded("prompt_highlight", |lua| {
+            let ui: Table = lua.globals().get::<Table>("bone")?.get("ui")?;
+            let Some(f) = ui.get::<Option<Function>>("prompt_highlight")? else {
+                return Ok(None);
+            };
+            let Some(t) = f.call::<Option<Table>>(to_lua(lua, ctx)?)? else {
+                return Ok(None);
+            };
+            let mut marks = PromptMarks::default();
+            if let Some(list) = t.get::<Option<Table>>("highlights")? {
+                for h in list.sequence_values::<Table>() {
+                    let h = h?;
+                    marks.ranges.push(Mark {
+                        row: h.get("row")?,
+                        from: h.get("from")?,
+                        to: h.get("to")?,
+                        hl: h.get("hl")?,
+                    });
+                }
+            }
+            marks.ghost = t.get("ghost")?;
+            marks.ghost_hl = t
+                .get::<Option<String>>("ghost_hl")?
+                .unwrap_or_else(|| "Placeholder".into());
+            Ok(Some(marks))
+        })
+        .flatten()
+        .unwrap_or_default()
+    }
+
     pub fn prompt_ctx(&self, width_cols: u16) -> Json {
         let (row, col) = self.prompt.cursor();
         let selection = self.prompt.selection().map(|(a, b)| {

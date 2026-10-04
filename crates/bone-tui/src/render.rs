@@ -523,6 +523,20 @@ fn draw_prompt(
         return None;
     }
 
+    let marks = if app.prompt.is_empty() {
+        Default::default()
+    } else {
+        app.prompt_highlight(&ctx)
+    };
+    let theme = &app.theme;
+    let cursor_line = app.prompt.cursor();
+    let at_line_end = app
+        .prompt
+        .lines()
+        .get(cursor_line.0)
+        .is_some_and(|l| cursor_line.1 >= l.chars().count());
+    let selection = app.prompt.selection();
+    let selected = theme.hl("Selection");
     // A row's gutter: the prefix on the first, the continuation (or blanks
     // as wide) after; both padded to the same width.
     let gutter_spans = |items: Option<&[Item]>| -> Vec<Span<'static>> {
@@ -536,8 +550,7 @@ fn draw_prompt(
         }
         spans
     };
-    let selection = app.prompt.selection();
-    let selected = theme.hl("Selection");
+
     let lines: Vec<Line> = if app.prompt.is_empty() {
         let mut spans = gutter_spans(Some(&spec.prefix));
         spans.extend(render_items(&spec.placeholder, w, theme).spans);
@@ -564,16 +577,43 @@ fn draw_prompt(
                     };
                     (at(a), at(b))
                 });
-                match range {
-                    Some((lo, hi)) if lo < hi => {
-                        let part = |from: usize, to: usize| -> String {
-                            text.chars().skip(from).take(to - from).collect()
-                        };
-                        spans.push(Span::raw(part(0, lo)));
-                        spans.push(Span::styled(part(lo, hi), selected));
-                        spans.push(Span::raw(part(hi, text.chars().count())));
+                // Each char's style: Lua's marks, then the selection.
+                let chars: Vec<char> = text.chars().collect();
+                let mut styles = vec![ratatui::style::Style::default(); chars.len()];
+                for m in marks.ranges.iter().filter(|m| m.row == *line) {
+                    let style = theme.hl(&m.hl);
+                    for (k, s) in styles.iter_mut().enumerate() {
+                        if (m.from..m.to).contains(&(start + k)) {
+                            *s = style;
+                        }
                     }
-                    _ => spans.push(Span::raw(text.clone())),
+                }
+                if let Some((lo, hi)) = range {
+                    for s in styles.iter_mut().take(hi).skip(lo) {
+                        *s = selected;
+                    }
+                }
+                let mut k = 0;
+                while k < chars.len() {
+                    let mut j = k + 1;
+                    while j < chars.len() && styles[j] == styles[k] {
+                        j += 1;
+                    }
+                    spans.push(Span::styled(
+                        chars[k..j].iter().collect::<String>(),
+                        styles[k],
+                    ));
+                    k = j;
+                }
+                // Ghost text after the cursor, at the end of its line.
+                if i == crow
+                    && at_line_end
+                    && let Some(ghost) = marks.ghost.as_deref().filter(|g| !g.is_empty())
+                {
+                    spans.push(Span::styled(
+                        ghost.lines().next().unwrap_or("").to_owned(),
+                        theme.hl(&marks.ghost_hl),
+                    ));
                 }
                 Line::from(spans)
             })

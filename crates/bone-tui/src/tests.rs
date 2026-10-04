@@ -3727,3 +3727,55 @@ async fn layout_nests_rows_and_columns() {
         h.app.log
     );
 }
+
+#[tokio::test]
+async fn lua_styles_the_prompt_text_and_shows_ghost_text() {
+    let mut h = Harness::blank().await;
+    h.lua(
+        r##"
+        bone.hl.set("Cmd", { fg = "#ff0000" })
+        bone.hl.set("Ghost", { fg = "#00ff00" })
+        bone.ui.layout = { "chat", "prompt" }
+        bone.ui.prompt_highlight = function(ctx)
+          local out = { highlights = {} }
+          local s, e = ctx.text:find("^/%w+")
+          if s then
+            out.highlights[1] = { row = 0, from = s - 1, to = e, hl = "Cmd" }
+          end
+          if ctx.text == "/he" then out.ghost = "lp"; out.ghost_hl = "Ghost" end
+          return out
+        end
+        "##,
+    )
+    .await;
+    h.input("/he").await;
+    let (w, rows) = (20u16, 3u16);
+    let draw = |h: &mut Harness| {
+        let mut term = Terminal::new(TestBackend::new(w, rows)).unwrap();
+        term.draw(|f| render::draw(f, &mut h.app)).unwrap();
+        term.backend().buffer().clone()
+    };
+    let buf = draw(&mut h);
+    let y = rows - 1;
+    let row: String = (0..w).map(|x| buf[(x, y)].symbol().to_owned()).collect();
+    assert_eq!(row.trim_end(), "/help");
+    let red = ratatui::style::Color::Rgb(255, 0, 0);
+    let green = ratatui::style::Color::Rgb(0, 255, 0);
+    assert_eq!([buf[(0, y)].fg, buf[(2, y)].fg], [red, red]);
+    assert_eq!([buf[(3, y)].fg, buf[(4, y)].fg], [green, green]);
+    // Typing on past the ghost drops it; the selection wins over marks.
+    h.input(" x").await;
+    let buf = draw(&mut h);
+    let row: String = (0..w).map(|x| buf[(x, y)].symbol().to_owned()).collect();
+    assert_eq!(row.trim_end(), "/he x");
+    assert_eq!(buf[(1, y)].fg, red);
+    h.app
+        .with_api(|lua| {
+            lua.load("bone.prompt.select({ row = 0, col = 0 }, { row = 0, col = 2 })")
+                .exec()
+        })
+        .unwrap();
+    let buf = draw(&mut h);
+    assert_ne!(buf[(1, y)].fg, red);
+    assert_eq!(buf[(2, y)].fg, red);
+}

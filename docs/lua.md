@@ -743,6 +743,15 @@ bone.ui.prompt = {
 bone.ui.prompt = { prefix = "> ", background = "InputBackground", padding = { 1, 1 } }
 ```
 
+The text itself can be styled too. `bone.ui.prompt_highlight(ctx)` (same `ctx`) returns `{ highlights = { { row, from, to, hl }, … }, ghost, ghost_hl }`: each highlight colors chars `from` to `to` (exclusive, from 0) of line `row`, under the selection; `ghost` is text shown after the cursor when it is at the end of its line (in `ghost_hl`, default `Placeholder`), for completions you then accept from a key. Rust keeps the cursor, wrapping and editing. It runs on every frame while the prompt has text, so keep it light.
+
+```lua
+bone.ui.prompt_highlight = function(ctx)
+  local s, e = ctx.text:find("^/%w+")
+  return { highlights = s and { { row = 0, from = s - 1, to = e, hl = "Accent" } } or {} }
+end
+```
+
 A *line* is a list of items: `{ "text", "Group" }`, a plain string, or `{ fill = "─", hl = "Group" }` (stretches to fill the row). An empty table is a blank line. Lines longer than the width are cut with `…`.
 
 #### Views: how each item looks
