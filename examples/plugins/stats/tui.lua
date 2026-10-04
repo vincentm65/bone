@@ -55,7 +55,7 @@ end
 
 local QUERIES = {
   totals = [[
-    SELECT count(*), sum(input_tokens), sum(output_tokens), count(DISTINCT session_id)
+    SELECT count(*), sum(input_tokens), sum(output_tokens), count(DISTINCT nullif(session_id, ''))
     FROM usage WHERE at >= ?1]],
   models = [[
     SELECT model, count(*), sum(input_tokens), sum(output_tokens)

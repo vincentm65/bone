@@ -438,23 +438,66 @@ async fn turns_leave_usage_and_tool_calls_in_the_index() {
         input_tokens: input,
         output_tokens: output,
     };
-    let mut h = Harness::new(vec![
-        match calls(&[("c1", "nope", json!({}))]) {
-            Step::Reply(c) => Step::Reply(Completion {
-                usage: Some(used(10, 2)),
-                ..c
+    let lua = r#"
+        bone.rpc.register("ask", function(args)
+          return bone.model.complete({ prompt = "side question" }).content
+        end)
+    "#;
+    let mut h = Harness::with_lua(
+        lua,
+        vec![
+            match calls(&[("c1", "nope", json!({}))]) {
+                Step::Reply(c) => Step::Reply(Completion {
+                    usage: Some(used(10, 2)),
+                    ..c
+                }),
+                _ => unreachable!(),
+            },
+            Step::Reply(Completion {
+                content: "done".into(),
+                usage: Some(used(30, 4)),
+                ..Default::default()
             }),
-            _ => unreachable!(),
-        },
-        Step::Reply(Completion {
-            content: "done".into(),
-            usage: Some(used(30, 4)),
-            ..Default::default()
-        }),
-    ])
+            Step::Reply(Completion {
+                content: "lua".into(),
+                usage: Some(used(5, 1)),
+                ..Default::default()
+            }),
+            Step::Reply(Completion {
+                content: "client".into(),
+                usage: Some(used(7, 2)),
+                ..Default::default()
+            }),
+        ],
+    )
     .await;
     h.start("go").await;
     h.until::<TurnFinished>().await;
+    let sid = h.session_id.clone();
+    // Model calls outside the turn count too: from core Lua for the
+    // session, and from a client for none.
+    let answer = h
+        .call::<LuaCall>(LuaCallParams {
+            name: "ask".into(),
+            args: Value::Null,
+            session_id: Some(sid.clone()),
+            cwd: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(answer, json!("lua"));
+    h.call::<ModelComplete>(ModelCompleteParams {
+        provider: None,
+        messages: vec![ChatMessage::User {
+            content: "hi".into(),
+        }],
+        tools: vec![],
+        options: Value::Null,
+        stream: false,
+    })
+    .await
+    .unwrap();
+    h.until::<ModelCompleted>().await;
     let q = |sql: &str| StoreQueryParams {
         sql: sql.into(),
         params: Value::Null,
@@ -465,7 +508,22 @@ async fn turns_leave_usage_and_tool_calls_in_the_index() {
         ))
         .await
         .unwrap();
-    assert_eq!(out.rows, [[json!(2), json!(40), json!(6)]]);
+    assert_eq!(out.rows, [[json!(4), json!(52), json!(9)]]);
+    let out = h
+        .call::<StoreQuery>(q(
+            "SELECT source, session_id != '', input_tokens FROM usage ORDER BY at, rowid",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        out.rows,
+        [
+            [json!("turn"), json!(1), json!(10)],
+            [json!("turn"), json!(1), json!(30)],
+            [json!("lua"), json!(1), json!(5)],
+            [json!("client"), json!(0), json!(7)],
+        ]
+    );
     let out = h
         .call::<StoreQuery>(q("SELECT name, is_error FROM tool_calls"))
         .await
@@ -1120,6 +1178,41 @@ async fn nested_model_calls_stop_at_the_limit() {
         tool_result(&t[2]).0.contains("nested more than 4 deep"),
         "{}",
         tool_result(&t[2]).0
+    );
+}
+
+#[tokio::test]
+async fn a_provider_relaying_to_another_is_counted_once() {
+    let mut h = Harness::with_lua(
+        r#"
+        bone.provider.register("relay", { complete = function(req)
+          return assert(bone.model.complete({ provider = "x", messages = req.messages }))
+        end })
+        bone.config.providers.relay = { type = "relay", model = "r" }
+        bone.config.provider = "relay"
+        "#,
+        vec![Step::Reply(Completion {
+            content: "hi".into(),
+            usage: Some(Usage {
+                input_tokens: 9,
+                output_tokens: 3,
+            }),
+            ..Default::default()
+        })],
+    )
+    .await;
+    h.start("go").await;
+    h.until::<TurnFinished>().await;
+    let out = h
+        .call::<StoreQuery>(StoreQueryParams {
+            sql: "SELECT source, provider, model, input_tokens FROM usage".into(),
+            params: Value::Null,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        out.rows,
+        [[json!("turn"), json!("relay"), json!("r"), json!(9)]]
     );
 }
 

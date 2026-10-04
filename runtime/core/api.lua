@@ -241,6 +241,8 @@ function bone.model.stream(req)
     tools = req.tools,
     options = req.options,
     depth = (bone._depth[coroutine.running()] or 0) + 1,
+    -- Made by a provider: its usage is counted in the provider's result.
+    in_provider = bone._depth[coroutine.running()] ~= nil,
   } })
   return setmetatable({ id = r.stream }, ModelStream)
 end

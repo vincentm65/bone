@@ -53,6 +53,10 @@ pub struct UsageRecord {
     pub model: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// `None` for a turn; `"lua"` or `"client"` for a call made outside one
+    /// (then `turn_id` is 0).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -200,6 +204,9 @@ pub struct SessionStore {
     loaded: Mutex<HashMap<SessionId, SessionHandle>>,
     /// `None` when the index could not be opened; sessions work without.
     index: Option<Arc<Index>>,
+    /// Usage of model calls outside any session.
+    usage_log: PathBuf,
+    usage_lock: Mutex<()>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -225,6 +232,8 @@ impl SessionStore {
             dir: data_dir.join("sessions"),
             loaded: Mutex::new(HashMap::new()),
             index,
+            usage_log: data_dir.join("usage.jsonl"),
+            usage_lock: Mutex::new(()),
         }
     }
 
@@ -393,6 +402,30 @@ impl SessionStore {
         Ok(())
     }
 
+    /// Keep what a model call outside a turn used: in its session's file
+    /// (at the turn running, if any), or in `usage.jsonl` without one.
+    /// Failures only cost the record.
+    pub fn record_usage(&self, session: Option<&str>, mut usage: UsageRecord) {
+        if let Some(s) = session.and_then(|id| self.get(id).ok()) {
+            let mut s = s.lock().unwrap();
+            usage.turn_id = s.active.as_ref().map_or(0, |a| a.turn_id);
+            let _ = s.usage(usage);
+            return;
+        }
+        let _guard = self.usage_lock.lock().unwrap();
+        let written = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.usage_log)
+            .and_then(|mut f| write_record(&mut f, Record::Usage(usage)));
+        if written.is_ok()
+            && let Some(index) = &self.index
+            && let Err(e) = index.sync("", &self.usage_log, None)
+        {
+            eprintln!("bone: session index: {e}");
+        }
+    }
+
     pub fn index(&self) -> Option<&Arc<Index>> {
         self.index.as_ref()
     }
@@ -424,6 +457,10 @@ impl SessionStore {
             ids.push(id);
         }
         let _ = index.retain(&ids);
+        if self.usage_log.exists() {
+            let _guard = self.usage_lock.lock().unwrap();
+            let _ = index.sync("", &self.usage_log, None);
+        }
     }
 
     fn queue_path(&self, id: &str) -> PathBuf {
@@ -703,6 +740,7 @@ mod tests {
                 model: "m1".into(),
                 input_tokens: 100,
                 output_tokens: 7,
+                source: None,
             })
             .unwrap();
             for (call, err) in [("a", false), ("b", true)] {

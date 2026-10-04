@@ -59,6 +59,20 @@ impl Runtime {
         }
     }
 
+    /// The provider entry and model a call with these settings uses.
+    pub fn model_of(&self, name: Option<&str>, options: &Json) -> (Option<String>, String) {
+        let entry = name.map(str::to_owned).or_else(|| self.selected.clone());
+        let model = options["model"]
+            .as_str()
+            .map(str::to_owned)
+            .or_else(|| match name {
+                Some(n) => self.models.get(n).map(|p| p.model.clone()),
+                None => None,
+            })
+            .unwrap_or_else(|| self.config.provider.model.clone());
+        (entry, model)
+    }
+
     /// The configured providers, sorted by name.
     pub fn model_list(&self) -> Vec<ModelInfo> {
         let mut out: Vec<ModelInfo> = self
@@ -176,6 +190,9 @@ pub(crate) struct ModelCall {
     pub depth: u32,
     /// The session it is for, if any (for Lua providers and cancelling).
     pub session_id: Option<String>,
+    /// Who asked, for the usage record (`"lua"`, `"client"`); `None` when
+    /// a provider asked, as its own result counts what it used.
+    pub source: Option<&'static str>,
 }
 
 impl Inner {
@@ -207,6 +224,9 @@ impl Inner {
                 },
             })
             .collect();
+        let (entry, model) = self
+            .runtime()
+            .model_of(call.provider.as_deref(), &call.options);
         let session_id = call.session_id.unwrap_or_default();
         let req = CompletionRequest {
             session_id: &session_id,
@@ -214,7 +234,22 @@ impl Inner {
             tools: &tools,
             depth: call.depth,
         };
-        provider.complete(req, on_delta).await.map_err(|e| e.0)
+        let c = provider.complete(req, on_delta).await.map_err(|e| e.0)?;
+        if let (Some(source), Some(u)) = (call.source, c.usage) {
+            let session = (!session_id.is_empty()).then_some(session_id.as_str());
+            self.sessions.record_usage(
+                session,
+                crate::session::UsageRecord {
+                    turn_id: 0,
+                    provider: entry,
+                    model,
+                    input_tokens: u.input_tokens,
+                    output_tokens: u.output_tokens,
+                    source: Some(source.to_owned()),
+                },
+            );
+        }
+        Ok(c)
     }
 }
 
@@ -367,6 +402,7 @@ impl Host {
                 .unwrap_or_default(),
             depth: req["depth"].as_u64().unwrap_or(1) as u32,
             session_id: session_id.clone(),
+            source: (!req["in_provider"].as_bool().unwrap_or(false)).then_some("lua"),
         };
         let (dtx, drx) = mpsc::unbounded_channel();
         let (rtx, rrx) = oneshot::channel();

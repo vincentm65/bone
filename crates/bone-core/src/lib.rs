@@ -512,6 +512,7 @@ impl Core {
             tools: p.tools,
             depth: 0,
             session_id: None,
+            source: Some("client"),
         };
         let stream = p.stream;
         // Registered before it can finish, so it is always removed after.

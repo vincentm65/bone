@@ -20,7 +20,7 @@ use serde_json::{Value as Json, json};
 use crate::session::{Line, Record, title_of};
 
 /// Bump when the tables change; an index of another version is rebuilt.
-const VERSION: i64 = 1;
+const VERSION: i64 = 2;
 
 const SCHEMA: &str = "
 CREATE TABLE sessions (
@@ -31,8 +31,15 @@ CREATE TABLE sessions (
     renamed     TEXT,               -- a title given with session/rename
     created_at  INTEGER NOT NULL,
     updated_at  INTEGER NOT NULL,
-    messages    INTEGER NOT NULL DEFAULT 0,
-    indexed_len INTEGER NOT NULL DEFAULT 0
+    messages    INTEGER NOT NULL DEFAULT 0
+);
+-- How far each file is indexed.
+CREATE TABLE files (
+    path        TEXT PRIMARY KEY,
+    session_id  TEXT NOT NULL,      -- '' for usage.jsonl
+    indexed_len INTEGER NOT NULL,
+    messages    INTEGER NOT NULL,
+    last_at     INTEGER NOT NULL
 );
 CREATE TABLE messages (
     session_id TEXT NOT NULL,
@@ -47,8 +54,9 @@ CREATE VIRTUAL TABLE search USING fts5(
     text, session_id UNINDEXED, seq UNINDEXED, role UNINDEXED, at UNINDEXED
 );
 CREATE TABLE usage (
-    session_id    TEXT NOT NULL,
-    turn_id       INTEGER NOT NULL,
+    session_id    TEXT NOT NULL,    -- '' for calls outside any session
+    turn_id       INTEGER NOT NULL, -- 0 for calls outside a turn
+    source        TEXT NOT NULL,    -- turn, lua or client
     at            INTEGER NOT NULL,
     provider      TEXT,
     model         TEXT NOT NULL,
@@ -70,7 +78,14 @@ CREATE INDEX tool_calls_session ON tool_calls(session_id, call_id);
 CREATE INDEX tool_calls_at ON tool_calls(at);
 ";
 
-const TABLES: [&str; 5] = ["sessions", "messages", "search", "usage", "tool_calls"];
+const TABLES: [&str; 6] = [
+    "sessions",
+    "files",
+    "messages",
+    "search",
+    "usage",
+    "tool_calls",
+];
 
 /// Rows one query may return.
 const MAX_ROWS: usize = 10_000;
@@ -122,10 +137,11 @@ impl Index {
     pub fn sync(&self, id: &str, path: &Path, renamed: Option<&str>) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction().map_err(err)?;
+        let file = path.to_string_lossy();
         let known: Option<(u64, u64, u64)> = tx
             .query_row(
-                "SELECT indexed_len, messages, updated_at FROM sessions WHERE id = ?1",
-                [id],
+                "SELECT indexed_len, messages, last_at FROM files WHERE path = ?1",
+                [&file],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()
@@ -158,9 +174,14 @@ impl Index {
             }
         }
         tx.execute(
-            "UPDATE sessions SET indexed_len = ?2, messages = ?3,
-                 updated_at = max(updated_at, ?4) WHERE id = ?1",
-            params![id, offset, seq, last_at],
+            "INSERT OR REPLACE INTO files (path, session_id, indexed_len, messages, last_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![file, id, offset, seq, last_at],
+        )
+        .map_err(err)?;
+        tx.execute(
+            "UPDATE sessions SET messages = ?2, updated_at = max(updated_at, ?3) WHERE id = ?1",
+            params![id, seq, last_at],
         )
         .map_err(err)?;
         if let Some(title) = renamed {
@@ -274,14 +295,14 @@ impl Index {
 /// Remove a session's rows; its `sessions` row too when `all`, else just
 /// what is rebuilt from the file.
 fn clear(tx: &Transaction, id: &str, all: bool) -> Result<()> {
-    for t in ["messages", "search", "usage", "tool_calls"] {
+    for t in ["files", "messages", "search", "usage", "tool_calls"] {
         tx.execute(&format!("DELETE FROM {t} WHERE session_id = ?1"), [id])
             .map_err(err)?;
     }
     let sql = if all {
         "DELETE FROM sessions WHERE id = ?1"
     } else {
-        "UPDATE sessions SET title = NULL, messages = 0, indexed_len = 0 WHERE id = ?1"
+        "UPDATE sessions SET title = NULL, messages = 0 WHERE id = ?1"
     };
     tx.execute(sql, [id]).map(drop).map_err(err)
 }
@@ -297,9 +318,18 @@ fn index_record(tx: &Transaction, id: &str, record: Record, at: u64, seq: &mut u
         ),
         Record::Compact(_) => Ok(()),
         Record::Usage(u) => run(
-            "INSERT INTO usage (session_id, turn_id, at, provider, model, input_tokens, output_tokens)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![id, u.turn_id, at, u.provider, u.model, u.input_tokens, u.output_tokens],
+            "INSERT INTO usage (session_id, turn_id, source, at, provider, model, input_tokens, output_tokens)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                id,
+                u.turn_id,
+                u.source.as_deref().unwrap_or("turn"),
+                at,
+                u.provider,
+                u.model,
+                u.input_tokens,
+                u.output_tokens
+            ],
         ),
         Record::Message(m) => {
             *seq += 1;
