@@ -4580,6 +4580,56 @@ async fn local_catalog(h: &mut Harness, dir: &std::path::Path) -> std::path::Pat
     src
 }
 
+async fn add_local_catalog_package(h: &mut Harness, src: &std::path::Path, name: &str) {
+    let pkg = src.join("plugins").join(name);
+    std::fs::create_dir_all(&pkg).unwrap();
+    std::fs::write(pkg.join("tui.lua"), format!("{name}_loaded = true")).unwrap();
+    std::fs::write(
+        pkg.join("manifest.json"),
+        format!(r#"{{ "version": "1.0.0", "description": "{name}" }}"#),
+    )
+    .unwrap();
+    h.lua(&format!(
+        r#"local function file(p) local f = io.open("{src}/plugins/{name}/" .. p, "rb") local t = f:read("*a") f:close() return t end
+           local index_file = io.open("{src}/catalog.json", "rb")
+           local index = bone.json.decode(index_file:read("*a"))
+           index_file:close()
+           local files = {{}}
+           for _, p in ipairs({{ "manifest.json", "tui.lua" }}) do files[#files + 1] = {{ path = p, sha256 = bone.sha256(file(p)) }} end
+           index[#index + 1] = {{ name = "{name}", version = "1.0.0", description = "{name}", files = files }}
+           bone.fs.write("{src}/catalog.json", bone.json.encode(index))"#,
+        src = src.display(),
+        name = name,
+    ))
+    .await;
+}
+
+#[tokio::test]
+async fn catalog_selects_and_installs_multiple_packages() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = Harness::build(Some(dir.path().to_owned())).await;
+    let src = local_catalog(&mut h, dir.path()).await;
+    add_local_catalog_package(&mut h, &src, "demo_two").await;
+
+    h.input("/catalog{enter}").await;
+    assert!(h.screen(100, 30).contains("demo") && h.screen(100, 30).contains("demo_two"));
+    h.input("a{enter}").await;
+    assert!(
+        h.screen(100, 30).contains("install 2 selected packages?"),
+        "{}",
+        h.screen(100, 30)
+    );
+    h.input("y").await;
+
+    assert!(dir.path().join("plugins/demo/tui.lua").is_file());
+    assert!(dir.path().join("plugins/demo_two/tui.lua").is_file());
+    assert!(
+        h.screen(100, 30).contains("installed 2 packages"),
+        "{}",
+        h.screen(100, 30)
+    );
+}
+
 #[tokio::test]
 async fn catalog_installs_updates_and_removes_packages() {
     let dir = tempfile::tempdir().unwrap();
@@ -4610,7 +4660,7 @@ async fn catalog_installs_updates_and_removes_packages() {
 
     // A changed installed file shows as an update.
     std::fs::write(installed.join("tui.lua"), "-- edited").unwrap();
-    h.input("r").await;
+    h.input("u").await;
     assert!(
         h.screen(100, 30).contains("Updates"),
         "{}",

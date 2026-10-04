@@ -9,6 +9,8 @@
 --   catalog.install(entry, function(ok, err) end)
 --   catalog.remove(name, function(ok, err) end)
 --   catalog.open()                              -- the /catalog page
+-- The page supports space to select, a to select all available/updated
+-- packages, and one confirmation to install the selection.
 
 local M = {}
 
@@ -224,7 +226,16 @@ local function pad(s, w)
 end
 
 function M.open()
-  local st = { entries = nil, err = nil, sel = 1, note = nil, ask = nil, busy = false }
+  local st = {
+    entries = nil,
+    err = nil,
+    sel = 1,
+    selected = {},
+    note = nil,
+    ask = nil,
+    busy = false,
+    progress = nil,
+  }
   local id
 
   local function redraw()
@@ -233,10 +244,24 @@ function M.open()
     end
   end
 
-  local function load()
+  local function load(note)
     st.entries, st.err = nil, nil
+    if note then
+      st.note = { note }
+    end
     M.index(function(entries, err)
       st.entries, st.err = entries, err
+      if entries then
+        local present = {}
+        for _, e in ipairs(entries) do
+          present[e.name] = true
+        end
+        for name in pairs(st.selected) do
+          if not present[name] then
+            st.selected[name] = nil
+          end
+        end
+      end
       redraw()
     end)
   end
@@ -257,12 +282,34 @@ function M.open()
     return list
   end
 
+  local function selected_rows(list)
+    local out = {}
+    for _, e in ipairs(list) do
+      if st.selected[e.name] then
+        out[#out + 1] = e
+      end
+    end
+    return out
+  end
+
+  local function actionable(e)
+    return e.state == "available" or e.state == "update"
+  end
+
   local function render(ctx)
     local w = math.max(ctx.width, 30)
     local out = { { { fill = "─", hl = "Normal" } } }
-    out[#out + 1] = " Catalog   " .. bone.text.truncate(M.source(), w - 12)
-    out[#out + 1] = ""
     local list = rows()
+    local selected = selected_rows(list)
+    local updates = 0
+    for _, item in ipairs(list) do
+      if item.state == "update" then
+        updates = updates + 1
+      end
+    end
+    out[#out + 1] = " Catalog   " .. bone.text.truncate(M.source(), w - 12)
+    out[#out + 1] = (" Updates: %d · Selected: %d"):format(updates, #selected)
+    out[#out + 1] = ""
     st.sel = math.max(1, math.min(st.sel, math.max(#list, 1)))
     if st.err then
       out[#out + 1] = "   error: " .. st.err
@@ -285,24 +332,31 @@ function M.open()
         out[#out + 1] = "   " .. HEAD[e.state]
         last_state = e.state
       end
-      local mark = i == st.sel and " › " or "   "
-      local text = mark .. "  " .. pad(e.name, name_w) .. pad(e.version or "", 8) .. (e.description or "")
+      local cursor = i == st.sel and "›" or " "
+      local check = st.selected[e.name] and "x" or " "
+      local mark = cursor .. "[" .. check .. "] "
+      local text = mark .. pad(e.name, name_w) .. pad(e.version or "", 8) .. (e.description or "")
       out[#out + 1] = bone.text.truncate(text, w)
     end
     out[#out + 1] = ""
     local e = list[st.sel]
     local note = st.ask and st.ask.text
       or (st.note and ((st.note[2] and "error: " or "") .. st.note[1]))
+      or (st.progress and ("installing %d/%d…"):format(st.progress.done, st.progress.total))
       or (st.busy and "working…")
       or ""
     out[#out + 1] = bone.text.truncate("   " .. note, w)
     local hint
     if st.ask then
       hint = "y yes · n no"
+    elseif st.busy then
+      hint = "working…"
+    elseif e and #selected > 0 then
+      hint = "space toggle · enter install selected · a all · n clear · u scan · x remove · esc close"
     elseif e and e.state == "available" then
-      hint = "↑↓ move · enter install · r refresh · esc close"
+      hint = "↑↓ move · space select · enter install · a all · u scan · esc close"
     elseif e then
-      hint = "↑↓ move · enter " .. (e.state == "update" and "update" or "reinstall") .. " · x remove · r refresh · esc close"
+      hint = "↑↓ move · space select · enter " .. (e.state == "update" and "update" or "reinstall") .. " · a all · u scan · x remove · esc close"
     else
       hint = "r refresh · esc close"
     end
@@ -313,6 +367,7 @@ function M.open()
   local function done(what)
     return function(ok, err)
       st.busy = false
+      st.progress = nil
       if ok then
         st.note = { what .. (err and (" (" .. err .. ")") or "") }
       else
@@ -320,6 +375,37 @@ function M.open()
       end
       load()
     end
+  end
+
+  local function install_selected(entries)
+    st.busy = true
+    st.progress = { done = 0, total = #entries, failures = {} }
+    local i = 0
+    local function next_install()
+      i = i + 1
+      st.progress.done = i - 1
+      redraw()
+      local e = entries[i]
+      if not e then
+        local p = st.progress
+        st.busy, st.progress = false, nil
+        st.selected = {}
+        if #p.failures == 0 then
+          st.note = { ("installed %d package%s"):format(p.total, p.total == 1 and "" or "s") }
+        else
+          st.note = { ("installed %d/%d; failed: %s"):format(p.total - #p.failures, p.total, table.concat(p.failures, ", ")), true }
+        end
+        load(st.note[1])
+        return
+      end
+      M.install(e, function(ok)
+        if not ok then
+          st.progress.failures[#st.progress.failures + 1] = e.name
+        end
+        next_install()
+      end)
+    end
+    next_install()
   end
 
   local function on_key(k)
@@ -342,9 +428,31 @@ function M.open()
       st.sel = math.max(1, st.sel - 1)
     elseif k == "down" or k == "j" or k == "wheeldown" then
       st.sel = math.min(math.max(#list, 1), st.sel + 1)
-    elseif k == "r" then
-      load()
+    elseif (k == "r" or k == "u") and not st.busy then
+      load(k == "u" and "scanning for updates…" or nil)
+    elseif k == "space" and e and not st.busy then
+      st.selected[e.name] = not st.selected[e.name] or nil
+    elseif k == "a" and not st.busy then
+      for _, item in ipairs(list) do
+        if actionable(item) then
+          st.selected[item.name] = true
+        end
+      end
+      st.note = { "selected available and updated packages" }
+    elseif k == "n" and not st.busy then
+      st.selected = {}
+      st.note = { "selection cleared" }
     elseif k == "enter" and e and not st.busy then
+      local chosen = selected_rows(list)
+      if #chosen > 0 then
+        st.ask = {
+          text = ("install %d selected package%s? Its Lua runs with your permissions."):format(#chosen, #chosen == 1 and "" or "s"),
+          action = function()
+            install_selected(chosen)
+          end,
+        }
+        return true
+      end
       local verb = e.state == "available" and "install" or (e.state == "update" and "update" or "reinstall")
       st.ask = {
         text = verb .. " " .. e.name .. "? Its Lua runs with your permissions.",
