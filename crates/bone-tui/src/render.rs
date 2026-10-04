@@ -27,7 +27,7 @@ use crate::app::{App, CHAT_WIN, Level, PROMPT_WIN};
 use crate::editor::TextBuffer;
 use crate::layout::Placed;
 use crate::text::{sanitize, width};
-use crate::ui::{Border, Item, PromptSpec, render_items};
+use crate::ui::{Border, Item, LayoutNode, PromptSpec, Size, render_items};
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
@@ -35,84 +35,39 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     // The Normal group's background (if any) fills the screen.
     frame.render_widget(Block::default().style(app.theme.hl("Normal")), area);
 
-    let msg_rows = message_rows(app, area);
     let layout = app.layout();
-    let has = |n: &str| layout.iter().any(|l| l == n);
-    let status_h = u16::from(has("statusline") && app.ui_defined("statusline"));
-    let divider_h = u16::from(has("divider") && app.ui_defined("divider"));
+    // Without a "message" leaf, notifications take rows at the bottom.
+    let msg_rows = if layout.contains("message") {
+        0
+    } else {
+        message_rows(app, area)
+    };
     let main = Rect {
         height: area.height.saturating_sub(msg_rows),
         ..area
     };
-    let message = Rect {
+    let mut message = Rect {
         y: main.bottom(),
         height: msg_rows.min(area.height),
         ..area
     };
 
-    // Rows in `bone.ui.layout` order. Fixed rows first, then regions (never
-    // squeezing the chat below a few rows), then the chat takes the rest.
-    let prompt_ctx = app.prompt_ctx(main.width);
-    let spec = if has("prompt") {
-        app.prompt_spec(&prompt_ctx)
-    } else {
-        PromptSpec::default()
-    };
-    let insets = Insets::of(&spec, main.width);
-    let prompt_h = if has("prompt") {
-        let rows = prompt_rows(&app.prompt, insets.text_width).0.len();
-        let max = spec
-            .max_rows
-            .unwrap_or(app.options.prompt_max_height)
-            .max(spec.min_rows);
-        (rows.clamp(spec.min_rows, max) as u16 + insets.top + insets.bottom)
-            .min(main.height.saturating_sub(1 + divider_h + status_h))
-    } else {
-        0
-    };
-    let mut spare = main
-        .height
-        .saturating_sub(prompt_h + divider_h + status_h + 3);
-    let mut regions: HashMap<String, Vec<Line<'static>>> = HashMap::new();
-    let mut heights: Vec<u16> = Vec::new();
-    for name in &layout {
-        let h = match name.as_str() {
-            "chat" => 0,
-            "prompt" => prompt_h,
-            "divider" => divider_h,
-            "statusline" => status_h,
-            region => match app.region(region, main.width, spare) {
-                Some((h, lines)) => {
-                    spare = spare.saturating_sub(h);
-                    regions.insert(region.to_owned(), lines);
-                    h
-                }
-                None => 0,
-            },
-        };
-        heights.push(h);
-    }
-    let chat_h = main.height.saturating_sub(heights.iter().sum());
-    let mut y = main.y;
-    let mut rects: HashMap<&str, Rect> = HashMap::new();
-    for (name, h) in layout.iter().zip(heights) {
-        let h = if name == "chat" { chat_h } else { h };
-        let h = h.min(main.bottom().saturating_sub(y));
-        rects.insert(
-            name.as_str(),
-            Rect {
-                y,
-                height: h,
-                ..main
-            },
-        );
-        y += h;
-    }
+    let mut plan = Plan::default();
+    place(app, &layout, main, &mut plan);
     let none = Rect { height: 0, ..main };
-    let middle = rects.get("chat").copied().unwrap_or(none);
-    let divider = rects.get("divider").copied().unwrap_or(none);
-    let prompt_area = rects.get("prompt").copied().unwrap_or(none);
-    let status = rects.get("statusline").copied().unwrap_or(none);
+    let rect = |name: &str| {
+        plan.leaves
+            .iter()
+            .find(|(n, _)| n == name)
+            .map_or(none, |(_, r)| *r)
+    };
+    let middle = rect("chat");
+    let divider = rect("divider");
+    let prompt_area = rect("prompt");
+    let status = rect("statusline");
+    if layout.contains("message") {
+        message = rect("message");
+    }
 
     let mut chat_area = middle;
     if middle.width >= 40 {
@@ -135,11 +90,34 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
     }
     let chat_area = app.draw_panels(frame, chat_area);
-    for (name, lines) in regions {
-        if let Some(r) = rects.get(name.as_str()) {
-            frame.render_widget(Paragraph::new(lines), *r);
+    for (name, r, lines) in std::mem::take(&mut plan.regions) {
+        let lines = match lines {
+            Some(lines) => lines,
+            // Not sized by its content: drawn at the size it was given.
+            None => match app.region_sized(&name, r.width, r.height, true, true) {
+                Some((_, lines)) => lines,
+                None => continue,
+            },
+        };
+        frame.render_widget(Paragraph::new(lines), r);
+    }
+    for (x, area, sep) in std::mem::take(&mut plan.seps) {
+        let style = app.theme.hl("WinSeparator");
+        for y in area.y..area.bottom() {
+            if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
+                cell.set_symbol(&sep).set_style(style);
+            }
         }
     }
+    let (spec, insets, prompt_ctx) = match plan.prompt.take() {
+        Some(p) => p,
+        None => {
+            let ctx = app.prompt_ctx(main.width);
+            let spec = PromptSpec::default();
+            let insets = Insets::of(&spec, main.width);
+            (spec, insets, ctx)
+        }
+    };
 
     app.placed = HashMap::from([
         (CHAT_WIN, Placed { area: chat_area }),
@@ -204,6 +182,182 @@ fn vertical_bar(frame: &mut Frame<'_>, app: &App, x: u16, area: Rect) {
     for y in area.y..area.bottom() {
         if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
             cell.set_symbol("│").set_style(style);
+        }
+    }
+}
+
+/// Where the layout put things.
+#[derive(Default)]
+struct Plan {
+    /// Every leaf and its area.
+    leaves: Vec<(String, Rect)>,
+    /// Regions to draw: lines already made when sized by content.
+    regions: Vec<(String, Rect, Option<Vec<Line<'static>>>)>,
+    /// Column separators: x, the split's area, the symbol.
+    seps: Vec<(u16, Rect, String)>,
+    prompt: Option<(PromptSpec, Insets, serde_json::Value)>,
+}
+
+const BUILTIN: [&str; 5] = ["chat", "prompt", "divider", "statusline", "message"];
+
+/// Lay `node` out in `area`. In a split, fixed and percent sizes come first,
+/// then natural sizes (the prompt, one-row statusline and divider, the
+/// message line, then regions, which leave a filling sibling at least 3
+/// rows), and filling children share the rest.
+fn place(app: &mut App, node: &LayoutNode, area: Rect, plan: &mut Plan) {
+    let LayoutNode::Split {
+        rows,
+        sep,
+        children,
+        ..
+    } = node
+    else {
+        if let LayoutNode::Leaf { name, .. } = node {
+            plan.leaves.push((name.clone(), area));
+            if !BUILTIN.contains(&name.as_str()) {
+                plan.regions.push((name.clone(), area, None));
+            }
+        }
+        return;
+    };
+    let rows = *rows;
+    let n = children.len();
+    let seps = if rows || sep.is_none() {
+        0
+    } else {
+        n.saturating_sub(1) as u16
+    };
+    let total = if rows { area.height } else { area.width }.saturating_sub(seps);
+    let cross = if rows { area.width } else { area.height };
+    let mut sizes: Vec<Option<u16>> = vec![None; n];
+    let mut lines: Vec<Option<Vec<Line<'static>>>> = vec![None; n];
+    let leaf = |c: &LayoutNode| match c {
+        LayoutNode::Leaf { name, .. } => Some(name.clone()),
+        _ => None,
+    };
+    for (i, c) in children.iter().enumerate() {
+        sizes[i] = match (c.size(), leaf(c).as_deref()) {
+            (Size::Cells(v), _) => Some(v),
+            (Size::Percent(p), _) => Some((u32::from(total) * u32::from(p) / 100) as u16),
+            (Size::Auto, Some("prompt")) => {
+                let ctx = app.prompt_ctx(if rows { cross } else { total });
+                let spec = app.prompt_spec(&ctx);
+                let width = if rows { cross } else { total };
+                let insets = Insets::of(&spec, width);
+                let text = prompt_rows(&app.prompt, insets.text_width).0.len();
+                let max = spec
+                    .max_rows
+                    .unwrap_or(app.options.prompt_max_height)
+                    .max(spec.min_rows);
+                let h = text.clamp(spec.min_rows, max) as u16 + insets.top + insets.bottom;
+                plan.prompt = Some((spec, insets, ctx));
+                Some(if rows {
+                    h.min(total.saturating_sub(1))
+                } else {
+                    total / 2
+                })
+            }
+            (Size::Auto, Some(name @ ("divider" | "statusline"))) => {
+                Some(u16::from(app.ui_defined(name)))
+            }
+            (Size::Auto, Some("message")) => Some(message_rows(app, area)),
+            _ => None,
+        };
+    }
+    // The prompt also needs its spec when it was given a fixed size.
+    for (i, c) in children.iter().enumerate() {
+        if leaf(c).as_deref() == Some("prompt") && plan.prompt.is_none() {
+            let width = if rows {
+                cross
+            } else {
+                sizes[i].unwrap_or(total)
+            };
+            let ctx = app.prompt_ctx(width);
+            let spec = app.prompt_spec(&ctx);
+            let insets = Insets::of(&spec, width);
+            plan.prompt = Some((spec, insets, ctx));
+        }
+    }
+    let fills = children
+        .iter()
+        .enumerate()
+        .filter(|(i, c)| {
+            sizes[*i].is_none()
+                && !(c.size() == Size::Auto
+                    && leaf(c).is_some_and(|n| !BUILTIN.contains(&n.as_str())))
+        })
+        .count();
+    let used: u16 = sizes.iter().flatten().sum();
+    let keep = if fills > 0 && rows { 3 } else { 0 };
+    let mut spare = total.saturating_sub(used + keep);
+    for (i, c) in children.iter().enumerate() {
+        if sizes[i].is_some() || c.size() != Size::Auto {
+            continue;
+        }
+        let Some(name) = leaf(c).filter(|n| !BUILTIN.contains(&n.as_str())) else {
+            continue;
+        };
+        let (avail_w, avail_h) = if rows {
+            (cross, spare)
+        } else {
+            (spare.max(total), cross)
+        };
+        sizes[i] = Some(
+            match app.region_sized(&name, avail_w, avail_h, rows, false) {
+                Some((size, l)) => {
+                    let size = size.min(spare);
+                    lines[i] = Some(l);
+                    size
+                }
+                None => 0,
+            },
+        );
+        spare = spare.saturating_sub(sizes[i].unwrap_or(0));
+    }
+    let used: u16 = sizes.iter().flatten().sum();
+    let left = total.saturating_sub(used);
+    let fill_count = sizes.iter().filter(|s| s.is_none()).count() as u16;
+    let mut extra = if fill_count > 0 { left % fill_count } else { 0 };
+    let mut at = if rows { area.y } else { area.x };
+    let end = if rows { area.bottom() } else { area.right() };
+    for (i, c) in children.iter().enumerate() {
+        let mut size = sizes[i].unwrap_or_else(|| {
+            let share = left / fill_count.max(1) + u16::from(extra > 0);
+            extra = extra.saturating_sub(1);
+            share
+        });
+        size = size.min(end.saturating_sub(at));
+        let r = if rows {
+            Rect {
+                y: at,
+                height: size,
+                ..area
+            }
+        } else {
+            Rect {
+                x: at,
+                width: size,
+                ..area
+            }
+        };
+        match c {
+            LayoutNode::Split { .. } => place(app, c, r, plan),
+            LayoutNode::Leaf { name, .. } => {
+                plan.leaves.push((name.clone(), r));
+                if !BUILTIN.contains(&name.as_str()) {
+                    plan.regions.push((name.clone(), r, lines[i].take()));
+                }
+            }
+        }
+        at += size;
+        if let Some(sep) = sep
+            && !rows
+            && i + 1 < n
+            && size > 0
+            && at < end
+        {
+            plan.seps.push((at, area, sep.clone()));
+            at += 1;
         }
     }
 }

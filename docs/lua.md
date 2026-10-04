@@ -799,7 +799,24 @@ bone.ui.layout = { "statusline", "chat", "mybar", "prompt" }  -- statusline on t
 bone.ui.regions.mybar = { size = 1, render = function(ctx) return { "hello" } end }
 ```
 
-`chat`, `prompt`, `divider` and `statusline` are built in; leave one out and it is not shown. Row regions are sized in rows. `size` is a number or `"auto"` (fit the content, up to `max`, default 10); a bare function means `size = "auto"`. `render(ctx)` gets `{ region, width, height, spinner, popup, session }` and returns lines, or `nil` to hide the region. Regions are redrawn every frame, so keep them light.
+The layout is a tree. An entry is a name, `{ "name", size = … }`, or a split: `{ rows = { … } }` stacks its entries, `{ cols = { … }, sep = "│" }` puts them side by side (with `sep` drawn between), and splits nest:
+
+```lua
+bone.ui.layout = {
+  "statusline",
+  { cols = {
+      { "files", size = "25%" },              -- a region as a column
+      { rows = { "chat", "above_prompt" } },  -- the chat with a band under it
+      { "notes", size = 30 },
+    }, sep = "│" },
+  "message",                                  -- notifications here, not at the bottom
+  "prompt",
+}
+```
+
+`size` is cells (rows in a stack, columns side by side), `"30%"`, `"auto"` (its natural size) or `"fill"` (a share of what is left). By default the chat and splits fill; the prompt, statusline, divider and message line take their natural size; and regions take theirs from their own `size`. Fixed and percent sizes are given out first, then natural sizes (regions leave a filling sibling at least 3 rows), then filling entries share the rest. A region given a fixed, percent or fill size is drawn at exactly that size.
+
+`chat`, `prompt`, `divider`, `statusline` and `message` are built in; leave one out and it is not shown (without `message`, notifications take rows at the bottom). Row regions are sized in rows. `size` is a number or `"auto"` (fit the content, up to `max`, default 10); a bare function means `size = "auto"`. `render(ctx)` gets `{ region, width, height, spinner, popup, session }` and returns lines, or `nil` to hide the region. Regions are redrawn every frame, so keep them light.
 
 - `bone.chat.items({ kind = "tool", last = 3 })` returns items of the session on screen, as views receive them (more filters under Chat data).
 - `bone.ui.render(item, width, region)` renders an item with the current views.

@@ -3672,3 +3672,58 @@ async fn lua_adds_its_own_items_to_the_chat() {
     );
     assert!(h.screen(40, 5).contains("plain note"));
 }
+
+#[tokio::test]
+async fn layout_nests_rows_and_columns() {
+    let mut h = Harness::blank().await;
+    h.lua(
+        r#"
+        bone.ui.views.user = function(item) return { { { "> " .. item.text, "Normal" } } } end
+        bone.ui.statusline = function() return { "STATUS" } end
+        bone.ui.regions.files = function(ctx) return { "files " .. ctx.width .. "x" .. ctx.height } end
+        bone.ui.regions.notes = { size = 3, render = function(ctx) return { "N" .. ctx.width } end }
+        bone.ui.layout = {
+          "statusline",
+          { cols = {
+              { "files", size = "25%" },
+              { rows = { "chat", "notes" } },
+              { "message", size = 6 },
+            }, sep = "|" },
+          { "prompt", size = 1 },
+        }
+        "#,
+    )
+    .await;
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    h.lua(r#"bone.notify("hi")"#).await;
+    let screen = h.screen(41, 8);
+    let rows: Vec<&str> = screen.split('\n').collect();
+    // 41 columns, 2 separators: files 9 (25% of 39), message 6, chat 24.
+    assert_eq!(rows[0], "STATUS", "{screen}");
+    assert_eq!(rows[1], "files 9x6|> go                    |hi", "{screen}");
+    assert!(rows[4].starts_with("         |N24"), "{screen}");
+    assert_eq!(rows.len(), 8);
+
+    // A region set to fill shares the space with the chat.
+    h.lua(r#"bone.ui.layout = { { cols = { "chat", { "files", size = "fill" } } } }"#)
+        .await;
+    let screen = h.screen(40, 4);
+    // (The message is outside this layout, so it takes the bottom row.)
+    assert!(
+        screen.starts_with("> go                files 20x3"),
+        "{screen}"
+    );
+    assert!(screen.ends_with("hi"), "{screen}");
+
+    // A bad size says what is wrong, and the default layout is kept.
+    h.lua(r#"bone.ui.layout = { { "chat", size = "lots" } }"#)
+        .await;
+    let screen = h.screen(40, 12);
+    assert!(screen.contains("> go"), "{screen}");
+    assert!(
+        h.app.log.iter().any(|l| l.contains("bad size \"lots\"")),
+        "{:?}",
+        h.app.log
+    );
+}

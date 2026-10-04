@@ -117,6 +117,131 @@ fn line_of(lua: &mlua::Lua, v: Value, ctx: &Json, hl: &str) -> mlua::Result<Vec<
     }
 }
 
+/// How much room a layout node takes along its split.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Size {
+    /// Its natural size: a region's own `size` or content, the prompt's
+    /// text, one row for the statusline and divider.
+    Auto,
+    /// A share of what is left (the chat and splits by default).
+    Fill,
+    Cells(u16),
+    Percent(u16),
+}
+
+/// `bone.ui.layout`: leaves are built-ins (`chat`, `prompt`, `divider`,
+/// `statusline`, `message`) or region names; splits stack rows or place
+/// columns side by side.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LayoutNode {
+    Leaf {
+        name: String,
+        size: Size,
+    },
+    Split {
+        rows: bool,
+        /// Drawn between columns, one cell wide.
+        sep: Option<String>,
+        size: Size,
+        children: Vec<LayoutNode>,
+    },
+}
+
+impl LayoutNode {
+    fn leaf(name: &str, size: Option<Size>) -> Self {
+        let default = if name == "chat" {
+            Size::Fill
+        } else {
+            Size::Auto
+        };
+        LayoutNode::Leaf {
+            name: name.to_owned(),
+            size: size.unwrap_or(default),
+        }
+    }
+
+    pub fn size(&self) -> Size {
+        match self {
+            LayoutNode::Leaf { size, .. } | LayoutNode::Split { size, .. } => *size,
+        }
+    }
+
+    pub fn contains(&self, leaf: &str) -> bool {
+        match self {
+            LayoutNode::Leaf { name, .. } => name == leaf,
+            LayoutNode::Split { children, .. } => children.iter().any(|c| c.contains(leaf)),
+        }
+    }
+}
+
+fn parse_size(v: Value) -> mlua::Result<Option<Size>> {
+    Ok(match v {
+        Value::Nil => None,
+        Value::Integer(n) => Some(Size::Cells(n.max(0) as u16)),
+        Value::Number(n) => Some(Size::Cells(n.max(0.0) as u16)),
+        Value::String(s) => {
+            let s = s.to_str()?.to_owned();
+            match s.as_str() {
+                "auto" => Some(Size::Auto),
+                "fill" => Some(Size::Fill),
+                p if p.ends_with('%') => Some(Size::Percent(
+                    p[..p.len() - 1]
+                        .trim()
+                        .parse::<u16>()
+                        .map_err(|_| mlua::Error::runtime(format!("bad size {s:?}")))?
+                        .min(100),
+                )),
+                _ => return Err(mlua::Error::runtime(format!("bad size {s:?}"))),
+            }
+        }
+        other => {
+            return Err(mlua::Error::runtime(format!(
+                "a size is a number, \"auto\", \"fill\" or \"N%\", not {}",
+                other.type_name()
+            )));
+        }
+    })
+}
+
+fn layout_children(t: &Table) -> mlua::Result<Vec<LayoutNode>> {
+    t.sequence_values::<Value>()
+        .map(|v| layout_node(v?))
+        .collect()
+}
+
+fn layout_node(v: Value) -> mlua::Result<LayoutNode> {
+    match v {
+        Value::String(s) => Ok(LayoutNode::leaf(&s.to_str()?, None)),
+        Value::Table(t) => {
+            let size = parse_size(t.get("size")?)?;
+            for (key, rows) in [("rows", true), ("cols", false)] {
+                if let Some(children) = t.get::<Option<Table>>(key)? {
+                    return Ok(LayoutNode::Split {
+                        rows,
+                        sep: t.get("sep")?,
+                        size: size.unwrap_or(Size::Fill),
+                        children: layout_children(&children)?,
+                    });
+                }
+            }
+            let name: Option<String> = match t.get::<Option<String>>(1)? {
+                Some(n) => Some(n),
+                None => t.get("name")?,
+            };
+            match name {
+                Some(n) => Ok(LayoutNode::leaf(&n, size)),
+                None => Err(mlua::Error::runtime(
+                    "a layout entry is a name, { name, size = … }, { rows = {…} } or { cols = {…} }",
+                )),
+            }
+        }
+        other => Err(mlua::Error::runtime(format!(
+            "a layout entry is a name or a table, not {}",
+            other.type_name()
+        ))),
+    }
+}
+
 pub fn spinner() -> char {
     let ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -300,7 +425,8 @@ impl App {
     /// `bone.ui.layout`: the rows of the screen, top to bottom. `chat`,
     /// `prompt`, `divider` and `statusline` are built in; any other name is
     /// a region from `bone.ui.regions`.
-    pub fn layout(&mut self) -> Vec<String> {
+    /// `bone.ui.layout` as a tree: the top level is a stack of rows.
+    pub fn layout(&mut self) -> LayoutNode {
         const DEFAULT: [&str; 6] = [
             "top",
             "chat",
@@ -309,14 +435,29 @@ impl App {
             "prompt",
             "statusline",
         ];
+        let default = || LayoutNode::Split {
+            rows: true,
+            sep: None,
+            size: Size::Fill,
+            children: DEFAULT.iter().map(|n| LayoutNode::leaf(n, None)).collect(),
+        };
         self.guarded("layout", |lua| {
             let ui: Table = lua.globals().get::<Table>("bone")?.get("ui")?;
-            match ui.get::<Option<Vec<String>>>("layout")? {
-                Some(l) => Ok(l),
-                None => Ok(DEFAULT.iter().map(|s| s.to_string()).collect()),
+            match ui.get::<Value>("layout")? {
+                Value::Nil => Ok(default()),
+                Value::Table(t) => Ok(LayoutNode::Split {
+                    rows: true,
+                    sep: None,
+                    size: Size::Fill,
+                    children: layout_children(&t)?,
+                }),
+                other => Err(mlua::Error::runtime(format!(
+                    "bone.ui.layout is a list, not {}",
+                    other.type_name()
+                ))),
             }
         })
-        .unwrap_or_else(|| DEFAULT.iter().map(|s| s.to_string()).collect())
+        .unwrap_or_else(default)
     }
 
     /// Whether `bone.ui[name]` is a function (the statusline and divider
@@ -535,6 +676,20 @@ impl App {
         height: u16,
     ) -> Option<(u16, Vec<Line<'static>>)> {
         let rows = !matches!(name, "left" | "right");
+        self.region_sized(name, width_cols, height, rows, false)
+    }
+
+    /// A region in a stack of rows (`rows`: sized in rows, up to `height`)
+    /// or a row of columns (sized in columns, up to half of `width_cols`).
+    /// `exact` draws it at exactly `width_cols` × `height`, whatever its size.
+    pub fn region_sized(
+        &mut self,
+        name: &str,
+        width_cols: u16,
+        height: u16,
+        rows: bool,
+        exact: bool,
+    ) -> Option<(u16, Vec<Line<'static>>)> {
         let base = json!({
             "region": name,
             "spinner": spinner().to_string(),
@@ -575,6 +730,12 @@ impl App {
                     Value::Number(n) => Some(n.max(0.0) as u16),
                     _ => None,
                 };
+                if exact {
+                    let Some(lines) = call(width_cols, height)? else {
+                        return Ok(None);
+                    };
+                    return Ok(Some((if rows { height } else { width_cols }, lines)));
+                }
                 Ok(Some(if rows {
                     let h = fixed.unwrap_or(max).min(height);
                     let Some(lines) = call(width_cols, h)? else {
