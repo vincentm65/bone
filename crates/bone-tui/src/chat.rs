@@ -57,9 +57,10 @@ pub enum Part {
     Lua,
 }
 
-/// `Item::entry` of Lua items starts here (their slot added), clear of the
-/// transcript's entries and the queue after them.
+/// `Item::entry` of Lua items starts here (their slot added), and of queued
+/// messages here (their position added): clear of the transcript's ids.
 const LUA_BASE: usize = 1 << 40;
+const QUEUE_BASE: usize = 1 << 41;
 
 /// An item Lua put in the chat. It sits after the transcript entries that
 /// existed when it was added and is drawn by `bone.ui.views[kind]`. It is
@@ -70,8 +71,9 @@ pub struct LuaItem {
     pub kind: String,
     /// Its fields, as given to `bone.chat.add`/`update`.
     pub data: serde_json::Map<String, Value>,
-    /// Shown after this many transcript entries.
-    after: usize,
+    /// Shown after the transcript entry with this id (or the latest one
+    /// before it, if it is gone), or first (`None`).
+    after: Option<usize>,
     rev: u64,
 }
 
@@ -129,9 +131,14 @@ pub struct ChatBuffer {
     pub queue: Vec<QueuedMessage>,
     /// Bumped when the queue changes; the cache key of queued items.
     queue_rev: u64,
-    /// How finished turns ended, by the entry index of their user message.
+    /// How finished turns ended, by the id of their user message's entry.
     /// Only turns seen finishing here; loaded history has none.
     pub outcomes: HashMap<usize, TurnOutcome>,
+    /// Each entry's id: stable, never reused, increasing along `entries`
+    /// (entries are only pushed, popped or all cleared). Items, the render
+    /// cache and everything else about an entry go by its id.
+    ids: Vec<usize>,
+    next_id: usize,
     /// Bumped on every change to an entry; part of each cache key.
     revs: Vec<u64>,
     next_rev: u64,
@@ -140,7 +147,7 @@ pub struct ChatBuffer {
     lua_items: Vec<Option<LuaItem>>,
     /// Timing and live output of tool calls, by call id.
     tool_meta: HashMap<String, ToolMeta>,
-    /// Token usage of a model message, by the entry it starts at.
+    /// Token usage of a model message, by the id of its first entry.
     message_usage: HashMap<usize, Usage>,
 }
 
@@ -188,15 +195,23 @@ impl ChatBuffer {
 
     fn push(&mut self, e: Entry) {
         self.entries.push(e);
+        self.next_id += 1;
+        self.ids.push(self.next_id);
         self.next_rev += 1;
         self.revs.push(self.next_rev);
     }
 
     fn pop(&mut self) {
-        let i = self.entries.len() - 1;
         self.entries.pop();
         self.revs.pop();
-        self.cache.retain(|item, _| item.entry != i);
+        if let Some(id) = self.ids.pop() {
+            self.cache.retain(|item, _| item.entry != id);
+        }
+    }
+
+    /// Where the entry with id `id` is in `entries`.
+    fn position(&self, id: usize) -> Option<usize> {
+        self.ids.binary_search(&id).ok()
     }
 
     fn touch(&mut self, i: usize) {
@@ -215,6 +230,7 @@ impl ChatBuffer {
     ) {
         self.session = Some(info);
         self.entries.clear();
+        self.ids.clear();
         self.revs.clear();
         self.cache.clear();
         self.lua_items.clear();
@@ -293,9 +309,9 @@ impl ChatBuffer {
         let first = self.entries.len();
         self.add_assistant_message(&m.message);
         if let Some(u) = m.usage
-            && first < self.entries.len()
+            && let Some(&id) = self.ids.get(first)
         {
-            self.message_usage.insert(first, u);
+            self.message_usage.insert(id, u);
         }
         if m.usage.is_some() {
             self.usage = m.usage;
@@ -417,7 +433,7 @@ impl ChatBuffer {
             .iter()
             .rposition(|e| matches!(e, Entry::User(_)))
         {
-            self.outcomes.insert(user, t.outcome.clone());
+            self.outcomes.insert(self.ids[user], t.outcome.clone());
         }
         match &t.outcome {
             TurnOutcome::Completed => {}
@@ -460,13 +476,14 @@ impl ChatBuffer {
             .lua_items
             .iter()
             .enumerate()
-            .filter_map(|(slot, l)| l.as_ref().map(|l| (l.after.min(self.entries.len()), slot)))
+            .filter_map(|(slot, l)| l.as_ref().map(|l| (l.after.unwrap_or(0), slot)))
             .collect();
         lua.sort();
         let mut lua = lua.into_iter().peekable();
-        let mut add_lua = |upto: usize, out: &mut Vec<Item>| {
+        // Those anchored before `next` (an id; None: all that are left).
+        let mut add_lua = |next: Option<usize>, out: &mut Vec<Item>| {
             while let Some(&(after, slot)) = lua.peek() {
-                if after > upto {
+                if next.is_some_and(|n| after >= n) {
                     break;
                 }
                 out.push(Item {
@@ -476,8 +493,9 @@ impl ChatBuffer {
                 lua.next();
             }
         };
-        add_lua(0, &mut out);
-        for (entry, e) in self.entries.iter().enumerate() {
+        add_lua(self.ids.first().copied(), &mut out);
+        for (i, e) in self.entries.iter().enumerate() {
+            let entry = self.ids[i];
             let mut add = |part| out.push(Item { entry, part });
             match e {
                 Entry::User(_) => add(Part::User),
@@ -497,12 +515,11 @@ impl ChatBuffer {
                 Entry::Tool { .. } => add(Part::Tool),
                 Entry::Notice { .. } => add(Part::Notice),
             }
-            add_lua(entry + 1, &mut out);
+            add_lua(self.ids.get(i + 1).copied(), &mut out);
         }
-        // Queued messages come last; their "entries" count on past the end.
-        let n = self.entries.len();
+        // Queued messages come last.
         out.extend((0..self.queue.len()).map(|i| Item {
-            entry: n + i,
+            entry: QUEUE_BASE + i,
             part: Part::Queued,
         }));
         out
@@ -511,6 +528,18 @@ impl ChatBuffer {
     /// An item as data for Lua. Text is cleaned of escape sequences, and
     /// message text loses blank lines at its edges (models often send them).
     pub fn item_data(&self, item: Item, index: usize) -> Value {
+        let mut d = self.item_fields(item, index);
+        // A stable name for the item, for Lua to keep state by: it stays
+        // the same as items come and go before it.
+        d["key"] = json!(match item.part {
+            Part::Lua => d["id"].as_str().unwrap_or_default().to_owned(),
+            Part::Queued => format!("q{}", d["id"].as_str().unwrap_or_default()),
+            _ => format!("e{}", item.entry),
+        });
+        d
+    }
+
+    fn item_fields(&self, item: Item, index: usize) -> Value {
         if let Some(l) = self.lua_item(&item).filter(|_| item.part == Part::Lua) {
             let mut d = Value::Object(l.data.clone());
             d["kind"] = json!(l.kind);
@@ -520,7 +549,7 @@ impl ChatBuffer {
         }
         let kind = item.part.name();
         if item.part == Part::Queued {
-            let position = item.entry - self.entries.len();
+            let position = item.entry - QUEUE_BASE;
             let q = &self.queue[position];
             let mode = match q.mode {
                 QueueMode::Steer => "steer",
@@ -528,7 +557,10 @@ impl ChatBuffer {
             };
             return json!({ "kind": kind, "index": index, "id": q.id, "text": edges(&q.text), "mode": mode, "position": position + 1 });
         }
-        match (&self.entries[item.entry], item.part) {
+        let Some(at) = self.position(item.entry) else {
+            return json!({ "kind": kind, "index": index });
+        };
+        match (&self.entries[at], item.part) {
             (Entry::User(text), _) => json!({ "kind": kind, "index": index, "text": edges(text) }),
             (
                 Entry::Assistant {
@@ -592,7 +624,10 @@ impl ChatBuffer {
         if item.part == Part::Lua {
             return self.lua_item(item).map_or(0, |l| l.rev);
         }
-        self.revs.get(item.entry).copied().unwrap_or(self.queue_rev)
+        match item.part {
+            Part::Queued => self.queue_rev,
+            _ => self.position(item.entry).map_or(0, |at| self.revs[at]),
+        }
     }
 
     fn lua_item(&self, item: &Item) -> Option<&LuaItem> {
@@ -616,7 +651,7 @@ impl ChatBuffer {
             id,
             kind,
             data,
-            after: self.entries.len(),
+            after: self.ids.last().copied(),
             rev: self.next_rev,
         }));
     }
@@ -935,6 +970,50 @@ mod tests {
         });
         assert_eq!(c.item_data(items[3], 4)["output"], "ab\tc");
         assert_eq!(c.usage.unwrap().input_tokens, 5);
+    }
+
+    #[test]
+    fn entries_keep_their_ids_while_a_message_streams() {
+        let mut c = ChatBuffer::new(None);
+        c.turn_started(1, "go");
+        c.add_lua("note-1".into(), "note".into(), Default::default());
+        c.delta(&MessageDeltaParams {
+            session_id: "s".into(),
+            turn_id: 1,
+            kind: DeltaKind::Text,
+            text: "hi".into(),
+        });
+        let keys = |c: &ChatBuffer| -> Vec<String> {
+            c.items()
+                .iter()
+                .enumerate()
+                .map(|(n, i)| c.item_data(*i, n + 1)["key"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(keys(&c), ["e1", "note-1", "e2"]);
+        // The streamed entry is replaced by the final message: a new id, the
+        // others unchanged and the Lua item still after the user message.
+        c.message_completed(&MessageCompletedParams {
+            session_id: "s".into(),
+            turn_id: 1,
+            message: ChatMessage::Assistant {
+                content: "hi".into(),
+                reasoning: String::new(),
+                tool_calls: vec![],
+            },
+            usage: Some(Usage {
+                input_tokens: 5,
+                output_tokens: 1,
+            }),
+        });
+        assert_eq!(keys(&c), ["e1", "note-1", "e3"]);
+        assert_eq!(c.item_data(c.items()[2], 3)["usage"]["input"], 5);
+        c.turn_finished(&TurnFinishedParams {
+            session_id: "s".into(),
+            turn_id: 1,
+            outcome: TurnOutcome::Completed,
+        });
+        assert!(c.outcomes.contains_key(&1));
     }
 
     #[test]
