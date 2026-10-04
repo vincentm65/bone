@@ -5,6 +5,18 @@
 require("style.views") -- how each chat item looks (user, reasoning, assistant, tools, notices)
 require("style.ui") -- statusline and divider
 
+-- The classic arrangement: the divider (with the running turn) between the
+-- chat and the prompt and the statusline at the bottom. The standard UI's
+-- layout has no divider, so a complete look sets its own.
+bone.ui.layout = {
+  "top",
+  { cols = { "left", "chat", "right" }, sep = "│" },
+  "divider",
+  "above_prompt",
+  "prompt",
+  "statusline",
+}
+
 bone.ui.prompt = {
   prefix = { { "› ", "UserPrompt" } },
   placeholder = { { "Message bone… (enter sends, alt+enter for a new line, / for commands)", "Placeholder" } },
@@ -22,7 +34,7 @@ bone.ui.regions.top = {
     return {
       "",
       { { "  New session. Type a message and press enter.", "Dim" } },
-      { { "  /help lists commands · ctrl+r opens an earlier session", "Dim" } },
+      { { "  /help lists commands · ctrl+o opens an earlier session", "Dim" } },
     }
   end,
 }

@@ -122,13 +122,8 @@ function views.reasoning(item, ctx)
   if not bone.o.show_reasoning or trim(item.text) == "" then
     return nil
   end
-  -- Streaming reasoning is rendered in the thinking region, right below the
-  -- chat, so it scrolls with the transcript; keep completed reasoning here.
-  if item.streaming then
-    return nil
-  end
   local out = starts("reasoning", ctx)
-  local prefix = "│ "
+  local prefix = item.streaming and "∴ " or "│ "
   for _, line in ipairs(lines(trim(item.text))) do
     append(out, wrap({ { line, "Reasoning" } }, ctx.width,
       { first = { { prefix, "Reasoning" } }, rest = { { "  ", "Reasoning" } } }))

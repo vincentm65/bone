@@ -1,8 +1,8 @@
- run it                                     900 in · 30 out  │  <cwd>
 › run it
-
-  I'll run it.
   ◌ $ echo hello && seq 1 9
+
+
+
 
 
 
@@ -20,5 +20,5 @@
 
 
 ── * working <t>  ctrl+c to cancel ──────────────────────────────────────────────
-
 › Message bone… (enter sends, alt+enter for a new line, / for commands)
+ run it                                     900 in · 30 out  │  <cwd>

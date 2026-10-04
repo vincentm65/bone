@@ -656,6 +656,11 @@ impl App {
 
     pub fn lua_error(&mut self, context: &str, e: &mlua::Error) {
         self.log.push(format!("{context}: {e}"));
+        // The last few in full, for /health.
+        self.lua_errors.push(format!("{context}: {e}"));
+        if self.lua_errors.len() > 3 {
+            self.lua_errors.remove(0);
+        }
         self.error(format!("{context}: {}", short_error(e)));
     }
 
@@ -837,7 +842,7 @@ impl App {
         self.autocmds.iter().any(|a| a.event == event)
     }
 
-    /// `/lua code`, or `/lua =expr` to show a value.
+    /// Run Lua (`bone.api.exec_lua`): `code`, or `=expr` to show a value.
     pub fn exec_lua(&mut self, code: &str) {
         let (code, show) = match code.strip_prefix('=') {
             Some(expr) => (format!("return {expr}"), true),
@@ -1046,7 +1051,7 @@ fn dynamic_option_arg<'a>(app: &App, arg: &'a str) -> Option<DynamicOptionArg<'a
     None
 }
 
-/// Apply one `/set` argument to a dynamic option. `None` means the argument
+/// Apply one option argument (`bone.o.apply`) to a dynamic option. `None` means the argument
 /// belongs to the fixed Rust options instead.
 pub(crate) fn apply_dynamic_option(
     app: &mut App,
@@ -1884,7 +1889,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             ret(lua, app.log[start..].to_vec())
         }
         "show_message" => {
-            // Shown without adding to the log (for /messages itself).
+            // Shown without adding to the log (for showing the log itself).
             let text: String = args(lua, a)?;
             app.message = (!text.is_empty()).then_some((text, crate::app::Level::Info));
             app.dirty = true;

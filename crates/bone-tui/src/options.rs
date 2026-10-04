@@ -1,4 +1,4 @@
-//! Options, set with `/set` or `bone.o` in Lua.
+//! Options, set with `bone.o` in Lua.
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Options {
@@ -20,7 +20,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Options {
-            show_reasoning: true,
+            show_reasoning: false,
             tool_preview_lines: 4,
             diff_preview_lines: 8,
             prompt_max_height: 10,
@@ -155,7 +155,7 @@ impl Options {
         Ok(())
     }
 
-    /// Apply one `/set` argument: `name`, `noname`, `invname`, `name!`,
+    /// Apply one option argument (`bone.o.apply`): `name`, `noname`, `invname`, `name!`,
     /// `name=value` or `name?`. Returns text to show, if any.
     pub fn apply(&mut self, arg: &str) -> Result<Option<String>, String> {
         if let Some(name) = arg.strip_suffix('?') {

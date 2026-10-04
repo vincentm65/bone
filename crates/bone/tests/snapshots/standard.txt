@@ -1,7 +1,4 @@
-hello                                                                   done <t>
 › hello
-
-│ The user said hello.
 
   hi there
 
@@ -17,8 +14,11 @@ hello                                                                   done <t>
 
 
 
-────────────────────────────────────────────────────────────────────────────────
+
+
+
 
 
  › Message bone… (enter sends, alt+enter for a new line, / for commands)
 
+fake | done <t>

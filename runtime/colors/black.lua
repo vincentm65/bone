@@ -1,4 +1,4 @@
--- "black": the palette from the original bone. Load with /colorscheme black (the default).
+-- "black": the palette from the original bone. Load with bone.colorscheme("black") (the default).
 local p = {
   fg = "#eeeeee",
   muted = "#a0a0a0",

@@ -1,6 +1,6 @@
 //! Slash commands: the registry behind `bone.cmd.create`, typed argument
-//! parsing, and running a command line. Every command, `/help` and `/set`
-//! included, is Lua (`runtime/lua/bone/commands.lua`); so is the `/` menu
+//! parsing, and running a command line. Every command, `/help` included,
+//! is Lua (`runtime/lua/bone/commands.lua`); so is the `/` menu
 //! (`runtime/lua/bone/menu.lua`).
 
 use serde_json::{Map, Value as JsonValue};

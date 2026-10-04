@@ -4,6 +4,11 @@ local M = {}
 
 function M.setup(opts)
   opts = opts or {}
+  -- Reasoning is hidden by default (the option's default); only an
+  -- explicit choice here changes it, so ctrl+r survives a reload.
+  if opts.show_reasoning ~= nil then
+    bone.o.show_reasoning = opts.show_reasoning
+  end
   if not opts.colorscheme then
     bone.colorscheme("black")
   else

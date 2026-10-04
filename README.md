@@ -51,7 +51,7 @@ bone.config.provider = "local_model"
 
 For a one-off run without a config: `BONE_BASE_URL=http://localhost:8080/v1 BONE_MODEL=qwen bone3`.
 
-Type a message and press enter. Tools that change things (`write_file`, `edit_file`, `shell`) ask first: `y` allows, `n` denies. Type `/` for commands (`/help` lists them), `ctrl+r` opens an earlier session, `ctrl+c` cancels a turn (twice on an empty prompt quits), and `bone3 -r` picks up where you left off.
+Type a message and press enter. Tools that change things (`write_file`, `edit_file`, `shell`) ask first: `y` allows, `n` denies. Type `/` for commands (`/help` lists them), `ctrl+o` opens an earlier session, `ctrl+c` cancels a turn (twice on an empty prompt quits), and `bone3 -r` picks up where you left off.
 
 ## Running the core separately
 
@@ -67,6 +67,7 @@ bone3 --connect                  # a TUI on that server; run several, they stay 
 - [docs/lua.md](docs/lua.md): configuring and extending with Lua (core and TUI), colors, plugins.
 - [docs/protocol.md](docs/protocol.md): the JSON-RPC API for writing clients.
 - [docs/architecture.md](docs/architecture.md): how the pieces fit together.
+- [catalog/README.md](catalog/README.md): the native Bone 3 catalog and installer.
 - [examples/plugins/git](examples/plugins/git): a small plugin with a tool, a tool view and a command.
 - More examples in [examples/plugins](examples/plugins): `switch` (change provider from the TUI), `tasks` (a task panel), `review` (changed files and review prompts), `stats` (tokens, sessions and tool failure rates from the session index), `testrun` (tests streamed into a panel), `compact` (summarize long sessions), `output-cap` (limit tool result sizes), `retry` (backoff and provider fallback), `mcp` (MCP servers from JSON files), `skills` and `templates` (folders of them, with TUI commands), `ask-model` (side questions), `approve`, `style` and `anthropic`. None is installed by default.
 

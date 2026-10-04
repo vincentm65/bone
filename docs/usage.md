@@ -25,21 +25,21 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 
 | Key | Does |
 |---|---|
-| `enter` | send (or run a `/command`). While a turn runs, the message is queued: by default it joins that turn at its next step; with `/set queue_mode=next` it waits for a turn of its own. Queued messages show at the end of the chat |
+| `enter` | send (or run a `/command`). While a turn runs, the message is queued: by default it joins that turn at its next step; with `bone.o.queue_mode = "next"` in `tui.lua` it waits for a turn of its own. Queued messages show at the end of the chat |
 | `up` on an empty prompt | take the last queued message back to edit |
 | `alt+enter`, `shift+enter`, `ctrl+j` | new line |
 | `ctrl+c` | cancel the running turn; else clear the prompt; else press twice to quit |
 | `ctrl+d` | quit (on an empty prompt) |
-| `ctrl+r` | pick a session to open |
+| `ctrl+o` | pick a session to open |
+| `ctrl+r` | show / hide the model reasoning (live in the chat and in the transcript) |
 | `ctrl+t` | how much of each tool call to show: a summary line per stretch of calls ("Read 3 files, ran 2 shell commands"; edits and failures in full) → a row per call → everything in full → back. It stays until you press it again |
 | `ctrl+n` | new session |
-| `ctrl+t` | show / hide the model reasoning (live in the chat and in the transcript) |
 | `up` / `down` | move between prompt lines; past the edges, earlier messages. With `/` suggestions showing, move through them |
 | `tab` | complete the selected `/` command |
 | `esc` | hide suggestions, or clear a message |
 | `pageup` / `pagedown`, `shift+up` / `shift+down`, mouse wheel | scroll the session |
 | `ctrl+home` / `ctrl+end` | top / bottom (bottom keeps following new output) |
-| mouse drag | highlight text; releasing copies it to the clipboard (through tmux when inside it, else OSC 52, plus `wl-copy`/`xclip` locally). `/set nomouse` hands the mouse back to the terminal |
+| mouse drag | highlight text; releasing copies it to the clipboard (through tmux when inside it, else OSC 52, plus `wl-copy`/`xclip` locally). `bone.o.mouse = false` in `tui.lua` hands the mouse back to the terminal |
 | `ctrl+left` / `ctrl+right`, `alt+left` / `alt+right` | move by word |
 | `ctrl+a` / `ctrl+e`, `home` / `end` | start / end of line |
 | `ctrl+w`, `alt+backspace` | delete the word before the cursor |
@@ -50,7 +50,7 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 
 **Approval popup.** By default tool calls run without asking. With the approve plugin installed (`cp -r examples/plugins/approve ~/.bone/plugins/`), a tool that wants to change something asks first: `y` allows, `a` always allows that tool for this session, `n` or `esc` denies, `ctrl+c` cancels the turn. Keys typed in the first 300 ms after it appears are ignored, so text you were typing can't answer it.
 
-**Session picker** (`ctrl+r`, `/sessions`): type to filter, `up`/`down` to move, `enter` to open, `esc` to close.
+**Session picker** (`ctrl+o`, `/sessions`): type to filter, `up`/`down` to move, `enter` to open, `esc` to close.
 
 ## Commands
 
@@ -60,25 +60,15 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `/help {topic}` | the matching section of these docs in a scrollable window (`/help hooks`, `/help windows`, `/help lua` for a whole file) |
 | `/health`, `/checkhealth` | check the setup: provider address and key, sessions folder, terminal, mouse, clipboard route, Lua errors, plus plugins' own checks |
 | `/runtime`, `/runtime reset FILE`, `/runtime reset all` | your copies of built-in Lua files in `~/.bone/runtime/` (bone never overwrites them); reset goes back to the built-in ones, keeping your copies in `~/.bone/runtime-backup/` |
-| `/new` | start a new session |
+| `/new`, `/clear` | start a new session |
 | `/sessions`, `/resume` | pick a session to open |
-| `/open {id-prefix}` | open a session by id |
 | `/rename {title}` | give this session a title |
 | `/fork`, `/fork {N}` | continue in a copy of this session; with N, from before turn N (to try that turn again differently). The original stays as it was |
-| `/delete yes` | delete this session and its file (`/delete` alone asks) |
-| `/queue`, `/queue clear`, `/queue resume`, `/unqueue {N}` | list the queued messages, empty the queue, let a paused queue go on (after a cancel or a restart), take one out |
-| `/cancel` | cancel the running turn |
+| `/queue`, `/queue clear`, `/queue resume` | list the queued messages, empty the queue, let a paused queue go on (after a cancel or a restart) |
 | `/quit`, `/exit`, `/q` | quit |
-| `/set opt`, `/set noopt`, `/set opt!`, `/set opt=N`, `/set opt?` | options |
-| `/colorscheme {name}`, `/theme` | `black` (default), `ansi`, or your own |
-| `/hi {Group} fg=… bg=… bold` | change a color |
-| `/lua {code}`, `/lua ={expr}` | run Lua / show a value |
-| `/source {file}` | run a Lua file |
-| `/messages` | recent messages and full Lua errors |
 | `/plugin`, `/plugins` | list plugins (TUI and core halves); `/plugin load name`, `/plugin unload name`, `/plugin reload name` act on both halves (picking up edits to their files); `/plugin reload` reloads the core's whole Lua configuration (`core.lua` and core plugins) |
-| `/project`, `/project trust`, `/project untrust` | this directory's `.bone/tui.lua`: show it, trust it (runs it now and on later starts here), stop trusting it (unloads it) |
 
-`/rename`, `/fork`, `/delete`, `/plugin` and `/project` are Lua commands from `runtime/tui/defaults.lua`: change or remove them like any other (`bone.cmd.del("delete")`).
+`/rename`, `/fork` and `/plugin` are Lua commands from `runtime/tui/defaults.lua`: change or remove them like any other (`bone.cmd.del("fork")`).
 
 Enter on a partial name runs the highlighted suggestion (`/ses` + enter opens the picker). A message that really starts with `/` can be sent as `//like this`; paths such as `/etc/hosts …` are sent as messages anyway. Commands from Lua or plugins show up in the suggestions too.
 
@@ -86,7 +76,7 @@ Enter on a partial name runs the highlighted suggestion (`/ses` + enter opens th
 
 | Option | Default | |
 |---|---|---|
-| `show_reasoning` | on | show model reasoning |
+| `show_reasoning` | off | show model reasoning (`ctrl+r`) |
 | `tool_detail` | summary | tool calls: `summary`, `rows` or `full` (`ctrl+t`) |
 | `tool_preview_lines` | 4 | rows of tool output under each call (style plugin) |
 | `diff_preview_lines` | 8 | rows of diff under each edit (style plugin) |

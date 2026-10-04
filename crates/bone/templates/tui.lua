@@ -1,8 +1,8 @@
 -- bone TUI config: options, keys, commands, colors and events.
--- Runs after the built-in defaults. Try lines live with /lua <code>.
+-- Runs after the built-in defaults. Try lines with bone.api.exec_lua("code").
 -- Reference: docs/lua.md in the bone repository.
 
--- Options (same as /set):
+-- Options (set from Lua):
 -- bone.o.show_reasoning = false
 -- bone.o.tool_preview_lines = 4
 
@@ -11,7 +11,7 @@
 -- bone.keymap.set("f2", "/sessions")
 -- bone.keymap.set("ctrl+l", "/new")
 
--- Colors: /colorscheme black (default) or ansi; or tweak single groups:
+-- Colors: bone.colorscheme('black') (default) or 'ansi'; or tweak single groups:
 -- bone.hl.set("UserMessage", { fg = "#eeeeee", bg = "#202020" })
 
 -- The defaults draw the standard UI (runtime/lua/bone/ui/). Replace any

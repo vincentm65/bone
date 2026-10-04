@@ -1,7 +1,7 @@
- [new session]
 
   New session. Type a message and press enter.
-  /help lists commands · ctrl+r opens an earlier session
+  /help lists commands · ctrl+o opens an earlier session
+
 
 
 
@@ -20,5 +20,5 @@
 
 
 ────────────────────────────────────────────────────────────────────────────────
-
 › Message bone… (enter sends, alt+enter for a new line, / for commands)
+ [new session]

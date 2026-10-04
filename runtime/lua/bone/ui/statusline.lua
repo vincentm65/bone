@@ -53,6 +53,15 @@ end
 if state.events then
   for _, id in ipairs(state.events) do bone.off(id) end
 end
+bone.model.list(function(list)
+  for _, model in ipairs(list or {}) do
+    if model.current then
+      state.model = model.model or model.name
+      break
+    end
+  end
+  bone.ui.refresh()
+end)
 state.events = {
   bone.on("turn/started", function()
     state.started = now()
@@ -71,22 +80,27 @@ state.events = {
 function bone.ui.statusline(ctx)
   -- Match Bone's compact information strip: context first, then metrics and
   -- activity. Keep it quiet when there is no active session.
-  local title = ctx.title or (ctx.session and ctx.session.title) or "bone"
-  local left = { { title, "StatusLine" } }
+  local left = {}
   local right = {}
   local s = ctx.session
+  if state.model then
+    left[#left + 1] = { state.model, "StatusLine" }
+  end
   if s and s.usage then
-    right[#right + 1] = { "in " .. tokens(s.usage.input), "StatusLineDim" }
-    right[#right + 1] = { "out " .. tokens(s.usage.output), "StatusLineDim" }
+    local input = s.usage.input or 0
+    local output = s.usage.output or 0
+    local total = input + output
+    left[#left + 1] = { "curr " .. tokens(input), "StatusLineDim" }
+    left[#left + 1] = { "total " .. tokens(total), "StatusLineDim" }
   end
   if s and s.elapsed then
-    right[#right + 1] = { elapsed(s.elapsed), "StatusLineDim" }
+    left[#left + 1] = { elapsed(s.elapsed), "StatusLineDim" }
   end
   if s and s.running then
     local running_for = state.started and (now() - state.started) or nil
-    right[#right + 1] = { (ctx.spinner or "") .. " thinking" .. (running_for and (" " .. elapsed(running_for)) or ""), "Accent" }
+    left[#left + 1] = { (ctx.spinner or "") .. " thinking" .. (running_for and (" " .. elapsed(running_for)) or ""), "Accent" }
   elseif state.finished_elapsed then
-    right[#right + 1] = { "done " .. elapsed(state.finished_elapsed), "StatusLineDim" }
+    left[#left + 1] = { "done " .. elapsed(state.finished_elapsed), "StatusLineDim" }
   end
 
   local function joined(list)
@@ -100,31 +114,11 @@ function bone.ui.statusline(ctx)
     out[#out + 1] = " "
     return out
   end
-  local room = math.max((ctx.width or 1) - items_width(left) - 1, 1)
-  local r = joined(right)
-  while #right > 0 and items_width(r) > room do
-    right[#right] = nil
-    r = joined(right)
-  end
-
-  local items = left
-  items[#items + 1] = "%="
-  for _, it in ipairs(r) do
-    items[#items + 1] = it
-  end
-  return items
+  local room = math.max((ctx.width or 1), 1)
+  while #left > 1 and items_width(left) > room do table.remove(left, #left) end
+  return joined(left)
 end
 
 function bone.ui.divider(ctx)
-  local s = ctx.session
-  if s and s.running then
-    local status = s.elapsed and ("working " .. elapsed(s.elapsed)) or "starting"
-    return {
-      { "── ", "WinSeparator" },
-      { (ctx.spinner or "") .. " " .. status, "Accent" },
-      { "  ctrl+c to cancel ", "Dim" },
-      { fill = "─", hl = "WinSeparator" },
-    }
-  end
   return { { fill = "─", hl = "WinSeparator" } }
 end

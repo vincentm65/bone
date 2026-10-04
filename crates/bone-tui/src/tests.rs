@@ -559,21 +559,17 @@ async fn ctrl_c_cancels_clears_then_quits() {
 #[tokio::test]
 async fn slash_commands_suggest_complete_and_run() {
     let mut h = Harness::new().await;
-    h.input("/se").await;
+    h.input("/n").await;
     let screen = h.screen(80, 24);
     assert!(
-        screen.contains("/sessions")
-            && screen.contains("/set")
-            && screen.contains("pick a session"),
+        screen.contains("/new") && screen.contains("start a new session"),
         "{screen}"
     );
     // Tab completes the selected suggestion; enter runs it.
-    h.input("{down}{tab}").await;
-    assert_eq!(h.prompt(), "/set ");
-    h.input("tool_preview_lines=2 noshow_reasoning{enter}")
-        .await;
-    assert_eq!(h.app.options.tool_preview_lines, 2);
-    assert!(!h.app.options.show_reasoning);
+    h.input("{tab}").await;
+    assert_eq!(h.prompt(), "/new ");
+    h.input("{enter}").await;
+    assert_eq!(h.message(), "");
     assert_eq!(h.prompt(), "");
 
     // Enter on a partial name runs the selected suggestion.
@@ -604,6 +600,40 @@ async fn slash_commands_suggest_complete_and_run() {
 
     h.input("/quit{enter}").await;
     assert_eq!(h.app.quit, Some(None));
+}
+
+#[tokio::test]
+async fn slash_menu_scrolls_when_it_overflows() {
+    let mut h = Harness::new().await;
+    // 32 extra commands overflow the window (the 17 builtin names/aliases
+    // alone do not).
+    h.lua(
+        "for i = 1, 32 do bone.cmd.create('zz' .. i, function() end, { desc = 'generated ' .. i }) end",
+    )
+    .await;
+    h.input("/").await;
+    let screen = h.screen(80, 24);
+    // 49 = the 17 builtin names/aliases plus the 32 created above.
+    assert!(
+        screen.contains("/?") && screen.contains("of 49"),
+        "{screen}"
+    );
+    // The wheel and pages scroll the menu to the end.
+    h.input("{wheeldown}").await;
+    let screen = h.screen(80, 24);
+    // One wheel down moves the selection to row 4, still in the first window.
+    assert!(screen.contains("1–8 of 49"), "{screen}");
+    for _ in 0..10 {
+        h.input("{pagedown}").await;
+    }
+    let screen = h.screen(80, 24);
+    assert!(screen.contains("/zz9"), "{screen}");
+    // Up/down move the selection; tab completes it.
+    h.input("{tab}").await;
+    assert_eq!(h.prompt(), "/zz9 ");
+    for i in 1..=32 {
+        h.lua(&format!("bone.cmd.del('zz{}')", i)).await;
+    }
 }
 
 #[tokio::test]
@@ -833,10 +863,8 @@ async fn lua_phase2_commands_options_and_local_events() {
     );
     h.lua("bone.o.drop_probe = 2").await;
     assert_eq!(h.lua("=old_changes .. ':' .. new_changes").await, "\"0:1\"");
-    h.input("/set plugin_limit=8{enter}").await;
+    h.lua("bone.o.plugin_limit = 8").await;
     assert_eq!(h.lua("=changes[2]").await, "\"8:5\"");
-    h.input("/set plugin_limit?{enter}").await;
-    assert_eq!(h.message(), "plugin_limit=8");
 
     assert!(h.app.user_commands.contains_key("greet"), "{}", h.message());
     assert!(h.app.user_commands["greet"].completion.is_some());
@@ -879,18 +907,22 @@ async fn lua_phase2_commands_options_and_local_events() {
 async fn lua_api_and_errors() {
     let mut h = Harness::new().await;
     assert_eq!(h.lua("=1 + 1").await, "2");
-    h.input("/lua =bone.api.prompt_get(){enter}").await;
-    assert_eq!(h.message(), "\"\"");
+    assert_eq!(h.lua("=bone.api.prompt_get()").await, "\"\"");
 
-    // Errors show one line; /messages has the full traceback.
-    h.input("/lua error('boom'){enter}").await;
+    // Errors show one line; bone.api.log has the full traceback.
+    h.lua("error('boom')").await;
     assert!(
         h.message().starts_with("lua: ") && h.message().contains("boom"),
         "{}",
         h.message()
     );
-    h.input("/messages{enter}").await;
-    assert!(h.message().contains("stack traceback"), "{}", h.message());
+    assert!(
+        h.lua("=table.concat(bone.api.log(20), '\\n')")
+            .await
+            .contains("stack traceback"),
+        "{}",
+        h.message()
+    );
 
     // Requests from Lua with a callback.
     let r = h.lua("bone.request('session/list', {}, function(r) bone.notify(#r .. ' ' .. r[1].session_id) end)").await;
@@ -1043,11 +1075,12 @@ async fn lua_tool_views_highlights_and_colorschemes() {
     h.lua("bone.hl.set('ToolPath', { fg = '#010203', bold = true })")
         .await;
     assert_eq!(h.lua("=bone.hl.get('ToolPath').fg").await, "\"#010203\"");
-    h.input("/hi Mine fg=red underline{enter}").await;
+    h.lua("bone.hl.set('Mine', { fg = 'red', underline = true })")
+        .await;
     assert_eq!(h.lua("=bone.hl.get('Mine').underline").await, "true");
-    h.input("/colorscheme ansi{enter}").await;
+    h.lua("bone.colorscheme('ansi')").await;
     assert_eq!(h.lua("=bone.hl.get('ToolPath').fg").await, "\"cyan\"");
-    h.input("/theme nope{enter}").await;
+    h.lua("bone.colorscheme('nope')").await;
     assert!(h.message().contains("no colorscheme named nope"));
 }
 
@@ -1099,7 +1132,7 @@ async fn plugins_load_with_modules_and_colors() {
         h.lua("=table.concat(bone.plugins, ',')").await,
         "\"demo,git,style\""
     );
-    h.input("/colorscheme demo{enter}").await;
+    h.lua("bone.colorscheme('demo')").await;
     assert_eq!(h.lua("=bone.hl.get('Normal').fg").await, "\"#123456\"");
 
     // The example plugin's tool view renders git_status output.
@@ -2469,11 +2502,16 @@ async fn a_project_config_runs_only_when_trusted() {
     .unwrap();
     h.app.cwd = work.to_string_lossy().into_owned();
     h.app.load_project();
-    assert!(h.message().contains("/project trust"), "{}", h.message());
+    assert!(h.message().contains("/plugin trust"), "{}", h.message());
     assert_eq!(h.lua("=project_loads").await, "nil");
     assert_eq!(h.lua("=bone.project.info().trusted").await, "false");
 
-    h.input("/project trust{enter}").await;
+    h.input("/plugin trust{enter}").await;
+    assert!(
+        h.message().ends_with(": trusted and loaded"),
+        "{}",
+        h.message()
+    );
     assert_eq!(h.lua("=project_loads").await, "1");
     h.input("{f9}").await;
     assert_eq!(h.message(), "project f9");
@@ -2493,13 +2531,23 @@ async fn a_project_config_runs_only_when_trusted() {
     h.app.load_project();
     assert_eq!(h.lua("=project_loads").await, "2");
 
-    h.input("/project untrust{enter}").await;
+    h.input("/plugin untrust{enter}").await;
+    assert!(
+        h.message().ends_with(": no longer trusted, unloaded"),
+        "{}",
+        h.message()
+    );
     h.input("{f9}").await;
     assert_ne!(h.message(), "project f9");
     assert_eq!(h.lua("=bone.project.info().trusted").await, "false");
     h.app.cwd = "/".into();
-    h.input("/project{enter}").await;
-    assert!(h.message().contains("no .bone/tui.lua"), "{}", h.message());
+    assert!(
+        h.lua("=tostring(bone.project.info())")
+            .await
+            .contains("nil"),
+        "{}",
+        h.message()
+    );
 }
 
 /// A harness with the style plugin plus `examples/plugins/<name>` loaded.
@@ -2907,7 +2955,7 @@ async fn model_events_before_the_reply_are_kept() {
 }
 
 #[tokio::test]
-async fn session_commands_rename_fork_and_delete() {
+async fn session_commands_rename_and_fork() {
     let mut h = Harness::new().await;
     h.input("/rename x{enter}").await;
     assert!(h.message().contains("no messages yet"), "{}", h.message());
@@ -2931,11 +2979,6 @@ async fn session_commands_rename_fork_and_delete() {
     h.input("/fork two{enter}").await;
     assert!(h.message().contains("usage"));
 
-    h.input("/delete{enter}").await;
-    assert!(h.message().contains("/delete yes"));
-    assert!(h.requests("session/delete").is_empty());
-    h.input("/delete yes{enter}").await;
-    assert_eq!(h.requests("session/delete")[0]["session_id"], "s-fork");
     // Any client's delete clears the chat that shows it.
     h.emit::<SessionDeleted>(SessionRef {
         session_id: "s-fork".into(),
@@ -3019,9 +3062,7 @@ async fn typing_during_a_turn_queues_it() {
         h.requests("queue/remove")[0],
         json!({ "session_id": "s-new", "id": 7 })
     );
-    h.input("{ctrl+u}/unqueue 1{enter}").await;
-    assert_eq!(h.requests("queue/remove")[1]["id"], 6);
-    h.input("/queue clear{enter}").await;
+    h.input("{ctrl+u}/queue clear{enter}").await;
     assert_eq!(h.requests("queue/clear").len(), 1);
 
     // One the core refuses comes back at once.
@@ -3034,15 +3075,17 @@ async fn typing_during_a_turn_queues_it() {
 #[tokio::test]
 async fn the_command_menu_and_actions_are_lua() {
     let mut h = Harness::new().await;
-    // Matching is the bone.menu module: fewer rows.
-    h.lua("require('bone.menu').max = 2").await;
-    h.input("/s").await;
+    // The window is drawn by bone.ui.suggestions: show only the first row.
+    h.lua("bone.ui.suggestions = function(ctx) return { '/' .. ctx.items[1].name } end")
+        .await;
+    h.input("/").await;
     let screen = h.screen(80, 24);
     assert!(
-        screen.contains("/sessions") && screen.contains("/set") && !screen.contains("/source"),
+        screen.contains("/help") && !screen.contains("/sessions"),
         "{screen}"
     );
     h.input("{ctrl+u}").await;
+    h.lua("bone.ui.suggestions = nil").await;
     // A builtin action can be taken over; returning false lets it run.
     h.lua(
         r#"bone.ui.actions.submit = function()
@@ -3103,14 +3146,14 @@ async fn reload_resets_views_and_keeps_the_standard_ui() {
     };
     assert!(has(&mut h, "bone.ui.views.custom_kind"));
     assert!(has(&mut h, "bone.ui.views.reasoning"));
-    assert!(has(&mut h, "bone.ui.regions.thinking"));
+    assert!(has(&mut h, "bone.ui.regions.top"));
 
     // Deleting the line removes the view; the defaults' standard UI stays.
     std::fs::write(&tui, "").unwrap();
     h.app.reload_user_config();
     assert!(!has(&mut h, "bone.ui.views.custom_kind"));
     assert!(has(&mut h, "bone.ui.views.reasoning"));
-    assert!(has(&mut h, "bone.ui.regions.thinking"));
+    assert!(has(&mut h, "bone.ui.regions.top"));
     assert!(has(&mut h, "bone.ui.layout"));
 
     // An edited copy of the standard layout module is used after a reload.
@@ -3175,34 +3218,38 @@ async fn reload_reruns_the_defaults_and_keeps_option_values() {
 }
 
 #[tokio::test]
-async fn standard_ui_has_a_three_row_prompt_and_a_working_divider() {
+async fn standard_ui_has_a_three_row_prompt_and_a_running_statusline() {
     let mut h = Harness::build(None).await;
     let (w, rows) = (40, 16);
     let screen = h.screen(w, rows);
     let lines: Vec<&str> = screen.split('\n').collect();
     let n = lines.len();
-    assert!(lines[n - 2].starts_with(" › Message bone"), "{screen}");
-    assert_eq!((lines[n - 3], lines[n - 1]), ("", ""), "{screen}");
-    assert!(lines[n - 5].starts_with('─'), "{screen}");
+    // The prompt's three rows, then the statusline on the last row.
+    assert!(lines[n - 3].starts_with(" › Message bone"), "{screen}");
+    assert_eq!((lines[n - 4], lines[n - 2]), ("", ""), "{screen}");
 
-    // All three prompt rows share the input background and the row above
-    // does not, also on a short terminal where the regions get squeezed.
+    // All three prompt rows share the input background, and the rows above
+    // and below do not, also on a short terminal where regions get squeezed.
     for rows in [rows, 8] {
         let mut term = Terminal::new(TestBackend::new(w, rows)).unwrap();
         term.draw(|f| render::draw(f, &mut h.app)).unwrap();
         let buf = term.backend().buffer();
         let bg = |y: u16| buf[(w - 1, y)].bg;
-        assert_ne!(bg(rows - 2), ratatui::style::Color::Reset, "{rows} rows");
-        assert_eq!(bg(rows - 3), bg(rows - 2), "{rows} rows");
-        assert_eq!(bg(rows - 1), bg(rows - 2), "{rows} rows");
-        assert_ne!(bg(rows - 4), bg(rows - 2), "{rows} rows");
+        assert_ne!(bg(rows - 3), ratatui::style::Color::Reset, "{rows} rows");
+        assert_eq!(bg(rows - 4), bg(rows - 3), "{rows} rows");
+        assert_eq!(bg(rows - 2), bg(rows - 3), "{rows} rows");
+        assert_ne!(bg(rows - 5), bg(rows - 3), "{rows} rows");
+        assert_ne!(bg(rows - 1), bg(rows - 3), "{rows} rows");
     }
 
-    // The divider shows that a turn is running.
+    // The statusline shows that a turn is running.
     h.input("hello{enter}").await;
     h.emit::<TurnStarted>(started("s-new", "hello")).await;
     let screen = h.screen(w, rows);
-    assert!(screen.contains("ctrl+c to cancel"), "{screen}");
+    assert!(
+        screen.lines().last().unwrap_or("").contains("thinking"),
+        "{screen}"
+    );
 }
 
 /// Chat rows the standard UI draws for these finished tool calls.
@@ -4174,4 +4221,44 @@ async fn runtime_command_lists_and_resets_copies() {
         "{}",
         h.message()
     );
+}
+
+#[tokio::test]
+async fn the_command_menu_rests_on_the_prompt_with_few_matches() {
+    let mut h = Harness::build(None).await;
+    h.input("/qu").await;
+    let screen = h.screen(60, 20);
+    let rows: Vec<&str> = screen.split('\n').collect();
+    let prompt = rows
+        .iter()
+        .position(|r| r.contains("› /qu"))
+        .expect(&screen);
+    // The box's bottom edge is right above the prompt's padded top row.
+    assert!(rows[prompt - 2].starts_with('╰'), "{screen}");
+    assert!(rows[prompt - 3].contains("/quit"), "{screen}");
+}
+
+#[tokio::test]
+async fn health_shows_the_last_lua_error_in_full() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("tui.lua"),
+        "local function boom() error('kaboom') end\nbone.on('submit', function() boom() end)",
+    )
+    .unwrap();
+    let mut h = Harness::build(Some(dir.path().to_owned())).await;
+    h.app.load_user_config();
+    h.input("x{enter}").await;
+    let health = serde_json::to_string(&h.app.tui_health()).unwrap();
+    assert!(
+        health.contains("last error:") && health.contains("kaboom"),
+        "{health}"
+    );
+    assert!(
+        health.contains("traceback"),
+        "the full error, not one line: {health}"
+    );
+    h.app.reload_user_config();
+    let health = serde_json::to_string(&h.app.tui_health()).unwrap();
+    assert!(!health.contains("kaboom"), "{health}");
 }

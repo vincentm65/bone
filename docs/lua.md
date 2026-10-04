@@ -93,7 +93,7 @@ planned; those capabilities are not available until reported by
 | Panels | `bone.ui.win` is a Lua-drawn overlay, and regions/views customize the existing chat layout. Both keep working unchanged. | Persistent panels with IDs, docking, sizing, scrolling, focus, render/key callbacks and lifecycle events are available through `tui.panels` (`bone.ui.panel`). |
 | Prompt and chat | `bone.api.prompt_get`/`prompt_set` read and replace the whole prompt; `bone.chat.items({ kind, last })` lists the on-screen chat's items. | Cursor, range and selection edits (`tui.prompt_edit`, `bone.prompt`) and structured read-only items, turns and sessions with filters (`tui.chat_data`) are available. The TUI stays a prompt, not a file editor. |
 | Jobs | TUI `bone.system`, `bone.http` and `bone.defer` run one background operation and invoke a callback. Core waits are coroutine-based and turn cancellation stops them. v1 has no general process handle or streamed TUI job. | Streaming jobs with handles, stdout/stderr callbacks (chunks or lines), stdin writes, cancellation of the whole process group, timeouts, exit results, status and `job/*` events are available in the TUI through `jobs.streaming` (`bone.job`). |
-| Plugin state | Folder plugins load in name order between runtime defaults and the user's config; `bone.plugins` reports names and `.`/`_` folders are disabled. There is no persistent state store, reload hook or automatic resource cleanup yet. | In the TUI, plugins own what they create; `bone.plugin.on_shutdown`, load/unload/reload (`/plugin`), auto-saved `bone.plugin.state` and trusted project config (`/project`) are available through `plugins.lifecycle` and `tui.project`. Both sides have `bone.state` and `bone.plugin.current()` (`plugins.state`). |
+| Plugin state | Folder plugins load in name order between runtime defaults and the user's config; `bone.plugins` reports names and `.`/`_` folders are disabled. There is no persistent state store, reload hook or automatic resource cleanup yet. | In the TUI, plugins own what they create; `bone.plugin.on_shutdown`, load/unload/reload (`/plugin`), auto-saved `bone.plugin.state` and trusted project config (`/plugin trust`) are available through `plugins.lifecycle` and `tui.project`. Both sides have `bone.state` and `bone.plugin.current()` (`plugins.state`). |
 
 The existing detailed sections describe both the compatibility calls and the
 new additive APIs. A plugin may use a compatibility API today and opt into
@@ -137,7 +137,7 @@ bone.plugin.on_shutdown(function() ... end)  -- unload, reload and quit
 
 ### Project config
 
-A project can carry TUI config in `.bone/tui.lua` (and modules in `.bone/lua/`). bone looks for it in the working directory and its parents, but Lua has full trust, so it only runs after you trust that directory: `/project trust` runs it now and on later starts there, `/project untrust` unloads it and forgets the trust, and `/project` shows the state. Until then bone says that there is one. It loads after your own `tui.lua`, as a plugin named `project`, so it can be unloaded like any other. `bone.project.info()` returns `{ root, file, trusted, loaded }` or nil.
+A project can carry TUI config in `.bone/tui.lua` (and modules in `.bone/lua/`). bone looks for it in the working directory and its parents, but Lua has full trust, so it only runs after you trust that directory: `/plugin trust` runs it now and on later starts there, `/plugin untrust` unloads it and forgets the trust, and `/plugin` lists it (as `project`). Until then bone says that there is one. It loads after your own `tui.lua`, as a plugin named `project`, so it can be unloaded like any other. `bone.project.info()` returns `{ root, file, trusted, loaded }` or nil.
 
 ## Shared
 
@@ -404,7 +404,7 @@ bone.keymap.set("f2", "/sessions")                            -- a slash command
 bone.keymap.set("ctrl+l", "new_session")                      -- a builtin action
 bone.keymap.set("alt+s", function() bone.cmd("set noshow_reasoning") end)
 bone.keymap.set("ctrl+q", "interrupt", { context = "popup" })  -- while a popup is open
-bone.keymap.set("g g", "/messages")                            -- a key sequence
+bone.keymap.set("g g", "/health")                            -- a key sequence
 bone.keymap.context("review", { fallback = { "main" }, priority = 10 })
 bone.keymap.set("r", function() return false end, { context = "review" })
 bone.keymap.focus("review")
@@ -450,7 +450,7 @@ options are registered only in the TUI and are separate from the fixed Rust
 options:
 
 ```lua
-bone.o.apply("show_reasoning!")   -- a /set argument; returns what "name?" shows
+bone.o.apply("show_reasoning!")   -- "name", "noname", "name!", "name=value" or "name?"; returns what "name?" shows
 bone.o.list()                     -- every option as "name=value"
 bone.o.define("review_limit", 10, {
   type = "integer", desc = "Lines to show in review",
@@ -473,9 +473,9 @@ removed with the option. `bone.o.names()` lists names.
 again. `bone.o.info(name)` returns `{ type, value }` for a fixed
 option, and adds `{ default, desc }` for a dynamic option.
 
-Dynamic options also participate in `/set`: querying, assigning, enabling,
-disabling, toggling booleans and listing options use the same validation and
-callbacks as the Lua API.
+Dynamic options also work with `bone.o.apply`: querying, assigning, enabling,
+disabling and toggling booleans use the same validation and callbacks as
+assigning `bone.o.name`.
 ### Commands
 
 ```lua
@@ -520,7 +520,7 @@ only the current argument token is replaced. Names and aliases are accepted
 for lookup, completion and execution. Aliases must not collide with built-in
 names or aliases, other user commands/aliases, or the command's own name;
 `bone.cmd.del` accepts either the canonical name or an alias.
-User commands appear in the `/` suggestions with their `desc`, and in `/help`. Every command is one of these, the defaults included: `/help`, `/set`, `/lua` and the rest are defined in `runtime/lua/bone/commands.lua`, so `bone.cmd.create` replaces any of them and `bone.cmd.del` removes it. Commands related to Lua: `/lua code`, `/lua =expr` (show a value), `/source file`, `/messages` (recent messages, full Lua errors).
+User commands appear in the `/` suggestions with their `desc`, and in `/help`. Every command is one of these, the defaults included: `/help`, `/health`, `/new` and the rest are defined in `runtime/lua/bone/commands.lua`, so `bone.cmd.create` replaces any of them and `bone.cmd.del` removes it. For Lua from the prompt there is `bone.api.exec_lua(code)` and `bone.api.source(path)`; `bone.api.log(n)` gives the recent messages and full Lua errors.
 
 `bone.cmd.list()` returns `{ { name, desc, aliases, complete } }`, `bone.cmd.find(word)` the command a name or alias means, and `bone.cmd.complete(name, ctx)` runs a command's completion function. Aliases may be any word without spaces or `/` (`/?` is `/help`).
 
@@ -648,7 +648,7 @@ bone.now()                              -- milliseconds since the epoch
 - `bone.notify(msg, level)`: `level` is `"info"` (default) or `"error"`. `print(...)` is `bone.notify`.
 - `bone.press("ctrl+c")`: press a key. `bone.action("scroll_top")`: run a builtin action.
 - `bone.api.prompt_get()`, `bone.api.prompt_set(text)`, `bone.prompt.history_add(text)` (for up/down recall)
-- `bone.api.log(n)` (the last n messages), `bone.api.show(text)` (show without logging), `bone.api.colors_name()`, `bone.api.exec_lua(code)` and `bone.api.source(path)` (what `/lua` and `/source` do)
+- `bone.api.log(n)` (the last n messages), `bone.api.show(text)` (show without logging), `bone.api.colors_name()`, `bone.api.exec_lua(code)` and `bone.api.source(path)` (run Lua / a Lua file)
 - `bone.api.session()` → `{ session_id, cwd, title, running }` or `nil`
 - `bone.strwidth(s)`: display width in columns.
 - `bone.ui.win{ lines, width, height, anchor, row, col, z, focus, keys, on_key, guard }` → id: a window drawn over the screen. Lua draws every cell; Rust only places it and clears what is behind it.
@@ -662,7 +662,7 @@ bone.now()                              -- milliseconds since the epoch
 - `bone.ui.update(id, { ... })`: change any of those fields in place (`false` makes a size or position automatic again). Returns `false` if the window is closed.
 - `bone.ui.close(id)`, `bone.ui.is_open(id)`.
 - `bone.ui.select(items, { prompt, format, on_choice, loading, empty, footer, width, height })` → handle: a picker in a focused window. Typing filters (matching `format(item)`), `up`/`down` (or `ctrl+p`/`ctrl+n`, the wheel) move, `enter` calls `on_choice(item, index)`, `esc` calls `on_choice(nil)`. `handle:set_items(items)` fills it later (with `loading = true` it shows "loading…" until then); `handle:close()`.
-- `bone.ui.sessions()`: the session picker (`ctrl+r`, `/sessions`), defined in `runtime/tui/defaults.lua` with `bone.ui.select`. Replace it to change how sessions are listed.
+- `bone.ui.sessions()`: the session picker (`ctrl+o`, `/sessions`), defined in `runtime/tui/defaults.lua` with `bone.ui.select`. Replace it to change how sessions are listed.
 - `bone.ui.suggestions(ctx)` → lines: draws the `/` menu (see Commands) right above the prompt. `ctx = { items = { { name, desc } }, selected, width, height }`. Set it to `nil` for no list (tab still completes).
 - `bone.api.open_session(id)`: show a session.
 - `bone.ui.pager(content, { title, width, height })` → handle: scrollable text in a focused window. `content` is a string (wrapped; `#` lines are headings) or a list of lines. `up`/`down`/wheel, `pageup`/`pagedown`, `home`/`end`, `esc` or `q` closes. `handle:set(content)`, `handle:close()`.
@@ -697,7 +697,7 @@ bone.keymap.set("ctrl+x", function() job:cancel() end)
 
 ### Colors
 
-Everything is drawn with named highlight groups. `/colorscheme black` (the default, the original bone palette) and `/colorscheme ansi` (16 terminal colors) ship with bone; `colors/<name>.lua` in `~/.bone/` or a plugin adds more.
+Everything is drawn with named highlight groups. `bone.colorscheme("black")` (the default, the original bone palette) and `bone.colorscheme("ansi")` (16 terminal colors) ship with bone; `colors/<name>.lua` in `~/.bone/` or a plugin adds more.
 
 ```lua
 bone.colorscheme("ansi")
@@ -707,7 +707,7 @@ bone.hl.get("ToolPath")   -- { fg = "#7dcfff", bold = true }
 bone.hl.names()
 ```
 
-`/hi Group fg=#ff0000 bold` sets one from the prompt; `/hi` lists the groups.
+`bone.hl.names()` lists the groups.
 
 Groups: `Normal Dim Accent UserPrompt UserMessage Reasoning ToolName ToolArgs ToolPath ToolSummary ToolOutput ToolGutter ToolRunning ToolError DiffAdd DiffDelete ShellProgram ShellPath ShellFlag ShellString ShellVariable ShellComment ShellOperator MdHeading MdBold MdItalic MdCode MdCodeBlock MdQuote MdBullet MdLink Notice ErrorMsg WarningMsg WinSeparator StatusLine StatusLineDim Selection Placeholder PopupBorder PopupTitle PanelTitle PanelTitleFocus`.
 
@@ -918,4 +918,4 @@ Each returns one line (`"%="` is a blank stretch); the row exists only while the
 - `bone.text.shell(cmd)` → the command as highlighted spans.
 - `bone.ui.preview(text, max, group)` (style plugin) → at most `max` rows: first line, `⋮ +N lines`, last lines.
 
-Errors in Lua never crash bone: they show as a one-line message, with the full traceback in `/messages`.
+Errors in Lua never crash bone: they show as a one-line message, with the full traceback in `bone.api.log`.

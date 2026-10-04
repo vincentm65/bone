@@ -69,7 +69,7 @@ map({
   ["ctrl+n"] = "new_session",
   ["ctrl+r"] = function()
     -- Toggle the model reasoning (live, in the chat, and in the transcript).
-    -- The same switch as /set show_reasoning; it redraws on its own.
+    -- The same switch as bone.o.apply("show_reasoning!"); it redraws on its own.
     bone.o.apply("show_reasoning!")
   end,
 
@@ -156,7 +156,8 @@ function bone.ui.sessions()
 end
 
 -- Matching slash commands while typing "/…", right above the prompt.
--- ctx = { items = { { name, desc } }, selected, width, height }.
+-- ctx = { items = { { name, desc } }, selected, width, height, footer };
+-- footer is a dim row under the list while it scrolls.
 function bone.ui.suggestions(ctx)
   local name_w, desc_w = 0, 0
   for _, it in ipairs(ctx.items) do
@@ -171,6 +172,9 @@ function bone.ui.suggestions(ctx)
       { name .. string.rep(" ", name_w + 1 - bone.text.width(name)), hl },
       { it.desc .. string.rep(" ", desc_w - bone.text.width(it.desc)), hl },
     }
+  end
+  if ctx.footer then
+    lines[#lines + 1] = { { ctx.footer, "Dim" } }
   end
   return bone.ui.box(lines, { border_hl = "WinSeparator", width = math.min(name_w + desc_w + 5, ctx.width) })
 end
@@ -245,7 +249,14 @@ local function health_lines(title, items, out)
   out[#out + 1] = { { title, "Accent" } }
   for _, it in ipairs(items) do
     local m = MARK[it.status] or MARK.warn
-    out[#out + 1] = { m, { it.name .. ": ", "Normal" }, { it.message, "Dim" } }
+    local rows = {}
+    for line in (tostring(it.message) .. "\n"):gmatch("(.-)\n") do
+      rows[#rows + 1] = line
+    end
+    out[#out + 1] = { m, { it.name .. ": ", "Normal" }, { rows[1] or "", "Dim" } }
+    for i = 2, #rows do
+      out[#out + 1] = { { "    " .. rows[i], "Dim" } }
+    end
   end
   out[#out + 1] = {}
 end
@@ -321,21 +332,6 @@ bone.cmd.create("fork", function(c)
   end)
 end, { desc = "copy this session to try something else; /fork N starts before turn N" })
 
-bone.cmd.create("delete", function(c)
-  local id = current_session()
-  if not id then
-    return
-  end
-  if c.args ~= "yes" then
-    return bone.notify("Delete this session and its file? /delete yes")
-  end
-  bone.request("session/delete", { session_id = id }, function(_, err)
-    if err then
-      bone.notify("delete failed: " .. tostring(err), "error")
-    end
-  end)
-end, { desc = "delete this session (/delete yes)" })
-
 local function message(e)
   return (tostring(e):gsub("^runtime error: ", ""):gsub("\nstack traceback:.*$", ""))
 end
@@ -395,8 +391,20 @@ bone.cmd.create("plugin", function(c)
     end)
     return
   end
+  if (op == "trust" or op == "untrust") and name == "" then
+    -- This directory's .bone/tui.lua runs only once trusted.
+    local info = bone.project.info()
+    if not info then
+      return bone.notify("no .bone/tui.lua here or in a parent directory", "error")
+    end
+    local ok, e = pcall(bone.project.trust, op == "trust")
+    if not ok then
+      return bone.notify(message(e), "error")
+    end
+    return bone.notify(info.file .. (op == "trust" and ": trusted and loaded" or ": no longer trusted, unloaded"))
+  end
   if (op ~= "load" and op ~= "unload" and op ~= "reload") or name == "" then
-    return bone.notify("usage: /plugin [reload] [load|unload|reload name]", "error")
+    return bone.notify("usage: /plugin [reload] [load|unload|reload name] [trust|untrust]", "error")
   end
   local has_tui = false
   for _, p in ipairs(bone.plugin.list()) do
@@ -431,23 +439,6 @@ bone.cmd.create("plugin", function(c)
     bone.notify(name .. (has_tui and ": tui and core " or ": core ") .. done)
   end)
 end, {
-  desc = "plugins: list, load/unload/reload name; /plugin reload reloads the core's config",
+  desc = "plugins: list, load/unload/reload name; /plugin reload reloads the core's config; /plugin trust runs this project's .bone/tui.lua",
   aliases = { "plugins" },
 })
-
-bone.cmd.create("project", function(c)
-  local info = bone.project.info()
-  if not info then
-    return bone.notify("no .bone/tui.lua here or in a parent directory", "error")
-  end
-  if c.args == "" then
-    bone.notify(info.file .. ": " .. (info.trusted and "trusted" or "not trusted") .. (info.loaded and ", loaded" or ""))
-  elseif c.args == "trust" then
-    bone.project.trust(true)
-  elseif c.args == "untrust" then
-    bone.project.trust(false)
-    bone.notify("project config unloaded and no longer trusted")
-  else
-    bone.notify('unknown /project argument "' .. c.args .. '" (trust, untrust)', "error")
-  end
-end, { desc = "this project's .bone/tui.lua: show, trust, untrust" })

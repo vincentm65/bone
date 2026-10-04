@@ -110,7 +110,7 @@ end
 function option_api.info(name)
   return api("opt_info", name)
 end
---- One /set argument: "name", "noname", "name!", "name=value", "name?".
+--- One option argument: "name", "noname", "name!", "name=value", "name?".
 --- Returns what to show (for "name?"), or nil; errors on a bad argument.
 function option_api.apply(arg)
   return api("opt_apply", arg)
@@ -376,7 +376,7 @@ bone.api = {
   colors_name = function()
     return api("colors_name")
   end,
-  --- The last n messages shown (for /messages).
+  --- The last n messages shown.
   log = function(n)
     return api("log_tail", n or 20)
   end,
@@ -384,7 +384,7 @@ bone.api = {
   show = function(text)
     api("show_message", text)
   end,
-  --- Run Lua as /lua does ("=expr" shows a value) and /source runs a file.
+  --- Run Lua ("=expr" shows a value); source runs a file.
   exec_lua = function(code)
     api("exec_lua", code)
   end,
@@ -1086,7 +1086,7 @@ end
 
 --- This directory's project config: { root, file, trusted, loaded } when a
 --- .bone/tui.lua is here or above, else nil. It runs only after
---- /project trust (remembered per directory).
+--- /plugin trust (remembered per directory).
 bone.project = {
   info = function()
     return api("project_info")

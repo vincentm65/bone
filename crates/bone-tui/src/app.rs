@@ -107,7 +107,7 @@ pub struct App {
     pending_since: Option<Instant>,
     raw_interceptors: Vec<RawInterceptor>,
     pub message: Option<(String, Level)>,
-    /// Every message shown, for `/messages`.
+    /// Every message shown (`bone.api.log`).
     pub log: Vec<String>,
     pub options: Options,
     pub dynamic_options: HashMap<String, DynamicOption>,
@@ -166,6 +166,8 @@ pub struct App {
     pub plugins: Vec<crate::plugins::Plugin>,
     /// `bone.plugin.on_shutdown` callbacks, by owner.
     pub shutdown_hooks: Vec<(Option<String>, u64)>,
+    /// The last Lua errors in full (tracebacks included), for /health.
+    pub lua_errors: Vec<String>,
     /// Option values kept across a reload, for options defined again.
     pub carried_options: HashMap<String, crate::options::DynamicValue>,
 }
@@ -240,6 +242,7 @@ impl App {
             plugins: Vec::new(),
             shutdown_hooks: Vec::new(),
             carried_options: HashMap::new(),
+            lua_errors: Vec::new(),
         };
         crate::lua::init(&mut app, config_dir);
         app.dirty = true;
@@ -279,6 +282,7 @@ impl App {
         self.theme = Theme::default();
         self.colors_name = None;
         self.ui_broken.clear();
+        self.lua_errors.clear();
         self.spinner = Default::default();
         self.views_rev += 1;
         self.opts_rev += 1;
@@ -1099,7 +1103,8 @@ impl App {
             "mouse",
             "ok",
             if self.options.mouse {
-                "on: the wheel scrolls, dragging copies (/set nomouse for the terminal's own selection)".into()
+                "on: the wheel scrolls, dragging copies (turn it off with bone.o.mouse = false)"
+                    .into()
             } else {
                 "off: the terminal selects text; the wheel does not scroll".into()
             },
@@ -1132,11 +1137,20 @@ impl App {
             )
         };
         out.push(item("clipboard", status, route));
+        let last = self
+            .lua_errors
+            .last()
+            .map(|e| format!("\nlast error:\n{e}"))
+            .unwrap_or_default();
         if self.ui_broken.is_empty() {
             out.push(item(
                 "tui lua",
-                "ok",
-                "no errors in views, regions or windows".into(),
+                if self.lua_errors.is_empty() {
+                    "ok"
+                } else {
+                    "warn"
+                },
+                format!("no errors in views, regions or windows{last}"),
             ));
         } else {
             let mut names: Vec<&String> = self.ui_broken.iter().collect();
@@ -1145,10 +1159,7 @@ impl App {
             out.push(item(
                 "tui lua",
                 "error",
-                format!(
-                    "switched off after errors: {} (see /messages)",
-                    names.join(", ")
-                ),
+                format!("switched off after errors: {}{last}", names.join(", ")),
             ));
         }
         let overrides = self
