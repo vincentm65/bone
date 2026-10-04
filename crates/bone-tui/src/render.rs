@@ -6,7 +6,7 @@
 //!
 //! ```text
 //! top             region, if defined
-//! chat            the current session ("left"/"right" regions beside it,
+//! chat            the current session ("left"/"right" columns beside it,
 //!                 then docked Lua panels: bone.ui.panel)
 //! divider         only if bone.ui.divider is defined
 //! above_prompt    region, if defined
@@ -32,6 +32,7 @@ use crate::ui::{Border, Item, LayoutNode, PromptSpec, Size, render_items};
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
     app.screen = area;
+    app.spinner = app.read_spinner();
     // The Normal group's background (if any) fills the screen.
     frame.render_widget(Block::default().style(app.theme.hl("Normal")), area);
 
@@ -69,26 +70,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         message = rect("message");
     }
 
-    let mut chat_area = middle;
-    if middle.width >= 40 {
-        if let Some((w, lines)) = app.region("left", middle.width, middle.height) {
-            let r = Rect { width: w, ..middle };
-            frame.render_widget(Paragraph::new(lines), r);
-            vertical_bar(frame, app, r.right(), middle);
-            chat_area.x += w + 1;
-            chat_area.width = chat_area.width.saturating_sub(w + 1);
-        }
-        if let Some((w, lines)) = app.region("right", chat_area.width, middle.height) {
-            let r = Rect {
-                x: chat_area.right().saturating_sub(w),
-                width: w,
-                ..middle
-            };
-            frame.render_widget(Paragraph::new(lines), r);
-            vertical_bar(frame, app, r.x.saturating_sub(1), middle);
-            chat_area.width = chat_area.width.saturating_sub(w + 1);
-        }
-    }
+    let chat_area = middle;
     let chat_area = app.draw_panels(frame, chat_area);
     for (name, r, lines) in std::mem::take(&mut plan.regions) {
         let lines = match lines {
@@ -191,15 +173,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
 }
 
-fn vertical_bar(frame: &mut Frame<'_>, app: &App, x: u16, area: Rect) {
-    let style = app.theme.hl("WinSeparator");
-    for y in area.y..area.bottom() {
-        if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
-            cell.set_symbol("│").set_style(style);
-        }
-    }
-}
-
 /// Where the layout put things.
 #[derive(Default)]
 struct Plan {
@@ -236,12 +209,15 @@ fn place(app: &mut App, node: &LayoutNode, area: Rect, plan: &mut Plan) {
     };
     let rows = *rows;
     let n = children.len();
-    let seps = if rows || sep.is_none() {
-        0
-    } else {
+    // Separators go only between columns that have something in them; room
+    // for the most there could be is kept back while sizing regions.
+    let sep = sep.as_ref().filter(|_| !rows);
+    let most_seps = if sep.is_some() {
         n.saturating_sub(1) as u16
+    } else {
+        0
     };
-    let total = if rows { area.height } else { area.width }.saturating_sub(seps);
+    let total = if rows { area.height } else { area.width };
     let cross = if rows { area.width } else { area.height };
     let mut sizes: Vec<Option<u16>> = vec![None; n];
     let mut lines: Vec<Option<Vec<Line<'static>>>> = vec![None; n];
@@ -303,7 +279,7 @@ fn place(app: &mut App, node: &LayoutNode, area: Rect, plan: &mut Plan) {
         .count();
     let used: u16 = sizes.iter().flatten().sum();
     let keep = if fills > 0 && rows { 3 } else { 0 };
-    let mut spare = total.saturating_sub(used + keep);
+    let mut spare = total.saturating_sub(used + keep + most_seps);
     for (i, c) in children.iter().enumerate() {
         if sizes[i].is_some() || c.size() != Size::Auto {
             continue;
@@ -329,17 +305,33 @@ fn place(app: &mut App, node: &LayoutNode, area: Rect, plan: &mut Plan) {
         spare = spare.saturating_sub(sizes[i].unwrap_or(0));
     }
     let used: u16 = sizes.iter().flatten().sum();
-    let left = total.saturating_sub(used);
     let fill_count = sizes.iter().filter(|s| s.is_none()).count() as u16;
+    let shown = sizes.iter().filter(|s| s.is_none_or(|v| v > 0)).count() as u16;
+    let seps = if sep.is_some() {
+        shown.saturating_sub(1)
+    } else {
+        0
+    };
+    let left = total.saturating_sub(used + seps);
     let mut extra = if fill_count > 0 { left % fill_count } else { 0 };
     let mut at = if rows { area.y } else { area.x };
     let end = if rows { area.bottom() } else { area.right() };
+    let mut shown_before = false;
     for (i, c) in children.iter().enumerate() {
         let mut size = sizes[i].unwrap_or_else(|| {
             let share = left / fill_count.max(1) + u16::from(extra > 0);
             extra = extra.saturating_sub(1);
             share
         });
+        if let Some(sep) = sep
+            && size > 0
+            && shown_before
+            && at < end
+        {
+            plan.seps.push((at, area, sep.clone()));
+            at += 1;
+        }
+        shown_before |= size > 0;
         size = size.min(end.saturating_sub(at));
         let r = if rows {
             Rect {
@@ -364,15 +356,6 @@ fn place(app: &mut App, node: &LayoutNode, area: Rect, plan: &mut Plan) {
             }
         }
         at += size;
-        if let Some(sep) = sep
-            && !rows
-            && i + 1 < n
-            && size > 0
-            && at < end
-        {
-            plan.seps.push((at, area, sep.clone()));
-            at += 1;
-        }
     }
 }
 

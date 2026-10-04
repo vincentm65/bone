@@ -3706,10 +3706,10 @@ async fn layout_nests_rows_and_columns() {
     h.lua(r#"bone.notify("hi")"#).await;
     let screen = h.screen(41, 8);
     let rows: Vec<&str> = screen.split('\n').collect();
-    // 41 columns, 2 separators: files 9 (25% of 39), message 6, chat 24.
+    // 41 columns: files 10 (25% of them), message 6, 2 separators, chat 23.
     assert_eq!(rows[0], "STATUS", "{screen}");
-    assert_eq!(rows[1], "files 9x6|> go                    |hi", "{screen}");
-    assert!(rows[4].starts_with("         |N24"), "{screen}");
+    assert_eq!(rows[1], "files 10x6|> go                   |hi", "{screen}");
+    assert!(rows[4].starts_with("          |N23"), "{screen}");
     assert_eq!(rows.len(), 8);
 
     // A region set to fill shares the space with the chat.
@@ -3868,7 +3868,7 @@ async fn spinner_selection_and_title_are_lua() {
     let mut h = Harness::blank().await;
     h.lua(
         r#"
-        bone.ui.set_spinner({ "A", "B" }, 50)
+        bone.ui.spinner = { frames = { "A", "B" }, interval = 50 }
         bone.ui.statusline = function(ctx) return { "[" .. ctx.spinner .. "]" } end
         bone.ui.layout = { "chat", "statusline" }
         bone.ui.title = function(ctx) return "bone: " .. ctx.title end
@@ -3884,14 +3884,18 @@ async fn spinner_selection_and_title_are_lua() {
     );
     assert_eq!(h.app.spinner.interval_ms, 50);
     assert_eq!(h.app.ui_title().as_deref(), Some("bone: [new session]"));
-    h.lua("bone.ui.set_spinner()").await;
+    h.lua("bone.ui.spinner = nil").await;
+    h.screen(20, 3);
     assert_eq!(h.app.spinner.frames.len(), 10);
+    h.lua("bone.ui.spinner = { frames = {} }").await;
+    h.screen(20, 3);
     assert!(
         h.app
-            .with_api(|lua| lua
-                .load("return pcall(bone.ui.set_spinner, {})")
-                .eval::<bool>())
-            .is_ok_and(|ok| !ok)
+            .log
+            .iter()
+            .any(|l| l.contains("bone.ui.spinner needs frames")),
+        "{:?}",
+        h.app.log
     );
 
     // A selection: the handler sees its text; returning true keeps it from
@@ -4070,4 +4074,22 @@ async fn chat_items_around_an_item() {
     );
     // Around an item not of `kind`: nothing (an empty Lua table).
     assert_eq!(ids(&mut h, r#"{ around = 1, kind = "tool" }"#), json!({}));
+}
+
+#[tokio::test]
+async fn left_and_right_are_columns_of_the_default_layout() {
+    let mut h = Harness::blank().await;
+    h.lua(
+        r#"
+        bone.ui.views.user = function(item) return { { { "> " .. item.text, "Normal" } } } end
+        bone.ui.regions.left = { size = 6, render = function() return { "LEFT" } end }
+        "#,
+    )
+    .await;
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    // Only a separator between the two shown columns, none for `right`.
+    let screen = h.screen(30, 4);
+    assert!(screen.starts_with("LEFT  │> go\n"), "{screen}");
+    assert!(!screen.lines().next().unwrap().ends_with('│'), "{screen}");
 }

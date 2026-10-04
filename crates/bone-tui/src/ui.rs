@@ -258,7 +258,7 @@ fn layout_node(v: Value) -> mlua::Result<LayoutNode> {
     }
 }
 
-/// The spinner's frames and how long each shows (`bone.ui.set_spinner`).
+/// The spinner's frames and how long each shows (`bone.ui.spinner`).
 #[derive(Debug, Clone)]
 pub struct Spinner {
     pub frames: Vec<String>,
@@ -440,6 +440,28 @@ impl App {
         }
     }
 
+    /// `bone.ui.spinner = { frames = { ... }, interval = ms }`, or the
+    /// default; read once per frame.
+    pub fn read_spinner(&mut self) -> Spinner {
+        self.guarded("spinner", |lua| {
+            let ui: Table = lua.globals().get::<Table>("bone")?.get("ui")?;
+            let Some(t) = ui.get::<Option<Table>>("spinner")? else {
+                return Ok(None);
+            };
+            let frames: Vec<String> = t.get::<Option<Vec<String>>>("frames")?.unwrap_or_default();
+            if frames.is_empty() {
+                return Err(mlua::Error::runtime("bone.ui.spinner needs frames"));
+            }
+            let interval: Option<f64> = t.get("interval")?;
+            Ok(Some(Spinner {
+                frames,
+                interval_ms: interval.unwrap_or(100.0).max(16.0) as u64,
+            }))
+        })
+        .flatten()
+        .unwrap_or_default()
+    }
+
     /// `bone.ui.title(ctx)`: the terminal's title, or None to leave it.
     pub fn ui_title(&mut self) -> Option<String> {
         if !self.ui_defined("title") {
@@ -489,11 +511,30 @@ impl App {
             "prompt",
             "statusline",
         ];
+        // The chat with `left` and `right` columns beside it (empty unless
+        // those regions are defined).
         let default = || LayoutNode::Split {
             rows: true,
             sep: None,
             size: Size::Fill,
-            children: DEFAULT.iter().map(|n| LayoutNode::leaf(n, None)).collect(),
+            children: DEFAULT
+                .iter()
+                .map(|&n| {
+                    if n == "chat" {
+                        LayoutNode::Split {
+                            rows: false,
+                            sep: Some("│".into()),
+                            size: Size::Fill,
+                            children: ["left", "chat", "right"]
+                                .iter()
+                                .map(|n| LayoutNode::leaf(n, None))
+                                .collect(),
+                        }
+                    } else {
+                        LayoutNode::leaf(n, None)
+                    }
+                })
+                .collect(),
         };
         self.guarded("layout", |lua| {
             let ui: Table = lua.globals().get::<Table>("bone")?.get("ui")?;
@@ -750,19 +791,6 @@ impl App {
                 .collect(),
             None => bare(&data, key.width, key.prev.is_none()),
         }
-    }
-
-    /// The size `bone.ui.regions[name]` asks for and its lines. Row regions
-    /// (`top`, `above_prompt`) size in rows, `size = "auto"` fitting the
-    /// content up to `max`; column regions (`left`, `right`) in columns.
-    pub fn region(
-        &mut self,
-        name: &str,
-        width_cols: u16,
-        height: u16,
-    ) -> Option<(u16, Vec<Line<'static>>)> {
-        let rows = !matches!(name, "left" | "right");
-        self.region_sized(name, width_cols, height, rows, false)
     }
 
     /// A region in a stack of rows (`rows`: sized in rows, up to `height`)

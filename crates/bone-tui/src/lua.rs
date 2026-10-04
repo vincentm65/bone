@@ -2113,19 +2113,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             app.dirty |= found;
             ret(lua, found)
         }
-        "spinner_set" => {
-            let (frames, interval): (Option<Vec<String>>, Option<f64>) = args(lua, a)?;
-            app.spinner = match frames {
-                None => Default::default(),
-                Some(f) if f.is_empty() => return Err(err("a spinner needs at least one frame")),
-                Some(frames) => crate::ui::Spinner {
-                    frames,
-                    interval_ms: interval.unwrap_or(100.0).max(16.0) as u64,
-                },
-            };
-            app.dirty = true;
-            ret(lua, ())
-        }
         "chat_at" => {
             let (x, y): (u16, u16) = args(lua, a)?;
             match app.chat_at((x, y)) {

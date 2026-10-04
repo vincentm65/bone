@@ -9,6 +9,8 @@ bone runs two separate LuaJIT states, one per side:
 
 `$BONE_CONFIG_DIR` replaces `~/.bone`. The two states never share Lua values; they talk only through the bone protocol. Lua has full trust (no sandbox). Tool calls run without asking; asking first is a plugin (`examples/plugins/approve`, see below).
 
+Numbering, everywhere: indexes into lists start at 1, as in Lua (chat item `index`, `first`/`last`, `from`/`to`); positions start at 0 (screen cells `x`, `y`; prompt `row`, `col` and highlight ranges). Settings are fields you assign (`bone.ui.statusline = fn`, `bone.ui.layout = {…}`, `bone.ui.spinner = {…}`, `bone.o.name = value`); actions are calls (`bone.chat.add`, `bone.ui.popup`, `bone.notify`).
+
 Load order on each side: `runtime/<side>/api.lua`, then `runtime/<side>/defaults.lua`, then your file. The runtime is built into the binary, and any runtime file can be replaced by putting a file at the same path under `~/.bone/runtime/` (for example `~/.bone/runtime/tui/defaults.lua` drops every default keymap). A replacement hides every later change to the built-in file, so prefer changing pieces from your config; when you do replace a file, start from the built-in one and change only what you need:
 
 ```lua
@@ -814,10 +816,10 @@ bone.ui.regions.above_prompt = {
 bone.ui.regions.right = { size = 30, render = function(ctx) return { "notes" } end }
 ```
 
-Regions `left` and `right` sit beside the chat (sized in columns). Every other region is a row band placed by `bone.ui.layout`, which lists the screen's rows from top to bottom:
+Regions are placed by `bone.ui.layout`, which lists the screen's rows from top to bottom. The default puts `left` and `right` as columns beside the chat (empty until you define those regions):
 
 ```lua
-bone.ui.layout = { "top", "chat", "divider", "above_prompt", "prompt", "statusline" }  -- the default
+bone.ui.layout = { "top", { cols = { "left", "chat", "right" }, sep = "│" }, "divider", "above_prompt", "prompt", "statusline" }  -- the default
 bone.ui.layout = { "statusline", "chat", "mybar", "prompt" }  -- statusline on top, a custom band
 bone.ui.regions.mybar = { size = 1, render = function(ctx) return { "hello" } end }
 ```
@@ -839,7 +841,7 @@ bone.ui.layout = {
 
 `size` is cells (rows in a stack, columns side by side), `"30%"`, `"auto"` (its natural size) or `"fill"` (a share of what is left). By default the chat and splits fill; the prompt, statusline, divider and message line take their natural size; and regions take theirs from their own `size`. Fixed and percent sizes are given out first, then natural sizes (regions leave a filling sibling at least 3 rows), then filling entries share the rest. A region given a fixed, percent or fill size is drawn at exactly that size.
 
-The terminal's title is `bone.ui.title(ctx)` (the statusline's `ctx`), set when it changes; leave it undefined to keep the terminal's own. The spinner every `ctx.spinner` shows is `bone.ui.set_spinner(frames, interval_ms)`, e.g. `bone.ui.set_spinner({ "◐", "◓", "◑", "◒" }, 120)`; with no frames it goes back to the default, and the screen redraws at that pace while a turn runs.
+The terminal's title is `bone.ui.title(ctx)` (the statusline's `ctx`), set when it changes; leave it undefined to keep the terminal's own. The spinner every `ctx.spinner` shows is `bone.ui.spinner = { frames = { "◐", "◓", "◑", "◒" }, interval = 120 }` (milliseconds per frame); unset, it is the default braille dots, and the screen redraws at that pace while a turn runs.
 
 `chat`, `prompt`, `divider`, `statusline` and `message` are built in; leave one out and it is not shown (without `message`, notifications take rows at the bottom). Row regions are sized in rows. `size` is a number or `"auto"` (fit the content, up to `max`, default 10); a bare function means `size = "auto"`. `render(ctx)` gets `{ region, width, height, spinner, popup, session }` and returns lines, or `nil` to hide the region. Regions are redrawn every frame, so keep them light.
 
@@ -847,6 +849,8 @@ The terminal's title is `bone.ui.title(ctx)` (the statusline's `ctx`), set when 
 - `bone.ui.render(item, width, region)` renders an item with the current views.
 
 #### Panels: docked areas you own
+
+Panels are windows you open and close at runtime, docked beside the chat, with focus, keys and scrolling of their own. A fixed part of the screen (a file list, a notes column) is a region in `bone.ui.layout` instead.
 
 A panel is a persistent area beside, above or below the chat. It takes room from the chat (unlike `bone.ui.win`, which floats over it), keeps its scroll position while you do other things, can be hidden and shown again, and can take the keyboard. Lua supplies all of its content; Rust sizes and places it, scrolls it, and routes keys and the mouse wheel to it.
 
