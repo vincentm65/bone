@@ -3862,3 +3862,58 @@ async fn tool_items_carry_live_output_timing_and_usage() {
             .contains("    shell make\n      │ compiling a\n      ╰ compiling b")
     );
 }
+
+#[tokio::test]
+async fn spinner_selection_and_title_are_lua() {
+    let mut h = Harness::blank().await;
+    h.lua(
+        r#"
+        bone.ui.set_spinner({ "A", "B" }, 50)
+        bone.ui.statusline = function(ctx) return { "[" .. ctx.spinner .. "]" } end
+        bone.ui.layout = { "chat", "statusline" }
+        bone.ui.title = function(ctx) return "bone: " .. ctx.title end
+        picked = nil
+        bone.on("select", function(ev) picked = ev.text return ev.text:find("keep") ~= nil end)
+        "#,
+    )
+    .await;
+    let screen = h.screen(20, 3);
+    assert!(
+        screen.ends_with("[A]") || screen.ends_with("[B]"),
+        "{screen}"
+    );
+    assert_eq!(h.app.spinner.interval_ms, 50);
+    assert_eq!(h.app.ui_title().as_deref(), Some("bone: [new session]"));
+    h.lua("bone.ui.set_spinner()").await;
+    assert_eq!(h.app.spinner.frames.len(), 10);
+    assert!(
+        h.app
+            .with_api(|lua| lua
+                .load("return pcall(bone.ui.set_spinner, {})")
+                .eval::<bool>())
+            .is_ok_and(|ok| !ok)
+    );
+
+    // A selection: the handler sees its text; returning true keeps it from
+    // the clipboard, anything else lets it through.
+    let select = |h: &mut Harness| -> (Option<String>, Option<String>) {
+        h.screen(20, 3);
+        h.app.mouse("down", "left", (0, 2));
+        h.app.mouse("drag", "left", (8, 2));
+        h.app.mouse("up", "left", (8, 2));
+        h.app.clipboard = None;
+        h.screen(20, 3);
+        let picked: Option<String> = h
+            .app
+            .with_api(|lua| lua.load("return picked").eval())
+            .unwrap();
+        (picked, h.app.clipboard.take())
+    };
+    h.lua(r#"bone.notify("keep this")"#).await;
+    assert_eq!(select(&mut h), (Some("keep this".into()), None));
+    h.lua(r#"bone.notify("other one")"#).await;
+    assert_eq!(
+        select(&mut h),
+        (Some("other one".into()), Some("other one".into()))
+    );
+}

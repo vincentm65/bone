@@ -712,6 +712,7 @@ impl App {
             return;
         }
         self.ui_broken.clear();
+        self.spinner = Default::default();
         self.run_defaults();
         self.load_user_config();
         self.dirty = true;
@@ -2136,6 +2137,19 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             let found = app.chats.iter_mut().any(|c| c.remove_lua(&id));
             app.dirty |= found;
             ret(lua, found)
+        }
+        "spinner_set" => {
+            let (frames, interval): (Option<Vec<String>>, Option<f64>) = args(lua, a)?;
+            app.spinner = match frames {
+                None => Default::default(),
+                Some(f) if f.is_empty() => return Err(err("a spinner needs at least one frame")),
+                Some(frames) => crate::ui::Spinner {
+                    frames,
+                    interval_ms: interval.unwrap_or(100.0).max(16.0) as u64,
+                },
+            };
+            app.dirty = true;
+            ret(lua, ())
         }
         "chat_at" => {
             let (x, y): (u16, u16) = args(lua, a)?;

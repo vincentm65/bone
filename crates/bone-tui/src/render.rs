@@ -168,11 +168,25 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if let Some(c) = cursor {
         frame.set_cursor_position(c);
     }
-    if let Some(s) = &mut app.selection {
-        if s.done && !s.copied {
+    // A finished selection is copied, unless a `select` handler returns
+    // true for its text.
+    let finished = match &mut app.selection {
+        Some(s) if s.done && !s.copied => {
             s.copied = true;
-            app.clipboard = Some(s.text(frame.buffer_mut()));
+            Some(s.text(frame.buffer_mut()))
         }
+        _ => None,
+    };
+    if let Some(text) = finished {
+        let taken = app
+            .fire("select", serde_json::json!({ "text": text }))
+            .iter()
+            .any(|v| matches!(v, mlua::Value::Boolean(true)));
+        if !taken {
+            app.clipboard = Some(text);
+        }
+    }
+    if let Some(s) = &mut app.selection {
         s.highlight(frame.buffer_mut());
     }
 }

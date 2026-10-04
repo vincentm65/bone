@@ -490,6 +490,14 @@ end
 --- submit, complete, dismiss, up and down this way.
 bone.ui.actions = {}
 
+--- The spinner the statusline, divider, prompt and regions get as
+--- ctx.spinner: a list of frames and the milliseconds each shows (default
+--- 100). No frames restores the default braille dots.
+---   bone.ui.set_spinner({ "◐", "◓", "◑", "◒" }, 120)
+function bone.ui.set_spinner(frames, interval_ms)
+  return api("spinner_set", frames, interval_ms)
+end
+
 function bone.ui.refresh()
   api("ui_refresh")
 end

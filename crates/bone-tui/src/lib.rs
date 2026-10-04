@@ -54,7 +54,6 @@ pub use crate::headless::Headless;
 /// At most this often while content streams in.
 const FRAME: Duration = Duration::from_millis(16);
 /// Redraw rate for spinners and elapsed time.
-const ANIMATION: Duration = Duration::from_millis(100);
 const LUA_RELOAD_POLL: Duration = Duration::from_millis(250);
 
 pub struct RunOptions {
@@ -97,7 +96,7 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
         let draw_at = if app.dirty {
             Some((last_draw + FRAME).max(Instant::now()))
         } else if app.animating() {
-            Some(last_draw + ANIMATION)
+            Some(last_draw + Duration::from_millis(app.spinner.interval_ms.max(16)))
         } else {
             None
         };
@@ -130,6 +129,12 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
             _ = sleep_until(draw_at.unwrap_or_else(Instant::now).into()), if draw_at.is_some() => {
                 term.draw(|f| render::draw(f, &mut app))?;
                 app.dirty = false;
+                if let Some(title) = app.ui_title()
+                    && app.title.as_ref() != Some(&title)
+                {
+                    crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(&title))?;
+                    app.title = Some(title);
+                }
                 if let Some(seq) = app.clipboard.take().and_then(|t| selection::copy(&t)) {
                     crossterm::execute!(std::io::stdout(), crossterm::style::Print(seq))?;
                 }

@@ -122,6 +122,9 @@ pub struct App {
     pub chat_expiry: Option<std::time::Instant>,
     /// Numbers the items Lua adds to chats.
     pub lua_item_seq: u64,
+    pub spinner: crate::ui::Spinner,
+    /// The terminal title last set (`bone.ui.title`).
+    pub title: Option<String>,
     pub theme: Theme,
     pub colors_name: Option<String>,
     /// `bone.ui` functions that errored; skipped until restart.
@@ -205,6 +208,8 @@ impl App {
             render_expires: None,
             chat_expiry: None,
             lua_item_seq: 0,
+            spinner: Default::default(),
+            title: None,
             theme: Theme::default(),
             colors_name: None,
             ui_broken: HashSet::new(),

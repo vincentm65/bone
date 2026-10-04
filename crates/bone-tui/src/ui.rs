@@ -258,11 +258,34 @@ fn layout_node(v: Value) -> mlua::Result<LayoutNode> {
     }
 }
 
-pub fn spinner() -> char {
-    let ms = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_millis());
-    SPINNER[(ms / 100) as usize % SPINNER.len()]
+/// The spinner's frames and how long each shows (`bone.ui.set_spinner`).
+#[derive(Debug, Clone)]
+pub struct Spinner {
+    pub frames: Vec<String>,
+    pub interval_ms: u64,
+}
+
+impl Default for Spinner {
+    fn default() -> Self {
+        Spinner {
+            frames: SPINNER.iter().map(|c| c.to_string()).collect(),
+            interval_ms: 100,
+        }
+    }
+}
+
+impl Spinner {
+    /// The frame to show now.
+    pub fn frame(&self) -> String {
+        let ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis()) as u64;
+        let n = self.frames.len().max(1) as u64;
+        self.frames
+            .get(((ms / self.interval_ms.max(1)) % n) as usize)
+            .cloned()
+            .unwrap_or_default()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -417,13 +440,28 @@ impl App {
         }
     }
 
+    /// `bone.ui.title(ctx)`: the terminal's title, or None to leave it.
+    pub fn ui_title(&mut self) -> Option<String> {
+        if !self.ui_defined("title") {
+            return None;
+        }
+        let ctx = self.statusline_ctx(self.screen.width);
+        self.guarded("title", |lua| {
+            let ui: Table = lua.globals().get::<Table>("bone")?.get("ui")?;
+            let f: Function = ui.get("title")?;
+            f.call::<Option<String>>(to_lua(lua, &ctx)?)
+        })
+        .flatten()
+        .map(|t| crate::text::sanitize(&t))
+    }
+
     pub fn statusline_ctx(&self, width_cols: u16) -> Json {
         json!({
             "title": self.chats[self.current].title(),
             "popup": self.popup_name(),
             "panel": self.focused_panel().map(|p| p.id.clone()),
             "jobs": self.jobs.running(),
-            "spinner": spinner().to_string(),
+            "spinner": self.spinner.frame(),
             "width": width_cols,
             "session": self.session_ctx(Some(self.current)),
         })
@@ -432,7 +470,7 @@ impl App {
     /// The line between the chat and the prompt.
     pub fn divider_ctx(&self, width_cols: u16) -> Json {
         json!({
-            "spinner": spinner().to_string(),
+            "spinner": self.spinner.frame(),
             "width": width_cols,
             "session": self.session_ctx(Some(self.current)),
         })
@@ -599,7 +637,7 @@ impl App {
             "focused": self.focused_popup().is_none() && self.focused_panel().is_none(),
             "running": session["running"].as_bool().unwrap_or(false),
             "elapsed": session["elapsed"],
-            "spinner": spinner().to_string(),
+            "spinner": self.spinner.frame(),
             "session": session,
         })
     }
@@ -741,7 +779,7 @@ impl App {
     ) -> Option<(u16, Vec<Line<'static>>)> {
         let base = json!({
             "region": name,
-            "spinner": spinner().to_string(),
+            "spinner": self.spinner.frame(),
             "popup": self.popup_name(),
             "session": self.session_ctx(Some(self.current)),
         });

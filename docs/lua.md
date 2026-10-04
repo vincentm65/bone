@@ -540,6 +540,7 @@ Registration aliases normalize to these canonical names:
 | `key` | `key/pressed`, `key` | `{ key, context }` |
 | `paste` | `paste`, `text/pasted` | `{ text, context }` |
 | `mouse` | `mouse` | `{ action, button, x, y, index, line }` |
+| `select` | `select` | `{ text }` when a mouse selection ends; return `true` to keep it from the clipboard |
 | `panel/opened` | `panel`, `panel/opened`, `popup`, `popup/opened` | a window or a panel (see below) |
 | `panel/updated` | `panel/updated`, `popup/updated` | a window or a panel |
 | `panel/closed` | `panel/closed`, `popup/closed` | a window or a panel |
@@ -824,6 +825,8 @@ bone.ui.layout = {
 ```
 
 `size` is cells (rows in a stack, columns side by side), `"30%"`, `"auto"` (its natural size) or `"fill"` (a share of what is left). By default the chat and splits fill; the prompt, statusline, divider and message line take their natural size; and regions take theirs from their own `size`. Fixed and percent sizes are given out first, then natural sizes (regions leave a filling sibling at least 3 rows), then filling entries share the rest. A region given a fixed, percent or fill size is drawn at exactly that size.
+
+The terminal's title is `bone.ui.title(ctx)` (the statusline's `ctx`), set when it changes; leave it undefined to keep the terminal's own. The spinner every `ctx.spinner` shows is `bone.ui.set_spinner(frames, interval_ms)`, e.g. `bone.ui.set_spinner({ "◐", "◓", "◑", "◒" }, 120)`; with no frames it goes back to the default, and the screen redraws at that pace while a turn runs.
 
 `chat`, `prompt`, `divider`, `statusline` and `message` are built in; leave one out and it is not shown (without `message`, notifications take rows at the bottom). Row regions are sized in rows. `size` is a number or `"auto"` (fit the content, up to `max`, default 10); a bare function means `size = "auto"`. `render(ctx)` gets `{ region, width, height, spinner, popup, session }` and returns lines, or `nil` to hide the region. Regions are redrawn every frame, so keep them light.
 
