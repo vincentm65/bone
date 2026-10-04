@@ -702,7 +702,7 @@ Rust keeps the session data, wraps text, caches, scrolls and paints. Everything 
 
 `examples/plugins/style/` is another complete look built only from this API. Install it with `cp -r examples/plugins/style ~/.bone/plugins/`, or copy the parts you want.
 
-The TUI watches `tui.lua` and the `lua/`, `runtime/`, `colors/` and `plugins/` folders of the config directory. When a Lua file there changes, it clears the views, regions, statusline, divider, prompt, layout and `bone.ui.actions`, forgets every module `require`d since startup (the standard UI, menu and commands included), and runs the defaults, plugins and `tui.lua` again. Options keep their values when the file that defined them runs again.
+The TUI watches `tui.lua` and the `lua/`, `runtime/`, `colors/` and `plugins/` folders of the config directory. When a Lua file there changes, it reloads the way it starts: shutdown hooks run and plugin state is saved, the Lua state and everything made from it (keymaps, commands, event handlers, popups, panels, running `bone.job`s, colors) are dropped, and a fresh state runs the runtime, the defaults, the plugins and `tui.lua`. So deleting a line really removes what it made, and edited modules load anew. Options keep the values you gave them; the session, chats (with items you added), prompt and history are untouched. `bone.ui.clear()` removes every view, region, action and UI function, for a config that starts from a blank screen.
 
 #### The prompt
 

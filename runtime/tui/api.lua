@@ -471,9 +471,10 @@ local views, view_store = watched()
 local tool_views, tool_view_store = watched()
 bone.ui = { views = views, tool_views = tool_views, regions = {} }
 
--- Forget every UI customization before a live reload re-sources the config.
--- The views live in hidden stores, so pairs() on the proxies sees nothing.
-function bone.ui._reset()
+--- Remove every view, tool view, region, action and the statusline,
+--- divider, prompt and layout: a blank screen to build on (Rust draws plain
+--- text until you define things again).
+function bone.ui.clear()
   bone.ui.statusline = nil
   bone.ui.divider = nil
   bone.ui.prompt = nil

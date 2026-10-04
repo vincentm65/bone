@@ -166,6 +166,8 @@ pub struct App {
     pub plugins: Vec<crate::plugins::Plugin>,
     /// `bone.plugin.on_shutdown` callbacks, by owner.
     pub shutdown_hooks: Vec<(Option<String>, u64)>,
+    /// Option values kept across a reload, for options defined again.
+    pub carried_options: HashMap<String, crate::options::DynamicValue>,
 }
 
 impl App {
@@ -237,10 +239,50 @@ impl App {
             keymap_owner: HashMap::new(),
             plugins: Vec::new(),
             shutdown_hooks: Vec::new(),
+            carried_options: HashMap::new(),
         };
         crate::lua::init(&mut app, config_dir);
         app.dirty = true;
         app
+    }
+
+    /// Drop the Lua state and everything Lua made: keymaps, commands,
+    /// events, popups, panels, running jobs, options, plugin records, colors
+    /// and UI state. Chats (Lua's items in them too), the prompt, history,
+    /// built-in options and the session are kept.
+    pub(crate) fn forget_lua(&mut self) {
+        let jobs: Vec<u64> = self.jobs.list.iter().map(|j| j.id).collect();
+        for id in jobs {
+            self.cancel_job(id);
+            self.jobs.forget_callbacks(id);
+        }
+        self.keymaps = Keymaps::default();
+        self.focused_context = None;
+        self.pending_keys.clear();
+        self.pending_action = None;
+        self.pending_context = None;
+        self.pending_since = None;
+        self.raw_interceptors.clear();
+        self.dynamic_options.clear();
+        self.user_commands.clear();
+        self.autocmds.clear();
+        self.in_actions.clear();
+        self.owner = None;
+        self.callback_owner.clear();
+        self.owned.clear();
+        self.keymap_owner.clear();
+        self.plugins.clear();
+        self.shutdown_hooks.clear();
+        self.popups.clear();
+        self.panels.clear();
+        self.panel_focus = None;
+        self.theme = Theme::default();
+        self.colors_name = None;
+        self.ui_broken.clear();
+        self.spinner = Default::default();
+        self.views_rev += 1;
+        self.opts_rev += 1;
+        self.lua = None;
     }
 
     // ---- requests ------------------------------------------------------------

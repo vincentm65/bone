@@ -171,7 +171,7 @@ impl Harness {
                     r#"
                     local actions = {}
                     for k, v in pairs(bone.ui.actions) do actions[k] = v end
-                    bone.ui._reset()
+                    bone.ui.clear()
                     for k, v in pairs(actions) do bone.ui.actions[k] = v end
                     -- One blank row between the chat and the prompt.
                     bone.ui.divider = function() return {} end
@@ -3916,4 +3916,59 @@ async fn spinner_selection_and_title_are_lua() {
         select(&mut h),
         (Some("other one".into()), Some("other one".into()))
     );
+}
+
+#[tokio::test]
+async fn reload_starts_a_fresh_lua_state() {
+    let dir = tempfile::tempdir().unwrap();
+    let tui = dir.path().join("tui.lua");
+    let marker = dir.path().join("shut-down");
+    std::fs::write(
+        &tui,
+        format!(
+            r##"
+            bone.keymap.set("f5", "/hello")
+            bone.cmd.create("hello", function() bone.notify("hi") end)
+            bone.on("submit", function() return false end)
+            bone.hl.set("UserMessage", {{ fg = "#123456" }})
+            fresh = (fresh or 0) + 1
+            bone.plugin.on_shutdown(function()
+              local f = io.open({marker:?}, "w") f:write("x") f:close()
+            end)
+            "##
+        ),
+    )
+    .unwrap();
+    let mut h = Harness::build(Some(dir.path().to_owned())).await;
+    h.app.load_user_config();
+    let eval = |h: &mut Harness, code: &str| -> String {
+        h.app.with_api(|lua| lua.load(code).eval()).unwrap()
+    };
+    assert_eq!(
+        eval(&mut h, "return tostring(bone.cmd.find('hello') ~= nil)"),
+        "true"
+    );
+    let tweaked = h.app.theme.hl("UserMessage");
+
+    // Deleting every line takes all of it away, not just views.
+    std::fs::write(&tui, "").unwrap();
+    h.app.reload_user_config();
+    assert!(marker.exists(), "shutdown hooks ran");
+    assert_eq!(
+        eval(&mut h, "return tostring(fresh)"),
+        "nil",
+        "a new Lua state"
+    );
+    assert_eq!(
+        eval(&mut h, "return tostring(bone.cmd.find('hello') ~= nil)"),
+        "false"
+    );
+    assert_ne!(h.app.theme.hl("UserMessage"), tweaked);
+    h.input("{f5}").await;
+    assert!(h.prompt().is_empty(), "f5 is unmapped");
+    // The submit handler is gone too: messages go out again.
+    h.input("go{enter}").await;
+    assert_eq!(h.requests("turn/start").len(), 1);
+    // The defaults are back.
+    assert_eq!(eval(&mut h, "return type(bone.ui.views.user)"), "function");
 }
