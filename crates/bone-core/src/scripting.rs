@@ -200,12 +200,33 @@ pub fn load_with_options(
         events,
         config_dir: config_dir.to_owned(),
         options: options.clone(),
-        provider_name: ex
-            .provider
-            .clone()
-            .or_else(|| (ex.providers.len() == 1).then(|| ex.providers.keys().next().cloned())?),
-        providers: ex.providers,
+        provider_name: crate::settings::chosen_provider(
+            &saved_settings(config_dir),
+            &ex.providers,
+            ex.provider.as_deref(),
+        )
+        .map(str::to_owned)
+        .or_else(|| (ex.providers.len() == 1).then(|| ex.providers.keys().next().cloned())?),
+        // Each provider with its saved model, if one was chosen.
+        providers: {
+            let settings = saved_settings(config_dir);
+            let mut providers = ex.providers;
+            for (name, p) in providers.iter_mut() {
+                if let Some(model) = crate::settings::chosen_model(&settings, name) {
+                    p.model = model.to_owned();
+                }
+            }
+            providers
+        },
         mcp: ex.mcp,
+    })
+}
+
+/// settings.json, or nothing (with a warning) when it cannot be read.
+fn saved_settings(config_dir: &Path) -> serde_json::Value {
+    crate::settings::load(config_dir).unwrap_or_else(|e| {
+        eprintln!("bone: ignoring settings: {e}");
+        serde_json::json!({})
     })
 }
 
@@ -239,13 +260,26 @@ fn resolve(
             _ => {}
         }
     }
-    let mut provider = match &ex.provider {
+    // core.lua defines the providers; settings.json picks one and its
+    // model (an unknown saved name falls back to core.lua's choice).
+    let settings = saved_settings(config_dir);
+    let chosen = crate::settings::chosen_provider(&settings, &ex.providers, ex.provider.as_deref());
+    let mut provider = match chosen {
         Some(name) => Some(ex.providers.get(name).cloned().ok_or_else(|| {
             format!("bone.config.provider is {name:?}, but bone.config.providers has no such entry")
         })?),
         None if ex.providers.len() == 1 => ex.providers.values().next().cloned(),
         None => None,
     };
+    if let (Some(p), Some(name)) = (
+        provider.as_mut(),
+        chosen.or_else(|| {
+            (ex.providers.len() == 1).then(|| ex.providers.keys().next().map(String::as_str))?
+        }),
+    ) && let Some(model) = crate::settings::chosen_model(&settings, name)
+    {
+        p.model = model.to_owned();
+    }
     if let Some(base_url) = env("BONE_BASE_URL") {
         let model = env("BONE_MODEL").or_else(|| provider.as_ref().map(|p| p.model.clone()));
         let model = model.ok_or("BONE_BASE_URL is set but BONE_MODEL is not")?;
@@ -1153,6 +1187,19 @@ fn setup(
     lua.globals()
         .get::<Table>("bone")
         .and_then(|b| b.set("_models", models))
+        .map_err(|e| e.to_string())?;
+    // bone.settings: settings.json, read when asked (read-only here; clients
+    // change it through settings/set).
+    let settings_dir = dir.to_owned();
+    let settings = lua
+        .create_function(move |lua, ()| {
+            let s = crate::settings::load(&settings_dir).map_err(mlua::Error::runtime)?;
+            to_lua(lua, &s)
+        })
+        .map_err(|e| e.to_string())?;
+    lua.globals()
+        .get::<Table>("bone")
+        .and_then(|b| b.set("_settings", settings))
         .map_err(|e| e.to_string())?;
     run("core/defaults.lua")?;
     bone_lua::run_user_plugins_except(&lua, dir, "core.lua", &|name| disabled.contains(name))

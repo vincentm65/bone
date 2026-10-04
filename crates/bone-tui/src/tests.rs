@@ -4262,3 +4262,55 @@ async fn health_shows_the_last_lua_error_in_full() {
     let health = serde_json::to_string(&h.app.tui_health()).unwrap();
     assert!(!health.contains("kaboom"), "{health}");
 }
+
+#[tokio::test]
+async fn saved_settings_apply_before_tui_lua_and_keys_save_them() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("tui.lua"),
+        r#"bone.o.prompt_max_height = 4"#,
+    )
+    .unwrap();
+    let mut h = Harness::build(Some(dir.path().to_owned())).await;
+    h.app.settings = json!({ "tui": {
+        "tool_detail": "full", "show_reasoning": true, "prompt_max_height": 7, "nope": 1 } });
+    h.app.load_user_config();
+    assert_eq!(h.lua("=bone.o.tool_detail").await, "\"full\"");
+    assert!(h.app.options.show_reasoning);
+    // tui.lua runs last and wins.
+    assert_eq!(h.app.options.prompt_max_height, 4);
+    // An unknown saved option is reported, not fatal.
+    assert!(
+        h.app.lua_errors.iter().any(|e| e.contains("tui.nope")),
+        "{:?}",
+        h.app.lua_errors
+    );
+    assert_eq!(
+        h.lua("=bone.settings.get('tui.tool_detail')").await,
+        "\"full\""
+    );
+
+    // ctrl+t saves the new choice through the core.
+    h.input("{ctrl+t}").await;
+    let req = h.requests("settings/set");
+    assert_eq!(
+        req.last().unwrap(),
+        &json!({ "path": "tui.tool_detail", "value": "summary" })
+    );
+
+    // A change from anywhere (another client) applies now and is an event.
+    h.lua("seen = nil bone.on('settings/changed', function(ev) seen = ev.path end)")
+        .await;
+    h.emit::<SettingsChanged>(SettingsChangedParams {
+        path: "tui.tool_detail".into(),
+        value: json!("rows"),
+        settings: json!({ "tui": { "tool_detail": "rows" } }),
+    })
+    .await;
+    assert_eq!(h.lua("=bone.o.tool_detail").await, "\"rows\"");
+    assert_eq!(h.lua("=seen").await, "\"tui.tool_detail\"");
+    assert_eq!(
+        h.lua("=bone.settings.get('tui.tool_detail')").await,
+        "\"rows\""
+    );
+}

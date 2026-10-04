@@ -14,6 +14,7 @@ pub mod provider;
 mod runtime;
 pub mod scripting;
 pub mod session;
+pub mod settings;
 pub mod tools;
 
 use std::path::PathBuf;
@@ -27,9 +28,10 @@ use bone_proto::methods::{
     QueueChanged, QueueChangedParams, QueueClear, QueueMode, QueueMove, QueueRemove, QueueResume,
     QueueUpdate, SessionCreate, SessionCreateParams, SessionDelete, SessionDeleted, SessionFork,
     SessionForkParams, SessionList, SessionMessages, SessionMessagesResult, SessionRef,
-    SessionRename, SessionRenameParams, SessionUpdated, SessionUpdatedParams, StoreQuery,
-    StoreQueryParams, TurnCancel, TurnStart, TurnStartParams, TurnStartResult, TurnSteer,
-    TurnSteerParams,
+    SessionRename, SessionRenameParams, SessionUpdated, SessionUpdatedParams, SettingPath,
+    SettingSet, SettingsChanged, SettingsChangedParams, SettingsGet, SettingsReset, SettingsSet,
+    StoreQuery, StoreQueryParams, TurnCancel, TurnStart, TurnStartParams, TurnStartResult,
+    TurnSteer, TurnSteerParams,
 };
 use bone_proto::types::SessionInfo;
 use bone_proto::{Method, Notification, RpcError};
@@ -92,6 +94,9 @@ pub(crate) struct Inner {
     /// What each session's model has seen of files, for `edit_file`.
     views: Arc<tools::hashline::Views>,
     events: broadcast::Sender<Event>,
+    /// settings.json as last read or written; `Err` when the file could not
+    /// be read (then it is not written either, so it is never clobbered).
+    settings: Mutex<Result<Value, String>>,
 }
 
 impl Inner {
@@ -246,6 +251,10 @@ impl Core {
     }
 
     fn build(runtime: Runtime, source: Option<Source>, events: broadcast::Sender<Event>) -> Self {
+        let saved = match &source {
+            Some(s) => settings::load(&s.config_dir),
+            None => Ok(Value::Object(Default::default())),
+        };
         let core = Core {
             inner: Arc::new(Inner {
                 sessions: SessionStore::new(&runtime.config.data_dir),
@@ -260,6 +269,7 @@ impl Core {
                 model_requests: Mutex::new(Default::default()),
                 next_model_request: Default::default(),
                 views: Default::default(),
+                settings: Mutex::new(saved),
                 events,
             }),
         };
@@ -283,6 +293,63 @@ impl Core {
     /// [`CoreReload`].
     pub async fn reload(&self) -> Result<bone_proto::methods::ReloadResult, String> {
         self.inner.reload(Change::Same).await
+    }
+
+    /// Save one setting and tell every client; a provider or model change
+    /// reloads the configuration, and is undone if that fails.
+    async fn set_setting(&self, path: String, value: Value) -> Result<Value, RpcError> {
+        let source = self.inner.source.as_ref().ok_or_else(|| {
+            RpcError::invalid_params("this core has no config dir to save settings in")
+        })?;
+        // The provider choices must name a configured provider.
+        let provider_named = match path.split_once('.') {
+            None if path == "provider" => value.as_str().map(str::to_owned),
+            Some(("models", name)) => Some(name.to_owned()),
+            _ => None,
+        };
+        if let Some(name) = provider_named {
+            let known = self.inner.runtime().model_list();
+            if !known.iter().any(|m| m.name == name) {
+                let names: Vec<&str> = known.iter().map(|m| m.name.as_str()).collect();
+                return Err(RpcError::invalid_params(format!(
+                    "no provider {name:?} in core.lua (configured: {})",
+                    names.join(", ")
+                )));
+            }
+        }
+        let before = {
+            let mut guard = self.inner.settings.lock().unwrap();
+            let current = guard.as_mut().map_err(|e| {
+                RpcError::invalid_params(format!("{e}; fix or remove it before changing settings"))
+            })?;
+            let before = current.clone();
+            settings::set(current, &path, value.clone()).map_err(RpcError::invalid_params)?;
+            settings::save(&source.config_dir, current).map_err(RpcError::internal)?;
+            before
+        };
+        if (path == "provider" || path.starts_with("models."))
+            && let Err(e) = self.inner.reload(Change::Same).await
+        {
+            let mut guard = self.inner.settings.lock().unwrap();
+            if let Ok(current) = guard.as_mut() {
+                *current = before;
+                let _ = settings::save(&source.config_dir, current);
+            }
+            return Err(RpcError::invalid_params(format!("not saved: {e}")));
+        }
+        let all = self
+            .inner
+            .settings
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_default();
+        self.inner.emit::<SettingsChanged>(SettingsChangedParams {
+            path,
+            value,
+            settings: all.clone(),
+        });
+        Ok(all)
     }
 
     /// Subscribe to every event emitted from now on.
@@ -407,6 +474,19 @@ impl Core {
                     )));
                 }
                 Ok(Value::Null)
+            }
+            SettingsGet::METHOD => {
+                decode::<SettingsGet>(params)?;
+                let s = self.inner.settings.lock().unwrap().clone();
+                s.map_err(RpcError::invalid_params)
+            }
+            SettingsSet::METHOD => {
+                let p: SettingSet = decode::<SettingsSet>(params)?;
+                self.set_setting(p.path, p.value).await
+            }
+            SettingsReset::METHOD => {
+                let p: SettingPath = decode::<SettingsReset>(params)?;
+                self.set_setting(p.path, Value::Null).await
             }
             CoreReload::METHOD => {
                 decode::<CoreReload>(params)?;

@@ -1,0 +1,23 @@
+[
+  {
+    "id": 27,
+    "jsonrpc": "2.0",
+    "method": "settings/reset",
+    "params": {
+      "path": "web_search.num_results"
+    }
+  },
+  {
+    "id": 27,
+    "jsonrpc": "2.0",
+    "result": {
+      "models": {
+        "qwen": "Qwen3-27B"
+      },
+      "provider": "qwen",
+      "tui": {
+        "tool_detail": "rows"
+      }
+    }
+  }
+]

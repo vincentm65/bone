@@ -147,6 +147,25 @@ A project can carry TUI config in `.bone/tui.lua` (and modules in `.bone/lua/`).
 - `bone.util`: `split(s, sep)`, `trim(s)`, `startswith(s, prefix)`, `extend(t1, t2, ...)`, `front_matter(text)` → `meta, body` for Markdown files that start with `---` / `key: value` lines / `---`.
 - `bone.fs.list(dir)` → `{ { name, type = "file" | "dir" } }`, sorted (`~/` works), or `nil` and an error.
 
+### Settings
+
+`~/.bone/settings.json` holds the choices made in the app, as opposed to `core.lua` and `tui.lua`, which are yours and which bone never writes. The core owns the file: it checks each change, writes the file whole, and tells every client (`settings/changed`), so several TUIs stay in step. Delete the file to go back to the defaults; if it is not valid JSON, bone ignores it, says so, and refuses to change it until you fix it.
+
+```json
+{
+  "provider": "qwen",
+  "models": { "qwen": "Qwen3.8-27B-exl3-3.8bpw" },
+  "tui": { "tool_detail": "rows", "show_reasoning": true },
+  "web_search": { "num_results": 5 }
+}
+```
+
+- `provider` picks which of `core.lua`'s `bone.config.providers` turns use, over `core.lua`'s own `bone.config.provider`; `models.<name>` picks that provider's model, over the one `core.lua` gives it. `core.lua` defines the providers; settings choose among them; `BONE_*` environment variables override both for one run. Changing either reloads the core's configuration at once, and is undone if that fails (an unknown provider is refused).
+- `tui.<option>` sets a TUI option after the defaults and plugins, before your `tui.lua`, which runs last and wins. `ctrl+t` and `ctrl+r` save their choice here.
+- Anything else is free for plugins: a plugin keeps its settings under its own name (`web_search.num_results`).
+
+In the TUI: `bone.settings.get(path)`, `bone.settings.all()`, `bone.settings.set(path, value, cb)` and `bone.settings.reset(path, cb)` (paths are dotted, `cb(all, err)` gets every setting after the change), and the `settings/changed` event `{ path, value }`. In the core, `bone.settings.get(path)` and `bone.settings.all()` read the file (changes go through a client).
+
 ## Core (`core.lua`)
 
 ### `bone.config`

@@ -37,7 +37,13 @@ impl Headless {
             .await
             .map_err(|e| io::Error::other(format!("cannot connect to the bone server: {e}")))?;
         let (tx, rx) = mpsc::unbounded_channel();
+        // Saved settings apply before the user's tui.lua, so fetch them first.
+        let settings = client
+            .request::<bone_proto::methods::SettingsGet>(bone_proto::methods::Empty {})
+            .await
+            .unwrap_or_default();
         let mut app = App::new(Arc::new(client), tx, opts.cwd, opts.config_dir);
+        app.settings = settings;
         app.load_user_config();
         if let Some(id) = opts.resume {
             app.resume(id);

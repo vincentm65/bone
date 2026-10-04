@@ -673,6 +673,9 @@ impl App {
                 let name = bone_lua::plugin_name(&plugin);
                 self.load_plugin(&name, &plugin, crate::plugins::Kind::Plugin);
             }
+            // Saved settings, after the defaults and plugins (which define
+            // the options) and before tui.lua, which runs last.
+            self.apply_tui_settings(None);
             let path = dir.join("tui.lua");
             if let Err(e) = self.with_api(|lua| bone_lua::run_file(lua, &path)) {
                 self.lua_error(&path.display().to_string(), &e);
@@ -680,6 +683,47 @@ impl App {
             self.load_project();
         }
         self.fire("ready", serde_json::Value::Null);
+    }
+
+    /// Set the options saved under `tui` (or just `only`), as
+    /// `bone.o.<name> = value`; one that is unknown or wrong is reported.
+    pub fn apply_tui_settings(&mut self, only: Option<&str>) {
+        let Some(tui) = self
+            .settings
+            .get("tui")
+            .and_then(|t| t.as_object())
+            .cloned()
+        else {
+            return;
+        };
+        for (name, value) in tui {
+            if only.is_some_and(|o| o != name) {
+                continue;
+            }
+            let r = self.with_api(|lua| {
+                let o: Table = lua.globals().get::<Table>("bone")?.get("o")?;
+                o.set(name.as_str(), to_lua(lua, &value)?)
+            });
+            if let Err(e) = r {
+                self.lua_error(&format!("settings.json tui.{name}"), &e);
+            }
+        }
+    }
+
+    /// `settings/changed`: keep the copy current and apply TUI changes now.
+    pub fn settings_changed(&mut self, p: bone_proto::methods::SettingsChangedParams) {
+        self.settings = p.settings;
+        if let Some(name) = p.path.strip_prefix("tui.")
+            && !p.value.is_null()
+        {
+            let name = name.to_owned();
+            self.apply_tui_settings(Some(&name));
+        }
+        self.fire(
+            "settings/changed",
+            serde_json::json!({ "path": p.path, "value": p.value }),
+        );
+        self.dirty = true;
     }
 
     /// Load the Lua configuration again after a file changed: shut the
@@ -2118,6 +2162,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             app.dirty |= found;
             ret(lua, found)
         }
+        "settings_get" => ret(lua, to_lua(lua, &app.settings)?),
         "runtime_overrides" => {
             let list: Vec<serde_json::Value> = app
                 .config_dir

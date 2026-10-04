@@ -428,6 +428,23 @@ fn requests() {
             },
         ],
     );
+    let settings = json!({ "provider": "qwen", "models": { "qwen": "Qwen3-27B" }, "tui": { "tool_detail": "rows" } });
+    exchange::<SettingsGet>(25, Empty {}, settings.clone());
+    exchange::<SettingsSet>(
+        26,
+        SettingSet {
+            path: "tui.tool_detail".into(),
+            value: json!("rows"),
+        },
+        settings.clone(),
+    );
+    exchange::<SettingsReset>(
+        27,
+        SettingPath {
+            path: "web_search.num_results".into(),
+        },
+        settings,
+    );
 }
 
 #[test]
@@ -472,6 +489,11 @@ fn events() {
         output: "ok\n[exit code: 0]".into(),
         is_error: false,
         duration_ms: Some(42),
+    });
+    event::<SettingsChanged>(SettingsChangedParams {
+        path: "tui.tool_detail".into(),
+        value: json!("rows"),
+        settings: json!({ "tui": { "tool_detail": "rows" } }),
     });
     event::<ToolOutput>(ToolOutputParams {
         session_id: SID.into(),

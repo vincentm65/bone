@@ -56,6 +56,9 @@ After `initialize`, the server runs each request on its own task: replies carry 
 | `turn/cancel` | `{ session_id }` | `null` (no-op if nothing is running) |
 | `ask/respond` | `{ ask_id, answer }` | `null`; error if no question with that id is open |
 | `health/check` | `{}` | `[{ name, status: "ok" \| "warn" \| "error", message }]`: the core's checks (provider, API key, reachability, sessions folder, Lua) and core Lua's `bone.health` checks |
+| `settings/get` | `{}` | the saved settings (`settings.json` in the config dir), a JSON object |
+| `settings/set` | `{ path, value }` | every setting after the change. `path` is dotted (`tui.tool_detail`, `models.qwen`); `null` removes it. `provider` and `models.<name>` must name a configured provider; changing them reloads the configuration, and the change is undone if that fails. Every client hears `settings/changed` |
+| `settings/reset` | `{ path }` | as `settings/set` with `null` |
 | `core/reload` | `{}` | `ReloadResult`. Loads the Lua configuration again (runtime, enabled plugins, `core.lua`) and switches to it; running turns finish on the previous one. An error (and no change) if loading fails |
 | `plugin/list` | `{}` | `[{ name, core, loaded }]`: the plugins folder; `core` if it has a `core.lua`, `loaded` if that runs |
 | `lua/call` | `{ name, args?, session_id?, cwd? }` | whatever the function core Lua registered as `name` (`bone.rpc.register`) returns; it gets `args` and `{ session_id, cwd }`. An error for an unknown name or a failing function |
@@ -98,6 +101,7 @@ Every event carries `session_id` (except `echoed`, `ask/resolved`, `core/reloade
 | `turn/steered` | `{ text }` | a steer message from the queue joined the running turn's transcript (show it as a user message) |
 | `queue/changed` | `{ items, paused }` | the session's queue, all of it, after any change |
 | `turn/finished` | `{ outcome: { status: "completed" \| "cancelled" \| "failed", message? } }` | the turn is over |
+| `settings/changed` | `{ path, value, settings }` | a setting was saved (`value` null: removed) by some client; `settings` is all of them (no `session_id`) |
 | `core/reloaded` | `ReloadResult` | the core switched to a newly loaded Lua configuration (no `session_id`) |
 | `model/delta` | `{ request_id, kind, text }` | streamed output of a `model/complete` call (no `session_id`) |
 | `model/completed` | `{ request_id, message?, usage?, error? }` | a `model/complete` call ended: the assistant `message`, or an `error` (no `session_id`) |

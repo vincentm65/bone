@@ -2235,3 +2235,133 @@ async fn tool_events_carry_timing_and_live_output() {
     );
     h.until::<TurnFinished>().await;
 }
+
+#[tokio::test]
+async fn settings_choose_the_model_and_are_saved_for_every_client() {
+    let mut h = Harness::with_lua(
+        r#"bone.config.providers.y = { base_url = "http://unused", model = "y1" }
+           bone.config.provider = "x"
+           bone.tool.register { name = "probe_" .. tostring(bone.settings.get("probe.word")),
+             run = function() return "" end }"#,
+        vec![],
+    )
+    .await;
+    let current = |h: &Harness| -> (String, String) {
+        let m = h.core.inner.runtime().model_list();
+        let c = m.iter().find(|m| m.current).unwrap();
+        (c.name.clone(), c.model.clone())
+    };
+    assert_eq!(current(&h), ("x".into(), "m".into()));
+    assert_eq!(
+        h.core.handle(SettingsGet::METHOD, None).await.unwrap(),
+        json!({})
+    );
+
+    // A model for the provider in use: saved, broadcast, used at once.
+    let all = h
+        .core
+        .handle(
+            SettingsSet::METHOD,
+            Some(json!({ "path": "models.x", "value": "m2" })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(all, json!({ "models": { "x": "m2" } }));
+    let changed = h.until::<SettingsChanged>().await;
+    assert_eq!(
+        (changed.path.as_str(), &changed.value),
+        ("models.x", &json!("m2"))
+    );
+    assert_eq!(current(&h), ("x".into(), "m2".into()));
+    // The saved provider wins over core.lua's bone.config.provider.
+    h.core
+        .handle(
+            SettingsSet::METHOD,
+            Some(json!({ "path": "provider", "value": "y" })),
+        )
+        .await
+        .unwrap();
+    assert_eq!(current(&h), ("y".into(), "y1".into()));
+    let file: Value = serde_json::from_str(
+        &std::fs::read_to_string(h._data.path().join("settings.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(file, json!({ "provider": "y", "models": { "x": "m2" } }));
+
+    // Unknown providers are refused; a change that breaks the reload is undone.
+    let e = h
+        .core
+        .handle(
+            SettingsSet::METHOD,
+            Some(json!({ "path": "provider", "value": "nope" })),
+        )
+        .await
+        .unwrap_err();
+    assert!(e.message.contains("no provider \"nope\""), "{e:?}");
+    h.write_core_lua("error('broken')");
+    let e = h
+        .core
+        .handle(
+            SettingsSet::METHOD,
+            Some(json!({ "path": "provider", "value": "x" })),
+        )
+        .await
+        .unwrap_err();
+    assert!(e.message.contains("not saved:"), "{e:?}");
+    assert_eq!(
+        h.core.handle(SettingsGet::METHOD, None).await.unwrap()["provider"],
+        json!("y")
+    );
+
+    // Any other path is plugin or TUI data; core Lua reads it.
+    h.core
+        .handle(
+            SettingsSet::METHOD,
+            Some(json!({ "path": "probe.word", "value": "hi" })),
+        )
+        .await
+        .unwrap();
+    h.write_core_lua(
+        r#"bone.tool.register { name = "probe_" .. tostring(bone.settings.get("probe.word")),
+             run = function() return "" end }"#,
+    );
+    h.core.reload().await.unwrap();
+    assert!(
+        h.tool_names().contains(&"probe_hi".to_owned()),
+        "{:?}",
+        h.tool_names()
+    );
+    h.core
+        .handle(SettingsReset::METHOD, Some(json!({ "path": "probe.word" })))
+        .await
+        .unwrap();
+    assert!(
+        h.core
+            .handle(SettingsGet::METHOD, None)
+            .await
+            .unwrap()
+            .get("probe")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_broken_settings_file_is_never_overwritten() {
+    let h = Harness::with_lua("", vec![]).await;
+    std::fs::write(h._data.path().join("settings.json"), "{ not json").unwrap();
+    // The core read it at start (empty then); load it again as a restart would.
+    *h.core.inner.settings.lock().unwrap() = crate::settings::load(h._data.path());
+    let e = h
+        .core
+        .handle(
+            SettingsSet::METHOD,
+            Some(json!({ "path": "a.b", "value": 1 })),
+        )
+        .await
+        .unwrap_err();
+    assert!(e.message.contains("fix or remove it"), "{e:?}");
+    assert_eq!(
+        std::fs::read_to_string(h._data.path().join("settings.json")).unwrap(),
+        "{ not json"
+    );
+}

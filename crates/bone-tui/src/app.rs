@@ -166,6 +166,9 @@ pub struct App {
     pub plugins: Vec<crate::plugins::Plugin>,
     /// `bone.plugin.on_shutdown` callbacks, by owner.
     pub shutdown_hooks: Vec<(Option<String>, u64)>,
+    /// The saved settings (settings.json, via the core), kept current by
+    /// `settings/changed`.
+    pub settings: serde_json::Value,
     /// The last Lua errors in full (tracebacks included), for /health.
     pub lua_errors: Vec<String>,
     /// Option values kept across a reload, for options defined again.
@@ -243,6 +246,7 @@ impl App {
             shutdown_hooks: Vec::new(),
             carried_options: HashMap::new(),
             lua_errors: Vec::new(),
+            settings: serde_json::Value::Null,
         };
         crate::lua::init(&mut app, config_dir);
         app.dirty = true;
@@ -1459,6 +1463,7 @@ impl App {
             .with_chat(&p.session_id, |c| c.tool_started(&p)));
         on!(ToolFinished, |p| self
             .with_chat(&p.session_id, |c| c.tool_finished(&p)));
+        on!(SettingsChanged, |p| self.settings_changed(p));
         on!(ToolOutput, |p| self
             .with_chat(&p.session_id, |c| c.tool_output(&p)));
         on!(TurnSteered, |p| self

@@ -84,6 +84,9 @@ pub const METHODS: &[&str] = &[
     McpList::METHOD,
     LuaCall::METHOD,
     StoreQuery::METHOD,
+    SettingsGet::METHOD,
+    SettingsSet::METHOD,
+    SettingsReset::METHOD,
 ];
 
 /// Every server-to-client event.
@@ -105,6 +108,7 @@ pub const NOTIFICATIONS: &[&str] = &[
     SessionDeleted::METHOD,
     ModelDeltaEvent::METHOD,
     ModelCompleted::METHOD,
+    SettingsChanged::METHOD,
 ];
 
 // ---- connection ----------------------------------------------------------
@@ -384,6 +388,44 @@ pub enum HealthStatus {
     Error,
 }
 
+// ---- settings --------------------------------------------------------------
+
+method!(
+    /// The saved settings (`settings.json` in the config dir): a JSON object.
+    SettingsGet, "settings/get", Empty => serde_json::Value
+);
+method!(
+    /// Save one setting, by dotted path (`tui.tool_detail`, `models.qwen`);
+    /// `null` removes it. Every client hears `settings/changed`. Changing
+    /// `provider` or `models.*` reloads the core's configuration, and is
+    /// undone if that fails. Returns all the settings.
+    SettingsSet, "settings/set", SettingSet => serde_json::Value
+);
+method!(
+    /// Remove one setting (back to its default); as `settings/set` with null.
+    SettingsReset, "settings/reset", SettingPath => serde_json::Value
+);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SettingSet {
+    pub path: String,
+    pub value: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SettingPath {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SettingsChangedParams {
+    pub path: String,
+    /// The new value; null when it was removed.
+    pub value: serde_json::Value,
+    /// All the settings now.
+    pub settings: serde_json::Value,
+}
+
 // ---- core runtime and plugins ------------------------------------------
 
 method!(
@@ -556,6 +598,10 @@ notification!(
 notification!(
     /// A `turn/steer` message joined the running turn's transcript.
     TurnSteered, "turn/steered", TurnStartedParams
+);
+notification!(
+    /// A setting was saved or removed (by any client).
+    SettingsChanged, "settings/changed", SettingsChangedParams
 );
 notification!(
     /// The core switched to a newly loaded Lua configuration.

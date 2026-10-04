@@ -74,7 +74,13 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
         .await
         .map_err(|e| io::Error::other(format!("cannot connect to the bone server: {e}")))?;
     let (tx, mut rx) = mpsc::unbounded_channel();
+    // Saved settings apply before the user's tui.lua, so fetch them first.
+    let settings = client
+        .request::<bone_proto::methods::SettingsGet>(bone_proto::methods::Empty {})
+        .await
+        .unwrap_or_default();
     let mut app = App::new(Arc::new(client), tx, opts.cwd, opts.config_dir);
+    app.settings = settings;
     app.load_user_config();
     app.note_runtime_overrides();
     let mut lua_state = lua_snapshot(app.config_dir.as_deref());

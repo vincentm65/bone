@@ -145,6 +145,36 @@ function bone.request(method, params, callback)
   api("request", method, params or {}, callback)
 end
 
+--- The saved settings (settings.json in the config dir, kept by the core):
+---   bone.settings.get("tui.tool_detail")   -- a value, or nil
+---   bone.settings.all()                    -- every saved setting
+---   bone.settings.set(path, value, cb)     -- save it for good; cb(all, err)
+---   bone.settings.reset(path, cb)          -- remove it (back to the default)
+--- Paths are dotted: "provider", "models.<provider>", "tui.<option>" (applied
+--- before tui.lua, which runs last), or a plugin's own "<plugin>.<key>".
+--- Every client hears the change as the `settings/changed` event.
+bone.settings = {
+  all = function()
+    return api("settings_get")
+  end,
+  get = function(path)
+    local at = api("settings_get")
+    for key in tostring(path):gmatch("[^.]+") do
+      if type(at) ~= "table" then
+        return nil
+      end
+      at = at[key]
+    end
+    return at
+  end,
+  set = function(path, value, callback)
+    bone.request("settings/set", { path = path, value = value }, callback)
+  end,
+  reset = function(path, callback)
+    bone.request("settings/reset", { path = path }, callback)
+  end,
+}
+
 --- Call a model through the core (no session, no tools run):
 ---   bone.model.complete(req, on_delta, on_done) -> handle
 ---     req: { provider, messages or prompt (+ system), tools, options }

@@ -125,6 +125,25 @@ function bone.ask(question)
   return coroutine.yield({ ask = question })
 end
 
+--- The saved settings (settings.json in the config dir), read-only here:
+--- bone.settings.get("web_search.num_results") or nil, bone.settings.all().
+--- The TUI changes them (bone.settings.set there, or settings/set).
+bone.settings = {
+  all = function()
+    return bone._settings()
+  end,
+  get = function(path)
+    local at = bone._settings()
+    for key in tostring(path):gmatch("[^.]+") do
+      if type(at) ~= "table" then
+        return nil
+      end
+      at = at[key]
+    end
+    return at
+  end,
+}
+
 --- Run a shell command: { code, stdout, stderr } (or { timed_out = true }).
 --- opts: { cwd, stdin, timeout = ms }. In hooks and tools this waits without
 --- blocking anything else, and a cancelled turn kills the command (the call

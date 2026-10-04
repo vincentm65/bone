@@ -348,3 +348,41 @@ async fn init_templates_load() {
         .await
         .unwrap();
 }
+
+/// A choice made with a key is saved by the core and back after a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn settings_survive_a_restart() {
+    let e = env(vec![], false).await;
+    std::fs::write(
+        e.config.path().join("tui.lua"),
+        r#"bone.ui.statusline = function() return { "detail=" .. bone.o.tool_detail } end"#,
+    )
+    .unwrap();
+    let mut tui = e.tui(None).await;
+    tui.wait_for(WAIT, |s| s.contains("detail=summary"))
+        .await
+        .unwrap();
+    tui.press("ctrl+t").unwrap();
+    tui.wait_for(WAIT, |s| s.contains("detail=rows"))
+        .await
+        .unwrap();
+    let file = e.config.path().join("settings.json");
+    let deadline = std::time::Instant::now() + WAIT;
+    while !std::fs::read_to_string(&file).is_ok_and(|t| t.contains("\"rows\"")) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "settings.json was not written"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let saved: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(saved, json!({ "tui": { "tool_detail": "rows" } }));
+
+    // A new TUI starts with it.
+    let mut again = e.tui(None).await;
+    again
+        .wait_for(WAIT, |s| s.contains("detail=rows"))
+        .await
+        .unwrap();
+}

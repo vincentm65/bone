@@ -27,6 +27,8 @@ bone.o.define("tool_detail", "summary", {
 local next_detail = { summary = "rows", rows = "full", full = "summary" }
 bone.keymap.set("ctrl+t", function()
   bone.o.tool_detail = next_detail[bone.o.tool_detail] or "rows"
+  -- Remembered for next time (settings.json).
+  bone.settings.set("tui.tool_detail", bone.o.tool_detail)
 end)
 
 -- Up on an empty prompt takes the last queued message back to edit.
@@ -71,6 +73,7 @@ map({
     -- Toggle the model reasoning (live, in the chat, and in the transcript).
     -- The same switch as bone.o.apply("show_reasoning!"); it redraws on its own.
     bone.o.apply("show_reasoning!")
+    bone.settings.set("tui.show_reasoning", bone.o.show_reasoning)
   end,
 
   ["left"] = "left",

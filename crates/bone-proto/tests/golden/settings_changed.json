@@ -1,0 +1,15 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "settings/changed",
+    "params": {
+      "path": "tui.tool_detail",
+      "settings": {
+        "tui": {
+          "tool_detail": "rows"
+        }
+      },
+      "value": "rows"
+    }
+  }
+]

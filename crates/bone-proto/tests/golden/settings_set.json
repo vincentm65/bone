@@ -1,0 +1,24 @@
+[
+  {
+    "id": 26,
+    "jsonrpc": "2.0",
+    "method": "settings/set",
+    "params": {
+      "path": "tui.tool_detail",
+      "value": "rows"
+    }
+  },
+  {
+    "id": 26,
+    "jsonrpc": "2.0",
+    "result": {
+      "models": {
+        "qwen": "Qwen3-27B"
+      },
+      "provider": "qwen",
+      "tui": {
+        "tool_detail": "rows"
+      }
+    }
+  }
+]
