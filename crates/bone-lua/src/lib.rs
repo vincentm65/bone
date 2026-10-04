@@ -13,7 +13,7 @@ pub mod wait;
 
 use std::path::{Path, PathBuf};
 
-use mlua::{Function, Lua, LuaSerdeExt, Table, Value};
+use mlua::{Function, Lua, LuaSerdeExt, MultiValue, Table, Value};
 
 /// Files from the repository's `runtime/` directory, by relative path.
 macro_rules! runtime_files {
@@ -513,6 +513,23 @@ pub fn runtime_source(config_dir: Option<&Path>, rel: &str) -> Option<(String, S
         .map(|(_, src)| ((*src).to_owned(), format!("runtime/{rel}")))
 }
 
+/// The built-in runtime file at `rel`, ignoring any override.
+pub fn builtin_source(rel: &str) -> Option<&'static str> {
+    RUNTIME.iter().find(|(p, _)| *p == rel).map(|(_, src)| *src)
+}
+
+/// Runtime files `config_dir/runtime/` overrides, with whether each is the
+/// same as the built-in one (so only hides later updates).
+pub fn runtime_overrides(config_dir: &Path) -> Vec<(&'static str, bool)> {
+    RUNTIME
+        .iter()
+        .filter_map(|(rel, src)| {
+            let text = std::fs::read_to_string(config_dir.join("runtime").join(rel)).ok()?;
+            Some((*rel, text == *src))
+        })
+        .collect()
+}
+
 /// Run a runtime file (see [`runtime_source`]).
 pub fn run_runtime(lua: &Lua, config_dir: Option<&Path>, rel: &str) -> mlua::Result<()> {
     let (src, name) = runtime_source(config_dir, rel)
@@ -582,6 +599,31 @@ fn setup_require(lua: &Lua, config_dir: Option<&Path>) -> mlua::Result<()> {
             "\n\tno runtime module '{name}'"
         ))?))
     })?;
+    // bone.builtin(name): the built-in version of a runtime module (or file,
+    // given as a path), even when the config dir overrides it, so an
+    // override can start from it and change only what it needs.
+    let builtin = lua.create_function(|lua, name: String| {
+        let candidates = if name.contains('/') {
+            vec![name.clone()]
+        } else {
+            let rel = name.replace('.', "/");
+            vec![format!("lua/{rel}.lua"), format!("lua/{rel}/init.lua")]
+        };
+        let Some((rel, src)) = candidates
+            .iter()
+            .find_map(|c| builtin_source(c).map(|s| (c.clone(), s)))
+        else {
+            return Err(mlua::Error::runtime(format!(
+                "no built-in runtime file for {name:?}"
+            )));
+        };
+        lua.load(src)
+            .set_name(format!("@runtime/{rel} (built-in)"))
+            .call::<MultiValue>(name)
+    })?;
+    lua.globals()
+        .get::<Table>("bone")?
+        .set("builtin", builtin)?;
     // LuaJIT (5.1) calls the list `loaders`; 5.2+ calls it `searchers`.
     let list: Table = package
         .get("loaders")

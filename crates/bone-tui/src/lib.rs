@@ -76,6 +76,7 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
     let (tx, mut rx) = mpsc::unbounded_channel();
     let mut app = App::new(Arc::new(client), tx, opts.cwd, opts.config_dir);
     app.load_user_config();
+    app.note_runtime_overrides();
     let mut lua_state = lua_snapshot(app.config_dir.as_deref());
     if let Some(id) = opts.resume {
         app.resume(id);

@@ -9,7 +9,20 @@ bone runs two separate LuaJIT states, one per side:
 
 `$BONE_CONFIG_DIR` replaces `~/.bone`. The two states never share Lua values; they talk only through the bone protocol. Lua has full trust (no sandbox). Tool calls run without asking; asking first is a plugin (`examples/plugins/approve`, see below).
 
-Load order on each side: `runtime/<side>/api.lua`, then `runtime/<side>/defaults.lua`, then your file. The runtime is built into the binary, and any runtime file can be replaced by putting a file at the same path under `~/.bone/runtime/` (for example `~/.bone/runtime/tui/defaults.lua` drops every default keymap).
+Load order on each side: `runtime/<side>/api.lua`, then `runtime/<side>/defaults.lua`, then your file. The runtime is built into the binary, and any runtime file can be replaced by putting a file at the same path under `~/.bone/runtime/` (for example `~/.bone/runtime/tui/defaults.lua` drops every default keymap). A replacement hides every later change to the built-in file, so prefer changing pieces from your config; when you do replace a file, start from the built-in one and change only what you need:
+
+```lua
+-- ~/.bone/runtime/lua/bone/ui/layout.lua
+local M = bone.builtin("bone.ui.layout")   -- the built-in module, not this file
+local setup = M.setup
+function M.setup(opts)
+  setup(opts)
+  bone.ui.regions.top = function() return { "my header" } end
+end
+return M
+```
+
+`bone.builtin(name)` runs the built-in version of a module (`"bone.ui.layout"`) or file (`"tui/defaults.lua"`) and returns what it returns. `/health` lists every override, saying which are plain copies of the built-in (delete those) and which differ, and the TUI mentions them at startup.
 
 `require("x.y")` finds `~/.bone/lua/x/y.lua` (or `x/y/init.lua`), then each plugin's `lua/`, then the runtime's `lua/` modules.
 
@@ -511,7 +524,7 @@ User commands appear in the `/` suggestions with their `desc`, and in `/help`. E
 
 #### The `/` menu
 
-The menu is the Lua module `bone.menu` (`runtime/lua/bone/menu.lua`): it matches what you type against command names and aliases (by prefix, sorted, at most `max = 8`), or asks a command's completion function for its arguments, and keeps the selection. It is drawn by `bone.ui.suggestions(ctx)` in a window resting on the prompt. It takes part in keys through `bone.ui.actions`: `submit` runs `/commands` (the selected match for a partial name; `//text` sends `/text`; `/etc/hosts …` is a message), `complete` (tab) fills in the selection, `dismiss` (esc) hides the menu until the text changes, and `up`/`down` move through it. `require("bone.menu")` gives the module (`matches(text)`, `complete()`, `move(by)`, `max`); replace the file under `~/.bone/runtime/lua/bone/menu.lua` for different matching.
+The menu is the Lua module `bone.menu` (`runtime/lua/bone/menu.lua`): it matches what you type against command names and aliases (by prefix, sorted, at most `max = 8`), or asks a command's completion function for its arguments, and keeps the selection. It is drawn by `bone.ui.suggestions(ctx)` in a window resting on the prompt. It takes part in keys through `bone.ui.actions`: `submit` runs `/commands` (the selected match for a partial name; `//text` sends `/text`; `/etc/hosts …` is a message), `complete` (tab) fills in the selection, `dismiss` (esc) hides the menu until the text changes, and `up`/`down` move through it. `require("bone.menu")` gives the module (`matches(text)`, `complete()`, `move(by)`, `max`); override `~/.bone/runtime/lua/bone/menu.lua` (starting from `bone.builtin("bone.menu")`) for different matching.
 
 #### Actions in Lua
 
@@ -698,7 +711,7 @@ Groups: `Normal Dim Accent UserPrompt UserMessage Reasoning ToolName ToolArgs To
 
 ### Drawing the screen
 
-Rust keeps the session data, wraps text, caches, scrolls and paints. Everything about how things look is Lua. `runtime/tui/defaults.lua` calls `require("bone.ui").setup(opts)`, the standard UI in `runtime/lua/bone/ui/` (views, statusline, a divider that shows a running turn, the three-row prompt, the empty-session hint, the model reasoning in the chat while it streams, and the layout). Replace any piece from `tui.lua`, or copy a module to `~/.bone/runtime/lua/bone/ui/` and edit it. With nothing defined, Rust draws the chat as plain text (`> ` before your messages, one blank line between items, tool calls as name, arguments and output, reasoning hidden) and the bare prompt below it. Message text reaches views without blank lines at its edges.
+Rust keeps the session data, wraps text, caches, scrolls and paints. Everything about how things look is Lua. `runtime/tui/defaults.lua` calls `require("bone.ui").setup(opts)`, the standard UI in `runtime/lua/bone/ui/` (views, statusline, a divider that shows a running turn, the three-row prompt, the empty-session hint, the model reasoning in the chat while it streams, and the layout). Replace any piece from `tui.lua`, or override a module under `~/.bone/runtime/lua/bone/ui/` that starts from `bone.builtin` (see the top of this file). With nothing defined, Rust draws the chat as plain text (`> ` before your messages, one blank line between items, tool calls as name, arguments and output, reasoning hidden) and the bare prompt below it. Message text reaches views without blank lines at its edges.
 
 `examples/plugins/style/` is another complete look built only from this API. Install it with `cp -r examples/plugins/style ~/.bone/plugins/`, or copy the parts you want.
 

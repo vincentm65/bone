@@ -3972,3 +3972,57 @@ async fn reload_starts_a_fresh_lua_state() {
     // The defaults are back.
     assert_eq!(eval(&mut h, "return type(bone.ui.views.user)"), "function");
 }
+
+#[tokio::test]
+async fn runtime_overrides_can_extend_the_builtin_and_are_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let ui = dir.path().join("runtime/lua/bone/ui");
+    std::fs::create_dir_all(&ui).unwrap();
+    // Start from the built-in layout, change one thing.
+    std::fs::write(
+        ui.join("layout.lua"),
+        r#"
+        local M = bone.builtin("bone.ui.layout")
+        local setup = M.setup
+        function M.setup(opts)
+          setup(opts)
+          bone.ui.regions.top = function() return { "MINE" } end
+        end
+        return M
+        "#,
+    )
+    .unwrap();
+    // A plain copy of a built-in file.
+    std::fs::write(
+        ui.join("statusline.lua"),
+        bone_lua::builtin_source("lua/bone/ui/statusline.lua").unwrap(),
+    )
+    .unwrap();
+    let mut h = Harness::build(Some(dir.path().to_owned())).await;
+    h.app.load_user_config();
+    let screen = h.screen(40, 10);
+    assert!(screen.contains("MINE"), "{screen}");
+    // The rest of the built-in layout still applies: the three-row prompt.
+    assert!(screen.contains(" › Message bone"), "{screen}");
+
+    let health = serde_json::to_string(&h.app.tui_health()).unwrap();
+    assert!(
+        health.contains("lua/bone/ui/layout.lua (differs from built-in)"),
+        "{health}"
+    );
+    assert!(
+        health.contains("lua/bone/ui/statusline.lua (same as built-in: delete it to get updates)"),
+        "{health}"
+    );
+    h.app.note_runtime_overrides();
+    assert!(
+        h.message().contains("2 runtime files overridden"),
+        "{}",
+        h.message()
+    );
+    let e = h
+        .app
+        .with_api(|lua| lua.load(r#"bone.builtin("bone.nope")"#).exec())
+        .unwrap_err();
+    assert!(e.to_string().contains("no built-in runtime file"), "{e}");
+}

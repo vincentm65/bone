@@ -15,8 +15,8 @@
 -- bone.hl.set("UserMessage", { fg = "#eeeeee", bg = "#202020" })
 
 -- The defaults draw the standard UI (runtime/lua/bone/ui/). Replace any
--- piece here (docs/lua.md, "Drawing the screen"), copy a module to
--- ~/.bone/runtime/lua/bone/ui/ to edit it, or install the style plugin:
+-- piece here (docs/lua.md, "Drawing the screen"), override a module under
+-- ~/.bone/runtime/ starting from bone.builtin(...), or install the style plugin:
 -- cp -r <bone repo>/examples/plugins/style ~/.bone/plugins/
 -- bone.ui.prompt = { prefix = "> " }
 -- bone.ui.statusline = function(ctx) return { " " .. ctx.title, "%=", " " } end

@@ -1151,7 +1151,53 @@ impl App {
                 ),
             ));
         }
+        let overrides = self
+            .config_dir
+            .as_deref()
+            .map(bone_lua::runtime_overrides)
+            .unwrap_or_default();
+        if overrides.is_empty() {
+            out.push(item(
+                "runtime overrides",
+                "ok",
+                "none; the built-in runtime is used".into(),
+            ));
+        } else {
+            let list: Vec<String> = overrides
+                .iter()
+                .map(|(rel, same)| {
+                    if *same {
+                        format!("{rel} (same as built-in: delete it to get updates)")
+                    } else {
+                        format!("{rel} (differs from built-in)")
+                    }
+                })
+                .collect();
+            out.push(item(
+                "runtime overrides",
+                "warn",
+                format!(
+                    "these replace built-in files and hide their updates; start one from bone.builtin(...) to change only parts: {}",
+                    list.join(", ")
+                ),
+            ));
+        }
         out
+    }
+
+    /// At startup: say when runtime overrides hide built-in files.
+    pub fn note_runtime_overrides(&mut self) {
+        let n = self
+            .config_dir
+            .as_deref()
+            .map(|d| bone_lua::runtime_overrides(d).len())
+            .unwrap_or(0);
+        if n > 0 {
+            self.info(format!(
+                "{n} runtime file{} overridden in runtime/ (they hide built-in updates; see /health)",
+                if n == 1 { "" } else { "s" }
+            ));
+        }
     }
 
     /// Resume a session at startup: `None` for the newest one.
