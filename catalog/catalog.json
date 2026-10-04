@@ -1,0 +1,400 @@
+[
+  {
+    "name": "ask_user",
+    "kind": "plugin",
+    "version": "1.0.0",
+    "description": "Ask the user one or more interactive questions",
+    "min_bone_version": "0.1.0",
+    "capabilities": [
+      "tool",
+      "ask",
+      "ui"
+    ],
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "1e54f2a18c62d5ff98bb6118b7006ba8e26f79f2a2a9871f7d95c4ea212ef470"
+      },
+      {
+        "path": "core.lua",
+        "sha256": "dbbb97ef709df3b780356dd7e99e7942f5c2ab359d0ac05cd9662953755fece6"
+      },
+      {
+        "path": "tui.lua",
+        "sha256": "9643160f5c32b1d845c68fbc68de11e5a00d8bdff14c93d21d1d90328e6f4a0f"
+      }
+    ]
+  },
+  {
+    "name": "compact",
+    "kind": "plugin",
+    "version": "1.0.0",
+    "description": "Compact conversation context",
+    "min_bone_version": "0.1.0",
+    "capabilities": [
+      "hook",
+      "model",
+      "session"
+    ],
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "f3e18c06fc416c4e9e33717672fb13e3dcab9e757f5bdbefdf5cdbd8eb26b1cc"
+      },
+      {
+        "path": "core.lua",
+        "sha256": "127e7345755ea2e293a0ece3b9eea9d35aa82469b90251223742e714fd1f8345"
+      },
+      {
+        "path": "tui.lua",
+        "sha256": "d3393c15bcb3b81edc50ebfa1e0379798dae80ee7c89c0a3140a1e7df5c9a887"
+      }
+    ]
+  },
+  {
+    "name": "cron",
+    "kind": "plugin",
+    "version": "1.0.0",
+    "description": "Manage Bone 3 recurring crontab jobs",
+    "min_bone_version": "0.1.0",
+    "capabilities": [
+      "tool",
+      "shell",
+      "persistent-jobs"
+    ],
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "ef00b6f22fa7ada75924d5aee8bbb010699e5b55dab026aa4389aac47be80a10"
+      },
+      {
+        "path": "core.lua",
+        "sha256": "f20de09169512e7ac6fc18c953a7a1fa02cfbaed48a5df23940c6421586bd5d6"
+      }
+    ]
+  },
+  {
+    "name": "goal",
+    "kind": "plugin",
+    "version": "1.0.0",
+    "description": "Run and inspect an autonomous goal loop",
+    "min_bone_version": "0.1.0",
+    "capabilities": [
+      "tool",
+      "hooks",
+      "queue",
+      "state"
+    ],
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "0bb9b3b132d20c97931a124dee1bbce66dc9979eb7863412f3ffaba9fd18aaaa"
+      },
+      {
+        "path": "core.lua",
+        "sha256": "8a5bda60534116e2b61d3f655c7d23837cbca3aeac3e76aa24f65ec4f6b97acd"
+      },
+      {
+        "path": "tui.lua",
+        "sha256": "29b52088104a3caac2ffd1f1b4b3cf5f0421ae8c9b86ae81eee05d375111e42d"
+      }
+    ]
+  },
+  {
+    "name": "history",
+    "kind": "plugin",
+    "version": "1.0.0",
+    "description": "Resume a recent conversation",
+    "min_bone_version": "0.1.0",
+    "capabilities": [
+      "command",
+      "sessions"
+    ],
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "919dd4d0b7d0614c3ce062467ec273f965b6bf1a0f1e5d1d4f3d1fdec92d27ff"
+      },
+      {
+        "path": "tui.lua",
+        "sha256": "e24d76f385c6bd4e7d3ecbef9eff774f08d99a3699a39b5852f4902eab268665"
+      }
+    ]
+  },
+  {
+    "name": "mcp",
+    "kind": "plugin",
+    "version": "1.0.0",
+    "description": "Configure MCP servers and inspect their tools",
+    "min_bone_version": "0.1.0",
+    "capabilities": [
+      "mcp",
+      "panel"
+    ],
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "1bc81f472c3b3542c056252480f88fed32fc2633305ee10efd83b67c269489f9"
+      },
+      {
+        "path": "core.lua",
+        "sha256": "7abe5a2004cc4fc847c6983c968dc550bcb83209391d491d630a1184ffdc5d7b"
+      },
+      {
+        "path": "tui.lua",
+        "sha256": "ea4c627e90c9ea2e4131cd26e31fa21c33edf051f3de47b529e625e0719ade2d"
+      }
+    ]
+  },
+  {
+    "name": "recap",
+    "kind": "plugin",
+    "version": "1.0.0",
+    "description": "Show a brief recap of the conversation",
+    "min_bone_version": "0.1.0",
+    "capabilities": [
+      "command",
+      "model"
+    ],
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "6586c81f7975b0d1c5575da02ec973f6da4ce67f125db95bd09cd5d2c92358b6"
+      },
+      {
+        "path": "tui.lua",
+        "sha256": "e57549ba5f78760ab3bdff15cc3608f790bc3fef744624c0c315387cc8166ff6"
+      }
+    ]
+  },
+  {
+    "name": "review",
+    "kind": "plugin",
+    "version": "1.0.0",
+    "description": "Review files changed in the current session",
+    "min_bone_version": "0.1.0",
+    "capabilities": [
+      "panel",
+      "chat",
+      "job"
+    ],
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "97f86263b0147f57f9f3fd1fbac2b0af387f09c53dcccc74aee6ada1ac6553ea"
+      },
+      {
+        "path": "tui.lua",
+        "sha256": "e88d1f195cb0970c2419145b4ea03e7a0695c6e131edb016707519d1cd61c258"
+      }
+    ]
+  },
+  {
+    "name": "shotgun",
+    "kind": "plugin",
+    "version": "1.0.0",
+    "description": "Ask several configured providers and synthesize their answers",
+    "min_bone_version": "0.1.0",
+    "capabilities": [
+      "command",
+      "model"
+    ],
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "dfe4bbcf5e9dd657b6f77ee7a33b5efbaa20afb9c43492d33e49950f1edf40ae"
+      },
+      {
+        "path": "tui.lua",
+        "sha256": "84d2bfbb34e15bc09eb2d827b9a0af7a38fd34177893ee54e49d9508d33afeaf"
+      }
+    ]
+  },
+  {
+    "name": "skill",
+    "kind": "plugin",
+    "version": "1.0.0",
+    "description": "Inject and load skills from configured directories",
+    "min_bone_version": "0.1.0",
+    "capabilities": [
+      "skill",
+      "hook",
+      "tool"
+    ],
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "efdfa16b30c3107ed5907372cd60a3db442d84b496f5748d7b98dafea5ac9e2b"
+      },
+      {
+        "path": "core.lua",
+        "sha256": "755ad2b8a43962291c02214494cb860f594bf0ab93c52d92a421d8a6b9920ec8"
+      },
+      {
+        "path": "tui.lua",
+        "sha256": "bf66e66e41eb93c78de381ac7b13e5fcc6552ea48707866b14ee2531046f3c4d"
+      }
+    ]
+  },
+  {
+    "name": "subagent",
+    "kind": "plugin",
+    "version": "1.0.0",
+    "description": "Run a named, model-only sub-agent",
+    "min_bone_version": "0.1.0",
+    "capabilities": [
+      "tool",
+      "model"
+    ],
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "0719d7b9795c16c04e0341cfc0fb130b6b95c0e2dffc4316487ee633add991ec"
+      },
+      {
+        "path": "core.lua",
+        "sha256": "21936f2592ef32809bf24bb49fa6acaa130aa1e0d1085e789ae85c8fded1dce1"
+      },
+      {
+        "path": "tui.lua",
+        "sha256": "52422df8c157f083f93834e14c5555a5716b529347ec88d9d4f9de17ab005a75"
+      }
+    ]
+  },
+  {
+    "name": "task_loop",
+    "kind": "plugin",
+    "version": "1.0.0",
+    "description": "Maintain a visible autonomous checklist and continue it between turns",
+    "min_bone_version": "0.1.0",
+    "capabilities": [
+      "tool",
+      "hooks",
+      "queue",
+      "state",
+      "ui"
+    ],
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "233b12defc2d8f9d0885ae776c521c3f1d3aac018b882cf2746482a36d74f82f"
+      },
+      {
+        "path": "core.lua",
+        "sha256": "dee6d016517548731a3e458d322836bf5271c2fa1b3b31aa3918d538415c64a8"
+      },
+      {
+        "path": "tui.lua",
+        "sha256": "86bb164fb7a050097aee48dc3e27514ff640f6b18aa017ba0fc93b62afb026bf"
+      }
+    ]
+  },
+  {
+    "name": "themes",
+    "kind": "plugin",
+    "version": "1.0.0",
+    "description": "Pick or apply one of the ported Bone color themes",
+    "min_bone_version": "0.1.0",
+    "capabilities": [
+      "command",
+      "colors"
+    ],
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "d0ad281ed68529b73088b507f203904881d96f305ef0c3eba0db4915424fe690"
+      },
+      {
+        "path": "colors/ayu.lua",
+        "sha256": "67772b0bc029d8627685ae368cf958cd23f1036100fffcb12493a0cbb5c91c6b"
+      },
+      {
+        "path": "colors/black.lua",
+        "sha256": "c23720b8902b43d010a5b3ec775322d9a64cef727b3a0f9833865503f2626c35"
+      },
+      {
+        "path": "colors/catppuccin.lua",
+        "sha256": "891365499caadce9ebafb4d94be2cea283562842ce6e1e5d642f12bbcf5a220d"
+      },
+      {
+        "path": "colors/dracula.lua",
+        "sha256": "4e1657f97121fd114e1cdd4af1c746ed5701ec598619e0a8f793d552e89230a6"
+      },
+      {
+        "path": "colors/everforest.lua",
+        "sha256": "9a9a9713ec037354bc75a6e28fc6cbbdb352936dc5a635c342046fad65783613"
+      },
+      {
+        "path": "colors/gruvbox.lua",
+        "sha256": "9c1d3e41de41210774992a67f1871939e436594caee4ea68aefbe1ed68b38029"
+      },
+      {
+        "path": "colors/nord.lua",
+        "sha256": "509cb0cf4518bd64b33a5fbcea60124948fa8606c7885a4fe6218537769f5943"
+      },
+      {
+        "path": "colors/one-dark.lua",
+        "sha256": "52460608bedd735ec471a7b0642ee2a2b176af488b6fbbc687e7676f48a30665"
+      },
+      {
+        "path": "colors/rose-pine.lua",
+        "sha256": "61ac655d70cb6e91b40f041f8b482697aa630b99d08fc58cea63d98fd59011b5"
+      },
+      {
+        "path": "colors/solarized.lua",
+        "sha256": "9f776d4f0a2a1d3860ad688b22b88247a227bb9c28334ecba443e2280d1161f6"
+      },
+      {
+        "path": "colors/tokyo-night.lua",
+        "sha256": "da6b28d3a5d30837eb66ea283d6e2c85f5d2f6becf666f2038d04fb927a5998e"
+      },
+      {
+        "path": "tui.lua",
+        "sha256": "2dab9af5a54a05bd5293285608a8bdd09c99d957fbb9fd92babe48c80c6b97bd"
+      }
+    ]
+  },
+  {
+    "name": "usage",
+    "kind": "plugin",
+    "version": "1.0.0",
+    "description": "Show token, session, and tool usage",
+    "min_bone_version": "0.1.0",
+    "capabilities": [
+      "command",
+      "store"
+    ],
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "3b876371f5d22617fa923553ee8f264dacab45acea420b83db9d7d1ef2255bc9"
+      },
+      {
+        "path": "tui.lua",
+        "sha256": "75efe17544b7220e9ba24ab22cb6cc1378c847a32d6e8475ae9027d09d4f7280"
+      }
+    ]
+  },
+  {
+    "name": "web_search",
+    "kind": "plugin",
+    "version": "1.1.0",
+    "description": "Search the web with DuckDuckGo (real results through ddgs when uv is installed)",
+    "min_bone_version": "0.1.0",
+    "capabilities": [
+      "tool",
+      "network",
+      "process"
+    ],
+    "files": [
+      {
+        "path": "README.md",
+        "sha256": "f356a92c16e55472d5e626018aaa7f6c321627d832708c3fd57d1df04b64aee8"
+      },
+      {
+        "path": "core.lua",
+        "sha256": "e14d8969202eb14c9d5304186af6919d70b130723bc954a2fff3f6a9830fb1b0"
+      }
+    ]
+  }
+]

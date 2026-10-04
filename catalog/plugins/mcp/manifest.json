@@ -1,0 +1,1 @@
+{"version": "1.0.0", "description": "Configure MCP servers and inspect their tools", "capabilities": ["mcp", "panel"]}

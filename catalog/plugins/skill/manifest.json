@@ -1,0 +1,1 @@
+{"version": "1.0.0", "description": "Inject and load skills from configured directories", "capabilities": ["skill", "hook", "tool"]}

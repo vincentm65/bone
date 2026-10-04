@@ -1,0 +1,1 @@
+{"version": "1.0.0", "description": "Show token, session, and tool usage", "capabilities": ["command", "store"]}
