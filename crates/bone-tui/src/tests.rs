@@ -3408,3 +3408,96 @@ async fn tool_summary_follows_a_running_turn() {
         .await;
     assert_eq!(chat(&mut h), "    Read 1 file, ran 1 shell command");
 }
+
+#[tokio::test]
+async fn views_redraw_when_chat_data_they_read_changes() {
+    let (mut h, _dir) = Harness::with_config(
+        r#"
+        renders = { user = 0, notice = 0 }
+        -- The user line counts the tool calls after it: data from other items.
+        bone.ui.views.user = function(item)
+          renders.user = renders.user + 1
+          local n = #bone.chat.items({ kind = "tool", from = item.index })
+          return { { { "you: " .. item.text .. " [" .. n .. " tools]", "Normal" } } }
+        end
+        "#,
+    )
+    .await;
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    let user_row = |h: &mut Harness| -> String {
+        h.screen(60, 20)
+            .lines()
+            .find(|l| l.starts_with("you: "))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    assert_eq!(user_row(&mut h), "you: go [0 tools]");
+    let call = |id: &str| ToolCall {
+        id: id.into(),
+        name: "shell".into(),
+        arguments: json!({"command": "ls"}).to_string(),
+    };
+    h.emit::<MessageCompleted>(tool_calls("s-new", vec![call("a"), call("b")]))
+        .await;
+    assert_eq!(user_row(&mut h), "you: go [2 tools]");
+
+    // Unrelated changes do not redraw a view whose reads did not change.
+    let renders = |h: &mut Harness| -> i64 {
+        h.app
+            .with_api(|lua| lua.load("return renders.user").eval())
+            .unwrap()
+    };
+    let before = renders(&mut h);
+    h.screen(60, 20);
+    assert_eq!(renders(&mut h), before);
+}
+
+#[tokio::test]
+async fn views_can_ask_to_be_drawn_again() {
+    let (mut h, _dir) = Harness::with_config(
+        r#"
+        ticks = 0
+        bone.ui.views.user = function(item)
+          ticks = ticks + 1
+          bone.chat.refresh_in(1)
+          return { { { "tick " .. ticks, "Normal" } } }
+        end
+        "#,
+    )
+    .await;
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    let screen = h.screen(40, 10);
+    assert!(screen.contains("tick 1"), "{screen}");
+    assert!(h.app.chat_expiry.is_some());
+    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    let screen = h.screen(40, 10);
+    assert!(screen.contains("tick 2"), "{screen}");
+
+    // Outside a view it is an error; bone.chat.redraw works anywhere.
+    let e = h
+        .app
+        .with_api(|lua| lua.load("bone.chat.refresh_in(10)").exec())
+        .unwrap_err();
+    assert!(
+        e.to_string().contains("only works inside a chat view"),
+        "{e}"
+    );
+    h.app
+        .with_api(|lua| {
+            lua.load("bone.ui.views.user = function(i) return { { { 'plain', 'Normal' } } } end")
+                .exec()
+        })
+        .unwrap();
+    assert!(h.screen(40, 10).contains("plain"));
+    h.app
+        .with_api(|lua| lua.load("bone.chat.redraw(1) bone.chat.redraw()").exec())
+        .unwrap();
+    assert!(h.screen(40, 10).contains("plain"));
+    assert!(
+        h.app
+            .with_api(|lua| lua.load("return bone.now() > 0").eval::<bool>())
+            .unwrap()
+    );
+}

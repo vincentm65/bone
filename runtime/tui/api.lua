@@ -770,6 +770,18 @@ function bone.chat.items(opts)
   return api("chat_items", opts or {})
 end
 
+--- Inside a chat view: draw this item again after `ms` milliseconds (a
+--- clock, a spinner). Views are otherwise redrawn only when their item, the
+--- width, options or views change, or chat data they read changed.
+function bone.chat.refresh_in(ms)
+  return api("chat_refresh_in", ms)
+end
+
+--- Draw the item at `index` again, or every item (no index).
+function bone.chat.redraw(index)
+  return api("chat_redraw", index)
+end
+
 --- The item at `index`, or nil.
 function bone.chat.item(index, opts)
   return api("chat_items", { from = index, to = index, session = opts and opts.session })[1]

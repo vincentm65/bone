@@ -31,6 +31,14 @@ pub struct ItemFilter {
     pub session: Option<String>,
 }
 
+/// A `bone.chat.items` query a chat view made while drawing, and a digest of
+/// what it could see. The view is drawn again when the digest changes.
+#[derive(Debug, Clone)]
+pub struct Dep {
+    pub filter: ItemFilter,
+    pub sig: u64,
+}
+
 /// Turn number of each item: 0 before the first user message, then 1, 2, …
 fn turns_of(items: &[Item]) -> Vec<usize> {
     let mut n = 0;
@@ -100,6 +108,41 @@ impl App {
             .skip(skip)
             .take(f.first.unwrap_or(usize::MAX))
             .collect()
+    }
+
+    /// A digest of the items `f` could match: those its kind, turn and range
+    /// allow, with their revs. Coarser than the result (name, running, error,
+    /// first and last are left out), so it may redraw too often, never too
+    /// rarely.
+    pub fn chat_signature(&self, f: &ItemFilter) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let Some(chat) = self.data_chat(f.session.as_deref()) else {
+            return 0;
+        };
+        let items = chat.items();
+        let turns = turns_of(&items);
+        for (n, i) in items.iter().enumerate() {
+            let index = n + 1;
+            if f.kind.as_deref().is_none_or(|k| i.part.name() == k)
+                && f.turn.is_none_or(|t| turns[n] == t)
+                && f.from.is_none_or(|from| index >= from)
+                && f.to.is_none_or(|to| index <= to)
+            {
+                (index, i.entry, i.part.name(), chat.item_rev(i)).hash(&mut h);
+            }
+        }
+        h.finish()
+    }
+
+    /// Changes whenever any open chat's data does.
+    pub fn data_generation(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for c in &self.chats {
+            c.rev().hash(&mut h);
+        }
+        h.finish()
     }
 
     /// The turns of a chat: each user message and what followed it.

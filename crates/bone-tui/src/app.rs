@@ -114,6 +114,12 @@ pub struct App {
     pub opts_rev: u64,
     /// Bumped when Lua changes views; part of every render cache key.
     pub views_rev: u64,
+    /// While a chat view draws: the chat queries it made, and when it asked
+    /// to be drawn again (`bone.chat.refresh_in`).
+    pub render_deps: Option<Vec<crate::data::Dep>>,
+    pub render_expires: Option<std::time::Instant>,
+    /// When the chat on screen next needs drawing for a view's timer.
+    pub chat_expiry: Option<std::time::Instant>,
     pub theme: Theme,
     pub colors_name: Option<String>,
     /// `bone.ui` functions that errored; skipped until restart.
@@ -193,6 +199,9 @@ impl App {
             dynamic_options: HashMap::new(),
             opts_rev: 0,
             views_rev: 0,
+            render_deps: None,
+            render_expires: None,
+            chat_expiry: None,
             theme: Theme::default(),
             colors_name: None,
             ui_broken: HashSet::new(),

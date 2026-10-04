@@ -454,11 +454,25 @@ impl App {
     /// Render the stale items of a chat through `bone.ui.views` and cache them.
     pub fn render_chat(&mut self, buf: BufferId, width_cols: usize) {
         let generation = (self.views_rev, self.opts_rev);
-        let stale = self.chats[buf].stale(width_cols, generation);
-        for (item, index, key) in stale {
-            let lines = self.render_item(buf, item, index, &key);
-            self.chats[buf].store(item, key, lines);
+        // Views that read other chat data are drawn again when it changed.
+        let data = self.data_generation();
+        for (item, deps) in self.chats[buf].unchecked_deps(data) {
+            if deps.iter().all(|d| self.chat_signature(&d.filter) == d.sig) {
+                self.chats[buf].mark_checked(item, data);
+            } else {
+                self.chats[buf].invalidate(item);
+            }
         }
+        let stale = self.chats[buf].stale(width_cols, generation, std::time::Instant::now());
+        for (item, index, key) in stale {
+            self.render_deps = Some(Vec::new());
+            self.render_expires = None;
+            let lines = self.render_item(buf, item, index, &key);
+            let deps = self.render_deps.take().unwrap_or_default();
+            let expires = self.render_expires.take();
+            self.chats[buf].store(item, key, lines, deps, expires, data);
+        }
+        self.chat_expiry = self.chats[buf].next_expiry();
     }
 
     fn render_item(

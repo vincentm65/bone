@@ -117,6 +117,14 @@ fn setup(config_dir: Option<PathBuf>) -> mlua::Result<Lua> {
     let bone: Table = lua.globals().get("bone")?;
     bone.set("_api", forward)?;
     bone.set(
+        "now",
+        lua.create_function(|_, ()| {
+            Ok(std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0.0, |d| d.as_secs_f64() * 1000.0))
+        })?,
+    )?;
+    bone.set(
         "strwidth",
         lua.create_function(|_, s: String| Ok(crate::text::width(&s)))?,
     )?;
@@ -2057,12 +2065,49 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
         }
         "chat_items" => {
             let opts: Option<Table> = args(lua, a)?;
-            let items = app.chat_query(&item_filter(&opts)?);
+            let filter = item_filter(&opts)?;
+            let items = app.chat_query(&filter);
+            // Inside a chat view: what it read decides when it is redrawn.
+            if app.render_deps.is_some() {
+                let sig = app.chat_signature(&filter);
+                if let Some(deps) = &mut app.render_deps {
+                    deps.push(crate::data::Dep { filter, sig });
+                }
+            }
             ret(lua, to_lua(lua, &serde_json::Value::Array(items))?)
+        }
+        "chat_refresh_in" => {
+            let ms: f64 = args(lua, a)?;
+            if app.render_deps.is_none() {
+                return Err(err("bone.chat.refresh_in only works inside a chat view"));
+            }
+            let at =
+                std::time::Instant::now() + std::time::Duration::from_millis(ms.max(0.0) as u64);
+            app.render_expires = Some(app.render_expires.map_or(at, |e| e.min(at)));
+            ret(lua, ())
+        }
+        "chat_redraw" => {
+            let index: Option<usize> = args(lua, a)?;
+            let current = app.current;
+            app.chats[current].redraw(index);
+            app.dirty = true;
+            ret(lua, ())
         }
         "chat_turns" => {
             let opts: Option<Table> = args(lua, a)?;
-            let turns = app.chat_turns(session_opt(&opts)?.as_deref());
+            let session = session_opt(&opts)?;
+            // Inside a chat view, turns depend on every item of the chat.
+            if app.render_deps.is_some() {
+                let filter = crate::data::ItemFilter {
+                    session: session.clone(),
+                    ..Default::default()
+                };
+                let sig = app.chat_signature(&filter);
+                if let Some(deps) = &mut app.render_deps {
+                    deps.push(crate::data::Dep { filter, sig });
+                }
+            }
+            let turns = app.chat_turns(session.as_deref());
             ret(lua, to_lua(lua, &serde_json::Value::Array(turns))?)
         }
         "chat_session" => {

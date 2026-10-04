@@ -600,6 +600,9 @@ bone.chat.turns()                       -- one entry per user message
 bone.chat.session()                     -- the chat on screen
 bone.chat.sessions()                    -- every open chat
 bone.chat.messages(function(messages, err) ... end)  -- from the core
+bone.chat.refresh_in(500)               -- inside a chat view: draw this item again in 500 ms
+bone.chat.redraw(4)                     -- draw item 4 again; no index: every item
+bone.now()                              -- milliseconds since the epoch
 ```
 
 - `items(opts)` filters: `kind`, `name` (tool name), `turn`, `running`, `error` (failed tools and error notices), `from`/`to` (item indexes, inclusive), then `first`/`last` keep the first or last N matches. Items have the fields in the views table plus `turn` (0 for items before the first message).
@@ -753,7 +756,9 @@ end
 | `notice` | `text`, `error` |
 | `queued` | `id`, `text`, `mode` (`"steer"` joins the running turn, `"next"` waits for its own), `position` (1 first); messages waiting in the session's queue, after the transcript. Plain text: `(queued) text` |
 
-Every item also has `kind` and `index`. `ctx` is `{ width, region, prev = { kind } }`: `region` is `"chat"` in the transcript, and `prev` lets a view decide spacing (the style plugin adds a blank line except between a message and its tool calls). Assigning a view redraws the chat; a view that errors is reported once and its items fall back to plain text until it is redefined. Call `bone.ui.refresh()` if a view depends on something else you changed.
+Every item also has `kind` and `index`. `ctx` is `{ width, region, prev = { kind } }`: `region` is `"chat"` in the transcript, and `prev` lets a view decide spacing (the style plugin adds a blank line except between a message and its tool calls). Assigning a view redraws the chat; a view that errors is reported once and its items fall back to plain text until it is redefined.
+
+Chat views are cached: an item is drawn again when it changes, when the width, options, views or colors change, and when chat data the view read through `bone.chat.items`, `bone.chat.item`, `bone.chat.count` or `bone.chat.turns` changes (so a view may show what comes after its item, or sum up a turn). For time, call `bone.chat.refresh_in(ms)` inside the view and the item is drawn again after that long (a clock, a spinner; `bone.now()` is the time in milliseconds). For anything else, `bone.chat.redraw(index)` draws one item again and `bone.chat.redraw()` all of them; `bone.ui.refresh()` also redraws regions and windows.
 
 Tool calls have one more layer: `views.tool` draws the frame (status marker, label rows, output), and `bone.ui.tool_views[name](item, ctx)` can supply the content for one tool as `{ title = line, lines = { line, ... } }` (`title` may also be a list of lines; `lines` sit indented under it). Return `nil` for the built-in content (`bone.ui.tool_content`). The standard UI draws tools like the first bone: a label (`shell cmd`, `read_file path (lines 1-20, 20 read)`, `edit_file path (-1 | +2)`), shell output and errors in a `│ ╰` gutter cut to its first and last two rows, edits as a numbered diff, and other tools' first five output lines. `bone.o.tool_detail` (`ctrl+t`) picks how much: `"summary"` (the default) folds each stretch of calls between edits and failures into one line such as `Read 3 files, ran 2 shell commands`, `"rows"` is the above, `"full"` shows every output in full. A tool view's `ctx.run = { first, last }` gives the item indexes of the adjacent tool and reasoning items around it (for `bone.chat.items({ from, to })`); the view is redrawn when any of them changes.
 

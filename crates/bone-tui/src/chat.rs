@@ -3,10 +3,14 @@
 //! This module only holds data and a render cache. A transcript is a list of
 //! *items* (user, reasoning, assistant, tool, notice); how each one looks is
 //! decided elsewhere (Lua views, see `ui.rs`). Rendered lines are cached per
-//! item and redone only when the item, the width or the views change.
+//! item and redone only when the item, the width or the views change, when
+//! chat data the view read has changed (see [`Dep`]), or when the view asked
+//! to be drawn again later.
 
 use std::collections::HashMap;
 use std::time::Instant;
+
+use crate::data::Dep;
 
 use bone_proto::methods::{
     MessageCompletedParams, MessageDeltaParams, QueueMode, QueuedMessage, ToolFinishedParams,
@@ -110,7 +114,19 @@ pub struct ChatBuffer {
     /// Bumped on every change to an entry; part of each cache key.
     revs: Vec<u64>,
     next_rev: u64,
-    cache: HashMap<Item, (RenderKey, Vec<Line<'static>>)>,
+    cache: HashMap<Item, Cached>,
+}
+
+/// One item's rendered lines and what they were made from.
+struct Cached {
+    key: RenderKey,
+    lines: Vec<Line<'static>>,
+    /// Chat data the view read while drawing them.
+    deps: Vec<Dep>,
+    /// Drawn again from this moment (`bone.chat.refresh_in`).
+    expires: Option<Instant>,
+    /// The data generation `deps` were last found current at.
+    checked: u64,
 }
 
 impl ChatBuffer {
@@ -440,10 +456,62 @@ impl ChatBuffer {
 
     // ---- render cache --------------------------------------------------------
 
+    /// Bumped on every change to this chat's data.
+    pub fn rev(&self) -> u64 {
+        self.next_rev
+    }
+
+    /// The rev of the data behind `item`.
+    pub fn item_rev(&self, item: &Item) -> u64 {
+        self.revs.get(item.entry).copied().unwrap_or(self.queue_rev)
+    }
+
+    /// Cached items with dependencies not checked at data generation `data`.
+    pub fn unchecked_deps(&self, data: u64) -> Vec<(Item, Vec<Dep>)> {
+        self.cache
+            .iter()
+            .filter(|(_, c)| !c.deps.is_empty() && c.checked != data)
+            .map(|(item, c)| (*item, c.deps.clone()))
+            .collect()
+    }
+
+    pub fn mark_checked(&mut self, item: Item, data: u64) {
+        if let Some(c) = self.cache.get_mut(&item) {
+            c.checked = data;
+        }
+    }
+
+    /// Draw `item` again on the next frame.
+    pub fn invalidate(&mut self, item: Item) {
+        self.cache.remove(&item);
+    }
+
+    /// Draw the item at 1-based `index` again, or every item.
+    pub fn redraw(&mut self, index: Option<usize>) {
+        match index {
+            Some(i) => {
+                if let Some(item) = i.checked_sub(1).and_then(|i| self.items().get(i).copied()) {
+                    self.invalidate(item);
+                }
+            }
+            None => self.cache.clear(),
+        }
+    }
+
+    /// When the earliest cached item asked to be drawn again.
+    pub fn next_expiry(&self) -> Option<Instant> {
+        self.cache.values().filter_map(|c| c.expires).min()
+    }
+
     /// Items whose cached lines are missing or out of date, with their key.
-    pub fn stale(&self, width: usize, generation: (u64, u64)) -> Vec<(Item, usize, RenderKey)> {
+    pub fn stale(
+        &self,
+        width: usize,
+        generation: (u64, u64),
+        now: Instant,
+    ) -> Vec<(Item, usize, RenderKey)> {
         let items = self.items();
-        let rev = |item: &Item| self.revs.get(item.entry).copied().unwrap_or(self.queue_rev);
+        let rev = |item: &Item| self.item_rev(item);
         let runs = runs(&items, rev);
         items
             .iter()
@@ -456,14 +524,34 @@ impl ChatBuffer {
                     prev: i.checked_sub(1).map(|p| items[p].part),
                     run: runs[i],
                 };
-                let fresh = self.cache.get(item).is_some_and(|(k, _)| *k == key);
+                let fresh = self
+                    .cache
+                    .get(item)
+                    .is_some_and(|c| c.key == key && c.expires.is_none_or(|e| e > now));
                 (!fresh).then_some((*item, i + 1, key))
             })
             .collect()
     }
 
-    pub fn store(&mut self, item: Item, key: RenderKey, lines: Vec<Line<'static>>) {
-        self.cache.insert(item, (key, lines));
+    pub fn store(
+        &mut self,
+        item: Item,
+        key: RenderKey,
+        lines: Vec<Line<'static>>,
+        deps: Vec<Dep>,
+        expires: Option<Instant>,
+        checked: u64,
+    ) {
+        self.cache.insert(
+            item,
+            Cached {
+                key,
+                lines,
+                deps,
+                expires,
+                checked,
+            },
+        );
     }
 
     /// All rendered rows, in order (after `stale` items have been stored).
@@ -471,7 +559,7 @@ impl ChatBuffer {
         self.items()
             .into_iter()
             .filter_map(|item| self.cache.get(&item))
-            .flat_map(|(_, lines)| lines.iter())
+            .flat_map(|c| c.lines.iter())
             .collect::<Vec<_>>()
             .into_iter()
     }
@@ -480,7 +568,7 @@ impl ChatBuffer {
         self.items()
             .iter()
             .filter_map(|i| self.cache.get(i))
-            .map(|(_, l)| l.len())
+            .map(|c| c.lines.len())
             .sum()
     }
 }
@@ -570,9 +658,9 @@ mod tests {
 
     /// Render with the bare fallback, like a UI without Lua.
     fn rows(c: &mut ChatBuffer, width: usize) -> Vec<String> {
-        for (item, index, key) in c.stale(width, (0, 0)) {
+        for (item, index, key) in c.stale(width, (0, 0), Instant::now()) {
             let lines = bare(&c.item_data(item, index), width, index == 1);
-            c.store(item, key, lines);
+            c.store(item, key, lines, Vec::new(), None, 0);
         }
         c.rows().map(|l| l.to_string()).collect()
     }
@@ -638,10 +726,10 @@ mod tests {
         c.turn_started(1, "one two three");
         c.notice("x".into(), false);
         assert_eq!(rows(&mut c, 40), ["> one two three", "", "! x"]);
-        assert!(c.stale(40, (0, 0)).is_empty());
+        assert!(c.stale(40, (0, 0), Instant::now()).is_empty());
         // Width and generation changes redo everything.
-        assert_eq!(c.stale(9, (0, 0)).len(), 2);
-        assert_eq!(c.stale(40, (1, 0)).len(), 2);
+        assert_eq!(c.stale(9, (0, 0), Instant::now()).len(), 2);
+        assert_eq!(c.stale(40, (1, 0), Instant::now()).len(), 2);
         assert_eq!(rows(&mut c, 9), ["> one two", "three", "", "! x"]);
         // A change to one entry redoes only its item.
         c.delta(&MessageDeltaParams {
@@ -650,7 +738,7 @@ mod tests {
             kind: DeltaKind::Text,
             text: "hey".into(),
         });
-        assert_eq!(c.stale(9, (0, 0)).len(), 1);
+        assert_eq!(c.stale(9, (0, 0), Instant::now()).len(), 1);
         assert_eq!(c.row_count(), 4);
     }
 

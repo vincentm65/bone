@@ -101,6 +101,12 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
         } else {
             None
         };
+        // A chat view asked to be drawn again (bone.chat.refresh_in).
+        let expiry = app.chat_expiry.map(|e| e.max(last_draw + FRAME));
+        let draw_at = match (draw_at, expiry) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
         let timeout_at = app.key_sequence_deadline();
         tokio::select! {
             biased;
