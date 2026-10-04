@@ -124,7 +124,9 @@ impl Env {
 
 /// Compare with a snapshot, after masking paths that change between runs.
 fn snapshot(name: &str, screen: &str, work: &Path) {
-    let screen = mask_timers(&screen.replace(&*work.to_string_lossy(), "<cwd>")) + "\n";
+    let screen = mask_done(&mask_timers(
+        &screen.replace(&*work.to_string_lossy(), "<cwd>"),
+    )) + "\n";
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("tests/snapshots")
         .join(format!("{name}.txt"));
@@ -144,6 +146,25 @@ fn snapshot(name: &str, screen: &str, work: &Path) {
 
 /// Spinner frames and elapsed times change between runs: `⠸ working 3s`
 /// becomes `* working <t>`.
+/// `done 12s` / `done 1m05s` (a finished turn's time) as `done <t>`.
+fn mask_done(screen: &str) -> String {
+    let mut out = String::new();
+    let mut rest = screen;
+    while let Some(i) = rest.find("done ") {
+        out.push_str(&rest[..i + 5]);
+        rest = &rest[i + 5..];
+        let n = rest
+            .find(|c: char| !(c.is_ascii_digit() || c == 'm' || c == 's'))
+            .unwrap_or(rest.len());
+        if n > 0 && rest[..n].ends_with('s') && rest.starts_with(|c: char| c.is_ascii_digit()) {
+            out.push_str("<t>");
+            rest = &rest[n..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 fn mask_timers(screen: &str) -> String {
     const SPINNER: &str = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
     let mut out = String::new();
@@ -231,7 +252,7 @@ async fn full_turn_with_approval_then_resume() {
     assert!(screen.contains("$ echo hello && seq 1 9"), "{screen}");
 
     // The session list shows it.
-    again.press("ctrl+r").unwrap();
+    again.press("ctrl+o").unwrap();
     let screen = again
         .wait_for(WAIT, |s| s.contains("enter open"))
         .await
@@ -267,9 +288,9 @@ async fn denied_tool_and_startup_screen() {
     assert!(!e.work.path().join("x.txt").exists());
 }
 
-/// Without a style: only text, no statusline, divider or prompt prefix.
+/// Without plugins the runtime's standard UI draws the screen.
 #[tokio::test(flavor = "multi_thread")]
-async fn blank_slate() {
+async fn standard_ui_without_plugins() {
     let e = env(
         vec![sse(&[
             json!({"choices":[{"delta":{"reasoning_content":"The user said hello.\n"}}]}),
@@ -280,13 +301,13 @@ async fn blank_slate() {
     .await;
     let mut tui = e.tui(None).await;
     tui.settle(Duration::from_millis(50)).await;
-    assert!(tui.screen().trim().is_empty(), "{}", tui.screen());
+    assert!(tui.screen().contains("New session."), "{}", tui.screen());
     tui.type_text("hello\n");
     let screen = tui
         .wait_for(WAIT, |s| s.contains("hi there"))
         .await
         .unwrap();
-    snapshot("blank", &screen, e.work.path());
+    snapshot("standard", &screen, e.work.path());
 }
 
 /// The files `bone --init` writes load cleanly on both sides.

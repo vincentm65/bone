@@ -14,9 +14,9 @@ local p = {
   number = "#ff9e64",
   user_bg = "#1a1a1a",
   diff_add = "#7ee787",
-  diff_add_bg = "#14261a",
+  diff_add_bg = "#1a1a1a",
   diff_del = "#ff7b72",
-  diff_del_bg = "#2d1416",
+  diff_del_bg = "#222222",
 }
 
 local hl = bone.hl.set
@@ -25,6 +25,8 @@ hl("Dim", { fg = p.subtle })
 hl("Accent", { fg = p.accent, bold = true })
 hl("UserPrompt", { fg = p.accent, bg = p.user_bg, bold = true })
 hl("UserMessage", { fg = p.fg, bg = p.user_bg })
+hl("InputBackground", { fg = p.fg, bg = p.user_bg })
+hl("InputText", { fg = p.fg, bg = p.user_bg })
 hl("Reasoning", { fg = p.subtle, italic = true })
 hl("ToolName", { fg = p.fg })
 hl("ToolArgs", { fg = p.muted })
@@ -55,7 +57,7 @@ hl("Notice", { fg = p.warn })
 hl("ErrorMsg", { fg = p.error })
 hl("WarningMsg", { fg = p.warn })
 hl("WinSeparator", { fg = p.border })
-hl("StatusLine", { fg = p.muted })
+hl("StatusLine", { fg = p.fg, bold = true })
 hl("StatusLineDim", { fg = p.subtle })
 hl("Selection", { bg = "#2a2a2a" })
 hl("Placeholder", { fg = p.subtle })

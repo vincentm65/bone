@@ -2,6 +2,10 @@
 -- any of them; ~/.bone/runtime/tui/defaults.lua replaces this file.
 -- Keys without a mapping type text into the prompt.
 
+-- The standard Lua UI is the starting point. User config and plugins run
+-- afterward and can replace any individual view, region, or widget.
+require("bone.ui").setup()
+
 -- The slash commands and the / menu are Lua modules (runtime/lua/bone/).
 require("bone.commands")
 require("bone.menu")
@@ -10,6 +14,20 @@ require("bone.menu")
 -- running turn at its next step, "next" waits for a turn of its own. The
 -- actions queue_steer and queue_next do one or the other whatever this says.
 bone.o.define("queue_mode", "steer", { desc = "what enter does during a turn: steer or next" })
+
+-- How much of each tool call the chat shows: "summary" (one line per run
+-- of calls, edits and failures in full), "rows" (a row per call, output
+-- cut short) or "full" (everything). ctrl+t steps through them.
+bone.o.define("tool_detail", "summary", {
+  desc = "tool calls: summary, rows or full (ctrl+t)",
+  on_change = function()
+    bone.ui.refresh()
+  end,
+})
+local next_detail = { summary = "rows", rows = "full", full = "summary" }
+bone.keymap.set("ctrl+t", function()
+  bone.o.tool_detail = next_detail[bone.o.tool_detail] or "rows"
+end)
 
 -- Up on an empty prompt takes the last queued message back to edit.
 local menu_up = bone.ui.actions.up
@@ -47,8 +65,13 @@ map({
   ["esc"] = "dismiss",
   ["ctrl+c"] = "interrupt",
   ["ctrl+d"] = "quit_if_empty",
-  ["ctrl+r"] = "sessions",
+  ["ctrl+o"] = "sessions",
   ["ctrl+n"] = "new_session",
+  ["ctrl+r"] = function()
+    -- Toggle the model reasoning (live, in the chat, and in the transcript).
+    -- The same switch as /set show_reasoning; it redraws on its own.
+    bone.o.apply("show_reasoning!")
+  end,
 
   ["left"] = "left",
   ["right"] = "right",
@@ -102,13 +125,7 @@ map({
   wheeldown = "scroll_down",
 }, "panel")
 
--- One blank row between the chat and the prompt, so text never touches
--- what you type. Replace it (a spinner line, a rule) or set it to nil.
-function bone.ui.divider()
-  return {}
-end
-
--- The session picker (ctrl+r, /sessions), built on bone.ui.select.
+-- The session picker (ctrl+o, /sessions), built on bone.ui.select.
 function bone.ui.sessions()
   local home = os.getenv("HOME")
   local picker = bone.ui.select({}, {

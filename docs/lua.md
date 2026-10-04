@@ -421,8 +421,9 @@ The defaults are in `runtime/tui/defaults.lua`.
 
 ```lua
 bone.o.show_reasoning = false
-bone.o.tool_preview_lines = 4  -- rows of tool output under each call
-bone.o.diff_preview_lines = 8  -- rows of diff under each edit
+bone.o.tool_detail = "rows"     -- tool calls: "summary", "rows" or "full" (ctrl+t)
+bone.o.tool_preview_lines = 4  -- rows of tool output under each call (style plugin)
+bone.o.diff_preview_lines = 8  -- rows of diff under each edit (style plugin)
 bone.o.prompt_max_height = 10
 bone.o.mouse = false           -- leave the mouse to the terminal (its own selection, no wheel)
 ```
@@ -683,9 +684,11 @@ Groups: `Normal Dim Accent UserPrompt UserMessage Reasoning ToolName ToolArgs To
 
 ### Drawing the screen
 
-Rust keeps the session data, wraps text, caches, scrolls and paints. Everything about how things look is Lua, and **by default there is none**: the screen is the chat as plain text (`> ` before your messages, one blank line between items, tool calls as name, arguments and output, reasoning hidden) and the prompt below it. Message text reaches views without blank lines at its edges. No statusline, prompt prefix, colors or spacing until Lua adds them; the one default is a blank divider row between the chat and the prompt (`bone.ui.divider` in `runtime/tui/defaults.lua`; set it to `nil` to remove it).
+Rust keeps the session data, wraps text, caches, scrolls and paints. Everything about how things look is Lua. `runtime/tui/defaults.lua` calls `require("bone.ui").setup(opts)`, the standard UI in `runtime/lua/bone/ui/` (views, statusline, a divider that shows a running turn, the three-row prompt, the empty-session hint, the model reasoning in the chat while it streams, and the layout). Replace any piece from `tui.lua`, or copy a module to `~/.bone/runtime/lua/bone/ui/` and edit it. With nothing defined, Rust draws the chat as plain text (`> ` before your messages, one blank line between items, tool calls as name, arguments and output, reasoning hidden) and the bare prompt below it. Message text reaches views without blank lines at its edges.
 
-`examples/plugins/style/` is a complete look built only from this API (views, tool calls, statusline, divider, prompt prefix, the empty-session hint). Install it with `cp -r examples/plugins/style ~/.bone/plugins/`, or copy the parts you want.
+`examples/plugins/style/` is another complete look built only from this API. Install it with `cp -r examples/plugins/style ~/.bone/plugins/`, or copy the parts you want.
+
+The TUI watches `tui.lua` and the `lua/`, `runtime/`, `colors/` and `plugins/` folders of the config directory. When a Lua file there changes, it clears the views, regions, statusline, divider, prompt, layout and `bone.ui.actions`, forgets every module `require`d since startup (the standard UI, menu and commands included), and runs the defaults, plugins and `tui.lua` again. Options keep their values when the file that defined them runs again.
 
 #### The prompt
 
@@ -752,7 +755,7 @@ end
 
 Every item also has `kind` and `index`. `ctx` is `{ width, region, prev = { kind } }`: `region` is `"chat"` in the transcript, and `prev` lets a view decide spacing (the style plugin adds a blank line except between a message and its tool calls). Assigning a view redraws the chat; a view that errors is reported once and its items fall back to plain text until it is redefined. Call `bone.ui.refresh()` if a view depends on something else you changed.
 
-Tool calls have one more layer: `views.tool` draws the frame (status marker, header, gutter), and `bone.ui.tool_views[name](item, ctx)` can supply the content for one tool as `{ title = line, lines = { line, ... } }`. With the style plugin, return `nil` for its content (`bone.ui.tool_content`).
+Tool calls have one more layer: `views.tool` draws the frame (status marker, label rows, output), and `bone.ui.tool_views[name](item, ctx)` can supply the content for one tool as `{ title = line, lines = { line, ... } }` (`title` may also be a list of lines; `lines` sit indented under it). Return `nil` for the built-in content (`bone.ui.tool_content`). The standard UI draws tools like the first bone: a label (`shell cmd`, `read_file path (lines 1-20, 20 read)`, `edit_file path (-1 | +2)`), shell output and errors in a `│ ╰` gutter cut to its first and last two rows, edits as a numbered diff, and other tools' first five output lines. `bone.o.tool_detail` (`ctrl+t`) picks how much: `"summary"` (the default) folds each stretch of calls between edits and failures into one line such as `Read 3 files, ran 2 shell commands`, `"rows"` is the above, `"full"` shows every output in full. A tool view's `ctx.run = { first, last }` gives the item indexes of the adjacent tool and reasoning items around it (for `bone.chat.items({ from, to })`); the view is redrawn when any of them changes.
 
 #### Regions: content around the chat
 

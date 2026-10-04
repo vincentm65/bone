@@ -29,6 +29,8 @@ fn fmt_color(c: Color) -> String {
 
 const DISPATCH: &str = "bone.dispatch";
 const CALLBACKS: &str = "bone.callbacks";
+/// Names in `package.loaded` once the API is up; a reload unloads the rest.
+const API_MODULES: &str = "bone.api_modules";
 
 /// A user command defined from Lua.
 #[derive(Clone)]
@@ -84,12 +86,20 @@ pub fn init(app: &mut App, config_dir: Option<PathBuf>) {
         }
     };
     app.lua = Some(lua);
-    for rel in ["tui/api.lua", "tui/defaults.lua"] {
-        let dir = config_dir.clone();
-        if let Err(e) = app.with_api(|lua| bone_lua::run_runtime(lua, dir.as_deref(), rel)) {
-            app.lua_error(&format!("runtime/{rel}"), &e);
+    let dir = config_dir.clone();
+    if let Err(e) = app.with_api(|lua| {
+        bone_lua::run_runtime(lua, dir.as_deref(), "tui/api.lua")?;
+        let package: Table = lua.globals().get("package")?;
+        let loaded: Table = package.get("loaded")?;
+        let names = lua.create_table()?;
+        for pair in loaded.pairs::<Value, Value>() {
+            names.set(pair?.0, true)?;
         }
+        lua.set_named_registry_value(API_MODULES, names)
+    }) {
+        app.lua_error("runtime/tui/api.lua", &e);
     }
+    app.run_defaults();
 }
 
 fn setup(config_dir: Option<PathBuf>) -> mlua::Result<Lua> {
@@ -641,33 +651,44 @@ impl App {
         self.fire("ready", serde_json::Value::Null);
     }
 
+    fn run_defaults(&mut self) {
+        let dir = self.config_dir.clone();
+        let rel = "tui/defaults.lua";
+        if let Err(e) = self.with_api(|lua| bone_lua::run_runtime(lua, dir.as_deref(), rel)) {
+            self.lua_error(&format!("runtime/{rel}"), &e);
+        }
+    }
+
     /// Re-source Lua customization after a file change. This intentionally
     /// keeps the Lua state and Rust session alive, matching Vim's `:source`
     /// model; a later cleanup API can make plugin reloads fully idempotent.
     pub fn reload_user_config(&mut self) {
-        // `tui.lua` is sourced repeatedly. Clear mutable UI customization
-        // first so deleting a line really removes its previous definition.
-        // The API tables are intentionally kept alive; Rust still owns the
-        // session and the Lua callbacks are replaced by the next source.
+        // The defaults and `tui.lua` are sourced again. Clear mutable UI
+        // customization first so deleting a line really removes its previous
+        // definition, and forget every module required since the API was set
+        // up (the standard UI, menu and commands included) so edits to them
+        // load. The API tables stay alive; Rust still owns the session.
         let reset = self.with_api(|lua| {
+            let keep: Table = lua.named_registry_value(API_MODULES)?;
             lua.load(
                 r#"
-                bone.ui.statusline = nil
-                bone.ui.divider = nil
-                bone.ui.prompt = nil
-                bone.ui.layout = nil
-                for k in pairs(bone.ui.views) do bone.ui.views[k] = nil end
-                for k in pairs(bone.ui.tool_views) do bone.ui.tool_views[k] = nil end
-                for k in pairs(bone.ui.regions) do bone.ui.regions[k] = nil end
+                local keep = ...
+                bone.ui._reset()
+                for name in pairs(package.loaded) do
+                    if not keep[name] then
+                        package.loaded[name] = nil
+                    end
+                end
                 "#,
             )
-            .exec()
+            .call::<()>(keep)
         });
         if let Err(e) = reset {
             self.lua_error("resetting Lua UI", &e);
             return;
         }
         self.ui_broken.clear();
+        self.run_defaults();
         self.load_user_config();
         self.dirty = true;
         self.info("Lua configuration reloaded");
@@ -1371,9 +1392,12 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             if options::NAMES.contains(&name.as_str()) {
                 return Err(err(format!("{name} is a built-in option")));
             }
-            if app.dynamic_options.contains_key(&name) {
-                return Err(err(format!("option already defined: {name}")));
-            }
+            // Re-sourcing the file that defined an option keeps its value.
+            let previous = match app.dynamic_options.get(&name) {
+                Some(old) if old.owner == app.owner => Some(old.value.clone()),
+                Some(_) => return Err(err(format!("option already defined: {name}"))),
+                None => None,
+            };
             let requested = opts
                 .as_ref()
                 .map(|o| o.get::<Option<String>>("type"))
@@ -1398,11 +1422,17 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 .flatten()
                 .map(|f| app.store_callback(lua, f))
                 .transpose()?;
+            let current = previous
+                .filter(|v| v.kind() == kind)
+                .unwrap_or_else(|| value.clone());
             app.own(crate::plugins::Owned::Option(name.clone()));
+            if let Some(old) = app.dynamic_options.get(&name).and_then(|o| o.on_change) {
+                App::drop_callback(lua, old)?;
+            }
             app.dynamic_options.insert(
                 name,
                 DynamicOption {
-                    value: value.clone(),
+                    value: current,
                     default: value,
                     kind,
                     desc,

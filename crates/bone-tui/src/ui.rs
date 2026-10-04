@@ -474,6 +474,7 @@ impl App {
             "width": key.width,
             "region": "chat",
             "prev": key.prev.map(|p| json!({ "kind": p.name() })),
+            "run": key.run.map(|(first, last, _)| json!({ "first": first, "last": last })),
         });
         let view_data = data.clone();
         let lines = self

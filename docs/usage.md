@@ -2,7 +2,7 @@
 
 ## Screen
 
-Out of the box the screen is a blank slate: the session as plain text and the prompt under it, nothing else. Everything below comes from the style plugin (`cp -r examples/plugins/style ~/.bone/plugins/`) and can be changed or replaced in Lua (see [lua.md](lua.md)).
+Out of the box the screen is the runtime's standard UI (`runtime/lua/bone/ui/`). Everything below comes from the style plugin (`cp -r examples/plugins/style ~/.bone/plugins/`) and can be changed or replaced in Lua (see [lua.md](lua.md)).
 
 ```text
 › your message                         ← the session
@@ -31,7 +31,9 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `ctrl+c` | cancel the running turn; else clear the prompt; else press twice to quit |
 | `ctrl+d` | quit (on an empty prompt) |
 | `ctrl+r` | pick a session to open |
+| `ctrl+t` | how much of each tool call to show: a summary line per stretch of calls ("Read 3 files, ran 2 shell commands"; edits and failures in full) → a row per call → everything in full → back. It stays until you press it again |
 | `ctrl+n` | new session |
+| `ctrl+t` | show / hide the model reasoning (live in the chat and in the transcript) |
 | `up` / `down` | move between prompt lines; past the edges, earlier messages. With `/` suggestions showing, move through them |
 | `tab` | complete the selected `/` command |
 | `esc` | hide suggestions, or clear a message |
@@ -84,8 +86,9 @@ Enter on a partial name runs the highlighted suggestion (`/ses` + enter opens th
 | Option | Default | |
 |---|---|---|
 | `show_reasoning` | on | show model reasoning |
-| `tool_preview_lines` | 4 | rows of tool output under each call |
-| `diff_preview_lines` | 8 | rows of diff under each edit |
+| `tool_detail` | summary | tool calls: `summary`, `rows` or `full` (`ctrl+t`) |
+| `tool_preview_lines` | 4 | rows of tool output under each call (style plugin) |
+| `diff_preview_lines` | 8 | rows of diff under each edit (style plugin) |
 | `prompt_max_height` | 10 | prompt height limit |
 
 ## Command line

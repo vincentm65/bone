@@ -9,8 +9,9 @@ local function error_text(e)
 end
 
 local KEYS = [[
-Keys: enter send · alt+enter newline · ctrl+c cancel / clear / quit · ctrl+r sessions
-      pageup/pagedown scroll · ctrl+home/ctrl+end top/bottom · up/down history · tab complete]]
+Keys: enter send · alt+enter newline · ctrl+c cancel / clear / quit · ctrl+o sessions
+      pageup/pagedown scroll · ctrl+home/ctrl+end top/bottom · up/down history · tab complete
+      ctrl+r show/hide reasoning]]
 
 cmd("help", function(c)
   if c.args ~= "" then
@@ -37,7 +38,7 @@ end, { desc = "start a new session" })
 
 cmd("sessions", function()
   bone.action("sessions")
-end, { desc = "pick a session to open (ctrl+r)", aliases = { "resume" } })
+end, { desc = "pick a session to open (ctrl+o)", aliases = { "resume" } })
 
 cmd("open", function(c)
   local prefix = c.args

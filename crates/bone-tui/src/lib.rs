@@ -154,7 +154,15 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
 fn lua_snapshot(dir: Option<&Path>) -> u64 {
     let Some(dir) = dir else { return 0 };
     let mut files = Vec::new();
-    collect_lua_files(dir, &mut files);
+    // Only where TUI Lua is loaded from: the config dir also holds sessions
+    // and other data that would be walked on every poll.
+    let tui = dir.join("tui.lua");
+    if tui.is_file() {
+        files.push(tui);
+    }
+    for sub in ["lua", "runtime", "colors", "plugins"] {
+        collect_lua_files(&dir.join(sub), &mut files);
+    }
     files.sort();
     let mut h = DefaultHasher::new();
     for path in files {

@@ -14,9 +14,10 @@
 -- Colors: /colorscheme black (default) or ansi; or tweak single groups:
 -- bone.hl.set("UserMessage", { fg = "#eeeeee", bg = "#202020" })
 
--- The screen starts blank: plain text, no statusline, divider or prompt
--- prefix. Draw them in Lua (docs/lua.md, "Drawing the screen"), or install
--- the style plugin: cp -r <bone repo>/examples/plugins/style ~/.bone/plugins/
+-- The defaults draw the standard UI (runtime/lua/bone/ui/). Replace any
+-- piece here (docs/lua.md, "Drawing the screen"), copy a module to
+-- ~/.bone/runtime/lua/bone/ui/ to edit it, or install the style plugin:
+-- cp -r <bone repo>/examples/plugins/style ~/.bone/plugins/
 -- bone.ui.prompt = { prefix = "> " }
 -- bone.ui.statusline = function(ctx) return { " " .. ctx.title, "%=", " " } end
 

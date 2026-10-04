@@ -161,9 +161,26 @@ impl Harness {
         h
     }
 
-    /// No config at all: the blank slate.
+    /// No config and the standard UI taken off again: the blank slate the
+    /// Rust fallbacks draw (the defaults' keys and actions, a blank divider).
     async fn blank() -> Self {
-        Self::build(None).await
+        let mut h = Self::build(None).await;
+        h.app
+            .with_api(|lua| {
+                lua.load(
+                    r#"
+                    local actions = {}
+                    for k, v in pairs(bone.ui.actions) do actions[k] = v end
+                    bone.ui._reset()
+                    for k, v in pairs(actions) do bone.ui.actions[k] = v end
+                    -- One blank row between the chat and the prompt.
+                    bone.ui.divider = function() return {} end
+                    "#,
+                )
+                .exec()
+            })
+            .unwrap();
+        h
     }
 
     /// With a config dir containing `tui.lua` (and the style plugin),
@@ -562,7 +579,7 @@ async fn slash_commands_suggest_complete_and_run() {
     // Enter on a partial name runs the selected suggestion.
     h.input("/hel{enter}").await;
     assert!(
-        h.message().contains("/sessions") && h.message().contains("ctrl+r sessions"),
+        h.message().contains("/sessions") && h.message().contains("ctrl+o sessions"),
         "{}",
         h.message()
     );
@@ -592,7 +609,7 @@ async fn slash_commands_suggest_complete_and_run() {
 #[tokio::test]
 async fn session_picker_filters_and_opens() {
     let mut h = Harness::new().await;
-    h.input("{ctrl+r}").await;
+    h.input("{ctrl+o}").await;
     // The picker is a Lua window (bone.ui.select), so the popup context.
     assert_eq!(h.app.context(), Context::Popup);
     let screen = h.screen(80, 24);
@@ -628,7 +645,7 @@ async fn session_picker_filters_and_opens() {
     h.input("/new{enter}").await;
     assert!(h.screen(80, 24).contains("New session."));
     // Esc closes the picker without opening anything.
-    h.input("{ctrl+r}{esc}").await;
+    h.input("{ctrl+o}{esc}").await;
     assert_eq!(h.app.context(), Context::Main);
 }
 
@@ -945,7 +962,7 @@ async fn lua_statusline_divider_and_broken_ui() {
         "{screen}"
     );
     assert!(screen.contains("[40]====="), "{screen}");
-    h.input("{ctrl+r}").await;
+    h.input("{ctrl+o}").await;
     assert!(h.screen(40, 10).contains("popup"));
     h.input("{esc}").await;
 
@@ -1285,6 +1302,9 @@ async fn default_tool_views() {
 async fn views_are_lua_and_can_be_replaced() {
     let (mut h, _dir) = Harness::with_config(
         r#"
+        -- Rust's default arrangement instead of the standard layout.
+        bone.ui.layout = nil
+        bone.ui.regions.thinking = nil
         -- Reasoning out of the chat; a compact user line; no blank lines.
         bone.ui.views.reasoning = function(item, ctx)
           if ctx.region == "chat" then return nil end
@@ -3031,4 +3051,360 @@ async fn the_command_menu_and_actions_are_lua() {
     assert!(h.requests("turn/start").is_empty());
     h.input("hello{enter}").await;
     assert_eq!(h.requests("turn/start")[0]["text"], "hello");
+}
+
+#[tokio::test]
+async fn reload_picks_up_edited_standard_library_modules() {
+    let dir = tempfile::tempdir().unwrap();
+    let views = dir.path().join("runtime/lua/bone/ui/views.lua");
+    std::fs::create_dir_all(views.parent().unwrap()).unwrap();
+    let write = |tag: &str| {
+        std::fs::write(
+            &views,
+            format!("bone.ui.views.reasoning = function() return {{ {{ {{ '{tag}' }} }} }} end"),
+        )
+        .unwrap();
+    };
+    write("THINK-A");
+    let mut h = Harness::build(Some(dir.path().to_owned())).await;
+    let probe = |h: &mut Harness| -> String {
+        h.app
+            .with_api(|lua| {
+                lua.load(
+                    r#"local f = bone.ui.views.reasoning
+                       return f and f()[1][1][1] or "missing""#,
+                )
+                .eval()
+            })
+            .unwrap()
+    };
+    assert_eq!(probe(&mut h), "THINK-A");
+    write("THINK-B");
+    h.app.reload_user_config();
+    assert_eq!(probe(&mut h), "THINK-B");
+}
+
+#[tokio::test]
+async fn reload_resets_views_and_keeps_the_standard_ui() {
+    let dir = tempfile::tempdir().unwrap();
+    let tui = dir.path().join("tui.lua");
+    std::fs::write(&tui, "bone.ui.views.custom_kind = function() return {} end").unwrap();
+    let mut h = Harness::build(Some(dir.path().to_owned())).await;
+    h.app.load_user_config();
+    let has = |h: &mut Harness, expr: &str| -> bool {
+        h.app
+            .with_api(|lua| lua.load(format!("return {expr} ~= nil")).eval())
+            .unwrap()
+    };
+    assert!(has(&mut h, "bone.ui.views.custom_kind"));
+    assert!(has(&mut h, "bone.ui.views.reasoning"));
+    assert!(has(&mut h, "bone.ui.regions.thinking"));
+
+    // Deleting the line removes the view; the defaults' standard UI stays.
+    std::fs::write(&tui, "").unwrap();
+    h.app.reload_user_config();
+    assert!(!has(&mut h, "bone.ui.views.custom_kind"));
+    assert!(has(&mut h, "bone.ui.views.reasoning"));
+    assert!(has(&mut h, "bone.ui.regions.thinking"));
+    assert!(has(&mut h, "bone.ui.layout"));
+
+    // An edited copy of the standard layout module is used after a reload.
+    let layout = dir.path().join("runtime/lua/bone/ui/layout.lua");
+    std::fs::create_dir_all(layout.parent().unwrap()).unwrap();
+    std::fs::write(
+        &layout,
+        "return { setup = function() bone.ui.regions.thinking = { size = 7 } end }",
+    )
+    .unwrap();
+    h.app.reload_user_config();
+    let size: i64 = h
+        .app
+        .with_api(|lua| lua.load("return bone.ui.regions.thinking.size").eval())
+        .unwrap();
+    assert_eq!(size, 7);
+}
+
+#[tokio::test]
+async fn reload_reruns_the_defaults_and_keeps_option_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let tui = dir.path().join("tui.lua");
+    std::fs::write(&tui, r#"bone.o.define("my_opt", 1, { type = "integer" })"#).unwrap();
+    let mut h = Harness::build(Some(dir.path().to_owned())).await;
+    h.app.load_user_config();
+    let eval = |h: &mut Harness, code: &str| -> String {
+        h.app.with_api(|lua| lua.load(code).eval()).unwrap()
+    };
+    h.app
+        .with_api(|lua| {
+            lua.load(r#"bone.o.my_opt = 5 bone.o.queue_mode = "next""#)
+                .exec()
+        })
+        .unwrap();
+
+    // Edit the standard menu module: its actions must come from the new file.
+    let menu = dir.path().join("runtime/lua/bone/menu.lua");
+    std::fs::create_dir_all(menu.parent().unwrap()).unwrap();
+    std::fs::write(
+        &menu,
+        "bone.ui.actions.dismiss = function() return 'EDITED' end",
+    )
+    .unwrap();
+    h.app.reload_user_config();
+    assert_eq!(
+        h.app.log.last().unwrap(),
+        "Lua configuration reloaded",
+        "{:?}",
+        h.app.log
+    );
+
+    assert_eq!(eval(&mut h, "return bone.ui.actions.dismiss()"), "EDITED");
+    // Re-defining an option from the same file keeps what the user set.
+    assert_eq!(eval(&mut h, "return tostring(bone.o.my_opt)"), "5");
+    assert_eq!(eval(&mut h, "return bone.o.queue_mode"), "next");
+    // The defaults' divider is back, and Lua's own libraries are untouched.
+    assert_eq!(eval(&mut h, "return type(bone.ui.divider)"), "function");
+    assert_eq!(
+        eval(&mut h, r#"return tostring(require("bit").band(6, 3))"#),
+        "2"
+    );
+}
+
+#[tokio::test]
+async fn standard_ui_has_a_three_row_prompt_and_a_working_divider() {
+    let mut h = Harness::build(None).await;
+    let (w, rows) = (40, 16);
+    let screen = h.screen(w, rows);
+    let lines: Vec<&str> = screen.split('\n').collect();
+    let n = lines.len();
+    assert!(lines[n - 2].starts_with(" › Message bone"), "{screen}");
+    assert_eq!((lines[n - 3], lines[n - 1]), ("", ""), "{screen}");
+    assert!(lines[n - 5].starts_with('─'), "{screen}");
+
+    // All three prompt rows share the input background and the row above
+    // does not, also on a short terminal where the regions get squeezed.
+    for rows in [rows, 8] {
+        let mut term = Terminal::new(TestBackend::new(w, rows)).unwrap();
+        term.draw(|f| render::draw(f, &mut h.app)).unwrap();
+        let buf = term.backend().buffer();
+        let bg = |y: u16| buf[(w - 1, y)].bg;
+        assert_ne!(bg(rows - 2), ratatui::style::Color::Reset, "{rows} rows");
+        assert_eq!(bg(rows - 3), bg(rows - 2), "{rows} rows");
+        assert_eq!(bg(rows - 1), bg(rows - 2), "{rows} rows");
+        assert_ne!(bg(rows - 4), bg(rows - 2), "{rows} rows");
+    }
+
+    // The divider shows that a turn is running.
+    h.input("hello{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "hello")).await;
+    let screen = h.screen(w, rows);
+    assert!(screen.contains("ctrl+c to cancel"), "{screen}");
+}
+
+/// Chat rows the standard UI draws for these finished tool calls.
+async fn std_tool_screen(
+    calls: &[(&str, Value, &str, bool)],
+    width: u16,
+    ctrl_t: usize,
+) -> Vec<String> {
+    let mut h = Harness::build(None).await;
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    let list = calls
+        .iter()
+        .enumerate()
+        .map(|(i, (name, args, _, _))| ToolCall {
+            id: format!("c{i}"),
+            name: (*name).into(),
+            arguments: args.to_string(),
+        })
+        .collect();
+    h.emit::<MessageCompleted>(tool_calls("s-new", list)).await;
+    for (i, (_, _, output, is_error)) in calls.iter().enumerate() {
+        h.emit::<ToolFinished>(ToolFinishedParams {
+            session_id: "s-new".into(),
+            turn_id: 1,
+            call_id: format!("c{i}"),
+            output: (*output).into(),
+            is_error: *is_error,
+        })
+        .await;
+    }
+    for _ in 0..ctrl_t {
+        h.input("{ctrl+t}").await;
+    }
+    let screen = h.screen(width, 60);
+    screen
+        .lines()
+        .skip_while(|l| !l.starts_with(" › go") && !l.starts_with("› go"))
+        .skip(1)
+        .take_while(|l| !l.starts_with('─'))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[tokio::test]
+async fn standard_tool_views_match_the_first_bone() {
+    let calls = [
+        (
+            "read_file",
+            json!({"path": "src/main.rs"}),
+            "1#AB|fn main() {\n2#CD|}\n3#EF|x",
+            false,
+        ),
+        (
+            "shell",
+            json!({"command": "ls -la | grep foo"}),
+            "a\nb\nc\nd\ne\nf\ng\n[exit code: 0]",
+            false,
+        ),
+        (
+            "shell",
+            json!({"command": "echo hi"}),
+            "hi\n[exit code: 0]",
+            false,
+        ),
+        (
+            "web_search",
+            json!({"query": "rust ratatui"}),
+            "r1\nr2\nr3\nr4\nr5\nr6\nr7",
+            false,
+        ),
+        (
+            "edit_file",
+            json!({"path": "a.rs"}),
+            "Edited a.rs (-1 +2)\n4#AA|fn a() {\n-    old();\n+5#BB|    new();\n+6#CC|    more();\n7#DD|}",
+            false,
+        ),
+        (
+            "grep",
+            json!({"pattern": "foo"}),
+            "no such dir\nsecond",
+            true,
+        ),
+    ];
+    let collapsed = [
+        "",
+        "    read_file src/main.rs (lines 1-3, 3 read)",
+        "",
+        "    shell ls -la | grep foo",
+        "      │ a",
+        "      │ b",
+        "      │ ⋮ +3 terminal lines (ctrl+t)",
+        "      │ f",
+        "      ╰ g",
+        "",
+        "    shell echo hi",
+        "      ╰ hi",
+        "",
+        "    web_search rust ratatui",
+        "r1",
+        "r2",
+        "r3",
+        "r4",
+        "r5",
+        "⋮ +2 more lines (ctrl+t)",
+        "",
+        "    edit_file a.rs (-1 | +2)",
+        "      4   fn a() {",
+        "      5 -     old();",
+        "      5 +     new();",
+        "      6 +     more();",
+        "      6   }",
+        "",
+        "  ✕ grep",
+        "      │ no such dir",
+        "      ╰ second",
+    ];
+    // The default: one line for the stretch before the edit; the edit and
+    // the failed call in full.
+    let rows = std_tool_screen(&calls, 60, 0).await;
+    assert_eq!(
+        rows[..5],
+        [
+            "",
+            "    Read 1 file, ran 2 shell commands, called web_search",
+            "",
+            "    edit_file a.rs (-1 | +2)",
+            "      4   fn a() {",
+        ],
+        "{}",
+        rows.join("\n")
+    );
+    assert!(rows.join("\n").contains("  ✕ grep\n      │ no such dir"));
+
+    // ctrl+t once: a row per call.
+    let rows = std_tool_screen(&calls, 60, 1).await;
+    assert_eq!(rows[..collapsed.len()], collapsed, "{}", rows.join("\n"));
+
+    // ctrl+t twice: every output in full, file contents included.
+    let rows = std_tool_screen(&calls, 60, 2).await;
+    let text = rows.join("\n");
+    for want in [
+        "    read_file src/main.rs (lines 1-3, 3 read)\n      1   fn main() {\n      2   }\n      3   x",
+        "      │ c\n      │ d\n      │ e\n      │ f\n      ╰ g",
+        "r5\nr6\nr7\n",
+    ] {
+        assert!(text.contains(want), "{want:?} in\n{text}");
+    }
+    assert!(!text.contains("⋮"), "{text}");
+}
+
+#[tokio::test]
+async fn ctrl_t_steps_through_tool_detail() {
+    let mut h = Harness::build(None).await;
+    let get = |h: &mut Harness| -> String {
+        h.app
+            .with_api(|lua| lua.load("return bone.o.tool_detail").eval())
+            .unwrap()
+    };
+    let mut seen = vec![get(&mut h)];
+    for _ in 0..3 {
+        h.input("{ctrl+t}").await;
+        seen.push(get(&mut h));
+    }
+    assert_eq!(seen, ["summary", "rows", "full", "summary"]);
+}
+
+#[tokio::test]
+async fn tool_summary_follows_a_running_turn() {
+    let mut h = Harness::build(None).await;
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    let call = |id: &str, name: &str, args: Value| ToolCall {
+        id: id.into(),
+        name: name.into(),
+        arguments: args.to_string(),
+    };
+    let finish = |id: &str, output: &str| ToolFinishedParams {
+        session_id: "s-new".into(),
+        turn_id: 1,
+        call_id: id.into(),
+        output: output.into(),
+        is_error: false,
+    };
+    let chat = |h: &mut Harness| -> String {
+        h.screen(60, 20)
+            .lines()
+            .filter(|l| l.starts_with("  ◌ ") || l.starts_with("    ") && !l.contains('›'))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    h.emit::<MessageCompleted>(tool_calls(
+        "s-new",
+        vec![call("a", "read_file", json!({"path": "x"}))],
+    ))
+    .await;
+    assert_eq!(chat(&mut h), "  ◌ Read 1 file");
+    h.emit::<ToolFinished>(finish("a", "1#AB|x")).await;
+    assert_eq!(chat(&mut h), "    Read 1 file");
+    // A later round joins the same line, drawn when it was first seen.
+    h.emit::<MessageCompleted>(tool_calls(
+        "s-new",
+        vec![call("b", "shell", json!({"command": "ls"}))],
+    ))
+    .await;
+    assert_eq!(chat(&mut h), "  ◌ Read 1 file, ran 1 shell command");
+    h.emit::<ToolFinished>(finish("b", "x\n[exit code: 0]"))
+        .await;
+    assert_eq!(chat(&mut h), "    Read 1 file, ran 1 shell command");
 }

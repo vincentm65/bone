@@ -1,7 +1,7 @@
 # style
 
-A complete look for bone, built only from the Lua API. Without it bone's
-screen is a blank slate: the session as plain text and the prompt.
+A complete look for bone, built only from the Lua API, drawn over the
+runtime's standard UI.
 
 ```sh
 cp -r examples/plugins/style ~/.bone/plugins/

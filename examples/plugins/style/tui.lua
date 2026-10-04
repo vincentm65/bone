@@ -1,5 +1,5 @@
--- style: a look for bone, built only from the Lua API. Without it the TUI
--- is a blank slate: plain text, no statusline, no divider, no prompt prefix.
+-- style: a look for bone, built only from the Lua API, drawn over the
+-- runtime's standard UI.
 -- Install: cp -r examples/plugins/style ~/.bone/plugins/
 
 require("style.views") -- how each chat item looks (user, reasoning, assistant, tools, notices)

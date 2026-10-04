@@ -435,8 +435,8 @@ function bone.colorscheme(name)
   api("colorscheme", name)
 end
 
---- How the screen is drawn, all in Lua. Nothing is defined by default (Rust
---- draws plain text); examples/plugins/style is a full look. Lines are lists of { "text", "Group" } items (or
+--- How the screen is drawn, all in Lua. The defaults draw the standard UI
+--- (runtime/lua/bone/ui/); with nothing defined Rust draws plain text. Lines are lists of { "text", "Group" } items (or
 --- plain strings; { fill = "─", hl = "Group" } stretches).
 ---   bone.ui.views[kind] = function(item, ctx) return lines end
 ---       kind: "user", "reasoning", "assistant", "tool", "notice".
@@ -464,10 +464,25 @@ local function watched()
       store[k] = v
       api("ui_refresh")
     end,
-  })
+  }), store
 end
 
-bone.ui = { views = watched(), tool_views = watched(), regions = {} }
+local views, view_store = watched()
+local tool_views, tool_view_store = watched()
+bone.ui = { views = views, tool_views = tool_views, regions = {} }
+
+-- Forget every UI customization before a live reload re-sources the config.
+-- The views live in hidden stores, so pairs() on the proxies sees nothing.
+function bone.ui._reset()
+  bone.ui.statusline = nil
+  bone.ui.divider = nil
+  bone.ui.prompt = nil
+  bone.ui.layout = nil
+  for k in pairs(view_store) do view_store[k] = nil end
+  for k in pairs(tool_view_store) do tool_view_store[k] = nil end
+  for k in pairs(bone.ui.regions) do bone.ui.regions[k] = nil end
+  for k in pairs(bone.ui.actions) do bone.ui.actions[k] = nil end
+end
 
 --- Lua handlers for builtin actions: bone.ui.actions[name] = function()
 --- return true end handles the action; returning anything else lets the

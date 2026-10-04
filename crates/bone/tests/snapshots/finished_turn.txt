@@ -1,3 +1,4 @@
+ run it                                    1.5k in · 20 out  │  <cwd>
 › run it
 
   I'll run it.
@@ -18,7 +19,6 @@
 
 
 
-
 ────────────────────────────────────────────────────────────────────────────────
+
 › Message bone… (enter sends, alt+enter for a new line, / for commands)
- run it                                    1.5k in · 20 out  │  <cwd>
