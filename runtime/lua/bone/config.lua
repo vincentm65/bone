@@ -533,9 +533,9 @@ function M.open(want)
     save(row, value)
   end
 
-  -- Text attributes only (bold, dim, underline), no colors; the groups are
-  -- in theme.rs and a colorscheme can restyle them.
-  local MUTED, KEY, NOTE = "SettingsMuted", "SettingsKey", "SettingsNote"
+  -- Match the catalog's restrained palette: Accent is the theme's blue, while
+  -- Dim carries secondary values and help text in a quiet grey.
+  local MUTED, KEY, NOTE = "Dim", "Accent", "Dim"
 
   -- A line of { text, group } items, cut to the width as it grows.
   local function line(w)
@@ -646,13 +646,13 @@ function M.open(want)
     local out = {}
     -- The title in the top rule.
     local title = st.prov and (st.prov.new and "new provider" or st.prov.name)
-    local top = { { "── ", MUTED }, { "Settings", "SettingsTitle" } }
+    local top = { { "── ", "WinSeparator" }, { "Settings", "Accent" } }
     if title then
       top[#top + 1] = { " › ", MUTED }
-      top[#top + 1] = { title, "SettingsTitle" }
+      top[#top + 1] = { title, "Accent" }
     end
     top[#top + 1] = { " ", MUTED }
-    top[#top + 1] = { fill = "─", hl = MUTED }
+    top[#top + 1] = { fill = "─", hl = "WinSeparator" }
     out[1] = top
 
     -- The tabs, the current one bold and underlined, wrapped to the width.
@@ -665,7 +665,7 @@ function M.open(want)
           items, used = { { "  " } }, 2
         end
         items[#items + 1] = { " " }
-        items[#items + 1] = { tab.title, i == st.tab and "SettingsTabCurrent" or "SettingsTab" }
+        items[#items + 1] = { tab.title, i == st.tab and "Accent" or "Dim" }
         items[#items + 1] = { "  " }
         used = used + n
       end
@@ -692,12 +692,12 @@ function M.open(want)
       local items, add = line(w)
       if i == st.sel then
         add("  › ", KEY)
-        add(pad(r.label, label_w), "SettingsSelected")
+        add(pad(r.label, label_w), "Selection")
       else
         add("    " .. pad(r.label, label_w))
       end
       if i == st.sel and st.edit then
-        add(r.type == "secret" and string.rep("•", #st.edit) or st.edit, "SettingsSelected")
+        add(r.type == "secret" and string.rep("•", #st.edit) or st.edit, "Selection")
         add("▏")
       else
         value_into(add, r)
