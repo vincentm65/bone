@@ -464,10 +464,19 @@ impl App {
             }
         }
         let stale = self.chats[buf].stale(width_cols, generation, std::time::Instant::now());
+        let items = if stale.is_empty() {
+            Vec::new()
+        } else {
+            self.chats[buf].items()
+        };
         for (item, index, key) in stale {
+            let prev = index
+                .checked_sub(2)
+                .and_then(|p| items.get(p))
+                .map(|p| self.chats[buf].kind_name(p).to_owned());
             self.render_deps = Some(Vec::new());
             self.render_expires = None;
-            let lines = self.render_item(buf, item, index, &key);
+            let lines = self.render_item(buf, item, index, &key, prev);
             let deps = self.render_deps.take().unwrap_or_default();
             let expires = self.render_expires.take();
             self.chats[buf].store(item, key, lines, deps, expires, data);
@@ -481,13 +490,14 @@ impl App {
         item: ChatItem,
         index: usize,
         key: &RenderKey,
+        prev: Option<String>,
     ) -> Vec<Line<'static>> {
         let data = self.chats[buf].item_data(item, index);
-        let kind = item.part.name();
+        let kind = self.chats[buf].kind_name(&item).to_owned();
         let ctx = json!({
             "width": key.width,
             "region": "chat",
-            "prev": key.prev.map(|p| json!({ "kind": p.name() })),
+            "prev": prev.map(|kind| json!({ "kind": kind })),
             "run": key.run.map(|(first, last, _)| json!({ "first": first, "last": last })),
         });
         let view_data = data.clone();
@@ -498,7 +508,7 @@ impl App {
                     .get::<Table>("bone")?
                     .get::<Table>("ui")?
                     .get("views")?;
-                let Some(f) = views.get::<Option<Function>>(kind)? else {
+                let Some(f) = views.get::<Option<Function>>(kind.as_str())? else {
                     return Ok(None);
                 };
                 let v = f.call::<Value>((to_lua(lua, &view_data)?, to_lua(lua, &ctx)?))?;

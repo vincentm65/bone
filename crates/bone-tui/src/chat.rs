@@ -53,6 +53,26 @@ pub enum Part {
     Notice,
     /// A message waiting in the session's queue (after the transcript).
     Queued,
+    /// An item Lua added (`bone.chat.add`); its kind is its own.
+    Lua,
+}
+
+/// `Item::entry` of Lua items starts here (their slot added), clear of the
+/// transcript's entries and the queue after them.
+const LUA_BASE: usize = 1 << 40;
+
+/// An item Lua put in the chat. It sits after the transcript entries that
+/// existed when it was added and is drawn by `bone.ui.views[kind]`. It is
+/// the TUI's alone: the core never sees it, and reloading the chat drops it.
+#[derive(Debug, Clone)]
+pub struct LuaItem {
+    pub id: String,
+    pub kind: String,
+    /// Its fields, as given to `bone.chat.add`/`update`.
+    pub data: serde_json::Map<String, Value>,
+    /// Shown after this many transcript entries.
+    after: usize,
+    rev: u64,
 }
 
 impl Part {
@@ -64,6 +84,7 @@ impl Part {
             Part::Tool => "tool",
             Part::Notice => "notice",
             Part::Queued => "queued",
+            Part::Lua => "lua",
         }
     }
 }
@@ -115,6 +136,8 @@ pub struct ChatBuffer {
     revs: Vec<u64>,
     next_rev: u64,
     cache: HashMap<Item, Cached>,
+    /// Items Lua added, by slot (`None` once removed).
+    lua_items: Vec<Option<LuaItem>>,
 }
 
 /// One item's rendered lines and what they were made from.
@@ -179,6 +202,7 @@ impl ChatBuffer {
         self.entries.clear();
         self.revs.clear();
         self.cache.clear();
+        self.lua_items.clear();
         self.outcomes.clear();
         for m in messages {
             match m {
@@ -371,6 +395,28 @@ impl ChatBuffer {
     /// The transcript as renderable items, in order.
     pub fn items(&self) -> Vec<Item> {
         let mut out = Vec::new();
+        // Lua items in the order they go: by anchor, then as added.
+        let mut lua: Vec<(usize, usize)> = self
+            .lua_items
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, l)| l.as_ref().map(|l| (l.after.min(self.entries.len()), slot)))
+            .collect();
+        lua.sort();
+        let mut lua = lua.into_iter().peekable();
+        let mut add_lua = |upto: usize, out: &mut Vec<Item>| {
+            while let Some(&(after, slot)) = lua.peek() {
+                if after > upto {
+                    break;
+                }
+                out.push(Item {
+                    entry: LUA_BASE + slot,
+                    part: Part::Lua,
+                });
+                lua.next();
+            }
+        };
+        add_lua(0, &mut out);
         for (entry, e) in self.entries.iter().enumerate() {
             let mut add = |part| out.push(Item { entry, part });
             match e {
@@ -391,6 +437,7 @@ impl ChatBuffer {
                 Entry::Tool { .. } => add(Part::Tool),
                 Entry::Notice { .. } => add(Part::Notice),
             }
+            add_lua(entry + 1, &mut out);
         }
         // Queued messages come last; their "entries" count on past the end.
         let n = self.entries.len();
@@ -404,6 +451,13 @@ impl ChatBuffer {
     /// An item as data for Lua. Text is cleaned of escape sequences, and
     /// message text loses blank lines at its edges (models often send them).
     pub fn item_data(&self, item: Item, index: usize) -> Value {
+        if let Some(l) = self.lua_item(&item).filter(|_| item.part == Part::Lua) {
+            let mut d = Value::Object(l.data.clone());
+            d["kind"] = json!(l.kind);
+            d["index"] = json!(index);
+            d["id"] = json!(l.id);
+            return d;
+        }
         let kind = item.part.name();
         if item.part == Part::Queued {
             let position = item.entry - self.entries.len();
@@ -463,7 +517,75 @@ impl ChatBuffer {
 
     /// The rev of the data behind `item`.
     pub fn item_rev(&self, item: &Item) -> u64 {
+        if item.part == Part::Lua {
+            return self.lua_item(item).map_or(0, |l| l.rev);
+        }
         self.revs.get(item.entry).copied().unwrap_or(self.queue_rev)
+    }
+
+    fn lua_item(&self, item: &Item) -> Option<&LuaItem> {
+        self.lua_items
+            .get(item.entry.checked_sub(LUA_BASE)?)?
+            .as_ref()
+    }
+
+    /// The kind views know an item by: a Lua item's own kind, else its part.
+    pub fn kind_name<'a>(&'a self, item: &Item) -> &'a str {
+        match self.lua_item(item) {
+            Some(l) if item.part == Part::Lua => &l.kind,
+            _ => item.part.name(),
+        }
+    }
+
+    /// Add a Lua item after the transcript as it is now.
+    pub fn add_lua(&mut self, id: String, kind: String, data: serde_json::Map<String, Value>) {
+        self.next_rev += 1;
+        self.lua_items.push(Some(LuaItem {
+            id,
+            kind,
+            data,
+            after: self.entries.len(),
+            rev: self.next_rev,
+        }));
+    }
+
+    /// Merge `fields` into a Lua item (a null field removes it). False if
+    /// this chat has no item `id`.
+    pub fn update_lua(&mut self, id: &str, fields: serde_json::Map<String, Value>) -> bool {
+        if !self.lua_items.iter().flatten().any(|l| l.id == id) {
+            return false;
+        }
+        self.next_rev += 1;
+        let rev = self.next_rev;
+        let Some(l) = self.lua_items.iter_mut().flatten().find(|l| l.id == id) else {
+            return false;
+        };
+        for (k, v) in fields {
+            if v.is_null() {
+                l.data.remove(&k);
+            } else {
+                l.data.insert(k, v);
+            }
+        }
+        l.rev = rev;
+        true
+    }
+
+    pub fn remove_lua(&mut self, id: &str) -> bool {
+        let Some(slot) = self
+            .lua_items
+            .iter()
+            .position(|l| l.as_ref().is_some_and(|l| l.id == id))
+        else {
+            return false;
+        };
+        self.lua_items[slot] = None;
+        self.next_rev += 1;
+        self.cache.remove(&Item {
+            entry: LUA_BASE + slot,
+            part: Part::Lua,
+        });
+        true
     }
 
     /// Cached items with dependencies not checked at data generation `data`.

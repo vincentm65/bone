@@ -82,7 +82,7 @@ impl App {
             .enumerate()
             .filter(|(n, i)| {
                 let index = n + 1;
-                f.kind.as_deref().is_none_or(|k| i.part.name() == k)
+                f.kind.as_deref().is_none_or(|k| chat.kind_name(i) == k)
                     && f.turn.is_none_or(|t| turns[*n] == t)
                     && f.from.is_none_or(|from| index >= from)
                     && f.to.is_none_or(|to| index <= to)
@@ -124,12 +124,12 @@ impl App {
         let turns = turns_of(&items);
         for (n, i) in items.iter().enumerate() {
             let index = n + 1;
-            if f.kind.as_deref().is_none_or(|k| i.part.name() == k)
+            if f.kind.as_deref().is_none_or(|k| chat.kind_name(i) == k)
                 && f.turn.is_none_or(|t| turns[n] == t)
                 && f.from.is_none_or(|from| index >= from)
                 && f.to.is_none_or(|to| index <= to)
             {
-                (index, i.entry, i.part.name(), chat.item_rev(i)).hash(&mut h);
+                (index, i.entry, chat.kind_name(i), chat.item_rev(i)).hash(&mut h);
             }
         }
         h.finish()

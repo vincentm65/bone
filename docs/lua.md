@@ -602,6 +602,9 @@ bone.chat.turns()                       -- one entry per user message
 bone.chat.session()                     -- the chat on screen
 bone.chat.sessions()                    -- every open chat
 bone.chat.messages(function(messages, err) ... end)  -- from the core
+bone.chat.add("build", { text = "building…" })   -- an item of your own; returns its id
+bone.chat.update(id, { text = "built", ok = true })  -- merge fields, redraw it
+bone.chat.remove(id)
 bone.chat.at(x, y)                      -- the item at a screen cell: { index, line } or nil
 bone.chat.view()                        -- { top, height, rows, follow, first, last }
 bone.chat.scroll_to(4, "center")        -- "top" (default), "center" or "bottom"
@@ -611,6 +614,7 @@ bone.chat.redraw(4)                     -- draw item 4 again; no index: every it
 bone.now()                              -- milliseconds since the epoch
 ```
 
+- `add(kind, fields, opts)` puts an item of your own after what the chat holds now. `kind` is your name for it (lowercase, not a built-in kind) and `bone.ui.views[kind]` draws it, getting `fields` plus `kind`, `index` and `id`; without a view its `text` shows. It is listed by `items`, can be clicked and scrolled to, and stays where it was put while the answer streams after it. It belongs to the TUI: the core never sees it, and reloading the chat (opening the session again) drops it, so keep anything lasting in `bone.state`. `opts.session` adds to another open chat.
 - `items(opts)` filters: `kind`, `name` (tool name), `turn`, `running`, `error` (failed tools and error notices), `from`/`to` (item indexes, inclusive), then `first`/`last` keep the first or last N matches. Items have the fields in the views table plus `turn` (0 for items before the first message).
 - `turns(opts)` entries: `{ index, text, first, last (item indexes), items, tools, tool_errors, running, outcome, error }`. `outcome` is `"completed"`, `"cancelled"` or `"failed"` (with `error`) for turns that finished while the TUI watched, else nil.
 - `session(opts)`: `{ session_id, cwd, created_at, title, new, current, running, starting, turn = { id, elapsed_ms }, usage = { input, output }, items, turns }`, or nil. A chat with no messages yet has `new = true` and no `session_id`.

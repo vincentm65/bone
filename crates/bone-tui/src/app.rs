@@ -120,6 +120,8 @@ pub struct App {
     pub render_expires: Option<std::time::Instant>,
     /// When the chat on screen next needs drawing for a view's timer.
     pub chat_expiry: Option<std::time::Instant>,
+    /// Numbers the items Lua adds to chats.
+    pub lua_item_seq: u64,
     pub theme: Theme,
     pub colors_name: Option<String>,
     /// `bone.ui` functions that errored; skipped until restart.
@@ -202,6 +204,7 @@ impl App {
             render_deps: None,
             render_expires: None,
             chat_expiry: None,
+            lua_item_seq: 0,
             theme: Theme::default(),
             colors_name: None,
             ui_broken: HashSet::new(),

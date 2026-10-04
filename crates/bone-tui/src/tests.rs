@@ -3584,3 +3584,91 @@ async fn lua_sees_clicks_on_chat_items_and_scrolls_the_chat() {
     assert!(h.screen(30, 6).ends_with("tool 2"));
     assert_eq!(eval(&mut h, "return bone.chat.scroll_to(9)"), json!(false));
 }
+
+#[tokio::test]
+async fn lua_adds_its_own_items_to_the_chat() {
+    let (mut h, _dir) = Harness::with_config(
+        r#"
+        bone.ui.layout = { "chat" }
+        bone.ui.views.user = function(item) return { { { "> " .. item.text, "Normal" } } } end
+        bone.ui.views.assistant = function(item) return { { { item.text, "Normal" } } } end
+        bone.ui.views.build = function(item, ctx)
+          return { { { (item.ok and "✓ " or "… ") .. item.text .. " after " .. (ctx.prev and ctx.prev.kind or "-"), "Normal" } } }
+        end
+        "#,
+    )
+    .await;
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    let eval = |h: &mut Harness, code: &str| -> Value {
+        let v: mlua::Value = h.app.with_api(|lua| lua.load(code).eval()).unwrap();
+        serde_json::to_value(&v).unwrap()
+    };
+    let id = eval(
+        &mut h,
+        r#"return bone.chat.add("build", { text = "building" })"#,
+    );
+    assert_eq!(id, json!("build-1"));
+    // Streaming after it does not split the answer or move the item.
+    for text in ["hel", "lo"] {
+        h.emit::<MessageDelta>(MessageDeltaParams {
+            session_id: "s-new".into(),
+            turn_id: 1,
+            kind: DeltaKind::Text,
+            text: text.into(),
+        })
+        .await;
+    }
+    assert_eq!(h.screen(40, 5), "> go\n… building after user\nhello\n\n");
+    h.emit::<MessageCompleted>(MessageCompletedParams {
+        session_id: "s-new".into(),
+        turn_id: 1,
+        message: ChatMessage::Assistant {
+            content: "hello".into(),
+            reasoning: String::new(),
+            tool_calls: vec![],
+        },
+        usage: None,
+    })
+    .await;
+    assert_eq!(h.screen(40, 5), "> go\n… building after user\nhello\n\n");
+
+    // Updating redraws it; it is data like any other item.
+    assert_eq!(
+        eval(
+            &mut h,
+            r#"return bone.chat.update("build-1", { ok = true, text = "built" })"#
+        ),
+        json!(true)
+    );
+    assert!(h.screen(40, 5).contains("✓ built after user"));
+    assert_eq!(
+        eval(
+            &mut h,
+            r#"local i = bone.chat.items({ kind = "build" })[1] return { i.id, i.kind, i.index, i.ok }"#
+        ),
+        json!(["build-1", "build", 2, true])
+    );
+
+    // Removed, it is gone; bad kinds are refused.
+    assert_eq!(
+        eval(&mut h, r#"return bone.chat.remove("build-1")"#),
+        json!(true)
+    );
+    assert_eq!(h.screen(40, 5), "> go\nhello\n\n\n");
+    assert_eq!(
+        eval(&mut h, r#"return bone.chat.update("build-1", {})"#),
+        json!(false)
+    );
+    let e = h
+        .app
+        .with_api(|lua| lua.load(r#"bone.chat.add("tool", {})"#).exec())
+        .unwrap_err();
+    assert!(e.to_string().contains("not a built-in kind"), "{e}");
+    // Without a view, its text shows.
+    eval(
+        &mut h,
+        r#"return bone.chat.add("note", { text = "plain note" })"#,
+    );
+    assert!(h.screen(40, 5).contains("plain note"));
+}

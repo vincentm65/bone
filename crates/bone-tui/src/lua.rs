@@ -314,6 +314,22 @@ fn item_filter(opts: &Option<Table>) -> mlua::Result<crate::data::ItemFilter> {
     })
 }
 
+/// A table of fields for a Lua chat item, as a JSON object.
+fn lua_fields(v: Value) -> mlua::Result<serde_json::Map<String, serde_json::Value>> {
+    match v {
+        Value::Nil => Ok(Default::default()),
+        Value::Table(_) => match from_lua(&v)? {
+            serde_json::Value::Object(m) => Ok(m),
+            serde_json::Value::Array(a) if a.is_empty() => Ok(Default::default()),
+            _ => Err(err("chat item fields must be a table with string keys")),
+        },
+        other => Err(err(format!(
+            "chat item fields must be a table, not {}",
+            other.type_name()
+        ))),
+    }
+}
+
 fn session_opt(opts: &Option<Table>) -> mlua::Result<Option<String>> {
     match opts {
         Some(o) => o.get("session"),
@@ -2075,6 +2091,51 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 }
             }
             ret(lua, to_lua(lua, &serde_json::Value::Array(items))?)
+        }
+        "chat_add" => {
+            let (kind, fields, opts): (String, Value, Option<Table>) = args(lua, a)?;
+            let builtin = [
+                "user",
+                "reasoning",
+                "assistant",
+                "tool",
+                "notice",
+                "queued",
+                "lua",
+            ];
+            if !valid_dynamic_name(&kind) || builtin.contains(&kind.as_str()) {
+                return Err(err(format!(
+                    "a chat item kind is lowercase letters, digits and _, not a built-in kind: {kind:?}"
+                )));
+            }
+            let fields = lua_fields(fields)?;
+            let buf = match session_opt(&opts)? {
+                Some(id) => app
+                    .chat_by_session(&id)
+                    .ok_or_else(|| err(format!("no open chat for session {id}")))?,
+                None => app.current,
+            };
+            app.lua_item_seq += 1;
+            let id = format!("{kind}-{}", app.lua_item_seq);
+            app.chats[buf].add_lua(id.clone(), kind, fields);
+            app.dirty = true;
+            ret(lua, id)
+        }
+        "chat_update" => {
+            let (id, fields): (String, Value) = args(lua, a)?;
+            let fields = lua_fields(fields)?;
+            let found = app
+                .chats
+                .iter_mut()
+                .any(|c| c.update_lua(&id, fields.clone()));
+            app.dirty |= found;
+            ret(lua, found)
+        }
+        "chat_remove" => {
+            let id: String = args(lua, a)?;
+            let found = app.chats.iter_mut().any(|c| c.remove_lua(&id));
+            app.dirty |= found;
+            ret(lua, found)
         }
         "chat_at" => {
             let (x, y): (u16, u16) = args(lua, a)?;

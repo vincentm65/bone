@@ -777,6 +777,28 @@ function bone.chat.refresh_in(ms)
   return api("chat_refresh_in", ms)
 end
 
+--- Put an item of your own in the chat, after what is there now. It is
+--- drawn by bone.ui.views[kind] (or as its `text`), listed by
+--- bone.chat.items like any other, and kept until removed or the chat is
+--- reloaded; the core never sees it. Returns its id.
+---   local id = bone.chat.add("build", { text = "building…", running = true })
+---   bone.chat.update(id, { text = "build ok", running = false })
+--- opts: { session } to add to another open chat.
+function bone.chat.add(kind, fields, opts)
+  return api("chat_add", kind, fields or {}, opts)
+end
+
+--- Change fields of an item from bone.chat.add (a nil value cannot remove a
+--- field; set it to false instead). Returns false if it is gone.
+function bone.chat.update(id, fields)
+  return api("chat_update", id, fields or {})
+end
+
+--- Take an item from bone.chat.add out of the chat. Returns false if gone.
+function bone.chat.remove(id)
+  return api("chat_remove", id)
+end
+
 --- The chat item at screen cell x, y (0-based): { index, line }, or nil.
 function bone.chat.at(x, y)
   return api("chat_at", x, y)
