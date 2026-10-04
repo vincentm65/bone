@@ -19,25 +19,50 @@ use bone_proto::types::{ChatMessage, SessionId, SessionInfo, TurnId};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
+use crate::index::Index;
+
 const TITLE_CHARS: usize = 80;
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
-enum Record {
+pub(crate) enum Record {
     Session(Header),
     Message(ChatMessage),
     /// The transcript from here on starts as these messages.
     Compact(Vec<ChatMessage>),
+    /// What one model call used. Not part of the transcript.
+    Usage(UsageRecord),
+}
+
+/// One line of a session file: a record and when it was written.
+#[derive(Serialize, Deserialize)]
+pub(crate) struct Line {
+    #[serde(flatten)]
+    pub record: Record,
+    /// Unix seconds; missing in files from before it was kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UsageRecord {
+    pub turn_id: TurnId,
+    /// The `bone.config.providers` entry, if the call went through one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
 }
 
 #[derive(Serialize, Deserialize)]
-struct Header {
-    session_id: SessionId,
-    cwd: String,
-    created_at: u64,
+pub(crate) struct Header {
+    pub session_id: SessionId,
+    pub cwd: String,
+    pub created_at: u64,
     /// The session it was forked from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    parent: Option<SessionId>,
+    pub parent: Option<SessionId>,
 }
 
 pub struct Session {
@@ -54,6 +79,8 @@ pub struct Session {
     pub queue_paused: bool,
     next_turn: TurnId,
     file: File,
+    path: PathBuf,
+    index: Option<Arc<Index>>,
     /// Where the queue is kept.
     queue_path: PathBuf,
 }
@@ -77,9 +104,26 @@ impl Session {
         if self.info.title.is_none() {
             self.info.title = title_of(&msg);
         }
-        let written = write_record(&mut self.file, &Record::Message(msg.clone()));
+        let written = write_record(&mut self.file, Record::Message(msg.clone()));
         self.messages.push(msg);
+        self.reindex();
         written
+    }
+
+    /// Keep what a model call used (in the file, not the transcript).
+    pub fn usage(&mut self, usage: UsageRecord) -> std::io::Result<()> {
+        let written = write_record(&mut self.file, Record::Usage(usage));
+        self.reindex();
+        written
+    }
+
+    /// Bring the index up to date with the file.
+    fn reindex(&self) {
+        if let Some(index) = &self.index
+            && let Err(e) = index.sync(&self.info.session_id, &self.path, None)
+        {
+            eprintln!("bone: session index: {e}");
+        }
     }
 
     /// Add to the queue; returns the message's id.
@@ -131,8 +175,9 @@ impl Session {
     /// Replace the transcript with `messages`, keeping the old records in
     /// the file behind a checkpoint.
     pub fn compact(&mut self, messages: Vec<ChatMessage>) -> std::io::Result<()> {
-        let written = write_record(&mut self.file, &Record::Compact(messages.clone()));
+        let written = write_record(&mut self.file, Record::Compact(messages.clone()));
         self.messages = messages;
+        self.reindex();
         written
     }
 
@@ -153,6 +198,8 @@ pub type SessionHandle = Arc<Mutex<Session>>;
 pub struct SessionStore {
     dir: PathBuf,
     loaded: Mutex<HashMap<SessionId, SessionHandle>>,
+    /// `None` when the index could not be opened; sessions work without.
+    index: Option<Arc<Index>>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -167,9 +214,17 @@ pub enum SessionError {
 
 impl SessionStore {
     pub fn new(data_dir: &Path) -> Self {
+        let index = match Index::open(&data_dir.join("index.db")) {
+            Ok(i) => Some(Arc::new(i)),
+            Err(e) => {
+                eprintln!("bone: session index unavailable: {e}");
+                None
+            }
+        };
         SessionStore {
             dir: data_dir.join("sessions"),
             loaded: Mutex::new(HashMap::new()),
+            index,
         }
     }
 
@@ -203,9 +258,9 @@ impl SessionStore {
             title: messages.iter().find_map(title_of),
             parent: header.parent.clone(),
         };
-        write_record(&mut file, &Record::Session(header))?;
+        write_record(&mut file, Record::Session(header))?;
         for m in messages {
-            write_record(&mut file, &Record::Message(m.clone()))?;
+            write_record(&mut file, Record::Message(m.clone()))?;
         }
         let users = messages
             .iter()
@@ -221,7 +276,10 @@ impl SessionStore {
             queue_paused: false,
             next_turn: users as TurnId,
             file,
+            path,
+            index: self.index.clone(),
         }));
+        session.lock().unwrap().reindex();
         self.loaded
             .lock()
             .unwrap()
@@ -278,6 +336,8 @@ impl SessionStore {
             safe_point: false,
             next_turn,
             file,
+            path,
+            index: self.index.clone(),
         }));
         // Another caller may have loaded it meanwhile; keep the first.
         let mut loaded = self.loaded.lock().unwrap();
@@ -312,6 +372,9 @@ impl SessionStore {
     pub fn rename(&self, id: &str, title: &str) -> Result<SessionInfo, SessionError> {
         let session = self.get(id)?;
         std::fs::write(self.title_path(id), title)?;
+        if let Some(index) = &self.index {
+            let _ = index.rename(id, title);
+        }
         let mut s = session.lock().unwrap();
         s.info.title = Some(title.to_owned());
         Ok(s.info.clone())
@@ -324,7 +387,43 @@ impl SessionStore {
         std::fs::remove_file(self.path(id))?;
         let _ = std::fs::remove_file(self.title_path(id));
         let _ = std::fs::remove_file(self.queue_path(id));
+        if let Some(index) = &self.index {
+            let _ = index.remove(id);
+        }
         Ok(())
+    }
+
+    pub fn index(&self) -> Option<&Arc<Index>> {
+        self.index.as_ref()
+    }
+
+    /// Bring the index up to date with every session file (new, grown,
+    /// rewritten or gone). Cheap for files already indexed.
+    pub fn catch_up(&self) {
+        let Some(index) = &self.index else {
+            return;
+        };
+        let Ok(entries) = std::fs::read_dir(&self.dir) else {
+            return;
+        };
+        let mut ids = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_none_or(|e| e != "jsonl") {
+                continue;
+            }
+            let id = path
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let title = self.saved_title(&id);
+            if let Err(e) = index.sync(&id, &path, title.as_deref()) {
+                eprintln!("bone: session index: {id}: {e}");
+            }
+            ids.push(id);
+        }
+        let _ = index.retain(&ids);
     }
 
     fn queue_path(&self, id: &str) -> PathBuf {
@@ -394,7 +493,10 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
     let mut line = String::new();
     reader.read_line(&mut line)?;
     let header = match serde_json::from_str(&line) {
-        Ok(Record::Session(h)) => h,
+        Ok(Line {
+            record: Record::Session(h),
+            ..
+        }) => h,
         _ => return Err(corrupt("missing session header".into())),
     };
     let mut loaded = Loaded {
@@ -414,7 +516,8 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
         if reader.read_line(&mut line)? == 0 {
             break;
         }
-        match serde_json::from_str(&line) {
+        match serde_json::from_str::<Line>(&line).map(|l| l.record) {
+            Ok(Record::Usage(_)) => loaded.good_len += line.len() as u64,
             Ok(Record::Message(msg)) => {
                 if loaded.info.title.is_none() {
                     loaded.info.title = title_of(&msg);
@@ -448,13 +551,17 @@ fn now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-fn write_record(file: &mut File, record: &Record) -> std::io::Result<()> {
-    let mut line = serde_json::to_vec(record).map_err(std::io::Error::other)?;
+fn write_record(file: &mut File, record: Record) -> std::io::Result<()> {
+    let line = Line {
+        record,
+        at: Some(now()),
+    };
+    let mut line = serde_json::to_vec(&line).map_err(std::io::Error::other)?;
     line.push(b'\n');
     file.write_all(&line)
 }
 
-fn title_of(msg: &ChatMessage) -> Option<String> {
+pub(crate) fn title_of(msg: &ChatMessage) -> Option<String> {
     let ChatMessage::User { content } = msg else {
         return None;
     };
@@ -548,5 +655,160 @@ mod tests {
                 "{id}"
             );
         }
+    }
+
+    fn rows(store: &SessionStore, sql: &str) -> Vec<Vec<serde_json::Value>> {
+        let out = store
+            .index()
+            .unwrap()
+            .query(sql, &serde_json::Value::Null)
+            .unwrap();
+        serde_json::from_value(out["rows"].clone()).unwrap()
+    }
+
+    #[test]
+    fn the_index_follows_the_files_and_rebuilds_from_them() {
+        use bone_proto::types::ToolCall;
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path());
+        let s = store.create("/w".into()).unwrap();
+        let id = s.lock().unwrap().info.session_id.clone();
+        {
+            let mut s = s.lock().unwrap();
+            s.push(ChatMessage::User {
+                content: "find the walrus".into(),
+            })
+            .unwrap();
+            s.push(ChatMessage::Assistant {
+                content: String::new(),
+                reasoning: String::new(),
+                tool_calls: vec![
+                    ToolCall {
+                        id: "a".into(),
+                        name: "shell".into(),
+                        arguments: "{}".into(),
+                    },
+                    ToolCall {
+                        id: "b".into(),
+                        name: "edit_file".into(),
+                        arguments: "{}".into(),
+                    },
+                ],
+            })
+            .unwrap();
+            s.usage(UsageRecord {
+                turn_id: 1,
+                provider: Some("main".into()),
+                model: "m1".into(),
+                input_tokens: 100,
+                output_tokens: 7,
+            })
+            .unwrap();
+            for (call, err) in [("a", false), ("b", true)] {
+                s.push(ChatMessage::Tool {
+                    call_id: call.into(),
+                    content: "out".into(),
+                    is_error: err,
+                })
+                .unwrap();
+            }
+            s.push(ChatMessage::Assistant {
+                content: "the walrus is in the attic".into(),
+                reasoning: String::new(),
+                tool_calls: vec![],
+            })
+            .unwrap();
+        }
+        store.rename(&id, "Walrus hunt").unwrap();
+        let summary = "SELECT coalesce(renamed, title), messages FROM sessions";
+        let tools = "SELECT name, is_error FROM tool_calls ORDER BY name";
+        let usage = "SELECT model, input_tokens, output_tokens FROM usage";
+        let search = "SELECT role, seq FROM search WHERE search MATCH 'walrus' ORDER BY seq";
+        let check = |store: &SessionStore| {
+            assert_eq!(rows(store, summary), [[json!("Walrus hunt"), json!(5)]]);
+            assert_eq!(
+                rows(store, tools),
+                [[json!("edit_file"), json!(1)], [json!("shell"), json!(0)]]
+            );
+            assert_eq!(rows(store, usage), [[json!("m1"), json!(100), json!(7)]]);
+            assert_eq!(
+                rows(store, search),
+                [[json!("user"), json!(1)], [json!("assistant"), json!(5)]]
+            );
+        };
+        check(&store);
+
+        // The index is derived: without it, catching up rebuilds it.
+        drop(store);
+        drop(s);
+        for f in ["index.db", "index.db-wal", "index.db-shm"] {
+            let _ = std::fs::remove_file(dir.path().join(f));
+        }
+        let store = SessionStore::new(dir.path());
+        store.catch_up();
+        check(&store);
+
+        // A line still being written waits; a deleted session goes.
+        let path = store.path(&id);
+        let mut f = OpenOptions::new().append(true).open(&path).unwrap();
+        f.write_all(br#"{"kind":"message","data":{"role":"user","content":"x"}"#)
+            .unwrap();
+        store.catch_up();
+        assert_eq!(rows(&store, "SELECT messages FROM sessions"), [[json!(5)]]);
+        std::fs::remove_file(&path).unwrap();
+        store.catch_up();
+        assert!(rows(&store, "SELECT * FROM sessions").is_empty());
+        assert!(rows(&store, "SELECT * FROM usage").is_empty());
+    }
+
+    #[test]
+    fn queries_are_read_only_and_take_parameters() {
+        use serde_json::json;
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path());
+        store.create("/a".into()).unwrap();
+        store.create("/b".into()).unwrap();
+        let index = store.index().unwrap();
+        let err = index
+            .query("DELETE FROM sessions", &serde_json::Value::Null)
+            .unwrap_err();
+        assert!(err.contains("readonly"), "{err}");
+        let out = index
+            .query("SELECT cwd FROM sessions WHERE cwd = ?1", &json!(["/b"]))
+            .unwrap();
+        assert_eq!(out["rows"], json!([["/b"]]));
+        let out = index
+            .query(
+                "SELECT count(*) AS n FROM sessions WHERE cwd != :cwd",
+                &json!({"cwd": "/b"}),
+            )
+            .unwrap();
+        assert_eq!(
+            out,
+            json!({"columns": ["n"], "rows": [[1]], "truncated": false})
+        );
+        assert!(index.query("SELEC nope", &serde_json::Value::Null).is_err());
+    }
+
+    #[test]
+    fn files_from_before_timestamps_still_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path());
+        let id = uuid::Uuid::now_v7().to_string();
+        std::fs::create_dir_all(dir.path().join("sessions")).unwrap();
+        std::fs::write(
+            store.path(&id),
+            format!(
+                "{{\"kind\":\"session\",\"data\":{{\"session_id\":\"{id}\",\"cwd\":\"/w\",\"created_at\":5}}}}\n\
+                 {{\"kind\":\"message\",\"data\":{{\"role\":\"user\",\"content\":\"old\"}}}}\n"
+            ),
+        )
+        .unwrap();
+        let s = store.get(&id).unwrap();
+        assert_eq!(s.lock().unwrap().messages.len(), 1);
+        store.catch_up();
+        let out = rows(&store, "SELECT updated_at, messages FROM sessions");
+        assert_eq!(out, [[serde_json::json!(5), serde_json::json!(1)]]);
     }
 }

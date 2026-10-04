@@ -433,6 +433,52 @@ async fn hooks_run_at_every_step() {
 }
 
 #[tokio::test]
+async fn turns_leave_usage_and_tool_calls_in_the_index() {
+    let used = |input, output| Usage {
+        input_tokens: input,
+        output_tokens: output,
+    };
+    let mut h = Harness::new(vec![
+        match calls(&[("c1", "nope", json!({}))]) {
+            Step::Reply(c) => Step::Reply(Completion {
+                usage: Some(used(10, 2)),
+                ..c
+            }),
+            _ => unreachable!(),
+        },
+        Step::Reply(Completion {
+            content: "done".into(),
+            usage: Some(used(30, 4)),
+            ..Default::default()
+        }),
+    ])
+    .await;
+    h.start("go").await;
+    h.until::<TurnFinished>().await;
+    let q = |sql: &str| StoreQueryParams {
+        sql: sql.into(),
+        params: Value::Null,
+    };
+    let out = h
+        .call::<StoreQuery>(q(
+            "SELECT count(*), sum(input_tokens), sum(output_tokens) FROM usage",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(out.rows, [[json!(2), json!(40), json!(6)]]);
+    let out = h
+        .call::<StoreQuery>(q("SELECT name, is_error FROM tool_calls"))
+        .await
+        .unwrap();
+    assert_eq!(out.rows, [[json!("nope"), json!(1)]]);
+    let err = h
+        .call::<StoreQuery>(q("DROP TABLE usage"))
+        .await
+        .unwrap_err();
+    assert!(err.message.contains("readonly"), "{}", err.message);
+}
+
+#[tokio::test]
 async fn turn_start_hooks_can_refuse() {
     let mut h = Harness::with_lua(
         r#"bone.hook("turn_start", function(ev) return { deny = "quiet hours" } end)"#,

@@ -44,7 +44,9 @@
 
 ## Storage
 
-`~/.bone/sessions/<uuid-v7>.jsonl`: one header line, then one line per message, appended as they happen. A torn last line (from a crash) is dropped when the session is next loaded.
+`~/.bone/sessions/<uuid-v7>.jsonl`: one header line, then one line per message, appended as they happen, each with the time it was written (`at`). Compaction appends a checkpoint; a `usage` line after each model call says what it used (provider, model, tokens). A torn last line (from a crash) is dropped when the session is next loaded.
+
+`~/.bone/index.db` is a SQLite index over those files, for `store/query`: `sessions`, `messages` (role, time, size), `search` (FTS5 over user and assistant text), `usage` and `tool_calls` (name, error, output size). The files stay the record: the index reads what was appended to each since it last looked, during turns and at startup, so it can be deleted and comes back.
 
 ## Tests
 

@@ -83,6 +83,7 @@ pub const METHODS: &[&str] = &[
     ModelCancel::METHOD,
     McpList::METHOD,
     LuaCall::METHOD,
+    StoreQuery::METHOD,
 ];
 
 /// Every server-to-client event.
@@ -670,4 +671,30 @@ pub struct TurnFinishedParams {
     pub session_id: SessionId,
     pub turn_id: TurnId,
     pub outcome: TurnOutcome,
+}
+
+// ---- Store -----------------------------------------------------------------
+
+method!(
+    /// One read-only SQL statement against the session index (`index.db`):
+    /// tables `sessions`, `messages`, `search` (FTS5), `usage` and
+    /// `tool_calls`.
+    StoreQuery, "store/query", StoreQueryParams => StoreQueryResult
+);
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoreQueryParams {
+    pub sql: String,
+    /// A list for `?1`, `?2`…, or an object for `:name`.
+    #[serde(default, skip_serializing_if = "serde_json::Value::is_null")]
+    pub params: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct StoreQueryResult {
+    pub columns: Vec<String>,
+    pub rows: Vec<Vec<serde_json::Value>>,
+    /// There were more rows than one query returns (10,000).
+    #[serde(default)]
+    pub truncated: bool,
 }

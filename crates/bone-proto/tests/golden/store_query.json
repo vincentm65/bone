@@ -1,0 +1,30 @@
+[
+  {
+    "id": 24,
+    "jsonrpc": "2.0",
+    "method": "store/query",
+    "params": {
+      "params": [
+        1790000000
+      ],
+      "sql": "SELECT model, sum(input_tokens) AS input FROM usage WHERE at >= ?1 GROUP BY model"
+    }
+  },
+  {
+    "id": 24,
+    "jsonrpc": "2.0",
+    "result": {
+      "columns": [
+        "model",
+        "input"
+      ],
+      "rows": [
+        [
+          "gpt-5",
+          120400
+        ]
+      ],
+      "truncated": false
+    }
+  }
+]

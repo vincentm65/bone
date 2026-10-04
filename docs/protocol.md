@@ -60,6 +60,7 @@ After `initialize`, the server runs each request on its own task: replies carry 
 | `plugin/list` | `{}` | `[{ name, core, loaded }]`: the plugins folder; `core` if it has a `core.lua`, `loaded` if that runs |
 | `lua/call` | `{ name, args?, session_id?, cwd? }` | whatever the function core Lua registered as `name` (`bone.rpc.register`) returns; it gets `args` and `{ session_id, cwd }`. An error for an unknown name or a failing function |
 | `mcp/list` | `{}` | `[{ name, state, error?, tools }]`: the MCP servers core Lua configured; `state` is `"idle"`, `"starting"`, `"ready"` or `"failed"`, `tools` their tools by the names the model sees |
+| `store/query` | `{ sql, params? }` | `{ columns, rows, truncated }`: one read-only SQL statement against the session index (see architecture.md for its tables). `params` is a list (`?1`…) or an object (`:name`); at most 10,000 rows, 5 seconds |
 | `model/list` | `{}` | `[{ name, model, type?, current }]`: the `bone.config.providers` entries; `current` is the one turns use |
 | `model/complete` | `{ provider?, messages, tools?, options?, stream? }` | `{ request_id }`, returned at once. One model call outside any session: `provider` is an entry name (default: the current one), `tools` are offered but never run, `options` override `model`, `reasoning_effort` or a Lua provider's options. With `stream`, `model/delta` events follow; `model/completed` always ends it |
 | `model/cancel` | `{ request_id }` | `null`; the call ends with `model/completed` and the error `"cancelled"` |

@@ -396,6 +396,20 @@ fn requests() {
         },
         json!("Review src/main.rs for bugs."),
     );
+    exchange::<StoreQuery>(
+        24,
+        StoreQueryParams {
+            sql:
+                "SELECT model, sum(input_tokens) AS input FROM usage WHERE at >= ?1 GROUP BY model"
+                    .into(),
+            params: json!([1790000000]),
+        },
+        StoreQueryResult {
+            columns: vec!["model".into(), "input".into()],
+            rows: vec![vec![json!("gpt-5"), json!(120400)]],
+            truncated: false,
+        },
+    );
     exchange::<McpList>(
         22,
         Empty {},

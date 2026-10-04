@@ -24,7 +24,7 @@ use crate::Inner;
 use crate::config::CoreConfig;
 use crate::provider::{CompletionRequest, Delta};
 use crate::runtime::Runtime;
-use crate::session::SessionHandle;
+use crate::session::{SessionHandle, UsageRecord};
 use crate::tools::{ToolContext, ToolSpec, parse_args};
 
 /// After cancellation, how long a running tool gets to clean up (e.g. kill
@@ -242,6 +242,11 @@ impl Turn<'_> {
             let mut attempt = 0;
             // A request_error hook may move the rest of this call elsewhere.
             let mut provider = self.rt.provider.clone();
+            // Which entry and model answered, for the usage record.
+            let mut served = (
+                self.rt.selected.clone(),
+                self.rt.config.provider.model.clone(),
+            );
             let completion = loop {
                 attempt += 1;
                 let mut text = String::new();
@@ -302,6 +307,14 @@ impl Turn<'_> {
                                     .map_err(|why| {
                                         Stop::Failed(format!("request_error hook: {why}"))
                                     })?;
+                            served = (
+                                Some(name.to_owned()),
+                                self.rt
+                                    .models
+                                    .get(name)
+                                    .map(|p| p.model.clone())
+                                    .unwrap_or_default(),
+                            );
                         }
                         tokio::select! {
                             _ = self.cancel.cancelled() => return Err(Stop::Cancelled),
@@ -333,6 +346,17 @@ impl Turn<'_> {
                 calls = serde_json::from_value(list(&ev["tool_calls"])).map_err(|e| {
                     Stop::Failed(format!("message hook returned bad tool_calls: {e}"))
                 })?;
+            }
+            if let Some(u) = completion.usage {
+                let record = UsageRecord {
+                    turn_id: self.turn_id,
+                    provider: served.0.clone(),
+                    model: served.1.clone(),
+                    input_tokens: u.input_tokens,
+                    output_tokens: u.output_tokens,
+                };
+                // Losing a usage record is not worth failing the turn.
+                let _ = self.session.lock().unwrap().usage(record);
             }
             self.complete_message(content, reasoning, calls.clone(), completion.usage)?;
             if calls.is_empty() {

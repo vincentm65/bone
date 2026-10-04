@@ -7,6 +7,7 @@
 mod agent;
 pub mod config;
 mod health;
+mod index;
 pub mod mcp;
 pub mod provider;
 mod runtime;
@@ -25,8 +26,9 @@ use bone_proto::methods::{
     QueueChanged, QueueChangedParams, QueueClear, QueueMode, QueueMove, QueueRemove, QueueResume,
     QueueUpdate, SessionCreate, SessionCreateParams, SessionDelete, SessionDeleted, SessionFork,
     SessionForkParams, SessionList, SessionMessages, SessionMessagesResult, SessionRef,
-    SessionRename, SessionRenameParams, SessionUpdated, SessionUpdatedParams, TurnCancel,
-    TurnStart, TurnStartParams, TurnStartResult, TurnSteer, TurnSteerParams,
+    SessionRename, SessionRenameParams, SessionUpdated, SessionUpdatedParams, StoreQuery,
+    StoreQueryParams, TurnCancel, TurnStart, TurnStartParams, TurnStartResult, TurnSteer,
+    TurnSteerParams,
 };
 use bone_proto::types::SessionInfo;
 use bone_proto::{Method, Notification, RpcError};
@@ -264,6 +266,10 @@ impl Core {
             source.options.lock().unwrap().host.set(&core.inner);
         }
         core.inner.mcp.apply(core.inner.runtime().mcp.clone());
+        // Index sessions written while no core was running (or before the
+        // index existed) without holding up startup.
+        let inner = core.inner.clone();
+        std::thread::spawn(move || inner.sessions.catch_up());
         core
     }
 
@@ -442,6 +448,19 @@ impl Core {
                 )
                 .await
                 .map_err(|e| RpcError::new(RpcError::INVALID_PARAMS, e))
+            }
+            StoreQuery::METHOD => {
+                let p: StoreQueryParams = decode::<StoreQuery>(params)?;
+                let Some(index) = self.inner.sessions.index().cloned() else {
+                    return Err(RpcError::new(
+                        RpcError::INTERNAL_ERROR,
+                        "the session index is unavailable",
+                    ));
+                };
+                tokio::task::spawn_blocking(move || index.query(&p.sql, &p.params))
+                    .await
+                    .map_err(|e| RpcError::new(RpcError::INTERNAL_ERROR, e.to_string()))?
+                    .map_err(RpcError::invalid_params)
             }
             McpList::METHOD => {
                 decode::<McpList>(params)?;
