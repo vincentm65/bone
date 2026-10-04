@@ -100,7 +100,9 @@ bone.tool.register({
   run = function(args)
     local query = tostring(args.query or "")
     if query:match("^%s*$") then return nil, "query must be non-empty" end
-    local limit = math.max(1, math.min(10, tonumber(args.num_results) or 5))
+    -- The model may ask for a number; else the saved setting (/config), else 5.
+    local default = tonumber(bone.settings.get("web_search.num_results")) or 5
+    local limit = math.max(1, math.min(10, tonumber(args.num_results) or default))
     local out, err = ddgs_search(query, limit)
     if out then
       return out

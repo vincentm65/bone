@@ -16,6 +16,8 @@ while using Bone 3's APIs (`bone.tool.register`, `bone.cmd.create`,
 with no core or TUI half is still valid; for example, a colors-only package
 only contributes files under `colors/`.
 
+A package can declare settings in its `manifest.json` (`"settings": [ { "key", "label", "type", "default", "min", "max", "choices", "desc" } ]`); they get a tab in `/config` and are read with `bone.settings.get("<package>.<key>")`.
+
 Generate the index with:
 
 ```sh

@@ -669,9 +669,25 @@ impl App {
     /// fire `ready`.
     pub fn load_user_config(&mut self) {
         if let Some(dir) = self.config_dir.clone() {
+            // Plugins switched off in settings.json are listed, not loaded.
+            let disabled: Vec<String> = self
+                .settings
+                .get("plugins")
+                .and_then(|p| p.get("disabled"))
+                .and_then(|d| d.as_array())
+                .map(|l| {
+                    l.iter()
+                        .filter_map(|v| v.as_str().map(str::to_owned))
+                        .collect()
+                })
+                .unwrap_or_default();
             for plugin in bone_lua::plugins(&dir) {
                 let name = bone_lua::plugin_name(&plugin);
-                self.load_plugin(&name, &plugin, crate::plugins::Kind::Plugin);
+                if disabled.contains(&name) {
+                    self.register_plugin(&name, &plugin, crate::plugins::Kind::Plugin);
+                } else {
+                    self.load_plugin(&name, &plugin, crate::plugins::Kind::Plugin);
+                }
             }
             // Saved settings, after the defaults and plugins (which define
             // the options) and before tui.lua, which runs last.
@@ -1138,6 +1154,7 @@ pub(crate) fn apply_dynamic_option(
                 DynamicValue::Boolean(!value)
             }
         };
+        options::check_choice(&name, &app.dynamic_options[name.as_str()], &new)?;
         if current == new {
             return Ok(None);
         }
@@ -1414,6 +1431,8 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                     .ok_or_else(|| err(format!("unknown option: {name}")))?
                     .kind;
                 let (_, new_value) = dynamic_from_lua(value, Some(kind))?;
+                options::check_choice(&name, &app.dynamic_options[&name], &new_value)
+                    .map_err(err)?;
                 let (old_value, callback) = {
                     let option = app.dynamic_options.get_mut(&name).expect("option found");
                     let old = option.value.clone();
@@ -1477,6 +1496,28 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             let current = previous
                 .filter(|v| v.kind() == kind)
                 .unwrap_or_else(|| value.clone());
+            let choices: Vec<String> = opts
+                .as_ref()
+                .map(|o| o.get::<Option<Vec<String>>>("choices"))
+                .transpose()?
+                .flatten()
+                .unwrap_or_default();
+            if !choices.is_empty() {
+                let DynamicValue::String(d) = &value else {
+                    return Err(err(format!("{name}: choices are for string options")));
+                };
+                if !choices.contains(d) {
+                    return Err(err(format!(
+                        "{name}: the default {d:?} is not one of its choices"
+                    )));
+                }
+            }
+            let current = match &current {
+                DynamicValue::String(s) if !choices.is_empty() && !choices.contains(s) => {
+                    value.clone()
+                }
+                _ => current,
+            };
             app.own(crate::plugins::Owned::Option(name.clone()));
             app.dynamic_options.insert(
                 name,
@@ -1485,6 +1526,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                     default: value,
                     kind,
                     desc,
+                    choices,
                     on_change: callback,
                     owner: app.owner.clone(),
                 },
@@ -1524,11 +1566,20 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 };
                 table.set("type", kind)?;
                 table.set("value", value)?;
+                table.set("desc", options::describe(&name))?;
+                match options::Options::default().get(&name) {
+                    Some(options::Value::Bool(d)) => table.set("default", d)?,
+                    Some(options::Value::Number(d)) => table.set("default", d as i64)?,
+                    None => {}
+                }
             } else if let Some(option) = app.dynamic_options.get(&name) {
                 table.set("type", option.kind.name())?;
                 table.set("value", dynamic_to_lua(lua, &option.value)?)?;
                 table.set("default", dynamic_to_lua(lua, &option.default)?)?;
                 table.set("desc", option.desc.as_str())?;
+                if !option.choices.is_empty() {
+                    table.set("choices", option.choices.clone())?;
+                }
             } else {
                 return Err(err(format!("unknown option: {name}")));
             }

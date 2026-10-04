@@ -13,13 +13,17 @@ require("bone.menu")
 -- Enter during a turn queues the message in the core: "steer" joins the
 -- running turn at its next step, "next" waits for a turn of its own. The
 -- actions queue_steer and queue_next do one or the other whatever this says.
-bone.o.define("queue_mode", "steer", { desc = "what enter does during a turn: steer or next" })
+bone.o.define("queue_mode", "steer", {
+  desc = "what enter does during a turn: steer or next",
+  choices = { "steer", "next" },
+})
 
 -- How much of each tool call the chat shows: "summary" (one line per run
 -- of calls, edits and failures in full), "rows" (a row per call, output
 -- cut short) or "full" (everything). ctrl+t steps through them.
 bone.o.define("tool_detail", "summary", {
   desc = "tool calls: summary, rows or full (ctrl+t)",
+  choices = { "summary", "rows", "full" },
   on_change = function()
     bone.ui.refresh()
   end,

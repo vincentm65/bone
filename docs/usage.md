@@ -59,6 +59,7 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `/help`, `/?` | commands and keys |
 | `/help {topic}` | the matching section of these docs in a scrollable window (`/help hooks`, `/help windows`, `/help lua` for a whole file) |
 | `/health`, `/checkhealth` | check the setup: provider address and key, sessions folder, terminal, mouse, clipboard route, Lua errors, plus plugins' own checks |
+| `/config`, `/settings` | the settings page: TUI options, which provider and model to use, plugins on and off, and plugins' own settings; everything is saved in `~/.bone/settings.json` |
 | `/runtime`, `/runtime reset FILE`, `/runtime reset all` | your copies of built-in Lua files in `~/.bone/runtime/` (bone never overwrites them); reset goes back to the built-in ones, keeping your copies in `~/.bone/runtime-backup/` |
 | `/new`, `/clear` | start a new session |
 | `/sessions`, `/resume` | pick a session to open |

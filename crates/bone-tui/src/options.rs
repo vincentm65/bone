@@ -105,6 +105,8 @@ pub struct DynamicOption {
     pub default: DynamicValue,
     pub kind: DynamicKind,
     pub desc: String,
+    /// The values it may take, when it is a string with a fixed set.
+    pub choices: Vec<String>,
     pub on_change: Option<u64>,
     /// The plugin that defined it.
     pub owner: Option<String>,
@@ -116,6 +118,36 @@ impl std::fmt::Display for Value {
             Value::Bool(b) => write!(f, "{b}"),
             Value::Number(n) => write!(f, "{n}"),
         }
+    }
+}
+
+/// What a built-in option does, for /config and bone.o.info.
+pub fn describe(name: &str) -> &'static str {
+    match name {
+        "show_reasoning" => "show the model's reasoning (ctrl+r)",
+        "tool_preview_lines" => "rows of tool output under each call (style plugin)",
+        "diff_preview_lines" => "rows of diff under each edit (style plugin)",
+        "prompt_max_height" => "rows the prompt grows to before it scrolls",
+        "timeoutlen" => "milliseconds to wait for the rest of a key sequence",
+        "mouse" => "wheel scrolling and drag-to-copy (off: the terminal's own)",
+        _ => "",
+    }
+}
+
+/// A dynamic option's value is one of its choices, if it has any.
+pub fn check_choice(
+    name: &str,
+    option: &DynamicOption,
+    value: &DynamicValue,
+) -> Result<(), String> {
+    match value {
+        DynamicValue::String(s) if !option.choices.is_empty() && !option.choices.contains(s) => {
+            Err(format!(
+                "{name} must be one of: {}",
+                option.choices.join(", ")
+            ))
+        }
+        _ => Ok(()),
     }
 }
 

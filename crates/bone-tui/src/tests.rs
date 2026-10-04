@@ -128,6 +128,10 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
         "model/complete" => json!({ "request_id": 41 }),
         "queue/add" => json!({ "id": 1 }),
         "plugin/list" => json!([{ "name": "corepart", "core": true, "loaded": true }]),
+        "model/list" => json!([
+            { "name": "ds", "model": "d1", "current": false },
+            { "name": "qwen", "model": "q1", "current": true },
+        ]),
         "core/reload" => json!({ "plugins": [], "warnings": ["data_dir changed"] }),
         "initialize" => {
             json!({ "protocol_version": 0, "server_name": "fake", "server_version": "0" })
@@ -605,7 +609,7 @@ async fn slash_commands_suggest_complete_and_run() {
 #[tokio::test]
 async fn slash_menu_scrolls_when_it_overflows() {
     let mut h = Harness::new().await;
-    // 32 extra commands overflow the window (the 17 builtin names/aliases
+    // 32 extra commands overflow the window (the 19 builtin names/aliases
     // alone do not).
     h.lua(
         "for i = 1, 32 do bone.cmd.create('zz' .. i, function() end, { desc = 'generated ' .. i }) end",
@@ -613,16 +617,16 @@ async fn slash_menu_scrolls_when_it_overflows() {
     .await;
     h.input("/").await;
     let screen = h.screen(80, 24);
-    // 49 = the 17 builtin names/aliases plus the 32 created above.
+    // 51 = the 19 builtin names/aliases plus the 32 created above.
     assert!(
-        screen.contains("/?") && screen.contains("of 49"),
+        screen.contains("/?") && screen.contains("of 51"),
         "{screen}"
     );
     // The wheel and pages scroll the menu to the end.
     h.input("{wheeldown}").await;
     let screen = h.screen(80, 24);
     // One wheel down moves the selection to row 4, still in the first window.
-    assert!(screen.contains("1–8 of 49"), "{screen}");
+    assert!(screen.contains("1–8 of 51"), "{screen}");
     for _ in 0..10 {
         h.input("{pagedown}").await;
     }
@@ -4313,4 +4317,164 @@ async fn saved_settings_apply_before_tui_lua_and_keys_save_them() {
         h.lua("=bone.settings.get('tui.tool_detail')").await,
         "\"rows\""
     );
+}
+
+#[tokio::test]
+async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let webby = dir.path().join("plugins/webby");
+    std::fs::create_dir_all(&webby).unwrap();
+    std::fs::write(
+        webby.join("manifest.json"),
+        r#"{ "title": "Webby", "settings": [
+             { "key": "n", "label": "Results", "type": "integer", "default": 5, "min": 1, "max": 10 } ] }"#,
+    )
+    .unwrap();
+    let mut h = Harness::build(Some(dir.path().to_owned())).await;
+    h.app.load_user_config();
+    h.input("/config{enter}").await;
+    let screen = h.screen(100, 34);
+    for tab in [" General ", " Providers ", " Plugins ", " Webby "] {
+        assert!(screen.contains(tab), "{tab} in {screen}");
+    }
+    let last_set = |h: &Harness| {
+        h.requests("settings/set")
+            .last()
+            .cloned()
+            .unwrap_or_default()
+    };
+    // Move to the row whose label starts with `label`.
+    async fn select(h: &mut Harness, label: &str) {
+        for _ in 0..30 {
+            if h.screen(100, 34).contains(&format!("▌ {label}")) {
+                return;
+            }
+            h.input("{down}").await;
+        }
+        panic!("no row {label}: {}", h.screen(100, 34));
+    }
+
+    // General: a boolean toggles, a choice cycles, a number is typed.
+    select(&mut h, "show reasoning").await;
+    h.input("{enter}").await;
+    assert!(h.app.options.show_reasoning);
+    assert_eq!(
+        last_set(&h),
+        json!({ "path": "tui.show_reasoning", "value": true })
+    );
+    select(&mut h, "tool detail").await;
+    h.input("{enter}").await;
+    assert_eq!(
+        last_set(&h),
+        json!({ "path": "tui.tool_detail", "value": "rows" })
+    );
+    for _ in 0..30 {
+        h.input("{up}").await;
+    }
+    select(&mut h, "prompt max height").await;
+    h.input("{enter}{ctrl+u}x{enter}").await;
+    assert!(h.screen(100, 34).contains("must be a whole number"));
+    h.input("{enter}{ctrl+u}7{enter}").await;
+    assert_eq!(h.app.options.prompt_max_height, 7);
+    assert_eq!(
+        last_set(&h),
+        json!({ "path": "tui.prompt_max_height", "value": 7 })
+    );
+
+    // Providers: enter uses one, e sets its model.
+    h.input("{tab}").await;
+    let screen = h.screen(100, 34);
+    assert!(
+        screen.contains("● q1") && screen.contains("○ d1"),
+        "{screen}"
+    );
+    h.input("{enter}").await; // ds is first
+    assert_eq!(last_set(&h), json!({ "path": "provider", "value": "ds" }));
+    h.input("e{ctrl+u}d2{enter}").await;
+    assert_eq!(last_set(&h), json!({ "path": "models.ds", "value": "d2" }));
+
+    // Plugins: space switches one off, saved and unloaded on both sides.
+    h.input("{tab}").await;
+    select(&mut h, "corepart").await;
+    h.input("{space}").await;
+    assert_eq!(
+        last_set(&h),
+        json!({ "path": "plugins.disabled", "value": ["corepart"] })
+    );
+    assert_eq!(
+        h.requests("plugin/unload").last().unwrap()["name"],
+        "corepart"
+    );
+
+    // A plugin's own tab, from its manifest, with its limits.
+    h.input("{tab}").await;
+    assert!(
+        h.screen(100, 34).contains("Results"),
+        "{}",
+        h.screen(100, 34)
+    );
+    h.input("{enter}{ctrl+u}12{enter}").await;
+    assert!(h.screen(100, 34).contains("between 1 and 10"));
+    h.input("{enter}{ctrl+u}7{enter}").await;
+    assert_eq!(last_set(&h), json!({ "path": "webby.n", "value": 7 }));
+
+    h.input("{esc}").await;
+    assert!(!h.screen(100, 34).contains(" Providers "));
+}
+
+#[tokio::test]
+async fn plugins_switched_off_in_settings_are_listed_not_loaded() {
+    let dir = tempfile::tempdir().unwrap();
+    for name in ["kept", "off"] {
+        let p = dir.path().join("plugins").join(name);
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("tui.lua"), format!("ran_{name} = true")).unwrap();
+    }
+    let mut h = Harness::build(Some(dir.path().to_owned())).await;
+    h.app.settings = json!({ "plugins": { "disabled": ["off"] } });
+    h.app.load_user_config();
+    assert_eq!(h.lua("=ran_kept").await, "true");
+    assert_eq!(h.lua("=ran_off").await, "nil");
+    let off = h
+        .app
+        .plugins
+        .iter()
+        .find(|p| p.name == "off")
+        .expect("listed");
+    assert!(!off.loaded);
+    // It can be switched on again.
+    h.lua("bone.plugin.load('off')").await;
+    assert_eq!(h.lua("=ran_off").await, "true");
+}
+
+#[tokio::test]
+async fn options_with_choices_take_only_those() {
+    let mut h = Harness::build(None).await;
+    let set = |h: &mut Harness, code: &str| -> Result<(), String> {
+        h.app
+            .with_api(|lua| lua.load(code).exec())
+            .map_err(|e| e.to_string())
+    };
+    set(&mut h, "bone.o.tool_detail = 'full'").unwrap();
+    let e = set(&mut h, "bone.o.tool_detail = 'bogus'").unwrap_err();
+    assert!(
+        e.contains("tool_detail must be one of: summary, rows, full"),
+        "{e}"
+    );
+    let e = set(&mut h, "bone.o.apply('tool_detail=bogus')").unwrap_err();
+    assert!(e.contains("must be one of"), "{e}");
+    let info: String = h
+        .app
+        .with_api(|lua| {
+            lua.load("return table.concat(bone.o.info('tool_detail').choices, ',')")
+                .eval()
+        })
+        .unwrap();
+    assert_eq!(info, "summary,rows,full");
+    let e = set(
+        &mut h,
+        "bone.o.define('x_choice', 'a', { choices = { 'b' } })",
+    )
+    .unwrap_err();
+    assert!(e.contains("not one of its choices"), "{e}");
 }

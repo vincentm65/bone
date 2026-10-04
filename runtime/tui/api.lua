@@ -173,6 +173,23 @@ bone.settings = {
   reset = function(path, callback)
     bone.request("settings/reset", { path = path }, callback)
   end,
+  --- A tab of your own in /config: { name, title, fields = { { key, label,
+  --- type = "boolean" | "number" | "integer" | "string", choices, default,
+  --- min, max, desc } } }. Values are saved as "<name>.<key>". A plugin can
+  --- declare the same as "settings" in its manifest.json instead.
+  page = function(spec)
+    assert(type(spec) == "table" and type(spec.name) == "string" and type(spec.fields) == "table",
+      "bone.settings.page{ name, fields }")
+    spec.title = spec.title or spec.name
+    bone._settings_pages = bone._settings_pages or {}
+    for i, p in ipairs(bone._settings_pages) do
+      if p.name == spec.name then
+        bone._settings_pages[i] = spec
+        return
+      end
+    end
+    bone._settings_pages[#bone._settings_pages + 1] = spec
+  end,
 }
 
 --- Call a model through the core (no session, no tools run):

@@ -2365,3 +2365,28 @@ async fn a_broken_settings_file_is_never_overwritten() {
         "{ not json"
     );
 }
+
+#[tokio::test]
+async fn core_plugins_switched_off_in_settings_stay_off() {
+    let data = tempfile::tempdir().unwrap();
+    let p = data.path().join("plugins/quiet");
+    std::fs::create_dir_all(&p).unwrap();
+    std::fs::write(
+        p.join("core.lua"),
+        r#"bone.tool.register { name = "quiet_tool", run = function() return "" end }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        data.path().join("core.lua"),
+        r#"bone.config.providers.x = { base_url = "http://unused", model = "m" }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        data.path().join("settings.json"),
+        r#"{ "plugins": { "disabled": ["quiet"] } }"#,
+    )
+    .unwrap();
+    let loaded = crate::scripting::load_with(data.path(), &|_| None).unwrap();
+    assert!(!loaded.tools.iter().any(|t| t.name == "quiet_tool"));
+    assert!(loaded.options.disabled.contains("quiet"));
+}

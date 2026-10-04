@@ -378,7 +378,7 @@
   {
     "name": "web_search",
     "kind": "plugin",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "description": "Search the web with DuckDuckGo (real results through ddgs when uv is installed)",
     "min_bone_version": "0.1.0",
     "capabilities": [
@@ -393,7 +393,7 @@
       },
       {
         "path": "core.lua",
-        "sha256": "e14d8969202eb14c9d5304186af6919d70b130723bc954a2fff3f6a9830fb1b0"
+        "sha256": "3be9eb5460b7395fc3be0eb5f96059d828e6c1eeb822c042376d549d9a502a30"
       }
     ]
   }

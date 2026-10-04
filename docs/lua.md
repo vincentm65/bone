@@ -164,6 +164,16 @@ A project can carry TUI config in `.bone/tui.lua` (and modules in `.bone/lua/`).
 - `tui.<option>` sets a TUI option after the defaults and plugins, before your `tui.lua`, which runs last and wins. `ctrl+t` and `ctrl+r` save their choice here.
 - Anything else is free for plugins: a plugin keeps its settings under its own name (`web_search.num_results`).
 
+`/config` (or `/settings`) is the page for all of this: a **General** tab with every TUI option (space or enter toggles a boolean or cycles a choice, enter edits a number or text, `r` resets to the default; an option your `tui.lua` sets anyway is marked), **Providers** (enter uses one, `e` sets its model; an empty model goes back to `core.lua`'s), **Plugins** (space switches one off or on, both halves, and it stays that way: `plugins.disabled`), and a tab for each plugin that declares settings. A plugin declares them in its `manifest.json`, which also works for a core-only plugin:
+
+```json
+{ "title": "Web search", "settings": [
+  { "key": "num_results", "label": "Results per search", "type": "integer",
+    "default": 5, "min": 1, "max": 10, "desc": "when the model does not ask for a number" } ] }
+```
+
+or from its `tui.lua` with `bone.settings.page{ name = "myplugin", title = "My plugin", fields = { … } }` (the same field shape: `key`, `label`, `type` = `"boolean"`, `"integer"`, `"number"` or `"string"`, `choices`, `default`, `min`, `max`, `desc`). Values are saved as `<name>.<key>`, and the plugin reads them with `bone.settings.get` (falling back to its default). `require("bone.config").open(tab)` opens the page on a tab.
+
 In the TUI: `bone.settings.get(path)`, `bone.settings.all()`, `bone.settings.set(path, value, cb)` and `bone.settings.reset(path, cb)` (paths are dotted, `cb(all, err)` gets every setting after the change), and the `settings/changed` event `{ path, value }`. In the core, `bone.settings.get(path)` and `bone.settings.all()` read the file (changes go through a client).
 
 ## Core (`core.lua`)
@@ -484,13 +494,15 @@ local info = bone.o.info("review_limit")
 Dynamic options support `boolean`, `integer`, `number` and `string`. The
 default value is required; its type is inferred unless `type` is supplied, and
 an explicit type and default are validated. Unknown names and duplicate
-definitions are errors.
+definitions are errors. A string option may list its `choices`
+(`{ choices = { "summary", "rows", "full" } }`): any other value is refused,
+and `/config` cycles through them.
 `on_change` receives `(new, old)` only when the value changes, and is
 removed with the option. `bone.o.names()` lists names.
 `bone.o.del(name)` returns whether a dynamic option was removed;
 `bone.o.delete(name)` is an alias, and deletion permits defining the name
-again. `bone.o.info(name)` returns `{ type, value }` for a fixed
-option, and adds `{ default, desc }` for a dynamic option.
+again. `bone.o.info(name)` returns `{ type, value, default, desc }`, plus
+`choices` for a dynamic option that has them.
 
 Dynamic options also work with `bone.o.apply`: querying, assigning, enabling,
 disabling and toggling booleans use the same validation and callbacks as

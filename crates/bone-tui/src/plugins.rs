@@ -121,6 +121,20 @@ impl App {
 
     /// Run a plugin's `tui.lua` as that plugin. Errors are reported and kept
     /// in its info; what it set up before failing stays (and unloads).
+    /// Know about a plugin without loading it (it is switched off).
+    pub fn register_plugin(&mut self, name: &str, dir: &Path, kind: Kind) {
+        if !self.plugins.iter().any(|p| p.name == name) {
+            self.plugins.push(Plugin {
+                name: name.to_owned(),
+                dir: dir.to_owned(),
+                kind,
+                loaded: false,
+                error: None,
+                modules: Vec::new(),
+            });
+        }
+    }
+
     pub fn load_plugin(&mut self, name: &str, dir: &Path, kind: Kind) {
         let file = dir.join("tui.lua");
         if !self.plugins.iter().any(|p| p.name == name) {

@@ -162,7 +162,19 @@ pub fn load_with(
     config_dir: &Path,
     env: &dyn Fn(&str) -> Option<String>,
 ) -> Result<Loaded, String> {
-    load_with_options(config_dir, env, &LoadOptions::default())
+    // Plugins switched off in settings.json stay off.
+    let mut options = LoadOptions::default();
+    if let Some(list) = saved_settings(config_dir)
+        .get("plugins")
+        .and_then(|p| p.get("disabled"))
+        .and_then(|d| d.as_array())
+    {
+        options.disabled = list
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect();
+    }
+    load_with_options(config_dir, env, &options)
 }
 
 /// [`load_with`], leaving out disabled plugins.

@@ -139,4 +139,12 @@ end, {
   end,
 })
 
+
+cmd("config", function(c)
+  require("bone.config").open(c.args)
+end, {
+  desc = "settings: options, provider and model, plugins",
+  aliases = { "settings" },
+})
+
 return true
