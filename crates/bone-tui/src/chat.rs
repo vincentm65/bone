@@ -112,10 +112,6 @@ pub struct RenderKey {
     /// Bumped when views, options or colors change.
     pub generation: (u64, u64),
     pub prev: Option<Part>,
-    /// For a tool: its run of adjacent tool (and reasoning) items, as
-    /// 1-based item indexes and their newest rev, so views that summarize
-    /// a run redraw when any of it changes. `None` for other items.
-    pub run: Option<(usize, usize, u64)>,
 }
 
 #[derive(Default)]
@@ -741,7 +737,6 @@ impl ChatBuffer {
     ) -> Vec<(Item, usize, RenderKey)> {
         let items = self.items();
         let rev = |item: &Item| self.item_rev(item);
-        let runs = runs(&items, rev);
         items
             .iter()
             .enumerate()
@@ -751,7 +746,6 @@ impl ChatBuffer {
                     rev: rev(item),
                     generation,
                     prev: i.checked_sub(1).map(|p| items[p].part),
-                    run: runs[i],
                 };
                 let fresh = self
                     .cache
@@ -868,31 +862,6 @@ pub fn bare(data: &Value, width: usize, first: bool) -> Vec<Line<'static>> {
                 .map(Line::from),
         )
         .collect()
-}
-
-/// Each tool item's run: the stretch of adjacent tool and reasoning items
-/// around it (1-based item indexes) and the newest rev in it.
-fn runs(items: &[Item], rev: impl Fn(&Item) -> u64) -> Vec<Option<(usize, usize, u64)>> {
-    let mut out = vec![None; items.len()];
-    let mut i = 0;
-    while i < items.len() {
-        let mut j = i;
-        while j < items.len() && matches!(items[j].part, Part::Tool | Part::Reasoning) {
-            j += 1;
-        }
-        if j == i {
-            i += 1;
-            continue;
-        }
-        let newest = items[i..j].iter().map(&rev).max().unwrap_or(0);
-        for (k, item) in items.iter().enumerate().take(j).skip(i) {
-            if item.part == Part::Tool {
-                out[k] = Some((i + 1, j, newest));
-            }
-        }
-        i = j;
-    }
-    out
 }
 
 #[cfg(test)]

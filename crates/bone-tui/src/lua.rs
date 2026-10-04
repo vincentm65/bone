@@ -290,8 +290,20 @@ fn item_filter(opts: &Option<Table>) -> mlua::Result<crate::data::ItemFilter> {
     let Some(o) = opts else {
         return Ok(Default::default());
     };
+    let kind = match o.get::<Value>("kind")? {
+        Value::Nil => None,
+        Value::String(s) => Some(vec![s.to_str()?.to_owned()]),
+        Value::Table(t) => Some(t.sequence_values::<String>().collect::<mlua::Result<_>>()?),
+        other => {
+            return Err(err(format!(
+                "kind is a string or a list of them, not {}",
+                other.type_name()
+            )));
+        }
+    };
     Ok(crate::data::ItemFilter {
-        kind: o.get("kind")?,
+        kind,
+        around: o.get("around")?,
         name: o.get("name")?,
         turn: o.get("turn")?,
         running: o.get("running")?,

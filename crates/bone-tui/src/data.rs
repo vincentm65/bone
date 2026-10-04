@@ -13,7 +13,10 @@ use crate::chat::{ChatBuffer, Item, Part};
 /// on every item.
 #[derive(Debug, Default, Clone)]
 pub struct ItemFilter {
-    pub kind: Option<String>,
+    /// One kind, or any of several.
+    pub kind: Option<Vec<String>>,
+    /// Only the unbroken stretch of items (of `kind`) around this index.
+    pub around: Option<usize>,
     /// Tool name.
     pub name: Option<String>,
     pub turn: Option<usize>,
@@ -37,6 +40,45 @@ pub struct ItemFilter {
 pub struct Dep {
     pub filter: ItemFilter,
     pub sig: u64,
+}
+
+/// Whether item `n` (0-based) of `items` passes the filter's kind, turn,
+/// range and `around` tests: those that need no item data.
+fn candidates(chat: &ChatBuffer, items: &[Item], turns: &[usize], f: &ItemFilter) -> Vec<bool> {
+    let kind_ok = |i: &Item| {
+        f.kind
+            .as_ref()
+            .is_none_or(|ks| ks.iter().any(|k| chat.kind_name(i) == k))
+    };
+    // `around`: grow from the item while neighbours are of `kind`.
+    let (lo, hi) = match f.around.and_then(|a| a.checked_sub(1)) {
+        Some(at) if at < items.len() && kind_ok(&items[at]) => {
+            let mut lo = at;
+            while lo > 0 && kind_ok(&items[lo - 1]) {
+                lo -= 1;
+            }
+            let mut hi = at;
+            while hi + 1 < items.len() && kind_ok(&items[hi + 1]) {
+                hi += 1;
+            }
+            (lo, hi)
+        }
+        Some(_) => (1, 0),
+        None => (0, usize::MAX),
+    };
+    items
+        .iter()
+        .enumerate()
+        .map(|(n, i)| {
+            let index = n + 1;
+            n >= lo
+                && n <= hi
+                && kind_ok(i)
+                && f.turn.is_none_or(|t| turns[n] == t)
+                && f.from.is_none_or(|from| index >= from)
+                && f.to.is_none_or(|to| index <= to)
+        })
+        .collect()
 }
 
 /// Turn number of each item: 0 before the first user message, then 1, 2, …
@@ -77,16 +119,11 @@ impl App {
         };
         let items = chat.items();
         let turns = turns_of(&items);
+        let ok = candidates(chat, &items, &turns, f);
         let picked: Vec<Json> = items
             .iter()
             .enumerate()
-            .filter(|(n, i)| {
-                let index = n + 1;
-                f.kind.as_deref().is_none_or(|k| chat.kind_name(i) == k)
-                    && f.turn.is_none_or(|t| turns[*n] == t)
-                    && f.from.is_none_or(|from| index >= from)
-                    && f.to.is_none_or(|to| index <= to)
-            })
+            .filter(|(n, _)| ok[*n])
             .map(|(n, i)| {
                 let mut d = chat.item_data(*i, n + 1);
                 d["turn"] = json!(turns[n]);
@@ -110,8 +147,8 @@ impl App {
             .collect()
     }
 
-    /// A digest of the items `f` could match: those its kind, turn and range
-    /// allow, with their revs. Coarser than the result (name, running, error,
+    /// A digest of the items `f` could match: those its kind, turn, range
+    /// and `around` allow, with their revs. Coarser than the result (name, running, error,
     /// first and last are left out), so it may redraw too often, never too
     /// rarely.
     pub fn chat_signature(&self, f: &ItemFilter) -> u64 {
@@ -122,14 +159,10 @@ impl App {
         };
         let items = chat.items();
         let turns = turns_of(&items);
+        let ok = candidates(chat, &items, &turns, f);
         for (n, i) in items.iter().enumerate() {
-            let index = n + 1;
-            if f.kind.as_deref().is_none_or(|k| chat.kind_name(i) == k)
-                && f.turn.is_none_or(|t| turns[n] == t)
-                && f.from.is_none_or(|from| index >= from)
-                && f.to.is_none_or(|to| index <= to)
-            {
-                (index, i.entry, chat.kind_name(i), chat.item_rev(i)).hash(&mut h);
+            if ok[n] {
+                (n + 1, i.entry, chat.kind_name(i), chat.item_rev(i)).hash(&mut h);
             }
         }
         h.finish()

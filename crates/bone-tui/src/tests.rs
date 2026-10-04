@@ -4026,3 +4026,48 @@ async fn runtime_overrides_can_extend_the_builtin_and_are_reported() {
         .unwrap_err();
     assert!(e.to_string().contains("no built-in runtime file"), "{e}");
 }
+
+#[tokio::test]
+async fn chat_items_around_an_item() {
+    let mut h = Harness::build(None).await;
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    let call = |id: &str| ToolCall {
+        id: id.into(),
+        name: "shell".into(),
+        arguments: json!({"command": "ls"}).to_string(),
+    };
+    h.emit::<MessageCompleted>(tool_calls("s-new", vec![call("a"), call("b")]))
+        .await;
+    h.lua(r#"bone.chat.add("note", { text = "between" })"#)
+        .await;
+    h.emit::<MessageCompleted>(tool_calls("s-new", vec![call("c")]))
+        .await;
+    let ids = |h: &mut Harness, q: &str| -> Value {
+        let v: mlua::Value = h
+            .app
+            .with_api(|lua| {
+                lua.load(format!(
+                    "local out = {{}} for _, i in ipairs(bone.chat.items({q})) do out[#out + 1] = i.id or i.kind end return out"
+                ))
+                .eval()
+            })
+            .unwrap();
+        serde_json::to_value(&v).unwrap()
+    };
+    // Items: user, a, b, note, c. The note breaks the stretch of tools.
+    assert_eq!(
+        ids(&mut h, r#"{ around = 2, kind = "tool" }"#),
+        json!(["a", "b"])
+    );
+    assert_eq!(
+        ids(&mut h, r#"{ around = 5, kind = "tool" }"#),
+        json!(["c"])
+    );
+    assert_eq!(
+        ids(&mut h, r#"{ around = 5, kind = { "tool", "note" } }"#),
+        json!(["a", "b", "note-1", "c"])
+    );
+    // Around an item not of `kind`: nothing (an empty Lua table).
+    assert_eq!(ids(&mut h, r#"{ around = 1, kind = "tool" }"#), json!({}));
+}

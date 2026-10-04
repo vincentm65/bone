@@ -561,10 +561,16 @@ end
 --- calls between edits and failures, reasoning aside), nil for the rest.
 --- false when this call is not folded.
 local function summary_view(item, ctx)
-  if not ctx.run or not foldable(item) then
+  if not foldable(item) then
     return false
   end
-  local run = bone.chat.items({ from = ctx.run.first, to = ctx.run.last, kind = "tool" })
+  -- The calls next to this one (reasoning between them does not break it).
+  local run = {}
+  for _, t in ipairs(bone.chat.items({ around = item.index, kind = { "tool", "reasoning" } })) do
+    if t.kind == "tool" then
+      run[#run + 1] = t
+    end
+  end
   local stretch, mine = {}, false
   for _, t in ipairs(run) do
     if foldable(t) then
