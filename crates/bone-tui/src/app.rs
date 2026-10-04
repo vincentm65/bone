@@ -1120,6 +1120,118 @@ impl App {
 
     // ---- mouse selection -----------------------------------------------------
 
+    /// A mouse press, drag or release. Lua `mouse` handlers see it first
+    /// (with the chat item under it); one returning true takes it, else the
+    /// left button selects text and clicks focus panels.
+    pub fn mouse(&mut self, action: &str, button: &str, at: (u16, u16)) {
+        let mut ev = serde_json::json!({
+            "action": action, "button": button, "x": at.0, "y": at.1,
+        });
+        if let Some(hit) = self.chat_at(at) {
+            ev["index"] = hit["index"].clone();
+            ev["line"] = hit["line"].clone();
+        }
+        let handled = self
+            .fire("mouse", ev)
+            .iter()
+            .any(|v| matches!(v, mlua::Value::Boolean(true)));
+        if handled || button != "left" {
+            self.dirty = true;
+            return;
+        }
+        match action {
+            "down" => self.mouse_down(at),
+            "drag" => self.mouse_drag(at),
+            _ => self.mouse_up(at),
+        }
+    }
+
+    /// The chat item at screen cell `at`: `{ index, line }`, or None.
+    pub fn chat_at(&self, at: (u16, u16)) -> Option<serde_json::Value> {
+        let area = self.placed.get(&CHAT_WIN)?.area;
+        let (x, y) = at;
+        if x < area.x || x >= area.right() || y < area.y || y >= area.bottom() {
+            return None;
+        }
+        let top = self.windows.get(&CHAT_WIN)?.top;
+        let row = top + (y - area.y) as usize;
+        let (index, line) = self.chats[self.current].item_at_row(row)?;
+        Some(serde_json::json!({ "index": index, "line": line }))
+    }
+
+    /// The chat window: scroll position and which items show.
+    pub fn chat_view(&self) -> serde_json::Value {
+        let area = self
+            .placed
+            .get(&CHAT_WIN)
+            .map(|p| p.area)
+            .unwrap_or_default();
+        let win = self.windows.get(&CHAT_WIN);
+        let top = win.map_or(0, |w| w.top);
+        let height = area.height as usize;
+        let rows = self.chats[self.current].item_rows();
+        let visible: Vec<usize> = rows
+            .iter()
+            .filter(|&&(_, start, len)| len > 0 && start < top + height && start + len > top)
+            .map(|&(i, _, _)| i)
+            .collect();
+        serde_json::json!({
+            "top": top,
+            "height": height,
+            "rows": self.chats[self.current].row_count(),
+            "follow": win.is_some_and(|w| w.follow),
+            "first": visible.first(),
+            "last": visible.last(),
+        })
+    }
+
+    /// Scroll the chat so item `index` shows at the top, center or bottom.
+    /// Returns false when there is no such drawn item.
+    pub fn chat_scroll_to(&mut self, index: usize, at: &str) -> bool {
+        let Some((_, start, len)) = self.chats[self.current]
+            .item_rows()
+            .into_iter()
+            .find(|&(i, _, _)| i == index)
+        else {
+            return false;
+        };
+        let height = self
+            .placed
+            .get(&CHAT_WIN)
+            .map_or(0, |p| p.area.height as usize);
+        let top = match at {
+            "bottom" => (start + len).saturating_sub(height),
+            "center" => (start + len / 2).saturating_sub(height / 2),
+            _ => start,
+        };
+        if let Some(w) = self.windows.get_mut(&CHAT_WIN) {
+            w.top = top;
+            w.follow = false;
+        }
+        self.dirty = true;
+        true
+    }
+
+    /// Scroll the chat by rows, or to "top" / "bottom".
+    pub fn chat_scroll(&mut self, by: Option<i64>, to: Option<&str>) {
+        match (by, to) {
+            (_, Some("top")) => {
+                if let Some(w) = self.windows.get_mut(&CHAT_WIN) {
+                    w.top = 0;
+                    w.follow = false;
+                }
+            }
+            (_, Some(_)) => {
+                if let Some(w) = self.windows.get_mut(&CHAT_WIN) {
+                    w.follow = true;
+                }
+            }
+            (Some(n), None) => self.scroll(n),
+            (None, None) => {}
+        }
+        self.dirty = true;
+    }
+
     pub fn mouse_down(&mut self, at: (u16, u16)) {
         self.panel_click(at);
         self.selection = Some(crate::selection::Selection::new(at));

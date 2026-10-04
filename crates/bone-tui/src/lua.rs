@@ -2076,6 +2076,42 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             }
             ret(lua, to_lua(lua, &serde_json::Value::Array(items))?)
         }
+        "chat_at" => {
+            let (x, y): (u16, u16) = args(lua, a)?;
+            match app.chat_at((x, y)) {
+                Some(hit) => ret(lua, to_lua(lua, &hit)?),
+                None => ret(lua, Value::Nil),
+            }
+        }
+        "chat_view" => ret(lua, to_lua(lua, &app.chat_view())?),
+        "chat_scroll_to" => {
+            let (index, at): (usize, Option<String>) = args(lua, a)?;
+            let ok = app.chat_scroll_to(index, at.as_deref().unwrap_or("top"));
+            ret(lua, ok)
+        }
+        "chat_scroll" => {
+            let by: Value = args(lua, a)?;
+            match by {
+                Value::Integer(n) => app.chat_scroll(Some(n), None),
+                Value::Number(n) => app.chat_scroll(Some(n as i64), None),
+                Value::String(s) => {
+                    let s = s.to_str()?.to_owned();
+                    if s != "top" && s != "bottom" {
+                        return Err(err(format!(
+                            "scroll by rows, \"top\" or \"bottom\", not {s:?}"
+                        )));
+                    }
+                    app.chat_scroll(None, Some(&s));
+                }
+                other => {
+                    return Err(err(format!(
+                        "scroll by a number, not {}",
+                        other.type_name()
+                    )));
+                }
+            }
+            ret(lua, ())
+        }
         "chat_refresh_in" => {
             let ms: f64 = args(lua, a)?;
             if app.render_deps.is_none() {

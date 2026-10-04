@@ -539,6 +539,7 @@ Registration aliases normalize to these canonical names:
 | `resize` | `ui/resize`, `resize` | `{ width, height }` |
 | `key` | `key/pressed`, `key` | `{ key, context }` |
 | `paste` | `paste`, `text/pasted` | `{ text, context }` |
+| `mouse` | `mouse` | `{ action, button, x, y, index, line }` |
 | `panel/opened` | `panel`, `panel/opened`, `popup`, `popup/opened` | a window or a panel (see below) |
 | `panel/updated` | `panel/updated`, `popup/updated` | a window or a panel |
 | `panel/closed` | `panel/closed`, `popup/closed` | a window or a panel |
@@ -548,6 +549,7 @@ Registration aliases normalize to these canonical names:
 | `job/finished` | `job/finished` | the job's exit result (see `bone.job`) |
 
 Prompt events are deduplicated, so unchanged text/cursor/selection state is not emitted.
+`mouse` is emitted for every press, drag and release (`action` `"down"`, `"drag"`, `"up"`; `button` `"left"`, `"right"`, `"middle"`; `x`, `y` 0-based screen cells), with `index` and `line` when it is over a chat item. A callback that returns `true` takes it; otherwise the left button selects text and focuses panels as usual. With `bone.chat.redraw(index)` and your own state per item, that is enough for click-to-expand.
 `resize` is emitted when terminal dimensions change (and by `Headless:resize`);
 `paste` is emitted for bracketed paste with the active context. Popup lifecycle
 events are emitted when a `bone.ui.win`/`bone.ui.popup` window or a `bone.ui.panel` opens, updates or closes.
@@ -600,6 +602,10 @@ bone.chat.turns()                       -- one entry per user message
 bone.chat.session()                     -- the chat on screen
 bone.chat.sessions()                    -- every open chat
 bone.chat.messages(function(messages, err) ... end)  -- from the core
+bone.chat.at(x, y)                      -- the item at a screen cell: { index, line } or nil
+bone.chat.view()                        -- { top, height, rows, follow, first, last }
+bone.chat.scroll_to(4, "center")        -- "top" (default), "center" or "bottom"
+bone.chat.scroll(-5)                    -- rows (negative is up), or "top" / "bottom"
 bone.chat.refresh_in(500)               -- inside a chat view: draw this item again in 500 ms
 bone.chat.redraw(4)                     -- draw item 4 again; no index: every item
 bone.now()                              -- milliseconds since the epoch

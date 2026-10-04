@@ -195,6 +195,14 @@ fn collect_lua_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     }
 }
 
+fn button_name(b: MouseButton) -> &'static str {
+    match b {
+        MouseButton::Left => "left",
+        MouseButton::Right => "right",
+        MouseButton::Middle => "middle",
+    }
+}
+
 fn handle_terminal(app: &mut App, ev: Event) {
     match ev {
         Event::Key(k) if k.kind != KeyEventKind::Release => app.handle_key(k.into()),
@@ -209,9 +217,9 @@ fn handle_terminal(app: &mut App, ev: Event) {
                 }
                 MouseEventKind::ScrollUp => crate::keys::WHEEL_UP,
                 MouseEventKind::ScrollDown => crate::keys::WHEEL_DOWN,
-                MouseEventKind::Down(MouseButton::Left) => return app.mouse_down(at),
-                MouseEventKind::Drag(MouseButton::Left) => return app.mouse_drag(at),
-                MouseEventKind::Up(MouseButton::Left) => return app.mouse_up(at),
+                MouseEventKind::Down(b) => return app.mouse("down", button_name(b), at),
+                MouseEventKind::Drag(b) => return app.mouse("drag", button_name(b), at),
+                MouseEventKind::Up(b) => return app.mouse("up", button_name(b), at),
                 _ => return,
             };
             app.handle_key(crate::keys::Key::new(code, m.modifiers));

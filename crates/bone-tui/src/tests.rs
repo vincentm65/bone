@@ -3501,3 +3501,86 @@ async fn views_can_ask_to_be_drawn_again() {
             .unwrap()
     );
 }
+
+#[tokio::test]
+async fn lua_sees_clicks_on_chat_items_and_scrolls_the_chat() {
+    let (mut h, _dir) = Harness::with_config(
+        r#"
+        bone.ui.layout = { "chat" }
+        bone.ui.views.user = function(item)
+          local out = {}
+          for i = 1, 12 do out[i] = { { "user line " .. i, "Normal" } } end
+          return out
+        end
+        bone.ui.views.tool = function(item)
+          return { { { "tool " .. item.index, "Normal" } } }
+        end
+        clicks = {}
+        bone.on("mouse", function(ev)
+          clicks[#clicks + 1] = ev
+          return ev.button == "right" or ev.index == 2
+        end)
+        "#,
+    )
+    .await;
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    let call = ToolCall {
+        id: "a".into(),
+        name: "shell".into(),
+        arguments: json!({"command": "ls"}).to_string(),
+    };
+    h.emit::<MessageCompleted>(tool_calls("s-new", vec![call]))
+        .await;
+    let eval = |h: &mut Harness, code: &str| -> Value {
+        let v: mlua::Value = h.app.with_api(|lua| lua.load(code).eval()).unwrap();
+        serde_json::to_value(&v).unwrap()
+    };
+
+    // Following the end: the tool (item 2) is on the last row.
+    let screen = h.screen(30, 6);
+    assert!(screen.ends_with("tool 2"), "{screen}");
+    let view = eval(&mut h, "return bone.chat.view()");
+    assert_eq!(
+        (view["rows"].clone(), view["follow"].clone()),
+        (json!(13), json!(true))
+    );
+    assert_eq!(
+        (view["first"].clone(), view["last"].clone()),
+        (json!(1), json!(2))
+    );
+    assert_eq!(
+        eval(&mut h, "return bone.chat.at(0, 5)"),
+        json!({"index": 2, "line": 1})
+    );
+    assert_eq!(
+        eval(&mut h, "return bone.chat.at(0, 4)"),
+        json!({"index": 1, "line": 12})
+    );
+
+    // A click Lua takes does not start a text selection.
+    h.app.mouse("down", "left", (0, 5));
+    assert!(h.app.selection.is_none());
+    assert_eq!(
+        eval(
+            &mut h,
+            "local c = clicks[1] return { c.action, c.button, c.index, c.line, c.y }"
+        ),
+        json!(["down", "left", 2, 1, 5])
+    );
+    // One it leaves (the user item) selects text as before.
+    h.app.mouse("down", "left", (0, 1));
+    assert!(h.app.selection.is_some());
+    h.app.mouse("up", "left", (0, 1));
+
+    // Scrolling from Lua.
+    assert_eq!(eval(&mut h, "return bone.chat.scroll_to(1)"), json!(true));
+    let screen = h.screen(30, 6);
+    assert!(screen.starts_with("user line 1\n"), "{screen}");
+    assert_eq!(eval(&mut h, "return bone.chat.view().follow"), json!(false));
+    h.lua("bone.chat.scroll(3)").await;
+    assert!(h.screen(30, 6).starts_with("user line 4\n"));
+    h.lua("bone.chat.scroll('bottom')").await;
+    assert!(h.screen(30, 6).ends_with("tool 2"));
+    assert_eq!(eval(&mut h, "return bone.chat.scroll_to(9)"), json!(false));
+}

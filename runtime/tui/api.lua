@@ -777,6 +777,29 @@ function bone.chat.refresh_in(ms)
   return api("chat_refresh_in", ms)
 end
 
+--- The chat item at screen cell x, y (0-based): { index, line }, or nil.
+function bone.chat.at(x, y)
+  return api("chat_at", x, y)
+end
+
+--- The chat window: { top, height, rows, follow, first, last }. `top` is the
+--- first row shown, `rows` the transcript's height, first/last the indexes
+--- of the items on screen.
+function bone.chat.view()
+  return api("chat_view")
+end
+
+--- Scroll so item `index` is at the "top" (default), "center" or "bottom".
+function bone.chat.scroll_to(index, at)
+  return api("chat_scroll_to", index, at)
+end
+
+--- Scroll by `n` rows (negative is up), or to "top" or "bottom" (which
+--- follows new output again).
+function bone.chat.scroll(n)
+  return api("chat_scroll", n)
+end
+
 --- Draw the item at `index` again, or every item (no index).
 function bone.chat.redraw(index)
   return api("chat_redraw", index)

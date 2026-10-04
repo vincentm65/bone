@@ -564,6 +564,28 @@ impl ChatBuffer {
             .into_iter()
     }
 
+    /// Where each drawn item sits: (1-based index, first row, row count).
+    pub fn item_rows(&self) -> Vec<(usize, usize, usize)> {
+        let mut row = 0;
+        let mut out = Vec::new();
+        for (n, item) in self.items().iter().enumerate() {
+            if let Some(c) = self.cache.get(item) {
+                out.push((n + 1, row, c.lines.len()));
+                row += c.lines.len();
+            }
+        }
+        out
+    }
+
+    /// The item drawn on chat row `row` (0-based, from the top of the
+    /// transcript) and the 1-based line within it.
+    pub fn item_at_row(&self, row: usize) -> Option<(usize, usize)> {
+        self.item_rows()
+            .into_iter()
+            .find(|&(_, start, len)| row >= start && row < start + len)
+            .map(|(index, start, _)| (index, row - start + 1))
+    }
+
     pub fn row_count(&self) -> usize {
         self.items()
             .iter()
