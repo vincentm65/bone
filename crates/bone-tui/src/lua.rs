@@ -2113,6 +2113,34 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             app.dirty |= found;
             ret(lua, found)
         }
+        "runtime_overrides" => {
+            let list: Vec<serde_json::Value> = app
+                .config_dir
+                .as_deref()
+                .map(bone_lua::runtime_overrides)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(path, same)| serde_json::json!({ "path": path, "same": same }))
+                .collect();
+            ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
+        }
+        "runtime_reset" => {
+            let (rel, stamp): (String, Option<String>) = args(lua, a)?;
+            let dir = app
+                .config_dir
+                .clone()
+                .ok_or_else(|| err("there is no config directory"))?;
+            // One backup folder per reset (or per `/runtime reset all`).
+            let stamp = stamp.unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs())
+                    .to_string()
+            });
+            let backup = dir.join("runtime-backup").join(&stamp);
+            let to = bone_lua::reset_runtime_file(&dir, &rel, &backup).map_err(err)?;
+            ret(lua, to.to_string_lossy().into_owned())
+        }
         "chat_at" => {
             let (x, y): (u16, u16) = args(lua, a)?;
             match app.chat_at((x, y)) {

@@ -24,7 +24,7 @@ end
 return M
 ```
 
-`bone.builtin(name)` runs the built-in version of a module (`"bone.ui.layout"`) or file (`"tui/defaults.lua"`) and returns what it returns. `/health` lists every override, saying which are plain copies of the built-in (delete those) and which differ, and the TUI mentions them at startup.
+`bone.builtin(name)` runs the built-in version of a module (`"bone.ui.layout"`) or file (`"tui/defaults.lua"`) and returns what it returns. Bone never writes into `~/.bone/runtime/`, so your copies are safe from updates. `/runtime` lists them (and which are still identical to the built-in), and `/runtime reset FILE` or `/runtime reset all` goes back to the built-in versions: your copies are moved to `~/.bone/runtime-backup/<time>/`, not deleted, and the TUI reloads by itself. The TUI mentions overrides at startup and `/health` lists them.
 
 `require("x.y")` finds `~/.bone/lua/x/y.lua` (or `x/y/init.lua`), then each plugin's `lua/`, then the runtime's `lua/` modules.
 

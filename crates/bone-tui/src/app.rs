@@ -1167,7 +1167,7 @@ impl App {
                 .iter()
                 .map(|(rel, same)| {
                     if *same {
-                        format!("{rel} (same as built-in: delete it to get updates)")
+                        format!("{rel} (same as built-in)")
                     } else {
                         format!("{rel} (differs from built-in)")
                     }
@@ -1177,7 +1177,7 @@ impl App {
                 "runtime overrides",
                 "warn",
                 format!(
-                    "these replace built-in files and hide their updates; start one from bone.builtin(...) to change only parts: {}",
+                    "these replace built-in files and hide their updates (/runtime reset FILE goes back to the built-in one): {}",
                     list.join(", ")
                 ),
             ));
@@ -1194,7 +1194,7 @@ impl App {
             .unwrap_or(0);
         if n > 0 {
             self.info(format!(
-                "{n} runtime file{} overridden in runtime/ (they hide built-in updates; see /health)",
+                "{n} runtime file{} overridden in runtime/ (they hide built-in updates; see /runtime)",
                 if n == 1 { "" } else { "s" }
             ));
         }

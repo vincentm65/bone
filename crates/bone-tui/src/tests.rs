@@ -4015,7 +4015,7 @@ async fn runtime_overrides_can_extend_the_builtin_and_are_reported() {
         "{health}"
     );
     assert!(
-        health.contains("lua/bone/ui/statusline.lua (same as built-in: delete it to get updates)"),
+        health.contains("lua/bone/ui/statusline.lua (same as built-in)"),
         "{health}"
     );
     h.app.note_runtime_overrides();
@@ -4092,4 +4092,86 @@ async fn left_and_right_are_columns_of_the_default_layout() {
     let screen = h.screen(30, 4);
     assert!(screen.starts_with("LEFT  │> go\n"), "{screen}");
     assert!(!screen.lines().next().unwrap().ends_with('│'), "{screen}");
+}
+
+#[tokio::test]
+async fn runtime_command_lists_and_resets_copies() {
+    let dir = tempfile::tempdir().unwrap();
+    let ui = dir.path().join("runtime/lua/bone/ui");
+    std::fs::create_dir_all(&ui).unwrap();
+    std::fs::write(ui.join("views.lua"), "-- my views\\n").unwrap();
+    std::fs::write(
+        ui.join("statusline.lua"),
+        bone_lua::builtin_source("lua/bone/ui/statusline.lua").unwrap(),
+    )
+    .unwrap();
+    let mut h = Harness::build(Some(dir.path().to_owned())).await;
+    h.app.load_user_config();
+
+    h.input("/runtime{enter}").await;
+    let m = h.message();
+    assert!(m.contains("lua/bone/ui/views.lua  (changed)"), "{m}");
+    assert!(
+        m.contains("lua/bone/ui/statusline.lua  (same as built-in)"),
+        "{m}"
+    );
+
+    // Tab completion offers the copies after `reset`.
+    let names: Vec<String> = h
+        .app
+        .with_api(|lua| {
+            lua.load(
+                r#"local out = {}
+                   for _, c in ipairs(bone.cmd.complete("runtime", { args = "reset ", argv = { "reset" } }) or {}) do
+                     out[#out + 1] = type(c) == "table" and c.value or c
+                   end
+                   return out"#,
+            )
+            .eval()
+        })
+        .unwrap();
+    assert!(
+        names.contains(&"lua/bone/ui/views.lua".to_owned()),
+        "{names:?}"
+    );
+    assert!(names.contains(&"all".to_owned()), "{names:?}");
+
+    // One file: moved to a backup, the built-in is used again.
+    h.input("/runtime reset lua/bone/ui/views.lua{enter}").await;
+    let m = h.message();
+    assert!(
+        m.starts_with("Reset 1 file to the built-in version."),
+        "{m}"
+    );
+    assert!(!ui.join("views.lua").exists());
+    let backups: Vec<_> = std::fs::read_dir(dir.path().join("runtime-backup"))
+        .unwrap()
+        .collect();
+    assert_eq!(backups.len(), 1);
+    let saved = backups[0]
+        .as_ref()
+        .unwrap()
+        .path()
+        .join("lua/bone/ui/views.lua");
+    assert_eq!(std::fs::read_to_string(saved).unwrap(), "-- my views\\n");
+
+    // Bad names are refused; `all` takes the rest.
+    h.input("/runtime reset nope.lua{enter}").await;
+    assert!(
+        h.message()
+            .contains("nope.lua is not a built-in runtime file"),
+        "{}",
+        h.message()
+    );
+    h.input("/runtime reset lua/bone/ui/views.lua{enter}").await;
+    assert!(h.message().contains("is not overridden"), "{}", h.message());
+    h.input("/runtime reset all{enter}").await;
+    assert!(h.message().starts_with("Reset 1 file"), "{}", h.message());
+    assert!(!ui.join("statusline.lua").exists());
+    h.input("/runtime{enter}").await;
+    assert!(
+        h.message().starts_with("No runtime files are overridden"),
+        "{}",
+        h.message()
+    );
 }

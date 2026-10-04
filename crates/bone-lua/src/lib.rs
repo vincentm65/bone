@@ -530,6 +530,24 @@ pub fn runtime_overrides(config_dir: &Path) -> Vec<(&'static str, bool)> {
         .collect()
 }
 
+/// Stop overriding the built-in runtime file `rel`: move the copy under
+/// `config_dir/runtime/` into `backup` (same relative path), so the
+/// built-in one is used again. Returns where the copy went.
+pub fn reset_runtime_file(config_dir: &Path, rel: &str, backup: &Path) -> Result<PathBuf, String> {
+    if builtin_source(rel).is_none() {
+        return Err(format!("{rel} is not a built-in runtime file"));
+    }
+    let from = config_dir.join("runtime").join(rel);
+    if !from.is_file() {
+        return Err(format!("{rel} is not overridden"));
+    }
+    let to = backup.join(rel);
+    std::fs::create_dir_all(to.parent().expect("a file's directory"))
+        .and_then(|_| std::fs::rename(&from, &to))
+        .map_err(|e| format!("cannot move {}: {e}", from.display()))?;
+    Ok(to)
+}
+
 /// Run a runtime file (see [`runtime_source`]).
 pub fn run_runtime(lua: &Lua, config_dir: Option<&Path>, rel: &str) -> mlua::Result<()> {
     let (src, name) = runtime_source(config_dir, rel)

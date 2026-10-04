@@ -800,6 +800,20 @@ function bone.chat.remove(id)
   return api("chat_remove", id)
 end
 
+--- Your copies of built-in runtime files (in the config dir's runtime/):
+--- bone.runtime.overrides() → { { path, same }, … } (`same`: identical to
+--- the built-in one); bone.runtime.reset(path) moves your copy to
+--- runtime-backup/ so the built-in is used again, returning where it went
+--- (the TUI reloads by itself when the file goes).
+bone.runtime = {
+  overrides = function()
+    return api("runtime_overrides")
+  end,
+  reset = function(path, stamp)
+    return api("runtime_reset", path, stamp)
+  end,
+}
+
 --- The chat item at screen cell x, y (0-based): { index, line }, or nil.
 function bone.chat.at(x, y)
   return api("chat_at", x, y)

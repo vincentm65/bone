@@ -193,4 +193,65 @@ cmd("messages", function()
   bone.api.show(table.concat(bone.api.log(20), "\n"))
 end, { desc = "recent messages and full Lua errors" })
 
+-- /runtime: your copies of built-in runtime files, and going back to the
+-- built-in ones. Bone never writes these copies; this is how to undo them.
+cmd("runtime", function(c)
+  local sub, what = c.args:match("^(%S*)%s*(.-)%s*$")
+  local list = bone.runtime.overrides()
+  if sub == "" then
+    if #list == 0 then
+      return bone.notify("No runtime files are overridden; bone uses its built-in ones.")
+    end
+    local rows = { "Your copies in runtime/ (used instead of the built-in files):" }
+    for _, o in ipairs(list) do
+      rows[#rows + 1] = "  " .. o.path .. (o.same and "  (same as built-in)" or "  (changed)")
+    end
+    rows[#rows + 1] = "/runtime reset FILE or /runtime reset all goes back to the built-in ones."
+    return bone.notify(table.concat(rows, "\n"))
+  end
+  if sub ~= "reset" or what == "" then
+    return bone.notify("usage: /runtime, /runtime reset FILE, /runtime reset all", "error")
+  end
+  local paths = {}
+  if what == "all" then
+    for _, o in ipairs(list) do
+      paths[#paths + 1] = o.path
+    end
+    if #paths == 0 then
+      return bone.notify("Nothing to reset: no runtime files are overridden.")
+    end
+  else
+    paths[1] = what
+  end
+  local stamp = tostring(os.time())
+  local moved, where, core = 0, nil, false
+  for _, path in ipairs(paths) do
+    local ok, to = pcall(bone.runtime.reset, path, stamp)
+    if not ok then
+      return bone.notify(error_text(to), "error")
+    end
+    moved = moved + 1
+    where = to:sub(1, #to - #path - 1)
+    core = core or path:match("^core/") ~= nil
+  end
+  bone.notify(
+    ("Reset %d file%s to the built-in version. Your copies are in %s."):format(moved, moved == 1 and "" or "s", where)
+      .. (core and " Core files apply after /plugin reload." or "")
+  )
+end, {
+  desc = "your copies of built-in runtime files; /runtime reset FILE|all goes back to the built-in",
+  complete = function(ctx)
+    local argv = ctx.argv or {}
+    if #argv <= 1 and not (ctx.args or ""):match("%s$") then
+      return { { value = "reset", desc = "go back to the built-in file" } }
+    end
+    local out = { { value = "all", desc = "every overridden file" } }
+    for _, o in ipairs(bone.runtime.overrides()) do
+      out[#out + 1] = { value = o.path, desc = o.same and "same as built-in" or "changed" }
+    end
+    return out
+  end,
+})
+
 return true
+
