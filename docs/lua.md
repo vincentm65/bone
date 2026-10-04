@@ -696,6 +696,37 @@ bone.ui.prompt = {
 }
 ```
 
+Lua draws the prompt's box; Rust keeps its text. Rust wraps the text inside whatever room the box leaves, scrolls it, paints the selection and puts the cursor exactly where the character is, so mouse selection and editing stay right whatever the box looks like. Every field is optional:
+
+| Field | |
+|---|---|
+| `prefix`, `placeholder` | lines (or functions of `ctx` returning one): before the first row, and shown while empty |
+| `continuation` | the line before wrapped and later rows (default: blanks as wide as `prefix`) |
+| `border` | `"rounded"`, `"single"`, `"double"`, `"thick"`, `"ascii"`, `true` (rounded), or `{ style, chars = "╭╮╰╯─│", hl = "PromptBorder", sides = "tblr" }`; `sides` picks top, bottom, left, right |
+| `background` | a highlight group filling the box |
+| `padding` | columns inside the border on each side, or `{ rows, cols }` |
+| `min`, `max` | text rows shown at least and at most (default 1 and `bone.o.prompt_max_height`); the box grows with the text in between |
+| `top`, `bottom` | a line, or a function of `ctx` returning one, drawn into that edge between the corners (its default group is the border's); it gets its own row when there is no border on that side |
+
+The functions get `ctx = { width, text, lines, empty, cursor = { row, col }, selection = { start, end } or nil, focused, running, elapsed, spinner, session }`; `focused` is false while a popup or panel has the keyboard. `top` and `bottom` run after the text is laid out and also get `rows` (wrapped rows), `height` (rows shown), `text_width`, `scroll` and `cursor.screen = { row, col }`. Positions are from 0, as in `bone.prompt`.
+
+The first bone's input styles, as examples:
+
+```lua
+-- "lines": a rule above and below
+bone.ui.prompt = { prefix = "> ", border = { style = "single", sides = "tb", hl = "InputBorder" } }
+-- "box": rounded, with the state in the bottom edge
+bone.ui.prompt = {
+  prefix = "> ", border = { style = "rounded", hl = "InputBorder" }, padding = 1,
+  bottom = function(ctx)
+    if not ctx.running then return nil end
+    return { { fill = "─" }, { " " .. ctx.spinner .. " thinking " .. (ctx.elapsed or 0) .. "s ", "Dim" }, "─" }
+  end,
+}
+-- "filled": a background and no border
+bone.ui.prompt = { prefix = "> ", background = "InputBackground", padding = { 1, 1 } }
+```
+
 A *line* is a list of items: `{ "text", "Group" }`, a plain string, or `{ fill = "─", hl = "Group" }` (stretches to fill the row). An empty table is a blank line. Lines longer than the width are cut with `…`.
 
 #### Views: how each item looks

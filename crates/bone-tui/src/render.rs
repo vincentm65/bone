@@ -10,7 +10,7 @@
 //!                 then docked Lua panels: bone.ui.panel)
 //! divider         only if bone.ui.divider is defined
 //! above_prompt    region, if defined
-//! prompt          grows with its text; bone.ui.prompt adds a prefix
+//! prompt          grows with its text; bone.ui.prompt draws the box
 //! statusline      only if bone.ui.statusline is defined
 //! ```
 //! Lua windows (the `/` command menu is one) are drawn on top.
@@ -27,7 +27,7 @@ use crate::app::{App, CHAT_WIN, Level, PROMPT_WIN};
 use crate::editor::TextBuffer;
 use crate::layout::Placed;
 use crate::text::{sanitize, width};
-use crate::ui::{Item, render_items};
+use crate::ui::{Border, Item, PromptSpec, render_items};
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
@@ -40,14 +40,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let has = |n: &str| layout.iter().any(|l| l == n);
     let status_h = u16::from(has("statusline") && app.ui_defined("statusline"));
     let divider_h = u16::from(has("divider") && app.ui_defined("divider"));
-    let (prefix, placeholder) = app.prompt_decor();
-    let gutter = prefix
-        .iter()
-        .map(|i| match i {
-            Item::Text(t, _) => width(t),
-            Item::Fill(..) => 0,
-        })
-        .sum::<usize>();
     let main = Rect {
         height: area.height.saturating_sub(msg_rows),
         ..area
@@ -60,11 +52,20 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
     // Rows in `bone.ui.layout` order. Fixed rows first, then regions (never
     // squeezing the chat below a few rows), then the chat takes the rest.
+    let prompt_ctx = app.prompt_ctx(main.width);
+    let spec = if has("prompt") {
+        app.prompt_spec(&prompt_ctx)
+    } else {
+        PromptSpec::default()
+    };
+    let insets = Insets::of(&spec, main.width);
     let prompt_h = if has("prompt") {
-        let rows = prompt_rows(&app.prompt, (main.width as usize).saturating_sub(gutter))
-            .0
-            .len();
-        (rows.clamp(1, app.options.prompt_max_height) as u16)
+        let rows = prompt_rows(&app.prompt, insets.text_width).0.len();
+        let max = spec
+            .max_rows
+            .unwrap_or(app.options.prompt_max_height)
+            .max(spec.min_rows);
+        (rows.clamp(spec.min_rows, max) as u16 + insets.top + insets.bottom)
             .min(main.height.saturating_sub(1 + divider_h + status_h))
     } else {
         0
@@ -156,7 +157,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         );
     }
     let mut cursor = if prompt_area.height > 0 {
-        draw_prompt(frame, app, prompt_area, &prefix, &placeholder)
+        draw_prompt(frame, app, prompt_area, &spec, &insets, prompt_ctx)
     } else {
         None
     };
@@ -234,39 +235,158 @@ fn draw_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     frame.render_widget(Paragraph::new(lines), area);
 }
 
-/// Draw the prompt after `prefix` (continuation rows are indented to
-/// match); `placeholder` shows while it is empty. Returns where the cursor
-/// goes.
+/// What the prompt box takes around its text, and the text's width.
+struct Insets {
+    /// Rows above the text: the top edge (border or `top` line), padding.
+    top: u16,
+    bottom: u16,
+    /// Columns beside it: border, padding.
+    left: u16,
+    right: u16,
+    /// Columns before each text row: the prefix (or continuation).
+    gutter: usize,
+    text_width: usize,
+}
+
+impl Insets {
+    fn of(spec: &PromptSpec, width_cols: u16) -> Self {
+        let b = spec.border.as_ref();
+        let side = |on: fn(&Border) -> bool| u16::from(b.is_some_and(on));
+        let top = u16::from(b.is_some_and(|b| b.top) || spec.has_top) + spec.pad_rows;
+        let bottom = u16::from(b.is_some_and(|b| b.bottom) || spec.has_bottom) + spec.pad_rows;
+        let left = side(|b| b.left) + spec.pad_cols;
+        let right = side(|b| b.right) + spec.pad_cols;
+        let gutter =
+            items_width(&spec.prefix).max(spec.continuation.as_deref().map_or(0, items_width));
+        let text_width = (width_cols as usize)
+            .saturating_sub((left + right) as usize + gutter)
+            .max(1);
+        Insets {
+            top,
+            bottom,
+            left,
+            right,
+            gutter,
+            text_width,
+        }
+    }
+}
+
+fn items_width(items: &[Item]) -> usize {
+    items
+        .iter()
+        .map(|i| match i {
+            Item::Text(t, _) => width(t),
+            Item::Fill(..) => 0,
+        })
+        .sum()
+}
+
+/// Draw the prompt box: background, border and edge lines from
+/// `bone.ui.prompt`, then the text (wrapped, scrolled and selected here, so
+/// the cursor lands exactly). Returns where the cursor goes.
 fn draw_prompt(
     frame: &mut Frame<'_>,
     app: &mut App,
     area: Rect,
-    prefix: &[Item],
-    placeholder: &[Item],
+    spec: &PromptSpec,
+    insets: &Insets,
+    mut ctx: serde_json::Value,
 ) -> Option<Position> {
     if area.width == 0 || area.height == 0 {
         return None;
     }
-    let height = area.height as usize;
-    let theme = &app.theme;
-    let prefix = render_items(prefix, area.width as usize, theme);
-    let gutter = prefix.width();
-    let indent = Span::raw(" ".repeat(gutter));
-    let w = (area.width as usize).saturating_sub(gutter).max(1);
+    let inner = Rect {
+        x: area.x + insets.left.min(area.width),
+        y: area.y + insets.top.min(area.height),
+        width: area.width.saturating_sub(insets.left + insets.right),
+        height: area.height.saturating_sub(insets.top + insets.bottom),
+    };
+    let gutter = insets.gutter;
+    let w = (inner.width as usize).saturating_sub(gutter).max(1);
     let (rows, (crow, ccol)) = prompt_layout(&app.prompt, w);
-    let selection = app.prompt.selection();
-    let selected = theme.hl("Selection");
+    let height = inner.height as usize;
     let win = app.windows.get_mut(&PROMPT_WIN).unwrap();
     // Keep the cursor row visible.
     if crow < win.top {
         win.top = crow;
-    } else if crow >= win.top + height {
+    } else if height > 0 && crow >= win.top + height {
         win.top = crow + 1 - height;
     }
     let top = win.top;
+
+    // The edges get the laid-out box too.
+    let border_hl = spec
+        .border
+        .as_ref()
+        .map_or("PromptBorder", |b| b.hl.as_str())
+        .to_owned();
+    ctx["rows"] = rows.len().into();
+    ctx["height"] = height.into();
+    ctx["text_width"] = w.into();
+    ctx["scroll"] = top.into();
+    ctx["cursor"]["screen"] = serde_json::json!({ "row": crow, "col": ccol });
+    let top_line = spec
+        .has_top
+        .then(|| app.prompt_edge("top", &ctx, &border_hl));
+    let bottom_line = spec
+        .has_bottom
+        .then(|| app.prompt_edge("bottom", &ctx, &border_hl));
+
+    let theme = &app.theme;
+    let fill = spec.background.as_deref().map(|bg| theme.hl(bg));
+    if let Some(style) = fill {
+        frame.render_widget(Block::default().style(style), area);
+    }
+    let border = spec.border.as_ref();
+    let top_row = border.is_some_and(|b| b.top) || spec.has_top;
+    let bottom_row = border.is_some_and(|b| b.bottom) || spec.has_bottom;
+    if top_row {
+        let row = Rect { height: 1, ..area };
+        draw_edge(frame, theme, row, border, true, top_line.as_deref());
+    }
+    if bottom_row && area.height > 1 {
+        let row = Rect {
+            y: area.bottom() - 1,
+            height: 1,
+            ..area
+        };
+        draw_edge(frame, theme, row, border, false, bottom_line.as_deref());
+    }
+    if let Some(b) = border {
+        let style = theme.hl(&b.hl);
+        let from = area.y + u16::from(top_row);
+        let to = area.bottom().saturating_sub(u16::from(bottom_row));
+        for y in from..to {
+            for (on, x) in [(b.left, area.x), (b.right, area.right() - 1)] {
+                if let (true, Some(cell)) = (on, frame.buffer_mut().cell_mut((x, y))) {
+                    cell.set_char(b.chars[5]).set_style(style);
+                }
+            }
+        }
+    }
+    if inner.width == 0 || inner.height == 0 {
+        return None;
+    }
+
+    // A row's gutter: the prefix on the first, the continuation (or blanks
+    // as wide) after; both padded to the same width.
+    let gutter_spans = |items: Option<&[Item]>| -> Vec<Span<'static>> {
+        let mut spans = match items {
+            Some(i) => render_items(i, gutter, theme).spans,
+            None => Vec::new(),
+        };
+        let used: usize = spans.iter().map(|s| width(&s.content)).sum();
+        if used < gutter {
+            spans.push(Span::raw(" ".repeat(gutter - used)));
+        }
+        spans
+    };
+    let selection = app.prompt.selection();
+    let selected = theme.hl("Selection");
     let lines: Vec<Line> = if app.prompt.is_empty() {
-        let mut spans = prefix.spans.clone();
-        spans.extend(render_items(placeholder, w, theme).spans);
+        let mut spans = gutter_spans(Some(&spec.prefix));
+        spans.extend(render_items(&spec.placeholder, w, theme).spans);
         vec![Line::from(spans)]
     } else {
         rows.iter()
@@ -275,9 +395,9 @@ fn draw_prompt(
             .take(height)
             .map(|(i, r)| {
                 let mut spans = if i == 0 {
-                    prefix.spans.clone()
+                    gutter_spans(Some(&spec.prefix))
                 } else {
-                    vec![indent.clone()]
+                    gutter_spans(spec.continuation.as_deref())
                 };
                 let (text, line, start) = r;
                 // The selected chars of this row, if any.
@@ -305,11 +425,63 @@ fn draw_prompt(
             })
             .collect()
     };
-    frame.render_widget(Paragraph::new(lines), area);
+    let mut text = Paragraph::new(lines);
+    if let Some(style) = fill {
+        text = text.style(style);
+    }
+    frame.render_widget(text, inner);
     Some(Position {
-        x: area.x + (gutter + ccol).min(area.width as usize - 1) as u16,
-        y: area.y + (crow - top) as u16,
+        x: inner.x + (gutter + ccol).min(inner.width as usize - 1) as u16,
+        y: inner.y + (crow - top) as u16,
     })
+}
+
+/// The top (or bottom) row of the prompt box: corners where the border
+/// has both sides, and between them the edge's line, or the border.
+fn draw_edge(
+    frame: &mut Frame<'_>,
+    theme: &crate::theme::Theme,
+    row: Rect,
+    border: Option<&Border>,
+    top: bool,
+    line: Option<&[Item]>,
+) {
+    let mut mid = row;
+    if let Some(b) = border {
+        let on = if top { b.top } else { b.bottom };
+        let style = theme.hl(&b.hl);
+        let (lc, rc) = if top {
+            (b.chars[0], b.chars[1])
+        } else {
+            (b.chars[2], b.chars[3])
+        };
+        let buf = frame.buffer_mut();
+        if on && b.left && mid.width > 0 {
+            if let Some(c) = buf.cell_mut((mid.x, mid.y)) {
+                c.set_char(lc).set_style(style);
+            }
+            mid.x += 1;
+            mid.width -= 1;
+        }
+        if on && b.right && mid.width > 0 {
+            if let Some(c) = buf.cell_mut((mid.right() - 1, mid.y)) {
+                c.set_char(rc).set_style(style);
+            }
+            mid.width -= 1;
+        }
+        if on && line.is_none_or(<[Item]>::is_empty) {
+            for x in mid.x..mid.right() {
+                if let Some(c) = buf.cell_mut((x, mid.y)) {
+                    c.set_char(b.chars[4]).set_style(style);
+                }
+            }
+            return;
+        }
+    }
+    if let Some(items) = line.filter(|l| !l.is_empty()) {
+        let l = render_items(items, mid.width as usize, theme);
+        frame.render_widget(Paragraph::new(l), mid);
+    }
 }
 
 /// Char-wrap prompt text (so cursor mapping stays exact). Returns the rows and

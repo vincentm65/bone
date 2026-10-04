@@ -1449,6 +1449,123 @@ async fn blank_slate_draws_only_text() {
     assert!(h.screen(30, 6).ends_with("> say"), "{}", h.screen(30, 6));
 }
 
+/// The last `n` rows of a `w`×`h` screen, and the cursor.
+fn bottom(h: &mut Harness, w: u16, rows: u16, n: usize) -> (Vec<String>, Option<(u16, u16)>) {
+    let mut term = Terminal::new(TestBackend::new(w, rows)).unwrap();
+    term.draw(|f| render::draw(f, &mut h.app)).unwrap();
+    let cursor = term.get_cursor_position().ok().map(|p| (p.x, p.y));
+    let buf = term.backend().buffer();
+    let lines: Vec<String> = (0..rows)
+        .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect())
+        .collect();
+    (lines[lines.len() - n..].to_vec(), cursor)
+}
+
+#[tokio::test]
+async fn lua_draws_the_prompt_box_and_rust_keeps_the_text() {
+    let mut h = Harness::blank().await;
+    h.lua(
+        r##"
+        bone.hl.set("InputBackground", { bg = "#202020" })
+        bone.ui.prompt = {
+          border = { style = "rounded", hl = "InputBorder" },
+          background = "InputBackground",
+          padding = 1,
+          prefix = "› ",
+          continuation = "· ",
+          placeholder = "Message bone…",
+          top = { { " bone ", "InputTitle" }, { fill = "─" } },
+          bottom = function(ctx)
+            local state = ctx.running and "thinking" or (ctx.focused and "ready" or "away")
+            return { { fill = "─" }, " " .. state .. " " .. ctx.rows .. "/" .. ctx.height .. " " }
+          end,
+        }
+        "##,
+    )
+    .await;
+    let (rows, cursor) = bottom(&mut h, 20, 10, 3);
+    assert_eq!(
+        rows,
+        [
+            "╭ bone ────────────╮",
+            "│ › Message bone…  │",
+            "╰─────── ready 1/1 ╯",
+        ]
+    );
+    assert_eq!(cursor, Some((4, 8)));
+
+    // Text wraps inside the box, after the prefix and the continuation,
+    // and the cursor lands where the text is.
+    h.input("hello world foo").await;
+    let (rows, cursor) = bottom(&mut h, 20, 10, 4);
+    assert_eq!(
+        rows,
+        [
+            "╭ bone ────────────╮",
+            "│ › hello world fo │",
+            "│ · o              │",
+            "╰─────── ready 2/2 ╯",
+        ]
+    );
+    assert_eq!(cursor, Some((5, 8)));
+    {
+        let mut term = Terminal::new(TestBackend::new(20, 10)).unwrap();
+        term.draw(|f| render::draw(f, &mut h.app)).unwrap();
+        let buf = term.backend().buffer();
+        let bg = h.app.theme.hl("InputBackground").bg;
+        assert!(bg.is_some());
+        // The background fills the box, padding and text alike.
+        assert_eq!(buf[(1, 7)].style().bg, bg);
+        assert_eq!(buf[(6, 7)].style().bg, bg);
+    }
+
+    // Selection is still drawn by Rust, inside the box.
+    h.lua("bone.prompt.select(6, 11)").await;
+    {
+        let sel = h.app.theme.hl("Selection");
+        let mut term = Terminal::new(TestBackend::new(20, 10)).unwrap();
+        term.draw(|f| render::draw(f, &mut h.app)).unwrap();
+        let buf = term.backend().buffer();
+        let selected = |x: u16| {
+            buf[(x, 7)].style().add_modifier.contains(sel.add_modifier)
+                && buf[(x, 7)].style().bg == sel.bg
+        };
+        // "world" is columns 10..15 (border, pad, prefix, then "hello ").
+        assert!(!selected(9) && selected(10) && selected(14) && !selected(15));
+    }
+
+    // The edges follow the session: running shows in the bottom border.
+    h.input("{ctrl+u}go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    let (rows, _) = bottom(&mut h, 20, 10, 1);
+    assert_eq!(rows, ["╰──── thinking 1/1 ╯"]);
+}
+
+#[tokio::test]
+async fn prompt_box_sides_and_edges_without_a_border() {
+    let mut h = Harness::blank().await;
+    // Rules above and below only, like the old bone.
+    h.lua(r#"bone.ui.prompt = { border = { style = "single", sides = "tb" }, prefix = "> " }"#)
+        .await;
+    h.input("hi").await;
+    let (rows, cursor) = bottom(&mut h, 12, 6, 3);
+    assert_eq!(rows, ["────────────", "> hi        ", "────────────"]);
+    assert_eq!(cursor, Some((4, 4)));
+
+    // No border: a top line still gets its row, and a bad style is an error.
+    h.lua(r#"bone.ui.prompt = { top = function(ctx) return ctx.lines .. " line" end }"#)
+        .await;
+    let (rows, _) = bottom(&mut h, 12, 6, 2);
+    assert_eq!(rows, ["1 line      ", "hi          "]);
+    h.lua(r#"bone.ui.prompt = { border = "wavy" }"#).await;
+    h.screen(12, 6);
+    assert!(
+        h.message().contains("not one of rounded"),
+        "{}",
+        h.message()
+    );
+}
+
 #[tokio::test]
 async fn mouse_wheel_scrolls_the_chat() {
     let mut h = Harness::blank().await;

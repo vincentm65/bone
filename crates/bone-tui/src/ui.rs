@@ -5,7 +5,9 @@
 //! - `bone.ui.regions[name]` fills `top`, `left`, `right` and `above_prompt`.
 //! - `bone.ui.statusline(ctx)` and `bone.ui.divider(ctx)` draw those rows;
 //!   without them the rows are not there.
-//! - `bone.ui.prompt` sets the prompt's prefix and placeholder.
+//! - `bone.ui.prompt` sets how the prompt box looks: prefix, placeholder,
+//!   border, background, padding and lines in its top and bottom edges.
+//!   Rust keeps the text: it wraps, scrolls, selects and places the cursor.
 //!
 //! A line is a string or a list of items: `"text"`, `{ text, hl }`,
 //! `{ fill = "─", hl = ... }` (stretches to fill the row) or `"%="` (a
@@ -23,6 +25,97 @@ use crate::text::{sanitize, truncate, width};
 use crate::theme::Theme;
 
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+
+/// `bone.ui.prompt`, as Rust needs it to lay out and draw the box.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PromptSpec {
+    pub prefix: Vec<Item>,
+    /// Before wrapped and later rows; default: blank, as wide as `prefix`.
+    pub continuation: Option<Vec<Item>>,
+    pub placeholder: Vec<Item>,
+    pub border: Option<Border>,
+    /// A highlight group filling the box.
+    pub background: Option<String>,
+    /// Blank rows above and below the text, and columns beside it, inside
+    /// the border.
+    pub pad_rows: u16,
+    pub pad_cols: u16,
+    /// Text rows the box shows at least, and at most (default
+    /// `bone.o.prompt_max_height`).
+    pub min_rows: usize,
+    pub max_rows: Option<usize>,
+    /// `top`/`bottom` lines are set: they get a row even without a border.
+    pub has_top: bool,
+    pub has_bottom: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Border {
+    /// Top-left, top-right, bottom-left, bottom-right, horizontal, vertical.
+    pub chars: [char; 6],
+    pub hl: String,
+    pub top: bool,
+    pub bottom: bool,
+    pub left: bool,
+    pub right: bool,
+}
+
+const BORDERS: [(&str, &str); 5] = [
+    ("rounded", "╭╮╰╯─│"),
+    ("single", "┌┐└┘─│"),
+    ("double", "╔╗╚╝═║"),
+    ("thick", "┏┓┗┛━┃"),
+    ("ascii", "++++-|"),
+];
+
+/// `border = "rounded"`, `true`, or `{ style | chars, hl, sides = "tblr" }`.
+fn border_of(v: Value) -> mlua::Result<Option<Border>> {
+    let (style, hl, sides) = match v {
+        Value::Nil | Value::Boolean(false) => return Ok(None),
+        Value::Boolean(true) => ("rounded".to_owned(), None, None),
+        Value::String(s) => (s.to_str()?.to_owned(), None, None),
+        Value::Table(t) => (
+            t.get::<Option<String>>("chars")?
+                .or(t.get::<Option<String>>("style")?)
+                .unwrap_or_else(|| "rounded".into()),
+            t.get::<Option<String>>("hl")?,
+            t.get::<Option<String>>("sides")?,
+        ),
+        other => {
+            return Err(mlua::Error::runtime(format!(
+                "border is a style name or a table, not {}",
+                other.type_name()
+            )));
+        }
+    };
+    let chars = BORDERS
+        .iter()
+        .find(|(name, _)| *name == style)
+        .map_or(style.as_str(), |(_, c)| c);
+    let chars: Vec<char> = chars.chars().collect();
+    let chars: [char; 6] = chars.try_into().map_err(|_| {
+        mlua::Error::runtime(format!(
+            "border style {style:?} is not one of rounded, single, double, thick, ascii, or 6 characters"
+        ))
+    })?;
+    let sides = sides.unwrap_or_else(|| "tblr".into());
+    Ok(Some(Border {
+        chars,
+        hl: hl.unwrap_or_else(|| "PromptBorder".into()),
+        top: sides.contains('t'),
+        bottom: sides.contains('b'),
+        left: sides.contains('l'),
+        right: sides.contains('r'),
+    }))
+}
+
+/// A line, or a function of `ctx` returning one.
+fn line_of(lua: &mlua::Lua, v: Value, ctx: &Json, hl: &str) -> mlua::Result<Vec<Item>> {
+    match v {
+        Value::Function(f) => parse_items(f.call::<Value>(to_lua(lua, ctx)?)?, hl),
+        v => parse_items(v, hl),
+    }
+}
 
 pub fn spinner() -> char {
     let ms = std::time::SystemTime::now()
@@ -237,21 +330,88 @@ impl App {
         ui().unwrap_or(false)
     }
 
-    /// `bone.ui.prompt = { prefix = line, placeholder = line }`: what goes
-    /// before the prompt text and what shows while it is empty. Both default
-    /// to nothing.
-    pub fn prompt_decor(&mut self) -> (Vec<Item>, Vec<Item>) {
+    /// `bone.ui.prompt`, read with `ctx` (fields may be functions of it).
+    /// Nothing set means a bare prompt.
+    pub fn prompt_spec(&mut self, ctx: &Json) -> PromptSpec {
         self.guarded("prompt", |lua| {
             let ui: Table = lua.globals().get::<Table>("bone")?.get("ui")?;
             let Some(p) = ui.get::<Option<Table>>("prompt")? else {
-                return Ok((Vec::new(), Vec::new()));
+                return Ok(PromptSpec::default());
             };
-            Ok((
-                parse_items(p.get("prefix")?, "UserPrompt")?,
-                parse_items(p.get("placeholder")?, "Placeholder")?,
-            ))
+            let line = |key: &str, hl: &str| -> mlua::Result<Vec<Item>> {
+                line_of(lua, p.get(key)?, ctx, hl)
+            };
+            let border = border_of(p.get("border")?)?;
+            let (pad_rows, pad_cols) = match p.get::<Value>("padding")? {
+                Value::Nil => (0, 0),
+                Value::Integer(n) => (0, n.max(0) as u16),
+                Value::Number(n) => (0, n.max(0.0) as u16),
+                Value::Table(t) => (
+                    t.get::<Option<u16>>(1)?.unwrap_or(0),
+                    t.get::<Option<u16>>(2)?.unwrap_or(0),
+                ),
+                other => {
+                    return Err(mlua::Error::runtime(format!(
+                        "padding is a number or {{ rows, cols }}, not {}",
+                        other.type_name()
+                    )));
+                }
+            };
+            let continuation = match p.get::<Value>("continuation")? {
+                Value::Nil => None,
+                v => Some(line_of(lua, v, ctx, "UserPrompt")?),
+            };
+            Ok(PromptSpec {
+                prefix: line("prefix", "UserPrompt")?,
+                continuation,
+                placeholder: line("placeholder", "Placeholder")?,
+                background: p.get("background")?,
+                pad_rows,
+                pad_cols,
+                min_rows: p.get::<Option<usize>>("min")?.unwrap_or(1).max(1),
+                max_rows: p.get::<Option<usize>>("max")?,
+                has_top: !matches!(p.get::<Value>("top")?, Value::Nil),
+                has_bottom: !matches!(p.get::<Value>("bottom")?, Value::Nil),
+                border,
+            })
         })
         .unwrap_or_default()
+    }
+
+    /// The line `bone.ui.prompt.top` or `.bottom` draws into that edge.
+    pub fn prompt_edge(&mut self, edge: &str, ctx: &Json, hl: &str) -> Vec<Item> {
+        self.guarded("prompt", |lua| {
+            let ui: Table = lua.globals().get::<Table>("bone")?.get("ui")?;
+            let Some(p) = ui.get::<Option<Table>>("prompt")? else {
+                return Ok(Vec::new());
+            };
+            line_of(lua, p.get(edge)?, ctx, hl)
+        })
+        .unwrap_or_default()
+    }
+
+    /// What `bone.ui.prompt` functions get: the box and its state. Layout
+    /// fields (`rows`, `height`, `text_width`, `cursor.screen`) only reach
+    /// `top` and `bottom`, which are drawn after the text is laid out.
+    pub fn prompt_ctx(&self, width_cols: u16) -> Json {
+        let (row, col) = self.prompt.cursor();
+        let selection = self.prompt.selection().map(|(a, b)| {
+            json!({ "start": { "row": a.0, "col": a.1 }, "end": { "row": b.0, "col": b.1 } })
+        });
+        let session = self.session_ctx(Some(self.current));
+        json!({
+            "width": width_cols,
+            "text": self.prompt.text(),
+            "lines": self.prompt.lines().len(),
+            "empty": self.prompt.is_empty(),
+            "cursor": { "row": row, "col": col },
+            "selection": selection,
+            "focused": self.focused_popup().is_none() && self.focused_panel().is_none(),
+            "running": session["running"].as_bool().unwrap_or(false),
+            "elapsed": session["elapsed"],
+            "spinner": spinner().to_string(),
+            "session": session,
+        })
     }
 
     /// Run Lua that may fail; a failure is reported once and `name` is
