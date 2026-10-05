@@ -122,7 +122,7 @@ cmd("runtime", function(c)
   end
   bone.notify(
     ("Reset %d file%s to the built-in version. Your copies are in %s."):format(moved, moved == 1 and "" or "s", where)
-      .. (core and " Core files apply after /plugin reload." or "")
+      .. (core and " Core files apply when the core reloads (by itself, or /plugin reload)." or "")
   )
 end, {
   desc = "your copies of built-in runtime files; /runtime reset FILE|all goes back to the built-in",

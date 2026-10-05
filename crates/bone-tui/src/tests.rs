@@ -4848,3 +4848,6 @@ async fn setup_adds_a_provider_its_key_and_packages() {
     h.input("{enter}").await;
     assert!(!h.screen(100, 30).contains("Done."));
 }
+
+#[path = "reload_tests.rs"]
+mod reload_tests;

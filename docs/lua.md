@@ -434,6 +434,8 @@ Lua values do not survive a reload, so keep what must last in `bone.state`. `bon
 
 Core plugins can be switched off and on the same way: `plugin/unload`, `plugin/load` and `plugin/reload` (also `/plugin unload|load|reload name` in the TUI, which handles the plugin's TUI half too). Each is a reload with that plugin left out or put back; the choice lasts until the server restarts. A plugin installed while bone runs is picked up by any reload.
 
+When the TUI runs the core in its own process (not `--connect`), it also reloads the core by itself (with `core/reload`) when a file the core loads changes: `core.lua`, a plugin's `core.lua`, `runtime/core/`, or a module either side can `require` (`lua/`, a plugin's `lua/`, `runtime/lua/`). `bone.o.autoreload = false` turns this off.
+
 ### Environment overrides
 
 For one-off runs, these override `core.lua`: `BONE_BASE_URL` + `BONE_MODEL` (use this endpoint), `BONE_MODEL` alone (another model on the configured provider), `BONE_API_KEY`, `BONE_REASONING_EFFORT`, `BONE_SYSTEM_PROMPT`, `BONE_DATA_DIR`, and `BONE_APPROVAL=auto` (the approve plugin, if installed, never asks).
@@ -441,6 +443,16 @@ For one-off runs, these override `core.lua`: `BONE_BASE_URL` + `BONE_MODEL` (use
 ## TUI (`tui.lua`)
 
 The TUI has no modes: keys go to the prompt, and while a focused window is open (a popup, the session picker, any `bone.ui.select`) its own keys apply first. The built-in contexts are `main`, `popup` and `panel` (while a panel has the keyboard); Lua can define and focus named contexts without changing modeless text entry. Precedence: a focused popup, then a focused panel, then a focused named context, then `main`.
+
+### Reloading
+
+The TUI watches the Lua it loads (`tui.lua`, `lua/`, `colors/`, `runtime/`, the plugins that load, and a trusted project's `.bone/`) and reloads it when a file changes and then stays the same for one more check (a quarter of a second), so a file caught halfway through being saved is not loaded. It reloads the way it starts: a fresh Lua state runs the runtime, the defaults, the plugins, `tui.lua` and the `ready` handlers, so deleting a line really removes what it made and edited modules load anew. Options keep the values you gave them; the session, chats (with items you added), prompt and history are untouched.
+
+The new state loads while the current one keeps running, and it is taken only if loading it raised no Lua error the current one did not also have (the same file and message; only line numbers may differ). Otherwise the current configuration and the built-in options stay as they were, the error is shown (and listed by `/health`), and the next save tries again; requests the failed load already sent to the core are not undone. When it is taken, the old state's `bone.plugin.on_shutdown` hooks run and it is dropped with everything it made (keymaps, commands, event handlers, popups, panels, running `bone.job`s, colors), and replies to its requests are ignored. `bone.plugin.state` tables are saved before the new state loads, so it reads them; what a shutdown hook writes into one during a reload is saved but not seen by the new state, so save plugin state as it changes rather than in `on_shutdown`. Panels do not carry over; `ready` gets `{ reload = true, panels = { … } }`, the ids of the panels that were open, so a plugin can open its panel again.
+
+Files only the core loads, and modules either side can `require`, reload the core too when it runs in the same process (see [Reloading](#reloading); not with `--connect`). `bone.o.autoreload = false` stops watching.
+
+Every key comes from Lua, with one exception: when `ctrl+c` is not mapped where it is pressed (say, a broken or emptied `runtime/tui/defaults.lua`), or is mapped to a Lua function that errors or returns `false`, it runs the built-in `interrupt`, so bone can always be quit.
 
 ### Keys
 
@@ -486,6 +498,7 @@ bone.o.tool_preview_lines = 4  -- rows of tool output under each call (style plu
 bone.o.diff_preview_lines = 8  -- rows of diff under each edit (style plugin)
 bone.o.prompt_max_height = 10
 bone.o.mouse = false           -- leave the mouse to the terminal (its own selection, no wheel)
+bone.o.autoreload = false      -- stop reloading Lua when its files change
 ```
 
 #### Dynamic options
@@ -587,7 +600,7 @@ bone.off(id)
 ```
 
 - Every server notification, by method, with its params: `turn/started`, `turn/steered`, `message/delta`, `message/completed`, `tool/started`, `tool/output`, `tool/finished`, `ask/requested`, `ask/resolved`, `turn/finished`.
-- `ready`: after `tui.lua` has run.
+- `ready`: after `tui.lua` has run. After a reload its data is `{ reload = true, panels }` (see [Reloading](#reloading-1)); at startup it has none.
 - `submit`: `{ text }` before a message is sent. Return `false` to cancel, or a string to send instead.
 
 
@@ -771,7 +784,7 @@ Rust keeps the session data, wraps text, caches, scrolls and paints. Everything 
 
 `examples/plugins/style/` is another complete look built only from this API. Install it with `cp -r examples/plugins/style ~/.bone/plugins/`, or copy the parts you want.
 
-The TUI watches `tui.lua` and the `lua/`, `runtime/`, `colors/` and `plugins/` folders of the config directory. When a Lua file there changes, it reloads the way it starts: shutdown hooks run and plugin state is saved, the Lua state and everything made from it (keymaps, commands, event handlers, popups, panels, running `bone.job`s, colors) are dropped, and a fresh state runs the runtime, the defaults, the plugins and `tui.lua`. So deleting a line really removes what it made, and edited modules load anew. Options keep the values you gave them; the session, chats (with items you added), prompt and history are untouched. `bone.ui.clear()` removes every view, region, action and UI function, for a config that starts from a blank screen.
+The TUI reloads your Lua when it changes (see [Reloading](#reloading-1)). `bone.ui.clear()` removes every view, region, action and UI function, for a config that starts from a blank screen.
 
 #### The prompt
 

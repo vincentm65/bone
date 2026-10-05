@@ -53,7 +53,7 @@ pub use crate::headless::Headless;
 
 /// At most this often while content streams in.
 const FRAME: Duration = Duration::from_millis(16);
-/// Redraw rate for spinners and elapsed time.
+/// How often Lua files are checked for changes.
 const LUA_RELOAD_POLL: Duration = Duration::from_millis(250);
 
 pub struct RunOptions {
@@ -63,6 +63,9 @@ pub struct RunOptions {
     pub config_dir: Option<std::path::PathBuf>,
     /// Resume a session at startup: `Some(None)` for the newest.
     pub resume: Option<Option<String>>,
+    /// The core runs in this process, from the same config dir, so edits
+    /// to its Lua files reload it (`core/reload`). Off for `--connect`.
+    pub reload_core: bool,
 }
 
 /// Run the TUI on `conn` until the user quits. Returns a message to print
@@ -80,10 +83,18 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
         .await
         .unwrap_or_default();
     let mut app = App::new(Arc::new(client), tx, opts.cwd, opts.config_dir);
+    app.reload_core = opts.reload_core;
     app.settings = settings;
     app.load_user_config();
     app.note_runtime_overrides();
-    let mut lua_state = lua_snapshot(app.config_dir.as_deref());
+    let mut watched_project = app.project_dir();
+    // A real interval: a sleep made anew each pass would never fire while
+    // output streams or a spinner draws.
+    let mut lua_poll = tokio::time::interval(LUA_RELOAD_POLL);
+    lua_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut watching = true;
+    let mut lua_pending = None;
+    let mut lua_state = lua_snapshot(app.config_dir.as_deref(), watched_project.as_deref());
     if let Some(id) = opts.resume {
         app.resume(id);
     }
@@ -151,10 +162,35 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
                 }
                 last_draw = Instant::now();
             }
-            _ = tokio::time::sleep(LUA_RELOAD_POLL), if app.config_dir.is_some() => {
-                let next = lua_snapshot(app.config_dir.as_deref());
-                if next != lua_state {
-                    lua_state = next;
+            _ = lua_poll.tick(), if app.config_dir.is_some() => {
+                if !app.options.autoreload {
+                    watching = false;
+                    continue;
+                }
+                // Turned back on: compare from now, not from before.
+                if !watching {
+                    watching = true;
+                    lua_pending = None;
+                    lua_state = lua_snapshot(app.config_dir.as_deref(), watched_project.as_deref());
+                    continue;
+                }
+                // Trusting or untrusting the project (or a reload) changes
+                // what is watched: start comparing again, without a reload.
+                let project = app.project_dir();
+                if project != watched_project {
+                    watched_project = project;
+                    lua_pending = None;
+                    lua_state = lua_snapshot(app.config_dir.as_deref(), watched_project.as_deref());
+                    continue;
+                }
+                let next = lua_snapshot(app.config_dir.as_deref(), watched_project.as_deref());
+                let Some(changed) = settle(&mut lua_state, &mut lua_pending, next) else {
+                    continue;
+                };
+                if changed.core && app.reload_core {
+                    app.reload_core_config();
+                }
+                if changed.tui {
                     app.reload_user_config();
                 }
             }
@@ -165,34 +201,131 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
     Ok(app.quit.flatten())
 }
 
+/// What each side's Lua files looked like, as hashes of paths and metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LuaSources {
+    tui: u64,
+    core: u64,
+}
+
+/// Which sides changed, once a change has settled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Changed {
+    tui: bool,
+    core: bool,
+}
+
+/// Take `next` only once it has stayed the same for a whole poll, so a file
+/// caught halfway through being written (or a save touching several files)
+/// is not loaded. `pending` is what the last poll saw that differed from
+/// `state`. Returns which sides changed when `state` moves on.
+fn settle(
+    state: &mut LuaSources,
+    pending: &mut Option<LuaSources>,
+    next: LuaSources,
+) -> Option<Changed> {
+    if next == *state {
+        *pending = None;
+        return None;
+    }
+    if *pending != Some(next) {
+        *pending = Some(next);
+        return None;
+    }
+    let changed = Changed {
+        tui: next.tui != state.tui,
+        core: next.core != state.core,
+    };
+    *state = next;
+    *pending = None;
+    Some(changed)
+}
+
+/// Which side loads a file, by its path under the config dir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Watched {
+    Tui,
+    Core,
+    Both,
+}
+
+/// `tui.lua`, `colors/` and `runtime/tui/` are the TUI's; `core.lua` and
+/// `runtime/core/` the core's, and the same inside a plugin. Modules (`lua/`,
+/// `runtime/lua/`) can be required by either.
+fn side_of(rel: &Path) -> Watched {
+    let parts: Vec<&str> = rel.iter().filter_map(|p| p.to_str()).collect();
+    let parts = match parts.as_slice() {
+        ["plugins", _, rest @ ..] => rest,
+        ["runtime", rest @ ..] => rest,
+        all => all,
+    };
+    match parts {
+        ["tui.lua"] | ["tui", ..] | ["colors", ..] => Watched::Tui,
+        ["core.lua"] | ["core", ..] => Watched::Core,
+        _ => Watched::Both,
+    }
+}
+
 /// A deliberately small, dependency-free watcher. Editors commonly save by
 /// replacing files, so we hash paths and metadata instead of holding file
 /// handles open. Reloading is handled on the TUI task, keeping Lua callbacks
-/// single-threaded and preserving the active session.
-fn lua_snapshot(dir: Option<&Path>) -> u64 {
-    let Some(dir) = dir else { return 0 };
+/// single-threaded and preserving the active session. A trusted project's
+/// `.bone/` (`project`) is the TUI's only.
+fn lua_snapshot(dir: Option<&Path>, project: Option<&Path>) -> LuaSources {
+    let Some(dir) = dir else {
+        return LuaSources { tui: 0, core: 0 };
+    };
     let mut files = Vec::new();
-    // Only where TUI Lua is loaded from: the config dir also holds sessions
+    // Only where Lua is loaded from: the config dir also holds sessions
     // and other data that would be walked on every poll.
-    let tui = dir.join("tui.lua");
-    if tui.is_file() {
-        files.push(tui);
-    }
-    for sub in ["lua", "runtime", "colors", "plugins"] {
-        collect_lua_files(&dir.join(sub), &mut files);
-    }
-    files.sort();
-    let mut h = DefaultHasher::new();
-    for path in files {
-        path.hash(&mut h);
-        if let Ok(meta) = fs::metadata(&path) {
-            meta.len().hash(&mut h);
-            meta.modified().ok().hash(&mut h);
+    for name in ["tui.lua", "core.lua"] {
+        let path = dir.join(name);
+        if path.is_file() {
+            files.push(path);
         }
     }
-    h.finish()
+    for sub in ["lua", "runtime", "colors"] {
+        collect_lua_files(&dir.join(sub), &mut files);
+    }
+    // Only the plugins that load (not `_name` or `.name`).
+    for plugin in bone_lua::plugins(dir) {
+        collect_lua_files(&plugin, &mut files);
+    }
+    files.sort();
+    let mut tui = DefaultHasher::new();
+    let mut core = DefaultHasher::new();
+    for path in &files {
+        let side = side_of(path.strip_prefix(dir).unwrap_or(path));
+        if side != Watched::Core {
+            hash_file(path, &mut tui);
+        }
+        if side != Watched::Tui {
+            hash_file(path, &mut core);
+        }
+    }
+    if let Some(project) = project {
+        let mut files = Vec::new();
+        collect_lua_files(project, &mut files);
+        files.sort();
+        for path in &files {
+            hash_file(path, &mut tui);
+        }
+    }
+    LuaSources {
+        tui: tui.finish(),
+        core: core.finish(),
+    }
 }
 
+fn hash_file(path: &Path, h: &mut DefaultHasher) {
+    path.hash(h);
+    if let Ok(meta) = fs::metadata(path) {
+        meta.len().hash(h);
+        meta.modified().ok().hash(h);
+    }
+}
+
+/// Every `*.lua` under `dir`, skipping hidden folders (a plugin's `.git`).
 fn collect_lua_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = fs::read_dir(dir) else {
         return;
@@ -200,7 +333,9 @@ fn collect_lua_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_lua_files(&path, out);
+            if !entry.file_name().to_string_lossy().starts_with('.') {
+                collect_lua_files(&path, out);
+            }
         } else if path.extension().is_some_and(|ext| ext == "lua") {
             out.push(path);
         }

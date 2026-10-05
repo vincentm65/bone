@@ -43,6 +43,7 @@ impl Headless {
             .await
             .unwrap_or_default();
         let mut app = App::new(Arc::new(client), tx, opts.cwd, opts.config_dir);
+        app.reload_core = opts.reload_core;
         app.settings = settings;
         app.load_user_config();
         if let Some(id) = opts.resume {

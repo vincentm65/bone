@@ -260,6 +260,7 @@ async fn run(mode: Mode, loaded: Option<Loaded>, config_dir: PathBuf) -> ExitCod
             // Dropping the listener removes the socket file.
         }
         Mode::Tui { connect, resume } => {
+            let reload_core = connect.is_none();
             let conn = match connect {
                 Some(path) => match bone_client::connect_unix(&path).await {
                     Ok(c) => c,
@@ -279,6 +280,7 @@ async fn run(mode: Mode, loaded: Option<Loaded>, config_dir: PathBuf) -> ExitCod
                     cwd,
                     config_dir: Some(config_dir),
                     resume,
+                    reload_core,
                 },
             )
             .await

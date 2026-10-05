@@ -76,10 +76,33 @@ fn popup_event(p: &crate::app::Popup) -> serde_json::Value {
 }
 
 /// Create the TUI Lua state with the runtime API and default keymaps.
+/// What identifies a load error across reloads: where it happened and what
+/// it said, with numbers blanked so the same error on another line (after an
+/// edit above it) still matches.
+fn failure_key((context, message): &(String, String)) -> String {
+    let mut key = format!("{context}\n");
+    let mut digits = false;
+    for c in message.chars() {
+        if c.is_ascii_digit() {
+            if !digits {
+                key.push('#');
+            }
+            digits = true;
+        } else {
+            key.push(c);
+            digits = false;
+        }
+    }
+    key
+}
+
 pub fn init(app: &mut App, config_dir: Option<PathBuf>) {
     let lua = match setup(config_dir.clone()) {
         Ok(lua) => lua,
         Err(e) => {
+            if let Some(errors) = &mut app.load_errors {
+                errors.push(("lua".to_owned(), short_error(&e)));
+            }
             app.error(format!("lua: {}", short_error(&e)));
             return;
         }
@@ -656,6 +679,9 @@ impl App {
     }
 
     pub fn lua_error(&mut self, context: &str, e: &mlua::Error) {
+        if let Some(errors) = &mut self.load_errors {
+            errors.push((context.to_owned(), short_error(e)));
+        }
         self.log.push(format!("{context}: {e}"));
         // The last few in full, for /health.
         self.lua_errors.push(format!("{context}: {e}"));
@@ -667,8 +693,20 @@ impl App {
 
     /// Load each plugin's `tui.lua` (as that plugin), then
     /// `<config dir>/tui.lua`, then a trusted project's `.bone/tui.lua`, then
-    /// fire `ready`.
+    /// fire `ready`. Where this had errors is remembered for reloads.
     pub fn load_user_config(&mut self) {
+        self.load_user_files();
+        self.fire("ready", serde_json::Value::Null);
+        self.load_failures = self
+            .load_errors
+            .take()
+            .unwrap_or_default()
+            .iter()
+            .map(failure_key)
+            .collect();
+    }
+
+    fn load_user_files(&mut self) {
         if let Some(dir) = self.config_dir.clone() {
             // Plugins switched off in settings.json are listed, not loaded.
             let disabled: Vec<String> = self
@@ -699,7 +737,6 @@ impl App {
             }
             self.load_project();
         }
-        self.fire("ready", serde_json::Value::Null);
     }
 
     /// Set the options saved under `tui` (or just `only`), as
@@ -743,24 +780,63 @@ impl App {
         self.dirty = true;
     }
 
-    /// Load the Lua configuration again after a file changed: shut the
-    /// current Lua down (shutdown hooks, saved plugin state), drop it and
-    /// everything it made, and start a fresh state the way startup does
-    /// (API, defaults, plugins, `tui.lua`). The session, prompt, chats and
-    /// options' values are Rust's and stay.
+    /// Load the Lua configuration again after a file changed, the way
+    /// startup does (API, defaults, plugins, `tui.lua`, then `ready` with
+    /// `{ reload = true, panels = { ids open before } }`), into a fresh state
+    /// while the current one waits. The new one is taken only if it loaded
+    /// without a Lua error the current one did not also have; otherwise the
+    /// current one and the built-in options stay as they were and the error
+    /// is shown. On success the old state's shutdown hooks run and it is
+    /// dropped. The session, prompt, chats and options' values are Rust's
+    /// and stay.
     pub fn reload_user_config(&mut self) {
-        self.run_shutdown(None);
+        // The new state reads plugin state from disk, so write it first.
+        self.save_plugin_states(None);
         self.carried_options = self
             .dynamic_options
             .iter()
             .map(|(name, o)| (name.clone(), o.value.clone()))
             .collect();
-        self.forget_lua();
+        let panels: Vec<String> = self.panels.iter().map(|p| p.id.clone()).collect();
+        let options = self.options.clone();
+        let old = self.swap_lua_side(crate::app::LuaSide::empty());
+        self.load_errors = Some(Vec::new());
         let dir = self.config_dir.clone();
         init(self, dir);
-        self.load_user_config();
+        self.load_user_files();
         self.carried_options.clear();
-        self.dirty = true;
+        // Its handlers are part of the new config: an error there counts too.
+        self.fire(
+            "ready",
+            serde_json::json!({ "reload": true, "panels": panels }),
+        );
+        let errors = self.load_errors.take().unwrap_or_default();
+        let fresh = errors
+            .iter()
+            .find(|e| !self.load_failures.contains(&failure_key(e)))
+            .cloned();
+        if self.lua.is_none() || fresh.is_some() {
+            let new = self.swap_lua_side(old);
+            self.retire_lua_side(new);
+            self.options = options;
+            let (context, message) = fresh.unwrap_or_else(|| ("lua".into(), "cannot start".into()));
+            // The restored state's list, for /health.
+            self.lua_errors
+                .push(format!("reload: {context}: {message}"));
+            if self.lua_errors.len() > 3 {
+                self.lua_errors.remove(0);
+            }
+            self.error(format!(
+                "Lua reload failed, kept the previous configuration. {context}: {message}"
+            ));
+            return;
+        }
+        self.load_failures = errors.iter().map(failure_key).collect();
+        // The old state's shutdown hooks run on it, just before it goes.
+        let new = self.swap_lua_side(old);
+        self.run_shutdown(None);
+        let old = self.swap_lua_side(new);
+        self.retire_lua_side(old);
         self.info("Lua configuration reloaded");
     }
 
@@ -1622,7 +1698,10 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 let called = app.as_owner_of(cb, |app| {
                     app.with_api(|lua| {
                         let cbs: Table = lua.named_registry_value(CALLBACKS)?;
-                        let f: Function = cbs.get(cb)?;
+                        // Gone with a Lua state a reload replaced or rejected.
+                        let Some(f) = cbs.get::<Option<Function>>(cb)? else {
+                            return Ok(());
+                        };
                         cbs.set(cb, Value::Nil)?;
                         match r {
                             Ok(v) => f.call::<()>(to_lua(lua, &v)?),
@@ -1653,7 +1732,10 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 let called = app.as_owner_of(cb, |app| {
                     app.with_api(|lua| {
                         let cbs: Table = lua.named_registry_value(CALLBACKS)?;
-                        let f: Function = cbs.get(cb)?;
+                        // Gone with a Lua state a reload replaced or rejected.
+                        let Some(f) = cbs.get::<Option<Function>>(cb)? else {
+                            return Ok(());
+                        };
                         cbs.set(cb, Value::Nil)?;
                         match r {
                             Ok(v) => f.call::<()>(to_lua(lua, &v)?),

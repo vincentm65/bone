@@ -38,6 +38,10 @@ impl Key {
         Self::new(KeyCode::Char(c), KeyModifiers::NONE)
     }
 
+    pub fn ctrl_c() -> Self {
+        Self::new(KeyCode::Char('c'), KeyModifiers::CONTROL)
+    }
+
     /// The character this key types, if any.
     pub fn text(&self) -> Option<char> {
         match self.code {

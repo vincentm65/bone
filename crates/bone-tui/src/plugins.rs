@@ -349,6 +349,12 @@ impl App {
         }
         let ids: Vec<u64> = hooks.iter().map(|h| h.1).collect();
         self.release_callbacks(&ids);
+        self.save_plugin_states(owner);
+    }
+
+    /// Save the `bone.plugin.state` tables of `owner` (every one for
+    /// `None`) without shutting anything down.
+    pub fn save_plugin_states(&mut self, owner: Option<&str>) {
         let owner = owner.map(str::to_owned);
         let r = self.with_api(|lua| {
             let bone: Table = lua.globals().get("bone")?;
@@ -368,6 +374,31 @@ impl App {
     }
 
     // ---- project config ------------------------------------------------------
+
+    /// The trusted project's `.bone/`, while its config is registered
+    /// (loaded, or failed to load).
+    pub fn project_dir(&self) -> Option<PathBuf> {
+        self.plugin(PROJECT)
+            .filter(|p| p.kind == Kind::Project)
+            .map(|p| p.dir.clone())
+    }
+
+    /// A core Lua file changed: reload the core's configuration. The core
+    /// keeps the old one if the new one fails to load.
+    pub fn reload_core_config(&mut self) {
+        self.request::<bone_proto::methods::CoreReload>(bone_proto::methods::Empty {}, |app, r| {
+            match r {
+                Ok(r) if r.warnings.is_empty() => app.info("core configuration reloaded"),
+                Ok(r) => app.info(format!(
+                    "core configuration reloaded: {}",
+                    r.warnings.join("; ")
+                )),
+                Err(e) => app.error(format!(
+                    "core reload failed, kept the previous configuration: {e}"
+                )),
+            }
+        });
+    }
 
     /// The nearest directory at or above the working directory with a
     /// `.bone/tui.lua` (that is not the config dir itself).

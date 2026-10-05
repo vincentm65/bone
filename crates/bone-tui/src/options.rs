@@ -15,6 +15,9 @@ pub struct Options {
     /// Use the mouse: wheel scrolling and drag-to-copy. Off leaves the
     /// mouse to the terminal (its own selection, no wheel scrolling).
     pub mouse: bool,
+    /// Reload Lua when its files change: the TUI's own, and the core's
+    /// through `core/reload`.
+    pub autoreload: bool,
 }
 
 impl Default for Options {
@@ -26,6 +29,7 @@ impl Default for Options {
             prompt_max_height: 10,
             timeoutlen: 1000,
             mouse: true,
+            autoreload: true,
         }
     }
 }
@@ -130,6 +134,7 @@ pub fn describe(name: &str) -> &'static str {
         "prompt_max_height" => "rows the prompt grows to before it scrolls",
         "timeoutlen" => "milliseconds to wait for the rest of a key sequence",
         "mouse" => "wheel scrolling and drag-to-copy (off: the terminal's own)",
+        "autoreload" => "reload TUI and core Lua when their files change",
         _ => "",
     }
 }
@@ -158,6 +163,7 @@ pub const NAMES: &[&str] = &[
     "prompt_max_height",
     "timeoutlen",
     "mouse",
+    "autoreload",
 ];
 
 impl Options {
@@ -169,6 +175,7 @@ impl Options {
             "prompt_max_height" => Value::Number(self.prompt_max_height as u64),
             "timeoutlen" => Value::Number(self.timeoutlen),
             "mouse" => Value::Bool(self.mouse),
+            "autoreload" => Value::Bool(self.autoreload),
             _ => return None,
         })
     }
@@ -181,6 +188,7 @@ impl Options {
             ("prompt_max_height", Value::Number(n)) => self.prompt_max_height = (n as usize).max(1),
             ("timeoutlen", Value::Number(n)) => self.timeoutlen = n,
             ("mouse", Value::Bool(b)) => self.mouse = b,
+            ("autoreload", Value::Bool(b)) => self.autoreload = b,
             (name, _) if self.get(name).is_some() => return Err(format!("wrong type for {name}")),
             (name, _) => return Err(format!("unknown option: {name}")),
         }

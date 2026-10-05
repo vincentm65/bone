@@ -83,6 +83,73 @@ type PromptState = (
     Option<(crate::editor::Pos, crate::editor::Pos)>,
 );
 
+/// The Lua state and everything it made, kept aside during a reload (see
+/// [`App::swap_lua_side`]).
+pub(crate) struct LuaSide {
+    lua: Option<Lua>,
+    keymaps: Keymaps,
+    focused_context: Option<Context>,
+    pending_keys: Vec<Key>,
+    pending_action: Option<Action>,
+    pending_context: Option<Context>,
+    pending_since: Option<Instant>,
+    raw_interceptors: Vec<RawInterceptor>,
+    dynamic_options: HashMap<String, DynamicOption>,
+    user_commands: HashMap<String, UserCommand>,
+    autocmds: Vec<Autocmd>,
+    in_actions: Vec<Builtin>,
+    owner: Option<String>,
+    callback_owner: HashMap<u64, String>,
+    owned: HashMap<String, Vec<crate::plugins::Owned>>,
+    keymap_owner: HashMap<(Context, Vec<Key>), String>,
+    plugins: Vec<crate::plugins::Plugin>,
+    shutdown_hooks: Vec<(Option<String>, u64)>,
+    popups: Vec<Popup>,
+    panels: Vec<Panel>,
+    panel_focus: Option<String>,
+    jobs: crate::jobs::Jobs,
+    theme: Theme,
+    colors_name: Option<String>,
+    ui_broken: HashSet<String>,
+    lua_errors: Vec<String>,
+    spinner: crate::ui::Spinner,
+}
+
+impl LuaSide {
+    /// No Lua state and nothing made by Lua, as before `lua::init`.
+    pub(crate) fn empty() -> Self {
+        LuaSide {
+            lua: None,
+            keymaps: Keymaps::default(),
+            focused_context: None,
+            pending_keys: Vec::new(),
+            pending_action: None,
+            pending_context: None,
+            pending_since: None,
+            raw_interceptors: Vec::new(),
+            dynamic_options: HashMap::new(),
+            user_commands: HashMap::new(),
+            autocmds: Vec::new(),
+            in_actions: Vec::new(),
+            owner: None,
+            callback_owner: HashMap::new(),
+            owned: HashMap::new(),
+            keymap_owner: HashMap::new(),
+            plugins: Vec::new(),
+            shutdown_hooks: Vec::new(),
+            popups: Vec::new(),
+            panels: Vec::new(),
+            panel_focus: None,
+            jobs: Default::default(),
+            theme: Theme::default(),
+            colors_name: None,
+            ui_broken: HashSet::new(),
+            lua_errors: Vec::new(),
+            spinner: Default::default(),
+        }
+    }
+}
+
 /// Work to apply on the UI thread, e.g. a request reply.
 pub struct AppEvent(pub(crate) Box<dyn FnOnce(&mut App) + Send>);
 
@@ -177,6 +244,15 @@ pub struct App {
     pub lua_errors: Vec<String>,
     /// Option values kept across a reload, for options defined again.
     pub carried_options: HashMap<String, crate::options::DynamicValue>,
+    /// While the Lua config loads (at startup or on a reload): each Lua
+    /// error's context and short message.
+    pub load_errors: Option<Vec<(String, String)>>,
+    /// Where the last accepted load had errors. A reload that fails only
+    /// where this one did is still taken, so an old error cannot pin the
+    /// configuration.
+    pub load_failures: Vec<String>,
+    /// Reload the core when its Lua files change (see `RunOptions`).
+    pub reload_core: bool,
 }
 
 impl App {
@@ -254,50 +330,66 @@ impl App {
             carried_options: HashMap::new(),
             lua_errors: Vec::new(),
             settings: serde_json::Value::Null,
+            load_errors: Some(Vec::new()),
+            load_failures: Vec::new(),
+            reload_core: false,
         };
         crate::lua::init(&mut app, config_dir);
         app.dirty = true;
         app
     }
 
-    /// Drop the Lua state and everything Lua made: keymaps, commands,
-    /// events, popups, panels, running jobs, options, plugin records, colors
-    /// and UI state. Chats (Lua's items in them too), the prompt, history,
-    /// built-in options and the session are kept.
-    pub(crate) fn forget_lua(&mut self) {
+    /// Put `side` in place of the current Lua state and everything Lua made
+    /// (keymaps, commands, events, popups, panels, jobs, options, plugin
+    /// records, colors and UI state), returning what was there. Chats (Lua's
+    /// items in them too), the prompt, history, built-in options and the
+    /// session are not part of it. A reload builds the new side while the old
+    /// one waits here, so a failed reload can put the old one back.
+    pub(crate) fn swap_lua_side(&mut self, mut side: LuaSide) -> LuaSide {
+        use std::mem::swap;
+        swap(&mut self.lua, &mut side.lua);
+        swap(&mut self.keymaps, &mut side.keymaps);
+        swap(&mut self.focused_context, &mut side.focused_context);
+        swap(&mut self.pending_keys, &mut side.pending_keys);
+        swap(&mut self.pending_action, &mut side.pending_action);
+        swap(&mut self.pending_context, &mut side.pending_context);
+        swap(&mut self.pending_since, &mut side.pending_since);
+        swap(&mut self.raw_interceptors, &mut side.raw_interceptors);
+        swap(&mut self.dynamic_options, &mut side.dynamic_options);
+        swap(&mut self.user_commands, &mut side.user_commands);
+        swap(&mut self.autocmds, &mut side.autocmds);
+        swap(&mut self.in_actions, &mut side.in_actions);
+        swap(&mut self.owner, &mut side.owner);
+        swap(&mut self.callback_owner, &mut side.callback_owner);
+        swap(&mut self.owned, &mut side.owned);
+        swap(&mut self.keymap_owner, &mut side.keymap_owner);
+        swap(&mut self.plugins, &mut side.plugins);
+        swap(&mut self.shutdown_hooks, &mut side.shutdown_hooks);
+        swap(&mut self.popups, &mut side.popups);
+        swap(&mut self.panels, &mut side.panels);
+        swap(&mut self.panel_focus, &mut side.panel_focus);
+        swap(&mut self.jobs, &mut side.jobs);
+        swap(&mut self.theme, &mut side.theme);
+        swap(&mut self.colors_name, &mut side.colors_name);
+        swap(&mut self.ui_broken, &mut side.ui_broken);
+        swap(&mut self.lua_errors, &mut side.lua_errors);
+        swap(&mut self.spinner, &mut side.spinner);
+        self.views_rev += 1;
+        self.opts_rev += 1;
+        self.dirty = true;
+        side
+    }
+
+    /// Drop a Lua side that is not current: cancel its jobs without calling
+    /// back, then let it go.
+    pub(crate) fn retire_lua_side(&mut self, side: LuaSide) {
+        let current = self.swap_lua_side(side);
         let jobs: Vec<u64> = self.jobs.list.iter().map(|j| j.id).collect();
         for id in jobs {
             self.cancel_job(id);
             self.jobs.forget_callbacks(id);
         }
-        self.keymaps = Keymaps::default();
-        self.focused_context = None;
-        self.pending_keys.clear();
-        self.pending_action = None;
-        self.pending_context = None;
-        self.pending_since = None;
-        self.raw_interceptors.clear();
-        self.dynamic_options.clear();
-        self.user_commands.clear();
-        self.autocmds.clear();
-        self.in_actions.clear();
-        self.owner = None;
-        self.callback_owner.clear();
-        self.owned.clear();
-        self.keymap_owner.clear();
-        self.plugins.clear();
-        self.shutdown_hooks.clear();
-        self.popups.clear();
-        self.panels.clear();
-        self.panel_focus = None;
-        self.theme = Theme::default();
-        self.colors_name = None;
-        self.ui_broken.clear();
-        self.lua_errors.clear();
-        self.spinner = Default::default();
-        self.views_rev += 1;
-        self.opts_rev += 1;
-        self.lua = None;
+        drop(self.swap_lua_side(current));
     }
 
     // ---- requests ------------------------------------------------------------
@@ -606,6 +698,17 @@ impl App {
 
         if let Some(action) = lookup.action {
             self.discard_pending();
+            // A Lua function on ctrl+c that errors (or passes the key on)
+            // must not leave bone without a way to quit.
+            if let Action::Lua(id) = action
+                && sequence == [Key::ctrl_c()]
+            {
+                match self.call_callback(id, "keymap", |_| Ok(mlua::Value::Nil)) {
+                    None | Some(mlua::Value::Boolean(false)) => self.interrupt(),
+                    Some(_) => {}
+                }
+                return;
+            }
             if !self.dispatch_action(action) {
                 self.replay_literal(&ctx, &sequence);
             }
@@ -613,6 +716,12 @@ impl App {
         }
 
         if !had_pending {
+            // Keys all come from Lua. If its config is broken and nothing maps
+            // ctrl+c here, it still interrupts (directly, not through Lua), so
+            // bone can be quit.
+            if key == Key::ctrl_c() {
+                return self.interrupt();
+            }
             self.unmapped_in_context(&ctx, key);
             return;
         }
