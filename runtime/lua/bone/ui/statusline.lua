@@ -31,7 +31,7 @@ end
 
 local state = bone._standard_status or { generation = 0, started = nil, finished = nil }
 bone._standard_status = state
-state.total = state.total or { input = 0, output = 0 }
+state.total = state.total or { input = 0, output = 0, cached = 0 }
 state.generation = state.generation + 1
 local generation = state.generation
 
@@ -47,11 +47,15 @@ end
 
 local function load_total()
   bone.request("store/query", {
-    sql = "SELECT coalesce(sum(input_tokens), 0), coalesce(sum(output_tokens), 0) FROM usage",
+    sql = "SELECT coalesce(sum(input_tokens), 0), coalesce(sum(output_tokens), 0), coalesce(sum(cached_tokens), 0) FROM usage",
   }, function(res)
     local row = res and res.rows and res.rows[1]
     if row then
-      state.total = { input = tonumber(row[1]) or 0, output = tonumber(row[2]) or 0 }
+      state.total = {
+        input = tonumber(row[1]) or 0,
+        output = tonumber(row[2]) or 0,
+        cached = tonumber(row[3]) or 0,
+      }
     end
     bone.ui.refresh()
   end)
@@ -99,6 +103,7 @@ function bone.ui.statusline(ctx)
   local output = s and s.usage and s.usage.output or 0
   left[#left + 1] = { "curr " .. tokens(input), "StatusLineDim" }
   left[#left + 1] = { "total " .. tokens(state.total.input + state.total.output), "StatusLineDim" }
+  left[#left + 1] = { "cache " .. tokens(state.total.cached), "StatusLineDim" }
   if s and s.running then
     local running_for = state.started and (now() - state.started) or nil
     left[#left + 1] = { (ctx.spinner or "") .. " thinking" .. (running_for and (" " .. elapsed(running_for)) or ""), "Accent" }
@@ -118,7 +123,9 @@ function bone.ui.statusline(ctx)
     return out
   end
   local room = math.max((ctx.width or 1), 1)
-  while #left > 1 and items_width(left) > room do table.remove(left, #left) end
+  while #left > 1 and items_width(left) > room do
+    table.remove(left, s and s.running and #left - 1 or #left)
+  end
   return joined(left)
 end
 
