@@ -31,6 +31,7 @@ end
 
 local state = bone._standard_status or { generation = 0, started = nil, finished = nil }
 bone._standard_status = state
+state.total = state.total or { input = 0, output = 0 }
 state.generation = state.generation + 1
 local generation = state.generation
 
@@ -42,6 +43,18 @@ local function refresh_later()
   if state.generation ~= generation then return end
   bone.ui.refresh()
   bone.defer(1000, refresh_later)
+end
+
+local function load_total()
+  bone.request("store/query", {
+    sql = "SELECT coalesce(sum(input_tokens), 0), coalesce(sum(output_tokens), 0) FROM usage",
+  }, function(res)
+    local row = res and res.rows and res.rows[1]
+    if row then
+      state.total = { input = tonumber(row[1]) or 0, output = tonumber(row[2]) or 0 }
+    end
+    bone.ui.refresh()
+  end)
 end
 
 if state.events then
@@ -56,6 +69,7 @@ bone.model.list(function(list)
   end
   bone.ui.refresh()
 end)
+load_total()
 state.events = {
   bone.on("turn/started", function()
     state.started = now()
@@ -67,6 +81,7 @@ state.events = {
     state.finished = now()
     if state.started then state.finished_elapsed = state.finished - state.started end
     state.started = nil
+    load_total()
     bone.ui.refresh()
   end),
 }
@@ -83,7 +98,7 @@ function bone.ui.statusline(ctx)
   local input = s and s.usage and s.usage.input or 0
   local output = s and s.usage and s.usage.output or 0
   left[#left + 1] = { "curr " .. tokens(input), "StatusLineDim" }
-  left[#left + 1] = { "total " .. tokens(input + output), "StatusLineDim" }
+  left[#left + 1] = { "total " .. tokens(state.total.input + state.total.output), "StatusLineDim" }
   if s and s.running then
     local running_for = state.started and (now() - state.started) or nil
     left[#left + 1] = { (ctx.spinner or "") .. " thinking" .. (running_for and (" " .. elapsed(running_for)) or ""), "Accent" }
