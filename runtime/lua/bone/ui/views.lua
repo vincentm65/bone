@@ -267,8 +267,10 @@ end
 
 local function running_mark(item)
   bone.chat.refresh_in(300)
-  local start = item.started_at or bone.now()
-  return math.floor((bone.now() - start) / 300) % 2 == 0 and "◌" or "·"
+  local now = bone.now()
+  local start = item.started_at or now
+  if now - start > 86400000 then start = now end
+  return math.floor((now - start) / 300) % 2 == 0 and "◌" or "·"
 end
 
 local function plural(n, noun)
