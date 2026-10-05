@@ -576,10 +576,10 @@ function M.open(want)
   -- A row's value, added to a line.
   local function value_into(add, row)
     if row.kind == "provider" then
-      add(pad(row.model or "", 26))
-      add(pad(row.url or "", 34), MUTED)
+      add(pad(row.model or "", 22))
+      add(pad(row.url or "", 30), MUTED)
       if row.current then
-        add("● in use  ", KEY)
+        add("  ● in use  ", KEY)
       end
       if row.added then
         add("added", MUTED)
