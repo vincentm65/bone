@@ -3452,7 +3452,8 @@ async fn standard_tool_views_match_the_first_bone() {
         "{}",
         rows.join("\n")
     );
-    assert!(rows.join("\n").contains("  ✕ Called grep, 1 failed"));
+    assert!(rows.join("\n").contains("Called grep, 1 failed"));
+    assert!(!rows.join("\n").contains("✕ Called grep"));
 
     // ctrl+t once: a row per call.
     let rows = std_tool_screen(&calls, 60, 1).await;

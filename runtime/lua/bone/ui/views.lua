@@ -670,15 +670,13 @@ local function summary_view(item, ctx)
   if not stretch[1] or stretch[1].index ~= item.index then
     return nil
   end
-  local running, failed = false, false
+  local running = false
   for _, t in ipairs(stretch) do
     running = running or not t.done
-    failed = failed or (t.done and t.is_error)
   end
   local out = starts("tool", ctx)
   append(out, wrap({ { summary(stretch), "ToolArgs" } }, ctx.width, {
-    first = failed and { { "  ✕ ", "ToolError" } }
-      or (running and { { "  " .. running_mark(item) .. " ", "ToolRunning" } } or { { "    ", "Normal" } }),
+    first = running and { { "  " .. running_mark(item) .. " ", "ToolRunning" } } or { { "    ", "Normal" } },
     rest = { { "    ", "Normal" } },
   }))
   return out
