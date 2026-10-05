@@ -16,6 +16,9 @@ local function tokens(n)
     return "0"
   end
   n = math.floor(n + 0.5)
+  if n >= 1000000 then
+    return string.format("%.1fm", n / 1000000)
+  end
   if n >= 1000 then
     return string.format("%.1fk", n / 1000)
   end
@@ -103,7 +106,7 @@ function bone.ui.statusline(ctx)
   local input = s and s.usage and s.usage.input or 0
   local output = s and s.usage and s.usage.output or 0
   left[#left + 1] = { "curr " .. tokens(input), "StatusLineDim" }
-  left[#left + 1] = { "total " .. tokens(state.total.input + state.total.output), "StatusLineDim" }
+  left[#left + 1] = { "total " .. tokens(input + output), "StatusLineDim" }
   left[#left + 1] = { "cache " .. (state.total.input > 0 and string.format("%.0f%%", state.total.cached / state.total.input * 100) or "0%"), "StatusLineDim" }
   if s and s.running then
     local running_for = state.started and (now() - state.started) or nil
@@ -123,7 +126,7 @@ function bone.ui.statusline(ctx)
     out[#out + 1] = " "
     return out
   end
-  local room = math.max((ctx.width or 1), 1)
+  local room = math.max((ctx.width or 1) - 3 * (#left - 1), 1)
   while #left > 1 and items_width(left) > room do
     table.remove(left, s and s.running and #left - 1 or #left)
   end
