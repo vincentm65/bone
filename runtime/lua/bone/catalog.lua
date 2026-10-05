@@ -14,7 +14,7 @@
 
 local M = {}
 
-local OMIT = { history = true, cron = true, usage = true, themes = true }
+local OMIT = { history = true, cron = true, themes = true }
 
 M.DEFAULT_URL = "https://raw.githubusercontent.com/vincentm65/bone-catalog/refs/heads/main"
 
