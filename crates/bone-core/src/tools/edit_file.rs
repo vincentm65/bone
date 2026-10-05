@@ -8,9 +8,8 @@
 //! changes, and lines changed since they were read are refused.
 //!
 //! Models copy a line's text far more reliably than its hash, so an anchor
-//! may carry the text after `|`. The text decides: it confirms the line when
-//! the hash was miscopied, and finds it when the number is off — but only
-//! where that is unambiguous. Everything else fails with the reason per edit
+//! may carry the text after `|`. The text finds a line when its number is off,
+//! while a valid hash must still match. Everything else fails with the reason per edit
 //! and the current lines, with fresh anchors, to retry from.
 
 use std::collections::BTreeSet;
@@ -43,7 +42,8 @@ impl EditFile {
                           retyping old text. Use {at, text} to replace, {at, end, text} for a \
                           range, or {after, text}/{before, text} to insert (after \"0\" = top). \
                           Include the whole anchor such as `12#k3|    let x = 1;` when possible; \
-                          text after | can recover a copied number or hash. New content is \
+                          text after | can recover a copied line number, but a valid hash must \
+                          still match. New content is \
                           separated by newlines; an empty string deletes. Edits are atomic."
                 .into(),
             parameters: json!({
@@ -282,7 +282,7 @@ fn parse_edit(index: usize, spec: Value) -> Result<Edit, String> {
         return Err(format!("`end` {} is before `at` {}", e.raw, start.raw));
     }
     let lines = match text {
-        Some(Value::String(s)) => split_text(&s),
+        Some(Value::String(s)) => split_text(&s)?,
         Some(Value::Array(a)) => a
             .iter()
             .map(|l| l.as_str().map(str::to_owned))
@@ -360,20 +360,25 @@ fn parse_anchor(v: &Value, allow_top: bool) -> Result<Anchor, String> {
 
 /// New lines from `text`: one trailing newline is dropped, and anchors
 /// copied in front of every line are removed.
-fn split_text(text: &str) -> Vec<String> {
+fn split_text(text: &str) -> Result<Vec<String>, String> {
     let text = text.replace("\r\n", "\n").replace('\r', "\n");
     if text.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     let body = text.strip_suffix('\n').unwrap_or(&text);
     let lines: Vec<&str> = body.split('\n').collect();
-    match lines
+    let anchors: Vec<_> = lines
         .iter()
         .map(|l| strip_anchor(l))
-        .collect::<Option<Vec<_>>>()
-    {
-        Some(stripped) => stripped.into_iter().map(str::to_owned).collect(),
-        None => lines.into_iter().map(str::to_owned).collect(),
+        .collect();
+    match (anchors.iter().any(Option::is_some), anchors.into_iter().collect::<Option<Vec<_>>>()) {
+        (false, None) => Ok(lines.into_iter().map(str::to_owned).collect()),
+        (true, Some(stripped)) => Ok(stripped.into_iter().map(str::to_owned).collect()),
+        (true, None) => Err(
+            "text mixes read_file anchors with unanchored lines; send only the new file content"
+                .into(),
+        ),
+        (false, Some(_)) => unreachable!(),
     }
 }
 
@@ -428,11 +433,11 @@ fn find(lines: &[String], a: &Anchor) -> Found {
             Found::Missing
         };
     };
-    if at.is_some_and(|l| same(text, l)) {
+    if at.is_some_and(|l| same(text, l) && (a.hash.is_none() || hash_ok(l))) {
         return here;
     }
     let all: Vec<usize> = (0..lines.len())
-        .filter(|&i| same(text, &lines[i]))
+        .filter(|&i| same(text, &lines[i]) && (a.hash.is_none() || hash_ok(&lines[i])))
         .collect();
     let near: Vec<usize> = all
         .iter()
@@ -1147,7 +1152,7 @@ fn fuzzy_replace(text: &str, old: &str, new: &str) -> Result<String, String> {
     match hits.as_slice() {
         &[i] => {
             let mut out = file.clone();
-            let new_lines = split_text(new);
+            let new_lines = split_text(new)?;
             let mut ends = vec![file.newline(); new_lines.len()];
             if let Some(last) = ends.last_mut() {
                 *last = file.ends[i + n - 1];
@@ -1201,11 +1206,12 @@ mod tests {
 
     #[test]
     fn copied_anchors_are_stripped_from_text() {
-        assert_eq!(split_text(""), Vec::<String>::new());
-        assert_eq!(split_text("\n"), vec![String::new()]);
-        assert_eq!(split_text("a\r\nb\n"), vec!["a", "b"]);
-        assert_eq!(split_text("1#aa|x\n2#bb|y"), vec!["x", "y"]);
-        assert_eq!(split_text("1#aa|x\ny"), vec!["1#aa|x", "y"]);
+        assert_eq!(split_text("").unwrap(), Vec::<String>::new());
+        assert_eq!(split_text("\n").unwrap(), vec![String::new()]);
+        assert_eq!(split_text("a\r\nb\n").unwrap(), vec!["a", "b"]);
+        assert_eq!(split_text("1#aa|x\n2#bb|y").unwrap(), vec!["x", "y"]);
+        let err = split_text("1#aa|x\ny").unwrap_err();
+        assert!(err.contains("mixes read_file anchors"), "{err}");
     }
 
     #[test]
@@ -1262,11 +1268,8 @@ mod tests {
             Found::At { index, moved } => Some((index, moved)),
             _ => None,
         };
-        // Right number, miscopied hash: the text confirms the line.
-        assert_eq!(
-            at(find(&f, &anchor(2, Some("zz"), Some("x();")))),
-            Some((1, false))
-        );
+        // A valid but wrong hash cannot be bypassed by copied text.
+        assert_eq!(at(find(&f, &anchor(2, Some("zz"), Some("x();")))), None);
         // Number off by one: the text finds the line.
         assert_eq!(
             at(find(&f, &anchor(4, None, Some("y();")))),

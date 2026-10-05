@@ -237,13 +237,12 @@ async fn anchored_edits_apply_together_and_show_fresh_anchors() {
 }
 
 #[tokio::test]
-async fn text_rescues_a_miscopied_hash_or_number() {
+async fn text_rescues_a_miscopied_number_but_not_a_valid_hash() {
     let (_d, ctx, path) = setup(SRC).await;
-    // Right line, wrong hash; then right text, number one off.
+    // A valid but wrong hash is rejected; text can still recover a wrong number.
     let out = edit(
         &ctx,
         json!([
-            {"at": "2#zz|    one();", "text": "    uno();"},
             {"at": "5|    two();", "text": "    dos();"},
         ]),
     )
@@ -254,7 +253,7 @@ async fn text_rescues_a_miscopied_hash_or_number() {
         "{out}"
     );
     let now = std::fs::read_to_string(&path).unwrap();
-    assert!(now.contains("uno();") && now.contains("dos();"), "{now}");
+    assert!(now.contains("one();") && now.contains("dos();"), "{now}");
 
     // `}` is everywhere: with the number wrong, the text cannot decide.
     let before = std::fs::read_to_string(&path).unwrap();
@@ -382,7 +381,7 @@ async fn line_endings_and_a_missing_final_newline_survive() {
     let out = edit(
         &ctx,
         json!([
-            {"after": "3#zz|c", "text": "d"},
+            {"after": "3|c", "text": "d"},
             {"at": "1|a", "text": "A"},
         ]),
     )
