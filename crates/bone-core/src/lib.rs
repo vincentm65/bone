@@ -5,6 +5,7 @@
 //! provider and tools, and runs core-side Lua (hooks, tools, questions).
 
 mod agent;
+mod compact;
 pub mod config;
 mod health;
 pub mod import;
@@ -26,12 +27,13 @@ use bone_proto::methods::{
     ModelCompletedParams, ModelDeltaEvent, ModelDeltaParams, ModelList, ModelRequest, PluginList,
     PluginLoad, PluginRef, PluginReload, PluginUnload, QueueAdd, QueueAddParams, QueueAddResult,
     QueueChanged, QueueChangedParams, QueueClear, QueueMode, QueueMove, QueueRemove, QueueResume,
-    QueueUpdate, SecretSet, SecretsList, SecretsSet, SessionCreate, SessionCreateParams,
-    SessionDelete, SessionDeleted, SessionFork, SessionForkParams, SessionList, SessionMessages,
-    SessionMessagesResult, SessionRef, SessionRename, SessionRenameParams, SessionUpdated,
-    SessionUpdatedParams, SettingPath, SettingSet, SettingsChanged, SettingsChangedParams,
-    SettingsGet, SettingsReset, SettingsSet, StoreQuery, StoreQueryParams, TurnCancel, TurnStart,
-    TurnStartParams, TurnStartResult, TurnSteer, TurnSteerParams,
+    QueueUpdate, SecretSet, SecretsList, SecretsSet, SessionCompact, SessionCompactParams,
+    SessionCreate, SessionCreateParams, SessionDelete, SessionDeleted, SessionFork,
+    SessionForkParams, SessionList, SessionMessages, SessionMessagesResult, SessionRef,
+    SessionRename, SessionRenameParams, SessionUpdated, SessionUpdatedParams, SettingPath,
+    SettingSet, SettingsChanged, SettingsChangedParams, SettingsGet, SettingsReset, SettingsSet,
+    StoreQuery, StoreQueryParams, TurnCancel, TurnStart, TurnStartParams, TurnStartResult,
+    TurnSteer, TurnSteerParams,
 };
 use bone_proto::types::SessionInfo;
 use bone_proto::{Method, Notification, RpcError};
@@ -93,6 +95,8 @@ pub(crate) struct Inner {
     sessions: SessionStore,
     /// What each session's model has seen of files, for `edit_file`.
     views: Arc<tools::hashline::Views>,
+    /// Managed shell jobs shared by all tools in this core.
+    jobs: Arc<tools::ProcessRegistry>,
     events: broadcast::Sender<Event>,
     /// settings.json as last read or written; `Err` when the file could not
     /// be read (then it is not written either, so it is never clobbered).
@@ -269,6 +273,7 @@ impl Core {
                 model_requests: Mutex::new(Default::default()),
                 next_model_request: Default::default(),
                 views: Default::default(),
+                jobs: Default::default(),
                 settings: Mutex::new(saved),
                 events,
             }),
@@ -382,6 +387,23 @@ impl Core {
             SessionFork::METHOD => dispatch::<SessionFork, _>(params, |p| self.session_fork(p)),
             SessionDelete::METHOD => {
                 dispatch::<SessionDelete, _>(params, |p| self.session_delete(p))
+            }
+            SessionCompact::METHOD => {
+                let p: SessionCompactParams = decode::<SessionCompact>(params)?;
+                let session = self.inner.session(&p.session_id).map_err(session_error)?;
+                if !session.lock().unwrap().writable() {
+                    return Err(RpcError::invalid_params(
+                        "a running turn's transcript can only change between model calls",
+                    ));
+                }
+                let done = if p.clear {
+                    self.inner.clear_compaction(&session)
+                } else {
+                    self.inner.compact(&session, "manual").await
+                };
+                // "nothing to compact yet" and the like: plain messages.
+                done.map(|d| serde_json::to_value(d).unwrap_or_default())
+                    .map_err(|e| RpcError::new(RpcError::INVALID_PARAMS, e))
             }
             TurnStart::METHOD => dispatch::<TurnStart, _>(params, |p| self.turn_start(p)),
             TurnCancel::METHOD => dispatch::<TurnCancel, _>(params, |p| self.turn_cancel(p)),
@@ -740,6 +762,7 @@ impl Core {
                 format!("turn {} is still running", active.turn_id),
             ));
         }
+        self.inner.jobs.cancel_owner(&p.session_id);
         self.inner
             .sessions
             .delete(&p.session_id)
@@ -872,6 +895,12 @@ impl Core {
             active.cancel.cancel();
         }
         Ok(())
+    }
+}
+
+impl Drop for Core {
+    fn drop(&mut self) {
+        self.inner.jobs.cancel_all();
     }
 }
 

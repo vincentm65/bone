@@ -62,6 +62,7 @@ pub const METHODS: &[&str] = &[
     SessionRename::METHOD,
     SessionFork::METHOD,
     SessionDelete::METHOD,
+    SessionCompact::METHOD,
     TurnStart::METHOD,
     TurnCancel::METHOD,
     TurnSteer::METHOD,
@@ -107,6 +108,7 @@ pub const NOTIFICATIONS: &[&str] = &[
     QueueChanged::METHOD,
     CoreReloaded::METHOD,
     SessionUpdated::METHOD,
+    SessionCompacted::METHOD,
     SessionDeleted::METHOD,
     ModelDeltaEvent::METHOD,
     ModelCompleted::METHOD,
@@ -219,6 +221,37 @@ pub struct SessionForkParams {
     pub session_id: SessionId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub before_turn: Option<u32>,
+}
+
+method!(
+    /// Summarize the older part of a session for the model: from now on
+    /// model calls get the summary in place of those messages. The
+    /// transcript, the session file and what clients show are unchanged.
+    /// With `clear`, drop the summary and send the whole transcript again.
+    /// Also announced as `session/compacted`.
+    SessionCompact, "session/compact", SessionCompactParams => SessionCompactedParams
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCompactParams {
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub clear: bool,
+}
+
+/// What a compaction did. Token counts are estimates of what one model call
+/// would send, before and after.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCompactedParams {
+    pub session_id: SessionId,
+    /// Transcript messages newly folded into the summary (0 when cleared).
+    pub messages: usize,
+    pub tokens_before: u64,
+    pub tokens_after: u64,
+    /// `"manual"` (`session/compact`), `"limit"` (the context was over
+    /// `compact.limit`), `"overflow"` (the model said the context is too
+    /// long) or `"clear"`.
+    pub reason: String,
 }
 
 // ---- turns ---------------------------------------------------------------
@@ -648,6 +681,11 @@ notification!(
     SessionDeleted, "session/deleted", SessionRef
 );
 notification!(
+    /// A session was compacted (or its summary cleared), by a client or
+    /// automatically. The transcript is unchanged; nothing to reload.
+    SessionCompacted, "session/compacted", SessionCompactedParams
+);
+notification!(
     /// Streamed output of a `model/complete` call with `stream` set.
     ModelDeltaEvent, "model/delta", ModelDeltaParams
 );
@@ -677,8 +715,8 @@ pub struct ModelCompletedParams {
 
 notification!(
     /// Core Lua changed a session's transcript outside a turn's own
-    /// messages (`bone.session.append` or `compact`). Clients should load
-    /// it again with `session/messages`.
+    /// messages (`bone.session.append` or `bone.session.compact`). Clients
+    /// should load it again with `session/messages`.
     SessionUpdated, "session/updated", SessionUpdatedParams
 );
 

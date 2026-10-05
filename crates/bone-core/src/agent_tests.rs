@@ -131,6 +131,7 @@ impl Harness {
             system_prompt: None,
             data_dir: data.path().to_owned(),
             parallel_tools: true,
+            compact: Default::default(),
         };
         let provider = Arc::new(Scripted {
             steps: Mutex::new(steps.into()),
@@ -1580,42 +1581,151 @@ async fn templates_expand_with_arguments() {
     assert!(e.message.contains("no template named nope"), "{e:?}");
 }
 
-// ---- the example plugins (core halves) -------------------------------------------
+// ---- compaction ------------------------------------------------------------------
+
+impl Harness {
+    async fn compact(&self, clear: bool) -> Result<SessionCompactedParams, RpcError> {
+        self.call::<SessionCompact>(SessionCompactParams {
+            session_id: self.session_id.clone(),
+            clear,
+        })
+        .await
+    }
+
+    /// The model calls' messages, last first.
+    fn last_seen(&self) -> Vec<ChatMessage> {
+        self.provider.seen.lock().unwrap().last().unwrap().clone()
+    }
+}
+
+fn user(text: &str) -> ChatMessage {
+    ChatMessage::User {
+        content: text.into(),
+    }
+}
+
+fn assistant(text: &str) -> ChatMessage {
+    ChatMessage::Assistant {
+        content: text.into(),
+        reasoning: String::new(),
+        tool_calls: vec![],
+    }
+}
+
+fn summary(text: &str) -> ChatMessage {
+    user(&format!("Summary of the earlier conversation:\n\n{text}"))
+}
 
 #[tokio::test]
-async fn example_compact_plugin_summarizes_older_turns() {
-    let mut h = Harness::with_plugins(
-        &["compact"],
-        "bone.config.compact.keep = 1",
-        vec![text("a1"), text("a2"), text("SUMMARY")],
+async fn compact_summarizes_for_the_model_and_keeps_the_transcript() {
+    let mut h = Harness::with_lua(
+        "bone.config.compact = { keep = 1 }",
+        vec![text("a1"), text("a2"), text("SUMMARY"), text("a3")],
+    )
+    .await;
+    assert_eq!(
+        h.compact(false).await.unwrap_err().message,
+        "nothing to compact yet"
+    );
+    for q in ["q1", "q2"] {
+        h.start(q).await;
+        h.until::<TurnFinished>().await;
+    }
+    let done = h.compact(false).await.unwrap();
+    assert_eq!((done.messages, done.reason.as_str()), (2, "manual"));
+    assert!(done.tokens_before > 0 && done.tokens_after > 0, "{done:?}");
+    assert_eq!(h.until::<SessionCompacted>().await, done);
+    // The summarizer read the older turn, not the kept one.
+    let read = h.last_seen();
+    assert!(
+        matches!(&read[0], ChatMessage::User { content } if content.contains("USER: q1") && !content.contains("q2")),
+        "{read:#?}"
+    );
+
+    // The model gets the summary, then the kept turn word for word...
+    h.start("q3").await;
+    h.until::<TurnFinished>().await;
+    assert_eq!(
+        h.last_seen(),
+        vec![summary("SUMMARY"), user("q2"), assistant("a2"), user("q3")]
+    );
+    // ...while the transcript (what clients show) keeps everything.
+    let t = h.transcript().await;
+    assert_eq!(t.len(), 6, "{t:#?}");
+    assert_eq!(t[0], user("q1"));
+    // And the summary is a record in the session file.
+    let file = h
+        ._data
+        .path()
+        .join(format!("sessions/{}.jsonl", h.session_id));
+    let text = std::fs::read_to_string(file).unwrap();
+    assert!(text.contains(r#""kind":"summary""#), "{text}");
+}
+
+#[tokio::test]
+async fn compacting_again_folds_in_the_earlier_summary() {
+    let mut h = Harness::with_lua(
+        "bone.config.compact = { keep = 1 }",
+        vec![
+            text("a1"),
+            text("a2"),
+            text("S1"),
+            text("a3"),
+            text("S2"),
+            text("a4"),
+        ],
     )
     .await;
     for q in ["q1", "q2"] {
         h.start(q).await;
         h.until::<TurnFinished>().await;
     }
-    let r = h.lua_call("compact", json!({}), None).await.unwrap();
-    assert_eq!(
-        r,
-        "compacted 2 messages into a summary; kept the last 1 turns"
+    h.compact(false).await.unwrap();
+    h.start("q3").await;
+    h.until::<TurnFinished>().await;
+    let done = h.compact(false).await.unwrap();
+    assert_eq!(done.messages, 2);
+    let read = h.last_seen();
+    assert!(
+        matches!(&read[0], ChatMessage::User { content }
+            if content.contains("Summary of the earlier conversation:\n\nS1") && content.contains("USER: q2")),
+        "{read:#?}"
     );
-    let t = h.transcript().await;
+    h.start("q4").await;
+    h.until::<TurnFinished>().await;
     assert_eq!(
-        t[0],
-        ChatMessage::User {
-            content: "Summary of the earlier conversation:\n\nSUMMARY".into()
-        }
+        h.last_seen(),
+        vec![summary("S2"), user("q3"), assistant("a3"), user("q4")]
     );
-    assert_eq!(t.len(), 3, "{t:#?}");
-    let seen = h.provider.seen.lock().unwrap().clone();
-    assert!(matches!(&seen[2][0], ChatMessage::User { content } if content.contains("USER: q1")));
 }
 
 #[tokio::test]
-async fn example_compact_plugin_retries_when_the_context_is_full() {
-    let mut h = Harness::with_plugins(
-        &["compact"],
-        "bone.config.compact.keep = 1",
+async fn clearing_sends_the_whole_transcript_again() {
+    let mut h = Harness::with_lua(
+        "bone.config.compact = { keep = 1 }",
+        vec![text("a1"), text("a2"), text("S"), text("a3")],
+    )
+    .await;
+    assert_eq!(
+        h.compact(true).await.unwrap_err().message,
+        "this session is not compacted"
+    );
+    for q in ["q1", "q2"] {
+        h.start(q).await;
+        h.until::<TurnFinished>().await;
+    }
+    h.compact(false).await.unwrap();
+    let cleared = h.compact(true).await.unwrap();
+    assert_eq!((cleared.messages, cleared.reason.as_str()), (0, "clear"));
+    h.start("q3").await;
+    h.until::<TurnFinished>().await;
+    assert_eq!(h.last_seen()[0], user("q1"));
+}
+
+#[tokio::test]
+async fn a_full_context_compacts_and_retries() {
+    let mut h = Harness::with_lua(
+        "bone.config.compact = { keep = 1 }",
         vec![
             text("a1"),
             Step::Fail("HTTP 400: maximum context length exceeded".into()),
@@ -1627,12 +1737,91 @@ async fn example_compact_plugin_retries_when_the_context_is_full() {
     h.start("q1").await;
     h.until::<TurnFinished>().await;
     h.start("q2").await;
-    let finished = h.until::<TurnFinished>().await;
-    assert_eq!(finished.outcome, TurnOutcome::Completed);
-    let t = h.transcript().await;
-    assert_eq!(t.len(), 3, "{t:#?}");
-    assert!(matches!(&t[0], ChatMessage::User { content } if content.ends_with("SUM")));
+    assert_eq!(h.until::<SessionCompacted>().await.reason, "overflow");
+    assert_eq!(
+        h.until::<TurnFinished>().await.outcome,
+        TurnOutcome::Completed
+    );
+    assert_eq!(h.last_seen(), vec![summary("SUM"), user("q2")]);
+    assert_eq!(h.transcript().await.len(), 4);
 }
+
+#[tokio::test]
+async fn a_full_context_fails_as_before_without_auto() {
+    let mut h = Harness::with_lua(
+        "bone.config.compact = { keep = 1, auto = false }",
+        vec![
+            text("a1"),
+            Step::Fail("HTTP 400: maximum context length exceeded".into()),
+        ],
+    )
+    .await;
+    h.start("q1").await;
+    h.until::<TurnFinished>().await;
+    h.start("q2").await;
+    assert!(matches!(
+        h.until::<TurnFinished>().await.outcome,
+        TurnOutcome::Failed { .. }
+    ));
+}
+
+#[tokio::test]
+async fn the_limit_compacts_before_the_call() {
+    let mut h = Harness::with_lua(
+        "bone.config.compact = { keep = 1, limit = 1 }",
+        vec![text("a1"), text("SUM"), text("a2")],
+    )
+    .await;
+    // Over the limit, but nothing older than the kept turn: sent as is.
+    h.start("q1").await;
+    h.until::<TurnFinished>().await;
+    assert_eq!(h.last_seen(), vec![user("q1")]);
+    h.start("q2").await;
+    assert_eq!(h.until::<SessionCompacted>().await.reason, "limit");
+    h.until::<TurnFinished>().await;
+    assert_eq!(h.last_seen(), vec![summary("SUM"), user("q2")]);
+}
+
+#[tokio::test]
+async fn settings_change_compaction_at_once() {
+    let mut h = Harness::with_lua(
+        "bone.config.compact = { keep = 1 }",
+        vec![text("a1"), text("a2"), text("SUM")],
+    )
+    .await;
+    for q in ["q1", "q2"] {
+        h.start(q).await;
+        h.until::<TurnFinished>().await;
+    }
+    h.call::<SettingsSet>(SettingSet {
+        path: "compact.keep".into(),
+        value: json!(0),
+    })
+    .await
+    .unwrap();
+    // keep = 0: everything is summarized.
+    assert_eq!(h.compact(false).await.unwrap().messages, 4);
+}
+
+#[test]
+fn bad_compact_config_is_an_error() {
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(
+        data.path().join("core.lua"),
+        "bone.config.providers.x = { base_url = \"http://unused\", model = \"m\" }\n\
+         bone.config.compact = { kep = 3 }",
+    )
+    .unwrap();
+    let err = crate::scripting::load_with(data.path(), &|_| None)
+        .err()
+        .expect("an error");
+    assert!(
+        err.contains("bone.config.compact") && err.contains("kep"),
+        "{err}"
+    );
+}
+
+// ---- the example plugins (core halves) -------------------------------------------
 
 #[tokio::test]
 async fn example_retry_plugin_retries_passing_errors_only() {

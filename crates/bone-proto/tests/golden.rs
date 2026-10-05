@@ -366,6 +366,20 @@ fn requests() {
     };
     exchange::<QueueClear>(34, sref(), ());
     exchange::<QueueResume>(35, sref(), ());
+    exchange::<SessionCompact>(
+        27,
+        SessionCompactParams {
+            session_id: SID.into(),
+            clear: false,
+        },
+        SessionCompactedParams {
+            session_id: SID.into(),
+            messages: 48,
+            tokens_before: 182_000,
+            tokens_after: 41_000,
+            reason: "manual".into(),
+        },
+    );
     exchange::<SessionRename>(
         26,
         SessionRenameParams {
@@ -571,6 +585,13 @@ fn events() {
         session_id: SID.into(),
         turn_id: 1,
         text: "also update the README".into(),
+    });
+    event::<SessionCompacted>(SessionCompactedParams {
+        session_id: SID.into(),
+        messages: 12,
+        tokens_before: 130_500,
+        tokens_after: 98_200,
+        reason: "limit".into(),
     });
     event::<SessionDeleted>(SessionRef {
         session_id: SID.into(),

@@ -31,6 +31,7 @@ fn server_at(base_url: &str) -> Server {
         system_prompt: None,
         data_dir: data.path().to_owned(),
         parallel_tools: true,
+        compact: Default::default(),
     })))
 }
 

@@ -317,7 +317,7 @@ fn index_record(tx: &Transaction, id: &str, record: Record, at: u64, seq: &mut u
              ON CONFLICT(id) DO UPDATE SET parent = ?2, cwd = ?3, created_at = ?4",
             params![id, h.parent, h.cwd, h.created_at],
         ),
-        Record::Compact(_) => Ok(()),
+        Record::Compact(_) | Record::Summary(_) => Ok(()),
         Record::Usage(u) => run(
             "INSERT INTO usage (session_id, turn_id, source, at, provider, model,
                                 input_tokens, output_tokens, cached_tokens)

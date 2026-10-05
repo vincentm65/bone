@@ -3,9 +3,10 @@
 //! File layout: `<data_dir>/sessions/<session_id>.jsonl`, plus
 //! `<session_id>.title` when it was renamed and `<session_id>.queue.json`
 //! while messages are queued. The first record is
-//! the session header; every later record is one transcript message, or a
-//! compaction checkpoint that replaces the transcript before it (the earlier
-//! records stay in the file).
+//! the session header; every later record is one transcript message, a
+//! summary the model gets in place of the transcript's older part (see
+//! `compact.rs`), or a checkpoint that replaces the transcript before it
+//! (`bone.session.compact`, imports; the earlier records stay in the file).
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -30,6 +31,9 @@ pub(crate) enum Record {
     Message(ChatMessage),
     /// The transcript from here on starts as these messages.
     Compact(Vec<ChatMessage>),
+    /// From here on the model gets this summary in place of the
+    /// transcript's first messages; `null` sends the whole transcript again.
+    Summary(Option<Summary>),
     /// What one model call used. Not part of the transcript.
     Usage(UsageRecord),
 }
@@ -62,6 +66,14 @@ pub struct UsageRecord {
     pub source: Option<String>,
 }
 
+/// A summary standing in for the transcript's first `through` messages in
+/// what the model is sent. The transcript itself keeps them.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Summary {
+    pub through: usize,
+    pub text: String,
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Header {
     pub session_id: SessionId,
@@ -75,6 +87,16 @@ pub(crate) struct Header {
 pub struct Session {
     pub info: SessionInfo,
     pub messages: Vec<ChatMessage>,
+    /// What the model gets in place of the transcript's older part.
+    pub summary: Option<Summary>,
+    /// Characters per token in this session's last model call, to estimate
+    /// sizes; `None` until a reply reports its usage.
+    pub chars_per_token: Option<f64>,
+    /// A compaction is writing its summary.
+    pub compacting: bool,
+    /// Counts `bone.session.compact` rewrites, which invalidate positions
+    /// in the transcript.
+    pub generation: u64,
     pub active: Option<ActiveTurn>,
     /// The running turn is between model calls, where Lua may add to the
     /// transcript or compact it (never between tool calls and results).
@@ -180,12 +202,35 @@ impl Session {
     }
 
     /// Replace the transcript with `messages`, keeping the old records in
-    /// the file behind a checkpoint.
+    /// the file behind a checkpoint. A summary of the old transcript goes.
     pub fn compact(&mut self, messages: Vec<ChatMessage>) -> std::io::Result<()> {
         let written = write_record(&mut self.file, Record::Compact(messages.clone()));
         self.messages = messages;
+        self.summary = None;
+        self.generation += 1;
         self.reindex();
         written
+    }
+
+    /// Set (or clear) the summary the model gets in place of the
+    /// transcript's older part.
+    pub fn summarize(&mut self, summary: Option<Summary>) -> std::io::Result<()> {
+        let written = write_record(&mut self.file, Record::Summary(summary.clone()));
+        self.summary = summary;
+        written
+    }
+
+    /// The transcript as the model is sent it: the summary, then what it
+    /// does not cover.
+    pub fn context(&self) -> Vec<ChatMessage> {
+        match &self.summary {
+            Some(sum) if sum.through <= self.messages.len() => {
+                let mut out = vec![crate::compact::summary_message(&sum.text)];
+                out.extend(self.messages[sum.through..].iter().cloned());
+                out
+            }
+            _ => self.messages.clone(),
+        }
     }
 
     /// Whether Lua may change the transcript now: no turn, or a turn at a
@@ -241,15 +286,17 @@ impl SessionStore {
     }
 
     pub fn create(&self, cwd: String) -> Result<SessionHandle, SessionError> {
-        self.create_with(cwd, None, &[])
+        self.create_with(cwd, None, &[], None)
     }
 
-    /// A new session, maybe forked from another, starting with `messages`.
+    /// A new session, maybe forked from another, starting with `messages`
+    /// (and the summary standing in for their first part).
     fn create_with(
         &self,
         cwd: String,
         parent: Option<SessionId>,
         messages: &[ChatMessage],
+        summary: Option<Summary>,
     ) -> Result<SessionHandle, SessionError> {
         std::fs::create_dir_all(&self.dir)?;
         let header = Header {
@@ -274,6 +321,9 @@ impl SessionStore {
         for m in messages {
             write_record(&mut file, Record::Message(m.clone()))?;
         }
+        if summary.is_some() {
+            write_record(&mut file, Record::Summary(summary.clone()))?;
+        }
         let users = messages
             .iter()
             .filter(|m| matches!(m, ChatMessage::User { .. }))
@@ -282,6 +332,10 @@ impl SessionStore {
             queue_path: self.queue_path(&info.session_id),
             info: info.clone(),
             messages: messages.to_vec(),
+            summary,
+            chars_per_token: None,
+            compacting: false,
+            generation: 0,
             active: None,
             safe_point: false,
             queue: Vec::new(),
@@ -312,6 +366,7 @@ impl SessionStore {
         let Loaded {
             mut info,
             messages,
+            summary,
             good_len,
             users,
         } = match read_file(&path, usize::MAX) {
@@ -344,6 +399,10 @@ impl SessionStore {
             queue,
             info,
             messages,
+            summary,
+            chars_per_token: None,
+            compacting: false,
+            generation: 0,
             active: None,
             safe_point: false,
             next_turn,
@@ -360,7 +419,7 @@ impl SessionStore {
     /// user message `before_turn`, counting from 1) as a new session.
     pub fn fork(&self, id: &str, before_turn: Option<u32>) -> Result<SessionHandle, SessionError> {
         let source = self.get(id)?;
-        let (cwd, messages) = {
+        let (cwd, messages, summary) = {
             let s = source.lock().unwrap();
             let mut end = s.messages.len();
             if let Some(n) = before_turn {
@@ -375,9 +434,11 @@ impl SessionStore {
                     end = i;
                 }
             }
-            (s.info.cwd.clone(), s.messages[..end].to_vec())
+            // The summary comes along when it covers only what is copied.
+            let summary = s.summary.clone().filter(|sum| sum.through <= end);
+            (s.info.cwd.clone(), s.messages[..end].to_vec(), summary)
         };
-        self.create_with(cwd, Some(id.to_owned()), &messages)
+        self.create_with(cwd, Some(id.to_owned()), &messages, summary)
     }
 
     /// Give a session a title that stays (kept next to its file).
@@ -518,6 +579,7 @@ impl SessionStore {
 struct Loaded {
     info: SessionInfo,
     messages: Vec<ChatMessage>,
+    summary: Option<Summary>,
     /// Length of the file up to the last complete record. Shorter than the
     /// file when a crash left a torn final line.
     good_len: u64,
@@ -548,6 +610,7 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
             parent: header.parent,
         },
         messages: Vec::new(),
+        summary: None,
         good_len: line.len() as u64,
         users: 0,
     };
@@ -574,6 +637,11 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
             }
             Ok(Record::Compact(messages)) => {
                 loaded.messages = messages;
+                loaded.summary = None;
+                loaded.good_len += line.len() as u64;
+            }
+            Ok(Record::Summary(summary)) => {
+                loaded.summary = summary;
                 loaded.good_len += line.len() as u64;
             }
             Ok(Record::Session(_)) => return Err(corrupt(format!("second header at line {n}"))),
@@ -651,6 +719,57 @@ mod tests {
         assert_eq!(s.info.cwd, "/work");
         assert_eq!(s.messages.len(), 2);
         assert!(Arc::ptr_eq(&loaded, &fresh.get(&id).unwrap()));
+    }
+
+    #[test]
+    fn summaries_survive_reloads_and_follow_forks() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path());
+        let a = store.create("/work".into()).unwrap();
+        let id = a.lock().unwrap().info.session_id.clone();
+        let user = |t: &str| ChatMessage::User { content: t.into() };
+        {
+            let mut s = a.lock().unwrap();
+            for t in ["q1", "q2", "q3"] {
+                s.push(user(t)).unwrap();
+            }
+            s.summarize(Some(Summary {
+                through: 2,
+                text: "S".into(),
+            }))
+            .unwrap();
+            assert_eq!(
+                s.context(),
+                vec![crate::compact::summary_message("S"), user("q3")]
+            );
+        }
+
+        // From disk: the whole transcript, and the summary for the model.
+        let fresh = SessionStore::new(dir.path());
+        let loaded = fresh.get(&id).unwrap();
+        assert_eq!(loaded.lock().unwrap().messages.len(), 3);
+        assert_eq!(loaded.lock().unwrap().context().len(), 2);
+
+        // A fork keeps the summary only when it covers part of the copy.
+        let whole = fresh.fork(&id, None).unwrap();
+        assert_eq!(whole.lock().unwrap().context().len(), 2);
+        let early = fresh.fork(&id, Some(2)).unwrap();
+        assert_eq!(early.lock().unwrap().summary, None);
+
+        // Clearing sends everything again; so does replacing the transcript.
+        let mut s = loaded.lock().unwrap();
+        s.summarize(None).unwrap();
+        assert_eq!(s.context().len(), 3);
+        s.summarize(Some(Summary {
+            through: 1,
+            text: "T".into(),
+        }))
+        .unwrap();
+        s.compact(vec![user("restart")]).unwrap();
+        assert_eq!(s.context(), vec![user("restart")]);
+        drop(s);
+        let again = SessionStore::new(dir.path()).get(&id).unwrap();
+        assert_eq!(again.lock().unwrap().summary, None);
     }
 
     #[test]

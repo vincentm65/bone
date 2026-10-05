@@ -151,6 +151,8 @@ struct Extracted {
     mcp: Vec<crate::mcp::ServerConfig>,
     /// `bone.config.parallel_tools`.
     parallel: bool,
+    /// `bone.config.compact`.
+    compact: crate::config::CompactConfig,
 }
 
 /// Run the runtime, plugins and `<config_dir>/core.lua`, then apply `BONE_*`
@@ -396,6 +398,7 @@ fn resolve(
         .unwrap_or_else(|| config_dir.to_owned());
     Ok(CoreConfig {
         parallel_tools: ex.parallel,
+        compact: ex.compact.clone(),
         provider,
         system_prompt: env("BONE_SYSTEM_PROMPT").or_else(|| ex.system_prompt.clone()),
         data_dir,
@@ -1450,6 +1453,18 @@ fn extract(lua: &Lua) -> mlua::Result<Extracted> {
         parallel: config
             .get::<Option<bool>>("parallel_tools")?
             .unwrap_or(true),
+        compact: match config.get::<Value>("compact")? {
+            Value::Nil => Default::default(),
+            v => {
+                // An empty Lua table arrives as a list.
+                let json = match from_lua(&v)? {
+                    serde_json::Value::Array(a) if a.is_empty() => json!({}),
+                    j => j,
+                };
+                serde_json::from_value(json)
+                    .map_err(|e| mlua::Error::runtime(format!("bone.config.compact: {e}")))?
+            }
+        },
     })
 }
 

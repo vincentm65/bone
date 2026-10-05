@@ -9,6 +9,8 @@ mod read_file;
 mod shell;
 mod write_file;
 
+pub(crate) use shell::ProcessRegistry;
+
 use std::path::{Component, PathBuf};
 use std::sync::Arc;
 
@@ -33,13 +35,21 @@ pub struct ToolContext {
     pub cancel: CancellationToken,
     /// What the session's model has seen of each file (see `hashline`).
     pub views: Arc<hashline::Views>,
+    /// Session-scoped shell jobs shared by foreground and background runs.
+    pub(crate) jobs: Arc<ProcessRegistry>,
     /// Where a tool can send output while it runs (`tool/output`), if anyone
     /// listens. The result still carries all of it.
     pub output: Option<OutputSink>,
+    /// Used only by background shell jobs when they finish after the tool
+    /// call has returned.
+    pub(crate) finish: Option<FinishedSink>,
 }
 
 /// Takes a running tool's output as it comes.
 pub type OutputSink = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// `(rendered result, is_error, duration_ms)` for a detached tool call.
+pub type FinishedSink = Arc<dyn Fn(String, bool, u64) + Send + Sync>;
 
 impl ToolContext {
     /// An absolute path, with `.` and `..` worked out so one file has one

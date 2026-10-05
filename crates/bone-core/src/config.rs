@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct CoreConfig {
@@ -17,6 +17,40 @@ pub struct CoreConfig {
     /// Run a reply's parallel-safe tool calls at the same time.
     #[serde(default = "default_true")]
     pub parallel_tools: bool,
+    /// `bone.config.compact`: summarizing long sessions for the model.
+    #[serde(default)]
+    pub compact: CompactConfig,
+}
+
+/// How long sessions are compacted (see `compact.rs`). Set in `core.lua` as
+/// `bone.config.compact`; `settings.json`'s `compact` changes it field by
+/// field, and applies at once.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CompactConfig {
+    /// The latest user turns always sent word for word.
+    pub keep: usize,
+    /// Compact and retry when the model says the context is too long.
+    pub auto: bool,
+    /// Compact before a model call estimated above this many tokens.
+    pub limit: Option<u64>,
+    /// The `bone.config.providers` entry that writes summaries (default:
+    /// the one turns use).
+    pub provider: Option<String>,
+    /// Instructions for the summary, replacing the built-in ones.
+    pub prompt: Option<String>,
+}
+
+impl Default for CompactConfig {
+    fn default() -> Self {
+        CompactConfig {
+            keep: 2,
+            auto: true,
+            limit: None,
+            provider: None,
+            prompt: None,
+        }
+    }
 }
 
 /// A model provider: an OpenAI-compatible `/chat/completions` endpoint, or

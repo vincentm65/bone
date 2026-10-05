@@ -106,7 +106,9 @@ fn ctx() -> ToolContext {
         session_id: "s".into(),
         cancel: Default::default(),
         views: Default::default(),
+        jobs: Default::default(),
         output: None,
+        finish: None,
     }
 }
 

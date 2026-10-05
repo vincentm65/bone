@@ -21,4 +21,4 @@
 
  › Message bone… (enter sends, alt+enter for a new line, / for commands)
 
-fake | done <t>
+fake | worked <t>, finished at <t>

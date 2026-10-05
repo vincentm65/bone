@@ -111,7 +111,7 @@ A plugin is a folder in `~/.bone/plugins/`:
   colors/      colorschemes
 ```
 
-The repo's examples show most of the API at work: `style` (a complete look), `approve` (asking before tools run), `git` and `anthropic` (tools and a provider), `switch` (pick the provider from the TUI), `tasks` (a persistent task panel), `review` (the files a session changed, and review prompts), `stats` (usage and tool numbers from `store/query`), `testrun` (tests streamed into a panel), `compact` (summarize long sessions, by hand or when the context is full), `output-cap` (limit any tool result's size), `retry` (back off and fall back on passing errors), `mcp` (MCP servers from JSON files, and a status panel), `skills` and `templates` (load folders of them, with TUI commands) and `ask-model` (a side question to a model). None is installed by default.
+The repo's examples show most of the API at work: `style` (a complete look), `approve` (asking before tools run), `git` and `anthropic` (tools and a provider), `switch` (pick the provider from the TUI), `tasks` (a persistent task panel), `review` (the files a session changed, and review prompts), `stats` (usage and tool numbers from `store/query`), `testrun` (tests streamed into a panel), `output-cap` (limit any tool result's size), `retry` (back off and fall back on passing errors), `mcp` (MCP servers from JSON files, and a status panel), `skills` and `templates` (load folders of them, with TUI commands) and `ask-model` (a side question to a model). None is installed by default.
 
 Every part is optional. Plugins load in name order, after the runtime defaults and before your own `core.lua` / `tui.lua`, so your config can change anything a plugin set up. Rename a folder to start with `_` or `.` to disable it. `bone.plugins` lists the loaded names. Installing is just copying or `git clone`-ing into `~/.bone/plugins/`; see `examples/plugins/` in the repo (`git`, `approve`, `style`).
 
@@ -199,7 +199,16 @@ bone.config.provider = "qwen"      -- which entry to use (optional if there is o
 bone.config.system_prompt = "..."  -- or function(ctx) return "..." end; ctx = { cwd, session_id }
 bone.config.data_dir = "~/somewhere"  -- sessions; default is the config dir
 bone.config.parallel_tools = true  -- run a reply's read-only tool calls at the same time (default)
+bone.config.compact = {            -- summarizing long sessions for the model (these are the defaults)
+  keep = 2,                        -- the latest user turns always sent word for word
+  auto = true,                     -- compact and retry when the model says the context is too long
+  limit = nil,                     -- compact before a call estimated above this many tokens
+  provider = nil,                  -- which providers entry writes summaries (default: the current one)
+  prompt = nil,                    -- instructions for the summary, replacing the built-in ones
+}
 ```
+
+Compaction keeps a session's transcript whole: a model writes a summary of the older part, kept in the session file, and model calls get the summary in place of those messages (the `context` hook sees them that way; `bone.session.messages` and clients see everything). `/compact` in the TUI (the `session/compact` method) does it by hand; compacting again folds the earlier summary in. `settings.json`'s `compact` (`/config` → Compaction) changes these fields over `core.lua`'s, at once.
 
 The working directory is always appended to the system prompt.
 
@@ -222,7 +231,7 @@ bone.tool.register {
 
 A Lua tool with the same name as a built-in (`read_file`, `write_file`, `edit_file`, `shell`) replaces it. `error()` inside `run` becomes an error result for the model.
 
-When a reply asks for several tools, consecutive calls of tools that only read run at the same time (up to 8): `read_file`, Lua tools registered with `parallel = true`, and MCP tools their server marks `readOnlyHint`. Any other call runs on its own, after the ones before it and before the ones after it, so writes and shell commands keep their order. Results reach the transcript in the order of the calls. Results are not cut (only `shell` limits its own output); the `output-cap` example plugin limits every tool's.
+When a reply asks for several tools, consecutive calls of tools that only read run at the same time (up to 8): `read_file`, Lua tools registered with `parallel = true`, and MCP tools their server marks `readOnlyHint`. Any other call runs on its own, after the ones before it and before the ones after it, so writes and shell commands keep their order. Results reach the transcript in the order of the calls. `read_file` lets the model choose its range with `offset`/`limit`; use `full: true` when the whole file is needed. `shell` limits its own output; the `output-cap` example plugin limits every tool's.
 
 - `print(...)` appends to `~/.bone/core.log` (the core may share the terminal with the TUI).
 
@@ -234,7 +243,7 @@ A hook runs at a point in the core with an event table. It returns `nil` (no cha
 |---|---|---|
 | `turn_start` | `{ session_id, cwd, text }`, before the user's message is saved | the turn fails with "why" |
 | `system` | `{ session_id, cwd, prompt }`, once per turn: the system prompt (after `bone.config.system_prompt` and the working directory); return `{ prompt = ... }` to change it | the turn fails |
-| `context` | `{ session_id, messages }`, before each model call: the messages it will send (system prompt first); return `{ messages = ... }` to send different ones. The stored transcript is not changed | the turn fails |
+| `context` | `{ session_id, messages }`, before each model call: the messages it will send (system prompt first, then a compacted session's summary in place of what it covers); return `{ messages = ... }` to send different ones. The stored transcript is not changed | the turn fails |
 | `request` | `{ session_id, messages, tools }`, before each call to the model, after `context` | the turn fails |
 | `request_error` | `{ session_id, error, attempt, model }`, when a model call fails before any output arrived; return `{ retry = ms }` to try again after `ms` (at most 5 retries per call), or `{ retry = ms, provider = "name" }` to send the rest of this call to another `bone.config.providers` entry. Without a retry the turn fails as before | the turn fails |
 | `stream` | `{ session_id, turn_id, text, reasoning }`: output as it streams, collected into batches; results are ignored and the stream never waits for it | (ignored) |
@@ -273,7 +282,7 @@ bone.session.compact(id, { { role = "user", content = "Summary of earlier work: 
 
 The message queue is open to Lua too: `bone.queue.add(id, text, mode)` (`"steer"` or `"next"`; an idle session starts a turn), `bone.queue.list(id)`, `bone.queue.remove(id, queue_id)` and `bone.queue.clear(id)`, with the same effects (and `queue/changed` events) as the protocol's `queue/*` methods.
 
-`append` adds a message the model sees from the next call on. `compact` replaces the transcript: the session file keeps every earlier record behind a checkpoint, the session loads from the newest checkpoint, and turn ids keep counting. While a turn runs, the transcript can only change between model calls: in `turn_start`, `system`, `context`, `request` and `request_error` hooks, or after the turn (`turn_end`); elsewhere (a tool, a `tool_call` hook) the call fails, so a message never lands between tool calls and their results. Clients get a `session/updated` event and load the session again. Compacting itself (deciding what to keep, writing a summary) is up to a plugin.
+`append` adds a message the model sees from the next call on. `compact` replaces the transcript: the session file keeps every earlier record behind a checkpoint, the session loads from the newest checkpoint, and turn ids keep counting. While a turn runs, the transcript can only change between model calls: in `turn_start`, `system`, `context`, `request` and `request_error` hooks, or after the turn (`turn_end`); elsewhere (a tool, a `tool_call` hook) the call fails, so a message never lands between tool calls and their results. Clients get a `session/updated` event and load the session again. To keep a long session within the model's context without rewriting it, use the core's compaction (`bone.config.compact`) instead; `compact` here replaces the transcript for good and drops a compaction summary.
 
 ### Waiting without blocking
 
@@ -378,7 +387,7 @@ end)
 bone.rpc.call("notes.add", { text = "remember this" }, function(result, err) end)
 ```
 
-The function runs as a job, so it may wait (`bone.system`, `bone.model`, `bone.session`), and its return value goes back to the caller as JSON; an error becomes the call's error. Prefix names with the plugin's name. `bone.rpc.unregister(name)`. The example `skills`, `templates` and `compact` plugins work this way; skills and prompt templates themselves are plugins, not part of the core.
+The function runs as a job, so it may wait (`bone.system`, `bone.model`, `bone.session`), and its return value goes back to the caller as JSON; an error becomes the call's error. Prefix names with the plugin's name. `bone.rpc.unregister(name)`. The example `skills` and `templates` plugins work this way; skills and prompt templates themselves are plugins, not part of the core.
 
 ### Calling a model
 
@@ -564,7 +573,7 @@ User commands appear in the `/` suggestions with their `desc`, and in `/help`. E
 
 #### The `/` menu
 
-The menu is the Lua module `bone.menu` (`runtime/lua/bone/menu.lua`): it matches what you type against command names and aliases (by prefix, sorted, at most `max = 8`), or asks a command's completion function for its arguments, and keeps the selection. It is drawn by `bone.ui.suggestions(ctx)` in a window resting on the prompt. It takes part in keys through `bone.ui.actions`: `submit` runs `/commands` (the selected match for a partial name; `//text` sends `/text`; `/etc/hosts …` is a message), `complete` (tab) fills in the selection, `dismiss` (esc) hides the menu until the text changes, and `up`/`down` move through it. `require("bone.menu")` gives the module (`matches(text)`, `complete()`, `move(by)`, `max`); override `~/.bone/runtime/lua/bone/menu.lua` (starting from `bone.builtin("bone.menu")`) for different matching.
+The menu is the Lua module `bone.menu` (`runtime/lua/bone/menu.lua`): it matches what you type against command names and aliases (by prefix, sorted, at most eight rows), or asks a command's completion function for its arguments, and keeps the selection. It is drawn by `bone.ui.suggestions(ctx)` in the `above_prompt` region, so the prompt composer expands to contain the list instead of having a floating box cover it. It takes part in keys through `bone.ui.actions`: `submit` runs `/commands` (the selected match for a partial name; `//text` sends `/text`; `/etc/hosts …` is a message), `complete` (tab) fills in the selection, `dismiss` (esc) hides the menu until the text changes, and `up`/`down` move through it. `require("bone.menu")` gives the module (`all(text)`, `complete()`, `move(by)`); override `~/.bone/runtime/lua/bone/menu.lua` (starting from `bone.builtin("bone.menu")`) for different matching.
 
 #### Actions in Lua
 
@@ -701,7 +710,7 @@ bone.now()                              -- milliseconds since the epoch
 - `bone.ui.close(id)`, `bone.ui.is_open(id)`.
 - `bone.ui.select(items, { prompt, format, on_choice, loading, empty, footer, width, height })` → handle: a picker in a focused window. Typing filters (matching `format(item)`), `up`/`down` (or `ctrl+p`/`ctrl+n`, the wheel) move, `enter` calls `on_choice(item, index)`, `esc` calls `on_choice(nil)`. `handle:set_items(items)` fills it later (with `loading = true` it shows "loading…" until then); `handle:close()`.
 - `bone.ui.sessions()`: the session picker (`ctrl+o`, `/sessions`), defined in `runtime/tui/defaults.lua` with `bone.ui.select`. Replace it to change how sessions are listed.
-- `bone.ui.suggestions(ctx)` → lines: draws the `/` menu (see Commands) right above the prompt. `ctx = { items = { { name, desc } }, selected, width, height }`. Set it to `nil` for no list (tab still completes).
+- `bone.ui.suggestions(ctx)` → lines: draws the `/` menu (see Commands) right above the prompt, with the closest match nearest the input. `ctx = { items = { { name, desc } }, selected, width, height }`. Set it to `nil` for no list (tab still completes).
 - `bone.api.open_session(id)`: show a session.
 - `bone.ui.pager(content, { title, width, height })` → handle: scrollable text in a focused window. `content` is a string (wrapped; `#` lines are headings) or a list of lines. `up`/`down`/wheel, `pageup`/`pagedown`, `home`/`end`, `esc` or `q` closes. `handle:set(content)`, `handle:close()`.
 - `bone.ui.help(topic)` and `bone.ui.health()`: what `/help {topic}` and `/health` call (in `runtime/tui/defaults.lua`). The docs are in `bone._docs`; the TUI's built-in checks come from `bone.api.health()`.

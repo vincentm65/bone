@@ -1,19 +1,22 @@
 -- The / command menu: which commands (or arguments) match what you type,
 -- the selection, and what tab, up/down, the wheel, esc and enter do while
--- it shows. The window shows as many matches as fit and scrolls through the
--- rest (wheel, shift+up/down, pageup/pagedown).
+-- it shows. The composer shows as many matches as fit and scrolls through
+-- the rest (wheel, shift+up/down, pageup/pagedown).
 -- It handles those builtin actions through bone.ui.actions, so keymaps that
 -- name "submit", "complete", "dismiss", "up" or "down" keep working; how it
 -- looks is bone.ui.suggestions(ctx). Replace this module
 -- (~/.bone/runtime/lua/bone/menu.lua) to change how matching works.
 
 local M = {
-  offset = 0, -- first match row shown (the window scrolls when it overflows)
+  offset = 0, -- first match row shown (the list scrolls when it overflows)
   selected = 1, -- of the current matches (it may point past them)
   hidden_for = nil, -- esc hid the menu for exactly this prompt text
   last_text = nil, -- the prompt text the current scroll is for
-  last_selected = 1, -- to tell a moved selection from a scrolled window
+  last_selected = 1, -- to tell a moved selection from a scrolled list
 }
+
+local region
+local update_region
 
 -- A popup or panel with the keyboard has no menu.
 local function blocked()
@@ -31,7 +34,7 @@ end
 
 --- All of the matches for `text`: { { name, desc } }, and whether they are
 --- a command's arguments (completion) rather than command names. No cap:
---- the window shows what fits and scrolls through the rest.
+--- the composer shows what fits and scrolls through the rest.
 function M.all(text)
   if blocked() or text:sub(1, 1) ~= "/" then
     return {}, false
@@ -125,6 +128,9 @@ function M.dismiss()
   local text = bone.prompt.get()
   if #M.all(text) > 0 then
     M.hidden_for = text
+    if update_region then
+      update_region()
+    end
     return true
   end
   return false
@@ -183,7 +189,7 @@ bone.ui.actions.down = function()
 end
 
 --- The wheel, shift+up/down and pageup/pagedown move the selection through
---- the whole list (the window follows it), when the menu overflows
+--- the whole list (the composer follows it), when the menu overflows
 --- (returning false lets the chat scroll instead).
 local function scroll_by(by)
   local n = #M.all(bone.prompt.get())
@@ -206,66 +212,80 @@ bone.ui.actions.page_down = function()
   return scroll_by(8)
 end
 
--- The menu is a window resting on the prompt, drawn by bone.ui.suggestions
--- whenever there are matches.
-M.win = bone.ui.win({
-  anchor = "prompt",
-  row = -1,
-  col = 0,
-  z = -100,
-  -- No fixed height: the window fits what bone.ui.suggestions returns (at
-  -- most eight rows, the footer and the border), so it rests on the prompt
-  -- however few matches there are.
-  lines = function(ctx)
-    local items = M.all(bone.prompt.get())
-    if #items == 0 or type(bone.ui.suggestions) ~= "function" then
-      return {}
+-- The menu is the above_prompt region directly above the prompt. Its fixed size changes with
+-- the matches, so the prompt composer grows instead of being covered by a
+-- floating popup.
+local MAX_ROWS = 8
+region = { size = 0, max = MAX_ROWS }
+
+local function reset(text)
+  if M.last_text == text then
+    return
+  end
+  M.last_text = text
+  M.offset = 0
+  M.selected = 1
+  M.last_selected = 1
+end
+
+update_region = function()
+  -- `bone.ui.clear()` removes region registrations. Re-register this shared
+  -- region whenever the prompt or focus changes so it remains live after a
+  -- reset, while leaving an explicit user replacement alone.
+  if bone.ui.regions.above_prompt ~= nil and bone.ui.regions.above_prompt ~= region then
+    return
+  end
+  bone.ui.regions.above_prompt = region
+  local items = M.all(bone.prompt.get())
+  if #items == 0 or type(bone.ui.suggestions) ~= "function" then
+    region.size = 0
+    return
+  end
+  reset(bone.prompt.get())
+  local rows = math.min(#items, MAX_ROWS)
+  region.size = rows
+end
+
+local function render(ctx)
+  local text = bone.prompt.get()
+  local items = M.all(text)
+  if #items == 0 or type(bone.ui.suggestions) ~= "function" then
+    return {}
+  end
+  reset(text)
+  local n = #items
+  local height = math.min(MAX_ROWS, math.max(ctx.height, 1))
+  M.selected = math.max(1, math.min(M.selected, n))
+  if M.selected ~= M.last_selected then
+    M.last_selected = M.selected
+    if M.selected < M.offset + 1 then
+      M.offset = M.selected - 1
+    elseif M.selected > M.offset + height then
+      M.offset = M.selected - height
     end
-    -- Rows the box can show: its border takes two, the footer one more.
-    local height = 8
-    if M.last_text ~= bone.prompt.get() then
-      M.last_text = bone.prompt.get()
-      M.offset = 0
-      M.selected = 1
-      M.last_selected = 1
-    end
-    local n = #items
-    M.selected = math.max(1, math.min(M.selected, n))
-    -- The window follows the selection, but wheel-scrolling is not pulled
-    -- back to it.
-    if M.selected ~= M.last_selected then
-      M.last_selected = M.selected
-      if M.selected < M.offset + 1 then
-        M.offset = M.selected - 1
-      elseif M.selected > M.offset + height then
-        M.offset = M.selected - height
-      end
-    end
-    M.offset = math.max(0, math.min(M.offset, math.max(n - height, 0)))
-    local first = M.offset + 1
-    local shown = {}
-    for i = first, math.min(n, first + height - 1) do
-      shown[#shown + 1] = items[i]
-    end
-    local footer
-    if n > #shown then
-      local where = ""
-      if M.offset > 0 then
-        where = where .. "↑"
-      end
-      if M.offset + #shown < n then
-        where = where .. "↓"
-      end
-      footer = where .. " " .. first .. "–" .. (M.offset + #shown) .. " of " .. n
-    end
-    return bone.ui.suggestions({
-      items = shown,
-      selected = M.selected - M.offset,
-      width = ctx.width,
-      height = ctx.height,
-      footer = footer,
-    }) or {}
-  end,
-})
+  end
+  M.offset = math.max(0, math.min(M.offset, math.max(n - height, 0)))
+  local first = M.offset + 1
+  local shown = {}
+  local last = math.min(n, first + height - 1)
+  -- M.all keeps the closest match first. Draw the rows in reverse so that
+  -- that match is nearest to the text the user typed, at the bottom.
+  for i = last, first, -1 do
+    shown[#shown + 1] = items[i]
+  end
+  local selected = #shown - (M.selected - first + 1) + 1
+  return bone.ui.suggestions({
+    items = shown,
+    selected = selected,
+    width = ctx.width,
+    height = ctx.height,
+  }) or {}
+end
+
+region.render = render
+bone.ui.regions.above_prompt = region
+bone.on("prompt/changed", update_region)
+bone.on("focus/changed", update_region)
+update_region()
 
 return M

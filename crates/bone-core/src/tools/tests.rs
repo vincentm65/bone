@@ -12,7 +12,9 @@ fn ctx(dir: &tempfile::TempDir) -> ToolContext {
         session_id: "test".into(),
         cancel: CancellationToken::new(),
         views: Default::default(),
+        jobs: Default::default(),
         output: None,
+        finish: None,
     }
 }
 
@@ -76,6 +78,85 @@ async fn write_read_edit() {
     );
 }
 
+#[tokio::test]
+async fn read_file_uses_agent_selected_ranges_and_allows_full_reads() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(&dir);
+    let body: String = (1..=250).map(|i| format!("line {i}\n")).collect();
+    std::fs::write(dir.path().join("large.txt"), &body).unwrap();
+
+    let out = call(
+        &ctx,
+        "read_file",
+        json!({"path": "large.txt", "limit": 200}),
+    )
+    .await
+    .unwrap();
+    assert!(out.contains("line 1"));
+    assert!(!out.contains("line 201"));
+    assert!(out.contains("[showing lines 1-200 of 250; use offset to read more]"));
+
+    let out = call(
+        &ctx,
+        "read_file",
+        json!({"path": "large.txt", "full": true}),
+    )
+    .await
+    .unwrap();
+    assert!(out.contains("line 250"));
+    assert!(!out.contains("use offset to read more"));
+}
+
+#[tokio::test]
+async fn read_file_reads_multiple_ranges_and_remembers_all_anchors() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(&dir);
+    let body: String = (1..=12).map(|i| format!("line {i}\n")).collect();
+    std::fs::write(dir.path().join("ranges.txt"), &body).unwrap();
+
+    let out = call(
+        &ctx,
+        "read_file",
+        json!({"path": "ranges.txt", "ranges": [{"start": 2, "end": 3}, {"start": 10, "end": 11}]}),
+    )
+    .await
+    .unwrap();
+    assert!(out.contains("[lines 2-3 of 12]"));
+    assert!(out.contains("[lines 10-11 of 12]"));
+    assert!(out.contains("|line 2\n") && out.contains("|line 11\n"));
+    assert!(!out.contains("|line 1\n") && !out.contains("|line 9\n"));
+
+    let out = call(
+        &ctx,
+        "edit_file",
+        json!({
+            "path": "ranges.txt",
+            "edits": [{"at": anchor(&body, 2), "text": "second"}, {"at": anchor(&body, 10), "text": "tenth"}]
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(out.contains("second") && out.contains("tenth"));
+}
+
+#[tokio::test]
+async fn edit_file_accepts_simple_position_schema() {
+    let (_dir, ctx, path) = setup(SRC).await;
+    edit(
+        &ctx,
+        json!([
+            {"at": anchor(SRC, 2), "position": "replace", "text": "    changed();"},
+            {"at": "0", "position": "after", "text": "// header"}
+        ]),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(path).unwrap(),
+        "// header\nfn a() {\n    changed();\n}\n\nfn b() {\n    two();\n}\n"
+    );
+}
+
 /// `LINE#HASH|text` for line `n` of `text`.
 fn anchor(text: &str, n: usize) -> String {
     hashline::render_line(n, text.lines().nth(n - 1).unwrap())
@@ -91,7 +172,7 @@ async fn setup(body: &str) -> (tempfile::TempDir, ToolContext, PathBuf) {
     let ctx = ctx(&dir);
     let path = dir.path().join("f.rs");
     std::fs::write(&path, body).unwrap();
-    call(&ctx, "read_file", json!({"path": "f.rs"}))
+    call(&ctx, "read_file", json!({"path": "f.rs", "full": true}))
         .await
         .unwrap();
     (dir, ctx, path)
@@ -374,16 +455,22 @@ async fn shell_combines_output_and_reports_exit_code() {
 #[tokio::test]
 async fn shell_does_not_wait_for_background_processes() {
     let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("leaked");
     let start = Instant::now();
     let out = call(
         &ctx(&dir),
         "shell",
-        json!({"command": "sleep 30 & echo started"}),
+        json!({"command": format!("(sleep 0.3; echo leaked > '{}') & echo started", marker.display())}),
     )
     .await
     .unwrap();
     assert!(start.elapsed() < Duration::from_secs(5));
     assert_eq!(out, "started\n[exit code: 0]");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        !marker.exists(),
+        "background descendant survived shell exit"
+    );
 }
 
 #[tokio::test]
@@ -445,4 +532,98 @@ async fn shell_streams_output_while_it_runs() {
         "{chunks:?}"
     );
     assert_eq!(chunks.concat(), "a\nb é\n");
+}
+
+#[tokio::test]
+async fn shell_manages_background_jobs_and_reports_completion() {
+    let dir = tempfile::tempdir().unwrap();
+    let finished = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = finished.clone();
+    let mut ctx = ctx(&dir);
+    ctx.finish = Some(std::sync::Arc::new(move |output, is_error, _| {
+        seen.lock().unwrap().push((output, is_error));
+    }));
+
+    let started = call(
+        &ctx,
+        "shell",
+        json!({"command": "printf first; sleep 0.1; printf second", "mode": "start"}),
+    )
+    .await
+    .unwrap();
+    let id = started
+        .strip_prefix("background process started: ")
+        .unwrap();
+    let status = call(&ctx, "shell", json!({"action": "status", "id": id}))
+        .await
+        .unwrap();
+    assert!(status.contains(id));
+
+    let result = call(&ctx, "shell", json!({"action": "wait", "id": id}))
+        .await
+        .unwrap();
+    assert_eq!(result, "firstsecond\n[exit code: 0]");
+
+    for _ in 0..20 {
+        if !finished.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let finished = finished.lock().unwrap();
+    assert_eq!(finished.len(), 1);
+    assert_eq!(finished[0].0, result);
+    assert!(!finished[0].1);
+}
+
+#[tokio::test]
+async fn shell_status_bounds_saved_output_for_the_model() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(&dir);
+    let started = call(
+        &ctx,
+        "shell",
+        json!({"command": "printf '%*s' 100000 '' | tr ' ' x", "mode": "start"}),
+    )
+    .await
+    .unwrap();
+    let id = started
+        .strip_prefix("background process started: ")
+        .unwrap();
+    let _ = call(&ctx, "shell", json!({"action": "wait", "id": id}))
+        .await
+        .unwrap();
+    let status = call(&ctx, "shell", json!({"action": "status", "id": id}))
+        .await
+        .unwrap();
+    let status: Value = serde_json::from_str(&status).unwrap();
+    assert!(status["output"].as_str().unwrap().len() < 40_000);
+    assert_eq!(status["output_bytes"], 100_000);
+    assert_eq!(status["truncated"], true);
+}
+
+#[tokio::test]
+async fn shell_kills_a_managed_background_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(&dir);
+    let started = call(
+        &ctx,
+        "shell",
+        json!({"command": "sleep 30", "mode": "start"}),
+    )
+    .await
+    .unwrap();
+    let id = started
+        .strip_prefix("background process started: ")
+        .unwrap();
+    call(&ctx, "shell", json!({"action": "kill", "id": id}))
+        .await
+        .unwrap();
+    let result = call(&ctx, "shell", json!({"action": "wait", "id": id}))
+        .await
+        .unwrap_err();
+    assert!(
+        result.contains("cancelled") || result.contains("signal"),
+        "{result}"
+    );
 }

@@ -96,6 +96,26 @@ function M.extend(...)
   return out
 end
 
+--- Human-readable duration: `45s`, `1m 05s`, `1h 04m`.
+function M.duration(secs)
+  if not secs then
+    return ""
+  end
+  secs = math.floor(secs)
+  local h, m, s = math.floor(secs / 3600), math.floor(secs % 3600 / 60), secs % 60
+  if h > 0 then
+    return string.format("%dh %02dm", h, m)
+  elseif m > 0 then
+    return string.format("%dm %02ds", m, s)
+  end
+  return s .. "s"
+end
+
+--- Wall-clock time of an epoch second, e.g. `3:42 pm`.
+function M.format_time(secs)
+  return os.date("%-I:%M %p", secs or os.time()):lower()
+end
+
 --- Split a Markdown file's front matter from its body:
 --- "---\nname: x\ndescription: y\n---\nbody" -> { name = "x", ... }, "body".
 --- Only simple `key: value` lines; quotes around a value are dropped.

@@ -1,0 +1,21 @@
+[
+  {
+    "id": 27,
+    "jsonrpc": "2.0",
+    "method": "session/compact",
+    "params": {
+      "session_id": "01a0fe5e-0000-7000-8000-000000000001"
+    }
+  },
+  {
+    "id": 27,
+    "jsonrpc": "2.0",
+    "result": {
+      "messages": 48,
+      "reason": "manual",
+      "session_id": "01a0fe5e-0000-7000-8000-000000000001",
+      "tokens_after": 41000,
+      "tokens_before": 182000
+    }
+  }
+]

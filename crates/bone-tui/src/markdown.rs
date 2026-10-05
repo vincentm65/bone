@@ -10,7 +10,12 @@ use serde_json::{Value, json};
 pub fn parse(text: &str) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
     let mut code: Option<(Option<String>, Vec<String>)> = None;
-    for raw in text.lines() {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let start = i;
+        let raw = lines[i];
+        i += 1;
         let trimmed = raw.trim_start();
         if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
             match code.take() {
@@ -50,6 +55,40 @@ pub fn parse(text: &str) -> Vec<Value> {
             out.push(json!({ "kind": "rule" }));
             continue;
         }
+        if trimmed.starts_with('|') {
+            let mut j = start;
+            while j < lines.len() && lines[j].trim_start().starts_with('|') {
+                j += 1;
+            }
+            if j - start >= 2 {
+                let sep = lines[start + 1];
+                let sep_row = is_header_separator(sep);
+                let rows: Vec<Value> = (start..j)
+                    .filter(|&k| !is_separator_row(lines[k]))
+                    .map(|k| {
+                        Value::Array(
+                            split_row(lines[k])
+                                .into_iter()
+                                .map(|c| Value::Array(inline(c.trim())))
+                                .collect(),
+                        )
+                    })
+                    .collect();
+                if !rows.is_empty() {
+                    out.push(json!({
+                        "kind": "table",
+                        "header": sep_row,
+                        "align": if sep_row { Some(table_align(sep)) } else { None },
+                        "rows": rows,
+                    }));
+                    i = j;
+                    continue;
+                }
+            } else {
+                out.push(json!({ "kind": "paragraph", "indent": indent, "spans": inline(trimmed) }));
+            }
+            continue;
+        }
         if let Some(rest) = trimmed.strip_prefix('>') {
             out.push(json!({ "kind": "quote", "spans": inline(rest.trim_start()) }));
             continue;
@@ -73,6 +112,50 @@ pub fn parse(text: &str) -> Vec<Value> {
         out.pop();
     }
     out
+}
+
+/// A row like `| a | b |` to its cells (`a`, `b`); the trailing `|` is optional.
+fn split_row(row: &str) -> Vec<String> {
+    let t = row.trim();
+    let t = t.strip_prefix('|').unwrap_or(t);
+    let t = t.strip_suffix('|').unwrap_or(t);
+    t.split('|').map(|c| c.trim().to_owned()).collect()
+}
+
+/// `|---|:===:|`-style separator row.
+fn is_separator_row(s: &str) -> bool {
+    let t = s.trim();
+    t.starts_with('|')
+        && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
+        && t.contains('-')
+}
+
+fn is_header_separator(s: &str) -> bool {
+    is_separator_row(s)
+        && split_row(s).into_iter().all(|cell| {
+            let cell = cell.trim();
+            let aligned = cell.starts_with(':') || cell.ends_with(':');
+            let cell = cell.trim_matches(':');
+            cell.len() >= if aligned { 2 } else { 3 } && cell.chars().all(|c| c == '-')
+        })
+}
+
+/// Column alignments from a separator row: `"l"`, `"c"` or `"r"`.
+fn table_align(s: &str) -> Vec<String> {
+    split_row(s)
+        .into_iter()
+        .map(|c| {
+            let l = c.starts_with(':');
+            let r = c.ends_with(':');
+            if l && r {
+                "c".to_owned()
+            } else if r {
+                "r".to_owned()
+            } else {
+                "l".to_owned()
+            }
+        })
+        .collect()
 }
 
 fn list_item(s: &str) -> Option<(&str, &str)> {
@@ -241,5 +324,27 @@ mod tests {
         assert_eq!(s[1], json!({ "text": "b", "bold": true }));
         assert_eq!(s[3], json!({ "text": "c", "code": true }));
         assert_eq!(s[5], json!({ "text": "d", "link": "http://x" }));
+    }
+#[test]
+    fn tables() {
+        let md = "| a | b |\n|---|:--:|\n| 1 | **2** |\n\n| x |\n\nbefore\n| p | q |\n| - | - |\n| r | s |\n";
+        let b = parse(md);
+        assert_eq!(
+            kinds(md),
+            ["table", "blank", "paragraph", "blank", "paragraph", "table"]
+        );
+        let t = &b[0];
+        assert_eq!(t["header"], true);
+        assert_eq!(t["align"], json!(vec!["l", "c"]));
+        assert_eq!(t["rows"].as_array().unwrap().len(), 2);
+        assert_eq!(t["rows"][1][1][0]["text"], "2");
+        assert_eq!(t["rows"][1][1][0]["bold"], true);
+        // A lone pipe line is a paragraph, not a table.
+        assert_eq!(b[2]["kind"], "paragraph");
+        // Without a separator row there is no header or alignment.
+        let t2 = &b[5];
+        assert_eq!(t2["header"], false);
+        assert!(t2["align"].is_null());
+        assert_eq!(t2["rows"].as_array().unwrap().len(), 2);
     }
 }

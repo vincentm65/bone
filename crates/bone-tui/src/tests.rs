@@ -92,6 +92,13 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
             { "name": "db", "state": "failed", "error": "cannot run db-mcp", "tools": [] },
         ]),
         // The example plugins' core halves, as a core would answer for them.
+        "session/compact" => json!({
+            "session_id": params["session_id"],
+            "messages": if params["clear"] == json!(true) { 0 } else { 12 },
+            "tokens_before": 90000,
+            "tokens_after": 30000,
+            "reason": if params["clear"] == json!(true) { "clear" } else { "manual" },
+        }),
         "lua/call" => match params["name"].as_str().unwrap_or_default() {
             "skills.list" => json!([{ "name": "release", "description": "cut a release" }]),
             "templates.list" => {
@@ -101,7 +108,6 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
                 "Review {}",
                 params["args"]["args"].as_str().unwrap_or("")
             )),
-            "compact" => json!("compacted"),
             other => {
                 return Err(RpcError::new(
                     RpcError::INVALID_PARAMS,
@@ -115,13 +121,17 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
             let rows = if sql.contains("FROM tool_calls") {
                 json!([["edit_file", 10, 2, 300.0], ["shell", 4, 0, 1200.0]])
             } else if sql.contains("JOIN sessions") {
-                json!([["Walrus hunt", 12000, 800, 3]])
-            } else if sql.contains("GROUP BY model") {
-                json!([["gpt-5", 3, 12000, 800]])
-            } else if sql.contains("GROUP BY day") {
-                json!([["2026-10-03", 3, 12000, 800]])
+                json!([["Walrus hunt", "/home/u/zoo", 12800, 3]])
+            } else if sql.contains("GROUP BY provider, model") {
+                json!([["openai", "gpt-5", 3, 12000, 800, 600]])
+            } else if sql.contains("strftime('%w'") {
+                json!([["1", "14", 12800]])
+            } else if sql.contains(" AS k") {
+                json!([["2026-10-03", 12800, 3]])
+            } else if sql.contains(" AS d") {
+                json!([["2026-10-03", 12800]])
             } else {
-                json!([[3, 12000, 800, 1]])
+                json!([[3, 12000, 800, 600, 1, 1]])
             };
             json!({ "columns": [], "rows": rows, "truncated": false })
         }
@@ -610,7 +620,7 @@ async fn slash_commands_suggest_complete_and_run() {
 #[tokio::test]
 async fn slash_menu_scrolls_when_it_overflows() {
     let mut h = Harness::new().await;
-    // 32 extra commands overflow the window (the 21 builtin names/aliases
+    // 32 extra commands overflow the window (the 22 builtin names/aliases
     // alone do not).
     h.lua(
         "for i = 1, 32 do bone.cmd.create('zz' .. i, function() end, { desc = 'generated ' .. i }) end",
@@ -618,16 +628,12 @@ async fn slash_menu_scrolls_when_it_overflows() {
     .await;
     h.input("/").await;
     let screen = h.screen(80, 24);
-    // 53 = the 21 builtin names/aliases plus the 32 created above.
-    assert!(
-        screen.contains("/?") && screen.contains("of 53"),
-        "{screen}"
-    );
+    assert!(screen.contains("/?") && !screen.contains(" of 54"), "{screen}");
     // The wheel and pages scroll the menu to the end.
     h.input("{wheeldown}").await;
     let screen = h.screen(80, 24);
-    // One wheel down moves the selection to row 4, still in the first window.
-    assert!(screen.contains("1–8 of 53"), "{screen}");
+    // One wheel down moves the selection while the list remains attached to the prompt.
+    assert!(!screen.contains(" of 54"), "{screen}");
     for _ in 0..10 {
         h.input("{pagedown}").await;
     }
@@ -2605,21 +2611,27 @@ async fn example_tasks_plugin() {
 async fn example_stats_plugin() {
     let (mut h, _dir) = with_example("stats").await;
     h.input("/stats{enter}").await;
-    let screen = h.screen(100, 40);
+    let screen = h.screen(120, 60);
     for want in [
-        "Usage, the last 30 days",
-        "3 model calls in 1 sessions: 12k tokens in, 800 out.",
-        "gpt-5",
-        "2026-10-03",
+        "Usage",
+        "Tokens per day",
+        "12.8k",
+        "5% of input",
+        "openai / gpt-5",
         "Walrus hunt",
+        "zoo",
         "edit_file",
         "20.0%",
+        "busiest 14:00-15:00",
     ] {
         assert!(screen.contains(want), "{want}:\n{screen}");
     }
-    h.input("q/stats year{enter}").await;
+    h.input("1").await;
+    let screen = h.screen(120, 60);
+    assert!(screen.contains("Tokens per hour"), "{screen}");
+    h.input("q/stats bogus{enter}").await;
     assert!(
-        h.message().contains("use today, week, month or all"),
+        h.message().contains("use today, week, month, year, all"),
         "{}",
         h.message()
     );
@@ -2832,9 +2844,50 @@ async fn tui_lua_calls_core_lua_functions() {
 }
 
 #[tokio::test]
+async fn compact_command_and_chat_note() {
+    let (mut h, _dir) = Harness::with_config("").await;
+    h.input("/compact{enter}").await;
+    assert_eq!(h.message(), "this session has no messages yet");
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    h.emit::<TurnFinished>(finished("s-new", TurnOutcome::Completed))
+        .await;
+    h.input("/compact{enter}").await;
+    assert_eq!(
+        h.requests("session/compact").last().unwrap(),
+        &json!({ "session_id": "s-new" })
+    );
+    assert_eq!(h.message(), "compacted");
+    h.input("/compact clear{enter}").await;
+    assert_eq!(
+        h.requests("session/compact").last().unwrap(),
+        &json!({ "session_id": "s-new", "clear": true })
+    );
+
+    // Every compaction, however it came about, leaves one line in the
+    // chat; the messages above it stay.
+    h.emit::<SessionCompacted>(SessionCompactedParams {
+        session_id: "s-new".into(),
+        messages: 48,
+        tokens_before: 210_000,
+        tokens_after: 125_000,
+        reason: "overflow".into(),
+    })
+    .await;
+    let screen = h.screen(100, 20);
+    assert!(
+        screen.contains("› go")
+            && screen.contains(
+                "◇ compacted 48 messages · ~85k tokens saved (210k → 125k) (the context was full)"
+            ),
+        "{screen}"
+    );
+}
+
+#[tokio::test]
 async fn example_agent_extension_plugins_in_the_tui() {
     let (mut h, dir) = Harness::with_config("").await;
-    for name in ["compact", "mcp", "skills", "templates", "ask-model"] {
+    for name in ["mcp", "skills", "templates", "ask-model"] {
         install_example(dir.path(), name);
         h.input(&format!("/plugin load {name}{{enter}}")).await;
         assert!(
@@ -2846,9 +2899,7 @@ async fn example_agent_extension_plugins_in_the_tui() {
         );
     }
 
-    // compact: nothing before a session; then the core's template does it.
-    h.input("/compact{enter}").await;
-    assert_eq!(h.message(), "nothing to compact yet");
+    // A session with an answer, for /ask below.
     h.input("go{enter}").await;
     h.emit::<TurnStarted>(started("s-new", "go")).await;
     h.emit::<MessageCompleted>(MessageCompletedParams {
@@ -2864,13 +2915,6 @@ async fn example_agent_extension_plugins_in_the_tui() {
     .await;
     h.emit::<TurnFinished>(finished("s-new", TurnOutcome::Completed))
         .await;
-    h.input("/compact{enter}").await;
-    let req = h.requests("lua/call").last().unwrap().clone();
-    assert_eq!(
-        (req["name"].as_str(), req["session_id"].as_str()),
-        (Some("compact"), Some("s-new"))
-    );
-    assert_eq!(h.message(), "compacted");
 
     // mcp: a panel of servers.
     h.input("/mcp{enter}").await;
@@ -4236,11 +4280,25 @@ async fn the_command_menu_rests_on_the_prompt_with_few_matches() {
     let rows: Vec<&str> = screen.split('\n').collect();
     let prompt = rows
         .iter()
-        .position(|r| r.contains("› /qu"))
+        .position(|r| r.trim_end().ends_with("› /qu"))
         .expect(&screen);
-    // The box's bottom edge is right above the prompt's padded top row.
-    assert!(rows[prompt - 2].starts_with('╰'), "{screen}");
-    assert!(rows[prompt - 3].contains("/quit"), "{screen}");
+    // Suggestions are part of the composer and sit above the prompt text;
+    // there is no floating box edge between them.
+    let queue = rows
+        .iter()
+        .position(|r| r.contains("/queue"))
+        .expect(&screen);
+    let quit = rows
+        .iter()
+        .position(|r| r.contains("/quit"))
+        .expect(&screen);
+    assert!(quit < queue && queue < prompt, "{screen}");
+    assert!(
+        !rows[..prompt]
+            .iter()
+            .any(|r| r.starts_with('╭') || r.starts_with('╰')),
+        "{screen}"
+    );
 }
 
 #[tokio::test]
@@ -4481,6 +4539,14 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
     assert_eq!(
         h.requests("plugin/unload").last().unwrap()["name"],
         "corepart"
+    );
+
+    // The core's compaction settings have a tab of their own.
+    h.input("{tab}").await;
+    assert!(
+        h.screen(100, 34).contains("Turns kept in full"),
+        "{}",
+        h.screen(100, 34)
     );
 
     // A plugin's own tab, from its manifest, with its limits.

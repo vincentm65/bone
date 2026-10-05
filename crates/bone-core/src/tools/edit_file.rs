@@ -39,17 +39,10 @@ impl EditFile {
         let anchor = |what: &str| json!({ "type": "string", "description": what });
         EditFile(ToolSpec {
             name: "edit_file".into(),
-            description: "Edit a file by the LINE#HASH anchors read_file shows, instead of \
-                          retyping old text. Each edit is one of: {at, text} replaces one \
-                          line; {at, end, text} replaces lines at..end inclusive; {after, \
-                          text} or {before, text} inserts lines (after \"0\" = top of file). \
-                          Write an anchor as the whole line read_file showed, e.g. \
-                          \"12#k3|    let x = 1;\": the text after | finds the line even if \
-                          the number or hash is a little off. `text` is the new content \
-                          without anchors, lines separated by \\n; \"\" deletes. All edits \
-                          in one call apply together or not at all and must not overlap; \
-                          anchors from any earlier read of the file work. The result shows \
-                          the changed lines with fresh anchors."
+            description: "Apply multiple non-overlapping edits atomically. Use each read_file \
+                          line anchor as `at`; position is replace (default), after, or before. \
+                          Set `end` for an inclusive replacement range. `text` is new content \
+                          separated by newlines; an empty string deletes."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -62,13 +55,12 @@ impl EditFile {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "at": anchor("Replace from this line."),
-                                "end": anchor("Last line replaced, inclusive (with `at`)."),
-                                "after": anchor("Insert after this line; \"0\" inserts at the top."),
-                                "before": anchor("Insert before this line."),
+                                "at": anchor("Line anchor from read_file; use \"0\" with position=after for the top of the file."),
+                                "end": anchor("Last line replaced, inclusive."),
+                                "position": { "type": "string", "enum": ["replace", "after", "before"], "default": "replace" },
                                 "text": { "type": "string", "description": "New lines, without anchors. \"\" deletes." }
                             },
-                            "required": ["text"],
+                            "required": ["at", "text"],
                             "additionalProperties": false
                         }
                     }
@@ -156,8 +148,8 @@ impl Edit {
     }
 }
 
-const SHAPE: &str = "edit_file expects {path, edits: [{at|after|before, end?, text}]}";
-const EDIT_KEYS: [&str; 5] = ["at", "end", "after", "before", "text"];
+const SHAPE: &str = "edit_file expects {path, edits: [{at, position?, end?, text}]}";
+const EDIT_KEYS: [&str; 6] = ["at", "end", "position", "after", "before", "text"];
 
 fn parse(args: Value, last: Option<&Path>) -> Result<Request, String> {
     let Value::Object(mut args) = args else {
@@ -245,18 +237,35 @@ fn parse_edit(index: usize, spec: Value) -> Result<Edit, String> {
         return Err(format!("must be an object, not {}", kind_of(&spec)));
     };
     if let Some(k) = spec.keys().find(|k| !EDIT_KEYS.contains(&k.as_str())) {
-        return Err(format!(
-            "unknown field `{k}`; use at, end, after, before, text"
-        ));
+        return Err(format!("unknown field `{k}`; use at, position, end, text"));
     }
     let mut take = |k: &str| spec.remove(k).filter(|v| !v.is_null());
-    let (at, end, after, before) = (take("at"), take("end"), take("after"), take("before"));
+    let (at, end, position, after, before) = (
+        take("at"),
+        take("end"),
+        take("position"),
+        take("after"),
+        take("before"),
+    );
     let text = take("text");
-    let (kind, start) = match (at, after, before) {
-        (Some(a), None, None) => (Kind::Replace, a),
-        (None, Some(a), None) => (Kind::After, a),
-        (None, None, Some(a)) => (Kind::Before, a),
-        _ => return Err("set exactly one of `at`, `after`, `before`".into()),
+    let position = position
+        .map(|v| {
+            v.as_str()
+                .map(str::to_owned)
+                .ok_or("`position` must be a string")
+        })
+        .transpose()?;
+    let (kind, start) = match (at, position.as_deref(), after, before) {
+        (Some(a), None | Some("replace"), None, None) => (Kind::Replace, a),
+        (Some(a), Some("after"), None, None) => (Kind::After, a),
+        (Some(a), Some("before"), None, None) => (Kind::Before, a),
+        (None, None, Some(a), None) => (Kind::After, a),
+        (None, None, None, Some(a)) => (Kind::Before, a),
+        _ => {
+            return Err(
+                "set exactly one position: `at` with optional position=replace|after|before".into(),
+            );
+        }
     };
     if end.is_some() && kind != Kind::Replace {
         return Err("`end` only goes with `at`".into());

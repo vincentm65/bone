@@ -8,13 +8,7 @@
 -- Divider ctx: spinner, width, session.
 
 local function elapsed(secs)
-  if not secs then
-    return ""
-  end
-  if secs < 60 then
-    return secs .. "s"
-  end
-  return string.format("%dm%02ds", math.floor(secs / 60), secs % 60)
+  return bone.util.duration(secs)
 end
 
 local function tokens(n)

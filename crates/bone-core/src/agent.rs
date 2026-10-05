@@ -25,15 +25,17 @@ use crate::config::CoreConfig;
 use crate::provider::{CompletionRequest, Delta};
 use crate::runtime::Runtime;
 use crate::session::{SessionHandle, UsageRecord};
-use crate::tools::{ToolContext, ToolSpec, parse_args};
+use crate::tools::{FinishedSink, ToolContext, ToolSpec, parse_args};
 
 /// After cancellation, how long a running tool gets to clean up (e.g. kill
 /// its process group) before its future is dropped.
 const TOOL_CANCEL_GRACE: Duration = Duration::from_millis(500);
 
 const DEFAULT_SYSTEM_PROMPT: &str = "You are bone, a coding assistant working in the \
-user's terminal. Use the tools to inspect files, make changes and run commands. Read files \
-before editing them. Keep changes minimal and focused, and keep answers concise.";
+user's terminal. Use the tools to inspect files, make changes and run commands. Search with rg \
+before reading large files, then use read_file ranges for focused sections. Read files before \
+editing them; group independent hunks in one edit_file call. Keep changes minimal and focused, \
+and keep answers concise.";
 
 const CANCELLED: &str = "Cancelled by the user before this tool call ran.";
 
@@ -150,6 +152,16 @@ impl Turn<'_> {
         r
     }
 
+    /// Compact the session between model calls (see `compact.rs`); whether
+    /// it did. Failing to (nothing to compact yet, the summary failed) is
+    /// not the turn's failure.
+    async fn compact(&self, reason: &str) -> Result<bool, Stop> {
+        tokio::select! {
+            r = self.inner.compact(self.session, reason) => Ok(r.is_ok()),
+            _ = self.cancel.cancelled() => Err(Stop::Cancelled),
+        }
+    }
+
     /// A hook point that stops the turn when refused.
     async fn turn_hooks(&self, name: &str, event: Value) -> Result<Option<Value>, Stop> {
         self.hooks(name, event).await.map_err(|r| match r {
@@ -194,12 +206,28 @@ impl Turn<'_> {
         {
             system = p.to_owned();
         }
-        loop {
+        // Compacting after a context overflow, once per model call.
+        let mut overflowed = false;
+        'call: loop {
             self.take_steer()?;
-            let mut messages = vec![ChatMessage::System {
+            let system = ChatMessage::System {
                 content: system.clone(),
-            }];
-            messages.extend(self.session.lock().unwrap().messages.iter().cloned());
+            };
+            let compact = self.inner.compact_config();
+            if let Some(limit) = compact.limit {
+                let over = {
+                    let s = self.session.lock().unwrap();
+                    let mut all = vec![system.clone()];
+                    all.extend(s.context());
+                    crate::compact::tokens(&s, &all) > limit
+                };
+                if over {
+                    // Nothing left to compact is fine: the call goes as is.
+                    self.compact("limit").await?;
+                }
+            }
+            let mut messages = vec![system];
+            messages.extend(self.session.lock().unwrap().context());
             let ev = json!({ "session_id": self.session_id, "messages": messages });
             if let Some(ev) = self.safe_hooks("context", ev).await? {
                 messages = serde_json::from_value(list(&ev["messages"])).map_err(|e| {
@@ -239,6 +267,7 @@ impl Turn<'_> {
                     .unwrap_or_default();
             }
 
+            let sent_chars = crate::compact::chars(&messages);
             let mut attempt = 0;
             // A request_error hook may move the rest of this call elsewhere.
             let mut provider = self.rt.provider.clone();
@@ -286,6 +315,19 @@ impl Turn<'_> {
                 };
                 match result {
                     Some(Ok(c)) => break c,
+                    // Too long for the model: compact, then build the call
+                    // again with the summary.
+                    Some(Err(e))
+                        if text.is_empty()
+                            && reasoning.is_empty()
+                            && !overflowed
+                            && compact.auto
+                            && crate::compact::is_overflow(&e.0)
+                            && self.compact("overflow").await? =>
+                    {
+                        overflowed = true;
+                        continue 'call;
+                    }
                     // Nothing streamed yet: `request_error` hooks may retry.
                     Some(Err(e))
                         if text.is_empty() && reasoning.is_empty() && attempt <= MAX_RETRIES =>
@@ -347,7 +389,12 @@ impl Turn<'_> {
                     Stop::Failed(format!("message hook returned bad tool_calls: {e}"))
                 })?;
             }
+            overflowed = false;
             if let Some(u) = completion.usage {
+                if u.input_tokens > 0 {
+                    self.session.lock().unwrap().chars_per_token =
+                        Some(sent_chars as f64 / u.input_tokens as f64);
+                }
                 let record = UsageRecord {
                     turn_id: self.turn_id,
                     provider: served.0.clone(),
@@ -561,12 +608,29 @@ impl Turn<'_> {
                 }));
             })
         };
+        let finished: FinishedSink = {
+            let events = self.inner.events.clone();
+            let (session_id, turn_id, call_id) =
+                (self.session_id.clone(), self.turn_id, call.id.clone());
+            Arc::new(move |output: String, is_error: bool, duration_ms: u64| {
+                let _ = events.send(crate::Event::new::<ToolFinished>(ToolFinishedParams {
+                    session_id: session_id.clone(),
+                    turn_id,
+                    call_id: call_id.clone(),
+                    output,
+                    is_error,
+                    duration_ms: Some(duration_ms),
+                }));
+            })
+        };
         let ctx = ToolContext {
             cwd: self.cwd.clone(),
             session_id: self.session_id.clone(),
             cancel: self.cancel.clone(),
             views: self.inner.views.clone(),
+            jobs: self.inner.jobs.clone(),
             output: Some(output),
+            finish: Some(finished),
         };
         let hook_args = args.clone();
         let grace = async {

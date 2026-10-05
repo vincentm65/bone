@@ -75,6 +75,72 @@ local function md_spans(spans, base)
   return out
 end
 
+-- Lay a table block out to fixed-width lines. Column widths come from the
+-- widest cell; if the table is wider than `width`, the rightmost columns are
+-- truncated with an ellipsis. Cells are plain spans (no wrapping).
+local function md_table(b, width, indent)
+  local max_cols = 0
+  for _, row in ipairs(b.rows) do
+    max_cols = math.max(max_cols, #row)
+  end
+  local w = {}
+  for c = 1, max_cols do
+    w[c] = 0
+    for _, row in ipairs(b.rows) do
+      local cell = row[c]
+      if cell then
+        local n = 0
+        for _, s in ipairs(cell) do
+          n = n + bone.text.width(s.text)
+        end
+        w[c] = math.max(w[c], n)
+      end
+    end
+  end
+  -- separators: one " │ " (3 wide) between columns.
+  local seps = math.max(0, max_cols - 1) * 3
+  local total = #indent + seps
+  for c = 1, max_cols do
+    total = total + w[c]
+  end
+  if total > width then
+    -- Truncate from the right; each kept column stays at least 2 wide.
+    local budget = width - #indent - seps
+    for c = max_cols, 1, -1 do
+      local rest = 0
+      for k = 1, c - 1 do
+        rest = rest + math.min(w[k], 2)
+      end
+      local room = math.max(2, budget - rest)
+      w[c] = math.min(w[c], room)
+      budget = budget - w[c]
+    end
+  end
+  local out = {}
+  for i, row in ipairs(b.rows) do
+    local is_head = b.header and i == 1
+    local hl = is_head and "MdTableHeader" or "MdTable"
+    local line = { { indent, "Normal" } }
+    for c = 1, max_cols do
+      local cell = row[c] or {}
+      local spans = md_spans(cell, hl)
+      local n = 0
+      for _, s in ipairs(spans) do
+        n = n + bone.text.width(s[1])
+      end
+      for _, s in ipairs(spans) do
+        line[#line + 1] = s
+      end
+      line[#line + 1] = { string.rep(" ", math.max(0, w[c] - n)), hl }
+      if c < max_cols then
+        line[#line + 1] = { " │ ", "Dim" }
+      end
+    end
+    out[#out + 1] = line
+  end
+  return out
+end
+
 --- Markdown text to lines, every row prefixed with `indent`.
 function bone.ui.markdown(text, width, indent)
   indent = indent or ""
@@ -90,6 +156,8 @@ function bone.ui.markdown(text, width, indent)
     elseif b.kind == "quote" then
       local p = { { indent, "Normal" }, { "▏ ", "MdQuote" } }
       append(out, wrap(md_spans(b.spans, "MdQuote"), width, { first = p, rest = p }))
+    elseif b.kind == "table" then
+      append(out, md_table(b, width, indent))
     elseif b.kind == "item" then
       local lead = string.rep(" ", b.indent)
       local bullet = b.ordered and (b.marker .. " ") or "• "

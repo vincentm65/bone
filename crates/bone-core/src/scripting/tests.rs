@@ -175,7 +175,9 @@ async fn hooks_tools_and_system_prompt() {
         session_id: "s".into(),
         cancel: Default::default(),
         views: Default::default(),
+        jobs: Default::default(),
         output: None,
+        finish: None,
     };
     let shout = tool("shout");
     assert_eq!(
@@ -273,7 +275,9 @@ async fn ask_waits_for_an_answer_or_a_cancel() {
             session_id: session.into(),
             cancel: Default::default(),
             views: Default::default(),
+            jobs: Default::default(),
             output: None,
+            finish: None,
         };
         tokio::spawn(async move { tool.call(json!({}), &ctx).await })
     };
@@ -421,7 +425,9 @@ async fn plugins_run_before_user_config() {
         session_id: "s".into(),
         cancel: Default::default(),
         views: Default::default(),
+        jobs: Default::default(),
         output: None,
+        finish: None,
     };
     assert_eq!(
         tool.call(json!({}), &ctx).await.unwrap(),
@@ -446,7 +452,9 @@ fn ctx(session: &str) -> ToolContext {
         session_id: session.into(),
         cancel: Default::default(),
         views: Default::default(),
+        jobs: Default::default(),
         output: None,
+        finish: None,
     }
 }
 

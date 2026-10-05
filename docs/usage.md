@@ -67,11 +67,12 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `/sessions`, `/resume` | pick a session to open |
 | `/rename {title}` | give this session a title |
 | `/fork`, `/fork {N}` | continue in a copy of this session; with N, from before turn N (to try that turn again differently). The original stays as it was |
+| `/compact`, `/compact clear` | summarize the older part of this session for the model (the latest turns stay word for word); the chat and the session file keep everything, and one line notes the tokens saved. `clear` sends the whole history again. Bone also compacts by itself when the model says the context is too long, or before a call over `compact.limit` (`/config` → Compaction) |
 | `/queue`, `/queue clear`, `/queue resume` | list the queued messages, empty the queue, let a paused queue go on (after a cancel or a restart) |
 | `/quit`, `/exit`, `/q` | quit |
 | `/plugin`, `/plugins` | list plugins (TUI and core halves); `/plugin load name`, `/plugin unload name`, `/plugin reload name` act on both halves (picking up edits to their files); `/plugin reload` reloads the core's whole Lua configuration (`core.lua` and core plugins) |
 
-`/rename`, `/fork` and `/plugin` are Lua commands from `runtime/tui/defaults.lua`: change or remove them like any other (`bone.cmd.del("fork")`).
+`/rename`, `/fork`, `/compact` and `/plugin` are Lua commands from `runtime/tui/defaults.lua`: change or remove them like any other (`bone.cmd.del("fork")`).
 
 Enter on a partial name runs the highlighted suggestion (`/ses` + enter opens the picker). A message that really starts with `/` can be sent as `//like this`; paths such as `/etc/hosts …` are sent as messages anyway. Commands from Lua or plugins show up in the suggestions too.
 

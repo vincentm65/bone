@@ -146,24 +146,76 @@ fn snapshot(name: &str, screen: &str, work: &Path) {
 
 /// Spinner frames and elapsed times change between runs: `⠸ working 3s`
 /// becomes `* working <t>`.
-/// `done 12s` / `done 1m05s` (a finished turn's time) as `done <t>`.
+/// `worked 12s, finished at 3:42 pm` (a finished turn's times) as
+/// `worked <t>, finished at <t>`.
 fn mask_done(screen: &str) -> String {
     let mut out = String::new();
     let mut rest = screen;
-    while let Some(i) = rest.find("done ") {
-        out.push_str(&rest[..i + 5]);
-        rest = &rest[i + 5..];
-        let n = rest
-            .find(|c: char| !(c.is_ascii_digit() || c == 'm' || c == 's'))
-            .unwrap_or(rest.len());
-        if n > 0 && rest[..n].ends_with('s') && rest.starts_with(|c: char| c.is_ascii_digit()) {
+    while let Some(i) = rest.find("worked ") {
+        out.push_str(&rest[..i + 7]);
+        rest = &rest[i + 7..];
+        let n = timer_len(rest);
+        out.push_str("<t>");
+        rest = &rest[n..];
+        if let Some(j) = rest.find(", finished at ") {
+            out.push_str(", finished at ");
+            rest = &rest[j + 14..];
+            let m = clock_len(rest);
             out.push_str("<t>");
-            rest = &rest[n..];
+            rest = &rest[m..];
         }
     }
     out.push_str(rest);
     out
 }
+
+/// Length of a wall-clock time like `3:42 pm` at the start of `s`.
+fn clock_len(s: &str) -> usize {
+    let mut n = 0;
+    for (i, c) in s.char_indices() {
+        let stop = c.is_ascii_digit() || c == ':' || c.is_ascii_lowercase();
+        let space = c == ' ' && s[i + c.len_utf8()..].chars().next().is_some_and(|c2| c2.is_ascii_lowercase());
+        if stop || space {
+            n = i + c.len_utf8();
+        } else {
+            break;
+        }
+    }
+    n
+}
+
+/// Length of an elapsed time (like `12s` or `1m 05s`) at the start of `chars`,
+/// allowing leading spaces; 0 if there is none.
+fn timer_len(s: &str) -> usize {
+    let s: String = s.chars().take(10).collect();
+    let start = s.find(|c: char| !c.is_ascii_whitespace()).unwrap_or(s.len());
+    let t = &s[start..];
+    let digits = |t: &str| -> Option<usize> {
+        let n = t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len());
+        (n > 0).then_some(n)
+    };
+    let mut pos = match digits(t) {
+        Some(n) => n,
+        None => return 0,
+    };
+    if t[pos..].starts_with('m') {
+        pos += 1;
+        if t[pos..].starts_with(' ') {
+            pos += 1;
+        }
+        match digits(&t[pos..]) {
+            Some(n) => pos += n,
+            None => return 0,
+        }
+    }
+    if t[pos..].starts_with('s') {
+        pos += 1;
+    } else {
+        return 0;
+    }
+    start + pos
+}
+
 
 fn mask_timers(screen: &str) -> String {
     const SPINNER: &str = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
@@ -175,24 +227,17 @@ fn mask_timers(screen: &str) -> String {
             continue;
         }
         out.push('*');
-        let mut rest: String = chars.clone().take(9).collect();
+        let rest: String = chars.clone().take(9).collect();
         if rest.starts_with(" working ") {
             out.push_str(" working");
             chars.nth(7);
-            rest = chars.clone().take(1).collect();
         }
-        if rest.starts_with(' ') {
-            let mut ahead = chars.clone();
-            ahead.next();
-            let digits: String = ahead
-                .clone()
-                .take_while(|c| c.is_ascii_digit() || *c == 'm')
-                .collect();
-            if !digits.is_empty() && ahead.clone().nth(digits.chars().count()) == Some('s') {
-                out.push_str(" <t>");
-                for _ in 0..digits.chars().count() + 2 {
-                    chars.next();
-                }
+        // Elapsed time: e.g. `12s`, `1m 05s` (digits, units, one inner space).
+        let timer = timer_len(&chars.clone().take(10).collect::<String>());
+        if timer > 0 {
+            out.push_str(" <t>");
+            for _ in 0..timer {
+                chars.next();
             }
         }
     }
@@ -202,7 +247,7 @@ fn mask_timers(screen: &str) -> String {
 #[test]
 fn masking() {
     assert_eq!(mask_timers("── x  ⠸ 12s ──"), "── x  * <t> ──");
-    assert_eq!(mask_timers("│  ⠋ working 1m05s  │"), "│  * working <t>  │");
+    assert_eq!(mask_timers("│  ⠋ working 1m 05s  │"), "│  * working <t>  │");
 }
 
 #[tokio::test(flavor = "multi_thread")]

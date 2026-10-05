@@ -45,6 +45,7 @@ After `initialize`, the server runs each request on its own task: replies carry 
 | `session/rename` | `{ session_id, title }` | `SessionInfo` with the new title (kept in `<id>.title` next to the session file); a `session/updated` event with `reason: "rename"` follows |
 | `session/fork` | `{ session_id, before_turn? }` | `SessionInfo` of a new session holding a copy of the transcript (with `before_turn = N`, only what came before the Nth user message), its `parent` set. The original is untouched |
 | `session/delete` | `{ session_id }` | `null`; the session and its file are gone and `session/deleted` goes to every client. An error while a turn runs |
+| `session/compact` | `{ session_id, clear? }` | `{ session_id, messages, tokens_before, tokens_after, reason }`: the older part of the session is summarized by a model, and from then on model calls get the summary in place of it. The transcript, the session file and `session/messages` keep everything. `messages` is how many transcript messages were newly summarized; the token counts are estimates of what a model call sends, before and after. `clear` drops the summary instead (`reason: "clear"`). An error when there is nothing to compact yet. Also announced as `session/compacted` |
 | `turn/start` | `{ session_id, text }` | `{ turn_id }`, returned at once; the turn runs in the background |
 | `turn/steer` | `{ session_id, text }` | `null`; shorthand for `queue/add` with `mode: "steer"`, but an error when no turn is running |
 | `queue/add` | `{ session_id, text, mode? }` | `{ id? , turn_id? }`. Idle session: the message starts a turn at once (`turn_id`). Running turn: it is queued (`id`); `mode: "steer"` (the default) joins that turn before its next model call (`turn/steered` says when; one arriving during the final answer gets another step), `"next"` starts its own turn after it. Queued turns go through `turn_start` hooks; steered messages do not. Core Lua `queue_add` hooks may rewrite or refuse it |
@@ -108,7 +109,8 @@ Every event carries `session_id` (except `echoed`, `ask/resolved`, `core/reloade
 | `model/delta` | `{ request_id, kind, text }` | streamed output of a `model/complete` call (no `session_id`) |
 | `model/completed` | `{ request_id, message?, usage?, error? }` | a `model/complete` call ended: the assistant `message`, or an `error` (no `session_id`) |
 | `session/deleted` | `{ session_id }` | a client deleted the session |
-| `session/updated` | `{ reason: "append" \| "compact" \| "rename" }` | core Lua changed the session's transcript (`bone.session`), or it was renamed; load it again with `session/messages` |
+| `session/compacted` | `{ messages, tokens_before, tokens_after, reason }` | the session was compacted (`reason`: `"manual"` from `session/compact`, `"limit"` over `compact.limit`, `"overflow"` after the model said the context is too long, or `"clear"`). The transcript did not change; there is nothing to reload |
+| `session/updated` | `{ reason: "append" \| "compact" \| "rename" }` | core Lua changed the session's transcript (`bone.session.append`, or `bone.session.compact` replacing it), or it was renamed; load it again with `session/messages` |
 
 A typical turn: `turn/started`, then `message/delta`…, `message/completed` (with `tool_calls`), and for each call `tool/started`, then `ask/requested` → `ask/resolved` if a hook asks the user (the approve plugin does for tools that change things), then `tool/finished`. That repeats until a `message/completed` arrives without tool calls, then `turn/finished`.
 

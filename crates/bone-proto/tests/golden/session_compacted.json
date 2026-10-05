@@ -1,0 +1,13 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "session/compacted",
+    "params": {
+      "messages": 12,
+      "reason": "limit",
+      "session_id": "01a0fe5e-0000-7000-8000-000000000001",
+      "tokens_after": 98200,
+      "tokens_before": 130500
+    }
+  }
+]

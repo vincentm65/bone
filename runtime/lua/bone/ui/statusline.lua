@@ -8,13 +8,7 @@
 -- Divider ctx: spinner, width, session.
 
 local function elapsed(secs)
-  if not secs then
-    return ""
-  end
-  if secs < 60 then
-    return secs .. "s"
-  end
-  return string.format("%dm%02ds", math.floor(secs / 60), secs % 60)
+  return bone.util.duration(secs)
 end
 
 local function tokens(n)
@@ -93,14 +87,11 @@ function bone.ui.statusline(ctx)
     left[#left + 1] = { "curr " .. tokens(input), "StatusLineDim" }
     left[#left + 1] = { "total " .. tokens(total), "StatusLineDim" }
   end
-  if s and s.elapsed then
-    left[#left + 1] = { elapsed(s.elapsed), "StatusLineDim" }
-  end
   if s and s.running then
     local running_for = state.started and (now() - state.started) or nil
     left[#left + 1] = { (ctx.spinner or "") .. " thinking" .. (running_for and (" " .. elapsed(running_for)) or ""), "Accent" }
   elseif state.finished_elapsed then
-    left[#left + 1] = { "done " .. elapsed(state.finished_elapsed), "StatusLineDim" }
+    left[#left + 1] = { "worked " .. elapsed(state.finished_elapsed) .. ", finished at " .. bone.util.format_time(state.finished), "StatusLineDim" }
   end
 
   local function joined(list)

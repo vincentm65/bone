@@ -22,7 +22,7 @@ local function passing(err)
   return false
 end
 
--- Low priority: other request_error hooks (compact) decide first.
+-- Low priority: other request_error hooks decide first.
 bone.hook("request_error", function(ev)
   local cfg = bone.config.retry or {}
   if ev.retry or ev.attempt >= (cfg.attempts or 4) or not passing(ev.error) then

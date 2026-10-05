@@ -162,9 +162,8 @@ function bone.ui.sessions()
   end)
 end
 
--- Matching slash commands while typing "/…", right above the prompt.
--- ctx = { items = { { name, desc } }, selected, width, height, footer };
--- footer is a dim row under the list while it scrolls.
+-- Matching slash commands while typing "/…", attached to the prompt.
+-- ctx = { items = { { name, desc } }, selected, width, height };
 function bone.ui.suggestions(ctx)
   local name_w, desc_w = 0, 0
   for _, it in ipairs(ctx.items) do
@@ -173,17 +172,18 @@ function bone.ui.suggestions(ctx)
   end
   local lines = {}
   for i, it in ipairs(ctx.items) do
-    local hl = i == ctx.selected and "Selection" or "Normal"
+    local hl = i == ctx.selected and "Selection" or "InputBackground"
+    local prefix = "  "
     local name = "/" .. it.name
+    local name_text = prefix .. name
+    local used = bone.text.width(prefix) + name_w + 1 + desc_w
     lines[i] = {
-      { name .. string.rep(" ", name_w + 1 - bone.text.width(name)), hl },
+      { name_text .. string.rep(" ", name_w + 1 - bone.text.width(name)), hl },
       { it.desc .. string.rep(" ", desc_w - bone.text.width(it.desc)), hl },
+      { string.rep(" ", math.max(0, ctx.width - used)), hl },
     }
   end
-  if ctx.footer then
-    lines[#lines + 1] = { { ctx.footer, "Dim" } }
-  end
-  return bone.ui.box(lines, { border_hl = "WinSeparator", width = math.min(name_w + desc_w + 5, ctx.width) })
+  return lines
 end
 
 -- /help topic: the best matching section of the docs, in a pager.
@@ -338,6 +338,72 @@ bone.cmd.create("fork", function(c)
     bone.notify(n and ("forked from before turn " .. n) or "forked")
   end)
 end, { desc = "copy this session to try something else; /fork N starts before turn N" })
+
+-- Compaction (the core's; see crates/bone-core/src/compact.rs): the model
+-- gets a summary in place of the older part of a long session, while the
+-- chat and the session file keep everything. Each compaction, by /compact
+-- or automatic, leaves one line in the chat.
+local function tokens(n)
+  n = tonumber(n) or 0
+  if n >= 1000 then
+    return (string.format("%.1fk", n / 1000):gsub("%.0k$", "k"))
+  end
+  return tostring(n)
+end
+
+local WHY = { limit = " (over compact.limit)", overflow = " (the context was full)" }
+
+bone.on("session/compacted", function(ev)
+  local text
+  if ev.reason == "clear" then
+    text = ("compaction cleared · the full history is sent again (~%s tokens)"):format(tokens(ev.tokens_after))
+  else
+    text = ("compacted %d message%s · ~%s tokens saved (%s → %s)%s"):format(ev.messages,
+      ev.messages == 1 and "" or "s", tokens(math.max(ev.tokens_before - ev.tokens_after, 0)),
+      tokens(ev.tokens_before), tokens(ev.tokens_after), WHY[ev.reason] or "")
+  end
+  -- Only into a chat this TUI has open.
+  pcall(bone.chat.add, "compacted", { text = text, reason = ev.reason }, { session = ev.session_id })
+end)
+
+bone.cmd.create("compact", function(c)
+  local id = current_session()
+  if not id then
+    return
+  end
+  if c.args ~= "" and c.args ~= "clear" then
+    return bone.notify("usage: /compact [clear]", "error")
+  end
+  if c.args == "" then
+    bone.notify("compacting…")
+  end
+  bone.request("session/compact", { session_id = id, clear = c.args == "clear" or nil }, function(_, err)
+    if err then
+      return bone.notify("compact: " .. tostring(err):gsub("^rpc error %-?%d+: ", ""), "error")
+    end
+    bone.notify(c.args == "clear" and "compaction cleared" or "compacted")
+  end)
+end, {
+  desc = "summarize the older part of this session for the model; the chat stays",
+  complete = function()
+    return { { value = "clear", desc = "send the full history again" } }
+  end,
+})
+
+bone.settings.page({
+  name = "compact",
+  title = "Compaction",
+  fields = {
+    { key = "keep", label = "Turns kept in full", type = "integer", default = 2, min = 0, max = 50,
+      desc = "the latest user turns always sent word for word" },
+    { key = "auto", label = "Compact when full", type = "boolean", default = true,
+      desc = "compact and retry when the model says the context is too long" },
+    { key = "limit", label = "Token limit", type = "integer", default = 0, min = 0,
+      desc = "compact before a call estimated above this many tokens (0: never)" },
+    { key = "provider", label = "Summary provider", type = "string", default = "",
+      desc = "the provider that writes summaries (empty: the current one)" },
+  },
+})
 
 local function message(e)
   return (tostring(e):gsub("^runtime error: ", ""):gsub("\nstack traceback:.*$", ""))
