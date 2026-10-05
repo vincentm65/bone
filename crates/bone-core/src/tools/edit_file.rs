@@ -723,6 +723,18 @@ async fn commit(path: &Path, before: &str, text: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_output(path: &Path, text: &str) -> Result<(), String> {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("rs") => syn::parse_file(text)
+            .map(|_| ())
+            .map_err(|e| format!("{} would be invalid Rust: {e}", path.display())),
+        Some("json") => serde_json::from_str::<Value>(text)
+            .map(|_| ())
+            .map_err(|e| format!("{} would be invalid JSON: {e}", path.display())),
+        _ => Ok(()),
+    }
+}
+
 /// Add the lines around `center` (1-based) of a `len`-line file.
 fn window(len: usize, center: usize, shown: &mut BTreeSet<usize>) {
     if len == 0 {
@@ -1031,6 +1043,7 @@ async fn edit(ctx: &ToolContext, path_arg: &str, edits: &[Edit]) -> ToolResult {
         }
         return Ok(msg);
     }
+    validate_output(&path, &text).map_err(|e| format!("No changes written to {display}: {e}"))?;
     commit(&path, &before, &text).await?;
 
     let rows = diff_rows(&out.lines, &regions);
@@ -1131,6 +1144,7 @@ async fn replace(ctx: &ToolContext, path_arg: &str, old: &str, new: &str, all: b
         }
         _ => before.replace(old, new),
     };
+    validate_output(&path, &text).map_err(|e| format!("No changes written to {display}: {e}"))?;
     commit(&path, &before, &text).await?;
     let lines = Lines::parse(&text).lines;
     let seen = (1..=lines.len()).collect();

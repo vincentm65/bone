@@ -87,6 +87,7 @@ dependencies = [
  "serde",
  "serde_json",
  "similar",
+ "syn 2.0.119",
  "tempfile",
  "thiserror",
  "tokio",

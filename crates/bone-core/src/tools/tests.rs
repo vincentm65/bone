@@ -168,11 +168,16 @@ fn hash_anchor(text: &str, n: usize) -> String {
 }
 
 async fn setup(body: &str) -> (tempfile::TempDir, ToolContext, PathBuf) {
+    setup_file(body, "rs").await
+}
+
+async fn setup_file(body: &str, extension: &str) -> (tempfile::TempDir, ToolContext, PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let ctx = ctx(&dir);
-    let path = dir.path().join("f.rs");
+    let filename = format!("f.{extension}");
+    let path = dir.path().join(&filename);
     std::fs::write(&path, body).unwrap();
-    call(&ctx, "read_file", json!({"path": "f.rs", "full": true}))
+    call(&ctx, "read_file", json!({"path": filename, "full": true}))
         .await
         .unwrap();
     (dir, ctx, path)
@@ -180,6 +185,10 @@ async fn setup(body: &str) -> (tempfile::TempDir, ToolContext, PathBuf) {
 
 async fn edit(ctx: &ToolContext, edits: Value) -> ToolResult {
     call(ctx, "edit_file", json!({"path": "f.rs", "edits": edits})).await
+}
+
+async fn edit_path(ctx: &ToolContext, path: &str, edits: Value) -> ToolResult {
+    call(ctx, "edit_file", json!({"path": path, "edits": edits})).await
 }
 
 const SRC: &str = "fn a() {\n    one();\n}\n\nfn b() {\n    two();\n}\n";
@@ -320,24 +329,24 @@ async fn ranges_over_unseen_lines_are_shown_first() {
     let body: String = (1..=30).map(|i| format!("line {i}\n")).collect();
     let dir = tempfile::tempdir().unwrap();
     let ctx = ctx(&dir);
-    let path = dir.path().join("f.rs");
+    let path = dir.path().join("f.txt");
     std::fs::write(&path, &body).unwrap();
-    call(&ctx, "read_file", json!({"path": "f.rs", "limit": 5}))
+    call(&ctx, "read_file", json!({"path": "f.txt", "limit": 5}))
         .await
         .unwrap();
     call(
         &ctx,
         "read_file",
-        json!({"path": "f.rs", "offset": 20, "limit": 5}),
+        json!({"path": "f.txt", "offset": 20, "limit": 5}),
     )
     .await
     .unwrap();
     let range = json!([{"at": anchor(&body, 3), "end": anchor(&body, 22), "text": "gone"}]);
-    let err = edit(&ctx, range.clone()).await.unwrap_err();
+    let err = edit_path(&ctx, "f.txt", range.clone()).await.unwrap_err();
     assert!(err.contains("lines 3-22 were never shown"), "{err}");
     assert!(err.contains(&anchor(&body, 10)), "{err}");
     // Now they have been shown, the same edit goes through.
-    edit(&ctx, range).await.unwrap();
+    edit_path(&ctx, "f.txt", range).await.unwrap();
     assert_eq!(
         std::fs::read_to_string(&path).unwrap().lines().count(),
         30 - 20 + 1
@@ -360,6 +369,34 @@ async fn retrying_an_edit_that_went_through_is_not_an_error() {
 }
 
 #[tokio::test]
+async fn invalid_rust_edits_are_rejected_before_writing() {
+    let (_d, ctx, path) = setup(SRC).await;
+    let err = edit(
+        &ctx,
+        json!([{"at": anchor(SRC, 2), "text": "    let = ;"}]),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("would be invalid Rust"), "{err}");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), SRC);
+}
+
+#[tokio::test]
+async fn invalid_json_edits_are_rejected_before_writing() {
+    let body = "{\"value\": 1}\n";
+    let (_d, ctx, path) = setup_file(body, "json").await;
+    let err = edit_path(
+        &ctx,
+        "f.json",
+        json!([{"at": anchor(body, 1), "text": "{\"value\": }"}]),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.contains("would be invalid JSON"), "{err}");
+    assert_eq!(std::fs::read_to_string(path).unwrap(), body);
+}
+
+#[tokio::test]
 async fn overlapping_edits_are_refused() {
     let (_d, ctx, _path) = setup(SRC).await;
     let err = edit(
@@ -377,9 +414,10 @@ async fn overlapping_edits_are_refused() {
 #[tokio::test]
 async fn line_endings_and_a_missing_final_newline_survive() {
     let body = "\u{feff}a\r\nb\r\nc";
-    let (_d, ctx, path) = setup(body).await;
-    let out = edit(
+    let (_d, ctx, path) = setup_file(body, "txt").await;
+    let out = edit_path(
         &ctx,
+        "f.txt",
         json!([
             {"after": "3|c", "text": "d"},
             {"at": "1|a", "text": "A"},
