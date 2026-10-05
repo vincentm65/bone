@@ -105,6 +105,11 @@ function bone.ui.statusline(ctx)
   left[#left + 1] = { "total " .. tokens(state.total.input + state.total.output), "StatusLineDim" }
   left[#left + 1] = { "cache " .. tokens(state.total.cached), "StatusLineDim" }
   if s and s.running then
+    local turns = bone.chat.turns()
+    local turn = turns[#turns]
+    if turn and turn.tools and turn.tools > 0 then
+      left[#left + 1] = { "loop " .. (turn.tools + 1), "StatusLine" }
+    end
     local running_for = state.started and (now() - state.started) or nil
     left[#left + 1] = { (ctx.spinner or "") .. " thinking" .. (running_for and (" " .. elapsed(running_for)) or ""), "StatusLine" }
   elseif state.finished_elapsed then
