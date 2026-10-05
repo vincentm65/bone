@@ -119,6 +119,10 @@ fn plan(s: &Session, keep: usize) -> Option<Plan> {
     })
 }
 
+pub(crate) fn can_compact(s: &Session, keep: usize) -> bool {
+    plan(s, keep).is_some()
+}
+
 /// `text` cut to about `max` bytes, keeping its start and end.
 fn clip(text: &str, max: usize) -> String {
     if text.len() <= max {

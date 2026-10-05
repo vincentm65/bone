@@ -225,8 +225,13 @@ impl Turn<'_> {
                     crate::compact::tokens(&s, &all) > limit
                 };
                 if over {
-                    // Nothing left to compact is fine: the call goes as is.
-                    self.compact("limit").await?;
+                    let can = {
+                        let s = self.session.lock().unwrap();
+                        crate::compact::can_compact(&s, compact.keep)
+                    };
+                    if can {
+                        self.compact("limit").await?;
+                    }
                 }
             }
             let mut messages = vec![system];
@@ -412,6 +417,18 @@ impl Turn<'_> {
             }
             self.complete_message(content, reasoning, calls.clone(), completion.usage)?;
             if calls.is_empty() {
+                let compact = self.inner.compact_config();
+                if let Some(limit) = compact.limit {
+                    let can = {
+                        let s = self.session.lock().unwrap();
+                        let context = s.context();
+                        crate::compact::tokens(&s, &context) > limit
+                            && crate::compact::can_compact(&s, compact.keep)
+                    };
+                    if can {
+                        self.compact("limit").await?;
+                    }
+                }
                 // A message steered in meanwhile gets an answer before the
                 // turn ends; otherwise no more are accepted.
                 let mut s = self.session.lock().unwrap();
