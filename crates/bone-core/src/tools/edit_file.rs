@@ -367,11 +367,11 @@ fn split_text(text: &str) -> Result<Vec<String>, String> {
     }
     let body = text.strip_suffix('\n').unwrap_or(&text);
     let lines: Vec<&str> = body.split('\n').collect();
-    let anchors: Vec<_> = lines
-        .iter()
-        .map(|l| strip_anchor(l))
-        .collect();
-    match (anchors.iter().any(Option::is_some), anchors.into_iter().collect::<Option<Vec<_>>>()) {
+    let anchors: Vec<_> = lines.iter().map(|l| strip_anchor(l)).collect();
+    match (
+        anchors.iter().any(Option::is_some),
+        anchors.into_iter().collect::<Option<Vec<_>>>(),
+    ) {
         (false, None) => Ok(lines.into_iter().map(str::to_owned).collect()),
         (true, Some(stripped)) => Ok(stripped.into_iter().map(str::to_owned).collect()),
         (true, None) => Err(
@@ -407,6 +407,10 @@ fn same(text: &str, line: &str) -> bool {
     t == l || (t.chars().count() >= 40 && l.starts_with(&t))
 }
 
+fn same_exact(text: &str, line: &str) -> bool {
+    text == line || (text.chars().count() >= 40 && line.starts_with(text))
+}
+
 fn similarity(a: &str, b: &str) -> f32 {
     similar::TextDiff::from_chars(&norm(a), &norm(b)).ratio()
 }
@@ -433,11 +437,18 @@ fn find(lines: &[String], a: &Anchor) -> Found {
             Found::Missing
         };
     };
-    if at.is_some_and(|l| same(text, l) && (a.hash.is_none() || hash_ok(l))) {
+    let matches = |l: &String| {
+        (a.hash.is_some() && same(text, l) || a.hash.is_none() && same_exact(text, l))
+            && (a.hash.is_none() || hash_ok(l))
+    };
+    if at.is_some_and(matches) {
         return here;
     }
     let all: Vec<usize> = (0..lines.len())
-        .filter(|&i| same(text, &lines[i]) && (a.hash.is_none() || hash_ok(&lines[i])))
+        .filter(|&i| {
+            matches(&lines[i])
+                || (a.hash.is_none() && i != a.line.saturating_sub(1) && same(text, &lines[i]))
+        })
         .collect();
     let near: Vec<usize> = all
         .iter()
@@ -1270,6 +1281,15 @@ mod tests {
         };
         // A valid but wrong hash cannot be bypassed by copied text.
         assert_eq!(at(find(&f, &anchor(2, Some("zz"), Some("x();")))), None);
+        // A text-only anchor cannot silently accept a whitespace-only change.
+        let changed = vec![r#"let value = "a  b";"#.to_owned()];
+        assert_eq!(
+            at(find(
+                &changed,
+                &anchor(1, None, Some(r#"let value = "a b";"#))
+            )),
+            None
+        );
         // Number off by one: the text finds the line.
         assert_eq!(
             at(find(&f, &anchor(4, None, Some("y();")))),
