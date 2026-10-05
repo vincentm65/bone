@@ -15,6 +15,7 @@ local function tokens(n)
   if not n then
     return "0"
   end
+  n = math.floor(n + 0.5)
   if n >= 1000 then
     return string.format("%.1fk", n / 1000)
   end
