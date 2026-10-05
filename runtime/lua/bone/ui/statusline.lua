@@ -51,6 +51,7 @@ local function refresh_later()
 end
 
 local function load_total(session_id)
+  session_id = session_id or (bone.chat.session() or {}).session_id
   local key = session_id or ""
   state.total_session = key
   state.total = { input = 0, output = 0, cached = 0 }
@@ -107,7 +108,6 @@ function bone.ui.statusline(ctx)
   -- Match Bone's compact information strip: context first, then metrics and
   -- activity. Keep it quiet when there is no active session.
   local left = {}
-  local right = {}
   local s = ctx.session
   local session_id = s and s.session_id
   if (session_id or "") ~= state.total_session then

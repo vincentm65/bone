@@ -213,7 +213,6 @@ pub struct App {
     /// Text to put on the system clipboard after the next draw.
     pub clipboard: Option<String>,
     pastes: Vec<(String, String)>,
-    paste_seq: usize,
     prompt_history: Vec<String>,
     prompt_history_pos: Option<usize>,
     last_prompt_state: PromptState,
@@ -313,7 +312,6 @@ impl App {
             selection: None,
             clipboard: None,
             pastes: Vec::new(),
-            paste_seq: 0,
             prompt_history: Vec::new(),
             last_prompt_state: (String::new(), (0, 0), None),
             prompt_history_pos: None,
@@ -799,8 +797,7 @@ impl App {
                 self.prompt_history_pos = None;
                 let text = text.replace("\r\n", "\n").replace('\r', "\n");
                 if text.chars().count() > PASTE_PLACEHOLDER_THRESHOLD {
-                    self.paste_seq += 1;
-                    let token = format!("[Pasted text #{} +{} chars]", self.paste_seq, text.chars().count());
+                    let token = format!("[Pasted text #{} +{} chars]", self.pastes.len() + 1, text.chars().count());
                     self.prompt.insert_str(&token);
                     self.pastes.push((token, text));
                 } else {
