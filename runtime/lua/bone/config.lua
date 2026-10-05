@@ -151,6 +151,7 @@ function M.open(want)
     end
   end
   local id
+  local paste_event
 
   local function redraw()
     if id then
@@ -787,6 +788,10 @@ function M.open(want)
     if st.prov and (k == "esc" or k == "q") then
       st.prov, st.sel = nil, 1
     elseif k == "esc" or k == "ctrl+c" or k == "q" then
+      if paste_event then
+        bone.off(paste_event)
+        paste_event = nil
+      end
       bone.ui.close(id)
     elseif k == "up" or k == "wheelup" or k == "k" then
       st.sel = math.max(1, st.sel - 1)
@@ -839,6 +844,12 @@ function M.open(want)
   load_providers()
   load_plugins()
   id = bone.ui.popup({ lines = render, on_key = on_key, anchor = "prompt", width = false })
+  paste_event = bone.on("paste", function(ev)
+    if ev.context == "popup" and st.edit then
+      st.edit = st.edit .. (ev.text or ""):gsub("[\r\n]", "")
+      redraw()
+    end
+  end)
   return id
 end
 

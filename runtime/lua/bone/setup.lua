@@ -46,6 +46,7 @@ function M.open(opts)
     log = {},
   }
   local id
+  local paste_event
 
   local function redraw()
     if id then
@@ -54,6 +55,10 @@ function M.open(opts)
   end
 
   local function close(skipped)
+    if paste_event then
+      bone.off(paste_event)
+      paste_event = nil
+    end
     bone.ui.close(id)
     if skipped and opts.first_run then
       bone.settings.set("setup.skipped", true)
@@ -333,6 +338,12 @@ function M.open(opts)
   end
 
   id = bone.ui.popup({ lines = render, on_key = on_key, anchor = "prompt" })
+  paste_event = bone.on("paste", function(ev)
+    if ev.context == "popup" and st.edit then
+      st.edit = st.edit .. (ev.text or ""):gsub("[\r\n]", "")
+      redraw()
+    end
+  end)
   return id
 end
 

@@ -4500,7 +4500,9 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
     ] {
         assert!(screen.contains(row), "{row} in {screen}");
     }
-    h.input("{enter}{ctrl+u}d2{enter}").await; // Model
+    h.input("{enter}{ctrl+u}").await; // Model
+    h.app.paste("d2");
+    h.input("{enter}").await;
     assert_eq!(
         last_set(&h),
         json!({ "path": "providers.ds.model", "value": "d2" })
@@ -4812,7 +4814,9 @@ async fn setup_adds_a_provider_its_key_and_packages() {
     // Continue without a model is refused.
     h.input("{down}{down}{down}{enter}").await;
     assert!(h.screen(100, 30).contains("the model is needed"));
-    h.input("{up}{up}{up}{enter}qwen{enter}").await; // Model
+    h.input("{up}{up}{up}{enter}").await; // Model
+    h.app.paste("qwen");
+    h.input("{enter}").await;
     h.input("{down}{enter}sk-1{enter}").await; // API key
     let screen = h.screen(100, 30);
     assert!(
