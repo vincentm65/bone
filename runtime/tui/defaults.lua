@@ -521,7 +521,7 @@ bone.settings.page({
   name = "compact",
   title = "Compaction",
   fields = {
-    { key = "keep", label = "Turns kept in full", type = "integer", default = 2, min = 0, max = 50,
+    { key = "keep", label = "Turns kept in full", type = "integer", default = 0, min = 0, max = 50,
       desc = "the latest user turns always sent word for word" },
     { key = "auto", label = "Compact when full", type = "boolean", default = true,
       desc = "compact and retry when the model says the context is too long" },

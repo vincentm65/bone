@@ -44,7 +44,7 @@ pub struct CompactConfig {
 impl Default for CompactConfig {
     fn default() -> Self {
         CompactConfig {
-            keep: 2,
+            keep: 0,
             auto: true,
             limit: None,
             provider: None,
