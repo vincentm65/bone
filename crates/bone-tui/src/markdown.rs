@@ -55,9 +55,9 @@ pub fn parse(text: &str) -> Vec<Value> {
             out.push(json!({ "kind": "rule" }));
             continue;
         }
-        if trimmed.starts_with('|') {
+        if trimmed.contains('|') {
             let mut j = start;
-            while j < lines.len() && lines[j].trim_start().starts_with('|') {
+            while j < lines.len() && lines[j].contains('|') {
                 j += 1;
             }
             if j - start >= 2 {
@@ -127,7 +127,7 @@ fn split_row(row: &str) -> Vec<String> {
 /// `|---|:===:|`-style separator row.
 fn is_separator_row(s: &str) -> bool {
     let t = s.trim();
-    t.starts_with('|') && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ')) && t.contains('-')
+    t.contains('|') && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ')) && t.contains('-')
 }
 
 fn is_header_separator(s: &str) -> bool {
@@ -327,11 +327,13 @@ mod tests {
     }
     #[test]
     fn tables() {
-        let md = "| a | b |\n|---|:--:|\n| 1 | **2** |\n\n| x |\n\nbefore\n| p | q |\n| - | - |\n| r | s |\n";
+        let md = "| a | b |\n|---|:--:|\n| 1 | **2** |\n\na | b\n--- | :--:\n1 | **2**\n\n| x |\n\nbefore\n| p | q |\n| - | - |\n| r | s |\n";
         let b = parse(md);
         assert_eq!(
             kinds(md),
-            ["table", "blank", "paragraph", "blank", "paragraph", "table"]
+            [
+                "table", "blank", "table", "blank", "paragraph", "blank", "paragraph", "table",
+            ]
         );
         let t = &b[0];
         assert_eq!(t["header"], true);
@@ -339,10 +341,13 @@ mod tests {
         assert_eq!(t["rows"].as_array().unwrap().len(), 2);
         assert_eq!(t["rows"][1][1][0]["text"], "2");
         assert_eq!(t["rows"][1][1][0]["bold"], true);
+        let t_no_pipe = &b[2];
+        assert_eq!(t_no_pipe["header"], true);
+        assert_eq!(t_no_pipe["rows"][1][1][0]["bold"], true);
         // A lone pipe line is a paragraph, not a table.
-        assert_eq!(b[2]["kind"], "paragraph");
+        assert_eq!(b[4]["kind"], "paragraph");
         // Without a separator row there is no header or alignment.
-        let t2 = &b[5];
+        let t2 = &b[7];
         assert_eq!(t2["header"], false);
         assert!(t2["align"].is_null());
         assert_eq!(t2["rows"].as_array().unwrap().len(), 2);
