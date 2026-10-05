@@ -14,6 +14,8 @@
 
 local M = {}
 
+local OMIT = { history = true, cron = true, usage = true, themes = true }
+
 M.DEFAULT_URL = "https://raw.githubusercontent.com/vincentm65/bone-catalog/refs/heads/main"
 
 local function home(path)
@@ -108,9 +110,14 @@ function M.index(cb)
       return cb(nil, "the catalog's catalog.json is not valid")
     end
     local installed = installed_names()
+    local kept = {}
     for _, e in ipairs(entries) do
-      e.state = state_of(e, installed)
+      if not OMIT[e.name] then
+        e.state = state_of(e, installed)
+        kept[#kept + 1] = e
+      end
     end
+    entries = kept
     table.sort(entries, function(a, b)
       return a.name < b.name
     end)
