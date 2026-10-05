@@ -103,7 +103,7 @@ function bone.ui.statusline(ctx)
   local output = s and s.usage and s.usage.output or 0
   left[#left + 1] = { "curr " .. tokens(input), "StatusLineDim" }
   left[#left + 1] = { "total " .. tokens(state.total.input + state.total.output), "StatusLineDim" }
-  left[#left + 1] = { "cache " .. tokens(state.total.cached), "StatusLineDim" }
+  left[#left + 1] = { "cache " .. (state.total.input > 0 and string.format("%.0f%%", state.total.cached / state.total.input * 100) or "0%"), "StatusLineDim" }
   if s and s.running then
     local running_for = state.started and (now() - state.started) or nil
     left[#left + 1] = { (ctx.spinner or "") .. " thinking" .. (running_for and (" " .. elapsed(running_for)) or ""), "StatusLine" }
