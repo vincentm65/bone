@@ -711,6 +711,10 @@ async fn prompt_grows_and_history_recalls() {
     assert_eq!(h.prompt(), "pasted\ntext");
     h.input("{ctrl+a}{ctrl+k}").await;
     assert_eq!(h.prompt(), "pasted\n");
+    h.input("{esc}").await;
+    assert_eq!(h.prompt(), "");
+    h.input("clear me{esc}").await;
+    assert_eq!(h.prompt(), "");
 }
 
 #[tokio::test]

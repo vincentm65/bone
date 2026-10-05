@@ -926,9 +926,12 @@ impl App {
                 w.follow = false;
             }
             ScrollBottom => self.windows.get_mut(&CHAT_WIN).unwrap().follow = true,
-            // Without Lua: nothing to complete; esc clears the message.
+            // Without Lua: nothing to complete; esc clears the prompt.
             Complete => {}
-            Dismiss => self.message = None,
+            Dismiss => {
+                self.prompt.clear();
+                self.message = None;
+            }
             Interrupt => self.interrupt(),
             Quit => self.quit = Some(None),
             QuitIfEmpty => {
