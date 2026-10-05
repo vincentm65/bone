@@ -750,15 +750,21 @@ function bone.ui.box(lines, opts)
   top[#top + 1] = { c[3], bhl }
   local out = { top }
   for _, l in ipairs(lines) do
-    local row = { { c[4] .. pad, bhl } }
-    local used = 0
-    for _, sp in ipairs(bone.text.clip(spans(l), inner)) do
-      row[#row + 1] = sp
-      used = used + bone.text.width(sp[1])
+    local wrapped = bone.text.wrap(spans(l), inner)
+    if #wrapped == 0 then
+      wrapped = { {} }
     end
-    row[#row + 1] = { string.rep(" ", inner - used) .. pad, "Normal" }
-    row[#row + 1] = { c[4], bhl }
-    out[#out + 1] = row
+    for _, line in ipairs(wrapped) do
+      local row = { { c[4] .. pad, bhl } }
+      local used = 0
+      for _, sp in ipairs(line) do
+        row[#row + 1] = sp
+        used = used + bone.text.width(sp[1])
+      end
+      row[#row + 1] = { string.rep(" ", inner - used) .. pad, "Normal" }
+      row[#row + 1] = { c[4], bhl }
+      out[#out + 1] = row
+    end
   end
   out[#out + 1] = { { c[6] .. string.rep(c[2], inner + 2 * #pad) .. c[5], bhl } }
   return out
