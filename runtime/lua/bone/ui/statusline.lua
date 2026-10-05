@@ -80,13 +80,10 @@ function bone.ui.statusline(ctx)
   if state.model then
     left[#left + 1] = { state.model, "StatusLine" }
   end
-  if s and s.usage then
-    local input = s.usage.input or 0
-    local output = s.usage.output or 0
-    local total = input + output
-    left[#left + 1] = { "curr " .. tokens(input), "StatusLineDim" }
-    left[#left + 1] = { "total " .. tokens(total), "StatusLineDim" }
-  end
+  local input = s and s.usage and s.usage.input or 0
+  local output = s and s.usage and s.usage.output or 0
+  left[#left + 1] = { "curr " .. tokens(input), "StatusLineDim" }
+  left[#left + 1] = { "total " .. tokens(input + output), "StatusLineDim" }
   if s and s.running then
     local running_for = state.started and (now() - state.started) or nil
     left[#left + 1] = { (ctx.spinner or "") .. " thinking" .. (running_for and (" " .. elapsed(running_for)) or ""), "Accent" }

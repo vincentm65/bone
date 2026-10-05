@@ -3274,6 +3274,7 @@ async fn standard_ui_has_a_three_row_prompt_and_a_running_statusline() {
     let mut h = Harness::build(None).await;
     let (w, rows) = (40, 16);
     let screen = h.screen(w, rows);
+    assert!(screen.lines().last().unwrap_or("").contains("curr 0"), "{screen}");
     let lines: Vec<&str> = screen.split('\n').collect();
     let n = lines.len();
     // The prompt's three rows, then the statusline on the last row.
