@@ -261,6 +261,12 @@ local function expanded()
   return detail() == "full"
 end
 
+local function running_mark(item)
+  bone.chat.refresh_in(300)
+  local start = item.started_at or bone.now()
+  return math.floor((bone.now() - start) / 300) % 2 == 0 and "◌" or "·"
+end
+
 local function plural(n, noun)
   return n .. " " .. noun .. (n == 1 and "" or "s")
 end
@@ -634,12 +640,6 @@ end
 --- calls between edits and failures, reasoning aside), nil for the rest.
 --- false when this call is not folded.
 local function summary_view(item, ctx)
-  -- Keep quick commands folded, but promote a shell that has been running for
-  -- a second so a silent build or server is visibly active.
-  if item.name == "shell" and not item.done and item.started_at
-      and bone.now() - item.started_at >= 1000 then
-    return false
-  end
   if not foldable(item) then
     return false
   end
@@ -672,7 +672,7 @@ local function summary_view(item, ctx)
   local out = starts("tool", ctx)
   append(out, wrap({ { summary(stretch), "ToolArgs" } }, ctx.width, {
     first = failed and { { "  ✕ ", "ToolError" } }
-      or (running and { { "  ◌ ", "ToolRunning" } } or { { "    ", "Normal" } }),
+      or (running and { { "  " .. running_mark(item) .. " ", "ToolRunning" } } or { { "    ", "Normal" } }),
     rest = { { "    ", "Normal" } },
   }))
   return out
@@ -691,7 +691,7 @@ function views.tool(item, ctx)
 
   local marker
   if not item.done then
-    marker = { "  ◌ ", "ToolRunning" }
+    marker = { "  " .. running_mark(item) .. " ", "ToolRunning" }
   elseif item.is_error then
     marker = { "  ✕ ", "ToolError" }
   else
