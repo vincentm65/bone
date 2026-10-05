@@ -1629,23 +1629,19 @@ impl App {
                 session_id: session_id.clone(),
             },
             move |app, r| {
-                match r {
-                    Ok(r) => {
-                        app.processes_version = r.version;
-                        app.processes_session = Some(session_id);
-                        app.processes =
-                            r.processes.into_iter().map(|p| (p.id.clone(), p)).collect();
-                        app.fire(
-                            "processes/changed",
-                            serde_json::json!({
-                                "version": app.processes_version,
-                                "processes": app.process_list(),
-                            }),
-                        );
-                    }
-                    // Older/embedded servers may not implement process snapshots;
-                    // the chat remains fully usable without the optional pane.
-                    Err(_) => {}
+                // Older/embedded servers may not implement process snapshots;
+                // the chat remains fully usable without the optional pane.
+                if let Ok(r) = r {
+                    app.processes_version = r.version;
+                    app.processes_session = Some(session_id);
+                    app.processes = r.processes.into_iter().map(|p| (p.id.clone(), p)).collect();
+                    app.fire(
+                        "processes/changed",
+                        serde_json::json!({
+                            "version": app.processes_version,
+                            "processes": app.process_list(),
+                        }),
+                    );
                 }
             },
         );

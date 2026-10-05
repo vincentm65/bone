@@ -85,7 +85,9 @@ pub fn parse(text: &str) -> Vec<Value> {
                     continue;
                 }
             } else {
-                out.push(json!({ "kind": "paragraph", "indent": indent, "spans": inline(trimmed) }));
+                out.push(
+                    json!({ "kind": "paragraph", "indent": indent, "spans": inline(trimmed) }),
+                );
             }
             continue;
         }
@@ -125,9 +127,7 @@ fn split_row(row: &str) -> Vec<String> {
 /// `|---|:===:|`-style separator row.
 fn is_separator_row(s: &str) -> bool {
     let t = s.trim();
-    t.starts_with('|')
-        && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' '))
-        && t.contains('-')
+    t.starts_with('|') && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ')) && t.contains('-')
 }
 
 fn is_header_separator(s: &str) -> bool {
@@ -325,7 +325,7 @@ mod tests {
         assert_eq!(s[3], json!({ "text": "c", "code": true }));
         assert_eq!(s[5], json!({ "text": "d", "link": "http://x" }));
     }
-#[test]
+    #[test]
     fn tables() {
         let md = "| a | b |\n|---|:--:|\n| 1 | **2** |\n\n| x |\n\nbefore\n| p | q |\n| - | - |\n| r | s |\n";
         let b = parse(md);

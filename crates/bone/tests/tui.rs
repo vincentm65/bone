@@ -175,7 +175,11 @@ fn clock_len(s: &str) -> usize {
     let mut n = 0;
     for (i, c) in s.char_indices() {
         let stop = c.is_ascii_digit() || c == ':' || c.is_ascii_lowercase();
-        let space = c == ' ' && s[i + c.len_utf8()..].chars().next().is_some_and(|c2| c2.is_ascii_lowercase());
+        let space = c == ' '
+            && s[i + c.len_utf8()..]
+                .chars()
+                .next()
+                .is_some_and(|c2| c2.is_ascii_lowercase());
         if stop || space {
             n = i + c.len_utf8();
         } else {
@@ -189,7 +193,9 @@ fn clock_len(s: &str) -> usize {
 /// allowing leading spaces; 0 if there is none.
 fn timer_len(s: &str) -> usize {
     let s: String = s.chars().take(10).collect();
-    let start = s.find(|c: char| !c.is_ascii_whitespace()).unwrap_or(s.len());
+    let start = s
+        .find(|c: char| !c.is_ascii_whitespace())
+        .unwrap_or(s.len());
     let t = &s[start..];
     let digits = |t: &str| -> Option<usize> {
         let n = t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len());
@@ -216,7 +222,6 @@ fn timer_len(s: &str) -> usize {
     }
     start + pos
 }
-
 
 fn mask_timers(screen: &str) -> String {
     const SPINNER: &str = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏";
