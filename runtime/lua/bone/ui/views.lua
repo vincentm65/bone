@@ -95,19 +95,19 @@ local function md_table(b, width, indent)
   end
   -- separators: one " │ " (3 wide) between columns.
   local seps = math.max(0, max_cols - 1) * 3
-  local total = #indent + seps
+  local total = bone.text.width(indent) + seps
   for c = 1, max_cols do
     total = total + w[c]
   end
   if total > width then
     -- Truncate from the right; each kept column stays at least 2 wide.
-    local budget = width - #indent - seps
+    local budget = width - bone.text.width(indent) - seps
     for c = max_cols, 1, -1 do
       local rest = 0
       for k = 1, c - 1 do
-        rest = rest + math.min(w[k], 2)
+        rest = rest + math.min(w[k], 1)
       end
-      local room = math.max(2, budget - rest)
+      local room = math.max(1, budget - rest)
       w[c] = math.min(w[c], room)
       budget = budget - w[c]
     end
@@ -119,15 +119,19 @@ local function md_table(b, width, indent)
     local line = { { indent, "Normal" } }
     for c = 1, max_cols do
       local cell = row[c] or {}
-      local spans = md_spans(cell, hl)
+      local spans = bone.text.clip(md_spans(cell, hl), w[c])
       local n = 0
       for _, s in ipairs(spans) do
         n = n + bone.text.width(s[1])
       end
+      local pad = math.max(0, w[c] - n)
+      local align = b.align and b.align[c]
+      local left = align == "r" and pad or align == "c" and math.floor(pad / 2) or 0
+      line[#line + 1] = { string.rep(" ", left), hl }
       for _, s in ipairs(spans) do
         line[#line + 1] = s
       end
-      line[#line + 1] = { string.rep(" ", math.max(0, w[c] - n)), hl }
+      line[#line + 1] = { string.rep(" ", pad - left), hl }
       if c < max_cols then
         line[#line + 1] = { " │ ", "Dim" }
       end
