@@ -392,32 +392,31 @@ function M.open()
   local function install_selected(entries)
     st.busy = true
     st.progress = { done = 0, total = #entries, failures = {} }
-    local i = 0
-    local function next_install()
-      i = i + 1
-      st.progress.done = i - 1
-      redraw()
-      local e = entries[i]
-      if not e then
-        local p = st.progress
-        st.busy, st.progress = false, nil
-        st.selected = {}
-        if #p.failures == 0 then
-          st.note = { ("installed %d package%s"):format(p.total, p.total == 1 and "" or "s") }
-        else
-          st.note = { ("installed %d/%d; failed: %s"):format(p.total - #p.failures, p.total, table.concat(p.failures, ", ")), true }
-        end
-        load(st.note[1])
-        return
+    local remaining = #entries
+    local function finished()
+      local p = st.progress
+      st.busy, st.progress = false, nil
+      st.selected = {}
+      if #p.failures == 0 then
+        st.note = { ("installed %d package%s"):format(p.total, p.total == 1 and "" or "s") }
+      else
+        st.note = { ("installed %d/%d; failed: %s"):format(p.total - #p.failures, p.total, table.concat(p.failures, ", ")), true }
       end
+      load(st.note[1])
+    end
+    for _, e in ipairs(entries) do
+      redraw()
       M.install(e, function(ok)
         if not ok then
           st.progress.failures[#st.progress.failures + 1] = e.name
         end
-        next_install()
+        st.progress.done = st.progress.done + 1
+        remaining = remaining - 1
+        if remaining == 0 then
+          finished()
+        end
       end)
     end
-    next_install()
   end
 
   local function on_key(k)

@@ -126,17 +126,6 @@ function M.open(opts)
       st.step = "done"
       redraw()
     end
-    local function install_next(i)
-      local e = queue[i]
-      if not e then
-        return finished()
-      end
-      say("installing " .. e.name .. "…")
-      catalog.install(e, function(ok, err)
-        say(ok and ("installed " .. e.name) or ("error: " .. e.name .. ": " .. tostring(err)))
-        install_next(i + 1)
-      end)
-    end
     local function after_key()
       bone.settings.set("provider", f.name, function(_, err)
         if err then
@@ -144,7 +133,20 @@ function M.open(opts)
         else
           say("using " .. f.name .. " (" .. f.model .. ")")
         end
-        install_next(1)
+        if #queue == 0 then
+          return finished()
+        end
+        local remaining = #queue
+        for _, e in ipairs(queue) do
+          say("installing " .. e.name .. "…")
+          catalog.install(e, function(ok, err)
+            say(ok and ("installed " .. e.name) or ("error: " .. e.name .. ": " .. tostring(err)))
+            remaining = remaining - 1
+            if remaining == 0 then
+              finished()
+            end
+          end)
+        end
       end)
     end
     say("saving " .. f.name .. "…")
