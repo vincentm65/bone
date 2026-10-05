@@ -630,9 +630,9 @@ end
 --- false when this call is not folded.
 local function summary_view(item, ctx)
   -- Keep quick commands folded, but promote a shell that has been running for
-  -- half a second so a silent build or server is visibly active.
+  -- a second so a silent build or server is visibly active.
   if item.name == "shell" and not item.done and item.started_at
-      and bone.now() - item.started_at >= 500 then
+      and bone.now() - item.started_at >= 1000 then
     return false
   end
   if not foldable(item) then
