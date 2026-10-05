@@ -106,7 +106,7 @@ function bone.ui.statusline(ctx)
   left[#left + 1] = { "cache " .. tokens(state.total.cached), "StatusLineDim" }
   if s and s.running then
     local running_for = state.started and (now() - state.started) or nil
-    left[#left + 1] = { (ctx.spinner or "") .. " thinking" .. (running_for and (" " .. elapsed(running_for)) or ""), "Accent" }
+    left[#left + 1] = { (ctx.spinner or "") .. " thinking" .. (running_for and (" " .. elapsed(running_for)) or ""), "StatusLine" }
   elseif state.finished_elapsed then
     left[#left + 1] = { "worked " .. elapsed(state.finished_elapsed) .. ", finished at " .. bone.util.format_time(state.finished), "StatusLineDim" }
   end
