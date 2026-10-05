@@ -406,6 +406,7 @@ async fn first_message_creates_a_session_and_streams_the_reply() {
         usage: Some(Usage {
             input_tokens: 1500,
             output_tokens: 20,
+            cached_tokens: None,
         }),
     })
     .await;
@@ -1048,6 +1049,7 @@ async fn default_ui_fits_narrow_screens() {
         usage: Some(Usage {
             input_tokens: 10,
             output_tokens: 2,
+            cached_tokens: None,
         }),
     })
     .await;
@@ -3917,6 +3919,7 @@ async fn tool_items_carry_live_output_timing_and_usage() {
         usage: Some(Usage {
             input_tokens: 1200,
             output_tokens: 30,
+            cached_tokens: None,
         }),
     })
     .await;

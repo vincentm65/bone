@@ -764,6 +764,7 @@ fn completion(v: &Json) -> Result<crate::provider::Completion, String> {
     let usage = v["usage"].as_object().map(|u| Usage {
         input_tokens: u.get("input_tokens").and_then(Json::as_u64).unwrap_or(0),
         output_tokens: u.get("output_tokens").and_then(Json::as_u64).unwrap_or(0),
+        cached_tokens: u.get("cached_tokens").and_then(Json::as_u64),
     });
     Ok(crate::provider::Completion {
         content: text("content"),

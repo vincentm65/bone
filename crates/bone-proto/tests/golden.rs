@@ -543,6 +543,7 @@ fn events() {
         usage: Some(Usage {
             input_tokens: 1200,
             output_tokens: 40,
+            cached_tokens: None,
         }),
     });
     event::<ToolStarted>(ToolStartedParams {
@@ -606,6 +607,7 @@ fn events() {
         usage: Some(Usage {
             input_tokens: 30,
             output_tokens: 4,
+            cached_tokens: None,
         }),
         error: None,
     });

@@ -438,6 +438,7 @@ async fn turns_leave_usage_and_tool_calls_in_the_index() {
     let used = |input, output| Usage {
         input_tokens: input,
         output_tokens: output,
+        cached_tokens: None,
     };
     let lua = r#"
         bone.rpc.register("ask", function(args)
@@ -1197,6 +1198,7 @@ async fn a_provider_relaying_to_another_is_counted_once() {
             usage: Some(Usage {
                 input_tokens: 9,
                 output_tokens: 3,
+                cached_tokens: None,
             }),
             ..Default::default()
         })],

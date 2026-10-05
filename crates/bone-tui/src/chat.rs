@@ -916,6 +916,7 @@ mod tests {
             usage: Some(Usage {
                 input_tokens: 5,
                 output_tokens: 2,
+                cached_tokens: None,
             }),
         });
         assert_eq!(parts(&c), ["user", "reasoning", "assistant", "tool"]);
@@ -973,6 +974,7 @@ mod tests {
             usage: Some(Usage {
                 input_tokens: 5,
                 output_tokens: 1,
+                cached_tokens: None,
             }),
         });
         assert_eq!(keys(&c), ["e1", "note-1", "e3"]);

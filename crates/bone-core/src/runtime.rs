@@ -255,7 +255,7 @@ impl Inner {
                     model,
                     input_tokens: u.input_tokens,
                     output_tokens: u.output_tokens,
-                    cached_tokens: None,
+                    cached_tokens: u.cached_tokens,
                     source: Some(source.to_owned()),
                 },
             );

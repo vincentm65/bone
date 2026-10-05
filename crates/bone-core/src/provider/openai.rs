@@ -227,6 +227,16 @@ struct ChunkUsage {
     prompt_tokens: u64,
     #[serde(default)]
     completion_tokens: u64,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+    #[serde(default)]
+    prompt_cache_hit_tokens: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
 }
 
 #[derive(Default)]
@@ -252,6 +262,10 @@ impl Accumulator {
             self.usage = Some(Usage {
                 input_tokens: u.prompt_tokens,
                 output_tokens: u.completion_tokens,
+                cached_tokens: u
+                    .prompt_tokens_details
+                    .and_then(|d| d.cached_tokens)
+                    .or(u.prompt_cache_hit_tokens),
             });
         }
         let deltas = chunk
@@ -342,7 +356,7 @@ mod tests {
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\":\"a\"}"}}]}}]}"#,
             r#"{"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"name":"shell","arguments":"{}"}}]}}]}"#,
             r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}],"usage":null}"#,
-            r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5}}"#,
+            r#"{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":5,"prompt_tokens_details":{"cached_tokens":6}}}"#,
             "[DONE]",
             r#"{"choices":[{"delta":{"content":"after done"}}]}"#,
         ]);
@@ -367,7 +381,8 @@ mod tests {
             c.usage,
             Some(Usage {
                 input_tokens: 10,
-                output_tokens: 5
+                output_tokens: 5,
+                cached_tokens: Some(6),
             })
         );
         assert_eq!(
