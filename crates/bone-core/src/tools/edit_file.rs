@@ -39,10 +39,12 @@ impl EditFile {
         let anchor = |what: &str| json!({ "type": "string", "description": what });
         EditFile(ToolSpec {
             name: "edit_file".into(),
-            description: "Apply multiple non-overlapping edits atomically. Use each read_file \
-                          line anchor as `at`; position is replace (default), after, or before. \
-                          Set `end` for an inclusive replacement range. `text` is new content \
-                          separated by newlines; an empty string deletes."
+            description: "Edit a file by the LINE#HASH anchors read_file shows, instead of \
+                          retyping old text. Use {at, text} to replace, {at, end, text} for a \
+                          range, or {after, text}/{before, text} to insert (after \"0\" = top). \
+                          Include the whole anchor such as `12#k3|    let x = 1;` when possible; \
+                          text after | can recover a copied number or hash. New content is \
+                          separated by newlines; an empty string deletes. Edits are atomic."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -55,12 +57,14 @@ impl EditFile {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "at": anchor("Line anchor from read_file; use \"0\" with position=after for the top of the file."),
-                                "end": anchor("Last line replaced, inclusive."),
+                                "at": anchor("Line to replace, from read_file."),
+                                "end": anchor("Last line replaced, inclusive (with `at`)."),
+                                "after": anchor("Insert after this line; \"0\" inserts at the top."),
+                                "before": anchor("Insert before this line."),
                                 "position": { "type": "string", "enum": ["replace", "after", "before"], "default": "replace" },
                                 "text": { "type": "string", "description": "New lines, without anchors. \"\" deletes." }
                             },
-                            "required": ["at", "text"],
+                            "required": ["text"],
                             "additionalProperties": false
                         }
                     }
@@ -357,7 +361,7 @@ fn parse_anchor(v: &Value, allow_top: bool) -> Result<Anchor, String> {
 /// New lines from `text`: one trailing newline is dropped, and anchors
 /// copied in front of every line are removed.
 fn split_text(text: &str) -> Vec<String> {
-    let text = text.replace("\r\n", "\n");
+    let text = text.replace("\r\n", "\n").replace('\r', "\n");
     if text.is_empty() {
         return Vec::new();
     }
