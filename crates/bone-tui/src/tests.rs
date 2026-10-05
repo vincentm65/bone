@@ -628,7 +628,10 @@ async fn slash_menu_scrolls_when_it_overflows() {
     .await;
     h.input("/").await;
     let screen = h.screen(80, 24);
-    assert!(screen.contains("/?") && !screen.contains(" of 54"), "{screen}");
+    assert!(
+        screen.contains("/?") && !screen.contains(" of 54"),
+        "{screen}"
+    );
     // The wheel and pages scroll the menu to the end.
     h.input("{wheeldown}").await;
     let screen = h.screen(80, 24);
@@ -3957,6 +3960,40 @@ async fn tool_items_carry_live_output_timing_and_usage() {
         h.screen(50, 20)
             .contains("    shell make\n      │ compiling a\n      ╰ compiling b")
     );
+}
+
+#[tokio::test]
+async fn managed_process_events_are_visible_to_lua_and_the_default_panel() {
+    let mut h = Harness::build(None).await;
+    h.emit::<ProcessChanged>(ProcessChangedParams {
+        session_id: "s-new".into(),
+        version: 1,
+        process: ProcessSnapshot {
+            session_id: "s-new".into(),
+            id: "shell-1".into(),
+            command: "npm run dev".into(),
+            state: ProcessState::Running,
+            running: true,
+            pid: Some(42),
+            started_at_ms: 1_790_000_000_000,
+            finished_at_ms: None,
+            elapsed_ms: 3000,
+            stdout: "listening on 3000\n".into(),
+            stderr: String::new(),
+            output: "listening on 3000\n".into(),
+            output_bytes: 18,
+            truncated: false,
+            code: None,
+            signal: None,
+            error: None,
+        },
+    })
+    .await;
+    assert_eq!(h.lua("=bone.processes.list()[1].id").await, "\"shell-1\"");
+    let screen = h.screen(100, 20);
+    assert!(screen.contains("Processes"), "{screen}");
+    assert!(screen.contains("npm run dev"), "{screen}");
+    assert!(screen.contains("listening on 3000"), "{screen}");
 }
 
 #[tokio::test]

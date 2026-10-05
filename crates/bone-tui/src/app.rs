@@ -136,6 +136,10 @@ pub struct App {
     pub panel_focus: Option<String>,
     /// Streaming jobs from Lua (`bone.job`).
     pub jobs: crate::jobs::Jobs,
+    /// Core-managed shell processes, keyed by process id.
+    pub processes: HashMap<String, ProcessSnapshot>,
+    pub processes_version: u64,
+    pub processes_session: Option<String>,
     /// Text highlighted with the mouse.
     pub selection: Option<crate::selection::Selection>,
     /// Text to put on the system clipboard after the next draw.
@@ -224,6 +228,9 @@ impl App {
             panels: Vec::new(),
             panel_focus: None,
             jobs: Default::default(),
+            processes: HashMap::new(),
+            processes_version: 0,
+            processes_session: None,
             selection: None,
             clipboard: None,
             prompt_history: Vec::new(),
@@ -374,6 +381,10 @@ impl App {
     /// The chat on screen, which prompts are sent to.
     pub fn target_chat(&self) -> Option<BufferId> {
         Some(self.current)
+    }
+
+    pub fn current_session_id(&self) -> Option<String> {
+        self.chats[self.current].session_id().map(str::to_owned)
     }
 
     pub(crate) fn chat_by_session(&self, session_id: &str) -> Option<BufferId> {
@@ -997,6 +1008,7 @@ impl App {
                         if let Some(c) = app.chat_mut(buf) {
                             c.session = Some(info);
                         }
+                        app.request_processes(id.clone());
                         app.start_turn(buf, id, text);
                     }
                     Err(e) => {
@@ -1036,7 +1048,9 @@ impl App {
     /// Show a session, loading it if no chat has it yet.
     pub fn open_session(&mut self, session_id: String) {
         if let Some(buf) = self.chat_by_session(&session_id) {
-            return self.show_chat(buf);
+            self.show_chat(buf);
+            self.request_processes(session_id);
+            return;
         }
         // Reuse an untouched new chat rather than piling them up.
         let c = &self.chats[self.current];
@@ -1049,10 +1063,12 @@ impl App {
         self.show_chat(buf);
         self.request::<SessionMessages>(SessionRef { session_id }, move |app, r| match r {
             Ok(r) => {
+                let session_id = r.info.session_id.clone();
                 if let Some(c) = app.chat_mut(buf) {
                     c.load(r.info, &r.messages, r.active_turn);
                     c.set_queue(r.queue);
                 }
+                app.request_processes(session_id);
             }
             Err(e) => {
                 if let Some(c) = app.chat_mut(buf) {
@@ -1466,6 +1482,7 @@ impl App {
         on!(SettingsChanged, |p| self.settings_changed(p));
         on!(ToolOutput, |p| self
             .with_chat(&p.session_id, |c| c.tool_output(&p)));
+        on!(ProcessChanged, |p| self.process_changed(&p));
         on!(TurnSteered, |p| self
             .with_chat(&p.session_id, |c| c.steered(&p.text)));
         on!(TurnFinished, |p| self
@@ -1474,6 +1491,61 @@ impl App {
             .with_chat(&p.session_id, |c| c.set_queue(p.items)));
         on!(SessionUpdated, |p| self.reload_chat(p.session_id));
         on!(SessionDeleted, |p| self.session_deleted(&p.session_id));
+    }
+
+    fn process_changed(&mut self, p: &ProcessChangedParams) {
+        if self.processes_session.is_none() {
+            self.processes_session = Some(p.session_id.clone());
+        }
+        if self.processes_session.as_deref() != Some(p.session_id.as_str()) {
+            return;
+        }
+        self.processes_version = self.processes_version.max(p.version);
+        self.processes
+            .insert(p.process.id.clone(), p.process.clone());
+    }
+
+    pub fn request_processes(&mut self, session_id: String) {
+        if self.processes_session.as_deref() != Some(session_id.as_str()) {
+            self.processes.clear();
+            self.processes_version = 0;
+            self.fire(
+                "processes/changed",
+                serde_json::json!({ "version": 0, "processes": [] }),
+            );
+        }
+        self.processes_session = Some(session_id.clone());
+        self.request::<ProcessesGet>(
+            SessionRef {
+                session_id: session_id.clone(),
+            },
+            move |app, r| {
+                match r {
+                    Ok(r) => {
+                        app.processes_version = r.version;
+                        app.processes_session = Some(session_id);
+                        app.processes =
+                            r.processes.into_iter().map(|p| (p.id.clone(), p)).collect();
+                        app.fire(
+                            "processes/changed",
+                            serde_json::json!({
+                                "version": app.processes_version,
+                                "processes": app.process_list(),
+                            }),
+                        );
+                    }
+                    // Older/embedded servers may not implement process snapshots;
+                    // the chat remains fully usable without the optional pane.
+                    Err(_) => {}
+                }
+            },
+        );
+    }
+
+    pub fn process_list(&self) -> Vec<ProcessSnapshot> {
+        let mut processes: Vec<_> = self.processes.values().cloned().collect();
+        processes.sort_by(|a, b| a.id.cmp(&b.id));
+        processes
     }
 
     /// The default mode for messages sent during a turn: the `queue_mode`
@@ -1502,6 +1574,15 @@ impl App {
     /// A session was deleted: its chat becomes a fresh one (chats keep their
     /// places, which pending replies rely on).
     fn session_deleted(&mut self, session_id: &str) {
+        if self.processes_session.as_deref() == Some(session_id) {
+            self.processes.clear();
+            self.processes_version = 0;
+            self.processes_session = None;
+            self.fire(
+                "processes/changed",
+                serde_json::json!({ "version": 0, "processes": [] }),
+            );
+        }
         let Some(buf) = self.chat_by_session(session_id) else {
             return;
         };
@@ -1538,6 +1619,7 @@ impl App {
     /// Something is moving on screen (a spinner or elapsed time).
     pub fn animating(&self) -> bool {
         self.chats.iter().any(|c| c.turn.is_some() || c.starting)
+            || self.processes.values().any(|p| p.running)
     }
 
     pub fn server_closed(&mut self) {

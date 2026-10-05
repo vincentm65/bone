@@ -610,6 +610,8 @@ Registration aliases normalize to these canonical names:
 | `plugin/loaded`, `plugin/unloaded` | same | `{ name, dir, kind, loaded, error }` |
 | `job/started` | `job/started` | `{ id, name, cmd, pid }` |
 | `job/finished` | `job/finished` | the job's exit result (see `bone.job`) |
+| `process/changed` | `process/changed` | a core-managed shell process snapshot changed |
+| `processes/changed` | `processes/changed` | the TUI refreshed its process snapshot |
 
 Prompt events are deduplicated, so unchanged text/cursor/selection state is not emitted.
 `mouse` is emitted for every press, drag and release (`action` `"down"`, `"drag"`, `"up"`; `button` `"left"`, `"right"`, `"middle"`; `x`, `y` 0-based screen cells), with `index` and `line` when it is over a chat item. A callback that returns `true` takes it; otherwise the left button selects text and focuses panels as usual. With `bone.chat.redraw(index)` and your own state per item, that is enough for click-to-expand.
@@ -741,6 +743,11 @@ bone.keymap.set("ctrl+x", function() job:cancel() end)
 - `job:status()` (and each entry of `bone.job.list()`): `{ id, name, cmd, pid, state, running, elapsed_ms, stdout_bytes, stderr_bytes }`, plus `code`, `signal` and `error` once it has ended. `state` is `"running"`, `"exited"`, `"cancelled"`, `"timed_out"` or `"failed"` (it could not start; see `error`).
 - `on_exit` and the `job/finished` event get the status plus `cancelled`, `timed_out`, `duration_ms` and, when buffering, `stdout`, `stderr` and `truncated` (only the last 4 MiB of each stream are kept).
 - `bone.job.list()` has running jobs and the last 32 finished ones; `bone.job.get(id)` returns a handle; `bone.job.cancel_all()`. `job:running()` is a shortcut. The statusline context's `jobs` is the number running.
+
+Core-managed shell processes are separate from plugin jobs. The TUI exposes
+`bone.processes.list()`, `bone.processes.refresh()` and
+`bone.processes.cancel(id)`. The built-in runtime draws them in a bottom
+Processes panel; plugins can replace that panel or consume the process events.
 
 ### Colors
 

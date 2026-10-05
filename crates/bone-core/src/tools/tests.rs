@@ -14,7 +14,7 @@ fn ctx(dir: &tempfile::TempDir) -> ToolContext {
         views: Default::default(),
         jobs: Default::default(),
         output: None,
-        finish: None,
+        processes: None,
     }
 }
 
@@ -537,11 +537,11 @@ async fn shell_streams_output_while_it_runs() {
 #[tokio::test]
 async fn shell_manages_background_jobs_and_reports_completion() {
     let dir = tempfile::tempdir().unwrap();
-    let finished = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let seen = finished.clone();
     let mut ctx = ctx(&dir);
-    ctx.finish = Some(std::sync::Arc::new(move |output, is_error, _| {
-        seen.lock().unwrap().push((output, is_error));
+    let updates = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = updates.clone();
+    ctx.processes = Some(std::sync::Arc::new(move |view, _| {
+        seen.lock().unwrap().push(view);
     }));
 
     let started = call(
@@ -565,15 +565,49 @@ async fn shell_manages_background_jobs_and_reports_completion() {
     assert_eq!(result, "firstsecond\n[exit code: 0]");
 
     for _ in 0..20 {
-        if !finished.lock().unwrap().is_empty() {
+        if updates
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|view| view.state == ProcessState::Exited)
+        {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let finished = finished.lock().unwrap();
-    assert_eq!(finished.len(), 1);
-    assert_eq!(finished[0].0, result);
-    assert!(!finished[0].1);
+    assert!(
+        updates
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|view| view.state == ProcessState::Exited && view.stdout.contains("first"))
+    );
+}
+
+#[tokio::test]
+async fn shell_background_job_survives_turn_cancellation() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(&dir);
+    let cancel = ctx.cancel.clone();
+    let started = call(
+        &ctx,
+        "shell",
+        json!({"command": "sleep 1", "mode": "start"}),
+    )
+    .await
+    .unwrap();
+    let id = started
+        .strip_prefix("background process started: ")
+        .unwrap();
+    cancel.cancel();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let status = call(&ctx, "shell", json!({"action": "status", "id": id}))
+        .await
+        .unwrap();
+    assert!(status.contains("\"running\": true"), "{status}");
+    call(&ctx, "shell", json!({"action": "kill", "id": id}))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]

@@ -21,7 +21,8 @@ use tokio::time::{Instant, sleep_until};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-    FinishedSink, OutputSink, Tool, ToolContext, ToolResult, ToolSpec, truncate_middle, typed_args,
+    OutputSink, ProcessUpdateSink, Tool, ToolContext, ToolResult, ToolSpec, truncate_middle,
+    typed_args,
 };
 
 const DEFAULT_TIMEOUT_SECS: u64 = 120;
@@ -32,6 +33,12 @@ const MAX_OUTPUT: usize = 4 << 20;
 const SHOW_HEAD: usize = 10_000;
 const SHOW_TAIL: usize = 20_000;
 const MAX_COMPLETED: usize = 64;
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as u64)
+}
 
 pub struct Shell(ToolSpec);
 
@@ -80,7 +87,7 @@ fn default_action() -> String {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum State {
+pub(crate) enum ProcessState {
     Running,
     Exited,
     Cancelled,
@@ -88,7 +95,7 @@ enum State {
     Failed,
 }
 
-impl State {
+impl ProcessState {
     fn name(self) -> &'static str {
         match self {
             Self::Running => "running",
@@ -105,29 +112,54 @@ struct Snapshot {
     id: String,
     owner: String,
     command: String,
-    state: State,
+    state: ProcessState,
     pid: Option<u32>,
     started: Instant,
     finished: Option<Instant>,
+    started_at_ms: u64,
+    finished_at_ms: Option<u64>,
     combined: String,
+    stdout: String,
+    stderr: String,
     output_bytes: u64,
     truncated: bool,
+    background: bool,
     timeout_secs: Option<u64>,
     code: Option<i32>,
     signal: Option<i32>,
     error: Option<String>,
 }
 
+#[derive(Clone, Debug)]
+pub(crate) struct ProcessView {
+    pub id: String,
+    pub command: String,
+    pub state: ProcessState,
+    pub running: bool,
+    pub pid: Option<u32>,
+    pub started_at_ms: u64,
+    pub finished_at_ms: Option<u64>,
+    pub elapsed_ms: u64,
+    pub stdout: String,
+    pub stderr: String,
+    pub output: String,
+    pub output_bytes: u64,
+    pub truncated: bool,
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+    pub error: Option<String>,
+}
+
 struct Process {
     snapshot: Mutex<Snapshot>,
     control: mpsc::UnboundedSender<Control>,
-    cancel: CancellationToken,
     done: Notify,
 }
 
 enum Control {
     Write(Vec<u8>),
     CloseStdin,
+    Cancel,
 }
 
 struct JobSpec {
@@ -136,12 +168,13 @@ struct JobSpec {
     cwd: PathBuf,
     timeout: Option<Duration>,
     stdin: Stdin,
+    background: bool,
 }
 
 struct JobHooks {
     parent_cancel: CancellationToken,
     output: Option<OutputSink>,
-    finished: Option<FinishedSink>,
+    process: Option<ProcessUpdateSink>,
 }
 
 /// Session-scoped managed commands. Completed jobs remain available for
@@ -149,6 +182,7 @@ struct JobHooks {
 #[derive(Clone)]
 pub(crate) struct ProcessRegistry {
     next: Arc<AtomicU64>,
+    version: Arc<AtomicU64>,
     processes: Arc<Mutex<HashMap<String, Arc<Process>>>>,
 }
 
@@ -156,6 +190,7 @@ impl Default for ProcessRegistry {
     fn default() -> Self {
         Self {
             next: Arc::new(AtomicU64::new(1)),
+            version: Arc::new(AtomicU64::new(0)),
             processes: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -170,26 +205,34 @@ impl ProcessRegistry {
                 id: id.clone(),
                 owner: spec.owner.clone(),
                 command: spec.command.clone(),
-                state: State::Running,
+                state: ProcessState::Running,
                 pid: None,
                 started: Instant::now(),
                 finished: None,
+                started_at_ms: unix_ms(),
+                finished_at_ms: None,
                 combined: String::new(),
+                stdout: String::new(),
+                stderr: String::new(),
                 output_bytes: 0,
                 truncated: false,
                 timeout_secs: spec.timeout.map(|t| t.as_secs()),
+                background: spec.background,
                 code: None,
                 signal: None,
                 error: None,
             }),
             control,
-            cancel: CancellationToken::new(),
             done: Notify::new(),
         });
         self.processes
             .lock()
             .unwrap()
             .insert(id.clone(), process.clone());
+        let version = self.bump_version();
+        if let Some(sink) = &hooks.process {
+            sink(self.view_of(&process), version);
+        }
         let registry = self.clone();
         tokio::spawn(async move {
             run_job(registry, process, spec, controls, hooks).await;
@@ -206,11 +249,10 @@ impl ProcessRegistry {
         let process = self.get(owner, id)?;
         let deadline = timeout.map(|t| Instant::now() + t);
         loop {
-            let notified = process.done.notified();
-            let snapshot = process.snapshot.lock().unwrap().clone();
-            if snapshot.state != State::Running {
-                return Ok(snapshot);
+            if process.snapshot.lock().unwrap().state != ProcessState::Running {
+                return Ok(process.snapshot.lock().unwrap().clone());
             }
+            let notified = process.done.notified();
             match deadline {
                 Some(deadline) => {
                     tokio::select! { _ = notified => {}, _ = sleep_until(deadline) => return Err(format!("waiting for {id} timed out")) }
@@ -241,19 +283,65 @@ impl ProcessRegistry {
             .unwrap()
             .values()
             .filter(|p| p.snapshot.lock().unwrap().owner == owner)
+            .filter(|p| p.snapshot.lock().unwrap().background)
             .map(|p| p.snapshot.lock().unwrap().clone())
             .collect();
         jobs.sort_by(|a, b| a.id.cmp(&b.id));
         jobs
     }
 
-    fn cancel(&self, owner: &str, id: &str) -> Result<(), String> {
-        let process = self.get(owner, id)?;
-        if process.snapshot.lock().unwrap().state != State::Running {
-            return Err("job is no longer running".into());
+    pub(crate) fn cancel(&self, owner: &str, id: &str) -> Result<(), String> {
+        self.get(owner, id)?
+            .control
+            .send(Control::Cancel)
+            .map_err(|_| "job is no longer running".into())
+    }
+
+    fn bump_version(&self) -> u64 {
+        self.version.fetch_add(1, Ordering::Relaxed) + 1
+    }
+
+    pub(crate) fn version(&self) -> u64 {
+        self.version.load(Ordering::Relaxed)
+    }
+
+    fn view_of(&self, process: &Process) -> ProcessView {
+        let snapshot = process.snapshot.lock().unwrap();
+        ProcessView {
+            id: snapshot.id.clone(),
+            command: snapshot.command.clone(),
+            state: snapshot.state,
+            running: snapshot.state == ProcessState::Running,
+            pid: snapshot.pid,
+            started_at_ms: snapshot.started_at_ms,
+            finished_at_ms: snapshot.finished_at_ms,
+            elapsed_ms: snapshot.finished.map_or_else(
+                || snapshot.started.elapsed().as_millis() as u64,
+                |finished| finished.duration_since(snapshot.started).as_millis() as u64,
+            ),
+            stdout: snapshot.stdout.clone(),
+            stderr: snapshot.stderr.clone(),
+            output: snapshot.combined.clone(),
+            output_bytes: snapshot.output_bytes,
+            truncated: snapshot.truncated,
+            code: snapshot.code,
+            signal: snapshot.signal,
+            error: snapshot.error.clone(),
         }
-        process.cancel.cancel();
-        Ok(())
+    }
+
+    pub(crate) fn views(&self, owner: &str) -> Vec<ProcessView> {
+        let processes: Vec<_> = self
+            .processes
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|p| p.snapshot.lock().unwrap().owner == owner)
+            .cloned()
+            .collect();
+        let mut views: Vec<_> = processes.iter().map(|p| self.view_of(p)).collect();
+        views.sort_by(|a, b| a.id.cmp(&b.id));
+        views
     }
     fn write(&self, owner: &str, id: &str, data: Vec<u8>) -> Result<(), String> {
         self.get(owner, id)?
@@ -271,14 +359,14 @@ impl ProcessRegistry {
     pub(crate) fn cancel_owner(&self, owner: &str) {
         for process in self.processes.lock().unwrap().values() {
             if process.snapshot.lock().unwrap().owner == owner {
-                process.cancel.cancel();
+                let _ = process.control.send(Control::Cancel);
             }
         }
     }
 
     pub(crate) fn cancel_all(&self) {
         for process in self.processes.lock().unwrap().values() {
-            process.cancel.cancel();
+            let _ = process.control.send(Control::Cancel);
         }
     }
 
@@ -287,7 +375,7 @@ impl ProcessRegistry {
         let mut finished: Vec<_> = jobs
             .iter()
             .filter_map(|(id, p)| {
-                (p.snapshot.lock().unwrap().state != State::Running).then_some(id.clone())
+                (p.snapshot.lock().unwrap().state != ProcessState::Running).then_some(id.clone())
             })
             .collect();
         finished.sort();
@@ -355,20 +443,19 @@ async fn run_job(
     let JobHooks {
         parent_cancel,
         output,
-        finished,
+        process: process_sink,
     } = hooks;
-    let job_cancel = process.cancel.clone();
     let (reader, writer) = match std::io::pipe() {
         Ok(pipe) => pipe,
         Err(error) => {
             finish_job(
                 &registry,
                 &process,
-                State::Failed,
+                ProcessState::Failed,
                 None,
                 None,
                 Some(error.to_string()),
-                finished,
+                process_sink.clone(),
             )
             .await;
             return;
@@ -380,11 +467,11 @@ async fn run_job(
             finish_job(
                 &registry,
                 &process,
-                State::Failed,
+                ProcessState::Failed,
                 None,
                 None,
                 Some(error.to_string()),
-                finished,
+                process_sink.clone(),
             )
             .await;
             return;
@@ -409,11 +496,11 @@ async fn run_job(
             finish_job(
                 &registry,
                 &process,
-                State::Failed,
+                ProcessState::Failed,
                 None,
                 None,
                 Some(error.to_string()),
-                finished,
+                process_sink.clone(),
             )
             .await;
             return;
@@ -421,6 +508,10 @@ async fn run_job(
     };
     let pid = child.id();
     process.snapshot.lock().unwrap().pid = pid;
+    let version = registry.bump_version();
+    if let Some(sink) = &process_sink {
+        sink(registry.view_of(&process), version);
+    }
     drop(cmd);
     let mut rx = match pipe::Receiver::from_owned_fd(reader.into()) {
         Ok(rx) => rx,
@@ -429,54 +520,39 @@ async fn run_job(
             finish_job(
                 &registry,
                 &process,
-                State::Failed,
+                ProcessState::Failed,
                 None,
                 None,
                 Some(error.to_string()),
-                finished,
+                process_sink.clone(),
             )
             .await;
             return;
         }
     };
     let mut input = child.stdin.take();
+    if let Stdin::Text(text) = stdin
+        && let Some(mut pipe) = input.take()
+    {
+        let _ = pipe.write_all(text.as_bytes()).await;
+    }
+
     let mut out_decoder = Decoder::default();
     let mut status = None;
-    let mut state = State::Running;
+    let mut state = ProcessState::Running;
     let mut error = None;
     let mut kill_at = None;
     let deadline = timeout.map(|t| Instant::now() + t);
     let far = || Instant::now() + Duration::from_secs(86_400);
     let mut buf = vec![0u8; 16 * 1024];
     let mut pipe_open = true;
-    if let Stdin::Text(text) = stdin
-        && let Some(mut pipe) = input.take()
-    {
-        tokio::select! {
-            _ = pipe.write_all(text.as_bytes()) => drop(pipe),
-            _ = job_cancel.cancelled() => { state = State::Cancelled; signal_group(pid, libc::SIGTERM); kill_at = Some(Instant::now() + KILL_GRACE); },
-            _ = parent_cancel.cancelled() => { state = State::Cancelled; signal_group(pid, libc::SIGTERM); kill_at = Some(Instant::now() + KILL_GRACE); },
-            _ = sleep_until(deadline.unwrap_or_else(&far)), if deadline.is_some() => { state = State::TimedOut; signal_group(pid, libc::SIGTERM); kill_at = Some(Instant::now() + KILL_GRACE); },
-        }
-    }
     loop {
         tokio::select! {
-            n = rx.read(&mut buf), if pipe_open => match n { Ok(0) | Err(_) => pipe_open = false, Ok(n) => { let text = out_decoder.decode(&buf[..n]); record_output(&process, &text, n, &output); } },
+            n = rx.read(&mut buf), if pipe_open => match n { Ok(0) | Err(_) => pipe_open = false, Ok(n) => { let text = out_decoder.decode(&buf[..n]); record_output(&registry, &process, &text, n, false, &output, &process_sink); } },
             st = child.wait(), if status.is_none() => match st { Ok(st) => { status = Some(st); if kill_at.is_none() { signal_group(pid, libc::SIGTERM); kill_at = Some(Instant::now() + EXIT_GRACE); } }, Err(e) => { error = Some(e.to_string()); break; } },
-            Some(control) = controls.recv(), if kill_at.is_none() => match control {
-                Control::Write(data) => if let Some(pipe) = &mut input {
-                    tokio::select! {
-                        _ = pipe.write_all(&data) => {},
-                        _ = job_cancel.cancelled() => { state = State::Cancelled; signal_group(pid, libc::SIGTERM); kill_at = Some(Instant::now() + KILL_GRACE); },
-                        _ = parent_cancel.cancelled() => { state = State::Cancelled; signal_group(pid, libc::SIGTERM); kill_at = Some(Instant::now() + KILL_GRACE); },
-                        _ = sleep_until(deadline.unwrap_or_else(&far)), if deadline.is_some() => { state = State::TimedOut; signal_group(pid, libc::SIGTERM); kill_at = Some(Instant::now() + KILL_GRACE); },
-                    }
-                },
-                Control::CloseStdin => input = None,
-            },
-            _ = job_cancel.cancelled(), if kill_at.is_none() => { state = State::Cancelled; signal_group(pid, libc::SIGTERM); kill_at = Some(Instant::now() + KILL_GRACE); }
-            _ = parent_cancel.cancelled(), if kill_at.is_none() => { state = State::Cancelled; signal_group(pid, libc::SIGTERM); kill_at = Some(Instant::now() + KILL_GRACE); }
-            _ = sleep_until(deadline.unwrap_or_else(far)), if deadline.is_some() && kill_at.is_none() => { state = State::TimedOut; signal_group(pid, libc::SIGTERM); kill_at = Some(Instant::now() + KILL_GRACE); }
+            Some(control) = controls.recv(), if kill_at.is_none() => match control { Control::Write(data) => if let Some(pipe) = &mut input { let _ = pipe.write_all(&data).await; }, Control::CloseStdin => input = None, Control::Cancel => { state = ProcessState::Cancelled; signal_group(pid, libc::SIGTERM); kill_at = Some(Instant::now() + KILL_GRACE); } },
+            _ = parent_cancel.cancelled(), if kill_at.is_none() => { state = ProcessState::Cancelled; signal_group(pid, libc::SIGTERM); kill_at = Some(Instant::now() + KILL_GRACE); }
+            _ = sleep_until(deadline.unwrap_or_else(far)), if deadline.is_some() && kill_at.is_none() => { state = ProcessState::TimedOut; signal_group(pid, libc::SIGTERM); kill_at = Some(Instant::now() + KILL_GRACE); }
             _ = sleep_until(kill_at.unwrap_or_else(far)), if kill_at.is_some() => { signal_group(pid, libc::SIGKILL); break; }
             else => break,
         }
@@ -490,23 +566,58 @@ async fn run_job(
     signal_group(pid, libc::SIGKILL);
     let text = out_decoder.finish();
     if !text.is_empty() {
-        record_output(&process, &text, text.len(), &output);
+        record_output(
+            &registry,
+            &process,
+            &text,
+            text.len(),
+            false,
+            &output,
+            &process_sink,
+        );
     }
     let (code, signal) = status.map_or((None, None), |st| (st.code(), st.signal()));
-    if state == State::Running {
-        state = State::Exited;
+    if state == ProcessState::Running {
+        state = ProcessState::Exited;
     }
-    finish_job(&registry, &process, state, code, signal, error, finished).await;
+    finish_job(
+        &registry,
+        &process,
+        state,
+        code,
+        signal,
+        error,
+        process_sink,
+    )
+    .await;
 }
 
-fn record_output(process: &Process, text: &str, bytes: usize, output: &Option<OutputSink>) {
+fn record_output(
+    registry: &ProcessRegistry,
+    process: &Process,
+    text: &str,
+    bytes: usize,
+    is_stderr: bool,
+    output: &Option<OutputSink>,
+    process_sink: &Option<ProcessUpdateSink>,
+) {
     if text.is_empty() {
         return;
     }
     let mut snapshot = process.snapshot.lock().unwrap();
     snapshot.output_bytes += bytes as u64;
     snapshot.truncated |= append_bounded(&mut snapshot.combined, text);
+    let stream = if is_stderr {
+        &mut snapshot.stderr
+    } else {
+        &mut snapshot.stdout
+    };
+    snapshot.truncated |= append_bounded(stream, text);
     drop(snapshot);
+    let version = registry.bump_version();
+    if let Some(sink) = process_sink {
+        sink(registry.view_of(process), version);
+    }
     if let Some(output) = output {
         output(text);
     }
@@ -528,38 +639,34 @@ fn append_bounded(target: &mut String, text: &str) -> bool {
 async fn finish_job(
     registry: &ProcessRegistry,
     process: &Process,
-    state: State,
+    state: ProcessState,
     code: Option<i32>,
     signal: Option<i32>,
     error: Option<String>,
-    finished: Option<FinishedSink>,
+    process_sink: Option<ProcessUpdateSink>,
 ) {
-    let (result, is_error, duration) = {
+    {
         let mut snapshot = process.snapshot.lock().unwrap();
         snapshot.state = state;
         snapshot.code = code;
         snapshot.signal = signal;
         snapshot.error = error;
         snapshot.finished = Some(Instant::now());
-        let duration = snapshot
-            .finished
-            .unwrap()
-            .duration_since(snapshot.started)
-            .as_millis() as u64;
-        let result = render(&snapshot);
-        let is_error = state != State::Exited || code.is_some_and(|code| code != 0);
-        (result, is_error, duration)
-    };
+        snapshot.finished_at_ms = Some(unix_ms());
+    }
     process.done.notify_waiters();
     registry.prune();
-    if let Some(finished) = finished {
-        finished(result, is_error, duration);
+    let version = registry.bump_version();
+    if let Some(sink) = process_sink {
+        sink(registry.view_of(process), version);
     }
+    // The process event is the completion signal for detached commands. A
+    // background start already completed its tool call when it returned.
 }
 
 fn json_snapshot(snapshot: &Snapshot) -> Value {
     let output = truncate_middle(snapshot.combined.trim_end(), SHOW_HEAD, SHOW_TAIL);
-    json!({ "id": snapshot.id, "state": snapshot.state.name(), "running": snapshot.state == State::Running, "command": snapshot.command, "pid": snapshot.pid, "elapsed_ms": snapshot.finished.map_or_else(|| snapshot.started.elapsed().as_millis() as u64, |end| end.duration_since(snapshot.started).as_millis() as u64), "output": output, "output_bytes": snapshot.output_bytes, "truncated": snapshot.truncated || output.len() < snapshot.combined.trim_end().len(), "code": snapshot.code, "signal": snapshot.signal, "error": snapshot.error })
+    json!({ "id": snapshot.id, "state": snapshot.state.name(), "running": snapshot.state == ProcessState::Running, "command": snapshot.command, "pid": snapshot.pid, "started_at_ms": snapshot.started_at_ms, "finished_at_ms": snapshot.finished_at_ms, "elapsed_ms": snapshot.finished.map_or_else(|| snapshot.started.elapsed().as_millis() as u64, |end| end.duration_since(snapshot.started).as_millis() as u64), "output": output, "stdout": snapshot.stdout, "stderr": snapshot.stderr, "output_bytes": snapshot.output_bytes, "truncated": snapshot.truncated || output.len() < snapshot.combined.trim_end().len(), "code": snapshot.code, "signal": snapshot.signal, "error": snapshot.error })
 }
 
 fn render(snapshot: &Snapshot) -> String {
@@ -569,21 +676,21 @@ fn render(snapshot: &Snapshot) -> String {
         truncate_middle(snapshot.combined.trim_end(), SHOW_HEAD, SHOW_TAIL)
     };
     match snapshot.state {
-        State::Exited => match (snapshot.code, snapshot.signal) {
+        ProcessState::Exited => match (snapshot.code, snapshot.signal) {
             (Some(code), _) => result.push_str(&format!("\n[exit code: {code}]")),
             (None, Some(signal)) => result.push_str(&format!("\n[killed by signal {signal}]")),
             _ => {}
         },
-        State::Cancelled => result.push_str("\n[cancelled; process killed]"),
-        State::TimedOut => result.push_str(&format!(
+        ProcessState::Cancelled => result.push_str("\n[cancelled; process killed]"),
+        ProcessState::TimedOut => result.push_str(&format!(
             "\n[timed out after {}s; process killed]",
             snapshot.timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS)
         )),
-        State::Failed => result.push_str(&format!(
+        ProcessState::Failed => result.push_str(&format!(
             "\n[failed: {}]",
             snapshot.error.as_deref().unwrap_or("unknown error")
         )),
-        State::Running => {}
+        ProcessState::Running => {}
     }
     result
 }
@@ -626,7 +733,7 @@ impl Tool for Shell {
                             .clamp(1, MAX_TIMEOUT_SECS),
                     );
                     let snapshot = ctx.jobs.wait(&ctx.session_id, id, Some(timeout)).await?;
-                    if snapshot.state == State::Exited {
+                    if snapshot.state == ProcessState::Exited {
                         Ok(render(&snapshot))
                     } else {
                         Err(render(&snapshot))
@@ -687,18 +794,25 @@ async fn run_action(args: Args, ctx: &ToolContext) -> ToolResult {
             cwd: ctx.cwd.clone(),
             timeout,
             stdin,
+            background: start,
         },
         JobHooks {
-            parent_cancel: ctx.cancel.clone(),
-            output: ctx.output.clone(),
-            finished: start.then(|| ctx.finish.clone()).flatten(),
+            // A detached start owns its lifetime; cancelling the model turn
+            // must not kill a background process the model explicitly kept.
+            parent_cancel: if start {
+                CancellationToken::new()
+            } else {
+                ctx.cancel.clone()
+            },
+            output: if start { None } else { ctx.output.clone() },
+            process: if start { ctx.processes.clone() } else { None },
         },
     );
     if start {
         return Ok(format!("background process started: {id}"));
     }
     let snapshot = ctx.jobs.wait(&ctx.session_id, &id, None).await?;
-    if snapshot.state == State::Exited {
+    if snapshot.state == ProcessState::Exited {
         Ok(render(&snapshot))
     } else {
         Err(render(&snapshot))

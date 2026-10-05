@@ -2426,6 +2426,34 @@ async fn tool_events_carry_timing_and_live_output() {
 }
 
 #[tokio::test]
+async fn background_shells_publish_process_lifecycle_events_after_the_tool_returns() {
+    let mut h = Harness::with_lua(
+        "",
+        vec![
+            calls(&[(
+                "c1",
+                "shell",
+                json!({"command": "printf 'a\\n'; sleep 0.2; printf 'b\\n'", "mode": "start"}),
+            )]),
+            text("done"),
+        ],
+    )
+    .await;
+    h.start("go").await;
+    let started = h.until::<ProcessChanged>().await;
+    assert!(started.process.running);
+    let finished = loop {
+        let changed = h.until::<ProcessChanged>().await;
+        if !changed.process.running {
+            break changed;
+        }
+    };
+    assert_eq!(finished.process.state, ProcessState::Exited);
+    assert!(finished.process.stdout.contains("a\n"));
+    assert!(finished.process.stdout.contains("b\n"));
+}
+
+#[tokio::test]
 async fn settings_choose_the_model_and_are_saved_for_every_client() {
     let mut h = Harness::with_lua(
         r#"bone.config.providers.y = { base_url = "http://unused", model = "y1" }

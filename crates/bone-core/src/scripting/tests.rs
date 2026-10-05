@@ -177,7 +177,7 @@ async fn hooks_tools_and_system_prompt() {
         views: Default::default(),
         jobs: Default::default(),
         output: None,
-        finish: None,
+        processes: None,
     };
     let shout = tool("shout");
     assert_eq!(
@@ -277,7 +277,7 @@ async fn ask_waits_for_an_answer_or_a_cancel() {
             views: Default::default(),
             jobs: Default::default(),
             output: None,
-            finish: None,
+            processes: None,
         };
         tokio::spawn(async move { tool.call(json!({}), &ctx).await })
     };
@@ -427,7 +427,7 @@ async fn plugins_run_before_user_config() {
         views: Default::default(),
         jobs: Default::default(),
         output: None,
-        finish: None,
+        processes: None,
     };
     assert_eq!(
         tool.call(json!({}), &ctx).await.unwrap(),
@@ -454,7 +454,7 @@ fn ctx(session: &str) -> ToolContext {
         views: Default::default(),
         jobs: Default::default(),
         output: None,
-        finish: None,
+        processes: None,
     }
 }
 

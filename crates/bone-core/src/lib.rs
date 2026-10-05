@@ -25,7 +25,8 @@ use bone_proto::methods::{
     AskRespond, AskRespondParams, CoreReload, Echo, EchoParams, Echoed, HealthCheck, LuaCall,
     LuaCallParams, McpList, ModelCancel, ModelComplete, ModelCompleteParams, ModelCompleted,
     ModelCompletedParams, ModelDeltaEvent, ModelDeltaParams, ModelList, ModelRequest, PluginList,
-    PluginLoad, PluginRef, PluginReload, PluginUnload, QueueAdd, QueueAddParams, QueueAddResult,
+    PluginLoad, PluginRef, PluginReload, PluginUnload, ProcessCancel, ProcessRef, ProcessSnapshot,
+    ProcessState, ProcessesGet, ProcessesResult, QueueAdd, QueueAddParams, QueueAddResult,
     QueueChanged, QueueChangedParams, QueueClear, QueueMode, QueueMove, QueueRemove, QueueResume,
     QueueUpdate, SecretSet, SecretsList, SecretsSet, SessionCompact, SessionCompactParams,
     SessionCreate, SessionCreateParams, SessionDelete, SessionDeleted, SessionFork,
@@ -46,7 +47,7 @@ use crate::provider::{OpenAiProvider, Provider};
 use crate::runtime::{Change, Runtime, Source};
 use crate::scripting::{Loaded, Scripting};
 use crate::session::{ActiveTurn, SessionError, SessionStore};
-use crate::tools::Registry;
+use crate::tools::{ProcessState as CoreProcessState, ProcessView, Registry};
 
 /// Large because streamed deltas are many small events and a lagging client
 /// loses the ones it missed.
@@ -407,6 +408,10 @@ impl Core {
             }
             TurnStart::METHOD => dispatch::<TurnStart, _>(params, |p| self.turn_start(p)),
             TurnCancel::METHOD => dispatch::<TurnCancel, _>(params, |p| self.turn_cancel(p)),
+            ProcessesGet::METHOD => dispatch::<ProcessesGet, _>(params, |p| self.processes_get(p)),
+            ProcessCancel::METHOD => {
+                dispatch::<ProcessCancel, _>(params, |p| self.process_cancel(p))
+            }
             TurnSteer::METHOD => {
                 let p: TurnSteerParams = decode::<TurnSteer>(params)?;
                 let session = self.inner.session(&p.session_id).map_err(session_error)?;
@@ -699,6 +704,32 @@ impl Core {
         Ok(params)
     }
 
+    fn processes_get(&self, params: SessionRef) -> Result<ProcessesResult, RpcError> {
+        self.inner
+            .session(&params.session_id)
+            .map_err(session_error)?;
+        Ok(ProcessesResult {
+            version: self.inner.jobs.version(),
+            processes: self
+                .inner
+                .jobs
+                .views(&params.session_id)
+                .into_iter()
+                .map(|view| process_snapshot(&params.session_id, view))
+                .collect(),
+        })
+    }
+
+    fn process_cancel(&self, params: ProcessRef) -> Result<(), RpcError> {
+        self.inner
+            .session(&params.session_id)
+            .map_err(session_error)?;
+        self.inner
+            .jobs
+            .cancel(&params.session_id, &params.id)
+            .map_err(RpcError::invalid_params)
+    }
+
     fn session_create(&self, params: SessionCreateParams) -> Result<SessionInfo, RpcError> {
         let cwd = match params.cwd {
             Some(cwd) => PathBuf::from(cwd),
@@ -901,6 +932,35 @@ impl Core {
 impl Drop for Core {
     fn drop(&mut self) {
         self.inner.jobs.cancel_all();
+    }
+}
+
+fn process_snapshot(session_id: &str, view: ProcessView) -> ProcessSnapshot {
+    let state = match view.state {
+        CoreProcessState::Running => ProcessState::Running,
+        CoreProcessState::Exited => ProcessState::Exited,
+        CoreProcessState::Cancelled => ProcessState::Cancelled,
+        CoreProcessState::TimedOut => ProcessState::TimedOut,
+        CoreProcessState::Failed => ProcessState::Failed,
+    };
+    ProcessSnapshot {
+        session_id: session_id.to_owned(),
+        id: view.id,
+        command: view.command,
+        state,
+        running: view.running,
+        pid: view.pid,
+        started_at_ms: view.started_at_ms,
+        finished_at_ms: view.finished_at_ms,
+        elapsed_ms: view.elapsed_ms,
+        stdout: view.stdout,
+        stderr: view.stderr,
+        output: view.output,
+        output_bytes: view.output_bytes,
+        truncated: view.truncated,
+        code: view.code,
+        signal: view.signal,
+        error: view.error,
     }
 }
 

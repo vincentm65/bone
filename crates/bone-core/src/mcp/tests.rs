@@ -108,7 +108,7 @@ fn ctx() -> ToolContext {
         views: Default::default(),
         jobs: Default::default(),
         output: None,
-        finish: None,
+        processes: None,
     }
 }
 

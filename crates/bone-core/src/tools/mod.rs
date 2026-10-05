@@ -9,7 +9,7 @@ mod read_file;
 mod shell;
 mod write_file;
 
-pub(crate) use shell::ProcessRegistry;
+pub(crate) use shell::{ProcessRegistry, ProcessState, ProcessView};
 
 use std::path::{Component, PathBuf};
 use std::sync::Arc;
@@ -40,16 +40,15 @@ pub struct ToolContext {
     /// Where a tool can send output while it runs (`tool/output`), if anyone
     /// listens. The result still carries all of it.
     pub output: Option<OutputSink>,
-    /// Used only by background shell jobs when they finish after the tool
-    /// call has returned.
-    pub(crate) finish: Option<FinishedSink>,
+    /// Where managed-process snapshots are published while a command runs.
+    pub(crate) processes: Option<ProcessUpdateSink>,
 }
 
 /// Takes a running tool's output as it comes.
 pub type OutputSink = Arc<dyn Fn(&str) + Send + Sync>;
 
-/// `(rendered result, is_error, duration_ms)` for a detached tool call.
-pub type FinishedSink = Arc<dyn Fn(String, bool, u64) + Send + Sync>;
+/// Receives an authoritative update for a managed shell process.
+pub(crate) type ProcessUpdateSink = Arc<dyn Fn(ProcessView, u64) + Send + Sync>;
 
 impl ToolContext {
     /// An absolute path, with `.` and `..` worked out so one file has one

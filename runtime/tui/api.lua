@@ -397,6 +397,21 @@ bone.job = {
   end,
 }
 
+--- Core-managed shell processes started by the model.
+--- Entries contain id, command, state, running, pid, elapsed_ms, output
+--- tails, exit status and truncation metadata.
+bone.processes = {
+  list = function()
+    return api("process_list")
+  end,
+  refresh = function()
+    api("process_refresh")
+  end,
+  cancel = function(id)
+    return api("process_cancel", id)
+  end,
+}
+
 --- Run fn after `ms` milliseconds.
 function bone.defer(ms, fn)
   api("wait", { sleep = ms }, function()
@@ -1262,4 +1277,3 @@ function bone.ui.pager(content, opts)
   end
   return handle
 end
-

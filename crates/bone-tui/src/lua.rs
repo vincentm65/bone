@@ -9,6 +9,7 @@
 use std::path::PathBuf;
 
 use bone_lua::{Side, from_lua, short_error, to_lua};
+use bone_proto::methods::{ProcessCancel, ProcessRef};
 use mlua::{FromLuaMulti, Function, IntoLuaMulti, Lua, MultiValue, Table, Value};
 
 use crate::app::App;
@@ -1877,6 +1878,32 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
         "job_list" => {
             let list: Vec<serde_json::Value> = app.jobs.list.iter().map(|j| j.status()).collect();
             ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
+        }
+        "process_list" => {
+            let list: Vec<serde_json::Value> = app
+                .process_list()
+                .into_iter()
+                .map(|p| serde_json::to_value(p).unwrap_or_default())
+                .collect();
+            ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
+        }
+        "process_refresh" => {
+            if let Some(session_id) = app.current_session_id() {
+                app.request_processes(session_id);
+            }
+            ret(lua, ())
+        }
+        "process_cancel" => {
+            let id: String = args(lua, a)?;
+            let Some(session_id) = app.current_session_id() else {
+                return ret(lua, false);
+            };
+            app.request::<ProcessCancel>(ProcessRef { session_id, id }, |app, result| {
+                if let Err(e) = result {
+                    app.error(format!("cannot cancel shell process: {e}"));
+                }
+            });
+            ret(lua, true)
         }
         "plugin_current" => {
             let Some(name) = app.owner.clone() else {

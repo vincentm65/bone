@@ -478,6 +478,42 @@ fn requests() {
         },
         settings,
     );
+    exchange::<ProcessesGet>(
+        36,
+        SessionRef {
+            session_id: SID.into(),
+        },
+        ProcessesResult {
+            version: 4,
+            processes: vec![ProcessSnapshot {
+                session_id: SID.into(),
+                id: "shell-1".into(),
+                command: "cargo test".into(),
+                state: ProcessState::Running,
+                running: true,
+                pid: Some(1234),
+                started_at_ms: 1_790_000_000_000,
+                finished_at_ms: None,
+                elapsed_ms: 1200,
+                stdout: "running\n".into(),
+                stderr: String::new(),
+                output: "running\n".into(),
+                output_bytes: 8,
+                truncated: false,
+                code: None,
+                signal: None,
+                error: None,
+            }],
+        },
+    );
+    exchange::<ProcessCancel>(
+        37,
+        ProcessRef {
+            session_id: SID.into(),
+            id: "shell-1".into(),
+        },
+        (),
+    );
 }
 
 #[test]
@@ -607,6 +643,29 @@ fn events() {
             loaded: true,
         }],
         warnings: vec![],
+    });
+    event::<ProcessChanged>(ProcessChangedParams {
+        session_id: SID.into(),
+        version: 5,
+        process: ProcessSnapshot {
+            session_id: SID.into(),
+            id: "shell-1".into(),
+            command: "cargo test".into(),
+            state: ProcessState::Exited,
+            running: false,
+            pid: Some(1234),
+            started_at_ms: 1_790_000_000_000,
+            finished_at_ms: Some(1_790_000_001_500),
+            elapsed_ms: 1500,
+            stdout: "ok\n".into(),
+            stderr: String::new(),
+            output: "ok\n".into(),
+            output_bytes: 3,
+            truncated: false,
+            code: Some(0),
+            signal: None,
+            error: None,
+        },
     });
 }
 

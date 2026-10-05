@@ -55,6 +55,8 @@ After `initialize`, the server runs each request on its own task: replies carry 
 | `queue/clear` | `{ session_id }` | `null` |
 | `queue/resume` | `{ session_id }` | `null`; a paused queue goes on (starting a turn if the session is idle) |
 | `turn/cancel` | `{ session_id }` | `null` (no-op if nothing is running) |
+| `processes/get` | `{ session_id }` | `{ version, processes: [ProcessSnapshot] }` for managed shell processes |
+| `process/cancel` | `{ session_id, id }` | `null`; asks the process group to stop |
 | `ask/respond` | `{ ask_id, answer }` | `null`; error if no question with that id is open |
 | `health/check` | `{}` | `[{ name, status: "ok" \| "warn" \| "error", message }]`: the core's checks (provider, API key, reachability, sessions folder, Lua) and core Lua's `bone.health` checks |
 | `settings/get` | `{}` | the saved settings (`settings.json` in the config dir), a JSON object |
@@ -97,8 +99,9 @@ Every event carries `session_id` (except `echoed`, `ask/resolved`, `core/reloade
 | `message/delta` | `{ kind: "text" \| "reasoning", text }` | streamed model output |
 | `message/completed` | `{ message, usage? }` | the final assistant message as saved; replaces whatever streamed |
 | `tool/started` | `{ call, started_at? }` | the core is handling a tool call (`tool_call` hooks run next); `started_at` is milliseconds since the Unix epoch |
-| `tool/output` | `{ call_id, text }` | output a running tool produced, in order, as it comes (the shell tool sends its output this way); `tool/finished` still carries the whole result |
+| `tool/output` | `{ call_id, text }` | output a running foreground tool produced, in order, as it comes; `tool/finished` still carries the whole result. Detached shell processes use `process/changed` after their start result |
 | `tool/finished` | `{ call_id, output, is_error, duration_ms? }` | its result, as the model will see it, and how long it ran |
+| `process/changed` | `{ session_id, version, process: ProcessSnapshot }` | a managed shell process started, produced output, or changed state |
 | `ask/requested` | `{ ask_id, question }` | core Lua (a hook or tool) called `bone.ask(question)` and waits; answer with `ask/respond`. `question` is whatever the Lua passed, e.g. the approve plugin's `{ kind: "approval", title, tool, arguments }` |
 | `ask/resolved` | `{ ask_id, answer }` | answered by some client, or `answer: null` if the turn was cancelled first |
 | `turn/steered` | `{ text }` | a steer message from the queue joined the running turn's transcript (show it as a user message) |
@@ -115,6 +118,13 @@ Every event carries `session_id` (except `echoed`, `ask/resolved`, `core/reloade
 A typical turn: `turn/started`, then `message/delta`…, `message/completed` (with `tool_calls`), and for each call `tool/started`, then `ask/requested` → `ask/resolved` if a hook asks the user (the approve plugin does for tools that change things), then `tool/finished`. That repeats until a `message/completed` arrives without tool calls, then `turn/finished`.
 
 Events are broadcast to all clients. A client that falls more than 8192 events behind loses the oldest ones, so treat `message/completed` and `session/messages` as authoritative over accumulated deltas.
+
+`ProcessSnapshot` contains `id`, `command`, `state` (`running`, `exited`,
+`cancelled`, `timed_out` or `failed`), `running`, `pid`, start/finish times,
+bounded `stdout`/`stderr` tails, the ordered `output` tail, `output_bytes`,
+`truncated`, and exit status.
+Background shell processes are owned by the session and outlive the model turn;
+`process/changed` is the authoritative UI stream after the shell tool returns.
 
 ## Errors
 

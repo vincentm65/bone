@@ -12,9 +12,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use bone_proto::methods::{
-    MessageCompleted, MessageCompletedParams, MessageDelta, MessageDeltaParams, ToolFinished,
-    ToolFinishedParams, ToolOutput, ToolOutputParams, ToolStarted, ToolStartedParams, TurnFinished,
-    TurnFinishedParams, TurnStarted, TurnStartedParams, TurnSteered,
+    MessageCompleted, MessageCompletedParams, MessageDelta, MessageDeltaParams, ProcessChanged,
+    ProcessChangedParams, ProcessState, ToolFinished, ToolFinishedParams, ToolOutput,
+    ToolOutputParams, ToolStarted, ToolStartedParams, TurnFinished, TurnFinishedParams,
+    TurnStarted, TurnStartedParams, TurnSteered,
 };
 use bone_proto::types::{ChatMessage, DeltaKind, ToolCall, TurnId, TurnOutcome, Usage};
 use serde_json::{Value, json};
@@ -25,7 +26,9 @@ use crate::config::CoreConfig;
 use crate::provider::{CompletionRequest, Delta};
 use crate::runtime::Runtime;
 use crate::session::{SessionHandle, UsageRecord};
-use crate::tools::{FinishedSink, ToolContext, ToolSpec, parse_args};
+use crate::tools::{
+    ProcessState as CoreProcessState, ProcessView, ToolContext, ToolSpec, parse_args,
+};
 
 /// After cancellation, how long a running tool gets to clean up (e.g. kill
 /// its process group) before its future is dropped.
@@ -608,18 +611,39 @@ impl Turn<'_> {
                 }));
             })
         };
-        let finished: FinishedSink = {
+        let processes = {
             let events = self.inner.events.clone();
-            let (session_id, turn_id, call_id) =
-                (self.session_id.clone(), self.turn_id, call.id.clone());
-            Arc::new(move |output: String, is_error: bool, duration_ms: u64| {
-                let _ = events.send(crate::Event::new::<ToolFinished>(ToolFinishedParams {
+            let session_id = self.session_id.clone();
+            Arc::new(move |view: ProcessView, version: u64| {
+                let state = match view.state {
+                    CoreProcessState::Running => ProcessState::Running,
+                    CoreProcessState::Exited => ProcessState::Exited,
+                    CoreProcessState::Cancelled => ProcessState::Cancelled,
+                    CoreProcessState::TimedOut => ProcessState::TimedOut,
+                    CoreProcessState::Failed => ProcessState::Failed,
+                };
+                let _ = events.send(crate::Event::new::<ProcessChanged>(ProcessChangedParams {
                     session_id: session_id.clone(),
-                    turn_id,
-                    call_id: call_id.clone(),
-                    output,
-                    is_error,
-                    duration_ms: Some(duration_ms),
+                    version,
+                    process: bone_proto::methods::ProcessSnapshot {
+                        session_id: session_id.clone(),
+                        id: view.id,
+                        command: view.command,
+                        state,
+                        running: view.running,
+                        pid: view.pid,
+                        started_at_ms: view.started_at_ms,
+                        finished_at_ms: view.finished_at_ms,
+                        elapsed_ms: view.elapsed_ms,
+                        stdout: view.stdout,
+                        stderr: view.stderr,
+                        output: view.output,
+                        output_bytes: view.output_bytes,
+                        truncated: view.truncated,
+                        code: view.code,
+                        signal: view.signal,
+                        error: view.error,
+                    },
                 }));
             })
         };
@@ -630,7 +654,7 @@ impl Turn<'_> {
             views: self.inner.views.clone(),
             jobs: self.inner.jobs.clone(),
             output: Some(output),
-            finish: Some(finished),
+            processes: Some(processes),
         };
         let hook_args = args.clone();
         let grace = async {

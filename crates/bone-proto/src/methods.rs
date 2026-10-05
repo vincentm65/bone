@@ -10,6 +10,58 @@ use crate::types::{
     AskId, ChatMessage, DeltaKind, SessionId, SessionInfo, ToolCall, TurnId, TurnOutcome, Usage,
 };
 
+/// The lifecycle state of a managed shell process.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessState {
+    Running,
+    Exited,
+    Cancelled,
+    TimedOut,
+    Failed,
+}
+
+/// A bounded, session-scoped view of one managed shell process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessSnapshot {
+    pub session_id: SessionId,
+    pub id: String,
+    pub command: String,
+    pub state: ProcessState,
+    pub running: bool,
+    pub pid: Option<u32>,
+    pub started_at_ms: u64,
+    pub finished_at_ms: Option<u64>,
+    pub elapsed_ms: u64,
+    pub stdout: String,
+    pub stderr: String,
+    pub output: String,
+    pub output_bytes: u64,
+    pub truncated: bool,
+    pub code: Option<i32>,
+    pub signal: Option<i32>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessesResult {
+    pub version: u64,
+    pub processes: Vec<ProcessSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessChangedParams {
+    pub session_id: SessionId,
+    pub version: u64,
+    pub process: ProcessSnapshot,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessRef {
+    pub session_id: SessionId,
+    pub id: String,
+}
+
 /// A client-to-server request.
 pub trait Method {
     const METHOD: &'static str;
@@ -90,6 +142,8 @@ pub const METHODS: &[&str] = &[
     SettingsReset::METHOD,
     SecretsSet::METHOD,
     SecretsList::METHOD,
+    ProcessesGet::METHOD,
+    ProcessCancel::METHOD,
 ];
 
 /// Every server-to-client event.
@@ -113,6 +167,7 @@ pub const NOTIFICATIONS: &[&str] = &[
     ModelDeltaEvent::METHOD,
     ModelCompleted::METHOD,
     SettingsChanged::METHOD,
+    ProcessChanged::METHOD,
 ];
 
 // ---- connection ----------------------------------------------------------
@@ -124,6 +179,15 @@ method!(
 method!(
     /// Ask the server to close this connection after responding.
     Shutdown, "shutdown", Empty => ()
+);
+
+method!(
+    /// Return managed shell processes for a session.
+    ProcessesGet, "processes/get", SessionRef => ProcessesResult
+);
+method!(
+    /// Cancel one managed shell process.
+    ProcessCancel, "process/cancel", ProcessRef => ()
 );
 method!(
     /// Returns its input and also emits it as an [`Echoed`] event.
@@ -675,6 +739,10 @@ notification!(
 notification!(
     /// The core switched to a newly loaded Lua configuration.
     CoreReloaded, "core/reloaded", ReloadResult
+);
+notification!(
+    /// A managed shell process changed state or produced output.
+    ProcessChanged, "process/changed", ProcessChangedParams
 );
 notification!(
     /// A session was deleted (by any client).
