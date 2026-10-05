@@ -138,6 +138,9 @@ end
 
 --- up/down: move through the matches (or let them move in the prompt).
 function M.move(by)
+  if bone.prompt.info().history then
+    return false
+  end
   local n = #M.all(bone.prompt.get())
   if n == 0 then
     return false

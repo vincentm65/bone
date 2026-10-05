@@ -508,6 +508,10 @@ impl App {
         self.prompt.text()
     }
 
+    pub fn prompt_history_active(&self) -> bool {
+        self.prompt_history_pos.is_some()
+    }
+
     pub fn set_prompt_text(&mut self, text: &str) {
         self.prompt.set_text(text);
         self.emit_prompt_changed();

@@ -2437,6 +2437,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             t.set("text", app.prompt.text())?;
             t.set("lines", app.prompt.lines().to_vec())?;
             t.set("cursor", pos_out(lua, app.prompt.cursor())?)?;
+            t.set("history", app.prompt_history_active())?;
             if let Some((a, b)) = app.prompt.selection() {
                 let sel = lua.create_table()?;
                 sel.set("start", pos_out(lua, a)?)?;

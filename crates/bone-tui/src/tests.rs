@@ -715,6 +715,10 @@ async fn prompt_grows_and_history_recalls() {
     assert_eq!(h.prompt(), "");
     h.input("clear me{esc}").await;
     assert_eq!(h.prompt(), "");
+    h.app.history_add("/first");
+    h.app.history_add("/second");
+    h.input("{up}{up}").await;
+    assert_eq!(h.prompt(), "/first");
 }
 
 #[tokio::test]
