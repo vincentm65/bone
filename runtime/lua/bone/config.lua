@@ -701,12 +701,18 @@ function M.open(want)
         add(r.type == "secret" and string.rep("•", #st.edit) or st.edit, "Selection")
         add("▏")
       else
-        value_into(add, r)
+        value_into(i == st.sel and function(text)
+          add(text, "Selection")
+        end or add, r)
         -- tui.lua runs last; say so when it overrides the saved value.
         if r.kind == "option" then
           local saved = bone.settings.get(r.path)
           if saved ~= nil and saved ~= r.value then
-            add("   tui.lua sets " .. tostring(r.value), NOTE)
+            (i == st.sel and function()
+              add("   tui.lua sets " .. tostring(r.value), "Selection")
+            end or function()
+              add("   tui.lua sets " .. tostring(r.value), NOTE)
+            end)()
           end
         end
       end
