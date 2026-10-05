@@ -716,6 +716,12 @@ async fn prompt_grows_and_history_recalls() {
     assert_eq!(h.prompt(), "");
     h.input("clear me{esc}").await;
     assert_eq!(h.prompt(), "");
+    let bulk = "x".repeat(501);
+    h.app.paste(&format!("{bulk}\r\nend"));
+    assert!(h.prompt().starts_with("[Pasted text #1 +505 chars]"));
+    h.input("{left}").await;
+    assert_eq!(h.prompt(), format!("{bulk}\nend"));
+    h.input("{esc}").await;
     h.app.history_add("/first");
     h.app.history_add("/second");
     h.input("{up}{up}").await;

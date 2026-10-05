@@ -29,6 +29,7 @@ use crate::theme::Theme;
 
 /// A second ctrl+c within this long quits.
 const QUIT_WINDOW: Duration = Duration::from_secs(2);
+const PASTE_PLACEHOLDER_THRESHOLD: usize = 500;
 
 pub const CHAT_WIN: WindowId = 0;
 pub const PROMPT_WIN: WindowId = 1;
@@ -211,6 +212,8 @@ pub struct App {
     pub selection: Option<crate::selection::Selection>,
     /// Text to put on the system clipboard after the next draw.
     pub clipboard: Option<String>,
+    pastes: Vec<(String, String)>,
+    paste_seq: usize,
     prompt_history: Vec<String>,
     prompt_history_pos: Option<usize>,
     last_prompt_state: PromptState,
@@ -309,6 +312,8 @@ impl App {
             processes_session: None,
             selection: None,
             clipboard: None,
+            pastes: Vec::new(),
+            paste_seq: 0,
             prompt_history: Vec::new(),
             last_prompt_state: (String::new(), (0, 0), None),
             prompt_history_pos: None,
@@ -508,11 +513,29 @@ impl App {
         self.prompt.text()
     }
 
+    fn expand_pastes(&mut self) {
+        if self.pastes.is_empty() {
+            return;
+        }
+        let mut text = self.prompt.text();
+        for (token, content) in &self.pastes {
+            text = text.replace(token, content);
+        }
+        self.prompt.set_text(&text);
+        self.pastes.clear();
+    }
+
+    fn clear_prompt(&mut self) {
+        self.prompt.clear();
+        self.pastes.clear();
+    }
+
     pub fn prompt_history_active(&self) -> bool {
         self.prompt_history_pos.is_some()
     }
 
     pub fn set_prompt_text(&mut self, text: &str) {
+        self.pastes.clear();
         self.prompt.set_text(text);
         self.emit_prompt_changed();
         self.dirty = true;
@@ -756,6 +779,7 @@ impl App {
         match ctx {
             Context::Main | Context::Named(_) if self.focused_panel().is_none() => {
                 self.prompt_history_pos = None;
+                self.expand_pastes();
                 self.prompt.insert_char(c);
             }
             _ => {}
@@ -772,7 +796,16 @@ impl App {
         );
         match self.context() {
             Context::Main | Context::Named(_) if self.focused_panel().is_none() => {
-                self.prompt.insert_str(text)
+                self.prompt_history_pos = None;
+                let text = text.replace("\r\n", "\n").replace('\r', "\n");
+                if text.chars().count() > PASTE_PLACEHOLDER_THRESHOLD {
+                    self.paste_seq += 1;
+                    let token = format!("[Pasted text #{} +{} chars]", self.paste_seq, text.chars().count());
+                    self.prompt.insert_str(&token);
+                    self.pastes.push((token, text));
+                } else {
+                    self.prompt.insert_str(&text);
+                }
             }
             _ => {}
         }
@@ -875,6 +908,7 @@ impl App {
     }
 
     fn edit(&mut self, f: impl FnOnce(&mut TextBuffer)) {
+        self.expand_pastes();
         f(&mut self.prompt);
     }
 
@@ -891,6 +925,7 @@ impl App {
         if self.prompt.selection().is_some() {
             match b {
                 Backspace | Delete | DeleteWord | DeleteToStart | DeleteToEnd => {
+                    self.expand_pastes();
                     self.prompt.delete_selection();
                     return;
                 }
@@ -907,7 +942,7 @@ impl App {
             Submit => self.submit(None),
             QueueSteer => self.submit(Some(QueueMode::Steer)),
             QueueNext => self.submit(Some(QueueMode::Next)),
-            Newline => self.prompt.newline(),
+            Newline => self.edit(|t| t.newline()),
             Left => self.edit(|t| t.left()),
             Right => self.edit(|t| t.right()),
             Up | Down => self.vertical(b == Up),
@@ -933,7 +968,7 @@ impl App {
             // Without Lua: nothing to complete; esc clears the prompt.
             Complete => {}
             Dismiss => {
-                self.prompt.clear();
+                self.clear_prompt();
                 self.message = None;
             }
             Interrupt => self.interrupt(),
@@ -942,7 +977,7 @@ impl App {
                 if self.prompt.is_empty() {
                     self.quit = Some(None);
                 } else {
-                    self.prompt.delete();
+                    self.edit(|t| t.delete());
                 }
             }
             NewSession => self.new_session(),
@@ -1017,6 +1052,7 @@ impl App {
         let text = pos
             .map(|p| self.prompt_history[p].clone())
             .unwrap_or_default();
+        self.pastes.clear();
         self.prompt.set_text(&text);
         self.emit_prompt_changed();
     }
@@ -1049,7 +1085,7 @@ impl App {
             return self.info("cancelling…");
         }
         if !self.prompt.is_empty() {
-            self.prompt.clear();
+            self.clear_prompt();
             return;
         }
         if self.quit_armed.is_some_and(|t| t.elapsed() < QUIT_WINDOW) {
@@ -1065,6 +1101,7 @@ impl App {
     /// Send the prompt: a new turn when idle; while a turn runs, queued with
     /// `mode` (default: the `queue_mode` option, else steer).
     fn submit(&mut self, mode: Option<QueueMode>) {
+        self.expand_pastes();
         let mut text = self.prompt.text();
         if text.trim().is_empty() {
             return;
@@ -1073,7 +1110,7 @@ impl App {
         for v in self.fire("submit", serde_json::json!({ "text": text })) {
             match v {
                 mlua::Value::Boolean(false) => {
-                    self.prompt.clear();
+                    self.clear_prompt();
                     return;
                 }
                 mlua::Value::String(s) => text = s.to_string_lossy(),
@@ -1090,7 +1127,7 @@ impl App {
             && let Some(session_id) = chat.session_id().map(str::to_owned)
         {
             let mode = mode.unwrap_or_else(|| self.queue_mode());
-            self.prompt.clear();
+            self.clear_prompt();
             self.history_add(&text);
             let params = QueueAddParams {
                 session_id,
@@ -1109,7 +1146,7 @@ impl App {
             return self.error("A turn is still starting");
         }
         chat.starting = true;
-        self.prompt.clear();
+        self.clear_prompt();
         self.prompt_history_pos = None;
         if self.prompt_history.last() != Some(&text) {
             self.prompt_history.push(text.clone());
