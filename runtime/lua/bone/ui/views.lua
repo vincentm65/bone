@@ -575,9 +575,9 @@ end
 
 -- ---- tool summaries ------------------------------------------------------
 
--- Folded into a summary line: everything but edits and failed calls.
+-- Folded into a summary line: everything but edits.
 local function foldable(t)
-  return t.name ~= "edit_file" and not (t.done and t.is_error)
+  return t.name ~= "edit_file"
 end
 
 local function arg(t, key)
@@ -622,7 +622,12 @@ local function summary(calls)
     parts[#parts + 1] = s.phrase(s.n)
   end
   local text = table.concat(parts, ", ")
-  return text:sub(1, 1):upper() .. text:sub(2)
+  local failed = 0
+  for _, t in ipairs(calls) do
+    failed = failed + (t.done and t.is_error and 1 or 0)
+  end
+  text = text:sub(1, 1):upper() .. text:sub(2)
+  return failed > 0 and (text .. ", " .. failed .. " failed") or text
 end
 
 --- In summary mode: the line for the first foldable call of a stretch (the
@@ -659,13 +664,15 @@ local function summary_view(item, ctx)
   if not stretch[1] or stretch[1].index ~= item.index then
     return nil
   end
-  local running = false
+  local running, failed = false, false
   for _, t in ipairs(stretch) do
     running = running or not t.done
+    failed = failed or (t.done and t.is_error)
   end
   local out = starts("tool", ctx)
   append(out, wrap({ { summary(stretch), "ToolArgs" } }, ctx.width, {
-    first = { running and { "  ◌ ", "ToolRunning" } or { "    ", "Normal" } },
+    first = failed and { { "  ✕ ", "ToolError" } }
+      or (running and { { "  ◌ ", "ToolRunning" } } or { { "    ", "Normal" } }),
     rest = { { "    ", "Normal" } },
   }))
   return out
