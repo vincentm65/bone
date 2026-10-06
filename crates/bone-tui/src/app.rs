@@ -503,6 +503,12 @@ impl App {
     }
 
     pub fn show_chat(&mut self, id: BufferId) {
+        // A hidden chat keeps its data but not its rendered lines.
+        if id != self.current
+            && let Some(c) = self.chats.get_mut(self.current)
+        {
+            c.redraw(None);
+        }
         self.current = id;
         if let Some(w) = self.windows.get_mut(&CHAT_WIN) {
             w.top = 0;
@@ -1854,8 +1860,17 @@ impl App {
     }
 
     /// Core Lua changed a session's transcript: load it again if a chat
-    /// shows it.
+    /// shows it. No session (events were lost): load every chat again.
     fn reload_chat(&mut self, session_id: String) {
+        if session_id.is_empty() {
+            let ids: Vec<_> = self
+                .chats
+                .iter()
+                .filter_map(|c| c.session_id())
+                .map(str::to_owned)
+                .collect();
+            return ids.into_iter().for_each(|id| self.reload_chat(id));
+        }
         let Some(buf) = self.chat_by_session(&session_id) else {
             return;
         };

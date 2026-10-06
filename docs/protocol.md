@@ -116,7 +116,7 @@ Every event carries `session_id` (except `echoed`, `ask/resolved`, `core/reloade
 | `session/created` | `SessionInfo` | a session was created: by a client, a fork, or core Lua (a sub-agent's, with `owner`) |
 | `session/deleted` | `{ session_id }` | a client deleted the session |
 | `session/compacted` | `{ messages, tokens_before, tokens_after, reason }` | the session was compacted (`reason`: `"manual"` from `session/compact`, `"limit"` over `compact.limit`, `"overflow"` after the model said the context is too long, or `"clear"`). The transcript did not change; there is nothing to reload |
-| `session/updated` | `{ reason: "append" \| "compact" \| "rename" }` | core Lua changed the session's transcript (`bone.session.append`, or `bone.session.compact` replacing it), or it was renamed; load it again with `session/messages` |
+| `session/updated` | `{ reason: "append" \| "compact" \| "rename" \| "lagged" }` | core Lua changed the session's transcript (`bone.session.append`, or `bone.session.compact` replacing it), or it was renamed; load it again with `session/messages`. `"lagged"`, with `session_id` empty: this client fell behind and missed events, so load every session it shows again |
 
 A typical turn: `turn/started`, then `message/delta`…, `message/completed` (with `tool_calls`), and for each call `tool/started`, then `ask/requested` → `ask/resolved` if a hook asks the user (the approve plugin does for tools that change things), then `tool/finished`. That repeats until a `message/completed` arrives without tool calls, then `turn/finished`.
 

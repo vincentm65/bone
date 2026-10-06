@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,6 +24,9 @@ use tokio_util::sync::CancellationToken;
 use crate::index::Index;
 
 const TITLE_CHARS: usize = 80;
+/// Sessions kept in memory; past this the least recently used idle ones are
+/// dropped, to load again from disk when next asked for.
+const MAX_LOADED: usize = 32;
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]
@@ -252,7 +256,11 @@ pub type SessionHandle = Arc<Mutex<Session>>;
 
 pub struct SessionStore {
     dir: PathBuf,
-    loaded: Mutex<HashMap<SessionId, SessionHandle>>,
+    /// With when each was last asked for.
+    loaded: Mutex<HashMap<SessionId, (SessionHandle, u64)>>,
+    tick: AtomicU64,
+    /// What `list` read from files not loaded, by their modification time.
+    listed: Mutex<HashMap<SessionId, (SystemTime, SessionInfo)>>,
     /// `None` when the index could not be opened; sessions work without.
     index: Option<Arc<Index>>,
     /// Usage of model calls outside any session.
@@ -282,6 +290,8 @@ impl SessionStore {
         SessionStore {
             dir: data_dir.join("sessions"),
             loaded: Mutex::new(HashMap::new()),
+            tick: Default::default(),
+            listed: Mutex::new(HashMap::new()),
             index,
             usage_log: data_dir.join("usage.jsonl"),
             usage_lock: Mutex::new(()),
@@ -361,16 +371,13 @@ impl SessionStore {
             index: self.index.clone(),
         }));
         session.lock().unwrap().reindex();
-        self.loaded
-            .lock()
-            .unwrap()
-            .insert(info.session_id, session.clone());
-        Ok(session)
+        Ok(self.keep(&info.session_id, session))
     }
 
     /// The session from memory, or loaded from disk.
     pub fn get(&self, id: &str) -> Result<SessionHandle, SessionError> {
-        if let Some(s) = self.loaded.lock().unwrap().get(id) {
+        if let Some((s, used)) = self.loaded.lock().unwrap().get_mut(id) {
+            *used = self.tick.fetch_add(1, Ordering::Relaxed);
             return Ok(s.clone());
         }
         // Ids are UUIDs; anything else could escape the sessions directory.
@@ -425,9 +432,34 @@ impl SessionStore {
             path,
             index: self.index.clone(),
         }));
-        // Another caller may have loaded it meanwhile; keep the first.
+        Ok(self.keep(id, session))
+    }
+
+    /// Hold `session` in memory (or the one another caller loaded meanwhile)
+    /// and drop the least recently used idle ones past `MAX_LOADED`: those
+    /// nothing else holds, with no turn, queue or compaction.
+    fn keep(&self, id: &str, session: SessionHandle) -> SessionHandle {
         let mut loaded = self.loaded.lock().unwrap();
-        Ok(loaded.entry(id.to_owned()).or_insert(session).clone())
+        let used = self.tick.fetch_add(1, Ordering::Relaxed);
+        let session = loaded
+            .entry(id.to_owned())
+            .or_insert((session, used))
+            .0
+            .clone();
+        while loaded.len() > MAX_LOADED {
+            let idle = (loaded.iter())
+                .filter(|(_, (s, _))| {
+                    Arc::strong_count(s) == 1
+                        && s.try_lock().is_ok_and(|s| {
+                            s.active.is_none() && s.queue.is_empty() && !s.compacting
+                        })
+                })
+                .min_by_key(|(_, (_, used))| *used)
+                .map(|(id, _)| id.clone());
+            let Some(idle) = idle else { break };
+            loaded.remove(&idle);
+        }
+        session
     }
 
     /// A copy of a session's transcript (all of it, or what came before
@@ -472,6 +504,7 @@ impl SessionStore {
     pub fn delete(&self, id: &str) -> Result<(), SessionError> {
         self.get(id)?;
         self.loaded.lock().unwrap().remove(id);
+        self.listed.lock().unwrap().remove(id);
         std::fs::remove_file(self.path(id))?;
         let _ = std::fs::remove_file(self.title_path(id));
         let _ = std::fs::remove_file(self.queue_path(id));
@@ -572,14 +605,26 @@ impl SessionStore {
                 continue;
             }
             let id = path.file_stem().unwrap_or_default().to_string_lossy();
-            if let Some(s) = loaded.get(id.as_ref()) {
+            if let Some((s, _)) = loaded.get(id.as_ref()) {
                 out.push(s.lock().unwrap().info.clone());
-            } else if let Ok(mut l) = read_file(&path, 1) {
-                if let Some(t) = self.saved_title(&id) {
-                    l.info.title = Some(t);
-                }
-                out.push(l.info);
+                continue;
             }
+            // Only files changed since the last list are read again.
+            let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
+                continue;
+            };
+            let mut listed = self.listed.lock().unwrap();
+            let cached = listed.get(id.as_ref()).filter(|(t, _)| *t == mtime);
+            let Some(mut info) = (cached.map(|(_, i)| i.clone()))
+                .or_else(|| read_file(&path, 1).ok().map(|l| l.info))
+            else {
+                continue;
+            };
+            listed.insert(id.to_string(), (mtime, info.clone()));
+            if let Some(t) = self.saved_title(&id) {
+                info.title = Some(t);
+            }
+            out.push(info);
         }
         // UUIDv7 ids sort by creation time.
         out.sort_by(|a, b| b.session_id.cmp(&a.session_id));
@@ -987,5 +1032,64 @@ mod tests {
         store.catch_up();
         let out = rows(&store, "SELECT updated_at, messages FROM sessions");
         assert_eq!(out, [[serde_json::json!(5), serde_json::json!(1)]]);
+    }
+
+    #[test]
+    fn idle_sessions_past_the_cap_are_dropped_and_load_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path());
+        let held = store.create("/held".into()).unwrap();
+        let first = store.create("/first".into()).unwrap();
+        let first_id = first.lock().unwrap().info.session_id.clone();
+        first
+            .lock()
+            .unwrap()
+            .push(ChatMessage::User {
+                content: "kept on disk".into(),
+            })
+            .unwrap();
+        drop(first);
+        for _ in 0..MAX_LOADED + 4 {
+            store.create("/more".into()).unwrap();
+        }
+        let loaded = store.loaded.lock().unwrap();
+        assert_eq!(loaded.len(), MAX_LOADED);
+        // Held elsewhere stays; the least recently used idle one went.
+        assert!(loaded.contains_key(&held.lock().unwrap().info.session_id));
+        assert!(!loaded.contains_key(&first_id));
+        drop(loaded);
+        let again = store.get(&first_id).unwrap();
+        assert_eq!(again.lock().unwrap().messages.len(), 1);
+    }
+
+    #[test]
+    fn list_reads_a_file_again_once_it_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path());
+        let id = store
+            .create("/w".into())
+            .unwrap()
+            .lock()
+            .unwrap()
+            .info
+            .session_id
+            .clone();
+        // Not loaded, so `list` reads (and caches) the file.
+        store.loaded.lock().unwrap().clear();
+        assert_eq!(store.list().unwrap()[0].title, None);
+        let mut f = OpenOptions::new()
+            .append(true)
+            .open(store.path(&id))
+            .unwrap();
+        write_record(
+            &mut f,
+            Record::Message(ChatMessage::User {
+                content: "a title".into(),
+            }),
+        )
+        .unwrap();
+        let later = SystemTime::now() + std::time::Duration::from_secs(5);
+        f.set_modified(later).unwrap();
+        assert_eq!(store.list().unwrap()[0].title.as_deref(), Some("a title"));
     }
 }

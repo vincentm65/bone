@@ -647,6 +647,17 @@ async fn background_jobs_run_in_a_terminal_and_the_model_reads_clean_text() {
 }
 
 #[test]
+fn trim_front_cuts_in_batches_on_char_boundaries() {
+    let mut s = "é".repeat(5); // 10 bytes
+    // Up to a quarter past the cap is left alone.
+    assert_eq!(shell::trim_front(&mut s, 8), 0);
+    s.push_str("abc");
+    // Past it, back to about the cap, never inside a character.
+    assert_eq!(shell::trim_front(&mut s, 8), 6);
+    assert_eq!(s, "ééabc");
+}
+
+#[test]
 fn the_cleaner_settles_progress_lines_and_drops_escapes() {
     let mut c = shell::Cleaner::default();
     let mut out = String::new();

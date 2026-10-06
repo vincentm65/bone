@@ -2809,6 +2809,13 @@ async fn a_session_changed_by_core_lua_is_reloaded() {
     })
     .await;
     assert_eq!(h.requests("session/messages").len(), 1);
+    // Events were lost: every open chat loads again.
+    h.emit::<SessionUpdated>(SessionUpdatedParams {
+        session_id: String::new(),
+        reason: "lagged".into(),
+    })
+    .await;
+    assert_eq!(h.requests("session/messages").len(), 2);
 }
 
 #[tokio::test]

@@ -42,43 +42,61 @@ pub struct Dep {
     pub sig: u64,
 }
 
-/// Whether item `n` (0-based) of `items` passes the filter's kind, turn,
-/// range and `around` tests: those that need no item data.
-fn candidates(chat: &ChatBuffer, items: &[Item], turns: &[usize], f: &ItemFilter) -> Vec<bool> {
-    let kind_ok = |i: &Item| {
-        f.kind
-            .as_ref()
-            .is_none_or(|ks| ks.iter().any(|k| chat.kind_name(i) == k))
-    };
-    // `around`: grow from the item while neighbours are of `kind`.
-    let (lo, hi) = match f.around.and_then(|a| a.checked_sub(1)) {
-        Some(at) if at < items.len() && kind_ok(&items[at]) => {
-            let mut lo = at;
-            while lo > 0 && kind_ok(&items[lo - 1]) {
-                lo -= 1;
+/// A chat's items and their turns, built once for many queries.
+pub struct Indexed<'a> {
+    chat: &'a ChatBuffer,
+    items: Vec<Item>,
+    turns: Vec<usize>,
+}
+
+impl Indexed<'_> {
+    /// The items (0-based) that pass the filter's kind, turn, range and
+    /// `around` tests: those that need no item data.
+    fn candidates<'f>(&'f self, f: &'f ItemFilter) -> impl Iterator<Item = usize> + 'f {
+        let (chat, items) = (self.chat, &self.items);
+        let kind_ok = move |i: &Item| {
+            f.kind
+                .as_ref()
+                .is_none_or(|ks| ks.iter().any(|k| chat.kind_name(i) == k))
+        };
+        // `around`: grow from the item while neighbours are of `kind`.
+        let (lo, hi) = match f.around.and_then(|a| a.checked_sub(1)) {
+            Some(at) if at < items.len() && kind_ok(&items[at]) => {
+                let mut lo = at;
+                while lo > 0 && kind_ok(&items[lo - 1]) {
+                    lo -= 1;
+                }
+                let mut hi = at + 1;
+                while hi < items.len() && kind_ok(&items[hi]) {
+                    hi += 1;
+                }
+                (lo, hi)
             }
-            let mut hi = at;
-            while hi + 1 < items.len() && kind_ok(&items[hi + 1]) {
-                hi += 1;
-            }
-            (lo, hi)
-        }
-        Some(_) => (1, 0),
-        None => (0, usize::MAX),
-    };
-    items
-        .iter()
-        .enumerate()
-        .map(|(n, i)| {
-            let index = n + 1;
-            n >= lo
-                && n <= hi
-                && kind_ok(i)
-                && f.turn.is_none_or(|t| turns[n] == t)
-                && f.from.is_none_or(|from| index >= from)
-                && f.to.is_none_or(|to| index <= to)
+            Some(_) => (0, 0),
+            None => (0, items.len()),
+        };
+        (lo..hi).filter(move |&n| {
+            kind_ok(&items[n])
+                && f.turn.is_none_or(|t| self.turns[n] == t)
+                && f.from.is_none_or(|from| n + 1 >= from)
+                && f.to.is_none_or(|to| n < to)
         })
-        .collect()
+    }
+
+    /// A digest of the items `f` could match: those its kind, turn, range
+    /// and `around` allow, with their revs. Coarser than the result (name,
+    /// running, error, first and last are left out), so it may redraw too
+    /// often, never too rarely.
+    pub fn signature(&self, f: &ItemFilter) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let c = self.chat;
+        for n in self.candidates(f) {
+            let i = &self.items[n];
+            (n + 1, i.entry, c.kind_name(i), c.item_rev(i)).hash(&mut h);
+        }
+        h.finish()
+    }
 }
 
 /// Turn number of each item: 0 before the first user message, then 1, 2, …
@@ -114,19 +132,13 @@ impl App {
 
     /// Items as data, with their `turn`, filtered.
     pub fn chat_query(&self, f: &ItemFilter) -> Vec<Json> {
-        let Some(chat) = self.data_chat(f.session.as_deref()) else {
+        let Some(c) = self.indexed(f.session.as_deref()) else {
             return Vec::new();
         };
-        let items = chat.items();
-        let turns = turns_of(&items);
-        let ok = candidates(chat, &items, &turns, f);
-        let picked: Vec<Json> = items
-            .iter()
-            .enumerate()
-            .filter(|(n, _)| ok[*n])
-            .map(|(n, i)| {
-                let mut d = chat.item_data(*i, n + 1);
-                d["turn"] = json!(turns[n]);
+        let picked: Vec<Json> = (c.candidates(f))
+            .map(|n| {
+                let mut d = c.chat.item_data(c.items[n], n + 1);
+                d["turn"] = json!(c.turns[n]);
                 d
             })
             .filter(|d| {
@@ -147,25 +159,18 @@ impl App {
             .collect()
     }
 
-    /// A digest of the items `f` could match: those its kind, turn, range
-    /// and `around` allow, with their revs. Coarser than the result (name, running, error,
-    /// first and last are left out), so it may redraw too often, never too
-    /// rarely.
-    pub fn chat_signature(&self, f: &ItemFilter) -> u64 {
-        use std::hash::{Hash, Hasher};
-        let mut h = std::collections::hash_map::DefaultHasher::new();
-        let Some(chat) = self.data_chat(f.session.as_deref()) else {
-            return 0;
-        };
+    /// The chat a query is about, indexed for [`Indexed::signature`].
+    pub fn indexed(&self, session: Option<&str>) -> Option<Indexed<'_>> {
+        let chat = self.data_chat(session)?;
         let items = chat.items();
         let turns = turns_of(&items);
-        let ok = candidates(chat, &items, &turns, f);
-        for (n, i) in items.iter().enumerate() {
-            if ok[n] {
-                (n + 1, i.entry, chat.kind_name(i), chat.item_rev(i)).hash(&mut h);
-            }
-        }
-        h.finish()
+        Some(Indexed { chat, items, turns })
+    }
+
+    /// See [`Indexed::signature`]; 0 for a chat that isn't open.
+    pub fn chat_signature(&self, f: &ItemFilter) -> u64 {
+        self.indexed(f.session.as_deref())
+            .map_or(0, |c| c.signature(f))
     }
 
     /// Changes whenever any open chat's data does.

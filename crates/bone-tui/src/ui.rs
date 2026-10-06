@@ -725,8 +725,23 @@ impl App {
         let generation = (self.views_rev, self.opts_rev);
         // Views that read other chat data are drawn again when it changed.
         let data = self.data_generation();
-        for (item, deps) in self.chats[buf].unchecked_deps(data) {
-            if deps.iter().all(|d| self.chat_signature(&d.filter) == d.sig) {
+        // Each chat is indexed once, not once per view that read it.
+        let mut chats = std::collections::HashMap::new();
+        let checked: Vec<_> = self.chats[buf]
+            .unchecked_deps(data)
+            .into_iter()
+            .map(|(item, deps)| {
+                let fresh = deps.iter().all(|d| {
+                    let session = &d.filter.session;
+                    let chat = (chats.entry(session.clone()))
+                        .or_insert_with(|| self.indexed(session.as_deref()));
+                    chat.as_ref().map_or(0, |c| c.signature(&d.filter)) == d.sig
+                });
+                (item, fresh)
+            })
+            .collect();
+        for (item, fresh) in checked {
+            if fresh {
                 self.chats[buf].mark_checked(item, data);
             } else {
                 self.chats[buf].invalidate(item);

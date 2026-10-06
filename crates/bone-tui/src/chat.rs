@@ -683,6 +683,10 @@ impl ChatBuffer {
             return false;
         };
         self.lua_items[slot] = None;
+        // Reclaim trailing slots so add/remove churn (toasts, progress) doesn't grow it.
+        while let Some(None) = self.lua_items.last() {
+            self.lua_items.pop();
+        }
         self.next_rev += 1;
         self.cache.remove(&Item {
             entry: LUA_BASE + slot,
@@ -778,13 +782,12 @@ impl ChatBuffer {
     }
 
     /// All rendered rows, in order (after `stale` items have been stored).
+    /// Lazy, and `skip` steps over whole items, so drawing one screen of a
+    /// long chat doesn't walk every row.
     pub fn rows(&self) -> impl Iterator<Item = &Line<'static>> {
-        self.items()
-            .into_iter()
+        (self.items().into_iter())
             .filter_map(|item| self.cache.get(&item))
             .flat_map(|c| c.lines.iter())
-            .collect::<Vec<_>>()
-            .into_iter()
     }
 
     /// Where each drawn item sits: (1-based index, first row, row count).

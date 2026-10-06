@@ -289,22 +289,26 @@ impl ProcessRegistry {
             .ok_or_else(|| format!("unknown shell job {id:?}"))
     }
 
-    fn snapshot(&self, owner: &str, id: &str) -> Result<Snapshot, String> {
-        Ok(self.get(owner, id)?.snapshot.lock().unwrap().clone())
+    /// `f` of a job's snapshot, without copying its output.
+    fn with_snapshot<T>(
+        &self,
+        owner: &str,
+        id: &str,
+        f: impl FnOnce(&Snapshot) -> T,
+    ) -> Result<T, String> {
+        Ok(f(&self.get(owner, id)?.snapshot.lock().unwrap()))
     }
 
-    fn list(&self, owner: &str) -> Vec<Snapshot> {
-        let mut jobs: Vec<_> = self
-            .processes
-            .lock()
-            .unwrap()
+    fn list(&self, owner: &str) -> Vec<Value> {
+        let processes = self.processes.lock().unwrap();
+        let mut jobs: Vec<_> = processes
             .values()
-            .filter(|p| p.snapshot.lock().unwrap().owner == owner)
-            .filter(|p| p.snapshot.lock().unwrap().background)
-            .map(|p| p.snapshot.lock().unwrap().clone())
+            .map(|p| p.snapshot.lock().unwrap())
+            .filter(|s| s.owner == owner && s.background)
+            .map(|s| (s.id.clone(), json_snapshot(&s)))
             .collect();
-        jobs.sort_by(|a, b| a.id.cmp(&b.id));
-        jobs
+        jobs.sort_by(|a, b| a.0.cmp(&b.0));
+        jobs.into_iter().map(|(_, j)| j).collect()
     }
 
     pub(crate) fn cancel(&self, owner: &str, id: &str) -> Result<(), String> {
@@ -354,12 +358,13 @@ impl ProcessRegistry {
         id: &str,
         from: u64,
     ) -> Result<(u64, String, u64), String> {
-        let s = self.snapshot(owner, id)?;
-        let mut at = from.saturating_sub(s.raw_start).min(s.raw.len() as u64) as usize;
-        while !s.raw.is_char_boundary(at) {
-            at += 1;
-        }
-        Ok((s.raw_start + at as u64, s.raw[at..].to_owned(), s.raw_total))
+        self.with_snapshot(owner, id, |s| {
+            let mut at = from.saturating_sub(s.raw_start).min(s.raw.len() as u64) as usize;
+            while !s.raw.is_char_boundary(at) {
+                at += 1;
+            }
+            (s.raw_start + at as u64, s.raw[at..].to_owned(), s.raw_total)
+        })
     }
 
     /// Resize a terminal job's pseudo-terminal.
@@ -646,23 +651,14 @@ fn record_output(
     let mut snapshot = process.snapshot.lock().unwrap();
     snapshot.output_bytes += bytes as u64;
     match cleaner {
-        Some(c) => {
-            c.apply(text, &mut snapshot.combined);
-            snapshot.truncated |= append_bounded(&mut snapshot.combined, "");
-        }
-        None => snapshot.truncated |= append_bounded(&mut snapshot.combined, text),
+        Some(c) => c.apply(text, &mut snapshot.combined),
+        None => snapshot.combined.push_str(text),
     }
+    snapshot.truncated |= trim_front(&mut snapshot.combined, MAX_OUTPUT) > 0;
     let offset = snapshot.raw_total;
     snapshot.raw.push_str(text);
     snapshot.raw_total += text.len() as u64;
-    if snapshot.raw.len() > MAX_RAW {
-        let mut cut = snapshot.raw.len() - MAX_RAW;
-        while !snapshot.raw.is_char_boundary(cut) {
-            cut += 1;
-        }
-        snapshot.raw.drain(..cut);
-        snapshot.raw_start += cut as u64;
-    }
+    snapshot.raw_start += trim_front(&mut snapshot.raw, MAX_RAW) as u64;
     drop(snapshot);
     let version = registry.bump_version();
     if let Some(sink) = process_sink {
@@ -843,17 +839,19 @@ impl Cleaner {
     }
 }
 
-fn append_bounded(target: &mut String, text: &str) -> bool {
-    target.push_str(text);
-    if target.len() <= MAX_OUTPUT {
-        return false;
+/// Keep about the last `max` bytes of `target`, returning how many were cut.
+/// It may grow a quarter past `max` first, so a noisy job doesn't move
+/// megabytes on every chunk.
+pub(super) fn trim_front(target: &mut String, max: usize) -> usize {
+    if target.len() <= max + max / 4 {
+        return 0;
     }
-    let mut start = target.len() - MAX_OUTPUT;
-    while !target.is_char_boundary(start) {
-        start += 1;
+    let mut cut = target.len() - max;
+    while !target.is_char_boundary(cut) {
+        cut += 1;
     }
-    target.drain(..start);
-    true
+    target.drain(..cut);
+    cut
 }
 
 async fn finish_job(
@@ -924,23 +922,16 @@ impl Tool for Shell {
             let args: Args = typed_args(args)?;
             match args.action.as_str() {
                 "run" | "start" => run_action(args, ctx).await,
-                "list" => Ok(serde_json::to_string_pretty(
-                    &ctx.jobs
-                        .list(&ctx.session_id)
-                        .iter()
-                        .map(json_snapshot)
-                        .collect::<Vec<_>>(),
-                )
-                .unwrap()),
+                "list" => {
+                    Ok(serde_json::to_string_pretty(&ctx.jobs.list(&ctx.session_id)).unwrap())
+                }
                 "status" | "read" => {
                     let id = args
                         .id
                         .as_deref()
                         .ok_or("id is required for this action".to_owned())?;
-                    Ok(serde_json::to_string_pretty(&json_snapshot(
-                        &ctx.jobs.snapshot(&ctx.session_id, id)?,
-                    ))
-                    .unwrap())
+                    let json = ctx.jobs.with_snapshot(&ctx.session_id, id, json_snapshot)?;
+                    Ok(serde_json::to_string_pretty(&json).unwrap())
                 }
                 "wait" => {
                     let id = args

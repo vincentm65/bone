@@ -17,6 +17,8 @@ const ALPHABET: &[u8; 32] = b"0123456789abcdefghjkmnpqrstvwxyz";
 const HISTORY: usize = 8;
 /// Files remembered per session; the least recently used go first.
 const FILES: usize = 128;
+/// Sessions remembered; past this the one that read least recently goes.
+const SESSIONS: usize = 32;
 
 /// 2-character hash of one line's content (FNV-1a folded to 10 bits).
 pub fn line_hash(line: &str) -> String {
@@ -146,9 +148,17 @@ impl Views {
     /// again adds to what was seen; new text becomes the latest version.
     pub fn record(&self, session: &str, path: &Path, lines: &[String], seen: BTreeSet<usize>) {
         let mut all = self.0.lock().unwrap();
+        // One clock for every session, so they can be ordered too.
+        let tick = all.values().map(|s| s.tick).max().unwrap_or(0) + 1;
+        if !all.contains_key(session) && all.len() >= SESSIONS {
+            let oldest = all
+                .iter()
+                .min_by_key(|(_, s)| s.tick)
+                .map(|(id, _)| id.clone());
+            all.remove(&oldest.unwrap());
+        }
         let s = all.entry(session.to_owned()).or_default();
-        s.tick += 1;
-        let tick = s.tick;
+        s.tick = tick;
         s.last = Some(path.to_owned());
         if !s.files.contains_key(path) && s.files.len() >= FILES {
             let oldest = s

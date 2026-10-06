@@ -13,7 +13,9 @@ mod unix;
 use std::sync::Arc;
 
 use bone_core::{Core, Event, dispatch};
-use bone_proto::methods::{Initialize, InitializeParams, InitializeResult, Shutdown};
+use bone_proto::methods::{
+    Initialize, InitializeParams, InitializeResult, SessionUpdated, SessionUpdatedParams, Shutdown,
+};
 use bone_proto::{Connection, Message, Method, PROTOCOL_VERSION, RequestId, RpcError, transport};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -148,17 +150,21 @@ async fn respond(
         .map_err(|_| ())
 }
 
-/// Next core event, or pending forever before the handshake. Lagged receivers
-/// skip the dropped events rather than closing the connection.
+/// Next core event, or pending forever before the handshake. A receiver that
+/// fell behind gets `session/updated` with `reason: "lagged"` and no session
+/// in place of what it missed, so it loads its sessions again.
 async fn recv_event(events: &mut Option<broadcast::Receiver<Event>>) -> Event {
     let Some(rx) = events else {
         return std::future::pending().await;
     };
-    loop {
-        match rx.recv().await {
-            Ok(event) => return event,
-            Err(broadcast::error::RecvError::Lagged(_)) => continue,
-            Err(broadcast::error::RecvError::Closed) => return std::future::pending().await,
+    match rx.recv().await {
+        Ok(event) => event,
+        Err(broadcast::error::RecvError::Lagged(_)) => {
+            Event::new::<SessionUpdated>(SessionUpdatedParams {
+                session_id: String::new(),
+                reason: "lagged".into(),
+            })
         }
+        Err(broadcast::error::RecvError::Closed) => std::future::pending().await,
     }
 }
