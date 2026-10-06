@@ -2448,7 +2448,7 @@ async fn plugins_own_what_they_create_and_unload_cleanly() {
         "#,
     )
     .unwrap();
-    h.input("/plugin load demo{enter}").await;
+    h.input("/plugins load demo{enter}").await;
     assert_eq!(h.lua("=cur .. loads").await, "\"demo1\"");
     assert_eq!(
         h.lua("=bone.has_capability('plugins.lifecycle')").await,
@@ -2459,7 +2459,7 @@ async fn plugins_own_what_they_create_and_unload_cleanly() {
     assert_eq!(h.lua("=#bone.ui.panel.list()").await, "2");
     assert!(h.app.user_commands.contains_key("demo"));
 
-    h.input("/plugin unload demo{enter}").await;
+    h.input("/plugins unload demo{enter}").await;
     assert_eq!(h.lua("=shutdowns").await, "1");
     assert_eq!(h.lua("=#bone.ui.panel.list()").await, "0");
     assert!(!h.app.user_commands.contains_key("demo"));
@@ -2485,12 +2485,12 @@ async fn plugins_own_what_they_create_and_unload_cleanly() {
 
     // Loading again re-reads its modules and its state.
     std::fs::write(demo.join("lua/demo/mod.lua"), "return { v = 2 }").unwrap();
-    h.input("/plugin reload demo{enter}").await;
+    h.input("/plugins reload demo{enter}").await;
     assert!(h.message().contains("not loaded"), "{}", h.message());
-    h.input("/plugin load demo{enter}").await;
+    h.input("/plugins load demo{enter}").await;
     h.input("{f5}").await;
     assert_eq!(h.message(), "demo f5 2");
-    h.input("/plugin reload demo{enter}").await;
+    h.input("/plugins reload demo{enter}").await;
     assert_eq!(h.lua("=shutdowns .. ':' .. loads").await, "\"2:3\"");
     assert!(
         h.lua("=bone.inspect(bone.plugin.list())")
@@ -2501,7 +2501,7 @@ async fn plugins_own_what_they_create_and_unload_cleanly() {
     assert_eq!(h.lua("=shutdowns").await, "3");
     let saved = std::fs::read_to_string(dir.path().join("state/tui/demo.json")).unwrap();
     assert!(saved.contains("\"count\": 3"), "{saved}");
-    h.input("/plugin unload nope{enter}").await;
+    h.input("/plugins unload nope{enter}").await;
     assert!(
         h.message().contains("plugin nope has no core.lua"),
         "{}",
@@ -2510,7 +2510,7 @@ async fn plugins_own_what_they_create_and_unload_cleanly() {
 
     // Both halves: the list merges the core's plugins in, and a name that
     // only the core has goes to the core.
-    h.input("/plugin{enter}").await;
+    h.input("/plugins list{enter}").await;
     assert!(
         h.message().contains("corepart (core loaded)")
             && h.message().contains("demo (tui loaded)")
@@ -2518,15 +2518,15 @@ async fn plugins_own_what_they_create_and_unload_cleanly() {
         "{}",
         h.message()
     );
-    h.input("/plugin reload corepart{enter}").await;
+    h.input("/plugins reload corepart{enter}").await;
     assert_eq!(h.message(), "corepart: core reloaded");
     assert_eq!(
         h.requests("plugin/reload").last().unwrap()["name"],
         "corepart"
     );
-    h.input("/plugin reload demo{enter}").await;
+    h.input("/plugins reload demo{enter}").await;
     assert_eq!(h.message(), "demo: tui reloaded");
-    h.input("/plugin reload{enter}").await;
+    h.input("/plugins reload{enter}").await;
     assert_eq!(h.message(), "core configuration reloaded: data_dir changed");
     assert_eq!(h.requests("core/reload").len(), 1);
 }
@@ -2548,11 +2548,11 @@ async fn a_project_config_runs_only_when_trusted() {
     .unwrap();
     h.app.cwd = work.to_string_lossy().into_owned();
     h.app.load_project();
-    assert!(h.message().contains("/plugin trust"), "{}", h.message());
+    assert!(h.message().contains("/plugins trust"), "{}", h.message());
     assert_eq!(h.lua("=project_loads").await, "nil");
     assert_eq!(h.lua("=bone.project.info().trusted").await, "false");
 
-    h.input("/plugin trust{enter}").await;
+    h.input("/plugins trust{enter}").await;
     assert!(
         h.message().ends_with(": trusted and loaded"),
         "{}",
@@ -2577,7 +2577,7 @@ async fn a_project_config_runs_only_when_trusted() {
     h.app.load_project();
     assert_eq!(h.lua("=project_loads").await, "2");
 
-    h.input("/plugin untrust{enter}").await;
+    h.input("/plugins untrust{enter}").await;
     assert!(
         h.message().ends_with(": no longer trusted, unloaded"),
         "{}",
@@ -2600,7 +2600,7 @@ async fn a_project_config_runs_only_when_trusted() {
 async fn with_example(name: &str) -> (Harness, tempfile::TempDir) {
     let (mut h, dir) = Harness::with_config("").await;
     install_example(dir.path(), name);
-    h.input(&format!("/plugin load {name}{{enter}}")).await;
+    h.input(&format!("/plugins load {name}{{enter}}")).await;
     assert!(
         h.app
             .plugin(name)
@@ -2638,7 +2638,7 @@ async fn example_tasks_plugin() {
     h.input("{ctrl+u}/tasks{enter}").await;
     assert!(!h.screen(80, 12).contains("Tasks"));
     // Reloading reads the saved list back.
-    h.input("/tasks{enter}/plugin reload tasks{enter}").await;
+    h.input("/tasks{enter}/plugins reload tasks{enter}").await;
     assert!(h.screen(80, 12).contains("✓ write docs"));
 }
 
@@ -2931,7 +2931,7 @@ async fn example_agent_extension_plugins_in_the_tui() {
     let (mut h, dir) = Harness::with_config("").await;
     for name in ["mcp", "skills", "templates", "ask-model"] {
         install_example(dir.path(), name);
-        h.input(&format!("/plugin load {name}{{enter}}")).await;
+        h.input(&format!("/plugins load {name}{{enter}}")).await;
         assert!(
             h.app
                 .plugin(name)
@@ -5042,11 +5042,13 @@ async fn setup_adds_a_provider_its_key_and_packages() {
     assert!(dir.path().join("plugins/demo/tui.lua").is_file());
     let screen = h.screen(100, 30);
     assert!(
-        screen.contains("installed demo") && screen.contains("Done."),
+        screen.contains("installed demo") && screen.contains("Bone is ready."),
         "{screen}"
     );
+    // Enter hands the chosen first prompt to the prompt box and closes setup.
     h.input("{enter}").await;
-    assert!(!h.screen(100, 30).contains("Done."));
+    assert!(!h.screen(100, 30).contains("Bone is ready."));
+    assert_eq!(h.app.prompt_text(), "Find the main entry point");
 }
 
 #[path = "reload_tests.rs"]

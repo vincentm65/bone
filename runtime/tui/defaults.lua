@@ -436,12 +436,16 @@ local function message(e)
   return (tostring(e):gsub("^runtime error: ", ""):gsub("\nstack traceback:.*$", ""))
 end
 
--- /plugin lists both halves of every plugin; /plugin load|unload|reload name
--- acts on its TUI half here and its core half in the core; /plugin reload
--- reloads the core's whole configuration.
-bone.cmd.create("plugin", function(c)
+-- /plugins opens the plugin settings; /plugins list lists both halves of
+-- every plugin; /plugins load|unload|reload name acts on its TUI half here
+-- and its core half in the core; /plugins reload reloads the core's whole
+-- configuration.
+bone.cmd.create("plugins", function(c)
   local op, name = c.args:match("^(%S+)%s*(%S*)$")
   if not op then
+    return require("bone.config").open("plugins")
+  end
+  if op == "list" and name == "" then
     local tui = bone.plugin.list()
     bone.request("plugin/list", {}, function(core)
       core = core or {}
@@ -504,7 +508,7 @@ bone.cmd.create("plugin", function(c)
     return bone.notify(info.file .. (op == "trust" and ": trusted and loaded" or ": no longer trusted, unloaded"))
   end
   if (op ~= "load" and op ~= "unload" and op ~= "reload") or name == "" then
-    return bone.notify("usage: /plugin [reload] [load|unload|reload name] [trust|untrust]", "error")
+    return bone.notify("usage: /plugins [list] [reload] [load|unload|reload name] [trust|untrust]", "error")
   end
   local has_tui = false
   for _, p in ipairs(bone.plugin.list()) do
@@ -539,8 +543,7 @@ bone.cmd.create("plugin", function(c)
     bone.notify(name .. (has_tui and ": tui and core " or ": core ") .. done)
   end)
 end, {
-  desc = "plugins: list, load/unload/reload name; /plugin reload reloads the core's config; /plugin trust runs this project's .bone/tui.lua",
-  aliases = { "plugins" },
+  desc = "plugin settings; list, load/unload/reload name; /plugins reload reloads the core's config; /plugins trust runs this project's .bone/tui.lua",
 })
 
 -- First run: with no model provider at all, /setup opens by itself (unless

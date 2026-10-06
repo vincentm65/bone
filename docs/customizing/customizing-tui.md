@@ -1,7 +1,7 @@
 # Customizing the TUI's look and behavior
 
 Where: `~/.bone/tui.lua` (global) or `.bone/tui.lua` in a project (loaded only
-after `/plugin trust`). A Lua error never crashes bone; it is shown once and
+after `/plugins trust`). A Lua error never crashes bone; it is shown once and
 listed by `/health`. The TUI reloads when a file changes, so you can edit and
 watch. With nothing defined, Rust draws a plain-text chat and a bare prompt;
 everything else is Lua.

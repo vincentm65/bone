@@ -93,7 +93,7 @@ planned; those capabilities are not available until reported by
 | Panels | `bone.ui.win` is a Lua-drawn overlay, and regions/views customize the existing chat layout. Both keep working unchanged. | Persistent panels with IDs, docking, sizing, scrolling, focus, render/key callbacks and lifecycle events are available through `tui.panels` (`bone.ui.panel`). |
 | Prompt and chat | `bone.api.prompt_get`/`prompt_set` read and replace the whole prompt; `bone.chat.items({ kind, last })` lists the on-screen chat's items. | Cursor, range and selection edits (`tui.prompt_edit`, `bone.prompt`) and structured read-only items, turns and sessions with filters (`tui.chat_data`) are available. The TUI stays a prompt, not a file editor. |
 | Jobs | TUI `bone.system`, `bone.http` and `bone.defer` run one background operation and invoke a callback. Core waits are coroutine-based and turn cancellation stops them. v1 has no general process handle or streamed TUI job. | Streaming jobs with handles, stdout/stderr callbacks (chunks or lines), stdin writes, cancellation of the whole process group, timeouts, exit results, status and `job/*` events are available in the TUI through `jobs.streaming` (`bone.job`). |
-| Plugin state | Folder plugins load in name order between runtime defaults and the user's config; `bone.plugins` reports names and `.`/`_` folders are disabled. There is no persistent state store, reload hook or automatic resource cleanup yet. | In the TUI, plugins own what they create; `bone.plugin.on_shutdown`, load/unload/reload (`/plugin`), auto-saved `bone.plugin.state` and trusted project config (`/plugin trust`) are available through `plugins.lifecycle` and `tui.project`. Both sides have `bone.state` and `bone.plugin.current()` (`plugins.state`). |
+| Plugin state | Folder plugins load in name order between runtime defaults and the user's config; `bone.plugins` reports names and `.`/`_` folders are disabled. There is no persistent state store, reload hook or automatic resource cleanup yet. | In the TUI, plugins own what they create; `bone.plugin.on_shutdown`, load/unload/reload (`/plugins`), auto-saved `bone.plugin.state` and trusted project config (`/plugins trust`) are available through `plugins.lifecycle` and `tui.project`. Both sides have `bone.state` and `bone.plugin.current()` (`plugins.state`). |
 
 The existing detailed sections describe both the compatibility calls and the
 new additive APIs. A plugin may use a compatibility API today and opt into
@@ -131,13 +131,13 @@ bone.plugin.on_shutdown(function() ... end)  -- unload, reload and quit
 ```
 
 - `bone.plugin.list()`: `{ name, dir, kind, loaded, error }` for each plugin seen this session.
-- `bone.plugin.load(name)` (a folder in `plugins/`, even one added after startup or disabled with `_`), `bone.plugin.unload(name)`, `bone.plugin.reload(name)`; also `/plugin load|unload|reload name`. A plugin cannot unload itself from its own code.
+- `bone.plugin.load(name)` (a folder in `plugins/`, even one added after startup or disabled with `_`), `bone.plugin.unload(name)`, `bone.plugin.reload(name)`; also `/plugins load|unload|reload name`. A plugin cannot unload itself from its own code.
 - `bone.plugin.state(name)` returns a table that is loaded once and saved when its plugin unloads and when bone quits; `bone.plugin.save_state(name)` saves it now. `name` defaults to the current plugin.
 - Events: `plugin/loaded` and `plugin/unloaded` with the plugin's info.
 
 ### Project config
 
-A project can carry TUI config in `.bone/tui.lua` (and modules in `.bone/lua/`). bone looks for it in the working directory and its parents, but Lua has full trust, so it only runs after you trust that directory: `/plugin trust` runs it now and on later starts there, `/plugin untrust` unloads it and forgets the trust, and `/plugin` lists it (as `project`). Until then bone says that there is one. It loads after your own `tui.lua`, as a plugin named `project`, so it can be unloaded like any other. `bone.project.info()` returns `{ root, file, trusted, loaded }` or nil.
+A project can carry TUI config in `.bone/tui.lua` (and modules in `.bone/lua/`). bone looks for it in the working directory and its parents, but Lua has full trust, so it only runs after you trust that directory: `/plugins trust` runs it now and on later starts there, `/plugins untrust` unloads it and forgets the trust, and `/plugins list` lists it (as `project`). Until then bone says that there is one. It loads after your own `tui.lua`, as a plugin named `project`, so it can be unloaded like any other. `bone.project.info()` returns `{ root, file, trusted, loaded }` or nil.
 
 ## Shared
 
@@ -442,11 +442,11 @@ The TUI has its own `bone.health(name, fn)` for TUI-side checks (plain functions
 
 ### Reloading
 
-The core can load its Lua configuration again without restarting: `/plugin reload` in the TUI, or the `core/reload` method. It starts a fresh Lua state, runs the runtime, the enabled plugins and `core.lua`, and switches only if that worked; if loading fails, the old configuration stays. A turn that is running when this happens finishes with the configuration it started with, and questions it asked can still be answered. The provider, tools, hooks and system prompt all come from the new configuration from the next turn on. `data_dir` cannot change while running (a warning says so).
+The core can load its Lua configuration again without restarting: `/plugins reload` in the TUI, or the `core/reload` method. It starts a fresh Lua state, runs the runtime, the enabled plugins and `core.lua`, and switches only if that worked; if loading fails, the old configuration stays. A turn that is running when this happens finishes with the configuration it started with, and questions it asked can still be answered. The provider, tools, hooks and system prompt all come from the new configuration from the next turn on. `data_dir` cannot change while running (a warning says so).
 
 Lua values do not survive a reload, so keep what must last in `bone.state`. `bone.on_shutdown(fn)` runs `fn()` on the outgoing configuration just before the switch (errors come back as warnings; it gets five seconds).
 
-Core plugins can be switched off and on the same way: `plugin/unload`, `plugin/load` and `plugin/reload` (also `/plugin unload|load|reload name` in the TUI, which handles the plugin's TUI half too). Each is a reload with that plugin left out or put back; the choice lasts until the server restarts. A plugin installed while bone runs is picked up by any reload.
+Core plugins can be switched off and on the same way: `plugin/unload`, `plugin/load` and `plugin/reload` (also `/plugins unload|load|reload name` in the TUI, which handles the plugin's TUI half too). Each is a reload with that plugin left out or put back; the choice lasts until the server restarts. A plugin installed while bone runs is picked up by any reload.
 
 When the TUI runs the core in its own process (not `--connect`), it also reloads the core by itself (with `core/reload`) when a file the core loads changes: `core.lua`, a plugin's `core.lua`, `runtime/core/`, or a module either side can `require` (`lua/`, a plugin's `lua/`, `runtime/lua/`). `bone.o.autoreload = false` turns this off.
 

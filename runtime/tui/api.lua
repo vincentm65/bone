@@ -1163,7 +1163,7 @@ end
 
 --- This directory's project config: { root, file, trusted, loaded } when a
 --- .bone/tui.lua is here or above, else nil. It runs only after
---- /plugin trust (remembered per directory).
+--- /plugins trust (remembered per directory).
 bone.project = {
   info = function()
     return api("project_info")

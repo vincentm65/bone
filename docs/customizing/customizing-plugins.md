@@ -57,7 +57,7 @@ Panels do not carry over a reload: on `ready` with `reload = true`,
 (or in the TUI, while any of its callbacks run), else nil.
 
 Loading at runtime: `bone.plugin.load(name)`, `bone.plugin.unload(name)`,
-`bone.plugin.reload(name)`; also `/plugin load|unload|reload name`. A plugin
+`bone.plugin.reload(name)`; also `/plugins load|unload|reload name`. A plugin
 cannot unload itself from its own code. `bone.plugin.list()` gives
 `{ name, dir, kind, loaded, error }` for each plugin seen this session.
 
@@ -99,8 +99,8 @@ each question as a popup (`y`/`a`/`n`) and answers with
 A project can carry TUI config in `.bone/tui.lua` (and modules in
 `.bone/lua/`). bone looks for it in the working directory and its parents,
 but Lua has full trust, so it only runs after you trust that directory:
-`/plugin trust` runs it now and on later starts there, `/plugin untrust`
-unloads it and forgets the trust, and `/plugin` lists it (as `project`). It
+`/plugins trust` runs it now and on later starts there, `/plugins untrust`
+unloads it and forgets the trust, and `/plugins list` lists it (as `project`). It
 loads after your own `tui.lua`, as a plugin named `project`, so it can be
 unloaded like any other. `bone.project.info()` returns `{ root, file,
 trusted, loaded }` or nil.

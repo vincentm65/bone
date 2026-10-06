@@ -470,7 +470,7 @@ impl App {
             self.load_plugin(PROJECT, &dir, Kind::Project);
         } else {
             self.info(format!(
-                "{} is not loaded: /plugin trust runs it",
+                "{} is not loaded: /plugins trust runs it",
                 info["file"].as_str().unwrap_or_default()
             ));
         }
