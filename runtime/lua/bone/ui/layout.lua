@@ -19,7 +19,7 @@ function M.setup(opts)
     max = 3,
     render = function()
       local s = bone.api.session()
-      if s or #bone.chat.items({}) > 0 then return {} end
+      if s or bone.chat.session().items > 0 then return {} end
       if bone.settings.get("setup.skipped") then
         return {
           "",

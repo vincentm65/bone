@@ -651,26 +651,28 @@ local function summary_view(item, ctx)
   if not foldable(item) then
     return false
   end
-  -- The calls next to this one (reasoning between them does not break it).
-  local run = {}
-  for _, t in ipairs(bone.chat.items({ around = item.index, kind = { "tool", "reasoning" } })) do
-    if t.kind == "tool" then
-      run[#run + 1] = t
-    end
+  -- Not the first of its stretch: the call before it (reasoning aside)
+  -- folds too. Only the first reads the stretch, so a long one costs one
+  -- read rather than one per call.
+  local i = item.index - 1
+  local before = bone.chat.item(i)
+  while before and before.kind == "reasoning" do
+    i = i - 1
+    before = bone.chat.item(i)
   end
-  local stretch, mine = {}, false
-  for _, t in ipairs(run) do
-    if foldable(t) then
-      stretch[#stretch + 1] = t
-      mine = mine or t.index == item.index
-    elseif mine then
-      break
-    else
-      stretch = {}
-    end
-  end
-  if not stretch[1] or stretch[1].index ~= item.index then
+  if before and before.kind == "tool" and foldable(before) then
     return nil
+  end
+  -- This call and the ones after it (reasoning between them does not
+  -- break the stretch; an edit or sub-agent does).
+  local stretch = {}
+  for _, t in ipairs(bone.chat.items({ around = item.index, from = item.index, kind = { "tool", "reasoning" } })) do
+    if t.kind == "tool" then
+      if not foldable(t) then
+        break
+      end
+      stretch[#stretch + 1] = t
+    end
   end
   local running = false
   for _, t in ipairs(stretch) do

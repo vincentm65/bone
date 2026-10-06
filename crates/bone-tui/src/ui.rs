@@ -776,14 +776,13 @@ impl App {
         key: &RenderKey,
         prev: Option<String>,
     ) -> Vec<Line<'static>> {
-        let data = self.chats[buf].item_data(item, index);
+        let data = self.chats[buf].item_data(item, index, true);
         let kind = self.chats[buf].kind_name(&item).to_owned();
         let ctx = json!({
             "width": key.width,
             "region": "chat",
             "prev": prev.map(|kind| json!({ "kind": kind })),
         });
-        let view_data = data.clone();
         let lines = self
             .guarded(&format!("views.{kind}"), |lua| {
                 let views: Table = lua
@@ -794,7 +793,7 @@ impl App {
                 let Some(f) = views.get::<Option<Function>>(kind.as_str())? else {
                     return Ok(None);
                 };
-                let v = f.call::<Value>((to_lua(lua, &view_data)?, to_lua(lua, &ctx)?))?;
+                let v = f.call::<Value>((to_lua(lua, &data)?, to_lua(lua, &ctx)?))?;
                 // nil hides the item.
                 Ok(Some(parse_lines(v)?.unwrap_or_default()))
             })

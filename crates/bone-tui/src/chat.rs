@@ -521,10 +521,39 @@ impl ChatBuffer {
         out
     }
 
+    /// What `bone.chat.items` filters on besides kind and position, read
+    /// without building the item's data: its tool name, whether it is
+    /// running (a tool without output, text still streaming) and whether it
+    /// failed (a failed tool, an error notice).
+    pub fn item_status(&self, item: Item) -> (Option<std::borrow::Cow<'_, str>>, bool, bool) {
+        let at = self.position(item.entry);
+        match at.map(|at| &self.entries[at]) {
+            _ if matches!(item.part, Part::Lua | Part::Queued) => {
+                let d = self.item_fields(item, 0, false);
+                let running = d["streaming"].as_bool().unwrap_or(false)
+                    || (d["kind"] == "tool" && d["done"] == false);
+                let error = d["is_error"].as_bool().unwrap_or(false)
+                    || (d["kind"] == "notice" && d["error"] == true);
+                let name = d["name"].as_str().map(|n| n.to_owned().into());
+                (name, running, error)
+            }
+            Some(Entry::Tool { call, output }) => (
+                Some(call.name.as_str().into()),
+                output.is_none(),
+                output.as_ref().is_some_and(|o| o.1),
+            ),
+            Some(Entry::Assistant { streaming, .. }) => (None, *streaming, false),
+            Some(Entry::Notice { error, .. }) => (None, false, *error),
+            Some(Entry::User(_)) | None => (None, false, false),
+        }
+    }
+
     /// An item as data for Lua. Text is cleaned of escape sequences, and
     /// message text loses blank lines at its edges (models often send them).
-    pub fn item_data(&self, item: Item, index: usize) -> Value {
-        let mut d = self.item_fields(item, index);
+    /// Without `full`, a tool call leaves out its output, live output and
+    /// raw arguments, the costly part of a long chat.
+    pub fn item_data(&self, item: Item, index: usize, full: bool) -> Value {
+        let mut d = self.item_fields(item, index, full);
         // A stable name for the item, for Lua to keep state by: it stays
         // the same as items come and go before it.
         d["key"] = json!(match item.part {
@@ -535,7 +564,7 @@ impl ChatBuffer {
         d
     }
 
-    fn item_fields(&self, item: Item, index: usize) -> Value {
+    fn item_fields(&self, item: Item, index: usize, full: bool) -> Value {
         if let Some(l) = self.lua_item(&item).filter(|_| item.part == Part::Lua) {
             let mut d = Value::Object(l.data.clone());
             d["kind"] = json!(l.kind);
@@ -589,14 +618,16 @@ impl ChatBuffer {
                     "id": call.id,
                     "name": call.name,
                     "arguments": args,
-                    "raw_arguments": clean(&call.arguments),
-                    "output": output.as_ref().map(|o| clean(&o.0)),
                     "is_error": output.as_ref().is_some_and(|o| o.1),
                     "done": output.is_some(),
                     "started_at": meta.and_then(|m| m.started_at),
                     "duration_ms": meta.and_then(|m| m.duration_ms),
-                    "live": meta.map(|m| clean(&m.live)).filter(|l| !l.is_empty()),
                 });
+                if full {
+                    d["raw_arguments"] = json!(clean(&call.arguments));
+                    d["output"] = json!(output.as_ref().map(|o| clean(&o.0)));
+                    d["live"] = json!(meta.map(|m| clean(&m.live)).filter(|l| !l.is_empty()));
+                }
                 if let Some(u) = self.message_usage.get(&item.entry) {
                     d["usage"] = json!({ "input": u.input_tokens, "output": u.output_tokens });
                 }
@@ -882,7 +913,7 @@ mod tests {
     /// Render with the bare fallback, like a UI without Lua.
     fn rows(c: &mut ChatBuffer, width: usize) -> Vec<String> {
         for (item, index, key) in c.stale(width, (0, 0), Instant::now()) {
-            let lines = bare(&c.item_data(item, index), width, index == 1);
+            let lines = bare(&c.item_data(item, index, true), width, index == 1);
             c.store(item, key, lines, Vec::new(), None, 0);
         }
         c.rows().map(|l| l.to_string()).collect()
@@ -924,7 +955,7 @@ mod tests {
         });
         assert_eq!(parts(&c), ["user", "reasoning", "assistant", "tool"]);
         let items = c.items();
-        let tool = c.item_data(items[3], 4);
+        let tool = c.item_data(items[3], 4, true);
         assert_eq!(
             (
                 tool["name"].as_str(),
@@ -941,7 +972,7 @@ mod tests {
             is_error: false,
             duration_ms: None,
         });
-        assert_eq!(c.item_data(items[3], 4)["output"], "ab\tc");
+        assert_eq!(c.item_data(items[3], 4, true)["output"], "ab\tc");
         assert_eq!(c.usage.unwrap().input_tokens, 5);
     }
 
@@ -960,7 +991,12 @@ mod tests {
             c.items()
                 .iter()
                 .enumerate()
-                .map(|(n, i)| c.item_data(*i, n + 1)["key"].as_str().unwrap().to_owned())
+                .map(|(n, i)| {
+                    c.item_data(*i, n + 1, false)["key"]
+                        .as_str()
+                        .unwrap()
+                        .to_owned()
+                })
                 .collect()
         };
         assert_eq!(keys(&c), ["e1", "note-1", "e2"]);
@@ -981,7 +1017,7 @@ mod tests {
             }),
         });
         assert_eq!(keys(&c), ["e1", "note-1", "e3"]);
-        assert_eq!(c.item_data(c.items()[2], 3)["usage"]["input"], 5);
+        assert_eq!(c.item_data(c.items()[2], 3, false)["usage"]["input"], 5);
         c.turn_finished(&TurnFinishedParams {
             session_id: "s".into(),
             turn_id: 1,

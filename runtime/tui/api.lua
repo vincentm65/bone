@@ -562,6 +562,9 @@ end
 --- submit, complete, dismiss, up and down this way.
 bone.ui.actions = {}
 
+--- Draw every chat item again: for views that depend on your own state.
+--- Costly in a long chat, and not needed for regions, the statusline or
+--- popups, which are drawn on every frame (after any key, event or callback).
 function bone.ui.refresh()
   api("ui_refresh")
 end
@@ -841,9 +844,11 @@ bone.prompt = {
 --- open chat by session id; the default is the one on screen.
 bone.chat = {}
 
---- Items as views receive them, plus `turn` (0 before the first message).
+--- Items as views receive them, plus `turn` (0 before the first message),
+--- but tool calls leave out `output`, `live` and `raw_arguments` unless
+--- opts.full is true (building them is the costly part of a long chat).
 --- opts: { kind, name (tool), turn, running, error, from, to (indexes),
---- first, last (keep N), session }
+--- first, last (keep N), session, full }
 function bone.chat.items(opts)
   return api("chat_items", opts or {})
 end
@@ -919,9 +924,10 @@ function bone.chat.redraw(index)
   return api("chat_redraw", index)
 end
 
---- The item at `index`, or nil.
+--- The item at `index`, or nil. opts: { session, full } as for bone.chat.items.
 function bone.chat.item(index, opts)
-  return api("chat_items", { from = index, to = index, session = opts and opts.session })[1]
+  opts = opts or {}
+  return api("chat_items", { from = index, to = index, session = opts.session, full = opts.full })[1]
 end
 
 function bone.chat.count(opts)

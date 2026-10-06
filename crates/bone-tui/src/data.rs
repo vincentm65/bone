@@ -32,6 +32,8 @@ pub struct ItemFilter {
     pub last: Option<usize>,
     /// Another open chat, by session id (default: the one on screen).
     pub session: Option<String>,
+    /// Include tool output, live output and raw arguments.
+    pub full: bool,
 }
 
 /// A `bone.chat.items` query a chat view made while drawing, and a digest of
@@ -75,12 +77,11 @@ impl Indexed<'_> {
             Some(_) => (0, 0),
             None => (0, items.len()),
         };
-        (lo..hi).filter(move |&n| {
-            kind_ok(&items[n])
-                && f.turn.is_none_or(|t| self.turns[n] == t)
-                && f.from.is_none_or(|from| n + 1 >= from)
-                && f.to.is_none_or(|to| n < to)
-        })
+        // `from`/`to` narrow the walk itself: a one-item query is one step.
+        let lo = lo.max(f.from.map_or(0, |from| from.saturating_sub(1)));
+        let hi = hi.min(f.to.unwrap_or(usize::MAX));
+        (lo..hi.max(lo))
+            .filter(move |&n| kind_ok(&items[n]) && f.turn.is_none_or(|t| self.turns[n] == t))
     }
 
     /// A digest of the items `f` could match: those its kind, turn, range
@@ -130,32 +131,31 @@ impl App {
         }
     }
 
-    /// Items as data, with their `turn`, filtered.
+    /// Items as data, with their `turn`, filtered. Only the items returned
+    /// are built as data.
     pub fn chat_query(&self, f: &ItemFilter) -> Vec<Json> {
         let Some(c) = self.indexed(f.session.as_deref()) else {
             return Vec::new();
         };
-        let picked: Vec<Json> = (c.candidates(f))
-            .map(|n| {
-                let mut d = c.chat.item_data(c.items[n], n + 1);
-                d["turn"] = json!(c.turns[n]);
-                d
-            })
-            .filter(|d| {
-                let running = d["streaming"].as_bool().unwrap_or(false)
-                    || (d["kind"] == "tool" && d["done"] == false);
-                let error = d["is_error"].as_bool().unwrap_or(false)
-                    || (d["kind"] == "notice" && d["error"] == true);
-                f.name.as_deref().is_none_or(|n| d["name"] == n)
+        let picked: Vec<usize> = (c.candidates(f))
+            .filter(|&n| {
+                if f.name.is_none() && f.running.is_none() && f.error.is_none() {
+                    return true;
+                }
+                let (name, running, error) = c.chat.item_status(c.items[n]);
+                f.name.as_deref().is_none_or(|n| name.as_deref() == Some(n))
                     && f.running.is_none_or(|r| r == running)
                     && f.error.is_none_or(|e| e == error)
             })
             .collect();
         let skip = picked.len().saturating_sub(f.last.unwrap_or(usize::MAX));
-        picked
-            .into_iter()
-            .skip(skip)
+        (picked.into_iter().skip(skip))
             .take(f.first.unwrap_or(usize::MAX))
+            .map(|n| {
+                let mut d = c.chat.item_data(c.items[n], n + 1, f.full);
+                d["turn"] = json!(c.turns[n]);
+                d
+            })
             .collect()
     }
 
@@ -202,7 +202,7 @@ impl App {
                 let (first, user) = members[0];
                 let data: Vec<Json> = members
                     .iter()
-                    .map(|(n, i)| chat.item_data(**i, n + 1))
+                    .map(|(n, i)| chat.item_data(**i, n + 1, false))
                     .collect();
                 let tools = data.iter().filter(|d| d["kind"] == "tool");
                 let (outcome, error) = outcome(chat.outcomes.get(&user.entry));

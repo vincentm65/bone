@@ -1,27 +1,31 @@
 //! Terminal setup and restore. The guard restores on drop, and a panic hook
 //! restores before the panic message prints.
 
-use std::io::{self, Stdout};
+use std::io::{self, BufWriter, Stdout};
 
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
-use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-    supports_keyboard_enhancement,
+    BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
+    disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement,
 };
+use crossterm::{execute, queue};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 
+/// Frames are written whole: std's stdout flushes every 1 KB, which would
+/// split a full redraw into dozens of writes.
+type Backend = CrosstermBackend<BufWriter<Stdout>>;
+
 pub struct Guard {
-    terminal: Terminal<CrosstermBackend<Stdout>>,
+    terminal: Terminal<Backend>,
     enhanced: bool,
 }
 
 impl std::ops::Deref for Guard {
-    type Target = Terminal<CrosstermBackend<Stdout>>;
+    type Target = Terminal<Backend>;
     fn deref(&self) -> &Self::Target {
         &self.terminal
     }
@@ -50,9 +54,20 @@ pub fn enter() -> io::Result<Guard> {
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         )?;
     }
+    let out = BufWriter::with_capacity(256 * 1024, out);
     let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
     terminal.clear()?;
     Ok(Guard { terminal, enhanced })
+}
+
+impl Guard {
+    /// Draw a frame as one synchronized update, which terminals that support
+    /// it show only once it is complete (no half-drawn frames).
+    pub fn draw_frame(&mut self, render: impl FnOnce(&mut ratatui::Frame)) -> io::Result<()> {
+        queue!(self.terminal.backend_mut(), BeginSynchronizedUpdate)?;
+        self.terminal.draw(render)?;
+        execute!(self.terminal.backend_mut(), EndSynchronizedUpdate)
+    }
 }
 
 /// Report mouse buttons, drags and the wheel (SGR encoding), or stop so the

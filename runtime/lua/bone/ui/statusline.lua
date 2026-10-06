@@ -33,21 +33,13 @@ local function items_width(items)
   return w
 end
 
-local state = bone._standard_status or { generation = 0, started = nil, finished = nil }
+local state = bone._standard_status or { started = nil, finished = nil }
 bone._standard_status = state
 state.total = state.total or { input = 0, output = 0, cached = 0 }
 state.total_session = state.total_session or ""
-state.generation = state.generation + 1
-local generation = state.generation
 
 local function now()
   return os.time()
-end
-
-local function refresh_later()
-  if state.generation ~= generation then return end
-  bone.ui.refresh()
-  bone.defer(1000, refresh_later)
 end
 
 local function load_total(session_id)
@@ -56,7 +48,6 @@ local function load_total(session_id)
   state.total_session = key
   state.total = { input = 0, output = 0, cached = 0 }
   if key == "" then
-    bone.ui.refresh()
     return
   end
   bone.request("store/query", {
@@ -71,7 +62,6 @@ local function load_total(session_id)
         cached = tonumber(row[3]) or 0,
       }
     end
-    bone.ui.refresh()
   end)
 end
 
@@ -87,7 +77,6 @@ local function load_model()
         break
       end
     end
-    bone.ui.refresh()
   end)
 end
 load_model()
@@ -97,8 +86,6 @@ state.events = {
     if ev.session_id ~= (bone.chat.session() or {}).session_id then return end
     state.started = now()
     state.finished = nil
-    bone.ui.refresh()
-    bone.defer(1000, refresh_later)
   end),
   bone.on("turn/finished", function(ev)
     if ev.session_id ~= (bone.chat.session() or {}).session_id then return end
@@ -106,7 +93,6 @@ state.events = {
     if state.started then state.finished_elapsed = state.finished - state.started end
     state.started = nil
     load_total()
-    bone.ui.refresh()
   end),
   -- Each model call's usage is indexed before its message completes, so a
   -- long turn's totals keep up call by call.
@@ -133,7 +119,6 @@ state.events[#state.events + 1] = bone.on("settings/changed", function(ev)
   elseif ev.path == "provider" or path:match("^providers%.[^.]+$") then
     load_model()
   end
-  bone.ui.refresh()
 end)
 
 function bone.ui.statusline(ctx)

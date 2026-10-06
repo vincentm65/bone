@@ -194,7 +194,6 @@ function M.enter()
   end
   ui.sel = 1
   focus()
-  bone.ui.refresh()
   return true
 end
 
@@ -259,7 +258,6 @@ function M.toggle()
   else
     ui.folded = not ui.folded
   end
-  bone.ui.refresh()
 end
 
 ---------------------------------------------------------------------------
@@ -451,7 +449,6 @@ local function list_or_term(list, term)
     else
       list()
     end
-    bone.ui.refresh()
   end
 end
 
@@ -483,7 +480,6 @@ bone.keymap.set("ctrl+b", M.toggle)
 bone.on("prompt/changed", function()
   if focused() then
     leave()
-    bone.ui.refresh()
   end
 end)
 
@@ -520,7 +516,6 @@ bone.on("session/created", function(info)
   if o.call_id then
     by_call[o.call_id] = info.session_id
   end
-  bone.ui.refresh()
 end)
 
 bone.on("turn/started", function(ev)
@@ -562,7 +557,6 @@ bone.on("turn/finished", function(ev)
   a.status = ({ completed = "done", cancelled = "cancelled" })[o.status] or "failed"
   a.finished_at = bone.now()
   a.detail = o.status == "completed" and "done" or o.message or a.status
-  bone.ui.refresh()
 end)
 
 bone.on("session/deleted", function(ev)
@@ -587,7 +581,6 @@ bone.on("mouse", function(ev)
         end
       end
     end
-    bone.ui.refresh()
     return true
   end
   if ev.index and ev.line == 1 then

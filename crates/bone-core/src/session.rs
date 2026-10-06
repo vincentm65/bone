@@ -26,7 +26,7 @@ use crate::index::Index;
 const TITLE_CHARS: usize = 80;
 /// Sessions kept in memory; past this the least recently used idle ones are
 /// dropped, to load again from disk when next asked for.
-const MAX_LOADED: usize = 32;
+const MAX_LOADED: usize = 4;
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", content = "data", rename_all = "snake_case")]

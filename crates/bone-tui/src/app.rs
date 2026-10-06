@@ -1235,20 +1235,23 @@ impl App {
             self.chats.len() - 1
         };
         self.show_chat(buf);
-        self.request::<SessionMessages>(SessionRef { session_id }, move |app, r| match r {
-            Ok(r) => {
-                let session_id = r.info.session_id.clone();
-                if let Some(c) = app.chat_mut(buf) {
-                    c.load(r.info, &r.messages, r.active_turn);
-                    c.set_queue(r.queue);
+        self.request::<SessionMessages>(SessionRef { session_id }, move |app, r| {
+            match r {
+                Ok(r) => {
+                    let session_id = r.info.session_id.clone();
+                    if let Some(c) = app.chat_mut(buf) {
+                        c.load(r.info, &r.messages, r.active_turn);
+                        c.set_queue(r.queue);
+                    }
+                    app.request_processes(session_id);
                 }
-                app.request_processes(session_id);
-            }
-            Err(e) => {
-                if let Some(c) = app.chat_mut(buf) {
-                    c.notice(format!("cannot load session: {e}"), true);
+                Err(e) => {
+                    if let Some(c) = app.chat_mut(buf) {
+                        c.notice(format!("cannot load session: {e}"), true);
+                    }
                 }
             }
+            trim_heap();
         });
     }
 
@@ -1645,6 +1648,8 @@ impl App {
             let data = ev.params.clone().unwrap_or(serde_json::Value::Null);
             self.handle_server_inner(&ev);
             self.fire(&ev.method, data);
+            // Handlers change what regions show; regions draw every frame.
+            self.dirty = true;
         } else {
             self.handle_server_inner(&ev);
         }
@@ -1899,5 +1904,16 @@ impl App {
 
     pub fn server_closed(&mut self) {
         self.quit = Some(Some("the bone server closed the connection".into()));
+    }
+}
+
+/// Hand freed memory back to the OS. Loading a long transcript goes through
+/// large temporary JSON values, and glibc otherwise keeps the freed pages.
+fn trim_heap() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim only releases free heap pages; it has no
+    // preconditions.
+    unsafe {
+        libc::malloc_trim(0);
     }
 }

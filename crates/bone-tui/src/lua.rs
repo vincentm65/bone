@@ -337,6 +337,7 @@ fn item_filter(opts: &Option<Table>) -> mlua::Result<crate::data::ItemFilter> {
         first: o.get("first")?,
         last: o.get("last")?,
         session: o.get("session")?,
+        full: o.get::<Option<bool>>("full")?.unwrap_or(false),
     })
 }
 

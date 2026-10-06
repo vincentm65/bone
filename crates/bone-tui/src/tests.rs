@@ -3560,6 +3560,43 @@ async fn tool_summary_follows_a_running_turn() {
 }
 
 #[tokio::test]
+async fn tool_summary_follows_calls_finishing_out_of_order() {
+    // Calls of one message run concurrently: the first may finish last,
+    // and the summary (drawn by the first) must still notice.
+    let mut h = Harness::build(None).await;
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    let call = |id: &str| ToolCall {
+        id: id.into(),
+        name: "shell".into(),
+        arguments: json!({"command": "ls"}).to_string(),
+    };
+    let finish = |id: &str, is_error: bool| ToolFinishedParams {
+        session_id: "s-new".into(),
+        turn_id: 1,
+        call_id: id.into(),
+        output: "x".into(),
+        is_error,
+        duration_ms: None,
+    };
+    let summary = |h: &mut Harness| -> String {
+        h.screen(60, 20)
+            .lines()
+            .find(|l| l.contains("shell command"))
+            .unwrap_or_default()
+            .to_owned()
+    };
+    h.emit::<MessageCompleted>(tool_calls("s-new", vec![call("a"), call("b"), call("c")]))
+        .await;
+    assert_eq!(summary(&mut h), "  ◌ Ran 3 shell commands");
+    h.emit::<ToolFinished>(finish("c", false)).await;
+    h.emit::<ToolFinished>(finish("b", true)).await;
+    assert_eq!(summary(&mut h), "  ◌ Ran 3 shell commands, 1 failed");
+    h.emit::<ToolFinished>(finish("a", false)).await;
+    assert_eq!(summary(&mut h), "    Ran 3 shell commands, 1 failed");
+}
+
+#[tokio::test]
 async fn views_redraw_when_chat_data_they_read_changes() {
     let (mut h, _dir) = Harness::with_config(
         r#"
@@ -3981,7 +4018,7 @@ async fn tool_items_carry_live_output_timing_and_usage() {
         let v: mlua::Value = h
             .app
             .with_api(|lua| {
-                lua.load(r#"return bone.chat.items({ kind = "tool" })[1]"#)
+                lua.load(r#"return bone.chat.items({ kind = "tool", full = true })[1]"#)
                     .eval()
             })
             .unwrap();
@@ -3989,6 +4026,16 @@ async fn tool_items_carry_live_output_timing_and_usage() {
     };
     let i = item(&mut h);
     assert_eq!(i["live"], json!("compiling a\ncompiling b\n"));
+    // Without `full`, the costly fields stay out.
+    let brief: bool = h
+        .app
+        .with_api(|lua| {
+            lua.load(r#"local i = bone.chat.items({ kind = "tool" })[1]
+                return i.live == nil and i.output == nil and i.raw_arguments == nil and i.name == "shell""#)
+                .eval()
+        })
+        .unwrap();
+    assert!(brief);
     assert_eq!(i["started_at"], json!(1000));
     assert_eq!(i["usage"], json!({"input": 1200, "output": 30}));
     h.emit::<ToolFinished>(ToolFinishedParams {
@@ -5053,3 +5100,68 @@ async fn setup_adds_a_provider_its_key_and_packages() {
 
 #[path = "reload_tests.rs"]
 mod reload_tests;
+
+/// A running turn of `n` calls in one stretch, all but the last finished
+/// with `size` bytes of output, the last a running shell.
+async fn long_stretch(n: usize, size: usize) -> Harness {
+    let mut h = Harness::build(None).await;
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    let calls = (0..n)
+        .map(|i| ToolCall {
+            id: format!("c{i}"),
+            name: if i == n - 1 { "shell" } else { "read_file" }.into(),
+            arguments: json!({ "path": format!("f{i}.rs"), "command": "ls" }).to_string(),
+        })
+        .collect();
+    h.emit::<MessageCompleted>(tool_calls("s-new", calls)).await;
+    for i in 0..n - 1 {
+        h.emit::<ToolFinished>(ToolFinishedParams {
+            session_id: "s-new".into(),
+            turn_id: 1,
+            call_id: format!("c{i}"),
+            output: "x".repeat(size),
+            is_error: false,
+            duration_ms: None,
+        })
+        .await;
+    }
+    h
+}
+
+/// How long drawing a frame takes.
+fn frame_time(h: &mut Harness) -> std::time::Duration {
+    let t = std::time::Instant::now();
+    h.screen(120, 40);
+    t.elapsed()
+}
+
+/// Render cost of a long, tool-heavy chat in the default (summary) view.
+/// `cargo test -p bone-tui --release perf_probe -- --ignored --nocapture`
+#[tokio::test]
+#[ignore]
+async fn perf_probe() {
+    for (n, size) in [(50, 2_000), (200, 2_000), (500, 2_000), (500, 20_000)] {
+        let mut h = long_stretch(n, size).await;
+        let first = frame_time(&mut h);
+        let steady = frame_time(&mut h);
+        let mut live = std::time::Duration::ZERO;
+        for _ in 0..10 {
+            h.emit::<ToolOutput>(ToolOutputParams {
+                session_id: "s-new".into(),
+                turn_id: 1,
+                call_id: format!("c{}", n - 1),
+                text: "line\n".into(),
+            })
+            .await;
+            live += frame_time(&mut h) / 10;
+        }
+        h.app
+            .with_api(|lua| lua.load("bone.ui.refresh()").exec())
+            .unwrap();
+        let refresh = frame_time(&mut h);
+        println!(
+            "{n} calls, {size} B each: first {first:?}, steady {steady:?}, live output {live:?}, after bone.ui.refresh {refresh:?}"
+        );
+    }
+}
