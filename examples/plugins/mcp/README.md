@@ -1,6 +1,8 @@
 # mcp
 
-Loads MCP servers from JSON files and shows them in the TUI.
+Loads MCP servers from JSON files and shows them in the TUI. It also provides
+`/mcp-add NAME COMMAND [ARGS...]` for adding a local stdio server quickly;
+the command saves `~/.bone/mcp.json` and reloads the core.
 
 ```sh
 cp -r examples/plugins/mcp ~/.bone/plugins/
@@ -10,6 +12,10 @@ cp -r examples/plugins/mcp ~/.bone/plugins/
 -- ~/.bone/core.lua
 bone.config.mcp_files = { "~/.config/mcp.json" }   -- { "mcpServers": { ... } } files
 bone.config.mcp_options = { lazy = true }          -- start each server on first use
+```
+
+```text
+/mcp-add github github-mcp-server stdio
 ```
 
 `/mcp` opens a panel with every server, its state, its last error and its

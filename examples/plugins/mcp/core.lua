@@ -7,6 +7,16 @@
 bone.config.mcp_files = {}
 
 bone.on_ready(function()
+  -- The TUI's /mcp-add command keeps its small, user-owned config here.
+  local saved = bone.config_dir .. "/mcp.json"
+  local f = io.open(saved, "r")
+  if f then
+    f:close()
+    local ok, err = pcall(bone.mcp.load, saved, bone.config.mcp_options)
+    if not ok then
+      print("mcp plugin: " .. tostring(err))
+    end
+  end
   for _, file in ipairs(bone.config.mcp_files or {}) do
     local path = file
     if not path:match("^[/~]") then
