@@ -55,7 +55,7 @@ dependencies = [
 
 [[package]]
 name = "bone"
-version = "0.1.0"
+version = "3.0.0"
 dependencies = [
  "bone-client",
  "bone-core",
@@ -71,7 +71,7 @@ dependencies = [
 
 [[package]]
 name = "bone-client"
-version = "0.1.0"
+version = "3.0.0"
 dependencies = [
  "bone-proto",
  "serde_json",
@@ -81,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "bone-core"
-version = "0.1.0"
+version = "3.0.0"
 dependencies = [
  "bone-lua",
  "bone-proto",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "bone-lua"
-version = "0.1.0"
+version = "3.0.0"
 dependencies = [
  "mlua",
  "reqwest",
@@ -115,7 +115,7 @@ dependencies = [
 
 [[package]]
 name = "bone-proto"
-version = "0.1.0"
+version = "3.0.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "bone-server"
-version = "0.1.0"
+version = "3.0.0"
 dependencies = [
  "bone-client",
  "bone-core",
@@ -138,7 +138,7 @@ dependencies = [
 
 [[package]]
 name = "bone-tui"
-version = "0.1.0"
+version = "3.0.0"
 dependencies = [
  "bone-client",
  "bone-lua",
