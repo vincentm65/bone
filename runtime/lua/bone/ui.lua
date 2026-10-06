@@ -16,6 +16,7 @@ function M.setup(opts)
   end
   require("bone.ui.views")
   require("bone.ui.statusline")
+  require("bone.ui.tray")
   require("bone.ui.layout").setup(opts)
   return M
 end

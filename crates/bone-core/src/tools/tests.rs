@@ -8,6 +8,7 @@ use super::*;
 
 fn ctx(dir: &tempfile::TempDir) -> ToolContext {
     ToolContext {
+        call_id: String::new(),
         cwd: dir.path().to_owned(),
         session_id: "test".into(),
         cancel: CancellationToken::new(),
@@ -371,12 +372,9 @@ async fn retrying_an_edit_that_went_through_is_not_an_error() {
 #[tokio::test]
 async fn invalid_rust_edits_are_rejected_before_writing() {
     let (_d, ctx, path) = setup(SRC).await;
-    let err = edit(
-        &ctx,
-        json!([{"at": anchor(SRC, 2), "text": "    let = ;"}]),
-    )
-    .await
-    .unwrap_err();
+    let err = edit(&ctx, json!([{"at": anchor(SRC, 2), "text": "    let = ;"}]))
+        .await
+        .unwrap_err();
     assert!(err.contains("would be invalid Rust"), "{err}");
     assert_eq!(std::fs::read_to_string(path).unwrap(), SRC);
 }
@@ -442,17 +440,14 @@ async fn anchors_work_without_a_read_this_session() {
         .await
         .unwrap();
     assert!(std::fs::read_to_string(&path).unwrap().contains("dos();"));
-    let err = call(
+    let out = call(
         &ctx,
         "edit_file",
-        json!({"edits": [{"at": "1#aa", "text": ""}]}),
+        json!({"edits": [{"at": anchor(SRC, 1), "text": "fn a() {"}]}),
     )
     .await
-    .unwrap_err();
-    assert!(
-        err.contains("missing `path`") && err.contains("f.rs"),
-        "{err}"
-    );
+    .unwrap();
+    assert!(out.contains("Edited") || out.contains("No change"), "{out}");
 }
 
 #[tokio::test]
@@ -617,8 +612,55 @@ async fn shell_manages_background_jobs_and_reports_completion() {
             .lock()
             .unwrap()
             .iter()
-            .any(|view| view.state == ProcessState::Exited && view.stdout.contains("first"))
+            .any(|view| view.state == ProcessState::Exited && view.tail.contains("first"))
     );
+}
+
+#[tokio::test]
+async fn background_jobs_run_in_a_terminal_and_the_model_reads_clean_text() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(&dir);
+    let started = call(
+        &ctx,
+        "shell",
+        json!({
+            "command": "printf '\\033[32mok\\033[0m\\n'; printf '10%%\\r50%%\\r100%%\\n'; [ -t 1 ] && echo tty; echo $TERM $GIT_PAGER",
+            "mode": "start",
+        }),
+    )
+    .await
+    .unwrap();
+    let id = started
+        .strip_prefix("background process started: ")
+        .unwrap();
+    let done = call(&ctx, "shell", json!({"action": "wait", "id": id}))
+        .await
+        .unwrap();
+    assert_eq!(done, "ok\n100%\ntty\nxterm-256color cat\n[exit code: 0]");
+    // The terminal's own bytes are kept for terminal views.
+    let (offset, raw, total) = ctx.jobs.read(&ctx.session_id, id, 0).unwrap();
+    assert_eq!(offset, 0);
+    assert_eq!(total, raw.len() as u64);
+    assert!(raw.starts_with("\u{1b}[32mok\u{1b}[0m\r\n"), "{raw:?}");
+    let (offset, rest, _) = ctx.jobs.read(&ctx.session_id, id, 4).unwrap();
+    assert_eq!((offset, rest.as_str()), (4, &raw[4..]));
+}
+
+#[test]
+fn the_cleaner_settles_progress_lines_and_drops_escapes() {
+    let mut c = shell::Cleaner::default();
+    let mut out = String::new();
+    // Split mid-escape and mid-CRLF, as reads can be.
+    for part in [
+        "a\u{1b}[3",
+        "1mred\u{1b}[0m\r",
+        "\nbar 1\rbar 2\rbar 3\r\n",
+        "x\u{8}y",
+        "\u{1b}]0;title\u{7}z\n",
+    ] {
+        c.apply(part, &mut out);
+    }
+    assert_eq!(out, "ared\nbar 3\nyz\n");
 }
 
 #[tokio::test]
@@ -645,6 +687,75 @@ async fn shell_background_job_survives_turn_cancellation() {
     call(&ctx, "shell", json!({"action": "kill", "id": id}))
         .await
         .unwrap();
+}
+
+/// A repeatable model-shaped workload for the edit tool. The workload edits
+/// many independent files with three hunks per call. Every fourth call omits
+/// `path`, modeling the field being lost from a long tool-call retry while the
+/// session still has a last-read file. Both all-attempt and first-attempt
+/// failure rates are printed for before/after comparisons.
+#[tokio::test]
+#[ignore = "benchmark; run with cargo test -p bone-core edit_file_multi_file_benchmark -- --ignored --nocapture"]
+async fn edit_file_multi_file_benchmark() {
+    const FILES: usize = 32;
+    const LINES: usize = 48;
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(&dir);
+    let mut first_failures = 0usize;
+    let mut retries = 0usize;
+
+    for file_no in 0..FILES {
+        let filename = format!("conversion/file_{file_no:02}.txt");
+        let body = (1..=LINES)
+            .map(|line| format!("item_{file_no:02}_{line:02} = legacy_{line:02};\n"))
+            .collect::<String>();
+        let path = dir.path().join(&filename);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &body).unwrap();
+        call(&ctx, "read_file", json!({"path": filename, "full": true}))
+            .await
+            .unwrap();
+
+        let edits = json!([
+            {"at": anchor(&body, 5), "text": format!("item_{file_no:02}_05 = modern_05;")},
+            {"at": anchor(&body, 24), "text": format!("item_{file_no:02}_24 = modern_24;")},
+            {"at": anchor(&body, 43), "text": format!("item_{file_no:02}_43 = modern_43;")},
+        ]);
+        let args = if file_no % 4 == 0 {
+            json!({"edits": edits})
+        } else {
+            json!({"path": filename, "edits": edits})
+        };
+        let result = call(&ctx, "edit_file", args).await;
+        if result.is_err() {
+            first_failures += 1;
+            retries += 1;
+            call(&ctx, "edit_file", json!({"path": filename, "edits": edits}))
+                .await
+                .unwrap();
+        }
+    }
+
+    let total = FILES;
+    let attempts = total + retries;
+    let rate = first_failures as f64 / attempts as f64 * 100.0;
+    let first_attempt_rate = first_failures as f64 / total as f64 * 100.0;
+    println!(
+        "EDIT_BENCH files={FILES} calls={total} attempts={attempts} first_failures={first_failures} retries={retries} failure_rate={rate:.2}% first_attempt_rate={first_attempt_rate:.2}%"
+    );
+    assert_eq!(
+        (0..FILES)
+            .filter(|file_no| {
+                let path = dir.path().join(format!("conversion/file_{file_no:02}.txt"));
+                std::fs::read_to_string(path)
+                    .unwrap()
+                    .matches("modern_")
+                    .count()
+                    != 3
+            })
+            .count(),
+        0
+    );
 }
 
 #[tokio::test]

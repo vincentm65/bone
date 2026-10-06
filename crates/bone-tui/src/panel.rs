@@ -404,6 +404,22 @@ impl App {
             .map(|p| p.id.clone())
     }
 
+    /// The panel at a screen position and the line of its content there
+    /// (from 1; 0 on its title row).
+    pub fn panel_hit(&self, at: (u16, u16)) -> Option<(String, usize)> {
+        let id = self.panel_at(at)?;
+        let p = self.panel(&id)?;
+        let area = p.area?;
+        let row = (at.1 - area.y) as usize;
+        let title = usize::from(p.title.is_some());
+        let line = if row < title {
+            0
+        } else {
+            p.top + row - title + 1
+        };
+        Some((id, line))
+    }
+
     /// The wheel over a panel scrolls it. Returns whether it did.
     pub fn panel_wheel(&mut self, at: (u16, u16), up: bool) -> bool {
         if self.focused_popup().is_some() {
@@ -522,9 +538,11 @@ impl App {
                 (room.height, MIN_CHAT_ROWS)
             };
             let focused = self.focused_panel().is_some_and(|f| f.id == id);
+            let spinner = self.spinner.frame();
             let ctx = |w: u16, h: u16| {
                 json!({
                     "id": id,
+                    "spinner": spinner,
                     "dock": p.dock.name(),
                     "width": w,
                     "height": h,

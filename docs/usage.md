@@ -31,6 +31,7 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `ctrl+c` | cancel the running turn; else clear the prompt; else press twice to quit |
 | `ctrl+d` | quit (on an empty prompt) |
 | `ctrl+o` | pick a session to open |
+| `down` / `ctrl+b` | the tray below the prompt: sub-agents and shell jobs. `down` on an empty prompt moves into it (`up` from its top row leaves), `tab` switches between Agents and Shells, `enter` opens one (a sub-agent's session in the chat, a shell job as a terminal in the tray), `c` cancels, `esc` goes back; a click does the same. `ctrl+b` folds it to one line. In a sub-agent's session, `‹ main` in the tray or `esc` on an empty prompt goes back |
 | `ctrl+r` | show / hide the model reasoning (live in the chat and in the transcript) |
 | `ctrl+t` | how much of each tool call to show: a summary line per stretch of calls ("Read 3 files, ran 2 shell commands"; edits and failures in full) → a row per call → everything in full → back. It stays until you press it again |
 | `ctrl+n` | new session |
@@ -62,6 +63,7 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `/setup` | add a model provider: kind, URL, model and key (kept in `~/.bone/secrets.json`), and catalog plugins; opens by itself on a first run with no provider |
 | `/catalog` | browse the plugin catalog: install, update and remove packages (each file checked against the catalog's hashes) |
 | `/config`, `/settings` | the settings page: TUI options, which provider and model to use, plugins on and off, and plugins' own settings; everything is saved in `~/.bone/settings.json` |
+| `/model [name]` | show the current model and provider, or set the model for the current provider |
 | `/runtime`, `/runtime reset FILE`, `/runtime reset all` | your copies of built-in Lua files in `~/.bone/runtime/` (bone never overwrites them); reset goes back to the built-in ones, keeping your copies in `~/.bone/runtime-backup/` |
 | `/new`, `/clear` | start a new session |
 | `/sessions`, `/resume` | pick a session to open |

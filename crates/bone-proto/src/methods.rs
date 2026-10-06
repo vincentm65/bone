@@ -21,7 +21,8 @@ pub enum ProcessState {
     Failed,
 }
 
-/// A bounded, session-scoped view of one managed shell process.
+/// A session-scoped view of one managed shell process. Its output comes
+/// as `process/changed` chunks and from `process/read`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessSnapshot {
     pub session_id: SessionId,
@@ -33,14 +34,18 @@ pub struct ProcessSnapshot {
     pub started_at_ms: u64,
     pub finished_at_ms: Option<u64>,
     pub elapsed_ms: u64,
-    pub stdout: String,
-    pub stderr: String,
-    pub output: String,
+    /// The last line of output, escape codes removed.
+    #[serde(default)]
+    pub tail: String,
     pub output_bytes: u64,
     pub truncated: bool,
     pub code: Option<i32>,
     pub signal: Option<i32>,
     pub error: Option<String>,
+    /// It runs in a pseudo-terminal: its output is what a terminal shows
+    /// (colors, `\r` progress lines); `process/resize` sets the size.
+    #[serde(default)]
+    pub terminal: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,11 +54,48 @@ pub struct ProcessesResult {
     pub processes: Vec<ProcessSnapshot>,
 }
 
+/// Output as the process wrote it, from byte `offset` of everything it
+/// wrote (escape codes kept).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessChunk {
+    pub offset: u64,
+    pub data: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProcessChangedParams {
     pub session_id: SessionId,
     pub version: u64,
     pub process: ProcessSnapshot,
+    /// New output, if that is what changed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk: Option<ProcessChunk>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessReadParams {
+    pub session_id: SessionId,
+    pub id: String,
+    /// The byte offset to read from (0: as much as is kept).
+    #[serde(default)]
+    pub from: u64,
+}
+
+/// What `process/read` gives: `data` starts at byte `offset` (later than
+/// asked when older output is no longer kept); `total` bytes were written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessOutput {
+    pub offset: u64,
+    pub data: String,
+    pub total: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessResizeParams {
+    pub session_id: SessionId,
+    pub id: String,
+    pub cols: u16,
+    pub rows: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +186,8 @@ pub const METHODS: &[&str] = &[
     SecretsList::METHOD,
     ProcessesGet::METHOD,
     ProcessCancel::METHOD,
+    ProcessRead::METHOD,
+    ProcessResize::METHOD,
 ];
 
 /// Every server-to-client event.
@@ -164,6 +208,7 @@ pub const NOTIFICATIONS: &[&str] = &[
     SessionUpdated::METHOD,
     SessionCompacted::METHOD,
     SessionDeleted::METHOD,
+    SessionCreated::METHOD,
     ModelDeltaEvent::METHOD,
     ModelCompleted::METHOD,
     SettingsChanged::METHOD,
@@ -188,6 +233,14 @@ method!(
 method!(
     /// Cancel one managed shell process.
     ProcessCancel, "process/cancel", ProcessRef => ()
+);
+method!(
+    /// A managed shell process's output as written (escape codes kept).
+    ProcessRead, "process/read", ProcessReadParams => ProcessOutput
+);
+method!(
+    /// Set the size of a process's pseudo-terminal (it gets SIGWINCH).
+    ProcessResize, "process/resize", ProcessResizeParams => ()
 );
 method!(
     /// Returns its input and also emits it as an [`Echoed`] event.
@@ -743,6 +796,10 @@ notification!(
 notification!(
     /// A managed shell process changed state or produced output.
     ProcessChanged, "process/changed", ProcessChangedParams
+);
+notification!(
+    /// A session was created (by any client, or by core Lua for a subagent).
+    SessionCreated, "session/created", SessionInfo
 );
 notification!(
     /// A session was deleted (by any client).

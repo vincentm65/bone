@@ -102,6 +102,7 @@ fn names(m: &McpManager) -> Vec<String> {
 
 fn ctx() -> ToolContext {
     ToolContext {
+        call_id: String::new(),
         cwd: ".".into(),
         session_id: "s".into(),
         cancel: Default::default(),

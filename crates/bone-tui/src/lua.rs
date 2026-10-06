@@ -1969,6 +1969,37 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 .collect();
             ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
         }
+        "process_screen" => {
+            let (id, opts): (String, Option<mlua::Table>) = args(lua, a)?;
+            let get = |k: &str| -> mlua::Result<Option<i64>> {
+                Ok(match &opts {
+                    Some(t) => t.get(k)?,
+                    None => None,
+                })
+            };
+            let rows = get("height")?.unwrap_or(24).clamp(1, 500) as u16;
+            let cols = get("width")?.unwrap_or(80).clamp(1, 1000) as u16;
+            let scroll = get("scroll")?.unwrap_or(0).max(0) as usize;
+            let (lines, scroll, max) = app.process_screen(&id, rows, cols, scroll);
+            let out = lua.create_table()?;
+            for (i, line) in lines.iter().enumerate() {
+                let l = lua.create_table()?;
+                for (j, item) in line.iter().enumerate() {
+                    if let crate::ui::Item::Text(text, group) = item {
+                        l.set(
+                            j + 1,
+                            lua.create_sequence_from([text.as_str(), group.as_str()])?,
+                        )?;
+                    }
+                }
+                out.set(i + 1, l)?;
+            }
+            let r = lua.create_table()?;
+            r.set("lines", out)?;
+            r.set("scroll", scroll)?;
+            r.set("max", max)?;
+            ret(lua, r)
+        }
         "process_refresh" => {
             if let Some(session_id) = app.current_session_id() {
                 app.request_processes(session_id);

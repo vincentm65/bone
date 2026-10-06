@@ -165,6 +165,9 @@ pub struct App {
     pub windows: HashMap<WindowId, Window>,
     /// Where the chat and prompt were drawn last frame.
     pub placed: HashMap<WindowId, Placed>,
+    /// Every layout leaf (regions and the built-in ones) and where it was
+    /// drawn last, for mouse events.
+    pub leaves: Vec<(String, ratatui::layout::Rect)>,
     pub screen: Rect,
     pub keymaps: Keymaps,
     /// The explicitly focused named context (popup focus still takes precedence).
@@ -206,6 +209,13 @@ pub struct App {
     pub jobs: crate::jobs::Jobs,
     /// Core-managed shell processes, keyed by process id.
     pub processes: HashMap<String, ProcessSnapshot>,
+    /// Terminal views' output, by process id (see `term.rs`).
+    pub terms: HashMap<String, crate::term::Term>,
+    /// The size each process's terminal was last successfully given
+    /// (`process/resize`).
+    term_sizes: HashMap<String, (u16, u16)>,
+    /// Resize requests currently in flight, by process id.
+    term_resize_pending: HashMap<String, (u16, u16)>,
     pub processes_version: u64,
     pub processes_session: Option<String>,
     /// Text highlighted with the mouse.
@@ -279,6 +289,7 @@ impl App {
             prompt: TextBuffer::default(),
             windows: HashMap::from([(CHAT_WIN, window.clone()), (PROMPT_WIN, window)]),
             placed: HashMap::new(),
+            leaves: Vec::new(),
             screen: Rect::default(),
             keymaps: Keymaps::default(),
             focused_context: None,
@@ -307,6 +318,9 @@ impl App {
             panel_focus: None,
             jobs: Default::default(),
             processes: HashMap::new(),
+            terms: HashMap::new(),
+            term_sizes: HashMap::new(),
+            term_resize_pending: HashMap::new(),
             processes_version: 0,
             processes_session: None,
             selection: None,
@@ -797,7 +811,11 @@ impl App {
                 self.prompt_history_pos = None;
                 let text = text.replace("\r\n", "\n").replace('\r', "\n");
                 if text.chars().count() > PASTE_PLACEHOLDER_THRESHOLD {
-                    let token = format!("[Pasted text #{} +{} chars]", self.pastes.len() + 1, text.chars().count());
+                    let token = format!(
+                        "[Pasted text #{} +{} chars]",
+                        self.pastes.len() + 1,
+                        text.chars().count()
+                    );
                     self.prompt.insert_str(&token);
                     self.pastes.push((token, text));
                 } else {
@@ -1386,7 +1404,8 @@ impl App {
         match id {
             Some(id) => self.open_session(id),
             None => self.request::<SessionList>(Empty {}, move |app, r| match r {
-                Ok(list) => match list.into_iter().next() {
+                // A subagent's session is not one to resume.
+                Ok(list) => match list.into_iter().find(|s| s.owner.is_none()) {
                     Some(info) => app.open_session(info.session_id),
                     None => app.info("No sessions to resume"),
                 },
@@ -1398,7 +1417,8 @@ impl App {
     // ---- mouse selection -----------------------------------------------------
 
     /// A mouse press, drag or release. Lua `mouse` handlers see it first
-    /// (with the chat item under it); one returning true takes it, else the
+    /// (with the chat item and layout leaf under it); one returning true
+    /// takes it, else the
     /// left button selects text and clicks focus panels.
     pub fn mouse(&mut self, action: &str, button: &str, at: (u16, u16)) {
         let mut ev = serde_json::json!({
@@ -1407,6 +1427,21 @@ impl App {
         if let Some(hit) = self.chat_at(at) {
             ev["index"] = hit["index"].clone();
             ev["line"] = hit["line"].clone();
+        }
+        // The layout leaf under it (a region, "prompt", "statusline", …),
+        // with the row and column inside it, from 1.
+        if let Some((name, r)) = self
+            .leaves
+            .iter()
+            .find(|(_, r)| at.0 >= r.x && at.0 < r.right() && at.1 >= r.y && at.1 < r.bottom())
+        {
+            ev["region"] = name.clone().into();
+            ev["row"] = (at.1 - r.y + 1).into();
+            ev["col"] = (at.0 - r.x + 1).into();
+        }
+        if let Some((id, line)) = self.panel_hit(at) {
+            ev["panel"] = id.into();
+            ev["panel_line"] = line.into();
         }
         let handled = self
             .fire("mouse", ev)
@@ -1653,11 +1688,90 @@ impl App {
         self.processes_version = self.processes_version.max(p.version);
         self.processes
             .insert(p.process.id.clone(), p.process.clone());
+        // Only views being drawn keep output.
+        if let (Some(c), Some(t)) = (&p.chunk, self.terms.get_mut(&p.process.id)) {
+            t.chunk(c.offset, &c.data);
+        }
+    }
+
+    /// `bone.processes.screen`: a process's terminal at `rows` × `cols`,
+    /// scrolled back `scroll` rows. Starts reading its output the first
+    /// time (the lines come once it arrives) and resizes a running
+    /// process's terminal to match.
+    pub fn process_screen(
+        &mut self,
+        id: &str,
+        rows: u16,
+        cols: u16,
+        scroll: usize,
+    ) -> (Vec<Vec<crate::ui::Item>>, usize, usize) {
+        let Some(session_id) = self.processes_session.clone() else {
+            return (Vec::new(), 0, 0);
+        };
+        let running = self
+            .processes
+            .get(id)
+            .is_some_and(|p| p.running && p.terminal);
+        let size = (cols, rows);
+        if running
+            && self.term_sizes.get(id) != Some(&size)
+            && self.term_resize_pending.get(id) != Some(&size)
+        {
+            let pid = id.to_owned();
+            self.term_resize_pending.insert(pid.clone(), size);
+            self.request::<ProcessResize>(
+                ProcessResizeParams {
+                    session_id: session_id.clone(),
+                    id: pid.clone(),
+                    cols,
+                    rows,
+                },
+                move |app, result| {
+                    // A newer size may have been requested while this one
+                    // was in flight. Do not clear or overwrite its state.
+                    if app.term_resize_pending.get(&pid) == Some(&size) {
+                        app.term_resize_pending.remove(&pid);
+                    }
+                    if result.is_ok() {
+                        app.term_sizes.insert(pid, size);
+                    }
+                },
+            );
+        }
+        let term = self.terms.entry(id.to_owned()).or_default();
+        if term.stale && !term.reading {
+            term.begin_read();
+            let pid = id.to_owned();
+            self.request::<ProcessRead>(
+                ProcessReadParams {
+                    session_id,
+                    id: id.to_owned(),
+                    from: 0,
+                },
+                move |app, r| {
+                    if let Some(t) = app.terms.get_mut(&pid) {
+                        match r {
+                            Ok(out) => t.finish_read(out.offset, &out.data),
+                            Err(e) => {
+                                t.fail_read();
+                                app.error(format!("cannot read {pid}: {e}"));
+                            }
+                        }
+                    }
+                    app.dirty = true;
+                },
+            );
+        }
+        let term = self.terms.get_mut(id).unwrap();
+        term.lines(rows, cols, scroll, &mut self.theme)
     }
 
     pub fn request_processes(&mut self, session_id: String) {
         if self.processes_session.as_deref() != Some(session_id.as_str()) {
             self.processes.clear();
+            self.terms.clear();
+            self.term_sizes.clear();
+            self.term_resize_pending.clear();
             self.processes_version = 0;
             self.fire(
                 "processes/changed",
@@ -1690,7 +1804,7 @@ impl App {
 
     pub fn process_list(&self) -> Vec<ProcessSnapshot> {
         let mut processes: Vec<_> = self.processes.values().cloned().collect();
-        processes.sort_by(|a, b| a.id.cmp(&b.id));
+        processes.sort_by_key(|p| (p.started_at_ms, p.id.len(), p.id.clone()));
         processes
     }
 

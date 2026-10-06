@@ -256,6 +256,7 @@ fn convert(
         cwd: guess_cwd(&rows),
         created_at: started,
         parent: None,
+        owner: None,
     };
     let mut out = Vec::new();
     let mut put = |record: Record, at: u64| {

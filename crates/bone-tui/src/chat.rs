@@ -1018,6 +1018,7 @@ mod tests {
             created_at: 0,
             title: Some("t".into()),
             parent: None,
+            owner: None,
         };
         c.load(
             info,

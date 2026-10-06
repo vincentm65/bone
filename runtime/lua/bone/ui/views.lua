@@ -562,8 +562,10 @@ function bone.ui.tool_content(item, ctx)
     return { title = file_label(name, args.path, summary), body = diff_view(rows, width) }
   end
 
-  local target = args.path or args.query
-  local title = { { name, "ToolName" } }
+  -- A subagent call reads as its agent and task: "reviewer check the diff".
+  local target = args.path or args.query or args.task
+  local agent = name == "subagent" and args.name ~= "" and args.name
+  local title = { { type(agent) == "string" and agent or name, "ToolName" } }
   if type(target) == "string" and target ~= "" then
     title[#title + 1] = { " " .. target, "ToolArgs" }
   end
@@ -587,9 +589,9 @@ end
 
 -- ---- tool summaries ------------------------------------------------------
 
--- Folded into a summary line: everything but edits.
+-- Folded into a summary line: everything but edits and sub-agents.
 local function foldable(t)
-  return t.name ~= "edit_file"
+  return t.name ~= "edit_file" and t.name ~= "subagent"
 end
 
 local function arg(t, key)

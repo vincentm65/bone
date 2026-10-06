@@ -114,6 +114,7 @@ fn info() -> SessionInfo {
         created_at: 1_790_000_000,
         title: Some("Fix the typo in main.rs".into()),
         parent: None,
+        owner: None,
     }
 }
 
@@ -495,16 +496,38 @@ fn requests() {
                 started_at_ms: 1_790_000_000_000,
                 finished_at_ms: None,
                 elapsed_ms: 1200,
-                stdout: "running\n".into(),
-                stderr: String::new(),
-                output: "running\n".into(),
+                tail: "running".into(),
                 output_bytes: 8,
                 truncated: false,
                 code: None,
                 signal: None,
                 error: None,
+                terminal: true,
             }],
         },
+    );
+    exchange::<ProcessRead>(
+        38,
+        ProcessReadParams {
+            session_id: SID.into(),
+            id: "shell-1".into(),
+            from: 0,
+        },
+        ProcessOutput {
+            offset: 0,
+            data: "\u{1b}[32mrunning\u{1b}[0m\r\n".into(),
+            total: 19,
+        },
+    );
+    exchange::<ProcessResize>(
+        39,
+        ProcessResizeParams {
+            session_id: SID.into(),
+            id: "shell-1".into(),
+            cols: 100,
+            rows: 30,
+        },
+        (),
     );
     exchange::<ProcessCancel>(
         37,
@@ -631,6 +654,16 @@ fn events() {
         tokens_after: 98_200,
         reason: "limit".into(),
     });
+    event::<SessionCreated>(SessionInfo {
+        session_id: "01a0fe5e-0000-7000-8000-000000000003".into(),
+        title: Some("reviewer".into()),
+        owner: Some(SessionOwner {
+            session_id: SID.into(),
+            call_id: Some("call_7".into()),
+            name: Some("reviewer".into()),
+        }),
+        ..info()
+    });
     event::<SessionDeleted>(SessionRef {
         session_id: SID.into(),
     });
@@ -659,15 +692,18 @@ fn events() {
             started_at_ms: 1_790_000_000_000,
             finished_at_ms: Some(1_790_000_001_500),
             elapsed_ms: 1500,
-            stdout: "ok\n".into(),
-            stderr: String::new(),
-            output: "ok\n".into(),
-            output_bytes: 3,
+            tail: "ok".into(),
+            output_bytes: 4,
             truncated: false,
             code: Some(0),
             signal: None,
             error: None,
+            terminal: true,
         },
+        chunk: Some(ProcessChunk {
+            offset: 19,
+            data: "ok\r\n".into(),
+        }),
     });
 }
 

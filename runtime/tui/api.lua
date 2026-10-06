@@ -397,10 +397,19 @@ bone.job = {
   end,
 }
 
---- Core-managed shell processes started by the model.
---- Entries contain id, command, state, running, pid, elapsed_ms, output
---- tails, exit status and truncation metadata.
+--- Core-managed shell processes started by the model (of the session on
+--- screen). Entries: id, command, state, running, pid, started_at_ms,
+--- finished_at_ms, elapsed_ms, tail (the last line of output), code,
+--- signal, error, terminal (it runs in a pseudo-terminal).
+---   bone.processes.screen(id, { width, height, scroll }) -> { lines, scroll,
+---       max }: the process's terminal at that size, scrolled back `scroll`
+---       rows (at most `max`), as lines of { text, group }. The first call
+---       reads its output, which shows a moment later; a running process's
+---       terminal is resized to match.
 bone.processes = {
+  screen = function(id, opts)
+    return api("process_screen", id, opts or {})
+  end,
   list = function()
     return api("process_list")
   end,
@@ -621,7 +630,7 @@ end
 ---   max: the cap for "auto" (40 columns, 10 rows); min: hide below this
 ---   order: lower is placed nearer the screen edge (default 0)
 ---   render: function(ctx) -> lines, ctx = { id, dock, width, height,
----         focused, top, title }, called every frame; or lines: a list
+---         focused, top, title, spinner }, called every frame; or lines: a list
 ---   title: a row above the content that does not scroll
 ---   follow: keep the end in view as content grows
 ---   focusable (default true), focus: take the keyboard now

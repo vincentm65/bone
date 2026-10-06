@@ -32,7 +32,7 @@ function M.setup(opts)
     size = 1,
     render = function() return {} end,
   }
-  bone.ui.layout = { "top", "chat", "input_gap", "above_prompt", "prompt", "statusline" }
+  bone.ui.layout = { "top", "chat", "input_gap", "above_prompt", "prompt", "tray", "statusline" }
 end
 
 return M

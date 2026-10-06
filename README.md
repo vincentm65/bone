@@ -65,6 +65,7 @@ bone3 --connect                  # a TUI on that server; run several, they stay 
 
 - [docs/usage.md](docs/usage.md): keys, commands, options.
 - [docs/lua.md](docs/lua.md): configuring and extending with Lua (core and TUI), colors, plugins.
+- [docs/customizing.md](docs/customizing.md): the customization guides (TUI, panels, popups, chat, core, plugins), written to `~/.bone/docs/` at startup (the agent's system prompt points there) and available to Lua as `bone.docs`.
 - [docs/protocol.md](docs/protocol.md): the JSON-RPC API for writing clients.
 - [docs/architecture.md](docs/architecture.md): how the pieces fit together.
 - [Bone catalog](https://github.com/vincentm65/bone-catalog): the main catalog

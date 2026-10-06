@@ -1,0 +1,17 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "method": "session/created",
+    "params": {
+      "created_at": 1790000000,
+      "cwd": "/home/me/project",
+      "owner": {
+        "call_id": "call_7",
+        "name": "reviewer",
+        "session_id": "01a0fe5e-0000-7000-8000-000000000001"
+      },
+      "session_id": "01a0fe5e-0000-7000-8000-000000000003",
+      "title": "reviewer"
+    }
+  }
+]

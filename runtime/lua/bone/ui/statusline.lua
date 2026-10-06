@@ -78,31 +78,63 @@ end
 if state.events then
   for _, id in ipairs(state.events) do bone.off(id) end
 end
-bone.model.list(function(list)
-  for _, model in ipairs(list or {}) do
-    if model.current then
-      state.model = model.model or model.name
-      break
+local function load_model()
+  bone.model.list(function(list)
+    for _, model in ipairs(list or {}) do
+      if model.current then
+        state.provider = model.name
+        state.model = model.model or model.name
+        break
+      end
     end
-  end
-  bone.ui.refresh()
-end)
+    bone.ui.refresh()
+  end)
+end
+load_model()
 load_total()
 state.events = {
-  bone.on("turn/started", function()
+  bone.on("turn/started", function(ev)
+    if ev.session_id ~= (bone.chat.session() or {}).session_id then return end
     state.started = now()
     state.finished = nil
     bone.ui.refresh()
     bone.defer(1000, refresh_later)
   end),
-  bone.on("turn/finished", function()
+  bone.on("turn/finished", function(ev)
+    if ev.session_id ~= (bone.chat.session() or {}).session_id then return end
     state.finished = now()
     if state.started then state.finished_elapsed = state.finished - state.started end
     state.started = nil
     load_total()
     bone.ui.refresh()
   end),
+  -- Each model call's usage is indexed before its message completes, so a
+  -- long turn's totals keep up call by call.
+  bone.on("message/completed", function(ev)
+    if ev.session_id ~= (bone.chat.session() or {}).session_id then return end
+    load_total()
+  end),
 }
+state.events[#state.events + 1] = bone.on("settings/changed", function(ev)
+  local path = tostring(ev.path or "")
+  local provider, field = path:match("^providers%.([^.]+)%.([^.]+)$")
+  if field == "model" then
+    if provider == state.provider then
+      if type(ev.value) == "string" then
+        state.model = ev.value
+      else
+        -- A reset sends null; ask the core for the model inherited from
+        -- core.lua (or the provider's other saved configuration).
+        load_model()
+      end
+    elseif not state.provider then
+      load_model()
+    end
+  elseif ev.path == "provider" or path:match("^providers%.[^.]+$") then
+    load_model()
+  end
+  bone.ui.refresh()
+end)
 
 function bone.ui.statusline(ctx)
   -- Match Bone's compact information strip: context first, then metrics and
@@ -122,7 +154,7 @@ function bone.ui.statusline(ctx)
   left[#left + 1] = { "total " .. tokens(state.total.input + state.total.output), "StatusLineDim" }
   left[#left + 1] = { "cache " .. (state.total.input > 0 and string.format("%.0f%%", state.total.cached / state.total.input * 100) or "0%"), "StatusLineDim" }
   if s and s.running then
-    local running_for = state.started and (now() - state.started) or nil
+    local running_for = s.turn and math.floor((s.turn.elapsed_ms or 0) / 1000) or (state.started and (now() - state.started))
     left[#left + 1] = { (ctx.spinner or "") .. " thinking" .. (running_for and (" " .. elapsed(running_for)) or ""), "StatusLine" }
   elseif state.finished_elapsed then
     left[#left + 1] = { "worked " .. elapsed(state.finished_elapsed) .. ", finished at " .. bone.util.format_time(state.finished), "StatusLineDim" }

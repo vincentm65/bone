@@ -57,6 +57,8 @@ After `initialize`, the server runs each request on its own task: replies carry 
 | `turn/cancel` | `{ session_id }` | `null` (no-op if nothing is running) |
 | `processes/get` | `{ session_id }` | `{ version, processes: [ProcessSnapshot] }` for managed shell processes |
 | `process/cancel` | `{ session_id, id }` | `null`; asks the process group to stop |
+| `process/read` | `{ session_id, id, from? }` | `{ offset, data, total }`: the output as written (escape codes kept) from byte `from` (default 0); `offset` is later than asked when older output is no longer kept (the last 1 MiB is), `total` is how many bytes it wrote |
+| `process/resize` | `{ session_id, id, cols, rows }` | `null`; sets a running terminal job's size (it gets `SIGWINCH`) |
 | `ask/respond` | `{ ask_id, answer }` | `null`; error if no question with that id is open |
 | `health/check` | `{}` | `[{ name, status: "ok" \| "warn" \| "error", message }]`: the core's checks (provider, API key, reachability, sessions folder, Lua) and core Lua's `bone.health` checks |
 | `settings/get` | `{}` | the saved settings (`settings.json` in the config dir), a JSON object |
@@ -76,7 +78,7 @@ After `initialize`, the server runs each request on its own task: replies carry 
 
 `ReloadResult` is `{ plugins: [{ name, core, loaded }], warnings? }`; `warnings` lists settings that cannot change while running (`data_dir`) and errors from `bone.on_shutdown`. Disabling a plugin lasts until the server restarts; rename its folder to disable it for good.
 
-`SessionInfo` is `{ session_id, cwd, created_at, title?, parent? }`.
+`SessionInfo` is `{ session_id, cwd, created_at, title?, parent?, owner? }`. `parent` is the session it was forked from; `owner` is `{ session_id, call_id?, name? }` for a session core Lua started on another's behalf (a sub-agent, via `bone.session.create`): the session and tool call that started it. Clients usually leave owned sessions out of session pickers and show them with their owner.
 
 The queue: each session keeps `[{ id, text, mode: "steer" | "next", created_at }]`, saved next to its file (`<id>.queue.json`) so it outlives a restart. When a turn ends, any steer message that did not join it becomes `next`, and the first queued message starts the next turn, after completed and failed turns alike. A cancelled turn pauses the queue, and so does loading a session that had a queue; `queue/resume` or a new `queue/add` lets it go on. `session/messages` includes `queue` and `queue_paused`. `ChatMessage` is tagged by `role`:
 
@@ -101,7 +103,7 @@ Every event carries `session_id` (except `echoed`, `ask/resolved`, `core/reloade
 | `tool/started` | `{ call, started_at? }` | the core is handling a tool call (`tool_call` hooks run next); `started_at` is milliseconds since the Unix epoch |
 | `tool/output` | `{ call_id, text }` | output a running foreground tool produced, in order, as it comes; `tool/finished` still carries the whole result. Detached shell processes use `process/changed` after their start result |
 | `tool/finished` | `{ call_id, output, is_error, duration_ms? }` | its result, as the model will see it, and how long it ran |
-| `process/changed` | `{ session_id, version, process: ProcessSnapshot }` | a managed shell process started, produced output, or changed state |
+| `process/changed` | `{ session_id, version, process: ProcessSnapshot, chunk? }` | a managed shell process started, produced output, or changed state. `chunk` is `{ offset, data }`: new output as written, at byte `offset` (chunks follow on from each other; after a gap, `process/read` it) |
 | `ask/requested` | `{ ask_id, question }` | core Lua (a hook or tool) called `bone.ask(question)` and waits; answer with `ask/respond`. `question` is whatever the Lua passed, e.g. the approve plugin's `{ kind: "approval", title, tool, arguments }` |
 | `ask/resolved` | `{ ask_id, answer }` | answered by some client, or `answer: null` if the turn was cancelled first |
 | `turn/steered` | `{ text }` | a steer message from the queue joined the running turn's transcript (show it as a user message) |
@@ -111,6 +113,7 @@ Every event carries `session_id` (except `echoed`, `ask/resolved`, `core/reloade
 | `core/reloaded` | `ReloadResult` | the core switched to a newly loaded Lua configuration (no `session_id`) |
 | `model/delta` | `{ request_id, kind, text }` | streamed output of a `model/complete` call (no `session_id`) |
 | `model/completed` | `{ request_id, message?, usage?, error? }` | a `model/complete` call ended: the assistant `message`, or an `error` (no `session_id`) |
+| `session/created` | `SessionInfo` | a session was created: by a client, a fork, or core Lua (a sub-agent's, with `owner`) |
 | `session/deleted` | `{ session_id }` | a client deleted the session |
 | `session/compacted` | `{ messages, tokens_before, tokens_after, reason }` | the session was compacted (`reason`: `"manual"` from `session/compact`, `"limit"` over `compact.limit`, `"overflow"` after the model said the context is too long, or `"clear"`). The transcript did not change; there is nothing to reload |
 | `session/updated` | `{ reason: "append" \| "compact" \| "rename" }` | core Lua changed the session's transcript (`bone.session.append`, or `bone.session.compact` replacing it), or it was renamed; load it again with `session/messages` |
@@ -121,10 +124,15 @@ Events are broadcast to all clients. A client that falls more than 8192 events b
 
 `ProcessSnapshot` contains `id`, `command`, `state` (`running`, `exited`,
 `cancelled`, `timed_out` or `failed`), `running`, `pid`, start/finish times,
-bounded `stdout`/`stderr` tails, the ordered `output` tail, `output_bytes`,
-`truncated`, and exit status.
+`tail` (the last line of output, escape codes removed), `output_bytes`,
+`truncated`, exit status, and `terminal`. Its output comes as `process/changed`
+chunks and from `process/read`.
 Background shell processes are owned by the session and outlive the model turn;
 `process/changed` is the authoritative UI stream after the shell tool returns.
+They run in a pseudo-terminal (`terminal: true`, 120×32 until `process/resize`;
+`TERM=xterm-256color`, `PAGER=cat`), so their output is what a terminal shows:
+colors and `\r` progress lines. The model reads it with escape codes removed and
+progress lines settled.
 
 ## Errors
 

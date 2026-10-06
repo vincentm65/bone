@@ -612,7 +612,11 @@ impl Tool for LuaTool {
     fn call<'a>(&'a self, args: Json, ctx: &'a ToolContext) -> BoxFuture<'a, ToolResult> {
         Box::pin(async move {
             let (reply, rx) = oneshot::channel();
-            let lua_ctx = json!({ "cwd": ctx.cwd.to_string_lossy(), "session_id": ctx.session_id });
+            let lua_ctx = json!({
+                "cwd": ctx.cwd.to_string_lossy(),
+                "session_id": ctx.session_id,
+                "call_id": ctx.call_id,
+            });
             let args = vec![json!(self.spec.name), args, lua_ctx];
             self.scripting
                 .run("_run_tool", args, Some(&ctx.session_id), Done::Tool(reply))?;
@@ -1131,6 +1135,8 @@ impl State {
                 let calling = session_id.clone();
                 let task = self.rt.spawn(async move {
                     let result = if let Some(r) = host.mcp_wait(&spec).await {
+                        r
+                    } else if let Some(r) = host.session_wait(&spec).await {
                         r
                     } else if let Some(r) = host.model_wait(&spec, calling).await {
                         r

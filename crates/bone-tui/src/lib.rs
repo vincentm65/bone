@@ -25,6 +25,7 @@ mod plugins;
 mod render;
 mod selection;
 mod shellhl;
+mod term;
 mod terminal;
 mod text;
 mod theme;

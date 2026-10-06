@@ -30,6 +30,8 @@ pub struct ToolSpec {
 pub struct ToolContext {
     pub cwd: PathBuf,
     pub session_id: String,
+    /// The model's id for this call (empty outside a turn).
+    pub call_id: String,
     /// Cancelled when the turn is. Long-running tools should watch it; the
     /// agent also drops the call future on cancel.
     pub cancel: CancellationToken,

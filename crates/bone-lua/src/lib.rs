@@ -32,6 +32,7 @@ pub const RUNTIME: &[(&str, &str)] = runtime_files![
     "lua/bone/ui.lua",
     "lua/bone/ui/layout.lua",
     "lua/bone/ui/statusline.lua",
+    "lua/bone/ui/tray.lua",
     "lua/bone/ui/views.lua",
     "tui/api.lua",
     "tui/defaults.lua",
@@ -39,6 +40,27 @@ pub const RUNTIME: &[(&str, &str)] = runtime_files![
     "core/defaults.lua",
     "colors/black.lua",
     "colors/ansi.lua",
+];
+
+/// The customization guides and the references they point to, embedded.
+/// Exposed to both sides as `bone.docs`, and written to `<config dir>/docs/`
+/// at startup by [`write_docs`].
+macro_rules! docs_files {
+    ($($path:literal),* $(,)?) => {
+        &[$(($path, include_str!(concat!("../../../docs/", $path)))),*]
+    };
+}
+
+pub const DOCS: &[(&str, &str)] = docs_files![
+    "customizing.md",
+    "customizing/customizing-tui.md",
+    "customizing/customizing-panels.md",
+    "customizing/customizing-popups.md",
+    "customizing/customizing-chat.md",
+    "customizing/customizing-core.md",
+    "customizing/customizing-plugins.md",
+    "lua.md",
+    "architecture.md",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,6 +110,7 @@ static CORE_CAPABILITIES: &[&str] = &[
     "core.mcp",
     "core.rpc",
     "plugins.state",
+    "docs",
 ];
 
 static TUI_CAPABILITIES: &[&str] = &[
@@ -119,6 +142,7 @@ static TUI_CAPABILITIES: &[&str] = &[
     "tui.model",
     "tui.rpc",
     "plugins.state",
+    "docs",
     "plugins.lifecycle",
     "tui.project",
     "tui.session",
@@ -434,6 +458,48 @@ pub fn new_state(side: Side, config_dir: Option<&Path>) -> mlua::Result<Lua> {
                 .collect::<String>())
         })?,
     )?;
+    // bone.docs: the customization guides. list() -> { { name, desc } } (the
+    // description is the guide's first line); read(name) -> text, or nil and
+    // an error.
+    let docs = lua.create_table()?;
+    docs.set(
+        "list",
+        lua.create_function(|lua, ()| {
+            let out = lua.create_table()?;
+            for (name, src) in DOCS {
+                let entry = lua.create_table()?;
+                entry.set("name", *name)?;
+                entry.set(
+                    "desc",
+                    src.lines().find(|l| !l.trim().is_empty()).unwrap_or(""),
+                )?;
+                out.push(entry)?;
+            }
+            Ok(out)
+        })?,
+    )?;
+    docs.set(
+        "read",
+        lua.create_function(
+            |lua, name: String| match DOCS.iter().find(|(p, _)| *p == name) {
+                Some((_, src)) => {
+                    mlua::IntoLuaMulti::into_lua_multi(Value::String(lua.create_string(src)?), lua)
+                }
+                None => {
+                    let mut known: Vec<&str> = DOCS.iter().map(|(p, _)| *p).collect();
+                    known.sort();
+                    mlua::IntoLuaMulti::into_lua_multi(
+                        (
+                            Value::Nil,
+                            format!("no guide {name:?} (available: {})", known.join(", ")),
+                        ),
+                        lua,
+                    )
+                }
+            },
+        )?,
+    )?;
+    bone.set("docs", docs)?;
 
     let json = lua.create_table()?;
     json.set(
@@ -551,6 +617,20 @@ pub fn runtime_source(config_dir: Option<&Path>, rel: &str) -> Option<(String, S
         .iter()
         .find(|(p, _)| *p == rel)
         .map(|(_, src)| ((*src).to_owned(), format!("runtime/{rel}")))
+}
+
+/// Write the embedded docs to `<config dir>/docs/`, so they always match
+/// this build. A file is only rewritten when it changed.
+pub fn write_docs(config_dir: &Path) -> std::io::Result<()> {
+    for (name, src) in DOCS {
+        let path = config_dir.join("docs").join(name);
+        if std::fs::read_to_string(&path).is_ok_and(|old| old == *src) {
+            continue;
+        }
+        std::fs::create_dir_all(path.parent().expect("a file's directory"))?;
+        std::fs::write(&path, src)?;
+    }
+    Ok(())
 }
 
 /// `~/x` as a path under $HOME.
@@ -745,6 +825,16 @@ mod tests {
             lua.load("return bone.side").eval::<String>().unwrap(),
             "tui"
         );
+    }
+
+    #[test]
+    fn write_docs_replaces_stale_copies() {
+        let dir = tempfile::tempdir().unwrap();
+        let tui = dir.path().join("docs/customizing/customizing-tui.md");
+        std::fs::create_dir_all(tui.parent().unwrap()).unwrap();
+        std::fs::write(&tui, "old").unwrap();
+        write_docs(dir.path()).unwrap();
+        assert_eq!(std::fs::read_to_string(tui).unwrap(), DOCS[1].1);
     }
 
     #[test]

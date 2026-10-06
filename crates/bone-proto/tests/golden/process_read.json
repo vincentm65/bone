@@ -1,0 +1,21 @@
+[
+  {
+    "id": 38,
+    "jsonrpc": "2.0",
+    "method": "process/read",
+    "params": {
+      "from": 0,
+      "id": "shell-1",
+      "session_id": "01a0fe5e-0000-7000-8000-000000000001"
+    }
+  },
+  {
+    "id": 38,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": "\u001b[32mrunning\u001b[0m\r\n",
+      "offset": 0,
+      "total": 19
+    }
+  }
+]

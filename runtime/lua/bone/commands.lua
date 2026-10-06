@@ -11,7 +11,7 @@ end
 local KEYS = [[
 Keys: enter send · alt+enter newline · ctrl+c cancel / clear / quit · ctrl+o sessions
       pageup/pagedown scroll · ctrl+home/ctrl+end top/bottom · up/down history · tab complete
-      ctrl+r show/hide reasoning]]
+      ctrl+r show/hide reasoning · ↓ on empty prompt: sub-agents and shell jobs · ctrl+b fold them]]
 
 cmd("help", function(c)
   if c.args ~= "" then
@@ -146,6 +146,17 @@ end, {
   desc = "settings: options, provider and model, plugins",
   aliases = { "settings" },
 })
+
+-- `/model` is handled by the TUI so it can use the core's model and settings
+-- requests directly. Register it here so help, completion and the command
+-- menu expose it alongside the Lua commands.
+cmd("model", function() end, {
+  desc = "show or set the model for the current provider",
+})
+
+cmd("provider", function()
+  require("bone.config").open("providers")
+end, { desc = "the model provider (the providers page in /config)" })
 
 
 cmd("catalog", function()

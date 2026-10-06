@@ -13,9 +13,10 @@ use std::time::Duration;
 
 use bone_proto::methods::ModelInfo;
 use bone_proto::methods::{
-    AskRequested, AskResolved, PluginInfo, ReloadResult, SessionUpdated, SessionUpdatedParams,
+    AskRequested, AskResolved, PluginInfo, ReloadResult, SessionCreated, SessionUpdated,
+    SessionUpdatedParams, TurnFinished,
 };
-use bone_proto::types::ChatMessage;
+use bone_proto::types::{ChatMessage, SessionOwner};
 use serde_json::{Value as Json, json};
 use tokio::sync::broadcast;
 use tokio::sync::{mpsc, oneshot};
@@ -440,6 +441,69 @@ impl Host {
         Ok(json!({ "stream": id }))
     }
 
+    /// `{ session_run = { id, text } }` from core Lua: start a turn on an
+    /// idle session and wait for it to end, giving `{ text, outcome }` (the
+    /// final answer). The turn is cancelled if the wait is (the calling
+    /// turn was). `None` for other waits.
+    pub(crate) async fn session_wait(&self, spec: &Json) -> Option<Result<Json, String>> {
+        let run = spec.get("session_run")?;
+        let r = async {
+            let inner = self.inner()?;
+            let id = run["id"]
+                .as_str()
+                .ok_or("bone.session.run needs a session id")?;
+            let text = run["text"].as_str().unwrap_or_default().to_owned();
+            if text.trim().is_empty() {
+                return Err("bone.session.run needs text".to_string());
+            }
+            let session = inner.session(id).map_err(|e| e.to_string())?;
+            // Subscribed before the turn starts, so its end can't be missed.
+            let mut events = inner.events.subscribe();
+            let turn_id = inner
+                .begin_turn(session.clone(), text)
+                .map_err(|e| e.message)?;
+            let mut guard = CancelTurn(Some((session.clone(), turn_id)));
+            let outcome = loop {
+                match events.recv().await {
+                    Ok(ev)
+                        if ev.method == <TurnFinished as bone_proto::Notification>::METHOD
+                            && ev.params["session_id"] == id
+                            && ev.params["turn_id"] == json!(turn_id) =>
+                    {
+                        break ev.params["outcome"].clone();
+                    }
+                    Ok(_) => {}
+                    Err(broadcast::error::RecvError::Lagged(_)) => {
+                        let s = session.lock().unwrap();
+                        if s.active.as_ref().map(|a| a.turn_id) != Some(turn_id) {
+                            break json!({ "status": "completed" });
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => {
+                        return Err("the core stopped".to_string());
+                    }
+                }
+            };
+            guard.0 = None;
+            let text = session
+                .lock()
+                .unwrap()
+                .messages
+                .iter()
+                .rev()
+                .find_map(|m| match m {
+                    ChatMessage::Assistant { content, .. } if !content.is_empty() => {
+                        Some(content.clone())
+                    }
+                    ChatMessage::User { .. } => Some(String::new()),
+                    _ => None,
+                })
+                .unwrap_or_default();
+            Ok(json!({ "session_id": id, "turn_id": turn_id, "text": text, "outcome": outcome }))
+        };
+        Some(r.await)
+    }
+
     /// A session's turn was cancelled: stop the model calls its Lua made.
     pub(crate) fn cancel_models(&self, session_id: &str) {
         self.models.open.lock().unwrap().retain(|_, s| {
@@ -452,9 +516,12 @@ impl Host {
     }
 
     /// `bone.session.*`: `{ op = "messages" | "append" | "compact", id,
-    /// message?, messages? }`.
+    /// message?, messages? }`, or `{ op = "create", cwd?, title?, owner? }`.
     pub(crate) fn session_op(&self, spec: &Json) -> Result<Json, String> {
         let inner = self.inner()?;
+        if spec["op"] == "create" {
+            return session_create(&inner, spec);
+        }
         let id = spec["id"].as_str().ok_or("a session id is needed")?;
         let session = inner.sessions.get(id).map_err(|e| e.to_string())?;
         let op = spec["op"].as_str().unwrap_or_default();
@@ -540,6 +607,70 @@ impl Host {
         });
         Ok(json!(true))
     }
+}
+
+/// Cancels a turn when dropped, unless disarmed (`.0 = None`).
+struct CancelTurn(Option<(crate::session::SessionHandle, bone_proto::types::TurnId)>);
+
+impl Drop for CancelTurn {
+    fn drop(&mut self) {
+        if let Some((session, turn_id)) = self.0.take()
+            && let Some(active) = &session.lock().unwrap().active
+            && active.turn_id == turn_id
+        {
+            active.cancel.cancel();
+        }
+    }
+}
+
+/// `bone.session.create`: a new session, by default in the cwd of the
+/// session that owns it.
+fn session_create(inner: &Arc<Inner>, spec: &Json) -> Result<Json, String> {
+    let owner: Option<SessionOwner> = match &spec["owner"] {
+        Json::Null => None,
+        o => Some(serde_json::from_value(o.clone()).map_err(|e| format!("bad owner: {e}"))?),
+    };
+    let cwd = match (spec["cwd"].as_str(), &owner) {
+        (Some(cwd), _) => cwd.to_owned(),
+        (None, Some(o)) => inner
+            .sessions
+            .get(&o.session_id)
+            .map_err(|e| e.to_string())?
+            .lock()
+            .unwrap()
+            .info
+            .cwd
+            .clone(),
+        (None, None) => std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .to_string_lossy()
+            .into_owned(),
+    };
+    let cwd = std::fs::canonicalize(&cwd)
+        .ok()
+        .filter(|p| p.is_dir())
+        .ok_or_else(|| format!("not a directory: {cwd}"))?
+        .to_string_lossy()
+        .into_owned();
+    let session = match owner {
+        Some(o) => inner.sessions.create_owned(cwd, o),
+        None => inner.sessions.create(cwd),
+    }
+    .map_err(|e| e.to_string())?;
+    let mut info = session.lock().unwrap().info.clone();
+    if let Some(title) = spec["title"]
+        .as_str()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        info = inner
+            .sessions
+            .rename(&info.session_id, title)
+            .map_err(|e| e.to_string())?;
+    }
+    inner.started_session(&info.session_id, &info.cwd, true);
+    inner.emit::<SessionCreated>(info.clone());
+    serde_json::to_value(info).map_err(|e| e.to_string())
 }
 
 const NOT_NOW: &str = "a running turn's transcript can only change between model calls \

@@ -172,6 +172,7 @@ async fn hooks_tools_and_system_prompt() {
     };
     let ctx = ToolContext {
         cwd: "/w".into(),
+        call_id: String::new(),
         session_id: "s".into(),
         cancel: Default::default(),
         views: Default::default(),
@@ -272,6 +273,7 @@ async fn ask_waits_for_an_answer_or_a_cancel() {
         let tool = tool.clone();
         let ctx = ToolContext {
             cwd: "/".into(),
+            call_id: String::new(),
             session_id: session.into(),
             cancel: Default::default(),
             views: Default::default(),
@@ -422,6 +424,7 @@ async fn plugins_run_before_user_config() {
     let tool = LuaTool::new(spec, loaded.scripting.clone(), false);
     let ctx = ToolContext {
         cwd: repo.path().to_owned(),
+        call_id: String::new(),
         session_id: "s".into(),
         cancel: Default::default(),
         views: Default::default(),
@@ -448,6 +451,7 @@ fn lua_tool(loaded: &Loaded, name: &str) -> std::sync::Arc<LuaTool> {
 
 fn ctx(session: &str) -> ToolContext {
     ToolContext {
+        call_id: String::new(),
         cwd: "/".into(),
         session_id: session.into(),
         cancel: Default::default(),

@@ -16,7 +16,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bone_proto::methods::{QueueMode, QueuedMessage};
-use bone_proto::types::{ChatMessage, SessionId, SessionInfo, TurnId};
+use bone_proto::types::{ChatMessage, SessionId, SessionInfo, SessionOwner, TurnId};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
@@ -82,6 +82,9 @@ pub(crate) struct Header {
     /// The session it was forked from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<SessionId>,
+    /// The session that started this one (a subagent's).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<SessionOwner>,
 }
 
 pub struct Session {
@@ -286,7 +289,16 @@ impl SessionStore {
     }
 
     pub fn create(&self, cwd: String) -> Result<SessionHandle, SessionError> {
-        self.create_with(cwd, None, &[], None)
+        self.create_with(cwd, None, None, &[], None)
+    }
+
+    /// A new session started on behalf of another (a subagent).
+    pub fn create_owned(
+        &self,
+        cwd: String,
+        owner: SessionOwner,
+    ) -> Result<SessionHandle, SessionError> {
+        self.create_with(cwd, None, Some(owner), &[], None)
     }
 
     /// A new session, maybe forked from another, starting with `messages`
@@ -295,6 +307,7 @@ impl SessionStore {
         &self,
         cwd: String,
         parent: Option<SessionId>,
+        owner: Option<SessionOwner>,
         messages: &[ChatMessage],
         summary: Option<Summary>,
     ) -> Result<SessionHandle, SessionError> {
@@ -304,6 +317,7 @@ impl SessionStore {
             cwd,
             created_at: now(),
             parent,
+            owner,
         };
         let path = self.path(&header.session_id);
         let mut file = OpenOptions::new()
@@ -316,6 +330,7 @@ impl SessionStore {
             created_at: header.created_at,
             title: messages.iter().find_map(title_of),
             parent: header.parent.clone(),
+            owner: header.owner.clone(),
         };
         write_record(&mut file, Record::Session(header))?;
         for m in messages {
@@ -438,7 +453,7 @@ impl SessionStore {
             let summary = s.summary.clone().filter(|sum| sum.through <= end);
             (s.info.cwd.clone(), s.messages[..end].to_vec(), summary)
         };
-        self.create_with(cwd, Some(id.to_owned()), &messages, summary)
+        self.create_with(cwd, Some(id.to_owned()), None, &messages, summary)
     }
 
     /// Give a session a title that stays (kept next to its file).
@@ -608,6 +623,7 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
             created_at: header.created_at,
             title: None,
             parent: header.parent,
+            owner: header.owner,
         },
         messages: Vec::new(),
         summary: None,

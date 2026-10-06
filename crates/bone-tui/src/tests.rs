@@ -59,6 +59,16 @@ fn info(id: &str, title: Option<&str>) -> Value {
     json!({ "session_id": id, "cwd": "/work", "created_at": 0, "title": title })
 }
 
+/// A session as `session/messages` gives it; `child-*` sessions are
+/// sub-agents of s-new.
+fn loaded_info(id: &str) -> Value {
+    let mut i = info(id, Some("loaded"));
+    if id.starts_with("child-") {
+        i["owner"] = json!({ "session_id": "s-new", "call_id": "c1", "name": "reviewer" });
+    }
+    i
+}
+
 /// Canned replies by method.
 fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
     // The fake core has one core plugin, `corepart`; any other name is a
@@ -148,13 +158,19 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
             json!({ "protocol_version": 0, "server_name": "fake", "server_version": "0" })
         }
         "session/create" => info("s-new", None),
+        "process/read" => json!({
+            "offset": 0,
+            "data": "\u{1b}[32mlistening\u{1b}[0m on 3000\r\n",
+            "total": 28,
+        }),
+
         "turn/start" => json!({ "turn_id": 1 }),
         "session/list" => json!([info("s-two", Some("second")), info("s-one", Some("first"))]),
         "health/check" => {
             json!([{ "name": "provider", "status": "ok", "message": "m at http://x" }])
         }
         "session/messages" => json!({
-            "info": info(params["session_id"].as_str().unwrap(), Some("loaded")),
+            "info": loaded_info(params["session_id"].as_str().unwrap()),
             "messages": [
                 { "role": "user", "content": "old question" },
                 { "role": "assistant", "content": "old answer" },
@@ -3290,7 +3306,10 @@ async fn standard_ui_has_a_three_row_prompt_and_a_running_statusline() {
     let mut h = Harness::build(None).await;
     let (w, rows) = (40, 16);
     let screen = h.screen(w, rows);
-    assert!(screen.lines().last().unwrap_or("").contains("curr 0"), "{screen}");
+    assert!(
+        screen.lines().last().unwrap_or("").contains("curr 0"),
+        "{screen}"
+    );
     let lines: Vec<&str> = screen.split('\n').collect();
     let n = lines.len();
     // The prompt's three rows, then the statusline on the last row.
@@ -3981,38 +4000,189 @@ async fn tool_items_carry_live_output_timing_and_usage() {
     );
 }
 
+fn process(state: ProcessState, tail: &str) -> ProcessSnapshot {
+    ProcessSnapshot {
+        session_id: "s-new".into(),
+        id: "shell-1".into(),
+        command: "npm run dev".into(),
+        state,
+        running: state == ProcessState::Running,
+        pid: Some(42),
+        started_at_ms: 1_790_000_000_000,
+        finished_at_ms: (state != ProcessState::Running).then_some(1_790_000_041_000),
+        elapsed_ms: 3000,
+        tail: tail.into(),
+        output_bytes: 18,
+        truncated: false,
+        code: (state == ProcessState::Exited).then_some(0),
+        signal: None,
+        error: None,
+        terminal: true,
+    }
+}
+
 #[tokio::test]
-async fn managed_process_events_are_visible_to_lua_and_the_default_panel() {
+async fn shell_jobs_show_in_the_tray_and_open_in_place() {
     let mut h = Harness::build(None).await;
+    h.input("hi{enter}").await;
     h.emit::<ProcessChanged>(ProcessChangedParams {
         session_id: "s-new".into(),
         version: 1,
-        process: ProcessSnapshot {
-            session_id: "s-new".into(),
-            id: "shell-1".into(),
-            command: "npm run dev".into(),
-            state: ProcessState::Running,
-            running: true,
-            pid: Some(42),
-            started_at_ms: 1_790_000_000_000,
-            finished_at_ms: None,
-            elapsed_ms: 3000,
-            stdout: "listening on 3000\n".into(),
-            stderr: String::new(),
-            output: "listening on 3000\n".into(),
-            output_bytes: 18,
-            truncated: false,
-            code: None,
-            signal: None,
-            error: None,
-        },
+        process: process(ProcessState::Running, "listening on 3000"),
+        chunk: Some(ProcessChunk {
+            offset: 0,
+            data: "\u{1b}[32mlistening\u{1b}[0m on 3000\r\n".into(),
+        }),
     })
     .await;
     assert_eq!(h.lua("=bone.processes.list()[1].id").await, "\"shell-1\"");
     let screen = h.screen(100, 20);
-    assert!(screen.contains("Processes"), "{screen}");
-    assert!(screen.contains("npm run dev"), "{screen}");
-    assert!(screen.contains("listening on 3000"), "{screen}");
+    assert!(screen.contains("Shells 1"), "{screen}");
+    assert!(
+        screen.contains("$ npm run dev  listening on 3000"),
+        "{screen}"
+    );
+
+    // Down on the empty prompt moves into the tray; enter opens the job's
+    // terminal right there, which reads the output and shows it.
+    h.input("{down}").await;
+    assert_eq!(h.lua("=bone.keymap.current()").await, "\"tray\"");
+    h.input("{enter}").await;
+    h.screen(100, 20);
+    h.settle().await;
+    assert_eq!(h.requests("process/read").len(), 1);
+    let screen = h.screen(100, 20);
+    assert!(screen.contains("esc close"), "{screen}");
+    assert!(screen.contains("\n   listening on 3000"), "{screen}");
+    // The running process's terminal gets the tray's width.
+    let resize = h.requests("process/resize");
+    assert_eq!(resize.last().unwrap()["cols"], json!(97));
+    // Later output arrives as chunks.
+    h.emit::<ProcessChanged>(ProcessChangedParams {
+        session_id: "s-new".into(),
+        version: 2,
+        process: process(ProcessState::Exited, "bye"),
+        chunk: Some(ProcessChunk {
+            offset: 28,
+            data: "bye\r\n".into(),
+        }),
+    })
+    .await;
+    let screen = h.screen(100, 20);
+    assert!(screen.contains("\n   bye"), "{screen}");
+    assert!(screen.contains("✓ $ npm run dev  exit 0"), "{screen}");
+    // Esc closes the terminal, esc again gives the prompt the keyboard.
+    h.input("{esc}").await;
+    assert!(!h.screen(100, 20).contains("esc close"));
+    h.input("{esc}").await;
+    assert_eq!(h.lua("=bone.keymap.current()").await, "\"main\"");
+    // The finished row stays until the next message.
+    assert!(h.screen(100, 20).contains("$ npm run dev"));
+    h.input("next{enter}").await;
+    assert!(!h.screen(100, 20).contains("$ npm run dev"));
+    assert_eq!(h.lua("=#require('bone.ui.tray').rows('shells')").await, "0");
+}
+
+#[tokio::test]
+async fn terminal_resize_retries_after_a_startup_failure() {
+    let mut h = Harness::build(None).await;
+    h.input("hi{enter}").await;
+    h.emit::<ProcessChanged>(ProcessChangedParams {
+        session_id: "s-new".into(),
+        version: 1,
+        process: process(ProcessState::Running, "listening on 3000"),
+        chunk: None,
+    })
+    .await;
+    h.input("{down}{enter}").await;
+
+    *h.fail.lock().unwrap() = Some("process/resize".into());
+    h.screen(100, 20);
+    h.settle().await;
+    assert_eq!(h.requests("process/resize").len(), 1);
+
+    *h.fail.lock().unwrap() = None;
+    h.screen(100, 20);
+    h.settle().await;
+    assert_eq!(h.requests("process/resize").len(), 2);
+}
+
+#[tokio::test]
+async fn subagents_show_in_the_tray_and_open_on_click() {
+    let mut h = Harness::build(None).await;
+    h.input("hi{enter}").await;
+    h.emit::<SessionCreated>(bone_proto::types::SessionInfo {
+        session_id: "child-1".into(),
+        cwd: "/work".into(),
+        created_at: 0,
+        title: Some("find callers".into()),
+        parent: None,
+        owner: Some(bone_proto::types::SessionOwner {
+            session_id: "s-new".into(),
+            call_id: Some("c1".into()),
+            name: Some("reviewer".into()),
+        }),
+    })
+    .await;
+    h.emit::<TurnStarted>(started("child-1", "look around"))
+        .await;
+    h.emit::<ToolStarted>(ToolStartedParams {
+        session_id: "child-1".into(),
+        turn_id: 1,
+        call: ToolCall {
+            id: "x".into(),
+            name: "read_file".into(),
+            arguments: r#"{"path":"/work/src/panel.rs"}"#.into(),
+        },
+        started_at: None,
+    })
+    .await;
+    let screen = h.screen(100, 20);
+    assert!(screen.contains("Agents 1"), "{screen}");
+    assert!(
+        screen.contains("reviewer  find callers  read_file src/panel.rs"),
+        "{screen}"
+    );
+
+    // Into the tray and out again: down, then up from the top row.
+    h.input("{down}").await;
+    assert!(h.screen(100, 20).contains(" › "));
+    h.input("{up}").await;
+    assert_eq!(h.lua("=bone.keymap.current()").await, "\"main\"");
+
+    // A click on the row opens the sub-agent's session, with a way back.
+    let y = screen
+        .lines()
+        .position(|l| l.contains("find callers"))
+        .unwrap() as u16;
+    h.app.mouse("down", "left", (10, y));
+    h.settle().await;
+    assert!(
+        h.requests("session/messages")
+            .iter()
+            .any(|p| p["session_id"] == "child-1")
+    );
+    let screen = h.screen(100, 20);
+    assert!(screen.contains(" ‹ main │ Agents 1"), "{screen}");
+    // Esc on an empty prompt goes back to the session that started it.
+    h.input("{esc}").await;
+    assert_eq!(h.lua("=bone.chat.session().session_id").await, "\"s-new\"");
+
+    // Finished: a check mark, until the next message.
+    h.emit::<TurnFinished>(TurnFinishedParams {
+        session_id: "child-1".into(),
+        turn_id: 1,
+        outcome: TurnOutcome::Completed,
+    })
+    .await;
+    let screen = h.screen(100, 20);
+    assert!(
+        screen.contains("✓ reviewer  find callers  done"),
+        "{screen}"
+    );
+    // ctrl+b folds the tray; with nothing running it is gone.
+    h.input("{ctrl+b}").await;
+    assert!(!h.screen(100, 20).contains("find callers  done"));
 }
 
 #[tokio::test]

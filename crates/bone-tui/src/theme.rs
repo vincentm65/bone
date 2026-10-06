@@ -118,6 +118,10 @@ impl Theme {
             .unwrap_or_default()
     }
 
+    pub fn has(&self, name: &str) -> bool {
+        self.groups.contains_key(name)
+    }
+
     pub fn set(&mut self, name: &str, style: Style) {
         self.groups.insert(name.to_owned(), style);
     }

@@ -13,7 +13,7 @@ use std::time::Duration;
 
 use bone_proto::methods::{
     MessageCompleted, MessageCompletedParams, MessageDelta, MessageDeltaParams, ProcessChanged,
-    ProcessChangedParams, ProcessState, ToolFinished, ToolFinishedParams, ToolOutput,
+    ProcessChangedParams, ProcessChunk, ToolFinished, ToolFinishedParams, ToolOutput,
     ToolOutputParams, ToolStarted, ToolStartedParams, TurnFinished, TurnFinishedParams,
     TurnStarted, TurnStartedParams, TurnSteered,
 };
@@ -26,9 +26,7 @@ use crate::config::CoreConfig;
 use crate::provider::{CompletionRequest, Delta};
 use crate::runtime::Runtime;
 use crate::session::{SessionHandle, UsageRecord};
-use crate::tools::{
-    ProcessState as CoreProcessState, ProcessView, ToolContext, ToolSpec, parse_args,
-};
+use crate::tools::{ProcessView, ToolContext, ToolSpec, parse_args};
 
 /// After cancellation, how long a running tool gets to clean up (e.g. kill
 /// its process group) before its future is dropped.
@@ -38,7 +36,8 @@ const DEFAULT_SYSTEM_PROMPT: &str = "You are bone, a coding assistant working in
 user's terminal. Use the tools to inspect files, make changes and run commands. Search with rg \
 before reading large files, then use read_file ranges for focused sections. Read files before \
 editing them; group independent hunks in one edit_file call. Keep changes minimal and focused, \
-and keep answers concise.";
+and keep answers concise.\n\n\
+If the user wants to change or customize bone itself, first read ~/.bone/docs/customizing.md.";
 
 const CANCELLED: &str = "Cancelled by the user before this tool call ran.";
 
@@ -254,7 +253,9 @@ impl Turn<'_> {
                 "messages": messages,
                 "tools": tools.iter().map(|t| json!({ "name": t.name, "description": t.description, "parameters": t.parameters })).collect::<Vec<_>>(),
             });
+            let mut use_provider = None;
             if let Some(ev) = self.safe_hooks("request", ev).await? {
+                use_provider = ev["provider"].as_str().map(str::to_owned);
                 messages = serde_json::from_value(list(&ev["messages"])).map_err(|e| {
                     Stop::Failed(format!("request hook returned bad messages: {e}"))
                 })?;
@@ -284,6 +285,20 @@ impl Turn<'_> {
                 self.rt.selected.clone(),
                 self.rt.config.provider.model.clone(),
             );
+            // A request hook may send this call to another provider.
+            if let Some(name) = use_provider {
+                provider = self
+                    .rt
+                    .provider_for(Some(&name), &Value::Null)
+                    .map_err(|why| Stop::Failed(format!("request hook: {why}")))?;
+                served.1 = self
+                    .rt
+                    .models
+                    .get(&name)
+                    .map(|p| p.model.clone())
+                    .unwrap_or_default();
+                served.0 = Some(name);
+            }
             let completion = loop {
                 attempt += 1;
                 let mut text = String::new();
@@ -631,42 +646,23 @@ impl Turn<'_> {
         let processes = {
             let events = self.inner.events.clone();
             let session_id = self.session_id.clone();
-            Arc::new(move |view: ProcessView, version: u64| {
-                let state = match view.state {
-                    CoreProcessState::Running => ProcessState::Running,
-                    CoreProcessState::Exited => ProcessState::Exited,
-                    CoreProcessState::Cancelled => ProcessState::Cancelled,
-                    CoreProcessState::TimedOut => ProcessState::TimedOut,
-                    CoreProcessState::Failed => ProcessState::Failed,
-                };
+            Arc::new(move |mut view: ProcessView, version: u64| {
+                let chunk = view
+                    .chunk
+                    .take()
+                    .map(|(offset, data)| ProcessChunk { offset, data });
                 let _ = events.send(crate::Event::new::<ProcessChanged>(ProcessChangedParams {
                     session_id: session_id.clone(),
                     version,
-                    process: bone_proto::methods::ProcessSnapshot {
-                        session_id: session_id.clone(),
-                        id: view.id,
-                        command: view.command,
-                        state,
-                        running: view.running,
-                        pid: view.pid,
-                        started_at_ms: view.started_at_ms,
-                        finished_at_ms: view.finished_at_ms,
-                        elapsed_ms: view.elapsed_ms,
-                        stdout: view.stdout,
-                        stderr: view.stderr,
-                        output: view.output,
-                        output_bytes: view.output_bytes,
-                        truncated: view.truncated,
-                        code: view.code,
-                        signal: view.signal,
-                        error: view.error,
-                    },
+                    process: crate::process_snapshot(&session_id, view),
+                    chunk,
                 }));
             })
         };
         let ctx = ToolContext {
             cwd: self.cwd.clone(),
             session_id: self.session_id.clone(),
+            call_id: call.id.clone(),
             cancel: self.cancel.clone(),
             views: self.inner.views.clone(),
             jobs: self.inner.jobs.clone(),

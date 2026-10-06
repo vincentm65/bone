@@ -70,6 +70,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         message = rect("message");
     }
 
+    // For mouse events: which leaf is where.
+    app.leaves = plan.leaves.clone();
     let chat_area = middle;
     let chat_area = app.draw_panels(frame, chat_area);
     for (name, r, lines) in std::mem::take(&mut plan.regions) {

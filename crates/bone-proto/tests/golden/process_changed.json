@@ -3,6 +3,10 @@
     "jsonrpc": "2.0",
     "method": "process/changed",
     "params": {
+      "chunk": {
+        "data": "ok\r\n",
+        "offset": 19
+      },
       "process": {
         "code": 0,
         "command": "cargo test",
@@ -10,16 +14,15 @@
         "error": null,
         "finished_at_ms": 1790000001500,
         "id": "shell-1",
-        "output": "ok\n",
-        "output_bytes": 3,
+        "output_bytes": 4,
         "pid": 1234,
         "running": false,
         "session_id": "01a0fe5e-0000-7000-8000-000000000001",
         "signal": null,
         "started_at_ms": 1790000000000,
         "state": "exited",
-        "stderr": "",
-        "stdout": "ok\n",
+        "tail": "ok",
+        "terminal": true,
         "truncated": false
       },
       "session_id": "01a0fe5e-0000-7000-8000-000000000001",

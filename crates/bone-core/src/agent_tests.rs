@@ -233,6 +233,15 @@ impl Harness {
         }
     }
 
+    /// The next session created on another's behalf.
+    async fn child_created(&mut self) -> SessionInfo {
+        loop {
+            let info = self.until::<SessionCreated>().await;
+            if info.owner.is_some() {
+                return info;
+            }
+        }
+    }
     async fn transcript(&self) -> Vec<ChatMessage> {
         self.call::<SessionMessages>(SessionRef {
             session_id: self.session_id.clone(),
@@ -1240,6 +1249,86 @@ async fn cancelling_a_turn_stops_its_model_calls() {
         .await
         .expect("the turn ends promptly");
     assert_eq!(finished.outcome, TurnOutcome::Cancelled);
+}
+
+const CHILD_TOOL: &str = r#"
+bone.tool.register { name = "child", parallel = true, run = function(args, ctx)
+  local info = assert(bone.session.create({
+    title = "helper",
+    owner = { session_id = ctx.session_id, call_id = ctx.call_id, name = "helper" },
+  }))
+  local r, err = bone.session.run(info.session_id, args.prompt or "work")
+  if not r then return "error: " .. tostring(err) end
+  return r.outcome.status .. ":" .. r.text .. "|" .. (info.owner.call_id or "?")
+end }
+"#;
+
+#[tokio::test]
+async fn lua_tools_run_owned_child_sessions() {
+    let mut h = Harness::with_lua(
+        CHILD_TOOL,
+        vec![
+            calls(&[("c1", "child", json!({ "prompt": "look around" }))]),
+            text("child answer"),
+            text("outer"),
+        ],
+    )
+    .await;
+    h.start("go").await;
+    let created = h.child_created().await;
+    let owner = created.owner.clone().expect("owned");
+    assert_eq!(owner.session_id, h.session_id);
+    assert_eq!(owner.call_id.as_deref(), Some("c1"));
+    assert_eq!(created.title.as_deref(), Some("helper"));
+    // The child's turn runs and is reported like any other.
+    let started = h.until::<TurnStarted>().await;
+    assert_eq!(started.session_id, created.session_id);
+    loop {
+        let f = h.until::<TurnFinished>().await;
+        if f.session_id == h.session_id {
+            break;
+        }
+    }
+    let t = h.transcript().await;
+    assert_eq!(tool_result(&t[2]).0, "completed:child answer|c1");
+    // The child keeps its transcript and owner on disk.
+    let child: SessionMessagesResult = h
+        .call::<SessionMessages>(SessionRef {
+            session_id: created.session_id.clone(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(child.info.owner, Some(owner));
+    assert_eq!(child.messages.len(), 2);
+    assert_eq!(
+        child.info.cwd,
+        h.work.path().canonicalize().unwrap().to_string_lossy()
+    );
+}
+
+#[tokio::test]
+async fn cancelling_a_turn_cancels_its_child_sessions() {
+    let mut h = Harness::with_lua(
+        CHILD_TOOL,
+        vec![
+            calls(&[("c1", "child", json!({}))]),
+            Step::Hang("thinking".into()),
+        ],
+    )
+    .await;
+    h.start("go").await;
+    let created = h.child_created().await;
+    h.until::<MessageDelta>().await;
+    h.cancel().await;
+    let mut ended = Vec::new();
+    while ended.len() < 2 {
+        let f = tokio::time::timeout(Duration::from_secs(3), h.until::<TurnFinished>())
+            .await
+            .expect("both turns end promptly");
+        ended.push((f.session_id, f.outcome));
+    }
+    assert!(ended.contains(&(created.session_id, TurnOutcome::Cancelled)));
+    assert!(ended.contains(&(h.session_id.clone(), TurnOutcome::Cancelled)));
 }
 
 #[tokio::test]
@@ -2435,7 +2524,7 @@ async fn background_shells_publish_process_lifecycle_events_after_the_tool_retur
             calls(&[(
                 "c1",
                 "shell",
-                json!({"command": "printf 'a\\n'; sleep 0.2; printf 'b\\n'", "mode": "start"}),
+                json!({"command": "printf 'a\\n'; sleep 0.2; printf '\\033[1mb\\033[0m\\n'", "mode": "start"}),
             )]),
             text("done"),
         ],
@@ -2444,15 +2533,44 @@ async fn background_shells_publish_process_lifecycle_events_after_the_tool_retur
     h.start("go").await;
     let started = h.until::<ProcessChanged>().await;
     assert!(started.process.running);
+    assert!(started.process.terminal);
+    // Output comes as chunks that follow on from each other.
+    let mut raw = String::new();
     let finished = loop {
         let changed = h.until::<ProcessChanged>().await;
+        if let Some(c) = &changed.chunk {
+            assert_eq!(c.offset, raw.len() as u64);
+            raw.push_str(&c.data);
+        }
         if !changed.process.running {
             break changed;
         }
     };
     assert_eq!(finished.process.state, ProcessState::Exited);
-    assert!(finished.process.stdout.contains("a\n"));
-    assert!(finished.process.stdout.contains("b\n"));
+    assert_eq!(finished.process.tail, "b");
+    assert_eq!(raw, "a\r\n\u{1b}[1mb\u{1b}[0m\r\n");
+    let read: ProcessOutput = h
+        .call::<ProcessRead>(ProcessReadParams {
+            session_id: h.session_id.clone(),
+            id: finished.process.id.clone(),
+            from: 0,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        (read.offset, read.data, read.total),
+        (0, raw.clone(), raw.len() as u64)
+    );
+    // A finished job has no terminal to resize.
+    let resize = h
+        .call::<ProcessResize>(ProcessResizeParams {
+            session_id: h.session_id.clone(),
+            id: finished.process.id,
+            cols: 80,
+            rows: 24,
+        })
+        .await;
+    assert!(resize.is_err());
 }
 
 #[tokio::test]

@@ -332,7 +332,14 @@ mod tests {
         assert_eq!(
             kinds(md),
             [
-                "table", "blank", "table", "blank", "paragraph", "blank", "paragraph", "table",
+                "table",
+                "blank",
+                "table",
+                "blank",
+                "paragraph",
+                "blank",
+                "paragraph",
+                "table",
             ]
         );
         let t = &b[0];

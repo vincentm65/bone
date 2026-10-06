@@ -220,29 +220,32 @@ fn structured_args(spec: Option<&JsonValue>, raw: &str) -> Result<Option<JsonVal
 impl App {
     fn model_command(&mut self, args: &str) {
         let args = args.to_owned();
-        self.request::<bone_proto::methods::ModelList>(bone_proto::methods::Empty {}, move |app, r| {
-            let models = match r {
-                Ok(models) => models,
-                Err(e) => return app.error(format!("cannot list models: {e}")),
-            };
-            let Some(current) = models.into_iter().find(|model| model.current) else {
-                return app.error("no model provider is configured");
-            };
-            if args.is_empty() {
-                return app.info(format!("{} ({})", current.model, current.name));
-            }
-            let model = args.clone();
-            app.request::<bone_proto::methods::SettingsSet>(
-                bone_proto::methods::SettingSet {
-                    path: format!("providers.{}.model", current.name),
-                    value: serde_json::Value::String(args),
-                },
-                move |app, r| match r {
-                    Ok(_) => app.info(format!("model: {} ({})", model, current.name)),
-                    Err(e) => app.error(format!("cannot set model: {e}")),
-                },
-            );
-        });
+        self.request::<bone_proto::methods::ModelList>(
+            bone_proto::methods::Empty {},
+            move |app, r| {
+                let models = match r {
+                    Ok(models) => models,
+                    Err(e) => return app.error(format!("cannot list models: {e}")),
+                };
+                let Some(current) = models.into_iter().find(|model| model.current) else {
+                    return app.error("no model provider is configured");
+                };
+                if args.is_empty() {
+                    return app.info(format!("{} ({})", current.model, current.name));
+                }
+                let model = args.clone();
+                app.request::<bone_proto::methods::SettingsSet>(
+                    bone_proto::methods::SettingSet {
+                        path: format!("providers.{}.model", current.name),
+                        value: serde_json::Value::String(args),
+                    },
+                    move |app, r| match r {
+                        Ok(_) => app.info(format!("model: {} ({})", model, current.name)),
+                        Err(e) => app.error(format!("cannot set model: {e}")),
+                    },
+                );
+            },
+        );
     }
 
     /// Run a command line (without the leading `/`).

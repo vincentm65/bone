@@ -146,6 +146,7 @@ A project can carry TUI config in `.bone/tui.lua` (and modules in `.bone/lua/`).
 - `bone.inspect(value)`: readable dump of any value.
 - `bone.util`: `split(s, sep)`, `trim(s)`, `startswith(s, prefix)`, `extend(t1, t2, ...)`, `front_matter(text)` → `meta, body` for Markdown files that start with `---` / `key: value` lines / `---`.
 - `bone.fs.list(dir)` → `{ { name, type = "file" | "dir" } }`, sorted (`~/` works), or `nil` and an error.
+- `bone.docs.list()` → `{ { name, desc } }`, the customization guides (see `docs/customizing.md`); `bone.docs.read(name)` → the guide's text, or `nil` and an error. `name` is the guide's path, such as `customizing/customizing-tui.md`. bone also writes the guides to `~/.bone/docs/` at startup, and the agent's system prompt points it there.
 
 ### Settings
 
@@ -221,7 +222,7 @@ bone.tool.register {
   parameters = { type = "object", properties = { n = { type = "integer" } } },  -- JSON Schema
   needs_approval = false,   -- read by the approve plugin (default: ask)
   parallel = true,          -- only reads: may run alongside other such calls (default false)
-  run = function(args, ctx)  -- ctx = { cwd, session_id }
+  run = function(args, ctx)  -- ctx = { cwd, session_id, call_id }
     local r = bone.system("git log --oneline -n " .. (args.n or 10), { cwd = ctx.cwd })
     if r.code ~= 0 then return nil, r.stderr end   -- an error result
     return r.stdout                                -- or a table (sent as JSON)
@@ -244,7 +245,7 @@ A hook runs at a point in the core with an event table. It returns `nil` (no cha
 | `turn_start` | `{ session_id, cwd, text }`, before the user's message is saved | the turn fails with "why" |
 | `system` | `{ session_id, cwd, prompt }`, once per turn: the system prompt (after `bone.config.system_prompt` and the working directory); return `{ prompt = ... }` to change it | the turn fails |
 | `context` | `{ session_id, messages }`, before each model call: the messages it will send (system prompt first, then a compacted session's summary in place of what it covers); return `{ messages = ... }` to send different ones. The stored transcript is not changed | the turn fails |
-| `request` | `{ session_id, messages, tools }`, before each call to the model, after `context` | the turn fails |
+| `request` | `{ session_id, messages, tools }`, before each call to the model, after `context`; return `{ provider = "name" }` to send this call to another `bone.config.providers` entry | the turn fails |
 | `request_error` | `{ session_id, error, attempt, model }`, when a model call fails before any output arrived; return `{ retry = ms }` to try again after `ms` (at most 5 retries per call), or `{ retry = ms, provider = "name" }` to send the rest of this call to another `bone.config.providers` entry. Without a retry the turn fails as before | the turn fails |
 | `stream` | `{ session_id, turn_id, text, reasoning }`: output as it streams, collected into batches; results are ignored and the stream never waits for it | (ignored) |
 | `session_start` | `{ session_id, cwd, new }`, the first time this core uses a session (`new` when it was just created) | (ignored) |
@@ -281,6 +282,19 @@ bone.session.compact(id, { { role = "user", content = "Summary of earlier work: 
 ```
 
 The message queue is open to Lua too: `bone.queue.add(id, text, mode)` (`"steer"` or `"next"`; an idle session starts a turn), `bone.queue.list(id)`, `bone.queue.remove(id, queue_id)` and `bone.queue.clear(id)`, with the same effects (and `queue/changed` events) as the protocol's `queue/*` methods.
+
+Sessions of their own, for sub-agents:
+
+```lua
+local info = bone.session.create({
+  title = "find callers",                       -- default: the first message
+  owner = { session_id = ctx.session_id, call_id = ctx.call_id, name = "reviewer" },
+})                                              -- cwd defaults to the owner's
+local r, err = bone.session.run(info.session_id, "Find every caller of panel_at")
+-- r = { session_id, turn_id, text (the final answer), outcome = { status, message? } }
+```
+
+`create` emits `session/created`; with an `owner`, clients show the session as the owner's sub-agent (the TUI lists it above the prompt and opens it on a click). `run` starts a turn on an idle session and waits for it without blocking anything else, so several can run at once (a tool registered with `parallel = true`). Cancelling the calling turn cancels this one. The catalog's `subagent` plugin is built on these.
 
 `append` adds a message the model sees from the next call on. `compact` replaces the transcript: the session file keeps every earlier record behind a checkpoint, the session loads from the newest checkpoint, and turn ids keep counting. While a turn runs, the transcript can only change between model calls: in `turn_start`, `system`, `context`, `request` and `request_error` hooks, or after the turn (`turn_end`); elsewhere (a tool, a `tool_call` hook) the call fails, so a message never lands between tool calls and their results. Clients get a `session/updated` event and load the session again. To keep a long session within the model's context without rewriting it, use the core's compaction (`bone.config.compact`) instead; `compact` here replaces the transcript for good and drops a compaction summary.
 
@@ -614,7 +628,7 @@ Registration aliases normalize to these canonical names:
 | `resize` | `ui/resize`, `resize` | `{ width, height }` |
 | `key` | `key/pressed`, `key` | `{ key, context }` |
 | `paste` | `paste`, `text/pasted` | `{ text, context }` |
-| `mouse` | `mouse` | `{ action, button, x, y, index, line }` |
+| `mouse` | `mouse` | `{ action, button, x, y, index, line, region, row, col, panel, panel_line }` |
 | `select` | `select` | `{ text }` when a mouse selection ends; return `true` to keep it from the clipboard |
 | `panel/opened` | `panel`, `panel/opened`, `popup`, `popup/opened` | a window or a panel (see below) |
 | `panel/updated` | `panel/updated`, `popup/updated` | a window or a panel |
@@ -627,7 +641,7 @@ Registration aliases normalize to these canonical names:
 | `processes/changed` | `processes/changed` | the TUI refreshed its process snapshot |
 
 Prompt events are deduplicated, so unchanged text/cursor/selection state is not emitted.
-`mouse` is emitted for every press, drag and release (`action` `"down"`, `"drag"`, `"up"`; `button` `"left"`, `"right"`, `"middle"`; `x`, `y` 0-based screen cells), with `index` and `line` when it is over a chat item. A callback that returns `true` takes it; otherwise the left button selects text and focuses panels as usual. With `bone.chat.redraw(index)` and your own state per item, that is enough for click-to-expand.
+`mouse` is emitted for every press, drag and release (`action` `"down"`, `"drag"`, `"up"`; `button` `"left"`, `"right"`, `"middle"`; `x`, `y` 0-based screen cells), with `index` and `line` when it is over a chat item, `region`, `row` and `col` (from 1) for the layout leaf under it (a region, `"chat"`, `"prompt"`, `"statusline"`, …), and `panel` and `panel_line` (its content line, from 1; 0 on the title) over a panel. A callback that returns `true` takes it; otherwise the left button selects text and focuses panels as usual. With `bone.chat.redraw(index)` and your own state per item, that is enough for click-to-expand.
 `resize` is emitted when terminal dimensions change (and by `Headless:resize`);
 `paste` is emitted for bracketed paste with the active context. Popup lifecycle
 events are emitted when a `bone.ui.win`/`bone.ui.popup` window or a `bone.ui.panel` opens, updates or closes.
@@ -759,8 +773,23 @@ bone.keymap.set("ctrl+x", function() job:cancel() end)
 
 Core-managed shell processes are separate from plugin jobs. The TUI exposes
 `bone.processes.list()`, `bone.processes.refresh()` and
-`bone.processes.cancel(id)`. The built-in runtime draws them in a bottom
-Processes panel; plugins can replace that panel or consume the process events.
+`bone.processes.cancel(id)`; entries carry `tail`, the last line of output.
+`bone.processes.screen(id, { width, height, scroll })` gives a job's terminal
+at that size as lines of `{ text, group }` (`{ lines, scroll, max }`, scrolled
+back `scroll` rows); the first call reads its output, and a running job's
+pseudo-terminal is resized to match.
+
+### The tray
+
+`runtime/lua/bone/ui/tray.lua` shows the sub-agents and shell jobs of the
+session below the prompt, on two tabs (Agents, Shells), one row each: a
+spinner (✓ ✗ ⊘ ⏱ when done), the name and task, what it is doing now, and how
+long it has run. `down` on an empty prompt moves into it (the `tray` keymap
+context) and `up` from its top row leaves; `tab` switches tabs, `enter` opens
+a row (a sub-agent's session in the chat, with `‹ main` in the tray to go
+back; a shell job as a live terminal inside the tray), `c` cancels and `esc`
+goes back. `ctrl+b` folds it to one line. Finished rows stay until the next
+message. `require("bone.ui.tray").rows("agents" | "shells")` gives the rows.
 
 ### Colors
 

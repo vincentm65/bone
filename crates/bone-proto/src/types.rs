@@ -64,6 +64,20 @@ pub struct SessionInfo {
     /// The session this one was forked from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<SessionId>,
+    /// The session (and tool call) that started this one as a subagent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<SessionOwner>,
+}
+
+/// Who started a session on its behalf: a tool call in another session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionOwner {
+    pub session_id: SessionId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_id: Option<String>,
+    /// A short name for it (the subagent's), for UIs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

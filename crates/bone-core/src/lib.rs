@@ -25,16 +25,16 @@ use bone_proto::methods::{
     AskRespond, AskRespondParams, CoreReload, Echo, EchoParams, Echoed, HealthCheck, LuaCall,
     LuaCallParams, McpList, ModelCancel, ModelComplete, ModelCompleteParams, ModelCompleted,
     ModelCompletedParams, ModelDeltaEvent, ModelDeltaParams, ModelList, ModelRequest, PluginList,
-    PluginLoad, PluginRef, PluginReload, PluginUnload, ProcessCancel, ProcessRef, ProcessSnapshot,
-    ProcessState, ProcessesGet, ProcessesResult, QueueAdd, QueueAddParams, QueueAddResult,
-    QueueChanged, QueueChangedParams, QueueClear, QueueMode, QueueMove, QueueRemove, QueueResume,
-    QueueUpdate, SecretSet, SecretsList, SecretsSet, SessionCompact, SessionCompactParams,
-    SessionCreate, SessionCreateParams, SessionDelete, SessionDeleted, SessionFork,
-    SessionForkParams, SessionList, SessionMessages, SessionMessagesResult, SessionRef,
-    SessionRename, SessionRenameParams, SessionUpdated, SessionUpdatedParams, SettingPath,
-    SettingSet, SettingsChanged, SettingsChangedParams, SettingsGet, SettingsReset, SettingsSet,
-    StoreQuery, StoreQueryParams, TurnCancel, TurnStart, TurnStartParams, TurnStartResult,
-    TurnSteer, TurnSteerParams,
+    PluginLoad, PluginRef, PluginReload, PluginUnload, ProcessCancel, ProcessOutput, ProcessRead,
+    ProcessRef, ProcessResize, ProcessSnapshot, ProcessState, ProcessesGet, ProcessesResult,
+    QueueAdd, QueueAddParams, QueueAddResult, QueueChanged, QueueChangedParams, QueueClear,
+    QueueMode, QueueMove, QueueRemove, QueueResume, QueueUpdate, SecretSet, SecretsList,
+    SecretsSet, SessionCompact, SessionCompactParams, SessionCreate, SessionCreateParams,
+    SessionCreated, SessionDelete, SessionDeleted, SessionFork, SessionForkParams, SessionList,
+    SessionMessages, SessionMessagesResult, SessionRef, SessionRename, SessionRenameParams,
+    SessionUpdated, SessionUpdatedParams, SettingPath, SettingSet, SettingsChanged,
+    SettingsChangedParams, SettingsGet, SettingsReset, SettingsSet, StoreQuery, StoreQueryParams,
+    TurnCancel, TurnStart, TurnStartParams, TurnStartResult, TurnSteer, TurnSteerParams,
 };
 use bone_proto::types::SessionInfo;
 use bone_proto::{Method, Notification, RpcError};
@@ -412,6 +412,26 @@ impl Core {
             ProcessCancel::METHOD => {
                 dispatch::<ProcessCancel, _>(params, |p| self.process_cancel(p))
             }
+            ProcessRead::METHOD => dispatch::<ProcessRead, _>(params, |p| {
+                self.inner.session(&p.session_id).map_err(session_error)?;
+                let (offset, data, total) = self
+                    .inner
+                    .jobs
+                    .read(&p.session_id, &p.id, p.from)
+                    .map_err(RpcError::invalid_params)?;
+                Ok(ProcessOutput {
+                    offset,
+                    data,
+                    total,
+                })
+            }),
+            ProcessResize::METHOD => dispatch::<ProcessResize, _>(params, |p| {
+                self.inner.session(&p.session_id).map_err(session_error)?;
+                self.inner
+                    .jobs
+                    .resize(&p.session_id, &p.id, p.cols, p.rows)
+                    .map_err(RpcError::invalid_params)
+            }),
             TurnSteer::METHOD => {
                 let p: TurnSteerParams = decode::<TurnSteer>(params)?;
                 let session = self.inner.session(&p.session_id).map_err(session_error)?;
@@ -749,6 +769,7 @@ impl Core {
         let info = session.lock().unwrap().info.clone();
         self.inner
             .started_session(&info.session_id, &info.cwd, true);
+        self.inner.emit::<SessionCreated>(info.clone());
         Ok(info)
     }
 
@@ -778,6 +799,7 @@ impl Core {
         let info = session.lock().unwrap().info.clone();
         self.inner
             .started_session(&info.session_id, &info.cwd, true);
+        self.inner.emit::<SessionCreated>(info.clone());
         Ok(info)
     }
 
@@ -935,7 +957,7 @@ impl Drop for Core {
     }
 }
 
-fn process_snapshot(session_id: &str, view: ProcessView) -> ProcessSnapshot {
+pub(crate) fn process_snapshot(session_id: &str, view: ProcessView) -> ProcessSnapshot {
     let state = match view.state {
         CoreProcessState::Running => ProcessState::Running,
         CoreProcessState::Exited => ProcessState::Exited,
@@ -953,14 +975,13 @@ fn process_snapshot(session_id: &str, view: ProcessView) -> ProcessSnapshot {
         started_at_ms: view.started_at_ms,
         finished_at_ms: view.finished_at_ms,
         elapsed_ms: view.elapsed_ms,
-        stdout: view.stdout,
-        stderr: view.stderr,
-        output: view.output,
+        tail: view.tail,
         output_bytes: view.output_bytes,
         truncated: view.truncated,
         code: view.code,
         signal: view.signal,
         error: view.error,
+        terminal: view.terminal,
     }
 }
 

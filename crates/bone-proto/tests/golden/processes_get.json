@@ -19,7 +19,6 @@
           "error": null,
           "finished_at_ms": null,
           "id": "shell-1",
-          "output": "running\n",
           "output_bytes": 8,
           "pid": 1234,
           "running": true,
@@ -27,8 +26,8 @@
           "signal": null,
           "started_at_ms": 1790000000000,
           "state": "running",
-          "stderr": "",
-          "stdout": "running\n",
+          "tail": "running",
+          "terminal": true,
           "truncated": false
         }
       ],

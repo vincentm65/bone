@@ -112,6 +112,12 @@ fn main() -> ExitCode {
         }
     };
     let config_dir = bone_lua::config_dir();
+    if let Err(e) = bone_lua::write_docs(&config_dir) {
+        eprintln!(
+            "bone: cannot write {}: {e}",
+            config_dir.join("docs").display()
+        );
+    }
     if mode == Mode::Init {
         return init_config(&config_dir);
     }

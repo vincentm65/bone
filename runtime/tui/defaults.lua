@@ -35,131 +35,26 @@ bone.keymap.set("ctrl+t", function()
   bone.settings.set("tui.tool_detail", bone.o.tool_detail)
 end)
 
--- Core-managed shell processes stay visible after the model turn continues.
--- The panel is intentionally Lua-drawn so themes and layouts can replace it.
-local process_panel
-local process_selected = 1
-local process_viewer
-
-local function process_tail(p)
-  local text = (p.output and p.output ~= "" and p.output) or p.stdout or p.stderr or ""
-  local last
-  for line in text:gmatch("[^\n]+") do last = line end
-  return last or "starting"
-end
-
-local function process_elapsed(ms)
-  ms = ms or 0
-  if ms < 60000 then return string.format("%ds", math.floor(ms / 1000)) end
-  return string.format("%dm%02ds", math.floor(ms / 60000), math.floor(ms / 1000) % 60)
-end
-
-local function process_time(p)
-  if p.running and p.started_at_ms then
-    return process_elapsed(math.max(0, bone.now() - p.started_at_ms))
+-- Sub-agents and shell jobs: the tray below the prompt
+-- (runtime/lua/bone/ui/tray.lua). Down on an empty prompt moves into it;
+-- esc on an empty prompt in a sub-agent's session goes back to the session
+-- that started it.
+local tray = require("bone.ui.tray")
+local menu_dismiss = bone.ui.actions.dismiss
+bone.ui.actions.dismiss = function()
+  local done = menu_dismiss and menu_dismiss()
+  if done then
+    return done
   end
-  return process_elapsed(p.elapsed_ms)
+  return bone.prompt.get() == "" and tray.back()
 end
-
-local function process_lines(ctx)
-  local rows = bone.processes.list()
-  local out = {}
-  if process_selected > #rows then process_selected = math.max(1, #rows) end
-  for _, p in ipairs(rows) do
-    local index = #out + 1
-    local state = p.state or "running"
-    local mark = index == process_selected and "> " or (p.running and "◑ " or "  ")
-    local tail = process_tail(p)
-    local line = string.format("%s%s [%s · %s] — %s", mark, p.command or p.id,
-      state, process_time(p), tail)
-    out[#out + 1] = bone.text.clip({ { line, p.running and "ToolRunning" or "ToolOutput" } }, ctx.width)
+local menu_down = bone.ui.actions.down
+bone.ui.actions.down = function()
+  if menu_down and menu_down() then
+    return true
   end
-  if #out == 0 then
-    return { { "No managed shell processes", "ToolArgs" } }
-  end
-  return out
+  return bone.prompt.get() == "" and not bone.prompt.info().history and tray.enter()
 end
-
-local function selected_process()
-  return bone.processes.list()[process_selected]
-end
-
-local function process_view_lines(ctx)
-  local p = selected_process()
-  if not p then return { { "Process no longer exists", "ToolError" } } end
-  local out = { { "$ " .. (p.command or p.id), "ToolPath" } }
-  local add = function(text, hl)
-    for line in (text or ""):gmatch("[^\n]+") do
-      out[#out + 1] = { line, hl }
-    end
-  end
-  add(p.stdout, "ToolOutput")
-  add(p.stderr, "ToolError")
-  if p.error then add(p.error, "ToolError") end
-  out[#out + 1] = { string.format("%s · %s · %s", p.state or "running", process_time(p), p.id), "ToolArgs" }
-  return out
-end
-
-local function open_process_viewer()
-  if process_viewer and bone.ui.is_open(process_viewer) then return end
-  process_viewer = bone.ui.popup({
-    width = 72,
-    height = 18,
-    lines = process_view_lines,
-    keys = {
-      q = function() bone.ui.close(process_viewer) end,
-      esc = function() bone.ui.close(process_viewer) end,
-      c = function()
-        local p = selected_process()
-        if p and p.running then bone.processes.cancel(p.id) end
-      end,
-    },
-  })
-end
-
-local function show_process_panel()
-  if process_panel and process_panel:is_open() then
-    process_panel:show()
-    return
-  end
-  process_panel = bone.ui.panel.open({
-    id = "processes",
-    dock = "bottom",
-    size = "auto",
-    max = 6,
-    title = "Processes",
-    follow = true,
-    render = process_lines,
-    focusable = true,
-    keys = {
-      up = function()
-        process_selected = math.max(1, process_selected - 1)
-        bone.ui.refresh()
-      end,
-      down = function()
-        process_selected = math.min(#bone.processes.list(), process_selected + 1)
-        bone.ui.refresh()
-      end,
-      enter = open_process_viewer,
-      c = function()
-        local p = selected_process()
-        if p and p.running then bone.processes.cancel(p.id) end
-      end,
-    },
-  })
-end
-
-local function refresh_process_panel()
-  if #bone.processes.list() > 0 then
-    show_process_panel()
-  elseif process_panel and process_panel:is_open() then
-    process_panel:hide()
-  end
-  bone.ui.refresh()
-end
-
-bone.on("process/changed", refresh_process_panel)
-bone.on("processes/changed", refresh_process_panel)
 
 -- Up on an empty prompt takes the last queued message back to edit.
 local menu_up = bone.ui.actions.up
@@ -285,7 +180,12 @@ function bone.ui.sessions()
       bone.notify("cannot list sessions: " .. err, "error")
       return
     end
-    picker:set_items(list)
+    -- Subagents' sessions open from their owner's tray.
+    local top = {}
+    for _, s in ipairs(list) do
+      if not s.owner then top[#top + 1] = s end
+    end
+    picker:set_items(top)
   end)
 end
 

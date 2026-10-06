@@ -20,7 +20,7 @@ bone._tools = {}
 --- Add a tool the model can call.
 ---   name, description: strings
 ---   parameters: JSON Schema table for the arguments object
----   run = function(args, ctx) -> string | table   (ctx = { cwd, session_id })
+---   run = function(args, ctx) -> string | table   (ctx = { cwd, session_id, call_id })
 --- Other fields are kept for plugins to read (the approve plugin looks at
 --- `needs_approval`). Errors (error() or returning nil, "message") are
 --- reported to the model.
@@ -161,6 +161,15 @@ end
 ---   bone.session.append(id, message)   add a message the model will see next
 ---   bone.session.compact(id, messages) replace the transcript (the file keeps
 ---                                      the old one behind a checkpoint)
+---   bone.session.create(opts)          a new session: opts = { cwd?, title?,
+---                                      owner? = { session_id, call_id?, name? } }
+---                                      (a subagent's; cwd defaults to the
+---                                      owner's). Returns its info.
+---   bone.session.run(id, text)         start a turn on an idle session and wait
+---                                      for it: { session_id, turn_id, text,
+---                                      outcome = { status, message? } }, text
+---                                      being the final answer. Cancelling the
+---                                      calling turn cancels this one.
 --- During a turn the last two only work between model calls (system,
 --- context, request and request_error hooks, and turn_start) or after it
 --- (turn_end); clients get a session/updated event.
@@ -181,6 +190,18 @@ function bone.session.append(id, message)
 end
 function bone.session.compact(id, messages)
   return session_op("compact", id, { messages = messages })
+end
+function bone.session.create(opts)
+  opts = opts or {}
+  assert(type(opts) == "table", "bone.session.create(opts)")
+  return session_op("create", nil, { cwd = opts.cwd, title = opts.title, owner = opts.owner })
+end
+function bone.session.run(id, text)
+  if not in_job() then
+    error("bone.session.run only works inside hooks, tools and providers", 2)
+  end
+  assert(type(id) == "string" and type(text) == "string", "bone.session.run(id, text)")
+  return wait({ session_run = { id = id, text = text } })
 end
 
 --- A session's message queue (as queue/add and friends; clients see the
