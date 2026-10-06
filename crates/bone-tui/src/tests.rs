@@ -3773,6 +3773,41 @@ async fn lua_sees_clicks_on_chat_items_and_scrolls_the_chat() {
 }
 
 #[tokio::test]
+async fn regions_see_the_chat_back_at_its_end() {
+    let (mut h, _dir) = Harness::with_config(
+        r#"
+        bone.ui.layout = { "chat", "gap" }
+        bone.ui.regions.gap = { size = 1, render = function()
+          return bone.chat.view().follow and {} or { "END" }
+        end }
+        bone.ui.views.user = function(item)
+          local out = {}
+          for i = 1, 12 do out[i] = { { "user line " .. i, "Normal" } } end
+          return out
+        end
+        "#,
+    )
+    .await;
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    assert!(!h.screen(30, 6).contains("END"));
+    h.lua("bone.chat.scroll(-3)").await;
+    assert!(h.screen(30, 6).contains("END"));
+    // Scrolled back down by rows, not to "bottom": the frame that finds
+    // the chat at its end asks for another, which clears it.
+    h.lua("bone.chat.scroll(3)").await;
+    h.app.redraw = false;
+    h.screen(30, 6);
+    assert!(h.app.redraw);
+    let screen = h.screen(30, 6);
+    assert!(!screen.contains("END"), "{screen}");
+    // Settled: no more extra frames.
+    h.app.redraw = false;
+    h.screen(30, 6);
+    assert!(!h.app.redraw);
+}
+
+#[tokio::test]
 async fn lua_adds_its_own_items_to_the_chat() {
     let (mut h, _dir) = Harness::with_config(
         r#"

@@ -228,6 +228,9 @@ pub struct App {
     last_prompt_state: PromptState,
     quit_armed: Option<Instant>,
     pub dirty: bool,
+    /// Draw once more after this frame: something drawn earlier in it
+    /// (a region) saw state the frame then changed.
+    pub redraw: bool,
     pub quit: Option<Option<String>>,
     pub lua: Option<Lua>,
     pub config_dir: Option<PathBuf>,
@@ -331,6 +334,7 @@ impl App {
             prompt_history_pos: None,
             quit_armed: None,
             dirty: true,
+            redraw: false,
             quit: None,
             lua: None,
             config_dir: config_dir.clone(),

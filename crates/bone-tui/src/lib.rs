@@ -147,7 +147,7 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
             }
             _ = sleep_until(draw_at.unwrap_or_else(Instant::now).into()), if draw_at.is_some() => {
                 term.draw_frame(|f| render::draw(f, &mut app))?;
-                app.dirty = false;
+                app.dirty = std::mem::take(&mut app.redraw);
                 if let Some(title) = app.ui_title()
                     && app.title.as_ref() != Some(&title)
                 {

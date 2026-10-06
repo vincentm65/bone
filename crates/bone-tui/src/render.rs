@@ -382,6 +382,9 @@ fn draw_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let max_top = total.saturating_sub(height);
     if win.follow || win.top >= max_top {
         win.top = max_top;
+        // Regions were drawn first, with the chat still scrolled up (the
+        // "[↓ End]" mark): draw them again.
+        app.redraw |= !win.follow;
         win.follow = true;
     }
     let lines: Vec<Line> = chat.rows().skip(win.top).take(height).cloned().collect();
