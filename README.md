@@ -33,6 +33,13 @@ scripts/install.sh --name bone  # install as `bone` instead
 
 Or just `cargo build --release` and run `target/release/bone`. The Lua runtime is compiled into the binary; nothing else needs to be installed.
 
+On Android/Termux, use Clang with its compiler runtime installed. The build
+automatically discovers and links Clang's builtins archive for LuaJIT's
+instruction-cache flush; no extra `RUSTFLAGS` are needed. For cross builds,
+configure the Android C compiler through `CC_<target>` (for example,
+`CC_aarch64_linux_android`) and the Rust linker as usual. Select Android API
+23 or newer for the shell tool's `openpty` support.
+
 ## Quick start
 
 ```sh

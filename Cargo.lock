@@ -105,6 +105,7 @@ dependencies = [
 name = "bone-lua"
 version = "3.0.0"
 dependencies = [
+ "cc",
  "mlua",
  "reqwest",
  "serde_json",
