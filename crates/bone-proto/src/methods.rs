@@ -580,6 +580,10 @@ pub struct SecretSet {
 pub struct SettingSet {
     pub path: String,
     pub value: serde_json::Value,
+    /// A change to `provider` or its model also locks this session to the
+    /// result; other sessions keep the model they have.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -646,9 +650,16 @@ pub struct ReloadResult {
 // ---- model calls ----------------------------------------------------------
 
 method!(
-    /// The configured providers (`bone.config.providers`).
-    ModelList, "model/list", Empty => Vec<ModelInfo>
+    /// The configured providers (`bone.config.providers`); with a session,
+    /// `current` is the entry and model that session is locked to.
+    ModelList, "model/list", MaybeSession => Vec<ModelInfo>
 );
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaybeSession {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<SessionId>,
+}
 method!(
     /// One model call outside any session (no tools are run). Returns at
     /// once; the answer arrives as [`ModelCompleted`], with

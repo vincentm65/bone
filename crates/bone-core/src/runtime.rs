@@ -24,6 +24,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::config::{CoreConfig, ProviderConfig};
 use crate::provider::{Completion, CompletionRequest, Delta, OpenAiProvider, Provider};
 use crate::scripting::{AskEvent, LoadOptions, Loaded, LuaProvider, LuaTool, Scripting};
+use crate::session::Pin;
 use crate::tools::Registry;
 use crate::tools::ToolSpec;
 use crate::{Event, Inner};
@@ -77,16 +78,31 @@ impl Runtime {
         (entry, model)
     }
 
-    /// The configured providers, sorted by name.
-    pub fn model_list(&self) -> Vec<ModelInfo> {
+    /// The provider for a session locked to `pin`.
+    pub fn pinned(&self, pin: &Pin) -> Result<Arc<dyn Provider>, String> {
+        if *pin == self.model_of(None, &Json::Null) {
+            return Ok(self.provider.clone());
+        }
+        self.provider_for(pin.0.as_deref(), &json!({ "model": pin.1 }))
+    }
+
+    /// The configured providers, sorted by name, with `pin` (a session's)
+    /// as the current one.
+    pub fn model_list(&self, pin: Option<Pin>) -> Vec<ModelInfo> {
+        let (selected, model) = pin.unwrap_or_else(|| self.model_of(None, &Json::Null));
         let mut out: Vec<ModelInfo> = self
             .models
             .iter()
             .map(|(name, p)| ModelInfo {
                 name: name.clone(),
-                model: p.model.clone(),
+                model: (if selected.as_ref() == Some(name) {
+                    &model
+                } else {
+                    &p.model
+                })
+                .clone(),
                 kind: p.kind.clone(),
-                current: self.selected.as_ref() == Some(name),
+                current: selected.as_ref() == Some(name),
                 base_url: p.base_url.clone(),
                 reasoning_effort: p.reasoning_effort.clone(),
                 stream_usage: p.stream_usage,
@@ -339,7 +355,7 @@ impl Host {
     /// `bone.model.list()`.
     pub(crate) fn model_list(&self) -> mlua::Result<Json> {
         let inner = self.inner().map_err(mlua::Error::runtime)?;
-        serde_json::to_value(inner.runtime().model_list()).map_err(mlua::Error::external)
+        serde_json::to_value(inner.runtime().model_list(None)).map_err(mlua::Error::external)
     }
 
     /// Model waits from core Lua: `{ model_open = req }` starts a call and

@@ -278,7 +278,7 @@ fn requests() {
     exchange::<PluginReload>(18, approve(), reloaded());
     exchange::<ModelList>(
         19,
-        Empty {},
+        MaybeSession::default(),
         vec![
             ModelInfo {
                 name: "qwen".into(),
@@ -460,6 +460,7 @@ fn requests() {
         SettingSet {
             path: "tui.tool_detail".into(),
             value: json!("rows"),
+            session_id: None,
         },
         settings.clone(),
     );

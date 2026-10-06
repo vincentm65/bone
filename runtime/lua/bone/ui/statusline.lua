@@ -72,7 +72,6 @@ local function load_model()
   bone.model.list(function(list)
     for _, model in ipairs(list or {}) do
       if model.current then
-        state.provider = model.name
         state.model = model.model or model.name
         break
       end
@@ -101,22 +100,9 @@ state.events = {
     load_total()
   end),
 }
+-- Sessions keep their own model: ask the core for the one on screen's.
 state.events[#state.events + 1] = bone.on("settings/changed", function(ev)
-  local path = tostring(ev.path or "")
-  local provider, field = path:match("^providers%.([^.]+)%.([^.]+)$")
-  if field == "model" then
-    if provider == state.provider then
-      if type(ev.value) == "string" then
-        state.model = ev.value
-      else
-        -- A reset sends null; ask the core for the model inherited from
-        -- core.lua (or the provider's other saved configuration).
-        load_model()
-      end
-    elseif not state.provider then
-      load_model()
-    end
-  elseif ev.path == "provider" or path:match("^providers%.[^.]+$") then
+  if ev.path == "provider" or tostring(ev.path):match("^providers%.") then
     load_model()
   end
 end)
@@ -129,6 +115,7 @@ function bone.ui.statusline(ctx)
   local session_id = s and s.session_id
   if (session_id or "") ~= state.total_session then
     load_total(session_id)
+    load_model()
   end
   if state.model then
     left[#left + 1] = { state.model, "StatusLine" }

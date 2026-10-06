@@ -219,9 +219,11 @@ fn structured_args(spec: Option<&JsonValue>, raw: &str) -> Result<Option<JsonVal
 
 impl App {
     fn model_command(&mut self, args: &str) {
-        let args = args.to_owned();
+        let (args, session_id) = (args.to_owned(), self.current_session_id());
         self.request::<bone_proto::methods::ModelList>(
-            bone_proto::methods::Empty {},
+            bone_proto::methods::MaybeSession {
+                session_id: session_id.clone(),
+            },
             move |app, r| {
                 let models = match r {
                     Ok(models) => models,
@@ -238,6 +240,7 @@ impl App {
                     bone_proto::methods::SettingSet {
                         path: format!("providers.{}.model", current.name),
                         value: serde_json::Value::String(args),
+                        session_id,
                     },
                     move |app, r| match r {
                         Ok(_) => app.info(format!("model: {} ({})", model, current.name)),

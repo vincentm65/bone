@@ -303,7 +303,12 @@ impl Core {
 
     /// Save one setting and tell every client; a provider or model change
     /// reloads the configuration, and is undone if that fails.
-    async fn set_setting(&self, path: String, value: Value) -> Result<Value, RpcError> {
+    async fn set_setting(
+        &self,
+        path: String,
+        value: Value,
+        session_id: Option<String>,
+    ) -> Result<Value, RpcError> {
         let source = self.inner.source.as_ref().ok_or_else(|| {
             RpcError::invalid_params("this core has no config dir to save settings in")
         })?;
@@ -313,7 +318,7 @@ impl Core {
             _ => None,
         };
         if let Some(name) = provider_named {
-            let known = self.inner.runtime().model_list();
+            let known = self.inner.runtime().model_list(None);
             if !known.iter().any(|m| m.name == name) {
                 let names: Vec<&str> = known.iter().map(|m| m.name.as_str()).collect();
                 return Err(RpcError::invalid_params(format!(
@@ -349,6 +354,25 @@ impl Core {
                 let _ = settings::save(&source.config_dir, current);
             }
             return Err(RpcError::invalid_params(format!("not saved: {e}")));
+        }
+        // The session that asked follows the change; the others keep theirs.
+        let model = path == "provider" || path.ends_with(".model");
+        if let Some(session) = session_id
+            .filter(|_| model)
+            .and_then(|id| self.inner.session(&id).ok())
+        {
+            let rt = self.inner.runtime();
+            let mut s = session.lock().unwrap();
+            let default = rt.model_of(None, &Value::Null);
+            if path == "provider" {
+                s.pin(default).map_err(RpcError::internal)?;
+            } else if let Some(e) = (s.model.clone().unwrap_or(default).0)
+                .filter(|e| path == format!("providers.{e}.model"))
+                && let Some(p) = rt.models.get(&e)
+            {
+                s.pin((Some(e), p.model.clone()))
+                    .map_err(RpcError::internal)?;
+            }
         }
         let all = self
             .inner
@@ -536,11 +560,11 @@ impl Core {
             }
             SettingsSet::METHOD => {
                 let p: SettingSet = decode::<SettingsSet>(params)?;
-                self.set_setting(p.path, p.value).await
+                self.set_setting(p.path, p.value, p.session_id).await
             }
             SettingsReset::METHOD => {
                 let p: SettingPath = decode::<SettingsReset>(params)?;
-                self.set_setting(p.path, Value::Null).await
+                self.set_setting(p.path, Value::Null, None).await
             }
             SecretsSet::METHOD => {
                 let p: SecretSet = decode::<SecretsSet>(params)?;
@@ -627,8 +651,10 @@ impl Core {
                 Ok(serde_json::to_value(self.inner.mcp.list()).unwrap_or_default())
             }
             ModelList::METHOD => {
-                decode::<ModelList>(params)?;
-                Ok(serde_json::to_value(self.inner.runtime().model_list()).unwrap_or_default())
+                let p = decode::<ModelList>(params)?;
+                let session = p.session_id.and_then(|id| self.inner.session(&id).ok());
+                let pin = session.and_then(|s| s.lock().unwrap().model.clone());
+                Ok(serde_json::to_value(self.inner.runtime().model_list(pin)).unwrap_or_default())
             }
             ModelComplete::METHOD => {
                 dispatch::<ModelComplete, _>(params, |p| self.model_complete(p))

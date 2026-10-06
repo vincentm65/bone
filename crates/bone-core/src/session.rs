@@ -40,7 +40,12 @@ pub(crate) enum Record {
     Summary(Option<Summary>),
     /// What one model call used. Not part of the transcript.
     Usage(UsageRecord),
+    /// The provider entry and model this session's turns use from here on.
+    Model(Pin),
 }
+
+/// A provider entry (`None`: the env-configured one) and model.
+pub type Pin = (Option<String>, String);
 
 /// One line of a session file: a record and when it was written.
 #[derive(Serialize, Deserialize)]
@@ -113,6 +118,8 @@ pub struct Session {
     pub queue: Vec<QueuedMessage>,
     /// The queue waits (after a cancelled turn, or a restart).
     pub queue_paused: bool,
+    /// The model it is locked to; `None` until its first turn or change.
+    pub model: Option<Pin>,
     next_turn: TurnId,
     file: File,
     path: PathBuf,
@@ -151,6 +158,12 @@ impl Session {
         let written = write_record(&mut self.file, Record::Usage(usage));
         self.reindex();
         written
+    }
+
+    /// Lock the session to `model` (kept in the file).
+    pub fn pin(&mut self, model: Pin) -> std::io::Result<()> {
+        self.model = Some(model.clone());
+        write_record(&mut self.file, Record::Model(model))
     }
 
     /// Bring the index up to date with the file.
@@ -365,6 +378,7 @@ impl SessionStore {
             safe_point: false,
             queue: Vec::new(),
             queue_paused: false,
+            model: None,
             next_turn: users as TurnId,
             file,
             path,
@@ -391,6 +405,7 @@ impl SessionStore {
             summary,
             good_len,
             users,
+            model,
         } = match read_file(&path, usize::MAX) {
             Ok(r) => r,
             Err(SessionError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -427,6 +442,7 @@ impl SessionStore {
             generation: 0,
             active: None,
             safe_point: false,
+            model,
             next_turn,
             file,
             path,
@@ -485,7 +501,10 @@ impl SessionStore {
             let summary = s.summary.clone().filter(|sum| sum.through <= end);
             (s.info.cwd.clone(), s.messages[..end].to_vec(), summary)
         };
-        self.create_with(cwd, Some(id.to_owned()), None, &messages, summary)
+        let fork = self.create_with(cwd, Some(id.to_owned()), None, &messages, summary)?;
+        let model = source.lock().unwrap().model.clone();
+        model.map_or(Ok(()), |m| fork.lock().unwrap().pin(m))?;
+        Ok(fork)
     }
 
     /// Give a session a title that stays (kept next to its file).
@@ -645,6 +664,7 @@ struct Loaded {
     good_len: u64,
     /// User messages in the whole file, before checkpoints too.
     users: usize,
+    model: Option<Pin>,
 }
 
 /// Read a session file, stopping after `max_user` user messages (enough to
@@ -674,6 +694,7 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
         summary: None,
         good_len: line.len() as u64,
         users: 0,
+        model: None,
     };
     for n in 2.. {
         line.clear();
@@ -703,6 +724,10 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
             }
             Ok(Record::Summary(summary)) => {
                 loaded.summary = summary;
+                loaded.good_len += line.len() as u64;
+            }
+            Ok(Record::Model(model)) => {
+                loaded.model = Some(model);
                 loaded.good_len += line.len() as u64;
             }
             Ok(Record::Session(_)) => return Err(corrupt(format!("second header at line {n}"))),

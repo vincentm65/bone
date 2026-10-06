@@ -168,7 +168,7 @@ bone.settings = {
     return at
   end,
   set = function(path, value, callback)
-    bone.request("settings/set", { path = path, value = value }, callback)
+    bone.request("settings/set", { path = path, value = value, session_id = (bone.chat.session() or {}).session_id }, callback)
   end,
   reset = function(path, callback)
     bone.request("settings/reset", { path = path }, callback)
@@ -263,7 +263,7 @@ bone.model = {
     return handle
   end,
   list = function(callback)
-    bone.request("model/list", {}, callback)
+    bone.request("model/list", { session_id = (bone.chat.session() or {}).session_id }, callback)
   end,
 }
 

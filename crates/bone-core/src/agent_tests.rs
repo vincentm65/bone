@@ -1338,7 +1338,7 @@ async fn clients_call_the_model_over_the_protocol() {
         vec![text("streamed answer"), Step::Hang("never ends".into())],
     )
     .await;
-    let list = h.call::<ModelList>(Empty {}).await.unwrap();
+    let list = h.call::<ModelList>(Default::default()).await.unwrap();
     assert_eq!(list.len(), 1);
     assert!(list[0].current && list[0].name == "x");
     let req = h
@@ -1887,6 +1887,7 @@ async fn settings_change_compaction_at_once() {
     h.call::<SettingsSet>(SettingSet {
         path: "compact.keep".into(),
         value: json!(0),
+        session_id: None,
     })
     .await
     .unwrap();
@@ -2584,7 +2585,7 @@ async fn settings_choose_the_model_and_are_saved_for_every_client() {
     )
     .await;
     let current = |h: &Harness| -> (String, String) {
-        let m = h.core.inner.runtime().model_list();
+        let m = h.core.inner.runtime().model_list(None);
         let c = m.iter().find(|m| m.current).unwrap();
         (c.name.clone(), c.model.clone())
     };
@@ -2750,7 +2751,7 @@ async fn providers_and_keys_from_settings_and_secrets() {
     .await
     .unwrap();
     set_on(&h.core, "provider", json!("local")).await.unwrap();
-    let models = h.core.inner.runtime().model_list();
+    let models = h.core.inner.runtime().model_list(None);
     let local = models.iter().find(|m| m.name == "local").unwrap();
     assert!(local.current && local.model == "small" && local.added);
     // Bad entries are refused; keys never go in settings.json.
@@ -2838,7 +2839,7 @@ async fn providers_and_keys_from_settings_and_secrets() {
     set_on(&h.core, "providers.local.stream_usage", json!(false))
         .await
         .unwrap();
-    let info = h.core.inner.runtime().model_list();
+    let info = h.core.inner.runtime().model_list(None);
     let local = info.iter().find(|m| m.name == "local").unwrap();
     assert_eq!(
         (

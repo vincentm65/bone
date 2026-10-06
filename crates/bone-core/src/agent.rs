@@ -279,12 +279,15 @@ impl Turn<'_> {
             let sent_chars = crate::compact::chars(&messages);
             let mut attempt = 0;
             // A request_error hook may move the rest of this call elsewhere.
-            let mut provider = self.rt.provider.clone();
-            // Which entry and model answered, for the usage record.
-            let mut served = (
-                self.rt.selected.clone(),
-                self.rt.config.provider.model.clone(),
-            );
+            // Which entry and model answered, for the usage record: the
+            // session's, which its first turn locks to the default.
+            let pinned = self.session.lock().unwrap().model.clone();
+            let mut served = pinned.unwrap_or_else(|| {
+                let pin = self.rt.model_of(None, &Value::Null);
+                let _ = self.session.lock().unwrap().pin(pin.clone());
+                pin
+            });
+            let mut provider = self.rt.pinned(&served).map_err(Stop::Failed)?;
             // A request hook may send this call to another provider.
             if let Some(name) = use_provider {
                 provider = self
@@ -359,7 +362,7 @@ impl Turn<'_> {
                             "session_id": self.session_id,
                             "error": e.0,
                             "attempt": attempt,
-                            "model": self.rt.config.provider.model,
+                            "model": served.1,
                         });
                         let ev = self.safe_hooks("request_error", ev).await?;
                         let Some(ms) = ev.as_ref().and_then(|ev| ev["retry"].as_u64()) else {
