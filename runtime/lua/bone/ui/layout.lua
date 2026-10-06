@@ -37,9 +37,18 @@ function M.setup(opts)
 
   bone.ui.regions.input_gap = {
     size = 1,
-    render = function() return {} end,
+    render = function()
+      return bone.chat.view().follow and {} or { { { "  [↓ End]", "Dim" } } }
+    end,
   }
   bone.ui.layout = { "top", "chat", "input_gap", "above_prompt", "prompt", "tray", "statusline" }
+  bone.on("mouse", function(ev)
+    if ev.region == "input_gap" and ev.button == "left" and ev.action == "down"
+        and not bone.chat.view().follow and ev.col >= 3 and ev.col <= 9 then
+      bone.action("scroll_bottom")
+      return true
+    end
+  end)
 end
 
 return M
