@@ -104,6 +104,9 @@ pub struct Session {
     /// Characters per token in this session's last model call, to estimate
     /// sizes; `None` until a reply reports its usage.
     pub chars_per_token: Option<f64>,
+    /// Characters of the tool definitions sent with the last model call:
+    /// the provider counts them in its usage, so estimates must too.
+    pub tool_chars: usize,
     /// A compaction is writing its summary.
     pub compacting: bool,
     /// Counts `bone.session.compact` rewrites, which invalidate positions
@@ -372,6 +375,7 @@ impl SessionStore {
             messages: messages.to_vec(),
             summary,
             chars_per_token: None,
+            tool_chars: 0,
             compacting: false,
             generation: 0,
             active: None,
@@ -438,6 +442,7 @@ impl SessionStore {
             messages,
             summary,
             chars_per_token: None,
+            tool_chars: 0,
             compacting: false,
             generation: 0,
             active: None,

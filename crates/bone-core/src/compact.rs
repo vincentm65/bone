@@ -18,6 +18,7 @@ use crate::Inner;
 use crate::config::CompactConfig;
 use crate::runtime::ModelCall;
 use crate::session::{Session, SessionHandle, Summary};
+use crate::tools::ToolSpec;
 
 const PROMPT: &str = "Summarize the conversation below for the assistant that will continue it. \
 Keep: the user's goals and constraints, decisions made, files and commands involved, what is \
@@ -79,9 +80,19 @@ pub(crate) fn chars(messages: &[ChatMessage]) -> usize {
         .sum()
 }
 
-/// Estimated tokens for these messages in this session.
+/// Characters a model call sends for these tool definitions.
+pub(crate) fn tool_chars(tools: &[ToolSpec]) -> usize {
+    tools
+        .iter()
+        .map(|t| t.name.len() + t.description.len() + t.parameters.to_string().len())
+        .sum()
+}
+
+/// Estimated tokens for a model call with these messages in this session,
+/// tool definitions included.
 pub(crate) fn tokens(s: &Session, messages: &[ChatMessage]) -> u64 {
-    (chars(messages) as f64 / s.chars_per_token.unwrap_or(CHARS_PER_TOKEN)).round() as u64
+    ((chars(messages) + s.tool_chars) as f64 / s.chars_per_token.unwrap_or(CHARS_PER_TOKEN)).round()
+        as u64
 }
 
 /// What one compaction would summarize: the earlier summary (if any) and

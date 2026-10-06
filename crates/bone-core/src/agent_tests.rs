@@ -1874,6 +1874,36 @@ async fn the_limit_compacts_before_the_call() {
 }
 
 #[tokio::test]
+async fn tool_definitions_do_not_inflate_the_estimate() {
+    // ~100k tokens of tool definitions and a short transcript: the reply's
+    // usage is mostly the tools, so the estimate must count them, or the
+    // learned chars per token makes the next call look several times bigger.
+    let used = |s: &str| {
+        Step::Reply(Completion {
+            content: s.into(),
+            usage: Some(Usage {
+                input_tokens: 100_000,
+                output_tokens: 1,
+                cached_tokens: None,
+            }),
+            ..Default::default()
+        })
+    };
+    let mut h = Harness::with_lua(
+        r#"bone.config.compact = { keep = 0, limit = 150000 }
+        bone.tool.register { name = "big", description = string.rep("x", 400000),
+          run = function() return "" end }"#,
+        vec![used("a1"), used("a2")],
+    )
+    .await;
+    h.start("q1").await;
+    h.until::<TurnFinished>().await;
+    h.start(&"q".repeat(2000)).await;
+    h.until::<TurnFinished>().await;
+    assert_eq!(h.last_seen().len(), 3, "compacted: {:?}", h.last_seen());
+}
+
+#[tokio::test]
 async fn settings_change_compaction_at_once() {
     let mut h = Harness::with_lua(
         "bone.config.compact = { keep = 1 }",

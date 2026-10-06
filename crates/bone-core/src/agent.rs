@@ -276,7 +276,12 @@ impl Turn<'_> {
                     .unwrap_or_default();
             }
 
-            let sent_chars = crate::compact::chars(&messages);
+            // Tool definitions count toward the provider's input tokens; left
+            // out, a short transcript with many tools looks several times
+            // its size once the ratio is learned.
+            let tool_chars = crate::compact::tool_chars(&tools);
+            self.session.lock().unwrap().tool_chars = tool_chars;
+            let sent_chars = crate::compact::chars(&messages) + tool_chars;
             let mut attempt = 0;
             // A request_error hook may move the rest of this call elsewhere.
             // Which entry and model answered, for the usage record: the
