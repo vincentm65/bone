@@ -128,7 +128,9 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
         // What the session index would hold, for the stats plugin.
         "store/query" => {
             let sql = params["sql"].as_str().unwrap_or_default();
-            let rows = if sql.contains("FROM tool_calls") {
+            let rows = if sql.contains("ORDER BY rowid DESC LIMIT 1") && !sql.contains("sum(") {
+                json!([[10, 2]])
+            } else if sql.contains("FROM tool_calls") {
                 json!([["edit_file", 10, 2, 300.0], ["shell", 4, 0, 1200.0]])
             } else if sql.contains("JOIN sessions") {
                 json!([["Walrus hunt", "/home/u/zoo", 12800, 3]])
@@ -431,7 +433,7 @@ async fn first_message_creates_a_session_and_streams_the_reply() {
     let screen = h.screen(80, 24);
     assert!(screen.contains("  Hi! Done."), "{screen}");
     assert!(
-        screen.contains(" hello") && screen.contains("1.5k in · 20 out  │  /work"),
+        screen.contains(" hello") && screen.contains("10 in · 2 out  │  /work"),
         "{screen}"
     );
     assert!(!screen.contains("working"), "{screen}");
@@ -606,11 +608,14 @@ async fn slash_commands_suggest_complete_and_run() {
 
     // Enter on a partial name runs the selected suggestion.
     h.input("/hel{enter}").await;
+    assert_eq!(h.app.context(), Context::Popup);
+    h.input("sessions").await;
+    let screen = h.screen(80, 24);
     assert!(
-        h.message().contains("/sessions") && h.message().contains("ctrl+o sessions"),
-        "{}",
-        h.message()
+        screen.contains("/sessions") && screen.contains("ctrl+o"),
+        "{screen}"
     );
+    h.input("{esc}").await;
 
     // Unknown commands stay in the prompt with an error.
     h.input("/bogus{enter}").await;
@@ -780,11 +785,14 @@ async fn tui_lua_keys_commands_options_and_events() {
     assert!(h.screen(80, 24).contains("greet"));
     // Suggestions sort by name: /hello, then /help.
     h.input("{down}{enter}").await;
+    assert_eq!(h.app.context(), Context::Popup);
+    h.input("greet").await;
+    let screen = h.screen(80, 24);
     assert!(
-        h.message().contains("/hello") && h.message().contains("greet"),
-        "{}",
-        h.message()
+        screen.contains("/hello") && screen.contains("greet"),
+        "{screen}"
     );
+    h.input("{esc}").await;
 
     // Deleted default (ctrl+n is just ignored) and a new one.
     h.input("{ctrl+n}{f2}").await;
@@ -922,7 +930,10 @@ async fn lua_phase2_commands_options_and_local_events() {
         "\"bob 7 true|greet|bob|7|true\"",
     );
     h.input("/help{enter}").await;
-    assert!(h.message().contains("aliases: greetme"), "{}", h.message());
+    h.input("greetme").await;
+    let screen = h.screen(100, 24);
+    assert!(screen.contains("aliases: greetme"), "{screen}");
+    h.input("{esc}").await;
 
     h.lua("bone.keymap.context('phase2'); bone.keymap.focus('phase2')")
         .await;
@@ -1075,6 +1086,9 @@ async fn default_ui_fits_narrow_screens() {
         }),
     })
     .await;
+    // The statusline asks the index for the usage when it first draws.
+    h.screen(100, 12);
+    h.settle().await;
     let wide = h.screen(100, 12);
     assert!(wide.contains("10 in · 2 out  │  /work"), "{wide}");
     let narrow = h.screen(24, 12);
@@ -1844,6 +1858,75 @@ async fn select_and_suggestions_are_lua() {
     );
     h.lua("bone.ui.suggestions = nil").await;
     assert_eq!(h.screen(40, 6), "\n\n\n\n\n/ne");
+}
+
+#[tokio::test]
+async fn help_browser_searches_commands_keys_and_docs() {
+    let mut h = Harness::blank().await;
+    h.lua("bone.cmd.create('demo', function() demo_ran = true end, { desc = 'A custom plugin command', aliases = { 'demonstrate' } })").await;
+    h.input("/help{enter}").await;
+    assert_eq!(h.app.context(), Context::Popup);
+    let screen = h.screen(100, 24);
+    assert!(
+        screen.contains("bone / help") && screen.contains("Commands") && screen.contains("Docs"),
+        "{screen}"
+    );
+    // Alias and description search, including user/plugin commands.
+    h.input("demonstrate plugin").await;
+    let screen = h.screen(100, 24);
+    assert!(
+        screen.contains("/demo") && screen.contains("aliases: demonstrate"),
+        "{screen}"
+    );
+    assert!(!screen.contains("/quit"), "{screen}");
+    h.input("{enter}").await;
+    assert_eq!(h.app.context(), Context::Main);
+    assert_eq!(h.prompt(), "/demo ");
+    assert_eq!(h.lua("=demo_ran == nil").await, "true");
+    // F1 can open help without disturbing a draft; closing restores it.
+    h.input("{ctrl+u}a draft{f1}").await;
+    assert_eq!(h.app.context(), Context::Popup);
+    h.input("{tab}reasoning").await;
+    let screen = h.screen(80, 24);
+    assert!(
+        screen.contains("ctrl+r") && screen.contains("default shortcut"),
+        "{screen}"
+    );
+    h.input("{tab}lua hooks{enter}").await;
+    let screen = h.screen(80, 24);
+    assert!(
+        screen.contains("lua.md: Hooks") && screen.contains("### Hooks"),
+        "{screen}"
+    );
+    h.input("{esc}").await;
+    assert_eq!(h.app.context(), Context::Popup);
+    assert!(h.screen(80, 24).contains("lua hooks"));
+    h.input("{esc}").await;
+    assert_eq!(h.app.context(), Context::Main);
+    assert_eq!(h.prompt(), "a draft");
+}
+
+#[tokio::test]
+async fn help_browser_handles_empty_search_scrolling_and_resize() {
+    let mut h = Harness::blank().await;
+    h.input("/?{enter}no-such-command").await;
+    let screen = h.screen(80, 24);
+    assert!(screen.contains("No matches"), "{screen}");
+    h.input("{enter}").await;
+    assert_eq!(h.app.context(), Context::Popup);
+    h.input("{ctrl+u}{end}").await;
+    let screen = h.screen(80, 24);
+    assert!(screen.contains("/setup"), "{screen}");
+    h.input("{home}{pagedown}").await;
+    let screen = h.screen(40, 12);
+    assert!(
+        screen.contains("bone / help") && screen.contains("esc"),
+        "{screen}"
+    );
+    // A tiny terminal falls back to a compact hint and remains dismissible.
+    assert!(h.screen(18, 5).contains("Help"));
+    h.input("{esc}").await;
+    assert_eq!(h.app.context(), Context::Main);
 }
 
 #[tokio::test]
@@ -2675,6 +2758,9 @@ async fn example_stats_plugin() {
 #[tokio::test]
 async fn example_review_plugin() {
     let (mut h, _dir) = with_example("review").await;
+    h.input("/review{enter}{esc}").await;
+    assert!(h.app.panel("review").is_none());
+    assert_eq!(h.message(), "");
     h.input("go{enter}").await;
     h.emit::<TurnStarted>(started("s-new", "go")).await;
     let call = |id: &str, name: &str, path: &str| ToolCall {
@@ -3139,7 +3225,7 @@ async fn typing_during_a_turn_queues_it() {
         .collect();
     assert_eq!(modes, [json!("steer"), json!("next"), json!("steer")]);
 
-    // Up on an empty prompt takes the last queued message back.
+    // Up on an empty prompt edits the last queued message in place.
     h.emit::<QueueChanged>(changed(vec![
         queued(6, "first", QueueMode::Next),
         queued(7, "edit me", QueueMode::Next),
@@ -3149,11 +3235,38 @@ async fn typing_during_a_turn_queues_it() {
     assert_eq!(h.message(), "1. [next] first\n2. [next] edit me");
     h.input("{up}").await;
     assert_eq!(h.prompt(), "edit me");
+    h.input(" now{enter}").await;
+    assert_eq!(
+        h.requests("queue/update")[0],
+        json!({ "session_id": "s-new", "id": 7, "text": "edit me now" })
+    );
+    assert_eq!(
+        (h.prompt(), h.requests("queue/add").len()),
+        (String::new(), 3)
+    );
+    // The tray's Queue page: steer, move, drop.
+    h.input("{down}s{shift+down}{shift+down}d").await;
+    assert_eq!(
+        h.requests("queue/update")[1],
+        json!({ "session_id": "s-new", "id": 6, "mode": "steer" })
+    );
+    assert_eq!(
+        h.requests("queue/move")[0],
+        json!({ "session_id": "s-new", "id": 6, "to": 1 })
+    );
     assert_eq!(
         h.requests("queue/remove")[0],
-        json!({ "session_id": "s-new", "id": 7 })
+        json!({ "session_id": "s-new", "id": 6 })
     );
-    h.input("{ctrl+u}/queue clear{enter}").await;
+    assert_eq!(h.requests("queue/move")[0], h.requests("queue/move")[1]);
+    h.emit::<QueueChanged>(changed(vec![
+        queued(7, "edit me", QueueMode::Next),
+        queued(6, "first", QueueMode::Next),
+    ]))
+    .await;
+    h.input("d{esc}").await;
+    assert_eq!(h.requests("queue/remove")[0], h.requests("queue/remove")[1]);
+    h.input("/queue clear{enter}").await;
     assert_eq!(h.requests("queue/clear").len(), 1);
 
     // One the core refuses comes back at once.
@@ -3161,6 +3274,50 @@ async fn typing_during_a_turn_queues_it() {
     h.input("refused{enter}").await;
     assert_eq!(h.prompt(), "refused");
     assert!(h.message().starts_with("not sent"), "{}", h.message());
+
+    // Delay queue replies to exercise ordering and draft recovery.
+    h.emit::<TurnFinished>(finished("s-new", TurnOutcome::Completed))
+        .await;
+    h.lua(
+        r#"pending = {}
+      bone.request = function(method, params, callback)
+        pending[#pending + 1] = { method, params, callback }
+      end"#,
+    )
+    .await;
+    h.input("{ctrl+u}{down}{down}s").await;
+    h.lua("assert(#pending == 1 and pending[1][1] == 'queue/move' and pending[1][2].id == 6)")
+        .await;
+    assert_eq!(h.message(), "");
+    h.lua(
+        r#"local session = bone.chat.session
+      bone.chat.session = function() return { session_id = 'other' } end
+      pending[1][3]()
+      bone.chat.session = session
+      assert(#pending == 2 and pending[2][1] == 'queue/resume')
+      assert(pending[2][2].session_id == 's-new')"#,
+    )
+    .await;
+    assert_eq!(h.message(), "");
+    h.input("{esc}{down}{down}s").await;
+    h.lua("pending[3][3](nil, 'missing'); assert(#pending == 3)")
+        .await;
+    assert_eq!(h.message(), "missing");
+    h.lua("require('bone.ui.tray').edit({ id = 7, text = 'edit' })")
+        .await;
+    h.input("{enter}new draft").await;
+    h.lua("pending[4][3](nil, 'missing')").await;
+    assert_eq!(h.prompt(), "new draft\nedit");
+    h.lua("require('bone.ui.tray').edit({ id = 7, text = 'old session' })")
+        .await;
+    h.input("{enter}").await;
+    h.lua(
+        r#"bone.chat.session = function() return { session_id = 'other' } end
+      bone.prompt.set('other draft')
+      pending[5][3](nil, 'missing')"#,
+    )
+    .await;
+    assert_eq!(h.prompt(), "other draft");
 }
 
 #[tokio::test]
@@ -3793,14 +3950,17 @@ async fn regions_see_the_chat_back_at_its_end() {
     assert!(!h.screen(30, 6).contains("END"));
     h.lua("bone.chat.scroll(-3)").await;
     assert!(h.screen(30, 6).contains("END"));
-    // Scrolled back down by rows, not to "bottom": the frame that finds
-    // the chat at its end asks for another, which clears it.
+    // Scrolling back down by rows clears the marker in the first frame.
     h.lua("bone.chat.scroll(3)").await;
     h.app.redraw = false;
-    h.screen(30, 6);
-    assert!(h.app.redraw);
     let screen = h.screen(30, 6);
     assert!(!screen.contains("END"), "{screen}");
+    // Further wheel events at the bottom must not flash it again.
+    for _ in 0..3 {
+        h.input("{wheeldown}").await;
+        let screen = h.screen(30, 6);
+        assert!(!screen.contains("END"), "{screen}");
+    }
     // Settled: no more extra frames.
     h.app.redraw = false;
     h.screen(30, 6);
@@ -4124,19 +4284,19 @@ async fn shell_jobs_show_in_the_tray_and_open_in_place() {
         }),
     })
     .await;
-    assert_eq!(h.lua("=bone.processes.list()[1].id").await, "\"shell-1\"");
     let screen = h.screen(100, 20);
     assert!(screen.contains("Shells 1"), "{screen}");
-    assert!(
-        screen.contains("$ npm run dev  listening on 3000"),
-        "{screen}"
-    );
 
     // Down on the empty prompt moves into the tray; enter opens the job's
     // terminal right there, which reads the output and shows it.
-    h.input("{down}").await;
-    assert_eq!(h.lua("=bone.keymap.current()").await, "\"tray\"");
-    h.input("{enter}").await;
+    h.input("{down}review").await;
+    assert_eq!(h.prompt(), "review");
+    h.input("{ctrl+u}{down}").await;
+    h.app.windows.get_mut(&crate::app::CHAT_WIN).unwrap().top = 5;
+    h.input("{shift+up}").await;
+    assert_eq!(h.app.windows[&crate::app::CHAT_WIN].top, 2);
+    h.input("{shift+down}{enter}").await;
+    assert_eq!(h.app.windows[&crate::app::CHAT_WIN].top, 5);
     h.screen(100, 20);
     h.settle().await;
     assert_eq!(h.requests("process/read").len(), 1);
@@ -4233,11 +4393,11 @@ async fn subagents_show_in_the_tray_and_open_on_click() {
         "{screen}"
     );
 
-    // Into the tray and out again: down, then up from the top row.
-    h.input("{down}").await;
-    assert!(h.screen(100, 20).contains(" › "));
-    h.input("{up}").await;
-    assert_eq!(h.lua("=bone.keymap.current()").await, "\"main\"");
+    // Typing from the tray returns intact to the prompt.
+    h.input("{down}send").await;
+    assert_eq!(h.prompt(), "send");
+    h.input("{ctrl+u}{down}draft").await;
+    assert_eq!(h.prompt(), "draft");
 
     // A click on the row opens the sub-agent's session, with a way back.
     let y = screen
@@ -4254,7 +4414,7 @@ async fn subagents_show_in_the_tray_and_open_on_click() {
     let screen = h.screen(100, 20);
     assert!(screen.contains(" ‹ main │ Agents 1"), "{screen}");
     // Esc on an empty prompt goes back to the session that started it.
-    h.input("{esc}").await;
+    h.input("{ctrl+u}{esc}").await;
     assert_eq!(h.lua("=bone.chat.session().session_id").await, "\"s-new\"");
 
     // Finished: a check mark, until the next message.

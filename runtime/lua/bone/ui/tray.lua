@@ -1,18 +1,13 @@
--- The tray: the session's sub-agents and shell jobs, below the prompt.
---
---    Agents 2  Shells 1                    ↑↓ move · enter open · c cancel · esc
---   › ⠋ reviewer  check the diff     read_file src/panel.rs                 18s
---     ✓ explore   find callers       done                                   41s
---
--- ↓ on an empty prompt moves into it and ↑ from its top row goes back. Tab
--- (or ←/→) switches between Agents and Shells, enter opens the row (a
--- sub-agent's session in the chat, with "‹ main" here to go back; a shell
--- job as a live terminal right here), c cancels it and esc returns to the
--- prompt. ctrl+b folds the tray to one line and back. Finished rows stay
--- until the next message. A click does what enter does.
+-- Session queue, sub-agents and shell jobs below the prompt.
+-- ↓ on an empty prompt enters; ↑ from the top or esc returns. Tab/←/→
+-- changes pages; ctrl+b folds. Enter/click opens an agent chat or live
+-- shell; c cancels. Finished rows stay until the next message; ‹ main
+-- returns from an agent. Queue: enter edits (enter saves, esc cancels),
+-- s toggles steer/next or sends now when idle, shift+↑↓ reorders,
+-- d drops and r resumes a paused queue.
 local M = {}
 
-local CONTEXT = "tray"
+local CONTEXT, QUEUE_CONTEXT = "tray", "tray_queue"
 local TERM_ROWS = 12 -- output rows of an open shell job
 
 -- Sub-agents seen this run: session id -> agent; tool call id -> session id.
@@ -20,6 +15,9 @@ local agents, by_call = {}, {}
 -- Finished rows the user has moved past (sent a message since).
 local cleared = {}
 local ui = { page = "agents", sel = 1, open = nil, scroll = 0, folded = false }
+local PAGES = { { "queue", "Queue" }, { "agents", "Agents" }, { "shells", "Shells" } }
+-- The queued message being edited in the prompt: { session_id, id }.
+local editing
 -- What a click on each tray line does, from the last draw.
 local hits = { tabs = {} }
 
@@ -28,6 +26,8 @@ local GLYPH = {
   failed = { "✗", "ToolError" },
   cancelled = { "⊘", "Dim" },
   timeout = { "⏱", "ToolError" },
+  steer = { "↳", "Accent" },
+  next = { "◦", "Dim" },
 }
 
 local function duration(ms)
@@ -140,9 +140,22 @@ local function shell_rows()
   return out
 end
 
---- The rows of a page ("agents" or "shells") for the session on screen.
+local function queue_rows()
+  local s = bone.chat.session()
+  local rows = bone.chat.items({ kind = "queued" })
+  for _, q in ipairs(rows) do
+    q.key = s.session_id .. ":" .. q.id
+    q.status, q.time, q.title = q.mode, "", q.text:gsub("%s+", " ")
+    q.detail = s.queue_paused and "paused · r resume" or (q.mode == "steer" and "joins this turn" or "next turn")
+  end
+  return rows
+end
+
+--- The rows of a page ("queue", "agents" or "shells") for the session on screen.
 function M.rows(page)
-  if page == "shells" then
+  if page == "queue" then
+    return queue_rows()
+  elseif page == "shells" then
     return shell_rows()
   end
   local top = root()
@@ -163,11 +176,22 @@ end
 -- Focus and actions
 
 local function focused()
-  return bone.keymap.current() == CONTEXT
+  return bone.keymap.current() == CONTEXT or bone.keymap.current() == QUEUE_CONTEXT
 end
 
-local function selected()
-  return M.rows(ui.page)[ui.sel]
+local function selected(rows)
+  rows = rows or M.rows(ui.page)
+  ui.sel = math.max(1, math.min(ui.sel, #rows))
+  if ui.page == "queue" and ui.queue_id then
+    for i, r in ipairs(rows) do
+      if r.key == ui.queue_id then
+        ui.sel = i
+        return r
+      end
+    end
+    return nil
+  end
+  return rows[ui.sel]
 end
 
 local function leave()
@@ -179,30 +203,53 @@ end
 
 local function focus()
   ui.folded = false
-  bone.keymap.focus(CONTEXT)
+  bone.keymap.focus(ui.page == "queue" and QUEUE_CONTEXT or CONTEXT)
 end
 
---- Give the tray the keyboard, on its first row. Returns whether there
---- was anything in it.
+-- The pages with rows, in tab order.
+local function filled()
+  local out = {}
+  for _, pg in ipairs(PAGES) do
+    if #M.rows(pg[1]) > 0 then
+      out[#out + 1] = pg[1]
+    end
+  end
+  return out
+end
+
+--- Give the tray the keyboard, on its first row (the queue when it has
+--- any). Returns whether there was anything in it.
 function M.enter()
-  local agents_n, shells_n = #M.rows("agents"), #M.rows("shells")
-  if agents_n + shells_n == 0 then
+  local pages = filled()
+  if #pages == 0 then
     return false
   end
-  if #M.rows(ui.page) == 0 then
-    ui.page = agents_n > 0 and "agents" or "shells"
+  if pages[1] == "queue" or #M.rows(ui.page) == 0 then
+    ui.page = pages[1]
   end
-  ui.sel = 1
+  ui.sel, ui.queue_id = 1, nil
   focus()
   return true
 end
 
-local function switch(page)
-  ui.page = page or (ui.page == "agents" and "shells" or "agents")
-  ui.sel, ui.open, ui.scroll = 1, nil, 0
+-- To `page`, or `by` tabs along (wrapping round the pages with rows).
+local function switch(page, by)
+  if not page then
+    local pages = filled()
+    local at = 0
+    for i, p in ipairs(pages) do
+      at = p == ui.page and i or at
+    end
+    page = pages[(at + (by or 1) - 1) % math.max(#pages, 1) + 1] or ui.page
+  end
+  ui.page = page
+  ui.sel, ui.open, ui.scroll, ui.queue_id = 1, nil, 0, nil
+  if focused() then focus() end
 end
 
 local function move(by)
+  selected()
+  ui.queue_id = nil
   local n = #M.rows(ui.page)
   if ui.sel + by < 1 then
     return leave()
@@ -221,12 +268,70 @@ function M.back()
   return false
 end
 
+-- queue/<method> for the session on screen; errors are shown.
+local function queue(method, params, after)
+  local s = bone.chat.session()
+  params.session_id = params.session_id or (s and s.session_id)
+  if not params.session_id then
+    return
+  end
+  bone.request("queue/" .. method, params, function(_, err)
+    if err then
+      bone.notify(tostring(err), "error")
+    elseif after then
+      after(params.session_id)
+    end
+  end)
+end
+
+--- Put a queued message ({ id, text }) in the prompt to edit; enter saves
+--- it in place, esc gives up.
+function M.edit(r)
+  local s = bone.chat.session()
+  leave()
+  bone.prompt.set(r.text)
+  editing = { session_id = s.session_id, id = r.id }
+  bone.notify("editing a queued message · enter saves · esc cancels")
+end
+
+--- esc while editing: leave the queued message as it was.
+function M.cancel_edit()
+  if not editing then
+    return false
+  end
+  editing = nil
+  bone.prompt.set("")
+  return true
+end
+
+-- s: steer ⇄ next while a turn runs; when idle, send it now.
+local function steer()
+  local r, s = selected(), bone.chat.session()
+  if not (r and s) then
+    return
+  elseif s.running then
+    return queue("update", { id = r.id, mode = r.mode == "steer" and "next" or "steer" })
+  end
+  queue("move", { id = r.id, to = 0 }, function(id) queue("resume", { session_id = id }) end)
+end
+
+local function reorder(by)
+  local r = selected()
+  local to = ui.sel + by
+  if r and to >= 1 and to <= #M.rows("queue") then
+    ui.queue_id = r.key
+    queue("move", { id = r.id, to = to - 1 })
+  end
+end
+
 local function open()
   local r = selected()
   if not r then
     return
   end
-  if ui.page == "shells" then
+  if ui.page == "queue" then
+    M.edit(r)
+  elseif ui.page == "shells" then
     ui.open, ui.scroll = r.id, 0
   else
     leave()
@@ -236,7 +341,9 @@ end
 
 local function cancel()
   local r = selected()
-  if not (r and r.status == "running") then
+  if r and ui.page == "queue" then
+    return queue("remove", { id = r.id })
+  elseif not (r and r.status == "running") then
     return
   end
   if ui.page == "shells" then
@@ -295,22 +402,26 @@ local function header(width, active, rows_of)
     tab(from, M.back)
     add("│", "WinSeparator")
   end
-  for _, pg in ipairs({ { "agents", "Agents" }, { "shells", "Shells" } }) do
+  for _, pg in ipairs(PAGES) do
     local rows = rows_of[pg[1]]
-    local n = running(rows)
-    local on = active and ui.page == pg[1]
-    local from = col
-    add(" " .. pg[2] .. " ", on and "StatusLine" or "Dim")
-    add(tostring(n > 0 and n or #rows) .. " ", n > 0 and (on and "Accent" or "ToolArgs") or "Dim")
-    tab(from, function()
-      switch(pg[1])
-      focus()
-    end)
+    if pg[1] ~= "queue" or #rows > 0 then
+      local n = running(rows)
+      local on = active and ui.page == pg[1]
+      local from = col
+      add(" " .. pg[2] .. " ", on and "StatusLine" or "Dim")
+      add(tostring(n > 0 and n or #rows) .. " ", n > 0 and (on and "Accent" or "ToolArgs") or "Dim")
+      tab(from, function()
+        switch(pg[1])
+        focus()
+      end)
+    end
   end
   local hint = "↓ or ctrl+b"
   if ui.open then
     local r = selected()
     hint = (r and r.status == "running" and "c cancel · " or "") .. "↑↓ scroll · esc close"
+  elseif active and ui.page == "queue" then
+    hint = "enter edit · s steer · ⇧↑↓ move · d drop · esc"
   elseif active then
     hint = "↑↓ move · enter open · c cancel · esc"
   end
@@ -335,7 +446,7 @@ end
 local function row_line(r, width, cols, mark, spinner)
   local live = r.status == "running"
   local glyph = live and { spinner ~= "" and spinner or "◐", "Accent" } or GLYPH[r.status] or { "·", "Dim" }
-  local time = duration((r.finished_at or bone.now()) - (r.started_at or bone.now()))
+  local time = r.time or duration((r.finished_at or bone.now()) - (r.started_at or bone.now()))
   local line = { { mark and " › " or "   ", "Accent" }, { glyph[1] .. " ", glyph[2] } }
   local used = 5
   if cols[1] > 0 then
@@ -357,10 +468,14 @@ end
 
 local function render(ctx)
   hits = { tabs = {} }
-  local rows_of = { agents = M.rows("agents"), shells = M.rows("shells") }
-  local all, live = #rows_of.agents + #rows_of.shells, running(rows_of.agents) + running(rows_of.shells)
+  local rows_of = { queue = M.rows("queue"), agents = M.rows("agents"), shells = M.rows("shells") }
+  local all = #rows_of.queue + #rows_of.agents + #rows_of.shells
+  local live = running(rows_of.agents) + running(rows_of.shells)
   local active = focused()
   if all == 0 then
+    if active then
+      leave()
+    end
     return nil
   end
   local spinner = ctx.spinner or ""
@@ -382,16 +497,16 @@ local function render(ctx)
     }
   end
 
-  if not (active or ui.open) and #rows_of[ui.page] == 0 then
-    ui.page = ui.page == "agents" and "shells" or "agents"
+  if #rows_of[ui.page] == 0 and not (active and ui.page ~= "queue" or ui.open) then
+    ui.page = filled()[1] or ui.page
+    if active then focus() end
   end
   local rows = rows_of[ui.page]
-  ui.sel = math.max(1, math.min(ui.sel, #rows))
+  local r = selected(rows)
   local cols = { columns(rows, ctx.width) }
   local out = { header(ctx.width, active or ui.open, rows_of) }
 
   -- An open shell job: its row, then its terminal.
-  local r = rows[ui.sel]
   if ui.open and not (r and r.id == ui.open) then
     ui.open = nil
   end
@@ -423,9 +538,9 @@ local function render(ctx)
   local room = math.max(ctx.height - 1, 1)
   local first = math.max(1, math.min(ui.sel - room + 1, #rows - room + 1))
   for i = first, math.min(#rows, first + room - 1) do
-    out[#out + 1] = row_line(rows[i], ctx.width, cols, active and i == ui.sel, spinner)
+    out[#out + 1] = row_line(rows[i], ctx.width, cols, active and r and rows[i].id == r.id, spinner)
     hits[#out] = function()
-      ui.sel = i
+      ui.sel, ui.queue_id = i, nil
       if ui.page == "shells" then
         focus()
       end
@@ -439,48 +554,68 @@ M.region = { size = "auto", max = TERM_ROWS + 3, render = render }
 bone.ui.regions.tray = M.region
 
 ---------------------------------------------------------------------------
--- Keys while the tray has the keyboard. Text that is not mapped goes to
--- the prompt, which gives the prompt the keyboard back.
-
-local function list_or_term(list, term)
-  return function()
-    if ui.open then
-      term()
-    else
-      list()
-    end
-  end
-end
-
+-- Unmapped text returns to the prompt; queue controls have their own context.
 local keys = {
-  up = list_or_term(function() move(-1) end, function() scroll(1) end),
-  down = list_or_term(function() move(1) end, function() scroll(-1) end),
-  pageup = list_or_term(function() end, function() scroll(TERM_ROWS - 1) end),
-  pagedown = list_or_term(function() end, function() scroll(1 - TERM_ROWS) end),
-  home = list_or_term(function() ui.sel = 1 end, function() scroll(1e9) end),
-  ["end"] = list_or_term(function() ui.sel = 1e9 end, function() ui.scroll = 0 end),
-  wheelup = list_or_term(function() move(-1) end, function() scroll(3) end),
-  wheeldown = list_or_term(function() move(1) end, function() scroll(-3) end),
-  tab = list_or_term(switch, switch),
-  enter = list_or_term(open, function() end),
-  c = list_or_term(cancel, cancel),
-  esc = list_or_term(leave, function() ui.open = nil end),
+  up = { function() move(-1) end, function() scroll(1) end },
+  down = { function() move(1) end, function() scroll(-1) end },
+  pageup = { nil, function() scroll(TERM_ROWS - 1) end },
+  pagedown = { nil, function() scroll(1 - TERM_ROWS) end },
+  home = { function() ui.sel, ui.queue_id = 1, nil end, function() scroll(1e9) end },
+  ["end"] = { function() ui.sel, ui.queue_id = 1e9, nil end, function() ui.scroll = 0 end },
+  wheelup = { function() move(-1) end, function() scroll(3) end },
+  wheeldown = { function() move(1) end, function() scroll(-3) end },
+  tab = { switch, switch },
+  ["shift+tab"] = { function() switch(nil, -1) end, switch },
+  enter = { open },
+  c = { cancel, cancel },
+  s = { steer, context = QUEUE_CONTEXT },
+  r = { function() queue("resume", {}) end, context = QUEUE_CONTEXT },
+  ["shift+up"] = { function() reorder(-1) end, context = QUEUE_CONTEXT },
+  ["shift+down"] = { function() reorder(1) end, context = QUEUE_CONTEXT },
+  esc = { leave, function() ui.open = nil end },
 }
 keys.k, keys.j = keys.up, keys.down
-keys.left, keys.right, keys["shift+tab"] = keys.tab, keys.tab, keys.tab
+keys.left, keys.right = keys["shift+tab"], keys.tab
+keys.d = { cancel, context = QUEUE_CONTEXT }
+keys.delete = keys.d
 keys.q = keys.esc
 
 bone.keymap.context(CONTEXT, { fallback = "main" })
-for key, fn in pairs(keys) do
-  bone.keymap.set(key, fn, { context = CONTEXT })
+bone.keymap.context(QUEUE_CONTEXT, { fallback = CONTEXT })
+for key, actions in pairs(keys) do
+  bone.keymap.set(key, function()
+    local fn = actions[ui.open and 2 or 1]
+    if fn then fn() end
+  end, { context = actions.context or CONTEXT })
 end
 bone.keymap.set("ctrl+b", M.toggle)
 
--- Typing goes to the prompt, and so does the keyboard.
+-- Typing goes to the prompt, and so does the keyboard. Emptying the
+-- prompt gives up an edit.
 bone.on("prompt/changed", function()
   if focused() then
     leave()
   end
+  if editing and bone.prompt.get() == "" then
+    editing = nil
+  end
+end)
+
+-- Enter while editing a queued message saves it in place instead of sending.
+bone.on("submit", function(ev)
+  local e, s = editing, bone.chat.session()
+  editing = nil
+  if not (e and s and s.session_id == e.session_id) then
+    return
+  end
+  bone.request("queue/update", { session_id = e.session_id, id = e.id, text = ev.text }, function(_, err)
+    if err and (bone.chat.session() or {}).session_id == e.session_id then
+      local draft = bone.prompt.get()
+      bone.prompt.set(draft:match("%S") and draft .. "\n" .. ev.text or ev.text)
+      bone.notify("it was sent before the edit was saved; your text is back in the prompt", "error")
+    end
+  end)
+  return false
 end)
 
 -- Sending a message clears the finished rows.

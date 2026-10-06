@@ -152,6 +152,64 @@ impl Inner {
         Ok(turn_id)
     }
 
+    /// `queue/add` (and `bone.queue.add`) after the hooks: start a turn
+    /// when idle, else queue the message.
+    pub(crate) fn queue_add(
+        self: &Arc<Self>,
+        session: &session::SessionHandle,
+        text: String,
+        mode: QueueMode,
+    ) -> Result<QueueAddResult, RpcError> {
+        if session.lock().unwrap().active.is_none() {
+            // A new message also lets a paused queue go on afterwards.
+            let mut s = session.lock().unwrap();
+            if std::mem::take(&mut s.queue_paused) {
+                self.emit_queue(&s);
+            }
+            drop(s);
+            match self.begin_turn(session.clone(), text.clone()) {
+                Ok(turn_id) => {
+                    return Ok(QueueAddResult {
+                        id: None,
+                        turn_id: Some(turn_id),
+                    });
+                }
+                // Another client started one meanwhile: queue it after all.
+                Err(e) if e.code == RpcError::BUSY => {}
+                Err(e) => return Err(e),
+            }
+        }
+        let mut s = session.lock().unwrap();
+        let ending = s
+            .active
+            .as_ref()
+            .is_none_or(|a| a.closing || a.cancel.is_cancelled());
+        let id = s.enqueue(text, if ending { QueueMode::Next } else { mode });
+        self.emit_queue(&s);
+        Ok(QueueAddResult {
+            id: Some(id),
+            turn_id: None,
+        })
+    }
+
+    /// The other `queue/*` methods (and `bone.queue.*`): change the queue,
+    /// then tell clients and go on if idle.
+    pub(crate) fn queue_edit(
+        self: &Arc<Self>,
+        session_id: &str,
+        edit: impl FnOnce(&mut session::Session) -> Result<(), RpcError>,
+    ) -> Result<(), RpcError> {
+        let session = self.session(session_id).map_err(session_error)?;
+        {
+            let mut s = session.lock().unwrap();
+            edit(&mut s)?;
+            s.save_queue();
+            self.emit_queue(&s);
+        }
+        self.start_next(&session);
+        Ok(())
+    }
+
     /// Tell clients what a session's queue holds now.
     pub(crate) fn emit_queue(&self, s: &session::Session) {
         self.emit::<QueueChanged>(QueueChangedParams {
@@ -478,7 +536,7 @@ impl Core {
                 Ok(serde_json::to_value(r).unwrap_or_default())
             }
             QueueRemove::METHOD => dispatch::<QueueRemove, _>(params, |p| {
-                self.queue_edit(&p.session_id, |s| {
+                self.inner.queue_edit(&p.session_id, |s| {
                     let before = s.queue.len();
                     s.queue.retain(|q| q.id != p.id);
                     if s.queue.len() == before {
@@ -488,7 +546,7 @@ impl Core {
                 })
             }),
             QueueUpdate::METHOD => dispatch::<QueueUpdate, _>(params, |p| {
-                self.queue_edit(&p.session_id, |s| {
+                self.inner.queue_edit(&p.session_id, |s| {
                     let q = s
                         .queue
                         .iter_mut()
@@ -507,7 +565,7 @@ impl Core {
                 })
             }),
             QueueMove::METHOD => dispatch::<QueueMove, _>(params, |p| {
-                self.queue_edit(&p.session_id, |s| {
+                self.inner.queue_edit(&p.session_id, |s| {
                     let i = s
                         .queue
                         .iter()
@@ -520,14 +578,14 @@ impl Core {
                 })
             }),
             QueueClear::METHOD => dispatch::<QueueClear, _>(params, |p| {
-                self.queue_edit(&p.session_id, |s| {
+                self.inner.queue_edit(&p.session_id, |s| {
                     s.queue.clear();
                     s.queue_paused = false;
                     Ok(())
                 })
             }),
             QueueResume::METHOD => dispatch::<QueueResume, _>(params, |p| {
-                self.queue_edit(&p.session_id, |s| {
+                self.inner.queue_edit(&p.session_id, |s| {
                     s.queue_paused = false;
                     Ok(())
                 })
@@ -910,59 +968,7 @@ impl Core {
             }
         }
         let session = self.inner.session(&p.session_id).map_err(session_error)?;
-        let idle = session.lock().unwrap().active.is_none();
-        if idle {
-            // A new message also lets a paused queue go on afterwards.
-            {
-                let mut s = session.lock().unwrap();
-                if s.queue_paused {
-                    s.queue_paused = false;
-                    self.inner.emit_queue(&s);
-                }
-            }
-            match self.inner.begin_turn(session.clone(), text.clone()) {
-                Ok(turn_id) => {
-                    return Ok(QueueAddResult {
-                        id: None,
-                        turn_id: Some(turn_id),
-                    });
-                }
-                // Another client started one meanwhile: queue it after all.
-                Err(e) if e.code == RpcError::BUSY => {}
-                Err(e) => return Err(e),
-            }
-        }
-        let mut s = session.lock().unwrap();
-        let ending = s
-            .active
-            .as_ref()
-            .is_none_or(|a| a.closing || a.cancel.is_cancelled());
-        if mode == QueueMode::Steer && ending {
-            mode = QueueMode::Next;
-        }
-        let id = s.enqueue(text, mode);
-        self.inner.emit_queue(&s);
-        Ok(QueueAddResult {
-            id: Some(id),
-            turn_id: None,
-        })
-    }
-
-    /// The other `queue/*` methods: change the queue, then tell clients.
-    fn queue_edit(
-        &self,
-        session_id: &str,
-        edit: impl FnOnce(&mut session::Session) -> Result<(), RpcError>,
-    ) -> Result<(), RpcError> {
-        let session = self.inner.session(session_id).map_err(session_error)?;
-        {
-            let mut s = session.lock().unwrap();
-            edit(&mut s)?;
-            s.save_queue();
-            self.inner.emit_queue(&s);
-        }
-        self.inner.start_next(&session);
-        Ok(())
+        self.inner.queue_add(&session, text, mode)
     }
 
     fn turn_cancel(&self, params: SessionRef) -> Result<(), RpcError> {

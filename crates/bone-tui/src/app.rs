@@ -1245,7 +1245,7 @@ impl App {
                     let session_id = r.info.session_id.clone();
                     if let Some(c) = app.chat_mut(buf) {
                         c.load(r.info, &r.messages, r.active_turn);
-                        c.set_queue(r.queue);
+                        c.set_queue(r.queue, r.queue_paused);
                     }
                     app.request_processes(session_id);
                 }
@@ -1687,8 +1687,8 @@ impl App {
             .with_chat(&p.session_id, |c| c.steered(&p.text)));
         on!(TurnFinished, |p| self
             .with_chat(&p.session_id, |c| c.turn_finished(&p)));
-        on!(QueueChanged, |p| self
-            .with_chat(&p.session_id, |c| c.set_queue(p.items)));
+        on!(QueueChanged, |p| self.with_chat(&p.session_id, |c| c
+            .set_queue(p.items, p.paused)));
         on!(SessionUpdated, |p| self.reload_chat(p.session_id));
         on!(SessionDeleted, |p| self.session_deleted(&p.session_id));
     }
@@ -1887,7 +1887,7 @@ impl App {
             Ok(r) => {
                 if let Some(c) = app.chat_mut(buf) {
                     c.load(r.info, &r.messages, r.active_turn);
-                    c.set_queue(r.queue);
+                    c.set_queue(r.queue, r.queue_paused);
                 }
             }
             Err(e) => app.error(format!("cannot reload session: {e}")),

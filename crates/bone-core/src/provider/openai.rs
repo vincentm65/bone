@@ -274,10 +274,10 @@ impl Accumulator {
             .into_iter()
             .filter_map(|c| c.delta);
         for d in deltas {
-            if let Some(text) = d
-                .reasoning_content
-                .or(d.reasoning)
-                .filter(|t| !t.is_empty())
+            if let Some(text) = [d.reasoning_content, d.reasoning]
+                .into_iter()
+                .flatten()
+                .find(|t| !t.is_empty())
             {
                 self.reasoning.push_str(&text);
                 on_delta(Delta::Reasoning(text));
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn accumulates_text_reasoning_and_tool_calls() {
         let (c, deltas) = run(&[
-            r#"{"choices":[{"delta":{"role":"assistant","reasoning_content":"think"}}]}"#,
+            r#"{"choices":[{"delta":{"role":"assistant","reasoning_content":"","reasoning":"think"}}]}"#,
             r#"{"choices":[{"delta":{"content":"Hi"}}]}"#,
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"read_file","arguments":"{\"pa"}}]}}]}"#,
             r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"th\":\"a\"}"}}]}}]}"#,

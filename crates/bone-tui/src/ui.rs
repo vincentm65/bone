@@ -429,7 +429,6 @@ impl App {
             "cwd": s.cwd,
             "running": c.turn.is_some() || c.starting,
             "elapsed": c.turn.map(|t| t.started.elapsed().as_secs()),
-            "usage": c.usage.map(|u| json!({ "input": u.input_tokens, "output": u.output_tokens })),
         })
     }
 

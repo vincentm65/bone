@@ -74,8 +74,17 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     app.leaves = plan.leaves.clone();
     let chat_area = middle;
     let chat_area = app.draw_panels(frame, chat_area);
+    app.placed = HashMap::from([
+        (CHAT_WIN, Placed { area: chat_area }),
+        (PROMPT_WIN, Placed { area: prompt_area }),
+    ]);
+    let was_following = app.windows[&CHAT_WIN].follow;
+    draw_chat(frame, app, chat_area);
+    let resumed_follow = !was_following && app.windows[&CHAT_WIN].follow;
     for (name, r, lines) in std::mem::take(&mut plan.regions) {
-        let lines = match lines {
+        // Cached lines were made while sizing the layout, before the chat
+        // clamped its scroll position. Refresh them if it reached the end.
+        let lines = match lines.filter(|_| !resumed_follow) {
             Some(lines) => lines,
             // Not sized by its content: drawn at the size it was given.
             None => match app.region_sized(&name, r.width, r.height, true, true) {
@@ -103,11 +112,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
     };
 
-    app.placed = HashMap::from([
-        (CHAT_WIN, Placed { area: chat_area }),
-        (PROMPT_WIN, Placed { area: prompt_area }),
-    ]);
-    draw_chat(frame, app, chat_area);
     if divider.height > 0 {
         let ctx = app.divider_ctx(divider.width);
         let items = app
@@ -382,8 +386,8 @@ fn draw_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let max_top = total.saturating_sub(height);
     if win.follow || win.top >= max_top {
         win.top = max_top;
-        // Regions were drawn first, with the chat still scrolled up (the
-        // "[↓ End]" mark): draw them again.
+        // Regions were sized before the chat reached the end. Request
+        // another layout pass in case their size depends on following.
         app.redraw |= !win.follow;
         win.follow = true;
     }

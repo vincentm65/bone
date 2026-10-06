@@ -210,8 +210,8 @@ end
 Each returns one line (`"%="` is a blank stretch); the row exists only while
 the function is defined. The statusline `ctx` has `title`, `popup` (the active
 keymap context unless `main`), `panel` (focused panel id), `jobs` (running
-jobs), `spinner`, `width` and `session` (`{ title, cwd, running, elapsed,
-usage = { input, output } }` or nil).
+jobs), `spinner`, `width` and `session` (`{ title, cwd, running, elapsed }`
+or nil).
 
 ## A line is a list of items
 

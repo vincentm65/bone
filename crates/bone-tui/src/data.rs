@@ -238,13 +238,10 @@ impl App {
         v["current"] = json!(current);
         v["running"] = json!(chat.turn.is_some() || chat.starting);
         v["starting"] = json!(chat.starting);
+        v["queue_paused"] = json!(chat.queue_paused);
         v["turn"] = chat.turn.map_or(
             Json::Null,
             |t| json!({ "id": t.turn_id, "elapsed_ms": t.started.elapsed().as_millis() as u64 }),
-        );
-        v["usage"] = chat.usage.map_or(
-            Json::Null,
-            |u| json!({ "input": u.input_tokens, "output": u.output_tokens }),
         );
         v["items"] = json!(items.len());
         v["turns"] = json!(turns_of(&items).last().copied().unwrap_or(0));

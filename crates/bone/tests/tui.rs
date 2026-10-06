@@ -274,7 +274,7 @@ async fn full_turn_with_approval_then_resume() {
     let mut tui = e.tui(None).await;
     tui.type_text("run it\n");
     let screen = tui
-        .wait_for(WAIT, |s| s.contains("Allow shell?"))
+        .wait_for(WAIT, |s| s.contains("Allow shell?") && s.contains("900 in"))
         .await
         .unwrap();
     assert_eq!(tui.context(), "popup");
@@ -291,12 +291,13 @@ async fn full_turn_with_approval_then_resume() {
         .unwrap_or_else(|s| panic!("turn did not finish:\n{s}"));
     snapshot("finished_turn", &screen, e.work.path());
 
-    // A second UI resumes the newest session and sees the same transcript.
+    // A second UI resumes the newest session and sees the same transcript,
+    // and the last call's usage.
     tui.type_text("/quit\n");
     assert_eq!(tui.quit(), Some(None));
     let mut again = e.tui(Some(None)).await;
     let screen = again
-        .wait_for(WAIT, |s| s.contains("counted to 9"))
+        .wait_for(WAIT, |s| s.contains("counted to 9") && s.contains("1.5k in · 20 out"))
         .await
         .unwrap();
     assert!(screen.contains("› run it"), "{screen}");

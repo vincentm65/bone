@@ -13,7 +13,7 @@ pub mod wait;
 
 use std::path::{Path, PathBuf};
 
-use mlua::{Function, Lua, LuaSerdeExt, MultiValue, Table, Value};
+use mlua::{ExternalResult, Function, Lua, LuaSerdeExt, MultiValue, Table, Value};
 
 /// Files from the repository's `runtime/` directory, by relative path.
 macro_rules! runtime_files {
@@ -26,6 +26,7 @@ pub const RUNTIME: &[(&str, &str)] = runtime_files![
     "lua/bone/util.lua",
     "lua/bone/menu.lua",
     "lua/bone/commands.lua",
+    "lua/bone/help.lua",
     "lua/bone/config.lua",
     "lua/bone/catalog.lua",
     "lua/bone/setup.lua",
@@ -353,6 +354,8 @@ fn install_state(
 /// `config_dir` is `None` for states that must not read user files (tests).
 pub fn new_state(side: Side, config_dir: Option<&Path>) -> mlua::Result<Lua> {
     let lua = Lua::new();
+    #[cfg(target_os = "android")]
+    lua.load("jit.off()").exec()?;
     let bone = lua.create_table()?;
     bone.set("side", side.name())?;
     bone.set("version", env!("CARGO_PKG_VERSION"))?;
@@ -505,15 +508,13 @@ pub fn new_state(side: Side, config_dir: Option<&Path>) -> mlua::Result<Lua> {
     json.set(
         "encode",
         lua.create_function(|lua, v: Value| {
-            let v: serde_json::Value = lua.from_value(v)?;
-            Ok(v.to_string())
+            Ok(lua.from_value::<serde_json::Value>(v)?.to_string())
         })?,
     )?;
     json.set(
         "decode",
         lua.create_function(|lua, s: String| {
-            let v: serde_json::Value = serde_json::from_str(&s).map_err(mlua::Error::external)?;
-            to_lua(lua, &v)
+            to_lua(lua, &serde_json::from_str(&s).into_lua_err()?)
         })?,
     )?;
     bone.set("json", json)?;

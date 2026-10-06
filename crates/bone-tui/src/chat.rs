@@ -120,11 +120,12 @@ pub struct ChatBuffer {
     pub session: Option<SessionInfo>,
     pub entries: Vec<Entry>,
     pub turn: Option<RunningTurn>,
-    pub usage: Option<Usage>,
     /// A prompt was sent and the turn has not started yet.
     pub starting: bool,
     /// The session's queue, as the core last said (`queue/changed`).
     pub queue: Vec<QueuedMessage>,
+    /// The queue waits (after a cancel or a restart) until resumed.
+    pub queue_paused: bool,
     /// Bumped when the queue changes; the cache key of queued items.
     queue_rev: u64,
     /// How finished turns ended, by the id of their user message's entry.
@@ -309,9 +310,6 @@ impl ChatBuffer {
         {
             self.message_usage.insert(id, u);
         }
-        if m.usage.is_some() {
-            self.usage = m.usage;
-        }
     }
 
     fn add_assistant_message(&mut self, m: &ChatMessage) {
@@ -450,9 +448,10 @@ impl ChatBuffer {
     }
 
     /// The core's queue for this session changed.
-    pub fn set_queue(&mut self, queue: Vec<QueuedMessage>) {
-        if queue != self.queue {
+    pub fn set_queue(&mut self, queue: Vec<QueuedMessage>, paused: bool) {
+        if queue != self.queue || paused != self.queue_paused {
             self.queue = queue;
+            self.queue_paused = paused;
             self.next_rev += 1;
             self.queue_rev = self.next_rev;
         }
@@ -973,7 +972,6 @@ mod tests {
             duration_ms: None,
         });
         assert_eq!(c.item_data(items[3], 4, true)["output"], "ab\tc");
-        assert_eq!(c.usage.unwrap().input_tokens, 5);
     }
 
     #[test]

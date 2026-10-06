@@ -2430,7 +2430,7 @@ async fn the_queue_survives_a_restart() {
     let mut h = Harness::new(vec![Step::Hang("…".into())]).await;
     h.queue("running", QueueMode::Next).await;
     h.until::<MessageDelta>().await;
-    h.queue("later", QueueMode::Next).await;
+    let previous = h.queue("later", QueueMode::Next).await.id.unwrap();
     let path = h
         ._data
         .path()
@@ -2449,7 +2449,11 @@ async fn the_queue_survives_a_restart() {
     })
     .await
     .unwrap();
-    assert!(!path.exists());
+    let fresh = crate::session::SessionStore::new(h._data.path());
+    let session = fresh.get(&h.session_id).unwrap();
+    let mut s = session.lock().unwrap();
+    assert!(s.queue.is_empty());
+    assert!(s.enqueue("new".into(), QueueMode::Next) > previous);
 }
 
 #[tokio::test]
@@ -2489,7 +2493,8 @@ async fn queue_add_hooks_rewrite_or_refuse() {
 #[tokio::test]
 async fn core_lua_can_queue_messages() {
     let mut h = Harness::with_lua(
-        r#"bone.hook("turn_end", function(ev)
+        r#"bone.hook("queue_add", function(ev) return { text = ev.text .. "!" } end)
+           bone.hook("turn_end", function(ev)
              if not queued then
                queued = true
                bone.queue.add(ev.session_id, "follow up", "next")
@@ -2507,7 +2512,7 @@ async fn core_lua_can_queue_messages() {
     .await;
     h.start("go").await;
     let turns = h.turns(2).await;
-    assert_eq!(turns[1].0, "follow up");
+    assert_eq!(turns[1].0, "follow up!");
     assert_eq!(tool_result(&h.transcript().await[4]).0, "0");
 }
 

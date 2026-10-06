@@ -234,7 +234,8 @@ function views.compacted(item, ctx)
 end
 
 function views.queued(item, ctx)
-  local note = item.mode == "steer" and "joins this turn" or "next turn"
+  local s = bone.chat.session()
+  local note = s and s.queue_paused and "paused · /queue resume" or item.mode == "steer" and "joins this turn" or "next turn"
   local out = starts("queued", ctx)
   for i, line in ipairs(lines(item.text)) do
     local first = i == 1 and { { "◦ ", "Dim" } } or { { "  ", "Dim" } }

@@ -249,7 +249,7 @@ A hook runs at a point in the core with an event table. It returns `nil` (no cha
 | `request_error` | `{ session_id, error, attempt, model }`, when a model call fails before any output arrived; return `{ retry = ms }` to try again after `ms` (at most 5 retries per call), or `{ retry = ms, provider = "name" }` to send the rest of this call to another `bone.config.providers` entry. Without a retry the turn fails as before | the turn fails |
 | `stream` | `{ session_id, turn_id, text, reasoning }`: output as it streams, collected into batches; results are ignored and the stream never waits for it | (ignored) |
 | `session_start` | `{ session_id, cwd, new }`, the first time this core uses a session (`new` when it was just created) | (ignored) |
-| `queue_add` | `{ session_id, text, mode }`, a message about to be sent or queued (`queue/add`); return `{ text = ..., mode = ... }` to change it | it is refused with "why" |
+| `queue_add` | `{ session_id, text, mode }`, a message about to be sent or queued (`queue/add` or `bone.queue.add`); return `{ text = ..., mode = ... }` to change it | it is refused with "why" |
 | `message` | `{ session_id, content, reasoning, tool_calls, usage }`, the model's reply before it is saved | the turn fails |
 | `tool_call` | `{ session_id, cwd, id, name, arguments }` | the call is refused; the model sees "why" |
 | `tool_result` | `{ session_id, id, name, arguments, output, is_error }` | the model sees "why" as an error |
@@ -497,7 +497,7 @@ Key names: `ctrl+`, `alt+` and `shift+` combined with `enter`, `esc`, `tab`, `ba
 
 Builtin actions: `submit queue_steer queue_next newline left right up down word_left word_right line_start line_end backspace delete delete_word delete_to_start delete_to_end scroll_up scroll_down page_up page_down scroll_top scroll_bottom complete dismiss interrupt quit quit_if_empty new_session sessions focus_next focus_prev focus_prompt`.
 
-`submit` during a turn queues the message in the core with `bone.o.queue_mode` (`"steer"`, the default, or `"next"`); `queue_steer` and `queue_next` pick the mode regardless. Up on an empty prompt takes the last queued message back to edit (`runtime/tui/defaults.lua`).
+`submit` during a turn queues the message in the core with `bone.o.queue_mode` (`"steer"`, the default, or `"next"`); `queue_steer` and `queue_next` pick the mode regardless. Up on an empty prompt edits the last queued message in place, and the tray's Queue page edits, reorders, steers or drops any of them (`runtime/lua/bone/ui/tray.lua`).
 
 While a panel has the keyboard, `up`/`down` (one row), `scroll_up`/`scroll_down`, `page_up`/`page_down` and `scroll_top`/`scroll_bottom` scroll the panel, and `dismiss` gives the keyboard back to the prompt. `focus_next`/`focus_prev` cycle through the prompt and the focusable panels; `focus_prompt` returns to the prompt.
 
@@ -710,7 +710,7 @@ bone.now()                              -- milliseconds since the epoch
 - `add(kind, fields, opts)` puts an item of your own after what the chat holds now. `kind` is your name for it (lowercase, not a built-in kind) and `bone.ui.views[kind]` draws it, getting `fields` plus `kind`, `index` and `id`; without a view its `text` shows. It is listed by `items`, can be clicked and scrolled to, and stays where it was put while the answer streams after it. It belongs to the TUI: the core never sees it, and reloading the chat (opening the session again) drops it, so keep anything lasting in `bone.state`. `opts.session` adds to another open chat.
 - `items(opts)` filters: `kind` (one, or a list), `around` (an item index: only the unbroken stretch of items of `kind` around it), `name` (tool name), `turn`, `running`, `error` (failed tools and error notices), `from`/`to` (item indexes, inclusive), then `first`/`last` keep the first or last N matches. Items have the fields in the views table plus `turn` (0 for items before the first message), except that tool calls leave out `output`, `live` and `raw_arguments` unless `full = true`: building them is the costly part of a long chat, and views get them on their own item anyway. `item(index, opts)` takes `session` and `full` the same way.
 - `turns(opts)` entries: `{ index, text, first, last (item indexes), items, tools, tool_errors, running, outcome, error }`. `outcome` is `"completed"`, `"cancelled"` or `"failed"` (with `error`) for turns that finished while the TUI watched, else nil.
-- `session(opts)`: `{ session_id, cwd, created_at, title, new, current, running, starting, turn = { id, elapsed_ms }, usage = { input, output }, items, turns }`, or nil. A chat with no messages yet has `new = true` and no `session_id`.
+- `session(opts)`: `{ session_id, cwd, created_at, title, new, current, running, starting, queue_paused, turn = { id, elapsed_ms }, items, turns }`, or nil. A chat with no messages yet has `new = true` and no `session_id`.
 - `sessions()`: `{ session_id, title, new, current, running }` for each open chat.
 - `messages([session_id,] callback)`: `callback(messages, err, result)` with protocol messages (`{ role, content, ... }`, see the Providers section) for that session, default the one on screen (`{}` for a new chat).
 
@@ -743,7 +743,7 @@ bone.now()                              -- milliseconds since the epoch
 - `bone.ui.suggestions(ctx)` → lines: draws the `/` menu (see Commands) right above the prompt, with the closest match nearest the input. `ctx = { items = { { name, desc } }, selected, width, height }`. Set it to `nil` for no list (tab still completes).
 - `bone.api.open_session(id)`: show a session.
 - `bone.ui.pager(content, { title, width, height })` → handle: scrollable text in a focused window. `content` is a string (wrapped; `#` lines are headings) or a list of lines. `up`/`down`/wheel, `pageup`/`pagedown`, `home`/`end`, `esc` or `q` closes. `handle:set(content)`, `handle:close()`.
-- `bone.ui.help(topic)` and `bone.ui.health()`: what `/help {topic}` and `/health` call (in `runtime/tui/defaults.lua`). The docs are in `bone._docs`; the TUI's built-in checks come from `bone.api.health()`.
+- `bone.ui.help(topic)` and `bone.ui.health()`: what `/help {topic}` and `/health` call (in `runtime/tui/defaults.lua`). With no topic, `bone.ui.help()` opens the searchable Commands / Keys / Docs popup. Its browser and topic lookup live in `runtime/lua/bone/help.lua`; override `~/.bone/runtime/lua/bone/help.lua` to customize it. The docs are in `bone._docs`; the TUI's built-in checks come from `bone.api.health()`.
 - `bone.ui.box(lines, { title, title_hl, border_hl, width, pad, chars })` → the lines inside a rounded border (`PopupBorder`/`PopupTitle` by default). Only used if you call it.
 
 ### Jobs

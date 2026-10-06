@@ -8,24 +8,8 @@ local function error_text(e)
   return (tostring(e):gsub("^runtime error: ", ""):gsub("\nstack traceback:.*$", ""))
 end
 
-local KEYS = [[
-Keys: enter send · alt+enter newline · ctrl+c cancel / clear / quit · ctrl+o sessions
-      pageup/pagedown scroll · ctrl+home/ctrl+end top/bottom · up/down history · tab complete
-      ctrl+r show/hide reasoning · ↓ on empty prompt: sub-agents and shell jobs · ctrl+b fold them]]
-
 cmd("help", function(c)
-  if c.args ~= "" then
-    return bone.ui.help(c.args)
-  end
-  local rows = {}
-  for _, it in ipairs(bone.cmd.list()) do
-    local aliases = #it.aliases > 0 and (" (aliases: " .. table.concat(it.aliases, ", ") .. ")") or ""
-    rows[#rows + 1] = ("/%-12s %s%s"):format(it.name, it.desc, aliases)
-  end
-  rows[#rows + 1] = ""
-  rows[#rows + 1] = KEYS
-  rows[#rows + 1] = "Docs: /help topic (e.g. /help hooks, /help windows, /help keys)"
-  bone.notify(table.concat(rows, "\n"))
+  return bone.ui.help(c.args)
 end, { desc = "commands and keys; /help topic searches the docs", aliases = { "?" } })
 
 cmd("health", function()

@@ -2,7 +2,7 @@
 //!
 //! File layout: `<data_dir>/sessions/<session_id>.jsonl`, plus
 //! `<session_id>.title` when it was renamed and `<session_id>.queue.json`
-//! while messages are queued. The first record is
+//! for its queue and message ID counter. The first record is
 //! the session header; every later record is one transcript message, a
 //! summary the model gets in place of the transcript's older part (see
 //! `compact.rs`), or a checkpoint that replaces the transcript before it
@@ -124,6 +124,7 @@ pub struct Session {
     /// The model it is locked to; `None` until its first turn or change.
     pub model: Option<Pin>,
     next_turn: TurnId,
+    next_queue: u64,
     file: File,
     path: PathBuf,
     index: Option<Arc<Index>>,
@@ -131,9 +132,11 @@ pub struct Session {
     queue_path: PathBuf,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 struct SavedQueue {
     items: Vec<QueuedMessage>,
+    #[serde(default)]
+    next_id: u64,
 }
 
 pub struct ActiveTurn {
@@ -180,7 +183,8 @@ impl Session {
 
     /// Add to the queue; returns the message's id.
     pub fn enqueue(&mut self, text: String, mode: QueueMode) -> u64 {
-        let id = self.queue.iter().map(|q| q.id).max().unwrap_or(0) + 1;
+        self.next_queue += 1;
+        let id = self.next_queue;
         self.queue.push(QueuedMessage {
             id,
             text,
@@ -207,20 +211,17 @@ impl Session {
         self.queue.iter().any(|q| q.mode == QueueMode::Steer)
     }
 
-    /// Keep the queue on disk (or remove the file when it is empty).
+    /// Keep the queue and its ID counter on disk, even when empty.
     pub fn save_queue(&self) {
-        if self.queue.is_empty() {
-            let _ = std::fs::remove_file(&self.queue_path);
-            return;
-        }
         let saved = SavedQueue {
             items: self.queue.clone(),
+            next_id: self.next_queue,
         };
-        if let Ok(text) = serde_json::to_string(&saved) {
-            let tmp = self.queue_path.with_extension("json.tmp");
-            if std::fs::write(&tmp, text).is_ok() {
-                let _ = std::fs::rename(&tmp, &self.queue_path);
-            }
+        let tmp = self.queue_path.with_extension("json.tmp");
+        if let Ok(text) = serde_json::to_string(&saved)
+            && std::fs::write(&tmp, text).is_ok()
+        {
+            let _ = std::fs::rename(&tmp, &self.queue_path);
         }
     }
 
@@ -384,6 +385,7 @@ impl SessionStore {
             queue_paused: false,
             model: None,
             next_turn: users as TurnId,
+            next_queue: 0,
             file,
             path,
             index: self.index.clone(),
@@ -429,11 +431,14 @@ impl SessionStore {
         // too), so they stay unique across reloads.
         let next_turn = users as TurnId;
         // A queue left from before waits until resumed or added to.
-        let queue: Vec<QueuedMessage> = std::fs::read_to_string(self.queue_path(id))
+        let saved = std::fs::read_to_string(self.queue_path(id))
             .ok()
             .and_then(|t| serde_json::from_str::<SavedQueue>(&t).ok())
-            .map(|q| q.items)
             .unwrap_or_default();
+        let next_queue = saved
+            .next_id
+            .max(saved.items.iter().map(|q| q.id).max().unwrap_or(0));
+        let queue = saved.items;
         let session = Arc::new(Mutex::new(Session {
             queue_path: self.queue_path(id),
             queue_paused: !queue.is_empty(),
@@ -449,6 +454,7 @@ impl SessionStore {
             safe_point: false,
             model,
             next_turn,
+            next_queue,
             file,
             path,
             index: self.index.clone(),

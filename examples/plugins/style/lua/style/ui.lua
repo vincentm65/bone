@@ -3,8 +3,7 @@
 --   bone.ui.statusline = function(ctx) return { " ", ctx.title } end
 --
 -- Statusline ctx: title, popup ("popup", "picker" or nil), spinner, width,
--- and session (or nil): { title, cwd, running,
--- elapsed, usage = { input, output } }.
+-- and session (or nil): { title, cwd, running, elapsed }.
 -- Divider ctx: spinner, width, session.
 
 local function elapsed(secs)
@@ -26,13 +25,31 @@ local function items_width(items)
   return w
 end
 
+-- The latest turn call's tokens, from the session index (so a resumed
+-- session shows them too); refreshed as each reply completes.
+local last = {}
+local function load_last(id)
+  last = { session = id }
+  if not id then return end
+  bone.request("store/query", {
+    sql = "SELECT input_tokens, output_tokens FROM usage WHERE session_id = ?1 AND source = 'turn' ORDER BY rowid DESC LIMIT 1",
+    params = { id },
+  }, function(res)
+    if last.session == id then last.row = res and res.rows and res.rows[1] end
+  end)
+end
+bone.on("message/completed", function(ev)
+  if ev.session_id == last.session then load_last(ev.session_id) end
+end)
+
 function bone.ui.statusline(ctx)
   local left = { { " " .. ctx.title, "StatusLine" } }
   -- Right side, most important first; trailing items are dropped to fit.
   local right = {}
   local s = ctx.session
-  if s and s.usage then
-    right[#right + 1] = { tokens(s.usage.input) .. " in · " .. tokens(s.usage.output) .. " out", "StatusLineDim" }
+  if (s and s.session_id) ~= last.session then load_last(s and s.session_id) end
+  if last.row then
+    right[#right + 1] = { tokens(last.row[1]) .. " in · " .. tokens(last.row[2]) .. " out", "StatusLineDim" }
   end
   if s and s.cwd then
     right[#right + 1] = { s.cwd:gsub("^" .. (os.getenv("HOME") or "\0"), "~"), "StatusLineDim" }

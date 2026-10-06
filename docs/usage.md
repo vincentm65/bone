@@ -26,12 +26,13 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | Key | Does |
 |---|---|
 | `enter` | send (or run a `/command`). While a turn runs, the message is queued: by default it joins that turn at its next step; with `bone.o.queue_mode = "next"` in `tui.lua` it waits for a turn of its own. Queued messages show at the end of the chat |
-| `up` on an empty prompt | take the last queued message back to edit |
+| `up` on an empty prompt | edit the last queued message: `enter` saves it in place, `esc` leaves it as it was |
 | `alt+enter`, `shift+enter`, `ctrl+j` | new line |
 | `ctrl+c` | cancel the running turn; else clear the prompt; else press twice to quit |
 | `ctrl+d` | quit (on an empty prompt) |
 | `ctrl+o` | pick a session to open |
-| `down` / `ctrl+b` | the tray below the prompt: sub-agents and shell jobs. `down` on an empty prompt moves into it (`up` from its top row leaves), `tab` switches between Agents and Shells, `enter` opens one (a sub-agent's session in the chat, a shell job as a terminal in the tray), `c` cancels, `esc` goes back; a click does the same. `ctrl+b` folds it to one line. In a sub-agent's session, `‹ main` in the tray or `esc` on an empty prompt goes back |
+| `f1` | open the searchable help popup: Commands, Keys and Docs |
+| `down` / `ctrl+b` | the tray below the prompt: queued messages, sub-agents and shell jobs. `down` on an empty prompt moves into it (the Queue page first when anything is queued; `up` from its top row leaves), `tab` switches pages, `enter` opens one (a sub-agent's session in the chat, a shell job as a terminal in the tray), `c` cancels, `esc` goes back; a click does the same. On the Queue page `enter` edits a message, `s` switches it between steer and next (when no turn runs: sends it now), `shift+up`/`shift+down` move it, `d` drops it and `r` resumes a paused queue. `ctrl+b` folds the tray to one line. In a sub-agent's session, `‹ main` in the tray or `esc` on an empty prompt goes back |
 | `ctrl+r` | show / hide the model reasoning (live in the chat and in the transcript) |
 | `ctrl+t` | how much of each tool call to show: a summary line per stretch of calls ("Read 3 files, ran 2 shell commands"; edits and failures in full) → a row per call → everything in full → back. It stays until you press it again |
 | `ctrl+n` | new session |
@@ -57,7 +58,7 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 
 | Command | Does |
 |---|---|
-| `/help`, `/?` | commands and keys |
+| `/help`, `/?` | searchable help popup with Commands, Keys and Docs tabs (also `f1`) |
 | `/help {topic}` | the matching section of these docs in a scrollable window (`/help hooks`, `/help windows`, `/help lua` for a whole file) |
 | `/health`, `/checkhealth` | check the setup: provider address and key, sessions folder, terminal, mouse, clipboard route, Lua errors, plus plugins' own checks |
 | `/setup` | add a model provider: kind, URL, model and key (kept in `~/.bone/secrets.json`), and catalog plugins; opens by itself on a first run with no provider |
@@ -77,6 +78,8 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 `/rename`, `/fork`, `/compact` and `/plugins` are Lua commands from `runtime/tui/defaults.lua`: change or remove them like any other (`bone.cmd.del("fork")`).
 
 Enter on a partial name runs the highlighted suggestion (`/ses` + enter opens the picker). A message that really starts with `/` can be sent as `//like this`; paths such as `/etc/hosts …` are sent as messages anyway. Commands from Lua or plugins show up in the suggestions too.
+
+**Help popup.** Type to filter the current tab; `tab` / `shift+tab` or `left` / `right` switch between Commands, Keys and Docs. Search matches command aliases and descriptions too, and includes commands registered by plugins. Use `up` / `down`, the wheel, `pageup` / `pagedown` or `home` / `end` to navigate; `ctrl+u` clears the search. `enter` on a command puts it in the prompt ready to edit and submit; on a shortcut or doc topic, it opens the guide in a scrollable window. Close the guide with `esc` to return to the same search. `esc` closes help and returns to your draft. The Keys tab describes the default mappings; your `tui.lua` can override them.
 
 ## Options
 

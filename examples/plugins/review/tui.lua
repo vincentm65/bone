@@ -7,7 +7,6 @@
 -- In the panel: up/down select, enter asks for a review of that file (in
 -- the prompt, for you to edit and send), g shows its git diff, esc goes back.
 
-local panel
 local files, sel = {}, 1
 
 -- Changed files, from the edit_file/write_file calls of this session.
@@ -37,9 +36,6 @@ end
 
 local function render(ctx)
   collect()
-  if #files == 0 then
-    return { { { "no files changed in this session yet", "Dim" } } }
-  end
   local lines = {}
   for i, f in ipairs(files) do
     local hl = (ctx.focused and i == sel) and "Selection" or "Normal"
@@ -99,14 +95,15 @@ local keys = {
 }
 
 bone.cmd.create("review", function(c)
-  if c.args == "all" then
-    collect()
+  collect()
+  local panel = bone.ui.panel.get("review")
+  if c.args == "all" or (#files == 0 and (not panel or panel:info().hidden)) then
     return ask(files)
   end
-  if panel and panel:is_open() then
+  if panel then
     panel:toggle()
   else
-    panel = bone.ui.panel.open({ id = "review", dock = "bottom", size = "auto", max = 8, title = "Changed files", render = render, keys = keys })
+    bone.ui.panel.open({ id = "review", dock = "bottom", size = "auto", max = 8, title = "Changed files", render = render, keys = keys })
   end
 end, {
   desc = "files changed in this session; /review all asks for a review",

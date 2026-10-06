@@ -212,7 +212,11 @@ end
 ---   bone.queue.remove(id, queue_id), bone.queue.clear(id)
 bone.queue = {
   add = function(id, text, mode)
-    return session_op("queue_add", id, { text = text, mode = mode })
+    local ev, why = bone.run_hooks("queue_add", { session_id = id, text = text, mode = mode or "steer" })
+    if why then
+      error(why, 2)
+    end
+    return session_op("queue_add", id, { text = ev.text, mode = ev.mode })
   end,
   list = function(id)
     return session_op("queue_list", id)

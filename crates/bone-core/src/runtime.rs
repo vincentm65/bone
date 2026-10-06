@@ -552,36 +552,22 @@ impl Host {
                 if text.trim().is_empty() {
                     return Err("bone.queue.add needs text".into());
                 }
-                let mut mode: bone_proto::methods::QueueMode =
-                    serde_json::from_value(spec["mode"].clone()).unwrap_or_default();
-                if session.lock().unwrap().active.is_none()
-                    && let Ok(turn_id) = inner.begin_turn(session.clone(), text.clone())
-                {
-                    return Ok(json!({ "turn_id": turn_id }));
-                }
-                let mut s = session.lock().unwrap();
-                let ending = s
-                    .active
-                    .as_ref()
-                    .is_none_or(|a| a.closing || a.cancel.is_cancelled());
-                if ending {
-                    mode = bone_proto::methods::QueueMode::Next;
-                }
-                let qid = s.enqueue(text, mode);
-                inner.emit_queue(&s);
-                return Ok(json!({ "id": qid }));
+                let mode = serde_json::from_value(spec["mode"].clone()).unwrap_or_default();
+                let r = inner.queue_add(&session, text, mode);
+                return r.map(|r| json!(r)).map_err(|e| e.message);
             }
             "queue_remove" | "queue_clear" => {
-                {
-                    let mut s = session.lock().unwrap();
+                let r = inner.queue_edit(id, |s| {
                     match spec["queue_id"].as_u64() {
                         Some(qid) if op == "queue_remove" => s.queue.retain(|q| q.id != qid),
                         _ => s.queue.clear(),
                     }
-                    s.save_queue();
-                    inner.emit_queue(&s);
-                }
-                return Ok(json!(true));
+                    if op == "queue_clear" {
+                        s.queue_paused = false;
+                    }
+                    Ok(())
+                });
+                return r.map(|_| json!(true)).map_err(|e| e.message);
             }
             _ => {}
         }

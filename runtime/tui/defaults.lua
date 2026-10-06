@@ -46,7 +46,7 @@ bone.ui.actions.dismiss = function()
   if done then
     return done
   end
-  return bone.prompt.get() == "" and tray.back()
+  return tray.cancel_edit() or (bone.prompt.get() == "" and tray.back())
 end
 local menu_down = bone.ui.actions.down
 bone.ui.actions.down = function()
@@ -56,7 +56,8 @@ bone.ui.actions.down = function()
   return bone.prompt.get() == "" and not bone.prompt.info().history and tray.enter()
 end
 
--- Up on an empty prompt takes the last queued message back to edit.
+-- Up on an empty prompt edits the last queued message (enter saves it in
+-- place; the tray's Queue page edits any of them).
 local menu_up = bone.ui.actions.up
 bone.ui.actions.up = function()
   if menu_up and menu_up() then
@@ -71,8 +72,7 @@ bone.ui.actions.up = function()
   if not last then
     return false
   end
-  bone.prompt.set(last.text)
-  bone.request("queue/remove", { session_id = s.session_id, id = last.id })
+  tray.edit(last)
   return true
 end
 
@@ -84,6 +84,7 @@ end
 
 -- The prompt (the "main" context).
 map({
+  ["f1"] = "/help",
   ["enter"] = "submit",
   ["alt+enter"] = "newline",
   ["shift+enter"] = "newline",
@@ -213,67 +214,13 @@ function bone.ui.suggestions(ctx)
   return lines
 end
 
--- /help topic: the best matching section of the docs, in a pager.
-local function doc_sections()
-  local out = {}
-  for _, d in ipairs(bone._docs) do
-    local code = false
-    for line in (d.text .. "\n"):gmatch("(.-)\n") do
-      if line:match("^```") then
-        code = not code
-      end
-      local hashes, title = line:match("^(#+)%s+(.*)$")
-      if hashes and not code then
-        out[#out + 1] = { doc = d.name, level = #hashes, title = title, lines = {} }
-      end
-      if #out > 0 and out[#out].doc == d.name then
-        table.insert(out[#out].lines, line)
-      end
-    end
-  end
-  return out
-end
-
+-- /help and F1: the Lua help browser; /help topic opens a docs section.
 function bone.ui.help(topic)
-  local t = topic:lower()
-  for _, d in ipairs(bone._docs) do
-    if d.name == t then
-      return bone.ui.pager(d.text, { title = d.name .. ".md" })
-    end
+  local help = require("bone.help")
+  if topic and topic:match("%S") then
+    return help.topic(topic)
   end
-  local secs = doc_sections()
-  local best, score = nil, 0
-  for i, s in ipairs(secs) do
-    local title = s.title:lower():gsub("`", "")
-    local sc = 0
-    if title == t then
-      sc = 4
-    elseif (" " .. title .. " "):find("[^%w_]" .. t:gsub("%p", "%%%0") .. "[^%w_]") then
-      sc = 3
-    elseif title:find(t, 1, true) then
-      sc = 2
-    elseif table.concat(s.lines, "\n"):lower():find(t, 1, true) then
-      sc = 1
-    end
-    if sc > score then
-      best, score = i, sc
-    end
-  end
-  if not best then
-    return bone.notify("no help for " .. topic .. " (try /help lua or /help usage)", "error")
-  end
-  -- The section with its subsections.
-  local s = secs[best]
-  local lines = {}
-  for i = best, #secs do
-    if i > best and (secs[i].doc ~= s.doc or secs[i].level <= s.level) then
-      break
-    end
-    for _, l in ipairs(secs[i].lines) do
-      lines[#lines + 1] = l
-    end
-  end
-  bone.ui.pager(table.concat(lines, "\n"), { title = s.doc .. ".md: " .. s.title })
+  return help.open()
 end
 
 -- /health: the TUI's checks, then the core's (over the protocol).
