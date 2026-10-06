@@ -36,12 +36,16 @@ Or just `cargo build --release` and run `target/release/bone`. The Lua runtime i
 ## Quick start
 
 ```sh
-bone3 --init          # writes ~/.bone/core.lua and ~/.bone/tui.lua
-$EDITOR ~/.bone/core.lua   # pick a provider
-cd your/project && bone3
+cd your/project
+bone3                    # first run opens the guided provider setup
+# Or configure a provider for one run:
+BONE_BASE_URL=http://localhost:8080/v1 BONE_MODEL=qwen bone3
 ```
 
-A provider is any OpenAI-compatible `/chat/completions` endpoint: a local llama.cpp / vLLM / tabbyAPI server, DeepSeek, OpenRouter, OpenAI and so on.
+On the first run, choose a local server or hosted provider in the setup screen. API keys entered there are stored in `~/.bone/secrets.json`; settings are stored in `~/.bone/settings.json`, and your Lua configuration is left untouched. You can reopen the wizard with `/setup`, diagnose a connection with `/health`, or customize everything later with `/config`.
+```
+
+A provider is any OpenAI-compatible `/chat/completions` endpoint: a local llama.cpp / vLLM / tabbyAPI server, DeepSeek, OpenRouter, OpenAI and so on. For advanced users, `bone3 --init` still creates editable `core.lua` and `tui.lua` starter files.
 
 ```lua
 -- ~/.bone/core.lua
@@ -51,7 +55,7 @@ bone.config.provider = "local_model"
 
 For a one-off run without a config: `BONE_BASE_URL=http://localhost:8080/v1 BONE_MODEL=qwen bone3`.
 
-Type a message and press enter. Tools that change things (`write_file`, `edit_file`, `shell`) ask first: `y` allows, `n` denies. Type `/` for commands (`/help` lists them), `ctrl+o` opens an earlier session, `ctrl+c` cancels a turn (twice on an empty prompt quits), and `bone3 -r` picks up where you left off.
+Type a message and press enter. A good first test is `explain this project` or `run the tests and fix any failures`. Tools that change things (`write_file`, `edit_file`, `shell`) ask first: `y` allows, `n` denies. Type `/` for commands (`/help` lists them), `ctrl+o` opens an earlier session, `ctrl+c` cancels a turn (twice on an empty prompt quits), and `bone3 -r` picks up where you left off.
 
 ## Running the core separately
 

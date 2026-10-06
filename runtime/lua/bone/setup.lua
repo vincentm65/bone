@@ -44,6 +44,12 @@ function M.open(opts)
     packages_err = nil,
     picked = {},
     log = {},
+    first_prompts = {
+      "Explain this project",
+      "Find the main entry point",
+      "Review my git changes",
+      "Run the tests and summarize failures",
+    },
   }
   local id
   local paste_event
@@ -62,6 +68,7 @@ function M.open(opts)
     bone.ui.close(id)
     if skipped and opts.first_run then
       bone.settings.set("setup.skipped", true)
+      bone.notify("Setup paused. Run /setup when you’re ready to connect a provider.")
     end
   end
 
@@ -202,8 +209,13 @@ function M.open(opts)
       end
       if st.step == "done" then
         out[#out + 1] = ""
-        out[#out + 1] = "   Done. Type a message to start; /config changes any of this later."
-        hint = "enter or esc close"
+        out[#out + 1] = "   Bone is ready. Choose something to try:"
+        for i, prompt in ipairs(st.first_prompts) do
+          local mark = i == st.sel and " › " or "   "
+          out[#out + 1] = bone.text.truncate(mark .. prompt, w)
+        end
+        out[#out + 1] = ""
+        hint = "↑↓ choose · enter use prompt · esc close"
       else
         hint = "working…"
       end
@@ -263,7 +275,15 @@ function M.open(opts)
       return true
     end
     if st.step == "done" then
-      if k == "enter" or k == "esc" or k == "q" then
+      if k == "up" or k == "wheelup" then
+        st.sel = math.max(1, st.sel - 1)
+      elseif k == "down" or k == "wheeldown" then
+        st.sel = math.min(#st.first_prompts, st.sel + 1)
+      elseif k == "enter" then
+        local prompt = st.first_prompts[st.sel]
+        close(false)
+        bone.prompt.set(prompt)
+      elseif k == "esc" or k == "q" then
         close(false)
       end
       return true

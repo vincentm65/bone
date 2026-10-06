@@ -491,8 +491,8 @@ async fn first_run_setup_adds_a_provider() {
         .await
         .unwrap();
     tui.press("enter").unwrap(); // Continue (no packages)
-    tui.wait_for(WAIT, |s| s.contains("Done.")).await.unwrap();
-    tui.press("enter").unwrap();
+    tui.wait_for(WAIT, |s| s.contains("Bone is ready.")).await.unwrap();
+    tui.press("enter").unwrap(); // choose the first suggested prompt
 
     let settings: serde_json::Value = serde_json::from_str(
         &std::fs::read_to_string(e.config.path().join("settings.json")).unwrap(),
@@ -508,8 +508,8 @@ async fn first_run_setup_adds_a_provider() {
             .contains("sk-test")
     );
 
-    // The provider is in use: a message gets the fake model's reply.
-    tui.type_text("hi\n");
+    // The provider is in use: the suggested first prompt gets a reply.
+    tui.press("enter").unwrap();
     tui.wait_for(WAIT, |s| s.contains("hello from fake"))
         .await
         .unwrap();
