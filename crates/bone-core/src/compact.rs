@@ -64,7 +64,10 @@ pub(crate) fn chars(messages: &[ChatMessage], replays_reasoning: bool) -> usize 
         .iter()
         .map(|m| match m {
             ChatMessage::System { content } => content.len(),
-            ChatMessage::User { content, images } => {
+            ChatMessage::User { content, images }
+            | ChatMessage::Tool {
+                content, images, ..
+            } => {
                 content.len()
                     + images
                         .iter()
@@ -93,7 +96,6 @@ pub(crate) fn chars(messages: &[ChatMessage], replays_reasoning: bool) -> usize 
                         .map(|c| c.name.len() + c.arguments.len())
                         .sum::<usize>()
             }
-            ChatMessage::Tool { content, .. } => content.len(),
         })
         .sum()
 }
@@ -279,12 +281,11 @@ impl Inner {
         ];
         if can_see_images {
             for (index, message) in plan.input.iter().enumerate() {
-                if let ChatMessage::User { images, .. } = message
-                    && !images.is_empty()
-                {
+                let images = message.images();
+                if !images.is_empty() {
                     messages.push(ChatMessage::User {
                         content: format!("Images from transcript message {}. Preserve their relevant visual details in the summary.", index + 1),
-                        images: images.clone(),
+                        images: images.to_vec(),
                     });
                 }
             }

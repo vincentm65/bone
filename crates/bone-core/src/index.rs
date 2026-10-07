@@ -382,6 +382,7 @@ fn index_record(tx: &Transaction, id: &str, record: Record, at: u64, seq: &mut u
                     call_id,
                     content,
                     is_error,
+                    ..
                 } => run(
                     "UPDATE tool_calls SET is_error = ?3, output_chars = ?4
                          WHERE session_id = ?1 AND call_id = ?2 AND is_error IS NULL",

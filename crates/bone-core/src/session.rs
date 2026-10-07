@@ -1036,6 +1036,7 @@ mod tests {
             .unwrap();
             for (call, err) in [("a", false), ("b", true)] {
                 s.push(ChatMessage::Tool {
+                    images: Vec::new(),
                     call_id: call.into(),
                     content: "out".into(),
                     is_error: err,

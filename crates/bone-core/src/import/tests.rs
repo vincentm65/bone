@@ -179,6 +179,7 @@ fn transcripts_are_repaired_for_providers() {
         arguments: "{}".into(),
     };
     let result = |id: &str| ChatMessage::Tool {
+        images: Vec::new(),
         call_id: id.into(),
         content: "ok".into(),
         is_error: false,
@@ -200,6 +201,7 @@ fn transcripts_are_repaired_for_providers() {
         asked.clone(),
     ]);
     let missing = |id: &str| ChatMessage::Tool {
+        images: Vec::new(),
         call_id: id.into(),
         content: NO_RESULT.into(),
         is_error: true,

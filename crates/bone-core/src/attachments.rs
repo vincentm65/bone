@@ -36,7 +36,11 @@ impl AttachmentStore {
         let bytes = STANDARD
             .decode(data)
             .map_err(|_| "image data must be valid base64")?;
-        let png = bone_media::normalize(&bytes)?;
+        self.upload_bytes(&bytes, name)
+    }
+
+    pub fn upload_bytes(&self, bytes: &[u8], name: &str) -> Result<ImageAttachment, String> {
+        let png = bone_media::normalize(bytes)?;
         let id = format!("{:x}", Sha256::digest(&png.bytes));
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| format!("cannot create attachment storage: {e}"))?;
@@ -130,7 +134,7 @@ impl AttachmentStore {
     pub fn hydrate(&self, messages: &[ChatMessage]) -> Result<Vec<ChatMessage>, String> {
         let mut messages = messages.to_vec();
         for msg in &mut messages {
-            if let ChatMessage::User { images, .. } = msg {
+            if let Some(images) = msg.images_mut() {
                 self.resolve(images, true)?;
             }
         }

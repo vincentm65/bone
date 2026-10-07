@@ -77,20 +77,17 @@ impl OpenAiProvider {
         on_delta: DeltaSink<'_>,
     ) -> Result<Completion, ProviderError> {
         if self.config.supports_images == Some(false)
-            && req
-                .messages
-                .iter()
-                .any(|m| matches!(m, ChatMessage::User { images, .. } if !images.is_empty()))
+            && req.messages.iter().any(|m| !m.images().is_empty())
         {
             return Err(ProviderError(
                 "this model does not support images; select a vision model".into(),
             ));
         }
         for message in req.messages {
-            if let ChatMessage::User { images, .. } = message
-                && images
-                    .iter()
-                    .any(|image| image.data.as_deref().is_none_or(str::is_empty))
+            if message
+                .images()
+                .iter()
+                .any(|image| image.data.as_deref().is_none_or(str::is_empty))
             {
                 return Err(ProviderError(
                     "image bytes are unavailable; hydrate attachments before calling the provider"
@@ -134,7 +131,7 @@ impl Provider for OpenAiProvider {
 fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> Value {
     let mut body = json!({
         "model": config.model,
-        "messages": req.messages.iter().map(|msg| wire_message(msg, config.replay_reasoning)).collect::<Vec<_>>(),
+        "messages": wire_messages(req.messages, config.replay_reasoning),
         "stream": true,
     });
     if config.stream_usage {
@@ -162,22 +159,36 @@ fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> Value {
     body
 }
 
+fn wire_messages(messages: &[ChatMessage], replay_reasoning: bool) -> Vec<Value> {
+    let mut out = Vec::new();
+    let mut images = Vec::new();
+    for (index, message) in messages.iter().enumerate() {
+        out.push(wire_message(message, replay_reasoning));
+        if let ChatMessage::Tool {
+            call_id,
+            content,
+            images: attached,
+            ..
+        } = message
+            && !attached.is_empty()
+        {
+            images.push(wire_user(
+                &format!("Images from tool call {call_id}: {content}"),
+                attached,
+            ));
+        }
+        // Complete all tool replies before adding their multimodal content.
+        if !matches!(messages.get(index + 1), Some(ChatMessage::Tool { .. })) {
+            out.append(&mut images);
+        }
+    }
+    out
+}
+
 fn wire_message(msg: &ChatMessage, replay_reasoning: bool) -> Value {
     match msg {
         ChatMessage::System { content } => json!({ "role": "system", "content": content }),
-        ChatMessage::User { content, images } if !images.is_empty() => {
-            let mut parts = Vec::new();
-            if !content.is_empty() {
-                parts.push(json!({ "type": "text", "text": content }));
-            }
-            for image in images {
-                parts.push(json!({ "type": "image_url", "image_url": {
-                    "url": format!("data:{};base64,{}", image.mime_type, image.data.as_deref().unwrap_or_default())
-                }}));
-            }
-            json!({ "role": "user", "content": parts })
-        }
-        ChatMessage::User { content, .. } => json!({ "role": "user", "content": content }),
+        ChatMessage::User { content, images } => wire_user(content, images),
         ChatMessage::Assistant {
             content,
             tool_calls,
@@ -210,6 +221,22 @@ fn wire_message(msg: &ChatMessage, replay_reasoning: bool) -> Value {
             json!({ "role": "tool", "tool_call_id": call_id, "content": content })
         }
     }
+}
+
+fn wire_user(content: &str, images: &[bone_proto::types::ImageAttachment]) -> Value {
+    if images.is_empty() {
+        return json!({ "role": "user", "content": content });
+    }
+    let mut parts = Vec::new();
+    if !content.is_empty() {
+        parts.push(json!({ "type": "text", "text": content }));
+    }
+    for image in images {
+        parts.push(json!({ "type": "image_url", "image_url": {
+            "url": format!("data:{};base64,{}", image.mime_type, image.data.as_deref().unwrap_or_default())
+        }}));
+    }
+    json!({ "role": "user", "content": parts })
 }
 
 // ---- stream chunks -------------------------------------------------------
@@ -458,6 +485,7 @@ mod tests {
                 }],
             },
             ChatMessage::Tool {
+                images: Vec::new(),
                 call_id: "c1".into(),
                 content: "ok".into(),
                 is_error: false,

@@ -81,7 +81,7 @@ After `initialize`, the server runs each request on its own task: replies carry 
 | `model/cancel` | `{ request_id }` | `null`; the call ends with `model/completed` and the error `"cancelled"` |
 | `plugin/load`, `plugin/unload`, `plugin/reload` | `{ name }` | `ReloadResult`: enable, disable, or keep the plugin, then reload as `core/reload` does. An error for a plugin that is not there or has no `core.lua` |
 
-`ImageAttachment` is `{ id, name, mime_type, width, height, bytes }`, where `id` is the SHA-256 of a canonical PNG, `mime_type` is `"image/png"`, and `bytes` is its stored size. First upload bytes, then put returned references in `images` on user messages, turn or queue requests, or `model/complete` messages. Local client paths are never sent to the core. A message may have empty text when it has images. `queue/update` omits `images` to keep them or sends `images: []` to remove them; an empty message is rejected. Empty lists are omitted on the wire, preserving existing text-only messages.
+`ImageAttachment` is `{ id, name, mime_type, width, height, bytes }`, where `id` is the SHA-256 of a canonical PNG, `mime_type` is `"image/png"`, and `bytes` is its stored size. First upload bytes, then put returned references in `images` on user or tool messages, turn or queue requests, or `model/complete` messages. Local client paths are never sent to the core. A message may have empty text when it has images. `queue/update` omits `images` to keep them or sends `images: []` to remove them; an empty message is rejected. Empty lists are omitted on the wire, preserving existing text-only messages.
 
 Limits are 8 images/message, 20 MiB/image input and canonical PNG, 40 megapixels/image, 40 MiB/message, and 32 MiB per NDJSON frame. Image bytes are rejected inside references: only providers receive an extra `data` field with hydrated base64 PNG. Caller-supplied metadata is replaced by verified stored metadata. Sessions and queue files save references, so attachment files must move with the data directory. Uploads deduplicate by hash and are retained indefinitely.
 
@@ -99,6 +99,8 @@ The queue: each session keeps `[{ id, text, images?, mode: "steer" | "next", cre
 ```
 
 Empty `content`/`reasoning`/`tool_calls` and a false `is_error` are omitted. A tool call's `arguments` is the raw JSON string the model produced, which may be invalid.
+
+User and tool messages may include `images: [ImageAttachment, ...]`. `read_file` image results retain their references on the tool message. `tool/finished` reports the text and dimensions; `session/messages` includes the image references.
 
 ## Events
 

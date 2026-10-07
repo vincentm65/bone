@@ -350,6 +350,7 @@ impl Closer {
         self.pending
             .drain(..)
             .map(|call_id| ChatMessage::Tool {
+                images: Vec::new(),
                 call_id,
                 content: NO_RESULT.into(),
                 is_error: true,
@@ -401,6 +402,7 @@ fn message(
                 .unwrap_or_default(),
         },
         "tool" => ChatMessage::Tool {
+            images: Vec::new(),
             call_id: call_id.unwrap_or_default(),
             content,
             is_error,

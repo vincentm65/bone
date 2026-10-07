@@ -17,6 +17,21 @@ struct Request {
     reply: oneshot::Sender<String>,
 }
 impl Request {
+    fn tools(self, calls: &[(&str, &str, Value)]) {
+        let calls: Vec<_> = calls
+            .iter()
+            .enumerate()
+            .map(|(index, (id, name, args))| {
+                json!({"index": index, "id": id, "type": "function", "function": {
+                    "name": name, "arguments": args.to_string()
+                }})
+            })
+            .collect();
+        self.reply.send(format!("data: {}\n\ndata: [DONE]\n\n",
+            json!({"choices": [{"delta": {"tool_calls": calls}, "finish_reason": "tool_calls"}]})))
+            .unwrap();
+    }
+
     fn answer(self, text: &str) {
         self.reply
             .send(format!(
@@ -916,4 +931,379 @@ async fn missing_queued_image_is_reported_and_edit_can_recover() {
     tui.wait_for(WAIT, |s| s.contains("missing image recovered"))
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn read_file_images_reach_provider_and_survive_restart_without_source_files() {
+    for format in [
+        image::ImageFormat::Png,
+        image::ImageFormat::Jpeg,
+        image::ImageFormat::WebP,
+    ] {
+        let mut env = Env::new(true).await;
+        let pixels = image::load_from_memory(&env.png).unwrap();
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        pixels.write_to(&mut bytes, format).unwrap();
+        // Recognition uses content, including paths with spaces and no image extension.
+        let filename = "image pixels.dat";
+        std::fs::write(env.work.path().join(filename), bytes.get_ref()).unwrap();
+        env.png = bone_media::normalize(bytes.get_ref()).unwrap().bytes;
+        let mut tui = env.tui().await;
+        let (id, first) = env.begin(&mut tui).await;
+        first.tools(&[(
+            "image-read",
+            "read_file",
+            json!({"path": filename, "offset": 999}),
+        )]);
+        let next = env.request(&mut tui).await;
+        let messages = next.body["messages"].as_array().unwrap();
+        assert_eq!(messages[messages.len() - 2]["role"], "tool");
+        assert_eq!(messages[messages.len() - 2]["tool_call_id"], "image-read");
+        assert!(
+            messages.last().unwrap()["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("image-read")
+        );
+        env.assert_image(messages.last().unwrap(), None);
+        next.answer("File pixels received.");
+        tui.wait_for(WAIT, |s| s.contains("File pixels received."))
+            .await
+            .unwrap();
+        std::fs::remove_file(env.work.path().join(filename)).unwrap();
+        let restarted = Server::new(Arc::new(Core::from_loaded(
+            scripting::load_with(env.config.path(), &|_| None).unwrap(),
+        )));
+        let (client, _) = Client::new(restarted.connect_in_process());
+        client.initialize("read-file-restart").await.unwrap();
+        let stored = client
+            .request::<SessionMessages>(SessionRef {
+                session_id: id.clone(),
+            })
+            .await
+            .unwrap();
+        let tool = stored
+            .messages
+            .iter()
+            .find(|m| {
+                matches!(m,
+            bone_proto::types::ChatMessage::Tool {call_id, ..} if call_id == "image-read")
+            })
+            .unwrap();
+        assert_eq!(tool.images().len(), 1);
+        assert!(tool.images()[0].data.is_none());
+        assert_eq!(tool.images()[0].name, filename);
+        let data = client
+            .request::<AttachmentRead>(AttachmentReadParams {
+                id: tool.images()[0].id.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(STANDARD.decode(data.data).unwrap(), env.png);
+        let fork = client
+            .request::<SessionFork>(SessionForkParams {
+                session_id: id,
+                before_turn: None,
+            })
+            .await
+            .unwrap();
+        client
+            .request::<TurnStart>(TurnStartParams {
+                session_id: fork.session_id.clone(),
+                text: "What did the image show?".into(),
+                images: Vec::new(),
+            })
+            .await
+            .unwrap();
+        let followup = env.request(&mut tui).await;
+        let image_message = followup.body["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["content"].is_array())
+            .unwrap();
+        env.assert_image(image_message, None);
+        followup.answer("The stored pixels survived restart and fork.");
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let state = client
+                    .request::<SessionMessages>(SessionRef {
+                        session_id: fork.session_id.clone(),
+                    })
+                    .await
+                    .unwrap();
+                if state.active_turn.is_none() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn read_file_parallel_images_keep_tool_replies_ordered_over_stdio() {
+    let mut env = Env::new(true).await;
+    std::fs::write(env.work.path().join("notes.txt"), "plain text\n").unwrap();
+    let mut cmd = tokio::process::Command::new(
+        std::env::var_os("BONE_TEST_BINARY").unwrap_or_else(|| env!("CARGO_BIN_EXE_bone").into()),
+    );
+    cmd.arg("--headless")
+        .env("BONE_CONFIG_DIR", env.config.path())
+        .env_remove("BONE_BASE_URL")
+        .env_remove("BONE_MODEL");
+    let (conn, _child) = bone_client::spawn(cmd).unwrap();
+    let mut tui = Headless::start(
+        conn,
+        RunOptions {
+            clipboard_executable: None,
+            cwd: env.work.path().to_string_lossy().into_owned(),
+            config_dir: Some(env.config.path().to_owned()),
+            resume: None,
+            reload_core: false,
+        },
+        100,
+        24,
+    )
+    .await
+    .unwrap();
+    tui.type_text("Read both images and the text file.");
+    tui.press("enter").unwrap();
+    env.request(&mut tui).await.tools(&[
+        ("image-a", "read_file", json!({"path":"screen capture.png"})),
+        ("text", "read_file", json!({"path":"notes.txt"})),
+        (
+            "image-b",
+            "read_file",
+            json!({"path":env.work.path().join("screen capture.png")}),
+        ),
+    ]);
+    let next = env.request(&mut tui).await;
+    let messages = next.body["messages"].as_array().unwrap();
+    let start = messages
+        .iter()
+        .position(|m| m["tool_call_id"] == "image-a")
+        .unwrap();
+    for (index, id) in ["image-a", "text", "image-b"].iter().enumerate() {
+        assert_eq!(messages[start + index]["role"], "tool");
+        assert_eq!(messages[start + index]["tool_call_id"], *id);
+        assert!(messages[start + index]["content"].is_string());
+    }
+    assert!(
+        messages[start + 1]["content"]
+            .as_str()
+            .unwrap()
+            .contains("plain text")
+    );
+    assert_eq!(messages.len(), start + 5);
+    for (index, id) in ["image-a", "image-b"].iter().enumerate() {
+        let msg = &messages[start + 3 + index];
+        assert!(msg["content"][0]["text"].as_str().unwrap().contains(id));
+        env.assert_image(msg, None);
+    }
+    next.answer("Both images and the text arrived in order.");
+    tui.wait_for(WAIT, |s| {
+        s.contains("Both images and the text arrived in order.")
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn read_file_image_errors_are_tool_errors_and_text_only_models_keep_running() {
+    for vision in [true, false] {
+        let mut env = Env::new(vision).await;
+        std::fs::write(
+            env.work.path().join("corrupt.png"),
+            b"\x89PNG\r\n\x1a\ncorrupt",
+        )
+        .unwrap();
+        let oversized = env.work.path().join("oversized.png");
+        std::fs::write(&oversized, &env.png).unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&oversized)
+            .unwrap()
+            .set_len(bone_media::MAX_IMAGE_BYTES as u64 + 1)
+            .unwrap();
+        let mut tui = env.tui().await;
+        let (_, first) = env.begin(&mut tui).await;
+        let cases = if vision {
+            vec![
+                ("corrupt.png", "cannot read image dimensions"),
+                ("oversized.png", "20 MiB"),
+                ("missing.png", "cannot read"),
+            ]
+        } else {
+            vec![("screen capture.png", "does not support images")]
+        };
+        let calls: Vec<_> = cases
+            .iter()
+            .map(|(path, _)| (*path, "read_file", json!({"path":path})))
+            .collect();
+        first.tools(&calls);
+        let next = env.request(&mut tui).await;
+        let messages = next.body["messages"].as_array().unwrap();
+        assert!(!messages.iter().any(|m| m["content"].is_array()));
+        for (id, error) in &cases {
+            let result = messages.iter().find(|m| m["tool_call_id"] == *id).unwrap();
+            assert!(
+                result["content"].as_str().unwrap().contains(error),
+                "{result}"
+            );
+        }
+        next.answer("Tool errors handled; turn still works.");
+        tui.wait_for(WAIT, |s| {
+            s.contains("Tool errors handled; turn still works.")
+        })
+        .await
+        .unwrap();
+        let stored = env
+            .client
+            .request::<SessionMessages>(SessionRef {
+                session_id: env.id().await,
+            })
+            .await
+            .unwrap();
+        for message in &stored.messages {
+            if let bone_proto::types::ChatMessage::Tool {
+                is_error, images, ..
+            } = message
+            {
+                assert!(*is_error);
+                assert!(images.is_empty());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn read_file_tool_images_reach_compaction_summary() {
+    let mut env = Env::new(true).await;
+    let mut tui = env.tui().await;
+    let (id, first) = env.begin(&mut tui).await;
+    first.tools(&[(
+        "image-read",
+        "read_file",
+        json!({"path":"screen capture.png"}),
+    )]);
+    env.request(&mut tui)
+        .await
+        .answer("The image has colored pixels.");
+    tui.wait_for(WAIT, |s| s.contains("The image has colored pixels."))
+        .await
+        .unwrap();
+    tui.type_text("next question");
+    tui.press("enter").unwrap();
+    env.request(&mut tui).await.answer("next answer");
+    tui.wait_for(WAIT, |s| s.contains("next answer"))
+        .await
+        .unwrap();
+    let client = env.client.clone();
+    let compact = tokio::spawn(async move {
+        client
+            .request::<SessionCompact>(SessionCompactParams {
+                session_id: id,
+                clear: false,
+            })
+            .await
+    });
+    let summary = env.request(&mut tui).await;
+    let image_message = summary.body["messages"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["content"].is_array())
+        .unwrap();
+    env.assert_image(image_message, None);
+    summary.answer("Preserved visual details from read_file.");
+    assert!(compact.await.unwrap().is_ok());
+    let stored = env
+        .client
+        .request::<SessionMessages>(SessionRef {
+            session_id: env.id().await,
+        })
+        .await
+        .unwrap();
+    assert!(stored.messages.iter().any(|m| matches!(m,
+        bone_proto::types::ChatMessage::Tool {images, ..} if images.len()==1 && images[0].data.is_none())));
+}
+
+#[tokio::test]
+async fn read_file_images_are_hydrated_for_lua_providers() {
+    let mut env = Env::new(true).await;
+    let path = env.config.path().join("core.lua");
+    let mut config = std::fs::read_to_string(&path).unwrap();
+    config.push_str(&format!(r#"
+bone.provider.register("image_relay", {{ complete = function(req)
+    for _, message in ipairs(req.messages) do
+        if message.role == "tool" and #message.images > 0 then
+            assert(message.call_id == "lua-image")
+            assert(message.images[1].data == "{}")
+        end
+    end
+    return assert(bone.model.complete({{provider = "fake", messages = req.messages}}))
+end }})
+bone.config.providers.relay = {{type = "image_relay", model = "vision-test", supports_images = true}}
+bone.config.provider = "relay"
+"#, STANDARD.encode(&env.png)));
+    std::fs::write(path, config).unwrap();
+    env.client.request::<CoreReload>(Empty {}).await.unwrap();
+    let mut tui = env.tui().await;
+    let (_, first) = env.begin(&mut tui).await;
+    first.tools(&[(
+        "lua-image",
+        "read_file",
+        json!({"path":"screen capture.png"}),
+    )]);
+    let next = env.request(&mut tui).await;
+    env.assert_image(
+        next.body["messages"].as_array().unwrap().last().unwrap(),
+        None,
+    );
+    next.answer("Lua received the tool image pixels.");
+    tui.wait_for(WAIT, |s| s.contains("Lua received the tool image pixels."))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn read_file_result_hook_rejection_does_not_deliver_images() {
+    let mut env = Env::new(true).await;
+    let path = env.config.path().join("core.lua");
+    let mut config = std::fs::read_to_string(&path).unwrap();
+    config.push_str(
+        r#"
+bone.hook("tool_result", function(ev)
+    if ev.name == "read_file" then
+        assert(#ev.images == 1 and ev.images[1].data == nil)
+        return {output = "Image result refused by hook", is_error = true}
+    end
+end)
+"#,
+    );
+    std::fs::write(path, config).unwrap();
+    env.client.request::<CoreReload>(Empty {}).await.unwrap();
+    let mut tui = env.tui().await;
+    let (_, first) = env.begin(&mut tui).await;
+    first.tools(&[(
+        "refused-image",
+        "read_file",
+        json!({"path":"screen capture.png"}),
+    )]);
+    let next = env.request(&mut tui).await;
+    let messages = next.body["messages"].as_array().unwrap();
+    assert_eq!(
+        messages.last().unwrap()["content"],
+        "Image result refused by hook"
+    );
+    assert!(!messages.iter().any(|m| m["content"].is_array()));
+    next.answer("Rejected image stayed out of the request.");
+    tui.wait_for(WAIT, |s| {
+        s.contains("Rejected image stayed out of the request.")
+    })
+    .await
+    .unwrap();
 }

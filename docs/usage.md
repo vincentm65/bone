@@ -67,6 +67,8 @@ PNG, JPEG and WebP inputs become lossless PNG attachments. Limits: 8 images per 
 
 Saved sessions and forks refer to durable files under `<data_dir>/attachments/<sha256>.png`; pixels are sent to the model only when needed. Attachment files are retained, including uploads from drafts you discard; automatic garbage collection is not implemented. Back up the attachments directory together with sessions when moving your history.
 
+The model can also use `read_file` to view PNG, JPEG and WebP files on the core machine. Images are recognized by their contents and returned as pixels with the same limits and storage as attachments. Line ranges apply only to text files. Invalid images or a model with `supports_images = false` produce a tool error, allowing the model to continue.
+
 ## Commands
 
 | Command | Does |

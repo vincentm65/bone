@@ -252,7 +252,7 @@ A hook runs at a point in the core with an event table. It returns `nil` (no cha
 | `queue_add` | `{ session_id, text, mode, images }`, a message about to be sent or queued (`queue/add` or `bone.queue.add`); return `{ text = ..., mode = ... }` to change it | it is refused with "why" |
 | `message` | `{ session_id, content, reasoning, tool_calls, usage }`, the model's reply before it is saved | the turn fails |
 | `tool_call` | `{ session_id, cwd, id, name, arguments }` | the call is refused; the model sees "why" |
-| `tool_result` | `{ session_id, id, name, arguments, output, is_error }` | the model sees "why" as an error |
+| `tool_result` | `{ session_id, id, name, arguments, output, is_error, images }` (image references; marking the result as an error discards them) | the model sees "why" as an error |
 | `turn_end` | `{ session_id, turn_id, outcome }` | (changes are ignored) |
 
 ```lua
@@ -670,7 +670,7 @@ The selection is drawn with the `Selection` group. Typing or pasting replaces it
 
 `bone.prompt.images()` returns the draft's image references; `bone.prompt.set_images(refs)` replaces them. `bone.prompt.attach(path)` reads a file asynchronously, `bone.prompt.paste()` reads the local clipboard, and `bone.prompt.remove_image(index)` removes a 1-based attachment. `bone.prompt.empty()` checks text, images and pending reads. Setting text preserves attachments. The `submit` event includes `{ text, images }`; `prompt/changed` includes `images`, and `image/attached` announces `{ image }` after a successful upload. The default `attachments` layout region shows their labels.
 
-In core Lua coroutines, `bone.attachments.upload(base64, name)` yields and returns an `ImageAttachment`; `bone.attachments.read(id)` returns `{ data = base64_png }`. Use references in `{ role = "user", content = "", images = { ref } }`, `bone.queue.add(id, text, mode, { ref })`, session operations or model calls. Custom providers receive each image's hydrated PNG as `image.data`; translate it to your provider's multimodal format. Stored messages and hook events use references without pixels.
+In core Lua coroutines, `bone.attachments.upload(base64, name)` yields and returns an `ImageAttachment`; `bone.attachments.read(id)` returns `{ data = base64_png }`. Use references in `{ role = "user", content = "", images = { ref } }`, `bone.queue.add(id, text, mode, { ref })`, session operations or model calls. `read_file` image results include references on their `role = "tool"` messages. Custom providers receive hydrated PNGs as `image.data` on both user and tool messages; translate them to your provider's multimodal format. Stored messages and hook events use references without pixels.
 
 ### Chat data
 

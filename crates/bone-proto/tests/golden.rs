@@ -192,6 +192,7 @@ fn requests() {
                     tool_calls: vec![call()],
                 },
                 ChatMessage::Tool {
+                    images: Vec::new(),
                     call_id: "call_1".into(),
                     content: "ok\n[exit code: 0]".into(),
                     is_error: false,

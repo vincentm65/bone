@@ -550,6 +550,7 @@ impl Turn<'_> {
                         self.record(ChatMessage::Tool {
                             call_id: skipped.id.clone(),
                             content: CANCELLED.into(),
+                            images: Vec::new(),
                             is_error: true,
                         })?;
                     }
@@ -575,7 +576,7 @@ impl Turn<'_> {
                 }
                 let results = futures_util::future::join_all(batch.iter().map(|call| async move {
                     let began = std::time::Instant::now();
-                    let (output, is_error) = self.run_tool(call).await;
+                    let (output, is_error, images) = self.run_tool(call).await;
                     self.inner.emit::<ToolFinished>(ToolFinishedParams {
                         session_id: self.session_id.clone(),
                         turn_id: self.turn_id,
@@ -584,14 +585,15 @@ impl Turn<'_> {
                         is_error,
                         duration_ms: Some(began.elapsed().as_millis() as u64),
                     });
-                    (output, is_error)
+                    (output, is_error, images)
                 }))
                 .await;
                 // The transcript keeps the calls' order.
-                for (call, (output, is_error)) in batch.iter().zip(results) {
+                for (call, (output, is_error, images)) in batch.iter().zip(results) {
                     self.record(ChatMessage::Tool {
                         call_id: call.id.clone(),
                         content: output,
+                        images,
                         is_error,
                     })?;
                 }
@@ -670,8 +672,11 @@ impl Turn<'_> {
         }
     }
 
-    /// Run one call. Returns the text for the model and whether it is an error.
-    async fn run_tool(&self, call: &ToolCall) -> (String, bool) {
+    /// Run one call, retaining stored images only on success.
+    async fn run_tool(
+        &self,
+        call: &ToolCall,
+    ) -> (String, bool, Vec<bone_proto::types::ImageAttachment>) {
         let tool = self
             .rt
             .tools
@@ -693,11 +698,12 @@ impl Turn<'_> {
                     names.join(", ")
                 ),
                 true,
+                Vec::new(),
             );
         };
         let mut args = match parse_args(&call.arguments) {
             Ok(a) => a,
-            Err(e) => return (e, true),
+            Err(e) => return (e, true, Vec::new()),
         };
         let mut ev = json!({
             "session_id": self.session_id,
@@ -714,8 +720,8 @@ impl Turn<'_> {
         match self.hooks("tool_call", ev).await {
             Ok(Some(ev)) => args = ev["arguments"].clone(),
             Ok(None) => {}
-            Err(Refused::Denied(why)) => return (why, true),
-            Err(Refused::Cancelled) => return (CANCELLED.into(), true),
+            Err(Refused::Denied(why)) => return (why, true, Vec::new()),
+            Err(Refused::Cancelled) => return (CANCELLED.into(), true, Vec::new()),
         }
 
         let output: crate::tools::OutputSink = {
@@ -762,18 +768,38 @@ impl Turn<'_> {
             self.cancel.cancelled().await;
             tokio::time::sleep(TOOL_CANCEL_GRACE).await;
         };
-        let (output, is_error) = tokio::select! {
+        let result = tokio::select! {
             biased;
-            r = tool.call(args, &ctx) => match r {
-                Ok(out) => (out, false),
-                Err(out) => (out, true),
-            },
+            r = tool.call_with_images(args, &ctx) => r,
             _ = grace => {
                 if let Some(s) = self.rt.scripting.as_deref() {
                     s.cancel_session(&self.session_id);
                 }
-                return ("Cancelled by the user while running.".into(), true);
+                return ("Cancelled by the user while running.".into(), true, Vec::new());
             }
+        };
+        let (output, is_error, images) = match result.and_then(|response| {
+            let mut images = response
+                .images
+                .iter()
+                .map(|(bytes, name)| self.inner.attachments.upload_bytes(bytes, name))
+                .collect::<Result<Vec<_>, _>>()?;
+            if !images.is_empty() {
+                self.inner
+                    .validate_input(&self.session.lock().unwrap(), &response.output, &mut images)
+                    .map_err(|e| e.message)?;
+            }
+            let mut output = response.output;
+            for image in &images {
+                output.push_str(&format!(
+                    "\n[Image: {} {}×{}]",
+                    image.name, image.width, image.height
+                ));
+            }
+            Ok((output, images))
+        }) {
+            Ok((output, images)) => (output, false, images),
+            Err(output) => (output, true, Vec::new()),
         };
         let ev = json!({
             "session_id": self.session_id,
@@ -782,15 +808,17 @@ impl Turn<'_> {
             "arguments": hook_args,
             "output": output,
             "is_error": is_error,
+            "images": images,
         });
-        match self.hooks("tool_result", ev).await {
+        let (output, is_error) = match self.hooks("tool_result", ev).await {
             Ok(Some(ev)) => (
                 ev["output"].as_str().map(str::to_owned).unwrap_or(output),
                 ev["is_error"].as_bool().unwrap_or(is_error),
             ),
             Ok(None) | Err(Refused::Cancelled) => (output, is_error),
             Err(Refused::Denied(why)) => (why, true),
-        }
+        };
+        (output, is_error, if is_error { Vec::new() } else { images })
     }
 }
 

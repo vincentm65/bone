@@ -30,9 +30,27 @@ pub enum ChatMessage {
     Tool {
         call_id: String,
         content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageAttachment>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         is_error: bool,
     },
+}
+
+impl ChatMessage {
+    pub fn images(&self) -> &[ImageAttachment] {
+        match self {
+            Self::User { images, .. } | Self::Tool { images, .. } => images,
+            _ => &[],
+        }
+    }
+
+    pub fn images_mut(&mut self) -> Option<&mut Vec<ImageAttachment>> {
+        match self {
+            Self::User { images, .. } | Self::Tool { images, .. } => Some(images),
+            _ => None,
+        }
+    }
 }
 
 /// A tool call requested by the model.

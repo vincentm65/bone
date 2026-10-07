@@ -245,6 +245,7 @@ impl ChatBuffer {
                     call_id,
                     content,
                     is_error,
+                    ..
                 } => self.set_tool_output(call_id, content.clone(), *is_error),
             }
         }
@@ -1090,6 +1091,7 @@ mod tests {
                     tool_calls: vec![call("c1", r#"{"command":"x"}"#)],
                 },
                 ChatMessage::Tool {
+                    images: Vec::new(),
                     call_id: "c1".into(),
                     content: "boom".into(),
                     is_error: true,

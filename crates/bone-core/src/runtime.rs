@@ -604,7 +604,7 @@ impl Host {
             }
             "append" => {
                 let mut msg = message(&spec["message"])?;
-                if let ChatMessage::User { images, .. } = &mut msg {
+                if let Some(images) = msg.images_mut() {
                     inner.attachments.validate(images)?;
                 }
                 let mut s = session.lock().unwrap();
@@ -623,7 +623,7 @@ impl Host {
                     .map(message)
                     .collect::<Result<Vec<_>, _>>()?;
                 for msg in &mut msgs {
-                    if let ChatMessage::User { images, .. } = msg {
+                    if let Some(images) = msg.images_mut() {
                         inner.attachments.validate(images)?;
                     }
                 }

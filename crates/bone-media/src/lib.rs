@@ -12,6 +12,14 @@ pub struct PngImage {
     pub height: u32,
 }
 
+/// Recognize supported image content, independent of the filename.
+pub fn is_image(bytes: &[u8]) -> bool {
+    matches!(
+        image::guess_format(bytes),
+        Ok(image::ImageFormat::Png | image::ImageFormat::Jpeg | image::ImageFormat::WebP)
+    )
+}
+
 fn dimensions(width: u32, height: u32) -> Result<(), String> {
     if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_IMAGE_PIXELS {
         return Err("image dimensions are invalid or exceed 40 megapixels".into());

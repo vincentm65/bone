@@ -70,9 +70,31 @@ impl ToolContext {
 /// Text for the model. `Err` marks the result as an error.
 pub type ToolResult = Result<String, String>;
 
+/// Image bytes are normalized and stored by the agent before recording results.
+pub struct ToolResponse {
+    pub output: String,
+    pub images: Vec<(Vec<u8>, String)>,
+}
+
+impl From<String> for ToolResponse {
+    fn from(output: String) -> Self {
+        Self {
+            output,
+            images: Vec::new(),
+        }
+    }
+}
+
 pub trait Tool: Send + Sync {
     fn spec(&self) -> &ToolSpec;
     fn call<'a>(&'a self, args: Value, ctx: &'a ToolContext) -> BoxFuture<'a, ToolResult>;
+    fn call_with_images<'a>(
+        &'a self,
+        args: Value,
+        ctx: &'a ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResponse, String>> {
+        Box::pin(async move { self.call(args, ctx).await.map(Into::into) })
+    }
     /// Safe to run at the same time as other such calls (it only reads).
     fn parallel(&self) -> bool {
         false
