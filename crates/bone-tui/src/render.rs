@@ -44,9 +44,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     // The Normal group's background (if any) fills the screen.
     frame.render_widget(Block::default().style(app.theme.hl("Normal")), area);
     // Screen-height sidebars reserve a column for the entire main UI.
-    let area = app.draw_panels(frame, area, true);
-
     let layout = app.layout();
+    let mut panels = Vec::new();
+    let area = app.allocate_panels(area, true, &layout, &mut panels);
     // Without a "message" leaf, notifications take rows at the bottom.
     let msg_rows = if layout.contains("message") {
         0
@@ -80,29 +80,42 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         message = rect("message");
     }
 
-    // For mouse events: which leaf is where.
-    app.leaves = plan.leaves.clone();
-    let chat_area = middle;
-    let chat_area = app.draw_panels(frame, chat_area, false);
+    let chat_area = app.allocate_panels(middle, false, &layout, &mut panels);
+    for (name, r) in &mut plan.leaves {
+        if name == "chat" {
+            *r = chat_area;
+        }
+        if let Some(id) = name.strip_prefix("panel:") {
+            if app.panel(id).is_some_and(|p| !p.hidden)
+                && r.width > 0
+                && r.height > 0
+                && !panels.iter().any(|p| p.id == id)
+            {
+                panels.push(crate::panel::PanelPlacement {
+                    id: id.to_owned(),
+                    area: *r,
+                    separator: None,
+                });
+            } else {
+                r.width = 0;
+                r.height = 0;
+            }
+        }
+    }
+    // Publish final geometry once, before painting or input can observe it.
+    app.leaves = std::mem::take(&mut plan.leaves);
+    app.publish_panels(&panels);
     app.placed = HashMap::from([
         (CHAT_WIN, Placed { area: chat_area }),
         (PROMPT_WIN, Placed { area: prompt_area }),
     ]);
-    let was_following = app.windows[&CHAT_WIN].follow;
     draw_chat(frame, app, chat_area);
-    let resumed_follow = !was_following && app.windows[&CHAT_WIN].follow;
-    for (name, r, lines) in std::mem::take(&mut plan.regions) {
-        // Cached lines were made while sizing the layout, before the chat
-        // clamped its scroll position. Refresh them if it reached the end.
-        let lines = match lines.filter(|_| !resumed_follow) {
-            Some(lines) => lines,
-            // Not sized by its content: drawn at the size it was given.
-            None => match app.region_sized(&name, r.width, r.height, true, true) {
-                Some((_, lines)) => lines,
-                None => continue,
-            },
-        };
-        frame.render_widget(Paragraph::new(lines), r);
+    app.paint_panels(frame, &panels);
+    for (name, r) in std::mem::take(&mut plan.regions) {
+        // Measurement callbacks see available space; painting sees final space.
+        if let Some((_, lines)) = app.region_sized(&name, r.width, r.height, true, true) {
+            frame.render_widget(Paragraph::new(lines), r);
+        }
     }
     for (x, area, sep) in std::mem::take(&mut plan.seps) {
         let style = app.theme.hl("WinSeparator");
@@ -112,15 +125,10 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             }
         }
     }
-    let (spec, insets, prompt_ctx) = match plan.prompt.take() {
-        Some(p) => p,
-        None => {
-            let ctx = app.prompt_ctx(main.width);
-            let spec = PromptSpec::default();
-            let insets = Insets::of(&spec, main.width);
-            (spec, insets, ctx)
-        }
-    };
+    // Rebuild width-dependent prompt metadata after allocation has clamped it.
+    let prompt_ctx = app.prompt_ctx(prompt_area.width);
+    let spec = app.prompt_spec(&prompt_ctx);
+    let insets = Insets::of(&spec, prompt_area.width);
 
     if divider.height > 0 {
         let ctx = app.divider_ctx(divider.width);
@@ -163,6 +171,28 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if app.focused_panel().is_some() {
         cursor = None;
     }
+    // Callbacks can hide/close panels after geometry was published. Do not
+    // leave invisible panels in the last-frame geometry or mouse hit map.
+    for placement in &panels {
+        if app.panel(&placement.id).is_some_and(|p| !p.hidden) {
+            continue;
+        }
+        frame.render_widget(Clear, placement.area);
+        frame.render_widget(
+            Block::default().style(app.theme.hl("Normal")),
+            placement.area,
+        );
+        if let Some(p) = app.panel_mut(&placement.id) {
+            p.area = None;
+            p.view = 0;
+        }
+        for (name, rect) in &mut app.leaves {
+            if name.strip_prefix("panel:") == Some(placement.id.as_str()) {
+                rect.width = 0;
+                rect.height = 0;
+            }
+        }
+    }
     if let Some(c) = cursor {
         frame.set_cursor_position(c);
     }
@@ -194,15 +224,27 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 struct Plan {
     /// Every leaf and its area.
     leaves: Vec<(String, Rect)>,
-    /// Regions to draw: lines already made when sized by content.
-    regions: Vec<(String, Rect, Option<Vec<Line<'static>>>)>,
+    /// Regions to paint at their final dimensions.
+    regions: Vec<(String, Rect)>,
     /// Column separators: x, the split's area, the symbol.
     seps: Vec<(u16, Rect, String)>,
-    prompt: Option<(PromptSpec, Insets, serde_json::Value)>,
+}
+
+fn is_region(name: &str) -> bool {
+    !BUILTIN.contains(&name) && !name.starts_with("panel:")
 }
 
 const BUILTIN: [&str; 5] = ["chat", "prompt", "divider", "statusline", "message"];
 
+/// Panel-only subtrees disappear when every referenced panel is hidden or missing.
+fn empty_panels(app: &App, node: &LayoutNode) -> bool {
+    match node {
+        LayoutNode::Leaf { name, .. } => name
+            .strip_prefix("panel:")
+            .is_some_and(|id| app.panel(id).is_none_or(|p| p.hidden)),
+        LayoutNode::Split { children, .. } => children.iter().all(|c| empty_panels(app, c)),
+    }
+}
 /// Lay `node` out in `area`. In a split, fixed and percent sizes come first,
 /// then natural sizes (the prompt, one-row statusline and divider, the
 /// message line, then regions, which leave a filling sibling at least 3
@@ -217,8 +259,8 @@ fn place(app: &mut App, node: &LayoutNode, area: Rect, plan: &mut Plan) {
     else {
         if let LayoutNode::Leaf { name, .. } = node {
             plan.leaves.push((name.clone(), area));
-            if !BUILTIN.contains(&name.as_str()) {
-                plan.regions.push((name.clone(), area, None));
+            if is_region(name) {
+                plan.regions.push((name.clone(), area));
             }
         }
         return;
@@ -236,27 +278,30 @@ fn place(app: &mut App, node: &LayoutNode, area: Rect, plan: &mut Plan) {
     let total = if rows { area.height } else { area.width };
     let cross = if rows { area.width } else { area.height };
     let mut sizes: Vec<Option<u16>> = vec![None; n];
-    let mut lines: Vec<Option<Vec<Line<'static>>>> = vec![None; n];
-    let leaf = |c: &LayoutNode| match c {
-        LayoutNode::Leaf { name, .. } => Some(name.clone()),
-        _ => None,
-    };
+    fn leaf(c: &LayoutNode) -> Option<&str> {
+        match c {
+            LayoutNode::Leaf { name, .. } => Some(name),
+            _ => None,
+        }
+    }
     for (i, c) in children.iter().enumerate() {
-        sizes[i] = match (c.size(), leaf(c).as_deref()) {
+        sizes[i] = match (c.size(), leaf(c)) {
+            _ if empty_panels(app, c) => Some(0),
             (Size::Cells(v), _) => Some(v),
             (Size::Percent(p), _) => Some((u32::from(total) * u32::from(p) / 100) as u16),
             (Size::Auto, Some("prompt")) => {
-                let ctx = app.prompt_ctx(if rows { cross } else { total });
-                let spec = app.prompt_spec(&ctx);
                 let width = if rows { cross } else { total };
+                let ctx = app.prompt_ctx(width);
+                let spec = app.prompt_spec(&ctx);
                 let insets = Insets::of(&spec, width);
                 let text = prompt_rows(&app.prompt, insets.text_width).0.len();
                 let max = spec
                     .max_rows
                     .unwrap_or(app.options.prompt_max_height)
                     .max(spec.min_rows);
-                let h = text.clamp(spec.min_rows, max) as u16 + insets.top + insets.bottom;
-                plan.prompt = Some((spec, insets, ctx));
+                let h = (text.clamp(spec.min_rows, max).min(u16::MAX as usize) as u16)
+                    .saturating_add(insets.top)
+                    .saturating_add(insets.bottom);
                 Some(if rows {
                     h.min(total.saturating_sub(1))
                 } else {
@@ -270,57 +315,40 @@ fn place(app: &mut App, node: &LayoutNode, area: Rect, plan: &mut Plan) {
             _ => None,
         };
     }
-    // The prompt also needs its spec when it was given a fixed size.
-    for (i, c) in children.iter().enumerate() {
-        if leaf(c).as_deref() == Some("prompt") && plan.prompt.is_none() {
-            let width = if rows {
-                cross
-            } else {
-                sizes[i].unwrap_or(total)
-            };
-            let ctx = app.prompt_ctx(width);
-            let spec = app.prompt_spec(&ctx);
-            let insets = Insets::of(&spec, width);
-            plan.prompt = Some((spec, insets, ctx));
-        }
-    }
     let fills = children
         .iter()
         .enumerate()
         .filter(|(i, c)| {
             sizes[*i].is_none()
-                && !(c.size() == Size::Auto
-                    && leaf(c).is_some_and(|n| !BUILTIN.contains(&n.as_str())))
+                && !(c.size() == Size::Auto && leaf(c).is_some_and(|n| !BUILTIN.contains(&n)))
         })
         .count();
-    let used: u16 = sizes.iter().flatten().sum();
+    let mut used = sizes
+        .iter()
+        .flatten()
+        .fold(0u16, |sum, n| sum.saturating_add(*n));
     let keep = if fills > 0 && rows { 3 } else { 0 };
-    let mut spare = total.saturating_sub(used + keep + most_seps);
+    let mut spare = total.saturating_sub(used.saturating_add(keep).saturating_add(most_seps));
     for (i, c) in children.iter().enumerate() {
         if sizes[i].is_some() || c.size() != Size::Auto {
             continue;
         }
-        let Some(name) = leaf(c).filter(|n| !BUILTIN.contains(&n.as_str())) else {
+        let Some(name) = leaf(c).filter(|n| !BUILTIN.contains(n)) else {
             continue;
         };
-        let (avail_w, avail_h) = if rows {
-            (cross, spare)
+        let (avail_w, avail_h) = if rows { (cross, spare) } else { (total, cross) };
+        sizes[i] = Some(if let Some(id) = name.strip_prefix("panel:") {
+            app.measure_panel(id, avail_w, avail_h, rows).min(spare)
         } else {
-            (spare.max(total), cross)
-        };
-        sizes[i] = Some(
-            match app.region_sized(&name, avail_w, avail_h, rows, false) {
-                Some((size, l)) => {
-                    let size = size.min(spare);
-                    lines[i] = Some(l);
-                    size
-                }
+            match app.region_sized(name, avail_w, avail_h, rows, false) {
+                Some((size, _)) => size.min(spare),
                 None => 0,
-            },
-        );
-        spare = spare.saturating_sub(sizes[i].unwrap_or(0));
+            }
+        });
+        let size = sizes[i].unwrap_or(0);
+        spare = spare.saturating_sub(size);
+        used = used.saturating_add(size);
     }
-    let used: u16 = sizes.iter().flatten().sum();
     let fill_count = sizes.iter().filter(|s| s.is_none()).count() as u16;
     let shown = sizes.iter().filter(|s| s.is_none_or(|v| v > 0)).count() as u16;
     let seps = if sep.is_some() {
@@ -328,7 +356,7 @@ fn place(app: &mut App, node: &LayoutNode, area: Rect, plan: &mut Plan) {
     } else {
         0
     };
-    let left = total.saturating_sub(used + seps);
+    let left = total.saturating_sub(used.saturating_add(seps));
     let mut extra = if fill_count > 0 { left % fill_count } else { 0 };
     let mut at = if rows { area.y } else { area.x };
     let end = if rows { area.bottom() } else { area.right() };
@@ -362,15 +390,7 @@ fn place(app: &mut App, node: &LayoutNode, area: Rect, plan: &mut Plan) {
                 ..area
             }
         };
-        match c {
-            LayoutNode::Split { .. } => place(app, c, r, plan),
-            LayoutNode::Leaf { name, .. } => {
-                plan.leaves.push((name.clone(), r));
-                if !BUILTIN.contains(&name.as_str()) {
-                    plan.regions.push((name.clone(), r, lines[i].take()));
-                }
-            }
-        }
+        place(app, c, r, plan);
         at += size;
     }
 }
@@ -396,8 +416,7 @@ fn draw_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let max_top = total.saturating_sub(height);
     if win.follow || win.top >= max_top {
         win.top = max_top;
-        // Regions were sized before the chat reached the end. Request
-        // another layout pass in case their size depends on following.
+        // A following-dependent natural size may change on the next frame.
         app.redraw |= !win.follow;
         win.follow = true;
     }

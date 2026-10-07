@@ -933,9 +933,32 @@ The terminal's title is `bone.ui.title(ctx)` (the statusline's `ctx`), set when 
 - `bone.chat.items({ kind = "tool", last = 3 })` returns items of the session on screen, as views receive them (more filters under Chat data).
 - `bone.ui.render(item, width, region)` renders an item with the current views.
 
+#### Panels in the layout tree
+
+Use `{ panel = "id", size = … }` or `"panel:id"` wherever a region leaf
+can appear; open the panel normally. See the [panel guide](customizing/customizing-panels.md)
+for an example.
+
+- Sizing: defaults to `"fill"`; cells, `"N%"`, `"auto"` and `"fill"` override
+  dock sizing. Auto measures along the parent split (including titles for rows),
+  capped by panel `max`. Fixed/percent and natural sizes precede fill; allocations
+  clamp in tree order. Dock `min` and chat minimums do not apply to tree leaves.
+- Placement: a tree reference suppresses docking and `full_height`; removing it
+  restores docking. Use each ID once (only its first nonempty leaf is painted).
+  Tree panels use split `sep`. Hidden/missing panels and subtrees containing only
+  those panels reserve neither space nor separators.
+- Rendering: content callbacks may run for measurement, then with final `width`
+  and `height` (excluding panel titles). Keep measurement free of side effects;
+  sizing is one pass, not a fixed-point iteration. Prompt rendering and mouse
+  hits use final rectangles. Docked cells are excluded from the `chat` leaf;
+  tree mouse `region` is `"panel:id"`, with usual `panel`/`panel_line` fields.
+- Mutations: layout changes during rendering apply next frame. Hiding/closing a
+  panel clears its cells, geometry and hit targets immediately; reserved space
+  is reclaimed next frame. Floating windows/popups never consume layout space.
+
 #### Panels: docked areas you own
 
-Panels are windows you open and close at runtime, docked beside the chat, with focus, keys and scrolling of their own. A fixed part of the screen (a file list, a notes column) is a region in `bone.ui.layout` instead.
+Panels are windows you open and close at runtime, with focus, keys and scrolling of their own. They can dock beside the chat or occupy a leaf in `bone.ui.layout`. Regions remain useful for stateless bands without panel focus or scrolling.
 
 A panel is a persistent area beside, above or below the chat. It takes room from the chat (unlike `bone.ui.win`, which floats over it), keeps its scroll position while you do other things, can be hidden and shown again, and can take the keyboard. Lua supplies all of its content; Rust sizes and places it, scrolls it, and routes keys and the mouse wheel to it.
 
@@ -964,7 +987,7 @@ bone.keymap.set("f3", function() p:focus() end)
 
 - `size`: columns for `left`/`right`, rows for `top`/`bottom`. A number of cells, a fraction of the room (`0.3`), or `"auto"` to fit the content up to `max` (default 40 columns or 10 rows). The default is 30 columns beside the chat and `"auto"` above or below it. The chat always keeps 20 columns and 3 rows; a panel that would get less than `min` (default 1) is not drawn that frame (`info().visible` is false).
 - Placement: `left` and `right` panels normally span the chat viewport (after any `left`/`right` regions), then `top` and `bottom` panels split the chat column. Set `full_height = true` on a side panel to span the entire screen and keep the prompt, tray and statusline beside it; the conversation sidebar uses this. Among panels on the same side, lower `order` (default 0) is placed nearer the edge, then older first. Side panels get a `WinSeparator` bar next to the chat.
-- Content: `render(ctx)` returns every line (or nil for none), with `ctx = { id, dock, width, height, focused, top, title }`; for `"auto"` it gets the most room it could have. `lines` is a fixed list instead (a table you keep changing is fine, it is read every frame). Rust shows the rows from `top`; `follow = true` keeps the end in view as content grows, until it is scrolled away from it. A render error is reported once and leaves the panel empty until `update`/`set_lines` gives it new content.
+- Content: `render(ctx)` returns every line (or nil for none), with `ctx = { id, dock, width, height, focused, top, title }`; for `"auto"` it is first called with measurement room, then with the final body size. `lines` is a fixed list instead (a table you keep changing is fine, it is read every frame). Rust shows the rows from `top`; `follow = true` keeps the end in view as content grows, until it is scrolled away from it. A render error is reported once and leaves the panel empty until `update`/`set_lines` gives it new content.
 - The keyboard: `focus = true` (or `p:focus()`, `bone.ui.panel.focus(id)`, a click on it, `focus_next`) gives a `focusable` panel the keyboard. Its `keys` run first, then `on_key(key, panel)`, then the `panel` keymap context (or the panel's own `context`, a named context; give it `fallback = "panel"` to keep the scroll keys). The defaults map the arrows, page keys, `home`/`end` and the wheel to scrolling, `esc` back to the prompt, `tab`/`shift+tab` to the next/previous panel and `ctrl+c` to `interrupt`. Text that is not mapped is ignored. The wheel over any panel scrolls that panel.
 - Lifecycle: `panel/opened`, `panel/updated` and `panel/closed` events (`kind = "panel"`), and `on_close(panel)` when it closes. Hiding or closing the focused panel gives the keyboard back to the prompt. Panels stay open across sessions until closed.
 

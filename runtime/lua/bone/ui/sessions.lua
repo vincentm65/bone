@@ -169,7 +169,7 @@ local function render(ctx)
     if kind == "search" then
       formatted = row(state.query == "" and "  Search conversations…" or ("  Search: " .. state.query), state.query == "" and "Dim" or "Accent")
     elseif kind == "help" then
-      formatted = row("  ↑↓ move · ↵ open · alt+a archive · esc close", "Dim")
+      formatted = row("  ↑↓ move · ↵ open · esc close", "Dim")
     elseif kind == "status" then
       formatted = row(state.loading and " loading…" or (state.query == "" and " no sessions yet" or " no matching sessions"), "Dim")
     elseif kind == "separator" then
@@ -257,13 +257,6 @@ function M.open()
       esc = function() panel:close() end,
       ["ctrl+o"] = function() panel:close() end,
       enter = function() choose(state.selected) end,
-      ["alt+a"] = function()
-        local s = state.items[state.selected]
-        if not s then return end
-        M.archive_current(s.session_id)
-        filter()
-        reveal()
-      end,
       up = function() move(-1) end, down = function() move(1) end,
       ["ctrl+p"] = function() move(-1) end, ["ctrl+n"] = function() move(1) end,
       pageup = function() move(-math.max(1, math.floor(panel:info().height / 3))) end,

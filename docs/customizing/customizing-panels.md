@@ -6,9 +6,8 @@ scroll position while you do other things, can be hidden and shown again, and
 can take the keyboard. Lua supplies all of its content; Rust sizes and places
 it, scrolls it, and routes keys and the mouse wheel to it.
 
-A fixed part of the screen (a file list column, a notes column) that is there
-all the time is a region in `bone.ui.layout` instead (see the TUI guide).
-Panels are for things you open and close at runtime.
+Panels can also be leaves in `bone.ui.layout`, retaining their focus and
+scrolling. Use regions for stateless bands (see the TUI guide).
 
 Reference: `docs/lua.md` "Panels: docked areas you own". Source:
 `crates/bone-tui/src/panel.rs` (sizing, focus, keys) and `lua.rs` (the API).
@@ -54,12 +53,29 @@ bone.keymap.set("f3", function() p:focus() end)
   on the same side, lower `order` (default 0) is placed nearer the edge, then
   older first. Side panels get a `WinSeparator` bar next to the chat.
 
+## Composing panels with the prompt and chat
+
+```lua
+bone.ui.layout = {
+  { cols = {
+      { panel = "todo", size = 24 },
+      { rows = { "chat", "prompt", "statusline" } },
+    }, sep = "│" },
+}
+```
+
+Tree leaves default to fill; `size` overrides dock sizing. Referencing a panel
+suppresses docking/`full_height`; removing it restores them. Hidden/missing
+panel subtrees collapse, including separators. Use each ID once. See
+[Panels in the layout tree](../lua.md#panels-in-the-layout-tree) for sizing,
+final render dimensions, measurement side effects and callback mutations.
+
 ## Content
 
 `render(ctx)` returns every line (or nil for none), with
-`ctx = { id, dock, width, height, focused, top, title }`; for `"auto"` it gets
-the most room it could have. `lines` is a fixed list instead (a table you keep
-changing is fine, it is read every frame). Rust shows the rows from `top`;
+`ctx = { id, dock, width, height, focused, top, title }`; auto sizing measures
+available room, then renders with final body dimensions. `lines` is a fixed
+list instead (mutable tables are read every frame). Rust shows rows from `top`;
 `follow = true` keeps the end in view as content grows, until it is scrolled
 away from it. A render error is reported once and leaves the panel empty until
 `update`/`set_lines` gives it new content.

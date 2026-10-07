@@ -5180,7 +5180,7 @@ async fn statusline_preserves_new_session_timing_and_clears_old_timing() {
 }
 
 #[tokio::test]
-async fn session_sidebar_search_keeps_a_printable_and_archive_is_modified() {
+async fn session_sidebar_search_accepts_unicode_and_alt_a_does_not_archive() {
     let mut h = Harness::new().await;
     h.input("{ctrl+o}").await;
     h.input("a").await;
@@ -5198,12 +5198,12 @@ async fn session_sidebar_search_keeps_a_printable_and_archive_is_modified() {
     );
     h.input("{ctrl+u}{alt+a}").await;
     assert_eq!(
-        h.lua("=bone.state.load('sessions-archived')['s-one']")
+        h.lua("=next(bone.state.load('sessions-archived')) == nil")
             .await,
         "true"
     );
     let screen = h.screen(80, 24);
-    assert!(screen.contains("History · 2"), "{screen}");
+    assert!(!screen.contains("alt+a archive"), "{screen}");
     assert!(h.requests("session/messages").is_empty());
 }
 
@@ -5260,4 +5260,144 @@ async fn session_sidebar_formats_only_visible_rows_for_large_history() {
     h.input("{home}").await;
     assert!(h.screen(100, 24).contains("conversation 1"));
     assert!(h.requests("session/messages").is_empty());
+}
+
+#[tokio::test]
+async fn flexible_panel_tree_composes_and_publishes_final_geometry() {
+    let mut h = Harness::new().await;
+    h.lua(r#"
+        p = bone.ui.panel.open({ id = 'tree', full_height = true, dock = 'left', title = 'TREE',
+          render = function(ctx) panel_w = ctx.width; panel_h = ctx.height; return {'one', 'two'} end })
+        bone.ui.layout = { { cols = { { panel = 'tree', size = 12 },
+          { rows = { 'chat', 'prompt', 'statusline' } } }, sep = '│' } }
+        bone.on('mouse', function(ev) mouse_region = ev.region; mouse_panel = ev.panel; return true end)
+    "#).await;
+    h.screen(80, 24);
+    assert_eq!(
+        h.app.panel("tree").unwrap().area.unwrap(),
+        ratatui::layout::Rect::new(0, 0, 12, 24)
+    );
+    assert_eq!(h.lua("=panel_w .. ',' .. panel_h").await, "\"12,23\"");
+    assert_eq!(h.app.placed[&crate::app::CHAT_WIN].area.x, 13);
+    h.app.mouse("down", "left", (1, 1));
+    assert_eq!(
+        h.lua("=mouse_region .. ',' .. mouse_panel").await,
+        "\"panel:tree,tree\""
+    );
+}
+
+#[tokio::test]
+async fn flexible_layout_clamps_tiny_and_oversubscribed_frames() {
+    let mut h = Harness::new().await;
+    h.lua(
+        r#"
+      bone.ui.panel.open({id='tiny', lines={'a'}})
+      bone.ui.layout = {{ cols = { { panel='tiny', size=999999999 },
+        { rows = { {'chat', size=65535}, {'prompt', size=65535} } },
+        {'extra', size=65535} }, sep='│' }}
+    "#,
+    )
+    .await;
+    for (w, height) in [(0, 0), (1, 1), (2, 2), (10, 3), (80, 24)] {
+        h.screen(w, height);
+        for (_, r) in &h.app.leaves {
+            assert!(
+                r.right() <= w && r.bottom() <= height,
+                "{r:?} in {w}x{height}"
+            );
+        }
+        if let Some(r) = h.app.panel("tiny").unwrap().area {
+            assert!(r.right() <= w && r.bottom() <= height);
+        }
+    }
+}
+
+#[tokio::test]
+async fn flexible_docks_mouse_and_auto_content_use_final_rectangles() {
+    let mut h = Harness::new().await;
+    h.lua(
+        r#"
+      bone.ui.panel.open({id='auto', dock='right', size='auto',
+        render=function(ctx) final_w=ctx.width; final_h=ctx.height; return {'1234567890'} end})
+      bone.ui.layout={'chat','prompt'}
+      bone.on('mouse', function(ev) mouse_region=ev.region; mouse_panel=ev.panel; return true end)
+    "#,
+    )
+    .await;
+    h.screen(40, 10);
+    let r = h.app.panel("auto").unwrap().area.unwrap();
+    assert_eq!(
+        h.lua("=final_w .. ',' .. final_h").await,
+        format!("\"{},{}\"", r.width, r.height)
+    );
+    assert_eq!(
+        h.app.leaves.iter().find(|(n, _)| n == "chat").unwrap().1,
+        h.app.placed[&crate::app::CHAT_WIN].area
+    );
+    h.app.mouse("down", "left", (r.x, r.y));
+    assert_eq!(
+        h.lua("=tostring(mouse_region) .. ',' .. mouse_panel").await,
+        "\"nil,auto\""
+    );
+    h.screen(10, 2);
+    assert!(h.app.panel("auto").unwrap().area.is_none());
+}
+
+#[tokio::test]
+async fn flexible_auto_panel_reserves_prompt_and_fill_rows() {
+    let mut h = Harness::new().await;
+    h.lua(
+        r#"
+        local lines = {}; for i=1,30 do lines[i]='PANEL' end
+        bone.ui.panel.open({id='p', max=100, lines=lines})
+        bone.ui.layout={'chat', {panel='p', size='auto'}, 'prompt'}
+    "#,
+    )
+    .await;
+    h.screen(80, 24);
+    assert_eq!(h.app.placed[&crate::app::CHAT_WIN].area.height, 3);
+    assert_eq!(h.app.placed[&crate::app::PROMPT_WIN].area.height, 3);
+    assert_eq!(h.app.panel("p").unwrap().area.unwrap().height, 18);
+}
+
+#[tokio::test]
+async fn flexible_empty_panel_subtrees_do_not_reserve_space_or_separators() {
+    let mut h = Harness::new().await;
+    h.lua(
+        r#"
+        p=bone.ui.panel.open({id='p', lines={'PANEL'}}); p:hide()
+        bone.ui.layout={{cols={
+            {rows={{cols={{panel='p'}, {panel='missing'}}}}, size=12},
+            {rows={'chat','prompt'}}}, sep='|'}}
+    "#,
+    )
+    .await;
+    let screen = h.screen(80, 24);
+    let chat = h.app.placed[&crate::app::CHAT_WIN].area;
+    assert_eq!((chat.x, chat.width), (0, 80));
+    assert!(!screen.contains('|'), "{screen}");
+    h.lua("p:show()").await;
+    h.screen(80, 24);
+    assert_eq!(h.app.placed[&crate::app::CHAT_WIN].area.x, 13);
+}
+
+#[tokio::test]
+async fn flexible_render_callback_hide_clears_geometry_and_hits() {
+    let mut h = Harness::new().await;
+    h.lua(
+        r#"
+        p=bone.ui.panel.open({id='p', lines={'PANEL'}})
+        bone.ui.layout={{panel='p', size=4}, 'chat', 'prompt'}
+        bone.ui.regions.chat_empty=function() p:hide(); return {'EMPTY'} end
+    "#,
+    )
+    .await;
+    let screen = h.screen(80, 24);
+    assert!(!screen.contains("PANEL"), "{screen}");
+    assert!(h.app.panel("p").unwrap().area.is_none());
+    assert!(h.app.panel_hit((0, 0)).is_none());
+    let r = h.app.leaves.iter().find(|(n, _)| n == "panel:p").unwrap().1;
+    assert_eq!((r.width, r.height), (0, 0));
+    h.screen(80, 24);
+    assert_eq!(h.app.placed[&crate::app::CHAT_WIN].area.y, 0);
 }

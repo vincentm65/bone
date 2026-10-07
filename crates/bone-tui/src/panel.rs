@@ -87,6 +87,13 @@ pub enum Size {
     Auto,
 }
 
+/// Final frame geometry shared by panel painting and hit testing.
+pub(crate) struct PanelPlacement {
+    pub id: String,
+    pub area: Rect,
+    pub separator: Option<u16>,
+}
+
 #[derive(Clone)]
 pub struct Panel {
     pub id: String,
@@ -512,9 +519,47 @@ impl App {
         .unwrap_or_default()
     }
 
-    /// Place and draw the visible panels inside `room` (the chat's area).
-    /// Returns what is left for the chat.
-    pub fn draw_panels(&mut self, frame: &mut Frame<'_>, room: Rect, full_height: bool) -> Rect {
+    /// Measure an auto tree leaf. Painting always calls content again with
+    /// the final body dimensions; measurement is deliberately one pass.
+    pub(crate) fn measure_panel(&mut self, id: &str, width: u16, height: u16, rows: bool) -> u16 {
+        let Some(p) = self.panel(id).cloned().filter(|p| !p.hidden) else {
+            return 0;
+        };
+        let title = u16::from(p.title.is_some());
+        let lines = self.panel_content(
+            id,
+            p.content,
+            self.panel_ctx(&p, width, height.saturating_sub(title)),
+        );
+        if rows {
+            (lines.len().min(u16::MAX as usize) as u16)
+                .saturating_add(title)
+                .min(p.max())
+        } else {
+            lines
+                .iter()
+                .map(|l| crate::ui::items_width(l))
+                .max()
+                .unwrap_or(0)
+                .min(p.max() as usize) as u16
+        }
+    }
+
+    fn panel_ctx(&self, p: &Panel, width: u16, height: u16) -> Json {
+        json!({ "id": p.id, "spinner": self.spinner.frame(), "dock": p.dock.name(),
+            "width": width, "height": height,
+            "focused": self.focused_panel().is_some_and(|f| f.id == p.id),
+            "top": p.top, "title": p.title })
+    }
+
+    /// Allocate legacy docks without painting. Tree references take precedence.
+    pub(crate) fn allocate_panels(
+        &mut self,
+        room: Rect,
+        full_height: bool,
+        layout: &crate::ui::LayoutNode,
+        placements: &mut Vec<PanelPlacement>,
+    ) -> Rect {
         let order: Vec<String> = self
             .panels_in_order()
             .into_iter()
@@ -522,79 +567,89 @@ impl App {
             .collect();
         let mut room = room;
         for id in order {
-            // Content functions may open, close or change panels.
             let Some(p) = self.panel(&id).cloned() else {
                 continue;
             };
-            if (p.full_height && p.dock.sideways()) != full_height {
+            if p.hidden
+                || layout.contains(&format!("panel:{id}"))
+                || (p.full_height && p.dock.sideways()) != full_height
+            {
                 continue;
             }
-            if p.hidden {
-                if let Some(p) = self.panel_mut(&id) {
-                    p.area = None;
-                }
-                continue;
-            }
-            let dock = p.dock;
-            let side = dock.sideways();
-            let title_h = u16::from(p.title.is_some());
-            let (room_len, keep) = if side {
-                (room.width, MIN_CHAT_COLS)
-            } else {
-                (room.height, MIN_CHAT_ROWS)
-            };
-            let focused = self.focused_panel().is_some_and(|f| f.id == id);
-            let spinner = self.spinner.frame();
-            let ctx = |w: u16, h: u16| {
-                json!({
-                    "id": id,
-                    "spinner": spinner,
-                    "dock": p.dock.name(),
-                    "width": w,
-                    "height": h,
-                    "focused": focused,
-                    "top": p.top,
-                    "title": p.title,
-                })
-            };
-            // `auto` measures the content in the most room it could get.
-            let mut lines = None;
+            let side = p.dock.sideways();
+            let room_len = if side { room.width } else { room.height };
             let want = wanted(p.size(), p.max(), room_len, || {
-                let (w, h) = if side {
-                    (p.max().min(room.width), room.height.saturating_sub(title_h))
+                let w = if side {
+                    p.max().min(room.width)
                 } else {
-                    (room.width, p.max().min(room.height).saturating_sub(title_h))
+                    room.width
                 };
-                let l = self.panel_content(&id, p.content, ctx(w, h));
-                let n = if side {
-                    l.iter()
-                        .map(|l| crate::ui::items_width(l))
-                        .max()
-                        .unwrap_or(0)
-                        .min(u16::MAX as usize) as u16
+                let h = if side {
+                    room.height
                 } else {
-                    (l.len().min(u16::MAX as usize) as u16).saturating_add(title_h)
+                    p.max().min(room.height)
                 };
-                lines = Some(l);
-                n
+                self.measure_panel(&id, w, h, !side)
             });
-            let Some((rect, rest)) = split(room, p.dock, want, p.min.max(1), keep) else {
-                if let Some(p) = self.panel_mut(&id) {
-                    p.area = None;
-                }
+            let keep = if side { MIN_CHAT_COLS } else { MIN_CHAT_ROWS };
+            let Some((area, rest)) = split(room, p.dock, want, p.min.max(1), keep) else {
                 continue;
             };
             room = rest;
+            let separator = if side {
+                Some(if p.dock == Dock::Left {
+                    area.right()
+                } else {
+                    area.x - 1
+                })
+            } else {
+                None
+            };
+            placements.push(PanelPlacement {
+                id,
+                area,
+                separator,
+            });
+        }
+        room
+    }
+
+    /// Publish every panel rectangle before any final render callback runs.
+    pub(crate) fn publish_panels(&mut self, placements: &[PanelPlacement]) {
+        for p in &mut self.panels {
+            p.area = None;
+            p.view = 0;
+        }
+        for placement in placements {
+            if let Some(p) = self.panel_mut(&placement.id) {
+                p.area = Some(placement.area);
+                p.view = placement
+                    .area
+                    .height
+                    .saturating_sub(u16::from(p.title.is_some()));
+            }
+        }
+    }
+
+    pub(crate) fn paint_panels(&mut self, frame: &mut Frame<'_>, placements: &[PanelPlacement]) {
+        for placement in placements {
+            let Some(p) = self.panel(&placement.id).cloned().filter(|p| !p.hidden) else {
+                continue;
+            };
+            let rect = placement.area;
+            let title_h = u16::from(p.title.is_some()).min(rect.height);
             let body = Rect {
-                y: rect.y + title_h.min(rect.height),
-                height: rect.height.saturating_sub(title_h),
+                y: rect.y + title_h,
+                height: rect.height - title_h,
                 ..rect
             };
-            let lines = match lines {
-                Some(l) => l,
-                None => self.panel_content(&id, p.content, ctx(body.width, body.height)),
-            };
-            let Some(p) = self.panel_mut(&id) else {
+            let focused = self.focused_panel().is_some_and(|f| f.id == p.id);
+            let lines = self.panel_content(
+                &p.id,
+                p.content,
+                self.panel_ctx(&p, body.width, body.height),
+            );
+            let Some(p) = self.panel_mut(&placement.id) else {
                 continue;
             };
             let view = body.height as usize;
@@ -604,12 +659,8 @@ impl App {
             }
             p.top = p.top.min(max_top);
             p.rows = lines.len();
-            p.view = body.height;
-            p.area = Some(rect);
             let top = p.top;
-            let title = p.title.clone();
-
-            if let Some(t) = title {
+            if let Some(t) = p.title.clone().filter(|_| title_h > 0) {
                 let hl = if focused {
                     "PanelTitleFocus"
                 } else {
@@ -618,7 +669,10 @@ impl App {
                 let items = [Item::Text(t, hl.into()), Item::Fill(" ".into(), hl.into())];
                 frame.render_widget(
                     Paragraph::new(render_items(&items, rect.width as usize, &self.theme)),
-                    Rect { height: 1, ..rect },
+                    Rect {
+                        height: title_h,
+                        ..rect
+                    },
                 );
             }
             let shown: Vec<_> = lines
@@ -628,12 +682,7 @@ impl App {
                 .map(|l| render_items(l, body.width as usize, &self.theme))
                 .collect();
             frame.render_widget(Paragraph::new(shown), body);
-            if side {
-                let x = if dock == Dock::Left {
-                    rect.right()
-                } else {
-                    rect.x - 1
-                };
+            if let Some(x) = placement.separator {
                 let style = self.theme.hl("WinSeparator");
                 for y in rect.y..rect.bottom() {
                     if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
@@ -642,7 +691,6 @@ impl App {
                 }
             }
         }
-        room
     }
 }
 

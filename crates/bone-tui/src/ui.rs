@@ -165,7 +165,7 @@ pub enum LayoutNode {
 
 impl LayoutNode {
     fn leaf(name: &str, size: Option<Size>) -> Self {
-        let default = if name == "chat" {
+        let default = if name == "chat" || name.starts_with("panel:") {
             Size::Fill
         } else {
             Size::Auto
@@ -193,7 +193,7 @@ impl LayoutNode {
 fn parse_size(v: Value) -> mlua::Result<Option<Size>> {
     Ok(match v {
         Value::Nil => None,
-        Value::Integer(n) => Some(Size::Cells(n.max(0) as u16)),
+        Value::Integer(n) => Some(Size::Cells(n.clamp(0, u16::MAX as i64) as u16)),
         Value::Number(n) => Some(Size::Cells(n.max(0.0) as u16)),
         Value::String(s) => {
             let s = s.to_str()?.to_owned();
@@ -239,6 +239,9 @@ fn layout_node(v: Value) -> mlua::Result<LayoutNode> {
                         children: layout_children(&children)?,
                     });
                 }
+            }
+            if let Some(id) = t.get::<Option<String>>("panel")? {
+                return Ok(LayoutNode::leaf(&format!("panel:{id}"), size));
             }
             let name: Option<String> = match t.get::<Option<String>>(1)? {
                 Some(n) => Some(n),
@@ -579,7 +582,7 @@ impl App {
             let border = border_of(p.get("border")?)?;
             let (pad_rows, pad_cols) = match p.get::<Value>("padding")? {
                 Value::Nil => (0, 0),
-                Value::Integer(n) => (0, n.max(0) as u16),
+                Value::Integer(n) => (0, n.clamp(0, u16::MAX as i64) as u16),
                 Value::Number(n) => (0, n.max(0.0) as u16),
                 Value::Table(t) => (
                     t.get::<Option<u16>>(1)?.unwrap_or(0),
@@ -853,7 +856,7 @@ impl App {
                     parse_lines(render.call::<Value>(to_lua(lua, &ctx)?)?)
                 };
                 let fixed = match size {
-                    Value::Integer(n) => Some(n.max(0) as u16),
+                    Value::Integer(n) => Some(n.clamp(0, u16::MAX as i64) as u16),
                     Value::Number(n) => Some(n.max(0.0) as u16),
                     _ => None,
                 };
