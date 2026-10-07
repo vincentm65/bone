@@ -51,7 +51,7 @@
 
 Image uploads use `attachment/upload` regardless of transport. The core normalizes PNG/JPEG/WebP to bounded PNGs and atomically writes content-addressed files in `<data_dir>/attachments/`. Messages, queues, forks and events hold metadata and IDs; just before a model call the core verifies and hydrates the files. OpenAI-compatible providers send multimodal text/image parts, and Lua providers receive base64 PNG data. Compaction estimates image cost, includes images when the summary model supports them and retains the original transcript. Files are deduplicated but currently retained indefinitely.
 
-The TUI reads native clipboard pixels off the UI thread, with a separate file worker and a read timeout. Draft generations keep late reads from reappearing after a clear or attaching to another session. Image-only drafts submit, queue and edit through the same paths as text.
+The TUI reads native clipboard pixels in a short-lived helper process; a ten-second timeout kills and reaps a stuck helper so the next paste can recover. File reads are asynchronous, and the core handles file decoding and normalization. Composer state owns attachments, pending reads, per-session drafts and history; draft generations keep late reads from reappearing after a clear or attaching to another session. Image-only drafts submit, queue and edit through the same paths as text.
 
 ## Tests
 

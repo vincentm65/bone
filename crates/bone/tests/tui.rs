@@ -118,6 +118,7 @@ async fn env(bodies: Vec<String>, approval: bool) -> Env {
 impl Env {
     async fn tui(&self, resume: Option<Option<String>>) -> Headless {
         let opts = RunOptions {
+            clipboard_executable: None,
             cwd: self.work.path().to_string_lossy().into_owned(),
             config_dir: Some(self.config.path().to_owned()),
             resume,
@@ -267,6 +268,7 @@ async fn init_templates_load() {
     let server = Server::new(Arc::new(Core::from_loaded(loaded)));
     let work = tempfile::tempdir().unwrap();
     let opts = RunOptions {
+        clipboard_executable: None,
         cwd: work.path().to_string_lossy().into_owned(),
         config_dir: Some(config.path().to_owned()),
         resume: None,

@@ -16,7 +16,7 @@ mlua.workspace = true
 bone-lua.workspace = true
 ratatui.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["time", "process", "io-util"] }
+tokio = { workspace = true, features = ["time", "process", "io-util", "fs"] }
 unicode-width.workspace = true
 vt100 = "0.15"
 

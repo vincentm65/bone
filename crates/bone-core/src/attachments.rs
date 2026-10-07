@@ -89,6 +89,10 @@ impl AttachmentStore {
     }
 
     pub fn validate(&self, images: &mut [ImageAttachment]) -> Result<(), String> {
+        self.resolve(images, false)
+    }
+
+    fn resolve(&self, images: &mut [ImageAttachment], hydrate: bool) -> Result<(), String> {
         if images.len() > bone_media::MAX_IMAGES {
             return Err("a message can contain at most 8 images".into());
         }
@@ -113,6 +117,9 @@ impl AttachmentStore {
                 .take(120)
                 .collect();
             total += img.bytes;
+            if hydrate {
+                img.data = Some(STANDARD.encode(bytes));
+            }
         }
         if total > bone_media::MAX_MESSAGE_IMAGE_BYTES {
             return Err("message images exceed the 40 MiB limit".into());
@@ -127,10 +134,7 @@ impl AttachmentStore {
                 for img in images.iter_mut() {
                     img.data = None;
                 }
-                self.validate(images)?;
-                for img in images {
-                    img.data = Some(self.read(&img.id)?);
-                }
+                self.resolve(images, true)?;
             }
         }
         Ok(messages)

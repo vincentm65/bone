@@ -1797,7 +1797,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             if a.is_empty() {
                 return ret(
                     lua,
-                    to_lua(lua, &serde_json::to_value(&app.images).unwrap())?,
+                    to_lua(lua, &serde_json::to_value(app.prompt_images()).unwrap())?,
                 );
             }
             let value: Value = args(lua, a)?;
@@ -2520,7 +2520,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             t.set("text", app.prompt.text())?;
             t.set(
                 "images",
-                to_lua(lua, &serde_json::to_value(&app.images).unwrap())?,
+                to_lua(lua, &serde_json::to_value(app.prompt_images()).unwrap())?,
             )?;
             t.set("lines", app.prompt.lines().to_vec())?;
             t.set("cursor", pos_out(lua, app.prompt.cursor())?)?;

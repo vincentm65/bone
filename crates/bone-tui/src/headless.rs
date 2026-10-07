@@ -44,6 +44,7 @@ impl Headless {
             .unwrap_or_default();
         let mut app = App::new(Arc::new(client), tx, opts.cwd, opts.config_dir);
         app.reload_core = opts.reload_core;
+        app.clipboard_executable = opts.clipboard_executable;
         app.settings = settings;
         app.load_user_config();
         if let Some(id) = opts.resume {
@@ -84,7 +85,7 @@ impl Headless {
 
     /// The draft's image references, after asynchronous reads have settled.
     pub fn images(&self) -> &[bone_proto::types::ImageAttachment] {
-        &self.app.images
+        self.app.prompt_images()
     }
 
     pub fn prompt_text(&self) -> String {

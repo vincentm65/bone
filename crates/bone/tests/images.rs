@@ -113,6 +113,7 @@ impl Env {
         Headless::start(
             self.server.connect_in_process(),
             RunOptions {
+                clipboard_executable: None,
                 cwd: self.work.path().to_string_lossy().into_owned(),
                 config_dir: Some(self.config.path().to_owned()),
                 resume: None,
@@ -169,6 +170,34 @@ impl Env {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn jpeg_file_is_normalized_by_core_and_reaches_provider() {
+    let mut env = Env::new(true).await;
+    let mut jpeg = std::io::Cursor::new(Vec::new());
+    image::DynamicImage::new_rgb8(7, 5)
+        .write_to(&mut jpeg, image::ImageFormat::Jpeg)
+        .unwrap();
+    let jpeg = jpeg.into_inner();
+    env.png = bone_media::normalize(&jpeg).unwrap().bytes;
+    let path = env.work.path().join("photo.jpg");
+    std::fs::write(&path, jpeg).unwrap();
+    let mut tui = env.tui().await;
+    tui.attach_file(path);
+    env.wait_images(&mut tui, 1).await;
+    assert_eq!(tui.images()[0].mime_type, "image/png");
+    assert_eq!((tui.images()[0].width, tui.images()[0].height), (7, 5));
+    tui.press("enter").unwrap();
+    let request = env.request(&mut tui).await;
+    env.assert_image(
+        request.body["messages"].as_array().unwrap().last().unwrap(),
+        None,
+    );
+    request.answer("JPEG received.");
+    tui.wait_for(WAIT, |s| s.contains("JPEG received."))
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -427,7 +456,7 @@ async fn native_screenshot_paste_reaches_provider_over_stdio() {
     // server path. This covers the headless transport as well as clipboard.
     let binary =
         std::env::var_os("BONE_TEST_BINARY").unwrap_or_else(|| env!("CARGO_BIN_EXE_bone").into());
-    let mut cmd = tokio::process::Command::new(binary);
+    let mut cmd = tokio::process::Command::new(&binary);
     cmd.arg("--headless")
         .env("BONE_CONFIG_DIR", env.config.path())
         .env_remove("BONE_BASE_URL")
@@ -436,6 +465,7 @@ async fn native_screenshot_paste_reaches_provider_over_stdio() {
     let mut tui = Headless::start(
         conn,
         RunOptions {
+            clipboard_executable: Some(binary.into()),
             cwd: env.work.path().to_string_lossy().into_owned(),
             config_dir: Some(env.config.path().to_owned()),
             resume: None,
@@ -549,6 +579,7 @@ async fn image_send_over_local_socket_or_windows_named_pipe() {
     let mut tui = Headless::start(
         bone_client::connect_local(&path).await.unwrap(),
         RunOptions {
+            clipboard_executable: None,
             cwd: env.work.path().to_string_lossy().into_owned(),
             config_dir: Some(env.config.path().to_owned()),
             resume: None,

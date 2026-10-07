@@ -20,6 +20,7 @@ use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 
 use crate::chat::ChatBuffer;
+use crate::composer::{Composer, Draft};
 use crate::editor::TextBuffer;
 use crate::keymap::{Action, Builtin, Context, Keymaps};
 use crate::keys::Key;
@@ -32,14 +33,6 @@ use crate::theme::Theme;
 /// A second ctrl+c within this long quits.
 const QUIT_WINDOW: Duration = Duration::from_secs(2);
 const PASTE_PLACEHOLDER_THRESHOLD: usize = 500;
-
-#[derive(Clone, Default, PartialEq, Eq)]
-struct Draft {
-    text: String,
-    images: Vec<ImageAttachment>,
-    pastes: Vec<(String, String)>,
-    epoch: u64,
-}
 
 pub const CHAT_WIN: WindowId = 0;
 pub const PROMPT_WIN: WindowId = 1;
@@ -237,15 +230,8 @@ pub struct App {
     pub selection: Option<crate::selection::Selection>,
     /// Text to put on the system clipboard after the next draw.
     pub clipboard: Option<String>,
-    pastes: Vec<(String, String)>,
-    pub images: Vec<ImageAttachment>,
-    drafts: HashMap<BufferId, Draft>,
-    draft_epoch: u64,
-    next_draft_epoch: u64,
-    pending_images: HashMap<(BufferId, u64), usize>,
-    history_draft: Option<Draft>,
-    prompt_history: Vec<Draft>,
-    prompt_history_pos: Option<usize>,
+    composer: Composer,
+    pub(crate) clipboard_executable: Option<PathBuf>,
     last_prompt_state: PromptState,
     quit_armed: Option<Instant>,
     pub dirty: bool,
@@ -350,16 +336,9 @@ impl App {
             processes_session: None,
             selection: None,
             clipboard: None,
-            pastes: Vec::new(),
-            images: Vec::new(),
-            drafts: HashMap::new(),
-            draft_epoch: 0,
-            next_draft_epoch: 0,
-            pending_images: HashMap::new(),
-            history_draft: None,
-            prompt_history: Vec::new(),
+            composer: Composer::default(),
+            clipboard_executable: None,
             last_prompt_state: (String::new(), (0, 0), None, Vec::new()),
-            prompt_history_pos: None,
             quit_armed: None,
             dirty: true,
             redraw: false,
@@ -536,17 +515,17 @@ impl App {
 
     pub fn show_chat(&mut self, id: BufferId) {
         if id != self.current {
-            self.drafts.insert(self.current, self.draft());
-            let draft = self.drafts.remove(&id).unwrap_or_else(|| {
-                self.next_draft_epoch += 1;
+            self.composer.drafts.insert(self.current, self.draft());
+            let draft = self.composer.drafts.remove(&id).unwrap_or_else(|| {
+                self.composer.next_epoch += 1;
                 Draft {
-                    epoch: self.next_draft_epoch,
+                    epoch: self.composer.next_epoch,
                     ..Default::default()
                 }
             });
             self.apply_draft(draft);
-            self.prompt_history_pos = None;
-            self.history_draft = None;
+            self.composer.history_pos = None;
+            self.composer.saved = None;
         }
         // A hidden chat keeps its data but not its rendered lines.
         if id != self.current
@@ -582,51 +561,44 @@ impl App {
     }
 
     fn expand_pastes(&mut self) {
-        if self.pastes.is_empty() {
+        if self.composer.pastes.is_empty() {
             return;
         }
         let mut text = self.prompt.text();
-        for (token, content) in &self.pastes {
+        for (token, content) in &self.composer.pastes {
             text = text.replace(token, content);
         }
         self.prompt.set_text(&text);
-        self.pastes.clear();
+        self.composer.pastes.clear();
     }
 
     fn draft(&self) -> Draft {
-        Draft {
-            text: self.prompt.text(),
-            images: self.images.clone(),
-            pastes: self.pastes.clone(),
-            epoch: self.draft_epoch,
-        }
+        self.composer.snapshot(&self.prompt)
     }
 
     fn apply_draft(&mut self, draft: Draft) {
-        self.prompt.set_text(&draft.text);
-        self.images = draft.images;
-        self.pastes = draft.pastes;
-        self.draft_epoch = draft.epoch;
+        self.composer.apply(&mut self.prompt, draft);
         self.dirty = true;
     }
 
     fn invalidate_draft(&mut self) {
-        self.next_draft_epoch += 1;
-        self.draft_epoch = self.next_draft_epoch;
+        self.composer.invalidate();
+    }
+
+    pub fn prompt_images(&self) -> &[ImageAttachment] {
+        &self.composer.images
     }
 
     pub fn draft_empty(&self) -> bool {
         self.prompt.is_empty()
-            && self.images.is_empty()
-            && !self
-                .pending_images
-                .contains_key(&(self.current, self.draft_epoch))
+            && self.composer.images.is_empty()
+            && !self.composer.reading(self.current)
     }
 
     fn clear_prompt(&mut self) {
         self.prompt.clear();
-        self.pastes.clear();
-        self.images.clear();
+        self.composer.pastes.clear();
+        self.composer.images.clear();
         self.invalidate_draft();
     }
 
@@ -640,17 +612,17 @@ impl App {
         if images.iter().any(|i| i.data.is_some()) {
             return Err("use attachment/upload before attaching image references".into());
         }
-        self.images = images;
+        self.composer.images = images;
         self.emit_prompt_changed();
         self.dirty = true;
         Ok(())
     }
 
     pub fn remove_image(&mut self, index: usize) -> Result<(), String> {
-        if index == 0 || index > self.images.len() {
+        if index == 0 || index > self.composer.images.len() {
             return Err("image index is out of range".into());
         }
-        self.images.remove(index - 1);
+        self.composer.images.remove(index - 1);
         self.emit_prompt_changed();
         self.dirty = true;
         Ok(())
@@ -678,33 +650,38 @@ impl App {
         if self.focused_popup().is_some() || self.focused_panel().is_some() {
             return self.error("focus the prompt to paste an image");
         }
-        let (buf, epoch) = (self.current, self.draft_epoch);
-        let pending = self.pending_images.get(&(buf, epoch)).copied().unwrap_or(0);
+        let (buf, epoch) = (self.current, self.composer.epoch);
+        let pending = self
+            .composer
+            .pending
+            .get(&(buf, epoch))
+            .copied()
+            .unwrap_or(0);
         if pending >= bone_media::MAX_IMAGES {
             return self.error("too many clipboard/image reads are pending; try again in a moment");
         }
         // A clipboard may hold text, which must still paste at the image limit.
         if matches!(input, crate::clipboard::Input::File(_))
-            && self.images.len() + pending >= bone_media::MAX_IMAGES
+            && self.composer.images.len() + pending >= bone_media::MAX_IMAGES
         {
             return self.error("a message can contain at most 8 images");
         }
-        *self.pending_images.entry((buf, epoch)).or_default() += 1;
+        *self.composer.pending.entry((buf, epoch)).or_default() += 1;
         let tx = self.tx.clone();
-        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
-        crate::clipboard::read(input, move |result| {
-            let _ = result_tx.send(result);
-        });
+        let executable = self
+            .clipboard_executable
+            .clone()
+            .map(Ok)
+            .unwrap_or_else(std::env::current_exe);
         tokio::spawn(async move {
-            let result = match tokio::time::timeout(Duration::from_secs(10), result_rx).await {
-                Ok(Ok(result)) => result,
-                Ok(Err(_)) => Err("clipboard/image worker disconnected".into()),
-                Err(_) => Err("clipboard/image read timed out; try /attach PATH".into()),
+            let result = match executable {
+                Ok(executable) => crate::clipboard::read(input, executable).await,
+                Err(e) => Err(format!("cannot locate clipboard helper: {e}")),
             };
             let _ = tx.send(AppEvent(Box::new(move |app| match result {
-                Ok(crate::clipboard::Content::Image { png, name }) => {
+                Ok(crate::clipboard::Content::Image { bytes, name }) => {
                     let params = AttachmentUploadParams {
-                        data: base64::engine::general_purpose::STANDARD.encode(png),
+                        data: base64::engine::general_purpose::STANDARD.encode(bytes),
                         name,
                     };
                     app.request::<AttachmentUpload>(params, move |app, result| {
@@ -717,10 +694,13 @@ impl App {
                 }
                 Ok(crate::clipboard::Content::Text(text)) => {
                     app.finish_image_read(buf, epoch);
-                    if buf == app.current && epoch == app.draft_epoch {
+                    if buf == app.current && epoch == app.composer.epoch {
                         app.paste(&text);
-                    } else if let Some(draft) =
-                        app.drafts.get_mut(&buf).filter(|d| d.epoch == epoch)
+                    } else if let Some(draft) = app
+                        .composer
+                        .drafts
+                        .get_mut(&buf)
+                        .filter(|d| d.epoch == epoch)
                     {
                         draft.text.push_str(&text);
                     }
@@ -735,39 +715,22 @@ impl App {
     }
 
     fn finish_image_read(&mut self, buf: BufferId, epoch: u64) {
-        if let Some(n) = self.pending_images.get_mut(&(buf, epoch)) {
-            *n -= 1;
-            if *n == 0 {
-                self.pending_images.remove(&(buf, epoch));
-            }
-        }
+        self.composer.finish_read(buf, epoch);
         self.dirty = true;
     }
 
     fn deliver_image(&mut self, buf: BufferId, epoch: u64, image: ImageAttachment) {
-        if buf == self.current && epoch == self.draft_epoch {
-            let total: u64 = self.images.iter().map(|i| i.bytes).sum();
-            if self.images.len() >= bone_media::MAX_IMAGES
-                || total + image.bytes > bone_media::MAX_MESSAGE_IMAGE_BYTES
-            {
-                return self.error(
-                    "image would exceed the message attachment limit; remove an image first",
-                );
+        match self
+            .composer
+            .attach(self.current, buf, epoch, image.clone())
+        {
+            Ok(true) => {
+                self.fire("image/attached", serde_json::json!({ "image": image }));
+                self.emit_prompt_changed();
+                self.info("image attached · enter sends · /detach removes");
             }
-            self.images.push(image.clone());
-            self.fire("image/attached", serde_json::json!({ "image": image }));
-            self.emit_prompt_changed();
-            self.info("image attached · enter sends · /detach removes");
-        } else if let Some(draft) = self.drafts.get_mut(&buf).filter(|d| d.epoch == epoch) {
-            let total: u64 = draft.images.iter().map(|i| i.bytes).sum();
-            if draft.images.len() >= bone_media::MAX_IMAGES
-                || total + image.bytes > bone_media::MAX_MESSAGE_IMAGE_BYTES
-            {
-                return self.error(
-                    "image would exceed the message attachment limit; remove an image first",
-                );
-            }
-            draft.images.push(image);
+            Ok(false) => {}
+            Err(e) => self.error(e),
         }
         self.dirty = true;
     }
@@ -783,12 +746,12 @@ impl App {
                     format!("{current}\n{}", failed.text)
                 };
             }
-            failed.images.splice(0..0, self.images.clone());
-            failed.epoch = self.draft_epoch;
+            failed.images.splice(0..0, self.composer.images.clone());
+            failed.epoch = self.composer.epoch;
             self.apply_draft(failed);
             self.emit_prompt_changed();
         } else {
-            let draft = self.drafts.entry(buf).or_default();
+            let draft = self.composer.drafts.entry(buf).or_default();
             if !draft.text.is_empty() && !failed.text.is_empty() {
                 draft.text.push('\n');
             }
@@ -798,11 +761,11 @@ impl App {
     }
 
     pub fn prompt_history_active(&self) -> bool {
-        self.prompt_history_pos.is_some()
+        self.composer.history_pos.is_some()
     }
 
     pub fn set_prompt_text(&mut self, text: &str) {
-        self.pastes.clear();
+        self.composer.pastes.clear();
         self.prompt.set_text(text);
         self.emit_prompt_changed();
         self.dirty = true;
@@ -813,7 +776,7 @@ impl App {
             self.prompt.text(),
             self.prompt.cursor(),
             self.prompt.selection(),
-            self.images.clone(),
+            self.composer.images.clone(),
         );
         if self.last_prompt_state == state {
             return;
@@ -1047,7 +1010,7 @@ impl App {
         // Text goes to the prompt only while it has the keyboard.
         match ctx {
             Context::Main | Context::Named(_) if self.focused_panel().is_none() => {
-                self.prompt_history_pos = None;
+                self.composer.history_pos = None;
                 self.expand_pastes();
                 self.prompt.insert_char(c);
             }
@@ -1065,16 +1028,16 @@ impl App {
         );
         match self.context() {
             Context::Main | Context::Named(_) if self.focused_panel().is_none() => {
-                self.prompt_history_pos = None;
+                self.composer.history_pos = None;
                 let text = text.replace("\r\n", "\n").replace('\r', "\n");
                 if text.chars().count() > PASTE_PLACEHOLDER_THRESHOLD {
                     let token = format!(
                         "[Pasted text #{} +{} chars]",
-                        self.pastes.len() + 1,
+                        self.composer.pastes.len() + 1,
                         text.chars().count()
                     );
                     self.prompt.insert_str(&token);
-                    self.pastes.push((token, text));
+                    self.composer.pastes.push((token, text));
                 } else {
                     self.prompt.insert_str(&text);
                 }
@@ -1301,19 +1264,20 @@ impl App {
             ..Default::default()
         };
         self.history_add_draft(draft);
-        self.prompt_history_pos = None;
+        self.composer.history_pos = None;
     }
 
     fn history_add_draft(&mut self, draft: Draft) {
         if self
-            .prompt_history
+            .composer
+            .history
             .last()
             .is_none_or(|last| last.text != draft.text || last.images != draft.images)
         {
-            self.prompt_history.push(draft);
+            self.composer.history.push(draft);
         }
-        self.prompt_history_pos = None;
-        self.history_draft = None;
+        self.composer.history_pos = None;
+        self.composer.saved = None;
     }
 
     /// Up/Down: move between prompt lines, and past the first/last line
@@ -1324,26 +1288,26 @@ impl App {
         } else {
             self.prompt.down()
         };
-        if moved || self.prompt_history.is_empty() {
+        if moved || self.composer.history.is_empty() {
             return;
         }
-        let len = self.prompt_history.len();
-        let pos = match (self.prompt_history_pos, up) {
+        let len = self.composer.history.len();
+        let pos = match (self.composer.history_pos, up) {
             (None, true) => Some(len - 1),
             (None, false) => return,
             (Some(p), true) => Some(p.saturating_sub(1)),
             (Some(p), false) if p + 1 < len => Some(p + 1),
             (Some(_), false) => None,
         };
-        if self.prompt_history_pos.is_none() && pos.is_some() {
-            self.history_draft = Some(self.draft());
+        if self.composer.history_pos.is_none() && pos.is_some() {
+            self.composer.saved = Some(self.draft());
         }
-        self.prompt_history_pos = pos;
+        self.composer.history_pos = pos;
         let mut draft = pos
-            .map(|p| self.prompt_history[p].clone())
-            .unwrap_or_else(|| self.history_draft.take().unwrap_or_default());
+            .map(|p| self.composer.history[p].clone())
+            .unwrap_or_else(|| self.composer.saved.take().unwrap_or_default());
         self.invalidate_draft();
-        draft.epoch = self.draft_epoch;
+        draft.epoch = self.composer.epoch;
         self.apply_draft(draft);
         self.emit_prompt_changed();
     }
@@ -1392,10 +1356,7 @@ impl App {
     /// Send the prompt: a new turn when idle; while a turn runs, queued with
     /// `mode` (default: the `queue_mode` option, else steer).
     fn submit(&mut self, mode: Option<QueueMode>) {
-        if self
-            .pending_images
-            .contains_key(&(self.current, self.draft_epoch))
-        {
+        if self.composer.reading(self.current) {
             return self.info("wait for the image to finish attaching before sending");
         }
         self.expand_pastes();

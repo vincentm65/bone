@@ -1,7 +1,11 @@
-//! Clipboard and file workers keep image decoding off the UI thread.
-use std::io::Read;
+//! Clipboard calls run in a disposable process so native hangs can be killed.
+use std::io::Write;
 use std::path::PathBuf;
-use std::sync::{OnceLock, mpsc};
+use std::process::{ExitCode, Stdio};
+use std::time::Duration;
+
+use tokio::io::AsyncReadExt;
+use tokio::process::Command;
 
 pub(crate) enum Input {
     Clipboard,
@@ -9,57 +13,117 @@ pub(crate) enum Input {
 }
 pub(crate) enum Content {
     Text(String),
-    Image { png: Vec<u8>, name: String },
+    Image { bytes: Vec<u8>, name: String },
 }
-type Reply = Box<dyn FnOnce(Result<Content, String>) + Send>;
-type Job = (Input, Reply);
 
-pub(crate) fn read(input: Input, reply: impl FnOnce(Result<Content, String>) + Send + 'static) {
-    static CLIPBOARD_WORKER: OnceLock<mpsc::SyncSender<Job>> = OnceLock::new();
-    static FILE_WORKER: OnceLock<mpsc::SyncSender<Job>> = OnceLock::new();
-    let slot = match &input {
-        Input::Clipboard => &CLIPBOARD_WORKER,
-        Input::File(_) => &FILE_WORKER,
-    };
-    let worker = slot.get_or_init(|| {
-        let (tx, rx) = mpsc::sync_channel::<Job>(16);
-        std::thread::Builder::new()
-            .name("bone-clipboard".into())
-            .spawn(move || {
-                for (input, reply) in rx {
-                    let result = match input {
-                        Input::Clipboard => clipboard(),
-                        Input::File(path) => file(path),
-                    };
-                    reply(result);
-                }
-            })
-            .expect("clipboard worker starts");
-        tx
-    });
-    if let Err(e) = worker.try_send((input, Box::new(reply))) {
-        let (mpsc::TrySendError::Full((_, reply)) | mpsc::TrySendError::Disconnected((_, reply))) =
-            e;
-        reply(Err("clipboard worker is busy; try again in a moment".into()));
+pub(crate) async fn read(input: Input, executable: PathBuf) -> Result<Content, String> {
+    match input {
+        Input::Clipboard => {
+            let mut cmd = Command::new(executable);
+            cmd.arg("--clipboard-read");
+            // Avoid opening a console window for the helper on Windows.
+            #[cfg(windows)]
+            cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+            read_helper(cmd, Duration::from_secs(10)).await
+        }
+        Input::File(path) => tokio::time::timeout(Duration::from_secs(10), file(path))
+            .await
+            .map_err(|_| "image file read timed out")?,
     }
 }
 
-fn file(path: PathBuf) -> Result<Content, String> {
-    let f =
-        std::fs::File::open(&path).map_err(|e| format!("cannot open {}: {e}", path.display()))?;
+async fn file(path: PathBuf) -> Result<Content, String> {
+    let f = tokio::fs::File::open(&path)
+        .await
+        .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
     let mut bytes = Vec::new();
     f.take(bone_media::MAX_IMAGE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
+        .await
         .map_err(|e| e.to_string())?;
-    let png = bone_media::normalize(&bytes)?;
+    if bytes.len() > bone_media::MAX_IMAGE_BYTES {
+        return Err("image exceeds the 20 MiB limit".into());
+    }
+    // The core validates and normalizes file bytes once, on upload.
     Ok(Content::Image {
-        png: png.bytes,
+        bytes,
         name: path
             .file_name()
             .unwrap_or_default()
             .to_string_lossy()
             .into_owned(),
     })
+}
+
+async fn read_helper(mut cmd: Command, deadline: Duration) -> Result<Content, String> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|e| format!("cannot start clipboard helper: {e}"))?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .unwrap()
+        .take(bone_media::MAX_IMAGE_BYTES as u64 + 2);
+    let mut bytes = Vec::new();
+    let result = tokio::time::timeout(deadline, async {
+        tokio::try_join!(child.wait(), stdout.read_to_end(&mut bytes))
+    })
+    .await;
+    match result {
+        Err(_) => {
+            // kill() waits for exit too: neither stuck workers nor zombies remain.
+            child
+                .kill()
+                .await
+                .map_err(|e| format!("cannot stop clipboard helper: {e}"))?;
+            return Err("clipboard read timed out; try again or use /attach PATH".into());
+        }
+        Ok(Err(e)) => return Err(format!("clipboard helper failed: {e}")),
+        Ok(Ok((status, _))) if !status.success() => return Err("clipboard helper failed".into()),
+        Ok(Ok(_)) => {}
+    }
+    if bytes.len() > bone_media::MAX_IMAGE_BYTES + 1 {
+        return Err("clipboard contents exceed the 20 MiB limit".into());
+    }
+    if bytes.is_empty() {
+        return Err("invalid clipboard helper response".into());
+    }
+    match bytes.remove(0) {
+        b'I' => Ok(Content::Image {
+            bytes,
+            name: "Screenshot".into(),
+        }),
+        b'T' => String::from_utf8(bytes)
+            .map(Content::Text)
+            .map_err(|e| e.to_string()),
+        b'E' => Err(String::from_utf8_lossy(&bytes).into_owned()),
+        _ => Err("invalid clipboard helper response".into()),
+    }
+}
+
+/// Internal CLI entry point, invoked before loading any user configuration.
+#[doc(hidden)]
+pub fn run_clipboard_helper() -> ExitCode {
+    let result = clipboard();
+    let (tag, bytes) = match &result {
+        Ok(Content::Image { bytes, .. }) => (b'I', bytes.as_slice()),
+        Ok(Content::Text(text)) => (b'T', text.as_bytes()),
+        Err(error) => (b'E', error.as_bytes()),
+    };
+    let mut stdout = std::io::stdout().lock();
+    if stdout
+        .write_all(&[tag])
+        .and_then(|_| stdout.write_all(bytes))
+        .is_ok()
+    {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
@@ -70,7 +134,7 @@ fn clipboard() -> Result<Content, String> {
             Ok(image) => {
                 let png = bone_media::from_rgba(image.width, image.height, &image.bytes)?;
                 return Ok(Content::Image {
-                    png: png.bytes,
+                    bytes: png.bytes,
                     name: "Screenshot".into(),
                 });
             }
@@ -103,6 +167,54 @@ fn clipboard() -> Result<Content, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn file_bytes_are_forwarded_unchanged_and_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("photo.jpg");
+        // Validation belongs to the core, regardless of filename or contents.
+        std::fs::write(&path, b"original bytes").unwrap();
+        match file(path.clone()).await.unwrap() {
+            Content::Image { bytes, name } => {
+                assert_eq!(bytes, b"original bytes");
+                assert_eq!(name, "photo.jpg");
+            }
+            _ => panic!("file became text"),
+        }
+        std::fs::File::create(&path)
+            .unwrap()
+            .set_len(bone_media::MAX_IMAGE_BYTES as u64 + 1)
+            .unwrap();
+        assert!(matches!(file(path).await, Err(e) if e.contains("20 MiB")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_and_reaps_helper_then_next_read_succeeds() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("pid");
+        let mut stalled = Command::new("sh");
+        stalled
+            .args(["-c", "echo $$ > \"$1\"; exec sleep 30", "helper"])
+            .arg(&pid_file);
+        let result = read_helper(stalled, Duration::from_millis(250)).await;
+        assert!(matches!(result, Err(e) if e.contains("timed out")));
+        let pid: i32 = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        // wait()/kill() must reap the process, not merely abandon a worker.
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        let mut healthy = Command::new("sh");
+        healthy.args(["-c", "printf Tready"]);
+        assert!(matches!(read_helper(healthy, Duration::from_secs(2)).await,
+            Ok(Content::Text(text)) if text == "ready"));
+    }
     /// Run under Xvfb or a desktop: exercises actual native clipboard decoding.
     #[test]
     #[ignore = "requires a graphical clipboard; run with DISPLAY or WAYLAND_DISPLAY"]
@@ -117,8 +229,8 @@ mod tests {
             })
             .unwrap();
         match clipboard().unwrap() {
-            Content::Image { png, .. } => {
-                let decoded = bone_media::normalize(&png).unwrap();
+            Content::Image { bytes, .. } => {
+                let decoded = bone_media::normalize(&bytes).unwrap();
                 assert_eq!((decoded.width, decoded.height), (2, 1));
             }
             _ => panic!("image became text"),
