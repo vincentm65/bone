@@ -17,6 +17,8 @@ function M.setup(opts)
   require("bone.ui.views")
   require("bone.ui.statusline")
   require("bone.ui.tray")
+  -- Loaded now so its Running page sees background work from the start.
+  require("bone.ui.sessions")
   require("bone.ui.layout").setup(opts)
   return M
 end

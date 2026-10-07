@@ -517,6 +517,11 @@ impl App {
             c.redraw(None);
         }
         self.current = id;
+        // The tray's shells are the chat on screen's.
+        match self.chats[id].session_id().map(str::to_owned) {
+            Some(session_id) => self.request_processes(session_id),
+            None => self.clear_processes(),
+        }
         if let Some(w) = self.windows.get_mut(&CHAT_WIN) {
             w.top = 0;
             w.follow = true;
@@ -1230,7 +1235,6 @@ impl App {
     pub fn open_session(&mut self, session_id: String) {
         if let Some(buf) = self.chat_by_session(&session_id) {
             self.show_chat(buf);
-            self.request_processes(session_id);
             return;
         }
         // Reuse an untouched new chat rather than piling them up.
@@ -1697,9 +1701,6 @@ impl App {
     }
 
     fn process_changed(&mut self, p: &ProcessChangedParams) {
-        if self.processes_session.is_none() {
-            self.processes_session = Some(p.session_id.clone());
-        }
         if self.processes_session.as_deref() != Some(p.session_id.as_str()) {
             return;
         }
@@ -1784,17 +1785,26 @@ impl App {
         term.lines(rows, cols, scroll, &mut self.theme)
     }
 
+    /// Forget the tray's shells (a chat with no session, or a deleted one).
+    fn clear_processes(&mut self) {
+        if self.processes_session.is_none() && self.processes.is_empty() {
+            return;
+        }
+        self.processes.clear();
+        self.terms.clear();
+        self.term_sizes.clear();
+        self.term_resize_pending.clear();
+        self.processes_version = 0;
+        self.processes_session = None;
+        self.fire(
+            "processes/changed",
+            serde_json::json!({ "version": 0, "processes": [] }),
+        );
+    }
+
     pub fn request_processes(&mut self, session_id: String) {
         if self.processes_session.as_deref() != Some(session_id.as_str()) {
-            self.processes.clear();
-            self.terms.clear();
-            self.term_sizes.clear();
-            self.term_resize_pending.clear();
-            self.processes_version = 0;
-            self.fire(
-                "processes/changed",
-                serde_json::json!({ "version": 0, "processes": [] }),
-            );
+            self.clear_processes();
         }
         self.processes_session = Some(session_id.clone());
         self.request::<ProcessesGet>(
@@ -1804,9 +1814,11 @@ impl App {
             move |app, r| {
                 // Older/embedded servers may not implement process snapshots;
                 // the chat remains fully usable without the optional pane.
-                if let Ok(r) = r {
+                // A reply for a chat no longer on screen is stale.
+                if let Ok(r) = r
+                    && app.processes_session.as_deref() == Some(session_id.as_str())
+                {
                     app.processes_version = r.version;
-                    app.processes_session = Some(session_id);
                     app.processes = r.processes.into_iter().map(|p| (p.id.clone(), p)).collect();
                     app.fire(
                         "processes/changed",
@@ -1853,13 +1865,7 @@ impl App {
     /// places, which pending replies rely on).
     fn session_deleted(&mut self, session_id: &str) {
         if self.processes_session.as_deref() == Some(session_id) {
-            self.processes.clear();
-            self.processes_version = 0;
-            self.processes_session = None;
-            self.fire(
-                "processes/changed",
-                serde_json::json!({ "version": 0, "processes": [] }),
-            );
+            self.clear_processes();
         }
         let Some(buf) = self.chat_by_session(session_id) else {
             return;

@@ -186,6 +186,7 @@ pub const METHODS: &[&str] = &[
     SecretsSet::METHOD,
     SecretsList::METHOD,
     ProcessesGet::METHOD,
+    ProcessesList::METHOD,
     ProcessCancel::METHOD,
     ProcessRead::METHOD,
     ProcessResize::METHOD,
@@ -230,6 +231,10 @@ method!(
 method!(
     /// Return managed shell processes for a session.
     ProcessesGet, "processes/get", SessionRef => ProcessesResult
+);
+method!(
+    /// Return every session's managed shell processes.
+    ProcessesList, "processes/list", Empty => ProcessesResult
 );
 method!(
     /// Cancel one managed shell process.
@@ -827,6 +832,18 @@ notification!(
     /// automatically. The transcript is unchanged; nothing to reload.
     SessionCompacted, "session/compacted", SessionCompactedParams
 );
+notification!(
+    /// Automatic compaction failed; the transcript and summary are unchanged.
+    SessionCompactFailed, "session/compact_failed", SessionCompactFailedParams
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCompactFailedParams {
+    pub session_id: SessionId,
+    /// `"limit"` or `"overflow"`.
+    pub reason: String,
+    pub error: String,
+}
 notification!(
     /// Streamed output of a `model/complete` call with `stream` set.
     ModelDeltaEvent, "model/delta", ModelDeltaParams

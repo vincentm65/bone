@@ -32,8 +32,10 @@ local function items_width(items)
   return w
 end
 
-local state = bone._standard_status or { started = nil, finished = nil }
+local state = bone._standard_status or {}
 bone._standard_status = state
+-- Each session's last turn: { started, finished }, kept across chat switches.
+state.turns = state.turns or {}
 state.total = state.total or { input = 0, output = 0, cached = 0, curr = 0 }
 state.total_session = state.total_session or ""
 
@@ -83,15 +85,12 @@ load_model()
 load_total()
 state.events = {
   bone.on("turn/started", function(ev)
-    if ev.session_id ~= (bone.chat.session() or {}).session_id then return end
-    state.started, state.timing_session = now(), ev.session_id
-    state.finished, state.finished_elapsed = nil, nil
+    state.turns[ev.session_id] = { started = now() }
   end),
   bone.on("turn/finished", function(ev)
+    local t = state.turns[ev.session_id]
+    if t then t.finished = now() end
     if ev.session_id ~= (bone.chat.session() or {}).session_id then return end
-    state.finished = now()
-    if state.started then state.finished_elapsed = state.finished - state.started end
-    state.started = nil
     load_total()
   end),
   -- Each model call's usage is indexed before its message completes, so a
@@ -114,9 +113,6 @@ function bone.ui.statusline(ctx)
   local left = {}
   local s = ctx.session
   local session_id = s and s.session_id
-  if session_id ~= state.timing_session then
-    state.started, state.finished, state.finished_elapsed, state.timing_session = nil, nil, nil, session_id
-  end
   if (session_id or "") ~= state.total_session then
     load_total(session_id)
     load_model()
@@ -127,11 +123,11 @@ function bone.ui.statusline(ctx)
   left[#left + 1] = { "curr " .. tokens(state.total.curr), "StatusLineDim" }
   left[#left + 1] = { "total " .. tokens(state.total.input + state.total.output), "StatusLineDim" }
   left[#left + 1] = { "cache " .. (state.total.input > 0 and string.format("%.0f%%", state.total.cached / state.total.input * 100) or "0%"), "StatusLineDim" }
+  local t = session_id and state.turns[session_id]
   if s and s.running then
-    local running_for = s.turn and math.floor((s.turn.elapsed_ms or 0) / 1000) or (state.started and (now() - state.started))
-    left[#left + 1] = { (ctx.spinner or "") .. " thinking" .. (running_for and (" " .. elapsed(running_for)) or ""), "StatusLine" }
-  elseif state.finished_elapsed then
-    left[#left + 1] = { "worked " .. elapsed(state.finished_elapsed) .. ", finished at " .. bone.util.format_time(state.finished), "StatusLineDim" }
+    left[#left + 1] = { (ctx.spinner or "") .. " thinking" .. (s.elapsed and (" " .. elapsed(s.elapsed)) or ""), "StatusLine" }
+  elseif t and t.finished then
+    left[#left + 1] = { "worked " .. elapsed(t.finished - t.started) .. ", finished at " .. bone.util.format_time(t.finished), "StatusLineDim" }
   end
 
   local function joined(list)

@@ -1,0 +1,35 @@
+[
+  {
+    "id": 40,
+    "jsonrpc": "2.0",
+    "method": "processes/list",
+    "params": {}
+  },
+  {
+    "id": 40,
+    "jsonrpc": "2.0",
+    "result": {
+      "processes": [
+        {
+          "code": null,
+          "command": "cargo test",
+          "elapsed_ms": 1200,
+          "error": null,
+          "finished_at_ms": null,
+          "id": "shell-1",
+          "output_bytes": 8,
+          "pid": 1234,
+          "running": true,
+          "session_id": "01a0fe5e-0000-7000-8000-000000000001",
+          "signal": null,
+          "started_at_ms": 1790000000000,
+          "state": "running",
+          "tail": "running",
+          "terminal": true,
+          "truncated": false
+        }
+      ],
+      "version": 4
+    }
+  }
+]

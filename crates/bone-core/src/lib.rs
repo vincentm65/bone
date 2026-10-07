@@ -26,10 +26,10 @@ use bone_proto::methods::{
     LuaCallParams, McpList, ModelCancel, ModelComplete, ModelCompleteParams, ModelCompleted,
     ModelCompletedParams, ModelDeltaEvent, ModelDeltaParams, ModelList, ModelRequest, PluginList,
     PluginLoad, PluginRef, PluginReload, PluginUnload, ProcessCancel, ProcessOutput, ProcessRead,
-    ProcessRef, ProcessResize, ProcessSnapshot, ProcessState, ProcessesGet, ProcessesResult,
-    QueueAdd, QueueAddParams, QueueAddResult, QueueChanged, QueueChangedParams, QueueClear,
-    QueueMode, QueueMove, QueueRemove, QueueResume, QueueUpdate, SecretSet, SecretsList,
-    SecretsSet, SessionActive, SessionCompact, SessionCompactParams, SessionCreate,
+    ProcessRef, ProcessResize, ProcessSnapshot, ProcessState, ProcessesGet, ProcessesList,
+    ProcessesResult, QueueAdd, QueueAddParams, QueueAddResult, QueueChanged, QueueChangedParams,
+    QueueClear, QueueMode, QueueMove, QueueRemove, QueueResume, QueueUpdate, SecretSet,
+    SecretsList, SecretsSet, SessionActive, SessionCompact, SessionCompactParams, SessionCreate,
     SessionCreateParams, SessionCreated, SessionDelete, SessionDeleted, SessionFork,
     SessionForkParams, SessionList, SessionMessages, SessionMessagesResult, SessionRef,
     SessionRename, SessionRenameParams, SessionUpdated, SessionUpdatedParams, SettingPath,
@@ -504,6 +504,9 @@ impl Core {
             TurnStart::METHOD => dispatch::<TurnStart, _>(params, |p| self.turn_start(p)),
             TurnCancel::METHOD => dispatch::<TurnCancel, _>(params, |p| self.turn_cancel(p)),
             ProcessesGet::METHOD => dispatch::<ProcessesGet, _>(params, |p| self.processes_get(p)),
+            ProcessesList::METHOD => {
+                dispatch::<ProcessesList, _>(params, |_| Ok(self.processes_list()))
+            }
             ProcessCancel::METHOD => {
                 dispatch::<ProcessCancel, _>(params, |p| self.process_cancel(p))
             }
@@ -835,6 +838,19 @@ impl Core {
                 .map(|view| process_snapshot(&params.session_id, view))
                 .collect(),
         })
+    }
+
+    fn processes_list(&self) -> ProcessesResult {
+        ProcessesResult {
+            version: self.inner.jobs.version(),
+            processes: self
+                .inner
+                .jobs
+                .owned_views(None)
+                .into_iter()
+                .map(|(owner, view)| process_snapshot(&owner, view))
+                .collect(),
+        }
     }
 
     fn process_cancel(&self, params: ProcessRef) -> Result<(), RpcError> {

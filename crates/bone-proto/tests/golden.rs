@@ -481,33 +481,35 @@ fn requests() {
         },
         settings,
     );
+    let processes = ProcessesResult {
+        version: 4,
+        processes: vec![ProcessSnapshot {
+            session_id: SID.into(),
+            id: "shell-1".into(),
+            command: "cargo test".into(),
+            state: ProcessState::Running,
+            running: true,
+            pid: Some(1234),
+            started_at_ms: 1_790_000_000_000,
+            finished_at_ms: None,
+            elapsed_ms: 1200,
+            tail: "running".into(),
+            output_bytes: 8,
+            truncated: false,
+            code: None,
+            signal: None,
+            error: None,
+            terminal: true,
+        }],
+    };
     exchange::<ProcessesGet>(
         36,
         SessionRef {
             session_id: SID.into(),
         },
-        ProcessesResult {
-            version: 4,
-            processes: vec![ProcessSnapshot {
-                session_id: SID.into(),
-                id: "shell-1".into(),
-                command: "cargo test".into(),
-                state: ProcessState::Running,
-                running: true,
-                pid: Some(1234),
-                started_at_ms: 1_790_000_000_000,
-                finished_at_ms: None,
-                elapsed_ms: 1200,
-                tail: "running".into(),
-                output_bytes: 8,
-                truncated: false,
-                code: None,
-                signal: None,
-                error: None,
-                terminal: true,
-            }],
-        },
+        processes.clone(),
     );
+    exchange::<ProcessesList>(40, Empty {}, processes);
     exchange::<ProcessRead>(
         38,
         ProcessReadParams {

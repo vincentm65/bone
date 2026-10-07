@@ -2771,6 +2771,18 @@ async fn compact_command_and_chat_note() {
             ),
         "{screen}"
     );
+    h.emit::<SessionCompactFailed>(SessionCompactFailedParams {
+        session_id: "s-new".into(),
+        reason: "limit".into(),
+        error: "the summary failed: HTTP 429".into(),
+    })
+    .await;
+    let screen = h.screen(120, 20);
+    assert!(
+        screen.contains("compaction failed (over compact.limit): the summary failed: HTTP 429"),
+        "{screen}"
+    );
+    assert!(screen.contains("context unchanged"), "{screen}");
 }
 
 #[tokio::test]
@@ -4037,6 +4049,72 @@ fn process(state: ProcessState, tail: &str) -> ProcessSnapshot {
     }
 }
 
+fn running_shell() -> ProcessChangedParams {
+    ProcessChangedParams {
+        session_id: "s-new".into(),
+        version: 1,
+        process: process(ProcessState::Running, "listening on 3000"),
+        chunk: None,
+    }
+}
+
+#[tokio::test]
+async fn tray_shells_belong_to_the_chat_on_screen() {
+    let mut h = Harness::build(None).await;
+    h.input("hi{enter}").await;
+    h.emit::<ProcessChanged>(running_shell()).await;
+    assert!(h.screen(100, 20).contains("Shells 1"));
+    // A new chat has no shells, and the other chat's output doesn't take it over.
+    h.input("/new{enter}").await;
+    h.emit::<ProcessChanged>(running_shell()).await;
+    let screen = h.screen(100, 20);
+    assert!(!screen.contains("Shells"), "{screen}");
+}
+
+#[tokio::test]
+async fn sidebar_running_page_lists_every_chats_background_work() {
+    let mut h = Harness::build(None).await;
+    h.input("hi{enter}").await;
+    h.emit::<ProcessChanged>(running_shell()).await;
+    h.emit::<SessionCreated>(bone_proto::types::SessionInfo {
+        session_id: "child-1".into(),
+        cwd: "/work".into(),
+        created_at: 0,
+        title: Some("find callers".into()),
+        parent: None,
+        owner: Some(bone_proto::types::SessionOwner {
+            session_id: "s-new".into(),
+            call_id: Some("c1".into()),
+            name: Some("reviewer".into()),
+        }),
+    })
+    .await;
+    h.input("/new{enter}").await;
+    h.input("{ctrl+o}").await;
+    h.emit::<TurnStarted>(started("child-1", "find callers"))
+        .await;
+    let screen = h.screen(100, 30);
+    assert!(screen.contains("Running 2"), "{screen}");
+    h.input("{tab}").await;
+    let screen = h.screen(100, 30);
+    assert!(
+        screen.contains("$ npm run dev") && screen.contains("reviewer · find callers"),
+        "{screen}"
+    );
+    // x stops the selected one: the shell, the older of the two.
+    h.input("x").await;
+    assert_eq!(
+        h.requests("process/cancel"),
+        vec![json!({ "session_id": "s-new", "id": "shell-1" })]
+    );
+    h.emit::<TurnFinished>(finished("child-1", TurnOutcome::Completed))
+        .await;
+    let screen = h.screen(100, 30);
+    assert!(!screen.contains("reviewer"), "{screen}");
+    h.input("{tab}").await;
+    assert!(h.screen(100, 30).contains("Search conversations"));
+}
+
 #[tokio::test]
 async fn shell_jobs_show_in_the_tray_and_open_in_place() {
     let mut h = Harness::build(None).await;
@@ -5197,13 +5275,19 @@ async fn idle_session_sidebar_schedules_timestamp_refresh() {
 }
 
 #[tokio::test]
-async fn statusline_preserves_new_session_timing_and_clears_old_timing() {
+async fn statusline_keeps_each_sessions_timing_across_switches() {
     let mut h = Harness::new().await;
-    h.lua("local s = bone._standard_status; s.total_session = 'old'; s.timing_session = 'new'; s.started = os.time(); bone.ui.statusline({session = {session_id = 'new'}, width = 80})").await;
-    assert_eq!(h.lua("=bone._standard_status.started ~= nil").await, "true");
-    h.lua("bone.ui.statusline({session = {session_id = 'other'}, width = 80})")
-        .await;
-    assert_eq!(h.lua("=bone._standard_status.started == nil").await, "true");
+    h.lua("bone._standard_status.turns.a = { started = os.time() - 65, finished = os.time() }; line = function(s) local o = {} for _, it in ipairs(bone.ui.statusline({session = s, width = 120})) do o[#o + 1] = type(it) == 'table' and it[1] or it end return table.concat(o) end").await;
+    assert!(
+        h.lua("=line({session_id = 'b', running = true, elapsed = 65})")
+            .await
+            .contains("thinking 1m")
+    );
+    assert!(
+        h.lua("=line({session_id = 'a'})")
+            .await
+            .contains("worked 1m")
+    );
 }
 
 #[tokio::test]

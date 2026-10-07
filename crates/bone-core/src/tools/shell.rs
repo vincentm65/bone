@@ -389,16 +389,27 @@ impl ProcessRegistry {
     }
 
     pub(crate) fn views(&self, owner: &str) -> Vec<ProcessView> {
+        self.owned_views(Some(owner))
+            .into_iter()
+            .map(|(_, view)| view)
+            .collect()
+    }
+
+    /// Each process with its owner; every owner's when `owner` is None.
+    pub(crate) fn owned_views(&self, owner: Option<&str>) -> Vec<(String, ProcessView)> {
         let processes: Vec<_> = self
             .processes
             .lock()
             .unwrap()
             .values()
-            .filter(|p| p.snapshot.lock().unwrap().owner == owner)
-            .cloned()
+            .map(|p| (p.snapshot.lock().unwrap().owner.clone(), p.clone()))
+            .filter(|(o, _)| owner.is_none_or(|owner| o == owner))
             .collect();
-        let mut views: Vec<_> = processes.iter().map(|p| self.view_of(p)).collect();
-        views.sort_by(|a, b| a.id.cmp(&b.id));
+        let mut views: Vec<_> = processes
+            .into_iter()
+            .map(|(o, p)| (o, self.view_of(&p)))
+            .collect();
+        views.sort_by(|a, b| a.1.id.cmp(&b.1.id));
         views
     }
     fn write(&self, owner: &str, id: &str, data: Vec<u8>) -> Result<(), String> {

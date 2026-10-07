@@ -646,7 +646,6 @@ bone.on("session/created", function(info)
     cwd = info.cwd,
     status = "running",
     started_at = bone.now(),
-    stream = "",
   }
   if o.call_id then
     by_call[o.call_id] = info.session_id
@@ -666,20 +665,14 @@ bone.on("message/delta", function(ev)
   if not a then
     return
   end
-  if ev.kind == "reasoning" then
-    if a.stream == "" then
-      a.detail = "thinking"
-    end
-    return
-  end
-  a.stream = (a.stream .. (ev.text or "")):sub(-400):gsub("^[\128-\191]+", "")
-  a.detail = last_line(a.stream) or a.detail
+  -- A step label, not the streamed text: the row changes per step, not per token.
+  a.detail = ev.kind == "reasoning" and "thinking" or "writing"
 end)
 
 bone.on("tool/started", function(ev)
   local a = agents[ev.session_id]
   if a and ev.call then
-    a.detail, a.stream = call_summary(ev.call, a.cwd), ""
+    a.detail = call_summary(ev.call, a.cwd)
   end
 end)
 
