@@ -20,6 +20,7 @@ fn server_at(base_url: &str) -> Server {
     let data = Box::leak(Box::new(tempfile::tempdir().unwrap()));
     Server::new(Arc::new(Core::new(CoreConfig {
         provider: ProviderConfig {
+            supports_images: None,
             kind: None,
             options: serde_json::Value::Null,
             base_url: base_url.into(),

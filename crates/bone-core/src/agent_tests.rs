@@ -120,6 +120,7 @@ impl Harness {
         let work = tempfile::tempdir().unwrap();
         let config = CoreConfig {
             provider: ProviderConfig {
+                supports_images: None,
                 kind: None,
                 options: serde_json::Value::Null,
                 base_url: "http://unused".into(),
@@ -197,6 +198,7 @@ impl Harness {
         self.call::<TurnStart>(TurnStartParams {
             session_id: self.session_id.clone(),
             text: text.into(),
+            images: Vec::new(),
         })
         .await
         .unwrap()
@@ -400,7 +402,8 @@ async fn hooks_run_at_every_step() {
     assert_eq!(
         t[0],
         ChatMessage::User {
-            content: "go (via hook)".into()
+            content: "go (via hook)".into(),
+            images: Vec::new(),
         }
     );
     assert!(tool_result(&t[2]).0.starts_with("seen: Created"), "{t:#?}");
@@ -489,6 +492,7 @@ async fn turns_leave_usage_and_tool_calls_in_the_index() {
         provider: None,
         messages: vec![ChatMessage::User {
             content: "hi".into(),
+            images: Vec::new(),
         }],
         tools: vec![],
         options: Value::Null,
@@ -574,6 +578,7 @@ async fn cancel_while_streaming_keeps_partial_text() {
         .call::<TurnStart>(TurnStartParams {
             session_id: h.session_id.clone(),
             text: "x".into(),
+            images: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -996,7 +1001,8 @@ async fn system_and_context_hooks_shape_each_request() {
     assert_eq!(
         seen[1],
         vec![ChatMessage::User {
-            content: "second".into()
+            content: "second".into(),
+            images: Vec::new(),
         }]
     );
     // The stored transcript is untouched.
@@ -1252,14 +1258,16 @@ async fn hooks_can_add_to_and_compact_the_transcript() {
     );
     // The injected message reached the model on the next call.
     assert!(seen[1].contains(&ChatMessage::User {
-        content: "remember: be brief".into()
+        content: "remember: be brief".into(),
+        images: Vec::new(),
     }));
     // go, injected, assistant(poke), tool, done = 5 before compaction.
     let t = h.transcript().await;
     assert_eq!(
         t,
         vec![ChatMessage::User {
-            content: "summary of 5 messages".into()
+            content: "summary of 5 messages".into(),
+            images: Vec::new(),
         }]
     );
     // Turn ids keep counting, and the checkpoint survives a restart.
@@ -1273,7 +1281,8 @@ async fn hooks_can_add_to_and_compact_the_transcript() {
     assert_eq!(
         s.messages[0],
         ChatMessage::User {
-            content: "summary of 3 messages".into()
+            content: "summary of 3 messages".into(),
+            images: Vec::new(),
         }
     );
 }
@@ -1307,7 +1316,8 @@ async fn lua_tools_call_the_model() {
     assert_eq!(
         h.provider.seen.lock().unwrap()[1],
         vec![ChatMessage::User {
-            content: "say hi".into()
+            content: "say hi".into(),
+            images: Vec::new(),
         }]
     );
     assert_eq!(h.provider.systems.lock().unwrap()[1], "be brief");
@@ -1623,6 +1633,7 @@ async fn clients_call_the_model_over_the_protocol() {
             provider: None,
             messages: vec![ChatMessage::User {
                 content: "hi".into(),
+                images: Vec::new(),
             }],
             tools: vec![],
             options: Value::Null,
@@ -1648,6 +1659,7 @@ async fn clients_call_the_model_over_the_protocol() {
             provider: None,
             messages: vec![ChatMessage::User {
                 content: "again".into(),
+                images: Vec::new(),
             }],
             tools: vec![],
             options: Value::Null,
@@ -1826,6 +1838,7 @@ impl Harness {
 fn user(text: &str) -> ChatMessage {
     ChatMessage::User {
         content: text.into(),
+        images: Vec::new(),
     }
 }
 
@@ -1863,7 +1876,7 @@ async fn compact_summarizes_for_the_model_and_keeps_the_transcript() {
     // The summarizer read the older turn, not the kept one.
     let read = h.last_seen();
     assert!(
-        matches!(&read[0], ChatMessage::User { content } if content.contains("USER: q1") && !content.contains("q2")),
+        matches!(&read[0], ChatMessage::User { content, .. } if content.contains("USER: q1") && !content.contains("q2")),
         "{read:#?}"
     );
 
@@ -1912,7 +1925,7 @@ async fn compacting_again_folds_in_the_earlier_summary() {
     assert_eq!(done.messages, 2);
     let read = h.last_seen();
     assert!(
-        matches!(&read[0], ChatMessage::User { content }
+        matches!(&read[0], ChatMessage::User { content, .. }
             if content.contains("Summary of the earlier conversation:\n\nS1") && content.contains("USER: q2")),
         "{read:#?}"
     );
@@ -2227,6 +2240,7 @@ async fn sessions_can_be_renamed_forked_and_deleted() {
         .call::<TurnStart>(TurnStartParams {
             session_id: fork.session_id.clone(),
             text: "other way".into(),
+            images: Vec::new(),
         })
         .await
         .unwrap()
@@ -2298,6 +2312,7 @@ async fn session_active_tracks_all_running_turns_without_disk_access() {
     h.call::<TurnStart>(TurnStartParams {
         session_id: other.session_id.clone(),
         text: "second".into(),
+        images: Vec::new(),
     })
     .await
     .unwrap();
@@ -2353,6 +2368,7 @@ async fn steered_messages_join_before_the_next_model_call() {
     h.call::<TurnSteer>(TurnSteerParams {
         session_id: h.session_id.clone(),
         text: "also check the README".into(),
+        images: Vec::new(),
     })
     .await
     .unwrap();
@@ -2363,7 +2379,8 @@ async fn steered_messages_join_before_the_next_model_call() {
     assert_eq!(
         t[3],
         ChatMessage::User {
-            content: "also check the README".into()
+            content: "also check the README".into(),
+            images: Vec::new(),
         }
     );
     // The model saw it on its next call.
@@ -2378,6 +2395,7 @@ async fn a_message_steered_during_the_last_answer_still_gets_one() {
     h.call::<TurnSteer>(TurnSteerParams {
         session_id: h.session_id.clone(),
         text: "and one more thing".into(),
+        images: Vec::new(),
     })
     .await
     .unwrap();
@@ -2386,7 +2404,7 @@ async fn a_message_steered_during_the_last_answer_still_gets_one() {
     let texts: Vec<String> = t
         .iter()
         .map(|m| match m {
-            ChatMessage::User { content } => format!("user: {content}"),
+            ChatMessage::User { content, .. } => format!("user: {content}"),
             ChatMessage::Assistant { content, .. } => format!("assistant: {content}"),
             other => format!("{other:?}"),
         })
@@ -2405,6 +2423,7 @@ async fn a_message_steered_during_the_last_answer_still_gets_one() {
         .call::<TurnSteer>(TurnSteerParams {
             session_id: h.session_id.clone(),
             text: "late".into(),
+            images: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -2419,6 +2438,7 @@ impl Harness {
             session_id: self.session_id.clone(),
             text: text.into(),
             mode,
+            images: Vec::new(),
         })
         .await
         .unwrap()
@@ -2509,6 +2529,7 @@ async fn a_cancelled_turn_pauses_the_queue_until_resumed() {
         id: second,
         text: Some("second, edited".into()),
         mode: None,
+        images: None,
     })
     .await
     .unwrap();
@@ -2592,6 +2613,7 @@ async fn queue_add_hooks_rewrite_or_refuse() {
             session_id: h.session_id.clone(),
             text: "no".into(),
             mode: QueueMode::Next,
+            images: Vec::new(),
         })
         .await
         .unwrap_err();
@@ -2920,6 +2942,7 @@ async fn providers_and_keys_from_settings_and_secrets() {
         .await
         .unwrap();
     assert_eq!(names, json!(["local"]));
+    #[cfg(unix)]
     let path = h._data.path().join("secrets.json");
     #[cfg(unix)]
     {

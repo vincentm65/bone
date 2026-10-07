@@ -1,0 +1,23 @@
+[
+  {
+    "id": 60,
+    "jsonrpc": "2.0",
+    "method": "attachment/upload",
+    "params": {
+      "data": "cG5n",
+      "name": "Screenshot"
+    }
+  },
+  {
+    "id": 60,
+    "jsonrpc": "2.0",
+    "result": {
+      "bytes": 1024,
+      "height": 1080,
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "mime_type": "image/png",
+      "name": "Screenshot",
+      "width": 1920
+    }
+  }
+]

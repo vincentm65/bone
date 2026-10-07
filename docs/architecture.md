@@ -21,9 +21,10 @@
 |---|---|
 | `bone-proto` | the only contract: message envelope, typed methods/events, NDJSON codec, `Connection` and transports |
 | `bone-core` | everything authoritative: sessions (JSONL files), the agent loop, the OpenAI-compatible provider, built-in tools, hooks and `bone.ask`, `core.lua` |
-| `bone-server` | hosts a core for any number of connections: stdio, Unix socket, in-process |
+| `bone-server` | hosts a core for any number of connections: stdio, Unix socket, Windows named pipe, in-process |
 | `bone-client` | request/response matching and the event stream, for any transport |
 | `bone-tui` | the UI: the chat view, prompt, `/` commands, popups, keys, rendering, `tui.lua` |
+| `bone-media` | bounded image decoding and PNG normalization, shared by core and TUI |
 | `bone-lua` | shared Lua setup: `require` paths, plugins, JSON, helpers, the built-in runtime files |
 | `bone` | the command line |
 
@@ -48,6 +49,10 @@
 
 `~/.bone/index.db` is a SQLite index over those files, for `store/query`: `sessions`, `messages` (role, time, size), `search` (FTS5 over user and assistant text), `usage` (with `source`: `turn`, `lua` or `client`; `session_id` is `''` for none) and `tool_calls` (name, error, output size). The files stay the record: the index reads what was appended to each since it last looked, during turns and at startup, so it can be deleted and comes back.
 
+Image uploads use `attachment/upload` regardless of transport. The core normalizes PNG/JPEG/WebP to bounded PNGs and atomically writes content-addressed files in `<data_dir>/attachments/`. Messages, queues, forks and events hold metadata and IDs; just before a model call the core verifies and hydrates the files. OpenAI-compatible providers send multimodal text/image parts, and Lua providers receive base64 PNG data. Compaction estimates image cost, includes images when the summary model supports them and retains the original transcript. Files are deduplicated but currently retained indefinitely.
+
+The TUI reads native clipboard pixels off the UI thread, with a separate file worker and a read timeout. Draft generations keep late reads from reappearing after a clear or attaching to another session. Image-only drafts submit, queue and edit through the same paths as text.
+
 ## Tests
 
 - Unit tests next to the code: the agent loop against a scripted provider, tools, Lua, rendering and layout.
@@ -55,3 +60,5 @@
 - `bone-server/tests`: client ↔ server ↔ core, including the HTTP provider against a fake SSE server.
 - `bone/tests/headless.rs`: the real binary over stdio and sockets.
 - `bone/tests/tui.rs`: the standard TUI driven headlessly (`bone_tui::Headless`) against a real core and a fake model, with screen and interaction assertions.
+
+- `bone/tests/images.rs`: image upload, model payloads, persistence/forks, queue editing, draft races, compaction, and optional native clipboard through a separate headless process.

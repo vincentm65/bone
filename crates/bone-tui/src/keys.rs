@@ -11,7 +11,11 @@ pub struct Key {
 
 impl Key {
     pub fn new(code: KeyCode, mods: KeyModifiers) -> Self {
-        let mods = mods & (KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SHIFT);
+        let mods = mods
+            & (KeyModifiers::CONTROL
+                | KeyModifiers::ALT
+                | KeyModifiers::SHIFT
+                | KeyModifiers::SUPER);
         // One canonical form per key: shift is folded into characters, and
         // ctrl+letter is lowercase.
         match code {
@@ -107,6 +111,7 @@ pub fn parse(s: &str) -> Result<Key, String> {
             "ctrl" | "control" => KeyModifiers::CONTROL,
             "alt" | "meta" | "option" => KeyModifiers::ALT,
             "shift" => KeyModifiers::SHIFT,
+            "super" | "cmd" | "command" => KeyModifiers::SUPER,
             other => return Err(format!("unknown modifier {other:?} in {s:?}")),
         };
     }
@@ -158,6 +163,9 @@ pub fn format(k: &Key) -> String {
             .to_owned(),
     };
     let mut out = String::new();
+    if k.mods.contains(KeyModifiers::SUPER) {
+        out.push_str("super+");
+    }
     if k.mods.contains(KeyModifiers::CONTROL) {
         out.push_str("ctrl+");
     }

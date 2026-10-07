@@ -4,7 +4,8 @@ A terminal coding assistant: a small Rust core that talks to any
 OpenAI-compatible model, a fullscreen TUI, and Lua for everything you'd
 want to change.
 
-- **One API.** The core speaks JSON-RPC 2.0 over stdio or a Unix socket. The TUI is just a client; scripts and editors can be too.
+- **One API.** The core speaks JSON-RPC 2.0 over stdio, Unix sockets or Windows named pipes. The TUI is just a client; scripts and editors can be too.
+- **Images.** Paste screenshots with `ctrl+v` or `/paste`, attach PNG/JPEG/WebP files with `/attach PATH`, and send them to a vision model. Native clipboard support covers macOS, Windows, Linux X11 and Wayland.
 - **A simple TUI.** Type and press enter. `/` commands with suggestions, streaming output, and a session picker. Tool calls run without asking; Lua hooks can add confirmation prompts (see [docs/lua.md](docs/lua.md#asking-the-user)).
 - **Lua all the way down.** `~/.bone/core.lua` sets up providers (or writes new ones with the Lua provider API), tools and hooks; `~/.bone/tui.lua` keys, commands, colors, the statusline and how tool calls look. The screen starts with the standard UI in `runtime/lua/bone/ui/`, replaceable piece by piece.
 
@@ -32,6 +33,8 @@ scripts/install.sh --name bone  # install as `bone` instead
 ```
 
 Or just `cargo build --release` and run `target/release/bone`. The Lua runtime is compiled into the binary; nothing else needs to be installed.
+
+On Windows, build with `cargo build --release` in a Rust/C toolchain terminal and run `target/release/bone.exe`. Shell tools use `cmd.exe`; live shell jobs use ConPTY (Windows 10 version 1809 or newer). The default config directory is `%USERPROFILE%\.bone`.
 
 On Android/Termux, use Clang with its compiler runtime installed. The build
 automatically discovers and links Clang's builtins archive for LuaJIT's
@@ -90,4 +93,6 @@ cargo clippy --workspace --all-targets
 
 - Protocol golden files live in `crates/bone-proto/tests/golden/`; after an intended wire change run `UPDATE_GOLDEN=1 cargo test -p bone-proto --test golden`.
 - End-to-end TUI tests exercise the standard runtime UI against a real core and a fake model: `cargo test -p bone --test tui`.
+- Image integration tests: `cargo test -p bone --test images`. On an isolated desktop, run native clipboard coverage with `cargo test -p bone --test images -- --ignored`; set `BONE_TEST_SCREENSHOT` to a captured PNG to use its pixels, or `BONE_TEST_BINARY` to the release executable to test that build. These ignored tests replace and clear the clipboard on the display they run on.
+- Windows shell checks: `cargo test -p bone-core native_windows_shell`. Run `cargo test -p bone-core native_windows_shell_pty -- --ignored` on native Windows to validate ConPTY; Wine cannot validate its child console output.
 - `scripts/dist.sh` builds `dist/bone-<version>-<target>.tar.gz`.

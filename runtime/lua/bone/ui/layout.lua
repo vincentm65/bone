@@ -38,7 +38,18 @@ function M.setup(opts)
       return bone.chat.view().follow and {} or { { { "  [↓ End]", "Dim" } } }
     end,
   }
-  bone.ui.layout = { "top", "chat", "input_gap", "above_prompt", "prompt", "tray", "statusline" }
+  bone.ui.regions.attachments = {
+    render = function(ctx)
+      local out = {}
+      for i, image in ipairs(bone.prompt.images()) do
+        local label = ("  [%d: %s · %d×%d] · /detach %d"):format(i, image.name, image.width, image.height, i)
+        local rows = bone.text.wrap({ { label, "Dim" } }, ctx.width)
+        for _, row in ipairs(rows) do out[#out + 1] = row end
+      end
+      return out
+    end,
+  }
+  bone.ui.layout = { "top", "chat", "input_gap", "above_prompt", "prompt", "attachments", "tray", "statusline" }
   bone.on("mouse", function(ev)
     if ev.region == "input_gap" and ev.button == "left" and ev.action == "down"
         and not bone.chat.view().follow and ev.col >= 3 and ev.col <= 9 then

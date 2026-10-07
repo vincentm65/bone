@@ -124,6 +124,7 @@ fn queued(id: u64, mode: QueueMode, text: &str) -> QueuedMessage {
         text: text.into(),
         mode,
         created_at: 1_790_000_100,
+        images: Vec::new(),
     }
 }
 
@@ -183,6 +184,7 @@ fn requests() {
             messages: vec![
                 ChatMessage::User {
                     content: "run the tests".into(),
+                    images: Vec::new(),
                 },
                 ChatMessage::Assistant {
                     content: String::new(),
@@ -205,11 +207,35 @@ fn requests() {
             queue_paused: false,
         },
     );
+    exchange::<AttachmentUpload>(
+        60,
+        AttachmentUploadParams {
+            data: "cG5n".into(),
+            name: "Screenshot".into(),
+        },
+        ImageAttachment {
+            id: "a".repeat(64),
+            name: "Screenshot".into(),
+            mime_type: "image/png".into(),
+            width: 1920,
+            height: 1080,
+            bytes: 1024,
+            data: None,
+        },
+    );
+    exchange::<AttachmentRead>(
+        61,
+        AttachmentReadParams { id: "a".repeat(64) },
+        AttachmentReadResult {
+            data: "cG5n".into(),
+        },
+    );
     exchange::<TurnStart>(
         7,
         TurnStartParams {
             session_id: SID.into(),
             text: "run the tests".into(),
+            images: Vec::new(),
         },
         TurnStartResult { turn_id: 1 },
     );
@@ -282,6 +308,7 @@ fn requests() {
         MaybeSession::default(),
         vec![
             ModelInfo {
+                supports_images: None,
                 name: "qwen".into(),
                 model: "qwen".into(),
                 kind: None,
@@ -294,6 +321,7 @@ fn requests() {
                 added: false,
             },
             ModelInfo {
+                supports_images: None,
                 name: "claude".into(),
                 model: "claude-sonnet-5-5".into(),
                 kind: Some("anthropic".into()),
@@ -313,6 +341,7 @@ fn requests() {
             provider: Some("claude".into()),
             messages: vec![ChatMessage::User {
                 content: "Name this session in three words.".into(),
+                images: Vec::new(),
             }],
             tools: vec![],
             options: json!({ "max_tokens": 50 }),
@@ -326,6 +355,7 @@ fn requests() {
         TurnSteerParams {
             session_id: SID.into(),
             text: "also update the README".into(),
+            images: Vec::new(),
         },
         (),
     );
@@ -335,6 +365,7 @@ fn requests() {
             session_id: SID.into(),
             text: "then update the README".into(),
             mode: QueueMode::Next,
+            images: Vec::new(),
         },
         QueueAddResult {
             id: Some(4),
@@ -353,6 +384,7 @@ fn requests() {
             id: 4,
             text: Some("then update the docs".into()),
             mode: Some(QueueMode::Steer),
+            images: None,
         },
         (),
     );
@@ -554,6 +586,7 @@ fn events() {
         session_id: SID.into(),
         turn_id: 1,
         text: "run the tests".into(),
+        images: Vec::new(),
     });
     event::<MessageDelta>(MessageDeltaParams {
         session_id: SID.into(),
@@ -654,6 +687,7 @@ fn events() {
         session_id: SID.into(),
         turn_id: 1,
         text: "also update the README".into(),
+        images: Vec::new(),
     });
     event::<SessionCompacted>(SessionCompactedParams {
         session_id: SID.into(),

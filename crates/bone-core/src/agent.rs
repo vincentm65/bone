@@ -81,6 +81,7 @@ pub(crate) async fn run_turn(
     session: SessionHandle,
     turn_id: TurnId,
     text: String,
+    images: Vec<bone_proto::types::ImageAttachment>,
     cancel: CancellationToken,
 ) {
     let (session_id, cwd) = {
@@ -103,7 +104,7 @@ pub(crate) async fn run_turn(
         cancel: &cancel,
         stream,
     };
-    let outcome = match turn.drive(text).await {
+    let outcome = match turn.drive(text, images).await {
         Ok(()) => TurnOutcome::Completed,
         Err(Stop::Cancelled) => TurnOutcome::Cancelled,
         Err(Stop::Failed(message)) => TurnOutcome::Failed { message },
@@ -202,14 +203,28 @@ impl Turn<'_> {
         })
     }
 
-    async fn drive(&self, text: String) -> Result<(), Stop> {
-        let ev = json!({ "session_id": self.session_id, "cwd": self.cwd.to_string_lossy(), "text": text });
+    async fn drive(
+        &self,
+        text: String,
+        mut images: Vec<bone_proto::types::ImageAttachment>,
+    ) -> Result<(), Stop> {
+        let ev = json!({ "session_id": self.session_id, "cwd": self.cwd.to_string_lossy(), "text": text, "images": images });
         let text = match self.safe_hooks("turn_start", ev).await? {
-            Some(ev) => ev["text"].as_str().map(str::to_owned).unwrap_or(text),
+            Some(ev) => {
+                if let Some(v) = ev.get("images") {
+                    images =
+                        serde_json::from_value(list(v)).map_err(|e| Stop::Failed(e.to_string()))?;
+                }
+                ev["text"].as_str().map(str::to_owned).unwrap_or(text)
+            }
             None => text,
         };
+        self.inner
+            .validate_input(self.session, &text, &mut images)
+            .map_err(|e| Stop::Failed(e.message))?;
         self.record(ChatMessage::User {
             content: text.clone(),
+            images: images.clone(),
         })?;
         if !self.inner.mcp.is_empty() {
             self.inner.mcp.ensure_ready(MCP_WAIT).await;
@@ -218,6 +233,7 @@ impl Turn<'_> {
             session_id: self.session_id.clone(),
             turn_id: self.turn_id,
             text,
+            images,
         });
 
         let dynamic = match &self.rt.scripting {
@@ -281,7 +297,7 @@ impl Turn<'_> {
             messages.extend(self.session.lock().unwrap().context());
             let ev = json!({ "session_id": self.session_id, "messages": messages });
             if let Some(ev) = self.safe_hooks("context", ev).await? {
-                messages = serde_json::from_value(list(&ev["messages"])).map_err(|e| {
+                messages = messages_from_lua(&ev["messages"]).map_err(|e| {
                     Stop::Failed(format!("context hook returned bad messages: {e}"))
                 })?;
             }
@@ -302,7 +318,7 @@ impl Turn<'_> {
             if let Some(ev) = self.safe_hooks("request", ev).await? {
                 use_provider = ev["provider"].as_str().map(str::to_owned);
                 use_model = ev["model"].as_str().map(str::to_owned);
-                messages = serde_json::from_value(list(&ev["messages"])).map_err(|e| {
+                messages = messages_from_lua(&ev["messages"]).map_err(|e| {
                     Stop::Failed(format!("request hook returned bad messages: {e}"))
                 })?;
                 tools = list(&ev["tools"])
@@ -355,6 +371,11 @@ impl Turn<'_> {
             } else {
                 self.rt.pinned(&served).map_err(Stop::Failed)?
             };
+            let hydrated = self
+                .inner
+                .attachments
+                .hydrate(&messages)
+                .map_err(Stop::Failed)?;
             let completion = loop {
                 attempt += 1;
                 let mut text = String::new();
@@ -383,7 +404,7 @@ impl Turn<'_> {
                     };
                     let req = CompletionRequest {
                         session_id: &self.session_id,
-                        messages: &messages,
+                        messages: &hydrated,
                         tools: &tools,
                         depth: 0,
                     };
@@ -584,22 +605,24 @@ impl Turn<'_> {
 
     /// Add the waiting `turn/steer` messages to the transcript.
     fn take_steer(&self) -> Result<(), Stop> {
-        let texts: Vec<String> = {
+        let queued = {
             let mut s = self.session.lock().unwrap();
             let steer = s.take_steer();
             if !steer.is_empty() {
                 self.inner.emit_queue(&s);
             }
-            steer.into_iter().map(|q| q.text).collect()
+            steer
         };
-        for text in texts {
+        for q in queued {
             self.record(ChatMessage::User {
-                content: text.clone(),
+                content: q.text.clone(),
+                images: q.images.clone(),
             })?;
             self.inner.emit::<TurnSteered>(TurnStartedParams {
                 session_id: self.session_id.clone(),
                 turn_id: self.turn_id,
-                text,
+                text: q.text,
+                images: q.images,
             });
         }
         Ok(())
@@ -818,4 +841,19 @@ fn unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
+}
+
+fn messages_from_lua(v: &Value) -> Result<Vec<ChatMessage>, serde_json::Error> {
+    let mut v = list(v);
+    if let Some(messages) = v.as_array_mut() {
+        for msg in messages {
+            if let Some(images) = msg.get("images") {
+                msg["images"] = list(images);
+            }
+            if let Some(calls) = msg.get("tool_calls") {
+                msg["tool_calls"] = list(calls);
+            }
+        }
+    }
+    serde_json::from_value(v)
 }

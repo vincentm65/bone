@@ -158,6 +158,8 @@ pub const METHODS: &[&str] = &[
     SessionFork::METHOD,
     SessionDelete::METHOD,
     SessionCompact::METHOD,
+    AttachmentUpload::METHOD,
+    AttachmentRead::METHOD,
     TurnStart::METHOD,
     TurnCancel::METHOD,
     TurnSteer::METHOD,
@@ -447,6 +449,8 @@ pub struct QueuedMessage {
     pub mode: QueueMode,
     /// Unix seconds.
     pub created_at: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<crate::types::ImageAttachment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -455,6 +459,8 @@ pub struct QueueAddParams {
     pub text: String,
     #[serde(default)]
     pub mode: QueueMode,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<crate::types::ImageAttachment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -481,6 +487,9 @@ pub struct QueueUpdateParams {
     pub text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<QueueMode>,
+    /// Omitted keeps attachments; an empty list removes them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub images: Option<Vec<crate::types::ImageAttachment>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -507,12 +516,16 @@ method!(
 pub struct TurnStartParams {
     pub session_id: SessionId,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<crate::types::ImageAttachment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnSteerParams {
     pub session_id: SessionId,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<crate::types::ImageAttachment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -684,6 +697,8 @@ method!(
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supports_images: Option<bool>,
     /// The key in `bone.config.providers`.
     pub name: String,
     pub model: String,
@@ -896,6 +911,8 @@ pub struct TurnStartedParams {
     /// The user message that started the turn, so every attached client can
     /// show it.
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<crate::types::ImageAttachment>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -998,4 +1015,27 @@ pub struct StoreQueryResult {
     /// There were more rows than one query returns (10,000).
     #[serde(default)]
     pub truncated: bool,
+}
+
+method!(
+    /// Upload PNG, JPEG or WebP bytes as base64; returns a durable PNG reference.
+    AttachmentUpload, "attachment/upload", AttachmentUploadParams => crate::types::ImageAttachment
+);
+method!(
+    /// Read a durable image as base64-encoded PNG bytes.
+    AttachmentRead, "attachment/read", AttachmentReadParams => AttachmentReadResult
+);
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentUploadParams {
+    pub data: String,
+    #[serde(default)]
+    pub name: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentReadParams {
+    pub id: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttachmentReadResult {
+    pub data: String,
 }

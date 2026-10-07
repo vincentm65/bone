@@ -85,7 +85,7 @@ fn conversations_become_sessions_with_usage_and_checkpoints() {
         .messages
         .iter()
         .map(|m| match m {
-            ChatMessage::User { content } | ChatMessage::Assistant { content, .. } => {
+            ChatMessage::User { content, .. } | ChatMessage::Assistant { content, .. } => {
                 content.clone()
             }
             other => format!("{other:?}"),
@@ -152,6 +152,7 @@ fn importing_again_updates_but_never_overwrites_continued_sessions() {
         .unwrap()
         .push(ChatMessage::User {
             content: "continued in bone3".into(),
+            images: Vec::new(),
         })
         .unwrap();
     drop(store);
@@ -164,7 +165,8 @@ fn importing_again_updates_but_never_overwrites_continued_sessions() {
     assert_eq!(
         last,
         Some(ChatMessage::User {
-            content: "continued in bone3".into()
+            content: "continued in bone3".into(),
+            images: Vec::new(),
         })
     );
 }
@@ -183,6 +185,7 @@ fn transcripts_are_repaired_for_providers() {
     };
     let user = ChatMessage::User {
         content: "hi".into(),
+        images: Vec::new(),
     };
     let asked = ChatMessage::Assistant {
         content: String::new(),

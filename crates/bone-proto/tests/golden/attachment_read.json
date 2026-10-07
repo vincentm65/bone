@@ -1,0 +1,17 @@
+[
+  {
+    "id": 61,
+    "jsonrpc": "2.0",
+    "method": "attachment/read",
+    "params": {
+      "id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  },
+  {
+    "id": 61,
+    "jsonrpc": "2.0",
+    "result": {
+      "data": "cG5n"
+    }
+  }
+]

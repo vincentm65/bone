@@ -345,7 +345,7 @@ fn index_record(tx: &Transaction, id: &str, record: Record, at: u64, seq: &mut u
             let seq = *seq;
             let (role, text) = match &m {
                 ChatMessage::System { content } => ("system", content),
-                ChatMessage::User { content } => ("user", content),
+                ChatMessage::User { content, .. } => ("user", content),
                 ChatMessage::Assistant { content, .. } => ("assistant", content),
                 ChatMessage::Tool { content, .. } => ("tool", content),
             };

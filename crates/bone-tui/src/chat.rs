@@ -26,7 +26,7 @@ use crate::text::{clean, sanitize, truncate, wrap};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Entry {
-    User(String),
+    User(String, Vec<bone_proto::types::ImageAttachment>),
     Assistant {
         text: String,
         reasoning: String,
@@ -237,7 +237,9 @@ impl ChatBuffer {
         for m in messages {
             match m {
                 ChatMessage::System { .. } => {}
-                ChatMessage::User { content } => self.push(Entry::User(content.clone())),
+                ChatMessage::User { content, images } => {
+                    self.push(Entry::User(content.clone(), images.clone()))
+                }
                 ChatMessage::Assistant { .. } => self.add_assistant_message(m),
                 ChatMessage::Tool {
                     call_id,
@@ -252,16 +254,26 @@ impl ChatBuffer {
         });
     }
 
+    #[cfg(test)]
     pub fn turn_started(&mut self, turn_id: TurnId, text: &str) {
+        self.turn_started_with_images(turn_id, text, Vec::new());
+    }
+
+    pub fn turn_started_with_images(
+        &mut self,
+        turn_id: TurnId,
+        text: &str,
+        images: Vec<bone_proto::types::ImageAttachment>,
+    ) {
         if self.session.as_ref().is_some_and(|s| s.title.is_none()) {
             let title = text
                 .lines()
                 .find(|l| !l.trim().is_empty())
-                .unwrap_or("")
+                .unwrap_or_else(|| images.first().map(|i| i.name.as_str()).unwrap_or(""))
                 .trim();
             self.session.as_mut().unwrap().title = Some(truncate(title, 80));
         }
-        self.push(Entry::User(text.to_owned()));
+        self.push(Entry::User(text.to_owned(), images));
         self.turn = Some(RunningTurn {
             turn_id,
             started: Instant::now(),
@@ -425,7 +437,7 @@ impl ChatBuffer {
         if let Some(user) = self
             .entries
             .iter()
-            .rposition(|e| matches!(e, Entry::User(_)))
+            .rposition(|e| matches!(e, Entry::User(..)))
         {
             self.outcomes.insert(self.ids[user], t.outcome.clone());
         }
@@ -443,8 +455,12 @@ impl ChatBuffer {
     }
 
     /// A steered message joined the running turn.
-    pub fn steered(&mut self, text: &str) {
-        self.push(Entry::User(text.to_owned()));
+    pub fn steered_with_images(
+        &mut self,
+        text: &str,
+        images: Vec<bone_proto::types::ImageAttachment>,
+    ) {
+        self.push(Entry::User(text.to_owned(), images));
     }
 
     /// The core's queue for this session changed.
@@ -493,7 +509,7 @@ impl ChatBuffer {
             let entry = self.ids[i];
             let mut add = |part| out.push(Item { entry, part });
             match e {
-                Entry::User(_) => add(Part::User),
+                Entry::User(..) => add(Part::User),
                 Entry::Assistant {
                     text,
                     reasoning,
@@ -543,7 +559,7 @@ impl ChatBuffer {
             ),
             Some(Entry::Assistant { streaming, .. }) => (None, *streaming, false),
             Some(Entry::Notice { error, .. }) => (None, false, *error),
-            Some(Entry::User(_)) | None => (None, false, false),
+            Some(Entry::User(..)) | None => (None, false, false),
         }
     }
 
@@ -579,13 +595,15 @@ impl ChatBuffer {
                 QueueMode::Steer => "steer",
                 QueueMode::Next => "next",
             };
-            return json!({ "kind": kind, "index": index, "id": q.id, "text": edges(&q.text), "mode": mode, "position": position + 1 });
+            return json!({ "kind": kind, "index": index, "id": q.id, "text": edges(&q.text), "mode": mode, "position": position + 1, "images": q.images });
         }
         let Some(at) = self.position(item.entry) else {
             return json!({ "kind": kind, "index": index });
         };
         match (&self.entries[at], item.part) {
-            (Entry::User(text), _) => json!({ "kind": kind, "index": index, "text": edges(text) }),
+            (Entry::User(text, images), _) => {
+                json!({ "kind": kind, "index": index, "text": edges(text), "images": images })
+            }
             (
                 Entry::Assistant {
                     reasoning,
@@ -1064,6 +1082,7 @@ mod tests {
             &[
                 ChatMessage::User {
                     content: "go".into(),
+                    images: Vec::new(),
                 },
                 ChatMessage::Assistant {
                     content: String::new(),

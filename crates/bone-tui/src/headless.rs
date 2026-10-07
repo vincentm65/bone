@@ -82,6 +82,23 @@ impl Headless {
         self.app.paste(text);
     }
 
+    /// The draft's image references, after asynchronous reads have settled.
+    pub fn images(&self) -> &[bone_proto::types::ImageAttachment] {
+        &self.app.images
+    }
+
+    pub fn prompt_text(&self) -> String {
+        self.app.prompt_text()
+    }
+
+    pub fn attach_file(&mut self, path: std::path::PathBuf) {
+        self.app.attach_file(path);
+    }
+
+    pub fn open_session(&mut self, id: String) {
+        self.app.open_session(id);
+    }
+
     pub fn resize(&mut self, width: u16, height: u16) {
         self.terminal.backend_mut().resize(width, height);
         self.app.resize(width, height);

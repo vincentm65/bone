@@ -46,14 +46,14 @@ bone.ui.actions.dismiss = function()
   if done then
     return done
   end
-  return tray.cancel_edit() or (bone.prompt.get() == "" and tray.back())
+  return tray.cancel_edit() or (bone.prompt.empty() and tray.back())
 end
 local menu_down = bone.ui.actions.down
 bone.ui.actions.down = function()
   if menu_down and menu_down() then
     return true
   end
-  return bone.prompt.get() == "" and not bone.prompt.info().history and tray.enter()
+  return bone.prompt.empty() and not bone.prompt.info().history and tray.enter()
 end
 
 -- Up on an empty prompt edits the last queued message (enter saves it in
@@ -64,7 +64,7 @@ bone.ui.actions.up = function()
     return true
   end
   local s = bone.chat.session()
-  if bone.prompt.get() ~= "" or not s or not s.session_id then
+  if not bone.prompt.empty() or not s or not s.session_id then
     return false
   end
   local queued = bone.chat.items({ kind = "queued" })
@@ -86,6 +86,8 @@ end
 map({
   ["f1"] = "/help",
   ["enter"] = "submit",
+  ["ctrl+v"] = "paste_clipboard",
+  ["super+v"] = "paste_clipboard",
   ["alt+enter"] = "newline",
   ["shift+enter"] = "newline",
   ["ctrl+j"] = "newline",

@@ -73,6 +73,7 @@ end
 -- with tui/defaults.lua; user mappings can replace the defaults.
 local KEYS = {
   { "enter", "send a message; during a turn, queue it", "Messaging" },
+  { "ctrl+v / super+v", "paste clipboard screenshot or text (/paste if intercepted)", "Messaging" },
   { "alt+enter / shift+enter / ctrl+j", "insert a new line", "Messaging" },
   { "ctrl+c", "cancel the turn, clear the prompt, or press twice to quit", "Messaging" },
   { "up / down", "move in the prompt or recall message history", "Messaging" },

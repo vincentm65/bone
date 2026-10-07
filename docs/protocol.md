@@ -10,6 +10,7 @@ The typed definitions in `crates/bone-proto/src/methods.rs` and `types.rs` are t
 | Transport | How |
 |---|---|
 | stdio | start `bone --headless`, write requests to its stdin, read its stdout |
+| Windows named pipe | `bone --headless --listen [PATH]`, default `\\.\pipe\bone3-<USERNAME>`; restricted to the current user and local clients |
 | Unix socket | `bone --headless --listen [PATH]`, connect to `PATH` (default `$XDG_RUNTIME_DIR/bone3/bone.sock`, mode 0600) |
 | in-process | Rust only: `Server::connect_in_process()` |
 
@@ -47,11 +48,13 @@ After `initialize`, the server runs each request on its own task: replies carry 
 | `session/fork` | `{ session_id, before_turn? }` | `SessionInfo` of a new session holding a copy of the transcript (with `before_turn = N`, only what came before the Nth user message), its `parent` set. The original is untouched |
 | `session/delete` | `{ session_id }` | `null`; the session and its file are gone and `session/deleted` goes to every client. An error while a turn runs |
 | `session/compact` | `{ session_id, clear? }` | `{ session_id, messages, tokens_before, tokens_after, reason }`: the older part of the session is summarized by a model, and from then on model calls get the summary in place of it. The transcript, the session file and `session/messages` keep everything. `messages` is how many transcript messages were newly summarized; the token counts are estimates of what a model call sends, before and after. `clear` drops the summary instead (`reason: "clear"`). An error when there is nothing to compact yet. Also announced as `session/compacted` |
-| `turn/start` | `{ session_id, text }` | `{ turn_id }`, returned at once; the turn runs in the background |
-| `turn/steer` | `{ session_id, text }` | `null`; shorthand for `queue/add` with `mode: "steer"`, but an error when no turn is running |
-| `queue/add` | `{ session_id, text, mode? }` | `{ id? , turn_id? }`. Idle session: the message starts a turn at once (`turn_id`). Running turn: it is queued (`id`); `mode: "steer"` (the default) joins that turn before its next model call (`turn/steered` says when; one arriving during the final answer gets another step), `"next"` starts its own turn after it. Queued turns go through `turn_start` hooks; steered messages do not. Core Lua `queue_add` hooks may rewrite or refuse it |
+| `attachment/upload` | `{ data, name? }` (base64 PNG/JPEG/WebP) | `ImageAttachment`: validates, normalizes and stores the image on the core machine |
+| `attachment/read` | `{ id }` | `{ data }`: base64 PNG for a saved attachment |
+| `turn/start` | `{ session_id, text, images? }` | `{ turn_id }`, returned at once; the turn runs in the background |
+| `turn/steer` | `{ session_id, text, images? }` | `null`; shorthand for `queue/add` with `mode: "steer"`, but an error when no turn is running |
+| `queue/add` | `{ session_id, text, mode?, images? }` | `{ id? , turn_id? }`. Idle session: the message starts a turn at once (`turn_id`). Running turn: it is queued (`id`); `mode: "steer"` (the default) joins that turn before its next model call (`turn/steered` says when; one arriving during the final answer gets another step), `"next"` starts its own turn after it. Queued turns go through `turn_start` hooks; steered messages do not. Core Lua `queue_add` hooks may rewrite or refuse it |
 | `queue/remove` | `{ session_id, id }` | `null`; an error for an unknown id |
-| `queue/update` | `{ session_id, id, text?, mode? }` | `null` |
+| `queue/update` | `{ session_id, id, text?, mode?, images? }` | `null` |
 | `queue/move` | `{ session_id, id, to }` | `null`; `to` is the new position, 0 first |
 | `queue/clear` | `{ session_id }` | `null` |
 | `queue/resume` | `{ session_id }` | `null`; a paused queue goes on (starting a turn if the session is idle) |
@@ -73,16 +76,20 @@ After `initialize`, the server runs each request on its own task: replies carry 
 | `lua/call` | `{ name, args?, session_id?, cwd? }` | whatever the function core Lua registered as `name` (`bone.rpc.register`) returns; it gets `args` and `{ session_id, cwd }`. An error for an unknown name or a failing function |
 | `mcp/list` | `{}` | `[{ name, state, error?, tools }]`: the MCP servers core Lua configured; `state` is `"idle"`, `"starting"`, `"ready"` or `"failed"`, `tools` their tools by the names the model sees |
 | `store/query` | `{ sql, params? }` | `{ columns, rows, truncated }`: one read-only SQL statement against the session index (see architecture.md for its tables). `params` is a list (`?1`…) or an object (`:name`); at most 10,000 rows, 5 seconds |
-| `model/list` | `{}` | `[{ name, model, type?, current }]`: the `bone.config.providers` entries; `current` is the one turns use |
+| `model/list` | `{}` | `[{ name, model, type?, current, supports_images? }]`: the `bone.config.providers` entries; `current` is the one turns use |
 | `model/complete` | `{ provider?, messages, tools?, options?, stream? }` | `{ request_id }`, returned at once. One model call outside any session: `provider` is an entry name (default: the current one), `tools` are offered but never run, `options` override `model`, `reasoning_effort` or a Lua provider's options. With `stream`, `model/delta` events follow; `model/completed` always ends it |
 | `model/cancel` | `{ request_id }` | `null`; the call ends with `model/completed` and the error `"cancelled"` |
 | `plugin/load`, `plugin/unload`, `plugin/reload` | `{ name }` | `ReloadResult`: enable, disable, or keep the plugin, then reload as `core/reload` does. An error for a plugin that is not there or has no `core.lua` |
+
+`ImageAttachment` is `{ id, name, mime_type, width, height, bytes }`, where `id` is the SHA-256 of a canonical PNG, `mime_type` is `"image/png"`, and `bytes` is its stored size. First upload bytes, then put returned references in `images` on user messages, turn or queue requests, or `model/complete` messages. Local client paths are never sent to the core. A message may have empty text when it has images. `queue/update` omits `images` to keep them or sends `images: []` to remove them; an empty message is rejected. Empty lists are omitted on the wire, preserving existing text-only messages.
+
+Limits are 8 images/message, 20 MiB/image input and canonical PNG, 40 megapixels/image, 40 MiB/message, and 32 MiB per NDJSON frame. Image bytes are rejected inside references: only providers receive an extra `data` field with hydrated base64 PNG. Caller-supplied metadata is replaced by verified stored metadata. Sessions and queue files save references, so attachment files must move with the data directory. Uploads deduplicate by hash and are retained indefinitely.
 
 `ReloadResult` is `{ plugins: [{ name, core, loaded }], warnings? }`; `warnings` lists settings that cannot change while running (`data_dir`) and errors from `bone.on_shutdown`. Disabling a plugin lasts until the server restarts; rename its folder to disable it for good.
 
 `SessionInfo` is `{ session_id, cwd, created_at, title?, parent?, owner? }`. `parent` is the session it was forked from; `owner` is `{ session_id, call_id?, name? }` for a session core Lua started on another's behalf (a sub-agent, via `bone.session.create`): the session and tool call that started it. Clients usually leave owned sessions out of session pickers and show them with their owner.
 
-The queue: each session keeps `[{ id, text, mode: "steer" | "next", created_at }]`, saved next to its file (`<id>.queue.json`) so it outlives a restart. When a turn ends, any steer message that did not join it becomes `next`, and the first queued message starts the next turn, after completed and failed turns alike. A cancelled turn pauses the queue, and so does loading a session that had a queue; `queue/resume` or a new `queue/add` lets it go on. `session/messages` includes `queue` and `queue_paused`. `ChatMessage` is tagged by `role`:
+The queue: each session keeps `[{ id, text, images?, mode: "steer" | "next", created_at }]`, saved next to its file (`<id>.queue.json`) so it outlives a restart. When a turn ends, any steer message that did not join it becomes `next`, and the first queued message starts the next turn, after completed and failed turns alike. A cancelled turn pauses the queue, and so does loading a session that had a queue; `queue/resume` or a new `queue/add` lets it go on. `session/messages` includes `queue` and `queue_paused`. `ChatMessage` is tagged by `role`:
 
 ```json
 { "role": "system", "content": "..." }
@@ -99,7 +106,7 @@ Every event carries `session_id` (except `echoed`, `ask/resolved`, `core/reloade
 
 | Event | Params | Meaning |
 |---|---|---|
-| `turn/started` | `{ text }` | a user message started a turn (from any client) |
+| `turn/started` | `{ text, images? }` | a user message started a turn (from any client) |
 | `message/delta` | `{ kind: "text" \| "reasoning", text }` | streamed model output |
 | `message/completed` | `{ message, usage? }` | the final assistant message as saved; replaces whatever streamed |
 | `tool/started` | `{ call, started_at? }` | the core is handling a tool call (`tool_call` hooks run next); `started_at` is milliseconds since the Unix epoch |
@@ -152,7 +159,7 @@ progress lines settled.
 ## Rust client
 
 ```rust
-let (client, mut events) = bone_client::Client::new(bone_client::connect_unix(path).await?);
+let (client, mut events) = bone_client::Client::new(bone_client::connect_local(path).await?);
 client.initialize("my-tool").await?;
 let s = client.request::<SessionCreate>(SessionCreateParams { cwd: Some(cwd) }).await?;
 client.request::<TurnStart>(TurnStartParams { session_id: s.session_id, text: "hi".into() }).await?;

@@ -76,6 +76,28 @@ impl OpenAiProvider {
         req: CompletionRequest<'_>,
         on_delta: DeltaSink<'_>,
     ) -> Result<Completion, ProviderError> {
+        if self.config.supports_images == Some(false)
+            && req
+                .messages
+                .iter()
+                .any(|m| matches!(m, ChatMessage::User { images, .. } if !images.is_empty()))
+        {
+            return Err(ProviderError(
+                "this model does not support images; select a vision model".into(),
+            ));
+        }
+        for message in req.messages {
+            if let ChatMessage::User { images, .. } = message
+                && images
+                    .iter()
+                    .any(|image| image.data.as_deref().is_none_or(str::is_empty))
+            {
+                return Err(ProviderError(
+                    "image bytes are unavailable; hydrate attachments before calling the provider"
+                        .into(),
+                ));
+            }
+        }
         let body = request_body(&self.config, &req);
         let resp = self.send(&body).await?;
         let mut bytes = resp.bytes_stream();
@@ -143,7 +165,19 @@ fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> Value {
 fn wire_message(msg: &ChatMessage, replay_reasoning: bool) -> Value {
     match msg {
         ChatMessage::System { content } => json!({ "role": "system", "content": content }),
-        ChatMessage::User { content } => json!({ "role": "user", "content": content }),
+        ChatMessage::User { content, images } if !images.is_empty() => {
+            let mut parts = Vec::new();
+            if !content.is_empty() {
+                parts.push(json!({ "type": "text", "text": content }));
+            }
+            for image in images {
+                parts.push(json!({ "type": "image_url", "image_url": {
+                    "url": format!("data:{};base64,{}", image.mime_type, image.data.as_deref().unwrap_or_default())
+                }}));
+            }
+            json!({ "role": "user", "content": parts })
+        }
+        ChatMessage::User { content, .. } => json!({ "role": "user", "content": content }),
         ChatMessage::Assistant {
             content,
             tool_calls,

@@ -16,6 +16,8 @@ pub enum ChatMessage {
     },
     User {
         content: String,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<ImageAttachment>,
     },
     Assistant {
         #[serde(default, skip_serializing_if = "String::is_empty")]
@@ -96,4 +98,18 @@ pub enum TurnOutcome {
     Completed,
     Cancelled,
     Failed { message: String },
+}
+
+/// A durable image reference. `data` is hydrated only for provider calls;
+/// transcripts, queues and events keep the small reference without pixels.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImageAttachment {
+    pub id: String,
+    pub name: String,
+    pub mime_type: String,
+    pub width: u32,
+    pub height: u32,
+    pub bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<String>,
 }

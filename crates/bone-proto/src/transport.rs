@@ -9,13 +9,15 @@
 
 use std::path::PathBuf;
 
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc;
 
 use crate::{Message, RequestId, RpcError, codec};
 
 /// Bounded so a stalled peer applies backpressure instead of growing memory.
 const CHANNEL_CAPACITY: usize = 256;
+/// Enough for a 20 MiB image's base64 and envelope, with a hard allocation cap.
+const MAX_FRAME_BYTES: u64 = 32 * 1024 * 1024;
 
 /// One end of a bidirectional message stream.
 ///
@@ -87,19 +89,40 @@ async fn read_loop<R: AsyncRead + Unpin>(
     tx: mpsc::Sender<Message>,
     errors: mpsc::WeakSender<Message>,
 ) {
-    let mut lines = BufReader::new(reader).lines();
+    let mut reader = BufReader::new(reader);
+    let mut buffer = Vec::new();
     loop {
-        let line = tokio::select! {
-            line = lines.next_line() => match line {
-                Ok(Some(line)) => line,
-                Ok(None) | Err(_) => return,
+        buffer.clear();
+        let mut limited = (&mut reader).take(MAX_FRAME_BYTES + 1);
+        let size = tokio::select! {
+            size = limited.read_until(b'\n', &mut buffer) => match size {
+                Ok(0) | Err(_) => return,
+                Ok(size) => size,
             },
             _ = tx.closed() => return,
+        };
+        if size as u64 > MAX_FRAME_BYTES {
+            if let Some(out) = errors.upgrade() {
+                let _ = out
+                    .send(Message::Response {
+                        id: RequestId::Null,
+                        result: Err(RpcError::new(
+                            RpcError::INVALID_REQUEST,
+                            "JSON frame exceeds the 32 MiB limit",
+                        )),
+                    })
+                    .await;
+            }
+            return;
+        }
+        let line = match std::str::from_utf8(&buffer) {
+            Ok(line) => line,
+            Err(_) => return,
         };
         if line.trim().is_empty() {
             continue;
         }
-        match codec::decode(&line) {
+        match codec::decode(line) {
             Ok(msg) => {
                 if tx.send(msg).await.is_err() {
                     return;
@@ -206,6 +229,33 @@ mod tests {
         assert!(matches!(
             recv(&mut left.rx).await,
             Some(Message::Notification { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn oversized_frame_is_rejected_before_decoding() {
+        let (mut raw, b) = tokio::io::duplex(64 * 1024);
+        let (br, bw) = tokio::io::split(b);
+        let mut conn = framed(br, bw);
+        let writer = tokio::spawn(async move {
+            let block = vec![b'x'; 64 * 1024];
+            for _ in 0..MAX_FRAME_BYTES / block.len() as u64 {
+                raw.write_all(&block).await.unwrap();
+            }
+            raw.write_all(b"x").await.unwrap();
+            let mut reply = BufReader::new(raw).lines();
+            codec::decode(&reply.next_line().await.unwrap().unwrap()).unwrap()
+        });
+        assert_eq!(recv(&mut conn.rx).await, None);
+        assert!(matches!(
+            writer.await.unwrap(),
+            Message::Response {
+                result: Err(RpcError {
+                    code: RpcError::INVALID_REQUEST,
+                    ..
+                }),
+                ..
+            }
         ));
     }
 

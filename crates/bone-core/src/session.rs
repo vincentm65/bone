@@ -196,6 +196,15 @@ impl Session {
 
     /// Add to the queue; returns the message's id.
     pub fn enqueue(&mut self, text: String, mode: QueueMode) -> u64 {
+        self.enqueue_with_images(text, mode, Vec::new())
+    }
+
+    pub fn enqueue_with_images(
+        &mut self,
+        text: String,
+        mode: QueueMode,
+        images: Vec<bone_proto::types::ImageAttachment>,
+    ) -> u64 {
         self.next_queue += 1;
         let id = self.next_queue;
         self.queue.push(QueuedMessage {
@@ -203,6 +212,7 @@ impl Session {
             text,
             mode,
             created_at: now(),
+            images,
         });
         self.save_queue();
         id
@@ -796,10 +806,14 @@ pub(crate) fn write_record(file: &mut File, record: Record) -> std::io::Result<(
 }
 
 pub(crate) fn title_of(msg: &ChatMessage) -> Option<String> {
-    let ChatMessage::User { content } = msg else {
+    let ChatMessage::User { content, images } = msg else {
         return None;
     };
-    let line = content.lines().find(|l| !l.trim().is_empty())?.trim();
+    let line = content
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .map(str::trim)
+        .or_else(|| images.first().map(|i| i.name.as_str()))?;
     Some(match line.char_indices().nth(TITLE_CHARS) {
         Some((cut, _)) => format!("{}…", &line[..cut]),
         None => line.to_owned(),
@@ -840,6 +854,7 @@ mod tests {
             let mut s = a.lock().unwrap();
             s.push(ChatMessage::User {
                 content: "\n  fix the bug  \nplease".into(),
+                images: Vec::new(),
             })
             .unwrap();
             s.push(ChatMessage::Assistant {
@@ -873,7 +888,10 @@ mod tests {
         let store = SessionStore::new(dir.path());
         let a = store.create("/work".into()).unwrap();
         let id = a.lock().unwrap().info.session_id.clone();
-        let user = |t: &str| ChatMessage::User { content: t.into() };
+        let user = |t: &str| ChatMessage::User {
+            content: t.into(),
+            images: Vec::new(),
+        };
         {
             let mut s = a.lock().unwrap();
             for t in ["q1", "q2", "q3"] {
@@ -928,6 +946,7 @@ mod tests {
             .unwrap()
             .push(ChatMessage::User {
                 content: "hi".into(),
+                images: Vec::new(),
             })
             .unwrap();
         let path = dir.path().join(format!("sessions/{id}.jsonl"));
@@ -944,6 +963,7 @@ mod tests {
             .unwrap()
             .push(ChatMessage::User {
                 content: "again".into(),
+                images: Vec::new(),
             })
             .unwrap();
         let again = SessionStore::new(dir.path()).get(&id).unwrap();
@@ -983,6 +1003,7 @@ mod tests {
             let mut s = s.lock().unwrap();
             s.push(ChatMessage::User {
                 content: "find the walrus".into(),
+                images: Vec::new(),
             })
             .unwrap();
             s.push(ChatMessage::Assistant {
@@ -1132,6 +1153,7 @@ mod tests {
             .unwrap()
             .push(ChatMessage::User {
                 content: "kept on disk".into(),
+                images: Vec::new(),
             })
             .unwrap();
         drop(first);
@@ -1171,6 +1193,7 @@ mod tests {
             &mut f,
             Record::Message(ChatMessage::User {
                 content: "a title".into(),
+                images: Vec::new(),
             }),
         )
         .unwrap();

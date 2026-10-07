@@ -375,7 +375,10 @@ fn message(
     reasoning: Option<String>,
 ) -> Option<ChatMessage> {
     Some(match role {
-        "user" => ChatMessage::User { content },
+        "user" => ChatMessage::User {
+            content,
+            images: Vec::new(),
+        },
         "system" => ChatMessage::System { content },
         "assistant" => ChatMessage::Assistant {
             content,

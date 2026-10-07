@@ -1,0 +1,9 @@
+[package]
+name = "bone-media"
+description = "Bounded image decoding and screenshot normalization for Bone"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+image.workspace = true

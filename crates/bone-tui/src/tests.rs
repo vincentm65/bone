@@ -316,6 +316,7 @@ fn started(session: &str, text: &str) -> TurnStartedParams {
         session_id: session.into(),
         turn_id: 1,
         text: text.into(),
+        images: Vec::new(),
     }
 }
 
@@ -2893,6 +2894,7 @@ async fn typing_during_a_turn_queues_it() {
         text: text.into(),
         mode,
         created_at: 0,
+        images: Vec::new(),
     };
     let changed = |items: Vec<QueuedMessage>| QueueChangedParams {
         session_id: "s-new".into(),
@@ -4824,6 +4826,7 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
         "URL",
         "Type",
         "Reasoning effort",
+        "Accept images",
         "Stream usage",
         "API key",
         "Key variable",
@@ -4858,6 +4861,11 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
         last_set(&h),
         json!({ "path": "providers.ds.reasoning_effort", "value": "low" })
     );
+    h.input("{down}{enter}").await; // Accept images: on -> off
+    assert_eq!(
+        last_set(&h),
+        json!({ "path": "providers.ds.supports_images", "value": false })
+    );
     h.input("{down}{enter}").await; // Stream usage: on -> off
     assert_eq!(
         last_set(&h),
@@ -4869,7 +4877,7 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
         h.requests("secrets/set").last().unwrap(),
         &json!({ "provider": "ds", "key": "sk-9" })
     );
-    h.input("{up}{up}{up}{up}{up}r").await; // reset the model to core.lua's
+    h.input("{up}{up}{up}{up}{up}{up}r").await; // reset the model to core.lua's
     assert_eq!(
         h.requests("settings/reset").last().unwrap(),
         &json!({ "path": "providers.ds.model" })

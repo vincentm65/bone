@@ -206,17 +206,17 @@ end
 
 --- A session's message queue (as queue/add and friends; clients see the
 --- changes). In hooks, tools and providers:
----   bone.queue.add(id, text, mode)   mode "steer" (default) or "next";
+---   bone.queue.add(id, text, mode, images)   mode "steer" (default) or "next";
 ---                                     idle sessions start a turn: { turn_id }, else { id }
 ---   bone.queue.list(id)              { { id, text, mode, created_at } }
 ---   bone.queue.remove(id, queue_id), bone.queue.clear(id)
 bone.queue = {
-  add = function(id, text, mode)
-    local ev, why = bone.run_hooks("queue_add", { session_id = id, text = text, mode = mode or "steer" })
+  add = function(id, text, mode, images)
+    local ev, why = bone.run_hooks("queue_add", { session_id = id, text = text, mode = mode or "steer", images = images or {} })
     if why then
       error(why, 2)
     end
-    return session_op("queue_add", id, { text = ev.text, mode = ev.mode })
+    return session_op("queue_add", id, { text = ev.text, mode = ev.mode, images = ev.images })
   end,
   list = function(id)
     return session_op("queue_list", id)
@@ -572,4 +572,16 @@ bone._ready = {}
 function bone.on_ready(fn)
   assert(type(fn) == "function", "bone.on_ready(fn)")
   bone._ready[#bone._ready + 1] = fn
+end
+
+
+--- Durable image attachments. Upload base64 PNG/JPEG/WebP, then use the
+--- returned reference in a user message's `images` list. Providers receive
+--- base64 PNG in image.data; use read(id) to inspect an unhydrated reference.
+bone.attachments = {}
+function bone.attachments.upload(data, name)
+  return wait({ session = { op = "attachment_upload", data = data, name = name } })
+end
+function bone.attachments.read(id)
+  return wait({ session = { op = "attachment_read", attachment_id = id } })
 end

@@ -9,6 +9,7 @@
 
 mod app;
 mod chat;
+mod clipboard;
 mod commands;
 mod data;
 mod editor;
