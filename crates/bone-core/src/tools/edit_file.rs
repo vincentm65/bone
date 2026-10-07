@@ -950,7 +950,13 @@ fn show(lines: &[String], numbers: &BTreeSet<usize>) -> String {
 }
 
 /// Why an edit could not be placed, adding the live lines worth showing.
-fn explain(e: &Edit, miss: &Miss, live: &[String], shown: &mut BTreeSet<usize>) -> String {
+fn explain(
+    e: &Edit,
+    miss: &Miss,
+    path: &str,
+    live: &[String],
+    shown: &mut BTreeSet<usize>,
+) -> String {
     let n = live.len();
     let what = format!("edit {} {}", e.index, e.label());
     match miss {
@@ -958,8 +964,11 @@ fn explain(e: &Edit, miss: &Miss, live: &[String], shown: &mut BTreeSet<usize>) 
         Miss::Unseen(start, count) => {
             let hi = (start + count).min(start + MAX_SHOWN);
             shown.extend(start + 1..=hi);
+            let recovery = json!({"path": path, "offset": start + 1, "limit": count});
             format!(
-                "{what}: lines {}-{} were never shown to you; they are below. Check them, then send the same edit again.",
+                "{what}: lines {}-{} were not all shown in the matching read version; the preview below may be incomplete.\n\
+                 Recovery: call read_file with {recovery}\n\
+                 Copy fresh LINE#HASH anchors from that read, then retry the edit.",
                 start + 1,
                 start + count
             )
@@ -1147,7 +1156,7 @@ async fn edit(ctx: &ToolContext, path_arg: &str, edits: &[Edit]) -> ToolResult {
         let mut shown = BTreeSet::new();
         let reasons: Vec<String> = misses
             .iter()
-            .map(|(e, m)| explain(e, m, &live.lines, &mut shown))
+            .map(|(e, m)| explain(e, m, path_arg, &live.lines, &mut shown))
             .collect();
         let mut msg = format!(
             "No changes written to {display}: {failed} of {} edits could not be placed.\n{}",

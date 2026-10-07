@@ -344,7 +344,7 @@ async fn ranges_over_unseen_lines_are_shown_first() {
     .unwrap();
     let range = json!([{"at": anchor(&body, 3), "end": anchor(&body, 22), "text": "gone"}]);
     let err = edit_path(&ctx, "f.txt", range.clone()).await.unwrap_err();
-    assert!(err.contains("lines 3-22 were never shown"), "{err}");
+    assert!(err.contains("lines 3-22 were not all shown"), "{err}");
     assert!(err.contains(&anchor(&body, 10)), "{err}");
     // Now they have been shown, the same edit goes through.
     edit_path(&ctx, "f.txt", range).await.unwrap();
@@ -352,6 +352,58 @@ async fn ranges_over_unseen_lines_are_shown_first() {
         std::fs::read_to_string(&path).unwrap().lines().count(),
         30 - 20 + 1
     );
+}
+
+#[tokio::test]
+async fn unseen_range_recovery_reads_beyond_the_bounded_preview() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(&dir);
+    let filename = "long \"range\".txt";
+    let path = dir.path().join(filename);
+    let body: String = (1..=600).map(|i| format!("line {i}\n")).collect();
+    std::fs::write(&path, &body).unwrap();
+    // Only the endpoints have been read; the 500-line edit has an unseen interior.
+    call(
+        &ctx,
+        "read_file",
+        json!({"path": filename, "ranges": [{"start": 51, "end": 51}, {"start": 550, "end": 550}]}),
+    )
+    .await
+    .unwrap();
+    let edits = json!([{
+        "at": hash_anchor(&body, 51),
+        "end": hash_anchor(&body, 550),
+        "text": "replacement"
+    }]);
+    let err = edit_path(&ctx, filename, edits.clone()).await.unwrap_err();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+    assert!(err.contains(&anchor(&body, 130)), "{err}");
+    assert!(!err.contains(&anchor(&body, 131)), "{err}");
+    let recovery: Value = serde_json::from_str(
+        err.lines()
+            .find_map(|line| line.strip_prefix("Recovery: call read_file with "))
+            .expect("failure should supply an executable recovery read"),
+    )
+    .unwrap();
+    assert_eq!(
+        recovery,
+        json!({"path": filename, "offset": 51, "limit": 500})
+    );
+    // Merely suggesting a read must not grant visibility to its unshown lines.
+    edit_path(&ctx, filename, edits.clone()).await.unwrap_err();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+    let (view, _) = ctx.views.get(&ctx.session_id, &path);
+    assert!(!view.unwrap().seen.contains(&549));
+
+    let out = call(&ctx, "read_file", recovery).await.unwrap();
+    assert!(out.contains(&anchor(&body, 549)), "{out}");
+    edit_path(&ctx, filename, edits).await.unwrap();
+    let expected: String = (1..=50)
+        .map(|i| format!("line {i}\n"))
+        .chain(std::iter::once("replacement\n".to_owned()))
+        .chain((551..=600).map(|i| format!("line {i}\n")))
+        .collect();
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
 }
 
 #[tokio::test]
