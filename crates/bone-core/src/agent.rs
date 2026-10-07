@@ -220,7 +220,7 @@ impl Turn<'_> {
             None => text,
         };
         self.inner
-            .validate_input(self.session, &text, &mut images)
+            .validate_input(&self.session.lock().unwrap(), &text, &mut images)
             .map_err(|e| Stop::Failed(e.message))?;
         self.record(ChatMessage::User {
             content: text.clone(),
@@ -609,7 +609,7 @@ impl Turn<'_> {
             let mut s = self.session.lock().unwrap();
             let steer = s.take_steer();
             if !steer.is_empty() {
-                self.inner.emit_queue(&s);
+                self.inner.emit_queue(&s, None);
             }
             steer
         };
@@ -843,17 +843,11 @@ fn unix_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-fn messages_from_lua(v: &Value) -> Result<Vec<ChatMessage>, serde_json::Error> {
-    let mut v = list(v);
-    if let Some(messages) = v.as_array_mut() {
-        for msg in messages {
-            if let Some(images) = msg.get("images") {
-                msg["images"] = list(images);
-            }
-            if let Some(calls) = msg.get("tool_calls") {
-                msg["tool_calls"] = list(calls);
-            }
-        }
-    }
-    serde_json::from_value(v)
+fn messages_from_lua(v: &Value) -> Result<Vec<ChatMessage>, String> {
+    list(v)
+        .as_array()
+        .ok_or("messages must be a list")?
+        .iter()
+        .map(crate::runtime::message)
+        .collect()
 }

@@ -713,7 +713,7 @@ const NOT_NOW: &str = "a running turn's transcript can only change between model
 (in system, context, request or request_error hooks), or after the turn";
 
 /// A message from Lua, where an empty list may have arrived as `{}`.
-fn message(v: &Json) -> Result<ChatMessage, String> {
+pub(crate) fn message(v: &Json) -> Result<ChatMessage, String> {
     let mut v = v.clone();
     if let Some(images) = v.get("images") {
         v["images"] = crate::agent::list(images);

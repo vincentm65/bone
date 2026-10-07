@@ -618,7 +618,7 @@ bone.on("submit", function(ev)
       local images = bone.prompt.images()
       for _, image in ipairs(ev.images or {}) do images[#images + 1] = image end
       bone.prompt.set_images(images)
-      bone.notify("it was sent before the edit was saved; your text is back in the prompt", "error")
+      bone.notify("queue edit failed: " .. tostring(err) .. "; message restored to its draft", "error")
     end
   end)
   return false

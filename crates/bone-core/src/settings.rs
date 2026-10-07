@@ -109,6 +109,11 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
                     Err(format!(
                         "{path}: keys go in secrets.json (secrets/set), not settings"
                     ))
+                } else if p
+                    .get("supports_images")
+                    .is_some_and(|v| !v.is_boolean() && !v.is_null())
+                {
+                    Err(format!("{path}: supports_images must be a boolean"))
                 } else {
                     Ok(())
                 }
@@ -121,15 +126,15 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
                 "base_url" | "model" | "type" | "api_key_env" | "reasoning_effort",
                 Value::String(_),
             ) => Ok(()),
-            ("stream_usage" | "replay_reasoning", Value::Bool(_)) => Ok(()),
+            ("stream_usage" | "replay_reasoning" | "supports_images", Value::Bool(_)) => Ok(()),
             ("api_key", _) => Err("keys go in secrets.json (secrets/set), not settings".into()),
             (
                 "base_url" | "model" | "type" | "api_key_env" | "reasoning_effort" | "stream_usage"
-                | "replay_reasoning",
+                | "replay_reasoning" | "supports_images",
                 _,
             ) => Err(format!("{path} has the wrong type")),
             _ => Err(format!(
-                "{path}: a provider's settings are base_url, model, type, api_key_env, reasoning_effort, stream_usage and replay_reasoning"
+                "{path}: a provider's settings are base_url, model, type, api_key_env, reasoning_effort, stream_usage, replay_reasoning and supports_images"
             )),
         },
         _ => Ok(()),
@@ -285,6 +290,14 @@ mod tests {
         assert!(set(&mut s, "models.qwen", json!("x")).is_err());
         assert!(set(&mut s, "providers.qwen.api_key", json!("k")).is_err());
         assert!(set(&mut s, "providers.qwen.stream_usage", json!("yes")).is_err());
+        assert!(set(&mut s, "providers.qwen.supports_images", json!("yes")).is_err());
+        assert!(
+            validate(
+                "providers.qwen",
+                &json!({"model":"q", "base_url":"http://localhost", "supports_images":1})
+            )
+            .is_err()
+        );
 
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(load(dir.path()).unwrap(), json!({}));

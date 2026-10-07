@@ -125,6 +125,30 @@ impl Env {
         .await
         .unwrap()
     }
+    async fn begin(&mut self, tui: &mut Headless) -> (String, Request) {
+        tui.type_text("first message");
+        tui.press("enter").unwrap();
+        let request = self.request(tui).await;
+        (self.id().await, request)
+    }
+    async fn enqueue(
+        &self,
+        id: &str,
+        text: &str,
+        images: Vec<bone_proto::types::ImageAttachment>,
+    ) -> u64 {
+        self.client
+            .request::<QueueAdd>(QueueAddParams {
+                session_id: id.into(),
+                text: text.into(),
+                images,
+                mode: QueueMode::Next,
+            })
+            .await
+            .unwrap()
+            .id
+            .unwrap()
+    }
     async fn request(&mut self, tui: &mut Headless) -> Request {
         let deadline = tokio::time::Instant::now() + WAIT;
         loop {
@@ -672,4 +696,224 @@ async fn history_recalls_images_and_restores_the_unsent_text_draft() {
     tui.press("down").unwrap();
     assert_eq!(tui.prompt_text(), "unfinished question");
     assert!(tui.images().is_empty());
+}
+
+#[tokio::test]
+async fn accept_images_checkbox_saves_through_core_and_reset_restores_default() {
+    let env = Env::new(true).await;
+    let mut tui = env.tui().await;
+    tui.type_text("/config providers");
+    tui.press("enter").unwrap();
+    tui.wait_for(WAIT, |s| s.contains("vision-test"))
+        .await
+        .unwrap();
+    tui.press("e").unwrap();
+    tui.wait_for(WAIT, |s| s.contains("Accept images"))
+        .await
+        .unwrap();
+    for _ in 0..10 {
+        if tui.screen().contains("› Accept images") {
+            break;
+        }
+        tui.press("down").unwrap();
+    }
+    assert!(tui.screen().contains("› Accept images"), "{}", tui.screen());
+    tui.press("enter").unwrap();
+    tui.wait_for(WAIT, |s| s.contains("saved accept images"))
+        .await
+        .unwrap();
+    let settings = env.client.request::<SettingsGet>(Empty {}).await.unwrap();
+    assert_eq!(settings["providers"]["fake"]["supports_images"], false);
+    assert_eq!(
+        env.client
+            .request::<ModelList>(MaybeSession { session_id: None })
+            .await
+            .unwrap()[0]
+            .supports_images,
+        Some(false)
+    );
+    assert_eq!(
+        scripting::load_with(env.config.path(), &|_| None)
+            .unwrap()
+            .config
+            .provider
+            .supports_images,
+        Some(false)
+    );
+    env.client
+        .request::<SettingsReset>(SettingPath {
+            path: "providers.fake.supports_images".into(),
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        env.client
+            .request::<ModelList>(MaybeSession { session_id: None })
+            .await
+            .unwrap()[0]
+            .supports_images,
+        Some(true)
+    );
+}
+
+#[tokio::test]
+async fn queue_image_edit_rejection_is_atomic_and_original_text_still_runs() {
+    let mut env = Env::new(false).await;
+    let mut tui = env.tui().await;
+    let (id, first) = env.begin(&mut tui).await;
+    env.attach(&mut tui).await;
+    let queued = env.enqueue(&id, "original queued text", vec![]).await;
+    let result = env
+        .client
+        .request::<QueueUpdate>(QueueUpdateParams {
+            session_id: id.clone(),
+            id: queued,
+            text: Some("invalid replacement".into()),
+            images: Some(tui.images().to_vec()),
+            mode: Some(QueueMode::Steer),
+        })
+        .await;
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("does not support images")
+    );
+    let state = env
+        .client
+        .request::<SessionMessages>(SessionRef { session_id: id })
+        .await
+        .unwrap();
+    assert_eq!(state.queue[0].text, "original queued text");
+    assert_eq!(state.queue[0].mode, QueueMode::Next);
+    assert!(state.queue[0].images.is_empty());
+    first.answer("first complete");
+    let second = env.request(&mut tui).await;
+    assert_eq!(
+        second.body["messages"].as_array().unwrap().last().unwrap()["content"],
+        "original queued text"
+    );
+    second.answer("original queued text received");
+    tui.wait_for(WAIT, |s| s.contains("original queued text received"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn queued_image_capability_failure_is_visible_paused_and_recoverable() {
+    let mut env = Env::new(true).await;
+    let mut tui = env.tui().await;
+    let (id, first) = env.begin(&mut tui).await;
+    env.attach(&mut tui).await;
+    let images = tui.images().to_vec();
+    env.enqueue(&id, "queued image", images.clone()).await;
+    let setting = |value| SettingSet {
+        path: "providers.fake.supports_images".into(),
+        value,
+        session_id: None,
+    };
+    env.client
+        .request::<SettingsSet>(setting(json!(false)))
+        .await
+        .unwrap();
+    first.answer("first complete");
+    tui.wait_for(WAIT, |s| {
+        s.contains("Queue paused:") && s.contains("does not support images")
+    })
+    .await
+    .unwrap();
+    let state = env
+        .client
+        .request::<SessionMessages>(SessionRef {
+            session_id: id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(state.active_turn.is_none());
+    assert!(state.queue_paused);
+    assert_eq!(state.queue[0].images, images);
+    assert!(env.requests.try_recv().is_err());
+    // The paused queue survives reopening the saved session.
+    let reopened = Core::from_loaded(scripting::load_with(env.config.path(), &|_| None).unwrap());
+    let state = reopened
+        .handle("session/messages", Some(json!({"session_id":id})))
+        .await
+        .unwrap();
+    assert_eq!(state["queue_paused"], true);
+    env.client
+        .request::<SettingsSet>(setting(json!(true)))
+        .await
+        .unwrap();
+    env.client
+        .request::<QueueResume>(SessionRef { session_id: id })
+        .await
+        .unwrap();
+    let second = env.request(&mut tui).await;
+    env.assert_image(
+        second.body["messages"].as_array().unwrap().last().unwrap(),
+        Some("queued image"),
+    );
+    second.answer("queue recovered");
+    tui.wait_for(WAIT, |s| s.contains("queue recovered"))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn missing_queued_image_is_reported_and_edit_can_recover() {
+    let mut env = Env::new(true).await;
+    let mut tui = env.tui().await;
+    let (id, first) = env.begin(&mut tui).await;
+    env.attach(&mut tui).await;
+    let image = tui.images()[0].clone();
+    let queued = env.enqueue(&id, "queued image", vec![image.clone()]).await;
+    let data_dir = scripting::load_with(env.config.path(), &|_| None)
+        .unwrap()
+        .config
+        .data_dir;
+    std::fs::remove_file(
+        data_dir
+            .join("attachments")
+            .join(format!("{}.png", image.id)),
+    )
+    .unwrap();
+    first.answer("first complete");
+    tui.wait_for(WAIT, |s| {
+        s.contains("Queue paused:") && s.contains("cannot read attachment")
+    })
+    .await
+    .unwrap();
+    let state = env
+        .client
+        .request::<SessionMessages>(SessionRef {
+            session_id: id.clone(),
+        })
+        .await
+        .unwrap();
+    assert!(state.queue_paused);
+    assert!(state.active_turn.is_none());
+    assert_eq!(state.queue[0].images, vec![image]);
+    env.client
+        .request::<QueueUpdate>(QueueUpdateParams {
+            session_id: id.clone(),
+            id: queued,
+            text: Some("text recovery".into()),
+            images: Some(vec![]),
+            mode: None,
+        })
+        .await
+        .unwrap();
+    env.client
+        .request::<QueueResume>(SessionRef { session_id: id })
+        .await
+        .unwrap();
+    let second = env.request(&mut tui).await;
+    assert_eq!(
+        second.body["messages"].as_array().unwrap().last().unwrap()["content"],
+        "text recovery"
+    );
+    second.answer("missing image recovered");
+    tui.wait_for(WAIT, |s| s.contains("missing image recovered"))
+        .await
+        .unwrap();
 }

@@ -2900,6 +2900,7 @@ async fn typing_during_a_turn_queues_it() {
         session_id: "s-new".into(),
         items,
         paused: false,
+        error: None,
     };
     h.input("go{enter}").await;
     h.emit::<TurnStarted>(started("s-new", "go")).await;

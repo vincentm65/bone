@@ -682,6 +682,7 @@ fn events() {
             queued(4, QueueMode::Next, "then update the README"),
         ],
         paused: false,
+        error: None,
     });
     event::<TurnSteered>(TurnStartedParams {
         session_id: SID.into(),

@@ -98,7 +98,7 @@ impl AttachmentStore {
         }
         let mut total = 0;
         for img in images {
-            if img.data.is_some() {
+            if !hydrate && img.data.is_some() {
                 return Err(
                     "upload image bytes with attachment/upload before referencing them".into(),
                 );
@@ -131,9 +131,6 @@ impl AttachmentStore {
         let mut messages = messages.to_vec();
         for msg in &mut messages {
             if let ChatMessage::User { images, .. } = msg {
-                for img in images.iter_mut() {
-                    img.data = None;
-                }
                 self.resolve(images, true)?;
             }
         }

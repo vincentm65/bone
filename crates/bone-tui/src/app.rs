@@ -581,10 +581,6 @@ impl App {
         self.dirty = true;
     }
 
-    fn invalidate_draft(&mut self) {
-        self.composer.invalidate();
-    }
-
     pub fn prompt_images(&self) -> &[ImageAttachment] {
         &self.composer.images
     }
@@ -599,7 +595,7 @@ impl App {
         self.prompt.clear();
         self.composer.pastes.clear();
         self.composer.images.clear();
-        self.invalidate_draft();
+        self.composer.invalidate();
     }
 
     pub fn set_prompt_images(&mut self, images: Vec<ImageAttachment>) -> Result<(), String> {
@@ -668,16 +664,9 @@ impl App {
         }
         *self.composer.pending.entry((buf, epoch)).or_default() += 1;
         let tx = self.tx.clone();
-        let executable = self
-            .clipboard_executable
-            .clone()
-            .map(Ok)
-            .unwrap_or_else(std::env::current_exe);
+        let executable = self.clipboard_executable.clone();
         tokio::spawn(async move {
-            let result = match executable {
-                Ok(executable) => crate::clipboard::read(input, executable).await,
-                Err(e) => Err(format!("cannot locate clipboard helper: {e}")),
-            };
+            let result = crate::clipboard::read(input, executable).await;
             let _ = tx.send(AppEvent(Box::new(move |app| match result {
                 Ok(crate::clipboard::Content::Image { bytes, name }) => {
                     let params = AttachmentUploadParams {
@@ -685,7 +674,7 @@ impl App {
                         name,
                     };
                     app.request::<AttachmentUpload>(params, move |app, result| {
-                        app.finish_image_read(buf, epoch);
+                        app.composer.finish_read(buf, epoch);
                         match result {
                             Ok(image) => app.deliver_image(buf, epoch, image),
                             Err(e) => app.error(format!("cannot attach image: {e}")),
@@ -693,7 +682,7 @@ impl App {
                     });
                 }
                 Ok(crate::clipboard::Content::Text(text)) => {
-                    app.finish_image_read(buf, epoch);
+                    app.composer.finish_read(buf, epoch);
                     if buf == app.current && epoch == app.composer.epoch {
                         app.paste(&text);
                     } else if let Some(draft) = app
@@ -706,17 +695,12 @@ impl App {
                     }
                 }
                 Err(e) => {
-                    app.finish_image_read(buf, epoch);
+                    app.composer.finish_read(buf, epoch);
                     app.error(e);
                 }
             })));
         });
         self.info("reading clipboard/image…");
-    }
-
-    fn finish_image_read(&mut self, buf: BufferId, epoch: u64) {
-        self.composer.finish_read(buf, epoch);
-        self.dirty = true;
     }
 
     fn deliver_image(&mut self, buf: BufferId, epoch: u64, image: ImageAttachment) {
@@ -1306,7 +1290,7 @@ impl App {
         let mut draft = pos
             .map(|p| self.composer.history[p].clone())
             .unwrap_or_else(|| self.composer.saved.take().unwrap_or_default());
-        self.invalidate_draft();
+        self.composer.invalidate();
         draft.epoch = self.composer.epoch;
         self.apply_draft(draft);
         self.emit_prompt_changed();
@@ -1936,8 +1920,17 @@ impl App {
             .steered_with_images(&p.text, p.images.clone())));
         on!(TurnFinished, |p| self
             .with_chat(&p.session_id, |c| c.turn_finished(&p)));
-        on!(QueueChanged, |p| self.with_chat(&p.session_id, |c| c
-            .set_queue(p.items, p.paused)));
+        on!(QueueChanged, |p| self.with_chat(&p.session_id, |c| {
+            c.set_queue(p.items, p.paused);
+            if let Some(error) = p.error {
+                c.notice(
+                    format!(
+                        "Queue paused: {error}. Edit or remove the message, then resume the queue."
+                    ),
+                    true,
+                );
+            }
+        }));
         on!(SessionUpdated, |p| self.reload_chat(p.session_id));
         on!(SessionDeleted, |p| self.session_deleted(&p.session_id));
     }

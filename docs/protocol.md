@@ -116,7 +116,7 @@ Every event carries `session_id` (except `echoed`, `ask/resolved`, `core/reloade
 | `ask/requested` | `{ ask_id, question }` | core Lua (a hook or tool) called `bone.ask(question)` and waits; answer with `ask/respond`. `question` is whatever the Lua passed, e.g. `{ kind: "confirm", text: "Write this file?" }` |
 | `ask/resolved` | `{ ask_id, answer }` | answered by some client, or `answer: null` if the turn was cancelled first |
 | `turn/steered` | `{ text }` | a steer message from the queue joined the running turn's transcript (show it as a user message) |
-| `queue/changed` | `{ items, paused }` | the session's queue, all of it, after any change |
+| `queue/changed` | `{ items, paused, error? }` | the session's queue after a change; a failed start retains the item, pauses the queue and includes its error |
 | `turn/finished` | `{ outcome: { status: "completed" \| "cancelled" \| "failed", message? } }` | the turn is over |
 | `settings/changed` | `{ path, value, settings }` | a setting was saved (`value` null: removed) by some client; `settings` is all of them (no `session_id`) |
 | `core/reloaded` | `ReloadResult` | the core switched to a newly loaded Lua configuration (no `session_id`) |

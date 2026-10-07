@@ -88,7 +88,7 @@ Saved sessions and forks refer to durable files under `<data_dir>/attachments/<s
 | `/rename {title}` | give this session a title |
 | `/fork`, `/fork {N}` | continue in a copy of this session; with N, from before turn N (to try that turn again differently). The original stays as it was |
 | `/compact`, `/compact clear` | summarize the older part of this session for the model (the latest turns stay word for word); the chat and the session file keep everything, and one line notes the tokens saved. `clear` sends the whole history again. Bone also compacts by itself when the model says the context is too long, or before a call over `compact.limit` (`/config` → Compaction) |
-| `/queue`, `/queue clear`, `/queue resume` | list the queued messages, empty the queue, let a paused queue go on (after a cancel or a restart) |
+| `/queue`, `/queue clear`, `/queue resume` | list the queued messages, empty the queue, let a paused queue go on (after a cancel, restart or queued-message error) |
 | `/quit`, `/exit`, `/q` | quit |
 | `/plugins` | open the plugin settings; `/plugins list` lists plugins (TUI and core halves); `/plugins load name`, `/plugins unload name`, `/plugins reload name` act on both halves (picking up edits to their files); `/plugins reload` reloads the core's whole Lua configuration (`core.lua` and core plugins) |
 

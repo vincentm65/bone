@@ -505,6 +505,9 @@ pub struct QueueChangedParams {
     pub items: Vec<QueuedMessage>,
     #[serde(default)]
     pub paused: bool,
+    /// Why an automatic queue start failed. The item is retained and paused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 method!(

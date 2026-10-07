@@ -16,9 +16,13 @@ pub(crate) enum Content {
     Image { bytes: Vec<u8>, name: String },
 }
 
-pub(crate) async fn read(input: Input, executable: PathBuf) -> Result<Content, String> {
+pub(crate) async fn read(input: Input, executable: Option<PathBuf>) -> Result<Content, String> {
     match input {
         Input::Clipboard => {
+            let executable = executable
+                .map(Ok)
+                .unwrap_or_else(std::env::current_exe)
+                .map_err(|e| format!("cannot locate clipboard helper: {e}"))?;
             let mut cmd = Command::new(executable);
             cmd.arg("--clipboard-read");
             // Avoid opening a console window for the helper on Windows.
@@ -70,59 +74,58 @@ async fn read_helper(mut cmd: Command, deadline: Duration) -> Result<Content, St
         .take(bone_media::MAX_IMAGE_BYTES as u64 + 2);
     let mut bytes = Vec::new();
     let result = tokio::time::timeout(deadline, async {
-        tokio::try_join!(child.wait(), stdout.read_to_end(&mut bytes))
-    })
-    .await;
-    match result {
-        Err(_) => {
-            // kill() waits for exit too: neither stuck workers nor zombies remain.
-            child
-                .kill()
-                .await
-                .map_err(|e| format!("cannot stop clipboard helper: {e}"))?;
-            return Err("clipboard read timed out; try again or use /attach PATH".into());
+        stdout
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|e| format!("clipboard helper failed: {e}"))?;
+        if bytes.len() > bone_media::MAX_IMAGE_BYTES + 1 {
+            return Err("clipboard contents exceed the 20 MiB limit".into());
         }
-        Ok(Err(e)) => return Err(format!("clipboard helper failed: {e}")),
-        Ok(Ok((status, _))) if !status.success() => return Err("clipboard helper failed".into()),
-        Ok(Ok(_)) => {}
+        if !child.wait().await.map_err(|e| e.to_string())?.success() {
+            return Err("clipboard helper failed".into());
+        }
+        if bytes.is_empty() {
+            return Err("invalid clipboard helper response".into());
+        }
+        match bytes.remove(0) {
+            b'I' => Ok(Content::Image {
+                bytes,
+                name: "Screenshot".into(),
+            }),
+            b'T' => String::from_utf8(bytes)
+                .map(Content::Text)
+                .map_err(|e| e.to_string()),
+            b'E' => Err(String::from_utf8_lossy(&bytes).into_owned()),
+            _ => Err("invalid clipboard helper response".into()),
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Err("clipboard read timed out; try again or use /attach PATH".into()));
+    // Stop and reap unfinished helpers on timeout or excessive output.
+    if result.is_err() && child.id().is_some() {
+        child
+            .kill()
+            .await
+            .map_err(|e| format!("cannot stop clipboard helper: {e}"))?;
     }
-    if bytes.len() > bone_media::MAX_IMAGE_BYTES + 1 {
-        return Err("clipboard contents exceed the 20 MiB limit".into());
-    }
-    if bytes.is_empty() {
-        return Err("invalid clipboard helper response".into());
-    }
-    match bytes.remove(0) {
-        b'I' => Ok(Content::Image {
-            bytes,
-            name: "Screenshot".into(),
-        }),
-        b'T' => String::from_utf8(bytes)
-            .map(Content::Text)
-            .map_err(|e| e.to_string()),
-        b'E' => Err(String::from_utf8_lossy(&bytes).into_owned()),
-        _ => Err("invalid clipboard helper response".into()),
-    }
+    result
 }
 
 /// Internal CLI entry point, invoked before loading any user configuration.
 #[doc(hidden)]
 pub fn run_clipboard_helper() -> ExitCode {
-    let result = clipboard();
-    let (tag, bytes) = match &result {
-        Ok(Content::Image { bytes, .. }) => (b'I', bytes.as_slice()),
-        Ok(Content::Text(text)) => (b'T', text.as_bytes()),
-        Err(error) => (b'E', error.as_bytes()),
+    let (tag, bytes) = match clipboard() {
+        Ok(Content::Image { bytes, .. }) => (b'I', bytes),
+        Ok(Content::Text(text)) => (b'T', text.into_bytes()),
+        Err(error) => (b'E', error.into_bytes()),
     };
     let mut stdout = std::io::stdout().lock();
-    if stdout
+    match stdout
         .write_all(&[tag])
-        .and_then(|_| stdout.write_all(bytes))
-        .is_ok()
+        .and_then(|_| stdout.write_all(&bytes))
     {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
+        Ok(()) => ExitCode::SUCCESS,
+        Err(_) => ExitCode::FAILURE,
     }
 }
 
@@ -186,6 +189,15 @@ mod tests {
             .set_len(bone_media::MAX_IMAGE_BYTES as u64 + 1)
             .unwrap();
         assert!(matches!(file(path).await, Err(e) if e.contains("20 MiB")));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn oversized_helper_output_is_rejected_before_waiting_for_exit() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf T; exec head -c 33554432 /dev/zero"]);
+        assert!(matches!(read_helper(cmd, Duration::from_secs(2)).await,
+            Err(e) if e.contains("20 MiB")));
     }
 
     #[cfg(unix)]

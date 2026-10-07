@@ -136,7 +136,7 @@ impl Inner {
         text: String,
         mut images: Vec<ImageAttachment>,
     ) -> Result<bone_proto::types::TurnId, RpcError> {
-        self.validate_input(&session, &text, &mut images)?;
+        self.validate_input(&session.lock().unwrap(), &text, &mut images)?;
         let (turn_id, cancel) = {
             let mut s = session.lock().unwrap();
             if let Some(active) = &s.active {
@@ -164,11 +164,10 @@ impl Inner {
         Ok(turn_id)
     }
 
-    /// `queue/add` (and `bone.queue.add`) after the hooks: start a turn
-    /// when idle, else queue the message.
+    /// Validate stored attachments and the session's model before saving input.
     pub(crate) fn validate_input(
         &self,
-        session: &session::SessionHandle,
+        session: &session::Session,
         text: &str,
         images: &mut [ImageAttachment],
     ) -> Result<(), RpcError> {
@@ -179,8 +178,8 @@ impl Inner {
             .validate(images)
             .map_err(RpcError::invalid_params)?;
         let rt = self.runtime();
-        let pin = session.lock().unwrap().model.clone();
-        let config = pin
+        let config = session
+            .model
             .as_ref()
             .and_then(|p| p.0.as_ref())
             .and_then(|n| rt.models.get(n))
@@ -200,12 +199,12 @@ impl Inner {
         mode: QueueMode,
         mut images: Vec<ImageAttachment>,
     ) -> Result<QueueAddResult, RpcError> {
-        self.validate_input(session, &text, &mut images)?;
+        self.validate_input(&session.lock().unwrap(), &text, &mut images)?;
         if session.lock().unwrap().active.is_none() {
             // A new message also lets a paused queue go on afterwards.
             let mut s = session.lock().unwrap();
             if std::mem::take(&mut s.queue_paused) {
-                self.emit_queue(&s);
+                self.emit_queue(&s, None);
             }
             drop(s);
             match self.begin_turn_with_images(session.clone(), text.clone(), images.clone()) {
@@ -226,7 +225,7 @@ impl Inner {
             .as_ref()
             .is_none_or(|a| a.closing || a.cancel.is_cancelled());
         let id = s.enqueue_with_images(text, if ending { QueueMode::Next } else { mode }, images);
-        self.emit_queue(&s);
+        self.emit_queue(&s, None);
         Ok(QueueAddResult {
             id: Some(id),
             turn_id: None,
@@ -245,18 +244,19 @@ impl Inner {
             let mut s = session.lock().unwrap();
             edit(&mut s)?;
             s.save_queue();
-            self.emit_queue(&s);
+            self.emit_queue(&s, None);
         }
         self.start_next(&session);
         Ok(())
     }
 
     /// Tell clients what a session's queue holds now.
-    pub(crate) fn emit_queue(&self, s: &session::Session) {
+    pub(crate) fn emit_queue(&self, s: &session::Session, error: Option<String>) {
         self.emit::<QueueChanged>(QueueChangedParams {
             session_id: s.info.session_id.clone(),
             items: s.queue.clone(),
             paused: s.queue_paused,
+            error,
         });
     }
 
@@ -270,18 +270,22 @@ impl Inner {
             }
             let q = s.queue.remove(0);
             s.save_queue();
-            self.emit_queue(&s);
+            self.emit_queue(&s, None);
             q
         };
-        if self
-            .begin_turn_with_images(session.clone(), next.text.clone(), next.images.clone())
-            .is_err()
+        if let Err(e) =
+            self.begin_turn_with_images(session.clone(), next.text.clone(), next.images.clone())
         {
-            // Raced with another turn: put it back in front.
             let mut s = session.lock().unwrap();
             s.queue.insert(0, next);
+            let error = if e.code == RpcError::BUSY {
+                None
+            } else {
+                s.queue_paused = true;
+                Some(e.message)
+            };
             s.save_queue();
-            self.emit_queue(&s);
+            self.emit_queue(&s, error);
         }
     }
 
@@ -304,7 +308,7 @@ impl Inner {
             }
             if changed {
                 s.save_queue();
-                self.emit_queue(&s);
+                self.emit_queue(&s, None);
             }
         }
         self.start_next(session);
@@ -626,20 +630,16 @@ impl Core {
             QueueUpdate::METHOD => dispatch::<QueueUpdate, _>(params, |p| {
                 // Validate the complete replacement before changing either field.
                 self.inner.queue_edit(&p.session_id, |s| {
-                    let q = s
+                    let index = s
                         .queue
-                        .iter_mut()
-                        .find(|q| q.id == p.id)
+                        .iter()
+                        .position(|q| q.id == p.id)
                         .ok_or_else(|| no_item(p.id))?;
+                    let q = &s.queue[index];
                     let text = p.text.unwrap_or_else(|| q.text.clone());
                     let mut images = p.images.unwrap_or_else(|| q.images.clone());
-                    if text.trim().is_empty() && images.is_empty() {
-                        return Err(RpcError::invalid_params("message is empty"));
-                    }
-                    self.inner
-                        .attachments
-                        .validate(&mut images)
-                        .map_err(RpcError::invalid_params)?;
+                    self.inner.validate_input(s, &text, &mut images)?;
+                    let q = &mut s.queue[index];
                     q.text = text;
                     q.images = images;
                     if let Some(m) = p.mode {
