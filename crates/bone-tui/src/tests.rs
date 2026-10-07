@@ -1443,6 +1443,33 @@ async fn text_helpers_and_markdown_data() {
 }
 
 #[tokio::test]
+async fn markdown_tables_wrap_instead_of_clipping() {
+    let mut h = Harness::new().await;
+    assert_eq!(h.lua(r#"=(function() local md = '| **abcdefghij** | 日本語 | [link](https://example.com) |\n|---|:---:|---:|\n| z |'
+        for _, width in ipairs({ 10, 24, 80 }) do
+          local text, bold, header = '', false, false
+          for _, row in ipairs(bone.ui.markdown(md, width, '  ')) do
+            local n = 0
+            for _, s in ipairs(row) do
+              n = n + bone.text.width(s[1])
+              text = text .. s[1]
+              bold = bold or s[2] == 'MdBold'
+              header = header or s[2] == 'MdTableHeader'
+            end
+            assert(n <= width, n .. ' > ' .. width)
+          end
+          text = text:gsub('%s', ''):gsub('│', '')
+          for ch in ('abcdefghij日本語link<https://example.com>z'):gmatch('.') do
+            local pos = assert(text:find(ch, 1, true), text)
+            text = text:sub(1, pos - 1) .. text:sub(pos + 1)
+          end
+          assert(text == '', text)
+          assert(bold and header)
+        end
+        return 'ok' end)()"#).await, "\"ok\"");
+}
+
+#[tokio::test]
 async fn without_lua_views_rust_draws_plain_text() {
     let mut h = Harness::blank().await;
     h.input("hello **world**{enter}").await;

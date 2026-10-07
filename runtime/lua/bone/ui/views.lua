@@ -71,72 +71,62 @@ local function md_spans(spans, base)
   return out
 end
 
--- Lay a table block out to fixed-width lines. Column widths come from the
--- widest cell; if the table is wider than `width`, the rightmost columns are
--- truncated with an ellipsis. Cells are plain spans (no wrapping).
+-- Wrap cells without losing content; stack columns when separators cannot fit.
 local function md_table(b, width, indent)
-  local max_cols = 0
+  local w, out = {}, {}
   for _, row in ipairs(b.rows) do
-    max_cols = math.max(max_cols, #row)
-  end
-  local w = {}
-  for c = 1, max_cols do
-    w[c] = 0
-    for _, row in ipairs(b.rows) do
-      local cell = row[c]
-      if cell then
-        local n = 0
-        for _, s in ipairs(cell) do
-          n = n + bone.text.width(s.text)
-        end
-        w[c] = math.max(w[c], n)
-      end
-    end
-  end
-  -- separators: one " │ " (3 wide) between columns.
-  local seps = math.max(0, max_cols - 1) * 3
-  local total = bone.text.width(indent) + seps
-  for c = 1, max_cols do
-    total = total + w[c]
-  end
-  if total > width then
-    -- Truncate from the right; each kept column stays at least 2 wide.
-    local budget = width - bone.text.width(indent) - seps
-    for c = max_cols, 1, -1 do
-      local rest = 0
-      for k = 1, c - 1 do
-        rest = rest + math.min(w[k], 1)
-      end
-      local room = math.max(1, budget - rest)
-      w[c] = math.min(w[c], room)
-      budget = budget - w[c]
-    end
-  end
-  local out = {}
-  for i, row in ipairs(b.rows) do
-    local is_head = b.header and i == 1
-    local hl = is_head and "MdTableHeader" or "MdTable"
-    local line = { { indent, "Normal" } }
-    for c = 1, max_cols do
-      local cell = row[c] or {}
-      local spans = bone.text.clip(md_spans(cell, hl), w[c])
+    for c, cell in ipairs(row) do
       local n = 0
-      for _, s in ipairs(spans) do
+      for _, s in ipairs(md_spans(cell, "MdTable")) do
         n = n + bone.text.width(s[1])
       end
-      local pad = math.max(0, w[c] - n)
-      local align = b.align and b.align[c]
-      local left = align == "r" and pad or align == "c" and math.floor(pad / 2) or 0
-      line[#line + 1] = { string.rep(" ", left), hl }
-      for _, s in ipairs(spans) do
-        line[#line + 1] = s
+      w[c] = math.max(w[c] or 2, n)
+    end
+  end
+  local budget = width - bone.text.width(indent) - math.max(0, #w - 1) * 3
+  local stacked = budget < #w * 2
+  if not stacked then
+    local total = 0
+    for _, n in ipairs(w) do total = total + n end
+    while total > budget do
+      local widest = 1
+      for c = 2, #w do
+        if w[c] > w[widest] then widest = c end
       end
-      line[#line + 1] = { string.rep(" ", pad - left), hl }
-      if c < max_cols then
-        line[#line + 1] = { " │ ", "Dim" }
+      w[widest], total = w[widest] - 1, total - 1
+    end
+  end
+  for i, row in ipairs(b.rows) do
+    local hl = b.header and i == 1 and "MdTableHeader" or "MdTable"
+    local cells, height = {}, 1
+    for c = 1, #w do
+      local spans = md_spans(row[c] or {}, hl)
+      if stacked then
+        append(out, wrap(spans, width, { first = { { indent, "Normal" } }, rest = { { indent, "Normal" } } }))
+      else
+        cells[c] = wrap(spans, w[c])
+        height = math.max(height, #cells[c])
       end
     end
-    out[#out + 1] = line
+    if stacked then
+      if i < #b.rows then out[#out + 1] = {} end
+    else
+      for r = 1, height do
+        local line = { { indent, "Normal" } }
+        for c = 1, #w do
+          local spans, n = cells[c][r] or {}, 0
+          for _, s in ipairs(spans) do n = n + bone.text.width(s[1]) end
+          local pad = math.max(0, w[c] - n)
+          local align = b.align and b.align[c]
+          local left = align == "r" and pad or align == "c" and math.floor(pad / 2) or 0
+          line[#line + 1] = { string.rep(" ", left), hl }
+          append(line, spans)
+          line[#line + 1] = { string.rep(" ", pad - left), hl }
+          if c < #w then line[#line + 1] = { " │ ", "Dim" } end
+        end
+        out[#out + 1] = line
+      end
+    end
   end
   return out
 end
