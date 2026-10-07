@@ -8,8 +8,7 @@ each item's lines are.
 Reference: `docs/lua.md` "Views: how each item looks" and "Chat data".
 Source: `crates/bone-tui/src/chat.rs` (the items), `render.rs` (drawing and
 caching), `lua.rs` (the API). The standard views are
-`runtime/lua/bone/ui/views.lua`; `examples/plugins/style/` is a complete
-alternative look built only from this API.
+`runtime/lua/bone/ui/views.lua`; override individual views to change the look.
 
 ## Views
 
@@ -71,6 +70,12 @@ diff. `bone.o.tool_detail` (`ctrl+t`) picks how much: `"summary"` (the
 default) folds each stretch of calls between edits and failures into one line
 such as `Read 3 files, ran 2 shell commands`, `"rows"` is the above, `"full"`
 shows every output in full.
+
+Sub-agent calls show the task first, then the agent's name and status. Their
+reports render as Markdown in an indented gutter, with an opening paragraph
+preview of up to three rows in `"summary"` and `"rows"` and the whole report
+in `"full"`; failures show the whole report at every level. Clicking the
+call opens its session when it was started during this run.
 
 ## Your own items
 

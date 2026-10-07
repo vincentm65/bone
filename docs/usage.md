@@ -2,7 +2,7 @@
 
 ## Screen
 
-Out of the box the screen is the runtime's standard UI (`runtime/lua/bone/ui/`). Everything below comes from the style plugin (`cp -r examples/plugins/style ~/.bone/plugins/`) and can be changed or replaced in Lua (see [lua.md](lua.md)).
+Out of the box the screen is the runtime's standard UI (`runtime/lua/bone/ui/`). It can be changed or replaced in Lua (see [lua.md](lua.md)).
 
 ```text
 › your message                         ← the session
@@ -50,9 +50,9 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 
 **Panels.** Plugins can dock panels beside, above or below the session (`bone.ui.panel`). Click one (or use the key its plugin gives) to give it the keyboard: the arrows, `pageup`/`pagedown`, `home`/`end` and the wheel scroll it, `tab`/`shift+tab` move to the next/previous panel and back to the prompt, `esc` returns to the prompt. The wheel over a panel always scrolls that panel.
 
-**Approval popup.** By default tool calls run without asking. With the approve plugin installed (`cp -r examples/plugins/approve ~/.bone/plugins/`), a tool that wants to change something asks first: `y` allows, `a` always allows that tool for this session, `n` or `esc` denies, `ctrl+c` cancels the turn. Keys typed in the first 300 ms after it appears are ignored, so text you were typing can't answer it.
+**Approval popup.** By default tool calls run without asking. Custom hooks can pause with `bone.ask`; a TUI handler displays the question and replies with `ask/respond` (see [lua.md](lua.md#asking-the-user)).
 
-**Session picker** (`ctrl+o`, `/sessions`): type to filter, `up`/`down` to move, `enter` to open, `esc` to close.
+**Agents sidebar** (`ctrl+o`, `/sessions`): a docked left column groups top-level conversations into **Running** (animated spinners), **Recent** (active or opened within the last hour by default; configure `bone.ui.sessions_recent_seconds` in `tui.lua`), and **History**, newest activity first within each group. It shows titles, last-activity times, total input + output tokens, and user-turn counts. Type to filter by title or directory, `up`/`down` to select, and `enter` or a mouse click to open. Switching leaves the sidebar open and returns keyboard focus to the prompt; background turns keep running. `ctrl+o` focuses it again, or closes it when already focused; `esc` closes it. Page keys and `home`/`end` navigate longer lists; the mouse wheel scrolls. Running status updates live, including turns already active when connecting to the core; usage totals refresh when turns finish.
 
 ## Commands
 
@@ -87,8 +87,8 @@ Enter on a partial name runs the highlighted suggestion (`/ses` + enter opens th
 |---|---|---|
 | `show_reasoning` | off | show model reasoning (`ctrl+r`) |
 | `tool_detail` | summary | tool calls: `summary`, `rows` or `full` (`ctrl+t`) |
-| `tool_preview_lines` | 4 | rows of tool output under each call (style plugin) |
-| `diff_preview_lines` | 8 | rows of diff under each edit (style plugin) |
+| `tool_preview_lines` | 4 | rows of tool output under each call |
+| `diff_preview_lines` | 8 | rows of diff under each edit |
 | `prompt_max_height` | 10 | prompt height limit |
 
 Options are set in `~/.bone/tui.lua` (`bone.o.tool_detail = "rows"`). What you choose with `ctrl+t` and `ctrl+r` is remembered in `~/.bone/settings.json`, which bone writes for you; `tui.lua` still wins when it sets the same option. The same file remembers which provider to use and your changes to providers (`"provider"`, `"providers": { "<name>": { "model": … } }`): `/config` edits every provider's settings there, over what `core.lua` gives them, and adds new ones.
@@ -101,4 +101,4 @@ bone --headless [--listen [PATH]]   core only, on stdio or a socket
 bone --init                         starter ~/.bone/core.lua and tui.lua
 ```
 
-Configuration lives in `~/.bone/` (or `$BONE_CONFIG_DIR`); sessions are saved in `~/.bone/sessions/`. `bone --import-bone [DB]` brings in the first bone's conversations (default `~/.bone-rust/data/conversations.db`) as sessions, with their usage and latest checkpoint; run it again to pick up newer ones, and sessions you continued here are never overwritten. `BONE_BASE_URL`, `BONE_MODEL`, `BONE_API_KEY`, `BONE_REASONING_EFFORT`, `BONE_SYSTEM_PROMPT`, and `BONE_DATA_DIR` override `core.lua` for one run; `BONE_APPROVAL=auto` stops the approve plugin (if installed) from asking.
+Configuration lives in `~/.bone/` (or `$BONE_CONFIG_DIR`); sessions are saved in `~/.bone/sessions/`. `bone --import-bone [DB]` brings in the first bone's conversations (default `~/.bone-rust/data/conversations.db`) as sessions, with their usage and latest checkpoint; run it again to pick up newer ones, and sessions you continued here are never overwritten. `BONE_BASE_URL`, `BONE_MODEL`, `BONE_API_KEY`, `BONE_REASONING_EFFORT`, `BONE_SYSTEM_PROMPT`, and `BONE_DATA_DIR` override `core.lua` for one run.

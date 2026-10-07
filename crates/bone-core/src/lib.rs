@@ -29,12 +29,13 @@ use bone_proto::methods::{
     ProcessRef, ProcessResize, ProcessSnapshot, ProcessState, ProcessesGet, ProcessesResult,
     QueueAdd, QueueAddParams, QueueAddResult, QueueChanged, QueueChangedParams, QueueClear,
     QueueMode, QueueMove, QueueRemove, QueueResume, QueueUpdate, SecretSet, SecretsList,
-    SecretsSet, SessionCompact, SessionCompactParams, SessionCreate, SessionCreateParams,
-    SessionCreated, SessionDelete, SessionDeleted, SessionFork, SessionForkParams, SessionList,
-    SessionMessages, SessionMessagesResult, SessionRef, SessionRename, SessionRenameParams,
-    SessionUpdated, SessionUpdatedParams, SettingPath, SettingSet, SettingsChanged,
-    SettingsChangedParams, SettingsGet, SettingsReset, SettingsSet, StoreQuery, StoreQueryParams,
-    TurnCancel, TurnStart, TurnStartParams, TurnStartResult, TurnSteer, TurnSteerParams,
+    SecretsSet, SessionActive, SessionCompact, SessionCompactParams, SessionCreate,
+    SessionCreateParams, SessionCreated, SessionDelete, SessionDeleted, SessionFork,
+    SessionForkParams, SessionList, SessionMessages, SessionMessagesResult, SessionRef,
+    SessionRename, SessionRenameParams, SessionUpdated, SessionUpdatedParams, SettingPath,
+    SettingSet, SettingsChanged, SettingsChangedParams, SettingsGet, SettingsReset, SettingsSet,
+    StoreQuery, StoreQueryParams, TurnCancel, TurnStart, TurnStartParams, TurnStartResult,
+    TurnSteer, TurnSteerParams,
 };
 use bone_proto::types::SessionInfo;
 use bone_proto::{Method, Notification, RpcError};
@@ -460,7 +461,19 @@ impl Core {
             SessionCreate::METHOD => {
                 dispatch::<SessionCreate, _>(params, |p| self.session_create(p))
             }
-            SessionList::METHOD => dispatch::<SessionList, _>(params, |_| self.session_list()),
+            SessionList::METHOD => {
+                let inner = self.inner.clone();
+                tokio::task::spawn_blocking(move || {
+                    dispatch::<SessionList, _>(params, |_| {
+                        inner.sessions.list().map_err(session_error)
+                    })
+                })
+                .await
+                .map_err(RpcError::internal)?
+            }
+            SessionActive::METHOD => {
+                dispatch::<SessionActive, _>(params, |_| Ok(self.inner.sessions.active()))
+            }
             SessionMessages::METHOD => {
                 dispatch::<SessionMessages, _>(params, |p| self.session_messages(p))
             }
@@ -908,10 +921,6 @@ impl Core {
         self.inner.views.forget(&p.session_id);
         self.inner.emit::<SessionDeleted>(p);
         Ok(())
-    }
-
-    fn session_list(&self) -> Result<Vec<SessionInfo>, RpcError> {
-        self.inner.sessions.list().map_err(session_error)
     }
 
     fn session_messages(&self, params: SessionRef) -> Result<SessionMessagesResult, RpcError> {

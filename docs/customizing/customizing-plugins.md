@@ -6,7 +6,7 @@ review flow), or should be installable on other machines. Everything in the
 other guides works in a plugin's files unchanged.
 
 ```text
-~/.bone/plugins/git/
+~/.bone/plugins/myplugin/
   core.lua     runs in the core (tools, hooks)
   tui.lua      runs in the TUI (keys, commands, tool views)
   lua/         modules for require()
@@ -20,12 +20,7 @@ anything a plugin set up. Rename a folder to start with `_` or `.` to disable
 it. `bone.plugins` lists the loaded names. Installing is just copying or
 `git clone`-ing into `~/.bone/plugins/`.
 
-The repo's `examples/plugins/` show most of the API at work: `style` (a
-complete look), `approve` (asking before tools run), `git` and `anthropic`
-(tools and a provider), `switch` (pick the provider from the TUI), `tasks`
-(a persistent task panel), `review`, `stats`, `testrun`, `output-cap`,
-`retry`, `mcp`, `skills`, `templates`, `ask-model`. None is installed by
-default. Read the one closest to what you are building.
+The [Bone catalog](https://github.com/vincentm65/bone-catalog) is the source of installable packages. Use `/catalog` to install and update them, or read packages such as `mcp`, `skill`, `usage`, `themes` and `review` for API usage. None is installed by default.
 
 ## State
 
@@ -89,10 +84,7 @@ The common shape of a plugin is a core half (a tool, or hooks) and a TUI half
 - The core emits questions and events; the TUI reacts with `bone.on` and
   answers with `bone.request(method, params, cb)`.
 
-`examples/plugins/approve/` is the reference: its `core.lua` asks
-`bone.ask({ kind = "approval", … })` before risky tools, its `tui.lua` shows
-each question as a popup (`y`/`a`/`n`) and answers with
-`bone.request("ask/respond", …)`.
+For confirmation, a core hook calls `bone.ask({ kind = "confirm", text = "Proceed?" })`. A TUI handler listens for `ask/requested` and replies with `ask/respond`; see the minimal paired examples in [lua.md](../lua.md#asking-the-user) and the popup guide.
 
 ## Project config
 

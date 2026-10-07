@@ -467,6 +467,9 @@ fn apply_panel_spec(
             ))
         })?;
     }
+    if let Some(full_height) = spec.get::<Option<bool>>("full_height")? {
+        p.full_height = full_height;
+    }
     match spec.get::<Value>("size")? {
         Value::Nil => {}
         Value::Boolean(false) => p.size = None,
@@ -2294,6 +2297,13 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             app.views_rev += 1;
             app.ui_broken.clear();
             app.dirty = true;
+            ret(lua, ())
+        }
+        "ui_refresh_in" => {
+            let ms: f64 = args(lua, a)?;
+            let at =
+                std::time::Instant::now() + std::time::Duration::from_millis(ms.max(0.0) as u64);
+            app.ui_expiry = Some(app.ui_expiry.map_or(at, |e| e.min(at)));
             ret(lua, ())
         }
         "chat_items" => {

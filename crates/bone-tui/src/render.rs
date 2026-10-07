@@ -30,11 +30,21 @@ use crate::text::{sanitize, width};
 use crate::ui::{Border, Item, LayoutNode, PromptSpec, Size, render_items};
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
+    // Consume due UI timers before Lua draws, so render callbacks can rearm
+    // them. Keep future deadlines across intervening event-driven frames.
+    if app
+        .ui_expiry
+        .is_some_and(|at| at <= std::time::Instant::now())
+    {
+        app.ui_expiry = None;
+    }
     let area = frame.area();
     app.screen = area;
     app.spinner = app.read_spinner();
     // The Normal group's background (if any) fills the screen.
     frame.render_widget(Block::default().style(app.theme.hl("Normal")), area);
+    // Screen-height sidebars reserve a column for the entire main UI.
+    let area = app.draw_panels(frame, area, true);
 
     let layout = app.layout();
     // Without a "message" leaf, notifications take rows at the bottom.
@@ -73,7 +83,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     // For mouse events: which leaf is where.
     app.leaves = plan.leaves.clone();
     let chat_area = middle;
-    let chat_area = app.draw_panels(frame, chat_area);
+    let chat_area = app.draw_panels(frame, chat_area, false);
     app.placed = HashMap::from([
         (CHAT_WIN, Placed { area: chat_area }),
         (PROMPT_WIN, Placed { area: prompt_area }),
@@ -137,7 +147,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             main.bottom()
         };
         let anchors = Anchors {
-            screen: area,
+            screen: app.screen,
             chat: chat_area,
             prompt: Rect {
                 y: area.y,
@@ -393,6 +403,22 @@ fn draw_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     let lines: Vec<Line> = chat.rows().skip(win.top).take(height).cloned().collect();
     frame.render_widget(Paragraph::new(lines), area);
+    if total == 0 {
+        if let Some((_, lines)) =
+            app.region_sized("chat_empty", area.width, area.height, true, true)
+        {
+            let height = (lines.len().min(area.height as usize)) as u16;
+            let centered = Rect {
+                y: area.y + area.height.saturating_sub(height) / 2,
+                height,
+                ..area
+            };
+            frame.render_widget(
+                Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center),
+                centered,
+            );
+        }
+    }
 }
 
 /// What the prompt box takes around its text, and the text's width.
@@ -817,6 +843,59 @@ fn draw_popups(frame: &mut Frame<'_>, app: &mut App, anchors: &Anchors) {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn panel_refresh_timer_preserves_chat_cache_and_rearms() {
+        let (conn, _server) = bone_proto::transport::in_process();
+        let (client, _events) = bone_client::Client::new(conn);
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut app = App::new(std::sync::Arc::new(client), tx, "/work".into(), None);
+        app.with_api(|lua| {
+            lua.load(
+                r#"
+                chat_ticks = 0
+                panel_ticks = 0
+                bone.ui.views.timer_test = function(item)
+                  chat_ticks = chat_ticks + 1
+                  return { "cached chat" }
+                end
+                bone.chat.add("timer_test", { text = "cached chat" })
+                bone.ui.panel.open({
+                  id = "timer", dock = "right", size = 20,
+                  render = function(ctx)
+                    panel_ticks = panel_ticks + 1
+                    bone.ui.refresh_in(10000)
+                    return { "panel tick " .. panel_ticks }
+                  end,
+                })
+                "#,
+            )
+            .exec()
+        })
+        .unwrap();
+        let rev = app.views_rev;
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        let first = app.ui_expiry.unwrap();
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert_eq!(app.ui_expiry, Some(first));
+        app.ui_expiry = Some(std::time::Instant::now());
+        terminal.draw(|f| draw(f, &mut app)).unwrap();
+        assert!(app.ui_expiry.unwrap() > first);
+        assert_eq!(app.views_rev, rev);
+        assert!(app.chat_expiry.is_none());
+        let ticks: (usize, usize) = app
+            .with_api(|lua| lua.load("return chat_ticks, panel_ticks").eval())
+            .unwrap();
+        assert_eq!(ticks, (1, 3));
+        // Multiple callers retain the earliest deadline, including an immediate one.
+        app.with_api(|lua| {
+            lua.load("bone.ui.refresh_in(-1); bone.ui.refresh_in(20000)")
+                .exec()
+        })
+        .unwrap();
+        assert!(app.ui_expiry.unwrap() <= std::time::Instant::now());
+    }
     #[test]
     fn prompt_rows_map_the_cursor() {
         let mut t = TextBuffer::default();

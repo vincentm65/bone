@@ -312,81 +312,15 @@ async fn ask_waits_for_an_answer_or_a_cancel() {
 }
 
 #[tokio::test]
-async fn approve_plugin_asks_before_changes() {
-    let dir = tempfile::tempdir().unwrap();
-    let plugin = dir.path().join("plugins/approve");
-    std::fs::create_dir_all(&plugin).unwrap();
-    let example =
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/approve/core.lua");
-    std::fs::copy(example, plugin.join("core.lua")).unwrap();
-    write(
-        dir.path(),
-        &format!(
-            r#"
-            {PROVIDER}
-            bone.config.approve.allow = function(ev) return ev.name == "shell" and ev.arguments.command == "ls" end
-            bone.tool.register {{ name = "safe", needs_approval = false, run = function() return "" end }}
-            bone.tool.register {{ name = "risky", run = function() return "" end }}
-            "#
-        ),
-    );
-    let mut loaded = load(dir.path()).unwrap();
-    let s = loaded.scripting.clone();
-    let ev = |name: &str, args: Json| json!({ "id": "c", "name": name, "arguments": args, "session_id": "s" });
-    let quick = |name: &str, args: Json| {
-        let (s, ev) = (s.clone(), ev(name, args));
-        async move {
-            tokio::time::timeout(Duration::from_millis(500), s.hooks("tool_call", ev))
-                .await
-                .ok()
-        }
-    };
-    // No question for reads, opted-out tools, or allowed commands.
-    for (name, args) in [
-        ("read_file", json!({"path": "a"})),
-        ("safe", json!({})),
-        ("shell", json!({"command": "ls"})),
-    ] {
-        assert_eq!(quick(name, args).await.and_then(|o| o.deny), None, "{name}");
-    }
-
-    let ask = |name: &str, args: Json| {
-        let (s, ev) = (s.clone(), ev(name, args));
-        tokio::spawn(async move { s.hooks("tool_call", ev).await })
-    };
-    let pending = ask("shell", json!({"command": "rm x"}));
-    let AskEvent::Requested(q) = next_event(&mut loaded.events).await else {
-        panic!()
-    };
-    assert_eq!(
-        q.question,
-        json!({ "kind": "approval", "title": "Allow shell?", "tool": "shell", "arguments": {"command": "rm x"} })
-    );
-    s.answer(q.ask_id, json!("deny")).await;
-    assert_eq!(
-        pending.await.unwrap().deny.as_deref(),
-        Some("The user denied this tool call.")
-    );
-    next_event(&mut loaded.events).await; // resolved
-
-    let pending = ask("risky", json!({}));
-    let AskEvent::Requested(q) = next_event(&mut loaded.events).await else {
-        panic!()
-    };
-    s.answer(q.ask_id, json!("always")).await;
-    assert_eq!(pending.await.unwrap().deny, None);
-    next_event(&mut loaded.events).await;
-    // "always" holds for that tool in that session.
-    assert_eq!(quick("risky", json!({})).await.map(|o| o.deny), Some(None));
-}
-
-#[tokio::test]
 async fn plugins_run_before_user_config() {
     let dir = tempfile::tempdir().unwrap();
-    let plugin = dir.path().join("plugins/git");
+    let plugin = dir.path().join("plugins/fixture");
     std::fs::create_dir_all(&plugin).unwrap();
-    let example = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/git/core.lua");
-    std::fs::copy(example, plugin.join("core.lua")).unwrap();
+    std::fs::write(
+        plugin.join("core.lua"),
+        r#"bone.tool.register { name = "fixture", run = function() return "loaded" end }"#,
+    )
+    .unwrap();
     std::fs::create_dir_all(dir.path().join("plugins/.hidden")).unwrap();
     std::fs::write(
         dir.path().join("plugins/.hidden/core.lua"),
@@ -398,8 +332,8 @@ async fn plugins_run_before_user_config() {
         &format!(
             r#"
             {PROVIDER}
-            assert(bone._tools.git_status, "plugin loaded first")
-            assert(table.concat(bone.plugins, ",") == "git", table.concat(bone.plugins, ","))
+            assert(bone._tools.fixture, "plugin loaded first")
+            assert(table.concat(bone.plugins, ",") == "fixture", table.concat(bone.plugins, ","))
             "#
         ),
     );
@@ -407,23 +341,13 @@ async fn plugins_run_before_user_config() {
     let spec = loaded
         .tools
         .iter()
-        .find(|t| t.name == "git_status")
+        .find(|t| t.name == "fixture")
         .unwrap()
         .clone();
 
-    let repo = tempfile::tempdir().unwrap();
-    let git = |args: &[&str]| {
-        std::process::Command::new("git")
-            .args(args)
-            .current_dir(repo.path())
-            .output()
-            .unwrap()
-    };
-    git(&["init", "-q", "-b", "main"]);
-    std::fs::write(repo.path().join("new.txt"), "x").unwrap();
     let tool = LuaTool::new(spec, loaded.scripting.clone(), false);
     let ctx = ToolContext {
-        cwd: repo.path().to_owned(),
+        cwd: dir.path().to_owned(),
         call_id: String::new(),
         session_id: "s".into(),
         cancel: Default::default(),
@@ -432,10 +356,7 @@ async fn plugins_run_before_user_config() {
         output: None,
         processes: None,
     };
-    assert_eq!(
-        tool.call(json!({}), &ctx).await.unwrap(),
-        "## No commits yet on main\n?? new.txt\n"
-    );
+    assert_eq!(tool.call(json!({}), &ctx).await.unwrap(), "loaded");
 }
 
 /// A Lua tool by name, ready to call.
@@ -565,164 +486,67 @@ async fn system_sleep_and_http_wait_without_blocking() {
     assert_eq!(other.await.unwrap().unwrap(), "d 0");
 }
 
-/// Serve canned SSE bodies, one per request, recording request bodies.
-async fn fake_sse(bodies: Vec<String>) -> (String, Arc<std::sync::Mutex<Vec<Json>>>) {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let url = format!("http://{}/v1", listener.local_addr().unwrap());
-    let seen: Arc<std::sync::Mutex<Vec<Json>>> = Default::default();
-    let seen2 = seen.clone();
-    tokio::spawn(async move {
-        for body in bodies {
-            let (mut sock, _) = listener.accept().await.unwrap();
-            let mut buf = Vec::new();
-            let mut chunk = [0u8; 8192];
-            loop {
-                let n = sock.read(&mut chunk).await.unwrap();
-                buf.extend_from_slice(&chunk[..n]);
-                if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                    let head = String::from_utf8_lossy(&buf[..i]).to_lowercase();
-                    let len: usize = head
-                        .lines()
-                        .find_map(|l| l.strip_prefix("content-length:"))
-                        .map(|v| v.trim().parse().unwrap())
-                        .unwrap_or(0);
-                    while buf.len() < i + 4 + len {
-                        let n = sock.read(&mut chunk).await.unwrap();
-                        buf.extend_from_slice(&chunk[..n]);
-                    }
-                    assert!(head.contains("x-api-key: k"), "{head}");
-                    seen2
-                        .lock()
-                        .unwrap()
-                        .push(serde_json::from_slice(&buf[i + 4..i + 4 + len]).unwrap());
-                    break;
-                }
-            }
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}"
-            );
-            sock.write_all(resp.as_bytes()).await.unwrap();
-            sock.shutdown().await.unwrap();
-        }
-    });
-    (url, seen)
-}
-
-fn anthropic_sse(events: &[Json]) -> String {
-    events
-        .iter()
-        .map(|e| format!("event: {}\ndata: {e}\n\n", e["type"].as_str().unwrap()))
-        .collect()
-}
-
+/// A minimal provider exercises streaming and tool calls without a wire adapter.
 #[tokio::test(flavor = "multi_thread")]
 async fn lua_provider_streams_and_calls_tools() {
     use crate::Core;
     use bone_proto::methods::*;
-    let (url, seen) = fake_sse(vec![
-        anthropic_sse(&[
-            json!({"type":"message_start","message":{"usage":{"input_tokens":12}}}),
-            json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}),
-            json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"stamp it"}}),
-            json!({"type":"content_block_stop","index":0}),
-            json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"tu_1","name":"stamp"}}),
-            json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"word\":"}}),
-            json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"hi\"}"}}),
-            json!({"type":"content_block_stop","index":1}),
-            json!({"type":"message_delta","usage":{"output_tokens":7}}),
-            json!({"type":"message_stop"}),
-        ]),
-        anthropic_sse(&[
-            json!({"type":"message_start","message":{"usage":{"input_tokens":30}}}),
-            json!({"type":"content_block_start","index":0,"content_block":{"type":"text"}}),
-            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Stamped "}}),
-            json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"HI."}}),
-            json!({"type":"content_block_stop","index":0}),
-            json!({"type":"message_delta","usage":{"output_tokens":3}}),
-        ]),
-    ])
-    .await;
-
     let dir = tempfile::tempdir().unwrap();
-    let plugin = dir.path().join("plugins/anthropic");
-    std::fs::create_dir_all(&plugin).unwrap();
-    std::fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/anthropic/core.lua"),
-        plugin.join("core.lua"),
-    )
-    .unwrap();
     write(
         dir.path(),
-        &format!(
-            r#"
-            bone.config.providers.claude = {{ type = "anthropic", model = "claude-test", api_key = "k", base_url = "{url}" }}
-            bone.config.system_prompt = "Be brief."
-            bone.tool.register {{ name = "stamp", run = function(a) return a.word:upper() end }}
-            "#
-        ),
+        r#"
+        local requests = 0
+        bone.provider.register("fixture", { complete = function(req, emit)
+          requests = requests + 1
+          assert(req.session_id and req.messages and req.tools)
+          if requests == 1 then
+            emit({ reasoning = "stamp it" })
+            return { reasoning = "stamp it", tool_calls = {
+              { id = "tu_1", name = "stamp", arguments = { word = "hi" } }
+            }, usage = { input_tokens = 12, output_tokens = 7 } }
+          end
+          assert(req.messages[#req.messages].content == "HI")
+          emit({ text = "Stamped HI." })
+          return { content = "Stamped HI." }
+        end })
+        bone.config.providers.x = { type = "fixture", model = "m" }
+        bone.tool.register { name = "stamp", run = function(a) return a.word:upper() end }
+    "#,
     );
-    let loaded = load(dir.path()).unwrap();
-    assert_eq!(loaded.config.provider.kind.as_deref(), Some("anthropic"));
-    let core = Core::from_loaded(loaded);
+    let core = Core::from_loaded(load(dir.path()).unwrap());
     let mut events = core.subscribe();
-    let call = |m: &'static str, p: Json| {
-        let core = &core;
-        async move { core.handle(m, Some(p)).await.unwrap() }
-    };
-    let work = tempfile::tempdir().unwrap();
-    let info = call(SessionCreate::METHOD, json!({ "cwd": work.path() })).await;
-    let sid = info["session_id"].as_str().unwrap().to_owned();
-    call(
+    let info = core
+        .handle(SessionCreate::METHOD, Some(json!({ "cwd": dir.path() })))
+        .await
+        .unwrap();
+    let sid = info["session_id"].clone();
+    core.handle(
         TurnStart::METHOD,
-        json!({ "session_id": sid, "text": "stamp hi" }),
+        Some(json!({ "session_id": sid, "text": "stamp hi" })),
     )
-    .await;
-
+    .await
+    .unwrap();
     let mut deltas = String::new();
-    let outcome = loop {
-        let e = tokio::time::timeout(Duration::from_secs(10), events.recv())
-            .await
-            .expect("event")
-            .unwrap();
+    loop {
+        let e = next_core_event(&mut events).await;
         if e.method == MessageDelta::METHOD {
             deltas.push_str(e.params["text"].as_str().unwrap());
         }
         if e.method == TurnFinished::METHOD {
-            break e.params["outcome"].clone();
+            assert_eq!(e.params["outcome"]["status"], "completed", "{}", e.params);
+            break;
         }
-    };
-    assert_eq!(outcome["status"], "completed", "{outcome}");
+    }
     assert_eq!(deltas, "stamp itStamped HI.");
-
-    let msgs = call(SessionMessages::METHOD, json!({ "session_id": sid })).await;
+    let msgs = core
+        .handle(SessionMessages::METHOD, Some(json!({ "session_id": sid })))
+        .await
+        .unwrap();
     let msgs = msgs["messages"].as_array().unwrap();
     assert_eq!(msgs[1]["tool_calls"][0]["arguments"], r#"{"word":"hi"}"#);
     assert_eq!(msgs[1]["reasoning"], "stamp it");
     assert_eq!(msgs[2]["content"], "HI");
     assert_eq!(msgs[3]["content"], "Stamped HI.");
-
-    // What the API received: the system prompt apart, the tool round trip
-    // as tool_use and tool_result blocks.
-    let seen = seen.lock().unwrap().clone();
-    assert_eq!(seen[0]["model"], "claude-test");
-    assert!(seen[0]["system"].as_str().unwrap().starts_with("Be brief."));
-    assert_eq!(seen[0]["messages"][0]["content"][0]["text"], "stamp hi");
-    assert_eq!(
-        seen[0]["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|t| t["name"] == "stamp")
-            .count(),
-        1
-    );
-    let m = &seen[1]["messages"];
-    assert_eq!(m[1]["role"], "assistant");
-    assert_eq!(m[1]["content"][0]["type"], "tool_use");
-    assert_eq!(m[1]["content"][0]["input"]["word"], "hi");
-    assert_eq!(m[2]["content"][0]["type"], "tool_result");
-    assert_eq!(m[2]["content"][0]["content"], "HI");
 }
 
 #[test]
@@ -871,119 +695,6 @@ fn openai_sse(chunks: &[Json]) -> String {
     let mut s: String = chunks.iter().map(|c| format!("data: {c}\n\n")).collect();
     s.push_str("data: [DONE]\n\n");
     s
-}
-
-/// examples/plugins/switch: a Lua router over OpenAI-compatible entries,
-/// switched through the shared state between turns.
-#[tokio::test(flavor = "multi_thread")]
-async fn switch_plugin_routes_to_the_chosen_provider() {
-    use crate::Core;
-    use bone_proto::methods::*;
-    let delta = |d: Json| json!({ "choices": [{ "index": 0, "delta": d }] });
-    let (url, seen) = fake_openai(vec![
-        openai_sse(&[
-            delta(json!({ "reasoning_content": "use the tool" })),
-            delta(json!({ "tool_calls": [{ "index": 0, "id": "c1", "function": { "name": "stamp", "arguments": "{\"word\":" } }] })),
-            delta(json!({ "tool_calls": [{ "index": 0, "function": { "arguments": "\"hi\"}" } }] })),
-            json!({ "choices": [], "usage": { "prompt_tokens": 9, "completion_tokens": 4 } }),
-        ]),
-        openai_sse(&[delta(json!({ "content": "Stamped " })), delta(json!({ "content": "HI." }))]),
-        openai_sse(&[delta(json!({ "content": "from b" }))]),
-    ])
-    .await;
-
-    let dir = tempfile::tempdir().unwrap();
-    let plugin = dir.path().join("plugins/switch");
-    std::fs::create_dir_all(&plugin).unwrap();
-    std::fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/switch/core.lua"),
-        plugin.join("core.lua"),
-    )
-    .unwrap();
-    write(
-        dir.path(),
-        &format!(
-            r#"
-            bone.config.providers.a = {{ base_url = "{url}", model = "m1", api_key = "ka", stream_usage = true }}
-            bone.config.providers.b = {{ base_url = "{url}/", model = "m2", api_key = "kb" }}
-            bone.config.providers.switch = {{ type = "switch", model = "switch", default = "a" }}
-            bone.config.provider = "switch"
-            bone.tool.register {{ name = "stamp", run = function(a) return a.word:upper() end }}
-            "#
-        ),
-    );
-    let loaded = load(dir.path()).unwrap();
-    // on_ready published the choices for the TUI half.
-    let published =
-        std::fs::read_to_string(dir.path().join("state/shared/switch-providers.json")).unwrap();
-    let published: Json = serde_json::from_str(&published).unwrap();
-    assert_eq!(published["default"], "a");
-    assert_eq!(published["providers"][1]["name"], "b");
-    assert_eq!(published["providers"][1]["model"], "m2");
-
-    let core = Core::from_loaded(loaded);
-    let mut events = core.subscribe();
-    let call = |m: &'static str, p: Json| {
-        let core = &core;
-        async move { core.handle(m, Some(p)).await.unwrap() }
-    };
-    let work = tempfile::tempdir().unwrap();
-    let info = call(SessionCreate::METHOD, json!({ "cwd": work.path() })).await;
-    let sid = info["session_id"].as_str().unwrap().to_owned();
-    let mut turn = async |text: &str| {
-        call(
-            TurnStart::METHOD,
-            json!({ "session_id": sid, "text": text }),
-        )
-        .await;
-        let mut deltas = String::new();
-        loop {
-            let e = next_core_event(&mut events).await;
-            if e.method == MessageDelta::METHOD {
-                deltas.push_str(e.params["text"].as_str().unwrap());
-            }
-            if e.method == TurnFinished::METHOD {
-                assert_eq!(e.params["outcome"]["status"], "completed", "{}", e.params);
-                return deltas;
-            }
-        }
-    };
-    assert_eq!(turn("stamp hi").await, "use the toolStamped HI.");
-    std::fs::write(
-        dir.path().join("state/shared/switch.json"),
-        r#"{ "current": "b" }"#,
-    )
-    .unwrap();
-    assert_eq!(turn("again").await, "from b");
-
-    let msgs = call(SessionMessages::METHOD, json!({ "session_id": sid })).await;
-    let msgs = msgs["messages"].as_array().unwrap();
-    assert_eq!(msgs[1]["tool_calls"][0]["arguments"], r#"{"word":"hi"}"#);
-    assert_eq!(msgs[2]["content"], "HI");
-
-    let seen = seen.lock().unwrap().clone();
-    assert_eq!(seen.len(), 3);
-    assert_eq!(seen[0].0, "bearer ka");
-    assert_eq!(seen[0].1["model"], "m1");
-    assert_eq!(seen[0].1["stream_options"]["include_usage"], true);
-    assert!(
-        seen[0].1["tools"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|t| t["function"]["name"] == "stamp")
-    );
-    // The tool round trip in OpenAI's shape.
-    let m = &seen[1].1["messages"];
-    let n = m.as_array().unwrap().len();
-    assert_eq!(m[n - 2]["tool_calls"][0]["function"]["name"], "stamp");
-    assert_eq!(m[n - 1]["role"], "tool");
-    assert_eq!(m[n - 1]["tool_call_id"], "c1");
-    assert_eq!(m[n - 1]["content"], "HI");
-    // Switched: the other entry, its own key, no usage option.
-    assert_eq!(seen[2].0, "bearer kb");
-    assert_eq!(seen[2].1["model"], "m2");
-    assert!(seen[2].1.get("stream_options").is_none());
 }
 
 /// `model/complete` against a named OpenAI-compatible entry, with options.

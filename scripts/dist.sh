@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build a release tarball: dist/bone-<version>-<target>.tar.gz containing the
-# binary (with its Lua runtime built in), docs and the example plugin.
+# binary (with its Lua runtime built in), docs.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -14,7 +14,6 @@ rm -rf "$stage"
 mkdir -p "$stage"
 cp target/release/bone README.md "$stage/"
 cp -r docs "$stage/docs"
-mkdir -p "$stage/examples" && cp -r examples/plugins "$stage/examples/plugins"
 tar -C dist -czf "dist/$name.tar.gz" "$name"
 rm -rf "$stage"
 echo "dist/$name.tar.gz"

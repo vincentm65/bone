@@ -119,8 +119,13 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
         } else {
             None
         };
-        // A chat view asked to be drawn again (bone.chat.refresh_in).
-        let expiry = app.chat_expiry.map(|e| e.max(last_draw + FRAME));
+        // Chat view timers and UI-only redraws share the frame rate limit.
+        let expiry = app
+            .chat_expiry
+            .into_iter()
+            .chain(app.ui_expiry)
+            .min()
+            .map(|e| e.max(last_draw + FRAME));
         let draw_at = match (draw_at, expiry) {
             (Some(a), Some(b)) => Some(a.min(b)),
             (a, b) => a.or(b),

@@ -191,6 +191,8 @@ pub struct App {
     pub render_expires: Option<std::time::Instant>,
     /// When the chat on screen next needs drawing for a view's timer.
     pub chat_expiry: Option<std::time::Instant>,
+    /// A UI redraw requested without invalidating cached chat views.
+    pub ui_expiry: Option<std::time::Instant>,
     /// Numbers the items Lua adds to chats.
     pub lua_item_seq: u64,
     pub spinner: crate::ui::Spinner,
@@ -310,6 +312,7 @@ impl App {
             render_deps: None,
             render_expires: None,
             chat_expiry: None,
+            ui_expiry: None,
             lua_item_seq: 0,
             spinner: Default::default(),
             title: None,

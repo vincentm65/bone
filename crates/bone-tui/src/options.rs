@@ -129,8 +129,8 @@ impl std::fmt::Display for Value {
 pub fn describe(name: &str) -> &'static str {
     match name {
         "show_reasoning" => "show the model's reasoning (ctrl+r)",
-        "tool_preview_lines" => "rows of tool output under each call (style plugin)",
-        "diff_preview_lines" => "rows of diff under each edit (style plugin)",
+        "tool_preview_lines" => "rows of tool output under each call",
+        "diff_preview_lines" => "rows of diff under each edit",
         "prompt_max_height" => "rows the prompt grows to before it scrolls",
         "timeoutlen" => "milliseconds to wait for the rest of a key sequence",
         "mouse" => "wheel scrolling and drag-to-copy (off: the terminal's own)",

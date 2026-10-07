@@ -172,6 +172,7 @@ fn requests() {
         },
     );
     exchange::<SessionList>(5, Empty {}, vec![info()]);
+    exchange::<SessionActive>(5, Empty {}, vec![SID.into()]);
     exchange::<SessionMessages>(
         6,
         SessionRef {

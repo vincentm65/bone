@@ -16,8 +16,7 @@
 
 -- The defaults draw the standard UI (runtime/lua/bone/ui/). Replace any
 -- piece here (docs/lua.md, "Drawing the screen"), override a module under
--- ~/.bone/runtime/ starting from bone.builtin(...), or install the style plugin:
--- cp -r <bone repo>/examples/plugins/style ~/.bone/plugins/
+-- ~/.bone/runtime/ starting from bone.builtin(...).
 -- bone.ui.prompt = { prefix = "> " }
 -- bone.ui.statusline = function(ctx) return { " " .. ctx.title, "%=", " " } end
 

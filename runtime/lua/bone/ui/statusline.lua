@@ -84,8 +84,8 @@ load_total()
 state.events = {
   bone.on("turn/started", function(ev)
     if ev.session_id ~= (bone.chat.session() or {}).session_id then return end
-    state.started = now()
-    state.finished = nil
+    state.started, state.timing_session = now(), ev.session_id
+    state.finished, state.finished_elapsed = nil, nil
   end),
   bone.on("turn/finished", function(ev)
     if ev.session_id ~= (bone.chat.session() or {}).session_id then return end
@@ -114,6 +114,9 @@ function bone.ui.statusline(ctx)
   local left = {}
   local s = ctx.session
   local session_id = s and s.session_id
+  if session_id ~= state.timing_session then
+    state.started, state.finished, state.finished_elapsed, state.timing_session = nil, nil, nil, session_id
+  end
   if (session_id or "") ~= state.total_session then
     load_total(session_id)
     load_model()

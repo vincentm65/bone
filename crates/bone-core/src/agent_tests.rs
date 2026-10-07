@@ -141,23 +141,9 @@ impl Harness {
         Self::finish(core, provider, work, data).await
     }
 
-    /// A core running `core_lua` (plus the runtime and built-in plugins).
+    /// A core running a small inline Lua fixture plus the runtime.
     async fn with_lua(core_lua: &str, steps: Vec<Step>) -> Self {
-        Self::with_plugins(&[], core_lua, steps).await
-    }
-
-    /// With plugins from `examples/plugins/` installed.
-    async fn with_plugins(plugins: &[&str], core_lua: &str, steps: Vec<Step>) -> Self {
         let data = tempfile::tempdir().unwrap();
-        for name in plugins {
-            let dir = data.path().join("plugins").join(name);
-            std::fs::create_dir_all(&dir).unwrap();
-            let example = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .join("../../examples/plugins")
-                .join(name)
-                .join("core.lua");
-            std::fs::copy(example, dir.join("core.lua")).unwrap();
-        }
         let work = tempfile::tempdir().unwrap();
         let lua = format!(
             "bone.config.providers.x = {{ base_url = \"http://unused\", model = \"m\" }}
@@ -607,10 +593,11 @@ async fn cancel_while_streaming_keeps_partial_text() {
 
 #[tokio::test]
 async fn cancel_while_asking_closes_every_tool_call() {
-    // The approve plugin asks before shell commands.
-    let mut h = Harness::with_plugins(
-        &["approve"],
-        "",
+    let mut h = Harness::with_lua(
+        r#"bone.hook("tool_call", function(ev)
+          local answer = bone.ask({ kind = "approval", tool = ev.name })
+          if answer ~= "allow" then return { deny = "not approved" } end
+        end)"#,
         vec![
             calls(&[
                 ("c1", "shell", json!({"command": "true"})),
@@ -1471,7 +1458,7 @@ async fn mcp_tools_reach_the_model_and_survive_reloads() {
     assert!(h.call::<McpList>(Empty {}).await.unwrap().is_empty());
 }
 
-// ---- skills and prompt templates (plugins), lua/call ----------------------------
+// ---- lua/call ------------------------------------------------------------------
 
 impl Harness {
     /// `lua/call` for this session.
@@ -1527,149 +1514,6 @@ async fn clients_call_functions_core_lua_registered() {
     );
     let e = h.lua_call("demo.fail", json!({}), None).await.unwrap_err();
     assert!(e.message.contains("nope"), "{e:?}");
-}
-
-#[tokio::test]
-async fn registered_skills_are_listed_and_loaded_on_demand() {
-    let skills = tempfile::tempdir().unwrap();
-    let release = skills.path().join("release");
-    std::fs::create_dir_all(&release).unwrap();
-    std::fs::write(
-        release.join("SKILL.md"),
-        "---\nname: release\ndescription: \"Cut a release: changelog, tag, publish\"\n---\nStep 1: update CHANGELOG.md\n",
-    )
-    .unwrap();
-    std::fs::write(release.join("checklist.md"), "- [ ] tag").unwrap();
-    std::fs::create_dir_all(skills.path().join("not-a-skill")).unwrap();
-    let mut h = Harness::with_plugins(
-        &["skills"],
-        &format!(
-            r#"
-            assert(bone.skill.load_dir("{dir}") == 1)
-            bone.skill.register {{ name = "style", description = "house style", content = "Use tabs." }}
-            bone.skill.register {{ name = "hidden", description = "never shown", content = "x",
-              enabled = function(ctx) return false end }}
-            "#,
-            dir = skills.path().display()
-        ),
-        vec![
-            calls(&[
-                ("c1", "skill", json!({ "name": "release" })),
-                ("c2", "skill", json!({ "name": "hidden" })),
-                ("c3", "skill", json!({ "name": "style" })),
-            ]),
-            text("done"),
-        ],
-    )
-    .await;
-    h.start("ship it").await;
-    h.until::<TurnFinished>().await;
-    let system = h.provider.systems.lock().unwrap()[0].clone();
-    assert!(
-        system.contains("## Skills")
-            && system.contains("- release: Cut a release: changelog, tag, publish")
-            && system.contains("- style: house style")
-            && !system.contains("hidden"),
-        "{system}"
-    );
-    assert!(h.provider.tools.lock().unwrap()[0].contains(&"skill".to_owned()));
-    let t = h.transcript().await;
-    let release_text = tool_result(&t[2]).0;
-    assert!(
-        release_text.starts_with("# Skill: release")
-            && release_text.contains("Step 1: update CHANGELOG.md")
-            && !release_text.contains("description:")
-            && release_text.contains("release/checklist.md"),
-        "{release_text}"
-    );
-    assert_eq!(tool_result(&t[3]), ("no skill named hidden", true));
-    assert!(tool_result(&t[4]).0.contains("Use tabs."));
-
-    let list = h.lua_call("skills.list", json!({}), None).await.unwrap();
-    let names: Vec<&str> = list
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|s| s["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(names, ["hidden", "release", "style"]);
-    assert!(
-        list[1]["path"]
-            .as_str()
-            .unwrap()
-            .ends_with("release/SKILL.md")
-    );
-}
-
-#[tokio::test]
-async fn the_skills_prompt_can_be_left_to_plugins() {
-    let mut h = Harness::with_plugins(
-        &["skills"],
-        r#"bone.skill.register { name = "a", description = "b", content = "c" }
-           bone.config.skills.prompt = false"#,
-        vec![text("ok")],
-    )
-    .await;
-    h.start("hi").await;
-    h.until::<TurnFinished>().await;
-    assert!(!h.provider.systems.lock().unwrap()[0].contains("## Skills"));
-    assert!(h.provider.tools.lock().unwrap()[0].contains(&"skill".to_owned()));
-}
-
-#[tokio::test]
-async fn templates_expand_with_arguments() {
-    let prompts = tempfile::tempdir().unwrap();
-    std::fs::write(
-        prompts.path().join("review.md"),
-        "---\ndescription: Review a file\nargs: path, focus\n---\nReview {{path}} for {{focus}}.\n",
-    )
-    .unwrap();
-    std::fs::write(prompts.path().join("notes.txt"), "not a template").unwrap();
-    let h = Harness::with_plugins(
-        &["templates"],
-        &format!(
-            r#"
-            bone.template.load_dir("{dir}")
-            bone.template.register {{ name = "fix", description = "fix an issue", args = {{ "issue" }},
-              body = "Fix issue $1 ($@) in 100% of cases" }}
-            bone.template.register {{ name = "status", body = function(args, ctx)
-              local r = bone.system("printf clean")
-              return "git says " .. r.stdout .. " for " .. (args.argv[1] or "?") .. " in " .. tostring(ctx.cwd)
-            end }}
-            "#,
-            dir = prompts.path().display()
-        ),
-        vec![],
-    )
-    .await;
-    let list = h.lua_call("templates.list", json!({}), None).await.unwrap();
-    let names: Vec<&str> = list
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(names, ["fix", "review", "status"]);
-    assert_eq!(list[1]["args"], json!(["path", "focus"]));
-    assert_eq!(list[1]["description"], "Review a file");
-    let expand = |name: &str, args: &str| json!({ "name": name, "args": args });
-    let call = |args: Value| h.lua_call("templates.expand", args, Some("/proj"));
-    assert_eq!(
-        call(expand("review", r#"src/main.rs "error handling""#))
-            .await
-            .unwrap(),
-        "Review src/main.rs for error handling.\n"
-    );
-    assert_eq!(
-        call(expand("fix", "42 crash")).await.unwrap(),
-        "Fix issue 42 (42 crash) in 100% of cases"
-    );
-    assert_eq!(
-        call(expand("status", "main")).await.unwrap(),
-        "git says clean for main in /proj"
-    );
-    let e = call(expand("nope", "")).await.unwrap_err();
-    assert!(e.message.contains("no template named nope"), "{e:?}");
 }
 
 // ---- compaction ------------------------------------------------------------------
@@ -1943,79 +1787,6 @@ fn bad_compact_config_is_an_error() {
     );
 }
 
-// ---- the example plugins (core halves) -------------------------------------------
-
-#[tokio::test]
-async fn example_retry_plugin_retries_passing_errors_only() {
-    let mut h = Harness::with_plugins(
-        &["retry"],
-        "bone.config.retry.delay = 1",
-        vec![
-            Step::Fail("HTTP 503 Service Unavailable".into()),
-            Step::Fail("overloaded".into()),
-            text("ok"),
-            Step::Fail("HTTP 400: bad request".into()),
-        ],
-    )
-    .await;
-    h.start("one").await;
-    assert_eq!(
-        h.until::<TurnFinished>().await.outcome,
-        TurnOutcome::Completed
-    );
-    h.start("two").await;
-    assert_eq!(
-        h.until::<TurnFinished>().await.outcome,
-        TurnOutcome::Failed {
-            message: "HTTP 400: bad request".into()
-        }
-    );
-}
-
-#[tokio::test]
-async fn example_folder_plugins_load_mcp_skills_and_templates() {
-    let files = tempfile::tempdir().unwrap();
-    let script = files.path().join("server.sh");
-    std::fs::write(&script, crate::mcp::tests::BASH_SERVER).unwrap();
-    std::fs::write(
-        files.path().join("mcp.json"),
-        json!({ "mcpServers": { "sh": { "command": "bash", "args": [script.to_string_lossy()] } } })
-            .to_string(),
-    )
-    .unwrap();
-    std::fs::create_dir_all(files.path().join("skills/release")).unwrap();
-    std::fs::write(
-        files.path().join("skills/release/SKILL.md"),
-        "---\ndescription: cut a release\n---\nsteps",
-    )
-    .unwrap();
-    std::fs::create_dir_all(files.path().join("prompts")).unwrap();
-    std::fs::write(files.path().join("prompts/review.md"), "Review $1").unwrap();
-    let h = Harness::with_plugins(
-        &["mcp", "skills", "templates"],
-        &format!(
-            r#"
-            bone.config.mcp_files = {{ "{dir}/mcp.json" }}
-            bone.config.mcp_options = {{ lazy = true }}
-            bone.config.skill_dirs = {{ "{dir}/skills" }}
-            bone.config.template_dirs = {{ "{dir}/prompts" }}
-            "#,
-            dir = files.path().display()
-        ),
-        vec![],
-    )
-    .await;
-    let servers = h.call::<McpList>(Empty {}).await.unwrap();
-    assert_eq!(
-        (servers[0].name.as_str(), servers[0].state.as_str()),
-        ("sh", "idle")
-    );
-    let skills = h.lua_call("skills.list", json!({}), None).await.unwrap();
-    assert_eq!(skills[0]["name"], "release");
-    let templates = h.lua_call("templates.list", json!({}), None).await.unwrap();
-    assert_eq!(templates[0]["name"], "review");
-}
-
 // ---- parallel tool calls and output limits --------------------------------------
 
 const PARALLEL_TOOLS: &str = r#"
@@ -2089,25 +1860,6 @@ async fn parallel_calls_can_be_switched_off() {
         tool_result(&t[7]).0,
         "start p1, end p1, start p2, end p2, start w, end w, start p3, end p3"
     );
-}
-
-#[tokio::test]
-async fn example_output_cap_plugin_cuts_long_results() {
-    let mut h = Harness::with_plugins(
-        &["output-cap"],
-        r#"bone.config.output_cap.max = 200
-           bone.tool.register { name = "big", run = function() return "A" .. string.rep("x", 5000) .. "Z" end }"#,
-        vec![calls(&[("c1", "big", json!({}))]), text("ok")],
-    )
-    .await;
-    h.start("go").await;
-    let finished = h.until::<ToolFinished>().await;
-    h.until::<TurnFinished>().await;
-    let out = tool_result(&h.transcript().await[2]).0.to_owned();
-    assert!(out.len() < 400, "{}", out.len());
-    assert!(out.starts_with('A') && out.ends_with('Z') && out.contains("bytes omitted"));
-    // Clients see what the model sees.
-    assert_eq!(finished.output, out);
 }
 
 // ---- session management --------------------------------------------------------
@@ -2219,6 +1971,51 @@ async fn sessions_can_be_renamed_forked_and_deleted() {
         .map(|s| s.session_id)
         .collect();
     assert!(!left.contains(&sid) && left.len() == 2);
+}
+
+#[tokio::test]
+async fn session_active_tracks_all_running_turns_without_disk_access() {
+    let mut h = Harness::new(vec![Step::Hang("one".into()), Step::Hang("two".into())]).await;
+    let other = h
+        .call::<SessionCreate>(SessionCreateParams::default())
+        .await
+        .unwrap();
+    assert!(h.call::<SessionActive>(Empty {}).await.unwrap().is_empty());
+
+    h.start("first").await;
+    h.until::<MessageDelta>().await;
+    h.call::<TurnStart>(TurnStartParams {
+        session_id: other.session_id.clone(),
+        text: "second".into(),
+    })
+    .await
+    .unwrap();
+    h.until::<MessageDelta>().await;
+
+    // The query only inspects in-memory state, even when disk is unavailable.
+    let sessions = h._data.path().join("sessions");
+    let hidden = h._data.path().join("hidden-sessions");
+    std::fs::rename(&sessions, &hidden).unwrap();
+    let mut active = h.call::<SessionActive>(Empty {}).await.unwrap();
+    let mut expected = vec![h.session_id.clone(), other.session_id.clone()];
+    active.sort();
+    expected.sort();
+    assert_eq!(active, expected);
+    std::fs::rename(&hidden, &sessions).unwrap();
+
+    h.cancel().await;
+    h.until::<TurnFinished>().await;
+    assert_eq!(
+        h.call::<SessionActive>(Empty {}).await.unwrap(),
+        vec![other.session_id.clone()]
+    );
+    h.call::<TurnCancel>(SessionRef {
+        session_id: other.session_id,
+    })
+    .await
+    .unwrap();
+    h.until::<TurnFinished>().await;
+    assert!(h.call::<SessionActive>(Empty {}).await.unwrap().is_empty());
 }
 
 // ---- steering a running turn ------------------------------------------------------

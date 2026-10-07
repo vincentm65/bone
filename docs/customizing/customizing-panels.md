@@ -12,7 +12,7 @@ Panels are for things you open and close at runtime.
 
 Reference: `docs/lua.md` "Panels: docked areas you own". Source:
 `crates/bone-tui/src/panel.rs` (sizing, focus, keys) and `lua.rs` (the API).
-A complete example: `examples/plugins/tasks/` (a persistent task panel).
+The [Bone catalog](https://github.com/vincentm65/bone-catalog) includes `review` and `mcp` packages with panels.
 
 ## Opening one
 

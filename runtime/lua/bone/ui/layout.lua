@@ -14,23 +14,20 @@ function M.setup(opts)
     min = 1,
   }
 
-  bone.ui.regions.top = {
-    size = "auto",
-    max = 3,
+  -- Drawn inside the chat viewport, after side panels have taken their space.
+  bone.ui.regions.chat_empty = {
     render = function()
       local s = bone.api.session()
       if s or bone.chat.session().items > 0 then return {} end
       if bone.settings.get("setup.skipped") then
         return {
-          "",
-          { { "  No model provider configured.", "Dim" } },
-          { { "  Run /setup to connect one · /health to diagnose setup", "Dim" } },
+          { { "No model provider configured.", "Dim" } },
+          { { "Run /setup to connect one · /health to diagnose setup", "Dim" } },
         }
       end
       return {
-        "",
-        { { "  New session. Type a message and press enter.", "Dim" } },
-        { { "  /help lists commands · ctrl+o opens an earlier session", "Dim" } },
+        { { "New session. Type a message and press enter.", "Dim" } },
+        { { "/help lists commands · ctrl+o opens an earlier session", "Dim" } },
       }
     end
   }

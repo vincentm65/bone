@@ -620,6 +620,20 @@ impl SessionStore {
             .filter(|t| !t.trim().is_empty())
     }
 
+    /// Running sessions are always held in memory; no disk reads are needed.
+    pub fn active(&self) -> Vec<SessionId> {
+        let sessions: Vec<_> = self
+            .loaded
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(id, (session, _))| (id.clone(), session.clone()))
+            .collect();
+        sessions
+            .into_iter()
+            .filter_map(|(id, session)| session.lock().unwrap().active.is_some().then_some(id))
+            .collect()
+    }
     /// Every session on disk, newest first. Unreadable files are skipped.
     pub fn list(&self) -> Result<Vec<SessionInfo>, SessionError> {
         let entries = match std::fs::read_dir(&self.dir) {
@@ -685,11 +699,10 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
     let mut reader = BufReader::new(File::open(path)?);
     let mut line = String::new();
     reader.read_line(&mut line)?;
-    let header = match serde_json::from_str(&line) {
-        Ok(Line {
-            record: Record::Session(h),
-            ..
-        }) => h,
+    // Timestamps are only needed by the index. Reading Record directly avoids
+    // buffering every message's JSON through Line's flattened fields.
+    let header = match serde_json::from_str::<Record>(&line) {
+        Ok(Record::Session(h)) => h,
         _ => return Err(corrupt("missing session header".into())),
     };
     let mut loaded = Loaded {
@@ -712,7 +725,7 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
         if reader.read_line(&mut line)? == 0 {
             break;
         }
-        match serde_json::from_str::<Line>(&line).map(|l| l.record) {
+        match serde_json::from_str::<Record>(&line) {
             Ok(Record::Usage(_)) => loaded.good_len += line.len() as u64,
             Ok(Record::Message(msg)) => {
                 if loaded.info.title.is_none() {
@@ -780,6 +793,26 @@ pub(crate) fn title_of(msg: &ChatMessage) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Read-only benchmark against an existing sessions directory.
+    #[test]
+    #[ignore = "set BONE_BENCH_SESSIONS_DIR to benchmark session listing"]
+    fn benchmark_session_list() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = SessionStore::new(dir.path());
+        store.dir = std::env::var_os("BONE_BENCH_SESSIONS_DIR")
+            .expect("BONE_BENCH_SESSIONS_DIR")
+            .into();
+        for label in ["cold", "warm", "warm"] {
+            let start = std::time::Instant::now();
+            let sessions = store.list().unwrap();
+            eprintln!(
+                "{label}: {} sessions in {:?}",
+                sessions.len(),
+                start.elapsed()
+            );
+        }
+    }
 
     #[test]
     fn create_persist_reload_list() {

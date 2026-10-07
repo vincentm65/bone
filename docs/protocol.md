@@ -41,6 +41,7 @@ After `initialize`, the server runs each request on its own task: replies carry 
 | `echo` | `{ text }` | `{ text }`, plus an `echoed` event (for testing) |
 | `session/create` | `{ cwd? }` | `SessionInfo`. `cwd` defaults to the server's directory, so clients should send their own |
 | `session/list` | `{}` | `[SessionInfo]`, newest first |
+| `session/active` | `{}` | `[SessionId]` for currently running turns in the core (ordering unspecified); no transcripts are loaded |
 | `session/messages` | `{ session_id }` | `{ info, messages: [ChatMessage], active_turn? }` |
 | `session/rename` | `{ session_id, title }` | `SessionInfo` with the new title (kept in `<id>.title` next to the session file); a `session/updated` event with `reason: "rename"` follows |
 | `session/fork` | `{ session_id, before_turn? }` | `SessionInfo` of a new session holding a copy of the transcript (with `before_turn = N`, only what came before the Nth user message), its `parent` set. The original is untouched |
@@ -104,7 +105,7 @@ Every event carries `session_id` (except `echoed`, `ask/resolved`, `core/reloade
 | `tool/output` | `{ call_id, text }` | output a running foreground tool produced, in order, as it comes; `tool/finished` still carries the whole result. Detached shell processes use `process/changed` after their start result |
 | `tool/finished` | `{ call_id, output, is_error, duration_ms? }` | its result, as the model will see it, and how long it ran |
 | `process/changed` | `{ session_id, version, process: ProcessSnapshot, chunk? }` | a managed shell process started, produced output, or changed state. `chunk` is `{ offset, data }`: new output as written, at byte `offset` (chunks follow on from each other; after a gap, `process/read` it) |
-| `ask/requested` | `{ ask_id, question }` | core Lua (a hook or tool) called `bone.ask(question)` and waits; answer with `ask/respond`. `question` is whatever the Lua passed, e.g. the approve plugin's `{ kind: "approval", title, tool, arguments }` |
+| `ask/requested` | `{ ask_id, question }` | core Lua (a hook or tool) called `bone.ask(question)` and waits; answer with `ask/respond`. `question` is whatever the Lua passed, e.g. `{ kind: "confirm", text: "Write this file?" }` |
 | `ask/resolved` | `{ ask_id, answer }` | answered by some client, or `answer: null` if the turn was cancelled first |
 | `turn/steered` | `{ text }` | a steer message from the queue joined the running turn's transcript (show it as a user message) |
 | `queue/changed` | `{ items, paused }` | the session's queue, all of it, after any change |
@@ -118,7 +119,7 @@ Every event carries `session_id` (except `echoed`, `ask/resolved`, `core/reloade
 | `session/compacted` | `{ messages, tokens_before, tokens_after, reason }` | the session was compacted (`reason`: `"manual"` from `session/compact`, `"limit"` over `compact.limit`, `"overflow"` after the model said the context is too long, or `"clear"`). The transcript did not change; there is nothing to reload |
 | `session/updated` | `{ reason: "append" \| "compact" \| "rename" \| "lagged" }` | core Lua changed the session's transcript (`bone.session.append`, or `bone.session.compact` replacing it), or it was renamed; load it again with `session/messages`. `"lagged"`, with `session_id` empty: this client fell behind and missed events, so load every session it shows again |
 
-A typical turn: `turn/started`, then `message/delta`…, `message/completed` (with `tool_calls`), and for each call `tool/started`, then `ask/requested` → `ask/resolved` if a hook asks the user (the approve plugin does for tools that change things), then `tool/finished`. That repeats until a `message/completed` arrives without tool calls, then `turn/finished`.
+A typical turn: `turn/started`, then `message/delta`…, `message/completed` (with `tool_calls`), and for each call `tool/started`, then `ask/requested` → `ask/resolved` if a hook asks the user (for example, a custom approval hook), then `tool/finished`. That repeats until a `message/completed` arrives without tool calls, then `turn/finished`.
 
 Events are broadcast to all clients. A client that falls more than 8192 events behind loses the oldest ones, so treat `message/completed` and `session/messages` as authoritative over accumulated deltas.
 

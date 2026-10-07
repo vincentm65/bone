@@ -180,7 +180,7 @@ end
 -- ---- messages -------------------------------------------------------------
 
 function views.user(item, ctx)
-  local out = starts("user", ctx)
+  local out = { {} } -- A blank line above every user message, including the first.
   local band = "UserMessage"
   for i, line in ipairs(lines(item.text)) do
     local first = i == 1 and { { "› ", "UserPrompt" } } or { { "  ", band } }
@@ -256,6 +256,7 @@ local HINT = " (ctrl+t)"
 local LABEL_MAX = 10 -- label rows before "⋮ +N lines"
 local GUTTER_MAX = 5 -- gutter rows before the first 2, "⋮ +N", last 2
 local PREVIEW_MAX = 5 -- output lines of other tools
+local AGENT_PREVIEW_MAX = 3 -- rendered report rows under a sub-agent's task
 
 local function detail()
   local d = bone.o.tool_detail
@@ -515,6 +516,51 @@ local function shell_label(args)
   return #out > 0 and out or { { { "shell", "ToolName" } } }
 end
 
+-- A delegated task is a small report, with its own hierarchy and Markdown.
+-- Keep the preview inside the same gutter as the expanded report so it
+-- cannot be mistaken for the main assistant's answer.
+local function agent_content(item, ctx, args)
+  local name = type(args.name) == "string" and trim(args.name) or ""
+  if name == "" then name = "subagent" end
+  local task = type(args.task) == "string" and trim(args.task):gsub("%s+", " ") or ""
+  local title = { { task ~= "" and task or name, "Accent" } }
+  if task ~= "" then
+    title[#title + 1] = { " · " .. name, "Dim" }
+  end
+  local status = not item.done and "running" or item.is_error and "failed" or "done"
+  title[#title + 1] = { " · " .. status, item.is_error and "ToolError" or "Dim" }
+
+  local report = bone.ui.markdown(trim(item.output or item.live or ""), math.max(ctx.width - 8, 1))
+  local shown = (expanded() or item.is_error) and #report or math.min(#report, AGENT_PREVIEW_MAX)
+  if not expanded() and not item.is_error then
+    -- Stop at the end of the opening paragraph, rather than leaving a
+    -- dangling "Changes:" label. A leading heading can keep its paragraph.
+    local heading = false
+    for _, span in ipairs(report[1] or {}) do heading = heading or span[2] == "MdHeading" end
+    for i = 2, shown do
+      if #report[i] == 0 and not (heading and i == 2) then
+        shown = i - 1
+        break
+      end
+    end
+  end
+  -- A blank at the preview boundary adds space without saying anything.
+  while shown > 0 and #report[shown] == 0 do shown = shown - 1 end
+  local body = {}
+  for i = 1, shown do body[#body + 1] = report[i] end
+  if shown < #report then
+    body[#body + 1] = { { more(#report - shown, "report line"), "ToolSummary" } }
+  end
+  local gutter_group = item.is_error and "ToolError" or "ToolGutter"
+  local rows = {}
+  for i, line in ipairs(body) do
+    local row = { { i == #body and "      ╰ " or "      │ ", gutter_group } }
+    append(row, line)
+    rows[#rows + 1] = row
+  end
+  return { title = title, body = rows }
+end
+
 --- The built-in content for a tool call: { title = spans or { spans, ... },
 --- lines = { spans, ... }, body = rows drawn as they are (gutter, diff) }.
 function bone.ui.tool_content(item, ctx)
@@ -525,7 +571,9 @@ function bone.ui.tool_content(item, ctx)
   local name = item.name
   local err = done and item.is_error and gutter(out, width, "ToolOutput", "ToolError") or nil
 
-  if name == "shell" then
+  if name == "subagent" then
+    return agent_content(item, ctx, args)
+  elseif name == "shell" then
     local body, code = split_exit_code(out)
     local failed = item.is_error or (code ~= nil and code ~= 0)
     if not done then
@@ -563,10 +611,8 @@ function bone.ui.tool_content(item, ctx)
     return { title = file_label(name, args.path, summary), body = diff_view(rows, width) }
   end
 
-  -- A subagent call reads as its agent and task: "reviewer check the diff".
   local target = args.path or args.query or args.task
-  local agent = name == "subagent" and args.name ~= "" and args.name
-  local title = { { type(agent) == "string" and agent or name, "ToolName" } }
+  local title = { { name, "ToolName" } }
   if type(target) == "string" and target ~= "" then
     title[#title + 1] = { " " .. target, "ToolArgs" }
   end
@@ -703,6 +749,8 @@ function views.tool(item, ctx)
     marker = { "  " .. running_mark(item) .. " ", "ToolRunning" }
   elseif item.is_error then
     marker = { "  ✕ ", "ToolError" }
+  elseif item.name == "subagent" then
+    marker = { "  ✓ ", "Accent" }
   else
     marker = { "    ", "Normal" }
   end

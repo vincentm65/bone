@@ -672,7 +672,7 @@ bone.on("message/delta", function(ev)
     end
     return
   end
-  a.stream = (a.stream .. (ev.text or "")):sub(-400)
+  a.stream = (a.stream .. (ev.text or "")):sub(-400):gsub("^[\128-\191]+", "")
   a.detail = last_line(a.stream) or a.detail
 end)
 
@@ -718,7 +718,7 @@ bone.on("mouse", function(ev)
     end
     return true
   end
-  if ev.index and ev.line == 1 then
+  if ev.index then
     local it = bone.chat.item(ev.index)
     local id = it and it.kind == "tool" and it.name == "subagent" and by_call[it.id]
     if id then

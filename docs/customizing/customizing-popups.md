@@ -7,9 +7,7 @@ popup for transient, floating things: confirmations, pickers, a pager, a
 streaming answer.
 
 Reference: `docs/lua.md` "UI API". Source: `crates/bone-tui/src/ui.rs`
-(windows, pickers, pagers) and `lua.rs`. Complete examples:
-`examples/plugins/approve/` (confirmation popups), `ask-model/` (a pager
-filled by a streaming model call), `switch/` (a provider picker).
+(windows, pickers, pagers) and `lua.rs`. The snippets below illustrate each API.
 
 ## A focused window
 
@@ -68,8 +66,9 @@ h:close()
 
 Typing filters (matching `format(item)`), `up`/`down` (or `ctrl+p`/`ctrl+n`,
 the wheel) move, `enter` calls `on_choice(item, index)`, `esc` calls
-`on_choice(nil)`. `bone.ui.sessions()` is the built-in session picker (`ctrl+o`);
-define your own with `bone.ui.select` to change how sessions are listed.
+`on_choice(nil)`. `bone.ui.sessions()` opens the built-in conversation sidebar
+(`ctrl+o`), implemented with `bone.ui.panel`; replace it with your own panel
+or `bone.ui.select` to change how sessions are listed.
 
 ## A pager
 
@@ -82,7 +81,7 @@ h:close()
 `content` is a string (wrapped; `#` lines are headings) or a list of lines.
 `up`/`down`/wheel, `pageup`/`pagedown`, `home`/`end`, `esc` or `q` closes.
 
-Streaming into a pager (from `ask-model`):
+Streaming into a pager (with a `question` string):
 
 ```lua
 local answer, pager = "", bone.ui.pager("…", { title = "ask" })
@@ -104,19 +103,25 @@ notifications take rows at the bottom.
 ## Confirming something from the core
 
 A core hook or tool can pause and ask the user (`bone.ask`); the TUI shows the
-question however it likes and answers it back. The `approve` plugin is a
-complete example; the shape is:
+question however it likes and answers it back. For example, pair this TUI
+handler with the `bone.ask` hook in [lua.md](../lua.md#asking-the-user):
 
 ```lua
 bone.on("ask/requested", function(ev)
   -- ev: { ask_id, question = ... }  (question is whatever the core sent)
-  local w = bone.ui.popup{
+  local w
+  local function answer(value)
+    bone.ui.close(w)
+    bone.request("ask/respond", { ask_id = ev.ask_id, answer = value })
+  end
+  w = bone.ui.popup{
+    guard = 300,
     lines = { { ev.question.text or "", "Normal" },
               "y = yes   n = no" },
     keys = {
-      y = function() bone.request("ask/respond", { ask_id = ev.ask_id, answer = "yes" }) end,
-      n = function() bone.request("ask/respond", { ask_id = ev.ask_id, answer = "no" }) end,
-      esc = function() bone.request("ask/respond", { ask_id = ev.ask_id, answer = "no" }) end,
+      y = function() answer("yes") end,
+      n = function() answer("no") end,
+      esc = function() answer("no") end,
     },
   }
 end)

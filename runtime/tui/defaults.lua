@@ -155,39 +155,9 @@ map({
   wheeldown = "scroll_down",
 }, "panel")
 
--- The session picker (ctrl+o, /sessions), built on bone.ui.select.
+-- The conversation sidebar (ctrl+o, /sessions), implemented entirely in Lua.
 function bone.ui.sessions()
-  local home = os.getenv("HOME")
-  local picker = bone.ui.select({}, {
-    prompt = "Sessions",
-    loading = true,
-    empty = "no sessions yet",
-    format = function(s)
-      local dir = s.cwd
-      if home and dir:sub(1, #home) == home then
-        dir = "~" .. dir:sub(#home + 1)
-      end
-      return (s.title or "[untitled]") .. "  " .. dir
-    end,
-    on_choice = function(s)
-      if s then
-        bone.api.open_session(s.session_id)
-      end
-    end,
-  })
-  bone.request("session/list", {}, function(list, err)
-    if err then
-      picker:close()
-      bone.notify("cannot list sessions: " .. err, "error")
-      return
-    end
-    -- Subagents' sessions open from their owner's tray.
-    local top = {}
-    for _, s in ipairs(list) do
-      if not s.owner then top[#top + 1] = s end
-    end
-    picker:set_items(top)
-  end)
+  return require("bone.ui.sessions").open()
 end
 
 -- Matching slash commands while typing "/…", attached to the prompt.

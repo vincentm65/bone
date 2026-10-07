@@ -569,6 +569,12 @@ function bone.ui.refresh()
   api("ui_refresh")
 end
 
+--- Schedule a UI frame after `ms` milliseconds without invalidating chat
+--- views. Call from a panel/region/statusline/popup render for animation;
+--- repeat each frame to keep it running. The earliest pending request wins.
+function bone.ui.refresh_in(ms)
+  return api("ui_refresh_in", ms)
+end
 --- Render an item with the current views, e.g. inside a region.
 function bone.ui.render(item, width, region)
   local view = bone.ui.views[item.kind]

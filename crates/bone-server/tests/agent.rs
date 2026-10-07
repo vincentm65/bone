@@ -213,19 +213,12 @@ async fn lua_tool_and_hooks_over_http() {
               run = function(args) local n = 0; for _ in args.text:gmatch("%S+") do n = n + 1 end; return tostring(n) end,
             }}
             bone.hook("tool_call", function(ev)
+              local answer = bone.ask({{ kind = "approval", tool = ev.name }})
+              if answer ~= "allow" then return {{ deny = "not approved" }} end
               if ev.name == "shell" then return {{ deny = "shell is off" }} end
             end)
             "#
         ),
-    )
-    .unwrap();
-    // The approve plugin from examples/, so tool calls ask first.
-    let plugin = dir.path().join("plugins/approve");
-    std::fs::create_dir_all(&plugin).unwrap();
-    std::fs::copy(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../examples/plugins/approve/core.lua"),
-        plugin.join("core.lua"),
     )
     .unwrap();
     let work = tempfile::tempdir().unwrap();
@@ -247,7 +240,7 @@ async fn lua_tool_and_hooks_over_http() {
         })
         .await
         .unwrap();
-    // The approve plugin asks (over the protocol) before both calls;
+    // The inline hook asks (over the protocol) before both calls;
     // the client allows them, then the user's hook still refuses shell.
     let mut asked = Vec::new();
     loop {

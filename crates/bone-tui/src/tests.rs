@@ -31,30 +31,6 @@ struct Harness {
     _dir: Option<tempfile::TempDir>,
 }
 
-/// Install `examples/plugins/style` into a config dir.
-fn install_style(config: &std::path::Path) {
-    install_example(config, "style");
-}
-
-/// Install `examples/plugins/<name>` into a config dir.
-fn install_example(config: &std::path::Path, name: &str) {
-    fn copy(from: &std::path::Path, to: &std::path::Path) {
-        std::fs::create_dir_all(to).unwrap();
-        for e in std::fs::read_dir(from).unwrap() {
-            let e = e.unwrap();
-            if e.file_type().unwrap().is_dir() {
-                copy(&e.path(), &to.join(e.file_name()));
-            } else {
-                std::fs::copy(e.path(), to.join(e.file_name())).unwrap();
-            }
-        }
-    }
-    let from = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../examples/plugins")
-        .join(name);
-    copy(&from, &config.join("plugins").join(name));
-}
-
 fn info(id: &str, title: Option<&str>) -> Value {
     json!({ "session_id": id, "cwd": "/work", "created_at": 0, "title": title })
 }
@@ -97,11 +73,7 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
         );
     }
     Ok(match method {
-        "mcp/list" => json!([
-            { "name": "gh", "state": "ready", "tools": ["gh_search"] },
-            { "name": "db", "state": "failed", "error": "cannot run db-mcp", "tools": [] },
-        ]),
-        // The example plugins' core halves, as a core would answer for them.
+        // Core RPC replies used by the API-contract tests.
         "session/compact" => json!({
             "session_id": params["session_id"],
             "messages": if params["clear"] == json!(true) { 0 } else { 12 },
@@ -110,11 +82,7 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
             "reason": if params["clear"] == json!(true) { "clear" } else { "manual" },
         }),
         "lua/call" => match params["name"].as_str().unwrap_or_default() {
-            "skills.list" => json!([{ "name": "release", "description": "cut a release" }]),
-            "templates.list" => {
-                json!([{ "name": "review", "description": "review", "args": ["path"] }])
-            }
-            "templates.expand" => json!(format!(
+            "demo.echo" => json!(format!(
                 "Review {}",
                 params["args"]["args"].as_str().unwrap_or("")
             )),
@@ -125,23 +93,17 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
                 ));
             }
         },
-        // What the session index would hold, for the stats plugin.
+        // Usage for the runtime session picker and statusline.
         "store/query" => {
-            let sql = params["sql"].as_str().unwrap_or_default();
-            let rows = if sql.contains("ORDER BY rowid DESC LIMIT 1") && !sql.contains("sum(") {
-                json!([[10, 2]])
-            } else if sql.contains("FROM tool_calls") {
-                json!([["edit_file", 10, 2, 300.0], ["shell", 4, 0, 1200.0]])
-            } else if sql.contains("JOIN sessions") {
-                json!([["Walrus hunt", "/home/u/zoo", 12800, 3]])
-            } else if sql.contains("GROUP BY provider, model") {
-                json!([["openai", "gpt-5", 3, 12000, 800, 600]])
-            } else if sql.contains("strftime('%w'") {
-                json!([["1", "14", 12800]])
-            } else if sql.contains(" AS k") {
-                json!([["2026-10-03", 12800, 3]])
-            } else if sql.contains(" AS d") {
-                json!([["2026-10-03", 12800]])
+            let rows = if params["sql"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("SELECT s.id, s.updated_at")
+            {
+                json!([
+                    ["s-two", 1700000001, 12800, 3],
+                    ["s-one", 1700000000, 42, 1]
+                ])
             } else {
                 json!([[3, 12000, 800, 600, 1, 1]])
             };
@@ -168,6 +130,7 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
 
         "turn/start" => json!({ "turn_id": 1 }),
         "session/list" => json!([info("s-two", Some("second")), info("s-one", Some("first"))]),
+        "session/active" => json!(["s-one"]),
         "health/check" => {
             json!([{ "name": "provider", "status": "ok", "message": "m at http://x" }])
         }
@@ -183,10 +146,9 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
 }
 
 impl Harness {
-    /// With the style plugin installed (most tests check how things look).
+    /// The standard runtime UI, with an isolated user config.
     async fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        install_style(dir.path());
         let mut h = Self::build(Some(dir.path().to_owned())).await;
         h.app.load_user_config();
         h.settle().await;
@@ -216,11 +178,10 @@ impl Harness {
         h
     }
 
-    /// With a config dir containing `tui.lua` (and the style plugin),
+    /// With a config dir containing `tui.lua`,
     /// loaded like at startup.
     async fn with_config(tui_lua: &str) -> (Self, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
-        install_style(dir.path());
         std::fs::write(dir.path().join("tui.lua"), tui_lua).unwrap();
         let mut h = Self::build(Some(dir.path().to_owned())).await;
         h.app.load_user_config();
@@ -411,7 +372,7 @@ async fn first_message_creates_a_session_and_streams_the_reply() {
     let screen = h.screen(80, 24);
     assert!(screen.contains("› hello\n  there"), "{screen}");
     assert!(screen.contains("Hi!▍"), "{screen}");
-    assert!(screen.contains("working 0s  ctrl+c to cancel"), "{screen}");
+    assert!(screen.contains("thinking"), "{screen}");
 
     h.emit::<MessageCompleted>(MessageCompletedParams {
         session_id: "s-new".into(),
@@ -433,7 +394,7 @@ async fn first_message_creates_a_session_and_streams_the_reply() {
     let screen = h.screen(80, 24);
     assert!(screen.contains("  Hi! Done."), "{screen}");
     assert!(
-        screen.contains(" hello") && screen.contains("10 in · 2 out  │  /work"),
+        screen.contains(" hello") && screen.contains("curr 600 | total 12.0k"),
         "{screen}"
     );
     assert!(!screen.contains("working"), "{screen}");
@@ -461,9 +422,28 @@ fn approval(id: u64, tool: &str, args: Value) -> AskRequestedParams {
 }
 
 #[tokio::test]
-async fn approve_plugin_popup_answers_questions() {
+async fn approval_popup_answers_questions() {
     let dir = tempfile::tempdir().unwrap();
-    install_example(dir.path(), "approve");
+    std::fs::write(
+        dir.path().join("tui.lua"),
+        r#"
+        local popups = {}
+        bone.on("ask/requested", function(ev)
+          if ev.question.kind ~= "approval" then return end
+          local function answer()
+            bone.request("ask/respond", { ask_id = ev.ask_id, answer = "allow" })
+            bone.ui.close(popups[ev.ask_id])
+          end
+          popups[ev.ask_id] = bone.ui.popup({
+            lines = { ev.question.title }, keys = { y = answer }, guard = 300,
+          })
+        end)
+        bone.on("ask/resolved", function(ev)
+          if popups[ev.ask_id] then bone.ui.close(popups[ev.ask_id]) end
+        end)
+    "#,
+    )
+    .unwrap();
     let mut h = Harness::build(Some(dir.path().to_owned())).await;
     h.app.load_user_config();
     h.settle().await;
@@ -474,12 +454,7 @@ async fn approve_plugin_popup_answers_questions() {
         .await;
     assert_eq!(h.app.context(), Context::Popup);
     let screen = h.screen(80, 24);
-    assert!(
-        screen.contains("Allow shell?")
-            && screen.contains("$ rm -rf build")
-            && screen.contains("a always"),
-        "{screen}"
-    );
+    assert!(screen.contains("Allow shell?"), "{screen}");
 
     // Keys right after the popup appears are swallowed, and `y` never
     // reaches the prompt.
@@ -501,7 +476,7 @@ async fn approve_plugin_popup_answers_questions() {
         json!({"path": "a", "content": "x"}),
     ))
     .await;
-    assert!(h.screen(80, 24).contains("a (1 lines)"));
+    assert!(h.screen(80, 24).contains("Allow write_file?"));
     h.emit::<AskResolved>(AskResolvedParams {
         ask_id: 8,
         answer: Value::Null,
@@ -509,7 +484,7 @@ async fn approve_plugin_popup_answers_questions() {
     .await;
     assert_eq!(h.app.context(), Context::Main);
 
-    // Questions of other kinds are not this plugin's business.
+    // The handler ignores unrelated questions.
     h.emit::<AskRequested>(AskRequestedParams {
         ask_id: 9,
         session_id: None,
@@ -673,21 +648,99 @@ async fn slash_menu_scrolls_when_it_overflows() {
 }
 
 #[tokio::test]
+async fn session_sidebar_groups_live_and_recent_chats() {
+    let mut h = Harness::new().await;
+    h.lua("bone.ui.spinner = { frames = { 'A', 'B' }, interval = 1 }")
+        .await;
+    h.input("{ctrl+o}").await;
+    let screen = h.screen(80, 24);
+    assert!(
+        screen.contains("Recent · last 1h · 1") && screen.contains("History · 1"),
+        "{screen}"
+    );
+    assert!(
+        screen.find("first").unwrap() < screen.find("second").unwrap(),
+        "{screen}"
+    );
+    assert!(
+        screen.contains("A first") || screen.contains("B first"),
+        "{screen}"
+    );
+    assert!(h.requests("session/messages").is_empty());
+    h.emit::<TurnFinished>(finished("s-one", TurnOutcome::Completed))
+        .await;
+    let screen = h.screen(80, 24);
+    assert!(
+        !screen.contains("Running ·") && screen.contains("Recent · last 1h"),
+        "{screen}"
+    );
+    h.lua("bone.ui.sessions_recent_seconds = 1800").await;
+    assert!(h.screen(80, 24).contains("Recent · last 30m"));
+    let queries_before_start = h.requests("store/query").len();
+    h.emit::<TurnStarted>(started("s-two", "work")).await;
+    assert_eq!(
+        h.requests("store/query").len(),
+        queries_before_start + 1,
+        "starting a turn must refresh sidebar counts, not only finishing it"
+    );
+    let screen = h.screen(80, 24);
+    assert!(
+        screen.contains("A second") || screen.contains("B second"),
+        "{screen}"
+    );
+    // Header lines don't open a transcript; selection stays on its session.
+    h.app.mouse("down", "left", (5, 2));
+    h.settle().await;
+    assert!(h.requests("session/messages").is_empty());
+    h.input("{enter}").await;
+    assert_eq!(
+        h.requests("session/messages"),
+        vec![json!({ "session_id": "s-one" })]
+    );
+    assert!(h.screen(80, 24).contains("Recent · last 30m · 2"));
+}
+#[tokio::test]
+async fn session_sidebar_mouse_opens_conversation() {
+    let mut h = Harness::new().await;
+    h.input("{ctrl+o}").await;
+    let screen = h.screen(80, 24);
+    let y = screen
+        .lines()
+        .position(|line| line.contains("first"))
+        .unwrap() as u16;
+    h.app.mouse("down", "left", (5, y));
+    h.settle().await;
+    assert_eq!(h.app.context(), Context::Main);
+    assert_eq!(
+        h.requests("session/messages"),
+        vec![json!({ "session_id": "s-one" })]
+    );
+}
+#[tokio::test]
 async fn session_picker_filters_and_opens() {
     let mut h = Harness::new().await;
     h.input("{ctrl+o}").await;
-    // The picker is a Lua window (bone.ui.select), so the popup context.
-    assert_eq!(h.app.context(), Context::Popup);
+    // Conversations use a docked Lua panel, not a floating picker.
+    assert_eq!(
+        h.app.context(),
+        Context::Panel,
+        "{} {}",
+        h.message(),
+        h.screen(80, 24)
+    );
     let screen = h.screen(80, 24);
     assert!(
-        screen.contains("second") && screen.contains("first"),
+        screen.contains("second")
+            && screen.contains("first")
+            && screen.contains("12.8k tokens")
+            && screen.contains("3 turns"),
         "{screen}"
     );
     // Typing filters.
     h.input("firs").await;
     let screen = h.screen(80, 24);
     assert!(
-        screen.contains("Sessions  firs") && screen.contains("first") && !screen.contains("second"),
+        screen.contains("Search: firs") && screen.contains("first") && !screen.contains("second"),
         "{screen}"
     );
     h.input("{enter}").await;
@@ -720,7 +773,7 @@ async fn prompt_grows_and_history_recalls() {
     let mut h = Harness::new().await;
     h.input("one{ctrl+j}two{ctrl+j}three").await;
     let screen = h.screen(40, 12);
-    assert!(screen.contains("› one\n  two\n  three"), "{screen}");
+    assert!(screen.contains(" › one\n   two\n   three"), "{screen}");
     h.input("{enter}").await;
     h.emit::<TurnStarted>(started("s-new", "one")).await;
     h.emit::<TurnFinished>(finished("s-new", TurnOutcome::Completed))
@@ -1040,6 +1093,7 @@ async fn lua_statusline_divider_and_broken_ui() {
     let (mut h, _dir) = Harness::with_config(
         r#"
         bone.ui.statusline = function(ctx) return { { "<" .. ctx.title .. ">", "Accent" }, "%=", tostring(ctx.popup) } end
+        bone.ui.layout = nil
         bone.ui.divider = function(ctx) return { "[", tostring(ctx.width), "]", { fill = "=" } } end
         "#,
     )
@@ -1051,7 +1105,7 @@ async fn lua_statusline_divider_and_broken_ui() {
     );
     assert!(screen.contains("[40]====="), "{screen}");
     h.input("{ctrl+o}").await;
-    assert!(h.screen(40, 10).contains("popup"));
+    assert!(h.screen(40, 10).contains("panel"));
     h.input("{esc}").await;
 
     // A failing statusline is reported once and leaves its row blank.
@@ -1090,10 +1144,10 @@ async fn default_ui_fits_narrow_screens() {
     h.screen(100, 12);
     h.settle().await;
     let wide = h.screen(100, 12);
-    assert!(wide.contains("10 in · 2 out  │  /work"), "{wide}");
+    assert!(wide.contains("curr 600 | total 12.0k | cache"), "{wide}");
     let narrow = h.screen(24, 12);
     assert!(
-        narrow.contains("10 in · 2 out") && !narrow.contains("/work"),
+        narrow.contains("thinking") && !narrow.contains("/work"),
         "{narrow}"
     );
 }
@@ -1102,6 +1156,7 @@ async fn default_ui_fits_narrow_screens() {
 async fn lua_tool_views_highlights_and_colorschemes() {
     let (mut h, _dir) = Harness::with_config(
         r#"
+        bone.o.tool_detail = "rows"
         bone.ui.tool_views.shell = function(ev)
           if not ev.done then return { title = "running " .. ev.arguments.command } end
           return { title = { { "ran ", "ToolName" }, { ev.arguments.command, "ToolPath" } }, lines = { "out: " .. ev.output } }
@@ -1129,7 +1184,7 @@ async fn lua_tool_views_highlights_and_colorschemes() {
     })
     .await;
     let screen = h.screen(60, 14);
-    assert!(screen.contains("    ran ls\n    ╰ out: a.txt"), "{screen}");
+    assert!(screen.contains("    ran ls\n    out: a.txt"), "{screen}");
 
     assert_eq!(h.app.colors_name.as_deref(), Some("black"));
     h.lua("bone.hl.set('ToolPath', { fg = '#010203', bold = true })")
@@ -1148,13 +1203,6 @@ async fn lua_tool_views_highlights_and_colorschemes() {
 async fn plugins_load_with_modules_and_colors() {
     let dir = tempfile::tempdir().unwrap();
     let plugins = dir.path().join("plugins");
-    // The shipped example plugin, plus a local one and a disabled one.
-    let example =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/plugins/git");
-    std::fs::create_dir_all(plugins.join("git")).unwrap();
-    for f in ["core.lua", "tui.lua"] {
-        std::fs::copy(example.join(f), plugins.join("git").join(f)).unwrap();
-    }
     std::fs::create_dir_all(plugins.join("demo/lua/demo")).unwrap();
     std::fs::create_dir_all(plugins.join("demo/colors")).unwrap();
     std::fs::write(
@@ -1181,45 +1229,14 @@ async fn plugins_load_with_modules_and_colors() {
     )
     .unwrap();
 
-    install_style(dir.path());
     let mut h = Harness::build(Some(dir.path().to_owned())).await;
     h.app.load_user_config();
     h.settle().await;
-    assert!(h.app.user_commands.contains_key("git"));
     h.input("/demo2{enter}").await;
     assert_eq!(h.message(), "from module");
-    assert_eq!(
-        h.lua("=table.concat(bone.plugins, ',')").await,
-        "\"demo,git,style\""
-    );
+    assert_eq!(h.lua("=table.concat(bone.plugins, ',')").await, "\"demo\"");
     h.lua("bone.colorscheme('demo')").await;
     assert_eq!(h.lua("=bone.hl.get('Normal').fg").await, "\"#123456\"");
-
-    // The example plugin's tool view renders git_status output.
-    h.input("go{enter}").await;
-    h.emit::<TurnStarted>(started("s-new", "go")).await;
-    let call = ToolCall {
-        id: "g".into(),
-        name: "git_status".into(),
-        arguments: "{}".into(),
-    };
-    h.emit::<MessageCompleted>(tool_calls("s-new", vec![call]))
-        .await;
-    h.emit::<ToolFinished>(ToolFinishedParams {
-        session_id: "s-new".into(),
-        turn_id: 1,
-        call_id: "g".into(),
-        output: "## main...origin/main\n M src/lib.rs\n?? notes.md\n".into(),
-        is_error: false,
-        duration_ms: None,
-    })
-    .await;
-    let screen = h.screen(60, 14);
-    assert!(
-        screen
-            .contains("    git status main...origin/main\n    │  M src/lib.rs\n    ╰ ?? notes.md"),
-        "{screen}"
-    );
 }
 
 #[tokio::test]
@@ -1241,6 +1258,8 @@ async fn tool_rows(
     width: u16,
 ) -> Vec<String> {
     let mut h = Harness::new().await;
+    h.lua("bone.o.tool_detail = 'rows'; bone.ui.layout = nil; bone.ui.prompt = { prefix = '› ' } ")
+        .await;
     h.input("go{enter}").await;
     h.emit::<TurnStarted>(started("s-new", "go")).await;
     let call = ToolCall {
@@ -1273,125 +1292,32 @@ async fn tool_rows(
 
 #[tokio::test]
 async fn default_tool_views() {
-    let cmd = json!({"command": "git status"});
-    assert_eq!(
-        tool_rows("shell", cmd.clone(), None, 60).await,
-        ["  ◌ $ git status"]
+    let pending = tool_rows("shell", json!({"command": "git status"}), None, 60).await;
+    assert_eq!(pending, ["  ◌ shell git status"]);
+    let done = tool_rows(
+        "shell",
+        json!({"command": "echo hi"}),
+        Some(("hi\n[exit code: 0]", false)),
+        60,
+    )
+    .await;
+    assert!(
+        done.iter().any(|row| row.contains("shell echo hi")),
+        "{done:?}"
     );
-    assert_eq!(
-        tool_rows(
-            "shell",
-            cmd.clone(),
-            Some(("M a\nM b\n[exit code: 0]", false)),
-            60
-        )
-        .await,
-        ["    $ git status", "    │ M a", "    ╰ M b"]
+    assert!(
+        done.iter()
+            .any(|row| row.contains("hi") && row.contains("╰")),
+        "{done:?}"
     );
-    assert_eq!(
-        tool_rows(
-            "shell",
-            cmd.clone(),
-            Some(("(no output)\n[exit code: 0]", false)),
-            60
-        )
-        .await,
-        ["    $ git status"]
+    let error = tool_rows("word_count", json!({}), Some(("failed", true)), 60).await;
+    assert!(
+        error
+            .iter()
+            .any(|row| row.contains("✕") && row.contains("word_count")),
+        "{error:?}"
     );
-    let long: String = (1..=9).map(|i| format!("l{i}\n")).collect::<String>() + "[exit code: 2]";
-    assert_eq!(
-        tool_rows("shell", cmd, Some((&long, false)), 60).await,
-        [
-            "    $ git status  exit 2",
-            "    │ l1",
-            "    │ ⋮ +6 lines",
-            "    │ l8",
-            "    ╰ l9"
-        ]
-    );
-    assert_eq!(
-        tool_rows("shell", json!({"command": "cat <<EOF\nx\nEOF"}), None, 60).await,
-        ["  ◌ $ cat <<EOF (+2 lines)"]
-    );
-    assert_eq!(
-        tool_rows(
-            "shell",
-            json!({"command": "sleep 9"}),
-            Some(("[timed out after 1s; process killed]", true)),
-            60
-        )
-        .await,
-        [
-            "  ✕ $ sleep 9",
-            "    ╰ [timed out after 1s; process killed]"
-        ]
-    );
-    assert_eq!(
-        tool_rows(
-            "read_file",
-            json!({"path": "src/x.rs"}),
-            Some(("     1\ta\n     2\tb\n", false)),
-            60
-        )
-        .await,
-        ["    read_file src/x.rs (2 lines)"]
-    );
-    let partial = "    10\ta\n    11\tb\n\n[showing lines 10-11 of 99; use offset to read more]\n";
-    assert_eq!(
-        tool_rows(
-            "read_file",
-            json!({"path": "x"}),
-            Some((partial, false)),
-            60
-        )
-        .await,
-        ["    read_file x (lines 10–11 of 99)"]
-    );
-    assert_eq!(
-        tool_rows(
-            "write_file",
-            json!({"path": "a", "content": "x\ny\n"}),
-            Some(("Created a (4 bytes)", false)),
-            60
-        )
-        .await,
-        ["    write_file a (2 lines)"]
-    );
-    let edit = json!({"path": "a.rs", "old_string": "fn a() {\n    old();\n}", "new_string": "fn a() {\n    new();\n    more();\n}"});
-    assert_eq!(
-        tool_rows(
-            "edit_file",
-            edit,
-            Some(("Replaced 1 occurrence in a.rs", false)),
-            30
-        )
-        .await,
-        [
-            "    edit_file a.rs (+2 −1)",
-            "    │ -     old();",
-            "    │ +     new();",
-            "    ╰ +     more();"
-        ]
-    );
-    let edit = json!({"path": "a.rs", "edits": [{"at": "2#aa|    old();", "text": "    new();\n    more();"}]});
-    assert_eq!(
-        tool_rows("edit_file", edit.clone(), None, 30).await,
-        ["  ◌ edit_file a.rs (+2 −1)"]
-    );
-    let out = "Edited a.rs (-1 +2)\n1#xx|fn a() {\n-    old();\n+2#yy|    new();\n+3#zz|    more();\n4#ww|}";
-    assert_eq!(
-        tool_rows("edit_file", edit, Some((out, false)), 30).await,
-        [
-            "    edit_file a.rs (+2 −1)",
-            "    │ -     old();",
-            "    │ +     new();",
-            "    ╰ +     more();"
-        ]
-    );
-    assert_eq!(
-        tool_rows("word_count", json!({"text": "a b"}), Some(("2", false)), 60).await,
-        ["    word_count {\"text\":\"a b\"}", "    ╰ 2"]
-    );
+    assert!(error.iter().any(|row| row.contains("failed")), "{error:?}");
 }
 
 #[tokio::test]
@@ -1401,6 +1327,7 @@ async fn views_are_lua_and_can_be_replaced() {
         -- Rust's default arrangement instead of the standard layout.
         bone.ui.layout = nil
         bone.ui.regions.thinking = nil
+        bone.ui.prompt = { prefix = "› " }
         -- Reasoning out of the chat; a compact user line; no blank lines.
         bone.ui.views.reasoning = function(item, ctx)
           if ctx.region == "chat" then return nil end
@@ -1449,7 +1376,7 @@ async fn views_are_lua_and_can_be_replaced() {
         .iter()
         .position(|r| r.starts_with("∴ pondering"))
         .expect(&screen);
-    assert!(rows[above + 1].starts_with("› Message bone"), "{screen}");
+    assert!(rows[above + 1].starts_with("›"), "{screen}");
 
     // Once the answer lands, the region disappears and the text shows.
     h.emit::<MessageCompleted>(MessageCompletedParams {
@@ -2595,9 +2522,7 @@ async fn plugins_own_what_they_create_and_unload_cleanly() {
     // only the core has goes to the core.
     h.input("/plugins list{enter}").await;
     assert!(
-        h.message().contains("corepart (core loaded)")
-            && h.message().contains("demo (tui loaded)")
-            && h.message().contains("style (tui loaded)"),
+        h.message().contains("corepart (core loaded)") && h.message().contains("demo (tui loaded)"),
         "{}",
         h.message()
     );
@@ -2677,197 +2602,6 @@ async fn a_project_config_runs_only_when_trusted() {
         "{}",
         h.message()
     );
-}
-
-/// A harness with the style plugin plus `examples/plugins/<name>` loaded.
-async fn with_example(name: &str) -> (Harness, tempfile::TempDir) {
-    let (mut h, dir) = Harness::with_config("").await;
-    install_example(dir.path(), name);
-    h.input(&format!("/plugins load {name}{{enter}}")).await;
-    assert!(
-        h.app
-            .plugin(name)
-            .is_some_and(|p| p.loaded && p.error.is_none()),
-        "{}",
-        h.message()
-    );
-    h.app.message = None;
-    (h, dir)
-}
-
-#[tokio::test]
-async fn example_tasks_plugin() {
-    let (mut h, dir) = with_example("tasks").await;
-    h.input("/task write docs{enter}/task ship it{enter}").await;
-    let screen = h.screen(80, 12);
-    assert!(
-        screen.contains("Tasks 2/2")
-            && screen.contains("· write docs")
-            && screen.contains("· ship it"),
-        "{screen}"
-    );
-    h.input("/task{enter}").await;
-    assert_eq!(h.app.context().name(), "panel");
-    h.input("{up}{enter}").await;
-    assert!(h.screen(80, 12).contains("Tasks 1/2"));
-    let saved = std::fs::read_to_string(dir.path().join("state/tui/tasks.json")).unwrap();
-    assert!(
-        saved.contains("\"done\": true") && saved.contains("\"open\": true"),
-        "{saved}"
-    );
-    h.input("{down}s").await;
-    assert_eq!(h.prompt(), "ship it");
-    assert_eq!(h.app.context().name(), "main");
-    h.input("{ctrl+u}/tasks{enter}").await;
-    assert!(!h.screen(80, 12).contains("Tasks"));
-    // Reloading reads the saved list back.
-    h.input("/tasks{enter}/plugins reload tasks{enter}").await;
-    assert!(h.screen(80, 12).contains("✓ write docs"));
-}
-
-#[tokio::test]
-async fn example_stats_plugin() {
-    let (mut h, _dir) = with_example("stats").await;
-    h.input("/stats{enter}").await;
-    let screen = h.screen(120, 60);
-    for want in [
-        "Usage",
-        "Tokens per day",
-        "12.8k",
-        "5% of input",
-        "openai / gpt-5",
-        "Walrus hunt",
-        "zoo",
-        "edit_file",
-        "20.0%",
-        "busiest 14:00-15:00",
-    ] {
-        assert!(screen.contains(want), "{want}:\n{screen}");
-    }
-    h.input("1").await;
-    let screen = h.screen(120, 60);
-    assert!(screen.contains("Tokens per hour"), "{screen}");
-    h.input("q/stats bogus{enter}").await;
-    assert!(
-        h.message().contains("use today, week, month, year, all"),
-        "{}",
-        h.message()
-    );
-}
-
-#[tokio::test]
-async fn example_review_plugin() {
-    let (mut h, _dir) = with_example("review").await;
-    h.input("/review{enter}{esc}").await;
-    assert!(h.app.panel("review").is_none());
-    assert_eq!(h.message(), "");
-    h.input("go{enter}").await;
-    h.emit::<TurnStarted>(started("s-new", "go")).await;
-    let call = |id: &str, name: &str, path: &str| ToolCall {
-        id: id.into(),
-        name: name.into(),
-        arguments: json!({ "path": path }).to_string(),
-    };
-    h.emit::<MessageCompleted>(tool_calls(
-        "s-new",
-        vec![
-            call("1", "edit_file", "src/a.rs"),
-            call("2", "edit_file", "src/a.rs"),
-            call("3", "write_file", "b.md"),
-            call("4", "read_file", "c.rs"),
-        ],
-    ))
-    .await;
-    for (id, is_error) in [("1", false), ("2", false), ("3", true), ("4", false)] {
-        h.emit::<ToolFinished>(ToolFinishedParams {
-            session_id: "s-new".into(),
-            turn_id: 1,
-            call_id: id.into(),
-            output: "ok".into(),
-            is_error,
-            duration_ms: None,
-        })
-        .await;
-    }
-    h.emit::<TurnFinished>(finished("s-new", TurnOutcome::Completed))
-        .await;
-    h.input("/review{enter}").await;
-    let screen = h.screen(100, 24);
-    assert!(
-        screen.contains("Changed files")
-            && screen.contains("src/a.rs  2 edits, turn 1")
-            && screen.contains("b.md  1 edit, turn 1, 1 failed")
-            && !screen.contains("c.rs  "),
-        "{screen}"
-    );
-    h.lua("bone.ui.panel.focus('review')").await;
-    h.input("{down}{enter}").await;
-    assert!(
-        h.prompt().starts_with("Review your changes to b.md:"),
-        "{}",
-        h.prompt()
-    );
-    assert_eq!(h.lua("=bone.prompt.selection().start.col").await, "0");
-    h.input("/review all{enter}").await;
-    assert!(h.prompt().contains("src/a.rs, b.md"), "{}", h.prompt());
-}
-
-#[tokio::test]
-async fn example_testrun_plugin() {
-    let (mut h, _dir) = with_example("testrun").await;
-    assert_eq!(h.lua("=bone.o.test_command").await, "\"cargo test\"");
-    h.input("/test printf 'ok 1\\nFAILED tests::x\\n'; exit 1{enter}")
-        .await;
-    h.until("bone.ui.panel.get('testrun'):info().title:find('failed') ~= nil")
-        .await;
-    let screen = h.screen(80, 20);
-    assert!(
-        screen.contains("Tests: failed (exit 1) · 1 failing lines")
-            && screen.contains("FAILED tests::x")
-            && screen.contains("ok 1"),
-        "{screen}"
-    );
-    h.lua("bone.ui.panel.focus('testrun')").await;
-    h.input("f").await;
-    assert!(
-        h.prompt().contains("These tests fail:\n\nFAILED tests::x"),
-        "{}",
-        h.prompt()
-    );
-    h.lua("bone.prompt.set('')").await;
-    h.input("/test sleep 30{enter}").await;
-    h.until("bone.ui.panel.get('testrun'):info().title:find('running') ~= nil")
-        .await;
-    h.input("/test cancel{enter}").await;
-    h.until("bone.ui.panel.get('testrun'):info().title:find('cancelled') ~= nil")
-        .await;
-}
-
-#[tokio::test]
-async fn example_switch_plugin_tui_side() {
-    let (mut h, dir) = with_example("switch").await;
-    h.lua(
-        r#"bone.state.save("switch-providers", { default = "a", providers = {
-          { name = "a", model = "m1", type = "openai" },
-          { name = "b", model = "m2", type = "anthropic" },
-        } }, { shared = true })"#,
-    )
-    .await;
-    assert_eq!(h.lua("=bone.switch.current()").await, "\"a\"");
-    h.input("/provider b{enter}").await;
-    assert_eq!(h.message(), "provider: b (m2)");
-    let saved = std::fs::read_to_string(dir.path().join("state/shared/switch.json")).unwrap();
-    assert!(saved.contains("\"current\": \"b\""), "{saved}");
-    h.input("/provider zzz{enter}").await;
-    assert!(h.message().contains("no provider zzz"), "{}", h.message());
-    h.input("/provider{enter}").await;
-    let screen = h.screen(100, 20);
-    assert!(
-        screen.contains("● b  m2  anthropic") && screen.contains("  a  m1  openai"),
-        "{screen}"
-    );
-    h.input("{up}{enter}").await;
-    assert_eq!(h.lua("=bone.switch.current()").await, "\"a\"");
 }
 
 #[tokio::test]
@@ -2959,7 +2693,7 @@ async fn tui_lua_calls_core_lua_functions() {
     assert_eq!(h.lua("=bone.has_capability('tui.rpc')").await, "true");
     h.lua(
         r#"
-        bone.rpc.call("templates.expand", { name = "review", args = "src/x.rs" }, function(text) expanded = text end)
+        bone.rpc.call("demo.echo", { name = "review", args = "src/x.rs" }, function(text) expanded = text end)
         bone.rpc.call("nothing.here", {}, function(r, err) failed = err end)
         "#,
     )
@@ -2967,7 +2701,7 @@ async fn tui_lua_calls_core_lua_functions() {
     assert_eq!(h.lua("=expanded").await, "\"Review src/x.rs\"");
     assert!(h.lua("=failed").await.contains("no function nothing.here"));
     let req = h.requests("lua/call")[0].clone();
-    assert_eq!(req["name"], "templates.expand");
+    assert_eq!(req["name"], "demo.echo");
     assert_eq!(req["args"]["args"], "src/x.rs");
 }
 
@@ -3010,91 +2744,6 @@ async fn compact_command_and_chat_note() {
             ),
         "{screen}"
     );
-}
-
-#[tokio::test]
-async fn example_agent_extension_plugins_in_the_tui() {
-    let (mut h, dir) = Harness::with_config("").await;
-    for name in ["mcp", "skills", "templates", "ask-model"] {
-        install_example(dir.path(), name);
-        h.input(&format!("/plugins load {name}{{enter}}")).await;
-        assert!(
-            h.app
-                .plugin(name)
-                .is_some_and(|p| p.loaded && p.error.is_none()),
-            "{name}: {}",
-            h.message()
-        );
-    }
-
-    // A session with an answer, for /ask below.
-    h.input("go{enter}").await;
-    h.emit::<TurnStarted>(started("s-new", "go")).await;
-    h.emit::<MessageCompleted>(MessageCompletedParams {
-        session_id: "s-new".into(),
-        turn_id: 1,
-        message: ChatMessage::Assistant {
-            content: "a long answer".into(),
-            reasoning: String::new(),
-            tool_calls: vec![],
-        },
-        usage: None,
-    })
-    .await;
-    h.emit::<TurnFinished>(finished("s-new", TurnOutcome::Completed))
-        .await;
-
-    // mcp: a panel of servers.
-    h.input("/mcp{enter}").await;
-    let screen = h.screen(120, 20);
-    assert!(
-        screen.contains("gh  ready  1 tools")
-            && screen.contains("gh_search")
-            && screen.contains("cannot run db-mcp"),
-        "{screen}"
-    );
-    h.input("{esc}").await;
-
-    // skills: names complete, and /skill writes the request.
-    h.input("/skill release do it now{enter}").await;
-    assert_eq!(h.prompt(), "Use the release skill: do it now");
-    h.lua("bone.prompt.set('')").await;
-
-    // templates: each one is a command that fills the prompt.
-    assert!(h.app.user_commands.contains_key("review"));
-    assert!(h.app.user_commands["review"].desc.ends_with("<path>"));
-    h.input("/review src/x.rs{enter}").await;
-    assert_eq!(h.prompt(), "Review src/x.rs");
-    h.lua("bone.prompt.set('')").await;
-
-    // ask-model: /ask alone explains the latest answer, in a pager.
-    h.input("/ask{enter}").await;
-    let req = h.requests("model/complete").last().unwrap().clone();
-    assert!(
-        req["messages"][1]["content"]
-            .as_str()
-            .unwrap()
-            .contains("a long answer")
-    );
-    h.emit::<ModelDeltaEvent>(ModelDeltaParams {
-        request_id: 41,
-        kind: DeltaKind::Text,
-        text: "It means".into(),
-    })
-    .await;
-    assert!(h.screen(100, 20).contains("It means"));
-    h.emit::<ModelCompleted>(ModelCompletedParams {
-        request_id: 41,
-        message: Some(ChatMessage::Assistant {
-            content: "It means: be careful.".into(),
-            reasoning: String::new(),
-            tool_calls: vec![],
-        }),
-        usage: None,
-        error: None,
-    })
-    .await;
-    assert!(h.screen(100, 20).contains("It means: be careful."));
 }
 
 #[tokio::test]
@@ -3394,14 +3043,14 @@ async fn reload_resets_views_and_keeps_the_standard_ui() {
     };
     assert!(has(&mut h, "bone.ui.views.custom_kind"));
     assert!(has(&mut h, "bone.ui.views.reasoning"));
-    assert!(has(&mut h, "bone.ui.regions.top"));
+    assert!(has(&mut h, "bone.ui.regions.chat_empty"));
 
     // Deleting the line removes the view; the defaults' standard UI stays.
     std::fs::write(&tui, "").unwrap();
     h.app.reload_user_config();
     assert!(!has(&mut h, "bone.ui.views.custom_kind"));
     assert!(has(&mut h, "bone.ui.views.reasoning"));
-    assert!(has(&mut h, "bone.ui.regions.top"));
+    assert!(has(&mut h, "bone.ui.regions.chat_empty"));
     assert!(has(&mut h, "bone.ui.layout"));
 
     // An edited copy of the standard layout module is used after a reload.
@@ -3653,6 +3302,97 @@ async fn standard_tool_views_match_the_first_bone() {
         assert!(text.contains(want), "{want:?} in\n{text}");
     }
     assert!(!text.contains("⋮"), "{text}");
+}
+
+#[tokio::test]
+async fn subagent_reports_have_a_task_header_and_a_markdown_preview() {
+    let report = "Implemented `session/active` in **bone-proto** and **bone-core**.\n\nChanges:\n- Registered `SessionActive`.\n- Added request dispatch.\n- Added coverage.\n\nValidation: all checks passed.";
+    let calls = [(
+        "subagent",
+        json!({"task": "Expose active sessions", "name": "implementer"}),
+        report,
+        false,
+    )];
+    for detail in [0, 1] {
+        let text = std_tool_screen(&calls, 80, detail).await.join("\n");
+        assert!(
+            text.contains("✓ Expose active sessions · implementer · done"),
+            "{text}"
+        );
+        assert!(
+            text.contains("│ Implemented session/active in bone-proto and bone-core."),
+            "{text}"
+        );
+        assert!(text.contains("╰ ⋮ +"), "{text}");
+        assert!(text.contains("report lines (ctrl+t)"), "{text}");
+        assert!(!text.contains("Changes:"), "{text}");
+        assert!(!text.contains("Registered SessionActive"), "{text}");
+        assert!(!text.contains('`') && !text.contains("**"), "{text}");
+    }
+    let text = std_tool_screen(&calls, 80, 2).await.join("\n");
+    assert!(text.contains("│ • Registered SessionActive."), "{text}");
+    assert!(text.contains("╰ Validation: all checks passed."), "{text}");
+    assert!(!text.contains("ctrl+t") && !text.contains('⋮'), "{text}");
+
+    // Narrow terminals wrap both the header and the report inside its gutter.
+    let rows = std_tool_screen(&calls, 32, 2).await;
+    assert!(
+        rows.iter()
+            .all(|r| unicode_width::UnicodeWidthStr::width(r.as_str()) <= 32)
+    );
+    let text = rows.join("\n");
+    assert!(text.contains("│ Implemented"), "{text}");
+    assert!(
+        text.contains("Validation: all checks\n      ╰ passed."),
+        "{text}"
+    );
+
+    // Failures keep the entire explanation even at the default detail level.
+    let calls = [("subagent", json!({"name": ""}), report, true)];
+    let text = std_tool_screen(&calls, 80, 0).await.join("\n");
+    assert!(text.contains("✕ subagent · failed"), "{text}");
+    assert!(text.contains("╰ Validation: all checks passed."), "{text}");
+    assert!(!text.contains('⋮'), "{text}");
+}
+
+#[tokio::test]
+async fn subagent_report_header_opens_the_running_session() {
+    let mut h = Harness::build(None).await;
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    h.emit::<MessageCompleted>(tool_calls(
+        "s-new",
+        vec![ToolCall {
+            id: "c1".into(),
+            name: "subagent".into(),
+            arguments: json!({"task": "Find callers", "name": "reviewer"}).to_string(),
+        }],
+    ))
+    .await;
+    h.emit::<SessionCreated>(bone_proto::types::SessionInfo {
+        session_id: "child-1".into(),
+        cwd: "/work".into(),
+        created_at: 0,
+        title: Some("Find callers".into()),
+        parent: None,
+        owner: Some(bone_proto::types::SessionOwner {
+            session_id: "s-new".into(),
+            call_id: Some("c1".into()),
+            name: Some("reviewer".into()),
+        }),
+    })
+    .await;
+    let screen = h.screen(80, 24);
+    let y = screen
+        .lines()
+        .position(|l| l.contains("Find callers · reviewer · running"))
+        .unwrap_or_else(|| panic!("{screen}")) as u16;
+    h.app.mouse("down", "left", (10, y));
+    h.settle().await;
+    assert_eq!(
+        h.lua("=bone.chat.session().session_id").await,
+        "\"child-1\""
+    );
 }
 
 #[tokio::test]
@@ -5359,4 +5099,165 @@ async fn perf_probe() {
             "{n} calls, {size} B each: first {first:?}, steady {steady:?}, live output {live:?}, after bone.ui.refresh {refresh:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn empty_session_hint_is_centered_in_chat_beside_panels() {
+    let mut h = Harness::build(None).await;
+    h.lua(r#"bone.ui.panel.open({ id = "notes", dock = "left", size = 20, lines = { "NOTES" } })"#)
+        .await;
+    for (width, height) in [(100, 24), (120, 30)] {
+        let screen = h.screen(width, height);
+        let area = h.app.placed[&crate::app::CHAT_WIN].area;
+        let lines: Vec<_> = screen.lines().collect();
+        let hint = "New session. Type a message and press enter.";
+        let row = lines.iter().position(|l| l.contains(hint)).unwrap();
+        assert_eq!(row, (area.y + (area.height - 2) / 2) as usize, "{screen}");
+        let col = lines[row][..lines[row].find(hint).unwrap()].chars().count();
+        assert_eq!(
+            col,
+            area.x as usize + (area.width as usize - hint.len()) / 2,
+            "{screen}"
+        );
+        assert!(lines[0].contains("NOTES"), "{screen}");
+        assert!(!lines[0].contains("New session"), "{screen}");
+    }
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    assert!(!h.screen(100, 24).contains("New session."));
+}
+
+#[tokio::test]
+async fn history_sidebar_spans_screen_and_keeps_composer_beside_it() {
+    let mut h = Harness::new().await;
+    h.input("{ctrl+o}").await;
+    for (width, height) in [(100, 24), (120, 30)] {
+        h.screen(width, height);
+        let sidebar = h.app.panel("sessions").unwrap().area.unwrap();
+        assert_eq!(sidebar.y, 0);
+        assert_eq!(sidebar.height, height);
+        let prompt = h.app.placed[&crate::app::PROMPT_WIN].area;
+        assert_eq!(prompt.x, sidebar.right() + 1);
+        let status = h
+            .app
+            .leaves
+            .iter()
+            .find(|(name, _)| name == "statusline")
+            .unwrap()
+            .1;
+        assert_eq!(status.x, prompt.x);
+        assert_eq!(status.bottom(), height);
+    }
+    h.input("{esc}").await;
+    h.screen(100, 24);
+    assert_eq!(h.app.placed[&crate::app::PROMPT_WIN].area.x, 0);
+}
+
+#[tokio::test]
+async fn idle_session_sidebar_schedules_timestamp_refresh() {
+    let mut h = Harness::new().await;
+    h.input("{ctrl+o}").await;
+    h.emit::<TurnFinished>(finished("s-one", TurnOutcome::Completed))
+        .await;
+    h.lua("bone.ui.refresh_in = function(ms) sidebar_delay = ms end")
+        .await;
+    h.screen(80, 24);
+    assert_eq!(
+        h.lua("=sidebar_delay > 120 and sidebar_delay <= 60000")
+            .await,
+        "true"
+    );
+}
+
+#[tokio::test]
+async fn statusline_preserves_new_session_timing_and_clears_old_timing() {
+    let mut h = Harness::new().await;
+    h.lua("local s = bone._standard_status; s.total_session = 'old'; s.timing_session = 'new'; s.started = os.time(); bone.ui.statusline({session = {session_id = 'new'}, width = 80})").await;
+    assert_eq!(h.lua("=bone._standard_status.started ~= nil").await, "true");
+    h.lua("bone.ui.statusline({session = {session_id = 'other'}, width = 80})")
+        .await;
+    assert_eq!(h.lua("=bone._standard_status.started == nil").await, "true");
+}
+
+#[tokio::test]
+async fn session_sidebar_search_keeps_a_printable_and_archive_is_modified() {
+    let mut h = Harness::new().await;
+    h.input("{ctrl+o}").await;
+    h.input("a").await;
+    assert!(h.screen(80, 24).contains("Search: a"));
+    h.input("中文+🦴").await;
+    let screen = h.screen(80, 24);
+    assert!(
+        screen.replace(' ', "").contains("Search:a中文+🦴"),
+        "{screen}"
+    );
+    assert_eq!(
+        h.lua("=next(bone.state.load('sessions-archived')) == nil")
+            .await,
+        "true"
+    );
+    h.input("{ctrl+u}{alt+a}").await;
+    assert_eq!(
+        h.lua("=bone.state.load('sessions-archived')['s-one']")
+            .await,
+        "true"
+    );
+    let screen = h.screen(80, 24);
+    assert!(screen.contains("History · 2"), "{screen}");
+    assert!(h.requests("session/messages").is_empty());
+}
+
+#[tokio::test]
+async fn screen_popups_cover_full_height_sidebars() {
+    let mut h = Harness::new().await;
+    h.input("{ctrl+o}").await;
+    h.lua("bone.ui.win({ anchor = 'screen', row = 0, col = 0, width = 80, lines = { string.rep('X', 80) } })")
+        .await;
+    let screen = h.screen(80, 24);
+    assert_eq!(screen.lines().next().unwrap(), "X".repeat(80));
+}
+
+#[tokio::test]
+async fn session_sidebar_formats_only_visible_rows_for_large_history() {
+    let mut h = Harness::new().await;
+    h.lua(
+        r#"
+        local request = bone.request
+        bone.request = function(method, params, cb)
+          if method == 'session/list' then
+            local sessions = {}
+            for i = 1, 4500 do
+              sessions[i] = { session_id = string.format('history-%04d', i),
+                title = 'conversation ' .. i, cwd = '/work', created_at = 0 }
+            end
+            cb(sessions)
+          else
+            return request(method, params, cb)
+          end
+        end
+        sidebar_formats = 0
+        local truncate = bone.text.truncate
+        bone.text.truncate = function(...)
+          sidebar_formats = sidebar_formats + 1
+          return truncate(...)
+        end
+    "#,
+    )
+    .await;
+    h.input("{ctrl+o}").await;
+    h.screen(100, 24);
+    assert!(h.app.panel("sessions").unwrap().rows >= 13500);
+    h.lua("sidebar_formats = 0").await;
+    let screen = h.screen(100, 24);
+    assert!(screen.contains("History · 4500"), "{screen}");
+    let formats: usize = h.lua("=sidebar_formats").await.parse().unwrap();
+    assert!(
+        formats <= 30,
+        "formatted {formats} rows for a 24-row viewport"
+    );
+    h.input("{end}").await;
+    assert!(h.screen(100, 24).contains("conversation 4500"));
+    h.input("{home}").await;
+    assert!(h.screen(100, 24).contains("conversation 1"));
+    assert!(h.requests("session/messages").is_empty());
 }

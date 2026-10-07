@@ -2,8 +2,8 @@
 
 Where: `~/.bone/core.lua` (global) or a plugin's `core.lua`. The core is the
 server: it owns sessions, turns, providers, tools and the protocol. Lua has
-full trust and tool calls run without asking (the `approve` plugin asks
-first). The core reloads when `core.lua` changes, if it runs in the same
+full trust and tool calls run without asking; a hook can ask first with
+`bone.ask`. The core reloads when `core.lua` changes, if it runs in the same
 process as the TUI.
 
 Reference: `docs/lua.md` "Core (`core.lua`)". Source:
@@ -36,7 +36,7 @@ bone.tool.register {
   name = "git_log",
   description = "Show recent commits.",
   parameters = { type = "object", properties = { n = { type = "integer" } } },  -- JSON Schema
-  needs_approval = false,   -- read by the approve plugin (default: ask)
+  needs_approval = false,   -- metadata for custom approval hooks; not enforced
   parallel = true,          -- only reads: may run alongside other such calls (default false)
   run = function(args, ctx)  -- ctx = { cwd, session_id, call_id }
     local r = bone.system("git log --oneline -n " .. (args.n or 10), { cwd = ctx.cwd })
@@ -173,5 +173,4 @@ on_delta, on_done)` → handle (see the popups guide).
 ## Environment overrides
 
 `BONE_BASE_URL`, `BONE_MODEL`, `BONE_API_KEY`, `BONE_REASONING_EFFORT`,
-`BONE_SYSTEM_PROMPT`, `BONE_DATA_DIR` override `core.lua` for one run;
-`BONE_APPROVAL=auto` turns the approve plugin off.
+`BONE_SYSTEM_PROMPT`, `BONE_DATA_DIR` override `core.lua` for one run.

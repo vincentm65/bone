@@ -152,6 +152,7 @@ pub const METHODS: &[&str] = &[
     Echo::METHOD,
     SessionCreate::METHOD,
     SessionList::METHOD,
+    SessionActive::METHOD,
     SessionMessages::METHOD,
     SessionRename::METHOD,
     SessionFork::METHOD,
@@ -278,6 +279,11 @@ method!(
 method!(
     /// All sessions, newest first.
     SessionList, "session/list", Empty => Vec<SessionInfo>
+);
+method!(
+    /// IDs of sessions with a running turn, without loading transcripts.
+    /// Ordering is unspecified.
+    SessionActive, "session/active", Empty => Vec<SessionId>
 );
 method!(
     /// A session's full transcript (loaded from disk if needed).

@@ -20,6 +20,11 @@ cmd("new", function()
   bone.action("new_session")
 end, { desc = "start a new session", aliases = { "clear" } })
 
+cmd("archive", function()
+  require("bone.ui.sessions").archive_current()
+  bone.action("new_session")
+end, { desc = "archive this conversation and start a new session" })
+
 cmd("sessions", function()
   bone.action("sessions")
 end, { desc = "pick a session to open (ctrl+o)", aliases = { "resume" } })

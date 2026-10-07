@@ -22,8 +22,8 @@ local providers = bone.config.providers
 
 -- bone.config.provider = "local_model"
 
--- Tool calls run without asking. To be asked first (y/n popup), install the
--- approve plugin: cp -r <bone repo>/examples/plugins/approve ~/.bone/plugins/
+-- Tool calls run without asking. Add a tool_call hook using bone.ask to
+-- request confirmation; see docs/lua.md, "Asking the user".
 
 -- Refuse dangerous commands (hooks run at turn_start, request, message,
 -- tool_call, tool_result and turn_end; see docs/lua.md):

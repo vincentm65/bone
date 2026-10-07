@@ -7,7 +7,7 @@ bone runs two separate LuaJIT states, one per side:
 | `~/.bone/core.lua` | the core (server) | providers, system prompt, tools, hooks |
 | `~/.bone/tui.lua` | the TUI | options, keys, commands, colors, events |
 
-`$BONE_CONFIG_DIR` replaces `~/.bone`. The two states never share Lua values; they talk only through the bone protocol. Lua has full trust (no sandbox). Tool calls run without asking; asking first is a plugin (`examples/plugins/approve`, see below).
+`$BONE_CONFIG_DIR` replaces `~/.bone`. The two states never share Lua values; they talk only through the bone protocol. Lua has full trust (no sandbox). Tool calls run without asking; asking first is a customization using `bone.ask` (see below).
 
 Numbering, everywhere: indexes into lists start at 1, as in Lua (chat item `index`, `first`/`last`, `from`/`to`); positions start at 0 (screen cells `x`, `y`; prompt `row`, `col` and highlight ranges). Settings are fields you assign (`bone.ui.statusline = fn`, `bone.ui.layout = {…}`, `bone.ui.spinner = {…}`, `bone.o.name = value`); actions are calls (`bone.chat.add`, `bone.ui.popup`, `bone.notify`).
 
@@ -104,16 +104,16 @@ each later capability independently.
 A plugin is a folder in `~/.bone/plugins/`:
 
 ```text
-~/.bone/plugins/git/
+~/.bone/plugins/myplugin/
   core.lua     runs in the core (tools, hooks)
   tui.lua      runs in the TUI (keys, commands, tool views)
   lua/         modules for require()
   colors/      colorschemes
 ```
 
-The repo's examples show most of the API at work: `style` (a complete look), `approve` (asking before tools run), `git` and `anthropic` (tools and a provider), `switch` (pick the provider from the TUI), `tasks` (a persistent task panel), `review` (the files a session changed, and review prompts), `stats` (usage and tool numbers from `store/query`), `testrun` (tests streamed into a panel), `output-cap` (limit any tool result's size), `retry` (back off and fall back on passing errors), `mcp` (MCP servers from JSON files, and a status panel), `skills` and `templates` (load folders of them, with TUI commands) and `ask-model` (a side question to a model). None is installed by default.
+The [Bone catalog](https://github.com/vincentm65/bone-catalog) is the source of installable plugins. Use `/catalog` for packages such as `mcp`, `skill`, `usage`, `themes` and `review`; none is installed by default.
 
-Every part is optional. Plugins load in name order, after the runtime defaults and before your own `core.lua` / `tui.lua`, so your config can change anything a plugin set up. Rename a folder to start with `_` or `.` to disable it. `bone.plugins` lists the loaded names. Installing is just copying or `git clone`-ing into `~/.bone/plugins/`; see `examples/plugins/` in the repo (`git`, `approve`, `style`).
+Every part is optional. Plugins load in name order, after the runtime defaults and before your own `core.lua` / `tui.lua`, so your config can change anything a plugin set up. Rename a folder to start with `_` or `.` to disable it. `bone.plugins` lists the loaded names. Install published packages with `/catalog`. Your own plugins can be placed directly in `~/.bone/plugins/`.
 
 ### Plugin lifecycle and state
 
@@ -220,7 +220,7 @@ bone.tool.register {
   name = "git_log",
   description = "Show recent commits.",
   parameters = { type = "object", properties = { n = { type = "integer" } } },  -- JSON Schema
-  needs_approval = false,   -- read by the approve plugin (default: ask)
+  needs_approval = false,   -- metadata for custom approval hooks; does not enforce approval
   parallel = true,          -- only reads: may run alongside other such calls (default false)
   run = function(args, ctx)  -- ctx = { cwd, session_id, call_id }
     local r = bone.system("git log --oneline -n " .. (args.n or 10), { cwd = ctx.cwd })
@@ -320,21 +320,7 @@ bone.hook("tool_call", function(ev)
 end)
 ```
 
-A TUI plugin shows the question however it likes, usually with `bone.ui.popup`, and answers with `bone.request("ask/respond", { ask_id = ev.ask_id, answer = ... })`. The built-in `approve` plugin is a complete example (`runtime/plugins/approve/`).
-
-### The approve plugin
-
-Not installed by default: bone runs every tool call without asking. Install it with `cp -r examples/plugins/approve ~/.bone/plugins/`. Then, before `write_file`, `edit_file`, `shell` and Lua tools (unless registered with `needs_approval = false`) it asks `{ kind = "approval", title, tool, arguments }`. The TUI shows `y` allow, `a` always (this tool, this session), `n`/`esc` deny.
-
-```lua
-bone.config.approve.enabled = false              -- never ask
-bone.config.approve.tools.shell = false          -- don't ask for shell
-bone.config.approve.allow = function(ev)         -- skip asking when this returns true
-  return ev.name == "shell" and ev.arguments.command:match("^git status")
-end
-```
-
-`BONE_APPROVAL=auto` turns it off for one run. It is about 60 lines of core Lua plus a popup; copy and change it to build your own rules.
+A TUI plugin shows the question however it likes, usually with `bone.ui.popup`, and answers with `bone.request("ask/respond", { ask_id = ev.ask_id, answer = ... })`. See [customizing-popups.md](customizing/customizing-popups.md#confirming-something-from-the-core) for a minimal TUI handler.
 
 ### Providers in Lua
 
@@ -364,7 +350,7 @@ bone.config.provider = "mine"
 - `bone.http_stream(req)` takes the same fields as `bone.http` and returns `{ status, headers }` with `:next()` (the next event's data, `nil` at the end), `:events()` (an iterator), `:text()` (the rest of the body) and `:close()`.
 - `complete` runs as a job: it waits without blocking, and a cancelled turn stops it.
 
-`examples/plugins/anthropic` is a complete provider for the Anthropic Messages API (streaming, thinking, tools) in about 140 lines.
+For APIs such as Anthropic Messages, implement the translation of messages, tools, streaming events and usage through this provider API; no dedicated Anthropic package is currently published in the catalog.
 
 ### MCP servers
 
@@ -378,7 +364,7 @@ bone.mcp.load("~/.config/mcp.json")   -- every server in an { "mcpServers": { ..
 ```
 
 - A server is a program speaking MCP on stdio (`command`, `args`, `env`, `cwd`) or an endpoint speaking Streamable HTTP (`url`, `headers`). Options: `tools = { allow, deny }` (by the server's tool names), `lazy` (start on first use instead of at once) and `timeout` (ms per call, default 120000).
-- Its tools reach the model as `<server>_<tool>` (a built-in or Lua tool with the same name wins). They run through the `tool_call` and `tool_result` hooks like any tool; `tool_call` events for them carry `mcp = { server, tool, annotations }`, so a hook can tell (the approve plugin asks for MCP tools unless the server marks them `readOnlyHint`).
+- Its tools reach the model as `<server>_<tool>` (a built-in or Lua tool with the same name wins). They run through the `tool_call` and `tool_result` hooks like any tool; `tool_call` events for them carry `mcp = { server, tool, annotations }`, so a hook can tell (an approval hook can use `readOnlyHint` to distinguish read-only tools).
 - Servers run for as long as the core. A reload restarts only the servers whose settings changed (and stops removed ones). A server that exits is restarted after 1, 2, 4, 8 and 16 seconds, then given up on until the next reload; a turn waits up to 10 seconds for servers starting the first time, never for one that is restarting. `/health` shows each server; `mcp/list` gives the same to clients.
 - In hooks and tools: `bone.mcp.call(server, tool, args)` → `{ text, is_error }` (by the server's own tool name), and `bone.mcp.list()` → `{ { name, state, error, tools } }`, `state` being `"idle"`, `"starting"`, `"ready"` or `"failed"`. `bone.mcp.remove(name)` takes a server out of the configuration (it stops at the next reload).
 
@@ -401,7 +387,7 @@ end)
 bone.rpc.call("notes.add", { text = "remember this" }, function(result, err) end)
 ```
 
-The function runs as a job, so it may wait (`bone.system`, `bone.model`, `bone.session`), and its return value goes back to the caller as JSON; an error becomes the call's error. Prefix names with the plugin's name. `bone.rpc.unregister(name)`. The example `skills` and `templates` plugins work this way; skills and prompt templates themselves are plugins, not part of the core.
+The function runs as a job, so it may wait (`bone.system`, `bone.model`, `bone.session`), and its return value goes back to the caller as JSON; an error becomes the call's error. Prefix names with the plugin's name. `bone.rpc.unregister(name)`. Skill loading is available through the catalog’s `skill` package; prompt-template loading can be implemented as a customization.
 
 ### Calling a model
 
@@ -438,7 +424,7 @@ The TUI has its own `bone.health(name, fn)` for TUI-side checks (plain functions
 
 ### After loading
 
-`bone.on_ready(fn)` runs `fn()` once after every `core.lua` (the plugins' and yours) has run, before the core serves anything. A plugin's `core.lua` runs before yours, so this is where it can read the final `bone.config` (the `switch` example publishes the provider list from here). An error stops the core from starting, like an error in `core.lua`.
+`bone.on_ready(fn)` runs `fn()` once after every `core.lua` (the plugins' and yours) has run, before the core serves anything. A plugin's `core.lua` runs before yours, so this is where it can read the final `bone.config`. An error stops the core from starting, like an error in `core.lua`.
 
 ### Reloading
 
@@ -452,7 +438,7 @@ When the TUI runs the core in its own process (not `--connect`), it also reloads
 
 ### Environment overrides
 
-For one-off runs, these override `core.lua`: `BONE_BASE_URL` + `BONE_MODEL` (use this endpoint), `BONE_MODEL` alone (another model on the configured provider), `BONE_API_KEY`, `BONE_REASONING_EFFORT`, `BONE_SYSTEM_PROMPT`, `BONE_DATA_DIR`, and `BONE_APPROVAL=auto` (the approve plugin, if installed, never asks).
+For one-off runs, these override `core.lua`: `BONE_BASE_URL` + `BONE_MODEL` (use this endpoint), `BONE_MODEL` alone (another model on the configured provider), `BONE_API_KEY`, `BONE_REASONING_EFFORT`, `BONE_SYSTEM_PROMPT`, `BONE_DATA_DIR`.
 
 ## TUI (`tui.lua`)
 
@@ -508,8 +494,8 @@ The defaults are in `runtime/tui/defaults.lua`.
 ```lua
 bone.o.show_reasoning = false
 bone.o.tool_detail = "rows"     -- tool calls: "summary", "rows" or "full" (ctrl+t)
-bone.o.tool_preview_lines = 4  -- rows of tool output under each call (style plugin)
-bone.o.diff_preview_lines = 8  -- rows of diff under each edit (style plugin)
+bone.o.tool_preview_lines = 4  -- rows of tool output under each call
+bone.o.diff_preview_lines = 8  -- rows of diff under each edit
 bone.o.prompt_max_height = 10
 bone.o.mouse = false           -- leave the mouse to the terminal (its own selection, no wheel)
 bone.o.autoreload = false      -- stop reloading Lua when its files change
@@ -739,7 +725,7 @@ bone.now()                              -- milliseconds since the epoch
 - `bone.ui.update(id, { ... })`: change any of those fields in place (`false` makes a size or position automatic again). Returns `false` if the window is closed.
 - `bone.ui.close(id)`, `bone.ui.is_open(id)`.
 - `bone.ui.select(items, { prompt, format, on_choice, loading, empty, footer, width, height })` → handle: a picker in a focused window. Typing filters (matching `format(item)`), `up`/`down` (or `ctrl+p`/`ctrl+n`, the wheel) move, `enter` calls `on_choice(item, index)`, `esc` calls `on_choice(nil)`. `handle:set_items(items)` fills it later (with `loading = true` it shows "loading…" until then); `handle:close()`.
-- `bone.ui.sessions()`: the session picker (`ctrl+o`, `/sessions`), defined in `runtime/tui/defaults.lua` with `bone.ui.select`. Replace it to change how sessions are listed.
+- `bone.ui.sessions()`: the agents sidebar (`ctrl+o`, `/sessions`), implemented in `runtime/lua/bone/ui/sessions.lua` with `bone.ui.panel`. Groups running sessions (animated `ctx.spinner`), recent activity (one hour by default, configurable with `bone.ui.sessions_recent_seconds`) and history; subagents remain hidden in their owner’s tray. Lists titles, activity timestamps, input + output tokens and user-turn counts; supports filtering, keyboard navigation and click-to-open. Switching keeps the panel visible and focuses the prompt. Initial running status comes from `session/active`, then turn events maintain it. Replace it to change how sessions are listed.
 - `bone.ui.suggestions(ctx)` → lines: draws the `/` menu (see Commands) right above the prompt, with the closest match nearest the input. `ctx = { items = { { name, desc } }, selected, width, height }`. Set it to `nil` for no list (tab still completes).
 - `bone.api.open_session(id)`: show a session.
 - `bone.ui.pager(content, { title, width, height })` → handle: scrollable text in a focused window. `content` is a string (wrapped; `#` lines are headings) or a list of lines. `up`/`down`/wheel, `pageup`/`pagedown`, `home`/`end`, `esc` or `q` closes. `handle:set(content)`, `handle:close()`.
@@ -812,7 +798,7 @@ Groups: `Normal Dim Accent UserPrompt UserMessage Reasoning ToolName ToolArgs To
 
 Rust keeps the session data, wraps text, caches, scrolls and paints. Everything about how things look is Lua. `runtime/tui/defaults.lua` calls `require("bone.ui").setup(opts)`, the standard UI in `runtime/lua/bone/ui/` (views, statusline, a divider that shows a running turn, the three-row prompt, the empty-session hint, the model reasoning in the chat while it streams, and the layout). Replace any piece from `tui.lua`, or override a module under `~/.bone/runtime/lua/bone/ui/` that starts from `bone.builtin` (see the top of this file). With nothing defined, Rust draws the chat as plain text (`> ` before your messages, one blank line between items, tool calls as name, arguments and output, reasoning hidden) and the bare prompt below it. Message text reaches views without blank lines at its edges.
 
-`examples/plugins/style/` is another complete look built only from this API. Install it with `cp -r examples/plugins/style ~/.bone/plugins/`, or copy the parts you want.
+The standard UI is implemented in `runtime/lua/bone/ui/`; override its callbacks or copy built-in modules with `/runtime` to change the look. The catalog’s `themes` package adds color palettes, not an alternate UI.
 
 The TUI reloads your Lua when it changes (see [Reloading](#reloading-1)). `bone.ui.clear()` removes every view, region, action and UI function, for a config that starts from a blank screen.
 
@@ -888,9 +874,11 @@ end
 | `notice` | `text`, `error` |
 | `queued` | `id`, `text`, `mode` (`"steer"` joins the running turn, `"next"` waits for its own), `position` (1 first); messages waiting in the session's queue, after the transcript. Plain text: `(queued) text` |
 
-Every item also has `kind`, `index` (its place in the chat now, from 1) and `key`: a name that stays the same as items come and go around it (`e12` for a transcript entry, your id for items from `bone.chat.add`, `q…` for queued messages), for keeping your own state per item, such as which ones are expanded. `ctx` is `{ width, region, prev = { kind } }`: `region` is `"chat"` in the transcript, and `prev` lets a view decide spacing (the style plugin adds a blank line except between a message and its tool calls). Assigning a view redraws the chat; a view that errors is reported once and its items fall back to plain text until it is redefined.
+Every item also has `kind`, `index` (its place in the chat now, from 1) and `key`: a name that stays the same as items come and go around it (`e12` for a transcript entry, your id for items from `bone.chat.add`, `q…` for queued messages), for keeping your own state per item, such as which ones are expanded. `ctx` is `{ width, region, prev = { kind } }`: `region` is `"chat"` in the transcript, and `prev` lets a view decide spacing (the standard UI adds a blank line except between a message and its tool calls). Assigning a view redraws the chat; a view that errors is reported once and its items fall back to plain text until it is redefined.
 
 Chat views are cached: an item is drawn again when it changes, when the width, options, views or colors change, and when chat data the view read through `bone.chat.items`, `bone.chat.item`, `bone.chat.count` or `bone.chat.turns` changes (so a view may show what comes after its item, or sum up a turn). For time, call `bone.chat.refresh_in(ms)` inside the view and the item is drawn again after that long (a clock, a spinner; `bone.now()` is the time in milliseconds). For anything else, `bone.chat.redraw(index)` draws one item again and `bone.chat.redraw()` all of them; `bone.ui.refresh()` draws every item again (costly in a long chat). Regions, the statusline and popups need none of these: they are drawn on every frame, after any key, event or callback.
+
+For time-based updates in panels, regions, the statusline or popups, call `bone.ui.refresh_in(ms)` from their render function. It schedules a UI frame after `ms` milliseconds without invalidating cached chat views (unlike `bone.ui.refresh()`). The earliest pending request wins; intervening frames keep the deadline, and the request is consumed when due. Call it again during rendering to keep animating. Zero or negative delays request the next frame; redraws remain frame-rate limited. Use `bone.chat.refresh_in(ms)` instead when a cached chat item itself needs to change.
 
 Tool calls have one more layer: `views.tool` draws the frame (status marker, label rows, output), and `bone.ui.tool_views[name](item, ctx)` can supply the content for one tool as `{ title = line, lines = { line, ... } }` (`title` may also be a list of lines; `lines` sit indented under it). Return `nil` for the built-in content (`bone.ui.tool_content`). The standard UI draws tools like the first bone: a label (`shell cmd`, `read_file path (lines 1-20, 20 read)`, `edit_file path (-1 | +2)`), shell output and errors in a `│ ╰` gutter cut to its first and last two rows, edits as a numbered diff, and other tools' first five output lines. `bone.o.tool_detail` (`ctrl+t`) picks how much: `"summary"` (the default) folds each stretch of calls between edits and failures into one line such as `Read 3 files, ran 2 shell commands`, `"rows"` is the above, `"full"` shows every output in full. The summary is drawn by the first call of a stretch: each call reads the item before it (`bone.chat.item`) to tell whether it is first, and only the first reads the stretch, with `bone.chat.items({ around = item.index, from = item.index, kind = { "tool", "reasoning" } })`. It is redrawn when any of them changes, like any view that reads chat data.
 
@@ -975,7 +963,7 @@ bone.keymap.set("f3", function() p:focus() end)
 ```
 
 - `size`: columns for `left`/`right`, rows for `top`/`bottom`. A number of cells, a fraction of the room (`0.3`), or `"auto"` to fit the content up to `max` (default 40 columns or 10 rows). The default is 30 columns beside the chat and `"auto"` above or below it. The chat always keeps 20 columns and 3 rows; a panel that would get less than `min` (default 1) is not drawn that frame (`info().visible` is false).
-- Placement: `left` and `right` panels take full-height columns (after any `left`/`right` regions), then `top` and `bottom` panels split the chat column. Among panels on the same side, lower `order` (default 0) is placed nearer the edge, then older first. Side panels get a `WinSeparator` bar next to the chat.
+- Placement: `left` and `right` panels normally span the chat viewport (after any `left`/`right` regions), then `top` and `bottom` panels split the chat column. Set `full_height = true` on a side panel to span the entire screen and keep the prompt, tray and statusline beside it; the conversation sidebar uses this. Among panels on the same side, lower `order` (default 0) is placed nearer the edge, then older first. Side panels get a `WinSeparator` bar next to the chat.
 - Content: `render(ctx)` returns every line (or nil for none), with `ctx = { id, dock, width, height, focused, top, title }`; for `"auto"` it gets the most room it could have. `lines` is a fixed list instead (a table you keep changing is fine, it is read every frame). Rust shows the rows from `top`; `follow = true` keeps the end in view as content grows, until it is scrolled away from it. A render error is reported once and leaves the panel empty until `update`/`set_lines` gives it new content.
 - The keyboard: `focus = true` (or `p:focus()`, `bone.ui.panel.focus(id)`, a click on it, `focus_next`) gives a `focusable` panel the keyboard. Its `keys` run first, then `on_key(key, panel)`, then the `panel` keymap context (or the panel's own `context`, a named context; give it `fallback = "panel"` to keep the scroll keys). The defaults map the arrows, page keys, `home`/`end` and the wheel to scrolling, `esc` back to the prompt, `tab`/`shift+tab` to the next/previous panel and `ctrl+c` to `interrupt`. Text that is not mapped is ignored. The wheel over any panel scrolls that panel.
 - Lifecycle: `panel/opened`, `panel/updated` and `panel/closed` events (`kind = "panel"`), and `on_close(panel)` when it closes. Hiding or closing the focused panel gives the keyboard back to the prompt. Panels stay open across sessions until closed.
@@ -1009,10 +997,10 @@ Each returns one line (`"%="` is a blank stretch); the row exists only while the
 #### Helpers
 
 - `bone.markdown.parse(text)` → blocks: `{ kind = "heading", level, spans }`, `"paragraph"` / `"item"` (`indent`, and for items `marker`, `ordered`), `"quote"`, `"code"` (`lang`, `lines`), `"rule"`, `"blank"`. Spans are `{ text, bold?, italic?, code?, link? }`.
-- `bone.ui.markdown(text, width, indent)` → the style plugin's rendering of that, as lines (only with the plugin).
+- `bone.ui.markdown(text, width, indent)` → the standard UI's rendering of that, as lines.
 - `bone.text.wrap(spans, width, { first, rest, pad })` → lines. `first`/`rest` prefix the first and following rows (`rest` defaults to blanks as wide as `first`); `pad = "Group"` fills each row to the width (background bands).
 - `bone.text.clip(spans, width)`, `bone.text.truncate(s, n)`, `bone.text.width(s)`.
 - `bone.text.shell(cmd)` → the command as highlighted spans.
-- `bone.ui.preview(text, max, group)` (style plugin) → at most `max` rows: first line, `⋮ +N lines`, last lines.
+- `bone.ui.preview(text, max, group)` → at most `max` rows: first line, `⋮ +N lines`, last lines.
 
 Errors in Lua never crash bone: they show as a one-line message, with the full traceback in `bone.api.log`.

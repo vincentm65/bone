@@ -91,6 +91,8 @@ pub enum Size {
 pub struct Panel {
     pub id: String,
     pub dock: Dock,
+    /// Side panels may span the screen instead of just the chat viewport.
+    pub full_height: bool,
     /// `None`: 30 columns beside the chat, `auto` above or below it.
     pub size: Option<Size>,
     pub max: Option<u16>,
@@ -128,6 +130,7 @@ impl Panel {
         Panel {
             id,
             dock: Dock::Right,
+            full_height: false,
             size: None,
             max: None,
             min: 1,
@@ -511,7 +514,7 @@ impl App {
 
     /// Place and draw the visible panels inside `room` (the chat's area).
     /// Returns what is left for the chat.
-    pub fn draw_panels(&mut self, frame: &mut Frame<'_>, room: Rect) -> Rect {
+    pub fn draw_panels(&mut self, frame: &mut Frame<'_>, room: Rect, full_height: bool) -> Rect {
         let order: Vec<String> = self
             .panels_in_order()
             .into_iter()
@@ -523,6 +526,9 @@ impl App {
             let Some(p) = self.panel(&id).cloned() else {
                 continue;
             };
+            if (p.full_height && p.dock.sideways()) != full_height {
+                continue;
+            }
             if p.hidden {
                 if let Some(p) = self.panel_mut(&id) {
                     p.area = None;

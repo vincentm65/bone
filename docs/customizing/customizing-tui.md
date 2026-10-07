@@ -20,8 +20,8 @@ you assign the name):
 ```lua
 bone.o.show_reasoning = false      -- hide model reasoning
 bone.o.tool_detail = "rows"        -- tool calls: "summary" (default), "rows", "full" (ctrl+t)
-bone.o.tool_preview_lines = 4      -- rows of tool output under each call (style plugin)
-bone.o.diff_preview_lines = 8      -- rows of diff under each edit (style plugin)
+bone.o.tool_preview_lines = 4      -- rows of tool output under each call
+bone.o.diff_preview_lines = 8      -- rows of diff under each edit
 bone.o.prompt_max_height = 10
 bone.o.mouse = false               -- leave the mouse to the terminal
 bone.o.autoreload = false          -- stop reloading Lua on file changes
