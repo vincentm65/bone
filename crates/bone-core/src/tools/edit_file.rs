@@ -962,15 +962,20 @@ fn explain(
     match miss {
         Miss::Applied => format!("{what}: already in the file"),
         Miss::Unseen(start, count) => {
-            let hi = (start + count).min(start + MAX_SHOWN);
-            shown.extend(start + 1..=hi);
-            let recovery = json!({"path": path, "offset": start + 1, "limit": count});
+            let (lo, hi) = (start + 1, start + count);
+            shown.extend(lo..=hi.min(start + MAX_SHOWN));
+            if *count <= MAX_SHOWN {
+                return format!(
+                    "{what}: lines {lo}-{hi} were never shown to you; they are below. Check them, then send the same edit again."
+                );
+            }
+            // Only the first MAX_SHOWN are below; showing more would flood
+            // the reply, so hand over the read that covers the rest.
+            let recovery = json!({"path": path, "offset": lo, "limit": count});
             format!(
-                "{what}: lines {}-{} were not all shown in the matching read version; the preview below may be incomplete.\n\
+                "{what}: lines {lo}-{hi} have not all been read; only the first {MAX_SHOWN} are below.\n\
                  Recovery: call read_file with {recovery}\n\
-                 Copy fresh LINE#HASH anchors from that read, then retry the edit.",
-                start + 1,
-                start + count
+                 Check those lines, then send the same edit again."
             )
         }
         Miss::Ambiguous(spots) => {

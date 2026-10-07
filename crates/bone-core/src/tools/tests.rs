@@ -344,7 +344,9 @@ async fn ranges_over_unseen_lines_are_shown_first() {
     .unwrap();
     let range = json!([{"at": anchor(&body, 3), "end": anchor(&body, 22), "text": "gone"}]);
     let err = edit_path(&ctx, "f.txt", range.clone()).await.unwrap_err();
-    assert!(err.contains("lines 3-22 were not all shown"), "{err}");
+    assert!(err.contains("lines 3-22 were never shown"), "{err}");
+    // All of them fit below, so no extra read is needed.
+    assert!(!err.contains("Recovery:"), "{err}");
     assert!(err.contains(&anchor(&body, 10)), "{err}");
     // Now they have been shown, the same edit goes through.
     edit_path(&ctx, "f.txt", range).await.unwrap();
@@ -377,6 +379,7 @@ async fn unseen_range_recovery_reads_beyond_the_bounded_preview() {
     }]);
     let err = edit_path(&ctx, filename, edits.clone()).await.unwrap_err();
     assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+    assert!(err.contains("lines 51-550 have not all been read"), "{err}");
     assert!(err.contains(&anchor(&body, 130)), "{err}");
     assert!(!err.contains(&anchor(&body, 131)), "{err}");
     let recovery: Value = serde_json::from_str(
