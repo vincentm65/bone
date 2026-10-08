@@ -250,14 +250,15 @@ impl Session {
     /// The transcript as the model is sent it: the summary, then what it
     /// does not cover.
     pub fn context(&self) -> Vec<ChatMessage> {
-        match &self.summary {
+        let messages = match &self.summary {
             Some(sum) if sum.through <= self.messages.len() => {
                 let mut out = vec![crate::compact::summary_message(&sum.text)];
                 out.extend(self.messages[sum.through..].iter().cloned());
                 out
             }
             _ => self.messages.clone(),
-        }
+        };
+        crate::import::repair(messages)
     }
 
     /// Whether Lua may change the transcript now: no turn, or a turn at a

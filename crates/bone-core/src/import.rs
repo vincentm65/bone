@@ -314,7 +314,7 @@ fn convert(
     Ok((text, rows.len()))
 }
 
-const NO_RESULT: &str = "[no result: the turn ended before this tool call finished]";
+const NO_RESULT: &str = "[no saved result: tool execution was interrupted; outcome unknown. Check current state before retrying side effects.]";
 
 /// Keeps a transcript as providers want it: each tool call answered before
 /// anything else comes, and no result without its call. The old app's
@@ -358,7 +358,7 @@ impl Closer {
     }
 }
 
-fn repair(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+pub(crate) fn repair(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
     let mut closer = Closer::default();
     let mut out: Vec<ChatMessage> = messages.into_iter().flat_map(|m| closer.next(m)).collect();
     out.extend(closer.close());
