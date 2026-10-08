@@ -1762,6 +1762,34 @@ async fn windows_without_focus_anchors_z_and_updates() {
 }
 
 #[tokio::test]
+async fn popup_mouse_hits_topmost_without_clicking_through() {
+    let mut h = Harness::blank().await;
+    h.lua(
+        r#"
+        bottom = bone.ui.popup({row = 1, col = 2, width = 8, height = 3, lines = {'bottom'}})
+        top = bone.ui.win({row = 1, col = 2, width = 4, height = 2, lines = {'top'}})
+        bone.on('mouse', function(ev) mouse_event = ev end)
+    "#,
+    )
+    .await;
+    h.screen(20, 8);
+    h.app.mouse("down", "left", (5, 2));
+    h.lua(
+        "assert(mouse_event.popup == top and not mouse_event.popup_focused); \
+        assert(mouse_event.popup_row == 2 and mouse_event.popup_col == 4); \
+        assert(mouse_event.region == nil)",
+    )
+    .await;
+    assert!(h.app.selection.is_none());
+    h.lua("bone.ui.close(top); bone.on('mouse', function(ev) bone.ui.close(ev.popup) end)")
+        .await;
+    h.app.mouse("down", "left", (5, 2));
+    h.lua("assert(mouse_event.popup == bottom and mouse_event.popup_focused)")
+        .await;
+    assert!(h.app.selection.is_none());
+    assert!(h.app.popups.is_empty());
+}
+#[tokio::test]
 async fn layout_orders_rows_and_takes_any_region() {
     let mut h = Harness::blank().await;
     h.lua(

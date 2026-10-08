@@ -59,6 +59,8 @@ pub struct Popup {
     /// Position; `None` centers, negative counts from the bottom/right.
     pub row: Option<i32>,
     pub col: Option<i32>,
+    /// Actual last-rendered bounds; absent until drawn or after an update.
+    pub rect: Option<Rect>,
     pub opened: Instant,
     /// Keys within this long after opening are ignored.
     pub guard: Duration,
@@ -1437,37 +1439,45 @@ impl App {
     // ---- mouse selection -----------------------------------------------------
 
     /// A mouse press, drag or release. Lua `mouse` handlers see it first
-    /// (with the chat item and layout leaf under it); one returning true
-    /// takes it, else the
-    /// left button selects text and clicks focus panels.
+    /// (with the popup, or underlying chat item and layout leaf). Returning
+    /// true takes it; otherwise the left button selects text and focuses
+    /// panels, except under popups.
     pub fn mouse(&mut self, action: &str, button: &str, at: (u16, u16)) {
         let mut ev = serde_json::json!({
             "action": action, "button": button, "x": at.0, "y": at.1,
         });
-        if let Some(hit) = self.chat_at(at) {
-            ev["index"] = hit["index"].clone();
-            ev["line"] = hit["line"].clone();
-        }
-        // The layout leaf under it (a region, "prompt", "statusline", …),
-        // with the row and column inside it, from 1.
-        if let Some((name, r)) = self
-            .leaves
-            .iter()
-            .find(|(_, r)| at.0 >= r.x && at.0 < r.right() && at.1 >= r.y && at.1 < r.bottom())
-        {
-            ev["region"] = name.clone().into();
-            ev["row"] = (at.1 - r.y + 1).into();
-            ev["col"] = (at.0 - r.x + 1).into();
-        }
-        if let Some((id, line)) = self.panel_hit(at) {
-            ev["panel"] = id.into();
-            ev["panel_line"] = line.into();
+        let popup_hit = self.popup_hit(at).map(|p| (p.id, p.rect.unwrap()));
+        if let Some((id, r)) = popup_hit {
+            ev["popup"] = id.into();
+            ev["popup_row"] = (at.1 - r.y + 1).into();
+            ev["popup_col"] = (at.0 - r.x + 1).into();
+            ev["popup_focused"] = (self.focused_popup().map(|p| p.id) == Some(id)).into();
+        } else {
+            if let Some(hit) = self.chat_at(at) {
+                ev["index"] = hit["index"].clone();
+                ev["line"] = hit["line"].clone();
+            }
+            // The layout leaf under it, with row and column from 1.
+            if let Some((name, r)) = self
+                .leaves
+                .iter()
+                .find(|(_, r)| at.0 >= r.x && at.0 < r.right() && at.1 >= r.y && at.1 < r.bottom())
+            {
+                ev["region"] = name.clone().into();
+                ev["row"] = (at.1 - r.y + 1).into();
+                ev["col"] = (at.0 - r.x + 1).into();
+            }
+            if let Some((id, line)) = self.panel_hit(at) {
+                ev["panel"] = id.into();
+                ev["panel_line"] = line.into();
+            }
         }
         let handled = self
             .fire("mouse", ev)
             .iter()
             .any(|v| matches!(v, mlua::Value::Boolean(true)));
-        if handled || button != "left" {
+        // A popup still owns this event if its handler closed it.
+        if handled || popup_hit.is_some() || button != "left" {
             self.dirty = true;
             return;
         }
@@ -1597,6 +1607,14 @@ impl App {
         let mut v: Vec<&Popup> = self.popups.iter().collect();
         v.sort_by_key(|p| (p.z, p.id));
         v
+    }
+
+    /// The topmost rendered window under a screen cell, focused or not.
+    pub fn popup_hit(&self, at: (u16, u16)) -> Option<&Popup> {
+        self.popups
+            .iter()
+            .filter(|p| p.rect.is_some_and(|r| r.contains(at.into())))
+            .max_by_key(|p| (p.z, p.id))
     }
 
     /// The topmost window that takes the keyboard.

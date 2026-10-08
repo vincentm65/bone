@@ -816,6 +816,10 @@ struct Anchors {
 /// Lua windows, bottom first. Lua draws every cell inside; Rust sizes,
 /// places and clears behind them.
 fn draw_popups(frame: &mut Frame<'_>, app: &mut App, anchors: &Anchors) {
+    // Skipped/zero-sized windows must not keep bounds from an earlier frame.
+    for p in &mut app.popups {
+        p.rect = None;
+    }
     let order: Vec<crate::app::Popup> = app.popups_in_order().into_iter().cloned().collect();
     for p in order {
         let (id, lines_cb, width, height, row, col, anchor) =
@@ -853,6 +857,11 @@ fn draw_popups(frame: &mut Frame<'_>, app: &mut App, anchors: &Anchors) {
             width: w,
             height: h,
         };
+        // A render callback may have closed the window.
+        let Some(p) = app.popups.iter_mut().find(|p| p.id == id) else {
+            continue;
+        };
+        p.rect = Some(rect);
         frame.render_widget(Clear, rect);
         frame.render_widget(Paragraph::new(lines).style(app.theme.hl("Normal")), rect);
     }

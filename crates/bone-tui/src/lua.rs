@@ -1820,6 +1820,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 height: None,
                 row: None,
                 col: None,
+                rect: None,
                 opened: std::time::Instant::now(),
                 guard: std::time::Duration::ZERO,
             };
@@ -1848,6 +1849,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             };
             let old_focus = app.focused_popup().map(|p| p.id);
             let mut p = app.popups.remove(i);
+            p.rect = None;
             if let Err(error) = apply_win_spec(app, lua, &mut p, &spec) {
                 app.popups.insert(i, p);
                 return Err(error);

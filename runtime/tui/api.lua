@@ -132,6 +132,8 @@ bone.o = setmetatable(option_api, {
 --- ("turn/started", "message/delta", "tool/finished", ...) plus "ready" and
 --- "submit" ({ text }; return false to cancel or a string to replace the
 --- text). Returns an id for bone.off.
+--- "mouse" has action/button/x/y; over a window it also has popup (id),
+--- popup_row/popup_col (1-based) and popup_focused. Return true to handle it.
 function bone.on(event, fn)
   return api("on", event, fn)
 end
