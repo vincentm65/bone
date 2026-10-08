@@ -1002,6 +1002,155 @@ async fn system_and_context_hooks_shape_each_request() {
     assert_eq!(h.transcript().await.len(), 4);
 }
 
+// Exercise the actual provider options as well as the usage metadata. The
+// scripted runtime default deliberately differs from the configured entries.
+async fn request_override_case(
+    override_fields: &str,
+    pin: Option<(&str, &str)>,
+    expected_entry: &str,
+    expected_model: &str,
+) {
+    let lua = format!(
+        r#"
+        bone.provider.register("echo", {{ complete = function(req)
+          return {{ content = req.options.tag .. ":" .. req.options.model,
+                    usage = {{ input_tokens = 7, output_tokens = 2 }} }}
+        end }})
+        bone.config.providers.x = {{ type = "echo", model = "x-default", tag = "x" }}
+        bone.config.providers.y = {{ type = "echo", model = "y-default", tag = "y" }}
+        bone.config.provider = "x"
+        local count = 0
+        bone.hook("request", function(ev)
+          count = count + 1
+          if count == 1 then return {{ {override_fields} }} end
+        end)
+        "#
+    );
+    let mut h = Harness::with_lua(&lua, vec![text("runtime-default")]).await;
+    let original = pin
+        .map(|(entry, model)| (Some(entry.to_owned()), model.to_owned()))
+        .unwrap_or((Some("x".into()), "x-default".into()));
+    if pin.is_some() {
+        h.core
+            .inner
+            .session(&h.session_id)
+            .unwrap()
+            .lock()
+            .unwrap()
+            .pin(original.clone())
+            .unwrap();
+    }
+    h.start("first").await;
+    assert_eq!(
+        h.until::<TurnFinished>().await.outcome,
+        TurnOutcome::Completed
+    );
+    assert!(
+        matches!(h.transcript().await.last(), Some(ChatMessage::Assistant { content, .. })
+        if content == &format!("{expected_entry}:{expected_model}"))
+    );
+    let out = h
+        .call::<StoreQuery>(StoreQueryParams {
+            sql: "SELECT provider, model FROM usage".into(),
+            params: Value::Null,
+        })
+        .await
+        .unwrap();
+    assert_eq!(out.rows, [[json!(expected_entry), json!(expected_model)]]);
+    assert_eq!(
+        h.core
+            .inner
+            .session(&h.session_id)
+            .unwrap()
+            .lock()
+            .unwrap()
+            .model,
+        Some(original.clone())
+    );
+
+    // The next call does not inherit either request override.
+    h.start("second").await;
+    assert_eq!(
+        h.until::<TurnFinished>().await.outcome,
+        TurnOutcome::Completed
+    );
+    let expected = if pin.is_some() {
+        format!("{}:{}", original.0.unwrap(), original.1)
+    } else {
+        "runtime-default".into()
+    };
+    assert!(
+        matches!(h.transcript().await.last(), Some(ChatMessage::Assistant { content, .. })
+        if content == &expected)
+    );
+}
+
+#[tokio::test]
+async fn request_hook_overrides_provider_and_model() {
+    request_override_case("provider = 'y', model = 'custom'", None, "y", "custom").await;
+}
+
+#[tokio::test]
+async fn request_hook_provider_only_uses_entry_model() {
+    request_override_case("provider = 'y'", None, "y", "y-default").await;
+}
+
+#[tokio::test]
+async fn request_hook_model_only_uses_selected_entry() {
+    request_override_case("model = 'custom'", None, "x", "custom").await;
+}
+
+#[tokio::test]
+async fn request_hook_model_only_keeps_session_pin() {
+    request_override_case(
+        "model = 'custom'",
+        Some(("y", "session-model")),
+        "y",
+        "custom",
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn request_hook_model_is_reported_to_retry_hook() {
+    let mut h = Harness::with_lua(
+        r#"
+        local attempts = 0
+        bone.provider.register("retry", { complete = function(req)
+          attempts = attempts + 1
+          if attempts == 1 then error("overloaded") end
+          return { content = req.options.model,
+                   usage = { input_tokens = 1, output_tokens = 1 } }
+        end })
+        bone.config.providers.y = { type = "retry", model = "default" }
+        bone.config.provider = "x"
+        bone.hook("request", function() return { provider = "y", model = "custom" } end)
+        bone.hook("request_error", function(ev)
+          assert(ev.model == "custom", "wrong served model: " .. ev.model)
+          return { retry = 0 }
+        end)
+        "#,
+        vec![],
+    )
+    .await;
+    h.start("go").await;
+    assert_eq!(
+        h.until::<TurnFinished>().await.outcome,
+        TurnOutcome::Completed
+    );
+    assert!(
+        matches!(h.transcript().await.last(), Some(ChatMessage::Assistant { content, .. })
+        if content == "custom")
+    );
+    let out = h
+        .call::<StoreQuery>(StoreQueryParams {
+            sql: "SELECT provider, model FROM usage".into(),
+            params: Value::Null,
+        })
+        .await
+        .unwrap();
+    assert_eq!(out.rows, [[json!("y"), json!("custom")]]);
+}
 #[tokio::test]
 async fn request_error_hooks_can_retry() {
     let mut h = Harness::with_lua(
@@ -1328,6 +1477,134 @@ async fn cancelling_a_turn_cancels_its_child_sessions() {
     }
     assert!(ended.contains(&(created.session_id, TurnOutcome::Cancelled)));
     assert!(ended.contains(&(h.session_id.clone(), TurnOutcome::Cancelled)));
+}
+
+#[tokio::test]
+async fn cancelled_child_runs_turn_end_after_cleanup() {
+    // Repeat to catch turn_end racing an already-cancelled token.
+    for _ in 0..8 {
+        let lua = format!(
+            r#"{CHILD_TOOL}
+            bone.hook("turn_end", function(ev)
+              bone.session.append(ev.session_id, {{
+                role = "user", content = "cleanup:" .. ev.outcome.status,
+              }})
+            end)
+            "#
+        );
+        let mut h = Harness::with_lua(
+            &lua,
+            vec![
+                calls(&[("c1", "child", json!({}))]),
+                Step::Hang("thinking".into()),
+            ],
+        )
+        .await;
+        h.start("go").await;
+        let child = h.child_created().await;
+        h.until::<MessageDelta>().await;
+        h.cancel().await;
+        for _ in 0..2 {
+            let finished = h.until::<TurnFinished>().await;
+            assert_eq!(finished.outcome, TurnOutcome::Cancelled);
+            let state = h
+                .call::<SessionMessages>(SessionRef {
+                    session_id: finished.session_id.clone(),
+                })
+                .await
+                .unwrap();
+            // Appending is only allowed after the active turn is cleared.
+            // The callback must finish before turn/finished, exactly once.
+            assert_eq!(
+                state.messages.last(),
+                Some(&ChatMessage::User {
+                    content: "cleanup:cancelled".into(),
+                }),
+            );
+            assert_eq!(
+                state
+                    .messages
+                    .iter()
+                    .filter(|m| matches!(m,
+                        ChatMessage::User { content } if content == "cleanup:cancelled"
+                    ))
+                    .count(),
+                1,
+            );
+            assert!(finished.session_id == child.session_id || finished.session_id == h.session_id);
+        }
+    }
+}
+
+#[tokio::test]
+async fn cancelled_turn_end_async_hooks_finish_within_grace() {
+    for wait in ["bone.ask({ q = 'cleanup?' })", "bone.sleep(60000)"] {
+        let lua = format!(
+            r#"bone.hook("turn_end", function(ev)
+              local result = {wait}
+              bone.state.save("cleanup", {{ resumed = true, cancelled = result == nil }})
+            end)"#
+        );
+        let mut h = Harness::with_lua(&lua, vec![Step::Hang("thinking".into())]).await;
+        h.start("go").await;
+        h.until::<MessageDelta>().await;
+        let question = tokio::time::timeout(Duration::from_secs(3), async {
+            h.cancel().await;
+            let question = if wait.contains("bone.ask") {
+                Some(h.until::<AskRequested>().await)
+            } else {
+                None
+            };
+            let finished = h.until::<TurnFinished>().await;
+            assert_eq!(finished.outcome, TurnOutcome::Cancelled);
+            question
+        })
+        .await
+        .expect("async cleanup must not hold up a cancelled turn");
+
+        if let Some(question) = question {
+            // The queued cancellation must remove the question, not merely
+            // abandon the Rust future waiting for the hook's result.
+            let error = h
+                .call::<AskRespond>(AskRespondParams {
+                    ask_id: question.ask_id,
+                    answer: json!("too late"),
+                })
+                .await
+                .unwrap_err();
+            assert!(error.message.contains("no open question"), "{error:?}");
+        }
+        let cleanup = file_text(&h._data.path().join("state/core/cleanup.json")).await;
+        let cleanup: Value = serde_json::from_str(&cleanup).unwrap();
+        assert_eq!(cleanup, json!({ "resumed": true, "cancelled": true }));
+    }
+}
+
+#[tokio::test]
+async fn completed_turn_end_question_retains_unbounded_wait() {
+    let mut h = Harness::with_lua(
+        r#"bone.hook("turn_end", function(ev) bone.ask({ q = "cleanup?" }) end)"#,
+        vec![text("done")],
+    )
+    .await;
+    h.start("go").await;
+    let question = h.until::<AskRequested>().await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(1200), h.until::<TurnFinished>())
+            .await
+            .is_err(),
+        "normal turns must still await cleanup past the cancellation grace"
+    );
+    h.call::<AskRespond>(AskRespondParams {
+        ask_id: question.ask_id,
+        answer: json!("yes"),
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        h.until::<TurnFinished>().await.outcome,
+        TurnOutcome::Completed
+    );
 }
 
 #[tokio::test]

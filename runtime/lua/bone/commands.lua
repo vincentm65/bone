@@ -12,6 +12,10 @@ cmd("help", function(c)
   return bone.ui.help(c.args)
 end, { desc = "commands and keys; /help topic searches the docs", aliases = { "?" } })
 
+cmd("md", function(c)
+  return require("bone.help").markdown(c.args)
+end, { desc = "browse project Markdown in a popup; /md [relative path]" })
+
 cmd("health", function()
   bone.ui.health()
 end, { desc = "check the setup: provider, terminal, clipboard, Lua", aliases = { "checkhealth" } })

@@ -38,8 +38,13 @@ end
 local function setup_colors()
   -- Derive from the theme, so this also works with custom colorschemes.
   local normal, dim, selection = bone.hl.get("Normal") or {}, bone.hl.get("Dim") or {}, bone.hl.get("Selection") or {}
-  bone.hl.set("SessionCardTitle", { fg = normal.fg, bg = selection.bg, bold = true })
+  local accent, warn = bone.hl.get("Accent") or {}, bone.hl.get("WarningMsg") or {}
+  -- The selected card: an accent title on the selection background.
+  bone.hl.set("SessionCardTitle", { fg = accent.fg, bg = selection.bg, bold = true })
   bone.hl.set("SessionCardMeta", { fg = dim.fg, bg = selection.bg })
+  bone.hl.set("SessionTab", { fg = normal.fg, bold = true })
+  bone.hl.set("SessionTabLine", { fg = accent.fg })
+  bone.hl.set("SessionCount", { fg = warn.fg or accent.fg })
 end
 
 local function activity(s)
@@ -98,7 +103,10 @@ local function filter_running()
     state.descriptors[#state.rows] = { kind, index }
     return #state.rows
   end
+  append("blank")
   append("tabs")
+  append("underline")
+  append("blank")
   append("help")
   if #state.items == 0 then append("status") end
   local previous
@@ -156,7 +164,10 @@ local function filter(reset)
     state.descriptors[line] = { kind, index }
     return line
   end
+  append("blank")
   append("tabs")
+  append("underline")
+  append("blank")
   append("search")
   append("help")
   if state.loading or #state.items == 0 then append("status") end
@@ -246,7 +257,8 @@ local function render(ctx)
     reveal(ctx)
   end
   local function row(text, hl)
-    text = bone.text.truncate(text:gsub("%s+", " "), ctx.width)
+    -- Collapse whitespace inside the text, but keep the indent.
+    text = bone.text.truncate(text:gsub("(%S)%s+", "%1 "), ctx.width)
     return { { text .. string.rep(" ", math.max(0, ctx.width - bone.text.width(text))), hl } }
   end
   local function card(text, style)
@@ -269,13 +281,17 @@ local function render(ctx)
       local n = state.page == "running" and #state.items or #jobs()
       formatted = {
         { "  ", "Normal" },
-        { " Chats ", state.page == "chats" and "SessionCardTitle" or "Dim" },
-        { "  ", "Normal" },
-        { " Processes" .. (n > 0 and (" " .. n) or "") .. " ", state.page == "running" and "SessionCardTitle" or "Dim" },
+        { "Chats", state.page == "chats" and "SessionTab" or "Dim" },
+        { "   ", "Normal" },
+        { "Processes", state.page == "running" and "SessionTab" or "Dim" },
+        { n > 0 and (" " .. n) or "", "SessionCount" },
         { fill = " ", hl = "Normal" },
       }
+    elseif kind == "underline" then
+      -- Under the active tab's label: "Chats" at column 2, "Processes" at 10.
+      formatted = row(state.page == "running" and ("          " .. string.rep("─", 9)) or ("  " .. string.rep("─", 5)), "SessionTabLine")
     elseif kind == "search" then
-      formatted = row(state.query == "" and "  Search conversations…" or ("  Search: " .. state.query), state.query == "" and "Dim" or "Accent")
+      formatted = row("  ⌕ " .. (state.query == "" and "search" or state.query), state.query == "" and "Dim" or "Accent")
     elseif kind == "help" then
       formatted = row(state.page == "running" and "  ↵ open · x stop · tab chats · esc prompt" or "  ↵ open · tab processes · esc prompt", "Dim")
     elseif kind == "status" then
@@ -374,7 +390,7 @@ function M.open()
   local st = state
   setup_colors()
   panel = bone.ui.panel.open({
-    id = "sessions", dock = "left", size = 48, full_height = true, focus = true,
+    id = "sessions", dock = "left", size = 48, full_height = true, separator = false, focus = true,
     render = render,
     keys = {
       esc = function() bone.ui.panel.focus(nil) end,
@@ -494,7 +510,7 @@ bone.on("mouse", function(ev)
     local index = state.hits[ev.panel_line]
     if index then
       choose(index)
-    elseif (state.descriptors[ev.panel_line] or {})[1] == "tabs" then
+    elseif ({ tabs = true, underline = true })[(state.descriptors[ev.panel_line] or {})[1]] then
       switch_page()
     end
     return true

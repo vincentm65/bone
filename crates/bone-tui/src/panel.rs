@@ -100,6 +100,9 @@ pub struct Panel {
     pub dock: Dock,
     /// Side panels may span the screen instead of just the chat viewport.
     pub full_height: bool,
+    /// Side panels draw a `WinSeparator` bar in the column next to the chat;
+    /// without it that column stays blank.
+    pub separator: bool,
     /// `None`: 30 columns beside the chat, `auto` above or below it.
     pub size: Option<Size>,
     pub max: Option<u16>,
@@ -138,6 +141,7 @@ impl Panel {
             id,
             dock: Dock::Right,
             full_height: false,
+            separator: true,
             size: None,
             max: None,
             min: 1,
@@ -596,7 +600,7 @@ impl App {
                 continue;
             };
             room = rest;
-            let separator = if side {
+            let separator = if side && p.separator {
                 Some(if p.dock == Dock::Left {
                     area.right()
                 } else {

@@ -470,6 +470,9 @@ fn apply_panel_spec(
     if let Some(full_height) = spec.get::<Option<bool>>("full_height")? {
         p.full_height = full_height;
     }
+    if let Some(separator) = spec.get::<Option<bool>>("separator")? {
+        p.separator = separator;
+    }
     match spec.get::<Value>("size")? {
         Value::Nil => {}
         Value::Boolean(false) => p.size = None,

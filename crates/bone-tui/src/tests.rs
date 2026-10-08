@@ -690,7 +690,7 @@ async fn session_sidebar_groups_live_and_recent_chats() {
         "{screen}"
     );
     // Header lines don't open a transcript; selection stays on its session.
-    h.app.mouse("down", "left", (5, 2));
+    h.app.mouse("down", "left", (5, 5));
     h.settle().await;
     assert!(h.requests("session/messages").is_empty());
     h.input("{enter}").await;
@@ -741,7 +741,7 @@ async fn session_picker_filters_and_opens() {
     h.input("firs").await;
     let screen = h.screen(80, 24);
     assert!(
-        screen.contains("Search: firs") && screen.contains("first") && !screen.contains("second"),
+        screen.contains("⌕ firs") && screen.contains("first") && !screen.contains("second"),
         "{screen}"
     );
     h.input("{enter}").await;
@@ -767,7 +767,7 @@ async fn session_picker_filters_and_opens() {
     h.input("{ctrl+o}{esc}").await;
     assert_eq!(h.app.context(), Context::Main);
     h.input("{ctrl+o}{tab}{tab}{esc}").await;
-    assert!(h.screen(80, 24).contains("Search: firs"));
+    assert!(h.screen(80, 24).contains("⌕ firs"));
 }
 
 #[tokio::test]
@@ -4143,7 +4143,7 @@ async fn sidebar_processes_page_lists_every_chats_background_work() {
     let screen = h.screen(100, 30);
     assert!(!screen.contains("reviewer"), "{screen}");
     h.input("{tab}").await;
-    assert!(h.screen(100, 30).contains("Search conversations"));
+    assert!(h.screen(100, 30).contains("⌕ search"));
 }
 
 #[tokio::test]
@@ -5363,7 +5363,7 @@ async fn session_sidebar_search_accepts_unicode_and_alt_a_does_not_archive() {
     h.input("a中文+🦴").await;
     let screen = h.screen(80, 24);
     assert!(
-        screen.replace(' ', "").contains("Search:a中文+🦴"),
+        screen.replace(' ', "").contains("⌕a中文+🦴"),
         "{screen}"
     );
     assert_eq!(

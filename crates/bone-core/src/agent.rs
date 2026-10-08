@@ -31,6 +31,8 @@ use crate::tools::{ProcessView, ToolContext, ToolSpec, parse_args};
 /// After cancellation, how long a running tool gets to clean up (e.g. kill
 /// its process group) before its future is dropped.
 const TOOL_CANCEL_GRACE: Duration = Duration::from_millis(500);
+/// Grace for cleanup hooks on cancelled turns only.
+const TURN_END_CANCEL_GRACE: Duration = Duration::from_secs(1);
 
 const DEFAULT_SYSTEM_PROMPT: &str = "You are bone, a coding assistant working in the \
 user's terminal. Use the tools to inspect files, make changes and run commands. Search with rg \
@@ -112,9 +114,30 @@ pub(crate) async fn run_turn(
             s.active = None;
         }
     }
-    let ev = json!({ "session_id": turn.session_id, "turn_id": turn_id, "outcome": outcome });
-    let _ = turn.hooks("turn_end", ev).await;
     let cancelled = matches!(outcome, TurnOutcome::Cancelled);
+    let ev = json!({ "session_id": turn.session_id, "turn_id": turn_id, "outcome": outcome });
+    // Cleanup hooks must run even when the turn's cancellation token is set.
+    // Give cancelled turns a grace period so synchronous cleanup still runs,
+    // but an async hook waiting on bone.ask/sleep cannot hold up turn/finished
+    // forever. Normal turns retain their unbounded hook semantics.
+    if let Some(s) = turn
+        .rt
+        .scripting
+        .as_deref()
+        .filter(|s| s.has_hook("turn_end"))
+    {
+        if cancelled {
+            if tokio::time::timeout(TURN_END_CANCEL_GRACE, s.hooks("turn_end", ev))
+                .await
+                .is_err()
+            {
+                // Dropping the await alone leaves Lua parked; resume it with nil.
+                s.cancel_session(&turn.session_id);
+            }
+        } else {
+            let _ = s.hooks("turn_end", ev).await;
+        }
+    }
     inner.emit::<TurnFinished>(TurnFinishedParams {
         session_id: turn.session_id,
         turn_id,
@@ -261,8 +284,10 @@ impl Turn<'_> {
                 "tools": tools.iter().map(|t| json!({ "name": t.name, "description": t.description, "parameters": t.parameters })).collect::<Vec<_>>(),
             });
             let mut use_provider = None;
+            let mut use_model = None;
             if let Some(ev) = self.safe_hooks("request", ev).await? {
                 use_provider = ev["provider"].as_str().map(str::to_owned);
+                use_model = ev["model"].as_str().map(str::to_owned);
                 messages = serde_json::from_value(list(&ev["messages"])).map_err(|e| {
                     Stop::Failed(format!("request hook returned bad messages: {e}"))
                 })?;
@@ -299,21 +324,24 @@ impl Turn<'_> {
                 let _ = self.session.lock().unwrap().pin(pin.clone());
                 pin
             });
-            let mut provider = self.rt.pinned(&served).map_err(Stop::Failed)?;
-            // A request hook may send this call to another provider.
-            if let Some(name) = use_provider {
-                provider = self
-                    .rt
-                    .provider_for(Some(&name), &Value::Null)
-                    .map_err(|why| Stop::Failed(format!("request hook: {why}")))?;
-                served.1 = self
-                    .rt
-                    .models
-                    .get(&name)
-                    .map(|p| p.model.clone())
-                    .unwrap_or_default();
-                served.0 = Some(name);
-            }
+            // Request overrides last for this call only. A model alone keeps
+            // the session's pinned entry, not the runtime's current default.
+            let mut provider = if use_provider.is_some() || use_model.is_some() {
+                let options = use_model
+                    .as_ref()
+                    .map(|model| json!({ "model": model }))
+                    .unwrap_or(Value::Null);
+                if let Some(name) = use_provider.as_deref() {
+                    served = self.rt.model_of(Some(name), &options);
+                } else if let Some(model) = use_model {
+                    served.1 = model;
+                }
+                self.rt
+                    .provider_for(served.0.as_deref(), &options)
+                    .map_err(|why| Stop::Failed(format!("request hook: {why}")))?
+            } else {
+                self.rt.pinned(&served).map_err(Stop::Failed)?
+            };
             let completion = loop {
                 attempt += 1;
                 let mut text = String::new();

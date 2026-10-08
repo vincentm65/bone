@@ -60,6 +60,7 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 |---|---|
 | `/help`, `/?` | searchable help popup with Commands, Keys and Docs tabs (also `f1`) |
 | `/help {topic}` | the matching section of these docs in a scrollable window (`/help hooks`, `/help windows`, `/help lua` for a whole file) |
+| `/md [relative path]` | browse the working directory's Markdown files in a large popup, or open a listed document directly |
 | `/health`, `/checkhealth` | check the setup: provider address and key, sessions folder, terminal, mouse, clipboard route, Lua errors, plus plugins' own checks |
 | `/setup` | add a model provider: kind, URL, model and key (kept in `~/.bone/secrets.json`), and catalog plugins; opens by itself on a first run with no provider |
 | `/catalog` | browse the plugin catalog: install, update and remove packages (each file checked against the catalog's hashes) |
@@ -80,6 +81,16 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 Enter on a partial name runs the highlighted suggestion (`/ses` + enter opens the picker). A message that really starts with `/` can be sent as `//like this`; paths such as `/etc/hosts …` are sent as messages anyway. Commands from Lua or plugins show up in the suggestions too.
 
 **Help popup.** Type to filter the current tab; `tab` / `shift+tab` or `left` / `right` switch between Commands, Keys and Docs. Search matches command aliases and descriptions too, and includes commands registered by plugins. Use `up` / `down`, the wheel, `pageup` / `pagedown` or `home` / `end` to navigate; `ctrl+u` clears the search. `enter` on a command puts it in the prompt ready to edit and submit; on a shortcut or doc topic, it opens the guide in a scrollable window. Close the guide with `esc` to return to the same search. `esc` closes help and returns to your draft. The Keys tab describes the default mappings; your `tui.lua` can override them.
+
+## Markdown popup
+
+`/md` recursively lists `.md` files (case-insensitive) in the current session's working directory, including hidden files but excluding `.git` internals and symlinks. On a new chat it uses Bone's launch directory. The popup leaves your draft and chat untouched; files are read locally, not sent to the model. `/md docs/usage.md` selects that relative path after discovery.
+
+Type in the file pane to filter relative paths (all search words must match); `backspace` edits and `ctrl+u` clears the filter. `up` / `down`, the wheel, page keys and `home` / `end` select files and preview them. `enter` focuses the reader; `tab` / `shift+tab` switch panes. In the reader those navigation keys scroll, and `space` pages down. `ctrl+r` rescans and reloads the selected file; `esc` closes. Reading positions are remembered while the popup stays open. Narrow terminals show only the active pane.
+
+The preview uses Bone's themed Markdown renderer for headings, emphasis, links, lists, quotes, code blocks and wrapping tables. Links are displayed, not executed. Discovery and reads run as background jobs using `find` and `head` from your PATH; no new Rust APIs or model calls are involved. UTF-8 filenames are supported, including spaces and newlines. Scans stop after 30 seconds or 20,000 files and report incomplete results; each read has a 10-second timeout and a 1 MiB limit. Unreadable, empty and oversized documents have explicit messages. This is a browser for trusted local projects, not a filesystem sandbox against concurrent symlink replacement.
+
+Implementation: `require("bone.help").markdown(path)` in the existing embedded `runtime/lua/bone/help.lua`. Lua regression tests: `luajit tests/md.lua`.
 
 ## Options
 
