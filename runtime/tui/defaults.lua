@@ -310,6 +310,12 @@ bone.on("session/compacted", function(ev)
   pcall(bone.chat.add, "compacted", { text = text, reason = ev.reason }, { session = ev.session_id })
 end)
 
+bone.on("session/compact_failed", function(ev)
+  local text = "compaction failed" .. (WHY[ev.reason] or "") .. ": " .. ev.error
+    .. " · context unchanged"
+  pcall(bone.chat.add, "compacted", { text = text, reason = ev.reason }, { session = ev.session_id })
+end)
+
 bone.cmd.create("compact", function(c)
   local id = current_session()
   if not id then

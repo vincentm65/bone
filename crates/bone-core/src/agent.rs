@@ -13,9 +13,9 @@ use std::time::Duration;
 
 use bone_proto::methods::{
     MessageCompleted, MessageCompletedParams, MessageDelta, MessageDeltaParams, ProcessChanged,
-    ProcessChangedParams, ProcessChunk, ToolFinished, ToolFinishedParams, ToolOutput,
-    ToolOutputParams, ToolStarted, ToolStartedParams, TurnFinished, TurnFinishedParams,
-    TurnStarted, TurnStartedParams, TurnSteered,
+    ProcessChangedParams, ProcessChunk, SessionCompactFailed, SessionCompactFailedParams,
+    ToolFinished, ToolFinishedParams, ToolOutput, ToolOutputParams, ToolStarted, ToolStartedParams,
+    TurnFinished, TurnFinishedParams, TurnStarted, TurnStartedParams, TurnSteered,
 };
 use bone_proto::types::{ChatMessage, DeltaKind, ToolCall, TurnId, TurnOutcome, Usage};
 use serde_json::{Value, json};
@@ -159,7 +159,14 @@ impl Turn<'_> {
     /// not the turn's failure.
     async fn compact(&self, reason: &str) -> Result<bool, Stop> {
         tokio::select! {
-            r = self.inner.compact(self.session, reason) => Ok(r.is_ok()),
+            r = self.inner.compact(self.session, reason) => {
+                if let Err(error) = &r {
+                    self.inner.emit::<SessionCompactFailed>(SessionCompactFailedParams {
+                        session_id: self.session_id.clone(), reason: reason.into(), error: error.clone(),
+                    });
+                }
+                Ok(r.is_ok())
+            },
             _ = self.cancel.cancelled() => Err(Stop::Cancelled),
         }
     }
@@ -407,6 +414,25 @@ impl Turn<'_> {
                 }
             };
 
+            if let Some(u) = completion.usage {
+                let context_tokens = u.context_tokens.unwrap_or(u.input_tokens);
+                if context_tokens > 0 {
+                    self.session.lock().unwrap().chars_per_token =
+                        Some(sent_chars as f64 / context_tokens as f64);
+                }
+                let record = UsageRecord {
+                    turn_id: self.turn_id,
+                    provider: served.0.clone(),
+                    model: served.1.clone(),
+                    input_tokens: u.input_tokens,
+                    output_tokens: u.output_tokens,
+                    context_tokens: u.context_tokens,
+                    cached_tokens: u.cached_tokens,
+                    source: None,
+                };
+                // Losing a usage record is not worth failing the turn.
+                let _ = self.session.lock().unwrap().usage(record);
+            }
             let (mut content, mut reasoning, mut calls) = (
                 completion.content,
                 completion.reasoning,
@@ -421,23 +447,6 @@ impl Turn<'_> {
                 })?;
             }
             overflowed = false;
-            if let Some(u) = completion.usage {
-                if u.input_tokens > 0 {
-                    self.session.lock().unwrap().chars_per_token =
-                        Some(sent_chars as f64 / u.input_tokens as f64);
-                }
-                let record = UsageRecord {
-                    turn_id: self.turn_id,
-                    provider: served.0.clone(),
-                    model: served.1.clone(),
-                    input_tokens: u.input_tokens,
-                    output_tokens: u.output_tokens,
-                    cached_tokens: u.cached_tokens,
-                    source: None,
-                };
-                // Losing a usage record is not worth failing the turn.
-                let _ = self.session.lock().unwrap().usage(record);
-            }
             self.complete_message(content, reasoning, calls.clone(), completion.usage)?;
             if calls.is_empty() {
                 let compact = self.inner.compact_config();

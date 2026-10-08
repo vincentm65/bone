@@ -1,10 +1,7 @@
--- Lua-owned agents/conversation browser. Transcripts load only when chosen.
--- Tab switches to the Running page: every chat's background shells and
--- sub-agents, whichever chat is on screen.
+-- Conversation sidebar with a Processes tab for every chat's background work.
 local M = {}
 local panel, state
 local live, touched, versions = {}, {}, {}
--- Background shells by process id, and sub-agent sessions by id, of every chat.
 local shells, subagents = {}, {}
 local empty_row = {}
 local archived = bone.state.load("sessions-archived")
@@ -121,9 +118,10 @@ local function filter_running()
 end
 
 local function filter(reset)
+  if reset then state.initial = nil end
   if state.page == "running" then return filter_running() end
   local selected = not reset and state.items[state.selected]
-  local id = selected and selected.session_id
+  local id = selected and selected.session_id or (not reset and state.initial)
   local now, window = os.time(), recent_window()
   state.filter_minute, state.filter_window, state.filter_dirty = math.floor(now / 60), window, false
   state.items = {}
@@ -179,15 +177,18 @@ local function filter(reset)
   end
 end
 
-local function reveal()
-  local info = panel:info()
+local function reveal(info)
+  info = info or panel:info()
   local first = state.lines[state.selected]
-  if not first then return end
-  if first < info.top + 1 then
-    panel:scroll(first - info.top - 1)
-  elseif first + 1 > info.top + info.height then
-    panel:scroll(first + 1 - info.top - info.height)
+  if not first or not info.height or info.height == 0 then return end
+  local top = info.top
+  if first < top + 1 then
+    top = first - 1
+  elseif first + 1 > top + info.height then
+    top = first + 1 - info.height
   end
+  panel:scroll(top - info.top)
+  info.top = top
 end
 
 local function choose(index)
@@ -200,13 +201,16 @@ local function choose(index)
 end
 
 local function switch_page()
+  state.initial = nil
+  state.pages[state.page] = { items = state.items, selected = state.selected, top = panel:info().top }
   state.page = state.page == "running" and "chats" or "running"
-  state.selected = 1
-  filter(true)
-  panel:scroll("top")
+  local saved = state.pages[state.page] or { items = {}, selected = 1, top = 0 }
+  state.items, state.selected = saved.items, saved.selected
+  filter()
+  panel:scroll(saved.top - panel:info().top)
 end
 
--- x on the Running page: stop the selected shell or sub-agent.
+-- x on the Processes page: stop the selected shell or sub-agent.
 local function stop()
   local j = state.items[state.selected]
   if not j then return end
@@ -218,6 +222,7 @@ local function stop()
 end
 
 local function move(delta)
+  state.initial = nil
   state.selected = math.max(1, math.min(#state.items, state.selected + delta))
   reveal()
 end
@@ -233,6 +238,12 @@ local function render(ctx)
   if state.filter_dirty or state.filter_window ~= recent_window()
       or state.filter_minute ~= math.floor(os.time() / 60) then
     filter()
+  end
+  -- Wait for both list ordering and viewport geometry, then reveal only once.
+  if state.initial and state.page == "chats" and not state.loading
+      and not state.stats_loading and ctx.height > 0 then
+    state.initial = nil
+    reveal(ctx)
   end
   local function row(text, hl)
     text = bone.text.truncate(text:gsub("%s+", " "), ctx.width)
@@ -260,13 +271,13 @@ local function render(ctx)
         { "  ", "Normal" },
         { " Chats ", state.page == "chats" and "SessionCardTitle" or "Dim" },
         { "  ", "Normal" },
-        { " Running" .. (n > 0 and (" " .. n) or "") .. " ", state.page == "running" and "SessionCardTitle" or "Dim" },
+        { " Processes" .. (n > 0 and (" " .. n) or "") .. " ", state.page == "running" and "SessionCardTitle" or "Dim" },
         { fill = " ", hl = "Normal" },
       }
     elseif kind == "search" then
       formatted = row(state.query == "" and "  Search conversations…" or ("  Search: " .. state.query), state.query == "" and "Dim" or "Accent")
     elseif kind == "help" then
-      formatted = row(state.page == "running" and "  ↑↓ move · ↵ open · x stop · tab chats" or "  ↑↓ move · ↵ open · tab running · esc close", "Dim")
+      formatted = row(state.page == "running" and "  ↵ open · x stop · tab chats · esc prompt" or "  ↵ open · tab processes · esc prompt", "Dim")
     elseif kind == "status" then
       formatted = row(state.page == "running" and " nothing running in the background"
         or state.loading and " loading…" or (state.query == "" and " no sessions yet" or " no matching sessions"), "Dim")
@@ -359,19 +370,18 @@ function M.open()
     if bone.ui.panel.focused() == "sessions" then panel:close() else panel:focus() end
     return
   end
-  state = { all = {}, items = {}, stats = {}, lines = {}, hits = {}, selected = 1, query = "", loading = true, stats_loading = true, page = "chats" }
+  state = { all = {}, items = {}, stats = {}, lines = {}, hits = {}, selected = 1, query = "", loading = true, stats_loading = true, page = "chats", pages = {}, initial = (bone.chat.session() or {}).session_id }
   local st = state
   setup_colors()
   panel = bone.ui.panel.open({
     id = "sessions", dock = "left", size = 48, full_height = true, focus = true,
     render = render,
     keys = {
-      esc = function() panel:close() end,
+      esc = function() bone.ui.panel.focus(nil) end,
       ["ctrl+o"] = function() panel:close() end,
       tab = switch_page, ["shift+tab"] = switch_page,
       enter = function() choose(state.selected) end,
       up = function() move(-1) end, down = function() move(1) end,
-      ["ctrl+p"] = function() move(-1) end, ["ctrl+n"] = function() move(1) end,
       pageup = function() move(-math.max(1, math.floor(panel:info().height / 3))) end,
       pagedown = function() move(math.max(1, math.floor(panel:info().height / 3))) end,
       home = function() move(-#state.items) end, ["end"] = function() move(#state.items) end,
@@ -479,6 +489,7 @@ end)
 
 bone.on("mouse", function(ev)
   if not panel or not panel:is_open() or ev.panel ~= "sessions" then return end
+  state.initial = nil
   if ev.button == "left" and ev.action == "down" then
     local index = state.hits[ev.panel_line]
     if index then

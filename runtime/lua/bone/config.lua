@@ -539,7 +539,7 @@ function M.open(want)
   local MUTED, KEY, NOTE = "Dim", "Accent", "Dim"
 
   -- A line of { text, group } items, cut to the width as it grows.
-  local function line(w)
+  local function line(w, selected)
     local items, used = {}, 0
     local function add(text, hl)
       text = tostring(text)
@@ -549,19 +549,20 @@ function M.open(want)
       if used + text_width(text) > w then
         text = bone.text.truncate(text, w - used)
       end
-      items[#items + 1] = { text, hl or "Normal" }
+      hl = hl or "Normal"
+      items[#items + 1] = { text, selected and ("ConfigSelected" .. hl) or hl }
       used = used + text_width(text)
     end
     return items, add
   end
 
-  -- The choices side by side, the current one bold and the rest dim.
+  -- Keep the current choice identifiable even without color.
   local function choices_into(add, list, value)
     for i, c in ipairs(list) do
       if i > 1 then
         add(" · ", MUTED)
       end
-      add(c, c == value and KEY or MUTED)
+      add(c == value and ("[" .. tostring(c) .. "]") or tostring(c), c == value and KEY or MUTED)
     end
   end
 
@@ -639,7 +640,22 @@ function M.open(want)
 
   -- A full-width pane resting on the prompt.
   local function render(ctx)
-    local w = math.max(ctx.width, 30)
+    local w = math.max(ctx.width, 1)
+    -- Preserve each span's foreground/emphasis on a full-row selection background.
+    -- Refresh on render so changing the colorscheme also updates an open page.
+    local selection = bone.hl.get("Selection") or {}
+    for _, group in ipairs({ "Normal", "Dim", "Accent", "ErrorMsg" }) do
+      local style = bone.hl.get(group) or {}
+      style.bg = selection.bg
+      local name = "ConfigSelected" .. group
+      local current = bone.hl.get(name) or {}
+      for _, key in ipairs({ "fg", "bg", "bold", "italic", "underline", "reverse", "dim" }) do
+        if current[key] ~= style[key] then
+          bone.hl.set(name, style)
+          break
+        end
+      end
+    end
     local t = st.tabs[st.tab]
     local list = rows()
     st.sel = math.max(1, math.min(st.sel, math.max(#list, 1)))
@@ -680,8 +696,10 @@ function M.open(want)
     end
     label_w = math.min(label_w + 4, math.floor(w / 2))
 
-    -- At most this many rows; the list scrolls with the selection.
-    local room = math.max(math.min(14, (ctx.height or 24) - 9), 3)
+    -- Reserve ten slots on every page (fewer on short terminals), plus a
+    -- permanent footer/counter slot so empty and overflowing pages stay level.
+    local room = math.max(1, math.min(10, (ctx.height or 24) - #out - 5))
+    local body_start = #out
     if t.name == "providers" and not st.providers then
       out[#out + 1] = { { "    loading…", MUTED } }
     elseif #list == 0 then
@@ -690,36 +708,38 @@ function M.open(want)
     local first = math.max(1, st.sel - room + 1)
     for i = first, math.min(#list, first + room - 1) do
       local r = list[i]
-      local items, add = line(w)
+      local items, add = line(w, i == st.sel)
       if i == st.sel then
         add("  › ", KEY)
-        add(pad(r.label, label_w), "Selection")
+        add(pad(r.label, label_w))
       else
         add("    " .. pad(r.label, label_w))
       end
       if i == st.sel and st.edit then
-        add(r.type == "secret" and string.rep("•", #st.edit) or st.edit, "Selection")
+        add(r.type == "secret" and string.rep("•", #st.edit) or st.edit)
         add("▏")
       else
-        value_into(i == st.sel and function(text)
-          add(text, "Selection")
-        end or add, r)
+        value_into(add, r)
         -- tui.lua runs last; say so when it overrides the saved value.
         if r.kind == "option" then
           local saved = bone.settings.get(r.path)
           if saved ~= nil and saved ~= r.value then
-            (i == st.sel and function()
-              add("   tui.lua sets " .. tostring(r.value), "Selection")
-            end or function()
-              add("   tui.lua sets " .. tostring(r.value), NOTE)
-            end)()
+            add("   tui.lua sets " .. tostring(r.value), NOTE)
           end
         end
       end
+      if i == st.sel then
+        items[#items + 1] = { fill = " ", hl = "ConfigSelectedNormal" }
+      end
       out[#out + 1] = items
+    end
+    while #out < body_start + room do
+      out[#out + 1] = ""
     end
     if #list > room then
       out[#out + 1] = { { ("    %d–%d of %d"):format(first, math.min(#list, first + room - 1), #list), MUTED } }
+    else
+      out[#out + 1] = ""
     end
 
     out[#out + 1] = ""

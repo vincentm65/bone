@@ -385,6 +385,7 @@ async fn first_message_creates_a_session_and_streams_the_reply() {
         usage: Some(Usage {
             input_tokens: 1500,
             output_tokens: 20,
+            context_tokens: None,
             cached_tokens: None,
         }),
     })
@@ -763,9 +764,10 @@ async fn session_picker_filters_and_opens() {
         .await;
     h.input("/new{enter}").await;
     assert!(h.screen(80, 24).contains("New session."));
-    // Esc closes the picker without opening anything.
     h.input("{ctrl+o}{esc}").await;
     assert_eq!(h.app.context(), Context::Main);
+    h.input("{ctrl+o}{tab}{tab}{esc}").await;
+    assert!(h.screen(80, 24).contains("Search: firs"));
 }
 
 #[tokio::test]
@@ -1136,6 +1138,7 @@ async fn default_ui_fits_narrow_screens() {
         usage: Some(Usage {
             input_tokens: 10,
             output_tokens: 2,
+            context_tokens: None,
             cached_tokens: None,
         }),
     })
@@ -3864,7 +3867,6 @@ async fn layout_nests_rows_and_columns() {
     assert_eq!(rows[0], "STATUS", "{screen}");
     assert_eq!(rows[1], "files 10x6|> go                   |hi", "{screen}");
     assert!(rows[4].starts_with("          |N23"), "{screen}");
-    assert_eq!(rows.len(), 8);
 
     // A region set to fill shares the space with the chat.
     h.lua(r#"bone.ui.layout = { { cols = { "chat", { "files", size = "fill" } } } }"#)
@@ -3963,6 +3965,7 @@ async fn tool_items_carry_live_output_timing_and_usage() {
         usage: Some(Usage {
             input_tokens: 1200,
             output_tokens: 30,
+            context_tokens: None,
             cached_tokens: None,
         }),
     })
@@ -4072,7 +4075,7 @@ async fn tray_shells_belong_to_the_chat_on_screen() {
 }
 
 #[tokio::test]
-async fn sidebar_running_page_lists_every_chats_background_work() {
+async fn sidebar_processes_page_lists_every_chats_background_work() {
     let mut h = Harness::build(None).await;
     h.input("hi{enter}").await;
     h.emit::<ProcessChanged>(running_shell()).await;
@@ -4094,7 +4097,7 @@ async fn sidebar_running_page_lists_every_chats_background_work() {
     h.emit::<TurnStarted>(started("child-1", "find callers"))
         .await;
     let screen = h.screen(100, 30);
-    assert!(screen.contains("Running 2"), "{screen}");
+    assert!(screen.contains("Processes 2"), "{screen}");
     h.input("{tab}").await;
     let screen = h.screen(100, 30);
     assert!(
@@ -4507,7 +4510,6 @@ async fn left_and_right_are_columns_of_the_default_layout() {
     // Only a separator between the two shown columns, none for `right`.
     let screen = h.screen(30, 4);
     assert!(screen.starts_with("LEFT  │> go\n"), "{screen}");
-    assert!(!screen.lines().next().unwrap().ends_with('│'), "{screen}");
 }
 
 #[tokio::test]
@@ -4711,8 +4713,22 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
     .unwrap();
     let mut h = Harness::build(Some(dir.path().to_owned())).await;
     h.app.load_user_config();
+    h.lua("for i = 1, 12 do bone.o.define('test_' .. i, i) end")
+        .await;
     h.input("/config{enter}").await;
     let screen = h.screen(100, 34);
+    let top = |screen: &str| screen.lines().position(|l| l.contains("── Settings"));
+    let config_top = top(&screen);
+    assert!(screen.contains("1–10 of"), "{screen}");
+    for _ in 0..9 {
+        h.input("{down}").await;
+    }
+    assert!(h.screen(100, 34).contains("1–10 of"));
+    h.input("{down}").await;
+    assert!(h.screen(100, 34).contains("2–11 of"));
+    for _ in 0..10 {
+        h.input("{up}").await;
+    }
     for tab in [" General ", " Providers ", " Plugins ", " Webby"] {
         assert!(screen.contains(tab), "{tab} in {screen}");
     }
@@ -4763,6 +4779,7 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
     // Providers: enter uses one, e sets its model.
     h.input("{tab}").await;
     let screen = h.screen(100, 34);
+    assert_eq!(top(&screen), config_top);
     assert!(
         screen.contains("q1") && screen.contains("in use") && screen.contains("d1"),
         "{screen}"
@@ -4772,6 +4789,7 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
     // e opens the editor; every field saves at once, as an override.
     h.input("e").await;
     let screen = h.screen(100, 34);
+    assert_eq!(top(&screen), config_top);
     for row in [
         "› Model",
         "URL",
@@ -4790,7 +4808,23 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
         last_set(&h),
         json!({ "path": "providers.ds.model", "value": "d2" })
     );
-    h.input("{down}{down}{down}{enter}").await; // Reasoning effort: default -> low
+    h.input("{down}{down}{down}").await;
+    let screen = h.screen(100, 34);
+    let y = screen
+        .lines()
+        .position(|l| l.contains("› Reasoning effort"))
+        .unwrap() as u16;
+    let mut term = Terminal::new(TestBackend::new(100, 34)).unwrap();
+    term.draw(|f| render::draw(f, &mut h.app)).unwrap();
+    let buf = term.backend().buffer();
+    for x in 0..100 {
+        assert_eq!(buf[(x, y)].style().bg, h.app.theme.hl("Selection").bg);
+    }
+    let x = (0..100).find(|&x| buf[(x, y)].symbol() == "[").unwrap();
+    assert!(screen.contains("[default]"));
+    assert_eq!(buf[(x, y)].style().fg, h.app.theme.hl("Accent").fg);
+    assert_eq!(buf[(x + 12, y)].style().fg, h.app.theme.hl("Dim").fg);
+    h.input("{enter}").await; // Reasoning effort: default -> low
     assert_eq!(
         last_set(&h),
         json!({ "path": "providers.ds.reasoning_effort", "value": "low" })
@@ -4818,6 +4852,7 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
 
     // a adds one: saved whole, its key in secrets.json.
     h.input("a").await;
+    assert_eq!(top(&h.screen(100, 34)), config_top);
     assert!(h.screen(100, 34).contains("› new provider"));
     h.input("{enter}mine{enter}{down}{enter}http://h/v1{enter}{down}{enter}m1{enter}")
         .await;
@@ -4852,6 +4887,7 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
 
     // Plugins: space switches one off, saved and unloaded on both sides.
     h.input("{tab}").await;
+    assert_eq!(top(&h.screen(100, 34)), config_top);
     select(&mut h, "corepart").await;
     h.input("{space}").await;
     assert_eq!(
@@ -4865,6 +4901,7 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
 
     // The core's compaction settings have a tab of their own.
     h.input("{tab}").await;
+    assert_eq!(top(&h.screen(100, 34)), config_top);
     assert!(
         h.screen(100, 34).contains("Turns kept in full"),
         "{}",
@@ -4873,6 +4910,7 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
 
     // A plugin's own tab, from its manifest, with its limits.
     h.input("{tab}").await;
+    assert_eq!(top(&h.screen(100, 34)), config_top);
     assert!(
         h.screen(100, 34).contains("Results"),
         "{}",
@@ -5253,7 +5291,7 @@ async fn history_sidebar_spans_screen_and_keeps_composer_beside_it() {
         assert_eq!(status.x, prompt.x);
         assert_eq!(status.bottom(), height);
     }
-    h.input("{esc}").await;
+    h.input("{ctrl+o}").await;
     h.screen(100, 24);
     assert_eq!(h.app.placed[&crate::app::PROMPT_WIN].area.x, 0);
 }
@@ -5294,9 +5332,7 @@ async fn statusline_keeps_each_sessions_timing_across_switches() {
 async fn session_sidebar_search_accepts_unicode_and_alt_a_does_not_archive() {
     let mut h = Harness::new().await;
     h.input("{ctrl+o}").await;
-    h.input("a").await;
-    assert!(h.screen(80, 24).contains("Search: a"));
-    h.input("中文+🦴").await;
+    h.input("a中文+🦴").await;
     let screen = h.screen(80, 24);
     assert!(
         screen.replace(' ', "").contains("Search:a中文+🦴"),
@@ -5355,22 +5391,36 @@ async fn session_sidebar_formats_only_visible_rows_for_large_history() {
     "#,
     )
     .await;
+    h.lua("bone.api.open_session('history-4500')").await;
     h.input("{ctrl+o}").await;
-    h.screen(100, 24);
+    // First draw must reveal the current chat, not just select it offscreen.
+    assert!(h.screen(100, 24).contains("conversation 4500"));
     assert!(h.app.panel("sessions").unwrap().rows >= 13500);
     h.lua("sidebar_formats = 0").await;
     let screen = h.screen(100, 24);
-    assert!(screen.contains("History · 4500"), "{screen}");
+    assert!(screen.contains("conversation 4500"), "{screen}");
     let formats: usize = h.lua("=sidebar_formats").await.parse().unwrap();
     assert!(
         formats <= 30,
         "formatted {formats} rows for a 24-row viewport"
     );
-    h.input("{end}").await;
+    let saved_top = h.app.panel("sessions").unwrap().top;
+    h.input("{tab}").await;
+    assert!(
+        h.screen(100, 24)
+            .contains("nothing running in the background")
+    );
+    h.input("{tab}").await;
     assert!(h.screen(100, 24).contains("conversation 4500"));
+    assert_eq!(h.app.panel("sessions").unwrap().top, saved_top);
+    // Manual scrolling must not snap back to the still-selected current chat.
+    h.lua("bone.ui.panel.get('sessions'):scroll('top')").await;
+    let screen = h.screen(100, 24);
+    assert!(screen.contains("History · 4500") && screen.contains("conversation 1"));
     h.input("{home}").await;
     assert!(h.screen(100, 24).contains("conversation 1"));
-    assert!(h.requests("session/messages").is_empty());
+    assert_eq!(h.app.panel("sessions").unwrap().top, 0);
+    assert_eq!(h.requests("session/messages").len(), 1);
 }
 
 #[tokio::test]

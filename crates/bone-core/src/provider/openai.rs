@@ -262,6 +262,7 @@ impl Accumulator {
             self.usage = Some(Usage {
                 input_tokens: u.prompt_tokens,
                 output_tokens: u.completion_tokens,
+                context_tokens: None,
                 cached_tokens: u
                     .prompt_tokens_details
                     .and_then(|d| d.cached_tokens)
@@ -382,6 +383,7 @@ mod tests {
             Some(Usage {
                 input_tokens: 10,
                 output_tokens: 5,
+                context_tokens: None,
                 cached_tokens: Some(6),
             })
         );

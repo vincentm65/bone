@@ -949,6 +949,7 @@ mod tests {
             usage: Some(Usage {
                 input_tokens: 5,
                 output_tokens: 2,
+                context_tokens: None,
                 cached_tokens: None,
             }),
         });
@@ -1011,6 +1012,7 @@ mod tests {
             usage: Some(Usage {
                 input_tokens: 5,
                 output_tokens: 1,
+                context_tokens: None,
                 cached_tokens: None,
             }),
         });

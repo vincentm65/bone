@@ -65,11 +65,10 @@ pub(crate) fn chars(messages: &[ChatMessage]) -> usize {
             ChatMessage::System { content } | ChatMessage::User { content } => content.len(),
             ChatMessage::Assistant {
                 content,
-                reasoning,
                 tool_calls,
+                ..
             } => {
                 content.len()
-                    + reasoning.len()
                     + tool_calls
                         .iter()
                         .map(|c| c.name.len() + c.arguments.len())

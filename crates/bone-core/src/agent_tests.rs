@@ -433,6 +433,7 @@ async fn turns_leave_usage_and_tool_calls_in_the_index() {
     let used = |input, output| Usage {
         input_tokens: input,
         output_tokens: output,
+        context_tokens: (input == 30).then_some(17),
         cached_tokens: None,
     };
     let lua = r#"
@@ -520,6 +521,16 @@ async fn turns_leave_usage_and_tool_calls_in_the_index() {
             [json!("lua"), json!(1), json!(5)],
             [json!("client"), json!(0), json!(7)],
         ]
+    );
+    let contexts = h
+        .call::<StoreQuery>(q(
+            "SELECT coalesce(context_tokens, input_tokens) FROM usage ORDER BY at, rowid",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(
+        contexts.rows,
+        [[json!(10)], [json!(17)], [json!(5)], [json!(7)]]
     );
     let out = h
         .call::<StoreQuery>(q("SELECT name, is_error FROM tool_calls"))
@@ -1194,6 +1205,7 @@ async fn a_provider_relaying_to_another_is_counted_once() {
             usage: Some(Usage {
                 input_tokens: 9,
                 output_tokens: 3,
+                context_tokens: None,
                 cached_tokens: None,
             }),
             ..Default::default()
@@ -1715,6 +1727,26 @@ async fn the_limit_compacts_before_the_call() {
     assert_eq!(h.until::<SessionCompacted>().await.reason, "limit");
     h.until::<TurnFinished>().await;
     assert_eq!(h.last_seen(), vec![summary("SUM"), user("q2")]);
+    // A failed summary leaves the context intact; the end-of-turn check retries.
+    h.provider.steps.lock().unwrap().extend([
+        Step::Fail("summary unavailable".into()),
+        text("a3"),
+        text("SUM2"),
+    ]);
+    h.start("q3").await;
+    let failed = h.until::<SessionCompactFailed>().await;
+    assert_eq!(failed.session_id, h.session_id);
+    assert_eq!(failed.reason, "limit");
+    assert_eq!(failed.error, "the summary failed: summary unavailable");
+    assert_eq!(h.until::<SessionCompacted>().await.reason, "limit");
+    assert_eq!(
+        h.until::<TurnFinished>().await.outcome,
+        TurnOutcome::Completed
+    );
+    assert_eq!(
+        h.provider.seen.lock().unwrap().iter().rev().nth(1).unwrap(),
+        &vec![summary("SUM"), user("q2"), assistant("a2"), user("q3")]
+    );
 }
 
 #[tokio::test]
@@ -1728,6 +1760,7 @@ async fn tool_definitions_do_not_inflate_the_estimate() {
             usage: Some(Usage {
                 input_tokens: 100_000,
                 output_tokens: 1,
+                context_tokens: None,
                 cached_tokens: None,
             }),
             ..Default::default()

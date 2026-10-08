@@ -210,7 +210,7 @@ impl Panel {
     /// Scroll the content; clamped on the next draw.
     pub fn scroll_by(&mut self, by: i64) {
         let max_top = self.rows.saturating_sub(self.view as usize);
-        self.top = (self.top as i64 + by).clamp(0, max_top as i64) as usize;
+        self.top = (self.top as i64).saturating_add(by).max(0) as usize;
         self.at_end = self.follow && self.top >= max_top;
     }
 
@@ -751,7 +751,10 @@ mod tests {
         p.scroll_by(-3);
         assert_eq!(p.top, 0);
         p.scroll_by(100);
-        assert_eq!(p.top, 6);
+        assert_eq!(
+            p.top, 100,
+            "upper bound is clamped against fresh content on draw"
+        );
         assert!(!p.at_end, "only following panels stick to the end");
         p.follow = true;
         p.scroll_to(true);

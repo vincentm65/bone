@@ -570,6 +570,7 @@ fn events() {
         usage: Some(Usage {
             input_tokens: 1200,
             output_tokens: 40,
+            context_tokens: None,
             cached_tokens: None,
         }),
     });
@@ -634,6 +635,7 @@ fn events() {
         usage: Some(Usage {
             input_tokens: 30,
             output_tokens: 4,
+            context_tokens: None,
             cached_tokens: None,
         }),
         error: None,

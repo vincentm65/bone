@@ -230,6 +230,7 @@ fn convert(
                         model: r.get(2)?,
                         input_tokens: r.get::<_, i64>(3)?.max(0) as u64,
                         output_tokens: r.get::<_, i64>(4)?.max(0) as u64,
+                        context_tokens: None,
                         cached_tokens: Some(r.get::<_, i64>(5)?.max(0) as u64),
                         source: None,
                     },

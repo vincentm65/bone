@@ -69,6 +69,9 @@ pub struct UsageRecord {
     /// Input tokens served from the provider's cache, when it says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_tokens: Option<u64>,
+    /// Input context of the last model call, distinct from aggregate consumption.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_tokens: Option<u64>,
     /// `None` for a turn; `"lua"` or `"client"` for a call made outside one
     /// (then `turn_id` is 0).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -992,6 +995,7 @@ mod tests {
                 model: "m1".into(),
                 input_tokens: 100,
                 output_tokens: 7,
+                context_tokens: None,
                 cached_tokens: None,
                 source: None,
             })

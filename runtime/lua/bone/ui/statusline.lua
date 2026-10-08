@@ -43,7 +43,7 @@ local function now()
   return os.time()
 end
 
-local function load_total(session_id)
+local function load_total(session_id, legacy)
   session_id = session_id or (bone.chat.session() or {}).session_id
   local key = session_id or ""
   state.total_session = key
@@ -51,13 +51,16 @@ local function load_total(session_id)
   if key == "" then
     return
   end
+  local context = legacy and "input_tokens" or "coalesce(context_tokens, input_tokens)"
   bone.request("store/query", {
-    -- curr: the context the latest turn call sent (rowid follows file order).
-    sql = "SELECT coalesce(sum(input_tokens), 0), coalesce(sum(output_tokens), 0), coalesce(sum(cached_tokens), 0), (SELECT input_tokens FROM usage WHERE session_id = ?1 AND source = 'turn' ORDER BY rowid DESC LIMIT 1) FROM usage WHERE session_id = ?1",
+    sql = "SELECT coalesce(sum(input_tokens), 0), coalesce(sum(output_tokens), 0), coalesce(sum(cached_tokens), 0), (SELECT " .. context .. " FROM usage WHERE session_id = ?1 AND source = 'turn' ORDER BY rowid DESC LIMIT 1) FROM usage WHERE session_id = ?1",
     params = { session_id },
   }, function(res)
+    if state.total_session ~= key then return end
     local row = res and res.rows and res.rows[1]
-    if row and state.total_session == key then
+    -- Retry older servers without the optional context column.
+    if not row and not legacy then return load_total(session_id, true) end
+    if row then
       state.total = {
         input = tonumber(row[1]) or 0,
         output = tonumber(row[2]) or 0,
@@ -90,16 +93,15 @@ state.events = {
   bone.on("turn/finished", function(ev)
     local t = state.turns[ev.session_id]
     if t then t.finished = now() end
-    if ev.session_id ~= (bone.chat.session() or {}).session_id then return end
-    load_total()
-  end),
-  -- Each model call's usage is indexed before its message completes, so a
-  -- long turn's totals keep up call by call.
-  bone.on("message/completed", function(ev)
-    if ev.session_id ~= (bone.chat.session() or {}).session_id then return end
-    load_total()
   end),
 }
+-- Usage is indexed before these events, including the summary call's.
+for _, event in ipairs({ "turn/finished", "message/completed", "session/compacted" }) do
+  state.events[#state.events + 1] = bone.on(event, function(ev)
+    if ev.session_id ~= (bone.chat.session() or {}).session_id then return end
+    load_total()
+  end)
+end
 -- Sessions keep their own model: ask the core for the one on screen's.
 state.events[#state.events + 1] = bone.on("settings/changed", function(ev)
   if ev.path == "provider" or tostring(ev.path):match("^providers%.") then

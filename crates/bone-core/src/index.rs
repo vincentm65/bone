@@ -20,7 +20,7 @@ use serde_json::{Value as Json, json};
 use crate::session::{Line, Record, title_of};
 
 /// Bump when the tables change; an index of another version is rebuilt.
-const VERSION: i64 = 3;
+const VERSION: i64 = 4;
 
 const SCHEMA: &str = "
 CREATE TABLE sessions (
@@ -62,7 +62,8 @@ CREATE TABLE usage (
     model         TEXT NOT NULL,
     input_tokens  INTEGER NOT NULL,
     output_tokens INTEGER NOT NULL,
-    cached_tokens INTEGER NOT NULL DEFAULT 0
+    cached_tokens INTEGER NOT NULL DEFAULT 0,
+    context_tokens INTEGER
 );
 CREATE INDEX usage_at ON usage(at);
 CREATE INDEX usage_session ON usage(session_id);
@@ -116,7 +117,11 @@ impl Index {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(err)?;
-        if version != VERSION {
+        if version == 3 {
+            conn.execute_batch(
+                "BEGIN; ALTER TABLE usage ADD COLUMN context_tokens INTEGER; PRAGMA user_version = 4; COMMIT;",
+            ).map_err(err)?;
+        } else if version != VERSION {
             let mut drop = String::new();
             for t in TABLES {
                 drop.push_str(&format!("DROP TABLE IF EXISTS {t};"));
@@ -320,8 +325,8 @@ fn index_record(tx: &Transaction, id: &str, record: Record, at: u64, seq: &mut u
         Record::Compact(_) | Record::Summary(_) | Record::Model(_) => Ok(()),
         Record::Usage(u) => run(
             "INSERT INTO usage (session_id, turn_id, source, at, provider, model,
-                                input_tokens, output_tokens, cached_tokens)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                                input_tokens, output_tokens, cached_tokens, context_tokens)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 id,
                 u.turn_id,
@@ -331,7 +336,8 @@ fn index_record(tx: &Transaction, id: &str, record: Record, at: u64, seq: &mut u
                 u.model,
                 u.input_tokens,
                 u.output_tokens,
-                u.cached_tokens.unwrap_or(0)
+                u.cached_tokens.unwrap_or(0),
+                u.context_tokens
             ],
         ),
         Record::Message(m) => {

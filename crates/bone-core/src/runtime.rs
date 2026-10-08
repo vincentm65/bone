@@ -272,6 +272,7 @@ impl Inner {
                     model,
                     input_tokens: u.input_tokens,
                     output_tokens: u.output_tokens,
+                    context_tokens: u.context_tokens,
                     cached_tokens: u.cached_tokens,
                     source: Some(source.to_owned()),
                 },
