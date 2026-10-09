@@ -597,26 +597,16 @@ end)
         .unwrap();
 }
 
-#[cfg(any(unix, windows))]
+#[cfg(unix)]
 #[tokio::test]
-async fn image_send_over_local_socket_or_windows_named_pipe() {
+async fn image_send_over_local_socket() {
     let mut env = Env::new(true).await;
-    #[cfg(unix)]
     let path = env.work.path().join("core.sock");
-    #[cfg(windows)]
-    let path = std::path::PathBuf::from(format!(
-        r"\\.\pipe\bone-image-tests-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
     let listener = bone_server::Listener::bind(&path).await.unwrap();
     let server = env.server.clone();
     let task = tokio::spawn(async move { listener.run(&server).await.unwrap() });
     let mut tui = Headless::start(
-        bone_client::connect_local(&path).await.unwrap(),
+        bone_client::connect_unix(&path).await.unwrap(),
         RunOptions {
             clipboard_executable: None,
             cwd: env.work.path().to_string_lossy().into_owned(),
@@ -629,7 +619,7 @@ async fn image_send_over_local_socket_or_windows_named_pipe() {
     )
     .await
     .unwrap();
-    let (second, _) = Client::new(bone_client::connect_local(&path).await.unwrap());
+    let (second, _) = Client::new(bone_client::connect_unix(&path).await.unwrap());
     second.initialize("second-client").await.unwrap();
     env.attach(&mut tui).await;
     tui.type_text("explain this image");

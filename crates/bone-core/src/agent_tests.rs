@@ -1530,6 +1530,7 @@ async fn cancelled_child_runs_turn_end_after_cleanup() {
                 state.messages.last(),
                 Some(&ChatMessage::User {
                     content: "cleanup:cancelled".into(),
+                    images: Vec::new(),
                 }),
             );
             assert_eq!(
@@ -1537,7 +1538,7 @@ async fn cancelled_child_runs_turn_end_after_cleanup() {
                     .messages
                     .iter()
                     .filter(|m| matches!(m,
-                        ChatMessage::User { content } if content == "cleanup:cancelled"
+                        ChatMessage::User { content, .. } if content == "cleanup:cancelled"
                     ))
                     .count(),
                 1,

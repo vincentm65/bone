@@ -15,7 +15,8 @@ impl ReadFile {
         ReadFile(ToolSpec {
             name: "read_file".into(),
             description: "Read a text file or view a PNG, JPEG or WebP image. Images are returned \
-                          as pixels; line ranges apply only to text. Use offset/limit for large files."
+                          as pixels; text is plain text without per-line prefixes. Line ranges apply \
+                          only to text; use offset/limit for large files."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -91,7 +92,6 @@ impl Tool for ReadFile {
             let text = String::from_utf8_lossy(&bytes);
             if text.is_empty() {
                 return Ok(String::from("(empty file)").into());
-            }
             }
 
             let total = text.lines().count();

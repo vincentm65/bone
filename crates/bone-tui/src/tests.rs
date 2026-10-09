@@ -5372,10 +5372,7 @@ async fn session_sidebar_search_accepts_unicode_and_alt_a_does_not_archive() {
     h.input("{ctrl+o}").await;
     h.input("a中文+🦴").await;
     let screen = h.screen(80, 24);
-    assert!(
-        screen.replace(' ', "").contains("⌕a中文+🦴"),
-        "{screen}"
-    );
+    assert!(screen.replace(' ', "").contains("⌕a中文+🦴"), "{screen}");
     assert_eq!(
         h.lua("=next(bone.state.load('sessions-archived')) == nil")
             .await,
