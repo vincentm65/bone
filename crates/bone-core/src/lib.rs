@@ -178,13 +178,11 @@ impl Inner {
             .validate(images)
             .map_err(RpcError::invalid_params)?;
         let rt = self.runtime();
-        let config = session
-            .model
-            .as_ref()
-            .and_then(|p| p.0.as_ref())
-            .and_then(|n| rt.models.get(n))
-            .unwrap_or(&rt.config.provider);
-        if !images.is_empty() && config.supports_images == Some(false) {
+        let pin = session.model.clone();
+        if !rt.supports_images(
+            pin.as_ref().and_then(|p| p.0.as_deref()),
+            !images.is_empty(),
+        ) {
             return Err(RpcError::invalid_params(
                 "this model does not support images; select a vision model",
             ));

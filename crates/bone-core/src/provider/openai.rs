@@ -166,14 +166,13 @@ fn wire_messages(messages: &[ChatMessage], replay_reasoning: bool) -> Vec<Value>
         out.push(wire_message(message, replay_reasoning));
         if let ChatMessage::Tool {
             call_id,
-            content,
             images: attached,
             ..
         } = message
             && !attached.is_empty()
         {
             images.push(wire_user(
-                &format!("Images from tool call {call_id}: {content}"),
+                &format!("Images from tool call {call_id}"),
                 attached,
             ));
         }

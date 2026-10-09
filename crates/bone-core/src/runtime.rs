@@ -116,6 +116,16 @@ impl Runtime {
         out
     }
 
+    pub(crate) fn supports_images(&self, name: Option<&str>, has_images: bool) -> bool {
+        !has_images
+            || name
+                .or(self.selected.as_deref())
+                .and_then(|n| self.models.get(n))
+                .map(|p| p.supports_images)
+                .unwrap_or(self.config.provider.supports_images)
+                != Some(false)
+    }
+
     /// The provider for a model call: entry `name` (default: the one turns
     /// use) with `options` laid over its settings.
     pub(crate) fn provider_for(
@@ -256,6 +266,12 @@ impl Inner {
         let (entry, model) = self
             .runtime()
             .model_of(call.provider.as_deref(), &call.options);
+        if !self.runtime().supports_images(
+            call.provider.as_deref(),
+            call.messages.iter().any(|m| !m.images().is_empty()),
+        ) {
+            return Err("this model does not support images; select a vision model".into());
+        }
         let session_id = call.session_id.unwrap_or_default();
         let messages = self.attachments.hydrate(&call.messages)?;
         let req = CompletionRequest {

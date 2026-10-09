@@ -377,6 +377,14 @@ impl Turn<'_> {
                 .hydrate(&messages)
                 .map_err(Stop::Failed)?;
             let completion = loop {
+                if !self.rt.supports_images(
+                    served.0.as_deref(),
+                    messages.iter().any(|m| !m.images().is_empty()),
+                ) {
+                    return Err(Stop::Failed(
+                        "this model does not support images; select a vision model".into(),
+                    ));
+                }
                 attempt += 1;
                 let mut text = String::new();
                 let mut reasoning = String::new();
@@ -789,14 +797,7 @@ impl Turn<'_> {
                     .validate_input(&self.session.lock().unwrap(), &response.output, &mut images)
                     .map_err(|e| e.message)?;
             }
-            let mut output = response.output;
-            for image in &images {
-                output.push_str(&format!(
-                    "\n[Image: {} {}×{}]",
-                    image.name, image.width, image.height
-                ));
-            }
-            Ok((output, images))
+            Ok((response.output, images))
         }) {
             Ok((output, images)) => (output, false, images),
             Err(output) => (output, true, Vec::new()),

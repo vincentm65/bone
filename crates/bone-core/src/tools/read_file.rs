@@ -62,25 +62,22 @@ impl Tool for ReadFile {
             let args: Args = typed_args(args)?;
             let path = ctx.resolve(&args.path);
             let read = async {
-                let mut file = tokio::fs::File::open(&path).await?;
                 let mut bytes = Vec::new();
-                (&mut file).take(12).read_to_end(&mut bytes).await?;
+                tokio::fs::File::open(&path)
+                    .await?
+                    .take(bone_media::MAX_IMAGE_BYTES as u64 + 1)
+                    .read_to_end(&mut bytes)
+                    .await?;
                 let image = bone_media::is_image(&bytes);
-                let limit = if image {
-                    bone_media::MAX_IMAGE_BYTES as u64 + 1 - bytes.len() as u64
-                } else {
-                    u64::MAX
-                };
-                file.take(limit).read_to_end(&mut bytes).await?;
                 Ok::<_, std::io::Error>((bytes, image))
             };
             let (bytes, image) = read
                 .await
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            if bytes.len() > bone_media::MAX_IMAGE_BYTES {
+                return Err("file exceeds the 20 MiB read limit".into());
+            }
             if image {
-                if bytes.len() > bone_media::MAX_IMAGE_BYTES {
-                    return Err("image exceeds the 20 MiB limit".into());
-                }
                 return Ok(ToolResponse {
                     output: format!("Read image: {}", path.display()),
                     images: vec![(bytes, args.path)],

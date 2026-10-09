@@ -1,6 +1,8 @@
 //! Image inputs are bounded, decoded by content, and normalized to lossless PNG.
 use std::io::Cursor;
 
+use image::ImageDecoder;
+
 pub const MAX_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 pub const MAX_IMAGE_PIXELS: u64 = 40_000_000;
 pub const MAX_IMAGES: usize = 8;
@@ -61,15 +63,12 @@ pub fn normalize(bytes: &[u8]) -> Result<PngImage, String> {
     limits.max_image_height = Some(MAX_IMAGE_PIXELS as u32);
     limits.max_alloc = Some(MAX_IMAGE_PIXELS * 8);
     reader.limits(limits);
-    // Inspect dimensions before allocating decoded pixels.
-    let (width, height) = image::ImageReader::new(Cursor::new(bytes))
-        .with_guessed_format()
-        .map_err(|e| e.to_string())?
-        .into_dimensions()
+    let decoder = reader
+        .into_decoder()
         .map_err(|e| format!("cannot read image dimensions: {e}"))?;
+    let (width, height) = decoder.dimensions();
     dimensions(width, height)?;
-    let img = reader
-        .decode()
+    let img = image::DynamicImage::from_decoder(decoder)
         .map_err(|e| format!("cannot decode image: {e}"))?;
     encode(img)
 }
