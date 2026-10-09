@@ -97,6 +97,8 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
                     Err(format!(
                         "{path}: base_url, model, type and api_key_env are strings"
                     ))
+                } else if p.get("replay_reasoning").is_some_and(|v| !v.is_boolean()) {
+                    Err(format!("{path}: replay_reasoning must be a boolean"))
                 } else if p.get("model").is_none() {
                     Err(format!("{path}: a provider needs a model"))
                 } else if p.get("base_url").is_none() && p.get("type").is_none() {
@@ -119,14 +121,15 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
                 "base_url" | "model" | "type" | "api_key_env" | "reasoning_effort",
                 Value::String(_),
             ) => Ok(()),
-            ("stream_usage", Value::Bool(_)) => Ok(()),
+            ("stream_usage" | "replay_reasoning", Value::Bool(_)) => Ok(()),
             ("api_key", _) => Err("keys go in secrets.json (secrets/set), not settings".into()),
             (
-                "base_url" | "model" | "type" | "api_key_env" | "reasoning_effort" | "stream_usage",
+                "base_url" | "model" | "type" | "api_key_env" | "reasoning_effort" | "stream_usage"
+                | "replay_reasoning",
                 _,
             ) => Err(format!("{path} has the wrong type")),
             _ => Err(format!(
-                "{path}: a provider's settings are base_url, model, type, api_key_env, reasoning_effort and stream_usage"
+                "{path}: a provider's settings are base_url, model, type, api_key_env, reasoning_effort, stream_usage and replay_reasoning"
             )),
         },
         _ => Ok(()),
@@ -289,5 +292,27 @@ mod tests {
         assert_eq!(load(dir.path()).unwrap(), s);
         std::fs::write(path(dir.path()), "[1]").unwrap();
         assert!(load(dir.path()).is_err());
+    }
+
+    #[test]
+    fn reasoning_replay_validation() {
+        let mut s = json!({});
+        set(&mut s, "providers.qwen.replay_reasoning", json!(true)).unwrap();
+        assert_eq!(
+            get(&s, "providers.qwen.replay_reasoning"),
+            Some(&json!(true))
+        );
+        assert!(validate("providers.qwen.replay_reasoning", &json!("true")).is_err());
+        assert!(
+            validate(
+                "providers.qwen",
+                &json!({
+                    "base_url":"http://local/v1", "model":"m", "replay_reasoning":"true"
+                })
+            )
+            .is_err()
+        );
+        set(&mut s, "providers.qwen.replay_reasoning", Value::Null).unwrap();
+        assert_eq!(s, json!({}));
     }
 }

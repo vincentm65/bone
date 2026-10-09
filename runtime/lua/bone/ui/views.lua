@@ -330,25 +330,56 @@ local function split_exit_code(text)
   return body, tonumber(code)
 end
 
--- read_file rows are "LINE#HASH|text".
+-- Stored legacy read_file rows are "LINE#HASH|text".
 local function anchored(l)
   local n, text = l:match("^(%d+)#%w%w|(.*)$")
   return tonumber(n), text
 end
 
-local function read_summary(text)
-  local first, last, n = nil, nil, 0
-  for _, l in ipairs(lines(text)) do
-    local num = anchored(l)
-    if num then
-      first = first or num
-      last = num
-      n = n + 1
+-- Recognize an entire anchored transcript, not individual anchor-looking lines
+-- in a plain file. Notices are metadata, not file lines (including their spacer).
+local function read_rows(text, args)
+  if text == "(empty file)" then
+    return { { text = text, notice = true } }
+  end
+  local ls, notice = lines(text), nil
+  if #ls > 1 and ls[#ls - 1] == "" and
+      ls[#ls]:match("^%[showing lines %d+%-%d+ of %d+; use offset to read more%]$") then
+    notice = table.remove(ls)
+    table.remove(ls)
+  end
+  local legacy, has_anchor = true, false
+  for _, l in ipairs(ls) do
+    if anchored(l) then
+      has_anchor = true
+    elseif l ~= "" and not l:match("^%[lines %d+%-%d+ of %d+%]$") then
+      legacy = false
     end
   end
-  if n == 0 then
-    return "0 lines"
+  legacy = legacy and has_anchor
+  local rows, next_n = {}, math.max(tonumber(args.offset) or 1, 1)
+  for _, l in ipairs(ls) do
+    local n, body
+    if legacy then
+      n, body = anchored(l)
+    else
+      n, body = next_n, l
+      next_n = next_n + 1
+    end
+    rows[#rows + 1] = { n = n, text = body or l, notice = not n }
   end
+  if notice then rows[#rows + 1] = { text = notice, notice = true } end
+  return rows
+end
+
+local function read_summary(rows)
+  local first, last, n = nil, nil, 0
+  for _, r in ipairs(rows) do
+    if r.n then
+      first, last, n = first or r.n, r.n, n + 1
+    end
+  end
+  if n == 0 then return "0 lines" end
   return "lines " .. first .. "-" .. last .. ", " .. n .. " read"
 end
 
@@ -389,16 +420,14 @@ local function plain(text, width)
 end
 
 --- Numbered rows ("   12   text") for expanded file contents.
-local function numbered(text, width)
+local function numbered(rows, width)
   local out = {}
-  for _, l in ipairs(lines(text)) do
-    local n, body = anchored(l)
-    if n then
-      append(out, wrap({ { body, "ToolOutput" } }, width, {
-        first = { { "  " .. string.format("%5d", n) .. "   ", "ToolGutter" } },
-        rest = { { string.rep(" ", 10), "ToolGutter" } },
-      }))
-    end
+  for _, r in ipairs(rows) do
+    local prefix = r.n and ("  " .. string.format("%5d", r.n) .. "   ") or "          "
+    append(out, wrap({ { r.text, r.notice and "ToolSummary" or "ToolOutput" } }, width, {
+      first = { { prefix, "ToolGutter" } },
+      rest = { { string.rep(" ", 10), "ToolGutter" } },
+    }))
   end
   return out
 end
@@ -575,10 +604,11 @@ function bone.ui.tool_content(item, ctx)
       body = gutter(body, width, "ToolOutput", failed and "ToolError" or "ToolGutter"),
     }
   elseif name == "read_file" then
-    local summary = ok and (trim(out) == "(empty file)" and "0 lines" or read_summary(out)) or nil
+    local rows = ok and read_rows(out, args) or {}
+    local summary = ok and read_summary(rows) or nil
     return {
       title = file_label(name, args.path, summary),
-      body = err or (ok and expanded() and numbered(out, width)) or {},
+      body = err or (ok and expanded() and numbered(rows, width)) or {},
     }
   elseif name == "write_file" then
     local body = {}
@@ -592,12 +622,24 @@ function bone.ui.tool_content(item, ctx)
     if not ok then
       return { title = file_label(name, args.path), body = err or {} }
     end
-    local rows = args.old_string and diff_lines(args.old_string, args.new_string or "") or anchored_diff(out)
-    local summary = "-" .. count(rows, "-") .. " | +" .. count(rows, "+")
-    local times = tonumber(out:match("^Replaced (%d+) "))
-    if times and times > 1 then
-      summary = summary .. " ×" .. times
+    local edits = type(args.edits) == "table" and args.edits or
+      (type(args.old_string) == "string" and { args } or nil)
+    local rows, all = {}, false
+    if edits then
+      -- Argument previews, not an actual file diff: offsets and per-edit
+      -- replace_all occurrence counts are unknown. Never multiply a batch
+      -- preview by the aggregate replacement count in the tool output.
+      for i, edit in ipairs(edits) do
+        if i > 1 then rows[#rows + 1] = { separator = true } end
+        append(rows, diff_lines(edit.old_string or "", edit.new_string or ""))
+        all = all or edit.replace_all == true
+      end
+    else
+      rows = anchored_diff(out)
     end
+    local summary = (edits and "preview: " or "") .. "-" .. count(rows, "-") .. " | +" .. count(rows, "+")
+    if edits and #edits > 1 then summary = summary .. "; " .. plural(#edits, "edit") end
+    if all then summary = summary .. "; replace_all" end
     return { title = file_label(name, args.path, summary), body = diff_view(rows, width) }
   end
 

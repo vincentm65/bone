@@ -106,6 +106,7 @@ impl Runtime {
                 base_url: p.base_url.clone(),
                 reasoning_effort: p.reasoning_effort.clone(),
                 stream_usage: p.stream_usage,
+                replay_reasoning: p.replay_reasoning,
                 has_key: p.api_key.is_some(),
                 added: self.settings_providers.contains(name),
             })

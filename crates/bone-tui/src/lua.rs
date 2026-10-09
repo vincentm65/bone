@@ -2552,6 +2552,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 bold: spec.get::<Option<bool>>("bold")?.unwrap_or(false),
                 italic: spec.get::<Option<bool>>("italic")?.unwrap_or(false),
                 underline: spec.get::<Option<bool>>("underline")?.unwrap_or(false),
+                strikethrough: spec.get::<Option<bool>>("strikethrough")?.unwrap_or(false),
                 reverse: spec.get::<Option<bool>>("reverse")?.unwrap_or(false),
                 dim: spec.get::<Option<bool>>("dim")?.unwrap_or(false),
                 link: spec.get("link")?,
@@ -2574,6 +2575,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 ("bold", Modifier::BOLD),
                 ("italic", Modifier::ITALIC),
                 ("underline", Modifier::UNDERLINED),
+                ("strikethrough", Modifier::CROSSED_OUT),
                 ("reverse", Modifier::REVERSED),
                 ("dim", Modifier::DIM),
             ] {

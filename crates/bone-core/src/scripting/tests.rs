@@ -26,7 +26,7 @@ fn config_and_env_overrides() {
         dir.path(),
         r#"
         bone.config.providers.a = { base_url = "http://a/v1", model = "ma" }
-        bone.config.providers.b = { base_url = "http://b/v1", model = "mb", api_key = "kb", stream_usage = false }
+        bone.config.providers.b = { base_url = "http://b/v1", model = "mb", api_key = "kb", stream_usage = false, replay_reasoning = true }
         bone.config.provider = "b"
         bone.config.data_dir = "~/somewhere"
         "#,
@@ -40,6 +40,8 @@ fn config_and_env_overrides() {
     .unwrap();
     let ex = extract(&lua).unwrap();
     let c = resolve(dir.path(), &ex, &no_env).unwrap();
+    assert!(!ex.providers["a"].replay_reasoning);
+    assert!(c.provider.replay_reasoning);
     assert_eq!(
         (c.provider.model.as_str(), c.provider.api_key.as_deref()),
         ("mb", Some("kb"))
@@ -54,6 +56,7 @@ fn config_and_env_overrides() {
         _ => None,
     };
     let c = resolve(dir.path(), &ex, &env).unwrap();
+    assert!(c.provider.replay_reasoning);
     assert_eq!(
         (c.provider.base_url.as_str(), c.provider.model.as_str()),
         ("http://b/v1", "override")
@@ -62,6 +65,7 @@ fn config_and_env_overrides() {
 
     let env = |k: &str| (k == "BONE_BASE_URL").then(|| "http://env/v1".to_string());
     let c = resolve(dir.path(), &ex, &env).unwrap();
+    assert!(!c.provider.replay_reasoning);
     assert_eq!(
         (c.provider.base_url.as_str(), c.provider.model.as_str()),
         ("http://env/v1", "mb")
@@ -175,7 +179,6 @@ async fn hooks_tools_and_system_prompt() {
         call_id: String::new(),
         session_id: "s".into(),
         cancel: Default::default(),
-        views: Default::default(),
         jobs: Default::default(),
         output: None,
         processes: None,
@@ -276,7 +279,6 @@ async fn ask_waits_for_an_answer_or_a_cancel() {
             call_id: String::new(),
             session_id: session.into(),
             cancel: Default::default(),
-            views: Default::default(),
             jobs: Default::default(),
             output: None,
             processes: None,
@@ -351,7 +353,6 @@ async fn plugins_run_before_user_config() {
         call_id: String::new(),
         session_id: "s".into(),
         cancel: Default::default(),
-        views: Default::default(),
         jobs: Default::default(),
         output: None,
         processes: None,
@@ -376,7 +377,6 @@ fn ctx(session: &str) -> ToolContext {
         cwd: "/".into(),
         session_id: session.into(),
         cancel: Default::default(),
-        views: Default::default(),
         jobs: Default::default(),
         output: None,
         processes: None,

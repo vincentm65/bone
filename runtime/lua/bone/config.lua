@@ -222,6 +222,8 @@ function M.open(want)
         desc = "enter types a new key (saved in ~/.bone/secrets.json, readable only by you); empty removes the saved one" },
       { kind = "pfield", key = "api_key_env", label = "Key variable", type = "string", value = env,
         desc = "an environment variable that holds the key" },
+      { kind = "pfield", key = "replay_reasoning", label = "Replay reasoning", type = "boolean", value = p.replay_reasoning == true,
+        changed = changed("replay_reasoning"), desc = "send stored reasoning_content; enable only for compatible endpoints (e.g. Qwen)" },
     }
     if not p.current then
       out[#out + 1] = { kind = "paction", action = "use", label = "Use this provider" }

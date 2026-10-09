@@ -97,6 +97,9 @@ impl OpenAiProvider {
 }
 
 impl Provider for OpenAiProvider {
+    fn replays_reasoning(&self) -> bool {
+        self.config.replay_reasoning
+    }
     fn complete<'a>(
         &'a self,
         req: CompletionRequest<'a>,
@@ -109,7 +112,7 @@ impl Provider for OpenAiProvider {
 fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> Value {
     let mut body = json!({
         "model": config.model,
-        "messages": req.messages.iter().map(wire_message).collect::<Vec<_>>(),
+        "messages": req.messages.iter().map(|msg| wire_message(msg, config.replay_reasoning)).collect::<Vec<_>>(),
         "stream": true,
     });
     if config.stream_usage {
@@ -137,19 +140,22 @@ fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> Value {
     body
 }
 
-fn wire_message(msg: &ChatMessage) -> Value {
+fn wire_message(msg: &ChatMessage, replay_reasoning: bool) -> Value {
     match msg {
         ChatMessage::System { content } => json!({ "role": "system", "content": content }),
         ChatMessage::User { content } => json!({ "role": "user", "content": content }),
         ChatMessage::Assistant {
             content,
             tool_calls,
-            ..
+            reasoning,
         } => {
             let mut m = json!({
                 "role": "assistant",
                 "content": if content.is_empty() { Value::Null } else { json!(content) },
             });
+            if replay_reasoning {
+                m["reasoning_content"] = json!(reasoning);
+            }
             if !tool_calls.is_empty() {
                 m["tool_calls"] = tool_calls
                     .iter()
@@ -423,7 +429,7 @@ mod tests {
                 is_error: false,
             },
         ];
-        let wire: Vec<Value> = msgs.iter().map(wire_message).collect();
+        let wire: Vec<Value> = msgs.iter().map(|msg| wire_message(msg, false)).collect();
         assert_eq!(
             wire,
             vec![
@@ -431,5 +437,27 @@ mod tests {
                 json!({"role":"tool","tool_call_id":"c1","content":"ok"}),
             ]
         );
+        let mut replayed = wire.clone();
+        replayed[0]["reasoning_content"] = json!("hidden");
+        assert_eq!(
+            msgs.iter()
+                .map(|msg| wire_message(msg, true))
+                .collect::<Vec<_>>(),
+            replayed
+        );
+        for reasoning in ["", "thought"] {
+            let msg = ChatMessage::Assistant {
+                content: "answer".into(),
+                reasoning: reasoning.into(),
+                tool_calls: vec![],
+            };
+            assert_eq!(
+                wire_message(&msg, true),
+                json!({
+                    "role":"assistant", "content":"answer", "reasoning_content":reasoning
+                })
+            );
+            assert!(wire_message(&msg, false).get("reasoning_content").is_none());
+        }
     }
 }

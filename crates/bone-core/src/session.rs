@@ -107,6 +107,8 @@ pub struct Session {
     /// Characters per token in this session's last model call, to estimate
     /// sizes; `None` until a reply reports its usage.
     pub chars_per_token: Option<f64>,
+    /// Replay mode used by the estimate and its learned ratio (not persisted).
+    pub replays_reasoning: bool,
     /// Characters of the tool definitions sent with the last model call:
     /// the provider counts them in its usage, so estimates must too.
     pub tool_chars: usize,
@@ -150,6 +152,14 @@ pub struct ActiveTurn {
 }
 
 impl Session {
+    /// A ratio learned without reasoning cannot estimate replayed reasoning,
+    /// or vice versa. Keep the mode even when no usage has been reported.
+    pub(crate) fn set_replays_reasoning(&mut self, replays_reasoning: bool) {
+        if self.replays_reasoning != replays_reasoning {
+            self.chars_per_token = None;
+            self.replays_reasoning = replays_reasoning;
+        }
+    }
     /// Append to the transcript and the file. A failed write is reported but
     /// the in-memory transcript still advances so the turn can continue.
     pub fn push(&mut self, msg: ChatMessage) -> std::io::Result<()> {
@@ -380,6 +390,7 @@ impl SessionStore {
             messages: messages.to_vec(),
             summary,
             chars_per_token: None,
+            replays_reasoning: false,
             tool_chars: 0,
             compacting: false,
             generation: 0,
@@ -451,6 +462,7 @@ impl SessionStore {
             messages,
             summary,
             chars_per_token: None,
+            replays_reasoning: false,
             tool_chars: 0,
             compacting: false,
             generation: 0,

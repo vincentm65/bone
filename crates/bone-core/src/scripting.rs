@@ -355,6 +355,7 @@ fn resolve(
             api_key: None,
             reasoning_effort: None,
             stream_usage: true,
+            replay_reasoning: false,
         });
     } else if let Some(model) = env("BONE_MODEL") {
         let p = provider
@@ -385,6 +386,7 @@ fn resolve(
         api_key: None,
         reasoning_effort: None,
         stream_usage: true,
+        replay_reasoning: false,
     });
     if let Some(key) = env("BONE_API_KEY") {
         provider.api_key = Some(key);

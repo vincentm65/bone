@@ -698,6 +698,9 @@ pub struct ModelInfo {
     pub reasoning_effort: Option<String>,
     #[serde(default = "yes")]
     pub stream_usage: bool,
+    /// Replay assistant `reasoning_content` (only for compatible endpoints).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replay_reasoning: bool,
     /// It has an API key (never sent).
     #[serde(default)]
     pub has_key: bool,

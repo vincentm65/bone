@@ -42,6 +42,11 @@ pub struct ProviderError(pub String);
 pub type DeltaSink<'a> = &'a mut (dyn FnMut(Delta) + Send);
 
 pub trait Provider: Send + Sync {
+    /// Whether assistant reasoning is replayed as input on subsequent calls.
+    fn replays_reasoning(&self) -> bool {
+        false
+    }
+
     /// Stream one completion, reporting deltas as they arrive. Dropping the
     /// future cancels the request.
     fn complete<'a>(

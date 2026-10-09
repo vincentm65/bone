@@ -20,16 +20,47 @@ bone.config.providers.qwen = {
   api_key = os.getenv("SOME_KEY"),        -- optional
   reasoning_effort = "medium",            -- optional
   stream_usage = true,                    -- send stream_options.include_usage
+  replay_reasoning = true,                -- Qwen: replay assistant reasoning_content
 }
 bone.config.provider = "qwen"      -- which entry to use (optional if there is one)
 bone.config.system_prompt = "..."  -- or function(ctx) return "..." end; ctx = { cwd, session_id }
 ```
+
+`replay_reasoning` defaults to `false`. Enable it only for endpoints that accept
+`reasoning_content` on assistant messages (including empty reasoning), such as
+the Qwen server above. Standard OpenAI and other compatible APIs may reject this
+nonstandard field. This is separate from `reasoning_effort`, which controls
+reasoning generation, not history replay. Change it in `/config` under the
+provider, or set `providers.<name>.replay_reasoning` in settings. Lua providers
+continue to control their own request serialization.
 
 `bone.config.system_prompt` replaces the built-in system prompt (the working
 directory is always appended after it). `BONE_SYSTEM_PROMPT` overrides it for
 one run. Settings and the `system` hook can change it per turn.
 
 ## Tools
+
+`read_file` returns plain text without line numbers or hashes; use `offset` and
+`limit` for focused reads. `edit_file` accepts a batch of exact replacements:
+
+```json
+{"path":"src/main.rs","edits":[
+  {"old_string":"old text","new_string":"new text"},
+  {"old_string":"another old text","new_string":"replacement","replace_all":false}
+]}
+```
+
+Every match is against the original file, including whitespace and line endings.
+Each `old_string` must be unique unless `replace_all` is true; replacements must
+not overlap. Any validation failure leaves the file unchanged. The final write
+is not a filesystem transaction or protection against concurrent writers. Empty
+matches and no-op replacements are rejected; use `write_file` to create files.
+The legacy top-level `old_string`/`new_string` shape still works. Hashline edit
+arguments no longer work; reread files in continued older sessions. The UI can
+still display stored hashline transcripts. Plain reads normalize line terminators
+for display and append a newline to the last returned line. For exact edits to
+CRLF files, use `\r\n` in the matching text; if the file has no final newline,
+leave that newline out of `old_string`.
 
 ```lua
 bone.tool.register {

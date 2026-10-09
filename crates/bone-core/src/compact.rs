@@ -58,7 +58,7 @@ pub(crate) fn is_overflow(error: &str) -> bool {
 }
 
 /// Characters a model call sends for these messages.
-pub(crate) fn chars(messages: &[ChatMessage]) -> usize {
+pub(crate) fn chars(messages: &[ChatMessage], replays_reasoning: bool) -> usize {
     messages
         .iter()
         .map(|m| match m {
@@ -66,9 +66,15 @@ pub(crate) fn chars(messages: &[ChatMessage]) -> usize {
             ChatMessage::Assistant {
                 content,
                 tool_calls,
+                reasoning,
                 ..
             } => {
                 content.len()
+                    + if replays_reasoning {
+                        reasoning.len()
+                    } else {
+                        0
+                    }
                     + tool_calls
                         .iter()
                         .map(|c| c.name.len() + c.arguments.len())
@@ -90,8 +96,9 @@ pub(crate) fn tool_chars(tools: &[ToolSpec]) -> usize {
 /// Estimated tokens for a model call with these messages in this session,
 /// tool definitions included.
 pub(crate) fn tokens(s: &Session, messages: &[ChatMessage]) -> u64 {
-    ((chars(messages) + s.tool_chars) as f64 / s.chars_per_token.unwrap_or(CHARS_PER_TOKEN)).round()
-        as u64
+    ((chars(messages, s.replays_reasoning) + s.tool_chars) as f64
+        / s.chars_per_token.unwrap_or(CHARS_PER_TOKEN))
+    .round() as u64
 }
 
 /// What one compaction would summarize: the earlier summary (if any) and
@@ -316,6 +323,25 @@ impl Inner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reasoning_counts_only_when_replayed() {
+        let messages = [ChatMessage::Assistant {
+            content: "answer".into(),
+            reasoning: "thought".into(),
+            tool_calls: vec![],
+        }];
+        assert_eq!(chars(&messages, false), 6);
+        assert_eq!(chars(&messages, true), 13);
+        let dir = tempfile::tempdir().unwrap();
+        let store = crate::session::SessionStore::new(dir.path());
+        let session = store.create(".".into()).unwrap();
+        let mut s = session.lock().unwrap();
+        s.chars_per_token = Some(2.0);
+        s.set_replays_reasoning(true);
+        assert_eq!(s.chars_per_token, None);
+        assert_eq!(tokens(&s, &messages), 3);
+    }
 
     #[test]
     fn overflow_errors_are_recognized() {

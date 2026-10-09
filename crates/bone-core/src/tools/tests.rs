@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use serde_json::json;
@@ -12,7 +11,6 @@ fn ctx(dir: &tempfile::TempDir) -> ToolContext {
         cwd: dir.path().to_owned(),
         session_id: "test".into(),
         cancel: CancellationToken::new(),
-        views: Default::default(),
         jobs: Default::default(),
         output: None,
         processes: None,
@@ -45,13 +43,9 @@ async fn write_read_edit() {
     .unwrap();
     assert_eq!(
         out,
-        format!(
-            "{}\n\n[showing lines 2-2 of 3; use offset to read more]\n",
-            hashline::render_line(2, "two")
-        )
+        "two\n\n[showing lines 2-2 of 3; use offset to read more]\n"
     );
 
-    // `old_string` still works, for models used to it.
     let err = call(
         &ctx,
         "edit_file",
@@ -66,443 +60,31 @@ async fn write_read_edit() {
     )
     .await;
     assert!(err.unwrap_err().contains("not found"));
+
     let out = call(
         &ctx,
         "edit_file",
-        json!({"path": "sub/./a.txt", "old_string": "two", "new_string": "2", "replace_all": true}),
+        json!({"path": "sub/a.txt", "old_string": "one", "new_string": "1"}),
+    )
+    .await;
+    assert_eq!(
+        out.unwrap(),
+        format!(
+            "Replaced 1 occurrence in {}",
+            dir.path().join("sub/a.txt").display()
+        )
+    );
+    let out = call(
+        &ctx,
+        "edit_file",
+        json!({"path": "sub/a.txt", "old_string": "two", "new_string": "2", "replace_all": true}),
     )
     .await;
     assert!(out.unwrap().starts_with("Replaced 2 occurrences"));
     assert_eq!(
         std::fs::read_to_string(dir.path().join("sub/a.txt")).unwrap(),
-        "one\n2\n2\n"
+        "1\n2\n2\n"
     );
-}
-
-#[tokio::test]
-async fn read_file_uses_agent_selected_ranges_and_allows_full_reads() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = ctx(&dir);
-    let body: String = (1..=250).map(|i| format!("line {i}\n")).collect();
-    std::fs::write(dir.path().join("large.txt"), &body).unwrap();
-
-    let out = call(
-        &ctx,
-        "read_file",
-        json!({"path": "large.txt", "limit": 200}),
-    )
-    .await
-    .unwrap();
-    assert!(out.contains("line 1"));
-    assert!(!out.contains("line 201"));
-    assert!(out.contains("[showing lines 1-200 of 250; use offset to read more]"));
-
-    let out = call(
-        &ctx,
-        "read_file",
-        json!({"path": "large.txt", "full": true}),
-    )
-    .await
-    .unwrap();
-    assert!(out.contains("line 250"));
-    assert!(!out.contains("use offset to read more"));
-}
-
-#[tokio::test]
-async fn read_file_reads_multiple_ranges_and_remembers_all_anchors() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = ctx(&dir);
-    let body: String = (1..=12).map(|i| format!("line {i}\n")).collect();
-    std::fs::write(dir.path().join("ranges.txt"), &body).unwrap();
-
-    let out = call(
-        &ctx,
-        "read_file",
-        json!({"path": "ranges.txt", "ranges": [{"start": 2, "end": 3}, {"start": 10, "end": 11}]}),
-    )
-    .await
-    .unwrap();
-    assert!(out.contains("[lines 2-3 of 12]"));
-    assert!(out.contains("[lines 10-11 of 12]"));
-    assert!(out.contains("|line 2\n") && out.contains("|line 11\n"));
-    assert!(!out.contains("|line 1\n") && !out.contains("|line 9\n"));
-
-    let out = call(
-        &ctx,
-        "edit_file",
-        json!({
-            "path": "ranges.txt",
-            "edits": [{"at": anchor(&body, 2), "text": "second"}, {"at": anchor(&body, 10), "text": "tenth"}]
-        }),
-    )
-    .await
-    .unwrap();
-    assert!(out.contains("second") && out.contains("tenth"));
-}
-
-#[tokio::test]
-async fn edit_file_accepts_simple_position_schema() {
-    let (_dir, ctx, path) = setup(SRC).await;
-    edit(
-        &ctx,
-        json!([
-            {"at": anchor(SRC, 2), "position": "replace", "text": "    changed();"},
-            {"at": "0", "position": "after", "text": "// header"}
-        ]),
-    )
-    .await
-    .unwrap();
-    assert_eq!(
-        std::fs::read_to_string(path).unwrap(),
-        "// header\nfn a() {\n    changed();\n}\n\nfn b() {\n    two();\n}\n"
-    );
-}
-
-/// `LINE#HASH|text` for line `n` of `text`.
-fn anchor(text: &str, n: usize) -> String {
-    hashline::render_line(n, text.lines().nth(n - 1).unwrap())
-}
-
-/// `LINE#HASH` alone.
-fn hash_anchor(text: &str, n: usize) -> String {
-    anchor(text, n).split('|').next().unwrap().to_owned()
-}
-
-async fn setup(body: &str) -> (tempfile::TempDir, ToolContext, PathBuf) {
-    setup_file(body, "rs").await
-}
-
-async fn setup_file(body: &str, extension: &str) -> (tempfile::TempDir, ToolContext, PathBuf) {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = ctx(&dir);
-    let filename = format!("f.{extension}");
-    let path = dir.path().join(&filename);
-    std::fs::write(&path, body).unwrap();
-    call(&ctx, "read_file", json!({"path": filename, "full": true}))
-        .await
-        .unwrap();
-    (dir, ctx, path)
-}
-
-async fn edit(ctx: &ToolContext, edits: Value) -> ToolResult {
-    call(ctx, "edit_file", json!({"path": "f.rs", "edits": edits})).await
-}
-
-async fn edit_path(ctx: &ToolContext, path: &str, edits: Value) -> ToolResult {
-    call(ctx, "edit_file", json!({"path": path, "edits": edits})).await
-}
-
-const SRC: &str = "fn a() {\n    one();\n}\n\nfn b() {\n    two();\n}\n";
-
-#[tokio::test]
-async fn anchored_edits_apply_together_and_show_fresh_anchors() {
-    let (_d, ctx, path) = setup(SRC).await;
-    let out = edit(
-        &ctx,
-        json!([
-            {"at": anchor(SRC, 2), "text": "    uno();\n    dos();"},
-            {"after": anchor(SRC, 7), "text": "\nfn c() {}"},
-            {"after": "0", "text": "// top"},
-        ]),
-    )
-    .await
-    .unwrap();
-    let now = std::fs::read_to_string(&path).unwrap();
-    assert_eq!(
-        now,
-        "// top\nfn a() {\n    uno();\n    dos();\n}\n\nfn b() {\n    two();\n}\n\nfn c() {}\n"
-    );
-    let diff: Vec<&str> = out.lines().skip(1).collect();
-    let (a, b) = (|n| anchor(&now, n), |n| format!("+{}", anchor(&now, n)));
-    assert_eq!(
-        diff,
-        [
-            b(1),
-            a(2),
-            "-    one();".into(),
-            b(3),
-            b(4),
-            a(5),
-            "...".into(),
-            a(9),
-            b(10),
-            b(11),
-        ],
-        "{out}"
-    );
-
-    // Anchors from the first read still work after the edit moved them.
-    let out = edit(
-        &ctx,
-        json!([{"at": hash_anchor(SRC, 6), "text": "    deux();"}]),
-    )
-    .await
-    .unwrap();
-    assert!(out.contains("deux"), "{out}");
-    assert!(
-        std::fs::read_to_string(&path)
-            .unwrap()
-            .contains("fn b() {\n    deux();\n}")
-    );
-}
-
-#[tokio::test]
-async fn text_rescues_a_miscopied_number_but_not_a_valid_hash() {
-    let (_d, ctx, path) = setup(SRC).await;
-    // A valid but wrong hash is rejected; text can still recover a wrong number.
-    let out = edit(
-        &ctx,
-        json!([
-            {"at": "5|    two();", "text": "    dos();"},
-        ]),
-    )
-    .await
-    .unwrap();
-    assert!(
-        out.contains("found `5|    two();` by its text at line 6"),
-        "{out}"
-    );
-    let now = std::fs::read_to_string(&path).unwrap();
-    assert!(now.contains("one();") && now.contains("dos();"), "{now}");
-
-    // `}` is everywhere: with the number wrong, the text cannot decide.
-    let before = std::fs::read_to_string(&path).unwrap();
-    let err = edit(&ctx, json!([{"at": "4|}", "text": "};"}]))
-        .await
-        .unwrap_err();
-    assert!(err.contains("could be line 3 or 7"), "{err}");
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
-}
-
-#[tokio::test]
-async fn a_failed_edit_writes_nothing_and_says_why_per_edit() {
-    let (_d, ctx, path) = setup(SRC).await;
-    let err = edit(
-        &ctx,
-        json!([
-            {"at": anchor(SRC, 2), "text": "    uno();"},
-            {"at": "6#zz", "text": "    dos();"},
-        ]),
-    )
-    .await
-    .unwrap_err();
-    assert!(err.starts_with("No changes written"), "{err}");
-    assert!(err.contains("1 of 2 edits could not be placed"), "{err}");
-    assert!(err.contains("edit 2 `6#zz`: line 6 is now"), "{err}");
-    assert!(err.contains("The other 1 placed fine"), "{err}");
-    assert!(
-        err.contains("Tip: write anchors as the whole line"),
-        "{err}"
-    );
-    assert!(err.contains(&anchor(SRC, 6)), "{err}");
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), SRC);
-
-    let err = edit(&ctx, json!([{"at": "6|    tow();", "text": "x"}]))
-        .await
-        .unwrap_err();
-    assert!(err.contains("the closest line is 6#"), "{err}");
-}
-
-#[tokio::test]
-async fn changes_made_elsewhere_are_followed_or_refused() {
-    let (_d, ctx, path) = setup(SRC).await;
-    // Someone adds a line on top and rewrites `one();`.
-    let changed = format!("use x;\n{}", SRC.replace("one();", "won();"));
-    std::fs::write(&path, &changed).unwrap();
-    let out = edit(
-        &ctx,
-        json!([{"at": hash_anchor(SRC, 6), "text": "    dos();"}]),
-    )
-    .await
-    .unwrap();
-    assert!(out.contains("7#"), "the edit followed its line down: {out}");
-    let err = edit(
-        &ctx,
-        json!([{"at": hash_anchor(SRC, 2), "text": "    uno();"}]),
-    )
-    .await
-    .unwrap_err();
-    assert!(err.contains("changed since you read them"), "{err}");
-}
-
-#[tokio::test]
-async fn ranges_over_unseen_lines_are_shown_first() {
-    let body: String = (1..=30).map(|i| format!("line {i}\n")).collect();
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = ctx(&dir);
-    let path = dir.path().join("f.txt");
-    std::fs::write(&path, &body).unwrap();
-    call(&ctx, "read_file", json!({"path": "f.txt", "limit": 5}))
-        .await
-        .unwrap();
-    call(
-        &ctx,
-        "read_file",
-        json!({"path": "f.txt", "offset": 20, "limit": 5}),
-    )
-    .await
-    .unwrap();
-    let range = json!([{"at": anchor(&body, 3), "end": anchor(&body, 22), "text": "gone"}]);
-    let err = edit_path(&ctx, "f.txt", range.clone()).await.unwrap_err();
-    assert!(err.contains("lines 3-22 were never shown"), "{err}");
-    // All of them fit below, so no extra read is needed.
-    assert!(!err.contains("Recovery:"), "{err}");
-    assert!(err.contains(&anchor(&body, 10)), "{err}");
-    // Now they have been shown, the same edit goes through.
-    edit_path(&ctx, "f.txt", range).await.unwrap();
-    assert_eq!(
-        std::fs::read_to_string(&path).unwrap().lines().count(),
-        30 - 20 + 1
-    );
-}
-
-#[tokio::test]
-async fn unseen_range_recovery_reads_beyond_the_bounded_preview() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = ctx(&dir);
-    let filename = "long \"range\".txt";
-    let path = dir.path().join(filename);
-    let body: String = (1..=600).map(|i| format!("line {i}\n")).collect();
-    std::fs::write(&path, &body).unwrap();
-    // Only the endpoints have been read; the 500-line edit has an unseen interior.
-    call(
-        &ctx,
-        "read_file",
-        json!({"path": filename, "ranges": [{"start": 51, "end": 51}, {"start": 550, "end": 550}]}),
-    )
-    .await
-    .unwrap();
-    let edits = json!([{
-        "at": hash_anchor(&body, 51),
-        "end": hash_anchor(&body, 550),
-        "text": "replacement"
-    }]);
-    let err = edit_path(&ctx, filename, edits.clone()).await.unwrap_err();
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
-    assert!(err.contains("lines 51-550 have not all been read"), "{err}");
-    assert!(err.contains(&anchor(&body, 130)), "{err}");
-    assert!(!err.contains(&anchor(&body, 131)), "{err}");
-    let recovery: Value = serde_json::from_str(
-        err.lines()
-            .find_map(|line| line.strip_prefix("Recovery: call read_file with "))
-            .expect("failure should supply an executable recovery read"),
-    )
-    .unwrap();
-    assert_eq!(
-        recovery,
-        json!({"path": filename, "offset": 51, "limit": 500})
-    );
-    // Merely suggesting a read must not grant visibility to its unshown lines.
-    edit_path(&ctx, filename, edits.clone()).await.unwrap_err();
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
-    let (view, _) = ctx.views.get(&ctx.session_id, &path);
-    assert!(!view.unwrap().seen.contains(&549));
-
-    let out = call(&ctx, "read_file", recovery).await.unwrap();
-    assert!(out.contains(&anchor(&body, 549)), "{out}");
-    edit_path(&ctx, filename, edits).await.unwrap();
-    let expected: String = (1..=50)
-        .map(|i| format!("line {i}\n"))
-        .chain(std::iter::once("replacement\n".to_owned()))
-        .chain((551..=600).map(|i| format!("line {i}\n")))
-        .collect();
-    assert_eq!(std::fs::read_to_string(&path).unwrap(), expected);
-}
-
-#[tokio::test]
-async fn retrying_an_edit_that_went_through_is_not_an_error() {
-    let (_d, ctx, path) = setup(SRC).await;
-    let edits = json!([{"at": hash_anchor(SRC, 2), "text": "    one_more_time();"}]);
-    edit(&ctx, edits.clone()).await.unwrap();
-    let out = edit(&ctx, edits).await.unwrap();
-    assert!(out.starts_with("No change"), "{out}");
-    assert!(out.contains("already in the file"), "{out}");
-    assert!(
-        std::fs::read_to_string(&path)
-            .unwrap()
-            .contains("one_more_time")
-    );
-}
-
-#[tokio::test]
-async fn invalid_rust_edits_are_rejected_before_writing() {
-    let (_d, ctx, path) = setup(SRC).await;
-    let err = edit(&ctx, json!([{"at": anchor(SRC, 2), "text": "    let = ;"}]))
-        .await
-        .unwrap_err();
-    assert!(err.contains("would be invalid Rust"), "{err}");
-    assert_eq!(std::fs::read_to_string(path).unwrap(), SRC);
-}
-
-#[tokio::test]
-async fn invalid_json_edits_are_rejected_before_writing() {
-    let body = "{\"value\": 1}\n";
-    let (_d, ctx, path) = setup_file(body, "json").await;
-    let err = edit_path(
-        &ctx,
-        "f.json",
-        json!([{"at": anchor(body, 1), "text": "{\"value\": }"}]),
-    )
-    .await
-    .unwrap_err();
-    assert!(err.contains("would be invalid JSON"), "{err}");
-    assert_eq!(std::fs::read_to_string(path).unwrap(), body);
-}
-
-#[tokio::test]
-async fn overlapping_edits_are_refused() {
-    let (_d, ctx, _path) = setup(SRC).await;
-    let err = edit(
-        &ctx,
-        json!([
-            {"at": anchor(SRC, 1), "end": anchor(SRC, 3), "text": "x"},
-            {"at": anchor(SRC, 2), "text": "y"},
-        ]),
-    )
-    .await
-    .unwrap_err();
-    assert!(err.contains("edits 1 and 2 overlap"), "{err}");
-}
-
-#[tokio::test]
-async fn line_endings_and_a_missing_final_newline_survive() {
-    let body = "\u{feff}a\r\nb\r\nc";
-    let (_d, ctx, path) = setup_file(body, "txt").await;
-    let out = edit_path(
-        &ctx,
-        "f.txt",
-        json!([
-            {"after": "3|c", "text": "d"},
-            {"at": "1|a", "text": "A"},
-        ]),
-    )
-    .await
-    .unwrap();
-    assert!(out.contains("4#"), "{out}");
-    assert_eq!(
-        std::fs::read_to_string(&path).unwrap(),
-        "\u{feff}A\r\nb\r\nc\r\nd"
-    );
-}
-
-#[tokio::test]
-async fn anchors_work_without_a_read_this_session() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = ctx(&dir);
-    let path = dir.path().join("f.rs");
-    std::fs::write(&path, SRC).unwrap();
-    edit(&ctx, json!([{"at": anchor(SRC, 6), "text": "    dos();"}]))
-        .await
-        .unwrap();
-    assert!(std::fs::read_to_string(&path).unwrap().contains("dos();"));
-    let out = call(
-        &ctx,
-        "edit_file",
-        json!({"edits": [{"at": anchor(SRC, 1), "text": "fn a() {"}]}),
-    )
-    .await
-    .unwrap();
-    assert!(out.contains("Edited") || out.contains("No change"), "{out}");
 }
 
 #[tokio::test]
@@ -537,6 +119,52 @@ async fn shell_combines_output_and_reports_exit_code() {
     .unwrap();
     let pwd = std::fs::canonicalize(dir.path()).unwrap();
     assert_eq!(out, format!("out\nerr\n{}\n[exit code: 3]", pwd.display()));
+}
+
+#[tokio::test]
+async fn shell_short_commands_skip_exit_grace() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(&dir);
+    let mut timings = Vec::new();
+    for _ in 0..5 {
+        let start = Instant::now();
+        assert_eq!(
+            call(&ctx, "shell", json!({"command": "true"}))
+                .await
+                .unwrap(),
+            "(no output)\n[exit code: 0]"
+        );
+        timings.push(start.elapsed());
+    }
+    timings.sort();
+    assert!(timings[2] < Duration::from_millis(150), "{timings:?}");
+}
+
+#[tokio::test]
+async fn shell_preserves_term_cleanup_for_redirected_descendants() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = call(
+        &ctx(&dir),
+        "shell",
+        json!({"command": r#"python3 -c 'import os, signal, time
+from pathlib import Path
+def cleanup(*_):
+    time.sleep(0.08)
+    Path("cleaned").write_text("done")
+    os._exit(0)
+signal.signal(signal.SIGTERM, cleanup)
+Path("ready").touch()
+while True: time.sleep(1)
+' </dev/null >/dev/null 2>&1 &
+while [ ! -f ready ]; do sleep 0.01; done"#, "timeout_secs": 5}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out, "(no output)\n[exit code: 0]");
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("cleaned")).unwrap(),
+        "done"
+    );
 }
 
 #[tokio::test]
@@ -594,6 +222,274 @@ fn truncate_middle_respects_char_boundaries() {
     assert_eq!(truncate_middle("short", 3, 3), "short");
 }
 
+#[tokio::test]
+async fn plain_read_preserves_line_whitespace() {
+    let dir = tempfile::tempdir().unwrap();
+    let text = "  leading\tand trailing  \n\tindented\t\n\n \n";
+    std::fs::write(dir.path().join("plain.txt"), text).unwrap();
+    let out = call(&ctx(&dir), "read_file", json!({"path": "plain.txt"}))
+        .await
+        .unwrap();
+    assert_eq!(out, text);
+    let registry = Registry::builtin();
+    let spec = registry.get("read_file").unwrap().spec();
+    assert!(
+        spec.description
+            .contains("plain text without per-line prefixes")
+    );
+    assert_eq!(
+        spec.parameters["properties"]["limit"]["description"],
+        "Maximum lines to read. Default 2000."
+    );
+}
+
+#[tokio::test]
+async fn plain_read_partial_pagination_and_end_behavior() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(&dir);
+    std::fs::write(dir.path().join("plain.txt"), "first\n  second\t\n\nlast\n").unwrap();
+    let out = call(
+        &ctx,
+        "read_file",
+        json!({"path": "plain.txt", "offset": 2, "limit": 2}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        out,
+        "  second\t\n\n\n[showing lines 2-3 of 4; use offset to read more]\n"
+    );
+    let out = call(
+        &ctx,
+        "read_file",
+        json!({"path": "plain.txt", "offset": 4, "limit": 2}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out, "last\n");
+    let err = call(&ctx, "read_file", json!({"path": "plain.txt", "offset": 5}))
+        .await
+        .unwrap_err();
+    assert_eq!(err, "offset 5 is past the end of the file (4 lines)");
+    let out = call(
+        &ctx,
+        "read_file",
+        json!({"path": "plain.txt", "offset": 0, "limit": 0}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        out,
+        "first\n\n[showing lines 1-1 of 4; use offset to read more]\n"
+    );
+}
+
+#[tokio::test]
+async fn plain_read_keeps_historical_newline_rendering() {
+    let dir = tempfile::tempdir().unwrap();
+    for (input, expected) in [
+        ("a\r\nb\r\n", "a\nb\n"),
+        ("a\nb", "a\nb\n"),
+        ("a\rb\r", "a\rb\r\n"),
+        ("\n", "\n"),
+    ] {
+        std::fs::write(dir.path().join("plain.txt"), input).unwrap();
+        let out = call(&ctx(&dir), "read_file", json!({"path": "plain.txt"}))
+            .await
+            .unwrap();
+        assert_eq!(out, expected);
+    }
+}
+
+#[tokio::test]
+async fn plain_read_empty_binary_and_lossy_utf8() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(&dir);
+    std::fs::write(dir.path().join("empty.txt"), "").unwrap();
+    let out = call(
+        &ctx,
+        "read_file",
+        json!({"path": "empty.txt", "offset": 99}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out, "(empty file)");
+    std::fs::write(dir.path().join("binary.txt"), b"a\0b").unwrap();
+    let err = call(&ctx, "read_file", json!({"path": "binary.txt"}))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        err,
+        format!(
+            "{} looks like a binary file",
+            dir.path().join("binary.txt").display()
+        )
+    );
+    std::fs::write(dir.path().join("lossy.txt"), b"a\xffb\n").unwrap();
+    let out = call(&ctx, "read_file", json!({"path": "lossy.txt"}))
+        .await
+        .unwrap();
+    assert_eq!(out, "a\u{fffd}b\n");
+}
+
+#[tokio::test]
+async fn plain_read_utf8_long_line_limit_is_2000_chars() {
+    let dir = tempfile::tempdir().unwrap();
+    let exact = "é🦀".repeat(1000);
+    std::fs::write(dir.path().join("long.txt"), format!("{exact}\n{exact}終\n")).unwrap();
+    let out = call(&ctx(&dir), "read_file", json!({"path": "long.txt"}))
+        .await
+        .unwrap();
+    assert_eq!(out, format!("{exact}\n{exact} [line truncated]\n"));
+}
+
+#[tokio::test]
+async fn plain_read_default_limit_is_2000_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(&dir);
+    let first = "line\n".repeat(2000);
+    let text = format!("{first}last\n");
+    std::fs::write(dir.path().join("many.txt"), &text).unwrap();
+    let out = call(&ctx, "read_file", json!({"path": "many.txt"}))
+        .await
+        .unwrap();
+    assert_eq!(
+        out,
+        format!("{first}\n[showing lines 1-2000 of 2001; use offset to read more]\n")
+    );
+    let out = call(
+        &ctx,
+        "read_file",
+        json!({"path": "many.txt", "offset": 2001}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out, "last\n");
+    let out = call(
+        &ctx,
+        "read_file",
+        json!({"path": "many.txt", "limit": 2001}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out, text);
+}
+
+#[tokio::test]
+async fn plain_read_to_exact_edit_roundtrip() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(&dir);
+    let original = "  α\t\n\n\tβ  \n";
+    let updated = "  α\t\n\n\tchanged β  \n";
+    std::fs::write(dir.path().join("roundtrip.txt"), original).unwrap();
+    let read = call(&ctx, "read_file", json!({"path": "roundtrip.txt"}))
+        .await
+        .unwrap();
+    assert_eq!(read, original);
+    let out = call(
+        &ctx,
+        "edit_file",
+        json!({"path": "roundtrip.txt", "old_string": read, "new_string": updated}),
+    )
+    .await
+    .unwrap();
+    assert!(out.starts_with("Replaced 1 occurrence"));
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("roundtrip.txt")).unwrap(),
+        updated
+    );
+    let read = call(
+        &ctx,
+        "read_file",
+        json!({"path": "roundtrip.txt", "offset": 3, "limit": 1}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(read, "\tchanged β  \n");
+    call(
+        &ctx,
+        "edit_file",
+        json!({"path": "roundtrip.txt", "old_string": read, "new_string": "\tfinal β  \n"}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("roundtrip.txt")).unwrap(),
+        "  α\t\n\n\tfinal β  \n"
+    );
+}
+
+#[tokio::test]
+async fn batch_validation_failure_never_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(&dir);
+    let path = dir.path().join("a.txt");
+    let original = "alpha beta gamma\r\n";
+    std::fs::write(&path, original).unwrap();
+    for edits in [
+        json!([{"old_string":"alpha", "new_string":"A"}, {"old_string":"missing", "new_string":"B"}]),
+        json!([{"old_string":"alpha beta", "new_string":"A"}, {"old_string":"beta", "new_string":"B"}]),
+        json!([{"old_string":"alpha", "new_string":"A"}, {"old_string":"beta", "new_string":"beta"}]),
+        json!([{"old_string":"alpha", "new_string":"A"}, {"old_string":"", "new_string":"B"}]),
+        json!([{"old_string":"alpha", "new_string":"A"}, {"old_string":"alpha", "new_string":"B"}]),
+        json!([{"old_string":"alpha", "new_string":"A"}, {"old_string":"beta", "new_string":"B", "typo":true}]),
+    ] {
+        assert!(
+            call(&ctx, "edit_file", json!({"path":"a.txt", "edits": edits}))
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+    }
+    let out = call(
+        &ctx,
+        "edit_file",
+        json!({"path":"a.txt", "edits":[
+            {"old_string":"gamma", "new_string":"G"},
+            {"old_string":"alpha", "new_string":"longer alpha"}
+        ]}),
+    )
+    .await
+    .unwrap();
+    assert!(out.contains("2 edits"));
+    assert_eq!(
+        std::fs::read_to_string(&path).unwrap(),
+        "longer alpha beta G\r\n"
+    );
+}
+
+#[tokio::test]
+async fn plain_read_huge_limit_does_not_overflow() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("plain.txt"), "first\nsecond\nlast").unwrap();
+    let out = call(
+        &ctx(&dir),
+        "read_file",
+        json!({"path": "plain.txt", "offset": 2, "limit": usize::MAX}),
+    )
+    .await
+    .unwrap();
+    assert_eq!(out, "second\nlast\n");
+}
+
+#[tokio::test]
+async fn exact_edit_rejects_non_utf8_without_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("a.txt");
+    let original = b"original\xff\n";
+    std::fs::write(&path, original).unwrap();
+    let err = call(
+        &ctx(&dir),
+        "edit_file",
+        json!({"path":"a.txt", "edits":[
+            {"old_string":"original", "new_string":"new"}
+        ]}),
+    )
+    .await
+    .unwrap_err();
+    assert!(err.starts_with("cannot read"), "{err}");
+    assert_eq!(std::fs::read(&path).unwrap(), original);
+}
 #[tokio::test]
 async fn shell_streams_output_while_it_runs() {
     let dir = tempfile::tempdir().unwrap();
@@ -753,75 +649,6 @@ async fn shell_background_job_survives_turn_cancellation() {
     call(&ctx, "shell", json!({"action": "kill", "id": id}))
         .await
         .unwrap();
-}
-
-/// A repeatable model-shaped workload for the edit tool. The workload edits
-/// many independent files with three hunks per call. Every fourth call omits
-/// `path`, modeling the field being lost from a long tool-call retry while the
-/// session still has a last-read file. Both all-attempt and first-attempt
-/// failure rates are printed for before/after comparisons.
-#[tokio::test]
-#[ignore = "benchmark; run with cargo test -p bone-core edit_file_multi_file_benchmark -- --ignored --nocapture"]
-async fn edit_file_multi_file_benchmark() {
-    const FILES: usize = 32;
-    const LINES: usize = 48;
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = ctx(&dir);
-    let mut first_failures = 0usize;
-    let mut retries = 0usize;
-
-    for file_no in 0..FILES {
-        let filename = format!("conversion/file_{file_no:02}.txt");
-        let body = (1..=LINES)
-            .map(|line| format!("item_{file_no:02}_{line:02} = legacy_{line:02};\n"))
-            .collect::<String>();
-        let path = dir.path().join(&filename);
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, &body).unwrap();
-        call(&ctx, "read_file", json!({"path": filename, "full": true}))
-            .await
-            .unwrap();
-
-        let edits = json!([
-            {"at": anchor(&body, 5), "text": format!("item_{file_no:02}_05 = modern_05;")},
-            {"at": anchor(&body, 24), "text": format!("item_{file_no:02}_24 = modern_24;")},
-            {"at": anchor(&body, 43), "text": format!("item_{file_no:02}_43 = modern_43;")},
-        ]);
-        let args = if file_no % 4 == 0 {
-            json!({"edits": edits})
-        } else {
-            json!({"path": filename, "edits": edits})
-        };
-        let result = call(&ctx, "edit_file", args).await;
-        if result.is_err() {
-            first_failures += 1;
-            retries += 1;
-            call(&ctx, "edit_file", json!({"path": filename, "edits": edits}))
-                .await
-                .unwrap();
-        }
-    }
-
-    let total = FILES;
-    let attempts = total + retries;
-    let rate = first_failures as f64 / attempts as f64 * 100.0;
-    let first_attempt_rate = first_failures as f64 / total as f64 * 100.0;
-    println!(
-        "EDIT_BENCH files={FILES} calls={total} attempts={attempts} first_failures={first_failures} retries={retries} failure_rate={rate:.2}% first_attempt_rate={first_attempt_rate:.2}%"
-    );
-    assert_eq!(
-        (0..FILES)
-            .filter(|file_no| {
-                let path = dir.path().join(format!("conversion/file_{file_no:02}.txt"));
-                std::fs::read_to_string(path)
-                    .unwrap()
-                    .matches("modern_")
-                    .count()
-                    != 3
-            })
-            .count(),
-        0
-    );
 }
 
 #[tokio::test]

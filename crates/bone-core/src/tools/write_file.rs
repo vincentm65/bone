@@ -49,9 +49,6 @@ impl Tool for WriteFile {
             tokio::fs::write(&path, &args.content)
                 .await
                 .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
-            let lines = super::hashline::Lines::parse(&args.content).lines;
-            let seen = (1..=lines.len()).collect();
-            ctx.views.record(&ctx.session_id, &path, &lines, seen);
             let verb = if existed { "Overwrote" } else { "Created" };
             Ok(format!(
                 "{verb} {} ({} bytes)",

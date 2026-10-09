@@ -4,7 +4,6 @@
 //! is dynamic so core-side Lua can add tools later.
 
 mod edit_file;
-pub mod hashline;
 mod read_file;
 mod shell;
 mod write_file;
@@ -35,8 +34,6 @@ pub struct ToolContext {
     /// Cancelled when the turn is. Long-running tools should watch it; the
     /// agent also drops the call future on cancel.
     pub cancel: CancellationToken,
-    /// What the session's model has seen of each file (see `hashline`).
-    pub views: Arc<hashline::Views>,
     /// Session-scoped shell jobs shared by foreground and background runs.
     pub(crate) jobs: Arc<ProcessRegistry>,
     /// Where a tool can send output while it runs (`tool/output`), if anyone

@@ -95,8 +95,6 @@ pub(crate) struct Inner {
     model_requests: Mutex<std::collections::HashMap<u64, tokio::task::AbortHandle>>,
     next_model_request: std::sync::atomic::AtomicU64,
     sessions: SessionStore,
-    /// What each session's model has seen of files, for `edit_file`.
-    views: Arc<tools::hashline::Views>,
     /// Managed shell jobs shared by all tools in this core.
     jobs: Arc<tools::ProcessRegistry>,
     events: broadcast::Sender<Event>,
@@ -332,7 +330,6 @@ impl Core {
                 mcp: Default::default(),
                 model_requests: Mutex::new(Default::default()),
                 next_model_request: Default::default(),
-                views: Default::default(),
                 jobs: Default::default(),
                 settings: Mutex::new(saved),
                 events,
@@ -934,7 +931,6 @@ impl Core {
             .delete(&p.session_id)
             .map_err(session_error)?;
         self.inner.started.lock().unwrap().remove(&p.session_id);
-        self.inner.views.forget(&p.session_id);
         self.inner.emit::<SessionDeleted>(p);
         Ok(())
     }

@@ -443,9 +443,9 @@ local function columns(rows, width)
   return name_w, title_w
 end
 
-local function row_line(r, width, cols, mark, spinner)
+local function row_line(r, width, cols, mark)
   local live = r.status == "running"
-  local glyph = live and { spinner ~= "" and spinner or "◐", "Accent" } or GLYPH[r.status] or { "·", "Dim" }
+  local glyph = live and { "●", "Accent" } or GLYPH[r.status] or { "·", "Dim" }
   local time = r.time or duration((r.finished_at or bone.now()) - (r.started_at or bone.now()))
   local line = { { mark and " › " or "   ", "Accent" }, { glyph[1] .. " ", glyph[2] } }
   local used = 5
@@ -478,7 +478,6 @@ local function render(ctx)
     end
     return nil
   end
-  local spinner = ctx.spinner or ""
   if ui.folded and not active then
     if live == 0 then
       return nil
@@ -489,7 +488,7 @@ local function render(ctx)
     end
     return {
       {
-        { " " .. (spinner ~= "" and spinner or "◐") .. " ", "Accent" },
+        { " ● ", "Accent" },
         { string.format("%d agent%s · %d shell%s", a, a == 1 and "" or "s", s, s == 1 and "" or "s"), "ToolArgs" },
         { fill = " ", hl = "Normal" },
         { "ctrl+b ", "Dim" },
@@ -511,7 +510,7 @@ local function render(ctx)
     ui.open = nil
   end
   if ui.open then
-    out[#out + 1] = row_line(r, ctx.width, cols, true, spinner)
+    out[#out + 1] = row_line(r, ctx.width, cols, true)
     hits[#out] = function()
       ui.open = nil
     end
@@ -538,7 +537,7 @@ local function render(ctx)
   local room = math.max(ctx.height - 1, 1)
   local first = math.max(1, math.min(ui.sel - room + 1, #rows - room + 1))
   for i = first, math.min(#rows, first + room - 1) do
-    out[#out + 1] = row_line(rows[i], ctx.width, cols, active and r and rows[i].id == r.id, spinner)
+    out[#out + 1] = row_line(rows[i], ctx.width, cols, active and r and rows[i].id == r.id)
     hits[#out] = function()
       ui.sel, ui.queue_id = i, nil
       if ui.page == "shells" then

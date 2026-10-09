@@ -99,6 +99,7 @@ async fn turn_with_tool_call_over_http() {
             api_key: Some("sk-test".into()),
             reasoning_effort: None,
             stream_usage: true,
+            replay_reasoning: false,
         },
         system_prompt: Some("SYSTEM".into()),
         data_dir: data.path().to_owned(),

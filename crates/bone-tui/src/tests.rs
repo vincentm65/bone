@@ -1193,9 +1193,10 @@ async fn lua_tool_views_highlights_and_colorschemes() {
     h.lua("bone.hl.set('ToolPath', { fg = '#010203', bold = true })")
         .await;
     assert_eq!(h.lua("=bone.hl.get('ToolPath').fg").await, "\"#010203\"");
-    h.lua("bone.hl.set('Mine', { fg = 'red', underline = true })")
+    h.lua("bone.hl.set('Mine', { fg = 'red', underline = true, strikethrough = true })")
         .await;
     assert_eq!(h.lua("=bone.hl.get('Mine').underline").await, "true");
+    assert_eq!(h.lua("=bone.hl.get('Mine').strikethrough").await, "true");
     h.lua("bone.colorscheme('ansi')").await;
     assert_eq!(h.lua("=bone.hl.get('ToolPath').fg").await, "\"cyan\"");
     h.lua("bone.colorscheme('nope')").await;

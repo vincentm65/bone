@@ -127,6 +127,7 @@ impl Harness {
                 api_key: None,
                 reasoning_effort: None,
                 stream_usage: true,
+                replay_reasoning: false,
             },
             system_prompt: None,
             data_dir: data.path().to_owned(),

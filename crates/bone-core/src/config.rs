@@ -76,6 +76,10 @@ pub struct ProviderConfig {
     /// Send `stream_options.include_usage`. Some servers reject it.
     #[serde(default = "default_true")]
     pub stream_usage: bool,
+    /// Replay assistant reasoning as `reasoning_content` for compatible servers.
+    /// Opt in explicitly; standard OpenAI requests omit this field.
+    #[serde(default)]
+    pub replay_reasoning: bool,
 }
 
 fn default_true() -> bool {

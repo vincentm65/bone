@@ -183,6 +183,7 @@ pub struct StyleSpec {
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
+    pub strikethrough: bool,
     pub reverse: bool,
     pub dim: bool,
     /// Another group to start from.
@@ -205,6 +206,7 @@ impl StyleSpec {
             (self.bold, Modifier::BOLD),
             (self.italic, Modifier::ITALIC),
             (self.underline, Modifier::UNDERLINED),
+            (self.strikethrough, Modifier::CROSSED_OUT),
             (self.reverse, Modifier::REVERSED),
             (self.dim, Modifier::DIM),
         ] {
@@ -234,11 +236,13 @@ mod tests {
         let spec = StyleSpec {
             link: Some("ToolError".into()),
             bold: true,
+            strikethrough: true,
             ..Default::default()
         };
         let s = spec.to_style(&t).unwrap();
         assert_eq!(s.fg, Some(Color::Red));
         assert!(s.add_modifier.contains(Modifier::BOLD));
+        assert!(s.add_modifier.contains(Modifier::CROSSED_OUT));
         t.set("Mine", s);
         assert_eq!(t.hl("Mine"), s);
         assert_eq!(t.hl("Unknown"), t.hl("Normal"));

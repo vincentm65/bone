@@ -36,7 +36,7 @@ const TURN_END_CANCEL_GRACE: Duration = Duration::from_secs(1);
 
 const DEFAULT_SYSTEM_PROMPT: &str = "You are bone, a coding assistant working in the \
 user's terminal. Use the tools to inspect files, make changes and run commands. Search with rg \
-before reading large files, then use read_file ranges for focused sections. Read files before \
+before reading large files, then use read_file offset/limit for focused sections. Read files before \
 editing them; group independent hunks in one edit_file call. Keep changes minimal and focused, \
 and keep answers concise.\n\n\
 If the user wants to change or customize bone itself, first read ~/.bone/docs/customizing.md.";
@@ -247,6 +247,20 @@ impl Turn<'_> {
             };
             let compact = self.inner.compact_config();
             if let Some(limit) = compact.limit {
+                // Proactive estimates describe the session's pinned provider,
+                // not a one-call request override or a previous retry target.
+                let pin = self
+                    .session
+                    .lock()
+                    .unwrap()
+                    .model
+                    .clone()
+                    .unwrap_or_else(|| self.rt.model_of(None, &Value::Null));
+                let provider = self.rt.pinned(&pin).map_err(Stop::Failed)?;
+                self.session
+                    .lock()
+                    .unwrap()
+                    .set_replays_reasoning(provider.replays_reasoning());
                 let over = {
                     let s = self.session.lock().unwrap();
                     let mut all = vec![system.clone()];
@@ -313,7 +327,6 @@ impl Turn<'_> {
             // its size once the ratio is learned.
             let tool_chars = crate::compact::tool_chars(&tools);
             self.session.lock().unwrap().tool_chars = tool_chars;
-            let sent_chars = crate::compact::chars(&messages) + tool_chars;
             let mut attempt = 0;
             // A request_error hook may move the rest of this call elsewhere.
             // Which entry and model answered, for the usage record: the
@@ -442,6 +455,14 @@ impl Turn<'_> {
                 }
             };
 
+            // Retries may have switched providers. Calibrate with the mode
+            // of the provider that actually answered, after all request hooks.
+            let replays_reasoning = provider.replays_reasoning();
+            let sent_chars = crate::compact::chars(&messages, replays_reasoning) + tool_chars;
+            self.session
+                .lock()
+                .unwrap()
+                .set_replays_reasoning(replays_reasoning);
             if let Some(u) = completion.usage {
                 let context_tokens = u.context_tokens.unwrap_or(u.input_tokens);
                 if context_tokens > 0 {
@@ -709,7 +730,6 @@ impl Turn<'_> {
             session_id: self.session_id.clone(),
             call_id: call.id.clone(),
             cancel: self.cancel.clone(),
-            views: self.inner.views.clone(),
             jobs: self.inner.jobs.clone(),
             output: Some(output),
             processes: Some(processes),

@@ -10,6 +10,7 @@ local providers = bone.config.providers
 -- providers.local_model = {
 --   base_url = "http://localhost:8080/v1",
 --   model = "your-model-name",
+--   -- replay_reasoning = true, -- only if the server accepts assistant reasoning_content
 -- }
 
 -- A hosted API. Keep keys in the environment, not in this file:
