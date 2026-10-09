@@ -178,6 +178,10 @@ pub const METHODS: &[&str] = &[
     ModelComplete::METHOD,
     ModelCancel::METHOD,
     McpList::METHOD,
+    McpReconnect::METHOD,
+    McpAuth::METHOD,
+    McpAuthCode::METHOD,
+    McpSignOut::METHOD,
     LuaCall::METHOD,
     StoreQuery::METHOD,
     SettingsGet::METHOD,
@@ -743,17 +747,86 @@ method!(
     McpList, "mcp/list", Empty => Vec<McpServerInfo>
 );
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct McpServerInfo {
     pub name: String,
-    /// `"idle"` (lazy, not started), `"starting"`, `"ready"` or `"failed"`.
+    /// `"idle"` (lazy, not started), `"starting"`, `"ready"`, `"auth"`
+    /// (needs a sign-in; see `mcp/auth`) or `"failed"`.
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     /// Its tools, by the names the model sees.
     #[serde(default)]
     pub tools: Vec<String>,
+    /// The endpoint of an HTTP server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// The command line of a stdio server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// Started on first use.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub lazy: bool,
+    /// A sign-in is saved for this HTTP server.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub signed_in: bool,
+    /// What each tool is, for the ones in `tools` (same order).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_info: Vec<McpToolInfo>,
 }
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpToolInfo {
+    /// The server's own name for the tool.
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    /// The server marked it read-only.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpRef {
+    pub name: String,
+}
+
+method!(
+    /// Drop a server's connection and start it again now (also for one that
+    /// gave up or needs a sign-in that was just completed).
+    McpReconnect, "mcp/reconnect", McpRef => Empty
+);
+
+method!(
+    /// Begin signing in to an HTTP server (OAuth). The result's `url` is for
+    /// the user's browser; the core finishes by itself when the browser is
+    /// redirected to this machine, or when `mcp/auth_code` is given the
+    /// address it ended up on. The server reconnects once signed in.
+    McpAuth, "mcp/auth", McpRef => McpAuthStart
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpAuthStart {
+    pub url: String,
+    pub redirect_uri: String,
+}
+
+method!(
+    /// Complete a sign-in from the address the browser was redirected to
+    /// (or the bare code), for when the browser is on another machine.
+    McpAuthCode, "mcp/auth_code", McpAuthCodeParams => Empty
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpAuthCodeParams {
+    pub name: String,
+    pub code: String,
+}
+
+method!(
+    /// Forget a server's saved sign-in and disconnect it.
+    McpSignOut, "mcp/sign_out", McpRef => Empty
+);
 
 // ---- core Lua -------------------------------------------------------------
 

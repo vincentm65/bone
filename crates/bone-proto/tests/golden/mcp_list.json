@@ -11,13 +11,24 @@
     "result": [
       {
         "name": "github",
+        "signed_in": true,
         "state": "ready",
+        "tool_info": [
+          {
+            "description": "Search issues",
+            "name": "search_issues",
+            "read_only": true
+          }
+        ],
         "tools": [
           "github_search_issues"
-        ]
+        ],
+        "url": "https://mcp.github.test/mcp"
       },
       {
+        "command": "postgres-mcp --ro",
         "error": "cannot run postgres-mcp: No such file or directory",
+        "lazy": true,
         "name": "db",
         "state": "failed",
         "tools": []

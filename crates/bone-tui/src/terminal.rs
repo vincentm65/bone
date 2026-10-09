@@ -11,6 +11,7 @@ use crossterm::terminal::{
     BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
     disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement,
 };
+use crossterm::cursor::Hide;
 use crossterm::{execute, queue};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -62,9 +63,10 @@ pub fn enter() -> io::Result<Guard> {
 
 impl Guard {
     /// Draw a frame as one synchronized update, which terminals that support
-    /// it show only once it is complete (no half-drawn frames).
+    /// it show only once it is complete. The cursor is hidden while cells
+    /// are written (tmux/SSH drop the update, and it would flicker).
     pub fn draw_frame(&mut self, render: impl FnOnce(&mut ratatui::Frame)) -> io::Result<()> {
-        queue!(self.terminal.backend_mut(), BeginSynchronizedUpdate)?;
+        queue!(self.terminal.backend_mut(), BeginSynchronizedUpdate, Hide)?;
         self.terminal.draw(render)?;
         execute!(self.terminal.backend_mut(), EndSynchronizedUpdate)
     }

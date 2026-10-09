@@ -447,15 +447,44 @@ fn requests() {
                 state: "ready".into(),
                 error: None,
                 tools: vec!["github_search_issues".into()],
+                url: Some("https://mcp.github.test/mcp".into()),
+                signed_in: true,
+                tool_info: vec![McpToolInfo {
+                    name: "search_issues".into(),
+                    description: "Search issues".into(),
+                    read_only: true,
+                }],
+                ..Default::default()
             },
             McpServerInfo {
                 name: "db".into(),
                 state: "failed".into(),
                 error: Some("cannot run postgres-mcp: No such file or directory".into()),
                 tools: vec![],
+                command: Some("postgres-mcp --ro".into()),
+                lazy: true,
+                ..Default::default()
             },
         ],
     );
+    exchange::<McpReconnect>(23, McpRef { name: "db".into() }, Empty {});
+    exchange::<McpAuth>(
+        24,
+        McpRef { name: "github".into() },
+        McpAuthStart {
+            url: "https://auth.github.test/authorize?client_id=c".into(),
+            redirect_uri: "http://127.0.0.1:41000/callback".into(),
+        },
+    );
+    exchange::<McpAuthCode>(
+        27,
+        McpAuthCodeParams {
+            name: "github".into(),
+            code: "http://127.0.0.1:41000/callback?code=abc&state=s".into(),
+        },
+        Empty {},
+    );
+    exchange::<McpSignOut>(28, McpRef { name: "github".into() }, Empty {});
     let settings = json!({ "provider": "qwen", "models": { "qwen": "Qwen3-27B" }, "tui": { "tool_detail": "rows" } });
     exchange::<SettingsGet>(25, Empty {}, settings.clone());
     exchange::<SettingsSet>(

@@ -185,7 +185,7 @@ function M.open(want)
     end
   end
 
-  local EFFORTS = { "default", "low", "medium", "high" }
+  local EFFORTS = { "default", "low", "medium", "high", "xhigh", "max", "none" }
 
   -- The editor's rows for one provider (or a new one's draft).
   local function provider_rows()
@@ -215,7 +215,8 @@ function M.open(want)
       { kind = "pfield", key = "type", label = "Type", type = "string", value = p.type or "", changed = changed("type"),
         desc = "a Lua provider type (from a plugin); empty: OpenAI-compatible" },
       { kind = "pfield", key = "reasoning_effort", label = "Reasoning effort", type = "choice", choices = EFFORTS,
-        value = p.reasoning_effort or "default", changed = changed("reasoning_effort") },
+        value = p.reasoning_effort or "default", changed = changed("reasoning_effort"),
+        desc = "default sends nothing (the provider chooses)" },
       { kind = "pfield", key = "stream_usage", label = "Stream usage", type = "boolean", value = p.stream_usage ~= false,
         changed = changed("stream_usage"), desc = "ask for token usage while streaming (some servers refuse it)" },
       { kind = "pfield", key = "key", label = "API key", type = "secret", value = key_text,

@@ -1,0 +1,18 @@
+[
+  {
+    "id": 24,
+    "jsonrpc": "2.0",
+    "method": "mcp/auth",
+    "params": {
+      "name": "github"
+    }
+  },
+  {
+    "id": 24,
+    "jsonrpc": "2.0",
+    "result": {
+      "redirect_uri": "http://127.0.0.1:41000/callback",
+      "url": "https://auth.github.test/authorize?client_id=c"
+    }
+  }
+]

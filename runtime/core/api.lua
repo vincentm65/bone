@@ -311,6 +311,8 @@ end
 ---                { tools = { allow = { "search" } }, lazy = true, timeout = 60000 })
 ---   bone.mcp.load(path)        add every server of an mcpServers JSON file
 ---   bone.mcp.remove(name)
+--- A url server answering 401 is in state "auth": sign in with mcp/auth
+--- (/mcp, mcp plugin). client_id = "..." for servers that refuse registration.
 --- Their tools reach the model as <server>_<tool>. In hooks and tools:
 ---   bone.mcp.call(server, tool, args) -> { text, is_error }
 ---   bone.mcp.list() -> { { name, state, error, tools } }
@@ -333,6 +335,7 @@ function bone.mcp.add(name, spec, opts)
     deny = tools.deny,
     lazy = opts.lazy,
     timeout = opts.timeout,
+    client_id = opts.client_id or spec.client_id,
   }
 end
 

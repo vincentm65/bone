@@ -27,6 +27,9 @@ use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::tools::{Tool, ToolContext, ToolResult, ToolSpec};
 
+pub mod oauth;
+use oauth::AUTH_REQUIRED;
+
 const PROTOCOL_VERSION: &str = "2025-06-18";
 /// A tool call's default limit; `timeout` (ms) in the server's config
 /// changes it.
@@ -67,6 +70,10 @@ pub struct ServerConfig {
     /// Per-call limit in ms.
     #[serde(default)]
     pub timeout: Option<u64>,
+    /// OAuth: a client registered by hand, for servers that do not allow
+    /// registering one on the fly.
+    #[serde(default)]
+    pub client_id: Option<String>,
 }
 
 impl ServerConfig {
@@ -311,6 +318,8 @@ impl Drop for ProcessGuard {
 /// Streamable HTTP: every message is a POST.
 pub struct HttpConn {
     http: reqwest::Client,
+    /// The server's name, for its saved sign-in.
+    name: String,
     url: String,
     headers: BTreeMap<String, String>,
     session: Mutex<Option<String>>,
@@ -329,20 +338,61 @@ impl HttpConn {
         for (k, v) in &self.headers {
             b = b.header(k, v);
         }
+        if !self.has_own_auth()
+            && let Some(t) = oauth::access_token(&self.name, &self.url)
+        {
+            b = b.bearer_auth(t);
+        }
         if let Some(s) = self.session.lock().unwrap().as_ref() {
             b = b.header("mcp-session-id", s);
         }
         b
     }
 
+    /// The config carries its own `Authorization` header.
+    fn has_own_auth(&self) -> bool {
+        self.headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("authorization"))
+    }
+
     async fn request(&self, method: &str, params: Value) -> Result<Value, String> {
         let id = self.next.fetch_add(1, Ordering::Relaxed) + 1;
         let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
+        if !self.has_own_auth() && oauth::needs_refresh(&self.name, &self.url) {
+            // Expired (or nearly): a failure here shows up as a 401 below.
+            let _ = oauth::refresh(&self.name, &self.url).await;
+        }
         let mut res = self
             .post(&body)
             .send()
             .await
             .map_err(|e| format!("{}: {e}", self.url))?;
+        if res.status() == reqwest::StatusCode::UNAUTHORIZED {
+            if self.has_own_auth() {
+                return Err(format!(
+                    "{AUTH_REQUIRED}: the server rejected the Authorization header in its config (HTTP 401)"
+                ));
+            }
+            // One refresh and retry before asking the user to sign in again.
+            if oauth::refresh(&self.name, &self.url).await.is_err() {
+                return Err(format!(
+                    "{AUTH_REQUIRED}: sign in to {} (HTTP 401)",
+                    self.name
+                ));
+            }
+            res = self
+                .post(&body)
+                .send()
+                .await
+                .map_err(|e| format!("{}: {e}", self.url))?;
+            if res.status() == reqwest::StatusCode::UNAUTHORIZED {
+                return Err(format!(
+                    "{AUTH_REQUIRED}: sign in to {} (HTTP 401)",
+                    self.name
+                ));
+            }
+        }
         if let Some(s) = res.headers().get("mcp-session-id")
             && let Ok(s) = s.to_str()
         {
@@ -519,6 +569,7 @@ pub fn connect(
             let (events, rx) = mpsc::unbounded_channel();
             let conn = HttpConn {
                 http: reqwest::Client::new(),
+                name: config.name.clone(),
                 url: url.clone(),
                 headers: config.headers.clone(),
                 session: Mutex::new(None),
@@ -597,6 +648,8 @@ enum Status {
     Idle,
     Starting,
     Ready,
+    /// The server wants a (new) sign-in; waits for `mcp/auth` or a reconnect.
+    Auth,
     Failed,
 }
 
@@ -606,6 +659,7 @@ impl Status {
             Status::Idle => "idle",
             Status::Starting => "starting",
             Status::Ready => "ready",
+            Status::Auth => "auth",
             Status::Failed => "failed",
         }
     }
@@ -623,6 +677,13 @@ struct Server {
     state: Mutex<State>,
     changed: Notify,
     task: Mutex<Option<tokio::task::AbortHandle>>,
+}
+
+/// A sign-in that is waiting for the browser.
+struct PendingAuth {
+    /// Pasted redirect addresses or codes.
+    paste: mpsc::UnboundedSender<String>,
+    task: tokio::task::AbortHandle,
 }
 
 impl Server {
@@ -682,6 +743,16 @@ async fn supervise(server: Arc<Server>, connector: Connector) {
             }
             Err(why) => why,
         };
+        if why.starts_with(AUTH_REQUIRED) {
+            // Retrying cannot help: wait to be signed in (or reconnected).
+            server.set(|s| {
+                s.conn = None;
+                s.tools.clear();
+                s.error = Some(why.clone());
+                s.status = Status::Auth;
+            });
+            std::future::pending::<()>().await;
+        }
         restarts += 1;
         let give_up = restarts > MAX_RESTARTS;
         server.set(|s| {
@@ -706,6 +777,7 @@ async fn supervise(server: Arc<Server>, connector: Connector) {
 pub struct McpManager {
     servers: Mutex<BTreeMap<String, Arc<Server>>>,
     connector: Mutex<Connector>,
+    auths: Mutex<HashMap<String, PendingAuth>>,
 }
 
 impl Default for McpManager {
@@ -713,6 +785,7 @@ impl Default for McpManager {
         McpManager {
             servers: Default::default(),
             connector: Mutex::new(Arc::new(connect)),
+            auths: Default::default(),
         }
     }
 }
@@ -757,14 +830,110 @@ impl McpManager {
     }
 
     fn start(&self, server: &Arc<Server>) {
-        let mut task = server.task.lock().unwrap();
-        if task.is_some() {
-            return;
-        }
-        server.set(|s| s.status = Status::Starting);
         let connector = self.connector.lock().unwrap().clone();
-        let handle = tokio::spawn(supervise(server.clone(), connector));
-        *task = Some(handle.abort_handle());
+        spawn_supervisor(server, connector, false);
+    }
+
+    fn server(&self, name: &str) -> Result<Arc<Server>, String> {
+        self.servers
+            .lock()
+            .unwrap()
+            .get(name)
+            .cloned()
+            .ok_or_else(|| format!("no MCP server {name}"))
+    }
+
+    /// Drop the server's connection and start it again now, with a fresh
+    /// restart budget.
+    pub fn reconnect(&self, name: &str) -> Result<(), String> {
+        let server = self.server(name)?;
+        let connector = self.connector.lock().unwrap().clone();
+        spawn_supervisor(&server, connector, true);
+        Ok(())
+    }
+
+    /// Begin signing in to an HTTP server. The address goes to the user's
+    /// browser; the server reconnects by itself once the browser comes back
+    /// here or `auth_code` is given what it was redirected to.
+    pub async fn auth_begin(&self, name: &str) -> Result<(String, String), String> {
+        let server = self.server(name)?;
+        let url = server
+            .config
+            .url
+            .clone()
+            .ok_or_else(|| format!("{name} is a stdio server; it has no sign-in"))?;
+        let mut flow = oauth::Flow::start(name, &url, server.config.client_id.clone()).await?;
+        let listener = flow.take_listener().ok_or("no redirect socket")?;
+        let (shown, redirect) = (flow.url.clone(), flow.redirect_uri.clone());
+        let flow = Arc::new(flow);
+        let (paste, mut pasted) = mpsc::unbounded_channel::<String>();
+        let connector = self.connector.lock().unwrap().clone();
+        let task_server = server.clone();
+        let handle = tokio::spawn(async move {
+            let outcome = async {
+                let redirected = flow.wait_for_redirect(listener);
+                tokio::pin!(redirected);
+                let code = loop {
+                    tokio::select! {
+                        r = &mut redirected => break r?,
+                        p = pasted.recv() => {
+                            let p = p.ok_or("cancelled")?;
+                            match flow.code_from(&p) {
+                                Ok(code) => break code,
+                                Err(e) => task_server.set(|s| s.error = Some(format!("{AUTH_REQUIRED}: {e}"))),
+                            }
+                        }
+                    }
+                };
+                flow.exchange(&code).await
+            };
+            match tokio::time::timeout(Duration::from_secs(600), outcome).await {
+                Ok(Ok(())) => spawn_supervisor(&task_server, connector, true),
+                Ok(Err(e)) => task_server.set(|s| {
+                    s.status = Status::Auth;
+                    s.error = Some(format!("{AUTH_REQUIRED}: sign-in failed: {e}"));
+                }),
+                Err(_) => task_server.set(|s| {
+                    s.status = Status::Auth;
+                    s.error = Some(format!("{AUTH_REQUIRED}: the sign-in timed out"));
+                }),
+            }
+        });
+        let old = self.auths.lock().unwrap().insert(
+            name.to_owned(),
+            PendingAuth {
+                paste,
+                task: handle.abort_handle(),
+            },
+        );
+        if let Some(old) = old {
+            old.task.abort();
+        }
+        Ok((shown, redirect))
+    }
+
+    /// Finish a sign-in from the address the browser was redirected to.
+    pub fn auth_code(&self, name: &str, pasted: &str) -> Result<(), String> {
+        let auths = self.auths.lock().unwrap();
+        let pending = auths
+            .get(name)
+            .ok_or_else(|| format!("no sign-in is waiting for {name}; start one first"))?;
+        pending
+            .paste
+            .send(pasted.to_owned())
+            .map_err(|_| "that sign-in is over; start a new one".to_owned())
+    }
+
+    /// Forget the sign-in and disconnect.
+    pub fn sign_out(&self, name: &str) -> Result<(), String> {
+        let server = self.server(name)?;
+        if let Some(p) = self.auths.lock().unwrap().remove(name) {
+            p.task.abort();
+        }
+        oauth::sign_out(name)?;
+        let connector = self.connector.lock().unwrap().clone();
+        spawn_supervisor(&server, connector, true);
+        Ok(())
     }
 
     fn all(&self) -> Vec<Arc<Server>> {
@@ -889,15 +1058,36 @@ impl McpManager {
             .iter()
             .map(|s| {
                 let st = s.state.lock().unwrap();
+                let shown: Vec<&RemoteTool> =
+                    st.tools.iter().filter(|t| s.config.wants(&t.name)).collect();
                 bone_proto::methods::McpServerInfo {
                     name: s.config.name.clone(),
                     state: st.status.name().into(),
                     error: st.error.clone(),
-                    tools: st
-                        .tools
+                    tools: shown
                         .iter()
-                        .filter(|t| s.config.wants(&t.name))
                         .map(|t| tool_name(&s.config.name, &t.name))
+                        .collect(),
+                    url: s.config.url.clone(),
+                    command: s.config.command.as_ref().map(|c| {
+                        std::iter::once(c.as_str())
+                            .chain(s.config.args.iter().map(String::as_str))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    }),
+                    lazy: s.config.lazy,
+                    signed_in: s
+                        .config
+                        .url
+                        .as_deref()
+                        .is_some_and(|u| oauth::signed_in(&s.config.name, u)),
+                    tool_info: shown
+                        .iter()
+                        .map(|t| bone_proto::methods::McpToolInfo {
+                            name: t.name.clone(),
+                            description: t.description.clone(),
+                            read_only: t.annotations["readOnlyHint"] == true,
+                        })
                         .collect(),
                 }
             })
@@ -914,7 +1104,7 @@ async fn call_on(server: &Server, tool: &str, args: Value) -> Result<(String, bo
                 let st = server.state.lock().unwrap();
                 match st.status {
                     Status::Ready => return st.conn.clone(),
-                    Status::Failed => return None,
+                    Status::Failed | Status::Auth => return None,
                     _ => {}
                 }
             }
@@ -932,9 +1122,41 @@ async fn call_on(server: &Server, tool: &str, args: Value) -> Result<(String, bo
             why.map(|w| format!(": {w}")).unwrap_or_default()
         ));
     };
-    tokio::time::timeout(server.config.call_timeout(), conn.call_tool(tool, args))
+    let result = tokio::time::timeout(server.config.call_timeout(), conn.call_tool(tool, args))
         .await
-        .map_err(|_| format!("{tool} did not answer in time"))?
+        .map_err(|_| format!("{tool} did not answer in time"))?;
+    if let Err(e) = &result
+        && e.starts_with(AUTH_REQUIRED)
+    {
+        // The token stopped working mid-session: show it and stop offering
+        // the tools until the user signs in again.
+        server.set(|s| {
+            s.conn = None;
+            s.tools.clear();
+            s.error = Some(e.clone());
+            s.status = Status::Auth;
+        });
+    }
+    result
+}
+
+/// (Re)start supervising `server`. Unless `force`, a running one is left.
+fn spawn_supervisor(server: &Arc<Server>, connector: Connector, force: bool) {
+    let mut task = server.task.lock().unwrap();
+    if let Some(t) = task.as_ref() {
+        if !force {
+            return;
+        }
+        t.abort();
+    }
+    server.set(|s| {
+        s.status = Status::Starting;
+        s.error = None;
+        s.conn = None;
+        s.tools.clear();
+    });
+    let handle = tokio::spawn(supervise(server.clone(), connector));
+    *task = Some(handle.abort_handle());
 }
 
 /// An MCP tool in the agent's hands.

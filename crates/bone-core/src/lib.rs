@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use bone_proto::methods::{
     AskRespond, AskRespondParams, CoreReload, Echo, EchoParams, Echoed, HealthCheck, LuaCall,
-    LuaCallParams, McpList, ModelCancel, ModelComplete, ModelCompleteParams, ModelCompleted,
+    LuaCallParams, McpAuth, McpAuthCode, McpAuthCodeParams, McpList, McpReconnect, McpRef, McpSignOut, ModelCancel, ModelComplete, ModelCompleteParams, ModelCompleted,
     ModelCompletedParams, ModelDeltaEvent, ModelDeltaParams, ModelList, ModelRequest, PluginList,
     PluginLoad, PluginRef, PluginReload, PluginUnload, ProcessCancel, ProcessOutput, ProcessRead,
     ProcessRef, ProcessResize, ProcessSnapshot, ProcessState, ProcessesGet, ProcessesList,
@@ -337,6 +337,9 @@ impl Core {
         };
         if let Some(source) = &core.inner.source {
             source.options.lock().unwrap().host.set(&core.inner);
+        }
+        if let Some(source) = &core.inner.source {
+            mcp::oauth::set_dir(source.config_dir.clone());
         }
         core.inner.mcp.apply(core.inner.runtime().mcp.clone());
         // Index sessions written while no core was running (or before the
@@ -720,6 +723,40 @@ impl Core {
             McpList::METHOD => {
                 decode::<McpList>(params)?;
                 Ok(serde_json::to_value(self.inner.mcp.list()).unwrap_or_default())
+            }
+            McpReconnect::METHOD => {
+                let p: McpRef = decode::<McpReconnect>(params)?;
+                self.inner
+                    .mcp
+                    .reconnect(&p.name)
+                    .map_err(RpcError::invalid_params)?;
+                Ok(serde_json::json!({}))
+            }
+            McpAuth::METHOD => {
+                let p: McpRef = decode::<McpAuth>(params)?;
+                let (url, redirect_uri) = self
+                    .inner
+                    .mcp
+                    .auth_begin(&p.name)
+                    .await
+                    .map_err(RpcError::invalid_params)?;
+                Ok(serde_json::json!({ "url": url, "redirect_uri": redirect_uri }))
+            }
+            McpAuthCode::METHOD => {
+                let p: McpAuthCodeParams = decode::<McpAuthCode>(params)?;
+                self.inner
+                    .mcp
+                    .auth_code(&p.name, &p.code)
+                    .map_err(RpcError::invalid_params)?;
+                Ok(serde_json::json!({}))
+            }
+            McpSignOut::METHOD => {
+                let p: McpRef = decode::<McpSignOut>(params)?;
+                self.inner
+                    .mcp
+                    .sign_out(&p.name)
+                    .map_err(RpcError::invalid_params)?;
+                Ok(serde_json::json!({}))
             }
             ModelList::METHOD => {
                 let p = decode::<ModelList>(params)?;

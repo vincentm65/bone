@@ -1,0 +1,15 @@
+[
+  {
+    "id": 28,
+    "jsonrpc": "2.0",
+    "method": "mcp/sign_out",
+    "params": {
+      "name": "github"
+    }
+  },
+  {
+    "id": 28,
+    "jsonrpc": "2.0",
+    "result": {}
+  }
+]

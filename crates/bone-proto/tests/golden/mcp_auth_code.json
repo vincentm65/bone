@@ -1,0 +1,16 @@
+[
+  {
+    "id": 27,
+    "jsonrpc": "2.0",
+    "method": "mcp/auth_code",
+    "params": {
+      "code": "http://127.0.0.1:41000/callback?code=abc&state=s",
+      "name": "github"
+    }
+  },
+  {
+    "id": 27,
+    "jsonrpc": "2.0",
+    "result": {}
+  }
+]
