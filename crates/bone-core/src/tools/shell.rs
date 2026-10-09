@@ -495,6 +495,13 @@ fn signal_group(pid: Option<u32>, signal: i32) {
 #[cfg(not(unix))]
 fn signal_group(_pid: Option<u32>, _signal: i32) {}
 
+/// Only a definite ESRCH means the group no longer needs exit grace.
+fn group_alive(pid: Option<u32>) -> bool {
+    let Some(pid) = pid else { return true };
+    let result = unsafe { libc::kill(-(pid as i32), 0) };
+    result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+}
+
 async fn run_job(
     registry: ProcessRegistry,
     process: Arc<Process>,
@@ -607,7 +614,7 @@ async fn run_job(
             Some(control) = controls.recv(), if kill_at.is_none() => match control { Control::Write(data) => if let Some(pipe) = &mut input { let _ = pipe.write_all(&data).await; }, Control::CloseStdin => input = None, Control::Cancel => { state = ProcessState::Cancelled; signal_group(pid, libc::SIGTERM); kill_at = Some(Instant::now() + KILL_GRACE); } },
             _ = parent_cancel.cancelled(), if kill_at.is_none() => { state = ProcessState::Cancelled; signal_group(pid, libc::SIGTERM); kill_at = Some(Instant::now() + KILL_GRACE); }
             _ = sleep_until(deadline.unwrap_or_else(far)), if deadline.is_some() && kill_at.is_none() => { state = ProcessState::TimedOut; signal_group(pid, libc::SIGTERM); kill_at = Some(Instant::now() + KILL_GRACE); }
-            _ = sleep_until(kill_at.unwrap_or_else(far)), if kill_at.is_some() => { signal_group(pid, libc::SIGKILL); break; }
+            _ = sleep_until(kill_at.unwrap_or_else(far)), if kill_at.is_some() && (state != ProcessState::Running || pipe_open || status.is_none() || group_alive(pid)) => { signal_group(pid, libc::SIGKILL); break; }
             else => break,
         }
     }
