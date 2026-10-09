@@ -61,6 +61,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .request::<TurnStart>(TurnStartParams {
                 session_id: session.session_id.clone(),
                 text,
+                images: Vec::new(),
             })
             .await?;
         let mut in_reasoning = false;

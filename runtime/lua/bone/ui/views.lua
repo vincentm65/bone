@@ -176,6 +176,9 @@ function views.user(item, ctx)
     local first = i == 1 and { { "› ", "UserPrompt" } } or { { "  ", band } }
     append(out, wrap({ { line, band } }, ctx.width, { first = first, rest = { { "  ", band } }, pad = band }))
   end
+  for _, image in ipairs(item.images or {}) do
+    append(out, wrap({ { ("  [Image: %s · %d×%d]"):format(image.name, image.width, image.height), "Dim" } }, ctx.width))
+  end
   return out
 end
 
@@ -230,6 +233,9 @@ function views.queued(item, ctx)
   for i, line in ipairs(lines(item.text)) do
     local first = i == 1 and { { "◦ ", "Dim" } } or { { "  ", "Dim" } }
     append(out, wrap({ { line, "Dim" } }, ctx.width, { first = first }))
+  end
+  for _, image in ipairs(item.images or {}) do
+    append(out, wrap({ { ("  [Image: %s · %d×%d]"):format(image.name, image.width, image.height), "Dim" } }, ctx.width))
   end
   out[#out + 1] = { { "  " .. note, "StatusLineDim" } }
   return out

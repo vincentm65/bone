@@ -217,6 +217,8 @@ function M.open(want)
       { kind = "pfield", key = "reasoning_effort", label = "Reasoning effort", type = "choice", choices = EFFORTS,
         value = p.reasoning_effort or "default", changed = changed("reasoning_effort"),
         desc = "default sends nothing (the provider chooses)" },
+      { kind = "pfield", key = "supports_images", label = "Accept images", type = "boolean", value = p.supports_images ~= false,
+        changed = changed("supports_images"), desc = "allow screenshots for a vision-enabled model; disable for text-only models" },
       { kind = "pfield", key = "stream_usage", label = "Stream usage", type = "boolean", value = p.stream_usage ~= false,
         changed = changed("stream_usage"), desc = "ask for token usage while streaming (some servers refuse it)" },
       { kind = "pfield", key = "key", label = "API key", type = "secret", value = key_text,

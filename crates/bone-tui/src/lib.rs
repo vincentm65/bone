@@ -9,7 +9,9 @@
 
 mod app;
 mod chat;
+mod clipboard;
 mod commands;
+mod composer;
 mod data;
 mod editor;
 mod headless;
@@ -50,6 +52,8 @@ use tokio::sync::mpsc;
 use tokio::time::sleep_until;
 
 use crate::app::App;
+#[doc(hidden)]
+pub use crate::clipboard::run_clipboard_helper;
 pub use crate::headless::Headless;
 
 /// At most this often while content streams in.
@@ -58,6 +62,8 @@ const FRAME: Duration = Duration::from_millis(16);
 const LUA_RELOAD_POLL: Duration = Duration::from_millis(250);
 
 pub struct RunOptions {
+    /// Executable implementing the internal clipboard helper; None uses this executable.
+    pub clipboard_executable: Option<std::path::PathBuf>,
     /// Working directory for new sessions.
     pub cwd: String,
     /// Where `tui.lua`, `lua/` modules and runtime overrides live.
@@ -85,6 +91,7 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
         .unwrap_or_default();
     let mut app = App::new(Arc::new(client), tx, opts.cwd, opts.config_dir);
     app.reload_core = opts.reload_core;
+    app.clipboard_executable = opts.clipboard_executable;
     app.settings = settings;
     app.load_user_config();
     app.note_runtime_overrides();

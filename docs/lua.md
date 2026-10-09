@@ -242,17 +242,17 @@ A hook runs at a point in the core with an event table. It returns `nil` (no cha
 
 | Point | Event | `deny` means |
 |---|---|---|
-| `turn_start` | `{ session_id, cwd, text }`, before the user's message is saved | the turn fails with "why" |
+| `turn_start` | `{ session_id, cwd, text, images }`, before the user's message is saved | the turn fails with "why" |
 | `system` | `{ session_id, cwd, prompt }`, once per turn: the system prompt (after `bone.config.system_prompt` and the working directory); return `{ prompt = ... }` to change it | the turn fails |
 | `context` | `{ session_id, messages }`, before each model call: the messages it will send (system prompt first, then a compacted session's summary in place of what it covers); return `{ messages = ... }` to send different ones. The stored transcript is not changed | the turn fails |
 | `request` | `{ session_id, messages, tools }`, before each call to the model, after `context`; return `{ provider = "name", model = "model-id" }` to override this call's provider entry and model (both fields optional). `provider` names a `bone.config.providers` entry; without `model`, that entry's configured model is used. `model` alone keeps the session's selected provider entry. Neither override changes the session's saved selection | the turn fails |
 | `request_error` | `{ session_id, error, attempt, model }`, when a model call fails before any output arrived; return `{ retry = ms }` to try again after `ms` (at most 5 retries per call), or `{ retry = ms, provider = "name" }` to send the rest of this call to another `bone.config.providers` entry. Without a retry the turn fails as before | the turn fails |
 | `stream` | `{ session_id, turn_id, text, reasoning }`: output as it streams, collected into batches; results are ignored and the stream never waits for it | (ignored) |
 | `session_start` | `{ session_id, cwd, new }`, the first time this core uses a session (`new` when it was just created) | (ignored) |
-| `queue_add` | `{ session_id, text, mode }`, a message about to be sent or queued (`queue/add` or `bone.queue.add`); return `{ text = ..., mode = ... }` to change it | it is refused with "why" |
+| `queue_add` | `{ session_id, text, mode, images }`, a message about to be sent or queued (`queue/add` or `bone.queue.add`); return `{ text = ..., mode = ... }` to change it | it is refused with "why" |
 | `message` | `{ session_id, content, reasoning, tool_calls, usage }`, the model's reply before it is saved | the turn fails |
 | `tool_call` | `{ session_id, cwd, id, name, arguments }` | the call is refused; the model sees "why" |
-| `tool_result` | `{ session_id, id, name, arguments, output, is_error }` | the model sees "why" as an error |
+| `tool_result` | `{ session_id, id, name, arguments, output, is_error, images }` (image references; marking the result as an error discards them) | the model sees "why" as an error |
 | `turn_end` | `{ session_id, turn_id, outcome }` | (changes are ignored) |
 
 ```lua
@@ -281,7 +281,7 @@ bone.session.append(id, { role = "user", content = "Remember: be brief." })
 bone.session.compact(id, { { role = "user", content = "Summary of earlier work: ..." } })
 ```
 
-The message queue is open to Lua too: `bone.queue.add(id, text, mode)` (`"steer"` or `"next"`; an idle session starts a turn), `bone.queue.list(id)`, `bone.queue.remove(id, queue_id)` and `bone.queue.clear(id)`, with the same effects (and `queue/changed` events) as the protocol's `queue/*` methods.
+The message queue is open to Lua too: `bone.queue.add(id, text, mode, images)` (`"steer"` or `"next"`; an idle session starts a turn), `bone.queue.list(id)`, `bone.queue.remove(id, queue_id)` and `bone.queue.clear(id)`, with the same effects (and `queue/changed` events) as the protocol's `queue/*` methods.
 
 Sessions of their own, for sub-agents:
 
@@ -652,7 +652,7 @@ Any protocol method works (see `crates/bone-proto/src/methods.rs`).
 
 ```lua
 bone.prompt.get()                      -- the text; bone.prompt.set(text) replaces it
-bone.prompt.info()                     -- { text, lines, cursor, selection = { start, end, text } or nil }
+bone.prompt.info()                     -- { text, images, lines, cursor, selection = { start, end, text } or nil }
 bone.prompt.lines()
 bone.prompt.cursor()                   -- { row, col }
 bone.prompt.set_cursor({ row = 0, col = 5 })
@@ -667,6 +667,10 @@ bone.prompt.position(4)                -- offset -> { row, col }
 ```
 
 The selection is drawn with the `Selection` group. Typing or pasting replaces it, `backspace`/`delete` and the other delete actions remove it, and cursor movement drops it. `bone.api.prompt_get`/`prompt_set` keep working.
+
+`bone.prompt.images()` returns the draft's image references; `bone.prompt.set_images(refs)` replaces them. `bone.prompt.attach(path)` reads a file asynchronously, `bone.prompt.paste()` reads the local clipboard, and `bone.prompt.remove_image(index)` removes a 1-based attachment. `bone.prompt.empty()` checks text, images and pending reads. Setting text preserves attachments. The `submit` event includes `{ text, images }`; `prompt/changed` includes `images`, and `image/attached` announces `{ image }` after a successful upload. The default `attachments` layout region shows their labels.
+
+In core Lua coroutines, `bone.attachments.upload(base64, name)` yields and returns an `ImageAttachment`; `bone.attachments.read(id)` returns `{ data = base64_png }`. Use references in `{ role = "user", content = "", images = { ref } }`, `bone.queue.add(id, text, mode, { ref })`, session operations or model calls. `read_file` image results include references on their `role = "tool"` messages. Custom providers receive hydrated PNGs as `image.data` on both user and tool messages; translate them to your provider's multimodal format. Stored messages and hook events use references without pixels.
 
 ### Chat data
 
@@ -868,7 +872,7 @@ end
 
 | Kind | Item fields |
 |---|---|
-| `user` | `text` |
+| `user` | `text`, `images` (attachment references) |
 | `reasoning`, `assistant` | `text`, `streaming`; `assistant` also `usage = { input, output }` (tokens of that model message, when the core sent them) |
 | `tool` | `id`, `name`, `arguments` (decoded), `raw_arguments`, `output` (nil while running), `is_error`, `done`, `live` (output so far while it runs, from `tool/output`; the last 64 KB), `started_at` (ms since the epoch), `duration_ms`, and `usage` when it is the first call of a message without text |
 | `notice` | `text`, `error` |

@@ -1,8 +1,9 @@
 use futures_util::future::BoxFuture;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use tokio::io::AsyncReadExt;
 
-use super::{Tool, ToolContext, ToolResult, ToolSpec, typed_args};
+use super::{Tool, ToolContext, ToolResponse, ToolResult, ToolSpec, typed_args};
 
 const DEFAULT_LIMIT: usize = 2000;
 const MAX_LINE_CHARS: usize = 2000;
@@ -13,8 +14,9 @@ impl ReadFile {
     pub fn new() -> Self {
         ReadFile(ToolSpec {
             name: "read_file".into(),
-            description: "Read a text file. Returns plain text without per-line prefixes. \
-                          Use offset/limit for large files."
+            description: "Read a text file or view a PNG, JPEG or WebP image. Images are returned \
+                          as pixels; text is plain text without per-line prefixes. Line ranges apply \
+                          only to text; use offset/limit for large files."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -48,18 +50,48 @@ impl Tool for ReadFile {
     }
 
     fn call<'a>(&'a self, args: Value, ctx: &'a ToolContext) -> BoxFuture<'a, ToolResult> {
+        Box::pin(async move { self.call_with_images(args, ctx).await.map(|r| r.output) })
+    }
+
+    fn call_with_images<'a>(
+        &'a self,
+        args: Value,
+        ctx: &'a ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResponse, String>> {
         Box::pin(async move {
             let args: Args = typed_args(args)?;
             let path = ctx.resolve(&args.path);
-            let bytes = tokio::fs::read(&path)
+            let read = async {
+                let mut file = tokio::fs::File::open(&path).await?;
+                let mut bytes = Vec::new();
+                (&mut file).take(12).read_to_end(&mut bytes).await?;
+                let image = bone_media::is_image(&bytes);
+                let limit = if image {
+                    bone_media::MAX_IMAGE_BYTES as u64 + 1 - bytes.len() as u64
+                } else {
+                    u64::MAX
+                };
+                file.take(limit).read_to_end(&mut bytes).await?;
+                Ok::<_, std::io::Error>((bytes, image))
+            };
+            let (bytes, image) = read
                 .await
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            if image {
+                if bytes.len() > bone_media::MAX_IMAGE_BYTES {
+                    return Err("image exceeds the 20 MiB limit".into());
+                }
+                return Ok(ToolResponse {
+                    output: format!("Read image: {}", path.display()),
+                    images: vec![(bytes, args.path)],
+                });
+            }
             if bytes[..bytes.len().min(8192)].contains(&0) {
                 return Err(format!("{} looks like a binary file", path.display()));
             }
             let text = String::from_utf8_lossy(&bytes);
             if text.is_empty() {
-                return Ok("(empty file)".into());
+                return Ok(String::from("(empty file)").into());
             }
 
             let total = text.lines().count();
@@ -84,7 +116,7 @@ impl Tool for ReadFile {
                     "\n[showing lines {start}-{end} of {total}; use offset to read more]\n"
                 ));
             }
-            Ok(out)
+            Ok(out.into())
         })
     }
 }

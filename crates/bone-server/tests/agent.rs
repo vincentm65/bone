@@ -92,6 +92,7 @@ async fn turn_with_tool_call_over_http() {
     let work = tempfile::tempdir().unwrap();
     let core = Core::new(CoreConfig {
         provider: ProviderConfig {
+            supports_images: None,
             kind: None,
             options: serde_json::Value::Null,
             base_url: url,
@@ -120,6 +121,7 @@ async fn turn_with_tool_call_over_http() {
         .request::<TurnStart>(TurnStartParams {
             session_id: info.session_id.clone(),
             text: "run echo hi".into(),
+            images: Vec::new(),
         })
         .await
         .unwrap();
@@ -238,6 +240,7 @@ async fn lua_tool_and_hooks_over_http() {
         .request::<TurnStart>(TurnStartParams {
             session_id: info.session_id,
             text: "count".into(),
+            images: Vec::new(),
         })
         .await
         .unwrap();

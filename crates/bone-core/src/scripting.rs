@@ -348,6 +348,7 @@ fn resolve(
         let model = env("BONE_MODEL").or_else(|| provider.as_ref().map(|p| p.model.clone()));
         let model = model.ok_or("BONE_BASE_URL is set but BONE_MODEL is not")?;
         provider = Some(ProviderConfig {
+            supports_images: None,
             kind: None,
             options: serde_json::Value::Null,
             base_url,
@@ -379,6 +380,7 @@ fn resolve(
     // No provider at all (a first run): the core still starts, so /setup
     // can add one; turns say how until then.
     let mut provider = provider.unwrap_or(ProviderConfig {
+        supports_images: None,
         kind: None,
         options: serde_json::Value::Null,
         base_url: String::new(),

@@ -94,6 +94,7 @@ impl Runtime {
             .models
             .iter()
             .map(|(name, p)| ModelInfo {
+                supports_images: p.supports_images,
                 name: name.clone(),
                 model: (if selected.as_ref() == Some(name) {
                     &model
@@ -256,9 +257,10 @@ impl Inner {
             .runtime()
             .model_of(call.provider.as_deref(), &call.options);
         let session_id = call.session_id.unwrap_or_default();
+        let messages = self.attachments.hydrate(&call.messages)?;
         let req = CompletionRequest {
             session_id: &session_id,
-            messages: &call.messages,
+            messages: &messages,
             tools: &tools,
             depth: call.depth,
         };
@@ -537,6 +539,21 @@ impl Host {
     /// message?, messages? }`, or `{ op = "create", cwd?, title?, owner? }`.
     pub(crate) fn session_op(&self, spec: &Json) -> Result<Json, String> {
         let inner = self.inner()?;
+        if spec["op"] == "attachment_upload" {
+            let image = inner.attachments.upload(
+                spec["data"].as_str().ok_or("image data is needed")?,
+                spec["name"].as_str().unwrap_or("Screenshot"),
+            )?;
+            return serde_json::to_value(image).map_err(|e| e.to_string());
+        }
+        if spec["op"] == "attachment_read" {
+            let data = inner.attachments.read(
+                spec["attachment_id"]
+                    .as_str()
+                    .ok_or("attachment id is needed")?,
+            )?;
+            return Ok(json!({ "data": data }));
+        }
         if spec["op"] == "create" {
             return session_create(&inner, spec);
         }
@@ -551,11 +568,18 @@ impl Host {
             }
             "queue_add" => {
                 let text = spec["text"].as_str().unwrap_or_default().to_owned();
-                if text.trim().is_empty() {
-                    return Err("bone.queue.add needs text".into());
+                let images: Vec<bone_proto::types::ImageAttachment> =
+                    serde_json::from_value(if spec["images"].is_null() {
+                        json!([])
+                    } else {
+                        crate::agent::list(&spec["images"])
+                    })
+                    .map_err(|e| format!("bad images: {e}"))?;
+                if text.trim().is_empty() && images.is_empty() {
+                    return Err("bone.queue.add needs text or images".into());
                 }
                 let mode = serde_json::from_value(spec["mode"].clone()).unwrap_or_default();
-                let r = inner.queue_add(&session, text, mode);
+                let r = inner.queue_add_with_images(&session, text, mode, images);
                 return r.map(|r| json!(r)).map_err(|e| e.message);
             }
             "queue_remove" | "queue_clear" => {
@@ -579,7 +603,10 @@ impl Host {
                 return serde_json::to_value(&s.messages).map_err(|e| e.to_string());
             }
             "append" => {
-                let msg = message(&spec["message"])?;
+                let mut msg = message(&spec["message"])?;
+                if let Some(images) = msg.images_mut() {
+                    inner.attachments.validate(images)?;
+                }
                 let mut s = session.lock().unwrap();
                 if !s.writable() {
                     return Err(NOT_NOW.into());
@@ -589,12 +616,17 @@ impl Host {
                 "append"
             }
             "compact" => {
-                let msgs = crate::agent::list(&spec["messages"])
+                let mut msgs = crate::agent::list(&spec["messages"])
                     .as_array()
                     .ok_or("compact needs a list of messages")?
                     .iter()
                     .map(message)
                     .collect::<Result<Vec<_>, _>>()?;
+                for msg in &mut msgs {
+                    if let Some(images) = msg.images_mut() {
+                        inner.attachments.validate(images)?;
+                    }
+                }
                 let mut s = session.lock().unwrap();
                 if !s.writable() {
                     return Err(NOT_NOW.into());
@@ -681,8 +713,11 @@ const NOT_NOW: &str = "a running turn's transcript can only change between model
 (in system, context, request or request_error hooks), or after the turn";
 
 /// A message from Lua, where an empty list may have arrived as `{}`.
-fn message(v: &Json) -> Result<ChatMessage, String> {
+pub(crate) fn message(v: &Json) -> Result<ChatMessage, String> {
     let mut v = v.clone();
+    if let Some(images) = v.get("images") {
+        v["images"] = crate::agent::list(images);
+    }
     if let Some(calls) = v.get("tool_calls") {
         v["tool_calls"] = crate::agent::list(calls);
     }

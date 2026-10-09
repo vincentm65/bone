@@ -5,6 +5,7 @@
 //! provider and tools, and runs core-side Lua (hooks, tools, questions).
 
 mod agent;
+mod attachments;
 mod compact;
 pub mod config;
 mod health;
@@ -22,22 +23,23 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use bone_proto::methods::{
-    AskRespond, AskRespondParams, CoreReload, Echo, EchoParams, Echoed, HealthCheck, LuaCall,
-    LuaCallParams, McpAuth, McpAuthCode, McpAuthCodeParams, McpList, McpReconnect, McpRef, McpSignOut, ModelCancel, ModelComplete, ModelCompleteParams, ModelCompleted,
-    ModelCompletedParams, ModelDeltaEvent, ModelDeltaParams, ModelList, ModelRequest, PluginList,
-    PluginLoad, PluginRef, PluginReload, PluginUnload, ProcessCancel, ProcessOutput, ProcessRead,
-    ProcessRef, ProcessResize, ProcessSnapshot, ProcessState, ProcessesGet, ProcessesList,
-    ProcessesResult, QueueAdd, QueueAddParams, QueueAddResult, QueueChanged, QueueChangedParams,
-    QueueClear, QueueMode, QueueMove, QueueRemove, QueueResume, QueueUpdate, SecretSet,
-    SecretsList, SecretsSet, SessionActive, SessionCompact, SessionCompactParams, SessionCreate,
-    SessionCreateParams, SessionCreated, SessionDelete, SessionDeleted, SessionFork,
+    AskRespond, AskRespondParams, AttachmentRead, AttachmentReadResult, AttachmentUpload,
+    CoreReload, Echo, EchoParams, Echoed, HealthCheck, LuaCall, LuaCallParams,
+    McpAuth, McpAuthCode, McpAuthCodeParams, McpList, McpReconnect, McpRef, McpSignOut,
+    ModelCancel, ModelComplete, ModelCompleteParams, ModelCompleted, ModelCompletedParams,
+    ModelDeltaEvent, ModelDeltaParams, ModelList, ModelRequest, PluginList, PluginLoad, PluginRef,
+    PluginReload, PluginUnload, ProcessCancel, ProcessOutput, ProcessRead, ProcessRef,
+    ProcessResize, ProcessSnapshot, ProcessState, ProcessesGet, ProcessesList, ProcessesResult,
+    QueueAdd, QueueAddParams, QueueAddResult, QueueChanged, QueueChangedParams, QueueClear,
+    QueueMode, QueueMove, QueueRemove, QueueResume, QueueUpdate, SecretSet, SecretsList,
+    SecretsSet, SessionActive, SessionCompact, SessionCompactParams, SessionCreate,
     SessionForkParams, SessionList, SessionMessages, SessionMessagesResult, SessionRef,
     SessionRename, SessionRenameParams, SessionUpdated, SessionUpdatedParams, SettingPath,
     SettingSet, SettingsChanged, SettingsChangedParams, SettingsGet, SettingsReset, SettingsSet,
     StoreQuery, StoreQueryParams, TurnCancel, TurnStart, TurnStartParams, TurnStartResult,
     TurnSteer, TurnSteerParams,
 };
-use bone_proto::types::SessionInfo;
+use bone_proto::types::{ImageAttachment, SessionInfo};
 use bone_proto::{Method, Notification, RpcError};
 use serde_json::Value;
 use tokio::sync::broadcast;
@@ -95,6 +97,7 @@ pub(crate) struct Inner {
     model_requests: Mutex<std::collections::HashMap<u64, tokio::task::AbortHandle>>,
     next_model_request: std::sync::atomic::AtomicU64,
     sessions: SessionStore,
+    attachments: Arc<attachments::AttachmentStore>,
     /// Managed shell jobs shared by all tools in this core.
     jobs: Arc<tools::ProcessRegistry>,
     events: broadcast::Sender<Event>,
@@ -124,6 +127,16 @@ impl Inner {
         session: session::SessionHandle,
         text: String,
     ) -> Result<bone_proto::types::TurnId, RpcError> {
+        self.begin_turn_with_images(session, text, Vec::new())
+    }
+
+    pub(crate) fn begin_turn_with_images(
+        self: &Arc<Self>,
+        session: session::SessionHandle,
+        text: String,
+        mut images: Vec<ImageAttachment>,
+    ) -> Result<bone_proto::types::TurnId, RpcError> {
+        self.validate_input(&session.lock().unwrap(), &text, &mut images)?;
         let (turn_id, cancel) = {
             let mut s = session.lock().unwrap();
             if let Some(active) = &s.active {
@@ -143,7 +156,7 @@ impl Inner {
         };
         // The turn saves the message and announces itself after its
         // `turn_start` hooks have run.
-        let turn = agent::run_turn(self.clone(), session, turn_id, text, cancel);
+        let turn = agent::run_turn(self.clone(), session, turn_id, text, images, cancel);
         match &self.tokio {
             Some(rt) => drop(rt.spawn(turn)),
             None => drop(tokio::spawn(turn)),
@@ -151,22 +164,50 @@ impl Inner {
         Ok(turn_id)
     }
 
-    /// `queue/add` (and `bone.queue.add`) after the hooks: start a turn
-    /// when idle, else queue the message.
-    pub(crate) fn queue_add(
+    /// Validate stored attachments and the session's model before saving input.
+    pub(crate) fn validate_input(
+        &self,
+        session: &session::Session,
+        text: &str,
+        images: &mut [ImageAttachment],
+    ) -> Result<(), RpcError> {
+        if text.trim().is_empty() && images.is_empty() {
+            return Err(RpcError::invalid_params("message is empty"));
+        }
+        self.attachments
+            .validate(images)
+            .map_err(RpcError::invalid_params)?;
+        let rt = self.runtime();
+        let config = session
+            .model
+            .as_ref()
+            .and_then(|p| p.0.as_ref())
+            .and_then(|n| rt.models.get(n))
+            .unwrap_or(&rt.config.provider);
+        if !images.is_empty() && config.supports_images == Some(false) {
+            return Err(RpcError::invalid_params(
+                "this model does not support images; select a vision model",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn queue_add_with_images(
         self: &Arc<Self>,
         session: &session::SessionHandle,
         text: String,
         mode: QueueMode,
+        mut images: Vec<ImageAttachment>,
     ) -> Result<QueueAddResult, RpcError> {
+        self.validate_input(&session.lock().unwrap(), &text, &mut images)?;
         if session.lock().unwrap().active.is_none() {
             // A new message also lets a paused queue go on afterwards.
             let mut s = session.lock().unwrap();
             if std::mem::take(&mut s.queue_paused) {
-                self.emit_queue(&s);
+                self.emit_queue(&s, None);
             }
             drop(s);
-            match self.begin_turn(session.clone(), text.clone()) {
+            match self.begin_turn_with_images(session.clone(), text.clone(), images.clone()) {
                 Ok(turn_id) => {
                     return Ok(QueueAddResult {
                         id: None,
@@ -183,8 +224,8 @@ impl Inner {
             .active
             .as_ref()
             .is_none_or(|a| a.closing || a.cancel.is_cancelled());
-        let id = s.enqueue(text, if ending { QueueMode::Next } else { mode });
-        self.emit_queue(&s);
+        let id = s.enqueue_with_images(text, if ending { QueueMode::Next } else { mode }, images);
+        self.emit_queue(&s, None);
         Ok(QueueAddResult {
             id: Some(id),
             turn_id: None,
@@ -203,18 +244,19 @@ impl Inner {
             let mut s = session.lock().unwrap();
             edit(&mut s)?;
             s.save_queue();
-            self.emit_queue(&s);
+            self.emit_queue(&s, None);
         }
         self.start_next(&session);
         Ok(())
     }
 
     /// Tell clients what a session's queue holds now.
-    pub(crate) fn emit_queue(&self, s: &session::Session) {
+    pub(crate) fn emit_queue(&self, s: &session::Session, error: Option<String>) {
         self.emit::<QueueChanged>(QueueChangedParams {
             session_id: s.info.session_id.clone(),
             items: s.queue.clone(),
             paused: s.queue_paused,
+            error,
         });
     }
 
@@ -228,15 +270,22 @@ impl Inner {
             }
             let q = s.queue.remove(0);
             s.save_queue();
-            self.emit_queue(&s);
+            self.emit_queue(&s, None);
             q
         };
-        if self.begin_turn(session.clone(), next.text.clone()).is_err() {
-            // Raced with another turn: put it back in front.
+        if let Err(e) =
+            self.begin_turn_with_images(session.clone(), next.text.clone(), next.images.clone())
+        {
             let mut s = session.lock().unwrap();
             s.queue.insert(0, next);
+            let error = if e.code == RpcError::BUSY {
+                None
+            } else {
+                s.queue_paused = true;
+                Some(e.message)
+            };
             s.save_queue();
-            self.emit_queue(&s);
+            self.emit_queue(&s, error);
         }
     }
 
@@ -259,7 +308,7 @@ impl Inner {
             }
             if changed {
                 s.save_queue();
-                self.emit_queue(&s);
+                self.emit_queue(&s, None);
             }
         }
         self.start_next(session);
@@ -320,6 +369,7 @@ impl Core {
         let core = Core {
             inner: Arc::new(Inner {
                 sessions: SessionStore::new(&runtime.config.data_dir),
+                attachments: Arc::new(attachments::AttachmentStore::new(&runtime.config.data_dir)),
                 data_dir: runtime.config.data_dir.clone(),
                 runtime: RwLock::new(Arc::new(runtime)),
                 source,
@@ -457,6 +507,24 @@ impl Core {
     /// Long work (turns) runs in the background and reports through events.
     pub async fn handle(&self, method: &str, params: Option<Value>) -> Result<Value, RpcError> {
         match method {
+            AttachmentUpload::METHOD => {
+                let p = decode::<AttachmentUpload>(params)?;
+                let store = self.inner.attachments.clone();
+                let image = tokio::task::spawn_blocking(move || store.upload(&p.data, &p.name))
+                    .await
+                    .map_err(RpcError::internal)?
+                    .map_err(RpcError::invalid_params)?;
+                Ok(serde_json::to_value(image).unwrap())
+            }
+            AttachmentRead::METHOD => {
+                let p = decode::<AttachmentRead>(params)?;
+                let store = self.inner.attachments.clone();
+                let data = tokio::task::spawn_blocking(move || store.read(&p.id))
+                    .await
+                    .map_err(RpcError::internal)?
+                    .map_err(RpcError::invalid_params)?;
+                Ok(serde_json::to_value(AttachmentReadResult { data }).unwrap())
+            }
             Echo::METHOD => dispatch::<Echo, _>(params, |p| self.echo(p)),
             SessionCreate::METHOD => {
                 dispatch::<SessionCreate, _>(params, |p| self.session_create(p))
@@ -541,6 +609,7 @@ impl Core {
                 self.queue_add(QueueAddParams {
                     session_id: p.session_id,
                     text: p.text,
+                    images: p.images,
                     mode: QueueMode::Steer,
                 })
                 .await?;
@@ -562,23 +631,26 @@ impl Core {
                 })
             }),
             QueueUpdate::METHOD => dispatch::<QueueUpdate, _>(params, |p| {
+                // Validate the complete replacement before changing either field.
                 self.inner.queue_edit(&p.session_id, |s| {
-                    let q = s
+                    let index = s
                         .queue
-                        .iter_mut()
-                        .find(|q| q.id == p.id)
+                        .iter()
+                        .position(|q| q.id == p.id)
                         .ok_or_else(|| no_item(p.id))?;
-                    if let Some(t) = p.text {
-                        if t.trim().is_empty() {
-                            return Err(RpcError::invalid_params("text is empty"));
-                        }
-                        q.text = t;
-                    }
+                    let q = &s.queue[index];
+                    let text = p.text.unwrap_or_else(|| q.text.clone());
+                    let mut images = p.images.unwrap_or_else(|| q.images.clone());
+                    self.inner.validate_input(s, &text, &mut images)?;
+                    let q = &mut s.queue[index];
+                    q.text = text;
+                    q.images = images;
                     if let Some(m) = p.mode {
                         q.mode = m;
                     }
                     Ok(())
-                })
+                })?;
+                Ok(())
             }),
             QueueMove::METHOD => dispatch::<QueueMove, _>(params, |p| {
                 self.inner.queue_edit(&p.session_id, |s| {
@@ -988,23 +1060,19 @@ impl Core {
     }
 
     fn turn_start(&self, params: TurnStartParams) -> Result<TurnStartResult, RpcError> {
-        if params.text.trim().is_empty() {
-            return Err(RpcError::invalid_params("text is empty"));
-        }
         let session = self
             .inner
             .session(&params.session_id)
             .map_err(session_error)?;
-        let turn_id = self.inner.begin_turn(session, params.text)?;
+        let turn_id = self
+            .inner
+            .begin_turn_with_images(session, params.text, params.images)?;
         Ok(TurnStartResult { turn_id })
     }
 
     /// `queue/add`: start a turn when idle, else queue the message.
     async fn queue_add(&self, p: QueueAddParams) -> Result<QueueAddResult, RpcError> {
-        if p.text.trim().is_empty() {
-            return Err(RpcError::invalid_params("text is empty"));
-        }
-        let (mut text, mut mode) = (p.text, p.mode);
+        let (mut text, mut mode, mut images) = (p.text, p.mode, p.images);
         // queue_add hooks may rewrite the message or refuse it.
         if let Some(s) = self
             .inner
@@ -1013,10 +1081,14 @@ impl Core {
             .clone()
             .filter(|s| s.has_hook("queue_add"))
         {
-            let ev = serde_json::json!({ "session_id": p.session_id, "text": text, "mode": mode });
+            let ev = serde_json::json!({ "session_id": p.session_id, "text": text, "mode": mode, "images": images });
             let out = s.hooks("queue_add", ev).await;
             if let Some(why) = out.deny {
                 return Err(RpcError::invalid_params(why));
+            }
+            if let Some(v) = out.event.get("images") {
+                images = serde_json::from_value(crate::agent::list(v))
+                    .map_err(RpcError::invalid_params)?;
             }
             if let Some(t) = out.event["text"].as_str() {
                 text = t.to_owned();
@@ -1026,7 +1098,8 @@ impl Core {
             }
         }
         let session = self.inner.session(&p.session_id).map_err(session_error)?;
-        self.inner.queue_add(&session, text, mode)
+        self.inner
+            .queue_add_with_images(&session, text, mode, images)
     }
 
     fn turn_cancel(&self, params: SessionRef) -> Result<(), RpcError> {

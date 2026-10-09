@@ -103,6 +103,13 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Mode>, St
 }
 
 fn main() -> ExitCode {
+    if std::env::args_os().len() == 2
+        && std::env::args_os()
+            .nth(1)
+            .is_some_and(|a| a == "--clipboard-read")
+    {
+        return bone_tui::run_clipboard_helper();
+    }
     let mode = match parse_args(std::env::args().skip(1)) {
         Ok(Some(mode)) => mode,
         Ok(None) => return ExitCode::SUCCESS,
@@ -283,6 +290,7 @@ async fn run(mode: Mode, loaded: Option<Loaded>, config_dir: PathBuf) -> ExitCod
             match bone_tui::run(
                 conn,
                 RunOptions {
+                    clipboard_executable: None,
                     cwd,
                     config_dir: Some(config_dir),
                     resume,

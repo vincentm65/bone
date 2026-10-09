@@ -46,13 +46,28 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `ctrl+a` / `ctrl+e`, `home` / `end` | start / end of line |
 | `ctrl+w`, `alt+backspace` | delete the word before the cursor |
 | `ctrl+u` / `ctrl+k` | delete to the start / end of the line |
-| paste | goes into the prompt |
+| `ctrl+v` / `super+v` | read the local clipboard: attach a screenshot, or paste text; `super+v` is Command+V on macOS when the terminal forwards it |
+| terminal paste | goes into the prompt as text |
 
 **Panels.** Plugins can dock panels beside, above or below the session (`bone.ui.panel`). Click one (or use the key its plugin gives) to give it the keyboard: the arrows, `pageup`/`pagedown`, `home`/`end` and the wheel scroll it, `tab`/`shift+tab` move to the next/previous panel and back to the prompt, `esc` returns to the prompt. The wheel over a panel always scrolls that panel.
 
 **Approval popup.** By default tool calls run without asking. Custom hooks can pause with `bone.ask`; a TUI handler displays the question and replies with `ask/respond` (see [lua.md](lua.md#asking-the-user)).
 
 **Agents sidebar** (`ctrl+o`, `/sessions`): a docked left column groups top-level conversations into **Running** (animated spinners), **Recent** (active or opened within the last hour by default; configure `bone.ui.sessions_recent_seconds` in `tui.lua`), and **History**, newest activity first within each group. It shows titles, last-activity times, total input + output tokens, and user-turn counts. Type to filter by title or directory, `up`/`down` to select, and `enter` or a mouse click to open. First open selects the current chat. Switching leaves the sidebar open and returns keyboard focus to the prompt; background turns keep running. `ctrl+o` focuses it again, or closes it when already focused; `esc` returns to the prompt without closing it. Page keys and `home`/`end` navigate longer lists; the mouse wheel scrolls. Running status updates live, including turns already active when connecting to the core; usage totals refresh when turns finish. `tab` switches to the **Processes** page, remembering selection and scroll on each tab: every chat's background shells and running sub-agents, grouped by chat, whichever chat is on screen. `enter` opens the chat a shell belongs to, or the sub-agent's own chat, and `x` stops the selected one. The tray below the prompt only shows the on-screen chat's shells and sub-agents.
+
+## Images
+
+Copy a screenshot to your system clipboard, focus the prompt and press `ctrl+v`. Bone reads the image in the background and shows its name and dimensions below the composer. Add a question or press `enter` to send the image alone. `/paste` does the same read when the terminal intercepts your paste shortcut; on macOS, forwarded Command+V also works. Ordinary clipboard text still pastes as text.
+
+`/attach PATH` adds an image file (paths may contain spaces or be quoted). `/detach 2` removes the second image; `/detach all` clears the attachment list. `esc` or `ctrl+c` clears the whole draft. Each open session keeps its draft, including images; queue editing and prompt history keep images too. Enter waits until pending image reads finish, so a screenshot cannot accidentally miss its message.
+
+Native clipboard access runs on the TUI's machine, including when connected to a separate core. Linux uses X11 or a Wayland compositor with clipboard data-control support (or its XWayland bridge). A terminal's usual paste shortcut may be handled by the terminal before Bone sees it; use `/paste` or configure the terminal to forward `ctrl+v`. In SSH or a desktop-free environment, use `/attach` on a local file. Native Windows builds use the Windows clipboard; a Linux build in WSL uses its Linux desktop clipboard.
+
+PNG, JPEG and WebP inputs become lossless PNG attachments. Limits: 8 images per message, 20 MiB per input and resulting PNG, 40 megapixels per image, and 40 MiB of image data per message. Select a model that accepts images and enable vision in its server configuration (for example, TabbyAPI can load a vision-capable model with its vision component disabled); `supports_images = false` in a provider entry rejects attachments before submission and preserves the draft. Leave it unset for the endpoint to decide, or set it to `true` for a vision provider.
+
+Saved sessions and forks refer to durable files under `<data_dir>/attachments/<sha256>.png`; pixels are sent to the model only when needed. Attachment files are retained, including uploads from drafts you discard; automatic garbage collection is not implemented. Back up the attachments directory together with sessions when moving your history.
+
+The model can also use `read_file` to view PNG, JPEG and WebP files on the core machine. Images are recognized by their contents and returned as pixels with the same limits and storage as attachments. Line ranges apply only to text files. Invalid images or a model with `supports_images = false` produce a tool error, allowing the model to continue.
 
 ## Commands
 
@@ -65,6 +80,9 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `/setup` | add a model provider: kind, URL, model and key (kept in `~/.bone/secrets.json`), and catalog plugins; opens by itself on a first run with no provider |
 | `/catalog` | browse the plugin catalog: install, update and remove packages (each file checked against the catalog's hashes) |
 | `/config`, `/settings` | the settings page: TUI options, which provider and model to use, plugins on and off, and plugins' own settings; everything is saved in `~/.bone/settings.json` |
+| `/paste` | paste a screenshot or text from the local clipboard |
+| `/attach PATH` | attach a PNG, JPEG or WebP file |
+| `/detach [N|all]` | remove an attachment (default: the last one) |
 | `/model [name]` | show the current model and provider, or set the model for the current provider |
 | `/runtime`, `/runtime reset FILE`, `/runtime reset all` | your copies of built-in Lua files in `~/.bone/runtime/` (bone never overwrites them); reset goes back to the built-in ones, keeping your copies in `~/.bone/runtime-backup/` |
 | `/new`, `/clear` | start a new session |
@@ -72,7 +90,7 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `/rename {title}` | give this session a title |
 | `/fork`, `/fork {N}` | continue in a copy of this session; with N, from before turn N (to try that turn again differently). The original stays as it was |
 | `/compact`, `/compact clear` | summarize the older part of this session for the model (the latest turns stay word for word); the chat and the session file keep everything, and one line notes the tokens saved. `clear` sends the whole history again. Bone also compacts by itself when the model says the context is too long, or before a call over `compact.limit` (`/config` → Compaction) |
-| `/queue`, `/queue clear`, `/queue resume` | list the queued messages, empty the queue, let a paused queue go on (after a cancel or a restart) |
+| `/queue`, `/queue clear`, `/queue resume` | list the queued messages, empty the queue, let a paused queue go on (after a cancel, restart or queued-message error) |
 | `/quit`, `/exit`, `/q` | quit |
 | `/plugins` | open the plugin settings; `/plugins list` lists plugins (TUI and core halves); `/plugins load name`, `/plugins unload name`, `/plugins reload name` act on both halves (picking up edits to their files); `/plugins reload` reloads the core's whole Lua configuration (`core.lua` and core plugins) |
 
@@ -108,8 +126,10 @@ Options are set in `~/.bone/tui.lua` (`bone.o.tool_detail = "rows"`). What you c
 
 ```text
 bone [-r [ID]] [--connect [PATH]]   TUI (core in-process, or on a socket server)
-bone --headless [--listen [PATH]]   core only, on stdio or a socket
+bone --headless [--listen [PATH]]   core only, on stdio or a local socket/named pipe
 bone --init                         starter ~/.bone/core.lua and tui.lua
 ```
 
 Configuration lives in `~/.bone/` (or `$BONE_CONFIG_DIR`); sessions are saved in `~/.bone/sessions/`. `bone --import-bone [DB]` brings in the first bone's conversations (default `~/.bone-rust/data/conversations.db`) as sessions, with their usage and latest checkpoint; run it again to pick up newer ones, and sessions you continued here are never overwritten. `BONE_BASE_URL`, `BONE_MODEL`, `BONE_API_KEY`, `BONE_REASONING_EFFORT`, `BONE_SYSTEM_PROMPT`, and `BONE_DATA_DIR` override `core.lua` for one run.
+
+On Windows, `--listen` and `--connect` use `\\.\pipe\bone3-<USERNAME>` by default (or the named-pipe path you provide). Only the current user can connect. Shell commands run in `cmd.exe`, and background jobs use ConPTY.

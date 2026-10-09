@@ -10,14 +10,17 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use base64::Engine;
 use bone_client::{Client, ClientError, Event as ServerEvent};
 use bone_proto::Method;
 use bone_proto::methods::*;
+use bone_proto::types::ImageAttachment;
 use mlua::Lua;
 use ratatui::layout::Rect;
 use tokio::sync::mpsc;
 
 use crate::chat::ChatBuffer;
+use crate::composer::{Composer, Draft};
 use crate::editor::TextBuffer;
 use crate::keymap::{Action, Builtin, Context, Keymaps};
 use crate::keys::Key;
@@ -84,6 +87,7 @@ type PromptState = (
     String,
     crate::editor::Pos,
     Option<(crate::editor::Pos, crate::editor::Pos)>,
+    Vec<ImageAttachment>,
 );
 
 /// The Lua state and everything it made, kept aside during a reload (see
@@ -226,9 +230,8 @@ pub struct App {
     pub selection: Option<crate::selection::Selection>,
     /// Text to put on the system clipboard after the next draw.
     pub clipboard: Option<String>,
-    pastes: Vec<(String, String)>,
-    prompt_history: Vec<String>,
-    prompt_history_pos: Option<usize>,
+    composer: Composer,
+    pub(crate) clipboard_executable: Option<PathBuf>,
     last_prompt_state: PromptState,
     quit_armed: Option<Instant>,
     pub dirty: bool,
@@ -333,10 +336,9 @@ impl App {
             processes_session: None,
             selection: None,
             clipboard: None,
-            pastes: Vec::new(),
-            prompt_history: Vec::new(),
-            last_prompt_state: (String::new(), (0, 0), None),
-            prompt_history_pos: None,
+            composer: Composer::default(),
+            clipboard_executable: None,
+            last_prompt_state: (String::new(), (0, 0), None, Vec::new()),
             quit_armed: None,
             dirty: true,
             redraw: false,
@@ -512,6 +514,19 @@ impl App {
     }
 
     pub fn show_chat(&mut self, id: BufferId) {
+        if id != self.current {
+            self.composer.drafts.insert(self.current, self.draft());
+            let draft = self.composer.drafts.remove(&id).unwrap_or_else(|| {
+                self.composer.next_epoch += 1;
+                Draft {
+                    epoch: self.composer.next_epoch,
+                    ..Default::default()
+                }
+            });
+            self.apply_draft(draft);
+            self.composer.history_pos = None;
+            self.composer.saved = None;
+        }
         // A hidden chat keeps its data but not its rendered lines.
         if id != self.current
             && let Some(c) = self.chats.get_mut(self.current)
@@ -534,7 +549,7 @@ impl App {
     /// A fresh session (created on the first message).
     pub fn new_session(&mut self) {
         let c = &self.chats[self.current];
-        if c.session.is_none() && c.entries.is_empty() {
+        if c.session.is_none() && c.entries.is_empty() && !c.starting {
             return;
         }
         self.chats.push(ChatBuffer::new(None));
@@ -546,28 +561,195 @@ impl App {
     }
 
     fn expand_pastes(&mut self) {
-        if self.pastes.is_empty() {
+        if self.composer.pastes.is_empty() {
             return;
         }
         let mut text = self.prompt.text();
-        for (token, content) in &self.pastes {
+        for (token, content) in &self.composer.pastes {
             text = text.replace(token, content);
         }
         self.prompt.set_text(&text);
-        self.pastes.clear();
+        self.composer.pastes.clear();
+    }
+
+    fn draft(&self) -> Draft {
+        self.composer.snapshot(&self.prompt)
+    }
+
+    fn apply_draft(&mut self, draft: Draft) {
+        self.composer.apply(&mut self.prompt, draft);
+        self.dirty = true;
+    }
+
+    pub fn prompt_images(&self) -> &[ImageAttachment] {
+        &self.composer.images
+    }
+
+    pub fn draft_empty(&self) -> bool {
+        self.prompt.is_empty()
+            && self.composer.images.is_empty()
+            && !self.composer.reading(self.current)
     }
 
     fn clear_prompt(&mut self) {
         self.prompt.clear();
-        self.pastes.clear();
+        self.composer.pastes.clear();
+        self.composer.images.clear();
+        self.composer.invalidate();
+    }
+
+    pub fn set_prompt_images(&mut self, images: Vec<ImageAttachment>) -> Result<(), String> {
+        if images.len() > bone_media::MAX_IMAGES {
+            return Err("a message can contain at most 8 images".into());
+        }
+        if images.iter().map(|i| i.bytes).sum::<u64>() > bone_media::MAX_MESSAGE_IMAGE_BYTES {
+            return Err("message images exceed the 40 MiB limit".into());
+        }
+        if images.iter().any(|i| i.data.is_some()) {
+            return Err("use attachment/upload before attaching image references".into());
+        }
+        self.composer.images = images;
+        self.emit_prompt_changed();
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn remove_image(&mut self, index: usize) -> Result<(), String> {
+        if index == 0 || index > self.composer.images.len() {
+            return Err("image index is out of range".into());
+        }
+        self.composer.images.remove(index - 1);
+        self.emit_prompt_changed();
+        self.dirty = true;
+        Ok(())
+    }
+
+    pub fn paste_clipboard(&mut self) {
+        self.read_image(crate::clipboard::Input::Clipboard);
+    }
+
+    pub fn attach_file(&mut self, path: PathBuf) {
+        let path = if path.is_absolute() {
+            path
+        } else {
+            let cwd = self.chats[self.current]
+                .session
+                .as_ref()
+                .map(|s| s.cwd.as_str())
+                .unwrap_or(&self.cwd);
+            PathBuf::from(cwd).join(path)
+        };
+        self.read_image(crate::clipboard::Input::File(path));
+    }
+
+    fn read_image(&mut self, input: crate::clipboard::Input) {
+        if self.focused_popup().is_some() || self.focused_panel().is_some() {
+            return self.error("focus the prompt to paste an image");
+        }
+        let (buf, epoch) = (self.current, self.composer.epoch);
+        let pending = self
+            .composer
+            .pending
+            .get(&(buf, epoch))
+            .copied()
+            .unwrap_or(0);
+        if pending >= bone_media::MAX_IMAGES {
+            return self.error("too many clipboard/image reads are pending; try again in a moment");
+        }
+        // A clipboard may hold text, which must still paste at the image limit.
+        if matches!(input, crate::clipboard::Input::File(_))
+            && self.composer.images.len() + pending >= bone_media::MAX_IMAGES
+        {
+            return self.error("a message can contain at most 8 images");
+        }
+        *self.composer.pending.entry((buf, epoch)).or_default() += 1;
+        let tx = self.tx.clone();
+        let executable = self.clipboard_executable.clone();
+        tokio::spawn(async move {
+            let result = crate::clipboard::read(input, executable).await;
+            let _ = tx.send(AppEvent(Box::new(move |app| match result {
+                Ok(crate::clipboard::Content::Image { bytes, name }) => {
+                    let params = AttachmentUploadParams {
+                        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+                        name,
+                    };
+                    app.request::<AttachmentUpload>(params, move |app, result| {
+                        app.composer.finish_read(buf, epoch);
+                        match result {
+                            Ok(image) => app.deliver_image(buf, epoch, image),
+                            Err(e) => app.error(format!("cannot attach image: {e}")),
+                        }
+                    });
+                }
+                Ok(crate::clipboard::Content::Text(text)) => {
+                    app.composer.finish_read(buf, epoch);
+                    if buf == app.current && epoch == app.composer.epoch {
+                        app.paste(&text);
+                    } else if let Some(draft) = app
+                        .composer
+                        .drafts
+                        .get_mut(&buf)
+                        .filter(|d| d.epoch == epoch)
+                    {
+                        draft.text.push_str(&text);
+                    }
+                }
+                Err(e) => {
+                    app.composer.finish_read(buf, epoch);
+                    app.error(e);
+                }
+            })));
+        });
+        self.info("reading clipboard/image…");
+    }
+
+    fn deliver_image(&mut self, buf: BufferId, epoch: u64, image: ImageAttachment) {
+        match self
+            .composer
+            .attach(self.current, buf, epoch, image.clone())
+        {
+            Ok(true) => {
+                self.fire("image/attached", serde_json::json!({ "image": image }));
+                self.emit_prompt_changed();
+                self.info("image attached · enter sends · /detach removes");
+            }
+            Ok(false) => {}
+            Err(e) => self.error(e),
+        }
+        self.dirty = true;
+    }
+
+    fn restore_draft(&mut self, buf: BufferId, mut failed: Draft) {
+        if buf == self.current {
+            self.expand_pastes();
+            let current = self.prompt.text();
+            if !current.is_empty() {
+                failed.text = if failed.text.is_empty() {
+                    current
+                } else {
+                    format!("{current}\n{}", failed.text)
+                };
+            }
+            failed.images.splice(0..0, self.composer.images.clone());
+            failed.epoch = self.composer.epoch;
+            self.apply_draft(failed);
+            self.emit_prompt_changed();
+        } else {
+            let draft = self.composer.drafts.entry(buf).or_default();
+            if !draft.text.is_empty() && !failed.text.is_empty() {
+                draft.text.push('\n');
+            }
+            draft.text.push_str(&failed.text);
+            draft.images.extend(failed.images);
+        }
     }
 
     pub fn prompt_history_active(&self) -> bool {
-        self.prompt_history_pos.is_some()
+        self.composer.history_pos.is_some()
     }
 
     pub fn set_prompt_text(&mut self, text: &str) {
-        self.pastes.clear();
+        self.composer.pastes.clear();
         self.prompt.set_text(text);
         self.emit_prompt_changed();
         self.dirty = true;
@@ -578,6 +760,7 @@ impl App {
             self.prompt.text(),
             self.prompt.cursor(),
             self.prompt.selection(),
+            self.composer.images.clone(),
         );
         if self.last_prompt_state == state {
             return;
@@ -588,6 +771,7 @@ impl App {
             "prompt/changed",
             serde_json::json!({
                 "text": state.0,
+                "images": state.3,
                 "cursor": pos(state.1),
                 "selection": state.2.map(|(a, b)| serde_json::json!({ "start": pos(a), "end": pos(b) })),
             }),
@@ -810,7 +994,7 @@ impl App {
         // Text goes to the prompt only while it has the keyboard.
         match ctx {
             Context::Main | Context::Named(_) if self.focused_panel().is_none() => {
-                self.prompt_history_pos = None;
+                self.composer.history_pos = None;
                 self.expand_pastes();
                 self.prompt.insert_char(c);
             }
@@ -828,16 +1012,16 @@ impl App {
         );
         match self.context() {
             Context::Main | Context::Named(_) if self.focused_panel().is_none() => {
-                self.prompt_history_pos = None;
+                self.composer.history_pos = None;
                 let text = text.replace("\r\n", "\n").replace('\r', "\n");
                 if text.chars().count() > PASTE_PLACEHOLDER_THRESHOLD {
                     let token = format!(
                         "[Pasted text #{} +{} chars]",
-                        self.pastes.len() + 1,
+                        self.composer.pastes.len() + 1,
                         text.chars().count()
                     );
                     self.prompt.insert_str(&token);
-                    self.pastes.push((token, text));
+                    self.composer.pastes.push((token, text));
                 } else {
                     self.prompt.insert_str(&text);
                 }
@@ -974,6 +1158,7 @@ impl App {
             return;
         }
         match b {
+            PasteClipboard => self.paste_clipboard(),
             Submit => self.submit(None),
             QueueSteer => self.submit(Some(QueueMode::Steer)),
             QueueNext => self.submit(Some(QueueMode::Next)),
@@ -1009,7 +1194,7 @@ impl App {
             Interrupt => self.interrupt(),
             Quit => self.quit = Some(None),
             QuitIfEmpty => {
-                if self.prompt.is_empty() {
+                if self.draft_empty() {
                     self.quit = Some(None);
                 } else {
                     self.edit(|t| t.delete());
@@ -1058,10 +1243,25 @@ impl App {
 
     /// Remember a sent prompt or command for up/down recall.
     pub fn history_add(&mut self, text: &str) {
-        if self.prompt_history.last().map(String::as_str) != Some(text) {
-            self.prompt_history.push(text.to_owned());
+        let draft = Draft {
+            text: text.to_owned(),
+            ..Default::default()
+        };
+        self.history_add_draft(draft);
+        self.composer.history_pos = None;
+    }
+
+    fn history_add_draft(&mut self, draft: Draft) {
+        if self
+            .composer
+            .history
+            .last()
+            .is_none_or(|last| last.text != draft.text || last.images != draft.images)
+        {
+            self.composer.history.push(draft);
         }
-        self.prompt_history_pos = None;
+        self.composer.history_pos = None;
+        self.composer.saved = None;
     }
 
     /// Up/Down: move between prompt lines, and past the first/last line
@@ -1072,23 +1272,27 @@ impl App {
         } else {
             self.prompt.down()
         };
-        if moved || self.prompt_history.is_empty() {
+        if moved || self.composer.history.is_empty() {
             return;
         }
-        let len = self.prompt_history.len();
-        let pos = match (self.prompt_history_pos, up) {
+        let len = self.composer.history.len();
+        let pos = match (self.composer.history_pos, up) {
             (None, true) => Some(len - 1),
             (None, false) => return,
             (Some(p), true) => Some(p.saturating_sub(1)),
             (Some(p), false) if p + 1 < len => Some(p + 1),
             (Some(_), false) => None,
         };
-        self.prompt_history_pos = pos;
-        let text = pos
-            .map(|p| self.prompt_history[p].clone())
-            .unwrap_or_default();
-        self.pastes.clear();
-        self.prompt.set_text(&text);
+        if self.composer.history_pos.is_none() && pos.is_some() {
+            self.composer.saved = Some(self.draft());
+        }
+        self.composer.history_pos = pos;
+        let mut draft = pos
+            .map(|p| self.composer.history[p].clone())
+            .unwrap_or_else(|| self.composer.saved.take().unwrap_or_default());
+        self.composer.invalidate();
+        draft.epoch = self.composer.epoch;
+        self.apply_draft(draft);
         self.emit_prompt_changed();
     }
 
@@ -1119,7 +1323,7 @@ impl App {
             });
             return self.info("cancelling…");
         }
-        if !self.prompt.is_empty() {
+        if !self.draft_empty() {
             self.clear_prompt();
             return;
         }
@@ -1136,58 +1340,60 @@ impl App {
     /// Send the prompt: a new turn when idle; while a turn runs, queued with
     /// `mode` (default: the `queue_mode` option, else steer).
     fn submit(&mut self, mode: Option<QueueMode>) {
+        if self.composer.reading(self.current) {
+            return self.info("wait for the image to finish attaching before sending");
+        }
         self.expand_pastes();
-        let mut text = self.prompt.text();
-        if text.trim().is_empty() {
+        let mut draft = self.draft();
+        if draft.text.trim().is_empty() && draft.images.is_empty() {
             return;
         }
-        // `submit` autocommands may cancel (false) or rewrite (a string).
-        for v in self.fire("submit", serde_json::json!({ "text": text })) {
+        for v in self.fire(
+            "submit",
+            serde_json::json!({ "text": draft.text, "images": draft.images }),
+        ) {
             match v {
                 mlua::Value::Boolean(false) => {
                     self.clear_prompt();
+                    self.emit_prompt_changed();
                     return;
                 }
-                mlua::Value::String(s) => text = s.to_string_lossy(),
+                mlua::Value::String(s) => draft.text = s.to_string_lossy(),
                 _ => {}
             }
         }
-        if text.trim().is_empty() {
+        if draft.text.trim().is_empty() && draft.images.is_empty() {
             return;
         }
         let buf = self.current;
-        let chat = &mut self.chats[buf];
-        // While a turn runs, the core queues it.
-        if chat.turn.is_some()
-            && let Some(session_id) = chat.session_id().map(str::to_owned)
+        if self.chats[buf].turn.is_some()
+            && let Some(session_id) = self.chats[buf].session_id().map(str::to_owned)
         {
             let mode = mode.unwrap_or_else(|| self.queue_mode());
+            self.history_add_draft(draft.clone());
             self.clear_prompt();
-            self.history_add(&text);
             let params = QueueAddParams {
                 session_id,
-                text: text.clone(),
+                text: draft.text.clone(),
                 mode,
+                images: draft.images.clone(),
             };
             self.request::<QueueAdd>(params, move |app, r| {
                 if let Err(e) = r {
-                    app.unqueue_text(buf, text);
-                    app.error(format!("not sent ({e}); it is back in the prompt"));
+                    app.restore_draft(buf, draft);
+                    app.error(format!("not sent ({e}); it is back in its draft"));
                 }
             });
             return;
         }
-        if chat.starting {
+        if self.chats[buf].starting {
             return self.error("A turn is still starting");
         }
-        chat.starting = true;
+        self.chats[buf].starting = true;
+        self.history_add_draft(draft.clone());
         self.clear_prompt();
-        self.prompt_history_pos = None;
-        if self.prompt_history.last() != Some(&text) {
-            self.prompt_history.push(text.clone());
-        }
         match self.chats[buf].session_id() {
-            Some(id) => self.start_turn(buf, id.to_owned(), text),
+            Some(id) => self.start_turn(buf, id.to_owned(), draft),
             None => {
                 let cwd = Some(self.cwd.clone());
                 self.request::<SessionCreate>(SessionCreateParams { cwd }, move |app, r| match r {
@@ -1197,43 +1403,40 @@ impl App {
                             c.session = Some(info);
                         }
                         app.request_processes(id.clone());
-                        app.start_turn(buf, id, text);
+                        app.start_turn(buf, id, draft);
                     }
                     Err(e) => {
-                        app.turn_not_started(buf, text, format!("cannot create session: {e}"))
+                        app.turn_not_started(buf, draft, format!("cannot create session: {e}"))
                     }
                 });
             }
         }
     }
 
-    fn start_turn(&mut self, buf: BufferId, session_id: String, text: String) {
+    fn start_turn(&mut self, buf: BufferId, session_id: String, draft: Draft) {
         let params = TurnStartParams {
             session_id,
-            text: text.clone(),
+            text: draft.text.clone(),
+            images: draft.images.clone(),
         };
         self.request::<TurnStart>(params, move |app, r| {
             if let Some(c) = app.chat_mut(buf) {
                 c.starting = false;
             }
             if let Err(e) = r {
-                app.turn_not_started(buf, text, format!("cannot start turn: {e}"));
+                app.turn_not_started(buf, draft, format!("cannot start turn: {e}"));
             }
         });
     }
 
-    fn turn_not_started(&mut self, buf: BufferId, text: String, why: String) {
+    fn turn_not_started(&mut self, buf: BufferId, draft: Draft, why: String) {
         if let Some(c) = self.chat_mut(buf) {
             c.starting = false;
         }
-        // Give the text back rather than losing it.
-        if self.prompt.is_empty() {
-            self.set_prompt_text(&text);
-        }
-        self.error(why);
+        self.restore_draft(buf, draft);
+        self.error(format!("{why}; message restored to its draft"));
     }
 
-    /// Show a session, loading it if no chat has it yet.
     pub fn open_session(&mut self, session_id: String) {
         if let Some(buf) = self.chat_by_session(&session_id) {
             self.show_chat(buf);
@@ -1241,12 +1444,13 @@ impl App {
         }
         // Reuse an untouched new chat rather than piling them up.
         let c = &self.chats[self.current];
-        let buf = if c.session.is_none() && c.entries.is_empty() {
-            self.current
-        } else {
-            self.chats.push(ChatBuffer::new(None));
-            self.chats.len() - 1
-        };
+        let buf =
+            if c.session.is_none() && c.entries.is_empty() && !c.starting && self.draft_empty() {
+                self.current
+            } else {
+                self.chats.push(ChatBuffer::new(None));
+                self.chats.len() - 1
+            };
         self.show_chat(buf);
         self.request::<SessionMessages>(SessionRef { session_id }, move |app, r| {
             match r {
@@ -1695,7 +1899,11 @@ impl App {
             };
         }
         on!(TurnStarted, |p| self.with_chat(&p.session_id, |c| c
-            .turn_started(p.turn_id, &p.text)));
+            .turn_started_with_images(
+                p.turn_id,
+                &p.text,
+                p.images.clone()
+            )));
         on!(MessageDelta, |p| self
             .with_chat(&p.session_id, |c| c.delta(&p)));
         on!(MessageCompleted, |p| self
@@ -1708,12 +1916,21 @@ impl App {
         on!(ToolOutput, |p| self
             .with_chat(&p.session_id, |c| c.tool_output(&p)));
         on!(ProcessChanged, |p| self.process_changed(&p));
-        on!(TurnSteered, |p| self
-            .with_chat(&p.session_id, |c| c.steered(&p.text)));
+        on!(TurnSteered, |p| self.with_chat(&p.session_id, |c| c
+            .steered_with_images(&p.text, p.images.clone())));
         on!(TurnFinished, |p| self
             .with_chat(&p.session_id, |c| c.turn_finished(&p)));
-        on!(QueueChanged, |p| self.with_chat(&p.session_id, |c| c
-            .set_queue(p.items, p.paused)));
+        on!(QueueChanged, |p| self.with_chat(&p.session_id, |c| {
+            c.set_queue(p.items, p.paused);
+            if let Some(error) = p.error {
+                c.notice(
+                    format!(
+                        "Queue paused: {error}. Edit or remove the message, then resume the queue."
+                    ),
+                    true,
+                );
+            }
+        }));
         on!(SessionUpdated, |p| self.reload_chat(p.session_id));
         on!(SessionDeleted, |p| self.session_deleted(&p.session_id));
     }
@@ -1863,20 +2080,6 @@ impl App {
             Some(crate::options::DynamicValue::String(m)) if m == "next" => QueueMode::Next,
             _ => QueueMode::Steer,
         }
-    }
-
-    /// Put an unsent message back in the prompt (after what is there).
-    fn unqueue_text(&mut self, buf: BufferId, text: String) {
-        if buf != self.current {
-            return;
-        }
-        let now = self.prompt.text();
-        let joined = if now.trim().is_empty() {
-            text
-        } else {
-            format!("{now}\n{text}")
-        };
-        self.set_prompt_text(&joined);
     }
 
     /// A session was deleted: its chat becomes a fresh one (chats keep their

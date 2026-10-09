@@ -794,6 +794,12 @@ end
 --- 0) or a char offset from 0; anything past the end is clamped. Edits run
 --- prompt/changed handlers and never send anything.
 bone.prompt = {
+  empty = function() return api("prompt_empty") end,
+  images = function() return api("prompt_images") end,
+  set_images = function(images) api("prompt_images", images) end,
+  attach = function(path) api("image_attach", path) end,
+  remove_image = function(index) api("image_remove", index) end,
+  paste = function() api("clipboard_paste") end,
   get = function()
     return api("prompt_get")
   end,

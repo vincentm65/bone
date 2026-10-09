@@ -81,6 +81,7 @@ pub(crate) async fn run_turn(
     session: SessionHandle,
     turn_id: TurnId,
     text: String,
+    images: Vec<bone_proto::types::ImageAttachment>,
     cancel: CancellationToken,
 ) {
     let (session_id, cwd) = {
@@ -103,7 +104,7 @@ pub(crate) async fn run_turn(
         cancel: &cancel,
         stream,
     };
-    let outcome = match turn.drive(text).await {
+    let outcome = match turn.drive(text, images).await {
         Ok(()) => TurnOutcome::Completed,
         Err(Stop::Cancelled) => TurnOutcome::Cancelled,
         Err(Stop::Failed(message)) => TurnOutcome::Failed { message },
@@ -202,14 +203,28 @@ impl Turn<'_> {
         })
     }
 
-    async fn drive(&self, text: String) -> Result<(), Stop> {
-        let ev = json!({ "session_id": self.session_id, "cwd": self.cwd.to_string_lossy(), "text": text });
+    async fn drive(
+        &self,
+        text: String,
+        mut images: Vec<bone_proto::types::ImageAttachment>,
+    ) -> Result<(), Stop> {
+        let ev = json!({ "session_id": self.session_id, "cwd": self.cwd.to_string_lossy(), "text": text, "images": images });
         let text = match self.safe_hooks("turn_start", ev).await? {
-            Some(ev) => ev["text"].as_str().map(str::to_owned).unwrap_or(text),
+            Some(ev) => {
+                if let Some(v) = ev.get("images") {
+                    images =
+                        serde_json::from_value(list(v)).map_err(|e| Stop::Failed(e.to_string()))?;
+                }
+                ev["text"].as_str().map(str::to_owned).unwrap_or(text)
+            }
             None => text,
         };
+        self.inner
+            .validate_input(&self.session.lock().unwrap(), &text, &mut images)
+            .map_err(|e| Stop::Failed(e.message))?;
         self.record(ChatMessage::User {
             content: text.clone(),
+            images: images.clone(),
         })?;
         if !self.inner.mcp.is_empty() {
             self.inner.mcp.ensure_ready(MCP_WAIT).await;
@@ -218,6 +233,7 @@ impl Turn<'_> {
             session_id: self.session_id.clone(),
             turn_id: self.turn_id,
             text,
+            images,
         });
 
         let dynamic = match &self.rt.scripting {
@@ -281,7 +297,7 @@ impl Turn<'_> {
             messages.extend(self.session.lock().unwrap().context());
             let ev = json!({ "session_id": self.session_id, "messages": messages });
             if let Some(ev) = self.safe_hooks("context", ev).await? {
-                messages = serde_json::from_value(list(&ev["messages"])).map_err(|e| {
+                messages = messages_from_lua(&ev["messages"]).map_err(|e| {
                     Stop::Failed(format!("context hook returned bad messages: {e}"))
                 })?;
             }
@@ -302,7 +318,7 @@ impl Turn<'_> {
             if let Some(ev) = self.safe_hooks("request", ev).await? {
                 use_provider = ev["provider"].as_str().map(str::to_owned);
                 use_model = ev["model"].as_str().map(str::to_owned);
-                messages = serde_json::from_value(list(&ev["messages"])).map_err(|e| {
+                messages = messages_from_lua(&ev["messages"]).map_err(|e| {
                     Stop::Failed(format!("request hook returned bad messages: {e}"))
                 })?;
                 tools = list(&ev["tools"])
@@ -355,6 +371,11 @@ impl Turn<'_> {
             } else {
                 self.rt.pinned(&served).map_err(Stop::Failed)?
             };
+            let hydrated = self
+                .inner
+                .attachments
+                .hydrate(&messages)
+                .map_err(Stop::Failed)?;
             let completion = loop {
                 attempt += 1;
                 let mut text = String::new();
@@ -383,7 +404,7 @@ impl Turn<'_> {
                     };
                     let req = CompletionRequest {
                         session_id: &self.session_id,
-                        messages: &messages,
+                        messages: &hydrated,
                         tools: &tools,
                         depth: 0,
                     };
@@ -529,6 +550,7 @@ impl Turn<'_> {
                         self.record(ChatMessage::Tool {
                             call_id: skipped.id.clone(),
                             content: CANCELLED.into(),
+                            images: Vec::new(),
                             is_error: true,
                         })?;
                     }
@@ -554,7 +576,7 @@ impl Turn<'_> {
                 }
                 let results = futures_util::future::join_all(batch.iter().map(|call| async move {
                     let began = std::time::Instant::now();
-                    let (output, is_error) = self.run_tool(call).await;
+                    let (output, is_error, images) = self.run_tool(call).await;
                     self.inner.emit::<ToolFinished>(ToolFinishedParams {
                         session_id: self.session_id.clone(),
                         turn_id: self.turn_id,
@@ -563,14 +585,15 @@ impl Turn<'_> {
                         is_error,
                         duration_ms: Some(began.elapsed().as_millis() as u64),
                     });
-                    (output, is_error)
+                    (output, is_error, images)
                 }))
                 .await;
                 // The transcript keeps the calls' order.
-                for (call, (output, is_error)) in batch.iter().zip(results) {
+                for (call, (output, is_error, images)) in batch.iter().zip(results) {
                     self.record(ChatMessage::Tool {
                         call_id: call.id.clone(),
                         content: output,
+                        images,
                         is_error,
                     })?;
                 }
@@ -584,22 +607,24 @@ impl Turn<'_> {
 
     /// Add the waiting `turn/steer` messages to the transcript.
     fn take_steer(&self) -> Result<(), Stop> {
-        let texts: Vec<String> = {
+        let queued = {
             let mut s = self.session.lock().unwrap();
             let steer = s.take_steer();
             if !steer.is_empty() {
-                self.inner.emit_queue(&s);
+                self.inner.emit_queue(&s, None);
             }
-            steer.into_iter().map(|q| q.text).collect()
+            steer
         };
-        for text in texts {
+        for q in queued {
             self.record(ChatMessage::User {
-                content: text.clone(),
+                content: q.text.clone(),
+                images: q.images.clone(),
             })?;
             self.inner.emit::<TurnSteered>(TurnStartedParams {
                 session_id: self.session_id.clone(),
                 turn_id: self.turn_id,
-                text,
+                text: q.text,
+                images: q.images,
             });
         }
         Ok(())
@@ -647,8 +672,11 @@ impl Turn<'_> {
         }
     }
 
-    /// Run one call. Returns the text for the model and whether it is an error.
-    async fn run_tool(&self, call: &ToolCall) -> (String, bool) {
+    /// Run one call, retaining stored images only on success.
+    async fn run_tool(
+        &self,
+        call: &ToolCall,
+    ) -> (String, bool, Vec<bone_proto::types::ImageAttachment>) {
         let tool = self
             .rt
             .tools
@@ -670,11 +698,12 @@ impl Turn<'_> {
                     names.join(", ")
                 ),
                 true,
+                Vec::new(),
             );
         };
         let mut args = match parse_args(&call.arguments) {
             Ok(a) => a,
-            Err(e) => return (e, true),
+            Err(e) => return (e, true, Vec::new()),
         };
         let mut ev = json!({
             "session_id": self.session_id,
@@ -691,8 +720,8 @@ impl Turn<'_> {
         match self.hooks("tool_call", ev).await {
             Ok(Some(ev)) => args = ev["arguments"].clone(),
             Ok(None) => {}
-            Err(Refused::Denied(why)) => return (why, true),
-            Err(Refused::Cancelled) => return (CANCELLED.into(), true),
+            Err(Refused::Denied(why)) => return (why, true, Vec::new()),
+            Err(Refused::Cancelled) => return (CANCELLED.into(), true, Vec::new()),
         }
 
         let output: crate::tools::OutputSink = {
@@ -739,18 +768,38 @@ impl Turn<'_> {
             self.cancel.cancelled().await;
             tokio::time::sleep(TOOL_CANCEL_GRACE).await;
         };
-        let (output, is_error) = tokio::select! {
+        let result = tokio::select! {
             biased;
-            r = tool.call(args, &ctx) => match r {
-                Ok(out) => (out, false),
-                Err(out) => (out, true),
-            },
+            r = tool.call_with_images(args, &ctx) => r,
             _ = grace => {
                 if let Some(s) = self.rt.scripting.as_deref() {
                     s.cancel_session(&self.session_id);
                 }
-                return ("Cancelled by the user while running.".into(), true);
+                return ("Cancelled by the user while running.".into(), true, Vec::new());
             }
+        };
+        let (output, is_error, images) = match result.and_then(|response| {
+            let mut images = response
+                .images
+                .iter()
+                .map(|(bytes, name)| self.inner.attachments.upload_bytes(bytes, name))
+                .collect::<Result<Vec<_>, _>>()?;
+            if !images.is_empty() {
+                self.inner
+                    .validate_input(&self.session.lock().unwrap(), &response.output, &mut images)
+                    .map_err(|e| e.message)?;
+            }
+            let mut output = response.output;
+            for image in &images {
+                output.push_str(&format!(
+                    "\n[Image: {} {}×{}]",
+                    image.name, image.width, image.height
+                ));
+            }
+            Ok((output, images))
+        }) {
+            Ok((output, images)) => (output, false, images),
+            Err(output) => (output, true, Vec::new()),
         };
         let ev = json!({
             "session_id": self.session_id,
@@ -759,15 +808,17 @@ impl Turn<'_> {
             "arguments": hook_args,
             "output": output,
             "is_error": is_error,
+            "images": images,
         });
-        match self.hooks("tool_result", ev).await {
+        let (output, is_error) = match self.hooks("tool_result", ev).await {
             Ok(Some(ev)) => (
                 ev["output"].as_str().map(str::to_owned).unwrap_or(output),
                 ev["is_error"].as_bool().unwrap_or(is_error),
             ),
             Ok(None) | Err(Refused::Cancelled) => (output, is_error),
             Err(Refused::Denied(why)) => (why, true),
-        }
+        };
+        (output, is_error, if is_error { Vec::new() } else { images })
     }
 }
 
@@ -818,4 +869,13 @@ fn unix_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as u64)
+}
+
+fn messages_from_lua(v: &Value) -> Result<Vec<ChatMessage>, String> {
+    list(v)
+        .as_array()
+        .ok_or("messages must be a list")?
+        .iter()
+        .map(crate::runtime::message)
+        .collect()
 }

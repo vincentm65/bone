@@ -290,7 +290,8 @@ function M.edit(r)
   local s = bone.chat.session()
   leave()
   bone.prompt.set(r.text)
-  editing = { session_id = s.session_id, id = r.id }
+  bone.prompt.set_images(r.images or {})
+  editing = { session_id = s.session_id, id = r.id, has_images = #(r.images or {}) > 0 }
   bone.notify("editing a queued message · enter saves · esc cancels")
 end
 
@@ -300,6 +301,7 @@ function M.cancel_edit()
     return false
   end
   editing = nil
+  bone.prompt.set_images({})
   bone.prompt.set("")
   return true
 end
@@ -595,7 +597,7 @@ bone.on("prompt/changed", function()
   if focused() then
     leave()
   end
-  if editing and bone.prompt.get() == "" then
+  if editing and bone.prompt.empty() then
     editing = nil
   end
 end)
@@ -607,11 +609,16 @@ bone.on("submit", function(ev)
   if not (e and s and s.session_id == e.session_id) then
     return
   end
-  bone.request("queue/update", { session_id = e.session_id, id = e.id, text = ev.text }, function(_, err)
+  local params = { session_id = e.session_id, id = e.id, text = ev.text }
+  if e.has_images or #(ev.images or {}) > 0 then params.images = ev.images end
+  bone.request("queue/update", params, function(_, err)
     if err and (bone.chat.session() or {}).session_id == e.session_id then
       local draft = bone.prompt.get()
       bone.prompt.set(draft:match("%S") and draft .. "\n" .. ev.text or ev.text)
-      bone.notify("it was sent before the edit was saved; your text is back in the prompt", "error")
+      local images = bone.prompt.images()
+      for _, image in ipairs(ev.images or {}) do images[#images + 1] = image end
+      bone.prompt.set_images(images)
+      bone.notify("queue edit failed: " .. tostring(err) .. "; message restored to its draft", "error")
     end
   end)
   return false

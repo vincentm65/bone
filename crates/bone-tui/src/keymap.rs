@@ -75,6 +75,7 @@ macro_rules! builtins {
 }
 
 builtins! {
+    PasteClipboard = "paste_clipboard",
     Submit = "submit",
     Newline = "newline",
     Left = "left",

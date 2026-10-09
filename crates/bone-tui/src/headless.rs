@@ -44,6 +44,7 @@ impl Headless {
             .unwrap_or_default();
         let mut app = App::new(Arc::new(client), tx, opts.cwd, opts.config_dir);
         app.reload_core = opts.reload_core;
+        app.clipboard_executable = opts.clipboard_executable;
         app.settings = settings;
         app.load_user_config();
         if let Some(id) = opts.resume {
@@ -80,6 +81,23 @@ impl Headless {
 
     pub fn paste(&mut self, text: &str) {
         self.app.paste(text);
+    }
+
+    /// The draft's image references, after asynchronous reads have settled.
+    pub fn images(&self) -> &[bone_proto::types::ImageAttachment] {
+        self.app.prompt_images()
+    }
+
+    pub fn prompt_text(&self) -> String {
+        self.app.prompt_text()
+    }
+
+    pub fn attach_file(&mut self, path: std::path::PathBuf) {
+        self.app.attach_file(path);
+    }
+
+    pub fn open_session(&mut self, id: String) {
+        self.app.open_session(id);
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {

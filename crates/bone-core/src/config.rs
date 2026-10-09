@@ -57,6 +57,9 @@ impl Default for CompactConfig {
 /// (with `type`) one written in Lua.
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProviderConfig {
+    /// Explicit image capability; absent lets the endpoint decide.
+    #[serde(default)]
+    pub supports_images: Option<bool>,
     /// e.g. `https://api.deepseek.com/v1` or `http://localhost:8081/v1`.
     /// Required for the built-in provider; a Lua provider may default it.
     #[serde(default)]

@@ -160,4 +160,27 @@ cmd("setup", function()
   require("bone.setup").open()
 end, { desc = "add a model provider (and catalog plugins)" })
 
+
+
+cmd("paste", function() bone.prompt.paste() end, { desc = "paste clipboard image or text (ctrl+v)" })
+cmd("attach", function(c)
+  local path = c.args:gsub("^%s+", ""):gsub("%s+$", "")
+  if path == "" then return bone.notify("usage: /attach PATH (PNG, JPEG or WebP)", "error") end
+  if (path:sub(1, 1) == '"' and path:sub(-1) == '"') or (path:sub(1, 1) == "'" and path:sub(-1) == "'") then
+    path = path:sub(2, -2)
+  end
+  bone.prompt.attach(path)
+end, { desc = "attach an image file; paths with spaces are supported" })
+cmd("detach", function(c)
+  if c.args == "" then
+    local images = bone.prompt.images()
+    if #images == 0 then return bone.notify("no images attached") end
+    return bone.prompt.remove_image(#images)
+  end
+  if c.args == "all" then return bone.prompt.set_images({}) end
+  local index = tonumber(c.args)
+  if not index or index % 1 ~= 0 or index < 1 then return bone.notify("usage: /detach [NUMBER|all]", "error") end
+  bone.prompt.remove_image(index)
+end, { desc = "remove the last image, a numbered image, or all images" })
+
 return true

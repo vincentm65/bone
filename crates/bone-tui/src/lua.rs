@@ -1693,7 +1693,8 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
         }
         "request" => {
             let (method, params, f): (String, Value, Option<Function>) = args(lua, a)?;
-            let params = from_lua(&params)?;
+            let mut params = from_lua(&params)?;
+            normalize_image_lists(&mut params);
             let cb = f.map(|f| app.store_callback(lua, f)).transpose()?;
             app.request_raw(method.clone(), params, move |app, r| {
                 let Some(cb) = cb else {
@@ -1778,6 +1779,41 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             app.run(Action::Builtin(b));
             ret(lua, ())
         }
+        "clipboard_paste" => {
+            app.paste_clipboard();
+            ret(lua, ())
+        }
+        "image_attach" => {
+            let path: String = args(lua, a)?;
+            app.attach_file(path.into());
+            ret(lua, ())
+        }
+        "image_remove" => {
+            let index: usize = args(lua, a)?;
+            app.remove_image(index).map_err(err)?;
+            ret(lua, ())
+        }
+        "prompt_images" => {
+            if a.is_empty() {
+                return ret(
+                    lua,
+                    to_lua(lua, &serde_json::to_value(app.prompt_images()).unwrap())?,
+                );
+            }
+            let value: Value = args(lua, a)?;
+            let images: Vec<bone_proto::types::ImageAttachment> = serde_json::from_value({
+                let value = from_lua(&value)?;
+                if value.as_object().is_some_and(|m| m.is_empty()) {
+                    serde_json::json!([])
+                } else {
+                    value
+                }
+            })
+            .map_err(|e| err(e.to_string()))?;
+            app.set_prompt_images(images).map_err(err)?;
+            ret(lua, ())
+        }
+        "prompt_empty" => ret(lua, app.draft_empty()),
         "prompt_get" => ret(lua, app.prompt_text()),
         "prompt_set" => {
             let text: String = args(lua, a)?;
@@ -2482,6 +2518,10 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
         "prompt_info" => {
             let t = lua.create_table()?;
             t.set("text", app.prompt.text())?;
+            t.set(
+                "images",
+                to_lua(lua, &serde_json::to_value(app.prompt_images()).unwrap())?,
+            )?;
             t.set("lines", app.prompt.lines().to_vec())?;
             t.set("cursor", pos_out(lua, app.prompt.cursor())?)?;
             t.set("history", app.prompt_history_active())?;
@@ -2605,5 +2645,26 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             ret(lua, ())
         }
         other => Err(err(format!("unknown bone API operation: {other}"))),
+    }
+}
+
+fn normalize_image_lists(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(images) = map.get_mut("images")
+                && images.as_object().is_some_and(|o| o.is_empty())
+            {
+                *images = serde_json::json!([]);
+            }
+            for value in map.values_mut() {
+                normalize_image_lists(value);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                normalize_image_lists(value);
+            }
+        }
+        _ => {}
     }
 }

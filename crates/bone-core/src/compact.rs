@@ -48,6 +48,7 @@ const OVERFLOW: &[&str] = &[
 pub(crate) fn summary_message(text: &str) -> ChatMessage {
     ChatMessage::User {
         content: format!("{SUMMARY_HEADER}{text}"),
+        images: Vec::new(),
     }
 }
 
@@ -62,7 +63,22 @@ pub(crate) fn chars(messages: &[ChatMessage], replays_reasoning: bool) -> usize 
     messages
         .iter()
         .map(|m| match m {
-            ChatMessage::System { content } | ChatMessage::User { content } => content.len(),
+            ChatMessage::System { content } => content.len(),
+            ChatMessage::User { content, images }
+            | ChatMessage::Tool {
+                content, images, ..
+            } => {
+                content.len()
+                    + images
+                        .iter()
+                        .map(|i| {
+                            // Conservative image allowance, independent of base64 size.
+                            let tiles = u64::from(i.width.div_ceil(512))
+                                * u64::from(i.height.div_ceil(512));
+                            (85 + 170 * tiles.min(256)) as usize * 4
+                        })
+                        .sum::<usize>()
+            }
             ChatMessage::Assistant {
                 content,
                 tool_calls,
@@ -80,7 +96,6 @@ pub(crate) fn chars(messages: &[ChatMessage], replays_reasoning: bool) -> usize 
                         .map(|c| c.name.len() + c.arguments.len())
                         .sum::<usize>()
             }
-            ChatMessage::Tool { content, .. } => content.len(),
         })
         .sum()
 }
@@ -162,8 +177,12 @@ fn render(messages: &[ChatMessage]) -> String {
     for m in messages {
         match m {
             ChatMessage::System { .. } => {}
-            ChatMessage::User { content } => {
-                out.push(format!("USER: {}", clip(content, MESSAGE_CHARS)));
+            ChatMessage::User { content, images } => {
+                let labels = images
+                    .iter()
+                    .map(|i| format!(" [Image: {} {}×{}]", i.name, i.width, i.height))
+                    .collect::<String>();
+                out.push(format!("USER: {}{}", clip(content, MESSAGE_CHARS), labels));
             }
             ChatMessage::Assistant {
                 content,
@@ -243,17 +262,38 @@ impl Inner {
             (s.info.session_id.clone(), plan, s.generation)
         };
         let _busy = Compacting(session);
+        let rt = self.runtime();
+        let can_see_images = cfg
+            .provider
+            .as_ref()
+            .and_then(|n| rt.models.get(n))
+            .unwrap_or(&rt.config.provider)
+            .supports_images
+            != Some(false);
+        let mut messages = vec![
+            ChatMessage::System {
+                content: cfg.prompt.clone().unwrap_or_else(|| PROMPT.into()),
+            },
+            ChatMessage::User {
+                content: render(&plan.input),
+                images: Vec::new(),
+            },
+        ];
+        if can_see_images {
+            for (index, message) in plan.input.iter().enumerate() {
+                let images = message.images();
+                if !images.is_empty() {
+                    messages.push(ChatMessage::User {
+                        content: format!("Images from transcript message {}. Preserve their relevant visual details in the summary.", index + 1),
+                        images: images.to_vec(),
+                    });
+                }
+            }
+        }
         let call = ModelCall {
             provider: cfg.provider.clone(),
             options: Value::Null,
-            messages: vec![
-                ChatMessage::System {
-                    content: cfg.prompt.clone().unwrap_or_else(|| PROMPT.into()),
-                },
-                ChatMessage::User {
-                    content: render(&plan.input),
-                },
-            ],
+            messages,
             tools: Vec::new(),
             depth: 0,
             session_id: Some(session_id.clone()),

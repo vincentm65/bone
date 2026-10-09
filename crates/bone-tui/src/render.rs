@@ -422,21 +422,20 @@ fn draw_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
     let lines: Vec<Line> = chat.rows().skip(win.top).take(height).cloned().collect();
     frame.render_widget(Paragraph::new(lines), area);
-    if total == 0 {
-        if let Some((_, lines)) =
+    if total == 0
+        && let Some((_, lines)) =
             app.region_sized("chat_empty", area.width, area.height, true, true)
-        {
-            let height = (lines.len().min(area.height as usize)) as u16;
-            let centered = Rect {
-                y: area.y + area.height.saturating_sub(height) / 2,
-                height,
-                ..area
-            };
-            frame.render_widget(
-                Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center),
-                centered,
-            );
-        }
+    {
+        let height = (lines.len().min(area.height as usize)) as u16;
+        let centered = Rect {
+            y: area.y + area.height.saturating_sub(height) / 2,
+            height,
+            ..area
+        };
+        frame.render_widget(
+            Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center),
+            centered,
+        );
     }
 }
 
