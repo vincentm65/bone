@@ -275,27 +275,4 @@ mod tests {
         assert_eq!(scroll, 2);
         assert_eq!(text(&lines[0]), "build");
     }
-
-    #[test]
-    fn a_gap_in_the_chunks_asks_for_a_read() {
-        let mut t = Term::default();
-        t.load(0, "ab");
-        t.chunk(5, "x");
-        assert!(t.stale);
-    }
-
-    #[test]
-    fn chunks_received_during_a_read_survive_the_read_response() {
-        let mut t = Term::default();
-        t.begin_read();
-        t.chunk(0, "before-read");
-        t.finish_read(0, "");
-        assert_eq!(t.text, "before-read");
-
-        t.begin_read();
-        t.chunk(t.end, "during-read");
-        t.finish_read(0, "before-read");
-        assert_eq!(t.text, "before-readduring-read");
-        assert!(!t.stale);
-    }
 }

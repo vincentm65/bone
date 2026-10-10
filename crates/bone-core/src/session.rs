@@ -824,26 +824,6 @@ pub(crate) fn title_of(msg: &ChatMessage) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// Read-only benchmark against an existing sessions directory.
-    #[test]
-    #[ignore = "set BONE_BENCH_SESSIONS_DIR to benchmark session listing"]
-    fn benchmark_session_list() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = SessionStore::new(dir.path());
-        store.dir = std::env::var_os("BONE_BENCH_SESSIONS_DIR")
-            .expect("BONE_BENCH_SESSIONS_DIR")
-            .into();
-        for label in ["cold", "warm", "warm"] {
-            let start = std::time::Instant::now();
-            let sessions = store.list().unwrap();
-            eprintln!(
-                "{label}: {} sessions in {:?}",
-                sessions.len(),
-                start.elapsed()
-            );
-        }
-    }
-
     #[test]
     fn create_persist_reload_list() {
         let dir = tempfile::tempdir().unwrap();

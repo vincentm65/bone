@@ -280,17 +280,27 @@ async fn an_error_in_a_ready_handler_rejects_the_reload() {
 
 #[tokio::test]
 async fn a_mapped_ctrl_c_does_what_lua_says() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("tui.lua"),
-        r#"bone.keymap.set("ctrl+c", function() PRESSED = "yes" end)"#,
-    )
-    .unwrap();
-    let mut h = Harness::build(Some(dir.path().to_owned())).await;
-    h.app.load_user_config();
-    h.input("hello{ctrl+c}").await;
-    assert_eq!(eval(&mut h, "return PRESSED"), "yes");
-    assert!(!h.app.prompt.is_empty());
+    // A handler that runs keeps the prompt; one that errors or returns
+    // false passes the key on, so it still interrupts.
+    for (handler, interrupts) in [
+        ("function() PRESSED = 'yes' end", false),
+        ("function() error('oops') end", true),
+        ("function() return false end", true),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("tui.lua"),
+            format!(r#"bone.keymap.set("ctrl+c", {handler})"#),
+        )
+        .unwrap();
+        let mut h = Harness::build(Some(dir.path().to_owned())).await;
+        h.app.load_user_config();
+        h.input("hello{ctrl+c}").await;
+        assert_eq!(h.app.prompt.is_empty(), interrupts, "{handler}");
+        if !interrupts {
+            assert_eq!(eval(&mut h, "return PRESSED"), "yes");
+        }
+    }
 }
 
 #[tokio::test]
@@ -389,32 +399,4 @@ fn a_change_reloads_only_once_it_has_settled() {
     assert_eq!(settle(&mut state, &mut pending, at(3, 2)), None);
     assert_eq!(settle(&mut state, &mut pending, at(3, 1)), None);
     assert_eq!(pending, None);
-}
-
-#[tokio::test]
-async fn ctrl_c_on_a_lua_function_that_errors_still_interrupts() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("tui.lua"),
-        r#"bone.keymap.set("ctrl+c", function() error("oops") end)"#,
-    )
-    .unwrap();
-    let mut h = Harness::build(Some(dir.path().to_owned())).await;
-    h.app.load_user_config();
-    h.input("hello{ctrl+c}").await;
-    assert!(h.app.prompt.is_empty());
-}
-
-#[tokio::test]
-async fn ctrl_c_on_a_lua_function_that_passes_it_on_interrupts() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(
-        dir.path().join("tui.lua"),
-        r#"bone.keymap.set("ctrl+c", function() return false end)"#,
-    )
-    .unwrap();
-    let mut h = Harness::build(Some(dir.path().to_owned())).await;
-    h.app.load_user_config();
-    h.input("hello{ctrl+c}").await;
-    assert!(h.app.prompt.is_empty());
 }

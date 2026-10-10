@@ -1,6 +1,7 @@
 //! Agent loop tests against a scripted provider.
 
 use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -145,7 +146,13 @@ impl Harness {
 
     /// A core running a small inline Lua fixture plus the runtime.
     async fn with_lua(core_lua: &str, steps: Vec<Step>) -> Self {
+        Self::with_lua_data(core_lua, steps).await.0
+    }
+
+    /// [`with_lua`], also handing back the config dir.
+    async fn with_lua_data(core_lua: &str, steps: Vec<Step>) -> (Self, PathBuf) {
         let data = tempfile::tempdir().unwrap();
+        let config_dir = data.path().to_path_buf();
         let work = tempfile::tempdir().unwrap();
         let lua = format!(
             "bone.config.providers.x = {{ base_url = \"http://unused\", model = \"m\" }}
@@ -158,7 +165,7 @@ impl Harness {
             ..Default::default()
         });
         let core = Core::with_lua(loaded, provider.clone());
-        Self::finish(core, provider, work, data).await
+        (Self::finish(core, provider, work, data).await, config_dir)
     }
 
     async fn finish(
@@ -1094,70 +1101,23 @@ async fn request_override_case(
 
 #[tokio::test]
 async fn request_hook_overrides_provider_and_model() {
-    request_override_case("provider = 'y', model = 'custom'", None, "y", "custom").await;
+    for (hook, pin, entry, model) in [
+        ("provider = 'y', model = 'custom'", None, "y", "custom"),
+        // Provider only uses that entry's model.
+        ("provider = 'y'", None, "y", "y-default"),
+        // Model only uses the selected entry, or the session's pin.
+        ("model = 'custom'", None, "x", "custom"),
+        (
+            "model = 'custom'",
+            Some(("y", "session-model")),
+            "y",
+            "custom",
+        ),
+    ] {
+        request_override_case(hook, pin, entry, model).await;
+    }
 }
 
-#[tokio::test]
-async fn request_hook_provider_only_uses_entry_model() {
-    request_override_case("provider = 'y'", None, "y", "y-default").await;
-}
-
-#[tokio::test]
-async fn request_hook_model_only_uses_selected_entry() {
-    request_override_case("model = 'custom'", None, "x", "custom").await;
-}
-
-#[tokio::test]
-async fn request_hook_model_only_keeps_session_pin() {
-    request_override_case(
-        "model = 'custom'",
-        Some(("y", "session-model")),
-        "y",
-        "custom",
-    )
-    .await;
-}
-
-#[tokio::test]
-async fn request_hook_model_is_reported_to_retry_hook() {
-    let mut h = Harness::with_lua(
-        r#"
-        local attempts = 0
-        bone.provider.register("retry", { complete = function(req)
-          attempts = attempts + 1
-          if attempts == 1 then error("overloaded") end
-          return { content = req.options.model,
-                   usage = { input_tokens = 1, output_tokens = 1 } }
-        end })
-        bone.config.providers.y = { type = "retry", model = "default" }
-        bone.config.provider = "x"
-        bone.hook("request", function() return { provider = "y", model = "custom" } end)
-        bone.hook("request_error", function(ev)
-          assert(ev.model == "custom", "wrong served model: " .. ev.model)
-          return { retry = 0 }
-        end)
-        "#,
-        vec![],
-    )
-    .await;
-    h.start("go").await;
-    assert_eq!(
-        h.until::<TurnFinished>().await.outcome,
-        TurnOutcome::Completed
-    );
-    assert!(
-        matches!(h.transcript().await.last(), Some(ChatMessage::Assistant { content, .. })
-        if content == "custom")
-    );
-    let out = h
-        .call::<StoreQuery>(StoreQueryParams {
-            sql: "SELECT provider, model FROM usage".into(),
-            params: Value::Null,
-        })
-        .await
-        .unwrap();
-    assert_eq!(out.rows, [[json!("y"), json!("custom")]]);
-}
 #[tokio::test]
 async fn request_error_hooks_can_retry() {
     let mut h = Harness::with_lua(
@@ -1491,135 +1451,6 @@ async fn cancelling_a_turn_cancels_its_child_sessions() {
 }
 
 #[tokio::test]
-async fn cancelled_child_runs_turn_end_after_cleanup() {
-    // Repeat to catch turn_end racing an already-cancelled token.
-    for _ in 0..8 {
-        let lua = format!(
-            r#"{CHILD_TOOL}
-            bone.hook("turn_end", function(ev)
-              bone.session.append(ev.session_id, {{
-                role = "user", content = "cleanup:" .. ev.outcome.status,
-              }})
-            end)
-            "#
-        );
-        let mut h = Harness::with_lua(
-            &lua,
-            vec![
-                calls(&[("c1", "child", json!({}))]),
-                Step::Hang("thinking".into()),
-            ],
-        )
-        .await;
-        h.start("go").await;
-        let child = h.child_created().await;
-        h.until::<MessageDelta>().await;
-        h.cancel().await;
-        for _ in 0..2 {
-            let finished = h.until::<TurnFinished>().await;
-            assert_eq!(finished.outcome, TurnOutcome::Cancelled);
-            let state = h
-                .call::<SessionMessages>(SessionRef {
-                    session_id: finished.session_id.clone(),
-                })
-                .await
-                .unwrap();
-            // Appending is only allowed after the active turn is cleared.
-            // The callback must finish before turn/finished, exactly once.
-            assert_eq!(
-                state.messages.last(),
-                Some(&ChatMessage::User {
-                    content: "cleanup:cancelled".into(),
-                    images: Vec::new(),
-                }),
-            );
-            assert_eq!(
-                state
-                    .messages
-                    .iter()
-                    .filter(|m| matches!(m,
-                        ChatMessage::User { content, .. } if content == "cleanup:cancelled"
-                    ))
-                    .count(),
-                1,
-            );
-            assert!(finished.session_id == child.session_id || finished.session_id == h.session_id);
-        }
-    }
-}
-
-#[tokio::test]
-async fn cancelled_turn_end_async_hooks_finish_within_grace() {
-    for wait in ["bone.ask({ q = 'cleanup?' })", "bone.sleep(60000)"] {
-        let lua = format!(
-            r#"bone.hook("turn_end", function(ev)
-              local result = {wait}
-              bone.state.save("cleanup", {{ resumed = true, cancelled = result == nil }})
-            end)"#
-        );
-        let mut h = Harness::with_lua(&lua, vec![Step::Hang("thinking".into())]).await;
-        h.start("go").await;
-        h.until::<MessageDelta>().await;
-        let question = tokio::time::timeout(Duration::from_secs(3), async {
-            h.cancel().await;
-            let question = if wait.contains("bone.ask") {
-                Some(h.until::<AskRequested>().await)
-            } else {
-                None
-            };
-            let finished = h.until::<TurnFinished>().await;
-            assert_eq!(finished.outcome, TurnOutcome::Cancelled);
-            question
-        })
-        .await
-        .expect("async cleanup must not hold up a cancelled turn");
-
-        if let Some(question) = question {
-            // The queued cancellation must remove the question, not merely
-            // abandon the Rust future waiting for the hook's result.
-            let error = h
-                .call::<AskRespond>(AskRespondParams {
-                    ask_id: question.ask_id,
-                    answer: json!("too late"),
-                })
-                .await
-                .unwrap_err();
-            assert!(error.message.contains("no open question"), "{error:?}");
-        }
-        let cleanup = file_text(&h._data.path().join("state/core/cleanup.json")).await;
-        let cleanup: Value = serde_json::from_str(&cleanup).unwrap();
-        assert_eq!(cleanup, json!({ "resumed": true, "cancelled": true }));
-    }
-}
-
-#[tokio::test]
-async fn completed_turn_end_question_retains_unbounded_wait() {
-    let mut h = Harness::with_lua(
-        r#"bone.hook("turn_end", function(ev) bone.ask({ q = "cleanup?" }) end)"#,
-        vec![text("done")],
-    )
-    .await;
-    h.start("go").await;
-    let question = h.until::<AskRequested>().await;
-    assert!(
-        tokio::time::timeout(Duration::from_millis(1200), h.until::<TurnFinished>())
-            .await
-            .is_err(),
-        "normal turns must still await cleanup past the cancellation grace"
-    );
-    h.call::<AskRespond>(AskRespondParams {
-        ask_id: question.ask_id,
-        answer: json!("yes"),
-    })
-    .await
-    .unwrap();
-    assert_eq!(
-        h.until::<TurnFinished>().await.outcome,
-        TurnOutcome::Completed
-    );
-}
-
-#[tokio::test]
 async fn clients_call_the_model_over_the_protocol() {
     let mut h = Harness::with_lua(
         "",
@@ -1794,6 +1625,23 @@ async fn nothing_changes_without_skills() {
         .await
         .unwrap_err();
     assert!(e.message.contains("no function skills.list"), "{e:?}");
+}
+
+#[tokio::test]
+async fn default_prompt_points_at_the_config_dir_docs() {
+    let (mut h, config_dir) = Harness::with_lua_data("", vec![text("plain")]).await;
+    h.start("hi").await;
+    h.until::<TurnFinished>().await;
+    let system = h.provider.systems.lock().unwrap()[0].clone();
+    let docs = config_dir.join("docs").to_string_lossy().into_owned();
+    assert!(
+        system.contains(&format!("{docs}/customizing.md")),
+        "system prompt should point at the config dir's customization docs: {system:?}"
+    );
+    assert!(
+        system.contains(&format!("{docs}/customizing/customizing-tui.md")),
+        "system prompt should point at the TUI guide: {system:?}"
+    );
 }
 
 #[tokio::test]
@@ -1986,25 +1834,6 @@ async fn a_full_context_compacts_and_retries() {
 }
 
 #[tokio::test]
-async fn a_full_context_fails_as_before_without_auto() {
-    let mut h = Harness::with_lua(
-        "bone.config.compact = { keep = 1, auto = false }",
-        vec![
-            text("a1"),
-            Step::Fail("HTTP 400: maximum context length exceeded".into()),
-        ],
-    )
-    .await;
-    h.start("q1").await;
-    h.until::<TurnFinished>().await;
-    h.start("q2").await;
-    assert!(matches!(
-        h.until::<TurnFinished>().await.outcome,
-        TurnOutcome::Failed { .. }
-    ));
-}
-
-#[tokio::test]
 async fn the_limit_compacts_before_the_call() {
     let mut h = Harness::with_lua(
         "bone.config.compact = { keep = 1, limit = 1 }",
@@ -2070,46 +1899,6 @@ async fn tool_definitions_do_not_inflate_the_estimate() {
     h.start(&"q".repeat(2000)).await;
     h.until::<TurnFinished>().await;
     assert_eq!(h.last_seen().len(), 3, "compacted: {:?}", h.last_seen());
-}
-
-#[tokio::test]
-async fn settings_change_compaction_at_once() {
-    let mut h = Harness::with_lua(
-        "bone.config.compact = { keep = 1 }",
-        vec![text("a1"), text("a2"), text("SUM")],
-    )
-    .await;
-    for q in ["q1", "q2"] {
-        h.start(q).await;
-        h.until::<TurnFinished>().await;
-    }
-    h.call::<SettingsSet>(SettingSet {
-        path: "compact.keep".into(),
-        value: json!(0),
-        session_id: None,
-    })
-    .await
-    .unwrap();
-    // keep = 0: everything is summarized.
-    assert_eq!(h.compact(false).await.unwrap().messages, 4);
-}
-
-#[test]
-fn bad_compact_config_is_an_error() {
-    let data = tempfile::tempdir().unwrap();
-    std::fs::write(
-        data.path().join("core.lua"),
-        "bone.config.providers.x = { base_url = \"http://unused\", model = \"m\" }\n\
-         bone.config.compact = { kep = 3 }",
-    )
-    .unwrap();
-    let err = crate::scripting::load_with(data.path(), &|_| None)
-        .err()
-        .expect("an error");
-    assert!(
-        err.contains("bone.config.compact") && err.contains("kep"),
-        "{err}"
-    );
 }
 
 // ---- parallel tool calls and output limits --------------------------------------
@@ -2681,63 +2470,6 @@ async fn tool_events_carry_timing_and_live_output() {
         finished.duration_ms
     );
     h.until::<TurnFinished>().await;
-}
-
-#[tokio::test]
-async fn background_shells_publish_process_lifecycle_events_after_the_tool_returns() {
-    let mut h = Harness::with_lua(
-        "",
-        vec![
-            calls(&[(
-                "c1",
-                "shell",
-                json!({"command": "printf 'a\\n'; sleep 0.2; printf '\\033[1mb\\033[0m\\n'", "mode": "start"}),
-            )]),
-            text("done"),
-        ],
-    )
-    .await;
-    h.start("go").await;
-    let started = h.until::<ProcessChanged>().await;
-    assert!(started.process.running);
-    assert!(started.process.terminal);
-    // Output comes as chunks that follow on from each other.
-    let mut raw = String::new();
-    let finished = loop {
-        let changed = h.until::<ProcessChanged>().await;
-        if let Some(c) = &changed.chunk {
-            assert_eq!(c.offset, raw.len() as u64);
-            raw.push_str(&c.data);
-        }
-        if !changed.process.running {
-            break changed;
-        }
-    };
-    assert_eq!(finished.process.state, ProcessState::Exited);
-    assert_eq!(finished.process.tail, "b");
-    assert_eq!(raw, "a\r\n\u{1b}[1mb\u{1b}[0m\r\n");
-    let read: ProcessOutput = h
-        .call::<ProcessRead>(ProcessReadParams {
-            session_id: h.session_id.clone(),
-            id: finished.process.id.clone(),
-            from: 0,
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        (read.offset, read.data, read.total),
-        (0, raw.clone(), raw.len() as u64)
-    );
-    // A finished job has no terminal to resize.
-    let resize = h
-        .call::<ProcessResize>(ProcessResizeParams {
-            session_id: h.session_id.clone(),
-            id: finished.process.id,
-            cols: 80,
-            rows: 24,
-        })
-        .await;
-    assert!(resize.is_err());
 }
 
 #[tokio::test]

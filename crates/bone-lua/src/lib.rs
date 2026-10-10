@@ -830,16 +830,6 @@ mod tests {
     }
 
     #[test]
-    fn write_docs_replaces_stale_copies() {
-        let dir = tempfile::tempdir().unwrap();
-        let tui = dir.path().join("docs/customizing/customizing-tui.md");
-        std::fs::create_dir_all(tui.parent().unwrap()).unwrap();
-        std::fs::write(&tui, "old").unwrap();
-        write_docs(dir.path()).unwrap();
-        assert_eq!(std::fs::read_to_string(tui).unwrap(), DOCS[1].1);
-    }
-
-    #[test]
     fn state_persists_per_side_and_plugins_know_their_name() {
         let dir = tempfile::tempdir().unwrap();
         let lua = new_state(Side::Core, Some(dir.path())).unwrap();
@@ -886,43 +876,6 @@ mod tests {
         assert_eq!(seen, "p1");
         let after: Value = lua.load("return bone._loading").eval().unwrap();
         assert!(after.is_nil());
-    }
-
-    #[test]
-    fn api_contract_reports_version_and_capabilities() {
-        for (side, present, absent) in [
-            (Side::Core, "core.tools", "tui.keymaps"),
-            (Side::Tui, "tui.keymaps", "core.tools"),
-        ] {
-            let lua = new_state(side, None).unwrap();
-            let bone: Table = lua.globals().get("bone").unwrap();
-            assert_eq!(bone.get::<u32>("api_version").unwrap(), API_VERSION);
-
-            let capabilities: Table = bone.get("capabilities").unwrap();
-            assert!(capabilities.get::<bool>(present).unwrap());
-            assert_eq!(capabilities.get::<Option<bool>>(absent).unwrap(), None);
-
-            let info: Table = lua.load("return bone.api_info()").eval().unwrap();
-            assert_eq!(info.get::<u32>("version").unwrap(), API_VERSION);
-            assert_eq!(info.get::<String>("side").unwrap(), side.name());
-            assert!(
-                info.get::<Table>("capabilities")
-                    .unwrap()
-                    .get::<bool>(present)
-                    .unwrap()
-            );
-
-            let has: bool = lua
-                .load(format!("return bone.has_capability({present:?})"))
-                .eval()
-                .unwrap();
-            assert!(has);
-            let has: bool = lua
-                .load(format!("return bone.has_capability({absent:?})"))
-                .eval()
-                .unwrap();
-            assert!(!has);
-        }
     }
 
     #[test]

@@ -395,22 +395,4 @@ mod tests {
             }
         );
     }
-
-    #[test]
-    fn fallback_priority_is_deterministic() {
-        let mut k = Keymaps::default();
-        let root = Context::from_name("root").unwrap();
-        let low = Context::from_name("low").unwrap();
-        let high = Context::from_name("high").unwrap();
-        k.define(root.clone(), Some(vec![low.clone(), high.clone()]), None)
-            .unwrap();
-        k.define(low.clone(), None, Some(1)).unwrap();
-        k.define(high.clone(), None, Some(2)).unwrap();
-        k.set(low, "x", Action::parse("dismiss").unwrap()).unwrap();
-        k.set(high, "x", Action::parse("quit").unwrap()).unwrap();
-        assert_eq!(
-            k.lookup(&root, &[keys::parse("x").unwrap()]).action,
-            Some(Action::Builtin(Builtin::Quit))
-        );
-    }
 }

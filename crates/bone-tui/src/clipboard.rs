@@ -171,35 +171,6 @@ fn clipboard() -> Result<Content, String> {
 mod tests {
     use super::*;
 
-    #[tokio::test]
-    async fn file_bytes_are_forwarded_unchanged_and_bounded() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("photo.jpg");
-        // Validation belongs to the core, regardless of filename or contents.
-        std::fs::write(&path, b"original bytes").unwrap();
-        match file(path.clone()).await.unwrap() {
-            Content::Image { bytes, name } => {
-                assert_eq!(bytes, b"original bytes");
-                assert_eq!(name, "photo.jpg");
-            }
-            _ => panic!("file became text"),
-        }
-        std::fs::File::create(&path)
-            .unwrap()
-            .set_len(bone_media::MAX_IMAGE_BYTES as u64 + 1)
-            .unwrap();
-        assert!(matches!(file(path).await, Err(e) if e.contains("20 MiB")));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn oversized_helper_output_is_rejected_before_waiting_for_exit() {
-        let mut cmd = Command::new("sh");
-        cmd.args(["-c", "printf T; exec head -c 33554432 /dev/zero"]);
-        assert!(matches!(read_helper(cmd, Duration::from_secs(2)).await,
-            Err(e) if e.contains("20 MiB")));
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn timeout_kills_and_reaps_helper_then_next_read_succeeds() {

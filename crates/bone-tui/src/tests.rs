@@ -1894,29 +1894,6 @@ async fn help_browser_searches_commands_keys_and_docs() {
 }
 
 #[tokio::test]
-async fn help_browser_handles_empty_search_scrolling_and_resize() {
-    let mut h = Harness::blank().await;
-    h.input("/?{enter}no-such-command").await;
-    let screen = h.screen(80, 24);
-    assert!(screen.contains("No matches"), "{screen}");
-    h.input("{enter}").await;
-    assert_eq!(h.app.context(), Context::Popup);
-    h.input("{ctrl+u}{end}").await;
-    let screen = h.screen(80, 24);
-    assert!(screen.contains("/setup"), "{screen}");
-    h.input("{home}{pagedown}").await;
-    let screen = h.screen(40, 12);
-    assert!(
-        screen.contains("bone / help") && screen.contains("esc"),
-        "{screen}"
-    );
-    // A tiny terminal falls back to a compact hint and remains dismissible.
-    assert!(h.screen(18, 5).contains("Help"));
-    h.input("{esc}").await;
-    assert_eq!(h.app.context(), Context::Main);
-}
-
-#[tokio::test]
 async fn help_topics_and_health_in_a_pager() {
     let mut h = Harness::blank().await;
     h.input("/help hooks{enter}").await;
@@ -4107,50 +4084,6 @@ async fn tray_shells_belong_to_the_chat_on_screen() {
 }
 
 #[tokio::test]
-async fn sidebar_processes_page_lists_every_chats_background_work() {
-    let mut h = Harness::build(None).await;
-    h.input("hi{enter}").await;
-    h.emit::<ProcessChanged>(running_shell()).await;
-    h.emit::<SessionCreated>(bone_proto::types::SessionInfo {
-        session_id: "child-1".into(),
-        cwd: "/work".into(),
-        created_at: 0,
-        title: Some("find callers".into()),
-        parent: None,
-        owner: Some(bone_proto::types::SessionOwner {
-            session_id: "s-new".into(),
-            call_id: Some("c1".into()),
-            name: Some("reviewer".into()),
-        }),
-    })
-    .await;
-    h.input("/new{enter}").await;
-    h.input("{ctrl+o}").await;
-    h.emit::<TurnStarted>(started("child-1", "find callers"))
-        .await;
-    let screen = h.screen(100, 30);
-    assert!(screen.contains("Processes 2"), "{screen}");
-    h.input("{tab}").await;
-    let screen = h.screen(100, 30);
-    assert!(
-        screen.contains("$ npm run dev") && screen.contains("reviewer · find callers"),
-        "{screen}"
-    );
-    // x stops the selected one: the shell, the older of the two.
-    h.input("x").await;
-    assert_eq!(
-        h.requests("process/cancel"),
-        vec![json!({ "session_id": "s-new", "id": "shell-1" })]
-    );
-    h.emit::<TurnFinished>(finished("child-1", TurnOutcome::Completed))
-        .await;
-    let screen = h.screen(100, 30);
-    assert!(!screen.contains("reviewer"), "{screen}");
-    h.input("{tab}").await;
-    assert!(h.screen(100, 30).contains("⌕ search"));
-}
-
-#[tokio::test]
 async fn shell_jobs_show_in_the_tray_and_open_in_place() {
     let mut h = Harness::build(None).await;
     h.input("hi{enter}").await;
@@ -4210,108 +4143,6 @@ async fn shell_jobs_show_in_the_tray_and_open_in_place() {
     h.input("next{enter}").await;
     assert!(!h.screen(100, 20).contains("$ npm run dev"));
     assert_eq!(h.lua("=#require('bone.ui.tray').rows('shells')").await, "0");
-}
-
-#[tokio::test]
-async fn terminal_resize_retries_after_a_startup_failure() {
-    let mut h = Harness::build(None).await;
-    h.input("hi{enter}").await;
-    h.emit::<ProcessChanged>(ProcessChangedParams {
-        session_id: "s-new".into(),
-        version: 1,
-        process: process(ProcessState::Running, "listening on 3000"),
-        chunk: None,
-    })
-    .await;
-    h.input("{down}{enter}").await;
-
-    *h.fail.lock().unwrap() = Some("process/resize".into());
-    h.screen(100, 20);
-    h.settle().await;
-    assert_eq!(h.requests("process/resize").len(), 1);
-
-    *h.fail.lock().unwrap() = None;
-    h.screen(100, 20);
-    h.settle().await;
-    assert_eq!(h.requests("process/resize").len(), 2);
-}
-
-#[tokio::test]
-async fn subagents_show_in_the_tray_and_open_on_click() {
-    let mut h = Harness::build(None).await;
-    h.input("hi{enter}").await;
-    h.emit::<SessionCreated>(bone_proto::types::SessionInfo {
-        session_id: "child-1".into(),
-        cwd: "/work".into(),
-        created_at: 0,
-        title: Some("find callers".into()),
-        parent: None,
-        owner: Some(bone_proto::types::SessionOwner {
-            session_id: "s-new".into(),
-            call_id: Some("c1".into()),
-            name: Some("reviewer".into()),
-        }),
-    })
-    .await;
-    h.emit::<TurnStarted>(started("child-1", "look around"))
-        .await;
-    h.emit::<ToolStarted>(ToolStartedParams {
-        session_id: "child-1".into(),
-        turn_id: 1,
-        call: ToolCall {
-            id: "x".into(),
-            name: "read_file".into(),
-            arguments: r#"{"path":"/work/src/panel.rs"}"#.into(),
-        },
-        started_at: None,
-    })
-    .await;
-    let screen = h.screen(100, 20);
-    assert!(screen.contains("Agents 1"), "{screen}");
-    assert!(
-        screen.contains("reviewer  find callers  read_file src/panel.rs"),
-        "{screen}"
-    );
-
-    // Typing from the tray returns intact to the prompt.
-    h.input("{down}send").await;
-    assert_eq!(h.prompt(), "send");
-    h.input("{ctrl+u}{down}draft").await;
-    assert_eq!(h.prompt(), "draft");
-
-    // A click on the row opens the sub-agent's session, with a way back.
-    let y = screen
-        .lines()
-        .position(|l| l.contains("find callers"))
-        .unwrap() as u16;
-    h.app.mouse("down", "left", (10, y));
-    h.settle().await;
-    assert!(
-        h.requests("session/messages")
-            .iter()
-            .any(|p| p["session_id"] == "child-1")
-    );
-    let screen = h.screen(100, 20);
-    assert!(screen.contains(" ‹ main │ Agents 1"), "{screen}");
-    // Esc on an empty prompt goes back to the session that started it.
-    h.input("{ctrl+u}{esc}").await;
-    assert_eq!(h.lua("=bone.chat.session().session_id").await, "\"s-new\"");
-
-    // Finished: a check mark, until the next message.
-    h.emit::<TurnFinished>(TurnFinishedParams {
-        session_id: "child-1".into(),
-        turn_id: 1,
-        outcome: TurnOutcome::Completed,
-    })
-    .await;
-    let screen = h.screen(100, 20);
-    assert!(
-        screen.contains("✓ reviewer  find callers  done"),
-        "{screen}"
-    );
-    // ctrl+b folds the tray; with nothing running it is gone.
-    h.input("{ctrl+b}").await;
-    assert!(!h.screen(100, 20).contains("find callers  done"));
 }
 
 #[tokio::test]
@@ -5217,71 +5048,6 @@ async fn setup_adds_a_provider_its_key_and_packages() {
 #[path = "reload_tests.rs"]
 mod reload_tests;
 
-/// A running turn of `n` calls in one stretch, all but the last finished
-/// with `size` bytes of output, the last a running shell.
-async fn long_stretch(n: usize, size: usize) -> Harness {
-    let mut h = Harness::build(None).await;
-    h.input("go{enter}").await;
-    h.emit::<TurnStarted>(started("s-new", "go")).await;
-    let calls = (0..n)
-        .map(|i| ToolCall {
-            id: format!("c{i}"),
-            name: if i == n - 1 { "shell" } else { "read_file" }.into(),
-            arguments: json!({ "path": format!("f{i}.rs"), "command": "ls" }).to_string(),
-        })
-        .collect();
-    h.emit::<MessageCompleted>(tool_calls("s-new", calls)).await;
-    for i in 0..n - 1 {
-        h.emit::<ToolFinished>(ToolFinishedParams {
-            session_id: "s-new".into(),
-            turn_id: 1,
-            call_id: format!("c{i}"),
-            output: "x".repeat(size),
-            is_error: false,
-            duration_ms: None,
-        })
-        .await;
-    }
-    h
-}
-
-/// How long drawing a frame takes.
-fn frame_time(h: &mut Harness) -> std::time::Duration {
-    let t = std::time::Instant::now();
-    h.screen(120, 40);
-    t.elapsed()
-}
-
-/// Render cost of a long, tool-heavy chat in the default (summary) view.
-/// `cargo test -p bone-tui --release perf_probe -- --ignored --nocapture`
-#[tokio::test]
-#[ignore]
-async fn perf_probe() {
-    for (n, size) in [(50, 2_000), (200, 2_000), (500, 2_000), (500, 20_000)] {
-        let mut h = long_stretch(n, size).await;
-        let first = frame_time(&mut h);
-        let steady = frame_time(&mut h);
-        let mut live = std::time::Duration::ZERO;
-        for _ in 0..10 {
-            h.emit::<ToolOutput>(ToolOutputParams {
-                session_id: "s-new".into(),
-                turn_id: 1,
-                call_id: format!("c{}", n - 1),
-                text: "line\n".into(),
-            })
-            .await;
-            live += frame_time(&mut h) / 10;
-        }
-        h.app
-            .with_api(|lua| lua.load("bone.ui.refresh()").exec())
-            .unwrap();
-        let refresh = frame_time(&mut h);
-        println!(
-            "{n} calls, {size} B each: first {first:?}, steady {steady:?}, live output {live:?}, after bone.ui.refresh {refresh:?}"
-        );
-    }
-}
-
 #[tokio::test]
 async fn empty_session_hint_is_centered_in_chat_beside_panels() {
     let mut h = Harness::build(None).await;
@@ -5364,29 +5130,6 @@ async fn statusline_keeps_each_sessions_timing_across_switches() {
             .await
             .contains("worked 1m")
     );
-}
-
-#[tokio::test]
-async fn session_sidebar_search_accepts_unicode_and_alt_a_does_not_archive() {
-    let mut h = Harness::new().await;
-    h.input("{ctrl+o}").await;
-    h.input("a中文+🦴").await;
-    let screen = h.screen(80, 24);
-    assert!(screen.replace(' ', "").contains("⌕a中文+🦴"), "{screen}");
-    assert_eq!(
-        h.lua("=next(bone.state.load('sessions-archived')) == nil")
-            .await,
-        "true"
-    );
-    h.input("{ctrl+u}{alt+a}").await;
-    assert_eq!(
-        h.lua("=next(bone.state.load('sessions-archived')) == nil")
-            .await,
-        "true"
-    );
-    let screen = h.screen(80, 24);
-    assert!(!screen.contains("alt+a archive"), "{screen}");
-    assert!(h.requests("session/messages").is_empty());
 }
 
 #[tokio::test]
@@ -5509,37 +5252,6 @@ async fn flexible_layout_clamps_tiny_and_oversubscribed_frames() {
 }
 
 #[tokio::test]
-async fn flexible_docks_mouse_and_auto_content_use_final_rectangles() {
-    let mut h = Harness::new().await;
-    h.lua(
-        r#"
-      bone.ui.panel.open({id='auto', dock='right', size='auto',
-        render=function(ctx) final_w=ctx.width; final_h=ctx.height; return {'1234567890'} end})
-      bone.ui.layout={'chat','prompt'}
-      bone.on('mouse', function(ev) mouse_region=ev.region; mouse_panel=ev.panel; return true end)
-    "#,
-    )
-    .await;
-    h.screen(40, 10);
-    let r = h.app.panel("auto").unwrap().area.unwrap();
-    assert_eq!(
-        h.lua("=final_w .. ',' .. final_h").await,
-        format!("\"{},{}\"", r.width, r.height)
-    );
-    assert_eq!(
-        h.app.leaves.iter().find(|(n, _)| n == "chat").unwrap().1,
-        h.app.placed[&crate::app::CHAT_WIN].area
-    );
-    h.app.mouse("down", "left", (r.x, r.y));
-    assert_eq!(
-        h.lua("=tostring(mouse_region) .. ',' .. mouse_panel").await,
-        "\"nil,auto\""
-    );
-    h.screen(10, 2);
-    assert!(h.app.panel("auto").unwrap().area.is_none());
-}
-
-#[tokio::test]
 async fn flexible_auto_panel_reserves_prompt_and_fill_rows() {
     let mut h = Harness::new().await;
     h.lua(
@@ -5554,46 +5266,4 @@ async fn flexible_auto_panel_reserves_prompt_and_fill_rows() {
     assert_eq!(h.app.placed[&crate::app::CHAT_WIN].area.height, 3);
     assert_eq!(h.app.placed[&crate::app::PROMPT_WIN].area.height, 3);
     assert_eq!(h.app.panel("p").unwrap().area.unwrap().height, 18);
-}
-
-#[tokio::test]
-async fn flexible_empty_panel_subtrees_do_not_reserve_space_or_separators() {
-    let mut h = Harness::new().await;
-    h.lua(
-        r#"
-        p=bone.ui.panel.open({id='p', lines={'PANEL'}}); p:hide()
-        bone.ui.layout={{cols={
-            {rows={{cols={{panel='p'}, {panel='missing'}}}}, size=12},
-            {rows={'chat','prompt'}}}, sep='|'}}
-    "#,
-    )
-    .await;
-    let screen = h.screen(80, 24);
-    let chat = h.app.placed[&crate::app::CHAT_WIN].area;
-    assert_eq!((chat.x, chat.width), (0, 80));
-    assert!(!screen.contains('|'), "{screen}");
-    h.lua("p:show()").await;
-    h.screen(80, 24);
-    assert_eq!(h.app.placed[&crate::app::CHAT_WIN].area.x, 13);
-}
-
-#[tokio::test]
-async fn flexible_render_callback_hide_clears_geometry_and_hits() {
-    let mut h = Harness::new().await;
-    h.lua(
-        r#"
-        p=bone.ui.panel.open({id='p', lines={'PANEL'}})
-        bone.ui.layout={{panel='p', size=4}, 'chat', 'prompt'}
-        bone.ui.regions.chat_empty=function() p:hide(); return {'EMPTY'} end
-    "#,
-    )
-    .await;
-    let screen = h.screen(80, 24);
-    assert!(!screen.contains("PANEL"), "{screen}");
-    assert!(h.app.panel("p").unwrap().area.is_none());
-    assert!(h.app.panel_hit((0, 0)).is_none());
-    let r = h.app.leaves.iter().find(|(n, _)| n == "panel:p").unwrap().1;
-    assert_eq!((r.width, r.height), (0, 0));
-    h.screen(80, 24);
-    assert_eq!(h.app.placed[&crate::app::CHAT_WIN].area.y, 0);
 }

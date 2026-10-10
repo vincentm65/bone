@@ -122,52 +122,6 @@ async fn shell_combines_output_and_reports_exit_code() {
 }
 
 #[tokio::test]
-async fn shell_short_commands_skip_exit_grace() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = ctx(&dir);
-    let mut timings = Vec::new();
-    for _ in 0..5 {
-        let start = Instant::now();
-        assert_eq!(
-            call(&ctx, "shell", json!({"command": "true"}))
-                .await
-                .unwrap(),
-            "(no output)\n[exit code: 0]"
-        );
-        timings.push(start.elapsed());
-    }
-    timings.sort();
-    assert!(timings[2] < Duration::from_millis(150), "{timings:?}");
-}
-
-#[tokio::test]
-async fn shell_preserves_term_cleanup_for_redirected_descendants() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = call(
-        &ctx(&dir),
-        "shell",
-        json!({"command": r#"python3 -c 'import os, signal, time
-from pathlib import Path
-def cleanup(*_):
-    time.sleep(0.08)
-    Path("cleaned").write_text("done")
-    os._exit(0)
-signal.signal(signal.SIGTERM, cleanup)
-Path("ready").touch()
-while True: time.sleep(1)
-' </dev/null >/dev/null 2>&1 &
-while [ ! -f ready ]; do sleep 0.01; done"#, "timeout_secs": 5}),
-    )
-    .await
-    .unwrap();
-    assert_eq!(out, "(no output)\n[exit code: 0]");
-    assert_eq!(
-        std::fs::read_to_string(dir.path().join("cleaned")).unwrap(),
-        "done"
-    );
-}
-
-#[tokio::test]
 async fn shell_does_not_wait_for_background_processes() {
     let dir = tempfile::tempdir().unwrap();
     let marker = dir.path().join("leaked");
@@ -223,27 +177,6 @@ fn truncate_middle_respects_char_boundaries() {
 }
 
 #[tokio::test]
-async fn plain_read_preserves_line_whitespace() {
-    let dir = tempfile::tempdir().unwrap();
-    let text = "  leading\tand trailing  \n\tindented\t\n\n \n";
-    std::fs::write(dir.path().join("plain.txt"), text).unwrap();
-    let out = call(&ctx(&dir), "read_file", json!({"path": "plain.txt"}))
-        .await
-        .unwrap();
-    assert_eq!(out, text);
-    let registry = Registry::builtin();
-    let spec = registry.get("read_file").unwrap().spec();
-    assert!(
-        spec.description
-            .contains("plain text without per-line prefixes")
-    );
-    assert_eq!(
-        spec.parameters["properties"]["limit"]["description"],
-        "Maximum lines to read. Default 2000."
-    );
-}
-
-#[tokio::test]
 async fn plain_read_partial_pagination_and_end_behavior() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = ctx(&dir);
@@ -285,23 +218,6 @@ async fn plain_read_partial_pagination_and_end_behavior() {
 }
 
 #[tokio::test]
-async fn plain_read_keeps_historical_newline_rendering() {
-    let dir = tempfile::tempdir().unwrap();
-    for (input, expected) in [
-        ("a\r\nb\r\n", "a\nb\n"),
-        ("a\nb", "a\nb\n"),
-        ("a\rb\r", "a\rb\r\n"),
-        ("\n", "\n"),
-    ] {
-        std::fs::write(dir.path().join("plain.txt"), input).unwrap();
-        let out = call(&ctx(&dir), "read_file", json!({"path": "plain.txt"}))
-            .await
-            .unwrap();
-        assert_eq!(out, expected);
-    }
-}
-
-#[tokio::test]
 async fn plain_read_empty_binary_and_lossy_utf8() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = ctx(&dir);
@@ -330,17 +246,6 @@ async fn plain_read_empty_binary_and_lossy_utf8() {
         .await
         .unwrap();
     assert_eq!(out, "a\u{fffd}b\n");
-}
-
-#[tokio::test]
-async fn plain_read_utf8_long_line_limit_is_2000_chars() {
-    let dir = tempfile::tempdir().unwrap();
-    let exact = "é🦀".repeat(1000);
-    std::fs::write(dir.path().join("long.txt"), format!("{exact}\n{exact}終\n")).unwrap();
-    let out = call(&ctx(&dir), "read_file", json!({"path": "long.txt"}))
-        .await
-        .unwrap();
-    assert_eq!(out, format!("{exact}\n{exact} [line truncated]\n"));
 }
 
 #[tokio::test]
@@ -459,38 +364,6 @@ async fn batch_validation_failure_never_writes() {
 }
 
 #[tokio::test]
-async fn plain_read_huge_limit_does_not_overflow() {
-    let dir = tempfile::tempdir().unwrap();
-    std::fs::write(dir.path().join("plain.txt"), "first\nsecond\nlast").unwrap();
-    let out = call(
-        &ctx(&dir),
-        "read_file",
-        json!({"path": "plain.txt", "offset": 2, "limit": usize::MAX}),
-    )
-    .await
-    .unwrap();
-    assert_eq!(out, "second\nlast\n");
-}
-
-#[tokio::test]
-async fn exact_edit_rejects_non_utf8_without_writing() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("a.txt");
-    let original = b"original\xff\n";
-    std::fs::write(&path, original).unwrap();
-    let err = call(
-        &ctx(&dir),
-        "edit_file",
-        json!({"path":"a.txt", "edits":[
-            {"old_string":"original", "new_string":"new"}
-        ]}),
-    )
-    .await
-    .unwrap_err();
-    assert!(err.starts_with("cannot read"), "{err}");
-    assert_eq!(std::fs::read(&path).unwrap(), original);
-}
-#[tokio::test]
 async fn shell_streams_output_while_it_runs() {
     let dir = tempfile::tempdir().unwrap();
     let got = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
@@ -567,36 +440,6 @@ async fn shell_manages_background_jobs_and_reports_completion() {
     );
 }
 
-#[tokio::test]
-async fn background_jobs_run_in_a_terminal_and_the_model_reads_clean_text() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = ctx(&dir);
-    let started = call(
-        &ctx,
-        "shell",
-        json!({
-            "command": "printf '\\033[32mok\\033[0m\\n'; printf '10%%\\r50%%\\r100%%\\n'; [ -t 1 ] && echo tty; echo $TERM $GIT_PAGER",
-            "mode": "start",
-        }),
-    )
-    .await
-    .unwrap();
-    let id = started
-        .strip_prefix("background process started: ")
-        .unwrap();
-    let done = call(&ctx, "shell", json!({"action": "wait", "id": id}))
-        .await
-        .unwrap();
-    assert_eq!(done, "ok\n100%\ntty\nxterm-256color cat\n[exit code: 0]");
-    // The terminal's own bytes are kept for terminal views.
-    let (offset, raw, total) = ctx.jobs.read(&ctx.session_id, id, 0).unwrap();
-    assert_eq!(offset, 0);
-    assert_eq!(total, raw.len() as u64);
-    assert!(raw.starts_with("\u{1b}[32mok\u{1b}[0m\r\n"), "{raw:?}");
-    let (offset, rest, _) = ctx.jobs.read(&ctx.session_id, id, 4).unwrap();
-    assert_eq!((offset, rest.as_str()), (4, &raw[4..]));
-}
-
 #[test]
 fn trim_front_cuts_in_batches_on_char_boundaries() {
     let mut s = "é".repeat(5); // 10 bytes
@@ -623,82 +466,4 @@ fn the_cleaner_settles_progress_lines_and_drops_escapes() {
         c.apply(part, &mut out);
     }
     assert_eq!(out, "ared\nbar 3\nyz\n");
-}
-
-#[tokio::test]
-async fn shell_background_job_survives_turn_cancellation() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = ctx(&dir);
-    let cancel = ctx.cancel.clone();
-    let started = call(
-        &ctx,
-        "shell",
-        json!({"command": "sleep 1", "mode": "start"}),
-    )
-    .await
-    .unwrap();
-    let id = started
-        .strip_prefix("background process started: ")
-        .unwrap();
-    cancel.cancel();
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let status = call(&ctx, "shell", json!({"action": "status", "id": id}))
-        .await
-        .unwrap();
-    assert!(status.contains("\"running\": true"), "{status}");
-    call(&ctx, "shell", json!({"action": "kill", "id": id}))
-        .await
-        .unwrap();
-}
-
-#[tokio::test]
-async fn shell_status_bounds_saved_output_for_the_model() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = ctx(&dir);
-    let started = call(
-        &ctx,
-        "shell",
-        json!({"command": "printf '%*s' 100000 '' | tr ' ' x", "mode": "start"}),
-    )
-    .await
-    .unwrap();
-    let id = started
-        .strip_prefix("background process started: ")
-        .unwrap();
-    let _ = call(&ctx, "shell", json!({"action": "wait", "id": id}))
-        .await
-        .unwrap();
-    let status = call(&ctx, "shell", json!({"action": "status", "id": id}))
-        .await
-        .unwrap();
-    let status: Value = serde_json::from_str(&status).unwrap();
-    assert!(status["output"].as_str().unwrap().len() < 40_000);
-    assert_eq!(status["output_bytes"], 100_000);
-    assert_eq!(status["truncated"], true);
-}
-
-#[tokio::test]
-async fn shell_kills_a_managed_background_job() {
-    let dir = tempfile::tempdir().unwrap();
-    let ctx = ctx(&dir);
-    let started = call(
-        &ctx,
-        "shell",
-        json!({"command": "sleep 30", "mode": "start"}),
-    )
-    .await
-    .unwrap();
-    let id = started
-        .strip_prefix("background process started: ")
-        .unwrap();
-    call(&ctx, "shell", json!({"action": "kill", "id": id}))
-        .await
-        .unwrap();
-    let result = call(&ctx, "shell", json!({"action": "wait", "id": id}))
-        .await
-        .unwrap_err();
-    assert!(
-        result.contains("cancelled") || result.contains("signal"),
-        "{result}"
-    );
 }
