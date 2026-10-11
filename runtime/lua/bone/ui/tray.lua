@@ -10,8 +10,7 @@ local M = {}
 local CONTEXT, QUEUE_CONTEXT = "tray", "tray_queue"
 local TERM_ROWS = 12 -- output rows of an open shell job
 
--- Sub-agents seen this run: session id -> agent; tool call id -> session id.
-local agents, by_call = {}, {}
+local agents = require("bone.agents")
 -- Finished rows the user has moved past (sent a message since).
 local cleared = {}
 local ui = { page = "agents", sel = 1, open = nil, scroll = 0, folded = false }
@@ -82,11 +81,7 @@ local function root()
   if not s then
     return nil
   end
-  local id = s.owner and s.owner.session_id or s.session_id
-  while agents[id] do
-    id = agents[id].parent
-  end
-  return id
+  return agents.top(s.owner and s.owner.session_id or s.session_id)
 end
 
 local function by_start(a, b)
@@ -95,12 +90,8 @@ end
 
 local function agent_rows(top)
   local out = {}
-  for id, a in pairs(agents) do
-    local r = a.parent
-    while agents[r] do
-      r = agents[r].parent
-    end
-    if r == top and not cleared["agent:" .. id] then
+  for _, a in ipairs(agents.list(top)) do
+    if not cleared[a.key] then
       out[#out + 1] = a
     end
   end
@@ -384,7 +375,7 @@ local function back_label()
   if not parent then
     return nil
   end
-  return "‹ " .. (agents[parent] and agents[parent].name or "main")
+  return "‹ " .. (agents.get(parent) and agents.get(parent).name or "main")
 end
 
 local function header(width, active, rows_of)
@@ -449,6 +440,9 @@ local function row_line(r, width, cols, mark)
   local live = r.status == "running"
   local glyph = live and { "●", "Accent" } or GLYPH[r.status] or { "·", "Dim" }
   local time = r.time or duration((r.finished_at or bone.now()) - (r.started_at or bone.now()))
+  if (r.tokens or 0) > 0 then
+    time = bone.util.tokens(r.tokens) .. " tok · " .. time
+  end
   local line = { { mark and " › " or "   ", "Accent" }, { glyph[1] .. " ", glyph[2] } }
   local used = 5
   if cols[1] > 0 then
@@ -459,7 +453,7 @@ local function row_line(r, width, cols, mark)
   line[#line + 1] = { pad(r.title or "", cols[2]) .. "  ", title_hl }
   used = used + cols[2] + 2
   local detail = r.detail or (live and "starting" or "")
-  local room = width - used - #time - 2
+  local room = width - used - bone.text.width(time) - 2
   if room >= 6 and detail ~= "" then
     line[#line + 1] = { bone.text.truncate(detail, room), "Dim" }
   end
@@ -636,65 +630,20 @@ bone.on("submit", function()
 end)
 
 ---------------------------------------------------------------------------
--- Sub-agents, from the core's events
-
-bone.on("session/created", function(info)
-  local o = info.owner
-  if not o then
-    return
-  end
-  agents[info.session_id] = {
-    key = "agent:" .. info.session_id,
-    id = info.session_id,
-    name = o.name or "agent",
-    title = info.title or "sub-agent",
-    parent = o.session_id,
-    cwd = info.cwd,
-    status = "running",
-    started_at = bone.now(),
-  }
-  if o.call_id then
-    by_call[o.call_id] = info.session_id
-  end
-end)
+-- Sub-agents (bone.agents keeps them): a rerun shows again; the step label.
 
 bone.on("turn/started", function(ev)
-  local a = agents[ev.session_id]
-  if a and a.status ~= "running" then
-    a.status, a.finished_at, a.started_at, a.detail = "running", nil, bone.now(), nil
+  local a = agents.get(ev.session_id)
+  if a then
     cleared[a.key] = nil
   end
 end)
 
-bone.on("message/delta", function(ev)
-  local a = agents[ev.session_id]
-  if not a then
-    return
-  end
-  -- A step label, not the streamed text: the row changes per step, not per token.
-  a.detail = ev.kind == "reasoning" and "thinking" or "writing"
-end)
-
 bone.on("tool/started", function(ev)
-  local a = agents[ev.session_id]
+  local a = agents.get(ev.session_id)
   if a and ev.call then
     a.detail = call_summary(ev.call, a.cwd)
   end
-end)
-
-bone.on("turn/finished", function(ev)
-  local a = agents[ev.session_id]
-  if not a then
-    return
-  end
-  local o = ev.outcome or {}
-  a.status = ({ completed = "done", cancelled = "cancelled" })[o.status] or "failed"
-  a.finished_at = bone.now()
-  a.detail = o.status == "completed" and "done" or o.message or a.status
-end)
-
-bone.on("session/deleted", function(ev)
-  agents[ev.session_id] = nil
 end)
 
 ---------------------------------------------------------------------------
@@ -719,9 +668,9 @@ bone.on("mouse", function(ev)
   end
   if ev.index then
     local it = bone.chat.item(ev.index)
-    local id = it and it.kind == "tool" and it.name == "subagent" and by_call[it.id]
-    if id then
-      bone.api.open_session(id)
+    local a = it and it.kind == "tool" and it.name == "subagent" and agents.for_call(it.id)
+    if a then
+      bone.api.open_session(a.id)
       return true
     end
   end

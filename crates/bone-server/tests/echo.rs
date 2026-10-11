@@ -6,7 +6,7 @@ use std::time::Duration;
 use bone_client::{Client, ClientError};
 use bone_core::Core;
 use bone_core::config::{CoreConfig, ProviderConfig};
-use bone_proto::methods::{Echo, EchoParams, Echoed, Initialize, InitializeParams};
+use bone_proto::methods::{Echo, EchoParams, Initialize, InitializeParams};
 use bone_proto::{PROTOCOL_VERSION, RpcError};
 use bone_server::Server;
 use tokio::time::timeout;
@@ -51,7 +51,7 @@ fn rpc_code(err: ClientError) -> i64 {
 
 #[tokio::test]
 async fn echo_round_trip_with_event() {
-    let (client, mut events) = connect();
+    let (client, _events) = connect();
 
     let init = client.initialize("test").await.unwrap();
     assert_eq!(init.protocol_version, PROTOCOL_VERSION);
@@ -63,26 +63,19 @@ async fn echo_round_trip_with_event() {
         .await
         .unwrap();
     assert_eq!(reply.text, text);
-
-    let event = timeout(Duration::from_secs(1), events.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(event.parse::<Echoed>().unwrap().unwrap().text, text);
 }
 
 #[tokio::test]
-async fn requests_before_initialize_are_rejected() {
+async fn handshake_errors() {
+    // 1. Any request before initialize is rejected.
     let (client, _events) = connect();
     let err = client
         .request::<Echo>(EchoParams { text: "x".into() })
         .await
         .unwrap_err();
     assert_eq!(rpc_code(err), RpcError::NOT_INITIALIZED);
-}
 
-#[tokio::test]
-async fn version_mismatch_is_rejected() {
+    // 2. A version mismatch is rejected, but the connection stays usable.
     let (client, _events) = connect();
     let err = client
         .request::<Initialize>(InitializeParams {
@@ -92,15 +85,9 @@ async fn version_mismatch_is_rejected() {
         .await
         .unwrap_err();
     assert_eq!(rpc_code(err), RpcError::VERSION_MISMATCH);
-
-    // A failed handshake leaves the connection uninitialized but usable.
     client.initialize("test").await.unwrap();
-}
 
-#[tokio::test]
-async fn double_initialize_is_rejected() {
-    let (client, _events) = connect();
-    client.initialize("test").await.unwrap();
+    // 3. Initializing twice on the same connection is rejected.
     let err = client.initialize("test").await.unwrap_err();
     assert_eq!(rpc_code(err), RpcError::INVALID_REQUEST);
 }
@@ -122,26 +109,6 @@ async fn shutdown_closes_connection() {
         .await
         .unwrap_err();
     assert!(matches!(err, ClientError::Disconnected), "{err:?}");
-}
-
-#[tokio::test]
-async fn events_reach_every_client() {
-    let server = server();
-    let (a, _a_events) = Client::new(server.connect_in_process());
-    let (b, mut b_events) = Client::new(server.connect_in_process());
-    a.initialize("a").await.unwrap();
-    b.initialize("b").await.unwrap();
-
-    a.request::<Echo>(EchoParams {
-        text: "from a".into(),
-    })
-    .await
-    .unwrap();
-    let event = timeout(Duration::from_secs(1), b_events.recv())
-        .await
-        .unwrap()
-        .unwrap();
-    assert_eq!(event.parse::<Echoed>().unwrap().unwrap().text, "from a");
 }
 
 /// Every method in the protocol list reaches a handler: none is

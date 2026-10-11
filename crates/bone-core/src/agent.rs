@@ -39,7 +39,9 @@ user's terminal. Use the tools to inspect files, make changes and run commands. 
 before reading large files, then use read_file offset/limit for focused sections. Read files before \
 editing them; group independent hunks in one edit_file call. Keep changes minimal and focused, \
 and keep answers concise.\n\n\
-If the user wants to change or customize bone itself, first read ~/.bone/docs/customizing.md.";
+If the user wants to change or customize bone itself, first read the \
+customization docs in the bone config directory (default ~/.bone) under \
+docs/customizing.md.";
 
 const CANCELLED: &str = "Cancelled by the user before this tool call ran.";
 

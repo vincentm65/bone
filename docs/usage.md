@@ -94,7 +94,7 @@ The model can also use `read_file` to view PNG, JPEG and WebP files on the core 
 | `/quit`, `/exit`, `/q` | quit |
 | `/plugins` | open the plugin settings; `/plugins list` lists plugins (TUI and core halves); `/plugins load name`, `/plugins unload name`, `/plugins reload name` act on both halves (picking up edits to their files); `/plugins reload` reloads the core's whole Lua configuration (`core.lua` and core plugins) |
 
-`/rename`, `/fork`, `/compact` and `/plugins` are Lua commands from `runtime/tui/defaults.lua`: change or remove them like any other (`bone.cmd.del("fork")`).
+`/rename`, `/fork`, `/compact` and `/plugins` are Lua commands from `runtime/lua/bone/commands.lua`: change or remove them like any other (`bone.cmd.del("fork")`).
 
 Enter on a partial name runs the highlighted suggestion (`/ses` + enter opens the picker). A message that really starts with `/` can be sent as `//like this`; paths such as `/etc/hosts …` are sent as messages anyway. Commands from Lua or plugins show up in the suggestions too.
 

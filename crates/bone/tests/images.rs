@@ -209,6 +209,33 @@ impl Env {
             );
         }
     }
+    /// Restart the server from the same config, read the attachment back,
+    /// and return the restarted client and the forked session's stored
+    /// messages.
+    async fn restart_and_fork(
+        &self,
+        client_name: &str,
+        image_id: String,
+        fork_id: String,
+    ) -> (Arc<Client>, bone_proto::methods::SessionMessagesResult) {
+        let restarted = Server::new(Arc::new(Core::from_loaded(
+            scripting::load_with(self.config.path(), &|_| None).unwrap(),
+        )));
+        let (client, _) = Client::new(restarted.connect_in_process());
+        client.initialize(client_name).await.unwrap();
+        let data = client
+            .request::<AttachmentRead>(AttachmentReadParams { id: image_id })
+            .await
+            .unwrap();
+        assert_eq!(STANDARD.decode(data.data).unwrap(), self.png);
+        let messages = client
+            .request::<SessionMessages>(SessionRef {
+                session_id: fork_id,
+            })
+            .await
+            .unwrap();
+        (Arc::new(client), messages)
+    }
 }
 
 #[tokio::test]
@@ -266,22 +293,9 @@ async fn image_only_send_persists_and_survives_restart_and_fork() {
         .request::<SessionDelete>(SessionRef { session_id: id })
         .await
         .unwrap();
-    let restarted = Server::new(Arc::new(Core::from_loaded(
-        scripting::load_with(env.config.path(), &|_| None).unwrap(),
-    )));
-    let (client, _) = Client::new(restarted.connect_in_process());
-    client.initialize("restart-test").await.unwrap();
-    let data = client
-        .request::<AttachmentRead>(AttachmentReadParams { id: image.id })
-        .await
-        .unwrap();
-    assert_eq!(STANDARD.decode(data.data).unwrap(), env.png);
-    let messages = client
-        .request::<SessionMessages>(SessionRef {
-            session_id: fork.session_id,
-        })
-        .await
-        .unwrap();
+    let (_client, messages) = env
+        .restart_and_fork("restart-test", image.id, fork.session_id)
+        .await;
     assert_eq!(messages.messages[0], stored.messages[0]);
 }
 
@@ -640,12 +654,8 @@ async fn read_file_images_reach_provider_and_survive_restart_without_source_file
             .await
             .unwrap();
         std::fs::remove_file(env.work.path().join(filename)).unwrap();
-        let restarted = Server::new(Arc::new(Core::from_loaded(
-            scripting::load_with(env.config.path(), &|_| None).unwrap(),
-        )));
-        let (client, _) = Client::new(restarted.connect_in_process());
-        client.initialize("read-file-restart").await.unwrap();
-        let stored = client
+        let stored = env
+            .client
             .request::<SessionMessages>(SessionRef {
                 session_id: id.clone(),
             })
@@ -662,20 +672,21 @@ async fn read_file_images_reach_provider_and_survive_restart_without_source_file
         assert_eq!(tool.images().len(), 1);
         assert!(tool.images()[0].data.is_none());
         assert_eq!(tool.images()[0].name, filename);
-        let data = client
-            .request::<AttachmentRead>(AttachmentReadParams {
-                id: tool.images()[0].id.clone(),
-            })
-            .await
-            .unwrap();
-        assert_eq!(STANDARD.decode(data.data).unwrap(), env.png);
-        let fork = client
+        let fork = env
+            .client
             .request::<SessionFork>(SessionForkParams {
-                session_id: id,
+                session_id: id.clone(),
                 before_turn: None,
             })
             .await
             .unwrap();
+        let (client, _forked) = env
+            .restart_and_fork(
+                "read-file-restart",
+                tool.images()[0].id.clone(),
+                fork.session_id.clone(),
+            )
+            .await;
         client
             .request::<TurnStart>(TurnStartParams {
                 session_id: fork.session_id.clone(),

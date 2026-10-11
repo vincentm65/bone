@@ -30,6 +30,7 @@ pub const RUNTIME: &[(&str, &str)] = runtime_files![
     "lua/bone/config.lua",
     "lua/bone/catalog.lua",
     "lua/bone/setup.lua",
+    "lua/bone/agents.lua",
     "lua/bone/ui.lua",
     "lua/bone/ui/layout.lua",
     "lua/bone/ui/sessions.lua",
@@ -38,6 +39,7 @@ pub const RUNTIME: &[(&str, &str)] = runtime_files![
     "lua/bone/ui/views.lua",
     "tui/api.lua",
     "tui/defaults.lua",
+    "tui/bare.lua",
     "core/api.lua",
     "core/defaults.lua",
     "colors/black.lua",
@@ -520,7 +522,7 @@ pub fn new_state(side: Side, config_dir: Option<&Path>) -> mlua::Result<Lua> {
     )?;
     bone.set("json", json)?;
 
-    setup_require(&lua, config_dir)?;
+    setup_require(&lua, side, config_dir)?;
     let util: Table = lua.load("return require('bone.util')").eval()?;
     bone.set("inspect", util.get::<Function>("inspect")?)?;
     bone.set("util", util)?;
@@ -621,6 +623,121 @@ pub fn runtime_source(config_dir: Option<&Path>, rel: &str) -> Option<(String, S
         .map(|(_, src)| ((*src).to_owned(), format!("runtime/{rel}")))
 }
 
+/// The TUI library chosen with `/tui`, kept in `<config dir>/library`:
+/// `None` for the standard one, else `bare` (no standard UI) or the name of
+/// a copy under `<config dir>/libraries/`.
+pub fn tui_library(config_dir: &Path) -> Option<String> {
+    let name = std::fs::read_to_string(config_dir.join("library")).ok()?;
+    let name = name.trim();
+    (!name.is_empty() && name != "standard").then(|| name.to_owned())
+}
+
+/// Like [`runtime_source`], for the TUI: the chosen library's copy of `rel`
+/// comes first. A file the library lacks is the standard one.
+pub fn tui_runtime_source(config_dir: Option<&Path>, rel: &str) -> Option<(String, String)> {
+    if let Some(dir) = config_dir
+        && let Some(name) = tui_library(dir)
+    {
+        let path = dir.join("libraries").join(name).join(rel);
+        if let Ok(src) = std::fs::read_to_string(&path) {
+            return Some((src, path.to_string_lossy().into_owned()));
+        }
+    }
+    runtime_source(config_dir, rel)
+}
+
+/// The libraries under `<config dir>/libraries/`, by name.
+pub fn tui_libraries(config_dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(config_dir.join("libraries"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    names.sort();
+    names
+}
+
+/// Copy the built-in TUI files (all but `tui/api.lua` and the core's) to a
+/// new library, `<config dir>/libraries/<name>/`; `bare` copies only the
+/// bare library's file, as its `tui/defaults.lua`. An existing one is never
+/// touched.
+pub fn create_tui_library(config_dir: &Path, name: &str, bare: bool) -> Result<PathBuf, String> {
+    let valid = !name.starts_with('.')
+        && !["", "bare", "standard"].contains(&name)
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || "_-.".contains(c));
+    if !valid {
+        return Err(format!("bad library name {name:?}"));
+    }
+    let root = config_dir.join("libraries");
+    let dest = root.join(name);
+    if dest.exists() {
+        return Err(format!("{} already exists", dest.display()));
+    }
+    // Copied whole into a hidden folder first, so a half copy is never listed.
+    let tmp = root.join(format!(".{name}.tmp"));
+    let copy = || -> std::io::Result<()> {
+        let _ = std::fs::remove_dir_all(&tmp);
+        for (rel, src) in RUNTIME {
+            let rel = match *rel {
+                "tui/bare.lua" if bare => "tui/defaults.lua",
+                _ if bare => continue,
+                "tui/api.lua" | "tui/bare.lua" => continue,
+                r if r.starts_with("core/") => continue,
+                r => r,
+            };
+            let path = tmp.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap_or(&tmp))?;
+            std::fs::write(path, src)?;
+        }
+        std::fs::rename(&tmp, &dest)
+    };
+    copy().map_err(|e| {
+        let _ = std::fs::remove_dir_all(&tmp);
+        format!("{}: {e}", dest.display())
+    })?;
+    Ok(dest)
+}
+
+/// Delete a library that is not in use: it is moved aside to a hidden
+/// `libraries/.deleted-<name>-<time>/`, returned.
+pub fn delete_tui_library(config_dir: &Path, name: &str) -> Result<PathBuf, String> {
+    if !tui_libraries(config_dir).iter().any(|n| n == name) {
+        return Err(format!("no library named {name}"));
+    }
+    if tui_library(config_dir).as_deref() == Some(name) {
+        return Err(format!("{name} is in use; switch to another first"));
+    }
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    let root = config_dir.join("libraries");
+    let to = root.join(format!(".deleted-{name}-{secs}"));
+    std::fs::rename(root.join(name), &to).map_err(|e| format!("{}: {e}", to.display()))?;
+    Ok(to)
+}
+
+/// Choose the TUI library: `standard`, `bare` or one under `libraries/`.
+pub fn set_tui_library(config_dir: &Path, name: &str) -> Result<(), String> {
+    let path = config_dir.join("library");
+    let r = match name {
+        "standard" => match std::fs::remove_file(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            r => r,
+        },
+        "bare" => std::fs::write(&path, "bare\n"),
+        _ if tui_libraries(config_dir).iter().any(|n| n == name) => {
+            std::fs::write(&path, format!("{name}\n"))
+        }
+        _ => return Err(format!("no library named {name}")),
+    };
+    r.map_err(|e| format!("{}: {e}", path.display()))
+}
+
 /// Write the embedded docs to `<config dir>/docs/`, so they always match
 /// this build. A file is only rewritten when it changed.
 pub fn write_docs(config_dir: &Path) -> std::io::Result<()> {
@@ -713,7 +830,7 @@ pub fn run_file(lua: &Lua, path: &Path) -> mlua::Result<bool> {
     Ok(true)
 }
 
-fn setup_require(lua: &Lua, config_dir: Option<&Path>) -> mlua::Result<()> {
+fn setup_require(lua: &Lua, side: Side, config_dir: Option<&Path>) -> mlua::Result<()> {
     let package: Table = lua.globals().get("package")?;
     // User modules come first, through the standard path searcher.
     if let Some(dir) = config_dir {
@@ -745,7 +862,11 @@ fn setup_require(lua: &Lua, config_dir: Option<&Path>) -> mlua::Result<()> {
     let searcher = lua.create_function(move |lua, name: String| {
         let rel = name.replace('.', "/");
         for candidate in [format!("lua/{rel}.lua"), format!("lua/{rel}/init.lua")] {
-            if let Some((src, chunk_name)) = runtime_source(dir.as_deref(), &candidate) {
+            let found = match side {
+                Side::Tui => tui_runtime_source(dir.as_deref(), &candidate),
+                _ => runtime_source(dir.as_deref(), &candidate),
+            };
+            if let Some((src, chunk_name)) = found {
                 let f = lua
                     .load(src)
                     .set_name(format!("@{chunk_name}"))

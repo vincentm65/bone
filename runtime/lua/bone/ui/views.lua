@@ -48,124 +48,7 @@ local function starts(kind, ctx)
   return { {} }
 end
 
--- ---- markdown -------------------------------------------------------------
-
-local function md_spans(spans, base)
-  local out = {}
-  for _, s in ipairs(spans) do
-    if s.code then
-      out[#out + 1] = { s.text, "MdCode" }
-    elseif s.link then
-      out[#out + 1] = { s.text, "MdLink" }
-      if s.link ~= s.text then
-        out[#out + 1] = { " <" .. s.link .. ">", "Dim" }
-      end
-    elseif s.bold then
-      out[#out + 1] = { s.text, "MdBold" }
-    elseif s.italic then
-      out[#out + 1] = { s.text, "MdItalic" }
-    else
-      out[#out + 1] = { s.text, base }
-    end
-  end
-  return out
-end
-
--- Wrap cells without losing content; stack columns when separators cannot fit.
-local function md_table(b, width, indent)
-  local w, out = {}, {}
-  for _, row in ipairs(b.rows) do
-    for c, cell in ipairs(row) do
-      local n = 0
-      for _, s in ipairs(md_spans(cell, "MdTable")) do
-        n = n + bone.text.width(s[1])
-      end
-      w[c] = math.max(w[c] or 2, n)
-    end
-  end
-  local budget = width - bone.text.width(indent) - math.max(0, #w - 1) * 3
-  local stacked = budget < #w * 2
-  if not stacked then
-    local total = 0
-    for _, n in ipairs(w) do total = total + n end
-    while total > budget do
-      local widest = 1
-      for c = 2, #w do
-        if w[c] > w[widest] then widest = c end
-      end
-      w[widest], total = w[widest] - 1, total - 1
-    end
-  end
-  for i, row in ipairs(b.rows) do
-    local hl = b.header and i == 1 and "MdTableHeader" or "MdTable"
-    local cells, height = {}, 1
-    for c = 1, #w do
-      local spans = md_spans(row[c] or {}, hl)
-      if stacked then
-        append(out, wrap(spans, width, { first = { { indent, "Normal" } }, rest = { { indent, "Normal" } } }))
-      else
-        cells[c] = wrap(spans, w[c])
-        height = math.max(height, #cells[c])
-      end
-    end
-    if stacked then
-      if i < #b.rows then out[#out + 1] = {} end
-    else
-      for r = 1, height do
-        local line = { { indent, "Normal" } }
-        for c = 1, #w do
-          local spans, n = cells[c][r] or {}, 0
-          for _, s in ipairs(spans) do n = n + bone.text.width(s[1]) end
-          local pad = math.max(0, w[c] - n)
-          local align = b.align and b.align[c]
-          local left = align == "r" and pad or align == "c" and math.floor(pad / 2) or 0
-          line[#line + 1] = { string.rep(" ", left), hl }
-          append(line, spans)
-          line[#line + 1] = { string.rep(" ", pad - left), hl }
-          if c < #w then line[#line + 1] = { " │ ", "Dim" } end
-        end
-        out[#out + 1] = line
-      end
-    end
-  end
-  return out
-end
-
---- Markdown text to lines, every row prefixed with `indent`.
-function bone.ui.markdown(text, width, indent)
-  indent = indent or ""
-  local pre = { { indent, "Normal" } }
-  local out = {}
-  for _, b in ipairs(bone.markdown.parse(text)) do
-    if b.kind == "blank" then
-      out[#out + 1] = {}
-    elseif b.kind == "heading" then
-      append(out, wrap(md_spans(b.spans, "MdHeading"), width, { first = pre, rest = pre }))
-    elseif b.kind == "rule" then
-      out[#out + 1] = { { indent, "Normal" }, { string.rep("─", math.min(width - #indent, 40)), "Dim" } }
-    elseif b.kind == "quote" then
-      local p = { { indent, "Normal" }, { "▏ ", "MdQuote" } }
-      append(out, wrap(md_spans(b.spans, "MdQuote"), width, { first = p, rest = p }))
-    elseif b.kind == "table" then
-      append(out, md_table(b, width, indent))
-    elseif b.kind == "item" then
-      local lead = string.rep(" ", b.indent)
-      local bullet = b.ordered and (b.marker .. " ") or "• "
-      local first = { { indent .. lead, "Normal" }, { bullet, "MdBullet" } }
-      local rest = { { string.rep(" ", #indent + #lead + bone.text.width(bullet)), "Normal" } }
-      append(out, wrap(md_spans(b.spans, "Normal"), width, { first = first, rest = rest }))
-    elseif b.kind == "code" then
-      local p = { { indent, "Normal" }, { "▎ ", "ToolGutter" } }
-      for _, l in ipairs(b.lines) do
-        append(out, wrap({ { l, "MdCodeBlock" } }, width, { first = p, rest = p }))
-      end
-    else
-      local first = { { indent .. string.rep(" ", b.indent), "Normal" } }
-      append(out, wrap(md_spans(b.spans, "Normal"), width, { first = first, rest = pre }))
-    end
-  end
-  return out
-end
+-- bone.ui.markdown (Markdown text to lines) is in the base API, tui/api.lua.
 
 -- ---- messages -------------------------------------------------------------
 
@@ -554,6 +437,19 @@ local function agent_content(item, ctx, args)
   end
   local status = not item.done and "running" or item.is_error and "failed" or "done"
   title[#title + 1] = { " · " .. status, item.is_error and "ToolError" or "Dim" }
+  -- Spend and time, for agents started this run.
+  local agent = require("bone.agents").for_call(item.id)
+  if agent then
+    local ms = (agent.finished_at or bone.now()) - (agent.started_at or bone.now())
+    local stats = bone.util.duration(math.max(ms, 0) / 1000)
+    if agent.tokens > 0 then
+      stats = bone.util.tokens(agent.tokens) .. " tok · " .. stats
+    end
+    title[#title + 1] = { " · " .. stats, "Dim" }
+    if not item.done then
+      bone.chat.refresh_in(1000)
+    end
+  end
 
   local report = bone.ui.markdown(trim(item.output or item.live or ""), math.max(ctx.width - 8, 1))
   local shown = (expanded() or item.is_error) and #report or math.min(#report, AGENT_PREVIEW_MAX)

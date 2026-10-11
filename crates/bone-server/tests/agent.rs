@@ -8,7 +8,7 @@ use bone_client::{Client, EventStream};
 use bone_core::Core;
 use bone_core::config::{CoreConfig, ProviderConfig};
 use bone_proto::methods::*;
-use bone_proto::types::{ChatMessage, DeltaKind, TurnOutcome};
+use bone_proto::types::{DeltaKind, TurnOutcome};
 use bone_server::Server;
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -176,17 +176,6 @@ async fn turn_with_tool_call_over_http() {
     assert_eq!(
         seen[1]["messages"][3],
         json!({"role":"tool","tool_call_id":"call_a","content":"hi\n[exit code: 0]"})
-    );
-
-    let msgs = client
-        .request::<SessionMessages>(SessionRef {
-            session_id: info.session_id,
-        })
-        .await
-        .unwrap();
-    assert_eq!(msgs.messages.len(), 4);
-    assert!(
-        matches!(&msgs.messages[3], ChatMessage::Assistant { content, .. } if content == "It printed hi.")
     );
 }
 

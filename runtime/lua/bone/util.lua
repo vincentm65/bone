@@ -111,6 +111,17 @@ function M.duration(secs)
   return s .. "s"
 end
 
+--- Compact token count: `850`, `12.3k`, `1.2m`.
+function M.tokens(n)
+  n = math.floor((n or 0) + 0.5)
+  if n >= 1000000 then
+    return string.format("%.1fm", n / 1000000)
+  elseif n >= 1000 then
+    return string.format("%.1fk", n / 1000)
+  end
+  return tostring(n)
+end
+
 --- Wall-clock time of an epoch second, e.g. `3:42 pm`.
 function M.format_time(secs)
   return os.date("%-I:%M %p", secs or os.time()):lower()

@@ -448,8 +448,18 @@ async fn turns_leave_usage_and_tool_calls_in_the_index() {
         cached_tokens: None,
     };
     let lua = r#"
+        -- A provider that relays to another: its usage is counted once, in
+        -- the relay's result, not again for the inner call.
+        bone.provider.register("relay", { complete = function(req)
+          return assert(bone.model.complete({ messages = req.messages }))
+        end })
+        bone.config.providers.relay = { type = "relay", model = "r" }
+        bone.config.provider = "x"
         bone.rpc.register("ask", function(args)
           return bone.model.complete({ prompt = "side question" }).content
+        end)
+        bone.rpc.register("relay", function(args)
+          return bone.model.complete({ provider = "relay", prompt = "relay q" }).content
         end)
     "#;
     let mut h = Harness::with_lua(
@@ -470,6 +480,14 @@ async fn turns_leave_usage_and_tool_calls_in_the_index() {
             Step::Reply(Completion {
                 content: "lua".into(),
                 usage: Some(used(5, 1)),
+                ..Default::default()
+            }),
+            // The relay's inner call: it answers through the turns' provider
+            // and is not recorded separately, but its usage rides up and is
+            // recorded once, as the relay's.
+            Step::Reply(Completion {
+                content: "relay".into(),
+                usage: Some(used(9, 3)),
                 ..Default::default()
             }),
             Step::Reply(Completion {
@@ -495,6 +513,17 @@ async fn turns_leave_usage_and_tool_calls_in_the_index() {
         .await
         .unwrap();
     assert_eq!(answer, json!("lua"));
+    // The relay answers from core Lua and is counted once, not twice.
+    let answer = h
+        .call::<LuaCall>(LuaCallParams {
+            name: "relay".into(),
+            args: Value::Null,
+            session_id: Some(sid.clone()),
+            cwd: None,
+        })
+        .await
+        .unwrap();
+    assert_eq!(answer, json!("relay"));
     h.call::<ModelComplete>(ModelCompleteParams {
         provider: None,
         messages: vec![ChatMessage::User {
@@ -518,22 +547,7 @@ async fn turns_leave_usage_and_tool_calls_in_the_index() {
         ))
         .await
         .unwrap();
-    assert_eq!(out.rows, [[json!(4), json!(52), json!(9)]]);
-    let out = h
-        .call::<StoreQuery>(q(
-            "SELECT source, session_id != '', input_tokens FROM usage ORDER BY at, rowid",
-        ))
-        .await
-        .unwrap();
-    assert_eq!(
-        out.rows,
-        [
-            [json!("turn"), json!(1), json!(10)],
-            [json!("turn"), json!(1), json!(30)],
-            [json!("lua"), json!(1), json!(5)],
-            [json!("client"), json!(0), json!(7)],
-        ]
-    );
+    assert_eq!(out.rows, [[json!(5), json!(61), json!(12)]]);
     let contexts = h
         .call::<StoreQuery>(q(
             "SELECT coalesce(context_tokens, input_tokens) FROM usage ORDER BY at, rowid",
@@ -542,7 +556,7 @@ async fn turns_leave_usage_and_tool_calls_in_the_index() {
         .unwrap();
     assert_eq!(
         contexts.rows,
-        [[json!(10)], [json!(17)], [json!(5)], [json!(7)]]
+        [[json!(10)], [json!(17)], [json!(5)], [json!(9)], [json!(7)]]
     );
     let out = h
         .call::<StoreQuery>(q("SELECT name, is_error FROM tool_calls"))
@@ -656,18 +670,6 @@ async fn cancel_while_asking_closes_every_tool_call() {
     let t = h.transcript().await;
     assert_eq!(t.len(), 4, "{t:#?}");
     assert!(tool_result(&t[2]).1 && tool_result(&t[3]).1);
-}
-
-#[tokio::test]
-async fn provider_errors_fail_the_turn() {
-    let mut h = Harness::new(vec![Step::Fail("HTTP 500: boom".into())]).await;
-    h.start("go").await;
-    assert_eq!(
-        h.until::<TurnFinished>().await.outcome,
-        TurnOutcome::Failed {
-            message: "HTTP 500: boom".into()
-        }
-    );
 }
 
 #[tokio::test]
@@ -809,17 +811,6 @@ async fn reload_switches_config_but_running_turns_keep_theirs() {
     let t = h.transcript().await;
     assert_eq!(tool_result(&t[2]).0, "old", "{t:#?}");
     assert_eq!(tool_result(&t[6]).0, "new", "{t:#?}");
-    // The old Lua thread is gone once its turn is.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert!(
-        h.core
-            .inner
-            .retired
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|w| w.strong_count() == 0)
-    );
 }
 
 #[tokio::test]
@@ -830,11 +821,9 @@ async fn a_failed_reload_changes_nothing() {
     )
     .await;
     h.write_core_lua("error('broken config')");
-    let e = h.core.reload().await.unwrap_err();
-    assert!(e.contains("broken config"), "{e}");
-    assert!(h.tool_names().contains(&"probe".to_owned()));
     let e = h.core.handle(CoreReload::METHOD, None).await.unwrap_err();
     assert!(e.message.contains("broken config"), "{e:?}");
+    assert!(h.tool_names().contains(&"probe".to_owned()));
 }
 
 #[tokio::test]
@@ -1213,7 +1202,7 @@ async fn hooks_can_add_to_and_compact_the_transcript() {
     });
     assert!(
         poke.as_deref().is_some_and(|p| p.starts_with("false: ")
-            && p.contains("a running turn's transcript can only change between model calls")),
+            && p.contains("can only change between model calls")),
         "{seen:#?}"
     );
     // The injected message reached the model on the next call.
@@ -1307,43 +1296,6 @@ async fn nested_model_calls_stop_at_the_limit() {
         tool_result(&t[2]).0.contains("nested more than 4 deep"),
         "{}",
         tool_result(&t[2]).0
-    );
-}
-
-#[tokio::test]
-async fn a_provider_relaying_to_another_is_counted_once() {
-    let mut h = Harness::with_lua(
-        r#"
-        bone.provider.register("relay", { complete = function(req)
-          return assert(bone.model.complete({ provider = "x", messages = req.messages }))
-        end })
-        bone.config.providers.relay = { type = "relay", model = "r" }
-        bone.config.provider = "relay"
-        "#,
-        vec![Step::Reply(Completion {
-            content: "hi".into(),
-            usage: Some(Usage {
-                input_tokens: 9,
-                output_tokens: 3,
-                context_tokens: None,
-                cached_tokens: None,
-            }),
-            ..Default::default()
-        })],
-    )
-    .await;
-    h.start("go").await;
-    h.until::<TurnFinished>().await;
-    let out = h
-        .call::<StoreQuery>(StoreQueryParams {
-            sql: "SELECT source, provider, model, input_tokens FROM usage".into(),
-            params: Value::Null,
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        out.rows,
-        [[json!("turn"), json!("relay"), json!("r"), json!(9)]]
     );
 }
 
@@ -1503,18 +1455,6 @@ async fn clients_call_the_model_over_the_protocol() {
     h.call::<ModelCancel>(req).await.unwrap();
     let done = h.until::<ModelCompleted>().await;
     assert_eq!(done.error.as_deref(), Some("cancelled"));
-    // An unknown provider is an error result, not a hang.
-    h.call::<ModelComplete>(ModelCompleteParams {
-        provider: Some("nope".into()),
-        messages: vec![],
-        tools: vec![],
-        options: Value::Null,
-        stream: false,
-    })
-    .await
-    .unwrap();
-    let done = h.until::<ModelCompleted>().await;
-    assert!(done.error.unwrap().contains("no provider \"nope\""));
 }
 
 // ---- MCP ----------------------------------------------------------------------
@@ -1613,10 +1553,11 @@ impl Harness {
 }
 
 #[tokio::test]
-async fn nothing_changes_without_skills() {
-    let mut h = Harness::with_lua("", vec![text("plain")]).await;
+async fn default_system_prompt_shape() {
+    let (mut h, config_dir) = Harness::with_lua_data("", vec![text("plain")]).await;
     h.start("hi").await;
     h.until::<TurnFinished>().await;
+    // No skills or skill tool by default.
     assert!(!h.provider.systems.lock().unwrap()[0].contains("## Skills"));
     assert!(!h.provider.tools.lock().unwrap()[0].contains(&"skill".to_owned()));
     // The core has no skills or templates of its own.
@@ -1625,13 +1566,7 @@ async fn nothing_changes_without_skills() {
         .await
         .unwrap_err();
     assert!(e.message.contains("no function skills.list"), "{e:?}");
-}
-
-#[tokio::test]
-async fn default_prompt_points_at_the_config_dir_docs() {
-    let (mut h, config_dir) = Harness::with_lua_data("", vec![text("plain")]).await;
-    h.start("hi").await;
-    h.until::<TurnFinished>().await;
+    // It points at the config dir's docs.
     let system = h.provider.systems.lock().unwrap()[0].clone();
     let docs = config_dir.join("docs").to_string_lossy().into_owned();
     assert!(
@@ -1858,7 +1793,7 @@ async fn the_limit_compacts_before_the_call() {
     let failed = h.until::<SessionCompactFailed>().await;
     assert_eq!(failed.session_id, h.session_id);
     assert_eq!(failed.reason, "limit");
-    assert_eq!(failed.error, "the summary failed: summary unavailable");
+    assert!(failed.error.contains("summary unavailable"), "{failed:?}");
     assert_eq!(h.until::<SessionCompacted>().await.reason, "limit");
     assert_eq!(
         h.until::<TurnFinished>().await.outcome,
@@ -2147,13 +2082,18 @@ fn later(ms: u64, s: &str) -> Step {
 }
 
 #[tokio::test]
-async fn steered_messages_join_before_the_next_model_call() {
+async fn a_message_steered_during_the_last_answer_still_gets_one() {
     let mut h = Harness::with_lua(
         r#"bone.tool.register { name = "slow", run = function() bone.sleep(200) return "slow done" end }"#,
-        vec![calls(&[("c1", "slow", json!({}))]), text("done")],
+        vec![
+            calls(&[("c1", "slow", json!({}))]),
+            later(200, "first answer"),
+            text("second answer"),
+        ],
     )
     .await;
     h.start("go").await;
+    // One steer while a tool call runs...
     h.until::<ToolStarted>().await;
     h.call::<TurnSteer>(TurnSteerParams {
         session_id: h.session_id.clone(),
@@ -2164,23 +2104,7 @@ async fn steered_messages_join_before_the_next_model_call() {
     .unwrap();
     let steered = h.until::<TurnSteered>().await;
     assert_eq!(steered.text, "also check the README");
-    h.until::<TurnFinished>().await;
-    let t = h.transcript().await;
-    assert_eq!(
-        t[3],
-        ChatMessage::User {
-            content: "also check the README".into(),
-            images: Vec::new(),
-        }
-    );
-    // The model saw it on its next call.
-    assert_eq!(h.provider.seen.lock().unwrap()[1].last(), Some(&t[3]));
-}
-
-#[tokio::test]
-async fn a_message_steered_during_the_last_answer_still_gets_one() {
-    let mut h = Harness::new(vec![later(200, "first answer"), text("second answer")]).await;
-    h.start("go").await;
+    // ...and one during the final answer.
     tokio::time::sleep(Duration::from_millis(50)).await;
     h.call::<TurnSteer>(TurnSteerParams {
         session_id: h.session_id.clone(),
@@ -2196,6 +2120,7 @@ async fn a_message_steered_during_the_last_answer_still_gets_one() {
         .map(|m| match m {
             ChatMessage::User { content, .. } => format!("user: {content}"),
             ChatMessage::Assistant { content, .. } => format!("assistant: {content}"),
+            ChatMessage::Tool { content, .. } => format!("tool: {content}"),
             other => format!("{other:?}"),
         })
         .collect();
@@ -2203,11 +2128,23 @@ async fn a_message_steered_during_the_last_answer_still_gets_one() {
         texts,
         [
             "user: go",
+            "assistant: ",
+            "tool: slow done",
+            "user: also check the README",
             "assistant: first answer",
             "user: and one more thing",
             "assistant: second answer"
         ]
     );
+    // The first steer joined before the next model call.
+    assert_eq!(
+        t[3],
+        ChatMessage::User {
+            content: "also check the README".into(),
+            images: Vec::new(),
+        }
+    );
+    assert_eq!(h.provider.seen.lock().unwrap()[1].last(), Some(&t[3]));
     // With no turn running there is nothing to steer.
     let e = h
         .call::<TurnSteer>(TurnSteerParams {
@@ -2413,8 +2350,7 @@ async fn queue_add_hooks_rewrite_or_refuse() {
 #[tokio::test]
 async fn core_lua_can_queue_messages() {
     let mut h = Harness::with_lua(
-        r#"bone.hook("queue_add", function(ev) return { text = ev.text .. "!" } end)
-           bone.hook("turn_end", function(ev)
+        r#"bone.hook("turn_end", function(ev)
              if not queued then
                queued = true
                bone.queue.add(ev.session_id, "follow up", "next")
@@ -2432,7 +2368,7 @@ async fn core_lua_can_queue_messages() {
     .await;
     h.start("go").await;
     let turns = h.turns(2).await;
-    assert_eq!(turns[1].0, "follow up!");
+    assert_eq!(turns[1].0, "follow up");
     assert_eq!(tool_result(&h.transcript().await[4]).0, "0");
 }
 

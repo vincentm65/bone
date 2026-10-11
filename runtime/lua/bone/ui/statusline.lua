@@ -10,19 +10,8 @@ local function elapsed(secs)
   return bone.util.duration(secs)
 end
 
-local function tokens(n)
-  if not n then
-    return "0"
-  end
-  n = math.floor(n + 0.5)
-  if n >= 1000000 then
-    return string.format("%.1fm", n / 1000000)
-  end
-  if n >= 1000 then
-    return string.format("%.1fk", n / 1000)
-  end
-  return tostring(n)
-end
+local tokens = bone.util.tokens
+local agents = require("bone.agents")
 
 local function items_width(items)
   local w = 0
@@ -125,6 +114,11 @@ function bone.ui.statusline(ctx)
   left[#left + 1] = { "curr " .. tokens(state.total.curr), "StatusLineDim" }
   left[#left + 1] = { "total " .. tokens(state.total.input + state.total.output), "StatusLineDim" }
   left[#left + 1] = { "cache " .. (state.total.input > 0 and string.format("%.0f%%", state.total.cached / state.total.input * 100) or "0%"), "StatusLineDim" }
+  -- Sub-agents' spend this run (their own sessions, so not in total).
+  local spent = session_id and agents.spend(agents.top(session_id)) or 0
+  if spent > 0 then
+    left[#left + 1] = { "agents " .. tokens(spent), "StatusLineDim" }
+  end
   local t = session_id and state.turns[session_id]
   if s and s.running then
     left[#left + 1] = { (ctx.spinner or "") .. " thinking" .. (s.elapsed and (" " .. elapsed(s.elapsed)) or ""), "StatusLine" }

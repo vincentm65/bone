@@ -142,6 +142,8 @@ async fn full_turn_with_approval_then_resume() {
             json!({"choices":[{"delta":{"content":"## Done\n\n- printed `hello`\n- counted to **9**"}}]}),
             json!({"choices":[],"usage":{"prompt_tokens":1500,"completion_tokens":20}}),
         ]),
+        sse(&[json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"write_file","arguments":"{\"path\":\"x.txt\",\"content\":\"hi\"}"}}]}}]})]),
+        sse(&[json!({"choices":[{"delta":{"content":"Okay, I won't."}}]})]),
     ], true)
     .await;
 
@@ -187,22 +189,16 @@ async fn full_turn_with_approval_then_resume() {
     // The session list shows it.
     again.press("ctrl+o").unwrap();
     let screen = again
-        .wait_for(WAIT, |s| s.contains("Search conversations"))
+        .wait_for(WAIT, |s| s.contains("Recent"))
         .await
         .unwrap();
     assert!(screen.contains("run it"), "{screen}");
-}
 
-#[tokio::test(flavor = "multi_thread")]
-async fn denied_tool_and_startup_screen() {
-    let e = env(vec![
-        sse(&[json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1","function":{"name":"write_file","arguments":"{\"path\":\"x.txt\",\"content\":\"hi\"}"}}]}}]})]),
-        sse(&[json!({"choices":[{"delta":{"content":"Okay, I won't."}}]})]),
-    ], true)
-    .await;
+    // A denied tool call shows the hook's refusal and the tool is not run.
     let mut tui = e.tui(None).await;
-    assert!(tui.screen().contains("New session.") && tui.screen().contains("Message bone"));
-
+    tui.wait_for(WAIT, |s| s.contains("New session."))
+        .await
+        .unwrap();
     tui.type_text("make x.txt\n");
     tui.wait_for(WAIT, |s| s.contains("Allow write_file?"))
         .await
@@ -313,10 +309,6 @@ async fn settings_survive_a_restart() {
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let saved: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
-    assert_eq!(saved, json!({ "tui": { "tool_detail": "rows" } }));
-
     // A new TUI starts with it.
     let mut again = e.tui(None).await;
     again

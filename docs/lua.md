@@ -1024,7 +1024,7 @@ Each returns one line (`"%="` is a blank stretch); the row exists only while the
 #### Helpers
 
 - `bone.markdown.parse(text)` → blocks: `{ kind = "heading", level, spans }`, `"paragraph"` / `"item"` (`indent`, and for items `marker`, `ordered`), `"quote"`, `"code"` (`lang`, `lines`), `"rule"`, `"blank"`. Spans are `{ text, bold?, italic?, code?, link? }`.
-- `bone.ui.markdown(text, width, indent)` → the standard UI's rendering of that, as lines.
+- `bone.ui.markdown(text, width, indent)` → that rendered as lines (part of the API, so it works under any TUI library).
 - `bone.text.wrap(spans, width, { first, rest, pad })` → lines. `first`/`rest` prefix the first and following rows (`rest` defaults to blanks as wide as `first`); `pad = "Group"` fills each row to the width (background bands).
 - `bone.text.clip(spans, width)`, `bone.text.truncate(s, n)`, `bone.text.width(s)`.
 - `bone.text.shell(cmd)` → the command as highlighted spans.

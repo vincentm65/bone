@@ -119,6 +119,17 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
     let mut last_draw = Instant::now() - FRAME;
 
     while app.quit.is_none() {
+        if std::mem::take(&mut app.reload_requested) {
+            let prev = app.library_prev.take();
+            // A library that does not load is not kept as the choice.
+            if !app.reload_user_config()
+                && let (Some(prev), Some(dir)) = (prev, app.config_dir.clone())
+            {
+                let _ = bone_lua::set_tui_library(&dir, &prev);
+            }
+            lua_pending = None;
+            lua_state = lua_snapshot(app.config_dir.as_deref(), watched_project.as_deref());
+        }
         let draw_at = if app.dirty {
             Some((last_draw + FRAME).max(Instant::now()))
         } else if app.animating() {
@@ -273,7 +284,9 @@ fn side_of(rel: &Path) -> Watched {
         all => all,
     };
     match parts {
-        ["tui.lua"] | ["tui", ..] | ["colors", ..] => Watched::Tui,
+        ["tui.lua"] | ["tui", ..] | ["colors", ..] | ["library"] | ["libraries", ..] => {
+            Watched::Tui
+        }
         ["core.lua"] | ["core", ..] => Watched::Core,
         _ => Watched::Both,
     }
@@ -291,7 +304,7 @@ fn lua_snapshot(dir: Option<&Path>, project: Option<&Path>) -> LuaSources {
     let mut files = Vec::new();
     // Only where Lua is loaded from: the config dir also holds sessions
     // and other data that would be walked on every poll.
-    for name in ["tui.lua", "core.lua"] {
+    for name in ["tui.lua", "core.lua", "library"] {
         let path = dir.join(name);
         if path.is_file() {
             files.push(path);
@@ -299,6 +312,10 @@ fn lua_snapshot(dir: Option<&Path>, project: Option<&Path>) -> LuaSources {
     }
     for sub in ["lua", "runtime", "colors"] {
         collect_lua_files(&dir.join(sub), &mut files);
+    }
+    // Only the library in use.
+    if let Some(name) = bone_lua::tui_library(dir) {
+        collect_lua_files(&dir.join("libraries").join(name), &mut files);
     }
     // Only the plugins that load (not `_name` or `.name`).
     for plugin in bone_lua::plugins(dir) {

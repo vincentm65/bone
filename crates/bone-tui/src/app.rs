@@ -275,6 +275,10 @@ pub struct App {
     pub load_failures: Vec<String>,
     /// Reload the core when its Lua files change (see `RunOptions`).
     pub reload_core: bool,
+    /// Reload the TUI's Lua from the main loop (a library was chosen).
+    pub reload_requested: bool,
+    /// The library before `/tui` switched, chosen again if the switch fails.
+    pub library_prev: Option<String>,
 }
 
 impl App {
@@ -361,6 +365,8 @@ impl App {
             load_errors: Some(Vec::new()),
             load_failures: Vec::new(),
             reload_core: false,
+            reload_requested: false,
+            library_prev: None,
         };
         crate::lua::init(&mut app, config_dir);
         app.dirty = true;
@@ -1506,6 +1512,12 @@ impl App {
             })
         };
         let mut out = Vec::new();
+        let library = self.config_dir.as_deref().and_then(bone_lua::tui_library);
+        out.push(item(
+            "library",
+            "ok",
+            library.unwrap_or_else(|| "standard".into()) + " (/tui switches)",
+        ));
         let term = env("TERM").unwrap_or_else(|| "unset".into());
         let tmux = env("TMUX").is_some();
         out.push(item(

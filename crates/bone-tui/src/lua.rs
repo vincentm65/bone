@@ -108,9 +108,28 @@ pub fn init(app: &mut App, config_dir: Option<PathBuf>) {
         }
     };
     app.lua = Some(lua);
-    for rel in ["tui/api.lua", "tui/defaults.lua"] {
+    // Bare loads its own small file in place of the standard UI's.
+    let bare = config_dir
+        .as_deref()
+        .and_then(bone_lua::tui_library)
+        .as_deref()
+        == Some("bare");
+    let files = [
+        "tui/api.lua",
+        if bare {
+            "tui/bare.lua"
+        } else {
+            "tui/defaults.lua"
+        },
+    ];
+    for rel in files {
         let dir = config_dir.clone();
-        if let Err(e) = app.with_api(|lua| bone_lua::run_runtime(lua, dir.as_deref(), rel)) {
+        let r = app.with_api(|lua| {
+            let (src, name) = bone_lua::tui_runtime_source(dir.as_deref(), rel)
+                .ok_or_else(|| mlua::Error::runtime(format!("missing runtime file {rel}")))?;
+            lua.load(src).set_name(format!("@{name}")).exec()
+        });
+        if let Err(e) = r {
             app.lua_error(&format!("runtime/{rel}"), &e);
         }
     }
@@ -738,6 +757,11 @@ impl App {
             // Saved settings, after the defaults and plugins (which define
             // the options) and before tui.lua, which runs last.
             self.apply_tui_settings(None);
+            // Bare is the plain UI: tui.lua and the project's would build
+            // a full one on top of it.
+            if bone_lua::tui_library(&dir).as_deref() == Some("bare") {
+                return;
+            }
             let path = dir.join("tui.lua");
             if let Err(e) = self.with_api(|lua| bone_lua::run_file(lua, &path)) {
                 self.lua_error(&path.display().to_string(), &e);
@@ -757,6 +781,13 @@ impl App {
         else {
             return;
         };
+        // Bare defines none of the standard options these may be saved for.
+        let bare = self
+            .config_dir
+            .as_deref()
+            .and_then(bone_lua::tui_library)
+            .as_deref()
+            == Some("bare");
         for (name, value) in tui {
             if only.is_some_and(|o| o != name) {
                 continue;
@@ -766,6 +797,9 @@ impl App {
                 o.set(name.as_str(), to_lua(lua, &value)?)
             });
             if let Err(e) = r {
+                if bare && short_error(&e).contains("unknown option") {
+                    continue;
+                }
                 self.lua_error(&format!("settings.json tui.{name}"), &e);
             }
         }
@@ -796,7 +830,7 @@ impl App {
     /// is shown. On success the old state's shutdown hooks run and it is
     /// dropped. The session, prompt, chats and options' values are Rust's
     /// and stay.
-    pub fn reload_user_config(&mut self) {
+    pub fn reload_user_config(&mut self) -> bool {
         // The new state reads plugin state from disk, so write it first.
         self.save_plugin_states(None);
         self.carried_options = self
@@ -836,7 +870,7 @@ impl App {
             self.error(format!(
                 "Lua reload failed, kept the previous configuration. {context}: {message}"
             ));
-            return;
+            return false;
         }
         self.load_failures = errors.iter().map(failure_key).collect();
         // The old state's shutdown hooks run on it, just before it goes.
@@ -845,6 +879,7 @@ impl App {
         let old = self.swap_lua_side(new);
         self.retire_lua_side(old);
         self.info("Lua configuration reloaded");
+        true
     }
 
     /// Load a colorscheme: `<config dir>/colors/<name>.lua`, a plugin's
@@ -867,7 +902,7 @@ impl App {
                     .ok()
                     .map(|s| (s, p.display().to_string()))
             })
-            .or_else(|| bone_lua::runtime_source(dir.as_deref(), &rel))
+            .or_else(|| bone_lua::tui_runtime_source(dir.as_deref(), &rel))
             .ok_or_else(|| format!("no colorscheme named {name}"))?;
         self.theme.reset();
         self.with_api(|lua| lua.load(src).set_name(format!("@{chunk}")).exec())
@@ -2433,6 +2468,41 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             let backup = dir.join("runtime-backup").join(&stamp);
             let to = bone_lua::reset_runtime_file(&dir, &rel, &backup).map_err(err)?;
             ret(lua, to.to_string_lossy().into_owned())
+        }
+        "library_info" => {
+            let dir = app.config_dir.as_deref();
+            let info = serde_json::json!({
+                "active": dir.and_then(bone_lua::tui_library).unwrap_or_else(|| "standard".into()),
+                "custom": dir.map(bone_lua::tui_libraries).unwrap_or_default(),
+                "dir": dir.map(|d| d.join("libraries").to_string_lossy().into_owned()),
+            });
+            ret(lua, to_lua(lua, &info)?)
+        }
+        "library_create" | "library_delete" => {
+            let (name, from): (String, Option<String>) = args(lua, a)?;
+            let dir = app
+                .config_dir
+                .clone()
+                .ok_or_else(|| err("there is no config directory"))?;
+            let path = if op == "library_create" {
+                bone_lua::create_tui_library(&dir, &name, from.as_deref() == Some("bare"))
+            } else {
+                bone_lua::delete_tui_library(&dir, &name)
+            };
+            ret(lua, path.map_err(err)?.to_string_lossy().into_owned())
+        }
+        "library_use" => {
+            let name: String = args(lua, a)?;
+            let dir = app
+                .config_dir
+                .clone()
+                .ok_or_else(|| err("there is no config directory"))?;
+            let prev = bone_lua::tui_library(&dir).unwrap_or_else(|| "standard".into());
+            bone_lua::set_tui_library(&dir, &name).map_err(err)?;
+            app.library_prev = Some(prev);
+            // Not from inside this callback: the reload replaces its state.
+            app.reload_requested = true;
+            ret(lua, ())
         }
         "chat_at" => {
             let (x, y): (u16, u16) = args(lua, a)?;

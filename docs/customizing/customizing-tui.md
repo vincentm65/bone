@@ -222,6 +222,23 @@ Helpers: `bone.text.wrap(spans, width, { first, rest, pad })`,
 `bone.text.clip`, `bone.text.truncate`, `bone.text.width`,
 `bone.text.shell(cmd)` (highlighted command spans), `bone.strwidth(s)`.
 
+## TUI libraries (/tui)
+
+`/tui` picks the library the TUI loads in place of the standard UI:
+
+- **standard**: the full UI. Most people never change this.
+- **bare**: plain chat and prompt, the basic keys and every command. It
+  skips `~/.bone/tui.lua` and the project's.
+- **your copies**, in `~/.bone/libraries/NAME/`: `/tui create NAME` copies
+  standard's files, `/tui create NAME bare` starts from bare instead. Edit
+  them (saves reload live), then `/tui use NAME`. A file a copy lacks is
+  the built-in one; `tui.lua` and plugins still run on top.
+
+`/tui delete NAME` moves a copy you are not using to
+`libraries/.deleted-NAME-…/`. A switch that fails to load keeps the UI you
+had. If a copy breaks so badly `/tui` is gone, delete `~/.bone/library` to
+go back to standard. Plugins work in every library.
+
 ## Overriding the runtime
 
 The default look is `runtime/lua/bone/ui/` (views, statusline, layout,

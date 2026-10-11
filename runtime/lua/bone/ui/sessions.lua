@@ -2,7 +2,8 @@
 local M = {}
 local panel, state
 local live, touched, versions = {}, {}, {}
-local shells, subagents = {}, {}
+local shells = {}
+local agents = require("bone.agents")
 local empty_row = {}
 local archived = bone.state.load("sessions-archived")
 -- Set bone.ui.sessions_recent_seconds in tui.lua; read each frame for live changes.
@@ -59,26 +60,21 @@ function M.archive_current(id)
   bone.state.save("sessions-archived", archived)
   if state then state.filter_dirty = true end
 end
--- The chat a session belongs to: itself, or the one that started its sub-agent.
-local function chat_of(id)
-  while subagents[id] do id = subagents[id].owner end
-  return id
-end
-
 local function jobs()
   local out = {}
   for _, p in pairs(shells) do
     out[#out + 1] = { key = "shell:" .. p.id, shell = p, session_id = p.session_id,
       title = "$ " .. (p.command or p.id), detail = p.tail or "", started = math.floor((p.started_at_ms or 0) / 1000) }
   end
-  for id, a in pairs(subagents) do
+  for _, a in ipairs(agents.list()) do
+    local id = a.id
     if live[id] then
       touched[id] = touched[id] or os.time()
       out[#out + 1] = { key = "agent:" .. id, session_id = id, title = a.name .. " · " .. (a.title or "sub-agent"),
         detail = "running", started = touched[id] }
     end
   end
-  for _, j in ipairs(out) do j.chat = chat_of(j.session_id) end
+  for _, j in ipairs(out) do j.chat = agents.top(j.session_id) end
   table.sort(out, function(a, b)
     if a.chat ~= b.chat then return a.chat < b.chat end
     if a.started ~= b.started then return a.started < b.started end
@@ -372,7 +368,7 @@ local function refresh_list(st, p)
     st.all = {}
     for _, s in ipairs(list or {}) do
       if s.owner then
-        subagents[s.session_id] = { owner = s.owner.session_id, name = s.owner.name or "agent", title = s.title }
+        agents.add(s)
       else
         st.all[#st.all + 1] = s
       end
@@ -473,11 +469,7 @@ bone.on("turn/finished", function(ev) turn_changed(ev, false) end)
 local function running_changed()
   if panel and panel:is_open() and state.page == "running" then state.filter_dirty = true end
 end
-bone.on("session/created", function(info)
-  local o = info.owner
-  if o then
-    subagents[info.session_id] = { owner = o.session_id, name = o.name or "agent", title = info.title }
-  end
+bone.on("session/created", function()
   if panel and panel:is_open() then refresh_list(state, panel) end
 end)
 -- Background shells run in pseudo-terminals; foreground ones are tool calls.
@@ -496,7 +488,7 @@ bone.on("session/updated", function()
   if panel and panel:is_open() then refresh_list(state, panel) end
 end)
 bone.on("session/deleted", function(ev)
-  live[ev.session_id], touched[ev.session_id], subagents[ev.session_id] = nil, nil, nil
+  live[ev.session_id], touched[ev.session_id] = nil, nil
   for id, proc in pairs(shells) do
     if proc.session_id == ev.session_id then shells[id] = nil end
   end
