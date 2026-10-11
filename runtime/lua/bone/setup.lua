@@ -202,6 +202,10 @@ function M.open(opts)
       out[#out + 1] = "   Welcome to bone. It needs a model provider to talk to: a server on this"
       out[#out + 1] = "   machine, or a hosted service. This sets one up (saved in ~/.bone/settings.json;"
       out[#out + 1] = "   your core.lua is not touched) and can install plugins from the catalog."
+      out[#out + 1] = ""
+      out[#out + 1] = "   Customize the TUI: edit ~/.bone/tui.lua for simple changes, or run"
+      out[#out + 1] = "   /tui create personal then /tui use personal for a full editable copy."
+      out[#out + 1] = "   Changes under ~/.bone reload automatically."
       hint = "enter start · esc " .. (opts.first_run and "not now (/setup later)" or "close")
     elseif st.step == "applying" or st.step == "done" then
       for _, l in ipairs(st.log) do

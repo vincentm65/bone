@@ -139,9 +139,12 @@ local function use_library(name)
   if not ok then
     return bone.notify(error_text(e), "error")
   end
-  if name == "bare" then
-    bone.notify("Switching to bare: the plain UI, without your tui.lua. /tui switches back.")
-  end
+  local info = bone.library.info()
+  local where = info.active == "standard" and "built into Bone"
+    or info.active == "bare" and "built into Bone (plain UI)"
+    or (info.dir .. "/" .. info.active)
+  bone.notify(("Using TUI library: %s\nLocation: %s\nAutoreload: %s"):format(
+    info.active, where, bone.o.autoreload and "enabled" or "disabled"))
 end
 
 cmd("tui", function(c)
@@ -175,7 +178,7 @@ cmd("tui", function(c)
   if sub == "delete" then
     return bone.notify(("Deleted %s (moved to %s)."):format(new, out))
   end
-  bone.notify(("Created %s. Edit it, then /tui use %s."):format(out, new))
+  bone.notify(("Created %s.\nEdit: %s\nActivate with: /tui use %s"):format(new, out, new))
 end, {
   desc = "the TUI library: standard, bare or your copies; /tui use|create|delete NAME",
   complete = function(ctx)

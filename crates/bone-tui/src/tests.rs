@@ -5045,6 +5045,31 @@ async fn history_sidebar_spans_screen_and_keeps_composer_beside_it() {
 }
 
 #[tokio::test]
+async fn session_sidebar_background_fills_both_tabs() {
+    let mut h = Harness::new().await;
+    h.lua("bone.ui.sessions_background = (bone.hl.get('InputBackground') or {}).bg").await;
+    h.input("{ctrl+o}").await;
+    for processes in [false, true] {
+        if processes {
+            h.input("{ctrl+o}{tab}{esc}").await;
+        } else {
+            h.input("{esc}").await;
+        }
+        let mut term = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        term.draw(|f| render::draw(f, &mut h.app)).unwrap();
+        let sidebar = h.app.panel("sessions").unwrap().area.unwrap();
+        let buf = term.backend().buffer();
+        let grey = h.app.theme.hl("InputBackground").bg;
+        for y in sidebar.y..sidebar.bottom() {
+            for x in sidebar.x..sidebar.right() {
+                assert_eq!(buf[(x, y)].style().bg, grey, "cell ({x}, {y})");
+            }
+        }
+        assert_ne!(buf[(sidebar.right() + 1, 0)].style().bg, grey);
+    }
+}
+
+#[tokio::test]
 async fn statusline_keeps_each_sessions_timing_across_switches() {
     let mut h = Harness::new().await;
     h.lua("bone._standard_status.turns.a = { started = os.time() - 65, finished = os.time() }; line = function(s) local o = {} for _, it in ipairs(bone.ui.statusline({session = s, width = 120})) do o[#o + 1] = type(it) == 'table' and it[1] or it end return table.concat(o) end").await;

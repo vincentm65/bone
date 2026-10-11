@@ -40,12 +40,16 @@ local function setup_colors()
   -- Derive from the theme, so this also works with custom colorschemes.
   local normal, dim, selection = bone.hl.get("Normal") or {}, bone.hl.get("Dim") or {}, bone.hl.get("Selection") or {}
   local accent, warn = bone.hl.get("Accent") or {}, bone.hl.get("WarningMsg") or {}
+  local background = bone.ui.sessions_background or "#202020"
+  bone.hl.set("SessionBackground", { fg = normal.fg, bg = background })
+  bone.hl.set("SessionDim", { fg = dim.fg, bg = background })
+  bone.hl.set("SessionAccent", { fg = accent.fg, bg = background, bold = true })
   -- The selected card: an accent title on the selection background.
   bone.hl.set("SessionCardTitle", { fg = accent.fg, bg = selection.bg, bold = true })
   bone.hl.set("SessionCardMeta", { fg = dim.fg, bg = selection.bg })
-  bone.hl.set("SessionTab", { fg = normal.fg, bold = true })
-  bone.hl.set("SessionTabLine", { fg = accent.fg })
-  bone.hl.set("SessionCount", { fg = warn.fg or accent.fg })
+  bone.hl.set("SessionTab", { fg = normal.fg, bg = background, bold = true })
+  bone.hl.set("SessionTabLine", { fg = accent.fg, bg = background })
+  bone.hl.set("SessionCount", { fg = warn.fg or accent.fg, bg = background })
 end
 
 local function activity(s)
@@ -269,6 +273,7 @@ local function render(ctx)
   local current = (bone.chat.session() or {}).session_id
   -- Rust clamps scrolling after the callback; format that same clamped viewport.
   local top = math.min(ctx.top, math.max(0, #out - ctx.height))
+  local styles = { Normal = "SessionBackground", Dim = "SessionDim", Accent = "SessionAccent" }
   for line = math.max(1, top + 1), math.min(#out, top + ctx.height) do
     local descriptor = state.descriptors[line]
     local kind, index = descriptor[1], descriptor[2]
@@ -324,12 +329,22 @@ local function render(ctx)
         formatted = card("   " .. timestamp(state.activities[s.session_id]) .. "  ·  " .. totals, active and "SessionCardMeta" or "Dim")
       end
     end
+    for _, span in ipairs(formatted) do
+      if span.hl then span.hl = styles[span.hl] or span.hl
+      else span[2] = styles[span[2]] or span[2] end
+    end
     out[line] = formatted
     state.visible_rows[#state.visible_rows + 1] = line
   end
   -- Animate runs, or refresh idle timestamps and age-based grouping each minute.
   if bone.ui.refresh_in then
     bone.ui.refresh_in(state.running and ((bone.ui.spinner and bone.ui.spinner.interval) or 120) or (60 - os.time() % 60) * 1000)
+  end
+  -- Fill unused viewport rows without adding padding to the scrollable content.
+  if #out < ctx.height then
+    local padded = {}
+    for i = 1, ctx.height do padded[i] = out[i] or row("", "SessionBackground") end
+    return padded
   end
   return out
 end
