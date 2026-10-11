@@ -12,6 +12,9 @@ serde_json.workspace = true
 sha2 = "0.10"
 tokio = { workspace = true, features = ["io-util", "process", "time"] }
 
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
 [build-dependencies]
 cc = "1"
 

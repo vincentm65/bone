@@ -1,10 +1,11 @@
 //! The `bone` binary in headless mode, over stdio and a Unix socket.
+#![cfg_attr(not(unix), allow(unused_imports))]
 
 use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use bone_client::{Client, connect_unix, spawn};
+use bone_client::{Client, connect, spawn};
 use bone_proto::methods::{Echo, EchoParams, Echoed, SessionCreate, SessionList};
 use tokio::process::Command;
 use tokio::time::{sleep, timeout};
@@ -20,6 +21,7 @@ fn bone(data: &Path) -> Command {
     cmd
 }
 
+#[cfg(unix)]
 async fn wait_for(path: &Path) {
     for _ in 0..100 {
         if path.exists() {
@@ -75,6 +77,7 @@ async fn stdio_exits_when_stdin_closes() {
     assert!(status.success(), "{status}");
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn socket_serves_many_clients_and_cleans_up() {
     let data = tempfile::tempdir().unwrap();
@@ -86,8 +89,8 @@ async fn socket_serves_many_clients_and_cleans_up() {
         .unwrap();
     wait_for(&sock).await;
 
-    let (a, _a_events) = Client::new(connect_unix(&sock).await.unwrap());
-    let (b, mut b_events) = Client::new(connect_unix(&sock).await.unwrap());
+    let (a, _a_events) = Client::new(connect(&sock).await.unwrap());
+    let (b, mut b_events) = Client::new(connect(&sock).await.unwrap());
     a.initialize("a").await.unwrap();
     b.initialize("b").await.unwrap();
     a.request::<Echo>(EchoParams { text: "hi".into() })
@@ -128,6 +131,7 @@ async fn socket_serves_many_clients_and_cleans_up() {
     assert!(!sock.exists());
 }
 
+#[cfg(unix)]
 #[tokio::test]
 async fn stale_socket_is_replaced() {
     let data = tempfile::tempdir().unwrap();
@@ -142,7 +146,7 @@ async fn stale_socket_is_replaced() {
         .unwrap();
     let conn = timeout(Duration::from_secs(5), async {
         loop {
-            if let Ok(c) = connect_unix(&sock).await {
+            if let Ok(c) = connect(&sock).await {
                 return c;
             }
             sleep(Duration::from_millis(50)).await;

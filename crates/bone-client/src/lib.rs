@@ -1,6 +1,6 @@
 //! Client for a bone server over any [`Connection`].
 //!
-//! Get a connection from [`connect_unix`], [`spawn`] (a headless server as a
+//! Get a connection from [`connect`], [`spawn`] (a headless server as a
 //! child process over its stdio), or a server's in-process transport.
 //!
 //! [`Client::new`] splits a connection into a request handle and an
@@ -140,11 +140,30 @@ impl Client {
     }
 }
 
-/// Connect to a server listening on a Unix socket.
-pub async fn connect_unix(path: impl AsRef<std::path::Path>) -> std::io::Result<Connection> {
-    let stream = tokio::net::UnixStream::connect(path).await?;
-    let (r, w) = stream.into_split();
+/// Connect to a server started with `--listen`: a Unix socket, or on
+/// Windows a named pipe.
+pub async fn connect(path: impl AsRef<std::path::Path>) -> std::io::Result<Connection> {
+    #[cfg(unix)]
+    let (r, w) = tokio::net::UnixStream::connect(path).await?.into_split();
+    #[cfg(windows)]
+    let (r, w) = tokio::io::split(open_pipe(path.as_ref()).await?);
     Ok(bone_proto::transport::framed(r, w))
+}
+
+/// Open a named pipe, waiting while every instance is busy.
+#[cfg(windows)]
+async fn open_pipe(
+    path: &std::path::Path,
+) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeClient> {
+    const ERROR_PIPE_BUSY: i32 = 231;
+    loop {
+        match tokio::net::windows::named_pipe::ClientOptions::new().open(path) {
+            Err(e) if e.raw_os_error() == Some(ERROR_PIPE_BUSY) => {
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            }
+            r => return r,
+        }
+    }
 }
 
 /// Start `cmd` (e.g. `bone --headless`) and talk to it over its stdin/stdout.

@@ -26,10 +26,8 @@ pub async fn run(spec: Json) -> Result<Json, String> {
 /// `{ code, stdout, stderr }`; on timeout the process is killed and
 /// `timed_out = true` (code nil).
 async fn system(cmd: &str, spec: &Json) -> Result<Json, String> {
-    let mut c = tokio::process::Command::new("bash");
-    c.arg("-c")
-        .arg(cmd)
-        .stdout(std::process::Stdio::piped())
+    let mut c = tokio::process::Command::from(crate::sys::shell(cmd));
+    c.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
     if let Some(cwd) = spec["cwd"].as_str() {

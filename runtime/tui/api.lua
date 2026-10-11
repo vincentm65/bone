@@ -338,7 +338,7 @@ end
 
 --- A streaming job: a process with a handle. Output reaches the callbacks as
 --- it arrives; the UI never waits.
----   cmd: a shell command (bash -c) or an argv list { "git", "status" }
+---   cmd: a shell command (bash -c; PowerShell on Windows) or an argv list { "git", "status" }
 ---   opts: { name, cwd, env = { K = "v" }, stdin = "text" or true (keep it
 ---     open for job:write), timeout = ms, lines = true (whole lines instead
 ---     of chunks), buffer (keep output for on_exit; default when there are

@@ -410,8 +410,8 @@ fn resolve(
 }
 
 fn expand_home(p: &str) -> PathBuf {
-    match (p.strip_prefix("~/"), std::env::var_os("HOME")) {
-        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
+    match (p.strip_prefix("~/"), bone_lua::sys::home_dir()) {
+        (Some(rest), Some(home)) => home.join(rest),
         _ => PathBuf::from(p),
     }
 }
@@ -1340,8 +1340,8 @@ fn install_helpers(lua: &Lua, dir: &Path, streams: &Arc<Streams>) -> mlua::Resul
     bone.set(
         "_system_sync",
         lua.create_function(|lua, (cmd, opts): (String, Option<Table>)| {
-            let mut c = std::process::Command::new("bash");
-            c.arg("-c").arg(&cmd).stdin(std::process::Stdio::null());
+            let mut c = bone_lua::sys::shell(&cmd);
+            c.stdin(std::process::Stdio::null());
             if let Some(cwd) = opts
                 .map(|o| o.get::<Option<String>>("cwd"))
                 .transpose()?

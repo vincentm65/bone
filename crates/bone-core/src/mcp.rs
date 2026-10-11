@@ -305,12 +305,8 @@ struct ProcessGuard {
 
 impl Drop for ProcessGuard {
     fn drop(&mut self) {
-        #[cfg(unix)]
         if let Some(pid) = self.pgid {
-            // SAFETY: kill(2) on our own child's process group.
-            unsafe {
-                libc::kill(-(pid as i32), libc::SIGKILL);
-            }
+            bone_lua::sys::kill_tree(pid);
         }
     }
 }
@@ -579,15 +575,14 @@ pub fn connect(
             return Ok((Conn::Http(conn), rx));
         }
         let program = config.command.clone().unwrap_or_default();
-        let mut cmd = tokio::process::Command::new(&program);
+        let mut cmd = tokio::process::Command::new(bone_lua::sys::program(&program));
         cmd.args(&config.args)
             .envs(config.env.iter())
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .kill_on_drop(true);
-        #[cfg(unix)]
-        cmd.process_group(0);
+        bone_lua::sys::new_group(cmd.as_std_mut());
         if let Some(cwd) = &config.cwd {
             cmd.current_dir(cwd);
         }
@@ -1058,8 +1053,11 @@ impl McpManager {
             .iter()
             .map(|s| {
                 let st = s.state.lock().unwrap();
-                let shown: Vec<&RemoteTool> =
-                    st.tools.iter().filter(|t| s.config.wants(&t.name)).collect();
+                let shown: Vec<&RemoteTool> = st
+                    .tools
+                    .iter()
+                    .filter(|t| s.config.wants(&t.name))
+                    .collect();
                 bone_proto::methods::McpServerInfo {
                     name: s.config.name.clone(),
                     state: st.status.name().into(),

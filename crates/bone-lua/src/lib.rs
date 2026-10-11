@@ -9,6 +9,7 @@
 //!   `bone.config_dir`, `bone.json`, `bone.util` and `bone.inspect`; each side
 //!   adds its own API on top.
 
+pub mod sys;
 pub mod wait;
 
 use std::path::{Path, PathBuf};
@@ -168,15 +169,12 @@ fn capability_table(lua: &Lua, side: Side) -> mlua::Result<Table> {
     Ok(table)
 }
 
-/// `$BONE_CONFIG_DIR`, else `~/.bone`.
+/// `$BONE_CONFIG_DIR`, else `~/.bone` (`%USERPROFILE%\.bone` on Windows).
 pub fn config_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("BONE_CONFIG_DIR").filter(|d| !d.is_empty()) {
         return PathBuf::from(dir);
     }
-    let home = std::env::var_os("HOME")
-        .filter(|h| !h.is_empty())
-        .unwrap_or_else(|| ".".into());
-    PathBuf::from(home).join(".bone")
+    sys::home_dir().unwrap_or_else(|| ".".into()).join(".bone")
 }
 
 /// Plugin directories: `<config dir>/plugins/<name>/`, in name order.

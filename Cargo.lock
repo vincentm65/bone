@@ -140,6 +140,7 @@ name = "bone-lua"
 version = "3.0.0"
 dependencies = [
  "cc",
+ "libc",
  "mlua",
  "reqwest",
  "serde_json",

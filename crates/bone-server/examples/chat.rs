@@ -14,7 +14,7 @@
 use std::io::{BufRead, Write};
 use std::sync::Arc;
 
-use bone_client::{Client, connect_unix};
+use bone_client::{Client, connect};
 use bone_core::Core;
 use bone_core::scripting;
 use bone_proto::methods::*;
@@ -24,7 +24,7 @@ use bone_server::Server;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let conn = match std::env::var("BONE_CONNECT").ok().filter(|v| !v.is_empty()) {
-        Some(sock) => connect_unix(sock).await?,
+        Some(sock) => connect(sock).await?,
         None => {
             let server = Server::new(Arc::new(Core::from_loaded(scripting::load(
                 &bone_lua::config_dir(),

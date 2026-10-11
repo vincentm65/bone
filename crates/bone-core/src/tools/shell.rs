@@ -5,8 +5,8 @@
 
 use std::collections::HashMap;
 use std::io::Read;
+#[cfg(unix)]
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-use std::os::unix::process::ExitStatusExt;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,7 +16,8 @@ use std::time::Duration;
 use futures_util::future::BoxFuture;
 use serde::Deserialize;
 use serde_json::{Value, json};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
+#[cfg(unix)]
 use tokio::net::unix::pipe;
 use tokio::sync::{Notify, mpsc};
 use tokio::time::{Instant, sleep_until};
@@ -38,7 +39,9 @@ const MAX_COMPLETED: usize = 64;
 /// Output kept as written, escape codes and all, for terminal views.
 const MAX_RAW: usize = 1 << 20;
 /// A background job's terminal until a client sets another size.
+#[cfg(unix)]
 const PTY_COLS: u16 = 120;
+#[cfg(unix)]
 const PTY_ROWS: u16 = 32;
 const TAIL_MAX: usize = 200;
 
@@ -54,12 +57,15 @@ impl Shell {
     pub fn new() -> Self {
         Shell(ToolSpec {
             name: "shell".into(),
-            description: "Run a bash command, stream its output, or manage a command started in the background. Use mode=\"start\" for long-lived commands (they run in a terminal the user can watch), then use action=status, read, wait, or kill with its job id. Commands are non-interactive unless stdin is supplied.".into(),
+            description: format!(
+                "Run a {} command, stream its output, or manage a command started in the background. Use mode=\"start\" for long-lived commands (they run in a terminal the user can watch), then use action=status, read, wait, or kill with its job id. Commands are non-interactive unless stdin is supplied.",
+                bone_lua::sys::shell_name()
+            ),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "action": { "type": "string", "enum": ["run", "start", "list", "status", "read", "wait", "kill", "write", "close_stdin"], "description": "run (default), start, or a job-management action." },
-                    "command": { "type": "string", "description": "The bash command for run or start." },
+                    "command": { "type": "string", "description": format!("The {} command for run or start.", bone_lua::sys::shell_name()) },
                     "mode": { "type": "string", "enum": ["wait", "start"], "description": "wait (default) for a foreground command, or start and return a job id immediately." },
                     "background": { "type": "boolean", "description": "Compatibility alias for mode=start." },
                     "id": { "type": "string", "description": "Job id for status, read, wait, kill, write, or close_stdin." },
@@ -163,10 +169,16 @@ pub(crate) struct ProcessView {
     pub chunk: Option<(u64, String)>,
 }
 
+#[cfg(unix)]
+type PtyMaster = OwnedFd;
+/// Windows jobs write to pipes; there is never a pseudo-terminal.
+#[cfg(not(unix))]
+type PtyMaster = std::convert::Infallible;
+
 struct Process {
     snapshot: Mutex<Snapshot>,
     /// The pseudo-terminal's master side while a terminal job runs.
-    pty: Mutex<Option<OwnedFd>>,
+    pty: Mutex<Option<PtyMaster>>,
     control: mpsc::UnboundedSender<Control>,
     done: Notify,
 }
@@ -374,18 +386,29 @@ impl ProcessRegistry {
         let Some(master) = pty.as_ref() else {
             return Err(format!("{id} has no terminal now"));
         };
+        #[cfg(not(unix))]
+        {
+            let _ = (cols, rows);
+            match *master {}
+        }
+        #[cfg(unix)]
         let ws = libc::winsize {
             ws_row: rows.max(1),
             ws_col: cols.max(1),
             ws_xpixel: 0,
             ws_ypixel: 0,
         };
-        if unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &ws) } != 0 {
-            return Err(std::io::Error::last_os_error().to_string());
+        #[cfg(unix)]
+        {
+            if unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &ws) } != 0 {
+                return Err(std::io::Error::last_os_error().to_string());
+            }
+            // Without a controlling terminal nothing else tells it.
+            if let Some(pid) = process.snapshot.lock().unwrap().pid {
+                unsafe { libc::kill(-(pid as i32), libc::SIGWINCH) };
+            }
+            Ok(())
         }
-        // Without a controlling terminal nothing else tells it.
-        signal_group(process.snapshot.lock().unwrap().pid, libc::SIGWINCH);
-        Ok(())
     }
 
     pub(crate) fn views(&self, owner: &str) -> Vec<ProcessView> {
@@ -484,22 +507,20 @@ impl Decoder {
     }
 }
 
-#[cfg(unix)]
-fn signal_group(pid: Option<u32>, signal: i32) {
+fn terminate(pid: Option<u32>) {
     if let Some(pid) = pid {
-        unsafe {
-            libc::kill(-(pid as i32), signal);
-        }
+        bone_lua::sys::terminate_tree(pid);
     }
 }
-#[cfg(not(unix))]
-fn signal_group(_pid: Option<u32>, _signal: i32) {}
 
-/// Only a definite ESRCH means the group no longer needs exit grace.
+fn kill(pid: Option<u32>) {
+    if let Some(pid) = pid {
+        bone_lua::sys::kill_tree(pid);
+    }
+}
+
 fn group_alive(pid: Option<u32>) -> bool {
-    let Some(pid) = pid else { return true };
-    let result = unsafe { libc::kill(-(pid as i32), 0) };
-    result == 0 || std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    pid.is_none_or(bone_lua::sys::tree_alive)
 }
 
 async fn run_job(
@@ -539,10 +560,9 @@ async fn run_job(
         Ok(fds) => fds,
         Err(error) => return fail(error.to_string()).await,
     };
-    let mut cmd = tokio::process::Command::new("bash");
-    cmd.arg("-c")
-        .arg(&command)
-        .current_dir(cwd)
+    let mut cmd = tokio::process::Command::from(bone_lua::sys::shell(&command));
+    bone_lua::sys::new_group(cmd.as_std_mut());
+    cmd.current_dir(cwd)
         .stdin(if matches!(stdin, Stdin::Null) {
             Stdio::null()
         } else {
@@ -550,7 +570,6 @@ async fn run_job(
         })
         .stdout(out_fd)
         .stderr(err_fd)
-        .process_group(0)
         .kill_on_drop(true);
     if terminal {
         // Nothing may wait on a pager; there is no terminal to type into.
@@ -571,23 +590,28 @@ async fn run_job(
     // Our copies of the write ends go, so the reader sees the end.
     drop(cmd);
     let mut rx = match master {
-        Master::Pipe(reader) => match pipe::Receiver::from_owned_fd(reader) {
+        #[cfg(unix)]
+        Master::Pipe(reader) => match pipe::Receiver::from_owned_fd(reader.into()) {
             Ok(rx) => Output::Pipe(rx),
             Err(error) => {
-                signal_group(pid, libc::SIGKILL);
+                kill(pid);
                 return fail(error.to_string()).await;
             }
         },
+        // Windows anonymous pipes cannot be polled.
+        #[cfg(not(unix))]
+        Master::Pipe(reader) => Output::Thread(read_blocking(reader)),
+        #[cfg(unix)]
         Master::Pty(master) => {
             let reader = match master.try_clone() {
                 Ok(fd) => fd,
                 Err(error) => {
-                    signal_group(pid, libc::SIGKILL);
+                    kill(pid);
                     return fail(error.to_string()).await;
                 }
             };
             *process.pty.lock().unwrap() = Some(master);
-            Output::Pty(read_pty(reader))
+            Output::Thread(read_blocking(std::fs::File::from(reader)))
         }
     };
     let mut input = child.stdin.take();
@@ -598,7 +622,8 @@ async fn run_job(
     }
 
     let mut out_decoder = Decoder::default();
-    let mut cleaner = terminal.then(Cleaner::default);
+    // Windows programs end lines with \r\n even in a pipe.
+    let mut cleaner = (terminal || cfg!(windows)).then(Cleaner::default);
     let mut status = None;
     let mut state = ProcessState::Running;
     let mut error = None;
@@ -610,11 +635,11 @@ async fn run_job(
     loop {
         tokio::select! {
             chunk = rx.next(&mut buf), if pipe_open => match chunk { None => pipe_open = false, Some(bytes) => { let text = out_decoder.decode(&bytes); record_output(&registry, &process, &text, bytes.len(), &mut cleaner, &output, &process_sink); } },
-            st = child.wait(), if status.is_none() => match st { Ok(st) => { status = Some(st); if kill_at.is_none() { signal_group(pid, libc::SIGTERM); kill_at = Some(Instant::now() + EXIT_GRACE); } }, Err(e) => { error = Some(e.to_string()); break; } },
-            Some(control) = controls.recv(), if kill_at.is_none() => match control { Control::Write(data) => if let Some(pipe) = &mut input { let _ = pipe.write_all(&data).await; }, Control::CloseStdin => input = None, Control::Cancel => { state = ProcessState::Cancelled; signal_group(pid, libc::SIGTERM); kill_at = Some(Instant::now() + KILL_GRACE); } },
-            _ = parent_cancel.cancelled(), if kill_at.is_none() => { state = ProcessState::Cancelled; signal_group(pid, libc::SIGTERM); kill_at = Some(Instant::now() + KILL_GRACE); }
-            _ = sleep_until(deadline.unwrap_or_else(far)), if deadline.is_some() && kill_at.is_none() => { state = ProcessState::TimedOut; signal_group(pid, libc::SIGTERM); kill_at = Some(Instant::now() + KILL_GRACE); }
-            _ = sleep_until(kill_at.unwrap_or_else(far)), if kill_at.is_some() && (state != ProcessState::Running || pipe_open || status.is_none() || group_alive(pid)) => { signal_group(pid, libc::SIGKILL); break; }
+            st = child.wait(), if status.is_none() => match st { Ok(st) => { status = Some(st); if kill_at.is_none() { if cfg!(unix) { terminate(pid); } kill_at = Some(Instant::now() + EXIT_GRACE); } }, Err(e) => { error = Some(e.to_string()); break; } },
+            Some(control) = controls.recv(), if kill_at.is_none() => match control { Control::Write(data) => if let Some(pipe) = &mut input { let _ = pipe.write_all(&data).await; }, Control::CloseStdin => input = None, Control::Cancel => { state = ProcessState::Cancelled; terminate(pid); kill_at = Some(Instant::now() + KILL_GRACE); } },
+            _ = parent_cancel.cancelled(), if kill_at.is_none() => { state = ProcessState::Cancelled; terminate(pid); kill_at = Some(Instant::now() + KILL_GRACE); }
+            _ = sleep_until(deadline.unwrap_or_else(far)), if deadline.is_some() && kill_at.is_none() => { state = ProcessState::TimedOut; terminate(pid); kill_at = Some(Instant::now() + KILL_GRACE); }
+            _ = sleep_until(kill_at.unwrap_or_else(far)), if kill_at.is_some() && (state != ProcessState::Running || pipe_open || status.is_none() || group_alive(pid)) => { kill(pid); break; }
             else => break,
         }
     }
@@ -624,7 +649,11 @@ async fn run_job(
         status = Some(st);
     }
     drop(input);
-    signal_group(pid, libc::SIGKILL);
+    // On Unix this also takes anything the command left running. A Windows
+    // tree cannot be found from a leader that has exited.
+    if cfg!(unix) || status.is_none() {
+        kill(pid);
+    }
     process.pty.lock().unwrap().take();
     let text = out_decoder.finish();
     if !text.is_empty() {
@@ -638,7 +667,9 @@ async fn run_job(
             &process_sink,
         );
     }
-    let (code, signal) = status.map_or((None, None), |st| (st.code(), st.signal()));
+    let (code, signal) = status.map_or((None, None), |st| {
+        (st.code(), bone_lua::sys::exit_signal(&st))
+    });
     if state == ProcessState::Running {
         state = ProcessState::Exited;
     }
@@ -706,17 +737,26 @@ fn tail_of(text: &str) -> String {
 /// Where a job's output goes: a pipe's read end, or a pseudo-terminal's
 /// master side.
 enum Master {
-    Pipe(OwnedFd),
+    Pipe(std::io::PipeReader),
+    #[cfg(unix)]
     Pty(OwnedFd),
 }
 
-/// The child's stdout and stderr, and our side.
+/// The child's stdout and stderr, and our side. Only Unix has
+/// pseudo-terminals; elsewhere a terminal job writes to a pipe too.
 fn open_output(terminal: bool) -> std::io::Result<(Stdio, Stdio, Master)> {
-    if !terminal {
-        let (reader, writer) = std::io::pipe()?;
-        let writer2 = writer.try_clone()?;
-        return Ok((writer2.into(), writer.into(), Master::Pipe(reader.into())));
+    #[cfg(unix)]
+    if terminal {
+        return open_pty();
     }
+    let _ = terminal;
+    let (reader, writer) = std::io::pipe()?;
+    let writer2 = writer.try_clone()?;
+    Ok((writer2.into(), writer.into(), Master::Pipe(reader)))
+}
+
+#[cfg(unix)]
+fn open_pty() -> std::io::Result<(Stdio, Stdio, Master)> {
     let (mut master, mut slave) = (-1, -1);
     let ws = libc::winsize {
         ws_row: PTY_ROWS,
@@ -729,8 +769,9 @@ fn open_output(terminal: bool) -> std::io::Result<(Stdio, Stdio, Master)> {
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
-            std::ptr::null(),
-            &ws,
+            std::ptr::null_mut(),
+            // macOS declares these pointers `*mut`, Linux `*const`.
+            (&raw const ws).cast_mut(),
         )
     };
     if r != 0 {
@@ -743,12 +784,12 @@ fn open_output(terminal: bool) -> std::io::Result<(Stdio, Stdio, Master)> {
     Ok((slave2.into(), slave.into(), Master::Pty(master)))
 }
 
-/// Read a pseudo-terminal's master side on a thread of its own (it is not a
-/// pipe tokio can poll). The channel ends when every writer is gone.
-fn read_pty(master: OwnedFd) -> mpsc::UnboundedReceiver<Vec<u8>> {
+/// Read a pseudo-terminal's master side, or a Windows pipe, on a thread of
+/// its own (neither is a pipe tokio can poll). The channel ends when every
+/// writer is gone.
+fn read_blocking(mut file: impl Read + Send + 'static) -> mpsc::UnboundedReceiver<Vec<u8>> {
     let (tx, rx) = mpsc::unbounded_channel();
     std::thread::spawn(move || {
-        let mut file = std::fs::File::from(master);
         let mut buf = [0u8; 16 * 1024];
         loop {
             match file.read(&mut buf) {
@@ -759,7 +800,7 @@ fn read_pty(master: OwnedFd) -> mpsc::UnboundedReceiver<Vec<u8>> {
                     }
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
-                // EIO: the last writer closed.
+                // EIO (a pty) or a broken pipe: the last writer closed.
                 Err(_) => break,
             }
         }
@@ -768,19 +809,23 @@ fn read_pty(master: OwnedFd) -> mpsc::UnboundedReceiver<Vec<u8>> {
 }
 
 enum Output {
+    #[cfg(unix)]
     Pipe(pipe::Receiver),
-    Pty(mpsc::UnboundedReceiver<Vec<u8>>),
+    Thread(mpsc::UnboundedReceiver<Vec<u8>>),
 }
 
 impl Output {
     /// The next bytes, or None at the end.
     async fn next(&mut self, buf: &mut [u8]) -> Option<Vec<u8>> {
+        #[cfg(not(unix))]
+        let _ = buf;
         match self {
-            Output::Pipe(rx) => match rx.read(buf).await {
+            #[cfg(unix)]
+            Output::Pipe(rx) => match tokio::io::AsyncReadExt::read(rx, buf).await {
                 Ok(0) | Err(_) => None,
                 Ok(n) => Some(buf[..n].to_vec()),
             },
-            Output::Pty(rx) => rx.recv().await,
+            Output::Thread(rx) => rx.recv().await,
         }
     }
 }

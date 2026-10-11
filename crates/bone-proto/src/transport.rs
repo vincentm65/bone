@@ -171,7 +171,12 @@ async fn write_loop<W: AsyncWrite + Unpin>(mut writer: W, mut rx: mpsc::Receiver
 }
 
 /// `$XDG_RUNTIME_DIR/bone3/bone.sock`, falling back to `/tmp/bone3-$USER/bone.sock`.
+/// On Windows the named pipe `\\.\pipe\bone3-%USERNAME%`.
 pub fn default_socket_path() -> PathBuf {
+    if cfg!(windows) {
+        let user = std::env::var("USERNAME").unwrap_or_else(|_| "user".into());
+        return PathBuf::from(format!(r"\\.\pipe\bone3-{user}"));
+    }
     let dir = match std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()) {
         Some(dir) => PathBuf::from(dir).join("bone3"),
         None => {

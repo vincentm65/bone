@@ -23,7 +23,8 @@ const BUFFER_MAX: usize = 4 << 20;
 /// Finished jobs remembered for `status`/`list`.
 const FINISHED_KEPT: usize = 32;
 
-/// What to run: `bash -c cmd`, or an argv list.
+/// What to run: a shell command (`bash -c`, PowerShell on Windows), or an
+/// argv list.
 #[derive(Debug, Clone)]
 pub enum Command {
     Shell(String),
@@ -455,34 +456,24 @@ fn send(tx: &mpsc::UnboundedSender<AppEvent>, f: impl FnOnce(&mut App) + Send + 
 struct Group(Option<u32>);
 
 impl Group {
-    fn signal(&self, sig: i32) {
-        #[cfg(unix)]
+    fn terminate(&self) {
         if let Some(pid) = self.0 {
-            // SAFETY: kill(2) on our own child's process group.
-            unsafe {
-                libc::kill(-(pid as i32), sig);
-            }
+            bone_lua::sys::terminate_tree(pid);
         }
-        #[cfg(not(unix))]
-        let _ = sig;
+    }
+
+    fn kill(&self) {
+        if let Some(pid) = self.0 {
+            bone_lua::sys::kill_tree(pid);
+        }
     }
 }
 
 impl Drop for Group {
     fn drop(&mut self) {
-        #[cfg(unix)]
-        self.signal(libc::SIGKILL);
+        self.kill();
     }
 }
-
-#[cfg(unix)]
-const SIGTERM: i32 = libc::SIGTERM;
-#[cfg(unix)]
-const SIGKILL: i32 = libc::SIGKILL;
-#[cfg(not(unix))]
-const SIGTERM: i32 = 15;
-#[cfg(not(unix))]
-const SIGKILL: i32 = 9;
 
 async fn pump(
     mut r: impl AsyncRead + Unpin,
@@ -510,13 +501,9 @@ async fn run(
     tx: mpsc::UnboundedSender<AppEvent>,
 ) {
     let mut cmd = match &spec.command {
-        Command::Shell(s) => {
-            let mut c = tokio::process::Command::new("bash");
-            c.arg("-c").arg(s);
-            c
-        }
+        Command::Shell(s) => tokio::process::Command::from(bone_lua::sys::shell(s)),
         Command::Argv(argv) => {
-            let mut c = tokio::process::Command::new(&argv[0]);
+            let mut c = tokio::process::Command::new(bone_lua::sys::program(&argv[0]));
             c.args(&argv[1..]);
             c
         }
@@ -529,8 +516,7 @@ async fn run(
         })
         .envs(spec.env.iter().cloned())
         .kill_on_drop(true);
-    #[cfg(unix)]
-    cmd.process_group(0);
+    bone_lua::sys::new_group(cmd.as_std_mut());
     if let Some(cwd) = &spec.cwd {
         cmd.current_dir(cwd);
     }
@@ -589,18 +575,18 @@ async fn run(
                 Ctl::CloseStdin => stdin = None,
                 Ctl::Cancel if kill_at.is_none() => {
                     exit.cancelled = true;
-                    group.signal(SIGTERM);
+                    group.terminate();
                     kill_at = Some(tokio::time::Instant::now() + KILL_GRACE);
                 }
                 Ctl::Cancel => {}
             },
             _ = tokio::time::sleep_until(deadline.unwrap_or_else(far)), if deadline.is_some() && kill_at.is_none() => {
                 exit.timed_out = true;
-                group.signal(SIGTERM);
+                group.terminate();
                 kill_at = Some(tokio::time::Instant::now() + KILL_GRACE);
             }
             _ = tokio::time::sleep_until(kill_at.unwrap_or_else(far)), if kill_at.is_some() => {
-                group.signal(SIGKILL);
+                group.kill();
                 kill_at = Some(far());
             }
         }
@@ -609,17 +595,13 @@ async fn run(
     match status {
         Ok(st) => {
             exit.code = st.code();
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::ExitStatusExt;
-                exit.signal = st.signal();
-            }
+            exit.signal = bone_lua::sys::exit_signal(&st);
         }
         Err(e) => exit.error = Some(e.to_string()),
     }
     // Anything still holding the pipes goes with the group.
     if exit.cancelled || exit.timed_out {
-        group.signal(SIGKILL);
+        group.kill();
     }
     for r in readers.into_iter().flatten() {
         let _ = tokio::time::timeout(Duration::from_secs(1), r).await;

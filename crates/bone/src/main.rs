@@ -9,7 +9,6 @@ use bone_core::scripting::{self, Loaded};
 use bone_proto::transport::default_socket_path;
 use bone_server::{Listener, Server};
 use bone_tui::RunOptions;
-use tokio::signal::unix::{SignalKind, signal};
 
 const USAGE: &str = "\
 usage: bone [-r [ID]] [--connect [PATH]]
@@ -22,7 +21,8 @@ usage: bone [-r [ID]] [--connect [PATH]]
   --connect [PATH]  open the TUI on a server started with --listen
   --headless        run the core without a UI and serve the bone API
                     (JSON-RPC 2.0, one JSON message per line) on stdin/stdout
-  --listen [PATH]   with --headless: serve on a Unix socket instead of stdio
+  --listen [PATH]   with --headless: serve on a Unix socket (a named pipe on
+                    Windows) instead of stdio
   --init            write starter core.lua and tui.lua (never overwrites)
   --import-bone [DB] import the first bone's conversations as sessions
                     (DB defaults to ~/.bone-rust/data/conversations.db);
@@ -30,7 +30,8 @@ usage: bone [-r [ID]] [--connect [PATH]]
   -h, --help        show this help
   -V, --version     show the version
 
-PATH defaults to $XDG_RUNTIME_DIR/bone3/bone.sock.
+PATH defaults to $XDG_RUNTIME_DIR/bone3/bone.sock (\\\\.\\pipe\\bone3-USERNAME
+on Windows).
 
 Configuration lives in ~/.bone (or $BONE_CONFIG_DIR):
   core.lua    providers, system prompt, Lua tools and hooks
@@ -159,8 +160,7 @@ fn main() -> ExitCode {
 }
 
 fn default_bone_db() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
+    bone_lua::sys::home_dir()
         .unwrap_or_default()
         .join(".bone-rust/data/conversations.db")
 }
@@ -191,6 +191,34 @@ fn import_bone(db: &std::path::Path, data_dir: &std::path::Path) -> ExitCode {
             eprintln!("\nbone: import failed: {e}");
             ExitCode::FAILURE
         }
+    }
+}
+
+/// Resolves on SIGINT or SIGTERM (Ctrl+C or the console closing on Windows).
+fn stop_signal() -> std::io::Result<impl Future<Output = ()>> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut int = signal(SignalKind::interrupt())?;
+        let mut term = signal(SignalKind::terminate())?;
+        Ok(async move {
+            tokio::select! {
+                _ = int.recv() => {}
+                _ = term.recv() => {}
+            }
+        })
+    }
+    #[cfg(windows)]
+    {
+        use tokio::signal::windows::{ctrl_c, ctrl_close};
+        let mut int = ctrl_c()?;
+        let mut close = ctrl_close()?;
+        Ok(async move {
+            tokio::select! {
+                _ = int.recv() => {}
+                _ = close.recv() => {}
+            }
+        })
     }
 }
 
@@ -253,12 +281,12 @@ async fn run(mode: Mode, loaded: Option<Loaded>, config_dir: PathBuf) -> ExitCod
                 }
             };
             eprintln!("bone: listening on {}", listener.path().display());
-            let (Ok(mut int), Ok(mut term)) = (
-                signal(SignalKind::interrupt()),
-                signal(SignalKind::terminate()),
-            ) else {
-                eprintln!("bone: cannot install signal handlers");
-                return ExitCode::FAILURE;
+            let stop = match stop_signal() {
+                Ok(stop) => stop,
+                Err(e) => {
+                    eprintln!("bone: cannot install signal handlers: {e}");
+                    return ExitCode::FAILURE;
+                }
             };
             tokio::select! {
                 r = listener.run(&server) => {
@@ -267,15 +295,14 @@ async fn run(mode: Mode, loaded: Option<Loaded>, config_dir: PathBuf) -> ExitCod
                         return ExitCode::FAILURE;
                     }
                 }
-                _ = int.recv() => {}
-                _ = term.recv() => {}
+                _ = stop => {}
             }
             // Dropping the listener removes the socket file.
         }
         Mode::Tui { connect, resume } => {
             let reload_core = connect.is_none();
             let conn = match connect {
-                Some(path) => match bone_client::connect_unix(&path).await {
+                Some(path) => match bone_client::connect(&path).await {
                     Ok(c) => c,
                     Err(e) => {
                         eprintln!("bone: cannot connect to {}: {e}", path.display());

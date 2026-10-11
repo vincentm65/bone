@@ -6,8 +6,11 @@
 //! waiting on the network) never holds up the others; replies carry their
 //! request's id and may come back in any order.
 //! Connections come from [`Server::connect_in_process`], [`Server::serve_stdio`]
-//! or a Unix socket [`Listener`].
+//! or a [`Listener`] (a Unix socket, or a named pipe on Windows).
 
+#[cfg(windows)]
+mod pipe;
+#[cfg(unix)]
 mod unix;
 
 use std::sync::Arc;
@@ -20,6 +23,9 @@ use bone_proto::{Connection, Message, Method, PROTOCOL_VERSION, RequestId, RpcEr
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 
+#[cfg(windows)]
+pub use pipe::Listener;
+#[cfg(unix)]
 pub use unix::Listener;
 
 pub const SERVER_NAME: &str = "bone";

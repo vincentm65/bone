@@ -302,7 +302,7 @@ local r, err = bone.session.run(info.session_id, "Find every caller of panel_at"
 
 Hooks, tools and a `system_prompt` function run as coroutines, so these wait without holding up anything else (other sessions, other hooks):
 
-- `bone.system(cmd, { cwd, stdin, timeout = ms })` runs `bash -c cmd` → `{ code, stdout, stderr }`, or `{ timed_out = true }`.
+- `bone.system(cmd, { cwd, stdin, timeout = ms })` runs `bash -c cmd` (PowerShell on Windows) → `{ code, stdout, stderr }`, or `{ timed_out = true }`.
 - `bone.sleep(ms)`.
 - `bone.http({ url, method, headers, body, timeout = ms })` → `{ status, headers, body }`. A table `body` is sent as JSON. Connection errors raise; HTTP error statuses don't.
 
@@ -754,7 +754,7 @@ local job = bone.job.start("cargo build --color=never", {
 bone.keymap.set("ctrl+x", function() job:cancel() end)
 ```
 
-- `cmd`: a shell command (run with `bash -c`) or an argv list such as `{ "git", "status", "--short" }`.
+- `cmd`: a shell command (run with `bash -c`, PowerShell on Windows) or an argv list such as `{ "git", "status", "--short" }`.
 - `opts`: `name`; `cwd`; `env` (variables added to the TUI's environment); `stdin` (a string to feed and close, or `true` to keep it open for `job:write(data)` / `job:close_stdin()`); `timeout` (ms); `lines`; `buffer` (keep the output for `on_exit`; the default when neither output callback is given); `on_stdout(data, job)`, `on_stderr(data, job)` and `on_exit(result, job)`.
 - Output is text: a character split between two reads is held back until it is complete, and invalid UTF-8 becomes `�`. In line mode `\r\n` and `\n` end lines and a last line without one arrives before `on_exit`.
 - `job:cancel()` sends SIGTERM to the job's process group (everything it started), then SIGKILL two seconds later. A timeout does the same. Quitting the TUI kills running jobs.

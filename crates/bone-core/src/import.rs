@@ -469,7 +469,7 @@ fn guess_cwd(rows: &[Row]) -> String {
                 .to_string_lossy()
                 .into_owned()
         })
-        .or_else(|| std::env::var("HOME").ok())
+        .or_else(|| bone_lua::sys::home_dir().map(|h| h.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "/".into())
 }
 
