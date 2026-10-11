@@ -46,7 +46,7 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `ctrl+a` / `ctrl+e`, `home` / `end` | start / end of line |
 | `ctrl+w`, `alt+backspace` | delete the word before the cursor |
 | `ctrl+u` / `ctrl+k` | delete to the start / end of the line |
-| `ctrl+v` / `super+v` | read the local clipboard: attach a screenshot, or paste text; `super+v` is Command+V on macOS when the terminal forwards it |
+| `ctrl+v` / `super+v` / `alt+v` | read the local clipboard: attach a screenshot, or paste text; `super+v` is Command+V on macOS when the terminal forwards it; use `alt+v` on Windows, where the terminal keeps `ctrl+v` for itself |
 | terminal paste | goes into the prompt as text |
 
 **Panels.** Plugins can dock panels beside, above or below the session (`bone.ui.panel`). Click one (or use the key its plugin gives) to give it the keyboard: the arrows, `pageup`/`pagedown`, `home`/`end` and the wheel scroll it, `tab`/`shift+tab` move to the next/previous panel and back to the prompt, `esc` returns to the prompt. The wheel over a panel always scrolls that panel.

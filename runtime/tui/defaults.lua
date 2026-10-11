@@ -88,6 +88,9 @@ map({
   ["enter"] = "submit",
   ["ctrl+v"] = "paste_clipboard",
   ["super+v"] = "paste_clipboard",
+  -- Windows terminals keep ctrl+v for their own paste and send nothing
+  -- when the clipboard holds only an image.
+  ["alt+v"] = "paste_clipboard",
   ["alt+enter"] = "newline",
   ["shift+enter"] = "newline",
   ["ctrl+j"] = "newline",
