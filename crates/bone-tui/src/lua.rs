@@ -1306,6 +1306,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
         "keymap_set" => {
             let (key, rhs, opts): (String, Value, Option<Table>) = args(lua, a)?;
             let ctx = context_arg(&opts)?;
+            let desc: Option<String> = opts.as_ref().map(|o| o.get("desc")).transpose()?.flatten();
             let action = match rhs {
                 Value::String(s) => Action::parse(&s.to_str()?).map_err(err)?,
                 Value::Function(f) => Action::Lua(app.store_callback(lua, f)?),
@@ -1317,10 +1318,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 }
             };
             let seq = keys::parse_sequence(&key).map_err(err)?;
-            let desc = (opts.as_ref())
-                .map(|o| o.get::<Option<String>>("desc"))
-                .transpose()?
-                .flatten();
             app.keymaps
                 .set(ctx.clone(), &key, action, desc)
                 .map_err(err)?;

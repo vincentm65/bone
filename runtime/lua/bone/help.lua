@@ -8,6 +8,8 @@ local CHAR = "^[%z\1-\127\194-\244][\128-\191]*$"
 
 -- Help browser and topic lookup. Override ~/.bone/runtime/lua/bone/help.lua
 -- to customize it, or replace bone.ui.help from tui.lua.
+local function file(d) return d.plugin and d.name .. "/README.md" or d.name .. ".md" end
+
 local function doc_sections()
   local out = {}
   for _, d in ipairs(bone._docs) do
@@ -18,9 +20,9 @@ local function doc_sections()
       end
       local hashes, title = line:match("^(#+)%s+(.*)$")
       if hashes and not code then
-        out[#out + 1] = { doc = d.name, level = #hashes, title = title, lines = {} }
+        out[#out + 1] = { doc = d, level = #hashes, title = title, lines = {} }
       end
-      if #out > 0 and out[#out].doc == d.name then
+      if #out > 0 and out[#out].doc == d then
         table.insert(out[#out].lines, line)
       end
     end
@@ -34,14 +36,14 @@ local function open_section(secs, best)
     if i > best and (secs[i].doc ~= s.doc or secs[i].level <= s.level) then break end
     for _, l in ipairs(secs[i].lines) do lines[#lines + 1] = l end
   end
-  return bone.ui.pager(table.concat(lines, "\n"), { title = s.doc .. ".md: " .. s.title })
+  return bone.ui.pager(table.concat(lines, "\n"), { title = file(s.doc) .. ": " .. s.title })
 end
 
 function M.topic(topic)
   local t = topic:lower():match("^%s*(.-)%s*$")
   for _, d in ipairs(bone._docs) do
-    if d.name == t then
-      return bone.ui.pager(d.text, { title = d.name .. ".md" })
+    if d.name:lower() == t then
+      return bone.ui.pager(d.text, { title = file(d) })
     end
   end
   local secs = doc_sections()
@@ -115,7 +117,19 @@ function M.open()
       or { label = d.name .. ".md", desc = "Read the complete " .. d.name .. " guide", topic = d.name, meta = "Full guide" }
   end
   for i, s in ipairs(sections) do
-    docs[#docs + 1] = { label = s.title:gsub("`", ""), desc = "Read this section of " .. s.doc .. ".md", meta = s.doc .. ".md", section = i }
+    docs[#docs + 1] = { label = s.title:gsub("`", ""), desc = "Read this section of " .. file(s.doc), meta = file(s.doc), section = i }
+  end
+  local keys, guide = {}, {}
+  for _, k in ipairs(KEYS) do
+    keys[#keys + 1] = { label = k[1], desc = k[2], meta = k[3] .. " · default shortcut", topic = "keys" }
+  end
+  -- Mappings given a desc (plugins' and your own).
+  for _, d in ipairs(bone._docs) do if d.plugin then guide[d.plugin] = d end end
+  local mine = bone.keymap.list()
+  table.sort(mine, function(a, b) return (a.plugin or "") .. "\0" .. a.keys < (b.plugin or "") .. "\0" .. b.keys end)
+  for _, k in ipairs(mine) do
+    local ctx = k.context ~= "main" and " · in " .. k.context or ""
+    keys[#keys + 1] = { label = k.keys, desc = k.desc, meta = (k.plugin or "your config") .. ctx, doc = guide[k.plugin or ""], topic = "keys" }
   end
 
   local function matches()
@@ -126,18 +140,7 @@ function M.open()
         all[#all + 1] = { label = "/" .. c.name, desc = c.desc or "", meta = aliases, command = c.name }
       end
     elseif st.tab == 2 then
-      for _, k in ipairs(KEYS) do
-        all[#all + 1] = { label = k[1], desc = k[2], meta = k[3] .. " · default shortcut", topic = "keys" }
-      end
-      -- Mappings given a desc (plugins' and your own).
-      local guide = {}
-      for _, d in ipairs(bone._docs) do guide[d.plugin or ""] = d end
-      local mine = bone.keymap.list()
-      table.sort(mine, function(a, b) return (a.plugin or "") .. a.keys < (b.plugin or "") .. b.keys end)
-      for _, k in ipairs(mine) do
-        local ctx = k.context ~= "main" and " · in " .. k.context or ""
-        all[#all + 1] = { label = k.keys, desc = k.desc, meta = (k.plugin or "your config") .. ctx, doc = guide[k.plugin or ""], topic = "keys" }
-      end
+      all = keys
     else
       all = docs
     end
@@ -258,7 +261,7 @@ function M.open()
         -- Use this exact section, rather than searching a duplicate heading.
         open_section(sections, it.section)
       elseif it and it.doc then
-        bone.ui.pager(it.doc.text, { title = it.doc.name })
+        bone.ui.pager(it.doc.text, { title = file(it.doc) })
       elseif it then
         M.topic(it.topic)
       end

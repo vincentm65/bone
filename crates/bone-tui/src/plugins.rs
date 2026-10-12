@@ -36,6 +36,8 @@ pub enum Owned {
     Option(String),
     Raw(u64),
     Context(Context),
+    /// Its README in `bone._docs`.
+    Doc,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -171,16 +173,10 @@ impl App {
                 Some(bone_lua::short_error(&e))
             }
         };
-        let p = self
-            .plugins
-            .iter_mut()
-            .find(|p| p.name == name)
-            .expect("plugin entry");
-        p.loaded = true;
-        p.error = error;
-        p.modules = after.into_iter().filter(|m| !before.contains(m)).collect();
         // Its README is a help page while it is loaded.
-        if let Ok(text) = std::fs::read_to_string(dir.join("README.md")) {
+        if error.is_none()
+            && let Ok(text) = std::fs::read_to_string(dir.join("README.md"))
+        {
             let _ = self.with_api(|lua| {
                 let doc = lua.create_table()?;
                 doc.set("name", name)?;
@@ -191,12 +187,19 @@ impl App {
                     .get::<Table>("_docs")?
                     .push(doc)
             });
+            self.owned
+                .entry(name.to_owned())
+                .or_default()
+                .push(Owned::Doc);
         }
         let p = self
             .plugins
-            .iter()
+            .iter_mut()
             .find(|p| p.name == name)
             .expect("plugin entry");
+        p.loaded = true;
+        p.error = error;
+        p.modules = after.into_iter().filter(|m| !before.contains(m)).collect();
         let info = p.info();
         self.fire("plugin/loaded", info);
         self.dirty = true;
@@ -273,17 +276,6 @@ impl App {
             .collect();
         self.release_callbacks(&gone);
         self.callback_owner.retain(|_, o| o != name);
-        let _ = self.with_api(|lua| {
-            let docs: Table = lua.globals().get::<Table>("bone")?.get("_docs")?;
-            let kept = lua.create_table()?;
-            for doc in docs.sequence_values::<Table>() {
-                let doc = doc?;
-                if doc.get::<Option<String>>("plugin")?.as_deref() != Some(name) {
-                    kept.push(doc)?;
-                }
-            }
-            lua.globals().get::<Table>("bone")?.set("_docs", kept)
-        });
         let p = self
             .plugins
             .iter_mut()
@@ -339,6 +331,16 @@ impl App {
                     Ok(())
                 }
             }
+            Owned::Doc => self.with_api(|lua| {
+                let docs: Table = lua.globals().get::<Table>("bone")?.get("_docs")?;
+                for i in (1..=docs.raw_len()).rev() {
+                    let owner: Option<String> = docs.get::<Table>(i)?.get("plugin")?;
+                    if owner.as_deref() == Some(plugin) {
+                        docs.raw_remove(i)?;
+                    }
+                }
+                Ok(())
+            }),
             Owned::Raw(id) => self.api_call("keymap_raw_del", id).map(drop),
             Owned::Context(ctx) => {
                 if self.keymaps.has_context(&ctx) {
