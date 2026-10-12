@@ -11,85 +11,41 @@
 use std::collections::BTreeMap;
 
 use bone_proto::types::{ChatMessage, ImageAttachment, ReasoningState, ToolCall, Usage};
-use futures_util::StreamExt;
-use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
-use super::openai::{Capture, check_images, configured, http_client, send};
-use super::sse::SseParser;
-use super::{Completion, CompletionRequest, Delta, DeltaSink, Provider, ProviderError};
+use super::openai::{configured, post_events};
+use super::{Completion, CompletionRequest, Delta, DeltaSink, ProviderError};
 use crate::config::ProviderConfig;
 
 pub(crate) const DEFAULT_URL: &str = "https://api.anthropic.com/v1";
 const DEFAULT_MAX_TOKENS: u64 = 32_000;
 
-pub struct AnthropicProvider {
-    http: reqwest::Client,
-    config: ProviderConfig,
-}
-
-impl AnthropicProvider {
-    pub fn new(config: ProviderConfig) -> Self {
-        AnthropicProvider {
-            http: http_client(),
-            config,
-        }
+/// One completion over Anthropic's `/messages`.
+pub(super) async fn stream(
+    http: &reqwest::Client,
+    config: &ProviderConfig,
+    req: CompletionRequest<'_>,
+    on_delta: DeltaSink<'_>,
+) -> Result<Completion, ProviderError> {
+    let url = format!("{}/messages", super::base_url(config));
+    let (body, prefix) = request_body(config, &req);
+    let mut headers = vec![("anthropic-version".into(), "2023-06-01".into())];
+    if let Some(key) = config.api_key.as_deref().filter(|k| !k.is_empty()) {
+        headers.push(("x-api-key".into(), key.to_owned()));
     }
-
-    fn url(&self) -> String {
-        format!("{}/messages", super::base_url(&self.config))
-    }
-
-    async fn stream(
-        &self,
-        req: CompletionRequest<'_>,
-        on_delta: DeltaSink<'_>,
-    ) -> Result<Completion, ProviderError> {
-        check_images(&self.config, req.messages)?;
-        let (body, prefix) = request_body(&self.config, &req);
-        let mut headers = vec![("anthropic-version".into(), "2023-06-01".into())];
-        if let Some(key) = self.config.api_key.as_deref().filter(|k| !k.is_empty()) {
-            headers.push(("x-api-key".into(), key.to_owned()));
-        }
-        let (body, headers) = configured(body, headers, &self.config);
-        let url = self.url();
-        let mut capture = Capture::start(&url, &body);
-        let resp = send(&self.http, &url, &headers, &body, &mut capture).await?;
-        let mut bytes = resp.bytes_stream();
-        let mut parser = SseParser::default();
-        let mut acc = Accumulator::default();
-        while let Some(chunk) = bytes.next().await {
-            let chunk = chunk.map_err(|e| ProviderError(format!("stream error: {e}")))?;
-            capture.chunk(&chunk);
-            for data in parser.push(&chunk) {
-                if acc.apply(&data, on_delta)? {
-                    return acc.finish(&self.config.model, prefix);
-                }
-            }
-        }
-        if let Some(data) = parser.finish()
-            && acc.apply(&data, on_delta)?
-        {
-            return acc.finish(&self.config.model, prefix);
-        }
-        Err(ProviderError(
+    let (body, headers) = configured(body, headers, config);
+    let mut acc = Accumulator::default();
+    if !post_events(http, &url, &headers, &body, |d| {
+        acc.apply(d, &mut *on_delta)
+    })
+    .await?
+    {
+        return Err(ProviderError(
             "the stream ended before the response completed".into(),
-        ))
+        ));
     }
-}
-
-impl Provider for AnthropicProvider {
-    fn replays_reasoning(&self) -> bool {
-        true
-    }
-    fn complete<'a>(
-        &'a self,
-        req: CompletionRequest<'a>,
-        on_delta: DeltaSink<'a>,
-    ) -> BoxFuture<'a, Result<Completion, ProviderError>> {
-        Box::pin(self.stream(req, on_delta))
-    }
+    acc.finish(&config.model, prefix)
 }
 
 /// The request, and the fingerprint of its history for the reply's thinking.

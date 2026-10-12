@@ -249,6 +249,11 @@ bone.provider.register("myapi", {
 bone.config.providers.mine = { type = "myapi", model = "m", base_url = "https://example.com" }
 ```
 
+A provider that speaks a known format (`completions`, `responses`,
+`anthropic`) and only needs its own destination or sign-in registers
+`prepare = function(req) return { api, base_url, headers, body } end`
+instead; a built-in provider sends what it returns (see docs/lua.md).
+
 The TUI can also call a model outside any session: `bone.model.complete(req,
 on_delta, on_done)` → handle (see the popups guide).
 

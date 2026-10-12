@@ -623,6 +623,8 @@ pub struct LuaProvider {
     kind: String,
     options: Json,
     scripting: Arc<Scripting>,
+    /// For requests shaped by `prepare`, so they reuse connections.
+    http: reqwest::Client,
 }
 
 impl LuaProvider {
@@ -631,6 +633,7 @@ impl LuaProvider {
             kind: config.kind.clone().unwrap_or_default(),
             options: config.options.clone(),
             scripting,
+            http: crate::provider::http_client(),
         }
     }
 }
@@ -713,7 +716,20 @@ impl crate::provider::Provider for LuaProvider {
             let v = result
                 .map_err(|_| err("the Lua thread stopped".into()))?
                 .map_err(err)?;
-            completion(&v).map_err(err)
+            let Some(Json::Object(prepared)) = v.get("prepare") else {
+                return completion(&v).map_err(err);
+            };
+            // The Lua provider shaped the request; a built-in one sends it.
+            let mut entry = self.options.clone();
+            for (k, v) in prepared {
+                entry[k] = v.clone();
+            }
+            let mut config: ProviderConfig =
+                serde_json::from_value(entry).map_err(|e| err(e.to_string()))?;
+            config.kind = None;
+            let http = self.http.clone();
+            let provider = crate::provider::BuiltIn { http, config };
+            provider.complete(req, on_delta).await
         })
     }
 }

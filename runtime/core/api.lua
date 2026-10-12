@@ -462,9 +462,14 @@ bone._providers = {}
 ---   emit({ text = "..." }) or emit({ reasoning = "..." }) streams output
 ---   return { content, reasoning, tool_calls = { { id, name, arguments } },
 ---            usage = { input_tokens, output_tokens } }
+--- Or, to only shape the request and let a built-in provider (api =
+--- "completions" | "responses" | "anthropic") send it, spec.prepare(req)
+--- returns { api, base_url, model?, headers, body } laid over the entry; it
+--- runs before every request (so a token read there is always fresh).
 function bone.provider.register(name, spec)
-  assert(type(name) == "string" and type(spec) == "table" and type(spec.complete) == "function",
-    "bone.provider.register(name, { complete = function(req, emit) ... end })")
+  assert(type(name) == "string" and type(spec) == "table"
+    and (type(spec.complete) == "function" or type(spec.prepare) == "function"),
+    "bone.provider.register(name, { complete = function(req, emit) ... end } or { prepare = function(req) ... end })")
   bone._providers[name] = spec
 end
 
@@ -523,6 +528,9 @@ function bone._provider_entry(name, req, emit)
   end
   -- Model calls this provider makes are nested one deeper.
   bone._depth[coroutine.running()] = req.depth or 0
+  if p.prepare then
+    return { prepare = p.prepare(req) }
+  end
   return p.complete(req, emit)
 end
 

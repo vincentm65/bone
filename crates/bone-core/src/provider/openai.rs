@@ -6,83 +6,57 @@ use std::time::Duration;
 
 use bone_proto::types::{ChatMessage, ToolCall, Usage};
 use futures_util::StreamExt;
-use futures_util::future::BoxFuture;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::sse::SseParser;
-use super::{Completion, CompletionRequest, Delta, DeltaSink, Provider, ProviderError};
+use super::{Completion, CompletionRequest, Delta, DeltaSink, ProviderError};
 use crate::config::ProviderConfig;
 
 const MAX_ATTEMPTS: u32 = 3;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 
-pub struct OpenAiProvider {
-    http: reqwest::Client,
-    config: ProviderConfig,
+/// One completion over `/chat/completions`.
+pub(super) async fn stream(
+    http: &reqwest::Client,
+    config: &ProviderConfig,
+    req: CompletionRequest<'_>,
+    on_delta: DeltaSink<'_>,
+) -> Result<Completion, ProviderError> {
+    let url = format!("{}/chat/completions", super::base_url(config));
+    let (body, headers) = configured(request_body(config, &req), bearer(config), config);
+    let mut acc = Accumulator::default();
+    let done = post_events(http, &url, &headers, &body, |d| {
+        acc.apply(d, &mut *on_delta)
+    })
+    .await?;
+    acc.check_end(done)?;
+    Ok(acc.finish())
 }
 
-impl OpenAiProvider {
-    pub fn new(config: ProviderConfig) -> Self {
-        OpenAiProvider {
-            http: http_client(),
-            config,
-        }
-    }
-
-    fn url(&self) -> String {
-        format!(
-            "{}/chat/completions",
-            self.config.base_url.trim_end_matches('/')
-        )
-    }
-
-    async fn stream(
-        &self,
-        req: CompletionRequest<'_>,
-        on_delta: DeltaSink<'_>,
-    ) -> Result<Completion, ProviderError> {
-        check_images(&self.config, req.messages)?;
-        let (body, headers) = configured(
-            request_body(&self.config, &req),
-            bearer(&self.config),
-            &self.config,
-        );
-        let mut capture = Capture::start(&self.url(), &body);
-        let resp = send(&self.http, &self.url(), &headers, &body, &mut capture).await?;
-        let mut bytes = resp.bytes_stream();
-        let mut parser = SseParser::default();
-        let mut acc = Accumulator::default();
-        while let Some(chunk) = bytes.next().await {
-            let chunk = chunk.map_err(|e| ProviderError(format!("stream error: {e}")))?;
-            capture.chunk(&chunk);
-            for data in parser.push(&chunk) {
-                if acc.apply(&data, on_delta)? {
-                    acc.check_end(true)?;
-                    return Ok(acc.finish());
-                }
+/// POST `body` and hand each server-sent event's data to `apply` until it
+/// says the response is complete. False if the stream ended first.
+pub(super) async fn post_events(
+    http: &reqwest::Client,
+    url: &str,
+    headers: &[(String, String)],
+    body: &Value,
+    mut apply: impl FnMut(&str) -> Result<bool, ProviderError>,
+) -> Result<bool, ProviderError> {
+    let mut capture = Capture::start(url, body);
+    let resp = send(http, url, headers, body, &mut capture).await?;
+    let mut bytes = resp.bytes_stream();
+    let mut parser = SseParser::default();
+    while let Some(chunk) = bytes.next().await {
+        let chunk = chunk.map_err(|e| ProviderError(format!("stream error: {e}")))?;
+        capture.chunk(&chunk);
+        for data in parser.push(&chunk) {
+            if apply(&data)? {
+                return Ok(true);
             }
         }
-        let done = match parser.finish() {
-            Some(data) => acc.apply(&data, on_delta)?,
-            None => false,
-        };
-        acc.check_end(done)?;
-        Ok(acc.finish())
     }
-}
-
-impl Provider for OpenAiProvider {
-    fn replays_reasoning(&self) -> bool {
-        self.config.replay_reasoning
-    }
-    fn complete<'a>(
-        &'a self,
-        req: CompletionRequest<'a>,
-        on_delta: DeltaSink<'a>,
-    ) -> BoxFuture<'a, Result<Completion, ProviderError>> {
-        Box::pin(self.stream(req, on_delta))
-    }
+    parser.finish().map_or(Ok(false), |data| apply(&data))
 }
 
 /// `Authorization: Bearer <key>`, when there is a key.
@@ -123,7 +97,8 @@ fn merge(into: &mut Value, from: &Value) {
     }
 }
 
-pub(super) fn http_client() -> reqwest::Client {
+/// An HTTP client for providers; one serves every request a provider makes.
+pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .connect_timeout(CONNECT_TIMEOUT)
         .build()

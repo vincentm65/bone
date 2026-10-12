@@ -324,7 +324,7 @@ async fn http_headers_path_stream_and_premature_eof() {
                 socket.write_all(chunk).await.unwrap();
             }
         });
-        let provider = AnthropicProvider::new(config);
+        let provider = crate::provider::built_in(config);
         let messages = [user("hello")];
         let result = provider
             .complete(

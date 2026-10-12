@@ -4,72 +4,27 @@
 //! between calls. Stateless: `store` is off and the whole history is sent.
 
 use bone_proto::types::{ChatMessage, ImageAttachment, ReasoningState, ToolCall, Usage};
-use futures_util::StreamExt;
-use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
 
-use super::openai::{Capture, bearer, check_images, configured, http_client, send};
-use super::sse::SseParser;
-use super::{Completion, CompletionRequest, Delta, DeltaSink, Provider, ProviderError};
+use super::openai::{bearer, configured, post_events};
+use super::{Completion, CompletionRequest, Delta, DeltaSink, ProviderError};
 use crate::config::ProviderConfig;
 
-pub struct OpenAiResponsesProvider {
-    http: reqwest::Client,
-    config: ProviderConfig,
-}
-
-impl OpenAiResponsesProvider {
-    pub fn new(config: ProviderConfig) -> Self {
-        OpenAiResponsesProvider {
-            http: http_client(),
-            config,
-        }
-    }
-
-    fn url(&self) -> String {
-        format!("{}/responses", self.config.base_url.trim_end_matches('/'))
-    }
-
-    async fn stream(
-        &self,
-        req: CompletionRequest<'_>,
-        on_delta: DeltaSink<'_>,
-    ) -> Result<Completion, ProviderError> {
-        check_images(&self.config, req.messages)?;
-        let (body, headers) = configured(
-            request_body(&self.config, &req),
-            bearer(&self.config),
-            &self.config,
-        );
-        let mut capture = Capture::start(&self.url(), &body);
-        let resp = send(&self.http, &self.url(), &headers, &body, &mut capture).await?;
-        let mut bytes = resp.bytes_stream();
-        let mut parser = SseParser::default();
-        let mut acc = Accumulator::default();
-        while let Some(chunk) = bytes.next().await {
-            let chunk = chunk.map_err(|e| ProviderError(format!("stream error: {e}")))?;
-            capture.chunk(&chunk);
-            for data in parser.push(&chunk) {
-                if acc.apply(&data, on_delta)? {
-                    return acc.finish(&self.config.model);
-                }
-            }
-        }
-        if let Some(data) = parser.finish() {
-            acc.apply(&data, on_delta)?;
-        }
-        acc.finish(&self.config.model)
-    }
-}
-
-impl Provider for OpenAiResponsesProvider {
-    fn complete<'a>(
-        &'a self,
-        req: CompletionRequest<'a>,
-        on_delta: DeltaSink<'a>,
-    ) -> BoxFuture<'a, Result<Completion, ProviderError>> {
-        Box::pin(self.stream(req, on_delta))
-    }
+/// One completion over `/responses`.
+pub(super) async fn stream(
+    http: &reqwest::Client,
+    config: &ProviderConfig,
+    req: CompletionRequest<'_>,
+    on_delta: DeltaSink<'_>,
+) -> Result<Completion, ProviderError> {
+    let url = format!("{}/responses", super::base_url(config));
+    let (body, headers) = configured(request_body(config, &req), bearer(config), config);
+    let mut acc = Accumulator::default();
+    post_events(http, &url, &headers, &body, |d| {
+        acc.apply(d, &mut *on_delta)
+    })
+    .await?;
+    acc.finish(&config.model)
 }
 
 fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> Value {
@@ -77,6 +32,14 @@ fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> Value {
     if let Some(effort) = config.reasoning_effort.as_deref().filter(|e| !e.is_empty()) {
         reasoning["effort"] = json!(effort);
     }
+    let instructions: Vec<&str> = req
+        .messages
+        .iter()
+        .filter_map(|m| match m {
+            ChatMessage::System { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect();
     let mut body = json!({
         "model": config.model,
         "input": wire_input(req.messages, &config.model),
@@ -85,16 +48,21 @@ fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> Value {
         "include": ["reasoning.encrypted_content"],
         "reasoning": reasoning,
     });
+    if !instructions.is_empty() {
+        body["instructions"] = json!(instructions.join("\n\n"));
+    }
     if !req.tools.is_empty() {
         body["tools"] = req
             .tools
             .iter()
             .map(|t| {
+                // Responses tools are strict by default; bone's schemas are not.
                 json!({
                     "type": "function",
                     "name": t.name,
                     "description": t.description,
                     "parameters": t.parameters,
+                    "strict": false,
                 })
             })
             .collect();
@@ -107,9 +75,8 @@ fn wire_input(messages: &[ChatMessage], model: &str) -> Vec<Value> {
     let mut images = Vec::new();
     for (index, message) in messages.iter().enumerate() {
         match message {
-            ChatMessage::System { content } => {
-                out.push(json!({ "role": "system", "content": content }));
-            }
+            // System prompts go in `instructions`.
+            ChatMessage::System { .. } => {}
             ChatMessage::User { content, images } => out.push(wire_user(content, images)),
             ChatMessage::Assistant {
                 content,

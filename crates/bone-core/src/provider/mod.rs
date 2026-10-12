@@ -5,9 +5,7 @@ mod openai;
 mod openai_responses;
 pub(crate) mod sse;
 
-pub use anthropic::AnthropicProvider;
-pub use openai::OpenAiProvider;
-pub use openai_responses::OpenAiResponsesProvider;
+pub(crate) use openai::http_client;
 
 use std::sync::Arc;
 
@@ -96,9 +94,43 @@ pub fn unconfigured(p: &crate::config::ProviderConfig) -> bool {
 
 /// The built-in provider for a config, by its `api`.
 pub fn built_in(p: crate::config::ProviderConfig) -> Arc<dyn Provider> {
-    match p.api {
-        ProviderApi::Completions => Arc::new(OpenAiProvider::new(p)),
-        ProviderApi::Responses => Arc::new(OpenAiResponsesProvider::new(p)),
-        ProviderApi::Anthropic => Arc::new(AnthropicProvider::new(p)),
+    Arc::new(BuiltIn {
+        http: http_client(),
+        config: p,
+    })
+}
+
+/// A built-in provider: the wire format its `api` names, over an HTTP
+/// client whose connections every request reuses.
+pub(crate) struct BuiltIn {
+    pub http: reqwest::Client,
+    pub config: crate::config::ProviderConfig,
+}
+
+impl Provider for BuiltIn {
+    fn replays_reasoning(&self) -> bool {
+        match self.config.api {
+            ProviderApi::Completions => self.config.replay_reasoning,
+            ProviderApi::Responses => false,
+            ProviderApi::Anthropic => true,
+        }
+    }
+
+    fn complete<'a>(
+        &'a self,
+        req: CompletionRequest<'a>,
+        on_delta: DeltaSink<'a>,
+    ) -> BoxFuture<'a, Result<Completion, ProviderError>> {
+        let (http, config) = (&self.http, &self.config);
+        Box::pin(async move {
+            openai::check_images(config, req.messages)?;
+            match config.api {
+                ProviderApi::Completions => openai::stream(http, config, req, on_delta).await,
+                ProviderApi::Responses => {
+                    openai_responses::stream(http, config, req, on_delta).await
+                }
+                ProviderApi::Anthropic => anthropic::stream(http, config, req, on_delta).await,
+            }
+        })
     }
 }

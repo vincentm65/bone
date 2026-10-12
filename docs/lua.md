@@ -350,7 +350,23 @@ bone.config.provider = "mine"
 - `bone.http_stream(req)` takes the same fields as `bone.http` and returns `{ status, headers }` with `:next()` (the next event's data, `nil` at the end), `:events()` (an iterator), `:text()` (the rest of the body) and `:close()`.
 - `complete` runs as a job: it waits without blocking, and a cancelled turn stops it.
 
-For APIs such as Anthropic Messages, implement the translation of messages, tools, streaming events and usage through this provider API; no dedicated Anthropic package is currently published in the catalog.
+When the API speaks a format bone already knows and only the destination or
+sign-in is special (a token that refreshes, extra headers), register
+`prepare` instead: it shapes each request and a built-in provider sends it,
+with streaming, reasoning, retries and errors handled for you.
+
+```lua
+bone.provider.register("corp", {
+  prepare = function(req)                -- runs before every request
+    return {
+      api = "responses",                 -- or "completions", "anthropic"
+      base_url = "https://llm.corp.example/v1",
+      headers = { authorization = "Bearer " .. read_token() },
+      body = { prompt_cache_key = req.session_id },
+    }
+  end,
+})
+```
 
 ### MCP servers
 
