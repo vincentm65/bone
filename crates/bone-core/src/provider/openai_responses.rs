@@ -329,6 +329,7 @@ impl Accumulator {
                 model: model.to_owned(),
                 items,
                 prefix: None,
+                field: None,
             }),
         })
     }

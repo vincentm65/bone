@@ -720,9 +720,10 @@ pub struct ModelInfo {
     pub reasoning_effort: Option<String>,
     #[serde(default = "yes")]
     pub stream_usage: bool,
-    /// Replay assistant `reasoning_content` (only for compatible endpoints).
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub replay_reasoning: bool,
+    /// Replay assistant reasoning: forced on or off; `None` replays it once
+    /// the server streams some.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replay_reasoning: Option<bool>,
     #[serde(
         default,
         skip_serializing_if = "crate::types::ProviderApi::is_completions"

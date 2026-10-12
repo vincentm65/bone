@@ -226,8 +226,9 @@ function M.open(want)
         desc = "enter types a new key (saved in ~/.bone/secrets.json, readable only by you); empty removes the saved one" },
       { kind = "pfield", key = "api_key_env", label = "Key variable", type = "string", value = env,
         desc = "an environment variable that holds the key" },
-      { kind = "pfield", key = "replay_reasoning", label = "Replay reasoning", type = "boolean", value = p.replay_reasoning == true,
-        changed = changed("replay_reasoning"), desc = "send stored reasoning_content; enable only for compatible endpoints (e.g. Qwen)" },
+      { kind = "pfield", key = "replay_reasoning", label = "Replay reasoning", type = "choice", choices = { "auto", "on", "off" },
+        value = p.replay_reasoning == nil and "auto" or (p.replay_reasoning and "on" or "off"), changed = changed("replay_reasoning"),
+        desc = "send reasoning back with past messages; auto does once the server streams some" },
       { kind = "pfield", key = "api", label = "API", type = "choice", choices = APIS,
         value = p.api_auto and "auto" or p.api or "completions", changed = changed("api"),
         desc = (p.api_auto and ("auto picks " .. (p.api or "completions") .. " for this URL; ") or "")
@@ -404,6 +405,9 @@ function M.open(want)
     local function after(_, err)
       load_providers()
       saved_note(err, "saved " .. row.label:lower())
+    end
+    if value == "on" or value == "off" then
+      value = value == "on"
     end
     if value == "" or value == "default" or value == "auto" then
       bone.settings.reset(path, after)

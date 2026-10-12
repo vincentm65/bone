@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use bone_proto::types::{ChatMessage, ToolCall, Usage};
+use bone_proto::types::{ChatMessage, ReasoningState, ToolCall, Usage};
 use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -31,7 +31,7 @@ pub(super) async fn stream(
     })
     .await?;
     acc.check_end(done)?;
-    Ok(acc.finish())
+    Ok(acc.finish(&config.model))
 }
 
 /// POST `body` and hand each server-sent event's data to `apply` until it
@@ -206,7 +206,7 @@ pub(super) async fn send(
 fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> Value {
     let mut body = json!({
         "model": config.model,
-        "messages": wire_messages(req.messages, config.replay_reasoning),
+        "messages": wire_messages(req.messages, replay_field(req.messages, config)),
         "stream": true,
     });
     if config.stream_usage {
@@ -234,11 +234,29 @@ fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> Value {
     body
 }
 
-fn wire_messages(messages: &[ChatMessage], replay_reasoning: bool) -> Vec<Value> {
+/// The field assistant messages carry their reasoning back in, if any: the
+/// one this model streamed reasoning in, unless `replay_reasoning` forces it
+/// off (or on, with `reasoning_content` before the model has streamed any).
+fn replay_field<'a>(messages: &'a [ChatMessage], config: &ProviderConfig) -> Option<&'a str> {
+    let streamed = messages.iter().find_map(|m| match m {
+        ChatMessage::Assistant {
+            reasoning_state: Some(s),
+            ..
+        } if s.model == config.model => s.field.as_deref(),
+        _ => None,
+    });
+    match config.replay_reasoning {
+        Some(false) => None,
+        Some(true) => Some(streamed.unwrap_or("reasoning_content")),
+        None => streamed,
+    }
+}
+
+fn wire_messages(messages: &[ChatMessage], replay: Option<&str>) -> Vec<Value> {
     let mut out = Vec::new();
     let mut images = Vec::new();
     for (index, message) in messages.iter().enumerate() {
-        out.push(wire_message(message, replay_reasoning));
+        out.push(wire_message(message, replay));
         if let ChatMessage::Tool {
             call_id,
             images: attached,
@@ -259,7 +277,7 @@ fn wire_messages(messages: &[ChatMessage], replay_reasoning: bool) -> Vec<Value>
     out
 }
 
-fn wire_message(msg: &ChatMessage, replay_reasoning: bool) -> Value {
+fn wire_message(msg: &ChatMessage, replay: Option<&str>) -> Value {
     match msg {
         ChatMessage::System { content } => json!({ "role": "system", "content": content }),
         ChatMessage::User { content, images } => wire_user(content, images),
@@ -273,8 +291,8 @@ fn wire_message(msg: &ChatMessage, replay_reasoning: bool) -> Value {
                 "role": "assistant",
                 "content": if content.is_empty() { Value::Null } else { json!(content) },
             });
-            if replay_reasoning {
-                m["reasoning_content"] = json!(reasoning);
+            if let Some(field) = replay {
+                m[field] = json!(reasoning);
             }
             if !tool_calls.is_empty() {
                 m["tool_calls"] = tool_calls
@@ -387,6 +405,8 @@ struct PromptTokensDetails {
 struct Accumulator {
     content: String,
     reasoning: String,
+    /// The field reasoning streamed in.
+    reasoning_field: Option<&'static str>,
     calls: BTreeMap<usize, ToolCall>,
     usage: Option<Usage>,
     finish_reason: Option<String>,
@@ -420,11 +440,14 @@ impl Accumulator {
         }
         let deltas = choices.into_iter().filter_map(|c| c.delta);
         for d in deltas {
-            if let Some(text) = [d.reasoning_content, d.reasoning]
-                .into_iter()
-                .flatten()
-                .find(|t| !t.is_empty())
+            if let Some((field, text)) = [
+                ("reasoning_content", d.reasoning_content),
+                ("reasoning", d.reasoning),
+            ]
+            .into_iter()
+            .find_map(|(f, t)| t.filter(|t| !t.is_empty()).map(|t| (f, t)))
             {
+                self.reasoning_field.get_or_insert(field);
                 self.reasoning.push_str(&text);
                 on_delta(Delta::Reasoning(text));
             }
@@ -469,7 +492,7 @@ impl Accumulator {
         Err(ProviderError(why.into()))
     }
 
-    fn finish(self) -> Completion {
+    fn finish(self, model: &str) -> Completion {
         let tool_calls = self
             .calls
             .into_iter()
@@ -485,7 +508,12 @@ impl Accumulator {
             reasoning: self.reasoning,
             tool_calls,
             usage: self.usage,
-            reasoning_state: None,
+            reasoning_state: self.reasoning_field.map(|f| ReasoningState {
+                model: model.to_owned(),
+                items: Vec::new(),
+                prefix: None,
+                field: Some(f.into()),
+            }),
         }
     }
 }
@@ -503,7 +531,7 @@ mod tests {
                 break;
             }
         }
-        (acc.finish(), deltas)
+        (acc.finish("m"), deltas)
     }
 
     #[test]
@@ -583,7 +611,7 @@ mod tests {
                 is_error: false,
             },
         ];
-        let wire: Vec<Value> = msgs.iter().map(|msg| wire_message(msg, false)).collect();
+        let wire: Vec<Value> = msgs.iter().map(|msg| wire_message(msg, None)).collect();
         assert_eq!(
             wire,
             vec![
@@ -595,7 +623,7 @@ mod tests {
         replayed[0]["reasoning_content"] = json!("hidden");
         assert_eq!(
             msgs.iter()
-                .map(|msg| wire_message(msg, true))
+                .map(|msg| wire_message(msg, Some("reasoning_content")))
                 .collect::<Vec<_>>(),
             replayed
         );
@@ -607,12 +635,12 @@ mod tests {
                 reasoning_state: None,
             };
             assert_eq!(
-                wire_message(&msg, true),
+                wire_message(&msg, Some("reasoning_content")),
                 json!({
                     "role":"assistant", "content":"answer", "reasoning_content":reasoning
                 })
             );
-            assert!(wire_message(&msg, false).get("reasoning_content").is_none());
+            assert!(wire_message(&msg, None).get("reasoning_content").is_none());
         }
     }
 }

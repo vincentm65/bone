@@ -110,7 +110,8 @@ fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> (Value,
                         && s.model == config.model
                         && s.prefix.as_deref() == Some(fingerprint.as_str())
                 });
-                lost = reasoning_state.is_some() && state.is_none() && !tool_calls.is_empty();
+                let had = reasoning_state.as_ref().is_some_and(|s| !s.items.is_empty());
+                lost = had && state.is_none() && !tool_calls.is_empty();
                 ("assistant", assistant_blocks(content, tool_calls, state))
             }
         };
@@ -496,6 +497,7 @@ impl Accumulator {
                 model: model.to_owned(),
                 items,
                 prefix: Some(prefix),
+                field: None,
             }),
         })
     }

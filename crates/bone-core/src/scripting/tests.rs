@@ -40,8 +40,8 @@ fn config_and_env_overrides() {
     .unwrap();
     let ex = extract(&lua).unwrap();
     let c = resolve(dir.path(), &ex, &no_env).unwrap();
-    assert!(!ex.providers["a"].replay_reasoning);
-    assert!(c.provider.replay_reasoning);
+    assert_eq!(ex.providers["a"].replay_reasoning, None);
+    assert_eq!(c.provider.replay_reasoning, Some(true));
     assert_eq!(
         (c.provider.model.as_str(), c.provider.api_key.as_deref()),
         ("mb", Some("kb"))
@@ -56,7 +56,7 @@ fn config_and_env_overrides() {
         _ => None,
     };
     let c = resolve(dir.path(), &ex, &env).unwrap();
-    assert!(c.provider.replay_reasoning);
+    assert_eq!(c.provider.replay_reasoning, Some(true));
     assert_eq!(
         (c.provider.base_url.as_str(), c.provider.model.as_str()),
         ("http://b/v1", "override")
@@ -65,7 +65,7 @@ fn config_and_env_overrides() {
 
     let env = |k: &str| (k == "BONE_BASE_URL").then(|| "http://env/v1".to_string());
     let c = resolve(dir.path(), &ex, &env).unwrap();
-    assert!(!c.provider.replay_reasoning);
+    assert_eq!(c.provider.replay_reasoning, None);
     assert_eq!(
         (c.provider.base_url.as_str(), c.provider.model.as_str()),
         ("http://env/v1", "mb")

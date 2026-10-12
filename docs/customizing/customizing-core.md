@@ -20,19 +20,21 @@ bone.config.providers.qwen = {
   api_key = os.getenv("SOME_KEY"),        -- optional
   reasoning_effort = "medium",            -- optional
   stream_usage = true,                    -- send stream_options.include_usage
-  replay_reasoning = true,                -- Qwen: replay assistant reasoning_content
 }
 bone.config.provider = "qwen"      -- which entry to use (optional if there is one)
 bone.config.system_prompt = "..."  -- or function(ctx) return "..." end; ctx = { cwd, session_id }
 ```
 
-`replay_reasoning` defaults to `false`. Enable it only for endpoints that accept
-`reasoning_content` on assistant messages (including empty reasoning), such as
-the Qwen server above. Standard OpenAI and other compatible APIs may reject this
-nonstandard field. This is separate from `reasoning_effort`, which controls
-reasoning generation, not history replay. Change it in `/config` under the
-provider, or set `providers.<name>.replay_reasoning` in settings. Lua providers
-continue to control their own request serialization.
+Over Chat Completions, once the model streams reasoning (in `reasoning_content`
+or `reasoning`), bone sends each assistant message's reasoning back in that
+field, empty where it had none, as servers like Qwen expect. Until then
+requests carry no reasoning fields, so standard endpoints never see them. Set
+`replay_reasoning = false` for a server that streams reasoning but rejects it
+back (or to send less), or `true` to send `reasoning_content` from the start.
+This is separate from `reasoning_effort`, which controls reasoning generation,
+not history replay. Change it in `/config` under the provider, or set
+`providers.<name>.replay_reasoning` in settings. Lua providers continue to
+control their own request serialization.
 
 bone picks the wire format from `base_url`: Anthropic's `/messages` for
 `api.anthropic.com` (or a `claude-*` model with no `base_url`, see below),

@@ -127,7 +127,8 @@ pub(crate) struct BuiltIn {
 impl Provider for BuiltIn {
     fn replays_reasoning(&self) -> bool {
         match api(&self.config) {
-            ProviderApi::Completions => self.config.replay_reasoning,
+            // Unset: reasoning only exists once the server sent some back.
+            ProviderApi::Completions => self.config.replay_reasoning != Some(false),
             ProviderApi::Responses => false,
             ProviderApi::Anthropic => true,
         }

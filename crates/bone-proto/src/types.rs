@@ -66,6 +66,10 @@ pub struct ReasoningState {
     /// providers that only accept it back after an unchanged history.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prefix: Option<String>,
+    /// The Chat Completions field the reasoning streamed in
+    /// (`reasoning_content` or `reasoning`), to replay it in.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field: Option<String>,
 }
 
 /// The wire format of a built-in provider.

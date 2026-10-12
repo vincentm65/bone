@@ -79,10 +79,10 @@ pub struct ProviderConfig {
     /// Send `stream_options.include_usage`. Some servers reject it.
     #[serde(default = "default_true")]
     pub stream_usage: bool,
-    /// Replay assistant reasoning as `reasoning_content` for compatible servers.
-    /// Opt in explicitly; standard OpenAI requests omit this field.
+    /// Send assistant reasoning back over Chat Completions: forced on or off;
+    /// `None` sends it once the model has streamed some, in the field it used.
     #[serde(default)]
-    pub replay_reasoning: bool,
+    pub replay_reasoning: Option<bool>,
     /// `/chat/completions`, `/responses` or `anthropic`; `None` picks one
     /// from the URL and model (`provider::api`).
     #[serde(default)]
