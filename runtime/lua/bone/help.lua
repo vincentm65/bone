@@ -110,7 +110,9 @@ function M.open()
   local docs = {}
   local sections = doc_sections()
   for _, d in ipairs(bone._docs) do
-    docs[#docs + 1] = { label = d.name .. ".md", desc = "Read the complete " .. d.name .. " guide", topic = d.name, meta = "Full guide" }
+    docs[#docs + 1] = d.plugin
+      and { label = d.name, desc = "Read the " .. d.name .. " plugin's guide", doc = d, meta = "Plugin" }
+      or { label = d.name .. ".md", desc = "Read the complete " .. d.name .. " guide", topic = d.name, meta = "Full guide" }
   end
   for i, s in ipairs(sections) do
     docs[#docs + 1] = { label = s.title:gsub("`", ""), desc = "Read this section of " .. s.doc .. ".md", meta = s.doc .. ".md", section = i }
@@ -126,6 +128,15 @@ function M.open()
     elseif st.tab == 2 then
       for _, k in ipairs(KEYS) do
         all[#all + 1] = { label = k[1], desc = k[2], meta = k[3] .. " · default shortcut", topic = "keys" }
+      end
+      -- Mappings given a desc (plugins' and your own).
+      local guide = {}
+      for _, d in ipairs(bone._docs) do guide[d.plugin or ""] = d end
+      local mine = bone.keymap.list()
+      table.sort(mine, function(a, b) return (a.plugin or "") .. a.keys < (b.plugin or "") .. b.keys end)
+      for _, k in ipairs(mine) do
+        local ctx = k.context ~= "main" and " · in " .. k.context or ""
+        all[#all + 1] = { label = k.keys, desc = k.desc, meta = (k.plugin or "your config") .. ctx, doc = guide[k.plugin or ""], topic = "keys" }
       end
     else
       all = docs
@@ -211,7 +222,7 @@ function M.open()
       body[#body + 1] = wrapped[2] or {}
       local meta = it and it.meta or ""
       if it and it.command then meta = meta .. " · enter puts it in the prompt" end
-      if st.tab == 2 then meta = meta .. " · enter opens the keys guide" end
+      if st.tab == 2 then meta = meta .. (it and it.doc and " · enter opens its guide" or " · enter opens the keys guide") end
       local pos = #list > 0 and (st.sel .. "/" .. #list) or "0 matches"
       body[#body + 1] = clip({ { pos .. "  ·  " .. meta, "Dim" } }, inner)
     end
@@ -246,6 +257,8 @@ function M.open()
       elseif it and it.section then
         -- Use this exact section, rather than searching a duplicate heading.
         open_section(sections, it.section)
+      elseif it and it.doc then
+        bone.ui.pager(it.doc.text, { title = it.doc.name })
       elseif it then
         M.topic(it.topic)
       end

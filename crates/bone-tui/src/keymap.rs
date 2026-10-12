@@ -147,6 +147,8 @@ struct ContextSpec {
 #[derive(Debug)]
 pub struct Keymaps {
     maps: HashMap<(Context, Vec<Key>), Action>,
+    /// What mappings do, for help (`desc` in `bone.keymap.set`).
+    descs: HashMap<(Context, Vec<Key>), String>,
     contexts: HashMap<Context, ContextSpec>,
 }
 
@@ -171,6 +173,7 @@ impl Default for Keymaps {
         }
         Self {
             maps: HashMap::new(),
+            descs: HashMap::new(),
             contexts,
         }
     }
@@ -223,23 +226,42 @@ impl Keymaps {
             return Err(format!("unknown context {}", ctx.name()));
         }
         self.maps.retain(|(context, _), _| context != ctx);
+        self.descs.retain(|(context, _), _| context != ctx);
         for spec in self.contexts.values_mut() {
             spec.fallbacks.retain(|fallback| fallback != ctx);
         }
         Ok(())
     }
 
-    pub fn set(&mut self, ctx: Context, key: &str, action: Action) -> Result<(), String> {
+    pub fn set(
+        &mut self,
+        ctx: Context,
+        key: &str,
+        action: Action,
+        desc: Option<String>,
+    ) -> Result<(), String> {
         self.ensure_context(ctx.clone());
-        self.maps.insert((ctx, keys::parse_sequence(key)?), action);
+        let k = (ctx, keys::parse_sequence(key)?);
+        match desc {
+            Some(d) => self.descs.insert(k.clone(), d),
+            None => self.descs.remove(&k),
+        };
+        self.maps.insert(k, action);
         Ok(())
     }
 
     pub fn del(&mut self, ctx: Context, key: &str) -> Result<(), String> {
+        let k = (ctx, keys::parse_sequence(key)?);
+        self.descs.remove(&k);
         self.maps
-            .remove(&(ctx, keys::parse_sequence(key)?))
+            .remove(&k)
             .map(|_| ())
             .ok_or_else(|| format!("no mapping for {key}"))
+    }
+
+    /// Every mapping with a description: context, keys, description.
+    pub fn described(&self) -> impl Iterator<Item = (&Context, &[Key], &str)> {
+        (self.descs.iter()).map(|((ctx, keys), d)| (ctx, keys.as_slice(), d.as_str()))
     }
 
     #[cfg(test)]
@@ -332,9 +354,14 @@ mod tests {
     #[test]
     fn maps_per_context() {
         let mut k = Keymaps::default();
-        k.set(Context::Main, "ctrl+r", Action::parse("/sessions").unwrap())
-            .unwrap();
-        k.set(Context::Popup, "y", Action::parse("dismiss").unwrap())
+        k.set(
+            Context::Main,
+            "ctrl+r",
+            Action::parse("/sessions").unwrap(),
+            None,
+        )
+        .unwrap();
+        k.set(Context::Popup, "y", Action::parse("dismiss").unwrap(), None)
             .unwrap();
         let y = keys::parse("y").unwrap();
         assert_eq!(
@@ -365,9 +392,14 @@ mod tests {
         let review = Context::from_name("review").unwrap();
         k.define(review.clone(), Some(vec![Context::Main]), Some(10))
             .unwrap();
-        k.set(review.clone(), "g g", Action::parse("sessions").unwrap())
-            .unwrap();
-        k.set(Context::Main, "x", Action::parse("dismiss").unwrap())
+        k.set(
+            review.clone(),
+            "g g",
+            Action::parse("sessions").unwrap(),
+            None,
+        )
+        .unwrap();
+        k.set(Context::Main, "x", Action::parse("dismiss").unwrap(), None)
             .unwrap();
 
         let g = [keys::parse("g").unwrap()];

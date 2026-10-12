@@ -14,7 +14,10 @@ other guides works in a plugin's files unchanged.
   manifest.json  optional: a settings page in /config
 ```
 
-Every part is optional. Plugins load in name order, after the runtime
+Every part is optional. A `README.md` is the plugin's help page while it
+is loaded: `/help <name>` opens it and the help browser lists it under Docs.
+Give its keys a `desc` (`bone.keymap.set(key, fn, { desc = "…" })`) and they
+are listed under Keys. Plugins load in name order, after the runtime
 defaults and before your own `core.lua` / `tui.lua`, so your config can change
 anything a plugin set up. Rename a folder to start with `_` or `.` to disable
 it. `bone.plugins` lists the loaded names. Installing is just copying or

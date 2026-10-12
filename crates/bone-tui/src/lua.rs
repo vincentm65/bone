@@ -1317,7 +1317,13 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 }
             };
             let seq = keys::parse_sequence(&key).map_err(err)?;
-            app.keymaps.set(ctx.clone(), &key, action).map_err(err)?;
+            let desc = (opts.as_ref())
+                .map(|o| o.get::<Option<String>>("desc"))
+                .transpose()?
+                .flatten();
+            app.keymaps
+                .set(ctx.clone(), &key, action, desc)
+                .map_err(err)?;
             match app.owner.clone() {
                 Some(owner) => {
                     app.keymap_owner.insert((ctx, seq), owner);
@@ -1365,6 +1371,19 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             ret(lua, ())
         }
         "keymap_current" => ret(lua, app.context().name().to_owned()),
+        "keymap_list" => {
+            let list: Vec<_> = (app.keymaps.described())
+                .map(|(ctx, seq, desc)| {
+                    let keys: Vec<_> = seq.iter().map(keys::format).collect();
+                    let owner = app.keymap_owner.get(&(ctx.clone(), seq.to_vec()));
+                    serde_json::json!({
+                        "keys": keys.join(" "), "desc": desc,
+                        "context": ctx.name(), "plugin": owner,
+                    })
+                })
+                .collect();
+            ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
+        }
         "keymap_context_del" => {
             let name: String = args(lua, a)?;
             let ctx = context_from_name(name)?;

@@ -179,6 +179,24 @@ impl App {
         p.loaded = true;
         p.error = error;
         p.modules = after.into_iter().filter(|m| !before.contains(m)).collect();
+        // Its README is a help page while it is loaded.
+        if let Ok(text) = std::fs::read_to_string(dir.join("README.md")) {
+            let _ = self.with_api(|lua| {
+                let doc = lua.create_table()?;
+                doc.set("name", name)?;
+                doc.set("text", text)?;
+                doc.set("plugin", name)?;
+                lua.globals()
+                    .get::<Table>("bone")?
+                    .get::<Table>("_docs")?
+                    .push(doc)
+            });
+        }
+        let p = self
+            .plugins
+            .iter()
+            .find(|p| p.name == name)
+            .expect("plugin entry");
         let info = p.info();
         self.fire("plugin/loaded", info);
         self.dirty = true;
@@ -255,6 +273,17 @@ impl App {
             .collect();
         self.release_callbacks(&gone);
         self.callback_owner.retain(|_, o| o != name);
+        let _ = self.with_api(|lua| {
+            let docs: Table = lua.globals().get::<Table>("bone")?.get("_docs")?;
+            let kept = lua.create_table()?;
+            for doc in docs.sequence_values::<Table>() {
+                let doc = doc?;
+                if doc.get::<Option<String>>("plugin")?.as_deref() != Some(name) {
+                    kept.push(doc)?;
+                }
+            }
+            lua.globals().get::<Table>("bone")?.set("_docs", kept)
+        });
         let p = self
             .plugins
             .iter_mut()

@@ -462,6 +462,8 @@ bone.keymap.set("ctrl+l", "new_session")                      -- a builtin actio
 bone.keymap.set("alt+s", function() bone.cmd("set noshow_reasoning") end)
 bone.keymap.set("ctrl+q", "interrupt", { context = "popup" })  -- while a popup is open
 bone.keymap.set("g g", "/health")                            -- a key sequence
+bone.keymap.set("alt+w v", split, { desc = "split right" })   -- listed in /help → Keys
+bone.keymap.list()                                            -- { { keys, desc, context, plugin } } for described mappings
 bone.keymap.context("review", { fallback = { "main" }, priority = 10 })
 bone.keymap.set("r", function() return false end, { context = "review" })
 bone.keymap.focus("review")

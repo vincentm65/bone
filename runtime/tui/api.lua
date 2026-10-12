@@ -11,9 +11,15 @@ bone.keymap = {}
 --- (`"/sessions"`), or a Lua function.
 --- opts.context: `"main"` (default), `"popup"`, or a named context. A focused
 --- Lua window gets its own keys first, then the `popup` context. Unmapped text
---- in `main` and named contexts enters the prompt.
+--- in `main` and named contexts enters the prompt. opts.desc: what it does,
+--- for help.
 function bone.keymap.set(key, action, opts)
   api("keymap_set", key, action, opts or {})
+end
+
+--- Every mapping with a desc: { keys, desc, context, plugin }.
+function bone.keymap.list()
+  return api("keymap_list")
 end
 
 --- Define or update a named context. `opts.fallback` is a context name or
