@@ -15,6 +15,15 @@ pub struct Window {
     pub follow: bool,
 }
 
+impl Default for Window {
+    fn default() -> Self {
+        Window {
+            top: 0,
+            follow: true,
+        }
+    }
+}
+
 /// Where an area was drawn, from the last frame.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Placed {

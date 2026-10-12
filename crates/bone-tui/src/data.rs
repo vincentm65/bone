@@ -127,7 +127,7 @@ impl App {
     pub fn data_chat(&self, session: Option<&str>) -> Option<&ChatBuffer> {
         match session {
             Some(id) => self.chat_by_session(id).and_then(|b| self.chat(b)),
-            None => self.chat(self.current),
+            None => self.chat(self.rendering.unwrap_or(self.current)),
         }
     }
 

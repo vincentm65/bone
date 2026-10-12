@@ -25,7 +25,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::app::{App, CHAT_WIN, Level, PROMPT_WIN};
 use crate::editor::TextBuffer;
-use crate::layout::Placed;
+use crate::layout::{BufferId, Placed};
 use crate::text::{sanitize, width};
 use crate::ui::{Border, Item, LayoutNode, PromptSpec, Size, render_items};
 
@@ -64,26 +64,37 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     };
 
     let mut plan = Plan::default();
-    place(app, &layout, main, &mut plan);
+    place(app, &layout, main, &mut plan, &mut Vec::new());
     let none = Rect { height: 0, ..main };
-    let rect = |name: &str| {
-        plan.leaves
+    let rect = |leaves: &[(String, Rect)], name: &str| {
+        leaves
             .iter()
             .find(|(n, _)| n == name)
             .map_or(none, |(_, r)| *r)
     };
-    let middle = rect("chat");
-    let divider = rect("divider");
-    let prompt_area = rect("prompt");
-    let status = rect("statusline");
+    // The chat on screen is the "chat" leaf, else its session's
+    // `chat:<id>` leaf. Docked panels go beside the first chat leaf.
+    let current_leaf = (app.current_session_id())
+        .map(|id| format!("chat:{id}"))
+        .filter(|n| !layout.contains("chat") && layout.contains(n))
+        .unwrap_or_else(|| "chat".into());
+    let dock_leaf = (plan.leaves.iter())
+        .map(|(n, _)| n)
+        .find(|n| *n == "chat" || n.starts_with("chat:"))
+        .cloned()
+        .unwrap_or_else(|| "chat".into());
+    let divider = rect(&plan.leaves, "divider");
+    let prompt_area = rect(&plan.leaves, "prompt");
+    let status = rect(&plan.leaves, "statusline");
     if layout.contains("message") {
-        message = rect("message");
+        message = rect(&plan.leaves, "message");
     }
 
-    let chat_area = app.allocate_panels(middle, false, &layout, &mut panels);
+    let docked = rect(&plan.leaves, &dock_leaf);
+    let docked = app.allocate_panels(docked, false, &layout, &mut panels);
     for (name, r) in &mut plan.leaves {
-        if name == "chat" {
-            *r = chat_area;
+        if *name == dock_leaf {
+            *r = docked;
         }
         if let Some(id) = name.strip_prefix("panel:") {
             if app.panel(id).is_some_and(|p| !p.hidden)
@@ -102,14 +113,37 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             }
         }
     }
+    let chat_area = rect(&plan.leaves, &current_leaf);
     // Publish final geometry once, before painting or input can observe it.
     app.leaves = std::mem::take(&mut plan.leaves);
+    app.seps = (plan.seps.iter())
+        .map(|(x, area, _, path)| (Rect::new(*x, area.y, 1, area.height), path.clone()))
+        .collect();
     app.publish_panels(&panels);
     app.placed = HashMap::from([
         (CHAT_WIN, Placed { area: chat_area }),
         (PROMPT_WIN, Placed { area: prompt_area }),
     ]);
-    draw_chat(frame, app, chat_area);
+    app.chat_expiry = None;
+    draw_chat(frame, app, chat_area, app.current);
+    // Other sessions' `chat:<id>` leaves, each session once.
+    let mut drawn = vec![app.current];
+    for i in 0..app.leaves.len() {
+        let (name, r) = &app.leaves[i];
+        let buf = (name.strip_prefix("chat:"))
+            .filter(|_| *name != current_leaf)
+            .and_then(|id| app.chat_by_session(id));
+        if let Some(buf) = buf.filter(|b| !drawn.contains(b)) {
+            drawn.push(buf);
+            draw_chat(frame, app, *r, buf);
+        }
+    }
+    // A hidden chat keeps its data but not its rendered lines.
+    for (b, c) in app.chats.iter_mut().enumerate() {
+        if !drawn.contains(&b) {
+            c.redraw(None);
+        }
+    }
     app.paint_panels(frame, &panels);
     for (name, r) in std::mem::take(&mut plan.regions) {
         // Measurement callbacks see available space; painting sees final space.
@@ -117,7 +151,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             frame.render_widget(Paragraph::new(lines), r);
         }
     }
-    for (x, area, sep) in std::mem::take(&mut plan.seps) {
+    for (x, area, sep, _) in std::mem::take(&mut plan.seps) {
         let style = app.theme.hl("WinSeparator");
         for y in area.y..area.bottom() {
             if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
@@ -226,12 +260,13 @@ struct Plan {
     leaves: Vec<(String, Rect)>,
     /// Regions to paint at their final dimensions.
     regions: Vec<(String, Rect)>,
-    /// Column separators: x, the split's area, the symbol.
-    seps: Vec<(u16, Rect, String)>,
+    /// Column separators: x, the split's area, the symbol, and the path
+    /// (1-based child indexes) to the column after it.
+    seps: Vec<(u16, Rect, String, Vec<usize>)>,
 }
 
 fn is_region(name: &str) -> bool {
-    !BUILTIN.contains(&name) && !name.starts_with("panel:")
+    !BUILTIN.contains(&name) && !name.starts_with("panel:") && !name.starts_with("chat:")
 }
 
 const BUILTIN: [&str; 5] = ["chat", "prompt", "divider", "statusline", "message"];
@@ -249,7 +284,7 @@ fn empty_panels(app: &App, node: &LayoutNode) -> bool {
 /// then natural sizes (the prompt, one-row statusline and divider, the
 /// message line, then regions, which leave a filling sibling at least 3
 /// rows), and filling children share the rest.
-fn place(app: &mut App, node: &LayoutNode, area: Rect, plan: &mut Plan) {
+fn place(app: &mut App, node: &LayoutNode, area: Rect, plan: &mut Plan, path: &mut Vec<usize>) {
     let LayoutNode::Split {
         rows,
         sep,
@@ -372,7 +407,9 @@ fn place(app: &mut App, node: &LayoutNode, area: Rect, plan: &mut Plan) {
             && shown_before
             && at < end
         {
-            plan.seps.push((at, area, sep.clone()));
+            let mut to = path.clone();
+            to.push(i + 1);
+            plan.seps.push((at, area, sep.clone(), to));
             at += 1;
         }
         shown_before |= size > 0;
@@ -390,7 +427,9 @@ fn place(app: &mut App, node: &LayoutNode, area: Rect, plan: &mut Plan) {
                 ..area
             }
         };
-        place(app, c, r, plan);
+        path.push(i + 1);
+        place(app, c, r, plan, path);
+        path.pop();
         at += size;
     }
 }
@@ -404,15 +443,21 @@ fn message_rows(app: &App, area: Rect) -> u16 {
     }
 }
 
-fn draw_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+/// Draw chat `buf` in `area`: the chat on screen scrolls with `CHAT_WIN`,
+/// others with their own view (`App::chat_views`).
+fn draw_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect, buf: BufferId) {
     if area.width == 0 || area.height == 0 {
         return;
     }
     let height = area.height as usize;
-    app.render_chat(app.current, area.width as usize);
-    let chat = &app.chats[app.current];
+    app.render_chat(buf, area.width as usize);
+    let chat = &app.chats[buf];
     let total = chat.row_count();
-    let win = app.windows.get_mut(&CHAT_WIN).unwrap();
+    let win = if buf == app.current {
+        app.windows.get_mut(&CHAT_WIN).unwrap()
+    } else {
+        app.chat_views.entry(buf).or_default()
+    };
     let max_top = total.saturating_sub(height);
     if win.follow || win.top >= max_top {
         win.top = max_top;

@@ -388,7 +388,8 @@ fn handle_terminal(app: &mut App, ev: Event) {
             let at = (m.column, m.row);
             let code = match m.kind {
                 MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                    if app.panel_wheel(at, m.kind == MouseEventKind::ScrollUp) =>
+                    if app.panel_wheel(at, m.kind == MouseEventKind::ScrollUp)
+                        || app.chat_wheel(at, m.kind == MouseEventKind::ScrollUp) =>
                 {
                     return;
                 }

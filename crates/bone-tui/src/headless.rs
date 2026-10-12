@@ -97,7 +97,7 @@ impl Headless {
     }
 
     pub fn open_session(&mut self, id: String) {
-        self.app.open_session(id);
+        self.app.open_session(id, true);
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {

@@ -621,6 +621,7 @@ Registration aliases normalize to these canonical names:
 | `panel/closed` | `panel/closed`, `popup/closed` | a window or a panel |
 
 | `plugin/loaded`, `plugin/unloaded` | same | `{ name, dir, kind, loaded, error }` |
+| `chat/shown` | `chat/shown` | `{ session_id }` when another chat goes on screen (nil for a new chat), and again once a session opened this way has loaded |
 | `job/started` | `job/started` | `{ id, name, cmd, pid }` |
 | `job/finished` | `job/finished` | the job's exit result (see `bone.job`) |
 | `process/changed` | `process/changed` | a core-managed shell process snapshot changed |
@@ -690,6 +691,7 @@ bone.chat.update(id, { text = "built", ok = true })  -- merge fields, redraw it
 bone.chat.remove(id)
 bone.chat.at(x, y)                      -- the item at a screen cell: { index, line } or nil
 bone.chat.view()                        -- { top, height, rows, follow, first, last }
+bone.chat.open(session_id)              -- open a chat without showing it (for a chat:<id> leaf)
 bone.chat.scroll_to(4, "center")        -- "top" (default), "center" or "bottom"
 bone.chat.scroll(-5)                    -- rows (negative is up), or "top" / "bottom"
 bone.chat.refresh_in(500)               -- inside a chat view: draw this item again in 500 ms
@@ -734,6 +736,7 @@ bone.now()                              -- milliseconds since the epoch
 - `bone.api.open_session(id)`: show a session.
 - `bone.ui.pager(content, { title, width, height })` → handle: scrollable text in a focused window. `content` is a string (wrapped; `#` lines are headings) or a list of lines. `up`/`down`/wheel, `pageup`/`pagedown`, `home`/`end`, `esc` or `q` closes. `handle:set(content)`, `handle:close()`.
 - `bone.ui.help(topic)` and `bone.ui.health()`: what `/help {topic}` and `/health` call (in `runtime/tui/defaults.lua`). With no topic, `bone.ui.help()` opens the searchable Commands / Keys / Docs popup. Its browser and topic lookup live in `runtime/lua/bone/help.lua`; override `~/.bone/runtime/lua/bone/help.lua` to customize it. The docs are in `bone._docs`; the TUI's built-in checks come from `bone.api.health()`.
+- `bone.ui.geometry()` → `{ leaves = { { name, x, y, width, height } }, seps = { { x, y, width, height, path } } }`: where the last frame put each layout leaf and column separator. A separator's `path` is the 1-based child indexes from `bone.ui.layout` to the column after it, so a mouse handler can resize the split it belongs to.
 - `bone.ui.box(lines, { title, title_hl, border_hl, width, pad, chars })` → the lines inside a rounded border (`PopupBorder`/`PopupTitle` by default). Only used if you call it.
 
 ### Jobs
@@ -959,6 +962,21 @@ for an example.
 - Mutations: layout changes during rendering apply next frame. Hiding/closing a
   panel clears its cells, geometry and hit targets immediately; reserved space
   is reclaimed next frame. Floating windows/popups never consume layout space.
+
+#### Chat windows in the layout tree
+
+`"chat:<session id>"` is a leaf that shows that session's chat, so a layout can hold any number of chats side by side:
+
+```lua
+bone.chat.open(b)  -- load it without leaving the chat on screen
+bone.ui.layout = { { cols = { "chat", "chat:" .. b }, sep = "│" }, "prompt", "statusline" }
+```
+
+- The chat on screen is the `"chat"` leaf, or, without one, its session's `chat:<id>` leaf. It has the prompt, the scroll keys, mouse selection and `bone.chat.at`/`view`. Every other chat window is drawn from its own render cache (only changed items render again), keeps its own scroll position, and scrolls with the wheel. Showing another chat (`bone.api.open_session`) keeps each one's scroll position.
+- A session shows once: a second leaf for it stays blank. A leaf for a session no chat has open is blank until `bone.chat.open` loads it.
+- While a view draws a chat window, `bone.chat` calls without `session` read that window's chat. Views see `ctx.region == "chat"` in every window.
+- Docked panels go beside the first chat leaf in the tree.
+- The catalog's `windows` plugin builds tiled windows on this (splits, focus, resizing and moving with keys or the mouse).
 
 #### Panels: docked areas you own
 

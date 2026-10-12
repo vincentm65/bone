@@ -165,7 +165,7 @@ pub enum LayoutNode {
 
 impl LayoutNode {
     fn leaf(name: &str, size: Option<Size>) -> Self {
-        let default = if name == "chat" || name.starts_with("panel:") {
+        let default = if name == "chat" || name.starts_with("panel:") || name.starts_with("chat:") {
             Size::Fill
         } else {
             Size::Auto
@@ -724,6 +724,8 @@ impl App {
 
     /// Render the stale items of a chat through `bone.ui.views` and cache them.
     pub fn render_chat(&mut self, buf: BufferId, width_cols: usize) {
+        // Views' chat queries default to the chat being drawn.
+        self.rendering = Some(buf);
         let generation = (self.views_rev, self.opts_rev);
         // Views that read other chat data are drawn again when it changed.
         let data = self.data_generation();
@@ -767,7 +769,9 @@ impl App {
             let expires = self.render_expires.take();
             self.chats[buf].store(item, key, lines, deps, expires, data);
         }
-        self.chat_expiry = self.chats[buf].next_expiry();
+        self.rendering = None;
+        let expiry = self.chats[buf].next_expiry();
+        self.chat_expiry = self.chat_expiry.into_iter().chain(expiry).min();
     }
 
     fn render_item(

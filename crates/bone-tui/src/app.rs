@@ -16,7 +16,7 @@ use bone_proto::Method;
 use bone_proto::methods::*;
 use bone_proto::types::ImageAttachment;
 use mlua::Lua;
-use ratatui::layout::Rect;
+use ratatui::layout::{Position, Rect};
 use tokio::sync::mpsc;
 
 use crate::chat::ChatBuffer;
@@ -169,6 +169,14 @@ pub struct App {
     pub current: BufferId,
     pub prompt: TextBuffer,
     pub windows: HashMap<WindowId, Window>,
+    /// Scroll position of every other chat (`chat:<id>` layout leaves, and
+    /// where a chat was when it is shown again).
+    pub chat_views: HashMap<BufferId, Window>,
+    /// The chat a view is drawing, which chat queries default to.
+    pub rendering: Option<BufferId>,
+    /// Column separators from last frame: their cells and the layout path
+    /// (1-based) to the column after each (`bone.ui.geometry`).
+    pub seps: Vec<(Rect, Vec<usize>)>,
     /// Where the chat and prompt were drawn last frame.
     pub placed: HashMap<WindowId, Placed>,
     /// Every layout leaf (regions and the built-in ones) and where it was
@@ -302,6 +310,9 @@ impl App {
             current: 0,
             prompt: TextBuffer::default(),
             windows: HashMap::from([(CHAT_WIN, window.clone()), (PROMPT_WIN, window)]),
+            chat_views: HashMap::new(),
+            rendering: None,
+            seps: Vec::new(),
             placed: HashMap::new(),
             leaves: Vec::new(),
             screen: Rect::default(),
@@ -533,22 +544,27 @@ impl App {
             self.composer.history_pos = None;
             self.composer.saved = None;
         }
-        // A hidden chat keeps its data but not its rendered lines.
-        if id != self.current
-            && let Some(c) = self.chats.get_mut(self.current)
-        {
-            c.redraw(None);
-        }
+        // Each chat keeps its scroll position (render.rs drops a hidden
+        // chat's rendered lines).
+        let w = if id == self.current {
+            Window::default()
+        } else {
+            let old = self.windows.get(&CHAT_WIN).cloned().unwrap_or_default();
+            self.chat_views.insert(self.current, old);
+            self.chat_views.remove(&id).unwrap_or_default()
+        };
+        self.windows.insert(CHAT_WIN, w);
         self.current = id;
         // The tray's shells are the chat on screen's.
         match self.chats[id].session_id().map(str::to_owned) {
             Some(session_id) => self.request_processes(session_id),
             None => self.clear_processes(),
         }
-        if let Some(w) = self.windows.get_mut(&CHAT_WIN) {
-            w.top = 0;
-            w.follow = true;
-        }
+        let session_id = self.chats[id].session_id().map(str::to_owned);
+        self.fire(
+            "chat/shown",
+            serde_json::json!({ "session_id": session_id }),
+        );
         self.dirty = true;
     }
 
@@ -1443,21 +1459,31 @@ impl App {
         self.error(format!("{why}; message restored to its draft"));
     }
 
-    pub fn open_session(&mut self, session_id: String) {
+    /// Open a session's chat, and show it unless `show` is false (it then
+    /// loads in the background, for a `chat:<id>` layout leaf).
+    pub fn open_session(&mut self, session_id: String, show: bool) {
         if let Some(buf) = self.chat_by_session(&session_id) {
-            self.show_chat(buf);
+            if show {
+                self.show_chat(buf);
+            }
             return;
         }
         // Reuse an untouched new chat rather than piling them up.
         let c = &self.chats[self.current];
-        let buf =
-            if c.session.is_none() && c.entries.is_empty() && !c.starting && self.draft_empty() {
-                self.current
-            } else {
-                self.chats.push(ChatBuffer::new(None));
-                self.chats.len() - 1
-            };
-        self.show_chat(buf);
+        let buf = if show
+            && c.session.is_none()
+            && c.entries.is_empty()
+            && !c.starting
+            && self.draft_empty()
+        {
+            self.current
+        } else {
+            self.chats.push(ChatBuffer::new(None));
+            self.chats.len() - 1
+        };
+        if show {
+            self.show_chat(buf);
+        }
         self.request::<SessionMessages>(SessionRef { session_id }, move |app, r| {
             match r {
                 Ok(r) => {
@@ -1466,7 +1492,11 @@ impl App {
                         c.load(r.info, &r.messages, r.active_turn);
                         c.set_queue(r.queue, r.queue_paused);
                     }
-                    app.request_processes(session_id);
+                    if buf == app.current {
+                        app.request_processes(session_id.clone());
+                        let ev = serde_json::json!({ "session_id": session_id });
+                        app.fire("chat/shown", ev);
+                    }
                 }
                 Err(e) => {
                     if let Some(c) = app.chat_mut(buf) {
@@ -1640,11 +1670,11 @@ impl App {
     /// Resume a session at startup: `None` for the newest one.
     pub fn resume(&mut self, id: Option<String>) {
         match id {
-            Some(id) => self.open_session(id),
+            Some(id) => self.open_session(id, true),
             None => self.request::<SessionList>(Empty {}, move |app, r| match r {
                 // A subagent's session is not one to resume.
                 Ok(list) => match list.into_iter().find(|s| s.owner.is_none()) {
-                    Some(info) => app.open_session(info.session_id),
+                    Some(info) => app.open_session(info.session_id, true),
                     None => app.info("No sessions to resume"),
                 },
                 Err(e) => app.error(format!("cannot list sessions: {e}")),
@@ -1788,6 +1818,29 @@ impl App {
             (None, None) => {}
         }
         self.dirty = true;
+    }
+
+    /// The wheel over another session's `chat:<id>` leaf scrolls that chat.
+    pub fn chat_wheel(&mut self, at: (u16, u16), up: bool) -> bool {
+        let pos = Position::new(at.0, at.1);
+        let Some(buf) = (self.leaves.iter())
+            .find(|(_, r)| r.contains(pos))
+            .and_then(|(name, _)| name.strip_prefix("chat:"))
+            .and_then(|id| self.chat_by_session(id))
+            .filter(|&b| b != self.current)
+        else {
+            return false;
+        };
+        let w = self.chat_views.entry(buf).or_default();
+        w.top = if up {
+            w.top.saturating_sub(3)
+        } else {
+            w.top + 3
+        };
+        // Render clamps and re-enables follow at the bottom.
+        w.follow = false;
+        self.dirty = true;
+        true
     }
 
     pub fn mouse_down(&mut self, at: (u16, u16)) {

@@ -603,6 +603,14 @@ end
 ---   guard: ms to ignore keys after opening (so typing can't hit them)
 --- Unhandled keys in a focused window go to the "popup" keymaps (ctrl+c
 --- cancels the turn). Returns an id. bone.ui.box draws a border if you want.
+--- Where the last frame put things: { leaves = { { name, x, y, width,
+--- height } }, seps = { { x, y, width, height, path } } }. A separator's
+--- `path` leads from bone.ui.layout (1-based child indexes) to the column
+--- after it.
+function bone.ui.geometry()
+  return api("geometry")
+end
+
 function bone.ui.win(spec)
   return api("popup_open", spec)
 end
@@ -953,6 +961,12 @@ end
 --- follows new output again).
 function bone.chat.scroll(n)
   return api("chat_scroll", n)
+end
+
+--- Open a session's chat without showing it (for a `chat:<id>` layout leaf);
+--- it then follows the session's events like the chat on screen.
+function bone.chat.open(session_id)
+  return api("open_session", session_id, false)
 end
 
 --- Draw the item at `index` again, or every item (no index).
