@@ -83,9 +83,10 @@ pub struct ProviderConfig {
     /// Opt in explicitly; standard OpenAI requests omit this field.
     #[serde(default)]
     pub replay_reasoning: bool,
-    /// `/chat/completions` (the default), `/responses` or `anthropic`.
+    /// `/chat/completions`, `/responses` or `anthropic`; `None` picks one
+    /// from the URL and model (`provider::api`).
     #[serde(default)]
-    pub api: bone_proto::types::ProviderApi,
+    pub api: Option<bone_proto::types::ProviderApi>,
     /// Extra request headers, after the provider's own.
     #[serde(default)]
     pub headers: std::collections::BTreeMap<String, String>,

@@ -19,13 +19,12 @@ local providers = bone.config.providers
 --   model = "model-name",
 --   api_key = os.getenv("EXAMPLE_API_KEY"),
 --   -- reasoning_effort = "medium",
---   -- api = "responses", -- OpenAI reasoning models: keep their thinking between calls
+--   -- api = "responses", -- a gateway that forwards /responses (picked for api.openai.com)
 -- }
 
 -- Anthropic (prompt caching and thinking built in):
 -- providers.claude = {
---   api = "anthropic",
---   model = "claude-opus-5-5",
+--   model = "claude-opus-5-5", -- a claude-* model with no base_url uses Anthropic's API
 --   api_key = os.getenv("ANTHROPIC_API_KEY"),
 -- }
 

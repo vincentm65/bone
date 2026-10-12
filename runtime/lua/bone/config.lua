@@ -186,7 +186,7 @@ function M.open(want)
   end
 
   local EFFORTS = { "default", "low", "medium", "high", "xhigh", "max", "none" }
-  local APIS = { "completions", "responses", "anthropic" }
+  local APIS = { "auto", "completions", "responses", "anthropic" }
 
   -- The editor's rows for one provider (or a new one's draft).
   local function provider_rows()
@@ -229,8 +229,9 @@ function M.open(want)
       { kind = "pfield", key = "replay_reasoning", label = "Replay reasoning", type = "boolean", value = p.replay_reasoning == true,
         changed = changed("replay_reasoning"), desc = "send stored reasoning_content; enable only for compatible endpoints (e.g. Qwen)" },
       { kind = "pfield", key = "api", label = "API", type = "choice", choices = APIS,
-        value = p.api or "completions", changed = changed("api"),
-        desc = "the wire format: completions, responses (OpenAI reasoning models), anthropic" },
+        value = p.api_auto and "auto" or p.api or "completions", changed = changed("api"),
+        desc = (p.api_auto and ("auto picks " .. (p.api or "completions") .. " for this URL; ") or "")
+          .. "set it for a gateway that forwards /responses or /messages" },
     }
     if not p.current then
       out[#out + 1] = { kind = "paction", action = "use", label = "Use this provider" }
@@ -384,7 +385,7 @@ function M.open(want)
   end
 
   -- One field of the provider being edited (or of a new one's draft).
-  -- An empty text, or "default", goes back to core.lua's value.
+  -- An empty text, "default" or "auto" goes back to core.lua's value.
   function save_provider_field(row, value)
     local pv = st.prov
     if pv.new then
@@ -404,7 +405,7 @@ function M.open(want)
       load_providers()
       saved_note(err, "saved " .. row.label:lower())
     end
-    if value == "" or value == "default" then
+    if value == "" or value == "default" or value == "auto" then
       bone.settings.reset(path, after)
     else
       bone.settings.set(path, value, after)

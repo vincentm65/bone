@@ -728,6 +728,9 @@ pub struct ModelInfo {
         skip_serializing_if = "crate::types::ProviderApi::is_completions"
     )]
     pub api: crate::types::ProviderApi,
+    /// `api` was picked from the URL and model, not configured.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub api_auto: bool,
     /// It has an API key (never sent).
     #[serde(default)]
     pub has_key: bool,

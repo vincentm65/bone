@@ -79,10 +79,27 @@ impl Provider for Unconfigured {
     }
 }
 
+/// The wire format: the configured one, or Anthropic's and OpenAI's own
+/// APIs by host (or a Claude model with no URL), else Chat Completions.
+pub fn api(p: &crate::config::ProviderConfig) -> ProviderApi {
+    if let Some(api) = p.api {
+        return api;
+    }
+    let host = reqwest::Url::parse(&p.base_url)
+        .ok()
+        .and_then(|u| u.host_str().map(str::to_owned));
+    match host.as_deref() {
+        Some("api.anthropic.com") => ProviderApi::Anthropic,
+        Some("api.openai.com") => ProviderApi::Responses,
+        None if p.base_url.is_empty() && p.model.starts_with("claude-") => ProviderApi::Anthropic,
+        _ => ProviderApi::Completions,
+    }
+}
+
 /// The URL requests go to: the configured one, or the API's default.
 pub fn base_url(p: &crate::config::ProviderConfig) -> &str {
     match p.base_url.trim_end_matches('/') {
-        "" if p.api == ProviderApi::Anthropic => anthropic::DEFAULT_URL,
+        "" if api(p) == ProviderApi::Anthropic => anthropic::DEFAULT_URL,
         url => url,
     }
 }
@@ -109,7 +126,7 @@ pub(crate) struct BuiltIn {
 
 impl Provider for BuiltIn {
     fn replays_reasoning(&self) -> bool {
-        match self.config.api {
+        match api(&self.config) {
             ProviderApi::Completions => self.config.replay_reasoning,
             ProviderApi::Responses => false,
             ProviderApi::Anthropic => true,
@@ -124,7 +141,7 @@ impl Provider for BuiltIn {
         let (http, config) = (&self.http, &self.config);
         Box::pin(async move {
             openai::check_images(config, req.messages)?;
-            match config.api {
+            match api(config) {
                 ProviderApi::Completions => openai::stream(http, config, req, on_delta).await,
                 ProviderApi::Responses => {
                     openai_responses::stream(http, config, req, on_delta).await

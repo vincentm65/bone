@@ -108,7 +108,8 @@ impl Runtime {
                 reasoning_effort: p.reasoning_effort.clone(),
                 stream_usage: p.stream_usage,
                 replay_reasoning: p.replay_reasoning,
-                api: p.api,
+                api: crate::provider::api(p),
+                api_auto: p.api.is_none(),
                 has_key: p.api_key.is_some(),
                 added: self.settings_providers.contains(name),
             })

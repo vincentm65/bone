@@ -27,7 +27,7 @@ pub(crate) async fn check(inner: &Inner) -> Vec<HealthItem> {
             "none configured: run /setup, or add one to core.lua",
         )];
     }
-    let anthropic = p.api == bone_proto::types::ProviderApi::Anthropic;
+    let anthropic = crate::provider::api(p) == bone_proto::types::ProviderApi::Anthropic;
     let base_url = crate::provider::base_url(p);
     let mut out = vec![item("provider", Ok, format!("{} at {base_url}", p.model))];
 

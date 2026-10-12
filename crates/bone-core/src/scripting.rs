@@ -253,10 +253,8 @@ fn apply_saved_providers(lua: &Lua, dir: &Path) -> mlua::Result<()> {
             let t = match providers.get::<Option<Table>>(name.as_str())? {
                 Some(t) => t,
                 None => {
-                    let whole = fields.contains_key("model")
-                        && (fields.contains_key("base_url")
-                            || fields.contains_key("type")
-                            || fields.get("api").and_then(|a| a.as_str()) == Some("anthropic"));
+                    let whole = serde_json::from_value(spec.clone())
+                        .is_ok_and(|c| !crate::provider::unconfigured(&c));
                     if !whole {
                         eprintln!(
                             "bone: settings.json providers.{name}: not in core.lua, and no model and base_url of its own"

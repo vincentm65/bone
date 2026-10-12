@@ -34,24 +34,25 @@ reasoning generation, not history replay. Change it in `/config` under the
 provider, or set `providers.<name>.replay_reasoning` in settings. Lua providers
 continue to control their own request serialization.
 
-`api` picks the wire format: `"completions"` (the default, `/chat/completions`),
-`"responses"` (`/responses`) or `"anthropic"` (Anthropic's `/messages`, see
-below). Use `"responses"` for OpenAI reasoning models,
-directly or through a gateway that forwards `/responses`: Chat Completions
-throws their reasoning away, while Responses returns it encrypted. bone keeps
+bone picks the wire format from `base_url`: Anthropic's `/messages` for
+`api.anthropic.com` (or a `claude-*` model with no `base_url`, see below),
+`/responses` for `api.openai.com`, and `/chat/completions` for everything else.
+Set `api` to `"completions"`, `"responses"` or `"anthropic"` to choose it
+yourself, e.g. for a gateway that forwards `/responses` to OpenAI reasoning
+models: Chat Completions throws their reasoning away, while Responses returns
+it encrypted. bone keeps
 those items on the assistant message and sends them back on later calls to the
 same model, so it does not have to work everything out again after each tool
 call. Requests are stateless (`store: false`) and ask for reasoning summaries,
 which show as the message's reasoning. To use both formats with one gateway,
 add two providers with the same `base_url`. Change it in `/config` under the
-provider, or set `providers.<name>.api` in settings.
+provider (auto goes back to picking), or set `providers.<name>.api` in settings.
 
 ### Anthropic
 
 ```lua
 bone.config.providers.claude = {
-  api = "anthropic",                       -- base_url defaults to https://api.anthropic.com/v1
-  model = "claude-opus-5-5",
+  model = "claude-opus-5-5",                -- a claude-* model with no base_url uses Anthropic's API
   api_key = os.getenv("ANTHROPIC_API_KEY"), -- sent as x-api-key
   reasoning_effort = "high",               -- output_config.effort; "none" turns thinking off
   -- cache = false,                        -- prompt caching is on by default

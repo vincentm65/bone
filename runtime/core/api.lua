@@ -3,9 +3,10 @@
 
 bone.config = {
   --- name -> { base_url, model, api?, api_key?, reasoning_effort?, stream_usage?, replay_reasoning? }
-  --- Any OpenAI-compatible /chat/completions endpoint, /responses with
-  --- api = "responses", or Anthropic's /messages with api = "anthropic"
-  --- (base_url optional; also cache?). Any of them: headers? (added to each
+  --- Any OpenAI-compatible /chat/completions endpoint, /responses or
+  --- Anthropic's /messages: api = "completions" | "responses" | "anthropic",
+  --- picked from base_url when absent (api.openai.com: responses,
+  --- api.anthropic.com or a claude-* model without one: anthropic; also cache?). Any of them: headers? (added to each
   --- request) and body? (merged into each request; null removes a field).
   providers = {},
   --- Which provider to use (a key of `providers`).

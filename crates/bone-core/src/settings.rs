@@ -105,9 +105,8 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
                     Err(format!("{path}: {API}"))
                 } else if p.get("model").is_none() {
                     Err(format!("{path}: a provider needs a model"))
-                } else if p.get("base_url").is_none()
-                    && p.get("type").is_none()
-                    && p.get("api").and_then(Value::as_str) != Some("anthropic")
+                } else if serde_json::from_value(value.clone())
+                    .is_ok_and(|c| crate::provider::unconfigured(&c))
                 {
                     Err(format!(
                         "{path}: a provider needs a base_url (or a Lua provider type)"

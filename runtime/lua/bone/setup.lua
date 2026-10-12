@@ -17,7 +17,6 @@ M.PRESETS = {
   {
     title = "Anthropic",
     name = "anthropic",
-    api = "anthropic",
     base_url = "https://api.anthropic.com/v1",
     model = "",
     key_env = "ANTHROPIC_API_KEY",
