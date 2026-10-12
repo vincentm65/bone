@@ -85,6 +85,8 @@ local KEYS = {
   { "ctrl+n", "start a new session", "Sessions" },
   { "ctrl+d", "quit on an empty prompt", "Sessions" },
   { "f1", "open this help browser", "Sessions" },
+  { "ctrl+]", "open or focus a terminal (/term); in it, back to the prompt", "Sessions" },
+  { "shift+pageup / shift+pagedown", "scroll back in a focused terminal", "Sessions" },
   { "pageup / pagedown", "scroll the conversation or command suggestions", "Reading" },
   { "shift+up / shift+down / wheel", "scroll the conversation or command suggestions", "Reading" },
   { "ctrl+home / ctrl+end", "jump to the top or bottom; bottom follows new output", "Reading" },

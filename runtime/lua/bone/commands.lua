@@ -33,6 +33,15 @@ cmd("sessions", function()
   bone.action("sessions")
 end, { desc = "pick a session to open (ctrl+o)", aliases = { "resume" } })
 
+cmd("term", function(c)
+  local command = c.args:match("^%s*(.-)%s*$")
+  local terminal = require("bone.ui.terminal")
+  if command == "close" then
+    return terminal.close() or bone.notify("no terminal is open", "error")
+  end
+  terminal.open(nil, { cmd = command ~= "" and command or nil })
+end, { desc = "open a terminal in a panel; /term [command], /term close (ctrl+])", aliases = { "terminal" } })
+
 cmd("quit", function()
   bone.action("quit")
 end, { desc = "quit bone", aliases = { "exit", "q" } })

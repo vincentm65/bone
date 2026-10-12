@@ -125,6 +125,33 @@ bone.on("ready", function(ev)
 end)
 ```
 
+## Terminals
+
+A terminal is a panel whose content is a program in a pseudo-terminal
+(`runtime/lua/bone/ui/terminal.lua`, built on `bone.job.start` with `pty`).
+`/term [command]` and `ctrl+]` open one with `terminal.defaults` (a bottom
+drawer). Every other panel option passes through, so place it like any panel:
+
+```lua
+local term = require("bone.ui.terminal")
+term.defaults = { dock = "right", size = 0.5 }          -- /term and ctrl+]
+bone.keymap.set("f6", function()
+  term.open({ id = "logs", dock = "left", size = 60 }, { cmd = "tail -f app.log" })
+end)
+-- or a layout leaf: { panel = "term1" } in bone.ui.layout, then term.open({ id = "term1" })
+```
+
+While a terminal has the keyboard every key goes to the program (including
+`esc`, `tab` and `ctrl+c`) except `ctrl+]`, which returns to the prompt;
+`ctrl+]` from the prompt focuses the last terminal again. `shift+pageup` and
+`shift+pagedown` scroll back. Keys in `terminal.passthrough` go to the
+`panel` keymap context instead, so a window manager's prefix works inside a
+terminal. A window manager can also wrap `terminal.open` to place `/term` in
+a layout leaf of its own (the `windows` plugin does both). Closing the panel
+stops the program, and the shell ending closes the panel (a command's output
+stays until it is closed, and a failure is reported). A TUI reload
+stops terminals, like any job.
+
 ## Worked example: a job viewer
 
 ```lua

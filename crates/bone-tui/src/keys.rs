@@ -159,7 +159,7 @@ pub fn format(k: &Key) -> String {
         code => NAMES
             .iter()
             .find(|(_, c)| *c == code)
-            .map_or("?", |(n, _)| *n)
+            .map_or("unknown", |(n, _)| *n)
             .to_owned(),
     };
     let mut out = String::new();

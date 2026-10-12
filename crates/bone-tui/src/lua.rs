@@ -435,13 +435,62 @@ fn job_spec(cmd: Value, opts: &Option<Table>) -> mlua::Result<crate::jobs::Spec>
         Value::Number(ms) if ms > 0.0 => Some(std::time::Duration::from_millis(ms as u64)),
         _ => return Err(err("job timeout is a positive number of milliseconds")),
     };
+    let pty = match get("pty")? {
+        Value::Nil | Value::Boolean(false) => None,
+        Value::Boolean(true) => Some((24, 80)),
+        Value::Table(t) => {
+            screen_size(&Some(t), (24, 80)).map(|(rows, cols, _)| Some((rows, cols)))?
+        }
+        _ => return Err(err("job pty is true or { width, height }")),
+    };
     Ok(Spec {
         command,
         cwd: opts.as_ref().map(|o| o.get("cwd")).transpose()?.flatten(),
         env,
         stdin,
         timeout,
+        pty,
     })
+}
+
+/// `{ width, height, scroll }` of a terminal screen: (rows, cols, scroll),
+/// the size defaulting to `size`.
+fn screen_size(opts: &Option<Table>, size: (u16, u16)) -> mlua::Result<(u16, u16, usize)> {
+    let get =
+        |k: &str| -> mlua::Result<Option<i64>> { opts.as_ref().map_or(Ok(None), |t| t.get(k)) };
+    Ok((
+        get("height")?.map_or(size.0, |h| h.clamp(1, 500) as u16),
+        get("width")?.map_or(size.1, |w| w.clamp(1, 1000) as u16),
+        get("scroll")?.unwrap_or(0).max(0) as usize,
+    ))
+}
+
+/// What `bone.processes.screen` and `job:screen` give: the screen's lines as
+/// `{ { text, group }, … }` rows, and how far it is scrolled back.
+fn screen_table(
+    lua: &Lua,
+    lines: &[Vec<crate::ui::Item>],
+    scroll: usize,
+    max: usize,
+) -> mlua::Result<Table> {
+    let out = lua.create_table()?;
+    for (i, line) in lines.iter().enumerate() {
+        let l = lua.create_table()?;
+        for (j, item) in line.iter().enumerate() {
+            if let crate::ui::Item::Text(text, group) = item {
+                l.set(
+                    j + 1,
+                    lua.create_sequence_from([text.as_str(), group.as_str()])?,
+                )?;
+            }
+        }
+        out.set(i + 1, l)?;
+    }
+    let r = lua.create_table()?;
+    r.set("lines", out)?;
+    r.set("scroll", scroll)?;
+    r.set("max", max)?;
+    Ok(r)
 }
 
 fn valid_panel_id(id: &str) -> bool {
@@ -2091,33 +2140,28 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
         }
         "process_screen" => {
             let (id, opts): (String, Option<mlua::Table>) = args(lua, a)?;
-            let get = |k: &str| -> mlua::Result<Option<i64>> {
-                Ok(match &opts {
-                    Some(t) => t.get(k)?,
-                    None => None,
-                })
-            };
-            let rows = get("height")?.unwrap_or(24).clamp(1, 500) as u16;
-            let cols = get("width")?.unwrap_or(80).clamp(1, 1000) as u16;
-            let scroll = get("scroll")?.unwrap_or(0).max(0) as usize;
+            let (rows, cols, scroll) = screen_size(&opts, (24, 80))?;
             let (lines, scroll, max) = app.process_screen(&id, rows, cols, scroll);
-            let out = lua.create_table()?;
-            for (i, line) in lines.iter().enumerate() {
-                let l = lua.create_table()?;
-                for (j, item) in line.iter().enumerate() {
-                    if let crate::ui::Item::Text(text, group) = item {
-                        l.set(
-                            j + 1,
-                            lua.create_sequence_from([text.as_str(), group.as_str()])?,
-                        )?;
-                    }
+            ret(lua, screen_table(lua, &lines, scroll, max)?)
+        }
+        "job_screen" => {
+            let (id, opts): (u64, Option<mlua::Table>) = args(lua, a)?;
+            // Without a size it stays the size it is.
+            let size = app
+                .jobs
+                .get(id)
+                .and_then(|j| Some(j.term.as_ref()?.state()?.size()));
+            let (rows, cols, scroll) = screen_size(&opts, size.unwrap_or((24, 80)))?;
+            let Some((lines, scroll, max, state)) = app.job_screen(id, rows, cols, scroll) else {
+                return ret(lua, Value::Nil);
+            };
+            let r = screen_table(lua, &lines, scroll, max)?;
+            if let Value::Table(state) = to_lua(lua, &state)? {
+                for kv in state.pairs::<Value, Value>() {
+                    let (k, v) = kv?;
+                    r.set(k, v)?;
                 }
-                out.set(i + 1, l)?;
             }
-            let r = lua.create_table()?;
-            r.set("lines", out)?;
-            r.set("scroll", scroll)?;
-            r.set("max", max)?;
             ret(lua, r)
         }
         "process_refresh" => {

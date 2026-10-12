@@ -3,7 +3,7 @@
 //! out, and its status can be read at any time. The UI never waits on it.
 //!
 //! Each job runs in its own task, in its own process group, so cancelling
-//! (SIGTERM, then SIGKILL after a grace period) also stops whatever it
+//! (SIGTERM or SIGHUP, then SIGKILL after a grace period) also stops whatever it
 //! started. The task reports back through the app's event channel in order:
 //! started, output chunks, exited.
 
@@ -11,10 +11,11 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value as Json, json};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
 use crate::app::{App, AppEvent};
+use crate::term::Term;
 
 /// After SIGTERM, how long before SIGKILL.
 const KILL_GRACE: Duration = Duration::from_secs(2);
@@ -57,6 +58,9 @@ pub struct Spec {
     pub env: Vec<(String, String)>,
     pub stdin: Stdin,
     pub timeout: Option<Duration>,
+    /// Run in a pseudo-terminal of (rows, cols) (Unix): its output plays into
+    /// a screen (`job:screen`) and `job:write` types into it.
+    pub pty: Option<(u16, u16)>,
 }
 
 /// Requests from the UI to a running job.
@@ -64,6 +68,7 @@ enum Ctl {
     Write(Vec<u8>),
     CloseStdin,
     Cancel,
+    Resize(u16, u16),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -165,6 +170,8 @@ pub struct Job {
     on_stdout: Option<u64>,
     on_stderr: Option<u64>,
     on_exit: Option<u64>,
+    /// The screen of a `pty` job.
+    pub term: Option<Term>,
 }
 
 impl Job {
@@ -280,6 +287,7 @@ impl App {
         let id = self.next_callback;
         let (ctl, ctl_rx) = mpsc::unbounded_channel();
         let command = spec.command.display();
+        let term = spec.pty.map(|(rows, cols)| Term::live(rows, cols));
         self.jobs.list.push(Job {
             id,
             name: cb.name,
@@ -297,6 +305,7 @@ impl App {
             on_stdout: cb.on_stdout,
             on_stderr: cb.on_stderr,
             on_exit: cb.on_exit,
+            term,
         });
         let tx = self.event_sender();
         tokio::spawn(run(id, spec, ctl_rx, tx));
@@ -304,12 +313,14 @@ impl App {
         id
     }
 
-    /// Ask a running job to stop. Returns whether it was running.
+    /// Ask a running job to stop, and drop its screen. Returns whether it was
+    /// running.
     pub fn cancel_job(&mut self, id: u64) -> bool {
-        match self.jobs.get(id) {
-            Some(j) if j.running() => j.ctl.send(Ctl::Cancel).is_ok(),
-            _ => false,
-        }
+        let Some(j) = self.jobs.get_mut(id) else {
+            return false;
+        };
+        j.term = None;
+        j.running() && j.ctl.send(Ctl::Cancel).is_ok()
     }
 
     /// Write to a job's stdin (opened with `stdin = true`).
@@ -318,6 +329,36 @@ impl App {
             Some(j) if j.running() => j.ctl.send(Ctl::Write(data)).is_ok(),
             _ => false,
         }
+    }
+
+    /// A `pty` job's screen at `rows` × `cols` (resizing its terminal to
+    /// that first), scrolled back `scroll` rows: its lines, the scroll, how
+    /// far it could scroll, and the state keys and paste depend on.
+    pub fn job_screen(
+        &mut self,
+        id: u64,
+        rows: u16,
+        cols: u16,
+        scroll: usize,
+    ) -> Option<(Vec<Vec<crate::ui::Item>>, usize, usize, Json)> {
+        let j = self.jobs.get_mut(id)?;
+        let running = j.running();
+        let term = j.term.as_mut()?;
+        if running && term.state().map(|s| s.size()) != Some((rows, cols)) {
+            let _ = j.ctl.send(Ctl::Resize(rows, cols));
+        }
+        let (lines, scroll, max) = term.lines(rows, cols, scroll, &mut self.theme);
+        let s = term.state()?;
+        let (row, col) = s.cursor_position();
+        let state = json!({
+            "cursor": (!s.hide_cursor() && scroll == 0).then_some([row + 1, col + 1]),
+            "title": s.title(),
+            "app_cursor": s.application_cursor(),
+            "bracketed_paste": s.bracketed_paste(),
+            "alt_screen": s.alternate_screen(),
+            "running": running,
+        });
+        Some((lines, scroll, max, state))
     }
 
     pub fn close_job_stdin(&mut self, id: u64) -> bool {
@@ -340,6 +381,17 @@ impl App {
         let Some(j) = self.jobs.get_mut(id) else {
             return;
         };
+        if let Some(term) = &mut j.term {
+            let reply = term.feed(chunk);
+            if !reply.is_empty() {
+                let _ = j.ctl.send(Ctl::Write(reply));
+            }
+            self.dirty = true;
+            if j.on_stdout.is_none() {
+                j.out.bytes += chunk.len() as u64;
+                return;
+            }
+        }
         let (out, cb) = match stream {
             Stream::Stdout => (&mut j.out, j.on_stdout),
             Stream::Stderr => (&mut j.err, j.on_stderr),
@@ -453,12 +505,14 @@ fn send(tx: &mpsc::UnboundedSender<AppEvent>, f: impl FnOnce(&mut App) + Send + 
 }
 
 /// Stops the process group if the job's task ends early (the TUI quits).
-struct Group(Option<u32>);
+/// A pty job's is hung up instead, as closing a terminal does: shells ignore
+/// SIGTERM, and pass SIGHUP on to their jobs.
+struct Group(Option<u32>, bool);
 
 impl Group {
     fn terminate(&self) {
         if let Some(pid) = self.0 {
-            bone_lua::sys::terminate_tree(pid);
+            bone_lua::sys::terminate_tree(pid, self.1);
         }
     }
 
@@ -493,6 +547,46 @@ async fn pump(
     }
 }
 
+/// A pty job's output, input, and how to resize it.
+type Pty = (
+    Box<dyn AsyncRead + Unpin + Send>,
+    Box<dyn AsyncWrite + Unpin + Send>,
+    Box<dyn Fn(u16, u16) + Send>,
+);
+
+/// Give `cmd` a new pseudo-terminal as its stdin, stdout, stderr and
+/// controlling terminal.
+#[cfg(unix)]
+fn attach_pty(cmd: &mut tokio::process::Command, rows: u16, cols: u16) -> std::io::Result<Pty> {
+    use std::os::fd::AsRawFd;
+    use tokio::net::unix::pipe;
+    let (master, slave) = bone_lua::sys::open_pty(rows, cols)?;
+    cmd.stdin(slave.try_clone()?)
+        .stdout(slave.try_clone()?)
+        .stderr(slave)
+        .env("TERM", "xterm-256color");
+    bone_lua::sys::controlling_tty(cmd.as_std_mut());
+    // tokio reads and writes it without blocking a thread.
+    let fd = master.as_raw_fd();
+    // SAFETY: fcntl on our own descriptor.
+    unsafe {
+        libc::fcntl(
+            fd,
+            libc::F_SETFL,
+            libc::fcntl(fd, libc::F_GETFL) | libc::O_NONBLOCK,
+        )
+    };
+    let out = pipe::Receiver::from_owned_fd_unchecked(master.try_clone()?)?;
+    let input = pipe::Sender::from_owned_fd_unchecked(master.try_clone()?)?;
+    let resize = move |rows, cols| drop(bone_lua::sys::set_winsize(&master, rows, cols));
+    Ok((Box::new(out), Box::new(input), Box::new(resize)))
+}
+
+#[cfg(not(unix))]
+fn attach_pty(_: &mut tokio::process::Command, _: u16, _: u16) -> std::io::Result<Pty> {
+    Err(std::io::Error::other("terminals need Unix for now"))
+}
+
 /// The job's task: spawn, pump output, obey the UI, report the end.
 async fn run(
     id: u64,
@@ -516,11 +610,20 @@ async fn run(
         })
         .envs(spec.env.iter().cloned())
         .kill_on_drop(true);
-    bone_lua::sys::new_group(cmd.as_std_mut());
     if let Some(cwd) = &spec.cwd {
         cmd.current_dir(cwd);
     }
-    let mut child = match cmd.spawn() {
+    // A pty job leads a session of its own instead (also a new group).
+    let pty = (spec.pty)
+        .map(|(rows, cols)| attach_pty(&mut cmd, rows, cols))
+        .transpose();
+    if spec.pty.is_none() {
+        bone_lua::sys::new_group(cmd.as_std_mut());
+    }
+    let spawned = pty.and_then(|pty| Ok((cmd.spawn()?, pty)));
+    // Our copies of a pty's slave side go, so reading it ends with the job.
+    drop(cmd);
+    let (mut child, pty) = match spawned {
         Ok(c) => c,
         Err(e) => {
             let error = format!("cannot run {}: {e}", spec.command.display());
@@ -536,10 +639,33 @@ async fn run(
             return;
         }
     };
-    let mut group = Group(child.id());
+    let mut group = Group(child.id(), pty.is_some());
     let pid = child.id();
     send(&tx, move |app| app.job_started(id, pid));
-    let readers = [
+    let (pty_out, stdin, resize) = match pty {
+        Some((out, input, resize)) => (Some(out), Some(input), Some(resize)),
+        None => (
+            None,
+            (child.stdin.take()).map(|s| Box::new(s) as Box<dyn AsyncWrite + Unpin + Send>),
+            None,
+        ),
+    };
+    // Writes have a task of their own: a program not reading never holds up
+    // the job.
+    let (mut stdin, writer) = stdin
+        .map(|mut pipe| {
+            let (w, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+            let task = async move {
+                while let Some(data) = rx.recv().await {
+                    if pipe.write_all(&data).await.is_err() {
+                        return;
+                    }
+                }
+            };
+            (w, tokio::spawn(task))
+        })
+        .unzip();
+    let tasks = [
         child
             .stdout
             .take()
@@ -548,15 +674,17 @@ async fn run(
             .stderr
             .take()
             .map(|r| tokio::spawn(pump(r, id, Stream::Stderr, tx.clone()))),
+        pty_out.map(|r| tokio::spawn(pump(r, id, Stream::Stdout, tx.clone()))),
+        writer,
     ];
-    let mut stdin = child.stdin.take();
-    if let Stdin::Text(text) = &spec.stdin
-        && let Some(mut pipe) = stdin.take()
+    if let Stdin::Text(text) = spec.stdin
+        && let Some(w) = &stdin
     {
-        let text = text.clone();
-        tokio::spawn(async move {
-            let _ = pipe.write_all(text.as_bytes()).await;
-        });
+        let _ = w.send(text.into_bytes());
+        // A terminal stays open for typing into.
+        if resize.is_none() {
+            stdin = None;
+        }
     }
 
     let mut exit = Exit::default();
@@ -568,9 +696,18 @@ async fn run(
             st = child.wait() => break st,
             Some(c) = ctl.recv() => match c {
                 Ctl::Write(data) => {
-                    if let Some(pipe) = &mut stdin {
-                        let _ = pipe.write_all(&data).await;
+                    if let Some(w) = &stdin {
+                        let _ = w.send(data);
                     }
+                }
+                Ctl::Resize(rows, cols) => {
+                    if let Some(resize) = &resize {
+                        resize(rows, cols);
+                    }
+                }
+                // A terminal's end of input is typing ctrl+d.
+                Ctl::CloseStdin if resize.is_some() => {
+                    let _ = stdin.as_ref().map(|w| w.send(vec![4]));
                 }
                 Ctl::CloseStdin => stdin = None,
                 Ctl::Cancel if kill_at.is_none() => {
@@ -603,8 +740,10 @@ async fn run(
     if exit.cancelled || exit.timed_out {
         group.kill();
     }
-    for r in readers.into_iter().flatten() {
-        let _ = tokio::time::timeout(Duration::from_secs(1), r).await;
+    // A pipe still held by something outside the group never ends.
+    for mut r in tasks.into_iter().flatten() {
+        let _ = tokio::time::timeout(Duration::from_secs(1), &mut r).await;
+        r.abort();
     }
     // Only an interrupted task (the TUI quitting) kills on drop: once the
     // leader is reaped its id may be reused.

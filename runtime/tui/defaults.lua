@@ -40,6 +40,9 @@ end)
 -- esc on an empty prompt in a sub-agent's session goes back to the session
 -- that started it.
 local tray = require("bone.ui.tray")
+-- Terminals in panels (/term, ctrl+]). Loaded here so the module is the
+-- runtime's: plugins that wrap terminal.open (window managers) share it.
+local terminal = require("bone.ui.terminal")
 local menu_dismiss = bone.ui.actions.dismiss
 bone.ui.actions.dismiss = function()
   local done = menu_dismiss and menu_dismiss()
@@ -101,6 +104,11 @@ map({
   ["ctrl+o"] = "sessions",
   ["ctrl+n"] = "new_session",
   ["ctrl+p"] = "focus_next",
+  -- A terminal in a panel (runtime/lua/bone/ui/terminal.lua); inside it,
+  -- ctrl+] comes back to the prompt.
+  ["ctrl+]"] = function() terminal.toggle() end,
+  -- ctrl+] in terminals without the kitty keyboard protocol.
+  ["ctrl+5"] = function() terminal.toggle() end,
   ["ctrl+r"] = function()
     -- Toggle the model reasoning (live, in the chat, and in the transcript).
     -- The same switch as bone.o.apply("show_reasoning!"); it redraws on its own.

@@ -25,6 +25,11 @@ pub struct Term {
     pending: Vec<(u64, String)>,
     /// The screen at its size (rows, cols).
     screen: Option<(u16, u16, vt100::Parser)>,
+    /// A live terminal (a `pty` job): no copy of the output is kept, and a
+    /// new size resizes the screen, since the program redraws it itself.
+    live: bool,
+    /// The last bytes a live terminal was fed, for spotting queries.
+    recent: [u8; 4],
 }
 
 impl Default for Term {
@@ -38,11 +43,55 @@ impl Default for Term {
             reading: false,
             pending: Vec::new(),
             screen: None,
+            live: false,
+            recent: [0; 4],
         }
     }
 }
 
 impl Term {
+    /// The screen of a `pty` job, `rows` × `cols`.
+    pub fn live(rows: u16, cols: u16) -> Self {
+        Term {
+            stale: false,
+            screen: Some((rows, cols, vt100::Parser::new(rows, cols, SCROLLBACK))),
+            live: true,
+            ..Default::default()
+        }
+    }
+
+    /// Output of a live terminal, as it arrives. Returns the replies to the
+    /// queries in it that `vt100` does not answer (programs like fish and vim
+    /// wait for them): device attributes and the cursor position. A query
+    /// can be split across chunks.
+    pub fn feed(&mut self, bytes: &[u8]) -> Vec<u8> {
+        let Some((_, _, p)) = &mut self.screen else {
+            return Vec::new();
+        };
+        let (mut reply, mut from) = (Vec::new(), 0);
+        for (i, &b) in bytes.iter().enumerate() {
+            self.recent.rotate_left(1);
+            self.recent[3] = b;
+            match self.recent {
+                [0x1b, b'[', b'6', b'n'] => {
+                    // The cursor where it asked from.
+                    p.process(&bytes[from..=i]);
+                    from = i + 1;
+                    let (row, col) = p.screen().cursor_position();
+                    reply.extend(format!("\x1b[{};{}R", row + 1, col + 1).bytes());
+                }
+                [_, 0x1b, b'[', b'c'] | [0x1b, b'[', b'0', b'c'] => reply.extend(b"\x1b[?1;2c"),
+                _ => {}
+            }
+        }
+        p.process(&bytes[from..]);
+        reply
+    }
+
+    /// Modes a live terminal's keys and paste depend on, and its cursor.
+    pub fn state(&self) -> Option<&vt100::Screen> {
+        self.screen.as_ref().map(|(_, _, p)| p.screen())
+    }
     /// Start a full output read.
     pub fn begin_read(&mut self) {
         self.reading = true;
@@ -135,6 +184,13 @@ impl Term {
         theme: &mut Theme,
     ) -> (Vec<Vec<Item>>, usize, usize) {
         let (rows, cols) = (rows.max(1), cols.max(1));
+        if self.live
+            && let Some((r, c, p)) = &mut self.screen
+            && (*r, *c) != (rows, cols)
+        {
+            p.set_size(rows, cols);
+            (*r, *c) = (rows, cols);
+        }
         if !matches!(&self.screen, Some((r, c, _)) if (*r, *c) == (rows, cols)) {
             // vt100 does not reflow: play everything again at the new size.
             let mut p = vt100::Parser::new(rows, cols, SCROLLBACK);

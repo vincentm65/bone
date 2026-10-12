@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 #[cfg(unix)]
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -392,17 +392,8 @@ impl ProcessRegistry {
             match *master {}
         }
         #[cfg(unix)]
-        let ws = libc::winsize {
-            ws_row: rows.max(1),
-            ws_col: cols.max(1),
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        #[cfg(unix)]
         {
-            if unsafe { libc::ioctl(master.as_raw_fd(), libc::TIOCSWINSZ, &ws) } != 0 {
-                return Err(std::io::Error::last_os_error().to_string());
-            }
+            bone_lua::sys::set_winsize(master, rows, cols).map_err(|e| e.to_string())?;
             // Without a controlling terminal nothing else tells it.
             if let Some(pid) = process.snapshot.lock().unwrap().pid {
                 unsafe { libc::kill(-(pid as i32), libc::SIGWINCH) };
@@ -509,7 +500,7 @@ impl Decoder {
 
 fn terminate(pid: Option<u32>) {
     if let Some(pid) = pid {
-        bone_lua::sys::terminate_tree(pid);
+        bone_lua::sys::terminate_tree(pid, false);
     }
 }
 
@@ -757,29 +748,8 @@ fn open_output(terminal: bool) -> std::io::Result<(Stdio, Stdio, Master)> {
 
 #[cfg(unix)]
 fn open_pty() -> std::io::Result<(Stdio, Stdio, Master)> {
-    let (mut master, mut slave) = (-1, -1);
-    let ws = libc::winsize {
-        ws_row: PTY_ROWS,
-        ws_col: PTY_COLS,
-        ws_xpixel: 0,
-        ws_ypixel: 0,
-    };
-    let r = unsafe {
-        libc::openpty(
-            &mut master,
-            &mut slave,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            // macOS declares these pointers `*mut`, Linux `*const`.
-            (&raw const ws).cast_mut(),
-        )
-    };
-    if r != 0 {
-        return Err(std::io::Error::last_os_error());
-    }
-    let (master, slave) = unsafe { (OwnedFd::from_raw_fd(master), OwnedFd::from_raw_fd(slave)) };
     // The child gets only the slave side.
-    unsafe { libc::fcntl(master.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) };
+    let (master, slave) = bone_lua::sys::open_pty(PTY_ROWS, PTY_COLS)?;
     let slave2 = slave.try_clone()?;
     Ok((slave2.into(), slave.into(), Master::Pty(master)))
 }

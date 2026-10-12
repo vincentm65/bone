@@ -379,6 +379,13 @@ function Job:running()
   local s = api("job_status", self.id)
   return s ~= nil and s.running
 end
+--- A `pty` job's screen, resized to { width, height } (default: as it is) and
+--- scrolled back `scroll` rows: { lines, scroll, max, cursor = { row, col } or
+--- nil, title, app_cursor, bracketed_paste, alt_screen, running }, or nil (as
+--- after job:cancel()).
+function Job:screen(opts)
+  return api("job_screen", self.id, opts)
+end
 
 bone.job = {
   _handle = job_handle,
