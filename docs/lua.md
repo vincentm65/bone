@@ -975,7 +975,7 @@ bone.ui.layout = { { cols = { "chat", "chat:" .. b }, sep = "│" }, "prompt", "
 - The chat on screen is the `"chat"` leaf, or, without one, its session's `chat:<id>` leaf. It has the prompt, the scroll keys, mouse selection and `bone.chat.at`/`view`. Every other chat window is drawn from its own render cache (only changed items render again), keeps its own scroll position, and scrolls with the wheel. Showing another chat (`bone.api.open_session`) keeps each one's scroll position.
 - A session shows once: a second leaf for it stays blank. A leaf for a session no chat has open is blank until `bone.chat.open` loads it.
 - While a view draws a chat window, `bone.chat` calls without `session` read that window's chat. Views see `ctx.region == "chat"` in every window.
-- Docked panels go beside the first chat leaf in the tree.
+- Docked panels go beside the chat on screen (without one, the first chat leaf).
 - The catalog's `windows` plugin builds tiled windows on this (splits, focus, resizing and moving with keys or the mouse).
 
 #### Panels: docked areas you own

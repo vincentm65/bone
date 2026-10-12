@@ -73,16 +73,20 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             .map_or(none, |(_, r)| *r)
     };
     // The chat on screen is the "chat" leaf, else its session's
-    // `chat:<id>` leaf. Docked panels go beside the first chat leaf.
+    // `chat:<id>` leaf. Docked panels go beside it, else the first chat leaf.
     let current_leaf = (app.current_session_id())
         .map(|id| format!("chat:{id}"))
         .filter(|n| !layout.contains("chat") && layout.contains(n))
         .unwrap_or_else(|| "chat".into());
-    let dock_leaf = (plan.leaves.iter())
-        .map(|(n, _)| n)
-        .find(|n| *n == "chat" || n.starts_with("chat:"))
-        .cloned()
-        .unwrap_or_else(|| "chat".into());
+    let dock_leaf = if layout.contains(&current_leaf) {
+        current_leaf.clone()
+    } else {
+        (plan.leaves.iter())
+            .map(|(n, _)| n)
+            .find(|n| n.starts_with("chat:"))
+            .cloned()
+            .unwrap_or_else(|| "chat".into())
+    };
     let divider = rect(&plan.leaves, "divider");
     let prompt_area = rect(&plan.leaves, "prompt");
     let status = rect(&plan.leaves, "statusline");
