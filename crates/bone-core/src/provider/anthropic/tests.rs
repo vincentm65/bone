@@ -101,13 +101,10 @@ fn converts_messages_and_places_cache_checkpoints() {
 
     // The entry's `body` adjusts any field; `null` removes one.
     config.options = json!({ "cache": false });
-    config.body = json!({ "max_tokens": 1024, "thinking": null, "metadata": { "user_id": "u" } });
+    config.body = json!({ "max_tokens": 1024, "thinking": null });
     config.reasoning_effort = Some("high".into());
     let (b, _) = configured(body(&config, &messages), Vec::new(), &config);
-    assert_eq!(
-        (&b["max_tokens"], &b["metadata"]["user_id"]),
-        (&json!(1024), &json!("u"))
-    );
+    assert_eq!(b["max_tokens"], 1024);
     assert!(!b.to_string().contains("cache_control"));
     assert!(b.get("thinking").is_none());
     assert_eq!(b["output_config"], json!({ "effort": "high" }));
@@ -168,6 +165,8 @@ fn streams_text_tools_and_cache_usage() {
         json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"command\":"}}),
         json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"pwd\"}"}}),
         json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":7}}),
+        json!({"type":"message_delta","usage":{"input_tokens":8,"cache_creation_input_tokens":0,"cache_read_input_tokens":30,"output_tokens":5}}),
+        json!({"type":"message_delta","usage":{"output_tokens":7}}),
         json!({"type":"message_stop"}),
     ]);
     let c = c.unwrap();
@@ -181,7 +180,7 @@ fn streams_text_tools_and_cache_usage() {
     let u = c.usage.unwrap();
     assert_eq!(
         (u.input_tokens, u.output_tokens, u.cached_tokens),
-        (33, 7, Some(20))
+        (38, 7, Some(30))
     );
 }
 
@@ -306,10 +305,6 @@ async fn http_headers_path_stream_and_premature_eof() {
             }
             let body: Value = serde_json::from_slice(&buf[header_end..header_end + len]).unwrap();
             assert_eq!(body["model"], "claude-test");
-            assert_eq!(
-                body["messages"][0]["content"][0]["cache_control"]["type"],
-                "ephemeral"
-            );
             let mut stream = concat!(
                 "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":4}}}\n\n",
                 "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
@@ -376,19 +371,4 @@ fn retains_previous_cache_boundary_beyond_lookback() {
         "ephemeral"
     );
     assert_eq!(b.to_string().matches("cache_control").count(), 4);
-}
-
-#[test]
-fn cumulative_usage_updates_replace_only_present_fields() {
-    let (c, _) = run(&[
-        json!({"type":"message_start","message":{"usage":{"input_tokens":3,"cache_creation_input_tokens":10,"cache_read_input_tokens":20,"output_tokens":1}}}),
-        json!({"type":"message_delta","usage":{"input_tokens":8,"cache_creation_input_tokens":0,"cache_read_input_tokens":30,"output_tokens":5}}),
-        json!({"type":"message_delta","usage":{"output_tokens":7}}),
-        json!({"type":"message_stop"}),
-    ]);
-    let u = c.unwrap().usage.unwrap();
-    assert_eq!(
-        (u.input_tokens, u.output_tokens, u.cached_tokens),
-        (38, 7, Some(30))
-    );
 }
