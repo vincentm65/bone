@@ -20,7 +20,7 @@ use serde_json::{Value as Json, json};
 use crate::session::{Line, Record, title_of};
 
 /// Bump when the tables change; an index of another version is rebuilt.
-const VERSION: i64 = 4;
+const VERSION: i64 = 5;
 
 const SCHEMA: &str = "
 CREATE TABLE sessions (
@@ -33,10 +33,9 @@ CREATE TABLE sessions (
     updated_at  INTEGER NOT NULL,
     messages    INTEGER NOT NULL DEFAULT 0
 );
--- How far each file is indexed.
+-- How far each session's file is indexed.
 CREATE TABLE files (
-    path        TEXT PRIMARY KEY,
-    session_id  TEXT NOT NULL,      -- '' for usage.jsonl
+    session_id  TEXT PRIMARY KEY,   -- '' for usage.jsonl
     indexed_len INTEGER NOT NULL,
     messages    INTEGER NOT NULL,
     last_at     INTEGER NOT NULL
@@ -117,11 +116,7 @@ impl Index {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(err)?;
-        if version == 3 {
-            conn.execute_batch(
-                "BEGIN; ALTER TABLE usage ADD COLUMN context_tokens INTEGER; PRAGMA user_version = 4; COMMIT;",
-            ).map_err(err)?;
-        } else if version != VERSION {
+        if version != VERSION {
             let mut drop = String::new();
             for t in TABLES {
                 drop.push_str(&format!("DROP TABLE IF EXISTS {t};"));
@@ -143,18 +138,19 @@ impl Index {
     pub fn sync(&self, id: &str, path: &Path, renamed: Option<&str>) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn.transaction().map_err(err)?;
-        let file = path.to_string_lossy();
         let known: Option<(u64, u64, u64)> = tx
             .query_row(
-                "SELECT indexed_len, messages, last_at FROM files WHERE path = ?1",
-                [&file],
+                "SELECT indexed_len, messages, last_at FROM files WHERE session_id = ?1",
+                [id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()
             .map_err(err)?;
         let len = std::fs::metadata(path).map_err(err)?.len();
         let (mut offset, mut seq, mut last_at) = known.unwrap_or_default();
-        if known.is_none() || offset > len {
+        // A session's rows are written with its `files` row, so one never
+        // seen has none to clear.
+        if offset > len {
             clear(&tx, id, false)?;
             (offset, seq) = (0, 0);
         }
@@ -180,9 +176,9 @@ impl Index {
             }
         }
         tx.execute(
-            "INSERT OR REPLACE INTO files (path, session_id, indexed_len, messages, last_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![file, id, offset, seq, last_at],
+            "INSERT OR REPLACE INTO files (session_id, indexed_len, messages, last_at)
+                 VALUES (?1, ?2, ?3, ?4)",
+            params![id, offset, seq, last_at],
         )
         .map_err(err)?;
         tx.execute(
