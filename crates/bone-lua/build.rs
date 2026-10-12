@@ -1,7 +1,8 @@
-use std::{env, path::Path};
+use std::{env, path::Path, process::Command};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    record_build();
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("android") {
         return;
     }
@@ -42,4 +43,33 @@ fn main() {
     );
     println!("cargo:rustc-link-lib=static={library}");
     println!("cargo:rerun-if-changed={}", archive.display());
+}
+
+/// The git commit (and checkout) built from, for `bone --version` and
+/// update checks.
+fn record_build() {
+    let git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+    };
+    let commit = match git(&["rev-parse", "--short", "HEAD"]) {
+        Some(c) => {
+            let dirty = git(&["status", "--porcelain", "--untracked-files=no"])
+                .is_some_and(|s| !s.is_empty());
+            if dirty { format!("{c}-dirty") } else { c }
+        }
+        None => String::new(),
+    };
+    println!("cargo:rustc-env=BONE_GIT_COMMIT={commit}");
+    let source = git(&["rev-parse", "--show-toplevel"]).unwrap_or_default();
+    println!("cargo:rustc-env=BONE_SOURCE_DIR={source}");
+    // Rebuild when HEAD moves or the index changes.
+    if let Some(dir) = git(&["rev-parse", "--absolute-git-dir"]) {
+        println!("cargo:rerun-if-changed={dir}/HEAD");
+        println!("cargo:rerun-if-changed={dir}/index");
+    }
 }

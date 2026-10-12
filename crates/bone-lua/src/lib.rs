@@ -30,6 +30,7 @@ pub const RUNTIME: &[(&str, &str)] = runtime_files![
     "lua/bone/help.lua",
     "lua/bone/config.lua",
     "lua/bone/catalog.lua",
+    "lua/bone/update.lua",
     "lua/bone/setup.lua",
     "lua/bone/agents.lua",
     "lua/bone/ui.lua",
@@ -89,6 +90,11 @@ impl Side {
 /// This changes only when an existing API meaning or call shape is broken;
 /// additive capabilities do not require a new version.
 pub const API_VERSION: u32 = 1;
+
+/// The git commit this was built from (`-dirty` with local changes), and the
+/// checkout it was built in; empty when unknown.
+pub const GIT_COMMIT: &str = env!("BONE_GIT_COMMIT");
+pub const SOURCE_DIR: &str = env!("BONE_SOURCE_DIR");
 
 static CORE_CAPABILITIES: &[&str] = &[
     "lua",
@@ -361,6 +367,10 @@ pub fn new_state(side: Side, config_dir: Option<&Path>) -> mlua::Result<Lua> {
     let bone = lua.create_table()?;
     bone.set("side", side.name())?;
     bone.set("version", env!("CARGO_PKG_VERSION"))?;
+    let build = lua.create_table()?;
+    build.set("commit", GIT_COMMIT)?;
+    build.set("source", SOURCE_DIR)?;
+    bone.set("build", build)?;
     bone.set("api_version", API_VERSION)?;
     bone.set("capabilities", capability_table(&lua, side)?)?;
     bone.set(

@@ -98,6 +98,24 @@ local function state_of(entry, installed)
   return "installed"
 end
 
+--- Whether version `have` is at least `need` ("3.0.2"; a missing `need`
+--- always is).
+function M.at_least(have, need)
+  local a, b = {}, {}
+  for n in tostring(have or ""):gmatch("%d+") do
+    a[#a + 1] = tonumber(n)
+  end
+  for n in tostring(need or ""):gmatch("%d+") do
+    b[#b + 1] = tonumber(n)
+  end
+  for i = 1, math.max(#a, #b) do
+    if (a[i] or 0) ~= (b[i] or 0) then
+      return (a[i] or 0) > (b[i] or 0)
+    end
+  end
+  return true
+end
+
 --- The catalog's packages, each with .state: "available", "installed" or
 --- "update". cb(entries) or cb(nil, err).
 function M.index(cb)
@@ -154,6 +172,10 @@ end
 function M.install(entry, cb)
   local files = entry.files or {}
   local name = entry.name
+  if not M.at_least(bone.version, entry.min_bone_version) then
+    return cb(false, ("%s needs bone %s or newer (this is %s); update bone first")
+      :format(tostring(name), entry.min_bone_version, bone.version))
+  end
   if type(name) ~= "string" or not name:match("^[%w_%-]+$") then
     return cb(false, "bad package name")
   end

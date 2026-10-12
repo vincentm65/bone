@@ -225,9 +225,9 @@ fn stop_signal() -> std::io::Result<impl Future<Output = ()>> {
 
 /// The version, plus the git commit it was built from when known.
 fn version() -> String {
-    match option_env!("BONE_GIT_COMMIT").filter(|c| !c.is_empty()) {
-        Some(c) => format!("{} ({c})", env!("CARGO_PKG_VERSION")),
-        None => env!("CARGO_PKG_VERSION").to_owned(),
+    match bone_lua::GIT_COMMIT {
+        "" => env!("CARGO_PKG_VERSION").to_owned(),
+        c => format!("{} ({c})", env!("CARGO_PKG_VERSION")),
     }
 }
 

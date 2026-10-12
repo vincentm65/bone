@@ -95,6 +95,8 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
     app.settings = settings;
     app.load_user_config();
     app.note_runtime_overrides();
+    // Updates to bone or its plugins: checked in the background, once.
+    app.exec_lua(r#"require("bone.update").check()"#);
     let mut watched_project = app.project_dir();
     // A real interval: a sleep made anew each pass would never fire while
     // output streams or a spinner draws.
