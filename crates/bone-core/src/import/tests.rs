@@ -192,6 +192,7 @@ fn transcripts_are_repaired_for_providers() {
         content: String::new(),
         reasoning: String::new(),
         tool_calls: vec![call("a"), call("b")],
+        reasoning_state: None,
     };
     let fixed = repair(vec![
         result("x"),

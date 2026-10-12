@@ -357,6 +357,7 @@ fn resolve(
             reasoning_effort: None,
             stream_usage: true,
             replay_reasoning: false,
+            api: Default::default(),
         });
     } else if let Some(model) = env("BONE_MODEL") {
         let p = provider
@@ -389,6 +390,7 @@ fn resolve(
         reasoning_effort: None,
         stream_usage: true,
         replay_reasoning: false,
+        api: Default::default(),
     });
     if let Some(key) = env("BONE_API_KEY") {
         provider.api_key = Some(key);
@@ -780,6 +782,7 @@ fn completion(v: &Json) -> Result<crate::provider::Completion, String> {
         reasoning: text("reasoning"),
         tool_calls,
         usage,
+        reasoning_state: None,
     })
 }
 

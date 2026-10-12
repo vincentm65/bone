@@ -26,6 +26,8 @@ pub enum ChatMessage {
         reasoning: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         tool_calls: Vec<ToolCall>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_state: Option<ReasoningState>,
     },
     Tool {
         call_id: String,
@@ -50,6 +52,32 @@ impl ChatMessage {
             Self::User { images, .. } | Self::Tool { images, .. } => Some(images),
             _ => None,
         }
+    }
+}
+
+/// Reasoning a provider returns sealed (OpenAI's encrypted reasoning items),
+/// replayed on later calls so the model keeps its thinking. Only the model
+/// that wrote it can read it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReasoningState {
+    pub model: String,
+    pub items: Vec<serde_json::Value>,
+}
+
+/// The wire format of an OpenAI-compatible provider.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderApi {
+    /// `/chat/completions`.
+    #[default]
+    Completions,
+    /// `/responses`, which keeps OpenAI models' encrypted reasoning.
+    Responses,
+}
+
+impl ProviderApi {
+    pub fn is_completions(&self) -> bool {
+        *self == Self::Completions
     }
 }
 

@@ -400,6 +400,7 @@ fn message(
                         .collect()
                 })
                 .unwrap_or_default(),
+            reasoning_state: None,
         },
         "tool" => ChatMessage::Tool {
             images: Vec::new(),

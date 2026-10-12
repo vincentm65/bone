@@ -17,7 +17,9 @@ use bone_proto::methods::{
     ToolFinished, ToolFinishedParams, ToolOutput, ToolOutputParams, ToolStarted, ToolStartedParams,
     TurnFinished, TurnFinishedParams, TurnStarted, TurnStartedParams, TurnSteered,
 };
-use bone_proto::types::{ChatMessage, DeltaKind, ToolCall, TurnId, TurnOutcome, Usage};
+use bone_proto::types::{
+    ChatMessage, DeltaKind, ReasoningState, ToolCall, TurnId, TurnOutcome, Usage,
+};
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
@@ -476,7 +478,7 @@ impl Turn<'_> {
                     interrupted => {
                         // Keep what the user already saw stream in.
                         if !text.is_empty() || !reasoning.is_empty() {
-                            self.complete_message(text, reasoning, Vec::new(), None)?;
+                            self.complete_message(text, reasoning, Vec::new(), None, None)?;
                         }
                         return Err(match interrupted {
                             Some(Err(e)) => Stop::Failed(e.0),
@@ -527,7 +529,13 @@ impl Turn<'_> {
                 })?;
             }
             overflowed = false;
-            self.complete_message(content, reasoning, calls.clone(), completion.usage)?;
+            self.complete_message(
+                content,
+                reasoning,
+                calls.clone(),
+                completion.usage,
+                completion.reasoning_state,
+            )?;
             if calls.is_empty() {
                 let compact = self.inner.compact_config();
                 if let Some(limit) = compact.limit {
@@ -646,11 +654,13 @@ impl Turn<'_> {
         reasoning: String,
         tool_calls: Vec<ToolCall>,
         usage: Option<Usage>,
+        reasoning_state: Option<ReasoningState>,
     ) -> Result<(), Stop> {
         let message = ChatMessage::Assistant {
             content,
             reasoning,
             tool_calls,
+            reasoning_state,
         };
         self.record(message.clone())?;
         self.inner.emit::<MessageCompleted>(MessageCompletedParams {

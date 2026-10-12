@@ -186,6 +186,7 @@ function M.open(want)
   end
 
   local EFFORTS = { "default", "low", "medium", "high", "xhigh", "max", "none" }
+  local APIS = { "completions", "responses" }
 
   -- The editor's rows for one provider (or a new one's draft).
   local function provider_rows()
@@ -227,6 +228,9 @@ function M.open(want)
         desc = "an environment variable that holds the key" },
       { kind = "pfield", key = "replay_reasoning", label = "Replay reasoning", type = "boolean", value = p.replay_reasoning == true,
         changed = changed("replay_reasoning"), desc = "send stored reasoning_content; enable only for compatible endpoints (e.g. Qwen)" },
+      { kind = "pfield", key = "api", label = "API", type = "choice", choices = APIS,
+        value = p.api or "completions", changed = changed("api"),
+        desc = "responses keeps OpenAI reasoning models' thinking between calls" },
     }
     if not p.current then
       out[#out + 1] = { kind = "paction", action = "use", label = "Use this provider" }

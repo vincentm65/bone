@@ -29,6 +29,7 @@ fn server_at(base_url: &str) -> Server {
             reasoning_effort: None,
             stream_usage: true,
             replay_reasoning: false,
+            api: Default::default(),
         },
         system_prompt: None,
         data_dir: data.path().to_owned(),

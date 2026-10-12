@@ -22,7 +22,7 @@ use tokio::sync::broadcast;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::config::{CoreConfig, ProviderConfig};
-use crate::provider::{Completion, CompletionRequest, Delta, OpenAiProvider, Provider};
+use crate::provider::{Completion, CompletionRequest, Delta, Provider};
 use crate::scripting::{AskEvent, LoadOptions, Loaded, LuaProvider, LuaTool, Scripting};
 use crate::session::Pin;
 use crate::tools::Registry;
@@ -108,6 +108,7 @@ impl Runtime {
                 reasoning_effort: p.reasoning_effort.clone(),
                 stream_usage: p.stream_usage,
                 replay_reasoning: p.replay_reasoning,
+                api: p.api,
                 has_key: p.api_key.is_some(),
                 added: self.settings_providers.contains(name),
             })
@@ -169,7 +170,7 @@ impl Runtime {
                     .ok_or("a Lua provider needs core Lua")?;
                 Arc::new(LuaProvider::new(&p, scripting))
             }
-            None => Arc::new(OpenAiProvider::new(p)),
+            None => crate::provider::openai_compatible(p),
         })
     }
 
@@ -185,7 +186,7 @@ impl Runtime {
         let provider = provider.unwrap_or_else(|| match &p.kind {
             Some(_) => Arc::new(LuaProvider::new(p, loaded.scripting.clone())),
             None if crate::provider::unconfigured(p) => Arc::new(crate::provider::Unconfigured),
-            None => Arc::new(OpenAiProvider::new(p.clone())),
+            None => crate::provider::openai_compatible(p.clone()),
         });
         let mut tools = Registry::builtin();
         for spec in loaded.tools {

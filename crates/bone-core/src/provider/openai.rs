@@ -24,11 +24,10 @@ pub struct OpenAiProvider {
 
 impl OpenAiProvider {
     pub fn new(config: ProviderConfig) -> Self {
-        let http = reqwest::Client::builder()
-            .connect_timeout(CONNECT_TIMEOUT)
-            .build()
-            .expect("reqwest client builds");
-        OpenAiProvider { http, config }
+        OpenAiProvider {
+            http: http_client(),
+            config,
+        }
     }
 
     fn url(&self) -> String {
@@ -38,65 +37,14 @@ impl OpenAiProvider {
         )
     }
 
-    /// Send the request, retrying connection failures, 429 and 5xx. Nothing has
-    /// streamed yet at this point, so retrying is invisible to the caller.
-    async fn send(&self, body: &Value) -> Result<reqwest::Response, ProviderError> {
-        let mut attempt = 1;
-        loop {
-            let mut req = self.http.post(self.url()).json(body);
-            if let Some(key) = self.config.api_key.as_deref().filter(|k| !k.is_empty()) {
-                req = req.bearer_auth(key);
-            }
-            let retryable = match req.send().await {
-                Ok(resp) if resp.status().is_success() => return Ok(resp),
-                Ok(resp) => {
-                    let status = resp.status();
-                    let text = resp.text().await.unwrap_or_default();
-                    let err = ProviderError(format!("HTTP {status}: {}", text.trim()));
-                    if !(status.as_u16() == 429 || status.is_server_error()) {
-                        return Err(err);
-                    }
-                    err
-                }
-                Err(e) if e.is_connect() || e.is_timeout() => {
-                    ProviderError(format!("request failed: {e}"))
-                }
-                Err(e) => return Err(ProviderError(format!("request failed: {e}"))),
-            };
-            if attempt >= MAX_ATTEMPTS {
-                return Err(retryable);
-            }
-            tokio::time::sleep(Duration::from_secs(1 << (attempt - 1))).await;
-            attempt += 1;
-        }
-    }
-
     async fn stream(
         &self,
         req: CompletionRequest<'_>,
         on_delta: DeltaSink<'_>,
     ) -> Result<Completion, ProviderError> {
-        if self.config.supports_images == Some(false)
-            && req.messages.iter().any(|m| !m.images().is_empty())
-        {
-            return Err(ProviderError(
-                "this model does not support images; select a vision model".into(),
-            ));
-        }
-        for message in req.messages {
-            if message
-                .images()
-                .iter()
-                .any(|image| image.data.as_deref().is_none_or(str::is_empty))
-            {
-                return Err(ProviderError(
-                    "image bytes are unavailable; hydrate attachments before calling the provider"
-                        .into(),
-                ));
-            }
-        }
+        check_images(&self.config, req.messages)?;
         let body = request_body(&self.config, &req);
-        let resp = self.send(&body).await?;
+        let resp = send(&self.http, &self.url(), &self.config, &body).await?;
         let mut bytes = resp.bytes_stream();
         let mut parser = SseParser::default();
         let mut acc = Accumulator::default();
@@ -125,6 +73,75 @@ impl Provider for OpenAiProvider {
         on_delta: DeltaSink<'a>,
     ) -> BoxFuture<'a, Result<Completion, ProviderError>> {
         Box::pin(self.stream(req, on_delta))
+    }
+}
+
+pub(super) fn http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .build()
+        .expect("reqwest client builds")
+}
+
+pub(super) fn check_images(
+    config: &ProviderConfig,
+    messages: &[ChatMessage],
+) -> Result<(), ProviderError> {
+    if config.supports_images == Some(false) && messages.iter().any(|m| !m.images().is_empty()) {
+        return Err(ProviderError(
+            "this model does not support images; select a vision model".into(),
+        ));
+    }
+    for message in messages {
+        if message
+            .images()
+            .iter()
+            .any(|image| image.data.as_deref().is_none_or(str::is_empty))
+        {
+            return Err(ProviderError(
+                "image bytes are unavailable; hydrate attachments before calling the provider"
+                    .into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Send the request, retrying connection failures, 429 and 5xx. Nothing has
+/// streamed yet at this point, so retrying is invisible to the caller.
+pub(super) async fn send(
+    http: &reqwest::Client,
+    url: &str,
+    config: &ProviderConfig,
+    body: &Value,
+) -> Result<reqwest::Response, ProviderError> {
+    let mut attempt = 1;
+    loop {
+        let mut req = http.post(url).json(body);
+        if let Some(key) = config.api_key.as_deref().filter(|k| !k.is_empty()) {
+            req = req.bearer_auth(key);
+        }
+        let retryable = match req.send().await {
+            Ok(resp) if resp.status().is_success() => return Ok(resp),
+            Ok(resp) => {
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                let err = ProviderError(format!("HTTP {status}: {}", text.trim()));
+                if !(status.as_u16() == 429 || status.is_server_error()) {
+                    return Err(err);
+                }
+                err
+            }
+            Err(e) if e.is_connect() || e.is_timeout() => {
+                ProviderError(format!("request failed: {e}"))
+            }
+            Err(e) => return Err(ProviderError(format!("request failed: {e}"))),
+        };
+        if attempt >= MAX_ATTEMPTS {
+            return Err(retryable);
+        }
+        tokio::time::sleep(Duration::from_secs(1 << (attempt - 1))).await;
+        attempt += 1;
     }
 }
 
@@ -192,6 +209,7 @@ fn wire_message(msg: &ChatMessage, replay_reasoning: bool) -> Value {
             content,
             tool_calls,
             reasoning,
+            ..
         } => {
             let mut m = json!({
                 "role": "assistant",
@@ -394,6 +412,7 @@ impl Accumulator {
             reasoning: self.reasoning,
             tool_calls,
             usage: self.usage,
+            reasoning_state: None,
         }
     }
 }
@@ -482,6 +501,7 @@ mod tests {
                     name: "shell".into(),
                     arguments: "{}".into(),
                 }],
+                reasoning_state: None,
             },
             ChatMessage::Tool {
                 images: Vec::new(),
@@ -511,6 +531,7 @@ mod tests {
                 content: "answer".into(),
                 reasoning: reasoning.into(),
                 tool_calls: vec![],
+                reasoning_state: None,
             };
             assert_eq!(
                 wire_message(&msg, true),

@@ -101,6 +101,7 @@ async fn turn_with_tool_call_over_http() {
             reasoning_effort: None,
             stream_usage: true,
             replay_reasoning: false,
+            api: Default::default(),
         },
         system_prompt: Some("SYSTEM".into()),
         data_dir: data.path().to_owned(),

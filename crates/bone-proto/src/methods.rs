@@ -723,6 +723,11 @@ pub struct ModelInfo {
     /// Replay assistant `reasoning_content` (only for compatible endpoints).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub replay_reasoning: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::types::ProviderApi::is_completions"
+    )]
+    pub api: crate::types::ProviderApi,
     /// It has an API key (never sent).
     #[serde(default)]
     pub has_key: bool,

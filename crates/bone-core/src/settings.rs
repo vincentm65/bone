@@ -99,6 +99,10 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
                     ))
                 } else if p.get("replay_reasoning").is_some_and(|v| !v.is_boolean()) {
                     Err(format!("{path}: replay_reasoning must be a boolean"))
+                } else if let Some(api) = p.get("api").filter(|v| !v.is_null())
+                    && !is_api(api)
+                {
+                    Err(format!("{path}: api is \"completions\" or \"responses\""))
                 } else if p.get("model").is_none() {
                     Err(format!("{path}: a provider needs a model"))
                 } else if p.get("base_url").is_none() && p.get("type").is_none() {
@@ -127,6 +131,8 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
                 Value::String(_),
             ) => Ok(()),
             ("stream_usage" | "replay_reasoning" | "supports_images", Value::Bool(_)) => Ok(()),
+            ("api", v) if is_api(v) => Ok(()),
+            ("api", _) => Err(format!("{path} is \"completions\" or \"responses\"")),
             ("api_key", _) => Err("keys go in secrets.json (secrets/set), not settings".into()),
             (
                 "base_url" | "model" | "type" | "api_key_env" | "reasoning_effort" | "stream_usage"
@@ -134,11 +140,15 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
                 _,
             ) => Err(format!("{path} has the wrong type")),
             _ => Err(format!(
-                "{path}: a provider's settings are base_url, model, type, api_key_env, reasoning_effort, stream_usage, replay_reasoning and supports_images"
+                "{path}: a provider's settings are base_url, model, type, api, api_key_env, reasoning_effort, stream_usage, replay_reasoning and supports_images"
             )),
         },
         _ => Ok(()),
     }
+}
+
+fn is_api(v: &Value) -> bool {
+    serde_json::from_value::<bone_proto::types::ProviderApi>(v.clone()).is_ok()
 }
 
 /// Set `path` to `value` (`null` removes it, and empty objects left behind).

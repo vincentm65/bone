@@ -130,6 +130,7 @@ impl Harness {
                 reasoning_effort: None,
                 stream_usage: true,
                 replay_reasoning: false,
+                api: Default::default(),
             },
             system_prompt: None,
             data_dir: data.path().to_owned(),
@@ -314,7 +315,8 @@ async fn runs_tools_until_the_model_answers() {
         ChatMessage::Assistant {
             content: "all done".into(),
             reasoning: String::new(),
-            tool_calls: vec![]
+            tool_calls: vec![],
+            reasoning_state: None,
         }
     );
 
@@ -420,7 +422,8 @@ async fn hooks_run_at_every_step() {
         ChatMessage::Assistant {
             content: "done!".into(),
             reasoning: String::new(),
-            tool_calls: vec![]
+            tool_calls: vec![],
+            reasoning_state: None,
         }
     );
     // The request hook removed a tool and added a message.
@@ -616,7 +619,8 @@ async fn cancel_while_streaming_keeps_partial_text() {
         ChatMessage::Assistant {
             content: "partial".into(),
             reasoning: String::new(),
-            tool_calls: vec![]
+            tool_calls: vec![],
+            reasoning_state: None,
         }
     );
 
@@ -1201,8 +1205,9 @@ async fn hooks_can_add_to_and_compact_the_transcript() {
         _ => None,
     });
     assert!(
-        poke.as_deref().is_some_and(|p| p.starts_with("false: ")
-            && p.contains("can only change between model calls")),
+        poke.as_deref().is_some_and(
+            |p| p.starts_with("false: ") && p.contains("can only change between model calls")
+        ),
         "{seen:#?}"
     );
     // The injected message reached the model on the next call.
@@ -1631,6 +1636,7 @@ fn assistant(text: &str) -> ChatMessage {
         content: text.into(),
         reasoning: String::new(),
         tool_calls: vec![],
+        reasoning_state: None,
     }
 }
 

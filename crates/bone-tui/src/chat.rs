@@ -330,6 +330,7 @@ impl ChatBuffer {
             content,
             reasoning,
             tool_calls,
+            ..
         } = m
         else {
             return;
@@ -964,6 +965,7 @@ mod tests {
                 content: "**Hello!**".into(),
                 reasoning: "think".into(),
                 tool_calls: vec![call("c1", r#"{"command":"ls"}"#)],
+                reasoning_state: None,
             },
             usage: Some(Usage {
                 input_tokens: 5,
@@ -1027,6 +1029,7 @@ mod tests {
                 content: "hi".into(),
                 reasoning: String::new(),
                 tool_calls: vec![],
+                reasoning_state: None,
             },
             usage: Some(Usage {
                 input_tokens: 5,
@@ -1089,6 +1092,7 @@ mod tests {
                     content: String::new(),
                     reasoning: String::new(),
                     tool_calls: vec![call("c1", r#"{"command":"x"}"#)],
+                    reasoning_state: None,
                 },
                 ChatMessage::Tool {
                     images: Vec::new(),

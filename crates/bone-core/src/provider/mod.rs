@@ -1,11 +1,15 @@
 //! Model providers.
 
 mod openai;
+mod openai_responses;
 pub(crate) mod sse;
 
 pub use openai::OpenAiProvider;
+pub use openai_responses::OpenAiResponsesProvider;
 
-use bone_proto::types::{ChatMessage, ToolCall, Usage};
+use std::sync::Arc;
+
+use bone_proto::types::{ChatMessage, ProviderApi, ReasoningState, ToolCall, Usage};
 use futures_util::future::BoxFuture;
 
 use crate::tools::ToolSpec;
@@ -33,6 +37,7 @@ pub struct Completion {
     pub reasoning: String,
     pub tool_calls: Vec<ToolCall>,
     pub usage: Option<Usage>,
+    pub reasoning_state: Option<ReasoningState>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -78,4 +83,12 @@ impl Provider for Unconfigured {
 /// OpenAI-compatible.
 pub fn unconfigured(p: &crate::config::ProviderConfig) -> bool {
     p.kind.is_none() && p.base_url.is_empty()
+}
+
+/// The built-in provider for a config, by its `api`.
+pub fn openai_compatible(p: crate::config::ProviderConfig) -> Arc<dyn Provider> {
+    match p.api {
+        ProviderApi::Completions => Arc::new(OpenAiProvider::new(p)),
+        ProviderApi::Responses => Arc::new(OpenAiResponsesProvider::new(p)),
+    }
 }

@@ -19,6 +19,7 @@ local providers = bone.config.providers
 --   model = "model-name",
 --   api_key = os.getenv("EXAMPLE_API_KEY"),
 --   -- reasoning_effort = "medium",
+--   -- api = "responses", -- OpenAI reasoning models: keep their thinking between calls
 -- }
 
 -- bone.config.provider = "local_model"

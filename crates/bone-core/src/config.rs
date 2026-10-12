@@ -83,6 +83,9 @@ pub struct ProviderConfig {
     /// Opt in explicitly; standard OpenAI requests omit this field.
     #[serde(default)]
     pub replay_reasoning: bool,
+    /// `/chat/completions` (the default) or `/responses`.
+    #[serde(default)]
+    pub api: bone_proto::types::ProviderApi,
 }
 
 fn default_true() -> bool {

@@ -34,6 +34,17 @@ reasoning generation, not history replay. Change it in `/config` under the
 provider, or set `providers.<name>.replay_reasoning` in settings. Lua providers
 continue to control their own request serialization.
 
+`api` picks the wire format: `"completions"` (the default, `/chat/completions`)
+or `"responses"` (`/responses`). Use `"responses"` for OpenAI reasoning models,
+directly or through a gateway that forwards `/responses`: Chat Completions
+throws their reasoning away, while Responses returns it encrypted. bone keeps
+those items on the assistant message and sends them back on later calls to the
+same model, so it does not have to work everything out again after each tool
+call. Requests are stateless (`store: false`) and ask for reasoning summaries,
+which show as the message's reasoning. To use both formats with one gateway,
+add two providers with the same `base_url`. Change it in `/config` under the
+provider, or set `providers.<name>.api` in settings.
+
 `bone.config.system_prompt` replaces the built-in system prompt (the working
 directory is always appended after it). `BONE_SYSTEM_PROMPT` overrides it for
 one run. Settings and the `system` hook can change it per turn.

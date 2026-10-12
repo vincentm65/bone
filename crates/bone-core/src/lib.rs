@@ -906,6 +906,7 @@ impl Core {
                         content: c.content,
                         reasoning: c.reasoning,
                         tool_calls: c.tool_calls,
+                        reasoning_state: c.reasoning_state,
                     }),
                     usage: c.usage,
                     error: None,

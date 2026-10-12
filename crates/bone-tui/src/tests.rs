@@ -336,6 +336,7 @@ fn tool_calls(session: &str, calls: Vec<ToolCall>) -> MessageCompletedParams {
             content: String::new(),
             reasoning: String::new(),
             tool_calls: calls,
+            reasoning_state: None,
         },
         usage: None,
     }
@@ -382,6 +383,7 @@ async fn first_message_creates_a_session_and_streams_the_reply() {
             content: "Hi! Done.".into(),
             reasoning: String::new(),
             tool_calls: vec![],
+            reasoning_state: None,
         },
         usage: Some(Usage {
             input_tokens: 1500,
@@ -1132,6 +1134,7 @@ async fn default_ui_fits_narrow_screens() {
             content: "ok".into(),
             reasoning: String::new(),
             tool_calls: vec![],
+            reasoning_state: None,
         },
         usage: Some(Usage {
             input_tokens: 10,
@@ -1388,6 +1391,7 @@ async fn views_are_lua_and_can_be_replaced() {
             content: "# Done".into(),
             reasoning: "pondering".into(),
             tool_calls: vec![],
+            reasoning_state: None,
         },
         usage: None,
     })
@@ -1483,6 +1487,7 @@ async fn without_lua_views_rust_draws_plain_text() {
             content: "\n\n# Title\n- item\n".into(),
             reasoning: "hmm\n".into(),
             tool_calls: vec![],
+            reasoning_state: None,
         },
         usage: None,
     })
@@ -2260,6 +2265,7 @@ async fn lua_reads_turns_items_and_sessions() {
             content: "done".into(),
             reasoning: String::new(),
             tool_calls: vec![],
+            reasoning_state: None,
         },
         usage: None,
     })
@@ -2703,6 +2709,7 @@ async fn tui_lua_calls_the_model_through_the_core() {
             content: "Fix typo".into(),
             reasoning: String::new(),
             tool_calls: vec![],
+            reasoning_state: None,
         }),
         usage: None,
         error: None,
@@ -2804,6 +2811,7 @@ async fn model_events_before_the_reply_are_kept() {
             content: "early answer".into(),
             reasoning: String::new(),
             tool_calls: vec![],
+            reasoning_state: None,
         }),
         usage: None,
         error: None,
@@ -3747,6 +3755,7 @@ async fn lua_adds_its_own_items_to_the_chat() {
             content: "hello".into(),
             reasoning: String::new(),
             tool_calls: vec![],
+            reasoning_state: None,
         },
         usage: None,
     })
@@ -3917,6 +3926,7 @@ async fn tool_items_carry_live_output_timing_and_usage() {
             content: String::new(),
             reasoning: String::new(),
             tool_calls: vec![call.clone()],
+            reasoning_state: None,
         },
         usage: Some(Usage {
             input_tokens: 1200,
@@ -5047,7 +5057,8 @@ async fn history_sidebar_spans_screen_and_keeps_composer_beside_it() {
 #[tokio::test]
 async fn session_sidebar_background_fills_both_tabs() {
     let mut h = Harness::new().await;
-    h.lua("bone.ui.sessions_background = (bone.hl.get('InputBackground') or {}).bg").await;
+    h.lua("bone.ui.sessions_background = (bone.hl.get('InputBackground') or {}).bg")
+        .await;
     h.input("{ctrl+o}").await;
     for processes in [false, true] {
         if processes {

@@ -370,6 +370,7 @@ mod tests {
             content: "answer".into(),
             reasoning: "thought".into(),
             tool_calls: vec![],
+            reasoning_state: None,
         }];
         assert_eq!(chars(&messages, false), 6);
         assert_eq!(chars(&messages, true), 13);

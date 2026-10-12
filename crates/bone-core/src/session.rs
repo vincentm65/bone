@@ -841,6 +841,7 @@ mod tests {
                 content: "done".into(),
                 reasoning: String::new(),
                 tool_calls: vec![],
+                reasoning_state: None,
             })
             .unwrap();
         }
@@ -1001,6 +1002,7 @@ mod tests {
                         arguments: "{}".into(),
                     },
                 ],
+                reasoning_state: None,
             })
             .unwrap();
             s.usage(UsageRecord {
@@ -1027,6 +1029,7 @@ mod tests {
                 content: "the walrus is in the attic".into(),
                 reasoning: String::new(),
                 tool_calls: vec![],
+                reasoning_state: None,
             })
             .unwrap();
         }

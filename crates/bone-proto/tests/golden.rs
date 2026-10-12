@@ -190,6 +190,7 @@ fn requests() {
                     content: String::new(),
                     reasoning: "Run cargo test.".into(),
                     tool_calls: vec![call()],
+                    reasoning_state: None,
                 },
                 ChatMessage::Tool {
                     images: Vec::new(),
@@ -201,6 +202,7 @@ fn requests() {
                     content: "All tests pass.".into(),
                     reasoning: String::new(),
                     tool_calls: vec![],
+                    reasoning_state: None,
                 },
             ],
             active_turn: None,
@@ -318,6 +320,7 @@ fn requests() {
                 reasoning_effort: None,
                 stream_usage: true,
                 replay_reasoning: false,
+                api: Default::default(),
                 has_key: false,
                 added: false,
             },
@@ -331,6 +334,7 @@ fn requests() {
                 reasoning_effort: Some("high".into()),
                 stream_usage: true,
                 replay_reasoning: false,
+                api: Default::default(),
                 has_key: true,
                 added: true,
             },
@@ -503,7 +507,9 @@ fn requests() {
     exchange::<McpReconnect>(23, McpRef { name: "db".into() }, Empty {});
     exchange::<McpAuth>(
         24,
-        McpRef { name: "github".into() },
+        McpRef {
+            name: "github".into(),
+        },
         McpAuthStart {
             url: "https://auth.github.test/authorize?client_id=c".into(),
             redirect_uri: "http://127.0.0.1:41000/callback".into(),
@@ -517,7 +523,13 @@ fn requests() {
         },
         Empty {},
     );
-    exchange::<McpSignOut>(28, McpRef { name: "github".into() }, Empty {});
+    exchange::<McpSignOut>(
+        28,
+        McpRef {
+            name: "github".into(),
+        },
+        Empty {},
+    );
     let settings = json!({ "provider": "qwen", "models": { "qwen": "Qwen3-27B" }, "tui": { "tool_detail": "rows" } });
     exchange::<SettingsGet>(25, Empty {}, settings.clone());
     exchange::<SettingsSet>(
@@ -631,6 +643,7 @@ fn events() {
             content: String::new(),
             reasoning: "Run cargo test.".into(),
             tool_calls: vec![call()],
+            reasoning_state: None,
         },
         usage: Some(Usage {
             input_tokens: 1200,
@@ -696,6 +709,7 @@ fn events() {
             content: "Fix main typo".into(),
             reasoning: String::new(),
             tool_calls: vec![],
+            reasoning_state: None,
         }),
         usage: Some(Usage {
             input_tokens: 30,

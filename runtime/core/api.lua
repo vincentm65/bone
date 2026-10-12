@@ -2,8 +2,9 @@
 -- ~/.bone/core.lua. The core reads `bone.config` once the files have run.
 
 bone.config = {
-  --- name -> { base_url, model, api_key?, reasoning_effort?, stream_usage?, replay_reasoning? }
-  --- Any OpenAI-compatible /chat/completions endpoint.
+  --- name -> { base_url, model, api?, api_key?, reasoning_effort?, stream_usage?, replay_reasoning? }
+  --- Any OpenAI-compatible /chat/completions endpoint, or /responses with
+  --- api = "responses".
   providers = {},
   --- Which provider to use (a key of `providers`).
   provider = nil,
