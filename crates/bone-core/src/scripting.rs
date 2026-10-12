@@ -663,14 +663,9 @@ impl crate::provider::Provider for LuaProvider {
         use crate::provider::{Delta, ProviderError};
         Box::pin(async move {
             let err = |e: String| ProviderError(format!("{} provider: {e}", self.kind));
-            let tools: Vec<Json> = req
-                .tools
-                .iter()
-                .map(|t| json!({ "name": t.name, "description": t.description, "parameters": t.parameters }))
-                .collect();
             let request = json!({
                 "messages": req.messages,
-                "tools": tools,
+                "tools": req.tools,
                 "options": self.options,
                 "session_id": req.session_id,
                 "depth": req.depth,

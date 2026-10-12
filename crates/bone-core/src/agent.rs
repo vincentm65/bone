@@ -286,22 +286,17 @@ impl Turn<'_> {
                     let mut all = vec![system.clone()];
                     all.extend(s.context());
                     crate::compact::tokens(&s, &all) > limit
+                        && crate::compact::can_compact(&s, compact.keep)
                 };
                 if over {
-                    let can = {
-                        let s = self.session.lock().unwrap();
-                        crate::compact::can_compact(&s, compact.keep)
-                    };
-                    if can {
-                        self.compact("limit").await?;
-                    }
+                    self.compact("limit").await?;
                 }
             }
             let mut messages = vec![system];
             messages.extend(self.session.lock().unwrap().context());
             let ev = json!({ "session_id": self.session_id, "messages": messages });
             if let Some(ev) = self.safe_hooks("context", ev).await? {
-                messages = messages_from_lua(&ev["messages"]).map_err(|e| {
+                messages = messages_from_lua(&ev["messages"], &messages).map_err(|e| {
                     Stop::Failed(format!("context hook returned bad messages: {e}"))
                 })?;
             }
@@ -315,31 +310,18 @@ impl Turn<'_> {
             let ev = json!({
                 "session_id": self.session_id,
                 "messages": messages,
-                "tools": tools.iter().map(|t| json!({ "name": t.name, "description": t.description, "parameters": t.parameters })).collect::<Vec<_>>(),
+                "tools": tools,
             });
             let mut use_provider = None;
             let mut use_model = None;
             if let Some(ev) = self.safe_hooks("request", ev).await? {
                 use_provider = ev["provider"].as_str().map(str::to_owned);
                 use_model = ev["model"].as_str().map(str::to_owned);
-                messages = messages_from_lua(&ev["messages"]).map_err(|e| {
+                messages = messages_from_lua(&ev["messages"], &messages).map_err(|e| {
                     Stop::Failed(format!("request hook returned bad messages: {e}"))
                 })?;
-                tools = list(&ev["tools"])
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .map(|t| ToolSpec {
-                                name: t["name"].as_str().unwrap_or_default().to_owned(),
-                                description: t["description"]
-                                    .as_str()
-                                    .unwrap_or_default()
-                                    .to_owned(),
-                                parameters: t["parameters"].clone(),
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default();
+                tools = serde_json::from_value(list(&ev["tools"]))
+                    .map_err(|e| Stop::Failed(format!("request hook returned bad tools: {e}")))?;
             }
 
             // Tool definitions count toward the provider's input tokens; left
@@ -884,11 +866,43 @@ fn unix_ms() -> u64 {
         .map_or(0, |d| d.as_millis() as u64)
 }
 
-fn messages_from_lua(v: &Value) -> Result<Vec<ChatMessage>, String> {
-    list(v)
+/// A hook's messages. Lua turns empty lists in saved reasoning (opaque
+/// provider data) into `{}`, so the items a hook kept are restored as sent.
+fn messages_from_lua(v: &Value, before: &[ChatMessage]) -> Result<Vec<ChatMessage>, String> {
+    let mut messages = list(v)
         .as_array()
         .ok_or("messages must be a list")?
         .iter()
         .map(crate::runtime::message)
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    let key = |i: &Value| i.get("id").or(i.get("signature")).cloned();
+    let saved: Vec<&Value> = before.iter().flat_map(reasoning_items).collect();
+    for m in &mut messages {
+        let ChatMessage::Assistant {
+            reasoning_state: Some(s),
+            ..
+        } = m
+        else {
+            continue;
+        };
+        for item in &mut s.items {
+            if let Some(o) = saved
+                .iter()
+                .find(|o| key(o).is_some() && key(o) == key(item))
+            {
+                *item = (*o).clone();
+            }
+        }
+    }
+    Ok(messages)
+}
+
+fn reasoning_items(m: &ChatMessage) -> &[Value] {
+    match m {
+        ChatMessage::Assistant {
+            reasoning_state: Some(s),
+            ..
+        } => &s.items,
+        _ => &[],
+    }
 }
