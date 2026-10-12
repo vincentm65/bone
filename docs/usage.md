@@ -130,6 +130,6 @@ bone --headless [--listen [PATH]]   core only, on stdio or a local socket/named 
 bone --init                         starter ~/.bone/core.lua and tui.lua
 ```
 
-Configuration lives in `~/.bone/` (or `$BONE_CONFIG_DIR`); sessions are saved in `~/.bone/sessions/`. `bone --import-bone [DB]` brings in the first bone's conversations (default `~/.bone-rust/data/conversations.db`) as sessions, with their usage and latest checkpoint; run it again to pick up newer ones, and sessions you continued here are never overwritten. `BONE_BASE_URL`, `BONE_MODEL`, `BONE_API_KEY`, `BONE_REASONING_EFFORT`, `BONE_SYSTEM_PROMPT`, and `BONE_DATA_DIR` override `core.lua` for one run.
+Configuration lives in `~/.bone/` (or `$BONE_CONFIG_DIR`); sessions are saved in `~/.bone/sessions/`. `bone --import-bone [DB]` brings in the first bone's conversations (default `~/.bone-rust/data/conversations.db`) as sessions, with their usage and latest checkpoint; run it again to pick up newer ones, and sessions you continued here are never overwritten. `BONE_BASE_URL`, `BONE_MODEL`, `BONE_API_KEY`, `BONE_REASONING_EFFORT`, `BONE_SYSTEM_PROMPT`, and `BONE_DATA_DIR` override `core.lua` for one run. `BONE_DEBUG_HTTP=<dir>` saves every model request and raw response there (API keys excluded), which is the thing to attach when a provider misbehaves.
 
 On Windows, `--listen` and `--connect` use `\\.\pipe\bone3-<USERNAME>` by default (or the named-pipe path you provide). Only the current user can connect. Shell commands run in `cmd.exe`, and background jobs use ConPTY.

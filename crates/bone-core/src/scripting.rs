@@ -254,7 +254,9 @@ fn apply_saved_providers(lua: &Lua, dir: &Path) -> mlua::Result<()> {
                 Some(t) => t,
                 None => {
                     let whole = fields.contains_key("model")
-                        && (fields.contains_key("base_url") || fields.contains_key("type"));
+                        && (fields.contains_key("base_url")
+                            || fields.contains_key("type")
+                            || fields.get("api").and_then(|a| a.as_str()) == Some("anthropic"));
                     if !whole {
                         eprintln!(
                             "bone: settings.json providers.{name}: not in core.lua, and no model and base_url of its own"
@@ -327,7 +329,7 @@ fn resolve(
                     }
                 ));
             }
-            None if p.base_url.is_empty() => {
+            None if crate::provider::unconfigured(p) => {
                 return Err(format!("bone.config.providers.{name}: base_url is missing"));
             }
             _ => {}
@@ -348,16 +350,9 @@ fn resolve(
         let model = env("BONE_MODEL").or_else(|| provider.as_ref().map(|p| p.model.clone()));
         let model = model.ok_or("BONE_BASE_URL is set but BONE_MODEL is not")?;
         provider = Some(ProviderConfig {
-            supports_images: None,
-            kind: None,
-            options: serde_json::Value::Null,
             base_url,
             model,
-            api_key: None,
-            reasoning_effort: None,
-            stream_usage: true,
-            replay_reasoning: false,
-            api: Default::default(),
+            ..Default::default()
         });
     } else if let Some(model) = env("BONE_MODEL") {
         let p = provider
@@ -380,18 +375,7 @@ fn resolve(
     }
     // No provider at all (a first run): the core still starts, so /setup
     // can add one; turns say how until then.
-    let mut provider = provider.unwrap_or(ProviderConfig {
-        supports_images: None,
-        kind: None,
-        options: serde_json::Value::Null,
-        base_url: String::new(),
-        model: String::new(),
-        api_key: None,
-        reasoning_effort: None,
-        stream_usage: true,
-        replay_reasoning: false,
-        api: Default::default(),
-    });
+    let mut provider = provider.unwrap_or_default();
     if let Some(key) = env("BONE_API_KEY") {
         provider.api_key = Some(key);
     }

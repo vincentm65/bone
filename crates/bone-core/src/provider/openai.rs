@@ -43,22 +43,31 @@ impl OpenAiProvider {
         on_delta: DeltaSink<'_>,
     ) -> Result<Completion, ProviderError> {
         check_images(&self.config, req.messages)?;
-        let body = request_body(&self.config, &req);
-        let resp = send(&self.http, &self.url(), &self.config, &body).await?;
+        let (body, headers) = configured(
+            request_body(&self.config, &req),
+            bearer(&self.config),
+            &self.config,
+        );
+        let mut capture = Capture::start(&self.url(), &body);
+        let resp = send(&self.http, &self.url(), &headers, &body, &mut capture).await?;
         let mut bytes = resp.bytes_stream();
         let mut parser = SseParser::default();
         let mut acc = Accumulator::default();
         while let Some(chunk) = bytes.next().await {
             let chunk = chunk.map_err(|e| ProviderError(format!("stream error: {e}")))?;
+            capture.chunk(&chunk);
             for data in parser.push(&chunk) {
                 if acc.apply(&data, on_delta)? {
+                    acc.check_end(true)?;
                     return Ok(acc.finish());
                 }
             }
         }
-        if let Some(data) = parser.finish() {
-            acc.apply(&data, on_delta)?;
-        }
+        let done = match parser.finish() {
+            Some(data) => acc.apply(&data, on_delta)?,
+            None => false,
+        };
+        acc.check_end(done)?;
         Ok(acc.finish())
     }
 }
@@ -73,6 +82,44 @@ impl Provider for OpenAiProvider {
         on_delta: DeltaSink<'a>,
     ) -> BoxFuture<'a, Result<Completion, ProviderError>> {
         Box::pin(self.stream(req, on_delta))
+    }
+}
+
+/// `Authorization: Bearer <key>`, when there is a key.
+pub(super) fn bearer(config: &ProviderConfig) -> Vec<(String, String)> {
+    let key = config.api_key.as_deref().filter(|k| !k.is_empty());
+    key.map(|k| ("authorization".into(), format!("Bearer {k}")))
+        .into_iter()
+        .collect()
+}
+
+/// The request as the provider entry adjusts it: its `body` merged in
+/// (`null` removes a field), its `headers` replacing any of the same name.
+pub(super) fn configured(
+    mut body: Value,
+    mut headers: Vec<(String, String)>,
+    config: &ProviderConfig,
+) -> (Value, Vec<(String, String)>) {
+    merge(&mut body, &config.body);
+    for (name, value) in &config.headers {
+        headers.retain(|(n, _)| !n.eq_ignore_ascii_case(name));
+        headers.push((name.clone(), value.clone()));
+    }
+    (body, headers)
+}
+
+fn merge(into: &mut Value, from: &Value) {
+    let (Value::Object(into), Value::Object(from)) = (into, from) else {
+        return;
+    };
+    for (k, v) in from {
+        if v.is_null() {
+            into.remove(k);
+        } else if let Some(slot) = into.get_mut(k).filter(|s| s.is_object() && v.is_object()) {
+            merge(slot, v);
+        } else {
+            into.insert(k.clone(), v.clone());
+        }
     }
 }
 
@@ -107,25 +154,61 @@ pub(super) fn check_images(
     Ok(())
 }
 
+/// With `BONE_DEBUG_HTTP=<dir>`, each request body and raw response is saved
+/// there (`<stem>.request.json`, `<stem>.response`) to replay or report.
+/// Keys are sent as headers, so they are not saved.
+pub(super) struct Capture(Option<std::fs::File>);
+
+impl Capture {
+    pub(super) fn start(url: &str, body: &Value) -> Self {
+        let Some(dir) = std::env::var_os("BONE_DEBUG_HTTP").filter(|d| !d.is_empty()) else {
+            return Capture(None);
+        };
+        static COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let dir = std::path::PathBuf::from(dir);
+        let _ = std::fs::create_dir_all(&dir);
+        let millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis());
+        let n = COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let stem = format!("{millis}-{}-{n}", std::process::id());
+        let request = json!({ "url": url, "body": body });
+        let _ = std::fs::write(
+            dir.join(format!("{stem}.request.json")),
+            serde_json::to_vec_pretty(&request).unwrap_or_default(),
+        );
+        Capture(std::fs::File::create(dir.join(format!("{stem}.response"))).ok())
+    }
+
+    pub(super) fn chunk(&mut self, bytes: &[u8]) {
+        if let Some(file) = &mut self.0 {
+            use std::io::Write;
+            let _ = file.write_all(bytes);
+        }
+    }
+}
+
 /// Send the request, retrying connection failures, 429 and 5xx. Nothing has
 /// streamed yet at this point, so retrying is invisible to the caller.
 pub(super) async fn send(
     http: &reqwest::Client,
     url: &str,
-    config: &ProviderConfig,
+    headers: &[(String, String)],
     body: &Value,
+    capture: &mut Capture,
 ) -> Result<reqwest::Response, ProviderError> {
     let mut attempt = 1;
     loop {
         let mut req = http.post(url).json(body);
-        if let Some(key) = config.api_key.as_deref().filter(|k| !k.is_empty()) {
-            req = req.bearer_auth(key);
+        for (name, value) in headers {
+            req = req.header(name, value);
         }
         let retryable = match req.send().await {
             Ok(resp) if resp.status().is_success() => return Ok(resp),
             Ok(resp) => {
                 let status = resp.status();
                 let text = resp.text().await.unwrap_or_default();
+                capture.chunk(format!("HTTP {status}\n{text}\n").as_bytes());
                 let err = ProviderError(format!("HTTP {status}: {}", text.trim()));
                 if !(status.as_u16() == 429 || status.is_server_error()) {
                     return Err(err);
@@ -273,6 +356,8 @@ struct Chunk {
 struct Choice {
     #[serde(default)]
     delta: Option<ChoiceDelta>,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -329,6 +414,7 @@ struct Accumulator {
     reasoning: String,
     calls: BTreeMap<usize, ToolCall>,
     usage: Option<Usage>,
+    finish_reason: Option<String>,
 }
 
 impl Accumulator {
@@ -353,11 +439,11 @@ impl Accumulator {
                     .or(u.prompt_cache_hit_tokens),
             });
         }
-        let deltas = chunk
-            .choices
-            .unwrap_or_default()
-            .into_iter()
-            .filter_map(|c| c.delta);
+        let choices = chunk.choices.unwrap_or_default();
+        if let Some(reason) = choices.iter().find_map(|c| c.finish_reason.clone()) {
+            self.finish_reason = Some(reason);
+        }
+        let deltas = choices.into_iter().filter_map(|c| c.delta);
         for d in deltas {
             if let Some(text) = [d.reasoning_content, d.reasoning]
                 .into_iter()
@@ -394,6 +480,18 @@ impl Accumulator {
             }
         }
         Ok(false)
+    }
+
+    /// Whether a stream that stopped (`done`: at `[DONE]`) gave a whole
+    /// answer. Some servers end without `[DONE]` but after a finish reason.
+    fn check_end(&self, done: bool) -> Result<(), ProviderError> {
+        let why = match self.finish_reason.as_deref() {
+            Some("length") => "response incomplete: the output token limit was reached",
+            Some("content_filter") => "the response was stopped by the content filter",
+            None if !done => "the stream ended before the response completed",
+            _ => return Ok(()),
+        };
+        Err(ProviderError(why.into()))
     }
 
     fn finish(self) -> Completion {

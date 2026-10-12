@@ -14,6 +14,14 @@ M.PRESETS = {
     model = "",
   },
   { title = "OpenAI", name = "openai", base_url = "https://api.openai.com/v1", model = "", key_env = "OPENAI_API_KEY" },
+  {
+    title = "Anthropic",
+    name = "anthropic",
+    api = "anthropic",
+    base_url = "https://api.anthropic.com/v1",
+    model = "",
+    key_env = "ANTHROPIC_API_KEY",
+  },
   { title = "DeepSeek", name = "deepseek", base_url = "https://api.deepseek.com/v1", model = "", key_env = "DEEPSEEK_API_KEY" },
   { title = "OpenRouter", name = "openrouter", base_url = "https://openrouter.ai/api/v1", model = "", key_env = "OPENROUTER_API_KEY" },
   { title = "Another OpenAI-compatible service", name = "", base_url = "", model = "" },
@@ -119,7 +127,7 @@ function M.open(opts)
       st.log[#st.log + 1] = line
       redraw()
     end
-    local spec = { base_url = f.base_url, model = f.model }
+    local spec = { base_url = f.base_url, model = f.model, api = f.api }
     if f.key_env ~= "" then
       spec.api_key_env = f.key_env
     end
@@ -334,7 +342,7 @@ function M.open(opts)
       st.sel = math.min(math.max(#list, 1), st.sel + 1)
     elseif st.step == "provider" and k == "enter" and row then
       local p = M.PRESETS[row.preset]
-      st.form = { name = p.name, base_url = p.base_url, model = p.model, key = "", key_env = p.key_env or "" }
+      st.form = { name = p.name, base_url = p.base_url, model = p.model, key = "", key_env = p.key_env or "", api = p.api }
       st.step, st.sel = "details", p.base_url == "" and 1 or 3
     elseif st.step == "details" and k == "enter" and row then
       if row.action == "details_done" then

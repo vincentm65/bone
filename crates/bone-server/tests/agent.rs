@@ -92,16 +92,10 @@ async fn turn_with_tool_call_over_http() {
     let work = tempfile::tempdir().unwrap();
     let core = Core::new(CoreConfig {
         provider: ProviderConfig {
-            supports_images: None,
-            kind: None,
-            options: serde_json::Value::Null,
             base_url: url,
             model: "test-model".into(),
             api_key: Some("sk-test".into()),
-            reasoning_effort: None,
-            stream_usage: true,
-            replay_reasoning: false,
-            api: Default::default(),
+            ..Default::default()
         },
         system_prompt: Some("SYSTEM".into()),
         data_dir: data.path().to_owned(),

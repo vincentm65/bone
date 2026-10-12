@@ -22,6 +22,13 @@ local providers = bone.config.providers
 --   -- api = "responses", -- OpenAI reasoning models: keep their thinking between calls
 -- }
 
+-- Anthropic (prompt caching and thinking built in):
+-- providers.claude = {
+--   api = "anthropic",
+--   model = "claude-opus-5-5",
+--   api_key = os.getenv("ANTHROPIC_API_KEY"),
+-- }
+
 -- bone.config.provider = "local_model"
 
 -- Tool calls run without asking. Add a tool_call hook using bone.ask to

@@ -83,9 +83,22 @@ pub struct ProviderConfig {
     /// Opt in explicitly; standard OpenAI requests omit this field.
     #[serde(default)]
     pub replay_reasoning: bool,
-    /// `/chat/completions` (the default) or `/responses`.
+    /// `/chat/completions` (the default), `/responses` or `anthropic`.
     #[serde(default)]
     pub api: bone_proto::types::ProviderApi,
+    /// Extra request headers, after the provider's own.
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// Merged into every request body; `null` removes a field.
+    #[serde(default)]
+    pub body: serde_json::Value,
+}
+
+impl Default for ProviderConfig {
+    /// No provider: every field at its default, as an empty entry reads.
+    fn default() -> Self {
+        serde_json::from_value(serde_json::json!({ "model": "" })).expect("defaults deserialize")
+    }
 }
 
 fn default_true() -> bool {

@@ -8,7 +8,7 @@ use futures_util::StreamExt;
 use futures_util::future::BoxFuture;
 use serde_json::{Value, json};
 
-use super::openai::{check_images, http_client, send};
+use super::openai::{Capture, bearer, check_images, configured, http_client, send};
 use super::sse::SseParser;
 use super::{Completion, CompletionRequest, Delta, DeltaSink, Provider, ProviderError};
 use crate::config::ProviderConfig;
@@ -36,23 +36,29 @@ impl OpenAiResponsesProvider {
         on_delta: DeltaSink<'_>,
     ) -> Result<Completion, ProviderError> {
         check_images(&self.config, req.messages)?;
-        let body = request_body(&self.config, &req);
-        let resp = send(&self.http, &self.url(), &self.config, &body).await?;
+        let (body, headers) = configured(
+            request_body(&self.config, &req),
+            bearer(&self.config),
+            &self.config,
+        );
+        let mut capture = Capture::start(&self.url(), &body);
+        let resp = send(&self.http, &self.url(), &headers, &body, &mut capture).await?;
         let mut bytes = resp.bytes_stream();
         let mut parser = SseParser::default();
         let mut acc = Accumulator::default();
         while let Some(chunk) = bytes.next().await {
             let chunk = chunk.map_err(|e| ProviderError(format!("stream error: {e}")))?;
+            capture.chunk(&chunk);
             for data in parser.push(&chunk) {
                 if acc.apply(&data, on_delta)? {
-                    return Ok(acc.finish(&self.config.model));
+                    return acc.finish(&self.config.model);
                 }
             }
         }
         if let Some(data) = parser.finish() {
             acc.apply(&data, on_delta)?;
         }
-        Ok(acc.finish(&self.config.model))
+        acc.finish(&self.config.model)
     }
 }
 
@@ -165,7 +171,8 @@ fn wire_assistant(
     let mut sent_calls = vec![false; tool_calls.len()];
     for item in state.map(|s| s.items.as_slice()).unwrap_or_default() {
         match item["type"].as_str() {
-            Some("reasoning") => out.push(item.clone()),
+            // Unsealed reasoning cannot be sent back statelessly.
+            Some("reasoning") if item["encrypted_content"].is_string() => out.push(item.clone()),
             Some("message") if !sent_text => {
                 sent_text = true;
                 out.push(json!({
@@ -233,6 +240,8 @@ struct Accumulator {
     /// The final output list from `response.completed`, when given.
     output: Option<Vec<Value>>,
     usage: Option<Usage>,
+    /// `response.completed` arrived: without it the answer is cut short.
+    completed: bool,
 }
 
 impl Accumulator {
@@ -250,6 +259,9 @@ impl Accumulator {
                 .map(str::to_owned)
         };
         match ev["type"].as_str().unwrap_or_default() {
+            _ if ev["error"].is_object() && ev["type"].is_null() => {
+                return Err(ProviderError(format!("provider error: {}", ev["error"])));
+            }
             "response.output_text.delta" => {
                 if let Some(t) = text() {
                     self.content.push_str(&t);
@@ -272,7 +284,13 @@ impl Accumulator {
                     .unwrap_or(self.items.len() as u64);
                 self.items.push((index, ev["item"].clone()));
             }
-            "response.completed" | "response.incomplete" => {
+            "response.incomplete" => {
+                let reason = &ev["response"]["incomplete_details"]["reason"];
+                let reason = reason.as_str().unwrap_or("no reason given");
+                return Err(ProviderError(format!("response incomplete: {reason}")));
+            }
+            "response.completed" => {
+                self.completed = true;
                 let response = &ev["response"];
                 if let Some(output) = response["output"].as_array().filter(|o| !o.is_empty()) {
                     self.output = Some(output.clone());
@@ -298,7 +316,12 @@ impl Accumulator {
         Ok(false)
     }
 
-    fn finish(mut self, model: &str) -> Completion {
+    fn finish(mut self, model: &str) -> Result<Completion, ProviderError> {
+        if !self.completed {
+            return Err(ProviderError(
+                "the stream ended before the response completed".into(),
+            ));
+        }
         self.items.sort_by_key(|(i, _)| *i);
         let items = self
             .output
@@ -324,8 +347,13 @@ impl Accumulator {
                 .filter_map(|part| part["text"].as_str().map(str::to_owned))
                 .collect();
         }
+        // Only sealed reasoning can go back (a gateway may drop the seal).
+        let items: Vec<Value> = items
+            .into_iter()
+            .filter(|i| i["type"] != "reasoning" || i["encrypted_content"].is_string())
+            .collect();
         let keep = items.iter().any(|i| i["type"] == "reasoning");
-        Completion {
+        Ok(Completion {
             content: self.content,
             reasoning: self.reasoning,
             tool_calls,
@@ -333,8 +361,9 @@ impl Accumulator {
             reasoning_state: keep.then(|| ReasoningState {
                 model: model.to_owned(),
                 items,
+                prefix: None,
             }),
-        }
+        })
     }
 }
 
@@ -360,7 +389,7 @@ mod tests {
                 break;
             }
         }
-        let c = acc.finish("gpt-x");
+        let c = acc.finish("gpt-x").unwrap();
         assert_eq!(deltas, vec![Delta::Reasoning("think".into())]);
         assert_eq!(c.reasoning, "think");
         assert_eq!(c.tool_calls[0].id, "call_a");

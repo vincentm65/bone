@@ -43,7 +43,8 @@ Environment variables override core.lua for one run:
   BONE_BASE_URL, BONE_MODEL       use this OpenAI-compatible endpoint and model
   BONE_API_KEY, BONE_REASONING_EFFORT, BONE_SYSTEM_PROMPT
   BONE_APPROVAL=auto              the approve plugin (if installed) never asks
-  BONE_DATA_DIR                   where sessions are stored";
+  BONE_DATA_DIR                   where sessions are stored
+  BONE_DEBUG_HTTP=DIR             save each model request and raw response in DIR";
 
 #[derive(Debug, PartialEq)]
 enum Mode {

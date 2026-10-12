@@ -46,7 +46,7 @@ use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::CoreConfig;
-use crate::provider::{OpenAiProvider, Provider};
+use crate::provider::Provider;
 use crate::runtime::{Change, Runtime, Source};
 use crate::scripting::{Loaded, Scripting};
 use crate::session::{ActiveTurn, SessionError, SessionStore};
@@ -329,7 +329,7 @@ impl Core {
     /// A core using the configured OpenAI-compatible provider and the
     /// built-in tools.
     pub fn new(config: CoreConfig) -> Self {
-        let provider = Arc::new(OpenAiProvider::new(config.provider.clone()));
+        let provider = crate::provider::built_in(config.provider.clone());
         Self::with_parts(config, provider, Registry::builtin())
     }
 

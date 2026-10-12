@@ -62,9 +62,13 @@ impl ChatMessage {
 pub struct ReasoningState {
     pub model: String,
     pub items: Vec<serde_json::Value>,
+    /// A fingerprint of the conversation the reasoning was produced in, for
+    /// providers that only accept it back after an unchanged history.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefix: Option<String>,
 }
 
-/// The wire format of an OpenAI-compatible provider.
+/// The wire format of a built-in provider.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderApi {
@@ -73,6 +77,8 @@ pub enum ProviderApi {
     Completions,
     /// `/responses`, which keeps OpenAI models' encrypted reasoning.
     Responses,
+    /// Anthropic's `/messages`, with prompt caching and thinking.
+    Anthropic,
 }
 
 impl ProviderApi {

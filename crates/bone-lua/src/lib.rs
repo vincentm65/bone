@@ -519,6 +519,8 @@ pub fn new_state(side: Side, config_dir: Option<&Path>) -> mlua::Result<Lua> {
             to_lua(lua, &serde_json::from_str(&s).into_lua_err()?)
         })?,
     )?;
+    // JSON `null` where a Lua `nil` would drop the key.
+    json.set("null", lua.null())?;
     bone.set("json", json)?;
 
     setup_require(&lua, side, config_dir)?;
@@ -933,6 +935,11 @@ mod tests {
             .unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v, serde_json::json!({"a": [1, 2, {}], "c": 1.5, "d": {}}));
+        let null: String = lua
+            .load("return bone.json.encode({ x = bone.json.null })")
+            .eval()
+            .unwrap();
+        assert_eq!(null, r#"{"x":null}"#);
         let s: String = lua
             .load(r#"return bone.inspect({1, "x", k = {true}})"#)
             .eval()

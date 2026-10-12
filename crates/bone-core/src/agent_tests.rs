@@ -121,16 +121,9 @@ impl Harness {
         let work = tempfile::tempdir().unwrap();
         let config = CoreConfig {
             provider: ProviderConfig {
-                supports_images: None,
-                kind: None,
-                options: serde_json::Value::Null,
                 base_url: "http://unused".into(),
                 model: "m".into(),
-                api_key: None,
-                reasoning_effort: None,
-                stream_usage: true,
-                replay_reasoning: false,
-                api: Default::default(),
+                ..Default::default()
             },
             system_prompt: None,
             data_dir: data.path().to_owned(),

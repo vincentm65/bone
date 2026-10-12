@@ -102,13 +102,23 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
                 } else if let Some(api) = p.get("api").filter(|v| !v.is_null())
                     && !is_api(api)
                 {
-                    Err(format!("{path}: api is \"completions\" or \"responses\""))
+                    Err(format!("{path}: {API}"))
                 } else if p.get("model").is_none() {
                     Err(format!("{path}: a provider needs a model"))
-                } else if p.get("base_url").is_none() && p.get("type").is_none() {
+                } else if p.get("base_url").is_none()
+                    && p.get("type").is_none()
+                    && p.get("api").and_then(Value::as_str) != Some("anthropic")
+                {
                     Err(format!(
                         "{path}: a provider needs a base_url (or a Lua provider type)"
                     ))
+                } else if p.get("cache").is_some_and(|v| !v.is_boolean()) {
+                    Err(format!("{path}.cache must be a boolean"))
+                } else if let Some(e) = ["headers", "body"]
+                    .into_iter()
+                    .find_map(|k| p.get(k).and_then(|v| extra(k, v).err()))
+                {
+                    Err(format!("{path}.{e}"))
                 } else if p.contains_key("api_key") {
                     Err(format!(
                         "{path}: keys go in secrets.json (secrets/set), not settings"
@@ -130,20 +140,35 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
                 "base_url" | "model" | "type" | "api_key_env" | "reasoning_effort",
                 Value::String(_),
             ) => Ok(()),
-            ("stream_usage" | "replay_reasoning" | "supports_images", Value::Bool(_)) => Ok(()),
+            ("stream_usage" | "replay_reasoning" | "supports_images" | "cache", Value::Bool(_)) => {
+                Ok(())
+            }
+            ("headers" | "body", v) => extra(field, v).map_err(|e| format!("{path}: {e}")),
             ("api", v) if is_api(v) => Ok(()),
-            ("api", _) => Err(format!("{path} is \"completions\" or \"responses\"")),
+            ("api", _) => Err(format!("{path}: {API}")),
             ("api_key", _) => Err("keys go in secrets.json (secrets/set), not settings".into()),
             (
                 "base_url" | "model" | "type" | "api_key_env" | "reasoning_effort" | "stream_usage"
-                | "replay_reasoning" | "supports_images",
+                | "replay_reasoning" | "supports_images" | "cache",
                 _,
             ) => Err(format!("{path} has the wrong type")),
             _ => Err(format!(
-                "{path}: a provider's settings are base_url, model, type, api, api_key_env, reasoning_effort, stream_usage, replay_reasoning and supports_images"
+                "{path}: a provider's settings are base_url, model, type, api, api_key_env, reasoning_effort, stream_usage, replay_reasoning, supports_images, headers, body, and for Anthropic cache"
             )),
         },
         _ => Ok(()),
+    }
+}
+
+const API: &str = "api is \"completions\", \"responses\" or \"anthropic\"";
+
+/// `headers`: an object of strings; `body`: an object.
+fn extra(key: &str, v: &Value) -> Result<(), String> {
+    match (key, v) {
+        ("headers", Value::Object(h)) if h.values().all(Value::is_string) => Ok(()),
+        ("headers", _) => Err("headers maps names to strings".into()),
+        (_, Value::Object(_)) => Ok(()),
+        _ => Err("body is an object merged into each request".into()),
     }
 }
 

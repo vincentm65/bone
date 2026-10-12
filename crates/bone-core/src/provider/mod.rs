@@ -1,9 +1,11 @@
 //! Model providers.
 
+mod anthropic;
 mod openai;
 mod openai_responses;
 pub(crate) mod sse;
 
+pub use anthropic::AnthropicProvider;
 pub use openai::OpenAiProvider;
 pub use openai_responses::OpenAiResponsesProvider;
 
@@ -79,16 +81,24 @@ impl Provider for Unconfigured {
     }
 }
 
-/// The provider for a config: Lua (with a type), none (no URL), else
-/// OpenAI-compatible.
+/// The URL requests go to: the configured one, or the API's default.
+pub fn base_url(p: &crate::config::ProviderConfig) -> &str {
+    match p.base_url.trim_end_matches('/') {
+        "" if p.api == ProviderApi::Anthropic => anthropic::DEFAULT_URL,
+        url => url,
+    }
+}
+
+/// No provider is set up: no Lua type, and nowhere to send requests.
 pub fn unconfigured(p: &crate::config::ProviderConfig) -> bool {
-    p.kind.is_none() && p.base_url.is_empty()
+    p.kind.is_none() && base_url(p).is_empty()
 }
 
 /// The built-in provider for a config, by its `api`.
-pub fn openai_compatible(p: crate::config::ProviderConfig) -> Arc<dyn Provider> {
+pub fn built_in(p: crate::config::ProviderConfig) -> Arc<dyn Provider> {
     match p.api {
         ProviderApi::Completions => Arc::new(OpenAiProvider::new(p)),
         ProviderApi::Responses => Arc::new(OpenAiResponsesProvider::new(p)),
+        ProviderApi::Anthropic => Arc::new(AnthropicProvider::new(p)),
     }
 }

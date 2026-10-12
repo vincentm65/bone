@@ -27,15 +27,13 @@ pub(crate) async fn check(inner: &Inner) -> Vec<HealthItem> {
             "none configured: run /setup, or add one to core.lua",
         )];
     }
-    let mut out = vec![item(
-        "provider",
-        Ok,
-        format!("{} at {}", p.model, p.base_url),
-    )];
+    let anthropic = p.api == bone_proto::types::ProviderApi::Anthropic;
+    let base_url = crate::provider::base_url(p);
+    let mut out = vec![item("provider", Ok, format!("{} at {base_url}", p.model))];
 
     let local = ["://localhost", "://127.", "://[::1]", "://0.0.0.0"]
         .iter()
-        .any(|h| p.base_url.contains(h));
+        .any(|h| base_url.contains(h));
     out.push(match (&p.api_key, local) {
         (Some(_), _) => item("api key", Ok, "set"),
         (None, true) => item("api key", Ok, "none (local server)"),
@@ -52,6 +50,11 @@ pub(crate) async fn check(inner: &Inner) -> Vec<HealthItem> {
             format!(
                 "not checked: the {kind} provider is Lua (a plugin can add a bone.health check)"
             ),
+        ),
+        None if anthropic => item(
+            "reachable",
+            Ok,
+            "not checked: Anthropic is checked by the first request",
         ),
         None => reachable(p).await,
     });

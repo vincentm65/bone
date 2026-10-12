@@ -34,8 +34,9 @@ reasoning generation, not history replay. Change it in `/config` under the
 provider, or set `providers.<name>.replay_reasoning` in settings. Lua providers
 continue to control their own request serialization.
 
-`api` picks the wire format: `"completions"` (the default, `/chat/completions`)
-or `"responses"` (`/responses`). Use `"responses"` for OpenAI reasoning models,
+`api` picks the wire format: `"completions"` (the default, `/chat/completions`),
+`"responses"` (`/responses`) or `"anthropic"` (Anthropic's `/messages`, see
+below). Use `"responses"` for OpenAI reasoning models,
 directly or through a gateway that forwards `/responses`: Chat Completions
 throws their reasoning away, while Responses returns it encrypted. bone keeps
 those items on the assistant message and sends them back on later calls to the
@@ -44,6 +45,56 @@ call. Requests are stateless (`store: false`) and ask for reasoning summaries,
 which show as the message's reasoning. To use both formats with one gateway,
 add two providers with the same `base_url`. Change it in `/config` under the
 provider, or set `providers.<name>.api` in settings.
+
+### Anthropic
+
+```lua
+bone.config.providers.claude = {
+  api = "anthropic",                       -- base_url defaults to https://api.anthropic.com/v1
+  model = "claude-opus-5-5",
+  api_key = os.getenv("ANTHROPIC_API_KEY"), -- sent as x-api-key
+  reasoning_effort = "high",               -- output_config.effort; "none" turns thinking off
+  -- cache = false,                        -- prompt caching is on by default
+}
+```
+
+The request is otherwise bone's defaults (`max_tokens = 32000`, adaptive
+thinking with summaries), adjustable with `body` as below.
+
+Point `base_url` at a gateway (LiteLLM's `/v1/messages`, a corporate proxy)
+the same way. **Prompt caching** marks up to four breakpoints per request:
+the tools, the system prompt, the end of the previous turn and the newest
+block, so each call reads everything the call before it sent and writes only
+what was added (check the cached share in the usage line). **Thinking** is
+adaptive with summaries shown as reasoning, and goes back to the model
+unchanged, as Anthropic requires. Anthropic only accepts thinking back while
+everything before it is unchanged, so after a compaction, a new system prompt
+or a changed tool list, bone leaves the old thinking out instead of failing
+the request.
+
+### Adjusting requests: `headers` and `body`
+
+Every built-in provider (any `api`) takes two optional settings, applied to
+each request after bone builds it:
+
+```lua
+bone.config.providers.gateway = {
+  base_url = "https://llm.corp.example/v1", model = "gpt-6",
+  headers = { ["x-team"] = "platform" },          -- replace any of the same name
+  body = {                                        -- merged into the JSON body
+    temperature = 0.2,
+    reasoning = { summary = "concise" },          -- objects merge field by field
+    include = bone.json.null,                     -- null removes a field
+  },
+}
+```
+
+`null` (`bone.json.null` in Lua, since a `nil` key is simply absent)
+removes a field bone would send: `body = { thinking = null }` turns Anthropic
+thinking off, `{ reasoning = null, include = null }` makes `api = "responses"`
+work with models that do not reason, and `{ max_tokens = 8000 }` sets
+Anthropic's output limit. Both can be set in `settings.json` too
+(`providers.<name>.headers`, `providers.<name>.body`).
 
 `bone.config.system_prompt` replaces the built-in system prompt (the working
 directory is always appended after it). `BONE_SYSTEM_PROMPT` overrides it for

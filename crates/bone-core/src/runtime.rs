@@ -170,7 +170,7 @@ impl Runtime {
                     .ok_or("a Lua provider needs core Lua")?;
                 Arc::new(LuaProvider::new(&p, scripting))
             }
-            None => crate::provider::openai_compatible(p),
+            None => crate::provider::built_in(p),
         })
     }
 
@@ -186,7 +186,7 @@ impl Runtime {
         let provider = provider.unwrap_or_else(|| match &p.kind {
             Some(_) => Arc::new(LuaProvider::new(p, loaded.scripting.clone())),
             None if crate::provider::unconfigured(p) => Arc::new(crate::provider::Unconfigured),
-            None => crate::provider::openai_compatible(p.clone()),
+            None => crate::provider::built_in(p.clone()),
         });
         let mut tools = Registry::builtin();
         for spec in loaded.tools {
