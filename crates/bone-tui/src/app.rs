@@ -580,19 +580,18 @@ impl App {
     }
 
     pub fn prompt_text(&self) -> String {
-        self.prompt.text()
-    }
-
-    fn expand_pastes(&mut self) {
-        if self.composer.pastes.is_empty() {
-            return;
-        }
         let mut text = self.prompt.text();
         for (token, content) in &self.composer.pastes {
             text = text.replace(token, content);
         }
-        self.prompt.set_text(&text);
-        self.composer.pastes.clear();
+        text
+    }
+
+    fn expand_pastes(&mut self) {
+        if !self.composer.pastes.is_empty() {
+            self.prompt.set_text(&self.prompt_text());
+            self.composer.pastes.clear();
+        }
     }
 
     fn draft(&self) -> Draft {
@@ -1028,7 +1027,6 @@ impl App {
         match ctx {
             Context::Main | Context::Named(_) if self.focused_panel().is_none() => {
                 self.composer.history_pos = None;
-                self.expand_pastes();
                 self.prompt.insert_char(c);
             }
             _ => {}
@@ -1159,11 +1157,6 @@ impl App {
         })
     }
 
-    fn edit(&mut self, f: impl FnOnce(&mut TextBuffer)) {
-        self.expand_pastes();
-        f(&mut self.prompt);
-    }
-
     fn builtin(&mut self, b: Builtin) {
         use Builtin::*;
         if b != Interrupt {
@@ -1177,7 +1170,6 @@ impl App {
         if self.prompt.selection().is_some() {
             match b {
                 Backspace | Delete | DeleteWord | DeleteToStart | DeleteToEnd => {
-                    self.expand_pastes();
                     self.prompt.delete_selection();
                     return;
                 }
@@ -1195,19 +1187,27 @@ impl App {
             Submit => self.submit(None),
             QueueSteer => self.submit(Some(QueueMode::Steer)),
             QueueNext => self.submit(Some(QueueMode::Next)),
-            Newline => self.edit(|t| t.newline()),
-            Left => self.edit(|t| t.left()),
-            Right => self.edit(|t| t.right()),
+            Newline => self.prompt.newline(),
+            Left => self.prompt.left(),
+            Right => self.prompt.right(),
             Up | Down => self.vertical(b == Up),
-            WordLeft => self.edit(|t| t.word_back()),
-            WordRight => self.edit(|t| t.word_forward()),
-            LineStart => self.edit(|t| t.line_start()),
-            LineEnd => self.edit(|t| t.line_end()),
-            Backspace => self.edit(|t| t.backspace()),
-            Delete => self.edit(|t| t.delete()),
-            DeleteWord => self.edit(|t| t.delete_word_back()),
-            DeleteToStart => self.edit(|t| t.delete_to_line_start()),
-            DeleteToEnd => self.edit(|t| t.delete_to_line_end()),
+            WordLeft => self.prompt.word_back(),
+            WordRight => self.prompt.word_forward(),
+            LineStart => self.prompt.line_start(),
+            LineEnd => self.prompt.line_end(),
+            // A paste's placeholder goes in one backspace.
+            Backspace => {
+                let (row, col) = self.prompt.cursor();
+                let before: String = self.prompt.lines()[row].chars().take(col).collect();
+                let token = self.composer.pastes.iter().find(|p| before.ends_with(&p.0));
+                for _ in 0..token.map_or(1, |p| p.0.chars().count()) {
+                    self.prompt.backspace();
+                }
+            }
+            Delete => self.prompt.delete(),
+            DeleteWord => self.prompt.delete_word_back(),
+            DeleteToStart => self.prompt.delete_to_line_start(),
+            DeleteToEnd => self.prompt.delete_to_line_end(),
             ScrollUp => self.scroll(-3),
             ScrollDown => self.scroll(3),
             PageUp => self.scroll(-(self.page() - 2).max(1)),
@@ -1230,7 +1230,7 @@ impl App {
                 if self.draft_empty() {
                     self.quit = Some(None);
                 } else {
-                    self.edit(|t| t.delete());
+                    self.prompt.delete();
                 }
             }
             NewSession => self.new_session(),
