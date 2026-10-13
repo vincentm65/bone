@@ -333,6 +333,7 @@ function M.open()
     err = nil,
     sel = 1,
     selected = {},
+    page = "plugin", -- "plugin" or "tui"; tab switches
     note = nil,
     ask = nil,
     busy = false,
@@ -373,7 +374,9 @@ function M.open()
   local function rows()
     local list = {}
     for _, e in ipairs(st.entries or {}) do
-      list[#list + 1] = e
+      if (e.kind == "tui") == (st.page == "tui") then
+        list[#list + 1] = e
+      end
     end
     table.sort(list, function(a, b)
       if ORDER[a.state] ~= ORDER[b.state] then
@@ -417,6 +420,12 @@ function M.open()
       { (" Updates: %d"):format(updates), "Accent" },
       { (" · Selected: %d"):format(#selected), "Dim" },
     }
+    out[#out + 1] = {
+      { "   " },
+      { "Plugins", st.page == "plugin" and "Accent" or "Dim" },
+      { "   " },
+      { "TUIs", st.page == "tui" and "Accent" or "Dim" },
+    }
     out[#out + 1] = ""
     st.sel = math.max(1, math.min(st.sel, math.max(#list, 1)))
     if st.err then
@@ -424,14 +433,14 @@ function M.open()
     elseif not st.entries then
       out[#out + 1] = { { "   loading…", "Dim" } }
     elseif #list == 0 then
-      out[#out + 1] = { { "   the catalog is empty", "Dim" } }
+      out[#out + 1] = { { st.page == "tui" and "   no TUIs in the catalog" or "   the catalog is empty", "Dim" } }
     end
     local name_w = 0
     for _, e in ipairs(list) do
       name_w = math.max(name_w, bone.text.width(e.name))
     end
     name_w = name_w + 3
-    local room = math.max(math.min(16, (ctx.height or 24) - 9), 3)
+    local room = math.max(math.min(16, (ctx.height or 24) - 10), 3)
     local first = math.max(1, st.sel - room + 1)
     local last_state
     for i = first, math.min(#list, first + room - 1) do
@@ -466,13 +475,13 @@ function M.open()
     elseif st.busy then
       hint = "working…"
     elseif e and #selected > 0 then
-      hint = "space toggle · enter install selected · a all · n clear · u scan · x remove · esc close"
+      hint = "space toggle · enter install selected · a all · n clear · u scan · x remove · tab page · esc close"
     elseif e and e.state == "available" then
-      hint = "↑↓ move · space select · enter install · a all · u scan · esc close"
+      hint = "↑↓ move · space select · enter install · a all · u scan · tab page · esc close"
     elseif e then
-      hint = "↑↓ move · space select · enter " .. (e.state == "update" and "update" or "reinstall") .. " · a all · u scan · x remove · esc close"
+      hint = "↑↓ move · space select · enter " .. (e.state == "update" and "update" or "reinstall") .. " · a all · u scan · x remove · tab page · esc close"
     else
-      hint = "r refresh · esc close"
+      hint = "r refresh · tab page · esc close"
     end
     out[#out + 1] = { { "   " .. hint, "Dim" } }
     return out
@@ -541,6 +550,8 @@ function M.open()
       st.sel = math.max(1, st.sel - 1)
     elseif k == "down" or k == "j" or k == "wheeldown" then
       st.sel = math.min(math.max(#list, 1), st.sel + 1)
+    elseif k == "tab" and not st.busy then
+      st.page, st.sel, st.selected = st.page == "tui" and "plugin" or "tui", 1, {}
     elseif (k == "r" or k == "u") and not st.busy then
       load(k == "u" and "scanning for updates…" or nil)
     elseif k == "space" and e and not st.busy then

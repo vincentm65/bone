@@ -352,7 +352,12 @@ function M.open(opts)
           st.step, st.sel = "packages", 1
           if not st.packages then
             catalog.index(function(entries, err)
-              st.packages, st.packages_err = entries or {}, err
+              st.packages, st.packages_err = {}, err
+              for _, e in ipairs(entries or {}) do
+                if e.kind ~= "tui" then
+                  st.packages[#st.packages + 1] = e
+                end
+              end
               redraw()
             end)
           end
