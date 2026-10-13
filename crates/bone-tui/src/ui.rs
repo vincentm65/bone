@@ -20,6 +20,7 @@ use serde_json::{Value as Json, json};
 
 use crate::app::App;
 use crate::chat::{Item as ChatItem, RenderKey, bare};
+use crate::editor::TextBuffer;
 use crate::layout::BufferId;
 use crate::text::{sanitize, truncate, width};
 use crate::theme::Theme;
@@ -165,7 +166,7 @@ pub enum LayoutNode {
 
 impl LayoutNode {
     fn leaf(name: &str, size: Option<Size>) -> Self {
-        let default = if name == "chat" || name.starts_with("panel:") || name.starts_with("chat:") {
+        let default = if ["chat", "panel"].contains(&name.split(':').next().unwrap_or(name)) {
             Size::Fill
         } else {
             Size::Auto
@@ -419,8 +420,8 @@ pub(crate) fn parse_lines(v: Value) -> mlua::Result<Option<Vec<Vec<Item>>>> {
 }
 
 impl App {
-    fn session_ctx(&self, buf: Option<BufferId>) -> Json {
-        let Some(c) = buf.and_then(|b| self.chat(b)) else {
+    fn session_ctx(&self, buf: BufferId) -> Json {
+        let Some(c) = self.chat(buf) else {
             return Json::Null;
         };
         let Some(s) = &c.session else {
@@ -469,7 +470,7 @@ impl App {
         if !self.ui_defined("title") {
             return None;
         }
-        let ctx = self.statusline_ctx(self.screen.width);
+        let ctx = self.statusline_ctx(self.screen.width, self.current);
         self.guarded("title", |lua| {
             let ui: Table = lua.globals().get::<Table>("bone")?.get("ui")?;
             let f: Function = ui.get("title")?;
@@ -479,24 +480,16 @@ impl App {
         .map(|t| crate::text::sanitize(&t))
     }
 
-    pub fn statusline_ctx(&self, width_cols: u16) -> Json {
+    /// What chat `buf`'s statusline and divider get.
+    pub fn statusline_ctx(&self, width_cols: u16, buf: BufferId) -> Json {
         json!({
-            "title": self.chats[self.current].title(),
+            "title": self.chats[buf].title(),
             "popup": self.popup_name(),
             "panel": self.focused_panel().map(|p| p.id.clone()),
             "jobs": self.jobs.running(),
             "spinner": self.spinner.frame(),
             "width": width_cols,
-            "session": self.session_ctx(Some(self.current)),
-        })
-    }
-
-    /// The line between the chat and the prompt.
-    pub fn divider_ctx(&self, width_cols: u16) -> Json {
-        json!({
-            "spinner": self.spinner.frame(),
-            "width": width_cols,
-            "session": self.session_ctx(Some(self.current)),
+            "session": self.session_ctx(buf),
         })
     }
 
@@ -664,20 +657,23 @@ impl App {
         .unwrap_or_default()
     }
 
-    pub fn prompt_ctx(&self, width_cols: u16) -> Json {
-        let (row, col) = self.prompt.cursor();
-        let selection = self.prompt.selection().map(|(a, b)| {
+    /// Chat `buf`'s prompt box, holding `text`.
+    pub fn prompt_ctx(&self, width_cols: u16, buf: BufferId, text: &TextBuffer) -> Json {
+        let (row, col) = text.cursor();
+        let selection = text.selection().map(|(a, b)| {
             json!({ "start": { "row": a.0, "col": a.1 }, "end": { "row": b.0, "col": b.1 } })
         });
-        let session = self.session_ctx(Some(self.current));
+        let session = self.session_ctx(buf);
         json!({
             "width": width_cols,
-            "text": self.prompt.text(),
-            "lines": self.prompt.lines().len(),
-            "empty": self.prompt.is_empty(),
+            "text": text.text(),
+            "lines": text.lines().len(),
+            "empty": text.is_empty(),
             "cursor": { "row": row, "col": col },
             "selection": selection,
-            "focused": self.focused_popup().is_none() && self.focused_panel().is_none(),
+            "focused": buf == self.current
+                && self.focused_popup().is_none()
+                && self.focused_panel().is_none(),
             "running": session["running"].as_bool().unwrap_or(false),
             "elapsed": session["elapsed"],
             "spinner": self.spinner.frame(),
@@ -724,8 +720,6 @@ impl App {
 
     /// Render the stale items of a chat through `bone.ui.views` and cache them.
     pub fn render_chat(&mut self, buf: BufferId, width_cols: usize) {
-        // Views' chat queries default to the chat being drawn.
-        self.rendering = Some(buf);
         let generation = (self.views_rev, self.opts_rev);
         // Views that read other chat data are drawn again when it changed.
         let data = self.data_generation();
@@ -769,7 +763,6 @@ impl App {
             let expires = self.render_expires.take();
             self.chats[buf].store(item, key, lines, deps, expires, data);
         }
-        self.rendering = None;
         let expiry = self.chats[buf].next_expiry();
         self.chat_expiry = self.chat_expiry.into_iter().chain(expiry).min();
     }
@@ -828,7 +821,7 @@ impl App {
             "region": name,
             "spinner": self.spinner.frame(),
             "popup": self.popup_name(),
-            "session": self.session_ctx(Some(self.current)),
+            "session": self.session_ctx(self.current),
         });
         let (size, lines) = self
             .guarded(&format!("regions.{name}"), |lua| {

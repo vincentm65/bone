@@ -709,7 +709,7 @@ bone.chat.update(id, { text = "built", ok = true })  -- merge fields, redraw it
 bone.chat.remove(id)
 bone.chat.at(x, y)                      -- the item at a screen cell: { index, line } or nil
 bone.chat.view()                        -- { top, height, rows, follow, first, last }
-bone.chat.open(session_id)              -- open a chat without showing it (for a chat:<id> leaf)
+bone.chat.open(session_id)              -- open a chat without showing it (for chat:<id> leaves)
 bone.chat.scroll_to(4, "center")        -- "top" (default), "center" or "bottom"
 bone.chat.scroll(-5)                    -- rows (negative is up), or "top" / "bottom"
 bone.chat.refresh_in(500)               -- inside a chat view: draw this item again in 500 ms
@@ -984,17 +984,17 @@ for an example.
 
 #### Chat windows in the layout tree
 
-`"chat:<session id>"` is a leaf that shows that session's chat, so a layout can hold any number of chats side by side:
+`chat`, `prompt`, `divider` and `statusline` show the chat on screen. With `:<session id>` they show that session's instead, so a layout can hold any number of chats, each with its own prompt and statusline:
 
 ```lua
 bone.chat.open(b)  -- load it without leaving the chat on screen
-bone.ui.layout = { { cols = { "chat", "chat:" .. b }, sep = "│" }, "prompt", "statusline" }
+local function win(s) return { rows = { "chat" .. s, "prompt" .. s, "statusline" .. s } } end
+bone.ui.layout = { { cols = { win(""), win(":" .. b) }, sep = "│" } }
 ```
 
-- The chat on screen is the `"chat"` leaf, or, without one, its session's `chat:<id>` leaf. It has the prompt, the scroll keys, mouse selection and `bone.chat.at`/`view`. Every other chat window is drawn from its own render cache (only changed items render again), keeps its own scroll position, and scrolls with the wheel. Showing another chat (`bone.api.open_session`) keeps each one's scroll position.
-- A session shows once: a second leaf for it stays blank. A leaf for a session no chat has open is blank until `bone.chat.open` loads it.
-- While a view draws a chat window, `bone.chat` calls without `session` read that window's chat. Views see `ctx.region == "chat"` in every window.
-- Docked panels go beside the chat on screen (without one, the first chat leaf).
+- The bare leaves are the chat on screen: the prompt you type in, the scroll keys, mouse selection, `bone.chat.at`/`view` and docked panels. Another chat's prompt shows its draft, which is yours to type into once it is on screen (`bone.api.open_session`). Each chat keeps its own scroll position and scrolls with the wheel.
+- Each leaf shows once per chat. A leaf for a session no chat has open is blank until `bone.chat.open` loads it.
+- While a leaf draws, `bone.chat` calls without `session` read its chat, and `ctx.session` is its session. Views see `ctx.region == "chat"` in every window.
 - The catalog's `windows` plugin builds tiled windows on this (splits, focus, resizing and moving with keys or the mouse).
 
 #### Panels: docked areas you own

@@ -598,6 +598,16 @@ impl App {
         self.composer.snapshot(&self.prompt)
     }
 
+    /// The prompt's text for chat `buf`: the one being edited, or its draft.
+    pub fn prompt_of(&self, buf: BufferId) -> TextBuffer {
+        if buf == self.current {
+            return self.prompt.clone();
+        }
+        let mut t = TextBuffer::default();
+        t.set_text(self.composer.drafts.get(&buf).map_or("", |d| &d.text));
+        t
+    }
+
     fn apply_draft(&mut self, draft: Draft) {
         self.composer.apply(&mut self.prompt, draft);
         self.dirty = true;

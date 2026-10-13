@@ -25,7 +25,7 @@ use unicode_width::UnicodeWidthChar;
 
 use crate::app::{App, CHAT_WIN, Level, PROMPT_WIN};
 use crate::editor::TextBuffer;
-use crate::layout::{BufferId, Placed};
+use crate::layout::{BufferId, Placed, Window};
 use crate::text::{sanitize, width};
 use crate::ui::{Border, Item, LayoutNode, PromptSpec, Size, render_items};
 
@@ -72,33 +72,17 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             .find(|(n, _)| n == name)
             .map_or(none, |(_, r)| *r)
     };
-    // The chat on screen is the "chat" leaf, else its session's
-    // `chat:<id>` leaf. Docked panels go beside it, else the first chat leaf.
-    let current_leaf = (app.current_session_id())
-        .map(|id| format!("chat:{id}"))
-        .filter(|n| !layout.contains("chat") && layout.contains(n))
-        .unwrap_or_else(|| "chat".into());
-    let dock_leaf = if layout.contains(&current_leaf) {
-        current_leaf.clone()
-    } else {
-        (plan.leaves.iter())
-            .map(|(n, _)| n)
-            .find(|n| n.starts_with("chat:"))
-            .cloned()
-            .unwrap_or_else(|| "chat".into())
-    };
-    let divider = rect(&plan.leaves, "divider");
     let prompt_area = rect(&plan.leaves, "prompt");
-    let status = rect(&plan.leaves, "statusline");
     if layout.contains("message") {
         message = rect(&plan.leaves, "message");
     }
 
-    let docked = rect(&plan.leaves, &dock_leaf);
-    let docked = app.allocate_panels(docked, false, &layout, &mut panels);
+    // Docked panels go beside the chat on screen.
+    let chat_area = rect(&plan.leaves, "chat");
+    let chat_area = app.allocate_panels(chat_area, false, &layout, &mut panels);
     for (name, r) in &mut plan.leaves {
-        if *name == dock_leaf {
-            *r = docked;
+        if name == "chat" {
+            *r = chat_area;
         }
         if let Some(id) = name.strip_prefix("panel:") {
             if app.panel(id).is_some_and(|p| !p.hidden)
@@ -117,7 +101,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             }
         }
     }
-    let chat_area = rect(&plan.leaves, &current_leaf);
     // Publish final geometry once, before painting or input can observe it.
     app.leaves = std::mem::take(&mut plan.leaves);
     app.seps = (plan.seps.iter())
@@ -129,22 +112,27 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         (PROMPT_WIN, Placed { area: prompt_area }),
     ]);
     app.chat_expiry = None;
-    draw_chat(frame, app, chat_area, app.current);
-    // Other sessions' `chat:<id>` leaves, each session once.
-    let mut drawn = vec![app.current];
+    // Every chat's own leaves, each once. Lua's chat queries default to the
+    // chat a leaf is drawn for.
+    let mut drawn = Vec::new();
+    let mut cursor = None;
     for i in 0..app.leaves.len() {
-        let (name, r) = &app.leaves[i];
-        let buf = (name.strip_prefix("chat:"))
-            .filter(|_| *name != current_leaf)
-            .and_then(|id| app.chat_by_session(id));
-        if let Some(buf) = buf.filter(|b| !drawn.contains(b)) {
-            drawn.push(buf);
-            draw_chat(frame, app, *r, buf);
+        let (name, r) = app.leaves[i].clone();
+        let Some((kind, buf)) = scoped(app, &name).filter(|s| !drawn.contains(s)) else {
+            continue;
+        };
+        drawn.push((kind, buf));
+        app.rendering = Some(buf);
+        match kind {
+            "chat" => draw_chat(frame, app, r, buf),
+            "prompt" => cursor = cursor.or(draw_prompt(frame, app, r, buf)),
+            _ => draw_line(frame, app, r, buf, kind),
         }
+        app.rendering = None;
     }
     // A hidden chat keeps its data but not its rendered lines.
     for (b, c) in app.chats.iter_mut().enumerate() {
-        if !drawn.contains(&b) {
+        if !drawn.contains(&("chat", b)) {
             c.redraw(None);
         }
     }
@@ -163,27 +151,6 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             }
         }
     }
-    // Rebuild width-dependent prompt metadata after allocation has clamped it.
-    let prompt_ctx = app.prompt_ctx(prompt_area.width);
-    let spec = app.prompt_spec(&prompt_ctx);
-    let insets = Insets::of(&spec, prompt_area.width);
-
-    if divider.height > 0 {
-        let ctx = app.divider_ctx(divider.width);
-        let items = app
-            .ui_items("divider", ctx, "WinSeparator")
-            .unwrap_or_default();
-        frame.render_widget(
-            Paragraph::new(render_items(&items, divider.width as usize, &app.theme)),
-            divider,
-        );
-    }
-    let mut cursor = if prompt_area.height > 0 {
-        draw_prompt(frame, app, prompt_area, &spec, &insets, prompt_ctx)
-    } else {
-        None
-    };
-    draw_status(frame, app, status);
     draw_message(frame, app, message);
 
     if !app.popups.is_empty() {
@@ -269,11 +236,26 @@ struct Plan {
     seps: Vec<(u16, Rect, String, Vec<usize>)>,
 }
 
+/// What a leaf is: `panel`, a built-in, or (anything else) a region. Built-ins
+/// other than `message` take `:<session id>` for that session's chat.
+fn kind(name: &str) -> &str {
+    name.split(':').next().unwrap_or(name)
+}
+
 fn is_region(name: &str) -> bool {
-    !BUILTIN.contains(&name) && !name.starts_with("panel:") && !name.starts_with("chat:")
+    !BUILTIN.contains(&kind(name)) && kind(name) != "panel"
 }
 
 const BUILTIN: [&str; 5] = ["chat", "prompt", "divider", "statusline", "message"];
+
+/// A chat's own leaf and the chat it shows: bare for the chat on screen.
+fn scoped(app: &App, name: &str) -> Option<(&'static str, BufferId)> {
+    let k = BUILTIN[..4].iter().copied().find(|b| *b == kind(name))?;
+    match name.split_once(':') {
+        Some((_, id)) => Some((k, app.chat_by_session(id)?)),
+        None => Some((k, app.current)),
+    }
+}
 
 /// Panel-only subtrees disappear when every referenced panel is hidden or missing.
 fn empty_panels(app: &App, node: &LayoutNode) -> bool {
@@ -324,16 +306,20 @@ fn place(app: &mut App, node: &LayoutNode, area: Rect, plan: &mut Plan, path: &m
         }
     }
     for (i, c) in children.iter().enumerate() {
-        sizes[i] = match (c.size(), leaf(c)) {
+        sizes[i] = match (c.size(), leaf(c).map(kind)) {
             _ if empty_panels(app, c) => Some(0),
             (Size::Cells(v), _) => Some(v),
             (Size::Percent(p), _) => Some((u32::from(total) * u32::from(p) / 100) as u16),
             (Size::Auto, Some("prompt")) => {
+                let buf = leaf(c)
+                    .and_then(|n| scoped(app, n))
+                    .map_or(app.current, |s| s.1);
                 let width = if rows { cross } else { total };
-                let ctx = app.prompt_ctx(width);
+                let text = app.prompt_of(buf);
+                let ctx = app.prompt_ctx(width, buf, &text);
                 let spec = app.prompt_spec(&ctx);
                 let insets = Insets::of(&spec, width);
-                let text = prompt_rows(&app.prompt, insets.text_width).0.len();
+                let text = prompt_rows(&text, insets.text_width).0.len();
                 let max = spec
                     .max_rows
                     .unwrap_or(app.options.prompt_max_height)
@@ -359,7 +345,7 @@ fn place(app: &mut App, node: &LayoutNode, area: Rect, plan: &mut Plan, path: &m
         .enumerate()
         .filter(|(i, c)| {
             sizes[*i].is_none()
-                && !(c.size() == Size::Auto && leaf(c).is_some_and(|n| !BUILTIN.contains(&n)))
+                && !(c.size() == Size::Auto && leaf(c).is_some_and(|n| !BUILTIN.contains(&kind(n))))
         })
         .count();
     let mut used = sizes
@@ -372,7 +358,7 @@ fn place(app: &mut App, node: &LayoutNode, area: Rect, plan: &mut Plan, path: &m
         if sizes[i].is_some() || c.size() != Size::Auto {
             continue;
         }
-        let Some(name) = leaf(c).filter(|n| !BUILTIN.contains(n)) else {
+        let Some(name) = leaf(c).filter(|n| !BUILTIN.contains(&kind(n))) else {
             continue;
         };
         let (avail_w, avail_h) = if rows { (cross, spare) } else { (total, cross) };
@@ -535,20 +521,23 @@ fn items_width(items: &[Item]) -> usize {
         .sum()
 }
 
-/// Draw the prompt box: background, border and edge lines from
+/// Draw chat `buf`'s prompt box: background, border and edge lines from
 /// `bone.ui.prompt`, then the text (wrapped, scrolled and selected here, so
-/// the cursor lands exactly). Returns where the cursor goes.
+/// the cursor lands exactly). Returns where the cursor goes, for the chat
+/// on screen.
 fn draw_prompt(
     frame: &mut Frame<'_>,
     app: &mut App,
     area: Rect,
-    spec: &PromptSpec,
-    insets: &Insets,
-    mut ctx: serde_json::Value,
+    buf: BufferId,
 ) -> Option<Position> {
     if area.width == 0 || area.height == 0 {
         return None;
     }
+    let text = app.prompt_of(buf);
+    let mut ctx = app.prompt_ctx(area.width, buf, &text);
+    let spec = &app.prompt_spec(&ctx);
+    let insets = Insets::of(spec, area.width);
     let inner = Rect {
         x: area.x + insets.left.min(area.width),
         y: area.y + insets.top.min(area.height),
@@ -557,9 +546,14 @@ fn draw_prompt(
     };
     let gutter = insets.gutter;
     let w = (inner.width as usize).saturating_sub(gutter).max(1);
-    let (rows, (crow, ccol)) = prompt_layout(&app.prompt, w);
+    let (rows, (crow, ccol)) = prompt_layout(&text, w);
     let height = inner.height as usize;
-    let win = app.windows.get_mut(&PROMPT_WIN).unwrap();
+    let live = buf == app.current;
+    let mut draft = Window::default();
+    let win = match live {
+        true => app.windows.get_mut(&PROMPT_WIN).unwrap(),
+        false => &mut draft,
+    };
     // Keep the cursor row visible.
     if crow < win.top {
         win.top = crow;
@@ -622,19 +616,18 @@ fn draw_prompt(
         return None;
     }
 
-    let marks = if app.prompt.is_empty() {
+    let marks = if text.is_empty() || !live {
         Default::default()
     } else {
         app.prompt_highlight(&ctx)
     };
     let theme = &app.theme;
-    let cursor_line = app.prompt.cursor();
-    let at_line_end = app
-        .prompt
+    let cursor_line = text.cursor();
+    let at_line_end = text
         .lines()
         .get(cursor_line.0)
         .is_some_and(|l| cursor_line.1 >= l.chars().count());
-    let selection = app.prompt.selection();
+    let selection = text.selection();
     let selected = theme.hl("Selection");
     // A row's gutter: the prefix on the first, the continuation (or blanks
     // as wide) after; both padded to the same width.
@@ -650,7 +643,7 @@ fn draw_prompt(
         spans
     };
 
-    let lines: Vec<Line> = if app.prompt.is_empty() {
+    let lines: Vec<Line> = if text.is_empty() {
         let mut spans = gutter_spans(Some(&spec.prefix));
         spans.extend(render_items(&spec.placeholder, w, theme).spans);
         vec![Line::from(spans)]
@@ -723,7 +716,7 @@ fn draw_prompt(
         text = text.style(style);
     }
     frame.render_widget(text, inner);
-    Some(Position {
+    live.then_some(Position {
         x: inner.x + (gutter + ccol).min(inner.width as usize - 1) as u16,
         y: inner.y + (crow - top) as u16,
     })
@@ -824,14 +817,18 @@ fn prompt_layout(t: &TextBuffer, width: usize) -> (Vec<PromptRow>, (usize, usize
     (rows, cursor)
 }
 
-fn draw_status(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+/// Chat `buf`'s statusline or divider row.
+fn draw_line(frame: &mut Frame<'_>, app: &mut App, area: Rect, buf: BufferId, kind: &str) {
     if area.height == 0 {
         return;
     }
-    let ctx = app.statusline_ctx(area.width);
-    let items = app
-        .ui_items("statusline", ctx, "StatusLine")
-        .unwrap_or_default();
+    let hl = if kind == "divider" {
+        "WinSeparator"
+    } else {
+        "StatusLine"
+    };
+    let ctx = app.statusline_ctx(area.width, buf);
+    let items = app.ui_items(kind, ctx, hl).unwrap_or_default();
     frame.render_widget(
         Paragraph::new(render_items(&items, area.width as usize, &app.theme)),
         area,
