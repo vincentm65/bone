@@ -79,6 +79,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
     // Docked panels go beside the chat on screen.
     let chat_area = rect(&plan.leaves, "chat");
+    let chat_top = chat_area.y;
     let chat_area = app.allocate_panels(chat_area, false, &layout, &mut panels);
     for (name, r) in &mut plan.leaves {
         if name == "chat" {
@@ -163,9 +164,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             screen: app.screen,
             chat: chat_area,
             prompt: Rect {
-                y: area.y,
-                height: prompt_top.saturating_sub(area.y),
-                ..area
+                y: chat_top,
+                height: prompt_top.saturating_sub(chat_top),
+                ..prompt_area
             },
         };
         draw_popups(frame, app, &anchors);
