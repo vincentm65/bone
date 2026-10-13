@@ -445,6 +445,14 @@ pub fn new_state(side: Side, config_dir: Option<&Path>) -> mlua::Result<Lua> {
             fs_result(lua, r.map_err(|e| format!("{dir}: {e}")))
         })?,
     )?;
+    // Remove a directory and its contents without following symlinks.
+    fs.set(
+        "remove_tree",
+        lua.create_function(|lua, dir: String| {
+            let r = std::fs::remove_dir_all(expand_home(&dir));
+            fs_result(lua, r.map_err(|e| format!("{dir}: {e}")))
+        })?,
+    )?;
     fs.set(
         "write",
         lua.create_function(|lua, (path, text): (String, mlua::String)| {

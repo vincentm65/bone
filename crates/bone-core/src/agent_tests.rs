@@ -2312,6 +2312,44 @@ async fn the_queue_survives_a_restart() {
 }
 
 #[tokio::test]
+async fn accepted_queue_changes_report_persistence_failures_without_rejecting() {
+    let mut h = Harness::new(vec![Step::Hang("…".into())]).await;
+    h.queue("running", QueueMode::Next).await;
+    h.until::<MessageDelta>().await;
+    let path = h
+        ._data
+        .path()
+        .join(format!("sessions/{}.queue.json", h.session_id));
+    // A failed replacement still accepts the message and reports the error.
+    std::fs::create_dir(&path).unwrap();
+    h.queue("later", QueueMode::Next).await;
+    let changed = h.until::<QueueChanged>().await;
+    assert!(changed.error.unwrap().starts_with("Could not save queue:"));
+    assert!(!changed.paused);
+    assert_eq!(h.queued_texts(), ["later"]);
+    std::fs::remove_dir(&path).unwrap();
+    let session = h.core.inner.sessions.get(&h.session_id).unwrap();
+    session.lock().unwrap().save_queue().unwrap();
+    let fresh = crate::session::SessionStore::new(h._data.path());
+    let session = fresh.get(&h.session_id).unwrap();
+    let tmp = path.with_extension("json.tmp");
+    std::fs::create_dir(&tmp).unwrap();
+    // A failed write of an empty queue must not permit eviction of its edits.
+    {
+        let mut s = session.lock().unwrap();
+        s.queue.clear();
+        assert!(s.save_queue().is_err());
+    }
+    drop(session);
+    for _ in 0..8 {
+        fresh.create("/more".into()).unwrap();
+    }
+    let session = fresh.get(&h.session_id).unwrap();
+    assert!(session.lock().unwrap().queue.is_empty());
+    std::fs::remove_dir(&tmp).unwrap();
+}
+
+#[tokio::test]
 async fn queue_add_hooks_rewrite_or_refuse() {
     let mut h = Harness::with_lua(
         r#"bone.hook("queue_add", function(ev)

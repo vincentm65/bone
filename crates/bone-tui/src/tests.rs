@@ -2888,13 +2888,11 @@ async fn typing_during_a_turn_queues_it() {
     );
     assert_eq!(h.prompt(), "");
     // The core's queue shows at the end of the chat, through a Lua view.
-    h.emit::<QueueChanged>(changed(vec![queued(
-        1,
-        "also the README",
-        QueueMode::Steer,
-    )]))
-    .await;
+    let mut event = changed(vec![queued(1, "also the README", QueueMode::Steer)]);
+    event.error = Some("Could not save queue: disk full. Changes may be lost on restart.".into());
+    h.emit::<QueueChanged>(event).await;
     let screen = h.screen(80, 20);
+    assert!(screen.contains("Could not save queue: disk full"));
     assert!(
         screen.contains("◦ also the README") && screen.contains("joins this turn"),
         "{screen}"
@@ -4905,6 +4903,7 @@ async fn catalog_installs_updates_and_removes_packages() {
         h.screen(100, 30)
     );
 
+    assert_eq!(h.lua("=demo_loaded").await, "2");
     // A changed installed file shows as an update.
     std::fs::write(installed.join("tui.lua"), "-- edited").unwrap();
     h.input("u").await;
@@ -4927,9 +4926,7 @@ async fn catalog_installs_updates_and_removes_packages() {
         "-- edited"
     );
 
-    // Remove: moved aside, not deleted. The reinstall above already kept a
-    // backup of demo in this second's dir, so wait for a new one.
-    tokio::time::sleep(Duration::from_millis(1100)).await;
+    // Remove immediately: each operation gets its own backup.
     h.input("x").await;
     assert!(h.screen(100, 30).contains("remove demo?"));
     h.input("y").await;

@@ -143,26 +143,54 @@ function M.index(cb)
   end)
 end
 
-local function backup_dir()
-  return (bone.config_dir or (os.getenv("HOME") .. "/.bone")) .. "/plugins-backup/" .. os.time()
+-- POSIX tmpname creates a file; Windows only supplies a name.
+local function temp_name()
+  local ok, tmp, err = pcall(os.tmpname)
+  if not ok or not tmp then
+    return nil, tostring(err or tmp or "cannot create temporary name")
+  end
+  local removed, why, code = os.remove(tmp)
+  if not removed and code ~= 2 then
+    return nil, tostring(why)
+  end
+  return tmp:match("[^/\\]+$")
 end
 
--- Load (or unload) a package's halves now, and keep it out of (or in)
--- settings' plugins.disabled.
+local function backup_dir()
+  local tmp, err = temp_name()
+  return tmp and ((bone.config_dir or (os.getenv("HOME") .. "/.bone")) .. "/plugins-backup/" .. tmp), err
+end
+
+-- Load, reload or unload a package's halves now.
 local function switch(name, files, on, cb)
-  local has_core, has_tui = false, false
+  local has_core, has_tui, tui_error = false, false
   for _, f in ipairs(files or {}) do
     has_core = has_core or f.path == "core.lua"
     has_tui = has_tui or f.path == "tui.lua"
   end
   if has_tui then
-    pcall(on and bone.plugin.load or bone.plugin.unload, name)
+    local loaded = false
+    for _, p in ipairs(bone.plugin.list()) do
+      loaded = loaded or (p.name == name and p.loaded)
+    end
+    if on or loaded then
+      local action = on and (loaded and bone.plugin.reload or bone.plugin.load) or bone.plugin.unload
+      local ok, err = pcall(action, name)
+      if not ok then
+        return cb(false, tostring(err))
+      end
+      for _, p in ipairs(bone.plugin.list()) do
+        if on and p.name == name and p.error then
+          tui_error = p.error
+        end
+      end
+    end
   end
   if not has_core then
-    return cb(true)
+    return cb(not tui_error, tui_error)
   end
   bone.request(on and "plugin/load" or "plugin/unload", { name = name }, function(_, err)
-    cb(err == nil, err)
+    cb(err == nil and not tui_error, err or tui_error)
   end)
 end
 
@@ -179,24 +207,46 @@ function M.install(entry, cb)
   if type(name) ~= "string" or not name:match("^[%w_%-]+$") then
     return cb(false, "bad package name")
   end
-  local stage = plugins_dir() .. "/." .. name .. ".staging"
+  local tmp, err = temp_name()
+  if not tmp then
+    return cb(false, err)
+  end
+  local stage = plugins_dir() .. "/." .. name .. "." .. tmp .. ".staging"
+  local ok, err = bone.fs.mkdir(stage)
+  if not ok then
+    return cb(false, tostring(err))
+  end
+  local function fail(why)
+    local cleaned, e = bone.fs.remove_tree(stage)
+    cb(false, tostring(why) .. (cleaned and "" or ("; cannot clean staging: " .. tostring(e))))
+  end
   local i = 0
   local function finish()
-    local dest = plugins_dir() .. "/" .. name
+    local dest, backup = plugins_dir() .. "/" .. name
     if installed_names()[name] then
-      local b = backup_dir()
+      local b, err = backup_dir()
+      if not b then
+        return fail(err)
+      end
+      backup = b .. "/" .. name
       bone.fs.mkdir(b)
-      local ok, err = os.rename(dest, b .. "/" .. name)
-      if not ok then
-        return cb(false, "cannot move the old version aside: " .. tostring(err))
+      local moved, e = os.rename(dest, backup)
+      if not moved then
+        return fail("cannot move the old version aside: " .. tostring(e))
       end
     end
-    local ok, err = os.rename(stage, dest)
-    if not ok then
-      return cb(false, "cannot install " .. name .. ": " .. tostring(err))
+    local moved, e = os.rename(stage, dest)
+    if not moved then
+      if backup then
+        local restored, why = os.rename(backup, dest)
+        if not restored then
+          e = tostring(e) .. "; cannot restore the old version: " .. tostring(why)
+        end
+      end
+      return fail("cannot install " .. name .. ": " .. tostring(e))
     end
-    switch(name, files, true, function(_, e)
-      cb(true, e and ("installed, but loading failed: " .. tostring(e)) or nil)
+    switch(name, files, true, function(loaded, why)
+      cb(loaded, why and ("installed, but loading failed: " .. tostring(why)) or nil)
     end)
   end
   local function next_file()
@@ -206,18 +256,18 @@ function M.install(entry, cb)
       return finish()
     end
     if type(f.path) ~= "string" or f.path:find("%.%.") or f.path:sub(1, 1) == "/" then
-      return cb(false, "bad file path in the catalog: " .. tostring(f.path))
+      return fail("bad file path in the catalog: " .. tostring(f.path))
     end
     fetch("plugins/" .. name .. "/" .. f.path, function(text, err)
       if not text then
-        return cb(false, tostring(err))
+        return fail(tostring(err))
       end
       if bone.sha256(text) ~= f.sha256 then
-        return cb(false, name .. "/" .. f.path .. " does not match the catalog (hash)")
+        return fail(name .. "/" .. f.path .. " does not match the catalog (hash)")
       end
       local ok, werr = bone.fs.write(stage .. "/" .. f.path, text)
       if not ok then
-        return cb(false, tostring(werr))
+        return fail(tostring(werr))
       end
       next_file()
     end)
@@ -235,8 +285,14 @@ function M.remove(name, cb)
   for _, e in ipairs(bone.fs.list(dest) or {}) do
     files[#files + 1] = { path = e.name }
   end
-  switch(name, files, false, function()
-    local b = backup_dir()
+  switch(name, files, false, function(unloaded, err)
+    if not unloaded then
+      return cb(false, err)
+    end
+    local b, err = backup_dir()
+    if not b then
+      return cb(false, err)
+    end
     bone.fs.mkdir(b)
     local ok, err = os.rename(dest, b .. "/" .. name)
     cb(ok and true or false, ok and nil or tostring(err))

@@ -28,7 +28,7 @@ pub struct Report {
     pub updated: usize,
     /// Already imported and unchanged, or without messages.
     pub unchanged: usize,
-    /// Imported before and since continued or deleted here: left alone.
+    /// Continued, deleted, or present without an import marker: left alone.
     pub kept: usize,
     pub messages: usize,
 }
@@ -66,10 +66,12 @@ pub fn import_bone1(
     let sessions = data_dir.join("sessions");
     std::fs::create_dir_all(&sessions).map_err(err)?;
     let marker_path = data_dir.join("imported/bone1.json");
-    let mut marker: Marker = std::fs::read_to_string(&marker_path)
-        .ok()
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default();
+    let mut marker: Marker = match std::fs::read_to_string(&marker_path) {
+        Ok(text) => serde_json::from_str(&text)
+            .map_err(|e| format!("cannot parse {}: {e}", marker_path.display()))?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Marker::new(),
+        Err(e) => return Err(format!("cannot read {}: {e}", marker_path.display())),
+    };
 
     let conversations: Vec<(i64, i64)> = conn
         .prepare(
@@ -120,8 +122,17 @@ pub fn import_bone1(
                 }
             }
             None => {
+                let session_id = session_id(id, started);
+                if sessions
+                    .join(format!("{session_id}.jsonl"))
+                    .try_exists()
+                    .map_err(err)?
+                {
+                    report.kept += 1;
+                    continue;
+                }
                 report.imported += 1;
-                session_id(id, started)
+                session_id
             }
         };
         let (text, count) = convert(&conn, id, started, &session_id)?;
@@ -144,7 +155,9 @@ pub fn import_bone1(
         std::fs::create_dir_all(dir).map_err(err)?;
     }
     let text = serde_json::to_string_pretty(&marker).map_err(err)?;
-    std::fs::write(&marker_path, text).map_err(err)?;
+    let tmp = marker_path.with_extension("json.importing");
+    std::fs::write(&tmp, text).map_err(err)?;
+    std::fs::rename(&tmp, &marker_path).map_err(err)?;
     SessionStore::new(data_dir).catch_up();
     Ok(report)
 }

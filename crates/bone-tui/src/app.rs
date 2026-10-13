@@ -2004,12 +2004,12 @@ impl App {
         on!(QueueChanged, |p| self.with_chat(&p.session_id, |c| {
             c.set_queue(p.items, p.paused);
             if let Some(error) = p.error {
-                c.notice(
-                    format!(
-                        "Queue paused: {error}. Edit or remove the message, then resume the queue."
-                    ),
-                    true,
-                );
+                let notice = if p.paused {
+                    format!("Queue paused: {error}. /queue to inspect or resume.")
+                } else {
+                    error
+                };
+                c.notice(notice, true);
             }
         }));
         on!(SessionUpdated, |p| self.reload_chat(p.session_id));

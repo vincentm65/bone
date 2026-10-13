@@ -8,6 +8,7 @@
 //! `compact.rs`), or a checkpoint that replaces the transcript before it
 //! (`bone.session.compact`, imports; the earlier records stay in the file).
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -135,6 +136,7 @@ pub struct Session {
     index: Option<Arc<Index>>,
     /// Where the queue is kept.
     queue_path: PathBuf,
+    queue_dirty: Cell<bool>,
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -197,7 +199,7 @@ impl Session {
         }
     }
 
-    /// Add to the queue; returns the message's id.
+    /// Add to the in-memory queue; returns the message's id.
     pub fn enqueue(&mut self, text: String, mode: QueueMode) -> u64 {
         self.enqueue_with_images(text, mode, Vec::new())
     }
@@ -217,19 +219,15 @@ impl Session {
             created_at: now(),
             images,
         });
-        self.save_queue();
         id
     }
 
-    /// Take the steer messages out of the queue (in order).
+    /// Take the steer messages out of the in-memory queue (in order).
     pub fn take_steer(&mut self) -> Vec<QueuedMessage> {
         let (steer, rest) = std::mem::take(&mut self.queue)
             .into_iter()
             .partition(|q| q.mode == QueueMode::Steer);
         self.queue = rest;
-        if !steer.is_empty() {
-            self.save_queue();
-        }
         steer
     }
 
@@ -238,17 +236,18 @@ impl Session {
     }
 
     /// Keep the queue and its ID counter on disk, even when empty.
-    pub fn save_queue(&self) {
+    pub fn save_queue(&self) -> std::io::Result<()> {
+        self.queue_dirty.set(true);
         let saved = SavedQueue {
             items: self.queue.clone(),
             next_id: self.next_queue,
         };
         let tmp = self.queue_path.with_extension("json.tmp");
-        if let Ok(text) = serde_json::to_string(&saved)
-            && std::fs::write(&tmp, text).is_ok()
-        {
-            let _ = std::fs::rename(&tmp, &self.queue_path);
-        }
+        let text = serde_json::to_vec(&saved).map_err(std::io::Error::other)?;
+        std::fs::write(&tmp, text)?;
+        std::fs::rename(&tmp, &self.queue_path)?;
+        self.queue_dirty.set(false);
+        Ok(())
     }
 
     /// Replace the transcript with `messages`, keeping the old records in
@@ -399,6 +398,7 @@ impl SessionStore {
             .count();
         let session = Arc::new(Mutex::new(Session {
             queue_path: self.queue_path(&info.session_id),
+            queue_dirty: Cell::new(false),
             info: info.clone(),
             messages: messages.to_vec(),
             summary,
@@ -469,6 +469,7 @@ impl SessionStore {
         let queue = saved.items;
         let session = Arc::new(Mutex::new(Session {
             queue_path: self.queue_path(id),
+            queue_dirty: Cell::new(false),
             queue_paused: !queue.is_empty(),
             queue,
             info,
@@ -493,7 +494,7 @@ impl SessionStore {
 
     /// Hold `session` in memory (or the one another caller loaded meanwhile)
     /// and drop the least recently used idle ones past `MAX_LOADED`: those
-    /// nothing else holds, with no turn, queue or compaction.
+    /// nothing else holds, with no turn, queue, unsaved edits or compaction.
     fn keep(&self, id: &str, session: SessionHandle) -> SessionHandle {
         let mut loaded = self.loaded.lock().unwrap();
         let used = self.tick.fetch_add(1, Ordering::Relaxed);
@@ -507,7 +508,10 @@ impl SessionStore {
                 .filter(|(_, (s, _))| {
                     Arc::strong_count(s) == 1
                         && s.try_lock().is_ok_and(|s| {
-                            s.active.is_none() && s.queue.is_empty() && !s.compacting
+                            s.active.is_none()
+                                && s.queue.is_empty()
+                                && !s.queue_dirty.get()
+                                && !s.compacting
                         })
                 })
                 .min_by_key(|(_, (_, used))| *used)

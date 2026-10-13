@@ -233,7 +233,6 @@ impl Inner {
             let at = at.min(s.queue.len());
             s.queue.insert(at, q);
             s.queue_paused = false;
-            s.save_queue();
         }
         self.emit_queue(&s, None);
         Ok(QueueAddResult {
@@ -243,7 +242,7 @@ impl Inner {
     }
 
     /// The other `queue/*` methods (and `bone.queue.*`): change the queue,
-    /// then tell clients and go on if idle.
+    /// then tell clients and go on if idle, even if persistence failed.
     pub(crate) fn queue_edit(
         self: &Arc<Self>,
         session_id: &str,
@@ -253,15 +252,21 @@ impl Inner {
         {
             let mut s = session.lock().unwrap();
             edit(&mut s)?;
-            s.save_queue();
             self.emit_queue(&s, None);
         }
         self.start_next(&session);
         Ok(())
     }
 
-    /// Tell clients what a session's queue holds now.
+    /// Save the accepted queue changes and tell clients, including any errors.
     pub(crate) fn emit_queue(&self, s: &session::Session, error: Option<String>) {
+        let error = match s.save_queue() {
+            Ok(()) => error,
+            Err(e) => Some(format!(
+                "{}Could not save queue: {e}. Changes may be lost on restart.",
+                error.map(|e| format!("{e}; ")).unwrap_or_default()
+            )),
+        };
         self.emit::<QueueChanged>(QueueChangedParams {
             session_id: s.info.session_id.clone(),
             items: s.queue.clone(),
@@ -279,7 +284,6 @@ impl Inner {
                 return;
             }
             let q = s.queue.remove(0);
-            s.save_queue();
             self.emit_queue(&s, None);
             q
         };
@@ -294,7 +298,6 @@ impl Inner {
                 s.queue_paused = true;
                 Some(e.message)
             };
-            s.save_queue();
             self.emit_queue(&s, error);
         }
     }
@@ -322,7 +325,6 @@ impl Inner {
                 changed = true;
             }
             if changed {
-                s.save_queue();
                 self.emit_queue(&s, None);
             }
         }

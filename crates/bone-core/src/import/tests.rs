@@ -169,6 +169,24 @@ fn importing_again_updates_but_never_overwrites_continued_sessions() {
             images: Vec::new(),
         })
     );
+
+    // A damaged or missing marker must not overwrite a continuation.
+    let marker = data.join("imported/bone1.json");
+    let path = data.join(format!("sessions/{id}.jsonl"));
+    let continued = std::fs::read(&path).unwrap();
+    std::fs::write(&marker, "{").unwrap();
+    let error = import_bone1(&db, &data, |_, _| {}).unwrap_err();
+    assert!(error.contains("cannot parse"), "{error}");
+    assert_eq!(std::fs::read(&path).unwrap(), continued);
+    std::fs::remove_file(&marker).unwrap();
+    for contents in [None, Some("{}")] {
+        if let Some(contents) = contents {
+            std::fs::write(&marker, contents).unwrap();
+        }
+        let report = import_bone1(&db, &data, |_, _| {}).unwrap();
+        assert_eq!((report.kept, report.imported, report.updated), (1, 0, 0));
+        assert_eq!(std::fs::read(&path).unwrap(), continued);
+    }
 }
 
 #[test]
