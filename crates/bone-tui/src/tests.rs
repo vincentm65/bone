@@ -4544,9 +4544,10 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
     for _ in 0..10 {
         h.input("{up}").await;
     }
-    for tab in [" General ", " Providers ", " Plugins ", " Webby"] {
+    for tab in [" General ", " Providers ", " Plugins"] {
         assert!(screen.contains(tab), "{tab} in {screen}");
     }
+    assert!(!screen.contains("Webby"), "{screen}");
     let last_set = |h: &Harness| {
         h.requests("settings/set")
             .last()
@@ -4555,7 +4556,7 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
     };
     // Move to the row whose label starts with `label`.
     async fn select(h: &mut Harness, label: &str) {
-        for _ in 0..30 {
+        for _ in 0..60 {
             if h.screen(100, 34).contains(&format!("› {label}")) {
                 return;
             }
@@ -4720,17 +4721,23 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
         "corepart"
     );
 
-    // The core's compaction settings have a tab of their own.
+    // Compaction is a detail page under General, not another tab.
     h.input("{tab}").await;
+    select(&mut h, "Compaction").await;
+    h.input("{enter}").await;
     assert_eq!(top(&h.screen(100, 34)), config_top);
-    assert!(
-        h.screen(100, 34).contains("Turns kept in full"),
-        "{}",
-        h.screen(100, 34)
-    );
+    assert!(h.screen(100, 34).contains("Settings › General › Compaction"));
+    assert!(h.screen(100, 34).contains("Turns kept in full"));
+    h.input("{tab}{right}{esc}").await;
+    assert!(h.screen(100, 34).contains("› Compaction"));
 
-    // A plugin's own tab, from its manifest, with its limits.
-    h.input("{tab}").await;
+    // A plugin's detail page, from its manifest, with its limits.
+    h.input("{shift+tab}").await;
+    select(&mut h, "Webby").await;
+    let sets = h.requests("settings/set").len();
+    h.input("{enter}").await;
+    assert_eq!(h.requests("settings/set").len(), sets);
+    assert!(h.screen(100, 34).contains("Settings › Plugins › Webby"));
     assert_eq!(top(&h.screen(100, 34)), config_top);
     assert!(
         h.screen(100, 34).contains("Results"),
@@ -4741,9 +4748,23 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
     assert!(h.screen(100, 34).contains("between 1 and 10"));
     h.input("{enter}{ctrl+u}7{enter}").await;
     assert_eq!(last_set(&h), json!({ "path": "webby.n", "value": 7 }));
-
+    h.input("r").await;
+    assert_eq!(
+        h.requests("settings/reset").last().unwrap(),
+        &json!({ "path": "webby.n" })
+    );
+    h.input("{esc}").await;
+    assert!(h.screen(100, 34).contains("› Webby"));
     h.input("{esc}").await;
     assert!(!h.screen(100, 34).contains(" Providers "));
+    for target in ["webby", "Webby"] {
+        h.lua(&format!("require('bone.config').open('{target}')"))
+            .await;
+        assert!(h.screen(100, 34).contains("Settings › Plugins › Webby"));
+        h.input("{esc}").await;
+        assert!(h.screen(100, 34).contains("› Webby"));
+        h.input("{esc}").await;
+    }
 }
 
 #[tokio::test]

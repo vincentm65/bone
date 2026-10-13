@@ -1,15 +1,14 @@
--- /config: the settings page. Tabs for the TUI's options, the providers,
--- the plugins and each plugin's own settings; every change is saved in
--- settings.json (through the core) and applies at once.
+-- /config: General, Providers and Plugins, with settings detail pages.
+-- Changes are saved in settings.json (through the core) and apply at once.
 --
--- A plugin gets a tab by declaring its settings, either in its
+-- A plugin gets a detail page by declaring its settings, either in its
 -- manifest.json ("settings": [ ... ]) or from its tui.lua with
 -- bone.settings.page{ name, title, fields = { ... } }. A field is
 -- { key, label, type = "boolean" | "number" | "integer" | "string",
 -- choices, default, min, max, desc }; its value is saved as
 -- "<name>.<key>" and read with bone.settings.get.
 --
--- require("bone.config").open(tab) opens the page; tab is a tab's name or
+-- require("bone.config").open(tab) opens a section or detail page by name or
 -- title ("providers", "web_search").
 
 local M = {}
@@ -122,7 +121,7 @@ local function tabs()
   for _, p in ipairs(declared) do
     if not seen[p.name] then
       seen[p.name] = true
-      out[#out + 1] = { name = p.name, title = p.title, page = p }
+      out[#out + 1] = { name = p.name, title = p.title, page = p, section = p.name == "compact" and 1 or 3 }
     end
   end
   return out
@@ -282,6 +281,13 @@ function M.open(want)
         r.core, r.core_loaded = true, p.loaded
       end
     end
+    for i, t in ipairs(st.tabs) do
+      if t.section == 3 then
+        local r = add(t.name)
+        r.label, r.page = t.title, i
+        r.kind = (r.tui or r.core) and "plugin" or "page"
+      end
+    end
     for _, r in ipairs(rows) do
       r.on = not off[r.name]
     end
@@ -294,7 +300,13 @@ function M.open(want)
   local function rows()
     local t = st.tabs[st.tab]
     if t.name == "general" then
-      return option_rows()
+      local out = option_rows()
+      for i, page in ipairs(st.tabs) do
+        if page.section == 1 then
+          out[#out + 1] = { kind = "page", label = page.title, page = i }
+        end
+      end
+      return out
     elseif t.name == "providers" then
       if st.prov then
         return provider_rows()
@@ -510,8 +522,12 @@ function M.open(want)
       elseif not space then
         st.edit = (row.type == "secret" and "") or (row.value == nil and "" or tostring(row.value))
       end
-    elseif row.kind == "plugin" then
-      toggle_plugin(row)
+    elseif row.kind == "plugin" or row.kind == "page" then
+      if space and row.kind == "plugin" then
+        toggle_plugin(row)
+      elseif not space and row.page then
+        st.tab, st.sel = row.page, 1
+      end
     elseif row.type == "boolean" then
       save(row, not row.value)
     elseif row.choices and #row.choices > 0 then
@@ -622,6 +638,8 @@ function M.open(want)
       if row.changed then
         add("   changed", NOTE)
       end
+    elseif row.kind == "page" then
+      add("›", KEY)
     elseif row.kind == "plugin" then
       switch_into(add, row.on)
       add(row.on and "    " or "   ")
@@ -676,7 +694,8 @@ function M.open(want)
 
     local out = {}
     -- The title in the top rule.
-    local title = st.prov and (st.prov.new and "new provider" or st.prov.name)
+    local section = t.section or st.tab
+    local title = t.page and (st.tabs[section].title .. " › " .. t.title) or (st.prov and (st.prov.new and "new provider" or st.prov.name))
     local top = { { "── ", "WinSeparator" }, { "Settings", "Accent" } }
     if title then
       top[#top + 1] = { " › ", MUTED }
@@ -689,14 +708,14 @@ function M.open(want)
     -- The tabs, the current one bold and underlined, wrapped to the width.
     if #st.tabs > 1 then
       local items, used = { { "  " } }, 2
-      for i, tab in ipairs(st.tabs) do
+      for i, tab in ipairs({ st.tabs[1], st.tabs[2], st.tabs[3] }) do
         local n = text_width(tab.title) + 3
         if used + n > w then
           out[#out + 1] = items
           items, used = { { "  " } }, 2
         end
         items[#items + 1] = { " " }
-        items[#items + 1] = { tab.title, i == st.tab and "Accent" or "Dim" }
+        items[#items + 1] = { tab.title, i == section and "Accent" or "Dim" }
         items[#items + 1] = { "  " }
         used = used + n
       end
@@ -775,12 +794,14 @@ function M.open(want)
       hint = { { "y", "yes" }, { "n", "no" } }
     elseif st.edit then
       hint = { { "enter", "save" }, { "esc", "cancel" } }
+    elseif t.page then
+      hint = { { "↑↓", "move" }, { "enter", "change" }, { "r", "reset" }, { "esc", "back" } }
     elseif t.name == "providers" and st.prov then
       hint = { { "↑↓", "move" }, { "enter", "change" }, { "r", "reset to core.lua" }, { "esc", "back" } }
     elseif t.name == "providers" then
       hint = { { "↑↓", "move" }, { "enter", "use" }, { "e", "edit" }, { "a", "add" }, { "d", "delete" }, { "tab", "section" }, { "esc", "close" } }
     elseif t.name == "plugins" then
-      hint = { { "↑↓", "move" }, { "space", "on/off" }, { "tab", "section" }, { "esc", "close" } }
+      hint = { { "↑↓", "move" }, { "enter", "settings" }, { "space", "on/off" }, { "tab", "section" }, { "esc", "close" } }
     else
       hint = { { "↑↓", "move" }, { "enter", "change" }, { "r", "reset" }, { "tab", "section" }, { "esc", "close" } }
     end
@@ -791,7 +812,7 @@ function M.open(want)
   end
 
   local function switch_tab(by)
-    st.tab = (st.tab - 1 + by) % #st.tabs + 1
+    st.tab = (st.tab - 1 + by) % 3 + 1
     st.sel, st.note, st.edit = 1, nil, nil
   end
 
@@ -825,7 +846,15 @@ function M.open(want)
       return true
     end
     st.note = nil
-    if st.prov and (k == "esc" or k == "q") then
+    if st.tab > 3 and (k == "esc" or k == "q") then
+      local page = st.tab
+      st.tab = st.tabs[page].section
+      for i, r in ipairs(rows()) do
+        if r.page == page then
+          st.sel = i
+        end
+      end
+    elseif st.prov and (k == "esc" or k == "q") then
       st.prov, st.sel = nil, 1
     elseif k == "esc" or k == "ctrl+c" or k == "q" then
       if paste_event then
@@ -841,9 +870,9 @@ function M.open(want)
       st.sel = math.max(1, st.sel - 10)
     elseif k == "pagedown" then
       st.sel = math.min(math.max(#list, 1), st.sel + 10)
-    elseif (k == "tab" or k == "right") and not st.prov then
+    elseif (k == "tab" or k == "right") and not st.prov and st.tab <= 3 then
       switch_tab(1)
-    elseif (k == "shift+tab" or k == "backtab" or k == "left") and not st.prov then
+    elseif (k == "shift+tab" or k == "backtab" or k == "left") and not st.prov and st.tab <= 3 then
       switch_tab(-1)
     elseif k == "enter" then
       activate(row, false)
