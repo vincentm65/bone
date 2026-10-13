@@ -1,13 +1,14 @@
 -- The plugin catalog: packages to install into ~/.bone/plugins, from
 -- settings "catalog.url" (default: the main branch of the bone-catalog
 -- repository on GitHub) or a local folder ("~/projects/bone-catalog").
--- The source holds catalog.json and plugins/<name>/<files>; every file is
+-- The source holds catalog.json, plugins/<name>/<files> and tuis/<name>/<files>
+-- (kind "tui": TUI libraries, installed into ~/.bone/libraries); every file is
 -- checked against catalog.json's SHA-256 before anything is installed.
 --
 --   local catalog = require("bone.catalog")
 --   catalog.index(function(entries, err) end)   -- with .state for each
 --   catalog.install(entry, function(ok, err) end)
---   catalog.remove(name, function(ok, err) end)
+--   catalog.remove(name, function(ok, err) end, kind)
 --   catalog.open()                              -- the /catalog page
 -- The page supports space to select, a to select all available/updated
 -- packages, and one confirmation to install the selection.
@@ -70,13 +71,13 @@ local function fetch(rel, cb)
   end)
 end
 
-local function plugins_dir()
-  return (bone.config_dir or (os.getenv("HOME") .. "/.bone")) .. "/plugins"
+local function plugins_dir(kind)
+  return (bone.config_dir or (os.getenv("HOME") .. "/.bone")) .. (kind == "tui" and "/libraries" or "/plugins")
 end
 
-local function installed_names()
+local function installed_names(kind)
   local out = {}
-  for _, e in ipairs(bone.fs.list(plugins_dir()) or {}) do
+  for _, e in ipairs(bone.fs.list(plugins_dir(kind)) or {}) do
     if e.type == "dir" and e.name:sub(1, 1) ~= "." then
       out[e.name] = true
     end
@@ -84,13 +85,20 @@ local function installed_names()
   return out
 end
 
--- "update" when an installed file differs from the catalog's.
+-- "update" when an installed file differs from the catalog's; for a TUI,
+-- which is yours to edit, only when the catalog's version is newer.
 local function state_of(entry, installed)
   if not installed[entry.name] then
     return "available"
   end
+  local dir = plugins_dir(entry.kind) .. "/" .. entry.name
+  if entry.kind == "tui" then
+    local ok, m = pcall(bone.json.decode, read_file(dir .. "/manifest.json") or "")
+    local have = ok and type(m) == "table" and m.version
+    return have and not M.at_least(have, entry.version) and "update" or "installed"
+  end
   for _, f in ipairs(entry.files or {}) do
-    local text = read_file(plugins_dir() .. "/" .. entry.name .. "/" .. f.path)
+    local text = read_file(dir .. "/" .. f.path)
     if not text or bone.sha256(text) ~= f.sha256 then
       return "update"
     end
@@ -127,11 +135,11 @@ function M.index(cb)
     if not ok or type(entries) ~= "table" then
       return cb(nil, "the catalog's catalog.json is not valid")
     end
-    local installed = installed_names()
+    local installed = { plugin = installed_names(), tui = installed_names("tui") }
     local kept = {}
     for _, e in ipairs(entries) do
       if not OMIT[e.name] then
-        e.state = state_of(e, installed)
+        e.state = state_of(e, e.kind == "tui" and installed.tui or installed.plugin)
         kept[#kept + 1] = e
       end
     end
@@ -211,7 +219,8 @@ function M.install(entry, cb)
   if not tmp then
     return cb(false, err)
   end
-  local stage = plugins_dir() .. "/." .. name .. "." .. tmp .. ".staging"
+  local tui = entry.kind == "tui"
+  local stage = plugins_dir(entry.kind) .. "/." .. name .. "." .. tmp .. ".staging"
   local ok, err = bone.fs.mkdir(stage)
   if not ok then
     return cb(false, tostring(err))
@@ -222,8 +231,8 @@ function M.install(entry, cb)
   end
   local i = 0
   local function finish()
-    local dest, backup = plugins_dir() .. "/" .. name
-    if installed_names()[name] then
+    local dest, backup = plugins_dir(entry.kind) .. "/" .. name
+    if installed_names(entry.kind)[name] then
       local b, err = backup_dir()
       if not b then
         return fail(err)
@@ -245,6 +254,9 @@ function M.install(entry, cb)
       end
       return fail("cannot install " .. name .. ": " .. tostring(e))
     end
+    if tui then
+      return cb(true)
+    end
     switch(name, files, true, function(loaded, why)
       cb(loaded, why and ("installed, but loading failed: " .. tostring(why)) or nil)
     end)
@@ -258,7 +270,7 @@ function M.install(entry, cb)
     if type(f.path) ~= "string" or f.path:find("%.%.") or f.path:sub(1, 1) == "/" then
       return fail("bad file path in the catalog: " .. tostring(f.path))
     end
-    fetch("plugins/" .. name .. "/" .. f.path, function(text, err)
+    fetch((tui and "tuis/" or "plugins/") .. name .. "/" .. f.path, function(text, err)
       if not text then
         return fail(tostring(err))
       end
@@ -275,8 +287,13 @@ function M.install(entry, cb)
   next_file()
 end
 
---- Unload a package and move it to plugins-backup/. cb(true) or cb(false, err).
-function M.remove(name, cb)
+--- Unload a package and move it to plugins-backup/ (a TUI: delete it with
+--- bone.library.delete, which keeps a copy). cb(true) or cb(false, err).
+function M.remove(name, cb, kind)
+  if kind == "tui" then
+    local ok, err = pcall(bone.library.delete, name)
+    return cb(ok, not ok and tostring(err) or nil)
+  end
   local dest = plugins_dir() .. "/" .. name
   if not installed_names()[name] then
     return cb(false, name .. " is not installed")
@@ -553,14 +570,15 @@ function M.open()
       st.ask = {
         text = verb .. " " .. e.name .. "? Its Lua runs with your permissions.",
         action = function()
-          M.install(e, done(e.name .. " " .. verb .. "ed"))
+          M.install(e, done(e.name .. " " .. verb .. "ed" .. (e.kind == "tui" and "; /tui use " .. e.name .. " to switch" or "")))
         end,
       }
     elseif k == "x" and e and e.state ~= "available" and not st.busy then
       st.ask = {
-        text = "remove " .. e.name .. "? It is moved to ~/.bone/plugins-backup/.",
+        text = "remove " .. e.name .. "? It is moved to ~/.bone/"
+          .. (e.kind == "tui" and "libraries/.deleted-…" or "plugins-backup/") .. ".",
         action = function()
-          M.remove(e.name, done(e.name .. " removed"))
+          M.remove(e.name, done(e.name .. " removed"), e.kind)
         end,
       }
     end

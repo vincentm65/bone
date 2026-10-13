@@ -97,7 +97,7 @@ function M.check()
   catalog.index(function(entries)
     local plugins = {}
     for _, e in ipairs(entries or {}) do
-      if e.state == "update" and catalog.at_least(bone.version, e.min_bone_version) then
+      if e.state == "update" and e.kind ~= "tui" and catalog.at_least(bone.version, e.min_bone_version) then
         plugins[#plugins + 1] = e
       end
     end
