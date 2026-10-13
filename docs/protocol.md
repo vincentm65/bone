@@ -67,7 +67,7 @@ After `initialize`, the server runs each request on its own task: replies carry 
 | `ask/respond` | `{ ask_id, answer }` | `null`; error if no question with that id is open |
 | `health/check` | `{}` | `[{ name, status: "ok" \| "warn" \| "error", message }]`: the core's checks (provider, API key, reachability, sessions folder, Lua) and core Lua's `bone.health` checks |
 | `settings/get` | `{}` | the saved settings (`settings.json` in the config dir), a JSON object |
-| `settings/set` | `{ path, value }` | every setting after the change. `path` is dotted (`tui.tool_detail`, `providers.qwen.model`); `null` removes it. `provider` must name a configured provider; `providers.<name>` adds a provider (`{ base_url, model, type, api_key_env }`) and `providers.<name>.<field>` changes one field of any provider; changing either reloads the configuration, and the change is undone if that fails. Every client hears `settings/changed` |
+| `settings/set` | `{ path, value, session_id? }` | every saved setting after the change. `path` is dotted (`tui.tool_detail`, `providers.qwen.model`); `null` removes it. `provider` must name a configured provider; `providers.<name>` adds a provider and `providers.<name>.<field>` changes one field; these changes reload the configuration and are undone if loading fails. With `session_id`, changing `provider` or that session's provider model also saves its provider/model selection; other sessions keep theirs. Every client hears `settings/changed` |
 | `secrets/set` | `{ provider, key }` | the names of the providers with a key. Saves (or with `key: null` removes) a provider's API key in `secrets.json` (mode 0600) and reloads. Keys are never sent to clients |
 | `secrets/list` | `{}` | the names of the providers with a saved key |
 | `settings/reset` | `{ path }` | as `settings/set` with `null` |
@@ -80,7 +80,7 @@ After `initialize`, the server runs each request on its own task: replies carry 
 | `mcp/auth_code` | `{ name, code }` | `{}`: finish a sign-in from the address the browser was redirected to (or the bare code), for a browser on another machine |
 | `mcp/sign_out` | `{ name }` | `{}`: forget the saved sign-in and reconnect |
 | `store/query` | `{ sql, params? }` | `{ columns, rows, truncated }`: one read-only SQL statement against the session index (see architecture.md for its tables). `params` is a list (`?1`…) or an object (`:name`); at most 10,000 rows, 5 seconds |
-| `model/list` | `{}` | `[{ name, model, type?, current, supports_images? }]`: the `bone.config.providers` entries; `current` is the one turns use |
+| `model/list` | `{ session_id? }` | `[ModelInfo]`: the configured providers, sorted by name. With a session, `current` and its `model` reflect that session's saved selection; otherwise they reflect the default |
 | `model/complete` | `{ provider?, messages, tools?, options?, stream? }` | `{ request_id }`, returned at once. One model call outside any session: `provider` is an entry name (default: the current one), `tools` are offered but never run, `options` override `model`, `reasoning_effort` or a Lua provider's options. With `stream`, `model/delta` events follow; `model/completed` always ends it |
 | `model/cancel` | `{ request_id }` | `null`; the call ends with `model/completed` and the error `"cancelled"` |
 | `plugin/load`, `plugin/unload`, `plugin/reload` | `{ name }` | `ReloadResult`: enable, disable, or keep the plugin, then reload as `core/reload` does. An error for a plugin that is not there or has no `core.lua` |
@@ -91,24 +91,26 @@ Limits are 8 images/message, 20 MiB/image input and canonical PNG, 40 megapixels
 
 `ReloadResult` is `{ plugins: [{ name, core, loaded }], warnings? }`; `warnings` lists settings that cannot change while running (`data_dir`) and errors from `bone.on_shutdown`. Disabling a plugin lasts until the server restarts; rename its folder to disable it for good.
 
+`ModelInfo` is `{ name, model, type?, current, supports_images?, base_url?, reasoning_effort?, stream_usage, replay_reasoning?, api?, api_auto?, has_key, added }`. `type` names a Lua provider; built-in providers use `api: "completions" | "responses" | "anthropic"` (`"completions"` is omitted). `api_auto` is true when the API was inferred rather than configured. `has_key` reports whether a key is configured, never the key itself; `added` marks a provider defined only in `settings.json`. `replay_reasoning` forces Chat Completions reasoning replay on or off; absent, reasoning is replayed once the server streams it. `supports_images: false` rejects image calls; absent leaves support to the endpoint.
+
 `SessionInfo` is `{ session_id, cwd, created_at, title?, parent?, owner? }`. `parent` is the session it was forked from; `owner` is `{ session_id, call_id?, name? }` for a session core Lua started on another's behalf (a sub-agent, via `bone.session.create`): the session and tool call that started it. Clients usually leave owned sessions out of session pickers and show them with their owner.
 
-The queue: each session keeps `[{ id, text, images?, mode: "steer" | "next", created_at }]`, saved next to its file (`<id>.queue.json`) so it outlives a restart. When a turn ends, any steer message that did not join it becomes `next`, and the first queued message starts the next turn, after completed and failed turns alike. A cancelled turn pauses the queue, and so does loading a session that had a queue; `queue/resume` or a new `queue/add` lets it go on. `session/messages` includes `queue` and `queue_paused`. `ChatMessage` is tagged by `role`:
+The queue: each session keeps `[{ id, text, images?, mode: "steer" | "next", created_at }]`, saved next to its file (`<id>.queue.json`) so it outlives a restart. When a turn ends (including cancellation), any steer message that did not join it becomes `next`. After completed and failed turns, the first queued message starts the next turn. Cancellation normally pauses a nonempty queue, and so does loading a session that had a queue; `queue/resume` or a new `queue/add` lets it go on. Messages submitted after cancellation while the turn winds down become `next`, are placed ahead of older queued items in submission order, and prevent the queue from pausing. Accepted queue changes remain in memory and may run even if saving fails; `queue/changed.error` warns that they may be lost on restart. `session/messages` includes `queue` and `queue_paused`. `ChatMessage` is tagged by `role`:
 
 ```json
 { "role": "system", "content": "..." }
 { "role": "user", "content": "..." }
-{ "role": "assistant", "content": "...", "reasoning": "...", "tool_calls": [{ "id", "name", "arguments" }] }
+{ "role": "assistant", "content": "...", "reasoning": "...", "tool_calls": [{ "id": "call-1", "name": "read_file", "arguments": "{\"path\":\"README.md\"}" }], "reasoning_state": { "model": "...", "items": [] } }
 { "role": "tool", "call_id": "...", "content": "...", "is_error": true }
 ```
 
-Empty `content`/`reasoning`/`tool_calls` and a false `is_error` are omitted. A tool call's `arguments` is the raw JSON string the model produced, which may be invalid.
+Empty assistant `content`/`reasoning`/`tool_calls`, absent `reasoning_state` and a false `is_error` are omitted. A tool call's `arguments` is the raw JSON string the model produced, which may be invalid. Assistant `reasoning_state` is saved with the transcript and returned to clients: `{ model, items, prefix?, field? }` holds opaque provider reasoning for replay on compatible later calls. Keep it intact when copying messages; `prefix` can bind it to an unchanged conversation, and `field` records the Chat Completions reasoning field.
 
 User and tool messages may include `images: [ImageAttachment, ...]`. `read_file` image results retain their references on the tool message. `tool/finished` reports the text and dimensions; `session/messages` includes the image references.
 
 ## Events
 
-Every event carries `session_id` (except `echoed`, `ask/resolved`, `core/reloaded` and the `model/*` events) and, for turns, `turn_id`.
+Every event carries `session_id` (except `echoed`, `ask/resolved`, `settings/changed`, `core/reloaded` and the `model/*` events) and, for turns, `turn_id`.
 
 | Event | Params | Meaning |
 |---|---|---|
@@ -122,7 +124,7 @@ Every event carries `session_id` (except `echoed`, `ask/resolved`, `core/reloade
 | `ask/requested` | `{ ask_id, question }` | core Lua (a hook or tool) called `bone.ask(question)` and waits; answer with `ask/respond`. `question` is whatever the Lua passed, e.g. `{ kind: "confirm", text: "Write this file?" }` |
 | `ask/resolved` | `{ ask_id, answer }` | answered by some client, or `answer: null` if the turn was cancelled first |
 | `turn/steered` | `{ text }` | a steer message from the queue joined the running turn's transcript (show it as a user message) |
-| `queue/changed` | `{ items, paused, error? }` | the session's queue after a change; a failed start retains the item, pauses the queue and includes its error |
+| `queue/changed` | `{ items, paused, error? }` | the session's queue after a change; a failed automatic start retains the item and pauses the queue. `error` also reports save failures, which do not reject accepted changes or stop the queue |
 | `turn/finished` | `{ outcome: { status: "completed" \| "cancelled" \| "failed", message? } }` | the turn is over |
 | `settings/changed` | `{ path, value, settings }` | a setting was saved (`value` null: removed) by some client; `settings` is all of them (no `session_id`) |
 | `core/reloaded` | `ReloadResult` | the core switched to a newly loaded Lua configuration (no `session_id`) |
@@ -165,14 +167,14 @@ progress lines settled.
 ## Rust client
 
 ```rust
-let (client, mut events) = bone_client::Client::new(bone_client::connect_local(path).await?);
+let (client, mut events) = bone_client::Client::new(bone_client::connect(path).await?);
 client.initialize("my-tool").await?;
 let s = client.request::<SessionCreate>(SessionCreateParams { cwd: Some(cwd) }).await?;
-client.request::<TurnStart>(TurnStartParams { session_id: s.session_id, text: "hi".into() }).await?;
+client.request::<TurnStart>(TurnStartParams { session_id: s.session_id, text: "hi".into(), images: Vec::new() }).await?;
 while let Some(e) = events.recv().await {
     if let Some(Ok(d)) = e.parse::<MessageDelta>() { print!("{}", d.text) }
     if e.parse::<TurnFinished>().is_some() { break }
 }
 ```
 
-`bone_client::spawn(Command::new("bone").arg("--headless"))` runs a private server as a child process. `crates/bone-server/examples/chat.rs` is a complete line-mode client.
+`bone_client::spawn` takes an owned `tokio::process::Command` configured with `--headless` and returns `(Connection, Child)` for a private server; keep the child handle alive while using the connection. `crates/bone-server/examples/chat.rs` is a complete line-mode client.

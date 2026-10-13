@@ -9,9 +9,9 @@ bone runs two separate LuaJIT states, one per side:
 
 `$BONE_CONFIG_DIR` replaces `~/.bone`. The two states never share Lua values; they talk only through the bone protocol. Lua has full trust (no sandbox). Tool calls run without asking; asking first is a customization using `bone.ask` (see below).
 
-Numbering, everywhere: indexes into lists start at 1, as in Lua (chat item `index`, `first`/`last`, `from`/`to`); positions start at 0 (screen cells `x`, `y`; prompt `row`, `col` and highlight ranges). Settings are fields you assign (`bone.ui.statusline = fn`, `bone.ui.layout = {…}`, `bone.ui.spinner = {…}`, `bone.o.name = value`); actions are calls (`bone.chat.add`, `bone.ui.popup`, `bone.notify`).
+Numbering, everywhere: indexes into lists start at 1, as in Lua (chat item `index`, `first`/`last`, `from`/`to`); positions start at 0 (screen cells `x`, `y`; prompt `row`, `col` and highlight ranges). Chat buffer numbers also start at 0; they are identifiers, not list indexes. Settings are fields you assign (`bone.ui.statusline = fn`, `bone.ui.layout = {…}`, `bone.ui.spinner = {…}`, `bone.o.name = value`); actions are calls (`bone.chat.add`, `bone.ui.popup`, `bone.notify`).
 
-Load order on each side: `runtime/<side>/api.lua`, then `runtime/<side>/defaults.lua`, then your file. The runtime is built into the binary, and any runtime file can be replaced by putting a file at the same path under `~/.bone/runtime/` (for example `~/.bone/runtime/tui/defaults.lua` drops every default keymap). A replacement hides every later change to the built-in file, so prefer changing pieces from your config; when you do replace a file, start from the built-in one and change only what you need:
+Load order on each side: `runtime/<side>/api.lua`, then `runtime/<side>/defaults.lua`, then plugins and your file. The runtime is built into the binary, and any runtime file can be replaced by putting a file at the same path under `~/.bone/runtime/` (for example `~/.bone/runtime/tui/defaults.lua` drops every default keymap). A replacement hides every later change to the built-in file, so prefer changing pieces from your config; when you do replace a file, start from the built-in one and change only what you need:
 
 ```lua
 -- ~/.bone/runtime/lua/bone/ui/layout.lua
@@ -26,7 +26,7 @@ return M
 
 `bone.builtin(name)` runs the built-in version of a module (`"bone.ui.layout"`) or file (`"tui/defaults.lua"`) and returns what it returns. Bone never writes into `~/.bone/runtime/`, so your copies are safe from updates. `/runtime` lists them (and which are still identical to the built-in), and `/runtime reset FILE` or `/runtime reset all` goes back to the built-in versions: your copies are moved to `~/.bone/runtime-backup/<time>/`, not deleted, and the TUI reloads by itself. The TUI mentions overrides at startup and `/health` lists them.
 
-`require("x.y")` finds `~/.bone/lua/x/y.lua` (or `x/y/init.lua`), then each plugin's `lua/`, then the runtime's `lua/` modules.
+`require("x.y")` finds `~/.bone/lua/x/y.lua` (or `x/y/init.lua`), then each plugin's `lua/`, then the runtime's `lua/` modules. In the TUI, an active custom library's files in `~/.bone/libraries/<name>/` take precedence over `~/.bone/runtime/` and the built-in runtime; missing files fall back to those. See [TUI libraries](#tui-libraries) below.
 
 ## Extension contract (API v1)
 
@@ -81,19 +81,18 @@ the newer implementation internally.
 
 ### TUI extension points (API v1)
 The following table records the compatibility boundary and the additive
-capabilities currently implemented. The last column names work that remains
-planned; those capabilities are not available until reported by
-`bone.has_capability`.
-| Extension point | Compatibility behavior | Current additive extension / planned work |
+capabilities currently implemented. Use `bone.has_capability` to check whether
+the running version provides a capability before using it.
+| Extension point | Compatibility behavior | Current additive extension |
 |---|---|---|
 | Input contexts | `main` is the prompt context and `popup` is the fallback context for a focused Lua window. A picker is a Lua window, not a third keymap context. Unmapped main text enters the prompt. | Named contexts, priority/fallback, key sequences, raw interception and real sequence timeouts are available through `tui.input`. |
 | Events | `bone.on` receives server notifications by method plus `ready` and `submit`. Server callbacks run after the TUI applies the notification; `submit` can cancel or replace text. | Local prompt/focus/resize/key/paste and panel lifecycle events are available through `tui.local_events`. |
-| Commands | Built-ins and user commands are slash commands. `bone.cmd.create` accepts one raw `{ args = "..." }` string and `{ desc }`; built-ins cannot be replaced. | Canonical names, aliases, alias-aware completion/execution/deletion, completion callbacks and typed argument metadata are available through `tui.command_specs`. |
-| Options | `bone.o` exposes the fixed, typed Rust options. v1 values are booleans or non-negative numbers; unknown names and wrong types are errors. | Dynamic boolean, integer, number and string options, defaults, metadata, deletion and change callbacks are available through `tui.dynamic_options`. |
+| Commands | Built-ins and user commands are slash commands. `bone.cmd.create` accepts a callback receiving `{ args = "..." }` and options such as `{ desc }`; standard slash commands are Lua commands and can be replaced, except `/model`, whose execution is handled by Rust (its Lua registration supplies help and completion). | Canonical names, aliases, alias-aware completion/execution/deletion, completion callbacks and typed argument metadata are available through `tui.command_specs`. |
+| Options | `bone.o` exposes typed options; unknown names and wrong types are errors. | Dynamic boolean, integer, number and string options, defaults, metadata, deletion and change callbacks are available through `tui.dynamic_options`. |
 | Panels | `bone.ui.win` is a Lua-drawn overlay, and regions/views customize the existing chat layout. Both keep working unchanged. | Persistent panels with IDs, docking, sizing, scrolling, focus, render/key callbacks and lifecycle events are available through `tui.panels` (`bone.ui.panel`). |
 | Prompt and chat | `bone.api.prompt_get`/`prompt_set` read and replace the whole prompt; `bone.chat.items({ kind, last })` lists the on-screen chat's items. | Cursor, range and selection edits (`tui.prompt_edit`, `bone.prompt`) and structured read-only items, turns and sessions with filters (`tui.chat_data`) are available. The TUI stays a prompt, not a file editor. |
-| Jobs | TUI `bone.system`, `bone.http` and `bone.defer` run one background operation and invoke a callback. Core waits are coroutine-based and turn cancellation stops them. v1 has no general process handle or streamed TUI job. | Streaming jobs with handles, stdout/stderr callbacks (chunks or lines), stdin writes, cancellation of the whole process group, timeouts, exit results, status and `job/*` events are available in the TUI through `jobs.streaming` (`bone.job`). |
-| Plugin state | Folder plugins load in name order between runtime defaults and the user's config; `bone.plugins` reports names and `.`/`_` folders are disabled. There is no persistent state store, reload hook or automatic resource cleanup yet. | In the TUI, plugins own what they create; `bone.plugin.on_shutdown`, load/unload/reload (`/plugins`), auto-saved `bone.plugin.state` and trusted project config (`/plugins trust`) are available through `plugins.lifecycle` and `tui.project`. Both sides have `bone.state` and `bone.plugin.current()` (`plugins.state`). |
+| Jobs | TUI `bone.system`, `bone.http` and `bone.defer` run one background operation and invoke a callback. Core waits are coroutine-based and turn cancellation stops them. | Streaming jobs with handles, stdout/stderr callbacks (chunks or lines), stdin writes, cancellation of the whole process group, timeouts, exit results, status and `job/*` events are available in the TUI through `jobs.streaming` (`bone.job`). |
+| Plugin state | Folder plugins load in name order between runtime defaults and the user's config; `bone.plugins` reports names and `.`/`_` folders are disabled. | In the TUI, plugins own what they create; `bone.plugin.on_shutdown`, load/unload/reload (`/plugins`), auto-saved `bone.plugin.state` and trusted project config (`/plugins trust`) are available through `plugins.lifecycle` and `tui.project`. Both sides have `bone.state` and `bone.plugin.current()` (`plugins.state`). |
 
 The existing detailed sections describe both the compatibility calls and the
 new additive APIs. A plugin may use a compatibility API today and opt into
@@ -142,7 +141,7 @@ A project can carry TUI config in `.bone/tui.lua` (and modules in `.bone/lua/`).
 ## Shared
 
 - `bone.side`: `"core"` or `"tui"`. `bone.version`, `bone.config_dir`.
-- `bone.json.encode(value)`, `bone.json.decode(string)`
+- `bone.json.encode(value)`, `bone.json.decode(string)`. `bone.json.null` represents JSON null in a Lua table (unlike `nil`, which removes its key).
 - `bone.inspect(value)`: readable dump of any value.
 - `bone.util`: `split(s, sep)`, `trim(s)`, `startswith(s, prefix)`, `extend(t1, t2, ...)`, `front_matter(text)` → `meta, body` for Markdown files that start with `---` / `key: value` lines / `---`.
 - `bone.fs.list(dir)` → `{ { name, type = "file" | "dir" } }`, sorted (`~/` works), or `nil` and an error.
@@ -162,17 +161,16 @@ A project can carry TUI config in `.bone/tui.lua` (and modules in `.bone/lua/`).
 }
 ```
 
-- `provider` picks which provider turns use, over `core.lua`'s own `bone.config.provider`. `providers.<name>.<field>` changes one field of a provider (`model`, `base_url`, `type`, `reasoning_effort`, `stream_usage`, `api_key_env`), over what `core.lua` gives it; `providers.<name>` as a whole (`{ base_url, model, … }`) adds a provider that `core.lua` does not have, as `/setup` and `/config` do. So `core.lua` defines providers and their defaults, settings change and add them, and `BONE_*` environment variables override both for one run. Changing any of this reloads the core's configuration at once, and is undone if that fails (an unknown provider is refused). A provider's key is the one saved in `~/.bone/secrets.json` (`secrets/set`; readable only by you, never sent back to clients, never in `settings.json`), else its `api_key_env` variable, else `core.lua`'s. Adding a provider while `settings.json` names none also chooses it. With no provider at all the core still starts, and turns say to run `/setup`; with several and none chosen it asks you to choose.
+- `provider` picks the default provider, over `core.lua`'s own `bone.config.provider`. Sessions keep their selected provider and model; choosing a provider or explicitly setting the selected provider's model through the TUI also updates the session on screen, not other sessions. Resetting a model field changes the configured default, not an existing session's saved selection. `providers.<name>.<field>` changes one field of a provider (`model`, `base_url`, `type`, `api`, `reasoning_effort`, `stream_usage`, `replay_reasoning`, `supports_images`, `headers`, `body`, `cache`, `api_key_env`), over what `core.lua` gives it; `providers.<name>` as a whole (`{ base_url, model, … }`) adds a provider that `core.lua` does not have, as `/setup` and `/config` do. So `core.lua` defines providers and their defaults, settings change and add them, and `BONE_*` environment variables override both for one run. Changing any of this reloads the core's configuration at once, and is undone if that fails (an unknown provider is refused). A provider's key is the one saved in `~/.bone/secrets.json` (`secrets/set`; readable only by you, never sent back to clients, never in `settings.json`), else its `api_key_env` variable, else `core.lua`'s. Adding a provider while `settings.json` names none also chooses it. With no provider at all the core still starts, and turns say to run `/setup`; with several and none chosen it asks you to choose.
 - `tui.<option>` sets a TUI option after the defaults and plugins, before your `tui.lua`, which runs last and wins. `ctrl+t` and `ctrl+r` save their choice here.
-- `providers.<name>` defines a provider (`{ base_url, model, type, api_key_env }`), as `/setup` does; it goes into `bone.config.providers` before plugins and `core.lua`, which may replace it. Its key is the one saved in `~/.bone/secrets.json` (`secrets/set`; readable only by you, never sent back to clients, never in `settings.json`), else the `api_key_env` variable. Adding a provider while `settings.json` names none also chooses it. With no provider at all the core still starts, and turns say to run `/setup`; with several and none chosen it asks you to choose.
 - `catalog.url` is where `/catalog` gets packages (below).
 - Anything else is free for plugins: a plugin keeps its settings under its own name (`web_search.num_results`).
 
-`/setup` adds a provider in three steps: what kind (a server on this machine, OpenAI, DeepSeek, OpenRouter, or any OpenAI-compatible service), its name, URL, model and key (typed hidden, saved in `secrets.json`, or the variable that holds it), and optionally packages from the catalog. It opens by itself when bone starts with no provider; dismissing it is remembered (`setup.skipped`), and `/setup` brings it back. It never writes `core.lua`.
+`/setup` adds a provider in three steps: what kind (a server on this machine, OpenAI, Anthropic, DeepSeek, OpenRouter, or any OpenAI-compatible service), its name, URL, model and key (typed hidden, saved in `secrets.json`, or the variable that holds it), and optionally packages from the catalog. It opens by itself when bone starts with no provider; dismissing it is remembered (`setup.skipped`), and `/setup` brings it back. It never writes `core.lua`.
 
 `/catalog` lists the catalog's packages as Updates (an installed file differs), Installed and Available. Use space to check packages, `a` to check every available/update, `n` to clear checks, and Enter to install the selection in one pass. `u` scans installed files for updates, `r` refreshes the index, and `x` removes a package (moved to `~/.bone/plugins-backup/`); install and update operations ask first because a package's Lua runs with your permissions. Packages come from `catalog.url`: a URL (by default `https://raw.githubusercontent.com/vincentm65/bone-catalog/refs/heads/main`) or a local folder (`~/projects/bone-catalog`), holding `catalog.json` and `plugins/<name>/…` as the repository's root does. Every file is checked against the SHA-256 in `catalog.json` before anything is installed, and a new package loads at once. In Lua: `require("bone.catalog")` has `index(cb)`, `install(entry, cb)`, `remove(name, cb)` and `open()`. Both sides also have `bone.sha256(text)`, `bone.fs.mkdir(dir)` and `bone.fs.write(path, text)` (whole, atomically).
 
-`/config` (or `/settings`) has three fixed sections: **General** with Compaction and every TUI option (space or enter toggles a boolean or cycles a choice, enter edits a number or text, `r` resets to the default; an option your `tui.lua` sets anyway is marked), **Providers** (enter uses one; `e` edits one: model, URL, type, reasoning effort, stream usage, API key and key variable, each saved at once, `r` resetting a field to `core.lua`'s and "Undo changes" all of them; `a` adds a provider, `d` deletes one you added), **Plugins** (space switches one off or on, both halves, and it stays that way: `plugins.disabled`; Enter opens declared settings, Esc returns to the selected list row). Tab switches sections from a list, not from a detail page. A plugin declares them in its `manifest.json`, which also works for a core-only plugin:
+`/config` (or `/settings`) has three fixed sections: **General** with Compaction and every TUI option (space or enter toggles a boolean or cycles a choice, enter edits a number or text, `r` resets to the default; an option your `tui.lua` sets anyway is marked), **Providers** (enter uses one; `e` edits one: model, URL, type, API, reasoning effort, image support, stream usage, reasoning replay, API key and key variable, each saved at once, `r` resetting a field to `core.lua`'s and "Undo changes" all of them; `a` adds a provider, `d` deletes one you added), **Plugins** (space switches one off or on, both halves, and it stays that way: `plugins.disabled`; Enter opens declared settings, Esc returns to the selected list row). Tab switches sections from a list, not from a detail page. A plugin declares them in its `manifest.json`, which also works for a core-only plugin:
 
 ```json
 { "title": "Web search", "settings": [
@@ -190,22 +188,39 @@ In the TUI: `bone.settings.get(path)`, `bone.settings.all()`, `bone.settings.set
 
 ```lua
 bone.config.providers.qwen = {
-  base_url = "http://localhost:8081/v1",  -- any OpenAI-compatible /chat/completions
+  base_url = "http://localhost:8081/v1",  -- the API's base URL
   model = "Qwen3.8-27B-exl3-3.8bpw",
+  api = "completions",                  -- optional: "completions", "responses" or "anthropic"
   api_key = os.getenv("SOME_KEY"),        -- optional
-  reasoning_effort = "medium",            -- optional
-  stream_usage = true,                    -- send stream_options.include_usage
+  reasoning_effort = "medium",           -- optional
+  stream_usage = true,                   -- Chat Completions: stream_options.include_usage
+  replay_reasoning = nil,                -- Chat Completions: automatic; or true / false
+  headers = { ["x-project"] = "bone" },   -- optional extra request headers
+  body = { temperature = 0.7 },          -- optional request body overrides
 }
-bone.config.provider = "qwen"      -- which entry to use (optional if there is one)
+bone.config.provider = "qwen"      -- default entry (optional if there is one)
 bone.config.system_prompt = "..."  -- or function(ctx) return "..." end; ctx = { cwd, session_id }
 bone.config.data_dir = "~/somewhere"  -- sessions; default is the config dir
 bone.config.parallel_tools = true  -- run a reply's read-only tool calls at the same time (default)
 bone.config.compact = {            -- summarizing long sessions for the model (these are the defaults)
-  keep = 2,                        -- the latest user turns always sent word for word
+  keep = 0,                        -- the latest user turns always sent word for word
   auto = true,                     -- compact and retry when the model says the context is too long
   limit = nil,                     -- compact before a call estimated above this many tokens
   provider = nil,                  -- which providers entry writes summaries (default: the current one)
   prompt = nil,                    -- instructions for the summary, replacing the built-in ones
+}
+```
+
+Without `api`, the built-in provider selects `"responses"` for `api.openai.com`, `"anthropic"` for `api.anthropic.com` (or a `claude-*` model with no URL), and `"completions"` otherwise. Set it explicitly for gateways using a different wire format. `type` selects a registered Lua provider instead.
+
+For Chat Completions, `replay_reasoning = nil` sends past assistant reasoning once the current model has streamed it, using the field the server used. `true` forces replay (`reasoning_content` before that field is known); `false` disables it. This option does not change Responses or Anthropic reasoning handling.
+
+Built-in providers apply `headers` after their own headers (names match case-insensitively). `body` recursively merges objects into the generated request body; other values replace a field, and `bone.json.null` removes a field. For example:
+
+```lua
+bone.config.providers.qwen.body = {
+  stream_options = bone.json.null,  -- remove the generated field
+  temperature = 0.5,
 }
 ```
 
@@ -379,10 +394,12 @@ bone.mcp.add("docs", { url = "https://example.com/mcp", headers = { authorizatio
 bone.mcp.load("~/.config/mcp.json")   -- every server in an { "mcpServers": { ... } } file
 ```
 
-- A server is a program speaking MCP on stdio (`command`, `args`, `env`, `cwd`) or an endpoint speaking Streamable HTTP (`url`, `headers`). Options: `tools = { allow, deny }` (by the server's tool names), `lazy` (start on first use instead of at once) and `timeout` (ms per call, default 120000).
+- A server is a program speaking MCP on stdio (`command`, `args`, `env`, `cwd`) or an endpoint speaking Streamable HTTP (`url`, `headers`, optional OAuth `client_id`). Options: `tools = { allow, deny }` (by the server's tool names), `lazy` (start on first use instead of at once) and `timeout` (ms per call, default 120000).
 - Its tools reach the model as `<server>_<tool>` (a built-in or Lua tool with the same name wins). They run through the `tool_call` and `tool_result` hooks like any tool; `tool_call` events for them carry `mcp = { server, tool, annotations }`, so a hook can tell (an approval hook can use `readOnlyHint` to distinguish read-only tools).
 - Servers run for as long as the core. A reload restarts only the servers whose settings changed (and stops removed ones). A server that exits is restarted after 1, 2, 4, 8 and 16 seconds, then given up on until the next reload (`mcp/reconnect` retries at once); a turn waits up to 10 seconds for servers starting the first time, never for one that is restarting. `/health` shows each server; `mcp/list` gives the same to clients.
-- In hooks and tools: `bone.mcp.call(server, tool, args)` → `{ text, is_error }` (by the server's own tool name), and `bone.mcp.list()` → `{ { name, state, error, tools } }`, `state` being `"idle"`, `"starting"`, `"ready"` or `"failed"`. `bone.mcp.remove(name)` takes a server out of the configuration (it stops at the next reload).
+- In hooks and tools: `bone.mcp.call(server, tool, args)` → `{ text, is_error }` (by the server's own tool name), and `bone.mcp.list()` → `{ { name, state, error, tools } }`, `state` being `"idle"`, `"starting"`, `"ready"`, `"auth"` (needs sign-in) or `"failed"`. `bone.mcp.remove(name)` takes a server out of the configuration (it stops at the next reload).
+
+An HTTP server requiring sign-in enters `"auth"` instead of repeatedly restarting. After a 401, bone tries to refresh a saved OAuth token before asking for sign-in. Clients start OAuth with `mcp/auth` (`{ name }`), open the returned `url` in the user's browser, and let the local redirect finish sign-in. For a browser on another machine, send the redirected address (or bare code) with `mcp/auth_code` (`{ name, code }`). The server reconnects after sign-in; `mcp/sign_out` (`{ name }`) forgets it and disconnects. The catalog's `mcp` plugin provides a UI for this. Set `client_id` in the server spec or options when the server refuses dynamic client registration.
 
 Results are text for the model: text parts as they are, a note such as `[image image/png]` for other parts, or the structured content when there is no text.
 
@@ -411,7 +428,7 @@ Hooks, tools and providers can call a model themselves (they wait without blocki
 
 ```lua
 local r, err = bone.model.complete({
-  provider = "cheap",                    -- a bone.config.providers key; default: the one turns use
+  provider = "cheap",                    -- a bone.config.providers key; default: the configured default
   system = "Answer in three words.",     -- with prompt, or messages = { { role, content }, ... }
   prompt = "Name this session: " .. text,
   options = { model = "small-model" },   -- overrides: model, reasoning_effort, a Lua provider's options
@@ -420,7 +437,7 @@ local r, err = bone.model.complete({
 -- r = { content, reasoning, tool_calls, usage }, or nil and an error
 ```
 
-`tools = { { name, description, parameters } }` offers tools: the model may ask for them, and you get `tool_calls` back; nothing runs them. `bone.model.stream(req)` returns a handle instead, read with `h:next()` (the next delta, `nil` at the end), `h:events()`, `h:result()` and `h:close()`. `bone.model.list()` returns `{ name, model, type, current }` for each provider entry. A model call made inside a Lua provider counts as nested; calls nest at most 4 deep, so a provider that ends up calling itself fails instead of looping.
+`tools = { { name, description, parameters } }` offers tools: the model may ask for them, and you get `tool_calls` back; nothing runs them. `bone.model.stream(req)` returns a handle instead, read with `h:next()` (the next delta, `nil` at the end), `h:events()`, `h:result()` and `h:close()`. Core `bone.model.list()` returns `{ name, model, type, current, ... }` for each provider entry, with `current` marking the configured default. The TUI's `bone.model.list` instead reports the session on screen's selected provider and model. A model call made inside a Lua provider counts as nested; calls nest at most 4 deep, so a provider that ends up calling itself fails instead of looping.
 
 Clients use the same through the protocol (`model/list`, `model/complete`, `model/cancel`); in the TUI that is `bone.model` (see the UI API).
 
@@ -444,7 +461,7 @@ The TUI has its own `bone.health(name, fn)` for TUI-side checks (plain functions
 
 ### Reloading
 
-The core can load its Lua configuration again without restarting: `/plugins reload` in the TUI, or the `core/reload` method. It starts a fresh Lua state, runs the runtime, the enabled plugins and `core.lua`, and switches only if that worked; if loading fails, the old configuration stays. A turn that is running when this happens finishes with the configuration it started with, and questions it asked can still be answered. The provider, tools, hooks and system prompt all come from the new configuration from the next turn on. `data_dir` cannot change while running (a warning says so).
+The core can load its Lua configuration again without restarting: `/plugins reload` in the TUI, or the `core/reload` method. It starts a fresh Lua state, runs the runtime, the enabled plugins and `core.lua`, and switches only if that worked; if loading fails, the old configuration stays. A turn that is running when this happens finishes with the configuration it started with, and questions it asked can still be answered. Provider definitions, tools, hooks and the system prompt come from the new configuration from the next turn on; sessions keep their saved provider and model selection. `data_dir` cannot change while running (a warning says so).
 
 Lua values do not survive a reload, so keep what must last in `bone.state`. `bone.on_shutdown(fn)` runs `fn()` on the outgoing configuration just before the switch (errors come back as warnings; it gets five seconds).
 
@@ -459,6 +476,19 @@ For one-off runs, these override `core.lua`: `BONE_BASE_URL` + `BONE_MODEL` (use
 ## TUI (`tui.lua`)
 
 The TUI has no modes: keys go to the prompt, and while a focused window is open (a popup, the session picker, any `bone.ui.select`) its own keys apply first. The built-in contexts are `main`, `popup` and `panel` (while a panel has the keyboard); Lua can define and focus named contexts without changing modeless text entry. Precedence: a focused popup, then a focused panel, then a focused named context, then `main`.
+
+### TUI libraries
+
+`/tui` chooses the standard library, `bare` (plain UI), or a custom copy in `~/.bone/libraries/<name>/`. `/tui create NAME` copies the built-in TUI runtime files for editing; `/tui create NAME bare` starts with only bare defaults. `/tui use NAME` switches and reloads, reverting if loading fails; `/tui delete NAME` moves an inactive copy aside rather than deleting it. Library files win over runtime overrides in the TUI, but do not change the core's runtime. Missing files fall back to runtime overrides, then built-ins; `bone.builtin` always reads the built-in copy.
+
+```lua
+bone.library.info()                  -- { active, custom = { names }, dir }
+bone.library.create("myui")          -- returns its folder; optional second argument: "bare"
+bone.library.use("myui")             -- or "standard", "bare"
+bone.library.delete("old-ui")        -- cannot delete the active library; returns backup folder
+```
+
+Selecting `bare` still loads plugins and saved TUI options, but skips the user's `tui.lua` and trusted project config. A custom library created from bare defaults does load those configs.
 
 ### Reloading
 
@@ -475,7 +505,7 @@ Every key comes from Lua, with one exception: when `ctrl+c` is not mapped where 
 ```lua
 bone.keymap.set("f2", "/sessions")                            -- a slash command
 bone.keymap.set("ctrl+l", "new_session")                      -- a builtin action
-bone.keymap.set("alt+s", function() bone.cmd("set noshow_reasoning") end)
+bone.keymap.set("alt+s", function() bone.o.show_reasoning = false end)
 bone.keymap.set("ctrl+q", "interrupt", { context = "popup" })  -- while a popup is open
 bone.keymap.set("g g", "/health")                            -- a key sequence
 bone.keymap.set("alt+w v", split, { desc = "split right" })   -- listed in /help → Keys
@@ -497,9 +527,9 @@ new key is retried. Lua keymap callbacks consume the key unless they return
 `false`; raw interceptors consume only when they return `true`. Context focus is
 independent of popups, but a focused popup always has precedence.
 
-Key names: `ctrl+`, `alt+` and `shift+` combined with `enter`, `esc`, `tab`, `backspace`, `delete`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `space`, `f1`–`f24`, `wheelup`, `wheeldown` (the mouse wheel) or a single character (`"?"`, `"G"`). Whitespace separates members of a sequence. Keys without a mapping type text.
+Key names: `ctrl+`, `alt+`, `shift+` and `super+` combined with `enter`, `esc`, `tab`, `backspace`, `delete`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`, `pagedown`, `space`, `f1`–`f24`, `wheelup`, `wheeldown` (the mouse wheel) or a single character (`"?"`, `"G"`). Whitespace separates members of a sequence. Keys without a mapping type text.
 
-Builtin actions: `submit queue_steer queue_next newline left right up down word_left word_right line_start line_end backspace delete delete_word delete_to_start delete_to_end scroll_up scroll_down page_up page_down scroll_top scroll_bottom complete dismiss interrupt quit quit_if_empty new_session sessions focus_next focus_prev focus_prompt`.
+Builtin actions: `submit queue_steer queue_next paste_clipboard newline left right up down word_left word_right line_start line_end backspace delete delete_word delete_to_start delete_to_end scroll_up scroll_down page_up page_down scroll_top scroll_bottom complete dismiss interrupt quit quit_if_empty new_session sessions focus_next focus_prev focus_prompt`.
 
 `submit` during a turn queues the message in the core with `bone.o.queue_mode` (`"steer"`, the default, or `"next"`); `queue_steer` and `queue_next` pick the mode regardless. Up on an empty prompt edits the last queued message in place, and the tray's Queue page edits, reorders, steers or drops any of them (`runtime/lua/bone/ui/tray.lua`).
 
@@ -639,7 +669,7 @@ Registration aliases normalize to these canonical names:
 | `panel/closed` | `panel/closed`, `popup/closed` | a window or a panel |
 
 | `plugin/loaded`, `plugin/unloaded` | same | `{ name, dir, kind, loaded, error }` |
-| `chat/shown` | `chat/shown` | `{ session_id }` when another chat goes on screen (nil for a new chat), and again once a session opened this way has loaded |
+| `chat/shown` | `chat/shown` | `{ session_id, chat }` (`chat`: the chat number, from 0) when another chat goes on screen (nil for a new chat), and again once a session opened this way has loaded |
 | `job/started` | `job/started` | `{ id, name, cmd, pid }` |
 | `job/finished` | `job/finished` | the job's exit result (see `bone.job`) |
 | `process/changed` | `process/changed` | a core-managed shell process snapshot changed |
@@ -720,7 +750,7 @@ bone.now()                              -- milliseconds since the epoch
 - `add(kind, fields, opts)` puts an item of your own after what the chat holds now. `kind` is your name for it (lowercase, not a built-in kind) and `bone.ui.views[kind]` draws it, getting `fields` plus `kind`, `index` and `id`; without a view its `text` shows. It is listed by `items`, can be clicked and scrolled to, and stays where it was put while the answer streams after it. It belongs to the TUI: the core never sees it, and reloading the chat (opening the session again) drops it, so keep anything lasting in `bone.state`. `opts.session` adds to another open chat.
 - `items(opts)` filters: `kind` (one, or a list), `around` (an item index: only the unbroken stretch of items of `kind` around it), `name` (tool name), `turn`, `running`, `error` (failed tools and error notices), `from`/`to` (item indexes, inclusive), then `first`/`last` keep the first or last N matches. Items have the fields in the views table plus `turn` (0 for items before the first message), except that tool calls leave out `output`, `live` and `raw_arguments` unless `full = true`: building them is the costly part of a long chat, and views get them on their own item anyway. `item(index, opts)` takes `session` and `full` the same way.
 - `turns(opts)` entries: `{ index, text, first, last (item indexes), items, tools, tool_errors, running, outcome, error }`. `outcome` is `"completed"`, `"cancelled"` or `"failed"` (with `error`) for turns that finished while the TUI watched, else nil.
-- `session(opts)`: `{ session_id, cwd, created_at, title, new, current, running, starting, queue_paused, turn = { id, elapsed_ms }, items, turns }`, or nil. A chat with no messages yet has `new = true` and no `session_id`.
+- `session(opts)`: `{ session_id, chat, cwd, created_at, title, new, current, running, starting, queue_paused, turn = { id, elapsed_ms }, items, turns }`, or nil. `chat` is the chat number (from 0), including for a new chat without a session id. A chat with no messages yet has `new = true` and no `session_id`.
 - `sessions()`: `{ session_id, title, new, current, running }` for each open chat.
 - `messages([session_id,] callback)`: `callback(messages, err, result)` with protocol messages (`{ role, content, ... }`, see the Providers section) for that session, default the one on screen (`{}` for a new chat).
 
@@ -749,11 +779,11 @@ bone.now()                              -- milliseconds since the epoch
 - `bone.ui.update(id, { ... })`: change any of those fields in place (`false` makes a size or position automatic again). Returns `false` if the window is closed.
 - `bone.ui.close(id)`, `bone.ui.is_open(id)`.
 - `bone.ui.select(items, { prompt, format, on_choice, loading, empty, footer, width, height })` → handle: a picker in a focused window. Typing filters (matching `format(item)`), `up`/`down` (or `ctrl+p`/`ctrl+n`, the wheel) move, `enter` calls `on_choice(item, index)`, `esc` calls `on_choice(nil)`. `handle:set_items(items)` fills it later (with `loading = true` it shows "loading…" until then); `handle:close()`.
-- `bone.ui.sessions()`: the agents sidebar (`ctrl+o`, `/sessions`), implemented in `runtime/lua/bone/ui/sessions.lua` with `bone.ui.panel`. Groups running sessions (animated `ctx.spinner`), recent activity (one hour by default, configurable with `bone.ui.sessions_recent_seconds`) and history; subagents remain hidden in their owner’s tray. Lists titles, activity timestamps, input + output tokens and user-turn counts; supports filtering, keyboard navigation and click-to-open. Switching keeps the panel visible and focuses the prompt. Initial running status comes from `session/active`, then turn events maintain it. Replace it to change how sessions are listed.
+- `bone.ui.sessions()`: the agents sidebar (`ctrl+o`, `/sessions`), implemented in `runtime/lua/bone/ui/sessions.lua` with `bone.ui.panel`. The Chats tab groups sessions into Recent (running or active within one hour by default, configurable with `bone.ui.sessions_recent_seconds`) and History; running sessions show animated `ctx.spinner`. `/archive` moves the current session to History and starts a new one. The Processes tab lists every chat's background shells and running sub-agents; `enter` opens their chat, `x` stops one. Sub-agent sessions are omitted from Chats but can also be opened from their owner's tray. Lists titles, activity timestamps, input + output tokens and user-turn counts; supports filtering, keyboard navigation and click-to-open. Switching keeps the panel visible and focuses the prompt. Initial running status comes from `session/active`, then turn events maintain it. Replace it to change how sessions are listed.
 - `bone.ui.suggestions(ctx)` → lines: draws the `/` menu (see Commands) right above the prompt, with the closest match nearest the input. `ctx = { items = { { name, desc } }, selected, width, height }`. Set it to `nil` for no list (tab still completes).
-- `bone.api.open_session(id)`: show a session.
+- `bone.api.open_session(id)`: show a session (also accepts a chat number).
 - `bone.ui.pager(content, { title, width, height })` → handle: scrollable text in a focused window. `content` is a string (wrapped; `#` lines are headings) or a list of lines. `up`/`down`/wheel, `pageup`/`pagedown`, `home`/`end`, `esc` or `q` closes. `handle:set(content)`, `handle:close()`.
-- `bone.ui.help(topic)` and `bone.ui.health()`: what `/help {topic}` and `/health` call (in `runtime/tui/defaults.lua`). With no topic, `bone.ui.help()` opens the searchable Commands / Keys / Docs popup. Its browser and topic lookup live in `runtime/lua/bone/help.lua`; override `~/.bone/runtime/lua/bone/help.lua` to customize it. The docs are in `bone._docs`; the TUI's built-in checks come from `bone.api.health()`.
+- `bone.ui.help(topic)` and `bone.ui.health()`: what `/help {topic}` and `/health` call (in `runtime/tui/defaults.lua`). With no topic, `bone.ui.help()` opens the searchable Commands / Keys / Docs popup. Its browser and topic lookup live in `runtime/lua/bone/help.lua`; override `~/.bone/runtime/lua/bone/help.lua` to customize it. The docs (usage, Lua, protocol, architecture, customization guides and loaded plugins' READMEs) are in `bone._docs`; the TUI's built-in checks come from `bone.api.health()`.
 - `bone.ui.geometry()` → `{ leaves = { { name, x, y, width, height } }, seps = { { x, y, width, height, path } } }`: where the last frame put each layout leaf and column separator. A separator's `path` is the 1-based child indexes from `bone.ui.layout` to the column after it, so a mouse handler can resize the split it belongs to.
 - `bone.ui.box(lines, { title, title_hl, border_hl, width, pad, chars })` → the lines inside a rounded border (`PopupBorder`/`PopupTitle` by default). Only used if you call it.
 
@@ -984,7 +1014,7 @@ for an example.
 
 #### Chat windows in the layout tree
 
-`chat`, `prompt`, `divider` and `statusline` show the chat on screen. With `:<session id>`, or `:<n>` for chat number `n` (`bone.chat.session().chat`, which a new chat has before its session), they show that chat instead, so a layout can hold any number of chats, each with its own prompt and statusline:
+`chat`, `prompt`, `divider` and `statusline` show the chat on screen. With `:<session id>`, or `:<n>` for chat number `n` (`bone.chat.session().chat`, which a new chat has before its session), they show that chat instead, so a layout can hold any number of chats, each with its own prompt and statusline. Chat numbers start at 0: unlike an item index, they identify a chat buffer, not a position in a list:
 
 ```lua
 bone.chat.open(b)  -- load it without leaving the chat on screen

@@ -1892,6 +1892,45 @@ async fn help_browser_searches_commands_keys_and_docs() {
 }
 
 #[tokio::test]
+async fn help_includes_customization_guides_and_current_shortcuts() {
+    let mut h = Harness::blank().await;
+    // Every customization guide exposed through bone.docs is also searchable.
+    assert_eq!(
+        h.lua(
+            r#"=(function()
+                local names = {}
+                for _, d in ipairs(bone._docs) do names[d.name .. '.md'] = true end
+                for _, d in ipairs(bone.docs.list()) do
+                    if d.name:match('^customizing') and not names[d.name] then return false end
+                end
+                return true
+            end)()"#,
+        )
+        .await,
+        "true"
+    );
+    h.input("/help{enter}{tab}super+v").await;
+    let screen = h.screen(100, 24);
+    assert!(
+        screen.contains("super+v") && screen.contains("Command+V"),
+        "{screen}"
+    );
+    h.input("{ctrl+u}ctrl+5").await;
+    assert!(h.screen(100, 24).contains("ctrl+] / ctrl+5"));
+    h.input("{tab}customizing/customizing-tui{enter}").await;
+    let screen = h.screen(100, 24);
+    assert!(
+        screen.contains("customizing/customizing-tui.md")
+            && screen.contains("# Customizing the TUI's look and behavior"),
+        "{screen}"
+    );
+    h.input("{esc}").await;
+    assert!(h.screen(100, 24).contains("customizing/customizing-tui"));
+    h.input("{esc}/help customizing{enter}").await;
+    assert!(h.screen(100, 24).contains("# Customizing bone"));
+}
+
+#[tokio::test]
 async fn help_topics_and_health_in_a_pager() {
     let mut h = Harness::blank().await;
     h.input("/help hooks{enter}").await;

@@ -92,9 +92,9 @@ bone.config.providers.gateway = {
 }
 ```
 
-`null` (`bone.json.null` in Lua, since a `nil` key is simply absent)
-removes a field bone would send: `body = { thinking = null }` turns Anthropic
-thinking off, `{ reasoning = null, include = null }` makes `api = "responses"`
+`bone.json.null` (a `nil` key is simply absent)
+removes a field bone would send: `body = { thinking = bone.json.null }` turns Anthropic
+thinking off, `{ reasoning = bone.json.null, include = bone.json.null }` makes `api = "responses"`
 work with models that do not reason, and `{ max_tokens = 8000 }` sets
 Anthropic's output limit. Both can be set in `settings.json` too
 (`providers.<name>.headers`, `providers.<name>.body`).

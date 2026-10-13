@@ -48,14 +48,14 @@ Every key comes from Lua. `bone.keymap.set(key, value, opts)`:
 ```lua
 bone.keymap.set("f2", "/sessions")                            -- run a slash command
 bone.keymap.set("ctrl+l", "new_session")                      -- run a builtin action
-bone.keymap.set("alt+s", function() bone.cmd("set noshow_reasoning") end)
+bone.keymap.set("alt+s", function() bone.o.show_reasoning = false end)
 bone.keymap.set("ctrl+q", "interrupt", { context = "popup" }) -- only while a popup is open
 bone.keymap.set("g g", "/health")                             -- key sequences
 bone.keymap.del("ctrl+n")
 ```
 
 A Lua callback consumes the key unless it returns `false`. Key names: `ctrl+`,
-`alt+`, `shift+` with `enter`, `esc`, `tab`, `backspace`, `delete`, arrows,
+`alt+`, `shift+`, `super+` with `enter`, `esc`, `tab`, `backspace`, `delete`, arrows,
 `home`, `end`, `pageup`, `pagedown`, `space`, `f1`–`f24`, `wheelup`,
 `wheeldown` or a character.
 
@@ -73,7 +73,7 @@ context, then `main`. `bone.keymap.raw(fn)` intercepts every key before
 mapping (return `true` to consume); `bone.keymap.raw_del(id)`.
 
 Builtin actions (the strings you can map): `submit queue_steer queue_next
-newline left right up down word_left word_right line_start line_end backspace
+paste_clipboard newline left right up down word_left word_right line_start line_end backspace
 delete delete_word delete_to_start delete_to_end scroll_up scroll_down page_up
 page_down scroll_top scroll_bottom complete dismiss interrupt quit quit_if_empty
 new_session sessions focus_next focus_prev focus_prompt`. Lua can take over any
@@ -232,7 +232,8 @@ Helpers: `bone.text.wrap(spans, width, { first, rest, pad })`,
 - **your copies**, in `~/.bone/libraries/NAME/`: `/tui create NAME` copies
   standard's files, `/tui create NAME bare` starts from bare instead. Edit
   them (saves reload live), then `/tui use NAME`. A file a copy lacks is
-  the built-in one; `tui.lua` and plugins still run on top.
+  the runtime override, if present, then the built-in one; `tui.lua` and
+  plugins still run on top. Library files take precedence over `~/.bone/runtime/`.
 
 `/tui delete NAME` moves a copy you are not using to
 `libraries/.deleted-NAME-…/`. A switch that fails to load keeps the UI you

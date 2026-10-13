@@ -15,9 +15,9 @@ Out of the box the screen is the runtime's standard UI (`runtime/lua/bone/ui/`).
  session title          1.2k in · 40 out │ ~/project   ← statusline
 ```
 
-Tool calls: `◌` while running, `✕` on failure, nothing when done. Shell calls show `$ command`, a non-zero `exit N`, and their output (first line, `⋮ +N lines`, last lines). Edits show a short `-`/`+` diff; reads and writes are one line.
+By default, stretches of tool calls collapse to a summary (for example, "Read 3 files, ran 2 shell commands"); edits and failures stay visible. Press `ctrl+t` for rows or full detail. Individual calls show `◌` while running, `✕` on failure, nothing when done. Shell rows show `$ command`, a non-zero `exit N`, and an output preview. Edits show a short `-`/`+` diff; reads and writes are one line.
 
-There are no modes: you always type into the prompt. Type `/` for commands; a list of matches appears as you type.
+There are no editing modes: normally you type into the prompt; focused popups, panels and terminals receive their own keys. Type `/` for commands; a list of matches appears as you type.
 
 ## Keys
 
@@ -36,6 +36,9 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `ctrl+r` | show / hide the model reasoning (live in the chat and in the transcript) |
 | `ctrl+t` | how much of each tool call to show: a summary line per stretch of calls ("Read 3 files, ran 2 shell commands"; edits and failures in full) → a row per call → everything in full → back. It stays until you press it again |
 | `ctrl+n` | new session |
+| `ctrl+]` / `ctrl+5` | open or focus a terminal panel (Unix); in the terminal, return to the prompt |
+| `shift+pageup` / `shift+pagedown` in a terminal | scroll terminal history |
+| `ctrl+p` | move focus to the next panel |
 | `up` / `down` | move between prompt lines; past the edges, earlier messages. With `/` suggestions showing, move through them |
 | `tab` | complete the selected `/` command |
 | `esc` | hide suggestions, or clear a message |
@@ -49,11 +52,13 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `ctrl+v` / `super+v` / `alt+v` | read the local clipboard: attach a screenshot, or paste text; `super+v` is Command+V on macOS when the terminal forwards it; use `alt+v` on Windows, where the terminal keeps `ctrl+v` for itself |
 | terminal paste | goes into the prompt as text |
 
+Pastes longer than 500 characters appear as `[Pasted text #N +M chars]` while you compose; the full text is sent when you submit. Backspace immediately after the placeholder removes the whole pasted block.
+
 **Panels.** Plugins can dock panels beside, above or below the session (`bone.ui.panel`). Click one (or use the key its plugin gives) to give it the keyboard: the arrows, `pageup`/`pagedown`, `home`/`end` and the wheel scroll it, `tab`/`shift+tab` move to the next/previous panel and back to the prompt, `esc` returns to the prompt. The wheel over a panel always scrolls that panel.
 
 **Approval popup.** By default tool calls run without asking. Custom hooks can pause with `bone.ask`; a TUI handler displays the question and replies with `ask/respond` (see [lua.md](lua.md#asking-the-user)).
 
-**Agents sidebar** (`ctrl+o`, `/sessions`): a docked left column groups top-level conversations into **Running** (animated spinners), **Recent** (active or opened within the last hour by default; configure `bone.ui.sessions_recent_seconds` in `tui.lua`), and **History**, newest activity first within each group. It shows titles, last-activity times, total input + output tokens, and user-turn counts. Type to filter by title or directory, `up`/`down` to select, and `enter` or a mouse click to open. First open selects the current chat. Switching leaves the sidebar open and returns keyboard focus to the prompt; background turns keep running. `ctrl+o` focuses it again, or closes it when already focused; `esc` returns to the prompt without closing it. Page keys and `home`/`end` navigate longer lists; the mouse wheel scrolls. Running status updates live, including turns already active when connecting to the core; usage totals refresh when turns finish. `tab` switches to the **Processes** page, remembering selection and scroll on each tab: every chat's background shells and running sub-agents, grouped by chat, whichever chat is on screen. `enter` opens the chat a shell belongs to, or the sub-agent's own chat, and `x` stops the selected one. The tray below the prompt only shows the on-screen chat's shells and sub-agents.
+**Conversations sidebar** (`ctrl+o`, `/sessions`): a docked left column has **Chats** and **Processes** tabs. Chats groups top-level conversations into **Recent** (running, active or opened within the last hour by default; configure `bone.ui.sessions_recent_seconds` in `tui.lua`) and **History**, newest activity first within each group. Running chats show animated spinners. `/archive` moves the current conversation to History and starts a new one; it does not delete the session. It shows titles, last-activity times, total input + output tokens, and user-turn counts. Type to filter by title or directory, `up`/`down` to select, and `enter` or a mouse click to open. First open selects the current chat. Switching leaves the sidebar open and returns keyboard focus to the prompt; background turns keep running. `ctrl+o` focuses it again, or closes it when already focused; `esc` returns to the prompt without closing it. Page keys and `home`/`end` navigate longer lists; the mouse wheel scrolls. Running status updates live, including turns already active when connecting to the core; usage totals refresh when turns finish. `tab` switches to the **Processes** page, remembering selection and scroll on each tab: every chat's background shells and running sub-agents, grouped by chat, whichever chat is on screen. `enter` opens the chat a shell belongs to, or the sub-agent's own chat, and `x` stops the selected one. The tray below the prompt only shows the on-screen chat's shells and sub-agents.
 
 ## Images
 
@@ -83,22 +88,34 @@ The model can also use `read_file` to view PNG, JPEG and WebP files on the core 
 | `/paste` | paste a screenshot or text from the local clipboard |
 | `/attach PATH` | attach a PNG, JPEG or WebP file |
 | `/detach [N|all]` | remove an attachment (default: the last one) |
-| `/model [name]` | show the current model and provider, or set the model for the current provider |
+| `/model [name]` | show or change the on-screen session's model for its selected provider |
+| `/provider` | open the Providers page in `/config` |
+| `/tui`, `/tui use NAME`, `/tui create NAME [bare]`, `/tui delete NAME` | choose standard, bare, or an editable TUI library; create a copy or move an inactive copy aside |
 | `/runtime`, `/runtime reset FILE`, `/runtime reset all` | your copies of built-in Lua files in `~/.bone/runtime/` (bone never overwrites them); reset goes back to the built-in ones, keeping your copies in `~/.bone/runtime-backup/` |
 | `/new`, `/clear` | start a new session |
+| `/archive` | move this conversation to History and start a new session |
+| `/term [command]`, `/terminal [command]`, `/term close` | open a terminal panel on the TUI's machine (Unix), or close it and stop its program |
 | `/sessions`, `/resume` | pick a session to open |
 | `/rename {title}` | give this session a title |
 | `/fork`, `/fork {N}` | continue in a copy of this session; with N, from before turn N (to try that turn again differently). The original stays as it was |
-| `/compact`, `/compact clear` | summarize the older part of this session for the model (the latest turns stay word for word); the chat and the session file keep everything, and one line notes the tokens saved. `clear` sends the whole history again. Bone also compacts by itself when the model says the context is too long, or before a call over `compact.limit` (`/config` → Compaction) |
-| `/queue`, `/queue clear`, `/queue resume` | list the queued messages, empty the queue, let a paused queue go on (after a cancel, restart or queued-message error) |
+| `/compact`, `/compact clear` | summarize this session for the model (`compact.keep` controls how many recent turns stay word for word; default 0); the chat and the session file keep everything, and one line notes the tokens saved. `clear` sends the whole history again. Bone also compacts by itself when the model says the context is too long, or before a call over `compact.limit` (`/config` → General → Compaction) |
+| `/queue`, `/queue clear`, `/queue resume` | list the queued messages, empty the queue, let a paused queue go on (after a cancel, restart or failed queued-turn start) |
 | `/quit`, `/exit`, `/q` | quit |
 | `/plugins` | open the plugin settings; `/plugins list` lists plugins (TUI and core halves); `/plugins load name`, `/plugins unload name`, `/plugins reload name` act on both halves (picking up edits to their files); `/plugins reload` reloads the core's whole Lua configuration (`core.lua` and core plugins) |
 
 `/rename`, `/fork`, `/compact` and `/plugins` are Lua commands from `runtime/lua/bone/commands.lua`: change or remove them like any other (`bone.cmd.del("fork")`).
 
+**Queue cancellation.** Cancelling a turn normally pauses older queued messages. Sending a new message resumes them; if the cancelled turn is still winding down, the new message goes ahead of the older queue and runs next. Queue save failures are reported without rejecting accepted messages, so those messages can still run but may be lost on restart.
+
 Enter on a partial name runs the highlighted suggestion (`/ses` + enter opens the picker). A message that really starts with `/` can be sent as `//like this`; paths such as `/etc/hosts …` are sent as messages anyway. Commands from Lua or plugins show up in the suggestions too.
 
-**Help popup.** Type to filter the current tab; `tab` / `shift+tab` or `left` / `right` switch between Commands, Keys and Docs. Search matches command aliases and descriptions too, and includes commands registered by plugins. Use `up` / `down`, the wheel, `pageup` / `pagedown` or `home` / `end` to navigate; `ctrl+u` clears the search. `enter` on a command puts it in the prompt ready to edit and submit; on a shortcut or doc topic, it opens the guide in a scrollable window. Close the guide with `esc` to return to the same search. `esc` closes help and returns to your draft. The Keys tab describes the default mappings; your `tui.lua` can override them.
+**Help popup.** Type to filter the current tab; `tab` / `shift+tab` or `left` / `right` switch between Commands, Keys and Docs. Search matches command aliases and descriptions too, and includes commands registered by plugins. Use `up` / `down`, the wheel, `pageup` / `pagedown` or `home` / `end` to navigate; `ctrl+u` clears the search. `enter` on a command puts it in the prompt ready to edit and submit; on a shortcut or doc topic, it opens the guide in a scrollable window. Close the guide with `esc` to return to the same search. `esc` closes help and returns to your draft. The Keys tab describes the default mappings; your `tui.lua` can override them. Described user and plugin mappings appear too. Docs includes usage, Lua, protocol, architecture and the customization guides (`/help customizing` or `/help customizing/customizing-tui`). Loaded plugins' READMEs are also available.
+
+## Terminal panels and chat windows
+
+`/term` opens your shell in a bottom panel; `/term cargo test` runs a command instead. Focused terminals send keys and pasted text to the program, except `ctrl+]` / `ctrl+5`, which return focus to the prompt; `shift+pageup` / `shift+pagedown` scroll history. From the prompt, `ctrl+]` focuses the last terminal or opens one. Closing the panel stops its program; an interactive shell's exit closes it, while a command's output remains until closed. These terminals use local TUI jobs and currently require Unix; they are separate from core-side background shell jobs shown in the tray.
+
+Lua layouts can show several chats at once, each with its own prompt, statusline, draft and scroll position. Chat numbers start at 0 and exist even before a new chat has a session ID. See `/help chat windows` for the layout API, or `/help customizing/customizing-tui` for editable libraries and UI configuration.
 
 ## Markdown popup
 
@@ -120,7 +137,7 @@ Implementation: `require("bone.help").markdown(path)` in the existing embedded `
 | `diff_preview_lines` | 8 | rows of diff under each edit |
 | `prompt_max_height` | 10 | prompt height limit |
 
-Options are set in `~/.bone/tui.lua` (`bone.o.tool_detail = "rows"`). What you choose with `ctrl+t` and `ctrl+r` is remembered in `~/.bone/settings.json`, which bone writes for you; `tui.lua` still wins when it sets the same option. The same file remembers which provider to use and your changes to providers (`"provider"`, `"providers": { "<name>": { "model": … } }`): `/config` edits every provider's settings there, over what `core.lua` gives them, and adds new ones.
+Options are set in `~/.bone/tui.lua` (`bone.o.tool_detail = "rows"`). What you choose with `ctrl+t` and `ctrl+r` is remembered in `~/.bone/settings.json`, which bone writes for you; `tui.lua` still wins when it sets the same option. The same file remembers the default provider and provider settings (`"provider"`, `"providers": { "<name>": { "model": … } }`): `/config` edits these over what `core.lua` gives them and adds new providers. Sessions persist their own provider/model selection; selecting a provider or explicitly setting the selected provider's model in the TUI updates the on-screen session too, without moving other sessions. Resetting a model field changes the default, not an existing session's saved selection.
 
 ## Command line
 

@@ -164,9 +164,13 @@ fn setup(config_dir: Option<PathBuf>) -> mlua::Result<Lua> {
     install_text(&lua, &bone)?;
     // The docs, for /help.
     let docs = lua.create_table()?;
-    for (name, text) in DOCS {
+    for (name, text) in DOCS.iter().chain(
+        bone_lua::DOCS
+            .iter()
+            .filter(|(name, _)| name.starts_with("customizing")),
+    ) {
         let d = lua.create_table()?;
-        d.set("name", *name)?;
+        d.set("name", name.trim_end_matches(".md"))?;
         d.set("text", *text)?;
         docs.push(d)?;
     }

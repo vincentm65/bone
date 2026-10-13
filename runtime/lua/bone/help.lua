@@ -75,7 +75,7 @@ end
 -- with tui/defaults.lua; user mappings can replace the defaults.
 local KEYS = {
   { "enter", "send a message; during a turn, queue it", "Messaging" },
-  { "ctrl+v / alt+v", "paste clipboard screenshot or text (alt+v on Windows, /paste if intercepted)", "Messaging" },
+  { "ctrl+v / super+v / alt+v", "paste clipboard screenshot or text (Command+V on macOS if forwarded; alt+v on Windows; /paste if intercepted)", "Messaging" },
   { "alt+enter / shift+enter / ctrl+j", "insert a new line", "Messaging" },
   { "ctrl+c", "cancel the turn, clear the prompt, or press twice to quit", "Messaging" },
   { "up / down", "move in the prompt or recall message history", "Messaging" },
@@ -85,7 +85,7 @@ local KEYS = {
   { "ctrl+n", "start a new session", "Sessions" },
   { "ctrl+d", "quit on an empty prompt", "Sessions" },
   { "f1", "open this help browser", "Sessions" },
-  { "ctrl+]", "open or focus a terminal (/term); in it, back to the prompt", "Sessions" },
+  { "ctrl+] / ctrl+5", "open or focus a terminal (/term, Unix); in it, back to the prompt", "Sessions" },
   { "shift+pageup / shift+pagedown", "scroll back in a focused terminal", "Sessions" },
   { "pageup / pagedown", "scroll the conversation or command suggestions", "Reading" },
   { "shift+up / shift+down / wheel", "scroll the conversation or command suggestions", "Reading" },
@@ -98,6 +98,10 @@ local KEYS = {
   { "ctrl+b", "fold or expand the tray", "Tray" },
   { "tab in the tray", "switch between Queue, Agents and Jobs", "Tray" },
   { "enter in the tray", "edit a queued message, open an agent or a shell terminal", "Tray" },
+  { "c in the tray", "cancel the selected agent or shell job", "Tray" },
+  { "s in Queue", "switch steer/next; when idle, send now", "Tray" },
+  { "shift+up / shift+down in Queue", "reorder queued messages", "Tray" },
+  { "d / r in Queue", "drop the selected message / resume a paused queue", "Tray" },
   { "esc in a sub-agent", "return to the main session when the prompt is empty", "Tray" },
   { "ctrl+left / ctrl+right", "move by word (also alt+left / alt+right)", "Editing" },
   { "home / end", "start or end of line (also ctrl+a / ctrl+e)", "Editing" },

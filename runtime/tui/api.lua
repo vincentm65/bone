@@ -158,7 +158,7 @@ end
 ---   bone.settings.all()                    -- every saved setting
 ---   bone.settings.set(path, value, cb)     -- save it for good; cb(all, err)
 ---   bone.settings.reset(path, cb)          -- remove it (back to the default)
---- Paths are dotted: "provider", "models.<provider>", "tui.<option>" (applied
+--- Paths are dotted: "provider", "providers.<provider>.model", "tui.<option>" (applied
 --- before tui.lua, which runs last), or a plugin's own "<plugin>.<key>".
 --- Every client hears the change as the `settings/changed` event.
 bone.settings = {
