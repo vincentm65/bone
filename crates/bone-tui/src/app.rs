@@ -524,10 +524,11 @@ impl App {
         self.chats[self.current].session_id().map(str::to_owned)
     }
 
-    pub(crate) fn chat_by_session(&self, session_id: &str) -> Option<BufferId> {
-        self.chats
-            .iter()
-            .position(|c| c.session_id() == Some(session_id))
+    /// A chat by its session id, or by its number (`bone.chat.session().chat`),
+    /// which a new chat has before its session.
+    pub(crate) fn chat_by_session(&self, id: &str) -> Option<BufferId> {
+        (self.chats.iter().position(|c| c.session_id() == Some(id)))
+            .or_else(|| id.parse().ok().filter(|&b| b < self.chats.len()))
     }
 
     pub fn show_chat(&mut self, id: BufferId) {
@@ -563,7 +564,7 @@ impl App {
         let session_id = self.chats[id].session_id().map(str::to_owned);
         self.fire(
             "chat/shown",
-            serde_json::json!({ "session_id": session_id }),
+            serde_json::json!({ "session_id": session_id, "chat": id }),
         );
         self.dirty = true;
     }
@@ -1471,12 +1472,12 @@ impl App {
 
     /// Open a session's chat, and show it unless `show` is false (it then
     /// loads in the background, for a `chat:<id>` layout leaf).
-    pub fn open_session(&mut self, session_id: String, show: bool) {
+    pub fn open_session(&mut self, session_id: String, show: bool) -> BufferId {
         if let Some(buf) = self.chat_by_session(&session_id) {
             if show {
                 self.show_chat(buf);
             }
-            return;
+            return buf;
         }
         // Reuse an untouched new chat rather than piling them up.
         let c = &self.chats[self.current];
@@ -1504,7 +1505,7 @@ impl App {
                     }
                     if buf == app.current {
                         app.request_processes(session_id.clone());
-                        let ev = serde_json::json!({ "session_id": session_id });
+                        let ev = serde_json::json!({ "session_id": session_id, "chat": buf });
                         app.fire("chat/shown", ev);
                     }
                 }
@@ -1516,6 +1517,7 @@ impl App {
             }
             trim_heap();
         });
+        buf
     }
 
     /// The session picker is Lua: `bone.ui.sessions()` (the default is in
@@ -1680,11 +1682,15 @@ impl App {
     /// Resume a session at startup: `None` for the newest one.
     pub fn resume(&mut self, id: Option<String>) {
         match id {
-            Some(id) => self.open_session(id, true),
+            Some(id) => {
+                self.open_session(id, true);
+            }
             None => self.request::<SessionList>(Empty {}, move |app, r| match r {
                 // A subagent's session is not one to resume.
                 Ok(list) => match list.into_iter().find(|s| s.owner.is_none()) {
-                    Some(info) => app.open_session(info.session_id, true),
+                    Some(info) => {
+                        app.open_session(info.session_id, true);
+                    }
                     None => app.info("No sessions to resume"),
                 },
                 Err(e) => app.error(format!("cannot list sessions: {e}")),

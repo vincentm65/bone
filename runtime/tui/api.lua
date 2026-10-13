@@ -976,8 +976,10 @@ function bone.chat.scroll(n)
   return api("chat_scroll", n)
 end
 
---- Open a session's chat without showing it (for a `chat:<id>` layout leaf);
---- it then follows the session's events like the chat on screen.
+--- Open a session's chat without showing it (for `chat:<id>` layout leaves);
+--- it then follows the session's events like the chat on screen. No
+--- session: a new chat. Returns the chat's number, which leaves and
+--- `bone.api.open_session` take in place of a session id.
 function bone.chat.open(session_id)
   return api("open_session", session_id, false)
 end

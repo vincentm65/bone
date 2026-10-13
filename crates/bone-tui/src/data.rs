@@ -227,7 +227,7 @@ impl App {
         let Some(chat) = self.data_chat(session) else {
             return Json::Null;
         };
-        let current = std::ptr::eq(chat, &self.chats[self.current]);
+        let buf = (self.chats.iter()).position(|c| std::ptr::eq(c, chat));
         let items = chat.items();
         let mut v = match &chat.session {
             Some(info) => serde_json::to_value(info).unwrap_or_else(|_| json!({})),
@@ -235,7 +235,8 @@ impl App {
         };
         v["title"] = json!(chat.title());
         v["new"] = json!(chat.session.is_none());
-        v["current"] = json!(current);
+        v["chat"] = json!(buf);
+        v["current"] = json!(buf == Some(self.current));
         v["running"] = json!(chat.turn.is_some() || chat.starting);
         v["starting"] = json!(chat.starting);
         v["queue_paused"] = json!(chat.queue_paused);

@@ -1939,9 +1939,16 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             to_lua(lua, &serde_json::Value::Array(app.tui_health()))?,
         ),
         "open_session" => {
-            let (id, show): (String, Option<bool>) = args(lua, a)?;
-            app.open_session(id, show.unwrap_or(true));
-            ret(lua, ())
+            // No session: a new chat (for a window to show).
+            let (id, show): (Option<String>, Option<bool>) = args(lua, a)?;
+            let buf = match id {
+                Some(id) => app.open_session(id, show.unwrap_or(true)),
+                None => {
+                    app.chats.push(crate::chat::ChatBuffer::new(None));
+                    app.chats.len() - 1
+                }
+            };
+            ret(lua, buf)
         }
         "geometry" => {
             let rect = |r: &ratatui::layout::Rect| {

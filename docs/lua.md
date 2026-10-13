@@ -709,7 +709,7 @@ bone.chat.update(id, { text = "built", ok = true })  -- merge fields, redraw it
 bone.chat.remove(id)
 bone.chat.at(x, y)                      -- the item at a screen cell: { index, line } or nil
 bone.chat.view()                        -- { top, height, rows, follow, first, last }
-bone.chat.open(session_id)              -- open a chat without showing it (for chat:<id> leaves)
+bone.chat.open(session_id)              -- open a chat without showing it; no id: a new chat. Returns its number
 bone.chat.scroll_to(4, "center")        -- "top" (default), "center" or "bottom"
 bone.chat.scroll(-5)                    -- rows (negative is up), or "top" / "bottom"
 bone.chat.refresh_in(500)               -- inside a chat view: draw this item again in 500 ms
@@ -984,7 +984,7 @@ for an example.
 
 #### Chat windows in the layout tree
 
-`chat`, `prompt`, `divider` and `statusline` show the chat on screen. With `:<session id>` they show that session's instead, so a layout can hold any number of chats, each with its own prompt and statusline:
+`chat`, `prompt`, `divider` and `statusline` show the chat on screen. With `:<session id>`, or `:<n>` for chat number `n` (`bone.chat.session().chat`, which a new chat has before its session), they show that chat instead, so a layout can hold any number of chats, each with its own prompt and statusline:
 
 ```lua
 bone.chat.open(b)  -- load it without leaving the chat on screen
