@@ -149,6 +149,9 @@ pub struct ActiveTurn {
     pub cancel: CancellationToken,
     /// The turn has decided to end; steer messages wait for the next one.
     pub closing: bool,
+    /// Messages sent after the turn was cancelled (they lead the queue).
+    /// Any at all and the queue goes on afterwards instead of pausing.
+    pub after_cancel: usize,
 }
 
 impl Session {

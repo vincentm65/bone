@@ -113,12 +113,13 @@ pub(crate) async fn run_turn(
         Err(Stop::Cancelled) => TurnOutcome::Cancelled,
         Err(Stop::Failed(message)) => TurnOutcome::Failed { message },
     };
-    {
+    let resumed = {
         let mut s = session.lock().unwrap();
-        if s.active.as_ref().is_some_and(|a| a.turn_id == turn_id) {
-            s.active = None;
+        match s.active.take_if(|a| a.turn_id == turn_id) {
+            Some(a) => a.after_cancel > 0,
+            None => false,
         }
-    }
+    };
     let cancelled = matches!(outcome, TurnOutcome::Cancelled);
     let ev = json!({ "session_id": turn.session_id, "turn_id": turn_id, "outcome": outcome });
     // Cleanup hooks must run even when the turn's cancellation token is set.
@@ -149,7 +150,7 @@ pub(crate) async fn run_turn(
         outcome,
     });
     // Then the next queued message, if any.
-    inner.after_turn(&session, cancelled);
+    inner.after_turn(&session, cancelled && !resumed);
 }
 
 impl Turn<'_> {

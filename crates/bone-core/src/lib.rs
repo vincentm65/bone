@@ -151,6 +151,7 @@ impl Inner {
                 turn_id,
                 cancel: cancel.clone(),
                 closing: false,
+                after_cancel: 0,
             });
             (turn_id, cancel)
         };
@@ -223,6 +224,17 @@ impl Inner {
             .as_ref()
             .is_none_or(|a| a.closing || a.cancel.is_cancelled());
         let id = s.enqueue_with_images(text, if ending { QueueMode::Next } else { mode }, images);
+        // Sent after a cancel, while the turn winds down: it goes first, as
+        // it would have once idle, and the queue doesn't pause.
+        if let Some(a) = s.active.as_mut().filter(|a| a.cancel.is_cancelled()) {
+            let at = a.after_cancel;
+            a.after_cancel += 1;
+            let q = s.queue.pop().expect("just queued");
+            let at = at.min(s.queue.len());
+            s.queue.insert(at, q);
+            s.queue_paused = false;
+            s.save_queue();
+        }
         self.emit_queue(&s, None);
         Ok(QueueAddResult {
             id: Some(id),
@@ -288,11 +300,16 @@ impl Inner {
     }
 
     /// A turn ended: steer messages that never joined it wait for the next
-    /// one; a cancelled turn pauses the queue, any other goes on to the next
-    /// queued message.
-    pub(crate) fn after_turn(self: &Arc<Self>, session: &session::SessionHandle, cancelled: bool) {
+    /// one; `pause` (a cancelled turn) pauses the queue, else it goes on to
+    /// the next queued message.
+    pub(crate) fn after_turn(self: &Arc<Self>, session: &session::SessionHandle, pause: bool) {
         {
             let mut s = session.lock().unwrap();
+            // A message sent during turn_end hooks has already started the
+            // next turn: the queue is its business now.
+            if s.active.is_some() {
+                return;
+            }
             let mut changed = false;
             for q in s.queue.iter_mut() {
                 if q.mode == QueueMode::Steer {
@@ -300,7 +317,7 @@ impl Inner {
                     changed = true;
                 }
             }
-            if cancelled && !s.queue.is_empty() && !s.queue_paused {
+            if pause && !s.queue.is_empty() && !s.queue_paused {
                 s.queue_paused = true;
                 changed = true;
             }
