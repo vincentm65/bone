@@ -215,9 +215,10 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
                     continue;
                 }
                 // Trusting or untrusting the project (or a reload) changes
-                // what is watched: start comparing again, without a reload.
+                // what is watched, and a plugin Lua loaded itself is already
+                // live: start comparing again, without a reload.
                 let project = app.project_dir();
-                if project != watched_project {
+                if std::mem::take(&mut app.rewatch) || project != watched_project {
                     watched_project = project;
                     lua_pending = None;
                     lua_state = lua_snapshot(app.config_dir.as_deref(), watched_project.as_deref());

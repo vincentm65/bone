@@ -1748,7 +1748,14 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             let mut params = from_lua(&params)?;
             normalize_image_lists(&mut params);
             let cb = f.map(|f| app.store_callback(lua, f)).transpose()?;
+            // Plugin files changed on purpose, before and in the callback.
+            let rewatch = matches!(
+                method.as_str(),
+                "plugin/load" | "plugin/unload" | "plugin/reload"
+            );
+            app.rewatch |= rewatch;
             app.request_raw(method.clone(), params, move |app, r| {
+                app.rewatch |= rewatch;
                 let Some(cb) = cb else {
                     if let Err(e) = r {
                         app.error(format!("{method}: {e}"));
@@ -2155,6 +2162,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                     "plugin {name} cannot unload itself while it runs"
                 )));
             }
+            app.rewatch = true;
             match op {
                 "plugin_load" => app.load_plugin_by_name(&name),
                 "plugin_unload" => app.unload_plugin(&name),

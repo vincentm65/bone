@@ -252,6 +252,9 @@ pub struct App {
     pub reload_core: bool,
     /// Reload the TUI's Lua from the main loop (a library was chosen).
     pub reload_requested: bool,
+    /// Lua loaded or unloaded a plugin itself: the watcher takes the files
+    /// as they are instead of reloading (which would drop pending callbacks).
+    pub rewatch: bool,
     /// The library before `/tui` switched, chosen again if the switch fails.
     pub library_prev: Option<String>,
 }
@@ -344,6 +347,7 @@ impl App {
             load_failures: Vec::new(),
             reload_core: false,
             reload_requested: false,
+            rewatch: false,
             library_prev: None,
         };
         crate::lua::init(&mut app, config_dir);
