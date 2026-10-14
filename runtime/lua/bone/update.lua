@@ -42,7 +42,7 @@ local function apply(latest, plugins)
     end
     catalog.install(e, function(ok, err)
       if not ok or err then
-        bone.notify(e.name .. ": " .. tostring(err), "error")
+        bone.notify(catalog.label(e) .. ": " .. tostring(err), "error")
       end
       plugin(i + 1)
     end)
@@ -67,7 +67,7 @@ end
 local function ask(latest, plugins)
   local names = {}
   for _, e in ipairs(plugins) do
-    names[#names + 1] = e.name .. " " .. tostring(e.version)
+    names[#names + 1] = catalog.label(e) .. " " .. tostring(e.version)
   end
   local what = latest and ("bone " .. bone.version .. " → " .. latest) or ""
   if #names > 0 then

@@ -105,7 +105,7 @@ function M.open(opts)
       for _, e in ipairs(st.packages or {}) do
         if e.state == "available" then
           out[#out + 1] = {
-            label = e.name,
+            label = catalog.label(e),
             value = (st.picked[e.name] and "[x] " or "[ ] ") .. (e.description or ""),
             package = e,
           }
@@ -150,9 +150,9 @@ function M.open(opts)
         end
         local remaining = #queue
         for _, e in ipairs(queue) do
-          say("installing " .. e.name .. "…")
+          say("installing " .. catalog.label(e) .. "…")
           catalog.install(e, function(ok, err)
-            say(ok and ("installed " .. e.name) or ("error: " .. e.name .. ": " .. tostring(err)))
+            say(ok and ("installed " .. catalog.label(e)) or ("error: " .. catalog.label(e) .. ": " .. tostring(err)))
             remaining = remaining - 1
             if remaining == 0 then
               finished()

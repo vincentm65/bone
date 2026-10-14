@@ -106,6 +106,11 @@ local function state_of(entry, installed)
   return "installed"
 end
 
+--- A package's display name: its catalog title ("Git Diff"), else its name.
+function M.label(entry)
+  return type(entry.title) == "string" and entry.title ~= "" and entry.title or entry.name
+end
+
 --- Whether version `have` is at least `need` ("3.0.2"; a missing `need`
 --- always is).
 function M.at_least(have, need)
@@ -145,7 +150,7 @@ function M.index(cb)
     end
     entries = kept
     table.sort(entries, function(a, b)
-      return a.name < b.name
+      return M.label(a):lower() < M.label(b):lower()
     end)
     cb(entries)
   end)
@@ -382,7 +387,7 @@ function M.open()
       if ORDER[a.state] ~= ORDER[b.state] then
         return ORDER[a.state] < ORDER[b.state]
       end
-      return a.name < b.name
+      return M.label(a):lower() < M.label(b):lower()
     end)
     return list
   end
@@ -437,7 +442,7 @@ function M.open()
     end
     local name_w = 0
     for _, e in ipairs(list) do
-      name_w = math.max(name_w, bone.text.width(e.name))
+      name_w = math.max(name_w, bone.text.width(M.label(e)))
     end
     name_w = name_w + 3
     local room = math.max(math.min(16, (ctx.height or 24) - 10), 3)
@@ -456,7 +461,7 @@ function M.open()
       local prefix = { { cursor, i == st.sel and "Accent" or "Dim" }, { "[", "Dim" } }
       prefix[#prefix + 1] = { check, st.selected[e.name] and "Accent" or "Dim" }
       prefix[#prefix + 1] = { "] ", "Dim" }
-      prefix[#prefix + 1] = { pad(e.name, name_w), row_hl }
+      prefix[#prefix + 1] = { pad(M.label(e), name_w), row_hl }
       prefix[#prefix + 1] = { pad(e.version or "", 8), muted_hl }
       prefix[#prefix + 1] = { bone.text.truncate(e.description or "", math.max(w - name_w - 13, 1)), muted_hl }
       out[#out + 1] = prefix
@@ -519,7 +524,7 @@ function M.open()
       redraw()
       M.install(e, function(ok)
         if not ok then
-          st.progress.failures[#st.progress.failures + 1] = e.name
+          st.progress.failures[#st.progress.failures + 1] = M.label(e)
         end
         st.progress.done = st.progress.done + 1
         remaining = remaining - 1
@@ -579,17 +584,17 @@ function M.open()
       end
       local verb = e.state == "available" and "install" or (e.state == "update" and "update" or "reinstall")
       st.ask = {
-        text = verb .. " " .. e.name .. "? Its Lua runs with your permissions.",
+        text = verb .. " " .. M.label(e) .. "? Its Lua runs with your permissions.",
         action = function()
-          M.install(e, done(e.name .. " " .. verb .. "ed" .. (e.kind == "tui" and "; /tui use " .. e.name .. " to switch" or "")))
+          M.install(e, done(M.label(e) .. " " .. verb .. "ed" .. (e.kind == "tui" and "; /tui use " .. e.name .. " to switch" or "")))
         end,
       }
     elseif k == "x" and e and e.state ~= "available" and not st.busy then
       st.ask = {
-        text = "remove " .. e.name .. "? It is moved to ~/.bone/"
+        text = "remove " .. M.label(e) .. "? It is moved to ~/.bone/"
           .. (e.kind == "tui" and "libraries/.deleted-…" or "plugins-backup/") .. ".",
         action = function()
-          M.remove(e.name, done(e.name .. " removed"), e.kind)
+          M.remove(e.name, done(M.label(e) .. " removed"), e.kind)
         end,
       }
     end
