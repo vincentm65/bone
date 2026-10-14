@@ -104,7 +104,7 @@ The model can also use `read_file` to view PNG, JPEG and WebP files on the core 
 
 `/rename`, `/compact` and `/plugins` are Lua commands from `runtime/lua/bone/commands.lua`: change or remove them like any other (`bone.cmd.del("rename")`).
 
-Conversation branching is available through the optional [fork plugin](../plugins/fork/README.md): `/fork` opens a user-message tree popup, `/fork N` branches before user message N and restores it as an editable draft, and `/fork copy` copies an idle session. The original stays unchanged.
+Conversation branching is available through the optional fork plugin in the catalog (install it from `/catalog`): `/fork` opens a user-message tree popup, `/fork N` branches before user message N and restores it as an editable draft, and `/fork copy` copies an idle session. The original stays unchanged.
 
 **Queue cancellation.** Cancelling a turn normally pauses older queued messages. Sending a new message resumes them; if the cancelled turn is still winding down, the new message goes ahead of the older queue and runs next. Queue save failures are reported without rejecting accepted messages, so those messages can still run but may be lost on restart.
 

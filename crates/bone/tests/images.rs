@@ -99,13 +99,6 @@ impl Env {
         std::fs::write(config.path().join("core.lua"), format!(
             "bone.config.providers.fake = {{ base_url = '{url}', model = 'vision-test', supports_images = {supports_images} }}\nbone.config.compact = {{ keep = 1, auto = false }}"
         )).unwrap();
-        let fork_dir = config.path().join("plugins/fork");
-        std::fs::create_dir_all(&fork_dir).unwrap();
-        std::fs::write(
-            fork_dir.join("core.lua"),
-            include_str!("../../../plugins/fork/core.lua"),
-        )
-        .unwrap();
         let server = Server::new(Arc::new(Core::from_loaded(
             scripting::load_with(config.path(), &|_| None).unwrap(),
         )));
@@ -217,13 +210,12 @@ impl Env {
         }
     }
     /// Restart the server from the same config, read the attachment back,
-    /// and return the restarted client and the forked session's stored
-    /// messages.
-    async fn restart_and_fork(
+    /// and return the restarted client and the session's stored messages.
+    async fn restart(
         &self,
         client_name: &str,
         image_id: String,
-        fork_id: String,
+        session_id: String,
     ) -> (Arc<Client>, bone_proto::methods::SessionMessagesResult) {
         let restarted = Server::new(Arc::new(Core::from_loaded(
             scripting::load_with(self.config.path(), &|_| None).unwrap(),
@@ -237,7 +229,7 @@ impl Env {
         assert_eq!(STANDARD.decode(data.data).unwrap(), self.png);
         let messages = client
             .request::<SessionMessages>(SessionRef {
-                session_id: fork_id,
+                session_id,
             })
             .await
             .unwrap();
@@ -246,7 +238,7 @@ impl Env {
 }
 
 #[tokio::test]
-async fn image_only_send_persists_and_survives_restart_and_fork() {
+async fn image_only_send_persists_and_survives_restart() {
     let mut env = Env::new(true).await;
     let mut tui = env.tui().await;
     env.attach(&mut tui).await;
@@ -288,24 +280,8 @@ async fn image_only_send_persists_and_survives_restart_and_fork() {
         !saved.contains(&STANDARD.encode(&env.png)),
         "pixels leaked into session JSONL"
     );
-    let result = env
-        .client
-        .request::<LuaCall>(LuaCallParams {
-            name: "fork.create".into(),
-            args: json!({ "session_id": id }),
-            session_id: Some(id.clone()),
-            cwd: None,
-        })
-        .await
-        .unwrap();
-    let fork: bone_proto::types::SessionInfo =
-        serde_json::from_value(result["info"].clone()).unwrap();
-    env.client
-        .request::<SessionDelete>(SessionRef { session_id: id })
-        .await
-        .unwrap();
     let (_client, messages) = env
-        .restart_and_fork("restart-test", image.id, fork.session_id)
+        .restart("restart-test", image.id, id)
         .await;
     assert_eq!(messages.messages, stored.messages);
 }
@@ -683,29 +659,17 @@ async fn read_file_images_reach_provider_and_survive_restart_without_source_file
         assert_eq!(tool.images().len(), 1);
         assert!(tool.images()[0].data.is_none());
         assert_eq!(tool.images()[0].name, filename);
-        let result = env
-            .client
-            .request::<LuaCall>(LuaCallParams {
-                name: "fork.create".into(),
-                args: json!({ "session_id": id }),
-                session_id: Some(id.clone()),
-                cwd: None,
-            })
-            .await
-            .unwrap();
-        let fork: bone_proto::types::SessionInfo =
-            serde_json::from_value(result["info"].clone()).unwrap();
-        let (client, forked) = env
-            .restart_and_fork(
+        let (client, restarted) = env
+            .restart(
                 "read-file-restart",
                 tool.images()[0].id.clone(),
-                fork.session_id.clone(),
+                id.clone(),
             )
             .await;
-        assert_eq!(forked.messages, stored.messages);
+        assert_eq!(restarted.messages, stored.messages);
         client
             .request::<TurnStart>(TurnStartParams {
-                session_id: fork.session_id.clone(),
+                session_id: id.clone(),
                 text: "What did the image show?".into(),
                 images: Vec::new(),
             })
@@ -719,12 +683,12 @@ async fn read_file_images_reach_provider_and_survive_restart_without_source_file
             .find(|m| m["content"].is_array())
             .unwrap();
         env.assert_image(image_message, None);
-        followup.answer("The stored pixels survived restart and fork.");
+        followup.answer("The stored pixels survived restart.");
         tokio::time::timeout(WAIT, async {
             loop {
                 let state = client
                     .request::<SessionMessages>(SessionRef {
-                        session_id: fork.session_id.clone(),
+                        session_id: id.clone(),
                     })
                     .await
                     .unwrap();

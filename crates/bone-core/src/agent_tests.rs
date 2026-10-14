@@ -1913,31 +1913,8 @@ async fn parallel_calls_can_be_switched_off() {
 // ---- session management --------------------------------------------------------
 
 #[tokio::test]
-async fn sessions_can_be_renamed_forked_and_deleted() {
-    let mut h = Harness::with_lua(
-        include_str!("../../../plugins/fork/core.lua"),
-        vec![
-            Step::Reply(Completion {
-                content: "a1".into(),
-                reasoning_state: Some(ReasoningState {
-                    model: "m".into(),
-                    items: vec![json!({
-                        "type": "reasoning",
-                        "encrypted_content": "sealed",
-                        "summary": [],
-                        "nested": { "null": null, "empty": [], "array": [null, [], {}] }
-                    })],
-                    prefix: Some("original-prefix".into()),
-                    field: None,
-                }),
-                ..Default::default()
-            }),
-            text("a2"),
-            text("in fork"),
-            Step::Hang("…".into()),
-        ],
-    )
-    .await;
+async fn sessions_can_be_renamed_and_deleted() {
+    let mut h = Harness::new(vec![text("a1"), text("a2"), Step::Hang("…".into())]).await;
     for q in ["q1", "q2"] {
         h.start(q).await;
         h.until::<TurnFinished>().await;
@@ -1957,87 +1934,10 @@ async fn sessions_can_be_renamed_forked_and_deleted() {
     let store = crate::session::SessionStore::new(h._data.path());
     assert_eq!(store.list().unwrap()[0].title.as_deref(), Some("Typo hunt"));
 
-    // Fork from before the second turn: the first exchange only.
-    let result = h
-        .call::<LuaCall>(LuaCallParams {
-            name: "fork.create".into(),
-            args: json!({ "session_id": sid, "before_turn": 2 }),
-            session_id: Some(sid.clone()),
-            cwd: None,
-        })
-        .await
-        .unwrap();
-    let fork: SessionInfo = serde_json::from_value(result["info"].clone()).unwrap();
-    assert_eq!(result["draft"]["text"], "q2");
-    assert_eq!(result["draft"]["copied_count"], 2);
-    let tree = h
-        .call::<LuaCall>(LuaCallParams {
-            name: "fork.tree".into(),
-            args: json!({ "session_id": sid }),
-            session_id: Some(sid.clone()),
-            cwd: None,
-        })
-        .await
-        .unwrap();
-    assert_eq!(tree["edges"][&fork.session_id]["parent"], sid);
-    assert_eq!(tree["edges"][&fork.session_id]["before_turn"], 2);
-    assert_ne!(fork.session_id, sid);
+    // Not while a turn runs; then it is gone.
     let msgs = |id: &str| SessionRef {
         session_id: id.to_owned(),
     };
-    let forked = h
-        .call::<SessionMessages>(msgs(&fork.session_id))
-        .await
-        .unwrap();
-    assert_eq!(forked.messages.len(), 2);
-    assert_eq!(forked.messages, h.transcript().await[..2]);
-    // The installed plugin must use raw messages: Lua table conversion alone
-    // would alter empty arrays and nulls in sealed provider state.
-    let reopened = crate::session::SessionStore::new(h._data.path());
-    let reloaded = reopened.get(&fork.session_id).unwrap();
-    assert_eq!(reloaded.lock().unwrap().messages, forked.messages);
-    assert_eq!(forked.info.title.as_deref(), Some("q1"));
-    // It goes its own way; the original is untouched.
-    let turn = h
-        .call::<TurnStart>(TurnStartParams {
-            session_id: fork.session_id.clone(),
-            text: "other way".into(),
-            images: Vec::new(),
-        })
-        .await
-        .unwrap()
-        .turn_id;
-    assert_eq!(turn, 2);
-    h.until::<TurnFinished>().await;
-    assert_eq!(
-        h.call::<SessionMessages>(msgs(&fork.session_id))
-            .await
-            .unwrap()
-            .messages
-            .len(),
-        4
-    );
-    assert_eq!(h.transcript().await.len(), 4);
-    let result = h
-        .call::<LuaCall>(LuaCallParams {
-            name: "fork.create".into(),
-            args: json!({ "session_id": sid }),
-            session_id: Some(sid.clone()),
-            cwd: None,
-        })
-        .await
-        .unwrap();
-    let whole: SessionInfo = serde_json::from_value(result["info"].clone()).unwrap();
-    assert_eq!(
-        h.call::<SessionMessages>(msgs(&whole.session_id))
-            .await
-            .unwrap()
-            .messages
-            .len(),
-        4
-    );
-
-    // Not while a turn runs; then it is gone.
     h.start("busy").await;
     h.until::<MessageDelta>().await;
     let e = h.call::<SessionDelete>(msgs(&sid)).await.unwrap_err();
@@ -2060,7 +1960,7 @@ async fn sessions_can_be_renamed_forked_and_deleted() {
         .into_iter()
         .map(|s| s.session_id)
         .collect();
-    assert!(!left.contains(&sid) && left.len() == 2);
+    assert!(left.is_empty());
 }
 
 #[tokio::test]

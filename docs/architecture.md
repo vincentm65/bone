@@ -69,4 +69,4 @@ The TUI reads native clipboard pixels in a short-lived helper process; a ten-sec
 - `bone/tests/headless.rs`: the real binary over stdio and sockets.
 - `bone/tests/tui.rs`: the standard TUI driven headlessly (`bone_tui::Headless`) against a real core and a fake model, with screen and interaction assertions.
 
-- `bone/tests/images.rs`: image upload, model payloads, persistence/forks, queue editing, draft races, compaction, and optional native clipboard through a separate headless process.
+- `bone/tests/images.rs`: image upload, model payloads, persistence/restart, queue editing, draft races, compaction, and optional native clipboard through a separate headless process.
