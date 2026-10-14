@@ -78,6 +78,17 @@ impl Runtime {
         (entry, model)
     }
 
+    /// Proactive compaction uses the session's provider, not a request override
+    /// or the summary provider. Resolve inheritance before treating zero as off.
+    pub(crate) fn compact_limit(&self, name: Option<&str>, fallback: Option<u64>) -> Option<u64> {
+        name.or(self.selected.as_deref())
+            .and_then(|n| self.models.get(n))
+            .unwrap_or(&self.config.provider)
+            .compact_limit
+            .or(fallback)
+            .filter(|&limit| limit > 0)
+    }
+
     /// The provider for a session locked to `pin`.
     pub fn pinned(&self, pin: &Pin) -> Result<Arc<dyn Provider>, String> {
         if *pin == self.model_of(None, &Json::Null) {
@@ -95,6 +106,7 @@ impl Runtime {
             .iter()
             .map(|(name, p)| ModelInfo {
                 supports_images: p.supports_images,
+                compact_limit: p.compact_limit,
                 name: name.clone(),
                 model: (if selected.as_ref() == Some(name) {
                     &model

@@ -288,7 +288,7 @@ local function tokens(n)
   return tostring(n)
 end
 
-local WHY = { limit = " (over compact.limit)", overflow = " (the context was full)" }
+local WHY = { limit = " (over compaction limit)", overflow = " (the context was full)" }
 
 bone.on("session/compacted", function(ev)
   local text

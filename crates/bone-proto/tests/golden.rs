@@ -312,6 +312,7 @@ fn requests() {
         vec![
             ModelInfo {
                 supports_images: None,
+                compact_limit: None,
                 name: "qwen".into(),
                 model: "qwen".into(),
                 kind: None,
@@ -327,6 +328,7 @@ fn requests() {
             },
             ModelInfo {
                 supports_images: None,
+                compact_limit: None,
                 name: "claude".into(),
                 model: "claude-sonnet-5-5".into(),
                 kind: Some("anthropic".into()),

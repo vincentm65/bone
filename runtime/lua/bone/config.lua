@@ -237,6 +237,8 @@ function M.open(want)
         value = p.api_auto and "auto" or p.api or "completions", changed = changed("api"),
         desc = (p.api_auto and ("auto picks " .. (p.api or "completions") .. " for this URL; ") or "")
           .. "set it for a gateway that forwards /responses or /messages" },
+      { kind = "pfield", key = "compact_limit", label = "Compaction limit", type = "integer", value = p.compact_limit,
+        changed = changed("compact_limit"), desc = "tokens before proactive compaction; unset: global compact.limit; 0: disabled (overflow retry unchanged)" },
     }
     if not p.current then
       out[#out + 1] = { kind = "paction", action = "use", label = "Use this provider" }
@@ -408,6 +410,12 @@ function M.open(want)
   -- One field of the provider being edited (or of a new one's draft).
   -- An empty text, "default" or "auto" goes back to core.lua's value.
   function save_provider_field(row, value)
+    if row.key == "compact_limit" and value ~= "" then
+      value = tonumber(value)
+      if not value or value < 0 or value % 1 ~= 0 then
+        return saved_note(row.label .. " must be a nonnegative whole number")
+      end
+    end
     local pv = st.prov
     if pv.new then
       pv.draft[row.key] = value

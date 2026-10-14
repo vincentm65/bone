@@ -692,6 +692,10 @@ method!(
 pub struct ModelInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub supports_images: Option<bool>,
+    /// Proactive compaction token limit: `None` inherits `compact.limit`,
+    /// and zero disables proactive compaction for this provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_limit: Option<u64>,
     /// The key in `bone.config.providers`.
     pub name: String,
     pub model: String,

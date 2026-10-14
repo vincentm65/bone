@@ -2863,7 +2863,7 @@ async fn compact_command_and_chat_note() {
     .await;
     let screen = h.screen(120, 20);
     assert!(
-        screen.contains("compaction failed (over compact.limit): the summary failed: HTTP 429"),
+        screen.contains("compaction failed (over compaction limit): the summary failed: HTTP 429"),
         "{screen}"
     );
     assert!(screen.contains("context unchanged"), "{screen}");
@@ -4576,6 +4576,30 @@ async fn saved_settings_apply_before_tui_lua_and_keys_save_them() {
     assert_eq!(
         h.lua("=bone.settings.get('tui.tool_detail')").await,
         "\"rows\""
+    );
+}
+
+#[tokio::test]
+async fn config_provider_compact_limit_saves_numbers_and_resets_empty() {
+    let mut h = Harness::new().await;
+    h.input("/provider{enter}").await;
+    h.input("e").await;
+    for _ in 0..20 {
+        if h.screen(100, 34).contains("› Compaction limit") {
+            break;
+        }
+        h.input("{down}").await;
+    }
+    let path = "providers.ds.compact_limit";
+    h.input("{enter}{ctrl+u}0{enter}").await;
+    assert_eq!(
+        h.requests("settings/set").last().unwrap(),
+        &json!({ "path": path, "value": 0 })
+    );
+    h.input("{enter}{ctrl+u}{enter}").await;
+    assert_eq!(
+        h.requests("settings/reset").last().unwrap(),
+        &json!({ "path": path })
     );
 }
 

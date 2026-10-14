@@ -1746,7 +1746,7 @@ async fn clearing_sends_the_whole_transcript_again() {
 #[tokio::test]
 async fn a_full_context_compacts_and_retries() {
     let mut h = Harness::with_lua(
-        "bone.config.compact = { keep = 1 }",
+        "bone.config.compact = { keep = 1, limit = 1 }; bone.config.providers.x.compact_limit = 0",
         vec![
             text("a1"),
             Step::Fail("HTTP 400: maximum context length exceeded".into()),
@@ -1801,6 +1801,51 @@ async fn the_limit_compacts_before_the_call() {
     assert_eq!(
         h.provider.seen.lock().unwrap().iter().rev().nth(1).unwrap(),
         &vec![summary("SUM"), user("q2"), assistant("a2"), user("q3")]
+    );
+}
+
+#[tokio::test]
+async fn provider_limits_override_the_global_limit_at_both_checks() {
+    for keep in [0, 1] {
+        let mut steps = vec![text("a1"), text("SUM")];
+        if keep == 1 {
+            steps.push(text("a2"));
+        }
+        let mut h = Harness::with_lua(
+            &format!("bone.config.compact = {{ keep = {keep}, limit = 200000000 }}; bone.config.providers.x.compact_limit = 1"),
+            steps,
+        ).await;
+        h.start("q1").await;
+        if keep == 0 {
+            // Nothing to summarize before the first call; compact after its reply.
+            assert_eq!(h.until::<SessionCompacted>().await.reason, "limit");
+            h.until::<TurnFinished>().await;
+        } else {
+            h.until::<TurnFinished>().await;
+            h.start("q2").await;
+            assert_eq!(h.until::<SessionCompacted>().await.reason, "limit");
+            h.until::<TurnFinished>().await;
+            assert_eq!(h.last_seen(), vec![summary("SUM"), user("q2")]);
+        }
+        assert!(h.provider.steps.lock().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn provider_limits_follow_the_session_provider() {
+    let h = Harness::with_lua(
+        r#"bone.config.providers.x.compact_limit = 100000
+        bone.config.providers.other = { base_url = "http://other/v1", model = "other", compact_limit = 0 }
+        bone.config.providers.inherit = { base_url = "http://inherit/v1", model = "inherit" }
+        bone.config.provider = "x""#,
+        vec![],
+    ).await;
+    let rt = h.core.inner.runtime();
+    assert_eq!(rt.compact_limit(None, Some(200000000)), Some(100000));
+    assert_eq!(rt.compact_limit(Some("other"), Some(200000000)), None);
+    assert_eq!(
+        rt.compact_limit(Some("inherit"), Some(200000000)),
+        Some(200000000)
     );
 }
 
@@ -2558,7 +2603,7 @@ async fn providers_and_keys_from_settings_and_secrets() {
     set_on(
         &h.core,
         "providers.local",
-        json!({ "base_url": "http://localhost:8080/v1", "model": "small" }),
+        json!({ "base_url": "http://localhost:8080/v1", "model": "small", "compact_limit": 0 }),
     )
     .await
     .unwrap();
@@ -2566,6 +2611,7 @@ async fn providers_and_keys_from_settings_and_secrets() {
     let models = h.core.inner.runtime().model_list(None);
     let local = models.iter().find(|m| m.name == "local").unwrap();
     assert!(local.current && local.model == "small" && local.added);
+    assert_eq!(local.compact_limit, Some(0));
     // Bad entries are refused; keys never go in settings.json.
     for (v, want) in [
         (json!({ "base_url": "http://x" }), "needs a model"),
@@ -2652,15 +2698,19 @@ async fn providers_and_keys_from_settings_and_secrets() {
     set_on(&h.core, "providers.local.stream_usage", json!(false))
         .await
         .unwrap();
+    set_on(&h.core, "providers.local.compact_limit", json!(100000))
+        .await
+        .unwrap();
     let info = h.core.inner.runtime().model_list(None);
     let local = info.iter().find(|m| m.name == "local").unwrap();
     assert_eq!(
         (
             local.reasoning_effort.as_deref(),
             local.stream_usage,
+            local.compact_limit,
             local.added
         ),
-        (Some("high"), false, false)
+        (Some("high"), false, Some(100000), false)
     );
     assert!(
         set_on(&h.core, "providers.local.colour", json!("red"))

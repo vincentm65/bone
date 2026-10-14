@@ -183,6 +183,15 @@ impl Turn<'_> {
         r
     }
 
+    /// Global compaction policy with the session provider's limit over it.
+    fn compact_config(&self) -> crate::config::CompactConfig {
+        let mut cfg = self.inner.compact_config();
+        let s = self.session.lock().unwrap();
+        let name = s.model.as_ref().and_then(|pin| pin.0.as_deref());
+        cfg.limit = self.rt.compact_limit(name, cfg.limit);
+        cfg
+    }
+
     /// Compact the session between model calls (see `compact.rs`); whether
     /// it did. Failing to (nothing to compact yet, the summary failed) is
     /// not the turn's failure.
@@ -266,7 +275,7 @@ impl Turn<'_> {
             let system = ChatMessage::System {
                 content: system.clone(),
             };
-            let compact = self.inner.compact_config();
+            let compact = self.compact_config();
             if let Some(limit) = compact.limit {
                 // Proactive estimates describe the session's pinned provider,
                 // not a one-call request override or a previous retry target.
@@ -520,7 +529,7 @@ impl Turn<'_> {
                 completion.reasoning_state,
             )?;
             if calls.is_empty() {
-                let compact = self.inner.compact_config();
+                let compact = self.compact_config();
                 if let Some(limit) = compact.limit {
                     let can = {
                         let s = self.session.lock().unwrap();

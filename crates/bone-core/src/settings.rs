@@ -97,6 +97,13 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
                     Err(format!(
                         "{path}: base_url, model, type and api_key_env are strings"
                     ))
+                } else if p
+                    .get("compact_limit")
+                    .is_some_and(|v| !v.is_null() && v.as_u64().is_none())
+                {
+                    Err(format!(
+                        "{path}: compact_limit must be a nonnegative integer"
+                    ))
                 } else if p.get("replay_reasoning").is_some_and(|v| !v.is_boolean()) {
                     Err(format!("{path}: replay_reasoning must be a boolean"))
                 } else if let Some(api) = p.get("api").filter(|v| !v.is_null())
@@ -142,6 +149,8 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
             ("stream_usage" | "replay_reasoning" | "supports_images" | "cache", Value::Bool(_)) => {
                 Ok(())
             }
+            ("compact_limit", v) if v.as_u64().is_some() => Ok(()),
+            ("compact_limit", _) => Err(format!("{path} must be a nonnegative integer")),
             ("headers" | "body", v) => extra(field, v).map_err(|e| format!("{path}: {e}")),
             ("api", v) if is_api(v) => Ok(()),
             ("api", _) => Err(format!("{path}: {API}")),
@@ -152,7 +161,7 @@ pub fn validate(path: &str, value: &Value) -> Result<(), String> {
                 _,
             ) => Err(format!("{path} has the wrong type")),
             _ => Err(format!(
-                "{path}: a provider's settings are base_url, model, type, api, api_key_env, reasoning_effort, stream_usage, replay_reasoning, supports_images, headers, body, and for Anthropic cache"
+                "{path}: a provider's settings are base_url, model, type, api, api_key_env, reasoning_effort, stream_usage, replay_reasoning, supports_images, compact_limit, headers, body, and for Anthropic cache"
             )),
         },
         _ => Ok(()),
