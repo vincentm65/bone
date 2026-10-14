@@ -79,9 +79,9 @@ local function field_rows(page)
   return rows
 end
 
--- Settings pages declared in the plugins' manifest.json files.
-local function manifest_pages()
-  local pages = {}
+-- Display names and settings declared in the plugins' manifest.json files.
+local function plugin_manifests()
+  local manifests = {}
   local dir = bone.config_dir and (bone.config_dir .. "/plugins")
   for _, e in ipairs(dir and bone.fs.list(dir) or {}) do
     if e.type == "dir" then
@@ -90,16 +90,17 @@ local function manifest_pages()
         local text = f:read("*a")
         f:close()
         local ok, m = pcall(bone.json.decode, text)
-        if ok and type(m) == "table" and type(m.settings) == "table" and #m.settings > 0 then
-          pages[#pages + 1] = { name = e.name, title = m.title or e.name, fields = m.settings }
+        if ok and type(m) == "table" then
+          m.name = e.name
+          manifests[e.name] = m
         end
       end
     end
   end
-  return pages
+  return manifests
 end
 
-local function tabs()
+local function tabs(manifests)
   local out = {
     { name = "general", title = "General" },
     { name = "providers", title = "Providers" },
@@ -110,8 +111,10 @@ local function tabs()
   for _, p in ipairs(bone._settings_pages or {}) do
     declared[#declared + 1] = p
   end
-  for _, p in ipairs(manifest_pages()) do
-    declared[#declared + 1] = p
+  for _, m in pairs(manifests) do
+    if type(m.settings) == "table" and #m.settings > 0 then
+      declared[#declared + 1] = { name = m.name, title = require("bone.catalog").label(m), fields = m.settings }
+    end
   end
   table.sort(declared, function(a, b)
     return tostring(a.title):lower() < tostring(b.title):lower()
@@ -128,8 +131,12 @@ end
 -- ---- the page ----------------------------------------------------------------
 
 function M.open(want)
+  local manifests = plugin_manifests()
+  local function plugin_label(name)
+    return require("bone.catalog").label(manifests[name] or { name = name })
+  end
   local st = {
-    tabs = tabs(),
+    tabs = tabs(manifests),
     tab = 1,
     sel = 1,
     edit = nil, -- the text being typed into a field
@@ -262,7 +269,7 @@ function M.open(want)
     end
     local function add(name)
       if not by[name] then
-        by[name] = { kind = "plugin", name = name, label = name, tui = false, core = false }
+        by[name] = { kind = "plugin", name = name, label = plugin_label(name), tui = false, core = false }
         rows[#rows + 1] = by[name]
       end
       return by[name]
@@ -282,7 +289,7 @@ function M.open(want)
     for i, t in ipairs(st.tabs) do
       if t.section == 3 then
         local r = add(t.name)
-        r.label, r.page = t.title, i
+        r.label, r.page = manifests[t.name] and plugin_label(t.name) or t.title, i
         r.kind = (r.tui or r.core) and "plugin" or "page"
       end
     end
@@ -290,6 +297,9 @@ function M.open(want)
       r.on = not off[r.name]
     end
     table.sort(rows, function(a, b)
+      if a.label:lower() ~= b.label:lower() then
+        return a.label:lower() < b.label:lower()
+      end
       return a.name < b.name
     end)
     return rows
@@ -382,10 +392,10 @@ function M.open(want)
       if row.core then
         bone.request(turning_on and "plugin/load" or "plugin/unload", { name = row.name }, function(_, e)
           load_plugins()
-          saved_note(e, row.name .. (turning_on and " on" or " off"))
+          saved_note(e, row.label .. (turning_on and " on" or " off"))
         end)
       else
-        saved_note(nil, row.name .. (turning_on and " on" or " off"))
+        saved_note(nil, row.label .. (turning_on and " on" or " off"))
       end
     end
     if #list > 0 then

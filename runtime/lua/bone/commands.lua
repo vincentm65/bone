@@ -12,10 +12,6 @@ cmd("help", function(c)
   return bone.ui.help(c.args)
 end, { desc = "commands and keys; /help topic searches the docs", aliases = { "?" } })
 
-cmd("md", function(c)
-  return require("bone.help").markdown(c.args)
-end, { desc = "browse project Markdown in a popup; /md [relative path]" })
-
 cmd("health", function()
   bone.ui.health()
 end, { desc = "check the setup: provider, terminal, clipboard, Lua", aliases = { "checkhealth" } })
@@ -32,15 +28,6 @@ end, { desc = "archive this conversation and start a new session" })
 cmd("sessions", function()
   bone.action("sessions")
 end, { desc = "pick a session to open (ctrl+o)", aliases = { "resume" } })
-
-cmd("term", function(c)
-  local command = c.args:match("^%s*(.-)%s*$")
-  local terminal = require("bone.ui.terminal")
-  if command == "close" then
-    return terminal.close() or bone.notify("no terminal is open", "error")
-  end
-  terminal.open(nil, { cmd = command ~= "" and command or nil })
-end, { desc = "open a terminal in a panel; /term [command], /term close (ctrl+])", aliases = { "terminal" } })
 
 cmd("quit", function()
   bone.action("quit")

@@ -616,7 +616,7 @@ async fn slash_commands_suggest_complete_and_run() {
 #[tokio::test]
 async fn slash_menu_scrolls_when_it_overflows() {
     let mut h = Harness::new().await;
-    // 32 extra commands overflow the window (the 22 builtin names/aliases
+    // 32 extra commands overflow the window (the builtin names/aliases
     // alone do not).
     h.lua(
         "for i = 1, 32 do bone.cmd.create('zz' .. i, function() end, { desc = 'generated ' .. i }) end",
@@ -634,11 +634,11 @@ async fn slash_menu_scrolls_when_it_overflows() {
         h.input("{pagedown}").await;
     }
     let screen = h.screen(80, 24);
-    // Two pages down (plus the wheel) has scrolled to the queue command.
-    assert!(screen.contains("/queue"), "{screen}");
+    // Two pages down (plus the wheel) has scrolled to the quit command.
+    assert!(screen.contains("/quit"), "{screen}");
     // The selection completes into the prompt.
     h.input("{tab}").await;
-    assert_eq!(h.prompt(), "/queue ");
+    assert_eq!(h.prompt(), "/quit ");
     for i in 1..=32 {
         h.lua(&format!("bone.cmd.del('zz{}')", i)).await;
     }
@@ -1911,7 +1911,8 @@ async fn help_includes_customization_guides_and_current_shortcuts() {
         "{screen}"
     );
     h.input("{ctrl+u}ctrl+5").await;
-    assert!(h.screen(100, 24).contains("ctrl+] / ctrl+5"));
+    let screen = h.screen(100, 24);
+    assert!(screen.contains("No matches."), "{screen}");
     h.input("{tab}customizing/customizing-tui{enter}").await;
     let screen = h.screen(100, 24);
     assert!(
@@ -1923,6 +1924,45 @@ async fn help_includes_customization_guides_and_current_shortcuts() {
     assert!(h.screen(100, 24).contains("customizing/customizing-tui"));
     h.input("{esc}/help customizing{enter}").await;
     assert!(h.screen(100, 24).contains("# Customizing bone"));
+}
+
+#[tokio::test]
+async fn markdown_and_terminal_are_not_built_in_without_plugins() {
+    let mut h = Harness::new().await;
+    assert_eq!(
+        h.lua(
+            r#"=(function()
+                local removed = { md = true, term = true, terminal = true }
+                for _, c in ipairs(bone.cmd.list()) do
+                    if removed[c.name] then return false end
+                    for _, alias in ipairs(c.aliases) do
+                        if removed[alias] then return false end
+                    end
+                end
+                return true
+            end)()"#,
+        )
+        .await,
+        "true"
+    );
+    for key in ["ctrl+]", "ctrl+5"] {
+        assert!(
+            h.app
+                .keymaps
+                .get(Context::Main, keys::parse(key).unwrap())
+                .is_none(),
+            "unexpected terminal shortcut: {key}"
+        );
+    }
+    assert_eq!(h.lua("=require('bone.help').markdown == nil").await, "true");
+    assert_eq!(
+        h.lua("=not pcall(require, 'bone.ui.terminal')").await,
+        "true"
+    );
+    assert_eq!(
+        h.lua("=not pcall(bone.builtin, 'bone.ui.terminal')").await,
+        "true"
+    );
 }
 
 #[tokio::test]

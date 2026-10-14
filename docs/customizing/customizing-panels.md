@@ -127,8 +127,9 @@ end)
 
 ## Terminals
 
+Install the optional **term** plugin from `/catalog` to use terminal panels.
 A terminal is a panel whose content is a program in a pseudo-terminal
-(`runtime/lua/bone/ui/terminal.lua`, built on `bone.job.start` with `pty`).
+(the plugin's `lua/bone/ui/terminal.lua`, built on `bone.job.start` with `pty`).
 `/term [command]` and `ctrl+]` open one with `terminal.defaults` (a bottom
 drawer). Every other panel option passes through, so place it like any panel:
 

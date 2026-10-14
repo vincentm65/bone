@@ -789,6 +789,9 @@ pub(crate) fn message(v: &Json) -> Result<ChatMessage, String> {
     if let Some(calls) = v.get("tool_calls") {
         v["tool_calls"] = crate::agent::list(calls);
     }
+    if let Some(items) = v.pointer("/reasoning_state/items") {
+        v["reasoning_state"]["items"] = crate::agent::list(items);
+    }
     serde_json::from_value(v).map_err(|e| format!("bad message: {e}"))
 }
 

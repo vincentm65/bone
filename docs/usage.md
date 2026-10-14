@@ -36,7 +36,7 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `ctrl+r` | show / hide the model reasoning (live in the chat and in the transcript) |
 | `ctrl+t` | how much of each tool call to show: a summary line per stretch of calls ("Read 3 files, ran 2 shell commands"; edits and failures in full) → a row per call → everything in full → back. It stays until you press it again |
 | `ctrl+n` | new session |
-| `ctrl+]` / `ctrl+5` | open or focus a terminal panel (Unix); in the terminal, return to the prompt |
+| `ctrl+]` / `ctrl+5` | **term plugin:** open or focus a terminal panel (Unix); in the terminal, return to the prompt |
 | `shift+pageup` / `shift+pagedown` in a terminal | scroll terminal history |
 | `ctrl+p` | move focus to the next panel |
 | `up` / `down` | move between prompt lines; past the edges, earlier messages. With `/` suggestions showing, move through them |
@@ -80,7 +80,7 @@ The model can also use `read_file` to view PNG, JPEG and WebP files on the core 
 |---|---|
 | `/help`, `/?` | searchable help popup with Commands, Keys and Docs tabs (also `f1`) |
 | `/help {topic}` | the matching section of these docs in a scrollable window (`/help hooks`, `/help windows`, `/help lua` for a whole file) |
-| `/md [relative path]` | browse the working directory's Markdown files in a large popup, or open a listed document directly |
+| `/md [relative path]` | **md plugin:** browse the working directory's Markdown files in a large popup, or open a listed document directly |
 | `/health`, `/checkhealth` | check the setup: provider address and key, sessions folder, terminal, mouse, clipboard route, Lua errors, plus plugins' own checks |
 | `/setup` | add a model provider: kind, URL, model and key (kept in `~/.bone/secrets.json`), and catalog plugins; opens by itself on a first run with no provider |
 | `/catalog` | browse the plugin catalog: install, update and remove packages (each file checked against the catalog's hashes) |
@@ -94,7 +94,7 @@ The model can also use `read_file` to view PNG, JPEG and WebP files on the core 
 | `/runtime`, `/runtime reset FILE`, `/runtime reset all` | your copies of built-in Lua files in `~/.bone/runtime/` (bone never overwrites them); reset goes back to the built-in ones, keeping your copies in `~/.bone/runtime-backup/` |
 | `/new`, `/clear` | start a new session |
 | `/archive` | move this conversation to History and start a new session |
-| `/term [command]`, `/terminal [command]`, `/term close` | open a terminal panel on the TUI's machine (Unix), or close it and stop its program |
+| `/term [command]`, `/terminal [command]`, `/term close` | **term plugin:** open a terminal panel on the TUI's machine (Unix), or close it and stop its program |
 | `/sessions`, `/resume` | pick a session to open |
 | `/rename {title}` | give this session a title |
 | `/compact`, `/compact clear` | summarize this session for the model (`compact.keep` controls how many recent turns stay word for word; default 0); the chat and the session file keep everything, and one line notes the tokens saved. `clear` sends the whole history again. Bone also compacts by itself when the model says the context is too long, or before a call over `compact.limit` (`/config` → General → Compaction) |
@@ -114,19 +114,19 @@ Enter on a partial name runs the highlighted suggestion (`/ses` + enter opens th
 
 ## Terminal panels and chat windows
 
-`/term` opens your shell in a bottom panel; `/term cargo test` runs a command instead. Focused terminals send keys and pasted text to the program, except `ctrl+]` / `ctrl+5`, which return focus to the prompt; `shift+pageup` / `shift+pagedown` scroll history. From the prompt, `ctrl+]` focuses the last terminal or opens one. Closing the panel stops its program; an interactive shell's exit closes it, while a command's output remains until closed. These terminals use local TUI jobs and currently require Unix; they are separate from core-side background shell jobs shown in the tray.
+Install the optional **term** plugin from `/catalog` for terminal panels. `/term` opens your shell in a bottom panel; `/term cargo test` runs a command instead. Focused terminals send keys and pasted text to the program, except `ctrl+]` / `ctrl+5`, which return focus to the prompt; `shift+pageup` / `shift+pagedown` scroll history. From the prompt, `ctrl+]` focuses the last terminal or opens one. Closing the panel stops its program; an interactive shell's exit closes it, while a command's output remains until closed. These terminals use local TUI jobs and currently require Unix; they are separate from core-side background shell jobs shown in the tray.
 
 Lua layouts can show several chats at once, each with its own prompt, statusline, draft and scroll position. Chat numbers start at 0 and exist even before a new chat has a session ID. See `/help chat windows` for the layout API, or `/help customizing/customizing-tui` for editable libraries and UI configuration.
 
 ## Markdown popup
 
-`/md` recursively lists `.md` files (case-insensitive) in the current session's working directory, including hidden files but excluding `.git` internals and symlinks. On a new chat it uses Bone's launch directory. The popup leaves your draft and chat untouched; files are read locally, not sent to the model. `/md docs/usage.md` selects that relative path after discovery.
+Install the optional **md** plugin from `/catalog` for the Markdown browser. `/md` recursively lists `.md` files (case-insensitive) in the current session's working directory, including hidden files but excluding `.git` internals and symlinks. On a new chat it uses Bone's launch directory. The popup leaves your draft and chat untouched; files are read locally, not sent to the model. `/md docs/usage.md` selects that relative path after discovery.
 
 Type in the file pane to filter relative paths (all search words must match); `backspace` edits and `ctrl+u` clears the filter. `up` / `down`, the wheel, page keys and `home` / `end` select files and preview them. `enter` focuses the reader; `tab` / `shift+tab` switch panes. In the reader those navigation keys scroll, and `space` pages down. `ctrl+r` rescans and reloads the selected file; `esc` closes. Reading positions are remembered while the popup stays open. Narrow terminals show only the active pane.
 
 The preview uses Bone's themed Markdown renderer for headings, emphasis, links, lists, quotes, code blocks and wrapping tables. Links are displayed, not executed. Discovery and reads run as background jobs using `find` and `head` from your PATH; no new Rust APIs or model calls are involved. UTF-8 filenames are supported, including spaces and newlines. Scans stop after 30 seconds or 20,000 files and report incomplete results; each read has a 10-second timeout and a 1 MiB limit. Unreadable, empty and oversized documents have explicit messages. This is a browser for trusted local projects, not a filesystem sandbox against concurrent symlink replacement.
 
-Implementation: `require("bone.help").markdown(path)` in the existing embedded `runtime/lua/bone/help.lua`. Lua regression tests: `luajit tests/md.lua`.
+Implementation: `require("md_browser").open(path)` in the catalog's `plugins/md/lua/md_browser.lua`. Run its regression tests from the catalog checkout: `luajit tests/md_test.lua`.
 
 ## Options
 
@@ -148,7 +148,7 @@ bone --headless [--listen [PATH]]   core only, on stdio or a local socket/named 
 bone --init                         starter ~/.bone/core.lua and tui.lua
 ```
 
-Configuration lives in `~/.bone/` (or `$BONE_CONFIG_DIR`); sessions are saved in `~/.bone/sessions/`. `bone --import-bone [DB]` brings in the first bone's conversations (default `~/.bone-rust/data/conversations.db`) as sessions, with their usage and latest checkpoint; run it again to pick up newer ones, and sessions you continued here are never overwritten. `BONE_BASE_URL`, `BONE_MODEL`, `BONE_API_KEY`, `BONE_REASONING_EFFORT`, `BONE_SYSTEM_PROMPT`, and `BONE_DATA_DIR` override `core.lua` for one run. `BONE_DEBUG_HTTP=<dir>` saves every model request and raw response there (API keys excluded), which is the thing to attach when a provider misbehaves.
+Configuration lives in `~/.bone/` (or `$BONE_CONFIG_DIR`); sessions are saved in `~/.bone/sessions/`. `BONE_BASE_URL`, `BONE_MODEL`, `BONE_API_KEY`, `BONE_REASONING_EFFORT`, `BONE_SYSTEM_PROMPT`, and `BONE_DATA_DIR` override `core.lua` for one run. `BONE_DEBUG_HTTP=<dir>` saves every model request and raw response there (API keys excluded), which is the thing to attach when a provider misbehaves.
 
 **Updates.** When bone starts it checks, in the background, for a newer bone and for updated catalog plugins. Installed from npm, it asks to update (bone first, then plugins) and then to restart; on Windows, quit and run `bone update`. Built from a git checkout, it says how many commits it is behind `origin/main` (update with `git pull && scripts/install.sh`). A plugin that needs a newer bone is not offered, or installed by `/catalog`, until bone is updated. "Skip this version" stops asking about that update; `update.check = false` in settings turns the check off.
 

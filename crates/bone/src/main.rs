@@ -14,7 +14,6 @@ const USAGE: &str = "\
 usage: bone [-r [ID]] [--connect [PATH]]
        bone --headless [--listen [PATH]]
        bone --init
-       bone --import-bone [DB]
 
   (no options)      open the TUI with the core running in this process
   -r, --resume [ID] reopen session ID, or the newest session
@@ -24,9 +23,6 @@ usage: bone [-r [ID]] [--connect [PATH]]
   --listen [PATH]   with --headless: serve on a Unix socket (a named pipe on
                     Windows) instead of stdio
   --init            write starter core.lua and tui.lua (never overwrites)
-  --import-bone [DB] import the first bone's conversations as sessions
-                    (DB defaults to ~/.bone-rust/data/conversations.db);
-                    again later to bring them up to date
   -h, --help        show this help
   -V, --version     show the version
 
@@ -49,7 +45,6 @@ Environment variables override core.lua for one run:
 #[derive(Debug, PartialEq)]
 enum Mode {
     Init,
-    Import(PathBuf),
     Stdio,
     Listen(PathBuf),
     Tui {
@@ -65,13 +60,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Mode>, St
     let mut connect = None;
     let mut resume = None;
     let mut init = false;
-    let mut import = None;
     while let Some(arg) = args.next() {
         let mut value = || args.next_if(|a| !a.starts_with('-'));
         match arg.as_str() {
             "--headless" => headless = true,
             "--init" => init = true,
-            "--import-bone" => import = Some(value().map_or_else(default_bone_db, PathBuf::from)),
             "--listen" => listen = Some(value().map_or_else(default_socket_path, PathBuf::from)),
             "--connect" => connect = Some(value().map_or_else(default_socket_path, PathBuf::from)),
             "-r" | "--resume" => resume = Some(value()),
@@ -88,9 +81,6 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Mode>, St
     }
     if init {
         return Ok(Some(Mode::Init));
-    }
-    if let Some(db) = import {
-        return Ok(Some(Mode::Import(db)));
     }
     if headless {
         if connect.is_some() || resume.is_some() {
@@ -149,50 +139,12 @@ fn main() -> ExitCode {
             }
         },
     };
-    if let (Mode::Import(db), Some(loaded)) = (&mode, &loaded) {
-        return import_bone(db, &loaded.config.data_dir);
-    }
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
     let code = runtime.block_on(run(mode, loaded, config_dir));
     // Stdin's blocking reader thread may still be waiting for input; don't
     // let runtime shutdown wait on it.
     runtime.shutdown_background();
     code
-}
-
-fn default_bone_db() -> PathBuf {
-    bone_lua::sys::home_dir()
-        .unwrap_or_default()
-        .join(".bone-rust/data/conversations.db")
-}
-
-/// `--import-bone`: the first bone's conversations, as sessions.
-fn import_bone(db: &std::path::Path, data_dir: &std::path::Path) -> ExitCode {
-    use std::io::Write;
-    eprintln!("Importing {} into {}", db.display(), data_dir.display());
-    let mut shown = usize::MAX;
-    let progress = |done: usize, total: usize| {
-        let pct = (done * 100).checked_div(total).unwrap_or(100);
-        if pct != shown {
-            shown = pct;
-            eprint!("\r  {done}/{total} conversations ({pct}%)");
-            let _ = std::io::stderr().flush();
-        }
-    };
-    match bone_core::import::import_bone1(db, data_dir, progress) {
-        Ok(r) => {
-            eprintln!();
-            println!(
-                "{} imported, {} updated, {} unchanged, {} continued here and left alone; {} messages written.",
-                r.imported, r.updated, r.unchanged, r.kept, r.messages
-            );
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("\nbone: import failed: {e}");
-            ExitCode::FAILURE
-        }
-    }
 }
 
 /// Resolves on SIGINT or SIGTERM (Ctrl+C or the console closing on Windows).
@@ -270,7 +222,7 @@ async fn run(mode: Mode, loaded: Option<Loaded>, config_dir: PathBuf) -> ExitCod
     };
     match mode {
         // stdout belongs to the protocol from here on.
-        Mode::Init | Mode::Import(_) => unreachable!("handled before running the core"),
+        Mode::Init => unreachable!("handled before running the core"),
         Mode::Stdio => server().serve_stdio().await,
         Mode::Listen(path) => {
             let server = server();
@@ -378,14 +330,6 @@ mod tests {
         );
         assert!(parse(&["--listen"]).is_err());
         assert_eq!(parse(&["--init"]), Ok(Some(Mode::Init)));
-        assert_eq!(
-            parse(&["--import-bone", "/x.db"]),
-            Ok(Some(Mode::Import("/x.db".into())))
-        );
-        assert_eq!(
-            parse(&["--import-bone"]),
-            Ok(Some(Mode::Import(default_bone_db())))
-        );
         assert!(parse(&["--headless", "-r"]).is_err());
         assert!(parse(&["--headless", "--bogus"]).is_err());
     }

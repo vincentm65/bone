@@ -6,7 +6,7 @@
 //! the session header; every later record is one transcript message, a
 //! summary the model gets in place of the transcript's older part (see
 //! `compact.rs`), or a checkpoint that replaces the transcript before it
-//! (`bone.session.compact`, imports; the earlier records stay in the file).
+//! (`bone.session.compact`; the earlier records stay in the file).
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -280,7 +280,7 @@ impl Session {
             }
             _ => self.messages.clone(),
         };
-        crate::import::repair(messages)
+        crate::transcript::repair(messages)
     }
 
     /// Whether Lua may change the transcript now: no turn, or a turn at a

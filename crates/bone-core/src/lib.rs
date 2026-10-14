@@ -9,7 +9,6 @@ mod attachments;
 mod compact;
 pub mod config;
 mod health;
-pub mod import;
 mod index;
 pub mod mcp;
 pub mod provider;
@@ -18,6 +17,7 @@ pub mod scripting;
 pub mod session;
 pub mod settings;
 pub mod tools;
+mod transcript;
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock, Weak};
