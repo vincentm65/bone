@@ -155,7 +155,6 @@ pub const METHODS: &[&str] = &[
     SessionActive::METHOD,
     SessionMessages::METHOD,
     SessionRename::METHOD,
-    SessionFork::METHOD,
     SessionDelete::METHOD,
     SessionCompact::METHOD,
     AttachmentUpload::METHOD,
@@ -334,12 +333,6 @@ method!(
     SessionRename, "session/rename", SessionRenameParams => SessionInfo
 );
 method!(
-    /// A new session with a copy of this one's transcript, or of the part
-    /// before turn `before_turn` (1 is the first user message), to try
-    /// something else from there. The original is untouched.
-    SessionFork, "session/fork", SessionForkParams => SessionInfo
-);
-method!(
     /// Delete a session and its file. Not while a turn runs.
     SessionDelete, "session/delete", SessionRef => ()
 );
@@ -348,13 +341,6 @@ method!(
 pub struct SessionRenameParams {
     pub session_id: SessionId,
     pub title: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SessionForkParams {
-    pub session_id: SessionId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub before_turn: Option<u32>,
 }
 
 method!(

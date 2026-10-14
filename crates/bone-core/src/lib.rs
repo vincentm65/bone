@@ -33,11 +33,11 @@ use bone_proto::methods::{
     QueueAddParams, QueueAddResult, QueueChanged, QueueChangedParams, QueueClear, QueueMode,
     QueueMove, QueueRemove, QueueResume, QueueUpdate, SecretSet, SecretsList, SecretsSet,
     SessionActive, SessionCompact, SessionCompactParams, SessionCreate, SessionCreateParams,
-    SessionCreated, SessionDelete, SessionDeleted, SessionFork, SessionForkParams, SessionList,
-    SessionMessages, SessionMessagesResult, SessionRef, SessionRename, SessionRenameParams,
-    SessionUpdated, SessionUpdatedParams, SettingPath, SettingSet, SettingsChanged,
-    SettingsChangedParams, SettingsGet, SettingsReset, SettingsSet, StoreQuery, StoreQueryParams,
-    TurnCancel, TurnStart, TurnStartParams, TurnStartResult, TurnSteer, TurnSteerParams,
+    SessionCreated, SessionDelete, SessionDeleted, SessionList, SessionMessages,
+    SessionMessagesResult, SessionRef, SessionRename, SessionRenameParams, SessionUpdated,
+    SessionUpdatedParams, SettingPath, SettingSet, SettingsChanged, SettingsChangedParams,
+    SettingsGet, SettingsReset, SettingsSet, StoreQuery, StoreQueryParams, TurnCancel, TurnStart,
+    TurnStartParams, TurnStartResult, TurnSteer, TurnSteerParams,
 };
 use bone_proto::types::{ImageAttachment, SessionInfo};
 use bone_proto::{Method, Notification, RpcError};
@@ -571,7 +571,6 @@ impl Core {
             SessionRename::METHOD => {
                 dispatch::<SessionRename, _>(params, |p| self.session_rename(p))
             }
-            SessionFork::METHOD => dispatch::<SessionFork, _>(params, |p| self.session_fork(p)),
             SessionDelete::METHOD => {
                 dispatch::<SessionDelete, _>(params, |p| self.session_delete(p))
             }
@@ -1028,17 +1027,6 @@ impl Core {
             session_id: p.session_id,
             reason: "rename".into(),
         });
-        Ok(info)
-    }
-
-    fn session_fork(&self, p: SessionForkParams) -> Result<SessionInfo, RpcError> {
-        let session = self
-            .inner
-            .sessions
-            .fork(&p.session_id, p.before_turn)
-            .map_err(session_error)?;
-        let info = session.lock().unwrap().info.clone();
-        self.inner.created_session(&info);
         Ok(info)
     }
 

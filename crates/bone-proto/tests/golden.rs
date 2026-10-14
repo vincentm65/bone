@@ -434,18 +434,6 @@ fn requests() {
             ..info()
         },
     );
-    exchange::<SessionFork>(
-        27,
-        SessionForkParams {
-            session_id: SID.into(),
-            before_turn: Some(3),
-        },
-        SessionInfo {
-            session_id: "01a0fe5e-0000-7000-8000-000000000002".into(),
-            parent: Some(SID.into()),
-            ..info()
-        },
-    );
     exchange::<SessionDelete>(
         28,
         SessionRef {

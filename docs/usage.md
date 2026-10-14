@@ -97,13 +97,14 @@ The model can also use `read_file` to view PNG, JPEG and WebP files on the core 
 | `/term [command]`, `/terminal [command]`, `/term close` | open a terminal panel on the TUI's machine (Unix), or close it and stop its program |
 | `/sessions`, `/resume` | pick a session to open |
 | `/rename {title}` | give this session a title |
-| `/fork`, `/fork {N}` | continue in a copy of this session; with N, from before turn N (to try that turn again differently). The original stays as it was |
 | `/compact`, `/compact clear` | summarize this session for the model (`compact.keep` controls how many recent turns stay word for word; default 0); the chat and the session file keep everything, and one line notes the tokens saved. `clear` sends the whole history again. Bone also compacts by itself when the model says the context is too long, or before a call over `compact.limit` (`/config` → General → Compaction) |
 | `/queue`, `/queue clear`, `/queue resume` | list the queued messages, empty the queue, let a paused queue go on (after a cancel, restart or failed queued-turn start) |
 | `/quit`, `/exit`, `/q` | quit |
 | `/plugins` | open the plugin settings; `/plugins list` lists plugins (TUI and core halves); `/plugins load name`, `/plugins unload name`, `/plugins reload name` act on both halves (picking up edits to their files); `/plugins reload` reloads the core's whole Lua configuration (`core.lua` and core plugins) |
 
-`/rename`, `/fork`, `/compact` and `/plugins` are Lua commands from `runtime/lua/bone/commands.lua`: change or remove them like any other (`bone.cmd.del("fork")`).
+`/rename`, `/compact` and `/plugins` are Lua commands from `runtime/lua/bone/commands.lua`: change or remove them like any other (`bone.cmd.del("rename")`).
+
+Conversation branching is available through the optional [fork plugin](../plugins/fork/README.md): `/fork` opens a user-message tree popup, `/fork N` branches before user message N and restores it as an editable draft, and `/fork copy` copies an idle session. The original stays unchanged.
 
 **Queue cancellation.** Cancelling a turn normally pauses older queued messages. Sending a new message resumes them; if the cancelled turn is still winding down, the new message goes ahead of the older queue and runs next. Queue save failures are reported without rejecting accepted messages, so those messages can still run but may be lost on restart.
 

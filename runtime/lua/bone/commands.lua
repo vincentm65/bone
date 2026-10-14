@@ -289,27 +289,6 @@ cmd("rename", function(c)
   end)
 end, { desc = "give this session a title" })
 
-cmd("fork", function(c)
-  local id = current_session()
-  if not id then
-    return
-  end
-  local n
-  if c.args ~= "" then
-    n = tonumber(c.args)
-    if not n or n < 1 or n % 1 ~= 0 then
-      return bone.notify("usage: /fork [turn number]", "error")
-    end
-  end
-  bone.request("session/fork", { session_id = id, before_turn = n }, function(info, err)
-    if err then
-      return bone.notify("fork failed: " .. tostring(err), "error")
-    end
-    bone.api.open_session(info.session_id)
-    bone.notify(n and ("forked from before turn " .. n) or "forked")
-  end)
-end, { desc = "copy this session to try something else; /fork N starts before turn N" })
-
 -- Compaction (the core's; see crates/bone-core/src/compact.rs): the model
 -- gets a summary in place of the older part of a long session, while the
 -- chat and the session file keep everything. Each compaction, by /compact

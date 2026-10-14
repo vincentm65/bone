@@ -247,7 +247,7 @@ end
 -- Colors (see runtime/colors/).
 bone.colorscheme("black")
 
--- /rename, /fork, /compact and /plugins are in lua/bone/commands.lua.
+-- /rename, /compact and /plugins are in lua/bone/commands.lua.
 
 -- First run: with no model provider at all, /setup opens by itself (unless
 -- it was dismissed before; /setup is always there). An empty provider list

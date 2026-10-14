@@ -161,14 +161,22 @@ function bone.system(cmd, opts)
 end
 
 --- A session's transcript, for hooks and tools (they wait without blocking):
----   bone.session.messages(id)          -> the messages, as providers see them
+---   bone.session.messages(id)          -> the full stored transcript
+---   bone.session.snapshot(id)          -> { info, messages, raw_messages, summary,
+---                                        model, active_turn, generation }, one snapshot
+---                                      raw_messages: exact ChatMessage JSON strings,
+---                                      for lossless copies (including sealed reasoning).
 ---   bone.session.append(id, message)   add a message the model will see next
 ---   bone.session.compact(id, messages) replace the transcript (the file keeps
 ---                                      the old one behind a checkpoint)
 ---   bone.session.create(opts)          a new session: opts = { cwd?, title?,
+---                                      messages?, summary? = { through, text },
+---                                      model? = { provider?, model },
 ---                                      owner? = { session_id, call_id?, name? } }
 ---                                      (a subagent's; cwd defaults to the
----                                      owner's). Returns its info.
+---                                      owner's). messages accepts tables or raw JSON
+---                                      strings from snapshot.raw_messages. Returns
+---                                      its info.
 ---   bone.session.run(id, text)         start a turn on an idle session and wait
 ---                                      for it: { session_id, turn_id, text,
 ---                                      outcome = { status, message? } }, text
@@ -189,6 +197,9 @@ end
 function bone.session.messages(id)
   return session_op("messages", id)
 end
+function bone.session.snapshot(id)
+  return session_op("snapshot", id)
+end
 function bone.session.append(id, message)
   return session_op("append", id, { message = message })
 end
@@ -198,7 +209,10 @@ end
 function bone.session.create(opts)
   opts = opts or {}
   assert(type(opts) == "table", "bone.session.create(opts)")
-  return session_op("create", nil, { cwd = opts.cwd, title = opts.title, owner = opts.owner })
+  return session_op("create", nil, {
+    cwd = opts.cwd, title = opts.title, owner = opts.owner,
+    messages = opts.messages, summary = opts.summary, model = opts.model,
+  })
 end
 function bone.session.run(id, text)
   if not in_job() then

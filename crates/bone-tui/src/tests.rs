@@ -49,11 +49,6 @@ fn loaded_info(id: &str) -> Value {
 fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
     // The fake core has one core plugin, `corepart`; any other name is a
     // TUI-only plugin to it.
-    if method == "session/fork" {
-        let mut i = info("s-fork", Some("forked"));
-        i["parent"] = params["session_id"].clone();
-        return Ok(i);
-    }
     if method == "session/rename" {
         return Ok(info(
             params["session_id"].as_str().unwrap(),
@@ -86,6 +81,41 @@ fn reply(method: &str, params: &Value) -> Result<Value, RpcError> {
                 "Review {}",
                 params["args"]["args"].as_str().unwrap_or("")
             )),
+            "fork.tree" => json!({
+                "session_id": "s-new",
+                "snapshot": {
+                    "info": info("s-new", Some("source")),
+                    "generation": 4,
+                    "messages": [
+                        { "role": "user", "content": "hello" },
+                        { "role": "assistant", "content": "first answer" },
+                        { "role": "user", "content": "revise this question" },
+                        { "role": "assistant", "content": "second answer" },
+                    ],
+                },
+                "points": [
+                    { "before_turn": 1, "copied_count": 0, "text": "hello", "images": [], "safe": true },
+                    { "before_turn": 2, "copied_count": 2, "text": "revise this question", "images": [], "safe": true },
+                ],
+                "expected": { "generation": 4, "content": "fake-fingerprint" },
+                "edges": { "s-one": { "parent": "s-new", "before_turn": 2 } },
+                "sessions": [info("s-new", Some("source")), info("s-one", Some("first"))],
+            }),
+            "fork.create" => {
+                let n = &params["args"]["before_turn"];
+                if !n.is_null() && n != &json!(1) && n != &json!(2) {
+                    return Err(RpcError::new(
+                        RpcError::INVALID_PARAMS,
+                        "fork: user ordinal out of range",
+                    ));
+                }
+                json!({
+                    "info": info("s-fork", Some("forked")),
+                    "draft": if n == &json!(2) {
+                        json!({ "before_turn": 2, "copied_count": 2, "text": "revise this question", "images": [], "safe": true })
+                    } else { Value::Null },
+                })
+            }
             other => {
                 return Err(RpcError::new(
                     RpcError::INVALID_PARAMS,
@@ -639,11 +669,11 @@ async fn slash_menu_scrolls_when_it_overflows() {
         h.input("{pagedown}").await;
     }
     let screen = h.screen(80, 24);
-    // Two pages down (plus the wheel) has scrolled past the builtins.
-    assert!(screen.contains("/q"), "{screen}");
+    // Two pages down (plus the wheel) has scrolled to the queue command.
+    assert!(screen.contains("/queue"), "{screen}");
     // The selection completes into the prompt.
     h.input("{tab}").await;
-    assert_eq!(h.prompt(), "/q ");
+    assert_eq!(h.prompt(), "/queue ");
     for i in 1..=32 {
         h.lua(&format!("bone.cmd.del('zz{}')", i)).await;
     }
@@ -2870,7 +2900,7 @@ async fn model_events_before_the_reply_are_kept() {
 }
 
 #[tokio::test]
-async fn session_commands_rename_and_fork() {
+async fn session_commands_rename_and_delete() {
     let mut h = Harness::new().await;
     h.input("/rename x{enter}").await;
     assert!(h.message().contains("no messages yet"), "{}", h.message());
@@ -2884,23 +2914,97 @@ async fn session_commands_rename_and_fork() {
     assert_eq!(h.requests("session/rename")[0]["title"], "Typo hunt");
     assert!(h.screen(80, 24).contains("Typo hunt"));
 
-    h.input("/fork 2{enter}").await;
-    assert_eq!(
-        h.requests("session/fork")[0],
-        json!({ "session_id": "s-new", "before_turn": 2 })
-    );
-    assert_eq!(h.message(), "forked from before turn 2");
-    assert_eq!(h.lua("=bone.chat.session().session_id").await, "\"s-fork\"");
-    h.input("/fork two{enter}").await;
-    assert!(h.message().contains("usage"));
-
     // Any client's delete clears the chat that shows it.
     h.emit::<SessionDeleted>(SessionRef {
-        session_id: "s-fork".into(),
+        session_id: "s-new".into(),
     })
     .await;
     assert_eq!(h.message(), "session deleted");
     assert_eq!(h.lua("=bone.chat.session().new").await, "true");
+}
+
+#[tokio::test]
+async fn fork_plugin_popup_creates_and_restores_draft_after_chat_shown() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugin = dir.path().join("plugins/fork");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::write(
+        plugin.join("tui.lua"),
+        include_str!("../../../plugins/fork/tui.lua"),
+    )
+    .unwrap();
+    let mut h = Harness::build(Some(dir.path().to_owned())).await;
+    // App startup installs /fork from the temporary plugin directory.
+    h.app.load_user_config();
+    h.settle().await;
+    assert!(h.app.user_commands.contains_key("fork"), "{}", h.message());
+    h.input("hello{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "hello")).await;
+    h.emit::<TurnFinished>(finished("s-new", TurnOutcome::Completed))
+        .await;
+
+    // Invalid syntax never calls the core; an invalid ordinal is rejected by it.
+    h.input("/fork two{enter}").await;
+    assert!(
+        h.message().contains("usage: /fork [N|copy]"),
+        "{}",
+        h.message()
+    );
+    assert!(h.requests("lua/call").is_empty());
+    h.input("/fork 99{enter}").await;
+    assert!(
+        h.message().contains("user ordinal out of range"),
+        "{}",
+        h.message()
+    );
+    assert_eq!(h.lua("=bone.chat.session().session_id").await, "\"s-new\"");
+    assert!(h.requests("session/messages").is_empty());
+    h.log.lock().unwrap().clear();
+    h.lua("bone.on('chat/shown', function() shown_session = bone.api.session().session_id; shown_prompt = bone.prompt.get() end)")
+        .await;
+
+    h.input("/fork{enter}").await;
+    assert_eq!(h.app.context(), Context::Popup);
+    let screen = h.screen(100, 26);
+    assert!(
+        screen.contains("Fork · session family")
+            && screen.contains("source")
+            && screen.contains("first  ← before #2")
+            && screen.contains("↳ 2  revise this question"),
+        "{screen}"
+    );
+    assert_eq!(h.requests("session/list"), vec![json!({})]);
+    assert_eq!(
+        h.requests("lua/call"),
+        vec![
+            json!({ "name": "fork.tree", "cwd": "/work", "session_id": "s-new", "args": {
+            "session_id": "s-new",
+            "sessions": [info("s-two", Some("second")), info("s-one", Some("first"))],
+        } })
+        ]
+    );
+    // Rows are source, user #1, its child branch, user #2. Enter forks a
+    // user row instead of merely opening the selected session.
+    tokio::time::sleep(Duration::from_millis(120)).await;
+    h.input("{down}{down}{down}{enter}").await;
+    assert_eq!(h.app.context(), Context::Main);
+    assert_eq!(
+        h.requests("lua/call")[1],
+        json!({ "name": "fork.create", "cwd": "/work", "session_id": "s-new", "args": {
+            "session_id": "s-new", "before_turn": 2,
+            "expected": { "generation": 4, "content": "fake-fingerprint" },
+        } })
+    );
+    assert_eq!(h.requests("lua/call").len(), 2);
+    assert_eq!(
+        h.requests("session/messages"),
+        vec![json!({ "session_id": "s-fork" })]
+    );
+    assert_eq!(h.lua("=shown_session").await, "\"s-fork\"");
+    assert_eq!(h.lua("=shown_prompt").await, "\"revise this question\"");
+    assert_eq!(h.lua("=bone.chat.session().session_id").await, "\"s-fork\"");
+    assert_eq!(h.prompt(), "revise this question");
+    assert!(h.requests("session/fork").is_empty());
 }
 
 #[tokio::test]
@@ -4765,7 +4869,10 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
     select(&mut h, "Compaction").await;
     h.input("{enter}").await;
     assert_eq!(top(&h.screen(100, 34)), config_top);
-    assert!(h.screen(100, 34).contains("Settings › General › Compaction"));
+    assert!(
+        h.screen(100, 34)
+            .contains("Settings › General › Compaction")
+    );
     assert!(h.screen(100, 34).contains("Turns kept in full"));
     h.input("{tab}{right}{esc}").await;
     assert!(h.screen(100, 34).contains("› Compaction"));

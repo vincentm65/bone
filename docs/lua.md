@@ -291,10 +291,15 @@ Any other name is a custom point: plugins can define their own with `bone.hook("
 Hooks and tools can read and change a session's stored transcript (they wait without blocking):
 
 ```lua
-bone.session.messages(id)                 -- the messages, as providers see them
+bone.session.messages(id)                 -- the full stored transcript
+bone.session.snapshot(id)                 -- info, messages, raw_messages, summary, model, active_turn, generation
 bone.session.append(id, { role = "user", content = "Remember: be brief." })
 bone.session.compact(id, { { role = "user", content = "Summary of earlier work: ..." } })
 ```
+
+`snapshot` reads a consistent session state under one lock. `raw_messages` contains each stored message as a JSON string, preserving nested nulls and empty arrays in opaque provider reasoning across Lua round trips. `model` is the optional saved `{ provider?, model }` object, and `summary` is `{ through, text }`.
+
+`bone.session.create({ cwd, messages, summary, model })` also accepts an initial transcript: message entries may be tables or exact JSON strings from `snapshot.raw_messages`. Images and summary bounds are validated before creating the session; user-message counts initialize turn numbering. The `session/created` event is emitted after initialization. There is no source-session or branching policy in this API: plugins choose what to copy and store their own genealogy.
 
 The message queue is open to Lua too: `bone.queue.add(id, text, mode, images)` (`"steer"` or `"next"`; an idle session starts a turn), `bone.queue.list(id)`, `bone.queue.remove(id, queue_id)` and `bone.queue.clear(id)`, with the same effects (and `queue/changed` events) as the protocol's `queue/*` methods.
 

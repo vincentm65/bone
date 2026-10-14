@@ -205,10 +205,21 @@ Hooks and tools can read and change a session's stored transcript (they wait
 without blocking):
 
 ```lua
-bone.session.messages(id)                 -- the messages, as providers see them
+bone.session.messages(id)                 -- the full stored transcript
+bone.session.snapshot(id)                 -- info, messages, raw_messages, summary, model, active_turn, generation
 bone.session.append(id, { role = "user", content = "Remember: be brief." })
 bone.session.compact(id, { { role = "user", content = "Summary of earlier work: ..." } })
 ```
+
+`snapshot` reads a consistent session state under one lock. To seed a new
+session, use `bone.session.create({ cwd, messages, summary, model })`.
+`messages` accepts tables or JSON strings from `snapshot.raw_messages`; use
+those strings for lossless copies of opaque provider reasoning, including
+nested nulls and empty arrays. `summary` is `{ through, text }`, and `model`
+is the optional saved `{ provider?, model }` pin. Creation validates image
+references and summary bounds, initializes turn numbering from user-message
+counts, and emits `session/created` after initialization. Plugins choose
+what to copy and store their own genealogy; the core has no branching policy.
 
 The message queue is open to Lua too: `bone.queue.add(id, text, mode)`
 (`"steer"` or `"next"`; an idle session starts a turn), `bone.queue.list(id)`,

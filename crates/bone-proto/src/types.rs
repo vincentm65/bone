@@ -122,7 +122,7 @@ pub struct SessionInfo {
     /// `None` until there is one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
-    /// The session this one was forked from.
+    /// Legacy ancestry from older session files; new branches use plugin metadata.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<SessionId>,
     /// The session (and tool call) that started this one as a subagent.

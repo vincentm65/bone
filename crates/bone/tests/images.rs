@@ -99,6 +99,13 @@ impl Env {
         std::fs::write(config.path().join("core.lua"), format!(
             "bone.config.providers.fake = {{ base_url = '{url}', model = 'vision-test', supports_images = {supports_images} }}\nbone.config.compact = {{ keep = 1, auto = false }}"
         )).unwrap();
+        let fork_dir = config.path().join("plugins/fork");
+        std::fs::create_dir_all(&fork_dir).unwrap();
+        std::fs::write(
+            fork_dir.join("core.lua"),
+            include_str!("../../../plugins/fork/core.lua"),
+        )
+        .unwrap();
         let server = Server::new(Arc::new(Core::from_loaded(
             scripting::load_with(config.path(), &|_| None).unwrap(),
         )));
@@ -281,14 +288,18 @@ async fn image_only_send_persists_and_survives_restart_and_fork() {
         !saved.contains(&STANDARD.encode(&env.png)),
         "pixels leaked into session JSONL"
     );
-    let fork = env
+    let result = env
         .client
-        .request::<SessionFork>(SessionForkParams {
-            session_id: id.clone(),
-            before_turn: None,
+        .request::<LuaCall>(LuaCallParams {
+            name: "fork.create".into(),
+            args: json!({ "session_id": id }),
+            session_id: Some(id.clone()),
+            cwd: None,
         })
         .await
         .unwrap();
+    let fork: bone_proto::types::SessionInfo =
+        serde_json::from_value(result["info"].clone()).unwrap();
     env.client
         .request::<SessionDelete>(SessionRef { session_id: id })
         .await
@@ -296,7 +307,7 @@ async fn image_only_send_persists_and_survives_restart_and_fork() {
     let (_client, messages) = env
         .restart_and_fork("restart-test", image.id, fork.session_id)
         .await;
-    assert_eq!(messages.messages[0], stored.messages[0]);
+    assert_eq!(messages.messages, stored.messages);
 }
 
 #[tokio::test]
@@ -672,21 +683,26 @@ async fn read_file_images_reach_provider_and_survive_restart_without_source_file
         assert_eq!(tool.images().len(), 1);
         assert!(tool.images()[0].data.is_none());
         assert_eq!(tool.images()[0].name, filename);
-        let fork = env
+        let result = env
             .client
-            .request::<SessionFork>(SessionForkParams {
-                session_id: id.clone(),
-                before_turn: None,
+            .request::<LuaCall>(LuaCallParams {
+                name: "fork.create".into(),
+                args: json!({ "session_id": id }),
+                session_id: Some(id.clone()),
+                cwd: None,
             })
             .await
             .unwrap();
-        let (client, _forked) = env
+        let fork: bone_proto::types::SessionInfo =
+            serde_json::from_value(result["info"].clone()).unwrap();
+        let (client, forked) = env
             .restart_and_fork(
                 "read-file-restart",
                 tool.images()[0].id.clone(),
                 fork.session_id.clone(),
             )
             .await;
+        assert_eq!(forked.messages, stored.messages);
         client
             .request::<TurnStart>(TurnStartParams {
                 session_id: fork.session_id.clone(),

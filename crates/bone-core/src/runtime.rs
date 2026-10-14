@@ -24,7 +24,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::config::{CoreConfig, ProviderConfig};
 use crate::provider::{Completion, CompletionRequest, Delta, Provider};
 use crate::scripting::{AskEvent, LoadOptions, Loaded, LuaProvider, LuaTool, Scripting};
-use crate::session::Pin;
+use crate::session::{Pin, Summary};
 use crate::tools::Registry;
 use crate::tools::ToolSpec;
 use crate::{Event, Inner};
@@ -553,8 +553,8 @@ impl Host {
         });
     }
 
-    /// `bone.session.*`: `{ op = "messages" | "append" | "compact", id,
-    /// message?, messages? }`, or `{ op = "create", cwd?, title?, owner? }`.
+    /// `bone.session.*`: transcript reads and edits, or creation with
+    /// optional cwd, title, owner, messages, summary and model.
     pub(crate) fn session_op(&self, spec: &Json) -> Result<Json, String> {
         let inner = self.inner()?;
         if spec["op"] == "attachment_upload" {
@@ -616,6 +616,26 @@ impl Host {
             _ => {}
         }
         let reason = match op {
+            "snapshot" => {
+                let s = session.lock().unwrap();
+                let raw_messages = s
+                    .messages
+                    .iter()
+                    .map(serde_json::to_string)
+                    .collect::<Result<Vec<String>, _>>()
+                    .map_err(|e| e.to_string())?;
+                return Ok(json!({
+                    "info": s.info,
+                    "messages": s.messages,
+                    "raw_messages": raw_messages,
+                    "summary": s.summary,
+                    "model": s.model.as_ref().map(|(provider, model)| json!({
+                        "provider": provider, "model": model,
+                    })),
+                    "active_turn": s.active.as_ref().map(|a| a.turn_id),
+                    "generation": s.generation,
+                }));
+            }
             "messages" => {
                 let s = session.lock().unwrap();
                 return serde_json::to_value(&s.messages).map_err(|e| e.to_string());
@@ -678,7 +698,8 @@ impl Drop for CancelTurn {
 }
 
 /// `bone.session.create`: a new session, by default in the cwd of the
-/// session that owns it.
+/// session that owns it. Messages may be Lua tables or raw ChatMessage JSON
+/// strings (from snapshot.raw_messages), preserving sealed reasoning state.
 fn session_create(inner: &Arc<Inner>, spec: &Json) -> Result<Json, String> {
     let owner: Option<SessionOwner> = match &spec["owner"] {
         Json::Null => None,
@@ -706,11 +727,41 @@ fn session_create(inner: &Arc<Inner>, spec: &Json) -> Result<Json, String> {
         .ok_or_else(|| format!("not a directory: {cwd}"))?
         .to_string_lossy()
         .into_owned();
-    let session = match owner {
-        Some(o) => inner.sessions.create_owned(cwd, o),
-        None => inner.sessions.create(cwd),
+    let mut messages = if spec["messages"].is_null() {
+        Vec::new()
+    } else {
+        crate::agent::list(&spec["messages"])
+            .as_array()
+            .ok_or("create needs a list of messages")?
+            .iter()
+            .map(|v| match v.as_str() {
+                Some(raw) => serde_json::from_str::<ChatMessage>(raw)
+                    .map_err(|e| format!("bad message: {e}")),
+                None => message(v),
+            })
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    for msg in &mut messages {
+        if let Some(images) = msg.images_mut() {
+            inner.attachments.validate(images)?;
+        }
     }
-    .map_err(|e| e.to_string())?;
+    let summary: Option<Summary> =
+        serde_json::from_value(spec["summary"].clone()).map_err(|e| format!("bad summary: {e}"))?;
+    if summary.as_ref().is_some_and(|s| s.through > messages.len()) {
+        return Err("summary.through exceeds the message count".into());
+    }
+    let model = if spec["model"].is_object() {
+        json!([spec["model"]["provider"], spec["model"]["model"]])
+    } else {
+        spec["model"].clone()
+    };
+    let model: Option<Pin> =
+        serde_json::from_value(model).map_err(|e| format!("bad model: {e}"))?;
+    let session = inner
+        .sessions
+        .create_with(cwd, owner, &messages, summary, model)
+        .map_err(|e| e.to_string())?;
     let mut info = session.lock().unwrap().info.clone();
     if let Some(title) = spec["title"]
         .as_str()
@@ -877,5 +928,170 @@ impl Inner {
                 .filter_map(|w| w.upgrade()),
         );
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_raw_messages_seed_losslessly_through_lua() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = serde_json::from_value(json!({
+            "provider": { "model": "unused" },
+            "data_dir": dir.path(),
+        }))
+        .unwrap();
+        let core = crate::Core::with_parts(
+            config,
+            Arc::new(crate::provider::Unconfigured),
+            Registry::builtin(),
+        );
+        let host = Host::default();
+        host.set(&core.inner);
+        let original: ChatMessage = serde_json::from_value(json!({
+            "role": "assistant",
+            "content": "reply",
+            "reasoning_state": {
+                "model": "sealed-model",
+                "items": [{
+                    "type": "reasoning",
+                    "encrypted_content": "sealed",
+                    "summary": [],
+                    "nested": { "null": null, "empty": [], "array": [null, [], {}] }
+                }],
+                "prefix": "fingerprint"
+            }
+        }))
+        .unwrap();
+        let source = core
+            .inner
+            .sessions
+            .create_with(
+                dir.path().to_string_lossy().into_owned(),
+                None,
+                std::slice::from_ref(&original),
+                None,
+                None,
+            )
+            .unwrap();
+        let id = source.lock().unwrap().info.session_id.clone();
+        let snapshot = host
+            .session_op(&json!({ "op": "snapshot", "id": id }))
+            .unwrap();
+        assert_eq!(
+            snapshot["messages"][0],
+            serde_json::to_value(&original).unwrap()
+        );
+        assert_eq!(
+            snapshot["raw_messages"][0],
+            serde_json::to_string(&original).unwrap()
+        );
+
+        // Exercise the actual converters on both sides of the Lua copy. The
+        // table message is lossy, while its raw counterpart must stay exact.
+        let lua = mlua::Lua::new();
+        lua.globals()
+            .set("s", bone_lua::to_lua(&lua, &snapshot).unwrap())
+            .unwrap();
+        let lossy: mlua::Value = lua.load("return s.messages[1]").eval().unwrap();
+        assert_ne!(
+            bone_lua::from_lua(&lossy).unwrap(),
+            serde_json::to_value(&original).unwrap()
+        );
+        let spec: mlua::Value = lua
+            .load(
+                r#"
+            return {
+                op = "create", cwd = s.info.cwd,
+                messages = { s.raw_messages[1], { role = "user", content = "next" } },
+                summary = { through = 1, text = "earlier reply" },
+                model = { "not-configured", "sealed-model" },
+            }
+        "#,
+            )
+            .eval()
+            .unwrap();
+        let created = host
+            .session_op(&bone_lua::from_lua(&spec).unwrap())
+            .unwrap();
+        let id = created["session_id"].as_str().unwrap();
+        let copied = host
+            .session_op(&json!({ "op": "snapshot", "id": id }))
+            .unwrap();
+        assert_eq!(copied["raw_messages"][0], snapshot["raw_messages"][0]);
+        assert_eq!(copied["messages"][0], snapshot["messages"][0]);
+        assert_eq!(copied["messages"][1]["content"], "next");
+        assert_eq!(
+            copied["summary"],
+            json!({ "through": 1, "text": "earlier reply" })
+        );
+        // Pins are validated by deserialization, not provider lookup.
+        assert_eq!(
+            copied["model"],
+            json!({ "provider": "not-configured", "model": "sealed-model" })
+        );
+        let reloaded = crate::session::SessionStore::new(dir.path())
+            .get(id)
+            .unwrap();
+        assert_eq!(reloaded.lock().unwrap().messages[0], original);
+
+        // A model pin with no provider must survive Lua's null -> nil conversion.
+        let created = host
+            .session_op(&json!({
+                "op": "create", "cwd": dir.path(), "model": { "model": "default-provider" }
+            }))
+            .unwrap();
+        let snapshot = host
+            .session_op(&json!({ "op": "snapshot", "id": created["session_id"] }))
+            .unwrap();
+        lua.globals()
+            .set("s", bone_lua::to_lua(&lua, &snapshot).unwrap())
+            .unwrap();
+        let spec: mlua::Value = lua
+            .load("return { op = 'create', cwd = s.info.cwd, model = s.model }")
+            .eval()
+            .unwrap();
+        let created = host
+            .session_op(&bone_lua::from_lua(&spec).unwrap())
+            .unwrap();
+        let seeded = core
+            .inner
+            .sessions
+            .get(created["session_id"].as_str().unwrap())
+            .unwrap();
+        assert_eq!(
+            seeded.lock().unwrap().model,
+            Some((None, "default-provider".into()))
+        );
+
+        assert!(
+            host.session_op(&json!({
+                "op": "create", "cwd": dir.path(), "model": ["invalid-length"]
+            }))
+            .unwrap_err()
+            .starts_with("bad model:")
+        );
+        assert!(
+            host.session_op(&json!({
+                "op": "create", "cwd": dir.path(), "messages": ["not json"]
+            }))
+            .unwrap_err()
+            .starts_with("bad message:")
+        );
+        let image = json!({
+            "role": "user", "content": "image", "images": [{
+                "id": "missing", "name": "image", "mime_type": "image/png",
+                "width": 1, "height": 1, "bytes": 1, "data": "inline"
+            }]
+        });
+        assert!(
+            host.session_op(&json!({
+                "op": "create", "cwd": dir.path(), "messages": [image.to_string()]
+            }))
+            .unwrap_err()
+            .contains("upload image bytes")
+        );
     }
 }

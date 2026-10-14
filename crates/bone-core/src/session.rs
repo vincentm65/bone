@@ -92,7 +92,7 @@ pub(crate) struct Header {
     pub session_id: SessionId,
     pub cwd: String,
     pub created_at: u64,
-    /// The session it was forked from.
+    /// Legacy ancestry, read from older session files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<SessionId>,
     /// The session that started this one (a subagent's).
@@ -342,7 +342,7 @@ impl SessionStore {
     }
 
     pub fn create(&self, cwd: String) -> Result<SessionHandle, SessionError> {
-        self.create_with(cwd, None, None, &[], None)
+        self.create_with(cwd, None, &[], None, None)
     }
 
     /// A new session started on behalf of another (a subagent).
@@ -351,25 +351,24 @@ impl SessionStore {
         cwd: String,
         owner: SessionOwner,
     ) -> Result<SessionHandle, SessionError> {
-        self.create_with(cwd, None, Some(owner), &[], None)
+        self.create_with(cwd, Some(owner), &[], None, None)
     }
 
-    /// A new session, maybe forked from another, starting with `messages`
-    /// (and the summary standing in for their first part).
-    fn create_with(
+    /// A new session starting with messages, an optional summary and model.
+    pub(crate) fn create_with(
         &self,
         cwd: String,
-        parent: Option<SessionId>,
         owner: Option<SessionOwner>,
         messages: &[ChatMessage],
         summary: Option<Summary>,
+        model: Option<Pin>,
     ) -> Result<SessionHandle, SessionError> {
         std::fs::create_dir_all(&self.dir)?;
         let header = Header {
             session_id: uuid::Uuid::now_v7().to_string(),
             cwd,
             created_at: now(),
-            parent,
+            parent: None,
             owner,
         };
         let path = self.path(&header.session_id);
@@ -392,12 +391,15 @@ impl SessionStore {
         if summary.is_some() {
             write_record(&mut file, Record::Summary(summary.clone()))?;
         }
+        if let Some(model) = &model {
+            write_record(&mut file, Record::Model(model.clone()))?;
+        }
         let users = messages
             .iter()
             .filter(|m| matches!(m, ChatMessage::User { .. }))
             .count();
         let id = info.session_id.clone();
-        let session = self.open(info, messages.to_vec(), summary, None, users, file);
+        let session = self.open(info, messages.to_vec(), summary, model, users, file);
         session.lock().unwrap().reindex();
         Ok(self.keep(&id, session))
     }
@@ -513,35 +515,6 @@ impl SessionStore {
             loaded.remove(&idle);
         }
         session
-    }
-
-    /// A copy of a session's transcript (all of it, or what came before
-    /// user message `before_turn`, counting from 1) as a new session.
-    pub fn fork(&self, id: &str, before_turn: Option<u32>) -> Result<SessionHandle, SessionError> {
-        let source = self.get(id)?;
-        let (cwd, messages, summary) = {
-            let s = source.lock().unwrap();
-            let mut end = s.messages.len();
-            if let Some(n) = before_turn {
-                // Cut at a user message, so no tool call loses its result.
-                if let Some((i, _)) = s
-                    .messages
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, m)| matches!(m, ChatMessage::User { .. }))
-                    .nth((n.max(1) - 1) as usize)
-                {
-                    end = i;
-                }
-            }
-            // The summary comes along when it covers only what is copied.
-            let summary = s.summary.clone().filter(|sum| sum.through <= end);
-            (s.info.cwd.clone(), s.messages[..end].to_vec(), summary)
-        };
-        let fork = self.create_with(cwd, Some(id.to_owned()), None, &messages, summary)?;
-        let model = source.lock().unwrap().model.clone();
-        model.map_or(Ok(()), |m| fork.lock().unwrap().pin(m))?;
-        Ok(fork)
     }
 
     /// Give a session a title that stays (kept next to its file).
@@ -864,7 +837,7 @@ mod tests {
     }
 
     #[test]
-    fn summaries_survive_reloads_and_follow_forks() {
+    fn summaries_survive_reloads_and_seeded_creation() {
         let dir = tempfile::tempdir().unwrap();
         let store = SessionStore::new(dir.path());
         let a = store.create("/work".into()).unwrap();
@@ -895,11 +868,21 @@ mod tests {
         assert_eq!(loaded.lock().unwrap().messages.len(), 3);
         assert_eq!(loaded.lock().unwrap().context().len(), 2);
 
-        // A fork keeps the summary only when it covers part of the copy.
-        let whole = fresh.fork(&id, None).unwrap();
-        assert_eq!(whole.lock().unwrap().context().len(), 2);
-        let early = fresh.fork(&id, Some(2)).unwrap();
-        assert_eq!(early.lock().unwrap().summary, None);
+        // A new session may be seeded with a transcript and summary.
+        let seeded = {
+            let s = loaded.lock().unwrap();
+            fresh
+                .create_with(
+                    s.info.cwd.clone(),
+                    None,
+                    &s.messages,
+                    s.summary.clone(),
+                    None,
+                )
+                .unwrap()
+        };
+        assert_eq!(seeded.lock().unwrap().context().len(), 2);
+        assert_eq!(seeded.lock().unwrap().info.parent, None);
 
         // Clearing sends everything again; so does replacing the transcript.
         let mut s = loaded.lock().unwrap();
@@ -915,6 +898,79 @@ mod tests {
         drop(s);
         let again = SessionStore::new(dir.path()).get(&id).unwrap();
         assert_eq!(again.lock().unwrap().summary, None);
+    }
+
+    #[test]
+    fn seeded_creation_persists_summary_model_and_turn_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path());
+        let messages = vec![
+            ChatMessage::User {
+                content: "first".into(),
+                images: Vec::new(),
+            },
+            ChatMessage::Assistant {
+                content: "reply".into(),
+                reasoning: String::new(),
+                tool_calls: vec![],
+                reasoning_state: None,
+            },
+            ChatMessage::User {
+                content: "second".into(),
+                images: Vec::new(),
+            },
+        ];
+        let summary = Some(Summary {
+            through: 2,
+            text: "earlier exchange".into(),
+        });
+        let model: Pin = (Some("provider".into()), "model".into());
+        let seeded = store
+            .create_with(
+                "/work".into(),
+                None,
+                &messages,
+                summary.clone(),
+                Some(model.clone()),
+            )
+            .unwrap();
+        let id = {
+            let mut s = seeded.lock().unwrap();
+            assert_eq!(s.info.parent, None);
+            assert_eq!(s.info.title.as_deref(), Some("first"));
+            assert_eq!(s.messages, messages);
+            assert_eq!(s.summary, summary);
+            assert_eq!(s.model, Some(model.clone()));
+            assert_eq!(s.next_turn_id(), 3);
+            s.info.session_id.clone()
+        };
+        let fresh = SessionStore::new(dir.path());
+        let loaded = fresh.get(&id).unwrap();
+        let mut s = loaded.lock().unwrap();
+        assert_eq!(s.info.parent, None);
+        assert_eq!(s.messages, messages);
+        assert_eq!(s.summary, summary);
+        assert_eq!(s.model, Some(model));
+        assert_eq!(s.context().len(), 2);
+        assert_eq!(s.next_turn_id(), 3);
+    }
+
+    #[test]
+    fn legacy_parent_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path());
+        let session = store.create("/work".into()).unwrap();
+        let id = session.lock().unwrap().info.session_id.clone();
+        let parent = uuid::Uuid::now_v7().to_string();
+        let mut header: serde_json::Value =
+            serde_json::from_str(std::fs::read_to_string(store.path(&id)).unwrap().trim()).unwrap();
+        header["data"]["parent"] = serde_json::json!(parent);
+        std::fs::write(store.path(&id), format!("{header}\n")).unwrap();
+        let fresh = SessionStore::new(dir.path());
+        assert_eq!(
+            fresh.get(&id).unwrap().lock().unwrap().info.parent,
+            Some(parent)
+        );
     }
 
     #[test]
