@@ -4,7 +4,6 @@
 -- browser; closing the document returns to the same search and selection.
 
 local M = {}
-local CHAR = "^[%z\1-\127\194-\244][\128-\191]*$"
 
 -- Help browser and topic lookup. Override ~/.bone/runtime/lua/bone/help.lua
 -- to customize it, or replace bone.ui.help from tui.lua.
@@ -195,7 +194,7 @@ function M.open()
     end
     local body = {
       clip(tabline, inner),
-      clip({ { "Search  ", "Accent" }, { st.query == "" and "type to filter…" or st.query, st.query == "" and "Dim" or "Normal" }, { " ▏", "Accent" } }, inner),
+      clip({ { "Search  ", "Accent" }, { st.query == "" and "type to filter…" or st.query, st.query == "" and "Dim" or "Normal" }, { "▏", "Accent" } }, inner),
       { { string.rep("─", inner), "PopupBorder" } },
     }
     local details = h >= 16 and 4 or 0
@@ -271,14 +270,8 @@ function M.open()
       elseif it then
         M.topic(it.topic)
       end
-    elseif k == "backspace" then
-      st.query, st.sel = st.query:gsub("[%z\1-\127\194-\244][\128-\191]*$", ""), 1
-    elseif k == "ctrl+u" then
-      st.query, st.sel = "", 1
-    elseif k == "space" then
-      st.query, st.sel = st.query .. " ", 1
-    elseif k:match(CHAR) then
-      st.query, st.sel = st.query .. k, 1
+    elseif bone.text.edit(st.query, k) then
+      st.query, st.sel = bone.text.edit(st.query, k), 1
     else
       return false
     end
@@ -492,12 +485,9 @@ function M.markdown(path)
         st.top = math.max(0, math.min(st.top, st.total - st.rows))
       end
     elseif st.pane == "files" then
-      if k == "backspace" then st.query = st.query:gsub(CHAR:sub(2, -2) .. "$", "")
-      elseif k == "ctrl+u" then st.query = ""
-      elseif k == "space" then st.query = st.query .. " "
-      elseif k:match(CHAR) then st.query = st.query .. k
-      else return false end
-      st.sel = 1
+      local query = bone.text.edit(st.query, k)
+      if not query then return false end
+      st.query, st.sel = query, 1
       filter()
     else return false end
     return true

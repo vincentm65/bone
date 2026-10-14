@@ -27,7 +27,7 @@ use crate::app::{App, CHAT_WIN, Level, PROMPT_WIN};
 use crate::editor::TextBuffer;
 use crate::layout::{BufferId, Placed, Window};
 use crate::text::{sanitize, width};
-use crate::ui::{Border, Item, LayoutNode, PromptSpec, Size, render_items};
+use crate::ui::{Border, Item, LayoutNode, PromptSpec, Size, items_width, render_items};
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     // Consume due UI timers before Lua draws, so render callbacks can rearm
@@ -510,16 +510,6 @@ impl Insets {
             text_width,
         }
     }
-}
-
-fn items_width(items: &[Item]) -> usize {
-    items
-        .iter()
-        .map(|i| match i {
-            Item::Text(t, _) => width(t),
-            Item::Fill(..) => 0,
-        })
-        .sum()
 }
 
 /// Draw chat `buf`'s prompt box: background, border and edge lines from

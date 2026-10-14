@@ -112,8 +112,8 @@ struct Exit {
 /// Output of one stream as the UI sees it.
 #[derive(Default)]
 struct Output {
-    /// Bytes of an incomplete UTF-8 character at the end of the last chunk.
-    tail: Vec<u8>,
+    /// Holds an incomplete UTF-8 character at the end of the last chunk.
+    tail: bone_lua::sys::Utf8Decoder,
     /// The incomplete last line, in line mode.
     line: String,
     /// Everything so far, for `on_exit` (when buffering).
@@ -126,16 +126,7 @@ impl Output {
     /// Decode a chunk, holding back a split character.
     fn decode(&mut self, chunk: &[u8]) -> String {
         self.bytes += chunk.len() as u64;
-        self.tail.extend_from_slice(chunk);
-        let valid = match std::str::from_utf8(&self.tail) {
-            Ok(_) => self.tail.len(),
-            Err(e) if e.error_len().is_none() => e.valid_up_to(),
-            Err(_) => self.tail.len(),
-        };
-        let rest = self.tail.split_off(valid);
-        let text = String::from_utf8_lossy(&self.tail).into_owned();
-        self.tail = rest;
-        text
+        self.tail.decode(chunk)
     }
 
     fn keep(&mut self, text: &str) {
@@ -422,7 +413,7 @@ impl App {
         // Whatever is left: a split character, a last line without "\n".
         let mut rest = Vec::new();
         for (out, cb) in [(&mut j.out, j.on_stdout), (&mut j.err, j.on_stderr)] {
-            let text = String::from_utf8_lossy(&std::mem::take(&mut out.tail)).into_owned();
+            let text = out.tail.finish();
             if j.buffer {
                 out.keep(&text);
             }

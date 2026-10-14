@@ -91,7 +91,9 @@ type PromptState = (
 );
 
 /// The Lua state and everything it made, kept aside during a reload (see
-/// [`App::swap_lua_side`]).
+/// [`App::swap_lua_side`]). The default has no Lua state and nothing made
+/// by Lua, as before `lua::init`.
+#[derive(Default)]
 pub(crate) struct LuaSide {
     lua: Option<Lua>,
     keymaps: Keymaps,
@@ -120,41 +122,6 @@ pub(crate) struct LuaSide {
     ui_broken: HashSet<String>,
     lua_errors: Vec<String>,
     spinner: crate::ui::Spinner,
-}
-
-impl LuaSide {
-    /// No Lua state and nothing made by Lua, as before `lua::init`.
-    pub(crate) fn empty() -> Self {
-        LuaSide {
-            lua: None,
-            keymaps: Keymaps::default(),
-            focused_context: None,
-            pending_keys: Vec::new(),
-            pending_action: None,
-            pending_context: None,
-            pending_since: None,
-            raw_interceptors: Vec::new(),
-            dynamic_options: HashMap::new(),
-            user_commands: HashMap::new(),
-            autocmds: Vec::new(),
-            in_actions: Vec::new(),
-            owner: None,
-            callback_owner: HashMap::new(),
-            owned: HashMap::new(),
-            keymap_owner: HashMap::new(),
-            plugins: Vec::new(),
-            shutdown_hooks: Vec::new(),
-            popups: Vec::new(),
-            panels: Vec::new(),
-            panel_focus: None,
-            jobs: Default::default(),
-            theme: Theme::default(),
-            colors_name: None,
-            ui_broken: HashSet::new(),
-            lua_errors: Vec::new(),
-            spinner: Default::default(),
-        }
-    }
 }
 
 /// Work to apply on the UI thread, e.g. a request reply.

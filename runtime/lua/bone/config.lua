@@ -13,8 +13,6 @@
 
 local M = {}
 
-local CHAR = "^[%z\1-\127\194-\244][\128-\191]*$"
-
 local function text_width(s)
   return bone.text.width(s)
 end
@@ -824,14 +822,8 @@ function M.open(want)
         finish_edit(row)
       elseif k == "esc" then
         st.edit = nil
-      elseif k == "backspace" then
-        st.edit = st.edit:gsub("[%z\1-\127\194-\244][\128-\191]*$", "")
-      elseif k == "ctrl+u" then
-        st.edit = ""
-      elseif k == "space" then
-        st.edit = st.edit .. " "
-      elseif k:match(CHAR) then
-        st.edit = st.edit .. k
+      else
+        st.edit = bone.text.edit(st.edit, k) or st.edit
       end
       return true
     end

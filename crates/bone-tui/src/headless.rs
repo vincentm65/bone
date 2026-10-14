@@ -3,10 +3,9 @@
 //! [`crate::run`] except that frames go to an in-memory buffer.
 
 use std::io;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bone_client::{Client, EventStream};
+use bone_client::EventStream;
 use bone_proto::Connection;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -31,23 +30,8 @@ impl Headless {
         width: u16,
         height: u16,
     ) -> io::Result<Self> {
-        let (client, events) = Client::new(conn);
-        client
-            .initialize("bone-headless")
-            .await
-            .map_err(|e| io::Error::other(format!("cannot connect to the bone server: {e}")))?;
-        let (tx, rx) = mpsc::unbounded_channel();
-        // Saved settings apply before the user's tui.lua, so fetch them first.
-        let settings = client
-            .request::<bone_proto::methods::SettingsGet>(bone_proto::methods::Empty {})
-            .await
-            .unwrap_or_default();
-        let mut app = App::new(Arc::new(client), tx, opts.cwd, opts.config_dir);
-        app.reload_core = opts.reload_core;
-        app.clipboard_executable = opts.clipboard_executable;
-        app.settings = settings;
-        app.load_user_config();
-        if let Some(id) = opts.resume {
+        let (mut app, events, rx, resume) = crate::connect(conn, "bone-headless", opts).await?;
+        if let Some(id) = resume {
             app.resume(id);
         }
         let terminal = Terminal::new(TestBackend::new(width, height))?;

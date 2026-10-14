@@ -1094,6 +1094,7 @@ Each returns one line (`"%="` is a blank stretch); the row exists only while the
 - `bone.ui.markdown(text, width, indent)` → that rendered as lines (part of the API, so it works under any TUI library).
 - `bone.text.wrap(spans, width, { first, rest, pad })` → lines. `first`/`rest` prefix the first and following rows (`rest` defaults to blanks as wide as `first`); `pad = "Group"` fills each row to the width (background bands).
 - `bone.text.clip(spans, width)`, `bone.text.truncate(s, n)`, `bone.text.width(s)`.
+- `bone.text.edit(s, key)` → `s` with a typing key applied (backspace, ctrl+u, space, a character), or nil for any other key: a one-line input in a popup's `on_key`.
 - `bone.text.shell(cmd)` → the command as highlighted spans.
 - `bone.ui.preview(text, max, group)` → at most `max` rows: first line, `⋮ +N lines`, last lines.
 

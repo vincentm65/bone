@@ -475,29 +475,6 @@ enum Stdin {
     Pipe,
 }
 
-#[derive(Default)]
-struct Decoder {
-    tail: Vec<u8>,
-}
-
-impl Decoder {
-    fn decode(&mut self, bytes: &[u8]) -> String {
-        self.tail.extend_from_slice(bytes);
-        let valid = match std::str::from_utf8(&self.tail) {
-            Ok(_) => self.tail.len(),
-            Err(e) if e.error_len().is_none() => e.valid_up_to(),
-            Err(_) => self.tail.len(),
-        };
-        let rest = self.tail.split_off(valid);
-        let text = String::from_utf8_lossy(&self.tail).into_owned();
-        self.tail = rest;
-        text
-    }
-    fn finish(&mut self) -> String {
-        String::from_utf8_lossy(&std::mem::take(&mut self.tail)).into_owned()
-    }
-}
-
 fn terminate(pid: Option<u32>) {
     if let Some(pid) = pid {
         bone_lua::sys::terminate_tree(pid, false);
@@ -612,7 +589,7 @@ async fn run_job(
         let _ = pipe.write_all(text.as_bytes()).await;
     }
 
-    let mut out_decoder = Decoder::default();
+    let mut out_decoder = bone_lua::sys::Utf8Decoder::default();
     // Windows programs end lines with \r\n even in a pipe.
     let mut cleaner = (terminal || cfg!(windows)).then(Cleaner::default);
     let mut status = None;

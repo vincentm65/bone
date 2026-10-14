@@ -26,8 +26,6 @@ M.PRESETS = {
   { title = "Another OpenAI-compatible service", name = "", base_url = "", model = "" },
 }
 
-local CHAR = "^[%z\1-\127\194-\244][\128-\191]*$"
-
 local function pad(s, w)
   s = tostring(s or "")
   local n = bone.text.width(s)
@@ -315,14 +313,8 @@ function M.open(opts)
         st.edit = nil
       elseif k == "esc" then
         st.edit = nil
-      elseif k == "backspace" then
-        st.edit = st.edit:gsub("[%z\1-\127\194-\244][\128-\191]*$", "")
-      elseif k == "ctrl+u" then
-        st.edit = ""
-      elseif k == "space" then
-        st.edit = st.edit .. " "
-      elseif k:match(CHAR) then
-        st.edit = st.edit .. k
+      else
+        st.edit = bone.text.edit(st.edit, k) or st.edit
       end
       return true
     end

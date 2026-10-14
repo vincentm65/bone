@@ -331,6 +331,12 @@ impl Inner {
         self.start_next(session);
     }
 
+    /// A session just made: start it and tell every client.
+    fn created_session(&self, info: &SessionInfo) {
+        self.started_session(&info.session_id, &info.cwd, true);
+        self.emit::<SessionCreated>(info.clone());
+    }
+
     fn started_session(&self, id: &str, cwd: &str, new: bool) {
         if !self.started.lock().unwrap().insert(id.to_owned()) {
             return;
@@ -1004,9 +1010,7 @@ impl Core {
             .create(cwd.to_string_lossy().into_owned())
             .map_err(session_error)?;
         let info = session.lock().unwrap().info.clone();
-        self.inner
-            .started_session(&info.session_id, &info.cwd, true);
-        self.inner.emit::<SessionCreated>(info.clone());
+        self.inner.created_session(&info);
         Ok(info)
     }
 
@@ -1034,9 +1038,7 @@ impl Core {
             .fork(&p.session_id, p.before_turn)
             .map_err(session_error)?;
         let info = session.lock().unwrap().info.clone();
-        self.inner
-            .started_session(&info.session_id, &info.cwd, true);
-        self.inner.emit::<SessionCreated>(info.clone());
+        self.inner.created_session(&info);
         Ok(info)
     }
 

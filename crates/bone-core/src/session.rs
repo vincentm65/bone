@@ -396,30 +396,10 @@ impl SessionStore {
             .iter()
             .filter(|m| matches!(m, ChatMessage::User { .. }))
             .count();
-        let session = Arc::new(Mutex::new(Session {
-            queue_path: self.queue_path(&info.session_id),
-            queue_dirty: Cell::new(false),
-            info: info.clone(),
-            messages: messages.to_vec(),
-            summary,
-            chars_per_token: None,
-            replays_reasoning: false,
-            tool_chars: 0,
-            compacting: false,
-            generation: 0,
-            active: None,
-            safe_point: false,
-            queue: Vec::new(),
-            queue_paused: false,
-            model: None,
-            next_turn: users as TurnId,
-            next_queue: 0,
-            file,
-            path,
-            index: self.index.clone(),
-        }));
+        let id = info.session_id.clone();
+        let session = self.open(info, messages.to_vec(), summary, None, users, file);
         session.lock().unwrap().reindex();
-        Ok(self.keep(&info.session_id, session))
+        Ok(self.keep(&id, session))
     }
 
     /// The session from memory, or loaded from disk.
@@ -457,21 +437,35 @@ impl SessionStore {
         }
         // Turn ids count every user message ever written (compacted ones
         // too), so they stay unique across reloads.
-        let next_turn = users as TurnId;
-        // A queue left from before waits until resumed or added to.
-        let saved = std::fs::read_to_string(self.queue_path(id))
+        let session = self.open(info, messages, summary, model, users, file);
+        Ok(self.keep(id, session))
+    }
+
+    /// A session over its open `file`, with nothing running yet. A queue
+    /// left from before waits until resumed or added to.
+    fn open(
+        &self,
+        info: SessionInfo,
+        messages: Vec<ChatMessage>,
+        summary: Option<Summary>,
+        model: Option<Pin>,
+        users: usize,
+        file: File,
+    ) -> SessionHandle {
+        let path = self.path(&info.session_id);
+        let queue_path = self.queue_path(&info.session_id);
+        let saved = std::fs::read_to_string(&queue_path)
             .ok()
             .and_then(|t| serde_json::from_str::<SavedQueue>(&t).ok())
             .unwrap_or_default();
         let next_queue = saved
             .next_id
             .max(saved.items.iter().map(|q| q.id).max().unwrap_or(0));
-        let queue = saved.items;
-        let session = Arc::new(Mutex::new(Session {
-            queue_path: self.queue_path(id),
+        Arc::new(Mutex::new(Session {
+            queue_path,
             queue_dirty: Cell::new(false),
-            queue_paused: !queue.is_empty(),
-            queue,
+            queue_paused: !saved.items.is_empty(),
+            queue: saved.items,
             info,
             messages,
             summary,
@@ -483,13 +477,12 @@ impl SessionStore {
             active: None,
             safe_point: false,
             model,
-            next_turn,
+            next_turn: users as TurnId,
             next_queue,
             file,
             path,
             index: self.index.clone(),
-        }));
-        Ok(self.keep(id, session))
+        }))
     }
 
     /// Hold `session` in memory (or the one another caller loaded meanwhile)

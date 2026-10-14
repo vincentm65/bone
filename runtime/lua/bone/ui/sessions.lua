@@ -417,14 +417,8 @@ function M.open()
       if state.page == "running" then
         if key == "x" then stop() return true end
         return false
-      elseif key == "backspace" then
-        state.query = state.query:gsub("[%z\1-\127\194-\244][\128-\191]*$", "")
-      elseif key == "ctrl+u" then
-        state.query = ""
-      elseif key == "space" then
-        state.query = state.query .. " "
-      elseif key:match("^[%z\1-\127\194-\244][\128-\191]*$") then
-        state.query = state.query .. key
+      elseif bone.text.edit(state.query, key) then
+        state.query = bone.text.edit(state.query, key)
       else
         return false
       end

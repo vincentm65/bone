@@ -61,11 +61,10 @@ async fn system(cmd: &str, spec: &Json) -> Result<Json, String> {
     }))
 }
 
-/// `{ status, headers, body }`. Errors (no connection, timeout) are
-/// returned to Lua as errors; HTTP error statuses are not.
-/// Build a request from `{ url, method?, headers?, body?, timeout? }`. A
-/// table body is sent as JSON.
-pub fn request(req: &Json) -> Result<reqwest::RequestBuilder, String> {
+/// Send `{ url, method?, headers?, body?, timeout? }` (a table body goes as
+/// JSON): the response, and `{ status, headers }` for Lua. Errors (no
+/// connection, timeout) are returned; HTTP error statuses are not.
+pub async fn send(req: &Json) -> Result<(reqwest::Response, Json), String> {
     let url = req["url"].as_str().ok_or("an HTTP request needs a url")?;
     let method = req["method"].as_str().unwrap_or("GET");
     let method = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
@@ -84,21 +83,20 @@ pub fn request(req: &Json) -> Result<reqwest::RequestBuilder, String> {
     if let Some(ms) = req["timeout"].as_u64() {
         b = b.timeout(Duration::from_millis(ms));
     }
-    Ok(b)
-}
-
-async fn http(req: &Json) -> Result<Json, String> {
-    let url = req["url"].as_str().unwrap_or_default();
-    let res = request(req)?
-        .send()
-        .await
-        .map_err(|e| format!("{url}: {e}"))?;
-    let status = res.status().as_u16();
+    let res = b.send().await.map_err(|e| format!("{url}: {e}"))?;
     let headers: serde_json::Map<String, Json> = res
         .headers()
         .iter()
         .map(|(k, v)| (k.to_string(), json!(v.to_str().unwrap_or_default())))
         .collect();
-    let body = res.text().await.map_err(|e| format!("{url}: {e}"))?;
-    Ok(json!({ "status": status, "headers": headers, "body": body }))
+    let meta = json!({ "status": res.status().as_u16(), "headers": headers });
+    Ok((res, meta))
+}
+
+/// `{ status, headers, body }`.
+async fn http(req: &Json) -> Result<Json, String> {
+    let (res, mut out) = send(req).await?;
+    let url = req["url"].as_str().unwrap_or_default();
+    out["body"] = json!(res.text().await.map_err(|e| format!("{url}: {e}"))?);
+    Ok(out)
 }

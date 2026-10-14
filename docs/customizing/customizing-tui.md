@@ -219,7 +219,7 @@ Everywhere above: a line is a list of items — a plain string,
 `{ "text", "Group" }`, or `{ fill = "─", hl = "Group" }` (stretches to fill
 the row). An empty table is a blank line; long lines are cut with `…`.
 Helpers: `bone.text.wrap(spans, width, { first, rest, pad })`,
-`bone.text.clip`, `bone.text.truncate`, `bone.text.width`,
+`bone.text.clip`, `bone.text.truncate`, `bone.text.width`, `bone.text.edit`,
 `bone.text.shell(cmd)` (highlighted command spans), `bone.strwidth(s)`.
 
 ## TUI libraries (/tui)

@@ -75,15 +75,22 @@ pub struct RunOptions {
     pub reload_core: bool,
 }
 
-/// Run the TUI on `conn` until the user quits. Returns a message to print
-/// after the terminal is restored, if the session ended abnormally.
-pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String>> {
-    let (client, mut server_events) = Client::new(conn);
+type Connected = (
+    App,
+    bone_client::EventStream,
+    mpsc::UnboundedReceiver<app::AppEvent>,
+    Option<Option<String>>,
+);
+
+/// Connect as `name`, make the app and load the user's config. The resume
+/// request comes back for the caller to act on once it is set up.
+async fn connect(conn: Connection, name: &str, opts: RunOptions) -> io::Result<Connected> {
+    let (client, events) = Client::new(conn);
     client
-        .initialize("bone-tui")
+        .initialize(name)
         .await
         .map_err(|e| io::Error::other(format!("cannot connect to the bone server: {e}")))?;
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, rx) = mpsc::unbounded_channel();
     // Saved settings apply before the user's tui.lua, so fetch them first.
     let settings = client
         .request::<bone_proto::methods::SettingsGet>(bone_proto::methods::Empty {})
@@ -94,6 +101,13 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
     app.clipboard_executable = opts.clipboard_executable;
     app.settings = settings;
     app.load_user_config();
+    Ok((app, events, rx, opts.resume))
+}
+
+/// Run the TUI on `conn` until the user quits. Returns a message to print
+/// after the terminal is restored, if the session ended abnormally.
+pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String>> {
+    let (mut app, mut server_events, mut rx, resume) = connect(conn, "bone-tui", opts).await?;
     app.note_runtime_overrides();
     // Updates to bone or its plugins: checked in the background, once.
     app.exec_lua(r#"require("bone.update").check()"#);
@@ -105,7 +119,7 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
     let mut watching = true;
     let mut lua_pending = None;
     let mut lua_state = lua_snapshot(app.config_dir.as_deref(), watched_project.as_deref());
-    if let Some(id) = opts.resume {
+    if let Some(id) = resume {
         app.resume(id);
     }
 

@@ -1052,6 +1052,20 @@ end
 -- One UTF-8 character.
 local CHAR = "^[%z\1-\127\194-\244][\128-\191]*$"
 
+--- Apply `key` to a one-line input `s`: the new text, or nil when the key
+--- does not edit text (backspace deletes a character, ctrl+u clears).
+function bone.text.edit(s, key)
+  if key == "backspace" then
+    return (s:gsub(CHAR:sub(2, -2) .. "$", ""))
+  elseif key == "ctrl+u" then
+    return ""
+  elseif key == "space" then
+    return s .. " "
+  elseif key:match(CHAR) then
+    return s .. key
+  end
+end
+
 --- Pick one of `items` in a focused window; typing filters.
 ---   opts.prompt: text before the filter ("")
 ---   opts.format: function(item) -> string (default tostring)
@@ -1137,15 +1151,8 @@ function bone.ui.select(items, opts)
       end
     elseif k == "esc" or k == "ctrl+c" then
       finish(nil)
-    elseif k == "backspace" then
-      st.query = st.query:gsub("[%z\1-\127\194-\244][\128-\191]*$", "")
-      st.sel = 1
-    elseif k == "ctrl+u" then
-      st.query, st.sel = "", 1
-    elseif k == "space" then
-      st.query, st.sel = st.query .. " ", 1
-    elseif k:match(CHAR) then
-      st.query, st.sel = st.query .. k, 1
+    elseif bone.text.edit(st.query, k) then
+      st.query, st.sel = bone.text.edit(st.query, k), 1
     else
       return false
     end

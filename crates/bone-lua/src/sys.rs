@@ -227,3 +227,30 @@ pub fn exit_signal(status: &ExitStatus) -> Option<i32> {
 pub fn home_dir() -> Option<PathBuf> {
     std::env::home_dir().filter(|h| !h.as_os_str().is_empty())
 }
+
+/// Decodes a command's output chunk by chunk, holding back a character
+/// split across chunks.
+#[derive(Default)]
+pub struct Utf8Decoder {
+    tail: Vec<u8>,
+}
+
+impl Utf8Decoder {
+    pub fn decode(&mut self, bytes: &[u8]) -> String {
+        self.tail.extend_from_slice(bytes);
+        let valid = match std::str::from_utf8(&self.tail) {
+            Ok(_) => self.tail.len(),
+            Err(e) if e.error_len().is_none() => e.valid_up_to(),
+            Err(_) => self.tail.len(),
+        };
+        let rest = self.tail.split_off(valid);
+        let text = String::from_utf8_lossy(&self.tail).into_owned();
+        self.tail = rest;
+        text
+    }
+
+    /// Whatever is held back, once the output has ended.
+    pub fn finish(&mut self) -> String {
+        String::from_utf8_lossy(&std::mem::take(&mut self.tail)).into_owned()
+    }
+}

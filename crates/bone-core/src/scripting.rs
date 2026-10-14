@@ -838,17 +838,7 @@ impl Streams {
     }
 
     async fn open_stream(&self, req: &Json) -> Result<Json, String> {
-        let url = req["url"].as_str().unwrap_or_default().to_owned();
-        let res = bone_lua::wait::request(req)?
-            .send()
-            .await
-            .map_err(|e| format!("{url}: {e}"))?;
-        let status = res.status().as_u16();
-        let headers: serde_json::Map<String, Json> = res
-            .headers()
-            .iter()
-            .map(|(k, v)| (k.to_string(), json!(v.to_str().unwrap_or_default())))
-            .collect();
+        let (res, mut out) = bone_lua::wait::send(req).await?;
         let id = self.next.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         let stream = HttpStream {
             res,
@@ -860,7 +850,8 @@ impl Streams {
             .lock()
             .unwrap()
             .insert(id, Arc::new(tokio::sync::Mutex::new(stream)));
-        Ok(json!({ "status": status, "headers": headers, "stream": id }))
+        out["stream"] = json!(id);
+        Ok(out)
     }
 }
 

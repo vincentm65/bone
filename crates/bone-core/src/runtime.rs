@@ -13,8 +13,8 @@ use std::time::Duration;
 
 use bone_proto::methods::ModelInfo;
 use bone_proto::methods::{
-    AskRequested, AskResolved, PluginInfo, ReloadResult, SessionCreated, SessionUpdated,
-    SessionUpdatedParams, TurnFinished,
+    AskRequested, AskResolved, PluginInfo, ReloadResult, SessionUpdated, SessionUpdatedParams,
+    TurnFinished,
 };
 use bone_proto::types::{ChatMessage, SessionOwner};
 use serde_json::{Value as Json, json};
@@ -722,8 +722,7 @@ fn session_create(inner: &Arc<Inner>, spec: &Json) -> Result<Json, String> {
             .rename(&info.session_id, title)
             .map_err(|e| e.to_string())?;
     }
-    inner.started_session(&info.session_id, &info.cwd, true);
-    inner.emit::<SessionCreated>(info.clone());
+    inner.created_session(&info);
     serde_json::to_value(info).map_err(|e| e.to_string())
 }
 

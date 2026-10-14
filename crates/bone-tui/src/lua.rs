@@ -10,7 +10,7 @@ use std::path::PathBuf;
 
 use bone_lua::{Side, from_lua, short_error, to_lua};
 use bone_proto::methods::{ProcessCancel, ProcessRef};
-use mlua::{FromLuaMulti, Function, IntoLuaMulti, Lua, MultiValue, Table, Value};
+use mlua::{FromLua, FromLuaMulti, Function, IntoLuaMulti, Lua, MultiValue, Table, Value};
 
 use crate::app::App;
 use crate::keymap::{Action, Builtin, Context};
@@ -380,9 +380,10 @@ fn lua_fields(v: Value) -> mlua::Result<serde_json::Map<String, serde_json::Valu
     }
 }
 
-fn session_opt(opts: &Option<Table>) -> mlua::Result<Option<String>> {
+/// Field `k` of an optional options table: None when it or the table is nil.
+fn opt<T: FromLua>(opts: &Option<Table>, k: &str) -> mlua::Result<Option<T>> {
     match opts {
-        Some(o) => o.get("session"),
+        Some(o) => o.get(k),
         None => Ok(None),
     }
 }
@@ -449,7 +450,7 @@ fn job_spec(cmd: Value, opts: &Option<Table>) -> mlua::Result<crate::jobs::Spec>
     };
     Ok(Spec {
         command,
-        cwd: opts.as_ref().map(|o| o.get("cwd")).transpose()?.flatten(),
+        cwd: opt(opts, "cwd")?,
         env,
         stdin,
         timeout,
@@ -698,18 +699,11 @@ fn install_text(lua: &Lua, bone: &Table) -> mlua::Result<()> {
         "wrap",
         lua.create_function(|lua, (spans, width, opts): (Value, usize, Option<Table>)| {
             let spans = spans_arg(spans)?;
-            let opt = |k: &str| -> mlua::Result<Option<Value>> {
-                Ok(opts
-                    .as_ref()
-                    .map(|o| o.get::<Value>(k))
-                    .transpose()?
-                    .filter(|v| !v.is_nil()))
-            };
-            let first = opt("first")?
+            let first = opt::<Value>(&opts, "first")?
                 .map(spans_arg)
                 .transpose()?
                 .unwrap_or_default();
-            let rest = match opt("rest")? {
+            let rest = match opt(&opts, "rest")? {
                 Some(v) => spans_arg(v)?,
                 None => {
                     let w: usize = first.iter().map(|(t, _)| crate::text::width(t)).sum();
@@ -720,7 +714,7 @@ fn install_text(lua: &Lua, bone: &Table) -> mlua::Result<()> {
                     }
                 }
             };
-            let pad: Option<String> = opt("pad")?.map(|v| lua.unpack(v)).transpose()?;
+            let pad: Option<String> = opt(&opts, "pad")?;
             let out = lua.create_table()?;
             for mut line in crate::text::wrap_groups(&spans, &first, &rest, width) {
                 if let Some(hl) = &pad {
@@ -893,7 +887,7 @@ impl App {
             .collect();
         let panels: Vec<String> = self.panels.iter().map(|p| p.id.clone()).collect();
         let options = self.options.clone();
-        let old = self.swap_lua_side(crate::app::LuaSide::empty());
+        let old = self.swap_lua_side(Default::default());
         self.load_errors = Some(Vec::new());
         let dir = self.config_dir.clone();
         init(self, dir);
@@ -1114,12 +1108,7 @@ fn ret(lua: &Lua, v: impl IntoLuaMulti) -> mlua::Result<MultiValue> {
 }
 
 fn context_arg(opts: &Option<Table>) -> mlua::Result<Context> {
-    match opts
-        .as_ref()
-        .map(|o| o.get::<Option<String>>("context"))
-        .transpose()?
-        .flatten()
-    {
+    match opt::<String>(opts, "context")? {
         None => Ok(Context::Main),
         Some(c) => Context::from_name(&c).ok_or_else(|| {
             mlua::Error::runtime(format!(
@@ -1156,11 +1145,7 @@ fn fallback_arg(opts: &Option<Table>) -> mlua::Result<Option<Vec<Context>>> {
 }
 
 fn raw_context_arg(opts: &Option<Table>) -> mlua::Result<Option<Context>> {
-    let Some(opts) = opts else { return Ok(None) };
-    match opts.get::<Option<String>>("context")? {
-        Some(name) => context_from_name(name).map(Some),
-        None => Ok(None),
-    }
+    opt(opts, "context")?.map(context_from_name).transpose()
 }
 
 fn err(msg: impl Into<String>) -> mlua::Error {
@@ -1359,7 +1344,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
         "keymap_set" => {
             let (key, rhs, opts): (String, Value, Option<Table>) = args(lua, a)?;
             let ctx = context_arg(&opts)?;
-            let desc: Option<String> = opts.as_ref().map(|o| o.get("desc")).transpose()?.flatten();
+            let desc: Option<String> = opt(&opts, "desc")?;
             let action = match rhs {
                 Value::String(s) => Action::parse(&s.to_str()?).map_err(err)?,
                 Value::Function(f) => Action::Lua(app.store_callback(lua, f)?),
@@ -1399,11 +1384,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 app.own(crate::plugins::Owned::Context(ctx.clone()));
             }
             let fallback = fallback_arg(&opts)?;
-            let priority = opts
-                .as_ref()
-                .map(|o| o.get::<Option<i32>>("priority"))
-                .transpose()?
-                .flatten();
+            let priority = opt::<i32>(&opts, "priority")?;
             app.keymaps.define(ctx, fallback, priority).map_err(err)?;
             ret(lua, ())
         }
@@ -1474,19 +1455,18 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                     "command names are lowercase letters, digits, - and _: {name:?}"
                 )));
             }
-            let aliases = match opts.as_ref().map(|o| o.get::<Value>("aliases")) {
-                None | Some(Ok(Value::Nil)) => Vec::new(),
-                Some(Ok(Value::String(alias))) => vec![alias.to_str()?.to_owned()],
-                Some(Ok(Value::Table(aliases))) => aliases
+            let aliases = match opt::<Value>(&opts, "aliases")? {
+                None => Vec::new(),
+                Some(Value::String(alias)) => vec![alias.to_str()?.to_owned()],
+                Some(Value::Table(aliases)) => aliases
                     .sequence_values::<String>()
                     .collect::<mlua::Result<Vec<_>>>()?,
-                Some(Ok(other)) => {
+                Some(other) => {
                     return Err(err(format!(
                         "command aliases must be a string or list, not {}",
                         other.type_name()
                     )));
                 }
-                Some(Err(e)) => return Err(e),
             };
             if app.user_commands.iter().any(|(old_name, old)| {
                 old_name != &name && old.aliases.iter().any(|alias| alias == &name)
@@ -1511,41 +1491,27 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                     return Err(err(format!("/{alias} is already a user command")));
                 }
             }
-            let args_spec = match opts.as_ref().map(|o| o.get::<Value>("args")) {
-                None | Some(Ok(Value::Nil)) => None,
-                Some(Ok(Value::Table(spec))) => {
+            let args_spec = match opt::<Value>(&opts, "args")? {
+                None => None,
+                Some(Value::Table(spec)) => {
                     let value = from_lua(&Value::Table(spec))?;
                     crate::commands::validate_argument_specs(&value).map_err(err)?;
                     Some(value)
                 }
-                Some(Ok(other)) => {
+                Some(other) => {
                     return Err(err(format!(
                         "command args must be a table, not {}",
                         other.type_name()
                     )));
                 }
-                Some(Err(e)) => return Err(e),
             };
-            let desc = opts
-                .as_ref()
-                .map(|o| o.get::<Option<String>>("desc"))
-                .transpose()?
-                .flatten()
-                .unwrap_or_default();
-            let completion = opts
-                .as_ref()
-                .map(|o| {
-                    let complete: Option<Function> = o.get("complete")?;
-                    if complete.is_some() {
-                        Ok(complete)
-                    } else {
-                        o.get("completion")
-                    }
-                })
-                .transpose()?
-                .flatten()
-                .map(|f| app.store_callback(lua, f))
-                .transpose()?;
+            let desc = opt::<String>(&opts, "desc")?.unwrap_or_default();
+            let completion = match opt::<Function>(&opts, "complete")? {
+                Some(f) => Some(f),
+                None => opt(&opts, "completion")?,
+            }
+            .map(|f| app.store_callback(lua, f))
+            .transpose()?;
             let callback = app.store_callback(lua, f)?;
             app.own(crate::plugins::Owned::Command(name.clone(), callback));
             if let Some(old) = app.user_commands.insert(
@@ -1657,39 +1623,21 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             }
             // After a reload, an option defined again keeps its value.
             let previous = app.carried_options.get(&name).cloned();
-            let requested = opts
-                .as_ref()
-                .map(|o| o.get::<Option<String>>("type"))
-                .transpose()?
-                .flatten()
+            let requested = opt::<String>(&opts, "type")?
                 .map(|name| {
                     DynamicKind::parse(&name)
                         .ok_or_else(|| err(format!("unknown option type {name:?}")))
                 })
                 .transpose()?;
             let (kind, value) = dynamic_from_lua(default, requested)?;
-            let desc = opts
-                .as_ref()
-                .map(|o| o.get::<Option<String>>("desc"))
-                .transpose()?
-                .flatten()
-                .unwrap_or_default();
-            let callback = opts
-                .as_ref()
-                .map(|o| o.get::<Option<Function>>("on_change"))
-                .transpose()?
-                .flatten()
+            let desc = opt::<String>(&opts, "desc")?.unwrap_or_default();
+            let callback = opt::<Function>(&opts, "on_change")?
                 .map(|f| app.store_callback(lua, f))
                 .transpose()?;
             let current = previous
                 .filter(|v| v.kind() == kind)
                 .unwrap_or_else(|| value.clone());
-            let choices: Vec<String> = opts
-                .as_ref()
-                .map(|o| o.get::<Option<Vec<String>>>("choices"))
-                .transpose()?
-                .flatten()
-                .unwrap_or_default();
+            let choices: Vec<String> = opt::<Vec<String>>(&opts, "choices")?.unwrap_or_default();
             if !choices.is_empty() {
                 let DynamicValue::String(d) = &value else {
                     return Err(err(format!("{name}: choices are for string options")));
@@ -2065,16 +2013,9 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
         "job_start" => {
             let (cmd, opts): (Value, Option<Table>) = args(lua, a)?;
             let spec = job_spec(cmd, &opts)?;
-            let opt = |k: &str| -> mlua::Result<Option<Value>> {
-                Ok(opts
-                    .as_ref()
-                    .map(|o| o.get::<Value>(k))
-                    .transpose()?
-                    .filter(|v| !v.is_nil()))
-            };
             let mut stored = Vec::new();
             let mut callback = |app: &mut App, k: &str| -> mlua::Result<Option<u64>> {
-                match opt(k)? {
+                match opt(&opts, k)? {
                     None => Ok(None),
                     Some(Value::Function(f)) => {
                         let id = app.store_callback(lua, f)?;
@@ -2106,7 +2047,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             let id = app.start_job(
                 spec,
                 crate::jobs::Callbacks {
-                    name: opts.as_ref().map(|o| o.get("name")).transpose()?.flatten(),
+                    name: opt(&opts, "name")?,
                     lines: flag("lines")?.unwrap_or(false),
                     // Without output callbacks, keep the output for on_exit.
                     buffer: flag("buffer")?.unwrap_or(on_stdout.is_none() && on_stderr.is_none()),
@@ -2507,7 +2448,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 )));
             }
             let fields = lua_fields(fields)?;
-            let buf = match session_opt(&opts)? {
+            let buf = match opt::<String>(&opts, "session")? {
                 Some(id) => app
                     .chat_by_session(&id)
                     .ok_or_else(|| err(format!("no open chat for session {id}")))?,
@@ -2654,7 +2595,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
         }
         "chat_turns" => {
             let opts: Option<Table> = args(lua, a)?;
-            let session = session_opt(&opts)?;
+            let session = opt::<String>(&opts, "session")?;
             // Inside a chat view, turns depend on every item of the chat.
             if app.render_deps.is_some() {
                 let filter = crate::data::ItemFilter {
@@ -2673,7 +2614,10 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             let opts: Option<Table> = args(lua, a)?;
             ret(
                 lua,
-                to_lua(lua, &app.chat_session(session_opt(&opts)?.as_deref()))?,
+                to_lua(
+                    lua,
+                    &app.chat_session(opt::<String>(&opts, "session")?.as_deref()),
+                )?,
             )
         }
         "chat_sessions" => ret(
