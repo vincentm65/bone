@@ -34,13 +34,15 @@ local function now()
 end
 
 local function load_total(key, legacy)
+  -- A chat's totals include its agents' (sessions.root).
   local context = legacy and "input_tokens" or "coalesce(context_tokens, input_tokens)"
+  local owned = legacy and "" or " OR session_id IN (SELECT id FROM sessions WHERE root = ?1)"
   bone.request("store/query", {
-    sql = "SELECT coalesce(sum(input_tokens), 0), coalesce(sum(output_tokens), 0), coalesce(sum(cached_tokens), 0), (SELECT " .. context .. " FROM usage WHERE session_id = ?1 AND source = 'turn' ORDER BY rowid DESC LIMIT 1) FROM usage WHERE session_id = ?1",
+    sql = "SELECT coalesce(sum(input_tokens), 0), coalesce(sum(output_tokens), 0), coalesce(sum(cached_tokens), 0), (SELECT " .. context .. " FROM usage WHERE session_id = ?1 AND source = 'turn' ORDER BY rowid DESC LIMIT 1) FROM usage WHERE session_id = ?1" .. owned,
     params = { key },
   }, function(res)
     local row = res and res.rows and res.rows[1]
-    -- Retry older servers without the optional context column.
+    -- Retry older servers without the optional context and root columns.
     if not row and not legacy then return load_total(key, true) end
     if row then
       local info = state.info[key]
@@ -84,10 +86,12 @@ state.events = {
     if t then t.finished = now() end
   end),
 }
--- Usage is indexed before these events, including the summary call's.
+-- Usage is indexed before these events, including the summary call's; an
+-- agent's counts toward its chat.
 for _, event in ipairs({ "turn/finished", "message/completed", "session/compacted" }) do
   state.events[#state.events + 1] = bone.on(event, function(ev)
-    if state.info[ev.session_id] then load_total(ev.session_id) end
+    local key = agents.top(ev.session_id)
+    if state.info[key] then load_total(key) end
   end)
 end
 state.events[#state.events + 1] = bone.on("settings/changed", function(ev)
@@ -109,11 +113,6 @@ function bone.ui.statusline(ctx)
   left[#left + 1] = { "curr " .. tokens(total.curr), "StatusLineDim" }
   left[#left + 1] = { "total " .. tokens(total.input + total.output), "StatusLineDim" }
   left[#left + 1] = { "cache " .. (total.input > 0 and string.format("%.0f%%", total.cached / total.input * 100) or "0%"), "StatusLineDim" }
-  -- Sub-agents' spend this run (their own sessions, so not in total).
-  local spent = session_id and agents.spend(agents.top(session_id)) or 0
-  if spent > 0 then
-    left[#left + 1] = { "agents " .. tokens(spent), "StatusLineDim" }
-  end
   local t = session_id and state.turns[session_id]
   if s and s.running then
     left[#left + 1] = { (ctx.spinner or "") .. " thinking" .. (s.elapsed and (" " .. elapsed(s.elapsed)) or ""), "StatusLine" }

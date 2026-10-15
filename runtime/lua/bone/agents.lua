@@ -59,15 +59,6 @@ function M.list(top)
   return out
 end
 
---- Tokens (input + output) those agents spent this run.
-function M.spend(top)
-  local n = 0
-  for _, a in ipairs(M.list(top)) do
-    n = n + a.tokens
-  end
-  return n
-end
-
 bone.on("session/created", function(info)
   local a = M.add(info)
   if a then

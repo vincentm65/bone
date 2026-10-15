@@ -351,11 +351,12 @@ end
 
 local function refresh_stats(st, p)
   -- Aggregate separately: joining messages directly to usage multiplies totals.
+  -- A chat's tokens include its agents' (sessions.root).
   bone.request("store/query", { sql = [[
     SELECT s.id, s.updated_at, coalesce(u.tokens, 0), coalesce(m.turns, 0)
     FROM sessions s
-    LEFT JOIN (SELECT session_id, sum(input_tokens + output_tokens) AS tokens
-               FROM usage GROUP BY session_id) u ON u.session_id = s.id
+    LEFT JOIN (SELECT coalesce(a.root, a.id) AS chat, sum(input_tokens + output_tokens) AS tokens
+               FROM usage JOIN sessions a ON a.id = usage.session_id GROUP BY chat) u ON u.chat = s.id
     LEFT JOIN (SELECT session_id, count(*) AS turns FROM messages
                WHERE role = 'user' GROUP BY session_id) m ON m.session_id = s.id
   ]] }, function(res, err)

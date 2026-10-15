@@ -20,12 +20,13 @@ use serde_json::{Value as Json, json};
 use crate::session::{Line, Record, title_of};
 
 /// Bump when the tables change; an index of another version is rebuilt.
-const VERSION: i64 = 5;
+const VERSION: i64 = 6;
 
 const SCHEMA: &str = "
 CREATE TABLE sessions (
     id          TEXT PRIMARY KEY,
     parent      TEXT,
+    root        TEXT,               -- the top-level session a subagent works for
     cwd         TEXT NOT NULL,
     title       TEXT,               -- the first user message
     renamed     TEXT,               -- a title given with session/rename
@@ -312,12 +313,15 @@ fn clear(tx: &Transaction, id: &str, all: bool) -> Result<()> {
 fn index_record(tx: &Transaction, id: &str, record: Record, at: u64, seq: &mut u64) -> Result<()> {
     let run = |sql: &str, p: &[&dyn rusqlite::ToSql]| tx.execute(sql, p).map(drop).map_err(err);
     match record {
+        // An agent's root is its owner's (the owner until that is indexed,
+        // which then moves its agents over).
         Record::Session(h) => run(
-            "INSERT INTO sessions (id, parent, cwd, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?4)
-             ON CONFLICT(id) DO UPDATE SET parent = ?2, cwd = ?3, created_at = ?4",
-            params![id, h.parent, h.cwd, h.created_at],
-        ),
+            "INSERT INTO sessions (id, parent, root, cwd, created_at, updated_at)
+                 VALUES (?1, ?2, (SELECT coalesce(max(root), ?3) FROM sessions WHERE id = ?3), ?4, ?5, ?5)
+             ON CONFLICT(id) DO UPDATE SET parent = ?2, root = excluded.root, cwd = ?4, created_at = ?5",
+            params![id, h.parent, h.owner.map(|o| o.session_id), h.cwd, h.created_at],
+        )
+        .and_then(|()| run("UPDATE sessions SET root = coalesce((SELECT root FROM sessions WHERE id = ?1), ?1) WHERE root = ?1", params![id])),
         Record::Compact(_) | Record::Summary(_) | Record::Model(_) => Ok(()),
         Record::Usage(u) => run(
             "INSERT INTO usage (session_id, turn_id, source, at, provider, model,
