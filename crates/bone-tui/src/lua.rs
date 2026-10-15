@@ -951,10 +951,17 @@ impl App {
             })
             .or_else(|| bone_lua::tui_runtime_source(dir.as_deref(), &rel))
             .ok_or_else(|| format!("no colorscheme named {name}"))?;
-        self.theme.reset();
-        self.with_api(|lua| lua.load(src).set_name(format!("@{chunk}")).exec())
-            .map_err(|e| format!("colorscheme {name}: {}", short_error(&e)))?;
-        self.colors_name = Some(name.to_owned());
+        // Its `bone.hl.set` calls replace the previous colorscheme's groups;
+        // the UI's, plugins' and the user's stay. One loaded from inside
+        // another colorscheme adds to it.
+        let saved = self.theme.begin_scheme();
+        let outer = saved.is_some();
+        let loaded = self.with_api(|lua| lua.load(src).set_name(format!("@{chunk}")).exec());
+        self.theme.end_scheme(saved, loaded.is_ok());
+        loaded.map_err(|e| format!("colorscheme {name}: {}", short_error(&e)))?;
+        if outer {
+            self.colors_name = Some(name.to_owned());
+        }
         self.opts_rev += 1;
         self.dirty = true;
         Ok(())
@@ -2719,10 +2726,9 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 dim: spec.get::<Option<bool>>("dim")?.unwrap_or(false),
                 link: spec.get("link")?,
             };
-            let style = spec
-                .to_style(&app.theme)
+            app.theme
+                .set(&name, &spec)
                 .map_err(|e| err(format!("{name}: {e}")))?;
-            app.theme.set(&name, style);
             app.opts_rev += 1;
             app.dirty = true;
             ret(lua, ())

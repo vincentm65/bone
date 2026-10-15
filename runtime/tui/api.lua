@@ -499,7 +499,11 @@ bone.api = {
 
 --- Highlight groups: bone.hl.set("ToolPath", { fg = "#7dcfff", bold = true })
 --- Keys: fg, bg (#rrggbb, a color name, or 0-255), bold, italic, underline,
---- reverse, dim, link (start from another group).
+--- strikethrough, reverse, dim, link (start from another group; followed
+--- live, so it tracks the colorscheme; a link to the group's own name starts
+--- from the colorscheme's version). Set from a colorscheme file, a group
+--- belongs to that colorscheme and goes when another loads; set from
+--- anywhere else, it stays across colorscheme loads.
 bone.hl = {
   set = function(name, spec)
     api("hl_set", name, spec or {})
@@ -507,7 +511,8 @@ bone.hl = {
   get = function(name)
     return api("hl_get", name)
   end,
-  --- Back to the built-in 16-color styles.
+  --- Back to the built-in 16-color styles. In a colorscheme file it drops
+  --- only that colorscheme's groups; anywhere else, every group set from Lua.
   reset = function()
     api("hl_reset")
   end,

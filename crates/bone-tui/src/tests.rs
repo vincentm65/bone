@@ -1194,10 +1194,63 @@ async fn lua_tool_views_highlights_and_colorschemes() {
         .await;
     assert_eq!(h.lua("=bone.hl.get('Mine').underline").await, "true");
     assert_eq!(h.lua("=bone.hl.get('Mine').strikethrough").await, "true");
+    // Groups set outside a colorscheme survive loading one.
     h.lua("bone.colorscheme('ansi')").await;
-    assert_eq!(h.lua("=bone.hl.get('ToolPath').fg").await, "\"cyan\"");
+    assert_eq!(h.lua("=bone.hl.get('ToolPath').fg").await, "\"#010203\"");
+    assert_eq!(h.lua("=bone.hl.get('Mine').strikethrough").await, "true");
     h.lua("bone.colorscheme('nope')").await;
     assert!(h.message().contains("no colorscheme named nope"));
+}
+
+#[tokio::test]
+async fn colorschemes_replace_only_their_own_groups() {
+    // A plugin's group, set before the user's config loads a colorscheme.
+    let dir = tempfile::tempdir().unwrap();
+    let plugin = dir.path().join("plugins/todo");
+    let colors = dir.path().join("colors");
+    std::fs::create_dir_all(&plugin).unwrap();
+    std::fs::create_dir_all(&colors).unwrap();
+    std::fs::write(
+        plugin.join("tui.lua"),
+        "bone.hl.set('TodoDone', { link = 'Dim', strikethrough = true })",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("tui.lua"), "bone.colorscheme('black')").unwrap();
+    // One builds on black; one fails halfway.
+    std::fs::write(
+        colors.join("mine.lua"),
+        "bone.colorscheme('black')\nbone.hl.set('Dim', { fg = '#0a0b0c' })",
+    )
+    .unwrap();
+    std::fs::write(
+        colors.join("broken.lua"),
+        "bone.hl.set('Only', { fg = 'red' })\nerror('boom')",
+    )
+    .unwrap();
+    let mut h = Harness::build(Some(dir.path().to_owned())).await;
+    h.app.load_user_config();
+    h.settle().await;
+
+    let done = "=bone.hl.get('TodoDone')";
+    assert_eq!(h.lua(&format!("{done}.strikethrough")).await, "true");
+    assert_eq!(
+        h.lua(&format!("{done}.fg")).await,
+        h.lua("=bone.hl.get('Dim').fg").await
+    );
+    // The link follows the colorscheme.
+    h.lua("bone.colorscheme('mine')").await;
+    assert_eq!(h.app.colors_name.as_deref(), Some("mine"));
+    assert_eq!(h.lua(&format!("{done}.fg")).await, "\"#0a0b0c\"");
+    assert!(h.app.theme.has("PopupBorder"));
+
+    // A failed load still sends later writes to the overrides.
+    h.lua("bone.colorscheme('broken')").await;
+    assert!(h.message().contains("boom"));
+    h.lua("bone.hl.set('After', { fg = 'blue' })").await;
+    h.lua("bone.colorscheme('ansi')").await;
+    assert!(!h.app.theme.has("Only"));
+    assert_eq!(h.lua("=bone.hl.get('After').fg").await, "\"blue\"");
+    assert_eq!(h.lua(&format!("{done}.fg")).await, "\"darkgray\"");
 }
 
 #[tokio::test]

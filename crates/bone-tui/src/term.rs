@@ -202,7 +202,6 @@ impl Term {
         let max = p.screen().scrollback();
         let scroll = scroll.min(max);
         p.set_scrollback(scroll);
-        let normal = theme.hl("Normal");
         let screen = p.screen();
         let mut out = Vec::with_capacity(rows as usize);
         for row in 0..rows {
@@ -216,7 +215,7 @@ impl Term {
                 if cell.is_wide_continuation() {
                     continue;
                 }
-                let group = group_of(cell, normal, theme);
+                let group = group_of(cell, theme);
                 if run_style.as_deref() != Some(group.as_str()) {
                     if let Some(g) = run_style.take() {
                         line.push(Item::Text(std::mem::take(&mut run), g));
@@ -243,8 +242,9 @@ impl Term {
 }
 
 /// The highlight group for a cell's look: "Normal", or an `@term…` group
-/// made on first use.
-fn group_of(cell: &vt100::Cell, normal: Style, theme: &mut Theme) -> String {
+/// made on first use. It links to `Normal`, so the colors the terminal left
+/// at their default follow the colorscheme.
+fn group_of(cell: &vt100::Cell, theme: &mut Theme) -> String {
     let (fg, bg) = (cell.fgcolor(), cell.bgcolor());
     let flags = [
         (cell.bold(), 'b'),
@@ -268,7 +268,7 @@ fn group_of(cell: &vt100::Cell, normal: Style, theme: &mut Theme) -> String {
             vt100::Color::Idx(i) => Some(Color::Indexed(i)),
             vt100::Color::Rgb(r, g, b) => Some(Color::Rgb(r, g, b)),
         };
-        let mut style = normal;
+        let mut style = Style::default();
         if let Some(c) = color(fg) {
             style = style.fg(c);
         }
@@ -285,7 +285,7 @@ fn group_of(cell: &vt100::Cell, normal: Style, theme: &mut Theme) -> String {
                 });
             }
         }
-        theme.set(&name, style);
+        theme.set_linked(&name, "Normal", style);
     }
     name
 }

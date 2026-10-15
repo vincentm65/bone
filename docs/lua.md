@@ -858,6 +858,17 @@ bone.hl.names()
 
 `bone.hl.names()` lists the groups.
 
+Groups come in two layers over the built-in fallback. `bone.hl.set` while a colorscheme file runs goes in the colorscheme's layer, which the next `bone.colorscheme()` replaces. `bone.hl.set` from anywhere else (the UI, plugins, `tui.lua`) goes in the override layer, which colorscheme loads leave alone, so the order of `bone.colorscheme()` and `bone.hl.set` calls does not matter. A group comes whole from the top layer that defines it: `{ bold = true }` does not keep the colorscheme's colors unless it links to them. A colorscheme that fails to load leaves the previous one in place. One loaded from inside another colorscheme file adds to it. A config reload starts both layers from empty. `bone.hl.reset()` in a colorscheme file empties only the colorscheme's layer; anywhere else it empties both.
+
+`link` is followed when drawing, so `{ link = "Dim", strikethrough = true }` keeps tracking whatever `Dim` the current colorscheme gives. A group whose link leads to a group that does not exist, or round a cycle, draws as `Normal`. A link to the group's own name starts from the layer below: `bone.hl.set("ToolPath", { link = "ToolPath", bold = true })` is the colorscheme's `ToolPath` in bold.
+
+A tweak for one colorscheme only belongs in a colorscheme that builds on it, e.g. `~/.bone/colors/mine.lua`:
+
+```lua
+bone.colorscheme("black")
+bone.hl.set("PopupBorder", { fg = "#333333" })
+```
+
 Groups: `Normal Dim Accent UserPrompt UserMessage Reasoning ToolName ToolArgs ToolPath ToolSummary ToolOutput ToolGutter ToolRunning ToolError DiffAdd DiffDelete ShellProgram ShellPath ShellFlag ShellString ShellVariable ShellComment ShellOperator MdHeading MdBold MdItalic MdCode MdCodeBlock MdQuote MdBullet MdLink Notice ErrorMsg WarningMsg WinSeparator StatusLine StatusLineDim Selection Placeholder PopupBorder PopupTitle PanelTitle PanelTitleFocus`.
 
 ### Drawing the screen

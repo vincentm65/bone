@@ -37,19 +37,19 @@ local function timestamp(at)
 end
 
 local function setup_colors()
-  -- Derive from the theme, so this also works with custom colorschemes.
-  local normal, dim, selection = bone.hl.get("Normal") or {}, bone.hl.get("Dim") or {}, bone.hl.get("Selection") or {}
-  local accent, warn = bone.hl.get("Accent") or {}, bone.hl.get("WarningMsg") or {}
+  -- Links follow the colorscheme; only the selection background is copied,
+  -- so it updates the next time the panel opens.
+  local selection = bone.hl.get("Selection") or {}
   local background = bone.ui.sessions_background or "#202020"
-  bone.hl.set("SessionBackground", { fg = normal.fg, bg = background })
-  bone.hl.set("SessionDim", { fg = dim.fg, bg = background })
-  bone.hl.set("SessionAccent", { fg = accent.fg, bg = background, bold = true })
+  bone.hl.set("SessionBackground", { link = "Normal", bg = background })
+  bone.hl.set("SessionDim", { link = "Dim", bg = background })
+  bone.hl.set("SessionAccent", { link = "Accent", bg = background, bold = true })
   -- The selected card: an accent title on the selection background.
-  bone.hl.set("SessionCardTitle", { fg = accent.fg, bg = selection.bg, bold = true })
-  bone.hl.set("SessionCardMeta", { fg = dim.fg, bg = selection.bg })
-  bone.hl.set("SessionTab", { fg = normal.fg, bg = background, bold = true })
-  bone.hl.set("SessionTabLine", { fg = accent.fg, bg = background })
-  bone.hl.set("SessionCount", { fg = warn.fg or accent.fg, bg = background })
+  bone.hl.set("SessionCardTitle", { link = "Accent", bg = selection.bg, bold = true })
+  bone.hl.set("SessionCardMeta", { link = "Dim", bg = selection.bg })
+  bone.hl.set("SessionTab", { link = "Normal", bg = background, bold = true })
+  bone.hl.set("SessionTabLine", { link = "Accent", bg = background })
+  bone.hl.set("SessionCount", { link = "WarningMsg", bg = background })
 end
 
 local function activity(s)

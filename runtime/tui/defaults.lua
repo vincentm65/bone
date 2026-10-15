@@ -236,8 +236,7 @@ function bone.ui.health()
   end)
 end
 
--- Colors (see runtime/colors/).
-bone.colorscheme("black")
+-- Colors (see runtime/colors/): bone.ui.setup() above loads "black".
 
 -- /rename, /compact and /plugins are in lua/bone/commands.lua.
 

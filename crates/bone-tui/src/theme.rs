@@ -1,17 +1,37 @@
 //! Highlight groups.
 //!
-//! Every style the TUI draws with comes from a named group (`ToolName`,
-//! `DiffAdd`, ...). Rust ships a 16-color fallback for each; colorschemes
-//! and `bone.hl.set` in Lua override them.
+//! Named styles resolve from overrides, then the current colorscheme, then
+//! built-in ANSI fallbacks. Loading a scheme replaces only its layer. Links
+//! are followed on every lookup, so they track the current layers; a
+//! self-link starts from the layer below.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
+use std::sync::LazyLock;
 
 use ratatui::style::{Color, Modifier, Style};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Theme {
-    groups: HashMap<String, Style>,
+    /// In lookup order: overrides, then the colorscheme.
+    layers: [Layer; 2],
+    /// A colorscheme file is running: `set` and `reset` touch its layer.
+    loading: bool,
 }
+
+type Layer = HashMap<String, Group>;
+
+/// The colorscheme layer from before a load, put back if the load fails.
+pub struct SavedScheme(Layer);
+
+/// One layer's definition of a group: `style` on top of the `link` group.
+#[derive(Debug, Clone)]
+struct Group {
+    link: Option<String>,
+    style: Style,
+}
+
+/// Links deeper than this are a cycle.
+const MAX_DEPTH: usize = 32;
 
 /// `(group, fallback)`. The fallback only uses the 16 ANSI colors so it
 /// works on any terminal.
@@ -97,44 +117,96 @@ fn fallback() -> Vec<(&'static str, Style)> {
     ]
 }
 
-impl Default for Theme {
-    fn default() -> Self {
-        Theme {
-            groups: fallback()
-                .into_iter()
-                .map(|(k, v)| (k.to_owned(), v))
-                .collect(),
-        }
-    }
-}
+static FALLBACK: LazyLock<HashMap<String, Style>> = LazyLock::new(|| {
+    fallback()
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v))
+        .collect()
+});
 
 impl Theme {
-    /// A group's style. Unknown groups fall back to `Normal`.
+    /// A group's style. Unknown groups, and links that lead nowhere, are
+    /// `Normal`.
     pub fn hl(&self, name: &str) -> Style {
-        self.groups
-            .get(name)
-            .or_else(|| self.groups.get("Normal"))
-            .copied()
+        self.resolve(name, 0, 0)
+            .or_else(|| self.resolve("Normal", 0, 0))
             .unwrap_or_default()
     }
 
     pub fn has(&self, name: &str) -> bool {
-        self.groups.contains_key(name)
+        FALLBACK.contains_key(name) || self.layers.iter().any(|l| l.contains_key(name))
     }
 
-    pub fn set(&mut self, name: &str, style: Style) {
-        self.groups.insert(name.to_owned(), style);
+    /// Define a group from Lua: in the colorscheme's layer while one loads,
+    /// else in the overrides.
+    pub fn set(&mut self, name: &str, spec: &StyleSpec) -> Result<(), String> {
+        let group = spec.to_group()?;
+        self.layers[usize::from(self.loading)].insert(name.to_owned(), group);
+        Ok(())
+    }
+
+    /// Define an override: `style` on top of the `link` group.
+    pub fn set_linked(&mut self, name: &str, link: &str, style: Style) {
+        let link = Some(link.to_owned());
+        self.layers[0].insert(name.to_owned(), Group { link, style });
     }
 
     pub fn names(&self) -> Vec<&str> {
-        let mut v: Vec<&str> = self.groups.keys().map(String::as_str).collect();
-        v.sort_unstable();
-        v
+        let names: BTreeSet<&str> = FALLBACK
+            .keys()
+            .chain(self.layers.iter().flat_map(HashMap::keys))
+            .map(String::as_str)
+            .collect();
+        names.into_iter().collect()
     }
 
-    /// Back to the fallback colors (before a colorscheme loads).
+    /// A colorscheme starts loading into an empty layer. `None` when it is
+    /// nested in another load, which it adds to.
+    pub fn begin_scheme(&mut self) -> Option<SavedScheme> {
+        if self.loading {
+            return None;
+        }
+        self.loading = true;
+        Some(SavedScheme(std::mem::take(&mut self.layers[1])))
+    }
+
+    /// The load from `begin_scheme` ends; a failed one puts the previous
+    /// colorscheme back.
+    pub fn end_scheme(&mut self, saved: Option<SavedScheme>, ok: bool) {
+        if let Some(SavedScheme(prev)) = saved {
+            self.loading = false;
+            if !ok {
+                self.layers[1] = prev;
+            }
+        }
+    }
+
+    /// Back to the fallback colors: in a colorscheme file, its own groups
+    /// go; anywhere else, every group set from Lua.
     pub fn reset(&mut self) {
-        *self = Theme::default();
+        self.layers[usize::from(self.loading)..]
+            .iter_mut()
+            .for_each(HashMap::clear);
+    }
+
+    /// `name` from layer `from` down (0 overrides, 1 scheme, 2 fallback);
+    /// `None` when it is undefined or its links never end.
+    fn resolve(&self, name: &str, from: usize, depth: usize) -> Option<Style> {
+        if depth > MAX_DEPTH {
+            return None;
+        }
+        for (i, layer) in self.layers.iter().enumerate().skip(from) {
+            if let Some(g) = layer.get(name) {
+                let base = match &g.link {
+                    None => Style::default(),
+                    // A link to its own name is the layer below's version.
+                    Some(l) if l == name => self.resolve(name, i + 1, depth + 1)?,
+                    Some(l) => self.resolve(l, 0, depth + 1)?,
+                };
+                return Some(base.patch(g.style));
+            }
+        }
+        FALLBACK.get(name).copied()
     }
 }
 
@@ -191,11 +263,8 @@ pub struct StyleSpec {
 }
 
 impl StyleSpec {
-    pub fn to_style(&self, theme: &Theme) -> Result<Style, String> {
-        let mut s = match &self.link {
-            Some(g) => theme.hl(g),
-            None => Style::default(),
-        };
+    fn to_group(&self) -> Result<Group, String> {
+        let mut s = Style::default();
         if let Some(c) = &self.fg {
             s = s.fg(parse_color(c)?);
         }
@@ -214,7 +283,10 @@ impl StyleSpec {
                 s = s.add_modifier(m);
             }
         }
-        Ok(s)
+        Ok(Group {
+            link: self.link.clone(),
+            style: s,
+        })
     }
 }
 
@@ -239,12 +311,102 @@ mod tests {
             strikethrough: true,
             ..Default::default()
         };
-        let s = spec.to_style(&t).unwrap();
+        t.set("Mine", &spec).unwrap();
+        let s = t.hl("Mine");
         assert_eq!(s.fg, Some(Color::Red));
         assert!(s.add_modifier.contains(Modifier::BOLD));
         assert!(s.add_modifier.contains(Modifier::CROSSED_OUT));
-        t.set("Mine", s);
-        assert_eq!(t.hl("Mine"), s);
         assert_eq!(t.hl("Unknown"), t.hl("Normal"));
+        let bad = StyleSpec {
+            fg: Some("mauve".into()),
+            ..Default::default()
+        };
+        assert!(t.set("Bad", &bad).is_err() && !t.has("Bad"));
+    }
+
+    fn spec(link: Option<&str>, fg: Option<&str>, bold: bool) -> StyleSpec {
+        StyleSpec {
+            link: link.map(str::to_owned),
+            fg: fg.map(str::to_owned),
+            bold,
+            ..Default::default()
+        }
+    }
+
+    /// `set` as a colorscheme file would.
+    fn scheme(t: &mut Theme, name: &str, spec: StyleSpec) {
+        t.loading = true;
+        t.set(name, &spec).unwrap();
+        t.loading = false;
+    }
+
+    #[test]
+    fn layers_and_live_links() {
+        let mut t = Theme::default();
+        scheme(&mut t, "Dim", spec(None, Some("#111111"), false));
+        scheme(&mut t, "SchemeOnly", spec(None, Some("red"), false));
+        t.set("Done", &spec(Some("Dim"), None, true)).unwrap();
+        t.set("ToolPath", &spec(None, Some("#222222"), false))
+            .unwrap();
+        assert_eq!(t.hl("Done").fg, Some(Color::Rgb(0x11, 0x11, 0x11)));
+
+        // A new scheme: overrides stay, links follow it, its old groups go.
+        let saved = t.begin_scheme();
+        t.end_scheme(saved, true);
+        assert!(!t.has("SchemeOnly"));
+        assert_eq!(t.hl("Done").fg, Some(Color::DarkGray));
+        assert!(t.hl("Done").add_modifier.contains(Modifier::BOLD));
+        assert_eq!(t.hl("ToolPath").fg, Some(Color::Rgb(0x22, 0x22, 0x22)));
+
+        // The top layer's definition replaces the lower one, no merging.
+        scheme(&mut t, "Accent", spec(None, Some("blue"), true));
+        t.set("Accent", &spec(None, None, false)).unwrap();
+        assert_eq!(t.hl("Accent"), Style::default());
+
+        t.reset();
+        assert!(!t.has("Done"));
+        assert_eq!(t.hl("ToolPath").fg, Some(Color::Cyan));
+    }
+
+    #[test]
+    fn self_links_and_cycles() {
+        let mut t = Theme::default();
+        scheme(&mut t, "ToolPath", spec(None, Some("#333333"), false));
+        t.set("ToolPath", &spec(Some("ToolPath"), None, true))
+            .unwrap();
+        let s = t.hl("ToolPath");
+        assert_eq!(s.fg, Some(Color::Rgb(0x33, 0x33, 0x33)));
+        assert!(s.add_modifier.contains(Modifier::BOLD));
+        // A scheme's self-link is the fallback's version.
+        scheme(&mut t, "Dim", spec(Some("Dim"), None, true));
+        assert_eq!(t.hl("Dim").fg, Some(Color::DarkGray));
+
+        // A missing link target is Normal; a cycle is Normal.
+        t.set("Normal", &spec(None, Some("white"), false)).unwrap();
+        t.set("Lost", &spec(Some("Nowhere"), None, false)).unwrap();
+        assert_eq!(t.hl("Lost").fg, Some(Color::White));
+        t.set("A", &spec(Some("B"), None, false)).unwrap();
+        t.set("B", &spec(Some("A"), None, false)).unwrap();
+        assert_eq!(t.hl("A").fg, Some(Color::White));
+        // A cycle through Normal is the fallback Normal.
+        t.set("Normal", &spec(Some("A"), None, false)).unwrap();
+        assert_eq!(t.hl("Normal"), Style::default());
+        assert_eq!(t.hl("A"), Style::default());
+    }
+
+    #[test]
+    fn linked_overrides_follow_their_base() {
+        let mut t = Theme::default();
+        scheme(&mut t, "Normal", spec(None, Some("#444444"), false));
+        t.set_linked(
+            "@term/2/-/",
+            "Normal",
+            Style::default().bg(Color::Indexed(2)),
+        );
+        assert_eq!(t.hl("@term/2/-/").fg, Some(Color::Rgb(0x44, 0x44, 0x44)));
+        let saved = t.begin_scheme();
+        t.end_scheme(saved, true);
+        let s = t.hl("@term/2/-/");
+        assert_eq!((s.fg, s.bg), (None, Some(Color::Indexed(2))));
     }
 }
