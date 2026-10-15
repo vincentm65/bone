@@ -173,8 +173,8 @@ end
 ---                                      messages?, summary? = { through, text },
 ---                                      model? = { provider?, model },
 ---                                      owner? = { session_id, call_id?, name? } }
----                                      (a subagent's; cwd defaults to the
----                                      owner's). messages accepts tables or raw JSON
+---                                      (a subagent's; cwd and model default to
+---                                      the owner's). messages accepts tables or raw JSON
 ---                                      strings from snapshot.raw_messages. Returns
 ---                                      its info.
 ---   bone.session.run(id, text)         start a turn on an idle session and wait

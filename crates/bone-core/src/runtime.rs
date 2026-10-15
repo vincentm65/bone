@@ -717,17 +717,10 @@ fn session_create(inner: &Arc<Inner>, spec: &Json) -> Result<Json, String> {
         Json::Null => None,
         o => Some(serde_json::from_value(o.clone()).map_err(|e| format!("bad owner: {e}"))?),
     };
+    let owned = |o: &SessionOwner| inner.sessions.get(&o.session_id).map_err(|e| e.to_string());
     let cwd = match (spec["cwd"].as_str(), &owner) {
         (Some(cwd), _) => cwd.to_owned(),
-        (None, Some(o)) => inner
-            .sessions
-            .get(&o.session_id)
-            .map_err(|e| e.to_string())?
-            .lock()
-            .unwrap()
-            .info
-            .cwd
-            .clone(),
+        (None, Some(o)) => owned(o)?.lock().unwrap().info.cwd.clone(),
         (None, None) => std::env::current_dir()
             .map_err(|e| e.to_string())?
             .to_string_lossy()
@@ -770,6 +763,7 @@ fn session_create(inner: &Arc<Inner>, spec: &Json) -> Result<Json, String> {
     };
     let model: Option<Pin> =
         serde_json::from_value(model).map_err(|e| format!("bad model: {e}"))?;
+    let model = model.or_else(|| owned(owner.as_ref()?).ok()?.lock().unwrap().model.clone());
     let session = inner
         .sessions
         .create_with(cwd, owner, &messages, summary, model)

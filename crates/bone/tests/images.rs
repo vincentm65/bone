@@ -228,9 +228,7 @@ impl Env {
             .unwrap();
         assert_eq!(STANDARD.decode(data.data).unwrap(), self.png);
         let messages = client
-            .request::<SessionMessages>(SessionRef {
-                session_id,
-            })
+            .request::<SessionMessages>(SessionRef { session_id })
             .await
             .unwrap();
         (Arc::new(client), messages)
@@ -280,9 +278,7 @@ async fn image_only_send_persists_and_survives_restart() {
         !saved.contains(&STANDARD.encode(&env.png)),
         "pixels leaked into session JSONL"
     );
-    let (_client, messages) = env
-        .restart("restart-test", image.id, id)
-        .await;
+    let (_client, messages) = env.restart("restart-test", image.id, id).await;
     assert_eq!(messages.messages, stored.messages);
 }
 
@@ -660,11 +656,7 @@ async fn read_file_images_reach_provider_and_survive_restart_without_source_file
         assert!(tool.images()[0].data.is_none());
         assert_eq!(tool.images()[0].name, filename);
         let (client, restarted) = env
-            .restart(
-                "read-file-restart",
-                tool.images()[0].id.clone(),
-                id.clone(),
-            )
+            .restart("read-file-restart", tool.images()[0].id.clone(), id.clone())
             .await;
         assert_eq!(restarted.messages, stored.messages);
         client

@@ -420,6 +420,7 @@ impl ChatBuffer {
     pub fn turn_finished(&mut self, t: &TurnFinishedParams) {
         if self.turn.is_none_or(|r| r.turn_id == t.turn_id) {
             self.turn = None;
+            self.starting = false;
         }
         // A streaming entry left open (e.g. cancelled mid-stream) is final now.
         if let Some(i) = self.entries.iter().rposition(|e| {

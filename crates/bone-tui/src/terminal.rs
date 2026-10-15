@@ -3,6 +3,7 @@
 
 use std::io::{self, BufWriter, Stdout};
 
+use crossterm::cursor::Hide;
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -11,7 +12,6 @@ use crossterm::terminal::{
     BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
     disable_raw_mode, enable_raw_mode, supports_keyboard_enhancement,
 };
-use crossterm::cursor::Hide;
 use crossterm::{execute, queue};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;

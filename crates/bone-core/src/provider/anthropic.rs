@@ -110,7 +110,7 @@ fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> (Value,
                         && s.model == config.model
                         && s.prefix.as_deref() == Some(fingerprint.as_str())
                 });
-                let had = reasoning_state.as_ref().is_some_and(|s| !s.items.is_empty());
+                let had = matches!(&reasoning_state, Some(s) if !s.items.is_empty());
                 lost = had && state.is_none() && !tool_calls.is_empty();
                 ("assistant", assistant_blocks(content, tool_calls, state))
             }

@@ -19,7 +19,7 @@ use mlua::Lua;
 use ratatui::layout::{Position, Rect};
 use tokio::sync::mpsc;
 
-use crate::chat::ChatBuffer;
+use crate::chat::{ChatBuffer, RunningTurn};
 use crate::composer::{Composer, Draft};
 use crate::editor::TextBuffer;
 use crate::keymap::{Action, Builtin, Context, Keymaps};
@@ -1423,13 +1423,18 @@ impl App {
             text: draft.text.clone(),
             images: draft.images.clone(),
         };
-        self.request::<TurnStart>(params, move |app, r| {
-            if let Some(c) = app.chat_mut(buf) {
-                c.starting = false;
+        // Running once accepted (turn/started waits on hooks and MCP), unless it already finished.
+        self.request::<TurnStart>(params, move |app, r| match r {
+            Ok(r) => {
+                if let Some(c) = app.chat_mut(buf).filter(|c| c.starting) {
+                    c.starting = false;
+                    c.turn.get_or_insert(RunningTurn {
+                        turn_id: r.turn_id,
+                        started: Instant::now(),
+                    });
+                }
             }
-            if let Err(e) = r {
-                app.turn_not_started(buf, draft, format!("cannot start turn: {e}"));
-            }
+            Err(e) => app.turn_not_started(buf, draft, format!("cannot start turn: {e}")),
         });
     }
 

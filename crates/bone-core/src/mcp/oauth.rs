@@ -32,7 +32,7 @@ pub fn set_dir(dir: PathBuf) {
 }
 
 fn path() -> Option<PathBuf> {
-    DIR.lock().unwrap().as_ref().map(|d| d.join("mcp-auth.json"))
+    Some(DIR.lock().unwrap().as_ref()?.join("mcp-auth.json"))
 }
 
 fn now() -> u64 {
@@ -120,9 +120,8 @@ pub fn access_token(name: &str, url: &str) -> Option<String> {
 
 /// True when the token is gone or about to expire (and a refresh could help).
 pub fn needs_refresh(name: &str, url: &str) -> bool {
-    entry(name, url).is_some_and(|e| {
-        e.refresh_token.is_some() && e.expires_at.is_some_and(|t| t <= now() + 60)
-    })
+    entry(name, url)
+        .is_some_and(|e| e.refresh_token.is_some() && e.expires_at.is_some_and(|t| t <= now() + 60))
 }
 
 fn form(pairs: &[(&str, &str)]) -> String {
@@ -135,7 +134,7 @@ fn b64url(bytes: &[u8]) -> String {
     const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
     let mut out = String::new();
     for c in bytes.chunks(3) {
-        let n = (c[0] as u32) << 16 | (*c.get(1).unwrap_or(&0) as u32) << 8 | *c.get(2).unwrap_or(&0) as u32;
+        let n = u32::from_be_bytes([0, c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)]);
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
         if c.len() > 1 {
@@ -199,17 +198,17 @@ fn origin(u: &Url) -> String {
 }
 
 /// RFC 9728 then RFC 8414 (falling back to the conventional paths).
-async fn discover(http: &reqwest::Client, server_url: &str, www: Option<&str>) -> Result<Meta, String> {
-    let server = Url::parse(server_url).map_err(|e| format!("{server_url}: {e}"))?;
+async fn discover(http: &reqwest::Client, url: &str, www: Option<&str>) -> Result<Meta, String> {
+    let server = Url::parse(url).map_err(|e| format!("{url}: {e}"))?;
     let mut candidates = Vec::new();
     if let Some(u) = www.and_then(resource_metadata) {
         candidates.push(u);
     }
-    let path = server.path().trim_end_matches('/');
+    let (o, path) = (origin(&server), server.path().trim_end_matches('/'));
     if !path.is_empty() {
-        candidates.push(format!("{}/.well-known/oauth-protected-resource{path}", origin(&server)));
+        candidates.push(format!("{o}/.well-known/oauth-protected-resource{path}"));
     }
-    candidates.push(format!("{}/.well-known/oauth-protected-resource", origin(&server)));
+    candidates.push(format!("{o}/.well-known/oauth-protected-resource"));
     let mut issuer = None;
     for c in candidates {
         if let Some(doc) = get_json(http, &c).await
@@ -219,16 +218,16 @@ async fn discover(http: &reqwest::Client, server_url: &str, www: Option<&str>) -
             break;
         }
     }
-    let issuer = Url::parse(issuer.as_deref().unwrap_or(&origin(&server)))
+    let issuer = Url::parse(issuer.as_deref().unwrap_or(&o))
         .map_err(|e| format!("authorization server: {e}"))?;
-    let ipath = issuer.path().trim_end_matches('/');
+    let (o, ipath) = (origin(&issuer), issuer.path().trim_end_matches('/'));
     let mut docs = Vec::new();
     if !ipath.is_empty() {
-        docs.push(format!("{}/.well-known/oauth-authorization-server{ipath}", origin(&issuer)));
-        docs.push(format!("{}/.well-known/openid-configuration{ipath}", origin(&issuer)));
+        docs.push(format!("{o}/.well-known/oauth-authorization-server{ipath}"));
+        docs.push(format!("{o}/.well-known/openid-configuration{ipath}"));
     }
-    docs.push(format!("{}/.well-known/oauth-authorization-server", origin(&issuer)));
-    docs.push(format!("{}/.well-known/openid-configuration", origin(&issuer)));
+    docs.push(format!("{o}/.well-known/oauth-authorization-server"));
+    docs.push(format!("{o}/.well-known/openid-configuration"));
     for d in docs {
         if let Some(doc) = get_json(http, &d).await
             && let (Some(a), Some(t)) = (
@@ -244,11 +243,10 @@ async fn discover(http: &reqwest::Client, server_url: &str, www: Option<&str>) -
         }
     }
     // Servers without metadata use these paths (the MCP spec's fallback).
-    let base = origin(&issuer);
     Ok(Meta {
-        authorization_endpoint: format!("{base}/authorize"),
-        token_endpoint: format!("{base}/token"),
-        registration_endpoint: Some(format!("{base}/register")),
+        authorization_endpoint: format!("{o}/authorize"),
+        token_endpoint: format!("{o}/token"),
+        registration_endpoint: Some(format!("{o}/register")),
     })
 }
 
@@ -268,11 +266,11 @@ pub struct Flow {
 
 impl Flow {
     /// Discover, register a client and build the authorization address.
-    pub async fn start(name: &str, server_url: &str, client_id: Option<String>) -> Result<Flow, String> {
+    pub async fn start(name: &str, url: &str, client_id: Option<String>) -> Result<Flow, String> {
         let http = reqwest::Client::new();
         // An unauthenticated request shows where the server says to look.
         let www = http
-            .post(server_url)
+            .post(url)
             .header("accept", "application/json, text/event-stream")
             .json(&json!({ "jsonrpc": "2.0", "id": 0, "method": "ping" }))
             .send()
@@ -283,7 +281,7 @@ impl Flow {
                     .get("www-authenticate")
                     .and_then(|h| h.to_str().ok().map(str::to_owned))
             });
-        let meta = discover(&http, server_url, www.as_deref()).await?;
+        let meta = discover(&http, url, www.as_deref()).await?;
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .map_err(|e| format!("cannot listen for the sign-in redirect: {e}"))?;
@@ -332,13 +330,13 @@ impl Flow {
             ("code_challenge", challenge.as_str()),
             ("code_challenge_method", "S256"),
             ("state", state.as_str()),
-            ("resource", server_url),
+            ("resource", url),
         ]);
         Ok(Flow {
             url: u.to_string(),
             redirect_uri,
             name: name.to_owned(),
-            server_url: server_url.to_owned(),
+            server_url: url.to_owned(),
             meta,
             client_id,
             client_secret,
@@ -366,13 +364,19 @@ impl Flow {
                 .unwrap_or("/");
             let result = self.code_from(&format!("http://127.0.0.1{target}"));
             let (status, body) = match &result {
-                Ok(_) => ("200 OK", "Signed in. You can close this tab and return to bone."),
+                Ok(_) => (
+                    "200 OK",
+                    "Signed in. You can close this tab and return to bone.",
+                ),
                 Err(_) if !target.starts_with("/callback") => {
                     // A favicon request or similar: keep waiting.
                     let _ = sock.write_all(b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
                     continue;
                 }
-                Err(_) => ("400 Bad Request", "Sign-in failed. Return to bone for details."),
+                Err(_) => (
+                    "400 Bad Request",
+                    "Sign-in failed. Return to bone for details.",
+                ),
             };
             let page = format!(
                 "<!doctype html><meta charset=utf-8><title>bone</title><body style=\"font:16px system-ui;margin:3em\">{body}"
@@ -436,30 +440,28 @@ impl Flow {
             pairs.push(("client_secret", s));
         }
         let doc = token_request(&self.meta.token_endpoint, &pairs).await?;
-        let entry = entry_from(&doc, &self.server_url, &self.client_id, self.client_secret.clone(), &self.meta.token_endpoint, None)?;
-        store(&self.name, entry)
+        let entry = Entry {
+            url: self.server_url.clone(),
+            client_id: self.client_id.clone(),
+            client_secret: self.client_secret.clone(),
+            token_endpoint: self.meta.token_endpoint.clone(),
+            ..Entry::default()
+        };
+        store(&self.name, entry_from(&doc, entry)?)
     }
 }
 
-fn entry_from(
-    doc: &Value,
-    url: &str,
-    client_id: &str,
-    client_secret: Option<String>,
-    token_endpoint: &str,
-    old_refresh: Option<String>,
-) -> Result<Entry, String> {
+/// `prev` with the tokens from `doc` (keeping its refresh token if none came).
+fn entry_from(doc: &Value, prev: Entry) -> Result<Entry, String> {
     let access = doc["access_token"]
         .as_str()
         .ok_or("the token response has no access_token")?;
+    let refresh = doc["refresh_token"].as_str().map(str::to_owned);
     Ok(Entry {
-        url: url.to_owned(),
-        client_id: client_id.to_owned(),
-        client_secret,
-        token_endpoint: token_endpoint.to_owned(),
         access_token: access.to_owned(),
-        refresh_token: doc["refresh_token"].as_str().map(str::to_owned).or(old_refresh),
+        refresh_token: refresh.or(prev.refresh_token),
         expires_at: doc["expires_in"].as_u64().map(|s| now() + s),
+        ..prev
     })
 }
 
@@ -509,8 +511,7 @@ pub async fn refresh(name: &str, url: &str) -> Result<(), String> {
     let doc = token_request(&e.token_endpoint, &pairs)
         .await
         .map_err(|why| format!("{AUTH_REQUIRED}: {why}"))?;
-    let next = entry_from(&doc, url, &e.client_id, e.client_secret.clone(), &e.token_endpoint, Some(rt))?;
-    store(name, next)
+    store(name, entry_from(&doc, e)?)
 }
 
 #[cfg(test)]
@@ -563,12 +564,10 @@ mod tests {
             state: "s1".into(),
             listener: None,
         };
-        assert_eq!(
-            flow.code_from("http://127.0.0.1:9/callback?code=abc&state=s1").unwrap(),
-            "abc"
-        );
-        assert!(flow.code_from("http://127.0.0.1:9/callback?code=abc&state=zz").is_err());
-        assert!(flow.code_from("http://127.0.0.1:9/callback?error=access_denied").is_err());
+        let code = |q: &str| flow.code_from(&format!("http://127.0.0.1:9/callback?{q}"));
+        assert_eq!(code("code=abc&state=s1").unwrap(), "abc");
+        assert!(code("code=abc&state=zz").is_err());
+        assert!(code("error=access_denied").is_err());
         assert_eq!(flow.code_from("rawcode").unwrap(), "rawcode");
     }
 }
