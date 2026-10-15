@@ -1842,6 +1842,11 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             app.paste_clipboard();
             ret(lua, ())
         }
+        "clipboard_copy" => {
+            // Copied after the next draw, like a mouse selection.
+            (app.clipboard, app.dirty) = (Some(args(lua, a)?), true);
+            ret(lua, ())
+        }
         "image_attach" => {
             let path: String = args(lua, a)?;
             app.attach_file(path.into());

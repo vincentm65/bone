@@ -357,37 +357,31 @@ impl HttpConn {
         let body = json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params });
         if !self.has_own_auth() && oauth::needs_refresh(&self.name, &self.url) {
             // Expired (or nearly): a failure here shows up as a 401 below.
-            let _ = oauth::refresh(&self.name, &self.url).await;
+            let _ = oauth::refresh(&self.name, &self.url, None).await;
         }
-        let mut res = self
-            .post(&body)
-            .send()
-            .await
-            .map_err(|e| format!("{}: {e}", self.url))?;
-        if res.status() == reqwest::StatusCode::UNAUTHORIZED {
-            if self.has_own_auth() {
-                return Err(format!(
-                    "{AUTH_REQUIRED}: the server rejected the Authorization header in its config (HTTP 401)"
-                ));
-            }
-            // One refresh and retry before asking the user to sign in again.
-            if oauth::refresh(&self.name, &self.url).await.is_err() {
-                return Err(format!(
-                    "{AUTH_REQUIRED}: sign in to {} (HTTP 401)",
-                    self.name
-                ));
-            }
-            res = self
-                .post(&body)
-                .send()
+        let sent = oauth::access_token(&self.name, &self.url);
+        let send = || self.post(&body).send();
+        let failed = |e: reqwest::Error| format!("{}: {e}", self.url);
+        let denied = |r: &reqwest::Response| r.status() == reqwest::StatusCode::UNAUTHORIZED;
+        let mut res = send().await.map_err(failed)?;
+        if denied(&res) && self.has_own_auth() {
+            return Err(format!(
+                "{AUTH_REQUIRED}: the server rejected the Authorization header in its config (HTTP 401)"
+            ));
+        }
+        // One refresh and retry before asking the user to sign in again.
+        if denied(&res)
+            && oauth::refresh(&self.name, &self.url, sent.as_deref())
                 .await
-                .map_err(|e| format!("{}: {e}", self.url))?;
-            if res.status() == reqwest::StatusCode::UNAUTHORIZED {
-                return Err(format!(
-                    "{AUTH_REQUIRED}: sign in to {} (HTTP 401)",
-                    self.name
-                ));
-            }
+                .is_ok()
+        {
+            res = send().await.map_err(failed)?;
+        }
+        if denied(&res) {
+            return Err(format!(
+                "{AUTH_REQUIRED}: sign in to {} (HTTP 401)",
+                self.name
+            ));
         }
         if let Some(s) = res.headers().get("mcp-session-id")
             && let Ok(s) = s.to_str()
@@ -681,6 +675,12 @@ struct PendingAuth {
     task: tokio::task::AbortHandle,
 }
 
+impl Drop for PendingAuth {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
 impl Server {
     fn set(&self, f: impl FnOnce(&mut State)) {
         f(&mut self.state.lock().unwrap());
@@ -799,6 +799,8 @@ impl McpManager {
             let keep = configs.iter().any(|c| &c.name == name && *c == s.config);
             if !keep {
                 s.stop();
+                // A sign-in finishing later would start the stopped server.
+                self.auths.lock().unwrap().remove(name);
             }
             keep
         });
@@ -882,28 +884,23 @@ impl McpManager {
                 };
                 flow.exchange(&code).await
             };
-            match tokio::time::timeout(Duration::from_secs(600), outcome).await {
-                Ok(Ok(())) => spawn_supervisor(&task_server, connector, true),
-                Ok(Err(e)) => task_server.set(|s| {
-                    s.status = Status::Auth;
-                    s.error = Some(format!("{AUTH_REQUIRED}: sign-in failed: {e}"));
-                }),
-                Err(_) => task_server.set(|s| {
-                    s.status = Status::Auth;
-                    s.error = Some(format!("{AUTH_REQUIRED}: the sign-in timed out"));
-                }),
-            }
+            let why = match tokio::time::timeout(Duration::from_secs(600), outcome).await {
+                Ok(Ok(())) => return spawn_supervisor(&task_server, connector, true),
+                Ok(Err(e)) => format!("sign-in failed: {e}"),
+                Err(_) => "the sign-in timed out".into(),
+            };
+            task_server.set(|s| {
+                s.status = Status::Auth;
+                s.error = Some(format!("{AUTH_REQUIRED}: {why}"));
+            });
         });
-        let old = self.auths.lock().unwrap().insert(
+        self.auths.lock().unwrap().insert(
             name.to_owned(),
             PendingAuth {
                 paste,
                 task: handle.abort_handle(),
             },
         );
-        if let Some(old) = old {
-            old.task.abort();
-        }
         Ok((shown, redirect))
     }
 
@@ -922,9 +919,7 @@ impl McpManager {
     /// Forget the sign-in and disconnect.
     pub fn sign_out(&self, name: &str) -> Result<(), String> {
         let server = self.server(name)?;
-        if let Some(p) = self.auths.lock().unwrap().remove(name) {
-            p.task.abort();
-        }
+        self.auths.lock().unwrap().remove(name);
         oauth::sign_out(name)?;
         let connector = self.connector.lock().unwrap().clone();
         spawn_supervisor(&server, connector, true);

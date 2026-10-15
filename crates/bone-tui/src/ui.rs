@@ -821,7 +821,7 @@ impl App {
             "region": name,
             "spinner": self.spinner.frame(),
             "popup": self.popup_name(),
-            "session": self.session_ctx(self.current),
+            "session": self.session_ctx(self.rendering.unwrap_or(self.current)),
         });
         let (size, lines) = self
             .guarded(&format!("regions.{name}"), |lua| {

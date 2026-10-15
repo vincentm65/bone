@@ -811,6 +811,9 @@ function bone.ui.box(lines, opts)
   return out
 end
 
+--- copy(text): onto the system clipboard via tmux, OSC 52 or wl-copy/xclip.
+bone.clipboard = { copy = function(text) api("clipboard_copy", text) end }
+
 --- The prompt as data. Positions are { row, col } (lines and chars, from
 --- 0) or a char offset from 0; anything past the end is clamped. Edits run
 --- prompt/changed handlers and never send anything.

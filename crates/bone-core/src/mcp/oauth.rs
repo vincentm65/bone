@@ -164,11 +164,13 @@ fn random(n: usize) -> Vec<u8> {
     buf
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 struct Meta {
     authorization_endpoint: String,
     token_endpoint: String,
     registration_endpoint: Option<String>,
+    /// The resource's scopes, and `offline_access` (refresh tokens) if offered.
+    scope: Vec<String>,
 }
 
 async fn get_json(http: &reqwest::Client, url: &str) -> Option<Value> {
@@ -209,12 +211,16 @@ async fn discover(http: &reqwest::Client, url: &str, www: Option<&str>) -> Resul
         candidates.push(format!("{o}/.well-known/oauth-protected-resource{path}"));
     }
     candidates.push(format!("{o}/.well-known/oauth-protected-resource"));
-    let mut issuer = None;
+    let words = |v: &Value| -> Vec<String> {
+        let all = v.as_array().into_iter().flatten().filter_map(Value::as_str);
+        all.map(str::to_owned).collect()
+    };
+    let (mut issuer, mut scope) = (None, Vec::new());
     for c in candidates {
         if let Some(doc) = get_json(http, &c).await
             && let Some(a) = doc["authorization_servers"][0].as_str()
         {
-            issuer = Some(a.to_owned());
+            (issuer, scope) = (Some(a.to_owned()), words(&doc["scopes_supported"]));
             break;
         }
     }
@@ -235,10 +241,15 @@ async fn discover(http: &reqwest::Client, url: &str, www: Option<&str>) -> Resul
                 doc["token_endpoint"].as_str(),
             )
         {
+            let offline = "offline_access".to_owned();
+            if words(&doc["scopes_supported"]).contains(&offline) && !scope.contains(&offline) {
+                scope.push(offline);
+            }
             return Ok(Meta {
                 authorization_endpoint: a.to_owned(),
                 token_endpoint: t.to_owned(),
                 registration_endpoint: doc["registration_endpoint"].as_str().map(str::to_owned),
+                scope,
             });
         }
     }
@@ -247,6 +258,7 @@ async fn discover(http: &reqwest::Client, url: &str, www: Option<&str>) -> Resul
         authorization_endpoint: format!("{o}/authorize"),
         token_endpoint: format!("{o}/token"),
         registration_endpoint: Some(format!("{o}/register")),
+        scope,
     })
 }
 
@@ -323,15 +335,17 @@ impl Flow {
         let state = b64url(&random(16));
         let mut u = Url::parse(&meta.authorization_endpoint)
             .map_err(|e| format!("{}: {e}", meta.authorization_endpoint))?;
-        u.query_pairs_mut().extend_pairs([
-            ("response_type", "code"),
-            ("client_id", client_id.as_str()),
-            ("redirect_uri", redirect_uri.as_str()),
-            ("code_challenge", challenge.as_str()),
-            ("code_challenge_method", "S256"),
-            ("state", state.as_str()),
-            ("resource", url),
-        ]);
+        u.query_pairs_mut()
+            .extend_pairs([
+                ("response_type", "code"),
+                ("client_id", client_id.as_str()),
+                ("redirect_uri", redirect_uri.as_str()),
+                ("code_challenge", challenge.as_str()),
+                ("code_challenge_method", "S256"),
+                ("state", state.as_str()),
+                ("resource", url),
+            ])
+            .extend_pairs((!meta.scope.is_empty()).then(|| ("scope", meta.scope.join(" "))));
         Ok(Flow {
             url: u.to_string(),
             redirect_uri,
@@ -381,15 +395,11 @@ impl Flow {
             let page = format!(
                 "<!doctype html><meta charset=utf-8><title>bone</title><body style=\"font:16px system-ui;margin:3em\">{body}"
             );
-            let _ = sock
-                .write_all(
-                    format!(
-                        "HTTP/1.1 {status}\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{page}",
-                        page.len()
-                    )
-                    .as_bytes(),
-                )
-                .await;
+            let reply = format!(
+                "HTTP/1.1 {status}\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{page}",
+                page.len()
+            );
+            let _ = sock.write_all(reply.as_bytes()).await;
             return result;
         }
     }
@@ -411,12 +421,8 @@ impl Flow {
         };
         let q: BTreeMap<_, _> = u.query_pairs().into_owned().collect();
         if let Some(e) = q.get("error") {
-            return Err(format!(
-                "the server refused: {e}{}",
-                q.get("error_description")
-                    .map(|d| format!(" ({d})"))
-                    .unwrap_or_default()
-            ));
+            let d = q.get("error_description").map(|d| format!(" ({d})"));
+            return Err(format!("the server refused: {e}{}", d.unwrap_or_default()));
         }
         if q.get("state").is_some_and(|s| *s != self.state) {
             return Err("the redirect belongs to a different sign-in".into());
@@ -491,10 +497,17 @@ async fn token_request(endpoint: &str, pairs: &[(&str, &str)]) -> Result<Value, 
     serde_json::from_str(&text).map_err(|e| format!("token response: {e}"))
 }
 
-/// Use the refresh token for a new access token. On failure the saved
-/// sign-in is kept (the caller asks for a new one).
-pub async fn refresh(name: &str, url: &str) -> Result<(), String> {
+/// Use the refresh token for a new access token, unless a refresh this call
+/// waited for (one at a time: reusing a rotated refresh token can revoke it)
+/// already replaced `rejected`, or the token about to expire. On failure the
+/// saved sign-in is kept (the caller asks for a new one).
+pub async fn refresh(name: &str, url: &str, rejected: Option<&str>) -> Result<(), String> {
+    static ONE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _one = ONE.lock().await;
     let e = entry(name, url).ok_or(format!("{AUTH_REQUIRED}: not signed in"))?;
+    if rejected.map_or(!needs_refresh(name, url), |t| t != e.access_token) {
+        return Ok(());
+    }
     let rt = e
         .refresh_token
         .clone()
@@ -553,11 +566,7 @@ mod tests {
             redirect_uri: String::new(),
             name: "x".into(),
             server_url: "https://x.test/mcp".into(),
-            meta: Meta {
-                authorization_endpoint: String::new(),
-                token_endpoint: String::new(),
-                registration_endpoint: None,
-            },
+            meta: Meta::default(),
             client_id: "c".into(),
             client_secret: None,
             verifier: String::new(),

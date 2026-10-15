@@ -82,28 +82,15 @@ pub(crate) async fn check(inner: &Inner) -> Vec<HealthItem> {
         .filter(|s| Registry::builtin().get(&s.name).is_none())
         .map(|s| s.name.as_str())
         .collect();
-    for server in inner.mcp.list() {
-        out.push(match server.state.as_str() {
-            "ready" => item(
-                &format!("mcp {}", server.name),
-                Ok,
-                format!("{} tools", server.tools.len()),
-            ),
-            "idle" => item(&format!("mcp {}", server.name), Ok, "starts on first use"),
-            "starting" => item(
-                &format!("mcp {}", server.name),
-                Warn,
-                match &server.error {
-                    Some(e) => format!("restarting after: {e}"),
-                    None => "starting".into(),
-                },
-            ),
-            _ => item(
-                &format!("mcp {}", server.name),
-                Error,
-                server.error.clone().unwrap_or_else(|| "failed".into()),
-            ),
-        });
+    for s in inner.mcp.list() {
+        let (status, message) = match (s.state.as_str(), s.error) {
+            ("ready", _) => (Ok, format!("{} tools", s.tools.len())),
+            ("idle", _) => (Ok, "starts on first use".into()),
+            ("starting", Some(e)) => (Warn, format!("restarting after: {e}")),
+            ("starting", None) => (Warn, "starting".into()),
+            (_, e) => (Error, e.unwrap_or_else(|| "failed".into())),
+        };
+        out.push(item(&format!("mcp {}", s.name), status, message));
     }
     match &rt.scripting {
         Some(s) => {

@@ -727,6 +727,8 @@ The selection is drawn with the `Selection` group. Typing or pasting replaces it
 
 `bone.prompt.images()` returns the draft's image references; `bone.prompt.set_images(refs)` replaces them. `bone.prompt.attach(path)` reads a file asynchronously, `bone.prompt.paste()` reads the local clipboard, and `bone.prompt.remove_image(index)` removes a 1-based attachment. `bone.prompt.empty()` checks text, images and pending reads. Setting text preserves attachments. The `submit` event includes `{ text, images }`; `prompt/changed` includes `images`, and `image/attached` announces `{ image }` after a successful upload. The default `attachments` layout region shows their labels.
 
+`bone.clipboard.copy(text)` puts text on the system clipboard the same ways a mouse selection does: through tmux when inside it, the OSC 52 sequence otherwise (so it works over SSH if the terminal allows clipboard writes), and `wl-copy` or `xclip` with a local display.
+
 In core Lua coroutines, `bone.attachments.upload(base64, name)` yields and returns an `ImageAttachment`; `bone.attachments.read(id)` returns `{ data = base64_png }`. Use references in `{ role = "user", content = "", images = { ref } }`, `bone.queue.add(id, text, mode, { ref })`, session operations or model calls. `read_file` image results include references on their `role = "tool"` messages. Custom providers receive hydrated PNGs as `image.data` on both user and tool messages; translate them to your provider's multimodal format. Stored messages and hook events use references without pixels.
 
 ### Chat data
