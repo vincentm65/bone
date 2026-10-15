@@ -402,7 +402,8 @@ function M.open()
   local st = state
   setup_colors()
   panel = bone.ui.panel.open({
-    id = "sessions", dock = "left", size = 48, full_height = true, separator = false, focus = true,
+    id = "sessions", dock = "left", full_height = true, separator = false, focus = true,
+    size = tonumber(bone.state.load("sessions-width").width) or tonumber(bone.ui.sessions_width) or 48,
     render = render,
     keys = {
       esc = function() bone.ui.panel.focus(nil) end,
@@ -506,17 +507,30 @@ bone.on("session/deleted", function(ev)
 end)
 
 bone.on("mouse", function(ev)
-  if not panel or not panel:is_open() or ev.panel ~= "sessions" then return end
-  state.initial = nil
-  if ev.button == "left" and ev.action == "down" then
-    local index = state.hits[ev.panel_line]
-    if index then
-      choose(index)
-    elseif ({ tabs = true, underline = true })[(state.descriptors[ev.panel_line] or {})[1]] then
-      switch_page()
+  if not panel or not panel:is_open() then return end
+  local info = panel:info()
+  if not info.visible then return end
+  if state.resizing then
+    if ev.action == "drag" then
+      panel:update({ size = math.max(20, ev.x - info.col) })
+    else
+      state.resizing = nil
+      bone.state.save("sessions-width", { width = info.size })
     end
     return true
   end
+  if ev.popup or ev.action ~= "down" or ev.button ~= "left" then return end
+  state.resizing = ev.x == info.col + info.width
+  if state.resizing then return true end
+  if ev.panel ~= "sessions" then return end
+  state.initial = nil
+  local index = state.hits[ev.panel_line]
+  if index then
+    choose(index)
+  elseif ({ tabs = true, underline = true })[(state.descriptors[ev.panel_line] or {})[1]] then
+    switch_page()
+  end
+  return true
 end)
 
 return M

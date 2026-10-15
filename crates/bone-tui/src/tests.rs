@@ -5185,6 +5185,26 @@ async fn history_sidebar_spans_screen_and_keeps_composer_beside_it() {
 }
 
 #[tokio::test]
+async fn session_sidebar_resizes_by_dragging_its_edge() {
+    let (mut h, _dir) = Harness::with_config("bone.ui.sessions_width = 60").await;
+    let width = |h: &Harness| h.app.panel("sessions").unwrap().area.unwrap().width;
+    h.input("{ctrl+o}").await;
+    h.lua("overlay = bone.ui.popup({ row = 4, col = 55, width = 30, height = 4, lines = {} })")
+        .await;
+    for (popup, x, expected) in [(true, 72, 60), (false, 72, 72), (false, 99, 79)] {
+        if !popup {
+            h.lua("bone.ui.close(overlay)").await;
+        }
+        h.screen(100, 24);
+        h.app.mouse("down", "left", (width(&h), 5));
+        h.app.mouse("drag", "left", (x, 5));
+        h.app.mouse("up", "left", (x, 5));
+        h.screen(100, 24);
+        assert_eq!(width(&h), expected);
+    }
+}
+
+#[tokio::test]
 async fn session_sidebar_background_fills_both_tabs() {
     let mut h = Harness::new().await;
     h.lua("bone.ui.sessions_background = (bone.hl.get('InputBackground') or {}).bg")
