@@ -1,20 +1,35 @@
 //! Durable, content-addressed PNGs, independent of a client's filesystem.
 //! Blobs are retained while any session (including forks) can refer to them.
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bone_proto::types::{ChatMessage, ImageAttachment};
 use sha2::{Digest, Sha256};
 
+/// Base64 kept of verified images, at most (then it starts over).
+const CACHE_BYTES: usize = 64 << 20;
+
 pub(crate) struct AttachmentStore {
     dir: PathBuf,
+    cache: Mutex<HashMap<String, Verified>>,
+}
+
+#[derive(Clone)]
+struct Verified {
+    width: u32,
+    height: u32,
+    bytes: u64,
+    data: String,
 }
 
 impl AttachmentStore {
     pub fn new(data_dir: &Path) -> Self {
         Self {
             dir: data_dir.join("attachments"),
+            cache: Mutex::default(),
         }
     }
 
@@ -71,7 +86,13 @@ impl AttachmentStore {
         })
     }
 
-    fn read_bytes(&self, id: &str) -> Result<Vec<u8>, String> {
+    /// A stored image, checked against its id, as base64 with its size.
+    /// Ids are content hashes, so each is read once rather than on every
+    /// model call; the cache starts over past `CACHE_BYTES`.
+    fn verified(&self, id: &str) -> Result<Verified, String> {
+        if let Some(v) = self.cache.lock().unwrap().get(id) {
+            return Ok(v.clone());
+        }
         let path = self.path(id)?;
         let file =
             std::fs::File::open(path).map_err(|e| format!("cannot read attachment {id}: {e}"))?;
@@ -85,11 +106,23 @@ impl AttachmentStore {
         if format!("{:x}", Sha256::digest(&bytes)) != id {
             return Err("stored image is corrupt".into());
         }
-        Ok(bytes)
+        let (width, height) = bone_media::png_dimensions(&bytes)?;
+        let v = Verified {
+            width,
+            height,
+            bytes: bytes.len() as u64,
+            data: STANDARD.encode(bytes),
+        };
+        let mut cache = self.cache.lock().unwrap();
+        if cache.values().map(|v| v.data.len()).sum::<usize>() > CACHE_BYTES {
+            cache.clear();
+        }
+        cache.insert(id.to_owned(), v.clone());
+        Ok(v)
     }
 
     pub fn read(&self, id: &str) -> Result<String, String> {
-        Ok(STANDARD.encode(self.read_bytes(id)?))
+        Ok(self.verified(id)?.data)
     }
 
     pub fn validate(&self, images: &mut [ImageAttachment]) -> Result<(), String> {
@@ -107,13 +140,10 @@ impl AttachmentStore {
                     "upload image bytes with attachment/upload before referencing them".into(),
                 );
             }
-            let bytes = self.read_bytes(&img.id)?;
-            // Hash-verified canonical bytes determine metadata, never caller input.
-            let (width, height) = bone_media::png_dimensions(&bytes)?;
+            // Checked canonical bytes determine metadata, never caller input.
+            let v = self.verified(&img.id)?;
             img.mime_type = "image/png".into();
-            img.width = width;
-            img.height = height;
-            img.bytes = bytes.len() as u64;
+            (img.width, img.height, img.bytes) = (v.width, v.height, v.bytes);
             img.name = img
                 .name
                 .chars()
@@ -122,7 +152,7 @@ impl AttachmentStore {
                 .collect();
             total += img.bytes;
             if hydrate {
-                img.data = Some(STANDARD.encode(bytes));
+                img.data = Some(v.data);
             }
         }
         if total > bone_media::MAX_MESSAGE_IMAGE_BYTES {

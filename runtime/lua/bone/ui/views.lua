@@ -50,6 +50,54 @@ end
 
 -- bone.ui.markdown (Markdown text to lines) is in the base API, tui/api.lua.
 
+-- A streaming item is drawn in two parts: a settled start, drawn once and
+-- kept, and the rest, drawn every frame, so a long reply doesn't cost more
+-- with every token. `cut(text, from)` is where the settled part may end,
+-- since nothing after it changes how the text before it draws.
+local kept = {}
+
+local function streamed(item, text, width, cut, draw)
+  if not item.streaming then
+    kept = {}
+    return draw(text)
+  end
+  local id = item.kind .. item.key
+  local k = kept[id]
+  if not (k and k.width == width and text:sub(1, #k.text) == k.text) then
+    k = { text = "", width = width, lines = {} }
+    kept[id] = k
+  end
+  local at = cut(text, #k.text + 1)
+  if at then
+    append(k.lines, draw(text:sub(#k.text + 1, at - 1)))
+    k.text = text:sub(1, at - 1)
+  end
+  return append(append({}, k.lines), draw(text:sub(#k.text + 1)))
+end
+
+-- After the last line break.
+local function after_line(text, from)
+  return text:match("^.*\n()", from)
+end
+
+-- Before the last line that follows a blank one outside a code block:
+-- Markdown blocks never run past such a line (see markdown.rs).
+local function after_blank(text, from)
+  local at, blank, fence = nil, false, false
+  for line in text:sub(from):gmatch("([^\n]*)\n") do
+    local empty = line:find("^%s*$")
+    if blank and not empty then
+      at = from
+    end
+    blank = empty and not fence
+    if line:find("^%s*```") or line:find("^%s*~~~") then
+      fence = not fence
+    end
+    from = from + #line + 1
+  end
+  return at
+end
+
 -- ---- messages -------------------------------------------------------------
 
 function views.user(item, ctx)
@@ -66,16 +114,19 @@ function views.user(item, ctx)
 end
 
 function views.reasoning(item, ctx)
-  if not bone.o.show_reasoning or trim(item.text) == "" then
+  local text = trim(item.text)
+  if not bone.o.show_reasoning or text == "" then
     return nil
   end
-  local out = starts("reasoning", ctx)
   local prefix = item.streaming and "∴ " or "│ "
-  for _, line in ipairs(lines(trim(item.text))) do
-    append(out, wrap({ { line, "Reasoning" } }, ctx.width,
-      { first = { { prefix, "Reasoning" } }, rest = { { "  ", "Reasoning" } } }))
-  end
-  return out
+  return append(starts("reasoning", ctx), streamed(item, text, ctx.width, after_line, function(part)
+    local out = {}
+    for _, line in ipairs(lines(part)) do
+      append(out, wrap({ { line, "Reasoning" } }, ctx.width,
+        { first = { { prefix, "Reasoning" } }, rest = { { "  ", "Reasoning" } } }))
+    end
+    return out
+  end))
 end
 
 function views.assistant(item, ctx)
@@ -87,9 +138,17 @@ function views.assistant(item, ctx)
     end
     return out
   end
-  local md = bone.ui.markdown(text, ctx.width, "  ")
+  local md = streamed(item, text, ctx.width, after_blank, function(part)
+    local md = bone.ui.markdown(part, ctx.width, "  ")
+    -- A settled part ends in a blank line, which is left out at the end.
+    if part:sub(-1) == "\n" then
+      md[#md + 1] = {}
+    end
+    return md
+  end)
   if item.streaming then
     if #md > 0 then
+      md[#md] = append({}, md[#md])
       table.insert(md[#md], { "▍", "Dim" })
     else
       md[1] = { { "  ▍", "Dim" } }

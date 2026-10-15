@@ -36,6 +36,8 @@ const MAX_OUTPUT: usize = 4 << 20;
 const SHOW_HEAD: usize = 10_000;
 const SHOW_TAIL: usize = 20_000;
 const MAX_COMPLETED: usize = 64;
+/// How often a running command's new output is sent.
+const SEND_EVERY: Duration = Duration::from_millis(16);
 /// Output kept as written, escape codes and all, for terminal views.
 const MAX_RAW: usize = 1 << 20;
 /// A background job's terminal until a client sets another size.
@@ -600,9 +602,11 @@ async fn run_job(
     let far = || Instant::now() + Duration::from_secs(86_400);
     let mut buf = vec![0u8; 16 * 1024];
     let mut pipe_open = true;
+    let mut unsent = Unsent::default();
     loop {
         tokio::select! {
-            chunk = rx.next(&mut buf), if pipe_open => match chunk { None => pipe_open = false, Some(bytes) => { let text = out_decoder.decode(&bytes); record_output(&registry, &process, &text, bytes.len(), &mut cleaner, &output, &process_sink); } },
+            chunk = rx.next(&mut buf), if pipe_open => match chunk { None => pipe_open = false, Some(bytes) => { let text = out_decoder.decode(&bytes); record_output(&process, &text, bytes.len(), &mut cleaner, &mut unsent); } },
+            _ = sleep_until(unsent.due.unwrap_or_else(far)), if unsent.due.is_some() => send_output(&registry, &process, &mut unsent, &output, &process_sink),
             st = child.wait(), if status.is_none() => match st { Ok(st) => { status = Some(st); if kill_at.is_none() { if cfg!(unix) { terminate(pid); } kill_at = Some(Instant::now() + EXIT_GRACE); } }, Err(e) => { error = Some(e.to_string()); break; } },
             Some(control) = controls.recv(), if kill_at.is_none() => match control { Control::Write(data) => if let Some(pipe) = &mut input { let _ = pipe.write_all(&data).await; }, Control::CloseStdin => input = None, Control::Cancel => { state = ProcessState::Cancelled; terminate(pid); kill_at = Some(Instant::now() + KILL_GRACE); } },
             _ = parent_cancel.cancelled(), if kill_at.is_none() => { state = ProcessState::Cancelled; terminate(pid); kill_at = Some(Instant::now() + KILL_GRACE); }
@@ -624,17 +628,8 @@ async fn run_job(
     }
     process.pty.lock().unwrap().take();
     let text = out_decoder.finish();
-    if !text.is_empty() {
-        record_output(
-            &registry,
-            &process,
-            &text,
-            text.len(),
-            &mut cleaner,
-            &output,
-            &process_sink,
-        );
-    }
+    record_output(&process, &text, text.len(), &mut cleaner, &mut unsent);
+    send_output(&registry, &process, &mut unsent, &output, &process_sink);
     let (code, signal) = status.map_or((None, None), |st| {
         (st.code(), bone_lua::sys::exit_signal(&st))
     });
@@ -653,14 +648,22 @@ async fn run_job(
     .await;
 }
 
+/// Output recorded but not yet sent. Events go out at most once a frame,
+/// so a noisy command cannot flood subscribers (one that falls behind has
+/// to reload everything).
+#[derive(Default)]
+struct Unsent {
+    offset: u64,
+    text: String,
+    due: Option<Instant>,
+}
+
 fn record_output(
-    registry: &ProcessRegistry,
     process: &Process,
     text: &str,
     bytes: usize,
     cleaner: &mut Option<Cleaner>,
-    output: &Option<OutputSink>,
-    process_sink: &Option<ProcessUpdateSink>,
+    unsent: &mut Unsent,
 ) {
     if text.is_empty() {
         return;
@@ -672,19 +675,35 @@ fn record_output(
         None => snapshot.combined.push_str(text),
     }
     snapshot.truncated |= trim_front(&mut snapshot.combined, MAX_OUTPUT) > 0;
-    let offset = snapshot.raw_total;
+    if unsent.text.is_empty() {
+        unsent.offset = snapshot.raw_total;
+        unsent.due = Some(Instant::now() + SEND_EVERY);
+    }
+    unsent.text.push_str(text);
     snapshot.raw.push_str(text);
     snapshot.raw_total += text.len() as u64;
     snapshot.raw_start += trim_front(&mut snapshot.raw, MAX_RAW) as u64;
-    drop(snapshot);
+}
+
+fn send_output(
+    registry: &ProcessRegistry,
+    process: &Process,
+    unsent: &mut Unsent,
+    output: &Option<OutputSink>,
+    process_sink: &Option<ProcessUpdateSink>,
+) {
+    let Unsent { offset, text, .. } = std::mem::take(unsent);
+    if text.is_empty() {
+        return;
+    }
     let version = registry.bump_version();
     if let Some(sink) = process_sink {
         let mut view = registry.view_of(process);
-        view.chunk = Some((offset, text.to_owned()));
+        view.chunk = Some((offset, text.clone()));
         sink(view, version);
     }
     if let Some(output) = output {
-        output(text);
+        output(&text);
     }
 }
 

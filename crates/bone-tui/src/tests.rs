@@ -1322,6 +1322,26 @@ async fn default_tool_views() {
 }
 
 #[tokio::test]
+async fn streaming_cursor_does_not_mutate_cached_markdown_rows() {
+    let mut h = Harness::new().await;
+    h.input("hello{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "hello")).await;
+    // An empty code block puts the cursor on a cached separator row.
+    for text in ["Intro\n\n```\n```", "\nNext"] {
+        h.emit::<MessageDelta>(MessageDeltaParams {
+            session_id: "s-new".into(),
+            turn_id: 1,
+            kind: DeltaKind::Text,
+            text: text.into(),
+        })
+        .await;
+        let screen = h.screen(80, 24);
+        assert_eq!(screen.matches('▍').count(), 1, "{screen}");
+    }
+    assert!(h.screen(80, 24).contains("Next▍"));
+}
+
+#[tokio::test]
 async fn views_are_lua_and_can_be_replaced() {
     let (mut h, _dir) = Harness::with_config(
         r#"
