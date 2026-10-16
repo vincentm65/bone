@@ -74,11 +74,7 @@ impl Shell {
                     "timeout_secs": { "type": "integer", "minimum": 1, "maximum": MAX_TIMEOUT_SECS, "description": "Command timeout. Foreground defaults to 120 seconds; background jobs have no timeout unless set." },
                     "data": { "type": "string", "description": "Data to write to a job opened with stdin=\"pipe\"." },
                     "stdin": { "type": "string", "description": "Input to write before closing stdin." }
-                },
-                "anyOf": [
-                    { "required": ["command"] },
-                    { "required": ["action"] }
-                ]
+                }
             }),
         })
     }
