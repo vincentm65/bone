@@ -28,7 +28,7 @@ use serde_json::{Value as Json, json};
 use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 
 use crate::config::{CoreConfig, ProviderConfig};
-use crate::tools::{Tool, ToolContext, ToolResult, ToolSpec};
+use crate::tools::{Tool, ToolContext, ToolResponse, ToolResult, ToolSpec};
 
 /// What loading `core.lua` produced.
 pub struct Loaded {
@@ -117,7 +117,7 @@ enum Job {
 
 /// Where a coroutine's result goes once it finishes.
 enum Done {
-    Tool(oneshot::Sender<ToolResult>),
+    Tool(oneshot::Sender<Result<ToolResponse, String>>),
     Hooks {
         reply: oneshot::Sender<HookOutcome>,
         name: String,
@@ -609,6 +609,14 @@ impl Tool for LuaTool {
     }
 
     fn call<'a>(&'a self, args: Json, ctx: &'a ToolContext) -> BoxFuture<'a, ToolResult> {
+        Box::pin(async move { self.call_with_images(args, ctx).await.map(|r| r.output) })
+    }
+
+    fn call_with_images<'a>(
+        &'a self,
+        args: Json,
+        ctx: &'a ToolContext,
+    ) -> BoxFuture<'a, Result<ToolResponse, String>> {
         Box::pin(async move {
             let (reply, rx) = oneshot::channel();
             let lua_ctx = json!({
@@ -622,6 +630,23 @@ impl Tool for LuaTool {
             rx.await.map_err(|_| "the Lua thread stopped".to_string())?
         })
     }
+}
+
+/// The image files a Lua tool returned as its third value.
+fn read_tool_images(paths: Vec<String>) -> Result<Vec<(Vec<u8>, String)>, String> {
+    if paths.len() > bone_media::MAX_IMAGES {
+        return Err(format!(
+            "a tool can return at most {} images",
+            bone_media::MAX_IMAGES
+        ));
+    }
+    paths
+        .into_iter()
+        .map(|path| {
+            let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
+            Ok((bytes, path))
+        })
+        .collect()
 }
 
 // ---- Lua providers ---------------------------------------------------------
@@ -1230,16 +1255,28 @@ impl State {
         let lua = &self.lua;
         match done {
             Done::Tool(reply) => {
-                let out = r.and_then(|v| <(Value, Option<String>)>::from_lua_multi(v, lua));
+                let out = r.and_then(|v| {
+                    <(Value, Option<String>, Option<Vec<String>>)>::from_lua_multi(v, lua)
+                });
                 let _ = reply.send(match out {
                     Err(e) => Err(short_error(&e)),
-                    Ok((Value::Nil, Some(err))) => Err(err),
-                    Ok((Value::Nil, None)) => Ok(String::new()),
-                    Ok((Value::String(s), _)) => Ok(s.to_string_lossy()),
-                    Ok((v @ Value::Table(_), _)) => from_lua(&v)
-                        .map(|j| serde_json::to_string_pretty(&j).unwrap_or_default())
-                        .map_err(|e| e.to_string()),
-                    Ok((v, _)) => Ok(v.to_string().unwrap_or_default()),
+                    Ok((Value::Nil, Some(err), _)) => Err(err),
+                    Ok((v, _, images)) => {
+                        let output = match v {
+                            Value::Nil => Ok(String::new()),
+                            Value::String(s) => Ok(s.to_string_lossy()),
+                            v @ Value::Table(_) => from_lua(&v)
+                                .map(|j| serde_json::to_string_pretty(&j).unwrap_or_default())
+                                .map_err(|e| e.to_string()),
+                            v => Ok(v.to_string().unwrap_or_default()),
+                        };
+                        output.and_then(|output| {
+                            Ok(ToolResponse {
+                                output,
+                                images: read_tool_images(images.unwrap_or_default())?,
+                            })
+                        })
+                    }
                 });
             }
             Done::Hooks { reply, name, event } => {

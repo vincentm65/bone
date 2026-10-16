@@ -248,6 +248,8 @@ bone.tool.register {
 }
 ```
 
+To send images with the result (a vision model sees them as pixels, like `read_file` images), return image file paths as a third value: `return "Took a screenshot", nil, { "/tmp/shot.png" }`. PNG, JPEG and WebP work, up to 8 per call; the files are read once `run` returns, so delete them afterwards only if they were copied elsewhere first, or leave them in a temporary directory.
+
 A Lua tool with the same name as a built-in (`read_file`, `write_file`, `edit_file`, `shell`) replaces it. `error()` inside `run` becomes an error result for the model.
 
 When a reply asks for several tools, consecutive calls of tools that only read run at the same time (up to 8): `read_file`, Lua tools registered with `parallel = true`, and MCP tools their server marks `readOnlyHint`. Any other call runs on its own, after the ones before it and before the ones after it, so writes and shell commands keep their order. Results reach the transcript in the order of the calls. `read_file` lets the model choose its range with `offset`/`limit`; use `full: true` when the whole file is needed. `shell` limits its own output; the `output-cap` example plugin limits every tool's.
