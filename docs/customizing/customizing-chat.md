@@ -69,13 +69,22 @@ in a `│ ╰` gutter cut to its first and last two rows, edits as a numbered
 diff. `bone.o.tool_detail` (`ctrl+t`) picks how much: `"summary"` (the
 default) folds each stretch of calls between edits and failures into one line
 such as `Read 3 files, ran 2 shell commands`, `"rows"` is the above, `"full"`
-shows every output in full.
+shows every output in full. Click a tool call to expand or collapse just that
+call; clicking a summary toggles the whole group. Changing `ctrl+t`'s global
+level clears these local choices. Live summaries type themselves in; completed
+history appears immediately.
+
+Each completed turn ends with a `Worked for … · Finished at …` footer, saved
+in TUI state so it survives reopening the session. The statusline shows elapsed
+time only while a turn is running. Its `total` covers the current session;
+`agents` separately shows sub-agents' input and output tokens seen this run.
 
 Sub-agent calls show the task first, then the agent's name and status. Their
 reports render as Markdown in an indented gutter, with an opening paragraph
 preview of up to three rows in `"summary"` and `"rows"` and the whole report
 in `"full"`; failures show the whole report at every level. Clicking the
-call opens its session when it was started during this run.
+title opens its session when it was started during this run; clicking the
+report expands or collapses it.
 
 ## Your own items
 

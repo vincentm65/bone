@@ -15,6 +15,7 @@ function M.setup(opts)
     bone.colorscheme(opts.colorscheme)
   end
   require("bone.ui.views")
+  require("bone.ui.turn_timing")
   require("bone.ui.statusline")
   require("bone.ui.tray")
   -- Loaded now so its Processes page sees background work from the start.

@@ -3399,7 +3399,7 @@ async fn standard_tool_views_match_the_first_bone() {
         "    shell ls -la | grep foo",
         "      │ a",
         "      │ b",
-        "      │ ⋮ +3 terminal lines (ctrl+t)",
+        "      │ ⋮ +3 terminal lines (click or ctrl+t)",
         "      │ f",
         "      ╰ g",
         "",
@@ -3412,7 +3412,7 @@ async fn standard_tool_views_match_the_first_bone() {
         "r3",
         "r4",
         "r5",
-        "⋮ +2 more lines (ctrl+t)",
+        "⋮ +2 more lines (click or ctrl+t)",
         "",
         "    edit_file a.rs (-1 | +2)",
         "      4   fn a() {",
@@ -3480,7 +3480,7 @@ async fn subagent_reports_have_a_task_header_and_a_markdown_preview() {
             "{text}"
         );
         assert!(text.contains("╰ ⋮ +"), "{text}");
-        assert!(text.contains("report lines (ctrl+t)"), "{text}");
+        assert!(text.contains("report lines (click or ctrl+t)"), "{text}");
         assert!(!text.contains("Changes:"), "{text}");
         assert!(!text.contains("Registered SessionActive"), "{text}");
         assert!(!text.contains('`') && !text.contains("**"), "{text}");
@@ -3570,6 +3570,20 @@ async fn ctrl_t_steps_through_tool_detail() {
 #[tokio::test]
 async fn tool_summary_follows_a_running_turn() {
     let mut h = Harness::build(None).await;
+    h.lua("TEST_NOW = 1700000000000; bone.now = function() return TEST_NOW end")
+        .await;
+    // Let the type-in animation settle without sleeping. Animation itself is
+    // covered by standard_ui_tests; here we check updates across tool rounds.
+    let screen = |h: &mut Harness| -> String {
+        h.screen(60, 20);
+        h.app
+            .with_api(|lua| {
+                lua.load("TEST_NOW = TEST_NOW + 1000; bone.chat.redraw()")
+                    .exec()
+            })
+            .unwrap();
+        h.screen(60, 20)
+    };
     h.input("go{enter}").await;
     h.emit::<TurnStarted>(started("s-new", "go")).await;
     let call = |id: &str, name: &str, args: Value| ToolCall {
@@ -3586,7 +3600,7 @@ async fn tool_summary_follows_a_running_turn() {
         duration_ms: None,
     };
     let chat = |h: &mut Harness| -> String {
-        h.screen(60, 20)
+        screen(h)
             .lines()
             .filter(|l| l.starts_with("  ◌ ") || l.starts_with("    ") && !l.contains('›'))
             .collect::<Vec<_>>()
@@ -3626,7 +3640,7 @@ async fn tool_summary_follows_a_running_turn() {
     ))
     .await;
     let summary = |h: &mut Harness| -> String {
-        h.screen(60, 20)
+        screen(h)
             .lines()
             .find(|l| l.contains("shell commands"))
             .unwrap_or_default()
@@ -5194,6 +5208,9 @@ async fn setup_adds_a_provider_its_key_and_packages() {
 #[path = "reload_tests.rs"]
 mod reload_tests;
 
+#[path = "standard_ui_tests.rs"]
+mod standard_ui_tests;
+
 #[tokio::test]
 async fn empty_session_hint_is_centered_in_chat_beside_panels() {
     let mut h = Harness::build(None).await;
@@ -5284,18 +5301,18 @@ async fn session_sidebar_background_fills_both_tabs() {
 }
 
 #[tokio::test]
-async fn statusline_keeps_each_sessions_timing_across_switches() {
+async fn statusline_only_shows_timing_for_running_sessions() {
     let mut h = Harness::new().await;
-    h.lua("bone._standard_status.turns.a = { started = os.time() - 65, finished = os.time() }; line = function(s) local o = {} for _, it in ipairs(bone.ui.statusline({session = s, width = 120})) do o[#o + 1] = type(it) == 'table' and it[1] or it end return table.concat(o) end").await;
+    h.lua("line = function(s) local o = {} for _, it in ipairs(bone.ui.statusline({session = s, width = 120})) do o[#o + 1] = type(it) == 'table' and it[1] or it end return table.concat(o) end").await;
     assert!(
         h.lua("=line({session_id = 'b', running = true, elapsed = 65})")
             .await
             .contains("thinking 1m")
     );
+    let idle = h.lua("=line({session_id = 'a'})").await;
     assert!(
-        h.lua("=line({session_id = 'a'})")
-            .await
-            .contains("worked 1m")
+        !idle.contains("worked") && !idle.contains("finished at"),
+        "{idle}"
     );
 }
 

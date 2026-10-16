@@ -37,10 +37,9 @@ local function timestamp(at)
 end
 
 local function setup_colors()
-  -- Links follow the colorscheme; only the selection background is copied,
-  -- so it updates the next time the panel opens.
+  -- Links follow live theme changes, including custom style modifiers.
   local selection = bone.hl.get("Selection") or {}
-  local background = bone.ui.sessions_background or "#202020"
+  local background = bone.ui.sessions_background or "#0b0b0b"
   bone.hl.set("SessionBackground", { link = "Normal", bg = background })
   bone.hl.set("SessionDim", { link = "Dim", bg = background })
   bone.hl.set("SessionAccent", { link = "Accent", bg = background, bold = true })
@@ -94,7 +93,7 @@ local function filter_running()
   for _, s in ipairs(bone.chat.sessions()) do
     if s.session_id then titles[s.session_id] = titles[s.session_id] or s.title end
   end
-  state.filter_dirty = false
+  state.filter_minute, state.filter_window, state.filter_dirty = math.floor(os.time() / 60), recent_window(), false
   state.items = jobs()
   state.lines, state.hits, state.descriptors, state.rows, state.visible_rows = {}, {}, {}, {}, {}
   state.running, state.titles = #state.items > 0, titles
@@ -205,6 +204,7 @@ end
 local function choose(index)
   local s = state.items[index]
   if not s then return end
+  state.selected = index
   -- Keep the agents panel available while interacting with the chosen chat.
   bone.ui.panel.focus(nil)
   -- A shell opens the chat that started it; a sub-agent, its own chat.
@@ -239,6 +239,12 @@ local function move(delta)
 end
 
 local function render(ctx)
+  -- After a drag, save the width drawn: Rust keeps the chat 20 columns, and
+  -- the release can arrive before the last drag has been drawn.
+  if state.save_width then
+    state.save_width = nil
+    bone.state.save("sessions-width", { width = ctx.width })
+  end
   -- Include starting turns and background chats already known by this TUI.
   for _, s in ipairs(bone.chat.sessions()) do
     if s.session_id and s.running and not live[s.session_id] then
@@ -515,7 +521,7 @@ bone.on("mouse", function(ev)
       panel:update({ size = math.max(20, ev.x - info.col) })
     else
       state.resizing = nil
-      bone.state.save("sessions-width", { width = info.size })
+      state.save_width = true
     end
     return true
   end
@@ -528,7 +534,8 @@ bone.on("mouse", function(ev)
   if index then
     choose(index)
   elseif ({ tabs = true, underline = true })[(state.descriptors[ev.panel_line] or {})[1]] then
-    switch_page()
+    -- "Chats" spans columns 2-6 and "Processes" 10-18: split in the gap.
+    if (ev.x - info.col >= 9 and "running" or "chats") ~= state.page then switch_page() end
   end
   return true
 end)

@@ -59,15 +59,25 @@ function M.list(top)
   return out
 end
 
+--- Tokens (input + output) those agents spent this run.
+function M.spend(top)
+  local n = 0
+  for _, a in ipairs(M.list(top)) do
+    n = n + a.tokens + (a.extra_tokens or 0)
+  end
+  return n
+end
+
 bone.on("session/created", function(info)
   local a = M.add(info)
   if a then
-    a.status, a.started_at = "running", bone.now()
+    a.status, a.started_at, a.first_turn = "running", bone.now(), 0
   end
 end)
 
 bone.on("turn/started", function(ev)
   local a = agents[ev.session_id]
+  if a then a.first_turn = a.first_turn or ev.turn_id end
   if a and a.status ~= "running" then
     a.status, a.finished_at, a.started_at, a.detail = "running", nil, bone.now(), nil
   end
@@ -99,6 +109,24 @@ bone.on("turn/finished", function(ev)
   a.finished_at = bone.now()
   a.detail = o.status == "completed" and "done" or o.message or a.status
 end)
+
+-- Non-turn calls inherit the active turn_id, even pre-response compaction.
+-- Its first usage row bounds resumed history and later idle (turn_id=0) calls.
+for _, event in ipairs({ "session/compacted", "session/compact_failed", "turn/finished" }) do
+  bone.on(event, function(ev)
+    local a = agents[ev.session_id]
+    if not a or not a.first_turn then return end
+    bone.request("store/query", {
+      sql = "SELECT coalesce(sum(input_tokens + output_tokens), 0) FROM usage WHERE session_id = ?1 AND source <> 'turn' AND rowid >= (SELECT min(rowid) FROM usage WHERE session_id = ?1 AND turn_id >= ?2)",
+      params = { a.id, a.first_turn },
+    }, function(res)
+      local row = res and res.rows and res.rows[1]
+      if row and agents[a.id] == a then
+        a.extra_tokens = math.max(a.extra_tokens or 0, tonumber(row[1]) or 0)
+      end
+    end)
+  end)
+end
 
 bone.on("session/deleted", function(ev)
   agents[ev.session_id] = nil

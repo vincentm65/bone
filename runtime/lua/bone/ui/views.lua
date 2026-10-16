@@ -190,7 +190,16 @@ end
 -- run of calls into one line ("Read 3 files, ran 2 shell commands"), "rows"
 -- is one call per row and "full" shows everything. ctrl+t steps through.
 
-local HINT = " (ctrl+t)"
+local HINT = " (click or ctrl+t)"
+local toggled = {}
+local last_detail
+
+-- Item keys are stable within a chat, but can repeat in another session.
+local function tool_key(item)
+  local s = bone.chat.session()
+  return (s and s.session_id or "") .. ":" .. item.key
+end
+
 local LABEL_MAX = 10 -- label rows before "⋮ +N lines"
 local GUTTER_MAX = 5 -- gutter rows before the first 2, "⋮ +N", last 2
 local PREVIEW_MAX = 5 -- output lines of other tools
@@ -198,10 +207,16 @@ local AGENT_PREVIEW_MAX = 3 -- rendered report rows under a sub-agent's task
 
 local function detail()
   local d = bone.o.tool_detail
-  return (d == "rows" or d == "full") and d or "summary"
+  d = (d == "rows" or d == "full") and d or "summary"
+  if d ~= last_detail then
+    toggled = {}
+    last_detail = d
+  end
+  return d
 end
 
-local function expanded()
+local function expanded(ctx)
+  if ctx and ctx.tool_expanded ~= nil then return ctx.tool_expanded end
   return detail() == "full"
 end
 
@@ -217,8 +232,8 @@ local function plural(n, noun)
   return n .. " " .. noun .. (n == 1 and "" or "s")
 end
 
-local function more(n, noun)
-  return "⋮ +" .. plural(n, noun or "line") .. (expanded() and "" or HINT)
+local function more(n, noun, ctx)
+  return "⋮ +" .. plural(n, noun or "line") .. (expanded(ctx) and "" or HINT)
 end
 
 local function trimmed_lines(text)
@@ -333,16 +348,16 @@ end
 
 --- Output rows in the shell gutter: "│ " before each, "╰ " before the last.
 --- Collapsed to the first and last two rows unless tools are expanded.
-local function gutter(text, width, group, gutter_group)
+local function gutter(text, width, group, gutter_group, ctx)
   local rows = {}
   for _, l in ipairs(trimmed_lines(text)) do
     for _, r in ipairs(wrap({ { l, group } }, math.max(width - 8, 1))) do
       rows[#rows + 1] = r
     end
   end
-  if not expanded() and #rows > GUTTER_MAX then
+  if not expanded(ctx) and #rows > GUTTER_MAX then
     local hidden = #rows - 4
-    rows = { rows[1], rows[2], { { more(hidden, "terminal line"), group } }, rows[#rows - 1], rows[#rows] }
+    rows = { rows[1], rows[2], { { more(hidden, "terminal line", ctx), group } }, rows[#rows - 1], rows[#rows] }
   end
   local out = {}
   for i, r in ipairs(rows) do
@@ -354,15 +369,15 @@ local function gutter(text, width, group, gutter_group)
 end
 
 --- Other tools' output, flush left: the first lines, then "⋮ +N more lines".
-local function plain(text, width)
+local function plain(text, width, ctx)
   local ls = trimmed_lines(text)
-  local shown = expanded() and #ls or math.min(#ls, PREVIEW_MAX)
+  local shown = expanded(ctx) and #ls or math.min(#ls, PREVIEW_MAX)
   local out = {}
   for i = 1, shown do
     append(out, wrap({ { ls[i], "ToolOutput" } }, width))
   end
   if shown < #ls then
-    out[#out + 1] = { { "⋮ +" .. (#ls - shown) .. " more " .. (#ls - shown == 1 and "line" or "lines") .. (expanded() and "" or HINT), "ToolOutput" } }
+    out[#out + 1] = { { "⋮ +" .. (#ls - shown) .. " more " .. (#ls - shown == 1 and "line" or "lines") .. (expanded(ctx) and "" or HINT), "ToolOutput" } }
   end
   return out
 end
@@ -496,23 +511,21 @@ local function agent_content(item, ctx, args)
   end
   local status = not item.done and "running" or item.is_error and "failed" or "done"
   title[#title + 1] = { " · " .. status, item.is_error and "ToolError" or "Dim" }
-  -- Spend and time, for agents started this run.
+  -- Prefer persisted tool timing: the agent record is only in memory.
   local agent = require("bone.agents").for_call(item.id)
-  if agent then
-    local ms = (agent.finished_at or bone.now()) - (agent.started_at or bone.now())
-    local stats = bone.util.duration(math.max(ms, 0) / 1000)
-    if agent.tokens > 0 then
-      stats = bone.util.tokens(agent.tokens) .. " tok · " .. stats
-    end
-    title[#title + 1] = { " · " .. stats, "Dim" }
-    if not item.done then
-      bone.chat.refresh_in(1000)
-    end
+  local start = item.started_at or (agent and agent.started_at)
+  local ms = item.duration_ms or (not item.done and start and bone.now() - start)
+    or (agent and agent.started_at and agent.finished_at and agent.finished_at - agent.started_at)
+  local stats = ms and bone.util.duration(math.max(ms, 0) / 1000)
+  if agent and agent.tokens > 0 then
+    stats = bone.util.tokens(agent.tokens) .. " tok" .. (stats and (" · " .. stats) or "")
   end
+  if stats then title[#title + 1] = { " · " .. stats, "Dim" } end
+  if not item.done then bone.chat.refresh_in(1000) end
 
   local report = bone.ui.markdown(trim(item.output or item.live or ""), math.max(ctx.width - 8, 1))
-  local shown = (expanded() or item.is_error) and #report or math.min(#report, AGENT_PREVIEW_MAX)
-  if not expanded() and not item.is_error then
+  local shown = (expanded(ctx) or item.is_error) and #report or math.min(#report, AGENT_PREVIEW_MAX)
+  if not expanded(ctx) and not item.is_error then
     -- Stop at the end of the opening paragraph, rather than leaving a
     -- dangling "Changes:" label. A leading heading can keep its paragraph.
     local heading = false
@@ -529,7 +542,7 @@ local function agent_content(item, ctx, args)
   local body = {}
   for i = 1, shown do body[#body + 1] = report[i] end
   if shown < #report then
-    body[#body + 1] = { { more(#report - shown, "report line"), "ToolSummary" } }
+    body[#body + 1] = { { more(#report - shown, "report line", ctx), "ToolSummary" } }
   end
   local gutter_group = item.is_error and "ToolError" or "ToolGutter"
   local rows = {}
@@ -549,7 +562,7 @@ function bone.ui.tool_content(item, ctx)
   local done, ok = item.done, item.done and not item.is_error
   local width = ctx.width
   local name = item.name
-  local err = done and item.is_error and gutter(out, width, "ToolOutput", "ToolError") or nil
+  local err = done and item.is_error and gutter(out, width, "ToolOutput", "ToolError", ctx) or nil
 
   if name == "subagent" then
     return agent_content(item, ctx, args)
@@ -558,22 +571,22 @@ function bone.ui.tool_content(item, ctx)
     local failed = item.is_error or (code ~= nil and code ~= 0)
     if not done then
       -- What it has printed so far (tool/output).
-      return { title = shell_label(args), body = gutter(item.live or "", width, "ToolOutput", "ToolGutter") }
+      return { title = shell_label(args), body = gutter(item.live or "", width, "ToolOutput", "ToolGutter", ctx) }
     end
     return {
       title = shell_label(args),
-      body = gutter(body, width, "ToolOutput", failed and "ToolError" or "ToolGutter"),
+      body = gutter(body, width, "ToolOutput", failed and "ToolError" or "ToolGutter", ctx),
     }
   elseif name == "read_file" then
     local rows = ok and read_rows(out, args) or {}
     local summary = ok and read_summary(rows) or nil
     return {
       title = file_label(name, args.path, summary),
-      body = err or (ok and expanded() and numbered(rows, width)) or {},
+      body = err or (ok and expanded(ctx) and numbered(rows, width)) or {},
     }
   elseif name == "write_file" then
     local body = {}
-    if ok and expanded() then
+    if ok and expanded(ctx) then
       for _, l in ipairs(lines(args.content or "")) do
         append(body, wrap({ { l, "ToolOutput" } }, width, { first = { { "      ", "Normal" } }, rest = { { "      ", "Normal" } } }))
       end
@@ -609,7 +622,7 @@ function bone.ui.tool_content(item, ctx)
   if type(target) == "string" and target ~= "" then
     title[#title + 1] = { " " .. target, "ToolArgs" }
   end
-  return { title = { title }, body = err or (done and plain(out, width)) or {} }
+  return { title = { title }, body = err or (done and plain(out, width, ctx)) or {} }
 end
 
 local function as_spans(v, group)
@@ -684,9 +697,42 @@ local function summary(calls)
   return failed > 0 and (text .. ", " .. failed .. " failed") or text
 end
 
+-- Type live summaries, preserving their common prefix when the text changes.
+-- Completed history appears immediately; keys include the session.
+local TYPE_MS = 12
+local typing = {}
+
+local function chars(s)
+  local t = {}
+  for c in s:gmatch("[%z\1-\127\194-\244][\128-\191]*") do
+    t[#t + 1] = c
+  end
+  return t
+end
+
+local function typed(id, text, running)
+  local now = bone.now()
+  local st = typing[id] or { shown = running and "" or text, at = now }
+  typing[id] = st
+  if st.shown ~= text then
+    local want, have = chars(text), chars(st.shown)
+    local keep = 0
+    while keep < #have and keep < #want and have[keep + 1] == want[keep + 1] do
+      keep = keep + 1
+    end
+    local n = math.min(#want, keep + math.max(1, math.floor((now - st.at) / TYPE_MS)))
+    st.shown = table.concat(want, "", 1, n)
+    if n < #want then bone.chat.refresh_in(TYPE_MS) end
+  end
+  st.at = now
+  return st.shown
+end
+
 --- In summary mode: the line for the first foldable call of a stretch (the
 --- calls between edits and failures, reasoning aside), nil for the rest.
 --- false when this call is not folded.
+local render_tool
+
 local function summary_view(item, ctx)
   if not foldable(item) then
     return false
@@ -719,21 +765,22 @@ local function summary_view(item, ctx)
     running = running or not t.done
   end
   local out = starts("tool", ctx)
-  append(out, wrap({ { summary(stretch), "ToolArgs" } }, ctx.width, {
+  append(out, wrap({ { typed(tool_key(item), summary(stretch), running), "ToolArgs" } }, ctx.width, {
     first = running and { { "  " .. running_mark(item) .. " ", "ToolRunning" } } or { { "    ", "Normal" } },
     rest = { { "    ", "Normal" } },
   }))
+  if toggled[tool_key(item)] then
+    for _, t in ipairs(stretch) do
+      -- The summary query omits costly output; fetch it only when expanded.
+      append(out, render_tool(bone.chat.item(t.index, { full = true }), ctx, true))
+    end
+  end
   return out
 end
 
 --- The label rows (marker on the first), then the output.
-function views.tool(item, ctx)
-  if detail() == "summary" then
-    local folded = summary_view(item, ctx)
-    if folded ~= false then
-      return folded
-    end
-  end
+render_tool = function(item, ctx, full)
+  ctx = { width = ctx.width, region = ctx.region, prev = ctx.prev, tool_expanded = full }
   local custom = bone.ui.tool_views[item.name]
   local content = custom and custom(item, ctx) or bone.ui.tool_content(item, ctx)
 
@@ -755,12 +802,12 @@ function views.tool(item, ctx)
       rest = { { "    ", "Normal" } },
     }))
   end
-  if not expanded() and #label > LABEL_MAX then
+  if not expanded(ctx) and #label > LABEL_MAX then
     local hidden = #label - (LABEL_MAX - 1)
     for i = #label, LABEL_MAX, -1 do
       label[i] = nil
     end
-    label[#label + 1] = { { "    " .. more(hidden, item.name == "shell" and "command line" or "line"), "ToolArgs" } }
+    label[#label + 1] = { { "    " .. more(hidden, item.name == "shell" and "command line" or "line", ctx), "ToolArgs" } }
   end
   append(out, label)
 
@@ -775,8 +822,40 @@ function views.tool(item, ctx)
     body[#body + 1] = row
   end
   if custom and item.is_error and #body == 0 then
-    body = gutter(item.output or "", ctx.width, "ToolOutput", "ToolError")
+    body = gutter(item.output or "", ctx.width, "ToolOutput", "ToolError", ctx)
   end
   append(out, body)
   return out
 end
+
+function views.tool(item, ctx)
+  local mode = detail()
+  if mode == "summary" then
+    local folded = summary_view(item, ctx)
+    if folded ~= false then return folded end
+  end
+  local full = mode == "full"
+  if toggled[tool_key(item)] then full = not full end
+  return render_tool(item, ctx, full)
+end
+
+local press
+bone.on("mouse", function(ev)
+  local down = press
+  press = ev.action == "down" and not ev.popup and not ev.panel and ev or nil
+  -- Leave selection events alone; only a release without a drag toggles.
+  if ev.action ~= "up" or ev.button ~= "left" or not down or down.button ~= "left"
+      or down.x ~= ev.x or down.y ~= ev.y or down.index ~= ev.index
+      or not ev.index or ev.popup or ev.panel then
+    return
+  end
+  local item = bone.chat.item(ev.index)
+  if not item or item.kind ~= "tool" then return end
+  -- A live sub-agent's title still opens its session; its report toggles.
+  if item.name == "subagent" and (ev.line or 1) <= 2 and require("bone.agents").for_call(item.id) then
+    return
+  end
+  detail() -- reset local overrides after ctrl+t changes the global level
+  toggled[tool_key(item)] = not toggled[tool_key(item)]
+  bone.chat.redraw(ev.index)
+end)

@@ -1837,7 +1837,13 @@ impl App {
 
     pub fn mouse_down(&mut self, at: (u16, u16)) {
         self.panel_click(at);
-        self.selection = Some(crate::selection::Selection::new(at));
+        // A selection stays inside the panel or layout leaf it starts in.
+        let pos = Position::new(at.0, at.1);
+        let clip = (self.panels.iter().filter_map(|p| p.area))
+            .chain(self.leaves.iter().map(|(_, r)| *r))
+            .find(|r| r.contains(pos))
+            .unwrap_or(self.screen);
+        self.selection = Some(crate::selection::Selection::new(at, clip));
         self.dirty = true;
     }
 

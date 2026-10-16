@@ -1,22 +1,22 @@
--- "black": the palette from the original bone. Load with bone.colorscheme("black") (the default).
+-- "black": a soft, near-black palette. Load with bone.colorscheme("black") (the default).
 local p = {
   fg = "#eeeeee",
   muted = "#a0a0a0",
   subtle = "#666666",
   border = "#333333",
-  accent = "#7aa2f7",
+  accent = "#c8dcf5",
   good = "#9ece6a",
   warn = "#e0af68",
   error = "#f7768e",
   selection = "#1a1a1a",
-  path = "#7dcfff",
+  path = "#abc4e3",
   variable = "#bb9af7",
   number = "#ff9e64",
-  user_bg = "#1a1a1a",
+  user_bg = "#0b0b0b",
   diff_add = "#7ee787",
-  diff_add_bg = "#1a1a1a",
+  diff_add_bg = "#101010",
   diff_del = "#ff7b72",
-  diff_del_bg = "#222222",
+  diff_del_bg = "#161616",
 }
 
 local hl = bone.hl.set

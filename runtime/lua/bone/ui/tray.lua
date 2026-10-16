@@ -666,7 +666,8 @@ bone.on("mouse", function(ev)
     end
     return true
   end
-  if ev.index then
+  -- Keep report clicks for expanding/collapsing; the title opens the agent.
+  if ev.index and (ev.line or 1) <= 2 then
     local it = bone.chat.item(ev.index)
     local a = it and it.kind == "tool" and it.name == "subagent" and agents.for_call(it.id)
     if a then

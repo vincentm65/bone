@@ -1,8 +1,9 @@
 //! Mouse selection: press and drag to highlight text on screen, release to
 //! copy it to the system clipboard. The selection runs in reading order like
-//! a terminal's own.
+//! a terminal's own, within the pane where it started.
 
 use ratatui::buffer::Buffer;
+use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use unicode_width::UnicodeWidthStr;
 
@@ -11,6 +12,8 @@ pub struct Selection {
     /// Where the button went down and where the pointer is, as (col, row).
     pub anchor: (u16, u16),
     pub head: (u16, u16),
+    /// The pane it started in; nothing outside it is selected.
+    pub clip: Rect,
     /// The button was released.
     pub done: bool,
     /// The text has been sent to the clipboard.
@@ -18,10 +21,11 @@ pub struct Selection {
 }
 
 impl Selection {
-    pub fn new(at: (u16, u16)) -> Self {
+    pub fn new(at: (u16, u16), clip: Rect) -> Self {
         Selection {
             anchor: at,
             head: at,
+            clip,
             done: false,
             copied: false,
         }
@@ -42,13 +46,17 @@ impl Selection {
     }
 
     pub fn contains(&self, x: u16, y: u16) -> bool {
+        let c = self.clip;
+        if x < c.left() || x >= c.right() || y < c.top() || y >= c.bottom() {
+            return false;
+        }
         let ((sx, sy), (ex, ey)) = self.bounds();
         (sy..=ey).contains(&y) && (y != sy || x >= sx) && (y != ey || x <= ex)
     }
 
     /// Reverse the colors of the selected cells.
     pub fn highlight(&self, buf: &mut Buffer) {
-        let area = buf.area;
+        let area = buf.area.intersection(self.clip);
         for y in area.top()..area.bottom() {
             for x in area.left()..area.right() {
                 if self.contains(x, y) {
@@ -61,7 +69,7 @@ impl Selection {
 
     /// The selected text: rows joined with newlines, trailing blanks dropped.
     pub fn text(&self, buf: &Buffer) -> String {
-        let area = buf.area;
+        let area = buf.area.intersection(self.clip);
         let ((_, sy), (_, ey)) = self.bounds();
         let mut rows = Vec::new();
         for y in sy.max(area.top())..=ey.min(area.bottom().saturating_sub(1)) {
@@ -159,7 +167,6 @@ fn base64(data: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ratatui::layout::Rect;
 
     #[test]
     fn reading_order_text_and_base64() {
@@ -168,7 +175,7 @@ mod tests {
         buf.set_string(0, 1, "日本 x", ratatui::style::Style::default());
         buf.set_string(0, 2, "uvw", ratatui::style::Style::default());
         // Dragged upward: still from (2,0) to (1,2).
-        let mut s = Selection::new((1, 2));
+        let mut s = Selection::new((1, 2), buf.area);
         s.head = (2, 0);
         assert_eq!(s.text(&buf), "cdef\n日本 x\nuv");
         assert!(s.contains(5, 0) && !s.contains(1, 0) && !s.contains(2, 2));
