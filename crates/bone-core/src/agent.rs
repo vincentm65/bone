@@ -36,14 +36,11 @@ const TOOL_CANCEL_GRACE: Duration = Duration::from_millis(500);
 /// Grace for cleanup hooks on cancelled turns only.
 const TURN_END_CANCEL_GRACE: Duration = Duration::from_secs(1);
 
-const DEFAULT_SYSTEM_PROMPT: &str = "You are bone, a coding assistant working in the \
-user's terminal. Use the tools to inspect files, make changes and run commands. Search with rg \
-before reading large files, then use read_file offset/limit for focused sections. Read files before \
-editing them; group independent hunks in one edit_file call. Keep changes minimal and focused, \
-and keep answers concise.\n\n\
-If the user wants to change or customize bone itself, first read the \
-customization docs in the bone config directory (default ~/.bone) under \
-docs/customizing.md.";
+const DEFAULT_SYSTEM_PROMPT: &str = "You are bone, a coding assistant. Find the relevant code \
+yourself with rg (rg --files to list files) and read it before editing. Keep changes minimal and \
+answers concise.\n\n\
+For requests about bone itself, first read docs/customizing.md in the bone config directory \
+(default ~/.bone).";
 
 const CANCELLED: &str = "Cancelled by the user before this tool call ran.";
 
@@ -866,7 +863,35 @@ fn system_prompt(config: &CoreConfig, dynamic: Option<&str>, cwd: &Path) -> Stri
     let base = dynamic
         .or(config.system_prompt.as_deref())
         .unwrap_or(DEFAULT_SYSTEM_PROMPT);
-    format!("{base}\n\nWorking directory: {cwd}", cwd = cwd.display())
+    format!(
+        "{base}\n\nWorking directory: {cwd}\nDate: {date}",
+        cwd = cwd.display(),
+        date = today()
+    )
+}
+
+/// Today's local date as YYYY-MM-DD (UTC where the offset is unknown).
+fn today() -> String {
+    let secs = (unix_ms() / 1000) as i64;
+    #[cfg(unix)]
+    let secs = {
+        let t = secs as libc::time_t;
+        // SAFETY: localtime_r only writes the tm it is given.
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        let local = unsafe { !libc::localtime_r(&t, &mut tm).is_null() };
+        secs + if local { tm.tm_gmtoff as i64 } else { 0 }
+    };
+    // Days since the epoch to a civil date (Howard Hinnant's algorithm).
+    let z = secs.div_euclid(86_400) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    format!("{y:04}-{m:02}-{d:02}")
 }
 
 /// Milliseconds since the Unix epoch.

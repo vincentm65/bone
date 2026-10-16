@@ -100,7 +100,7 @@ Anthropic's output limit. Both can be set in `settings.json` too
 (`providers.<name>.headers`, `providers.<name>.body`).
 
 `bone.config.system_prompt` replaces the built-in system prompt (the working
-directory is always appended after it). `BONE_SYSTEM_PROMPT` overrides it for
+directory and today's date are always appended after it). `BONE_SYSTEM_PROMPT` overrides it for
 one run. Settings and the `system` hook can change it per turn.
 
 ## Tools
