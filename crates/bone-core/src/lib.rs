@@ -23,7 +23,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use bone_proto::methods::{
-    AskRespond, AskRespondParams, AttachmentRead, AttachmentReadResult, AttachmentUpload,
+    AskList, AskRespond, AskRespondParams, AttachmentRead, AttachmentReadResult, AttachmentUpload,
     CoreReload, Echo, EchoParams, Echoed, HealthCheck, LuaCall, LuaCallParams, McpAuth,
     McpAuthCode, McpAuthCodeParams, McpList, McpReconnect, McpRef, McpSignOut, ModelCancel,
     ModelComplete, ModelCompleteParams, ModelCompleted, ModelCompletedParams, ModelDeltaEvent,
@@ -706,6 +706,10 @@ impl Core {
             }
             AskRespond::METHOD => {
                 let p: AskRespondParams = decode::<AskRespond>(params)?;
+                // `null` is what a dropped question resolves with.
+                if p.answer.is_null() {
+                    return Err(RpcError::invalid_params("an answer cannot be null"));
+                }
                 let mut answered = false;
                 for s in self.inner.all_scripting() {
                     if s.answer(p.ask_id, p.answer.clone()).await {
@@ -720,6 +724,15 @@ impl Core {
                     )));
                 }
                 Ok(Value::Null)
+            }
+            AskList::METHOD => {
+                decode::<AskList>(params)?;
+                let mut asks = Vec::new();
+                for s in self.inner.all_scripting() {
+                    asks.extend(s.open_asks().await);
+                }
+                asks.sort_by_key(|a| a.ask_id);
+                Ok(serde_json::to_value(asks).unwrap_or_default())
             }
             SettingsGet::METHOD => {
                 decode::<SettingsGet>(params)?;

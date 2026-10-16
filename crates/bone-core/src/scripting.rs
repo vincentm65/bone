@@ -13,7 +13,7 @@
 //! runtime owned by the Lua thread and the coroutine resumes with the result.
 //! Cancelling a session's turn kills its processes and resumes with `nil`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -109,6 +109,8 @@ enum Job {
     Cancel {
         session_id: String,
     },
+    /// The open questions, oldest first.
+    Asks(oneshot::Sender<Vec<AskRequestedParams>>),
     /// The runtime was replaced and nothing refers to it any more.
     Stop,
 }
@@ -560,6 +562,15 @@ impl Scripting {
         rx.await.unwrap_or(false)
     }
 
+    /// The questions still waiting for an answer, oldest first.
+    pub async fn open_asks(&self) -> Vec<AskRequestedParams> {
+        let (reply, rx) = oneshot::channel();
+        if self.jobs.send(Job::Asks(reply)).is_err() {
+            return Vec::new();
+        }
+        rx.await.unwrap_or_default()
+    }
+
     /// A session's turn was cancelled: its open questions are dropped and
     /// its background work (processes, timers, requests) stopped. The
     /// waiting Lua code gets `nil`.
@@ -909,8 +920,9 @@ struct Waiting {
 
 struct State {
     lua: Lua,
-    /// Coroutines waiting for an answer, by question.
-    waiting: HashMap<AskId, Waiting>,
+    /// Coroutines waiting for an answer, with what they asked, by question
+    /// (ids grow, so oldest first).
+    waiting: BTreeMap<AskId, (Waiting, AskRequestedParams)>,
     /// Shared by every runtime of one core, so ids never repeat.
     ask_ids: Arc<AtomicU64>,
     /// Coroutines waiting for background work, with a handle to stop it.
@@ -966,7 +978,7 @@ fn lua_thread(
     }
     let mut st = State {
         lua,
-        waiting: HashMap::new(),
+        waiting: BTreeMap::new(),
         ask_ids: opts.ask_ids.clone(),
         pending: HashMap::new(),
         next_wait: 0,
@@ -1018,7 +1030,7 @@ fn lua_thread(
                 answer,
                 reply,
             } => {
-                let Some(w) = st.waiting.remove(&ask_id) else {
+                let Some((w, _)) = st.waiting.remove(&ask_id) else {
                     let _ = reply.send(false);
                     continue;
                 };
@@ -1050,49 +1062,79 @@ fn lua_thread(
                 }
             }
             Job::Stop => break,
-            Job::Cancel { session_id } => {
-                st.host.cancel_models(&session_id);
-                let ids: Vec<u64> = st
-                    .pending
-                    .iter()
-                    .filter(|(_, (w, _))| w.session_id.as_deref() == Some(session_id.as_str()))
-                    .map(|(id, _)| *id)
-                    .collect();
-                for id in ids {
-                    let (w, abort) = st.pending.remove(&id).unwrap();
-                    abort.abort();
-                    st.step(
-                        w.thread,
-                        MultiValue::from_iter([Value::Nil]),
-                        w.session_id,
-                        w.done,
-                    );
-                }
-                let ids: Vec<AskId> = st
-                    .waiting
-                    .iter()
-                    .filter(|(_, w)| w.session_id.as_deref() == Some(session_id.as_str()))
-                    .map(|(id, _)| *id)
-                    .collect();
-                for ask_id in ids {
-                    let w = st.waiting.remove(&ask_id).unwrap();
-                    let _ = st.events.send(AskEvent::Resolved(AskResolvedParams {
-                        ask_id,
-                        answer: Json::Null,
-                    }));
-                    st.step(
-                        w.thread,
-                        MultiValue::from_iter([Value::Nil]),
-                        w.session_id,
-                        w.done,
-                    );
-                }
+            Job::Cancel { session_id } => st.cancel(&session_id),
+            Job::Asks(reply) => {
+                let _ = reply.send(st.waiting.values().map(|(_, q)| q.clone()).collect());
             }
         }
     }
+    // Questions nobody can answer any more: tell clients to put them away.
+    for ask_id in st.waiting.keys() {
+        let _ = st.events.send(AskEvent::Resolved(AskResolvedParams {
+            ask_id: *ask_id,
+            answer: Json::Null,
+        }));
+    }
 }
 
+/// How often a cancel resumes code that waits or asks again before it
+/// stops that code outright.
+const CANCEL_ROUNDS: usize = 8;
+
 impl State {
+    /// Resume the session's waiting coroutines with `nil`, again for any that
+    /// wait or ask anew, until none is left: nothing of a cancelled turn keeps
+    /// waiting. Code that keeps at it past `CANCEL_ROUNDS` is stopped.
+    fn cancel(&mut self, session_id: &str) {
+        self.host.cancel_models(session_id);
+        let mine = |w: &Waiting| w.session_id.as_deref() == Some(session_id);
+        for round in 0.. {
+            let waits: Vec<u64> = self
+                .pending
+                .iter()
+                .filter(|(_, (w, _))| mine(w))
+                .map(|(id, _)| *id)
+                .collect();
+            let asks: Vec<AskId> = self
+                .waiting
+                .iter()
+                .filter(|(_, (w, _))| mine(w))
+                .map(|(id, _)| *id)
+                .collect();
+            if waits.is_empty() && asks.is_empty() {
+                return;
+            }
+            let stop = round >= CANCEL_ROUNDS;
+            for id in waits {
+                let (w, abort) = self.pending.remove(&id).unwrap();
+                abort.abort();
+                self.cancelled(w, stop);
+            }
+            for ask_id in asks {
+                let (w, _) = self.waiting.remove(&ask_id).unwrap();
+                let _ = self.events.send(AskEvent::Resolved(AskResolvedParams {
+                    ask_id,
+                    answer: Json::Null,
+                }));
+                self.cancelled(w, stop);
+            }
+        }
+    }
+
+    /// One coroutine of a cancelled turn: resumed with `nil`, or stopped.
+    fn cancelled(&mut self, w: Waiting, stop: bool) {
+        if stop {
+            let e = mlua::Error::runtime("cancelled, but kept waiting");
+            return self.finish(w.done, Err(e));
+        }
+        self.step(
+            w.thread,
+            MultiValue::from_iter([Value::Nil]),
+            w.session_id,
+            w.done,
+        );
+    }
+
     /// Resume a coroutine. A yield is either background work
     /// (`{ wait = spec }`: start it and park the coroutine) or a question
     /// (`bone.ask`: park it and tell clients). Otherwise it finished.
@@ -1147,27 +1189,37 @@ impl State {
                 self.pending.insert(wait_id, (w, task.abort_handle()));
                 return;
             }
-            let question = yielded
-                .and_then(|v| match v {
-                    Value::Table(t) => t.get::<Value>("ask").ok(),
-                    other => Some(other),
-                })
-                .and_then(|v| from_lua(&v).ok())
-                .unwrap_or(Json::Null);
+            let question = match &yielded {
+                Some(Value::Table(t)) => match t.get::<Value>("ask") {
+                    Ok(q @ Value::Table(_)) => from_lua(&q).ok(),
+                    _ => None,
+                },
+                _ => None,
+            };
+            let Some(question) = question else {
+                let e = mlua::Error::runtime(
+                    "a hook, tool or system_prompt may only yield through bone.ask \
+                     or a waiting call (bone.system, bone.sleep, bone.http, ...)",
+                );
+                return self.finish(done, Err(e));
+            };
             let ask_id = self.ask_ids.fetch_add(1, Ordering::Relaxed) + 1;
             let params = AskRequestedParams {
                 ask_id,
                 session_id: session_id.clone(),
                 question,
             };
-            let _ = self.events.send(AskEvent::Requested(params));
+            let _ = self.events.send(AskEvent::Requested(params.clone()));
             self.waiting.insert(
                 ask_id,
-                Waiting {
-                    thread,
-                    session_id,
-                    done,
-                },
+                (
+                    Waiting {
+                        thread,
+                        session_id,
+                        done,
+                    },
+                    params,
+                ),
             );
             return;
         }

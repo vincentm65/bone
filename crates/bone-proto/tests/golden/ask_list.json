@@ -1,0 +1,22 @@
+[
+  {
+    "id": 9,
+    "jsonrpc": "2.0",
+    "method": "ask/list",
+    "params": {}
+  },
+  {
+    "id": 9,
+    "jsonrpc": "2.0",
+    "result": [
+      {
+        "ask_id": 1,
+        "question": {
+          "kind": "confirm",
+          "text": "Write this file?"
+        },
+        "session_id": "01a0fe5e-0000-7000-8000-000000000001"
+      }
+    ]
+  }
+]

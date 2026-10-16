@@ -103,20 +103,24 @@ notifications take rows at the bottom.
 ## Confirming something from the core
 
 A core hook or tool can pause and ask the user (`bone.ask`); the TUI shows the
-question however it likes and answers it back. For example, pair this TUI
-handler with the `bone.ask` hook in [lua.md](../lua.md#asking-the-user):
+question however it likes and answers it back (questions asked before the
+TUI was listening come from `bone.request("ask/list", {}, cb)`). For example,
+pair this TUI handler with the `bone.ask` hook in
+[lua.md](../lua.md#asking-the-user):
 
 ```lua
+local popups = {} -- ask_id -> popup
+
 bone.on("ask/requested", function(ev)
-  -- ev: { ask_id, question = ... }  (question is whatever the core sent)
-  local w
+  -- ev: { ask_id, session_id?, question = ... } (question is the table the core sent)
   local function answer(value)
-    bone.ui.close(w)
+    bone.ui.close(popups[ev.ask_id])
+    popups[ev.ask_id] = nil
     bone.request("ask/respond", { ask_id = ev.ask_id, answer = value })
   end
-  w = bone.ui.popup{
+  popups[ev.ask_id] = bone.ui.popup{
     guard = 300,
-    lines = { { ev.question.text or "", "Normal" },
+    lines = { { tostring(ev.question.text or ""), "Normal" },
               "y = yes   n = no" },
     keys = {
       y = function() answer("yes") end,
@@ -124,6 +128,14 @@ bone.on("ask/requested", function(ev)
       esc = function() answer("no") end,
     },
   }
+end)
+
+-- Answered elsewhere, or dropped by a cancel: put the popup away.
+bone.on("ask/resolved", function(ev)
+  if popups[ev.ask_id] then
+    bone.ui.close(popups[ev.ask_id])
+    popups[ev.ask_id] = nil
+  end
 end)
 ```
 

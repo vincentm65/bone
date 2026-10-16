@@ -120,11 +120,14 @@ end
 
 --- Ask the user something and wait for the answer. Works in hooks, tools
 --- and a system_prompt function. `question` is any table; clients receive
---- it in an `ask/requested` event and reply with `ask/respond`. Returns the
---- answer, or nil if the turn was cancelled first.
+--- it in an `ask/requested` event (or from `ask/list`) and reply with
+--- `ask/respond`. Returns the answer, or nil if the turn was cancelled first.
 function bone.ask(question)
   if not in_job() then
     error("bone.ask only works inside hooks, tools and system_prompt", 2)
+  end
+  if type(question) ~= "table" then
+    error("bone.ask: question must be a table", 2)
   end
   return coroutine.yield({ ask = question })
 end

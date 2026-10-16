@@ -257,6 +257,15 @@ fn requests() {
         },
         (),
     );
+    exchange::<AskList>(
+        9,
+        Empty {},
+        vec![AskRequestedParams {
+            ask_id: 1,
+            session_id: Some(SID.into()),
+            question: json!({ "kind": "confirm", "text": "Write this file?" }),
+        }],
+    );
     exchange::<HealthCheck>(
         10,
         Empty {},

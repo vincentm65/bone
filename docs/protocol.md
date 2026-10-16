@@ -63,7 +63,8 @@ After `initialize`, the server runs each request on its own task: replies carry 
 | `process/cancel` | `{ session_id, id }` | `null`; asks the process group to stop |
 | `process/read` | `{ session_id, id, from? }` | `{ offset, data, total }`: the output as written (escape codes kept) from byte `from` (default 0); `offset` is later than asked when older output is no longer kept (the last 1 MiB is), `total` is how many bytes it wrote |
 | `process/resize` | `{ session_id, id, cols, rows }` | `null`; sets a running terminal job's size (it gets `SIGWINCH`) |
-| `ask/respond` | `{ ask_id, answer }` | `null`; error if no question with that id is open |
+| `ask/respond` | `{ ask_id, answer }` | `null`; error if no question with that id is open, or if `answer` is `null` |
+| `ask/list` | `{}` | `[{ ask_id, session_id?, question }]`: the questions still waiting for an answer, oldest first, for a client that missed their `ask/requested` |
 | `health/check` | `{}` | `[{ name, status: "ok" \| "warn" \| "error", message }]`: the core's checks (provider, API key, reachability, sessions folder, Lua) and core Lua's `bone.health` checks |
 | `settings/get` | `{}` | the saved settings (`settings.json` in the config dir), a JSON object |
 | `settings/set` | `{ path, value, session_id? }` | every saved setting after the change. `path` is dotted (`tui.tool_detail`, `providers.qwen.model`); `null` removes it. `provider` must name a configured provider; `providers.<name>` adds a provider and `providers.<name>.<field>` changes one field; these changes reload the configuration and are undone if loading fails. With `session_id`, changing `provider` or that session's provider model also saves its provider/model selection; other sessions keep theirs. Every client hears `settings/changed` |
@@ -121,7 +122,7 @@ Every event carries `session_id` (except `echoed`, `ask/resolved`, `settings/cha
 | `tool/finished` | `{ call_id, output, is_error, duration_ms? }` | its result, as the model will see it, and how long it ran |
 | `process/changed` | `{ session_id, version, process: ProcessSnapshot, chunk? }` | a managed shell process started, produced output, or changed state. `chunk` is `{ offset, data }`: new output as written, at byte `offset` (chunks follow on from each other; after a gap, `process/read` it) |
 | `ask/requested` | `{ ask_id, question }` | core Lua (a hook or tool) called `bone.ask(question)` and waits; answer with `ask/respond`. `question` is whatever the Lua passed, e.g. `{ kind: "confirm", text: "Write this file?" }` |
-| `ask/resolved` | `{ ask_id, answer }` | answered by some client, or `answer: null` if the turn was cancelled first |
+| `ask/resolved` | `{ ask_id, answer }` | answered by some client, or `answer: null` if it was dropped (the turn was cancelled, or the core reloaded) first |
 | `turn/steered` | `{ text }` | a steer message from the queue joined the running turn's transcript (show it as a user message) |
 | `queue/changed` | `{ items, paused, error? }` | the session's queue after a change; a failed automatic start retains the item and pauses the queue. `error` also reports save failures, which do not reject accepted changes or stop the queue |
 | `turn/finished` | `{ outcome: { status: "completed" \| "cancelled" \| "failed", message? } }` | the turn is over |

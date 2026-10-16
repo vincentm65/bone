@@ -169,6 +169,7 @@ pub const METHODS: &[&str] = &[
     QueueClear::METHOD,
     QueueResume::METHOD,
     AskRespond::METHOD,
+    AskList::METHOD,
     HealthCheck::METHOD,
     CoreReload::METHOD,
     PluginList::METHOD,
@@ -505,6 +506,12 @@ method!(
     AskRespond, "ask/respond", AskRespondParams => ()
 );
 
+method!(
+    /// The questions still waiting for an answer, oldest first, so a client
+    /// that connects (or reloads) after an [`AskRequested`] can still show it.
+    AskList, "ask/list", Empty => Vec<AskRequestedParams>
+);
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TurnStartParams {
     pub session_id: SessionId,
@@ -529,8 +536,9 @@ pub struct TurnStartResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AskRespondParams {
     pub ask_id: AskId,
-    /// Any JSON; its meaning is agreed between the asking Lua code and the
-    /// client (e.g. "allow" / "deny" for the approval plugin).
+    /// Any JSON but `null` (which means "dropped"); its meaning is agreed
+    /// between the asking Lua code and the client (e.g. "allow" / "deny" for
+    /// the approval plugin).
     pub answer: serde_json::Value,
 }
 
