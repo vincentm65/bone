@@ -256,6 +256,18 @@ fn wire_messages(messages: &[ChatMessage], replay: Option<&str>) -> Vec<Value> {
     let mut out = Vec::new();
     let mut images = Vec::new();
     for (index, message) in messages.iter().enumerate() {
+        // Servers reject assistant turns with neither content nor tool calls
+        // (an empty or reasoning-only reply, or a cancelled turn).
+        if let ChatMessage::Assistant {
+            content,
+            tool_calls,
+            ..
+        } = message
+            && content.is_empty()
+            && tool_calls.is_empty()
+        {
+            continue;
+        }
         out.push(wire_message(message, replay));
         if let ChatMessage::Tool {
             call_id,
