@@ -1633,8 +1633,16 @@ fn assistant(text: &str) -> ChatMessage {
     }
 }
 
-fn summary(text: &str) -> ChatMessage {
-    user(&format!("Summary of the earlier conversation:\n\n{text}"))
+fn assert_handoff(message: &ChatMessage, text: &str) {
+    let ChatMessage::User { content, .. } = message else {
+        panic!("not a summary: {message:?}");
+    };
+    assert!(
+        content.starts_with(&format!("Summary of the earlier conversation:\n\n{text}"))
+            && content.contains("Handoff, not a new request.")
+            && content.contains("newest turns"),
+        "{content}"
+    );
 }
 
 #[tokio::test]
@@ -1663,13 +1671,16 @@ async fn compact_summarizes_for_the_model_and_keeps_the_transcript() {
         "{read:#?}"
     );
 
-    // The model gets the summary, then the kept turn word for word...
+    // The model gets the summary and handoff, then the kept turn word for word...
     h.start("q3").await;
     h.until::<TurnFinished>().await;
-    assert_eq!(
-        h.last_seen(),
-        vec![summary("SUMMARY"), user("q2"), assistant("a2"), user("q3")]
+    let seen = h.last_seen();
+    assert_handoff(&seen[0], "SUMMARY");
+    assert!(
+        matches!(&seen[0], ChatMessage::User { content, .. } if content.contains("q1") && content.contains("Learned:")),
+        "{seen:?}"
     );
+    assert_eq!(&seen[1..], &[user("q2"), assistant("a2"), user("q3")]);
     // ...while the transcript (what clients show) keeps everything.
     let t = h.transcript().await;
     assert_eq!(t.len(), 6, "{t:#?}");
@@ -1714,10 +1725,13 @@ async fn compacting_again_folds_in_the_earlier_summary() {
     );
     h.start("q4").await;
     h.until::<TurnFinished>().await;
-    assert_eq!(
-        h.last_seen(),
-        vec![summary("S2"), user("q3"), assistant("a3"), user("q4")]
+    let seen = h.last_seen();
+    assert_handoff(&seen[0], "S2");
+    assert!(
+        matches!(&seen[0], ChatMessage::User { content, .. } if content.contains("q2") && content.contains("Learned:")),
+        "{seen:?}"
     );
+    assert_eq!(&seen[1..], &[user("q3"), assistant("a3"), user("q4")]);
 }
 
 #[tokio::test]
@@ -1763,7 +1777,9 @@ async fn a_full_context_compacts_and_retries() {
         h.until::<TurnFinished>().await.outcome,
         TurnOutcome::Completed
     );
-    assert_eq!(h.last_seen(), vec![summary("SUM"), user("q2")]);
+    let seen = h.last_seen();
+    assert_handoff(&seen[0], "SUM");
+    assert_eq!(&seen[1..], &[user("q2")]);
     assert_eq!(h.transcript().await.len(), 4);
 }
 
@@ -1781,7 +1797,9 @@ async fn the_limit_compacts_before_the_call() {
     h.start("q2").await;
     assert_eq!(h.until::<SessionCompacted>().await.reason, "limit");
     h.until::<TurnFinished>().await;
-    assert_eq!(h.last_seen(), vec![summary("SUM"), user("q2")]);
+    let seen = h.last_seen();
+    assert_handoff(&seen[0], "SUM");
+    assert_eq!(&seen[1..], &[user("q2")]);
     // A failed summary leaves the context intact; the end-of-turn check retries.
     h.provider.steps.lock().unwrap().extend([
         Step::Fail("summary unavailable".into()),
@@ -1798,10 +1816,10 @@ async fn the_limit_compacts_before_the_call() {
         h.until::<TurnFinished>().await.outcome,
         TurnOutcome::Completed
     );
-    assert_eq!(
-        h.provider.seen.lock().unwrap().iter().rev().nth(1).unwrap(),
-        &vec![summary("SUM"), user("q2"), assistant("a2"), user("q3")]
-    );
+    let seen = h.provider.seen.lock().unwrap();
+    let call = seen.iter().rev().nth(1).unwrap();
+    assert_handoff(&call[0], "SUM");
+    assert_eq!(&call[1..], &[user("q2"), assistant("a2"), user("q3")]);
 }
 
 #[tokio::test]
@@ -1825,7 +1843,9 @@ async fn provider_limits_override_the_global_limit_at_both_checks() {
             h.start("q2").await;
             assert_eq!(h.until::<SessionCompacted>().await.reason, "limit");
             h.until::<TurnFinished>().await;
-            assert_eq!(h.last_seen(), vec![summary("SUM"), user("q2")]);
+            let seen = h.last_seen();
+            assert_handoff(&seen[0], "SUM");
+            assert_eq!(&seen[1..], &[user("q2")]);
         }
         assert!(h.provider.steps.lock().unwrap().is_empty());
     }

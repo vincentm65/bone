@@ -269,12 +269,16 @@ impl Session {
         written
     }
 
-    /// The transcript as the model is sent it: the summary, then what it
-    /// does not cover.
+    /// The transcript as the model is sent it: the summary and a handoff of
+    /// the cut, then what the summary does not cover.
     pub fn context(&self) -> Vec<ChatMessage> {
         let messages = match &self.summary {
             Some(sum) if sum.through <= self.messages.len() => {
-                let mut out = vec![crate::compact::summary_message(&sum.text)];
+                let mut out = vec![crate::compact::context_message(
+                    &sum.text,
+                    &self.messages[..sum.through],
+                    sum.through < self.messages.len(),
+                )];
                 out.extend(self.messages[sum.through..].iter().cloned());
                 out
             }
@@ -856,9 +860,13 @@ mod tests {
                 text: "S".into(),
             }))
             .unwrap();
+            let covered = s.messages[..2].to_vec();
             assert_eq!(
                 s.context(),
-                vec![crate::compact::summary_message("S"), user("q3")]
+                vec![
+                    crate::compact::context_message("S", &covered, true),
+                    user("q3"),
+                ]
             );
         }
 
