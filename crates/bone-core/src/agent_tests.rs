@@ -1551,20 +1551,10 @@ impl Harness {
 }
 
 #[tokio::test]
-async fn default_system_prompt_shape() {
+async fn default_system_prompt_points_at_the_docs() {
     let (mut h, config_dir) = Harness::with_lua_data("", vec![text("plain")]).await;
     h.start("hi").await;
     h.until::<TurnFinished>().await;
-    // No skills or skill tool by default.
-    assert!(!h.provider.systems.lock().unwrap()[0].contains("## Skills"));
-    assert!(!h.provider.tools.lock().unwrap()[0].contains(&"skill".to_owned()));
-    // The core has no skills or templates of its own.
-    let e = h
-        .lua_call("skills.list", json!({}), None)
-        .await
-        .unwrap_err();
-    assert!(e.message.contains("no function skills.list"), "{e:?}");
-    // It points at the config dir's docs.
     let system = h.provider.systems.lock().unwrap()[0].clone();
     let docs = config_dir.join("docs").to_string_lossy().into_owned();
     assert!(

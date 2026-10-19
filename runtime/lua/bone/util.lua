@@ -122,14 +122,6 @@ function M.tokens(n)
   return tostring(n)
 end
 
---- Wall-clock time of an epoch second, e.g. `3:42 pm`.
---- Built from os.date("*t"): strftime's `%-I` is glibc-only, and Windows'
---- C runtime aborts the whole process on a conversion it doesn't know.
-function M.format_time(secs)
-  local t = os.date("*t", secs or os.time())
-  return string.format("%d:%02d %s", (t.hour - 1) % 12 + 1, t.min, t.hour < 12 and "am" or "pm")
-end
-
 --- Split a Markdown file's front matter from its body:
 --- "---\nname: x\ndescription: y\n---\nbody" -> { name = "x", ... }, "body".
 --- Only simple `key: value` lines; quotes around a value are dropped.

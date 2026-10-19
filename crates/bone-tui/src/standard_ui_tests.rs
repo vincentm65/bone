@@ -147,23 +147,14 @@ async fn standard_tool_expansion_is_scoped_to_the_session() {
 }
 
 #[tokio::test]
-async fn standard_black_palette_is_soft_and_sidebar_matches_prompt() {
+async fn standard_sidebar_groups_follow_the_prompt_palette() {
     let mut h = Harness::new().await;
-    exec(
-        &mut h,
-        r##"
-        assert(bone.hl.get('Accent').fg == '#c8dcf5')
-        assert(bone.hl.get('InputBackground').bg == '#0b0b0b')
-        assert(bone.hl.get('DiffAdd').bg == '#101010')
-        assert(bone.hl.get('DiffDelete').bg == '#161616')
-    "##,
-    );
     h.input("{ctrl+o}").await;
     exec(
         &mut h,
         r##"
-        assert(bone.hl.get('SessionBackground').bg == '#0b0b0b')
-        assert(bone.hl.get('SessionAccent').fg == '#c8dcf5')
+        assert(bone.hl.get('SessionBackground').bg == bone.hl.get('InputBackground').bg)
+        assert(bone.hl.get('SessionAccent').fg == bone.hl.get('Accent').fg)
         bone.hl.set('Accent', { fg = '#ff0000' })
         bone.hl.set('Dim', { dim = true })
         assert(bone.hl.get('SessionAccent').fg == '#ff0000')

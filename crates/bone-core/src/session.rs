@@ -349,15 +349,6 @@ impl SessionStore {
         self.create_with(cwd, None, &[], None, None)
     }
 
-    /// A new session started on behalf of another (a subagent).
-    pub fn create_owned(
-        &self,
-        cwd: String,
-        owner: SessionOwner,
-    ) -> Result<SessionHandle, SessionError> {
-        self.create_with(cwd, Some(owner), &[], None, None)
-    }
-
     /// A new session starting with messages, an optional summary and model.
     pub(crate) fn create_with(
         &self,
