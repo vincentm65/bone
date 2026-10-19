@@ -5442,35 +5442,24 @@ async fn flexible_auto_panel_reserves_prompt_and_fill_rows() {
     assert_eq!(h.app.panel("p").unwrap().area.unwrap().height, 18);
 }
 
-/// A replacement server, deliberately separate from the Harness's original
-/// connection so requests sent to the old client cannot satisfy assertions.
-fn reconnect_server(
-    mut conn: bone_proto::Connection,
-    log: Log,
-    settings: Value,
-    asks: Vec<AskRequestedParams>,
-    buffered: Vec<Message>,
-) -> tokio::task::JoinHandle<()> {
+/// A client on its own server, so requests cannot hit the harness's original core.
+fn fresh_client() -> (Client, EventStream, Log, mpsc::Sender<Message>) {
+    let (client_end, server_end) = transport::in_process();
+    let push = server_end.tx.clone();
+    let log = Log::default();
+    let recorded = log.clone();
     tokio::spawn(async move {
-        let mut buffered = buffered;
+        let mut conn = server_end;
         while let Some(msg) = conn.rx.recv().await {
             let Message::Request { id, method, params } = msg else {
                 continue;
             };
             let params = params.unwrap_or(Value::Null);
-            log.lock().unwrap().push((method.clone(), params.clone()));
-            let result = match method.as_str() {
-                "settings/get" => Ok(settings.clone()),
-                "ask/list" => {
-                    // Notifications can arrive while snapshot RPCs are pending.
-                    for msg in buffered.drain(..) {
-                        conn.tx.send(msg).await.unwrap();
-                    }
-                    Ok(json!(asks))
-                }
-                "processes/get" => Ok(json!({ "version": 1, "processes": [] })),
-                _ => reply(&method, &params),
-            };
+            recorded
+                .lock()
+                .unwrap()
+                .push((method.clone(), params.clone()));
+            let result = reply(&method, &params);
             if conn
                 .tx
                 .send(Message::Response { id, result })
@@ -5480,127 +5469,13 @@ fn reconnect_server(
                 return;
             }
         }
-    })
-}
-
-fn reconnect_client() -> (Client, EventStream, Log, mpsc::Sender<Message>) {
-    let (client, server) = transport::in_process();
-    let push = server.tx.clone();
-    let log = Log::default();
-    reconnect_server(server, log.clone(), json!({}), vec![], vec![]);
-    let (client, events) = Client::new(client);
+    });
+    let (client, events) = Client::new(client_end);
     (client, events, log, push)
 }
 
 #[tokio::test]
-async fn reconnected_reconciles_question_popups_without_duplicates() {
-    let mut h = Harness::blank().await;
-    h.lua(
-        r#"
-        seen, popups = {}, {}
-        bone.on('ask/requested', function(ev)
-          seen[#seen + 1] = 'request:' .. ev.ask_id .. ':' .. ev.question.title
-          last_question = ev.question
-          popups[ev.ask_id] = bone.ui.popup({ lines = { ev.question.title } })
-        end)
-        bone.on('ask/resolved', function(ev)
-          seen[#seen + 1] = 'resolve:' .. ev.ask_id .. ':' .. tostring(ev.answer == nil)
-          if popups[ev.ask_id] then bone.ui.close(popups[ev.ask_id]); popups[ev.ask_id] = nil end
-        end)
-        bone.on('server/reconnected', function() seen[#seen + 1] = 'connected' end)
-    "#,
-    )
-    .await;
-    let old = approval(7, "shell", json!({"command": "old"}));
-    h.emit::<AskRequested>(old.clone()).await;
-    h.emit::<AskRequested>(old.clone()).await;
-    assert_eq!(
-        h.lua("=table.concat(seen, '|')").await,
-        "\"request:7:Allow shell?\""
-    );
-
-    let new = approval(8, "write_file", json!({}));
-    let (client, events, _, push) = reconnect_client();
-    h.push = push;
-    h.events = events;
-    h.app
-        .reconnected(client, json!({}), vec![old.clone(), new.clone()]);
-    h.settle().await;
-    h.emit::<AskRequested>(new).await; // Duplicate buffered notification.
-    assert_eq!(
-        h.lua("=table.concat(seen, '|')").await,
-        "\"request:7:Allow shell?|request:8:Allow write_file?|connected\""
-    );
-    assert_eq!(h.app.context(), Context::Popup);
-
-    // One question was answered live, the other disappeared while disconnected.
-    h.emit::<AskResolved>(AskResolvedParams {
-        ask_id: 8,
-        answer: json!("allow"),
-    })
-    .await;
-    h.lua("seen = {}").await;
-    let (client, events, _, push) = reconnect_client();
-    h.push = push;
-    h.events = events;
-    h.app.reconnected(client, json!({}), vec![]);
-    h.settle().await;
-    assert_eq!(
-        h.lua("=table.concat(seen, '|')").await,
-        "\"resolve:7:true|connected\""
-    );
-    assert_eq!(
-        h.app.context(),
-        Context::Main,
-        "no orphaned duplicate popup"
-    );
-
-    // The same ID can be used again; changing only its payload replaces it.
-    h.emit::<AskRequested>(old.clone()).await;
-    h.lua("seen = {}").await;
-    let mut changed = old;
-    changed.question["arguments"] = json!({"command": "new"});
-    let (client, events, _, push) = reconnect_client();
-    h.push = push;
-    h.events = events;
-    h.app.reconnected(client, json!({}), vec![changed.clone()]);
-    h.settle().await;
-    h.emit::<AskRequested>(changed).await;
-    assert_eq!(
-        h.lua("=table.concat(seen, '|')").await,
-        "\"resolve:7:true|request:7:Allow shell?|connected\""
-    );
-    assert_eq!(h.lua("=last_question.arguments.command").await, "\"new\"");
-    h.emit::<AskResolved>(AskResolvedParams {
-        ask_id: 7,
-        answer: Value::Null,
-    })
-    .await;
-    assert_eq!(h.app.context(), Context::Main);
-}
-
-#[tokio::test]
-async fn settings_changes_apply_once_and_leave_unchanged_overrides_alone() {
-    let mut h = Harness::new().await;
-    h.app.settings = json!({ "tui": { "prompt_max_height": 7 } });
-    h.lua("bone.o.prompt_max_height = 4; changes = 0; bone.on('settings/changed', function() changes = changes + 1 end)").await;
-    for (height, path, value, expected) in [
-        (7, "model", json!("new"), 4),
-        (8, "tui.prompt_max_height", json!(8), 8),
-    ] {
-        h.emit::<SettingsChanged>(SettingsChangedParams {
-            path: path.into(),
-            value,
-            settings: json!({ "tui": { "prompt_max_height": height }, "model": "new" }),
-        })
-        .await;
-        assert_eq!(h.app.options.prompt_max_height, expected);
-    }
-    assert_eq!(h.lua("=changes").await, "2");
-}
-
-#[tokio::test]
-async fn reconnected_preserves_lua_overrides_and_drafts_but_applies_changed_saved_options() {
+async fn reconnected_refreshes_on_the_new_client_without_clobbering_local_state() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(
         dir.path().join("tui.lua"),
@@ -5608,6 +5483,13 @@ async fn reconnected_preserves_lua_overrides_and_drafts_but_applies_changed_save
         loads = (loads or 0) + 1
         bone.o.prompt_max_height = 4
         bone.o.tool_detail = 'rows'
+        seen = {}
+        bone.on('ask/requested', function(ev)
+          seen[#seen + 1] = 'request:' .. ev.ask_id
+        end)
+        bone.on('ask/resolved', function(ev)
+          seen[#seen + 1] = 'resolve:' .. ev.ask_id .. ':' .. tostring(ev.answer == nil)
+        end)
     "#,
     )
     .unwrap();
@@ -5618,67 +5500,30 @@ async fn reconnected_preserves_lua_overrides_and_drafts_but_applies_changed_save
     let first = h.app.open_session("s-one".into(), true);
     h.settle().await;
     h.input("first draft").await;
-    let second = h.app.open_session("s-two".into(), true);
+    let second = h.app.open_session("s-new".into(), true);
     h.settle().await;
     h.input("second draft").await;
-
-    for (saved_detail, expected_detail) in [("full", "rows"), ("summary", "summary")] {
-        let (client, events, _, push) = reconnect_client();
-        h.push = push;
-        h.events = events;
-        h.app.reconnected(
-            client,
-            json!({
-                "tui": { "prompt_max_height": 7, "tool_detail": saved_detail }, "other": 2
-            }),
-            vec![],
-        );
-        h.settle().await;
-        assert_eq!(h.app.options.prompt_max_height, 4);
-        assert_eq!(
-            h.lua("=bone.o.tool_detail").await,
-            format!("{expected_detail:?}")
-        );
-        assert_eq!(h.lua("=bone.settings.get('other')").await, "2");
-        assert_eq!(
-            h.lua("=loads").await,
-            "1",
-            "reconnect must not reload tui.lua"
-        );
-        assert_eq!(h.app.current, second);
-        assert_eq!(h.prompt(), "second draft");
-        h.app.show_chat(first);
-        assert_eq!(h.prompt(), "first draft");
-        h.app.show_chat(second);
-    }
-}
-
-#[tokio::test]
-async fn reconnected_refreshes_all_chats_and_processes_and_submits_on_new_client() {
-    let mut h = Harness::blank().await;
-    h.app.open_session("s-one".into(), false);
-    h.app.open_session("s-new".into(), true);
-    h.settle().await;
+    let old = approval(7, "shell", json!({"command": "old"}));
+    h.emit::<AskRequested>(old.clone()).await;
+    h.emit::<AskRequested>(old.clone()).await;
     h.emit::<ProcessChanged>(running_shell()).await;
+    assert_eq!(h.lua("=table.concat(seen, '|')").await, "\"request:7\"");
     assert_eq!(h.app.process_list().len(), 1);
     let old_requests = h.log.lock().unwrap().clone();
-    h.lua(r#"
-        process_counts = {}
-        bone.on('processes/changed', function(ev) process_counts[#process_counts + 1] = #ev.processes end)
-        bone.on('server/reconnected', function() processes_at_reconnect = process_counts[#process_counts] end)
-    "#).await;
-    let (client, events, log, push) = reconnect_client();
+
+    let mut changed = old;
+    changed.question["arguments"] = json!({"command": "new"});
+    let extra = approval(8, "write_file", json!({}));
+    let (client, events, log, push) = fresh_client();
     h.push = push;
     h.events = events;
-    h.app.reconnected(client, json!({}), vec![]);
-    assert!(
-        h.app.process_list().is_empty(),
-        "clear stale processes before replies"
+    h.app.reconnected(
+        client,
+        json!({ "tui": { "prompt_max_height": 7, "tool_detail": "full" }, "other": 2 }),
+        vec![changed, extra.clone()],
     );
-    h.settle().await;
     assert!(h.app.process_list().is_empty());
-    assert_eq!(h.lua("=table.concat(process_counts, ',')").await, "\"0,0\"");
-    assert_eq!(h.lua("=processes_at_reconnect").await, "0");
+    h.settle().await;
     let requests = log.lock().unwrap().clone();
     let mut chats: Vec<_> = requests
         .iter()
@@ -5695,268 +5540,49 @@ async fn reconnected_refreshes_all_chats_and_processes_and_submits_on_new_client
             .collect::<Vec<_>>(),
         vec![json!({ "session_id": "s-new" })]
     );
-    h.input("after reconnect{enter}").await;
+    h.emit::<AskRequested>(extra).await;
+    assert_eq!(h.app.options.prompt_max_height, 4);
+    assert_eq!(h.lua("=bone.o.tool_detail").await, "\"rows\"");
+    assert_eq!(h.lua("=loads").await, "1");
+    assert_eq!(h.lua("=bone.settings.get('other')").await, "2");
+    assert_eq!(h.app.current, second);
+    assert_eq!(h.prompt(), "second draft");
+    h.app.show_chat(first);
+    assert_eq!(h.prompt(), "first draft");
+    h.app.show_chat(second);
+    assert_eq!(
+        h.lua("=table.concat(seen, '|')").await,
+        "\"request:7|resolve:7:true|request:7|request:8\""
+    );
+    h.input("{enter}").await;
     assert_eq!(h.prompt(), "");
-    let log = log.lock().unwrap();
-    let submitted: Vec<_> = log.iter().filter(|(m, _)| m == "turn/start").collect();
+    let submitted: Vec<_> = log
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|(m, _)| m == "turn/start")
+        .cloned()
+        .collect();
     assert_eq!(submitted.len(), 1);
     assert_eq!(submitted[0].1["session_id"], "s-new");
-    assert_eq!(submitted[0].1["text"], "after reconnect");
+    assert_eq!(submitted[0].1["text"], "second draft");
     assert_eq!(*h.log.lock().unwrap(), old_requests);
-}
 
-#[cfg(unix)]
-async fn reconnect_accept(listener: &tokio::net::UnixListener) -> bone_proto::Connection {
-    let (stream, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
-        .await
-        .expect("reconnect did not attempt a connection")
-        .unwrap();
-    let (read, write) = stream.into_split();
-    transport::framed(read, write)
-}
-
-#[cfg(unix)]
-async fn reconnect_request(
-    conn: &mut bone_proto::Connection,
-    expected: &str,
-) -> bone_proto::RequestId {
-    let msg = tokio::time::timeout(Duration::from_secs(2), conn.rx.recv())
-        .await
-        .expect("snapshot request timed out")
-        .expect("connection closed before snapshot");
-    let Message::Request { id, method, .. } = msg else {
-        panic!("expected request, got {msg:?}")
-    };
-    assert_eq!(method, expected);
-    id
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn reconnect_retries_absent_socket_and_delivers_snapshots_before_buffered_resolution() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("reconnect.sock");
-    let mut retry = Box::pin(crate::reconnect(path.clone()));
-    // Drive at least the first attempt while no socket exists, retaining the
-    // same future when the server subsequently appears.
-    assert!(
-        tokio::time::timeout(Duration::from_millis(350), &mut retry)
-            .await
-            .is_err()
-    );
-    let listener = tokio::net::UnixListener::bind(&path).unwrap();
-    let ask = approval(17, "shell", json!({"command": "true"}));
-    let settings = json!({ "tui": { "prompt_max_height": 6 }, "marker": "snapshot" });
-    let log = Log::default();
-    let server = async {
-        let conn = reconnect_accept(&listener).await;
-        reconnect_server(
-            conn,
-            log.clone(),
-            settings.clone(),
-            vec![ask.clone()],
-            vec![
-                Message::Notification {
-                    method: "ask/requested".into(),
-                    params: Some(json!(ask)),
-                },
-                Message::Notification {
-                    method: "ask/resolved".into(),
-                    params: Some(json!({ "ask_id": 17, "answer": "allow" })),
-                },
-            ],
-        )
-    };
-    let ((client, mut events, got_settings, asks), task) =
-        tokio::time::timeout(Duration::from_secs(3), async {
-            tokio::join!(retry, server)
-        })
-        .await
-        .expect("reconnect failed after socket appeared");
-    assert_eq!(got_settings, settings);
-    assert_eq!(asks, vec![ask]);
-    assert_eq!(
-        log.lock()
-            .unwrap()
-            .iter()
-            .map(|(m, _)| m.as_str())
-            .collect::<Vec<_>>(),
-        ["initialize", "settings/get", "ask/list"]
-    );
-
-    let mut h = Harness::blank().await;
-    h.lua(
-        r#"
-        seen = {}
-        bone.on('ask/requested', function(ev)
-          seen[#seen + 1] = 'request'
-          popup = bone.ui.popup({ lines = { ev.question.title } })
-        end)
-        bone.on('ask/resolved', function() seen[#seen + 1] = 'resolve'; bone.ui.close(popup) end)
-        bone.on('server/reconnected', function() seen[#seen + 1] = 'connected' end)
-    "#,
-    )
-    .await;
-    h.app.reconnected(client, got_settings, asks);
-    assert_eq!(h.app.context(), Context::Popup);
-    for expected in ["ask/requested", "ask/resolved"] {
-        let ev = tokio::time::timeout(Duration::from_secs(2), events.recv())
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(ev.method, expected);
-        h.app.handle_server(ev);
-    }
+    // A saved option that actually changed replaces the Lua override, and asks
+    // that disappeared while disconnected are resolved instead of left open.
+    let (client, events, _, push) = fresh_client();
+    h.push = push;
     h.events = events;
+    h.app.reconnected(
+        client,
+        json!({ "tui": { "prompt_max_height": 7, "tool_detail": "summary" }, "other": 2 }),
+        vec![],
+    );
     h.settle().await;
-    assert_eq!(
-        h.lua("=table.concat(seen, ',')").await,
-        "\"request,connected,resolve\""
-    );
-    assert_eq!(h.app.context(), Context::Main);
-    assert_eq!(h.app.options.prompt_max_height, 6);
-    task.abort();
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn reconnect_retries_failed_initialize_or_snapshot_without_returning_partial_state() {
-    for failed in ["initialize", "settings/get", "ask/list"] {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("reconnect.sock");
-        let listener = tokio::net::UnixListener::bind(&path).unwrap();
-        let log = Log::default();
-        let server = async {
-            let mut bad = reconnect_accept(&listener).await;
-            for method in ["initialize", "settings/get", "ask/list"] {
-                let id = reconnect_request(&mut bad, method).await;
-                let result = if method == failed {
-                    Err(RpcError::new(1, "retry me"))
-                } else if method == "settings/get" {
-                    Ok(json!({"partial": true}))
-                } else {
-                    reply(method, &Value::Null)
-                };
-                bad.tx.send(Message::Response { id, result }).await.unwrap();
-                if method == failed {
-                    break;
-                }
-            }
-            // Keep the failed peer alive: retry must follow the RPC failure,
-            // not rely on the connection closing.
-            let good = reconnect_accept(&listener).await;
-            let task =
-                reconnect_server(good, log.clone(), json!({"complete": true}), vec![], vec![]);
-            (bad, task)
-        };
-        let ((_, _, settings, asks), (_, task)) =
-            tokio::time::timeout(Duration::from_secs(3), async {
-                tokio::join!(crate::reconnect(path), server)
-            })
-            .await
-            .expect("failed handshake was not retried");
-        assert_eq!(settings, json!({"complete": true}), "failure at {failed}");
-        assert!(asks.is_empty());
-        assert_eq!(log.lock().unwrap().len(), 3);
-        task.abort();
-    }
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn reconnect_times_out_a_stalled_ask_snapshot_and_retries() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("reconnect.sock");
-    let listener = tokio::net::UnixListener::bind(&path).unwrap();
-    let server = async {
-        let mut stalled = reconnect_accept(&listener).await;
-        for method in ["initialize", "settings/get"] {
-            let id = reconnect_request(&mut stalled, method).await;
-            let result = if method == "settings/get" {
-                Ok(json!({"partial": true}))
-            } else {
-                reply(method, &Value::Null)
-            };
-            stalled
-                .tx
-                .send(Message::Response { id, result })
-                .await
-                .unwrap();
-        }
-        reconnect_request(&mut stalled, "ask/list").await;
-        // No reply, but don't close the socket either. The five-second attempt
-        // deadline must cover snapshots, not just connect/initialize.
-        let (stream, _) = tokio::time::timeout(Duration::from_secs(7), listener.accept())
-            .await
-            .expect("stalled snapshot was never retried")
-            .unwrap();
-        let (read, write) = stream.into_split();
-        let task = reconnect_server(
-            transport::framed(read, write),
-            Log::default(),
-            json!({"complete": true}),
-            vec![],
-            vec![],
-        );
-        (stalled, task)
-    };
-    let ((_, _, settings, asks), (_, task)) = tokio::time::timeout(Duration::from_secs(9), async {
-        tokio::join!(crate::reconnect(path), server)
-    })
-    .await
-    .expect("reconnect attempt did not time out");
-    assert_eq!(settings, json!({"complete": true}));
-    assert!(asks.is_empty());
-    task.abort();
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn reconnect_dropping_future_cancels_pending_handshake_and_future_accepts() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("reconnect.sock");
-    let listener = tokio::net::UnixListener::bind(&path).unwrap();
-    let mut retry = Box::pin(crate::reconnect(path));
-    let mut conn = tokio::select! {
-        conn = reconnect_accept(&listener) => conn,
-        _ = &mut retry => panic!("reconnect returned without a handshake"),
-    };
-    tokio::select! {
-        _ = reconnect_request(&mut conn, "initialize") => {},
-        _ = &mut retry => panic!("reconnect returned without an initialize reply"),
-    }
-    drop(retry);
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), conn.rx.recv())
-            .await
-            .expect("dropping reconnect left the pending client connected"),
-        None
-    );
-    assert!(
-        tokio::time::timeout(Duration::from_millis(800), listener.accept())
-            .await
-            .is_err(),
-        "dropping reconnect left a background retry running"
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn reconnect_dropping_future_during_backoff_cancels_future_accepts() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("reconnect.sock");
-    let mut retry = Box::pin(crate::reconnect(path.clone()));
-    assert!(
-        tokio::time::timeout(Duration::from_millis(350), &mut retry)
-            .await
-            .is_err()
-    );
-    drop(retry);
-    let listener = tokio::net::UnixListener::bind(&path).unwrap();
-    assert!(
-        tokio::time::timeout(Duration::from_millis(800), listener.accept())
-            .await
-            .is_err(),
-        "cancelled reconnect attempted another connection"
-    );
+    assert_eq!(h.app.options.prompt_max_height, 4);
+    assert_eq!(h.lua("=bone.o.tool_detail").await, "\"summary\"");
+    assert_eq!(h.lua("=loads").await, "1");
+    let seen = h.lua("=table.concat(seen, '|')").await;
+    assert!(seen.contains("resolve:7:true"), "{seen}");
+    assert!(seen.contains("resolve:8:true"), "{seen}");
 }

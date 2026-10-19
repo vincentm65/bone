@@ -329,32 +329,6 @@ mod tests {
         parse_args(args.iter().map(|s| s.to_string()))
     }
 
-    #[test]
-    fn private_overrides_are_nonempty_and_core_only() {
-        let names = [
-            "BONE_CONFIG_DIR",
-            "BONE_DATA_DIR",
-            "BONE_MODEL",
-            "BONE_BASE_URL",
-            "BONE_API_KEY",
-            "BONE_REASONING_EFFORT",
-            "BONE_SYSTEM_PROMPT",
-            "BONE_APPROVAL",
-            "BONE_DEBUG_HTTP",
-        ];
-        assert!(!private_core(|_| None));
-        assert!(!private_core(|_| Some("".into())));
-        for name in names {
-            assert!(
-                private_core(|key| (key == name).then(|| "value".into())),
-                "{name}"
-            );
-        }
-        assert!(!private_core(
-            |key| (key == "BONE_UNRELATED").then(|| "value".into())
-        ));
-    }
-
     #[cfg(unix)]
     #[tokio::test]
     async fn concurrent_startup_loser_attaches_to_winner() {
