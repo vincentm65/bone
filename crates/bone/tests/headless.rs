@@ -157,3 +157,89 @@ async fn stale_socket_is_replaced() {
     let (client, _events) = Client::new(conn);
     client.initialize("test").await.unwrap();
 }
+
+#[tokio::test]
+async fn explicit_connect_failure_does_not_load_core_or_start_one() {
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(data.path().join("core.lua"), "error('CORE_MUST_NOT_LOAD')").unwrap();
+    let sock = data.path().join("missing.sock");
+    let output = timeout(
+        Duration::from_secs(5),
+        bone(data.path()).arg("--connect").arg(&sock).output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(stderr.contains("cannot connect to"), "{stderr}");
+    assert!(!stderr.contains("CORE_MUST_NOT_LOAD"), "{stderr}");
+    assert!(!sock.exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn attaching_skips_core_config_even_with_empty_overrides() {
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join(".bone");
+    std::fs::create_dir_all(&config).unwrap();
+    // Both implicit and explicit attach must ignore even a broken core config.
+    std::fs::write(config.join("core.lua"), "error('CORE_MUST_NOT_LOAD')").unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    let sock = runtime.path().join("bone3/bone.sock");
+    let server_data = tempfile::tempdir().unwrap();
+    let _server = bone(server_data.path())
+        .args(["--headless", "--listen"])
+        .arg(&sock)
+        .spawn()
+        .unwrap();
+    wait_for(&sock).await;
+
+    for explicit in [false, true] {
+        let mut cmd = bone(&config);
+        cmd.env("HOME", home.path())
+            .env("XDG_RUNTIME_DIR", runtime.path())
+            .stdin(Stdio::null());
+        for name in [
+            "BONE_CONFIG_DIR",
+            "BONE_DATA_DIR",
+            "BONE_MODEL",
+            "BONE_BASE_URL",
+            "BONE_API_KEY",
+            "BONE_REASONING_EFFORT",
+            "BONE_SYSTEM_PROMPT",
+            "BONE_APPROVAL",
+            "BONE_DEBUG_HTTP",
+        ] {
+            cmd.env(name, "");
+        }
+        if explicit {
+            cmd.arg("--connect").arg(&sock);
+        }
+        let output = timeout(Duration::from_secs(10), cmd.output())
+            .await
+            .unwrap()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        // No terminal is available, so the TUI exits after its successful attach.
+        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert!(!stderr.contains("CORE_MUST_NOT_LOAD"), "{stderr}");
+        assert!(!stderr.contains("cannot connect"), "{stderr}");
+        assert!(sock.exists());
+    }
+}
+
+#[tokio::test]
+async fn core_config_errors_keep_exit_code_two() {
+    let data = tempfile::tempdir().unwrap();
+    std::fs::write(data.path().join("core.lua"), "error('BROKEN_CORE')").unwrap();
+    let output = timeout(
+        Duration::from_secs(5),
+        bone(data.path()).arg("--headless").output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(output.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&output.stderr).contains("BROKEN_CORE"));
+}

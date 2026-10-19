@@ -40,14 +40,16 @@ use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bone_client::Client;
+use bone_client::{Client, EventStream as ServerEvents};
 use bone_proto::Connection;
+use bone_proto::methods::{AskList, AskRequestedParams, Empty, SettingsGet};
 use crossterm::event::{Event, EventStream, KeyEventKind, MouseButton, MouseEventKind};
 use futures_util::StreamExt;
+use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::time::sleep_until;
 
@@ -63,21 +65,24 @@ const LUA_RELOAD_POLL: Duration = Duration::from_millis(250);
 
 pub struct RunOptions {
     /// Executable implementing the internal clipboard helper; None uses this executable.
-    pub clipboard_executable: Option<std::path::PathBuf>,
+    pub clipboard_executable: Option<PathBuf>,
     /// Working directory for new sessions.
     pub cwd: String,
     /// Where `tui.lua`, `lua/` modules and runtime overrides live.
-    pub config_dir: Option<std::path::PathBuf>,
+    pub config_dir: Option<PathBuf>,
     /// Resume a session at startup: `Some(None)` for the newest.
     pub resume: Option<Option<String>>,
     /// The core runs in this process, from the same config dir, so edits
     /// to its Lua files reload it (`core/reload`). Off for `--connect`.
     pub reload_core: bool,
+    /// The socket `--connect` opened: when the server goes away, connect
+    /// to it again (with backoff) and carry on instead of quitting.
+    pub reconnect: Option<PathBuf>,
 }
 
 type Connected = (
     App,
-    bone_client::EventStream,
+    ServerEvents,
     mpsc::UnboundedReceiver<app::AppEvent>,
     Option<Option<String>>,
 );
@@ -93,7 +98,7 @@ async fn connect(conn: Connection, name: &str, opts: RunOptions) -> io::Result<C
     let (tx, rx) = mpsc::unbounded_channel();
     // Saved settings apply before the user's tui.lua, so fetch them first.
     let settings = client
-        .request::<bone_proto::methods::SettingsGet>(bone_proto::methods::Empty {})
+        .request::<SettingsGet>(Empty {})
         .await
         .unwrap_or_default();
     let mut app = App::new(Arc::new(client), tx, opts.cwd, opts.config_dir);
@@ -107,7 +112,9 @@ async fn connect(conn: Connection, name: &str, opts: RunOptions) -> io::Result<C
 /// Run the TUI on `conn` until the user quits. Returns a message to print
 /// after the terminal is restored, if the session ended abnormally.
 pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String>> {
+    let reconnect_to = opts.reconnect.clone();
     let (mut app, mut server_events, mut rx, resume) = connect(conn, "bone-tui", opts).await?;
+    let mut retry = None;
     app.note_runtime_overrides();
     // Updates to bone or its plugins: checked in the background, once.
     app.exec_lua(r#"require("bone.update").check()"#);
@@ -177,10 +184,21 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
                 Some(Err(e)) => return Err(e),
                 None => break,
             },
-            ev = server_events.recv() => match ev {
+            ev = server_events.recv(), if retry.is_none() => match ev {
                 Some(ev) => app.handle_server(ev),
-                None => app.server_closed(),
+                None => match &reconnect_to {
+                    Some(path) => {
+                        app.server_lost();
+                        retry = Some(Box::pin(reconnect(path.clone())));
+                    }
+                    None => app.server_closed(),
+                },
             },
+            (client, events, settings, asks) = async { retry.as_mut().unwrap().await }, if retry.is_some() => {
+                retry = None;
+                server_events = events;
+                app.reconnected(client, settings, asks);
+            }
             _ = sleep_until(timeout_at.unwrap_or_else(Instant::now).into()), if timeout_at.is_some() => {
                 app.expire_key_sequence();
             }
@@ -240,6 +258,26 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
     app.shutdown();
     drop(term);
     Ok(app.quit.flatten())
+}
+
+/// Retry with backoff; dropping this future cancels retries. Fetch snapshots
+/// before consuming notifications, so buffered changes catch them up in order.
+async fn reconnect(path: PathBuf) -> (Client, ServerEvents, Value, Vec<AskRequestedParams>) {
+    let mut wait = Duration::from_millis(250);
+    loop {
+        tokio::time::sleep(wait).await;
+        let attempt = async {
+            let (client, events) = Client::new(bone_client::connect(&path).await.ok()?);
+            client.initialize("bone-tui").await.ok()?;
+            let settings = client.request::<SettingsGet>(Empty {}).await.ok()?;
+            let asks = client.request::<AskList>(Empty {}).await.ok()?;
+            Some((client, events, settings, asks))
+        };
+        if let Ok(Some(connection)) = tokio::time::timeout(Duration::from_secs(5), attempt).await {
+            return connection;
+        }
+        wait = (wait * 2).min(Duration::from_secs(5));
+    }
 }
 
 /// What each side's Lua files looked like, as hashes of paths and metadata.

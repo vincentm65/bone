@@ -14,7 +14,9 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use bone_proto::types::ChatMessage;
-use rusqlite::{Connection, OpenFlags, OptionalExtension, Transaction, params};
+use rusqlite::{
+    Connection, OpenFlags, OptionalExtension, Transaction, TransactionBehavior, params,
+};
 use serde_json::{Value as Json, json};
 
 use crate::session::{Line, Record, title_of};
@@ -138,7 +140,9 @@ impl Index {
     /// `renamed` sets the title a rename gave.
     pub fn sync(&self, id: &str, path: &Path, renamed: Option<&str>) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
-        let tx = conn.transaction().map_err(err)?;
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(err)?;
         let known: Option<(u64, u64, u64)> = tx
             .query_row(
                 "SELECT indexed_len, messages, last_at FROM files WHERE session_id = ?1",
@@ -417,5 +421,51 @@ fn from_sql(v: rusqlite::types::ValueRef) -> Json {
         ValueRef::Real(f) => json!(f),
         ValueRef::Text(t) => json!(String::from_utf8_lossy(t)),
         ValueRef::Blob(b) => json!(format!("<{} bytes>", b.len())),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_waits_for_another_writer_before_reading() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.db");
+        let file = dir.path().join("session.jsonl");
+        std::fs::write(&file, "").unwrap();
+        let index = Index::open(&db).unwrap();
+        let mut other = Connection::open(&db).unwrap();
+        let writer = other
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
+        let (started_tx, started) = std::sync::mpsc::channel();
+        let (done_tx, done) = std::sync::mpsc::channel();
+        let task = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            done_tx.send(index.sync("s", &file, None)).unwrap();
+        });
+        started.recv_timeout(Duration::from_secs(2)).unwrap();
+        // A deferred transaction reads first, then fails its write upgrade
+        // immediately instead of waiting for the existing writer to finish.
+        let early = done.recv_timeout(Duration::from_millis(100));
+        writer.commit().unwrap();
+        let result = done.recv_timeout(Duration::from_secs(2));
+        task.join().unwrap();
+        assert!(
+            early.is_err(),
+            "sync did not wait for the writer: {early:?}"
+        );
+        result.unwrap().unwrap();
+        assert_eq!(
+            other
+                .query_row(
+                    "SELECT count(*) FROM files WHERE session_id = 's'",
+                    [],
+                    |r| r.get::<_, usize>(0)
+                )
+                .unwrap(),
+            1
+        );
     }
 }

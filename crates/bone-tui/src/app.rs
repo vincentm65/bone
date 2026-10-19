@@ -17,6 +17,7 @@ use bone_proto::methods::*;
 use bone_proto::types::ImageAttachment;
 use mlua::Lua;
 use ratatui::layout::{Position, Rect};
+use serde_json::Value;
 use tokio::sync::mpsc;
 
 use crate::chat::{ChatBuffer, RunningTurn};
@@ -129,6 +130,7 @@ pub struct AppEvent(pub(crate) Box<dyn FnOnce(&mut App) + Send>);
 
 pub struct App {
     client: Arc<Client>,
+    asks: HashMap<u64, AskRequestedParams>,
     tx: mpsc::UnboundedSender<AppEvent>,
     pub cwd: String,
     pub chats: Vec<ChatBuffer>,
@@ -274,6 +276,7 @@ impl App {
         };
         let mut app = App {
             client,
+            asks: HashMap::new(),
             tx,
             cwd,
             chats: vec![ChatBuffer::new(None)],
@@ -1940,6 +1943,14 @@ impl App {
     // ---- server events -------------------------------------------------------
 
     pub fn handle_server(&mut self, ev: ServerEvent) {
+        if let Some(Ok(p)) = ev.parse::<AskRequested>()
+            && self.asks.insert(p.ask_id, p.clone()).as_ref() == Some(&p)
+        {
+            return;
+        }
+        if let Some(Ok(p)) = ev.parse::<AskResolved>() {
+            self.asks.remove(&p.ask_id);
+        }
         if self.has_autocmd(&ev.method) {
             let data = ev.params.clone().unwrap_or(serde_json::Value::Null);
             self.handle_server_inner(&ev);
@@ -1975,7 +1986,7 @@ impl App {
             .with_chat(&p.session_id, |c| c.tool_started(&p)));
         on!(ToolFinished, |p| self
             .with_chat(&p.session_id, |c| c.tool_finished(&p)));
-        on!(SettingsChanged, |p| self.settings_changed(p));
+        on!(SettingsChanged, |p| self.update_settings(p.settings));
         on!(ToolOutput, |p| self
             .with_chat(&p.session_id, |c| c.tool_output(&p)));
         on!(ProcessChanged, |p| self.process_changed(&p));
@@ -2201,6 +2212,44 @@ impl App {
 
     pub fn server_closed(&mut self) {
         self.quit = Some(Some("the bone server closed the connection".into()));
+    }
+
+    /// The server went away and `run` is reconnecting (`--connect`). Requests
+    /// fail until then; a prompt sent meanwhile comes back to its draft.
+    pub fn server_lost(&mut self) {
+        self.error("lost the bone server; reconnecting…");
+        self.fire("server/disconnected", serde_json::json!({}));
+    }
+
+    /// Refresh snapshots before consuming the new connection's buffered events.
+    pub fn reconnected(&mut self, client: Client, settings: Value, asks: Vec<AskRequestedParams>) {
+        self.client = Arc::new(client);
+        self.info("reconnected to the bone server");
+        self.update_settings(settings);
+        self.reload_chat(String::new());
+        self.clear_processes();
+        if let Some(id) = self.current_session_id() {
+            self.request_processes(id);
+        }
+        let gone: Vec<_> = self
+            .asks
+            .values()
+            .filter(|a| !asks.contains(a))
+            .map(|a| a.ask_id)
+            .collect();
+        for ask_id in gone {
+            self.handle_server(ServerEvent {
+                method: "ask/resolved".into(),
+                params: Some(serde_json::json!({ "ask_id": ask_id, "answer": null })),
+            });
+        }
+        for ask in asks {
+            self.handle_server(ServerEvent {
+                method: "ask/requested".into(),
+                params: Some(serde_json::json!(ask)),
+            });
+        }
+        self.fire("server/reconnected", serde_json::json!({}));
     }
 }
 

@@ -1,12 +1,12 @@
 //! `bone` command line.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
 
 use bone_core::Core;
-use bone_core::scripting::{self, Loaded};
-use bone_proto::transport::default_socket_path;
+use bone_core::scripting;
+use bone_proto::{Connection, transport::default_socket_path};
 use bone_server::{Listener, Server};
 use bone_tui::RunOptions;
 
@@ -15,7 +15,9 @@ usage: bone [-r [ID]] [--connect [PATH]]
        bone --headless [--listen [PATH]]
        bone --init
 
-  (no options)      open the TUI with the core running in this process
+  (no options)      open the TUI on the server at the default PATH if one
+                    is running; otherwise run the core in this process and
+                    serve it at PATH while the TUI is open
   -r, --resume [ID] reopen session ID, or the newest session
   --connect [PATH]  open the TUI on a server started with --listen
   --headless        run the core without a UI and serve the bone API
@@ -117,30 +119,14 @@ fn main() -> ExitCode {
             config_dir.join("docs").display()
         );
     }
-    if mode == Mode::Init {
-        return init_config(&config_dir);
-    }
-    // Only modes that run the core need its configuration.
-    let loaded = match &mode {
-        Mode::Tui {
-            connect: Some(_), ..
-        } => None,
-        _ => match scripting::load(&config_dir) {
-            Ok(l) => Some(l),
-            Err(e) => {
-                eprintln!("bone: {e}");
-                if !config_dir.join("core.lua").exists() {
-                    eprintln!(
-                        "Run `bone --init` to create a starter config in {}.",
-                        config_dir.display()
-                    );
-                }
-                return ExitCode::from(2);
-            }
-        },
-    };
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let code = runtime.block_on(run(mode, loaded, config_dir));
+    let code = match runtime.block_on(run(mode, config_dir)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err((code, why)) => {
+            eprintln!("bone: {why}");
+            ExitCode::from(code)
+        }
+    };
     // Stdin's blocking reader thread may still be waiting for input; don't
     // let runtime shutdown wait on it.
     runtime.shutdown_background();
@@ -150,29 +136,41 @@ fn main() -> ExitCode {
 /// Resolves on SIGINT or SIGTERM (Ctrl+C or the console closing on Windows).
 fn stop_signal() -> std::io::Result<impl Future<Output = ()>> {
     #[cfg(unix)]
-    {
+    let (mut int, mut term) = {
         use tokio::signal::unix::{SignalKind, signal};
-        let mut int = signal(SignalKind::interrupt())?;
-        let mut term = signal(SignalKind::terminate())?;
-        Ok(async move {
-            tokio::select! {
-                _ = int.recv() => {}
-                _ = term.recv() => {}
-            }
-        })
-    }
+        (
+            signal(SignalKind::interrupt())?,
+            signal(SignalKind::terminate())?,
+        )
+    };
     #[cfg(windows)]
-    {
+    let (mut int, mut term) = {
         use tokio::signal::windows::{ctrl_c, ctrl_close};
-        let mut int = ctrl_c()?;
-        let mut close = ctrl_close()?;
-        Ok(async move {
-            tokio::select! {
-                _ = int.recv() => {}
-                _ = close.recv() => {}
-            }
-        })
-    }
+        (ctrl_c()?, ctrl_close()?)
+    };
+    Ok(async move {
+        tokio::select! {
+            _ = int.recv() => {}
+            _ = term.recv() => {}
+        }
+    })
+}
+
+/// Private config, sessions or per-run core overrides must not use a shared core.
+fn private_core(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> bool {
+    [
+        "BONE_CONFIG_DIR",
+        "BONE_DATA_DIR",
+        "BONE_MODEL",
+        "BONE_BASE_URL",
+        "BONE_API_KEY",
+        "BONE_REASONING_EFFORT",
+        "BONE_SYSTEM_PROMPT",
+        "BONE_APPROVAL",
+        "BONE_DEBUG_HTTP",
+    ]
+    .iter()
+    .any(|name| env(name).is_some_and(|value| !value.is_empty()))
 }
 
 /// The version, plus the git commit it was built from when known.
@@ -189,85 +187,113 @@ const TEMPLATES: &[(&str, &str)] = &[
 ];
 
 /// Write starter config files that do not exist yet.
-fn init_config(dir: &std::path::Path) -> ExitCode {
-    if let Err(e) = std::fs::create_dir_all(dir) {
-        eprintln!("bone: cannot create {}: {e}", dir.display());
-        return ExitCode::FAILURE;
-    }
+fn init_config(dir: &Path) -> StartupResult<()> {
+    std::fs::create_dir_all(dir)
+        .map_err(|e| (1, format!("cannot create {}: {e}", dir.display())))?;
     for (name, body) in TEMPLATES {
         let path = dir.join(name);
         if path.exists() {
             println!("kept    {} (already exists)", path.display());
             continue;
         }
-        if let Err(e) = std::fs::write(&path, body) {
-            eprintln!("bone: cannot write {}: {e}", path.display());
-            return ExitCode::FAILURE;
-        }
+        std::fs::write(&path, body)
+            .map_err(|e| (1, format!("cannot write {}: {e}", path.display())))?;
         println!("created {}", path.display());
     }
     println!(
         "Next: pick a provider in {}, then run bone.",
         dir.join("core.lua").display()
     );
-    ExitCode::SUCCESS
+    Ok(())
 }
 
-async fn run(mode: Mode, loaded: Option<Loaded>, config_dir: PathBuf) -> ExitCode {
-    let mut loaded = loaded;
-    let mut server = || {
-        Server::new(Arc::new(Core::from_loaded(
-            loaded.take().expect("config loaded"),
-        )))
-    };
+type StartupResult<T> = Result<T, (u8, String)>;
+
+fn server(config_dir: &Path) -> StartupResult<Server> {
+    scripting::load(config_dir)
+        .map(|loaded| Server::new(Arc::new(Core::from_loaded(loaded))))
+        .map_err(|mut why| {
+            if !config_dir.join("core.lua").exists() {
+                why += &format!(
+                    "\nRun `bone --init` to create a starter config in {}.",
+                    config_dir.display()
+                );
+            }
+            (2, why)
+        })
+}
+
+enum Endpoint {
+    Attached(Connection),
+    Local(Option<Listener>),
+}
+
+/// Another startup may win the socket after our initial connect failed.
+async fn bind_or_connect(path: &Path) -> StartupResult<Endpoint> {
+    let display = path.display();
+    match Listener::bind(path).await {
+        Ok(listener) => Ok(Endpoint::Local(Some(listener))),
+        Err(bind) => bone_client::connect(path)
+            .await
+            .map(Endpoint::Attached)
+            .map_err(|connect| {
+                (
+                    1,
+                    format!("cannot listen on {display}: {bind}; cannot connect: {connect}"),
+                )
+            }),
+    }
+}
+
+async fn run(mode: Mode, config_dir: PathBuf) -> StartupResult<()> {
     match mode {
         // stdout belongs to the protocol from here on.
-        Mode::Init => unreachable!("handled before running the core"),
-        Mode::Stdio => server().serve_stdio().await,
+        Mode::Init => init_config(&config_dir)?,
+        Mode::Stdio => server(&config_dir)?.serve_stdio().await,
         Mode::Listen(path) => {
-            let server = server();
-            let listener = match Listener::bind(&path).await {
-                Ok(l) => l,
-                Err(e) => {
-                    eprintln!("bone: cannot listen on {}: {e}", path.display());
-                    return ExitCode::FAILURE;
-                }
-            };
+            let listener = Listener::bind(&path)
+                .await
+                .map_err(|e| (1, format!("cannot listen on {}: {e}", path.display())))?;
+            let server = server(&config_dir)?;
             eprintln!("bone: listening on {}", listener.path().display());
-            let stop = match stop_signal() {
-                Ok(stop) => stop,
-                Err(e) => {
-                    eprintln!("bone: cannot install signal handlers: {e}");
-                    return ExitCode::FAILURE;
-                }
-            };
+            let stop =
+                stop_signal().map_err(|e| (1, format!("cannot install signal handlers: {e}")))?;
             tokio::select! {
-                r = listener.run(&server) => {
-                    if let Err(e) = r {
-                        eprintln!("bone: accept failed: {e}");
-                        return ExitCode::FAILURE;
-                    }
-                }
+                r = listener.run(&server) => r.map_err(|e| (1, format!("accept failed: {e}")))?,
                 _ = stop => {}
             }
             // Dropping the listener removes the socket file.
         }
         Mode::Tui { connect, resume } => {
-            let reload_core = connect.is_none();
-            let conn = match connect {
-                Some(path) => match bone_client::connect(&path).await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        eprintln!("bone: cannot connect to {}: {e}", path.display());
-                        return ExitCode::FAILURE;
+            // Explicit connects never start a core. Plain bone attaches or hosts
+            // the default socket, except when this run has private core settings.
+            let explicit = connect.is_some();
+            let path = connect
+                .or_else(|| (!private_core(|k| std::env::var_os(k))).then(default_socket_path));
+            let endpoint = match &path {
+                Some(path) => match bone_client::connect(path).await {
+                    Ok(conn) => Endpoint::Attached(conn),
+                    Err(e) if explicit => {
+                        return Err((1, format!("cannot connect to {}: {e}", path.display())));
                     }
+                    Err(_) => bind_or_connect(path).await?,
                 },
-                None => server().connect_in_process(),
+                None => Endpoint::Local(None),
+            };
+            // Loading core.lua is deliberately after deciding whether to attach.
+            let (conn, shared, reload_core) = match endpoint {
+                Endpoint::Attached(conn) => (conn, None, false),
+                Endpoint::Local(listener) => {
+                    let server = server(&config_dir)?;
+                    let conn = server.connect_in_process();
+                    let shared = listener.map(|listener| (listener, server));
+                    (conn, shared, true)
+                }
             };
             let cwd = std::env::current_dir()
                 .map(|d| d.to_string_lossy().into_owned())
                 .unwrap_or_else(|_| ".".into());
-            match bone_tui::run(
+            let tui = bone_tui::run(
                 conn,
                 RunOptions {
                     clipboard_executable: None,
@@ -275,23 +301,24 @@ async fn run(mode: Mode, loaded: Option<Loaded>, config_dir: PathBuf) -> ExitCod
                     config_dir: Some(config_dir),
                     resume,
                     reload_core,
+                    reconnect: if reload_core { None } else { path },
                 },
-            )
-            .await
-            {
-                Ok(None) => {}
-                Ok(Some(why)) => {
-                    eprintln!("bone: {why}");
-                    return ExitCode::FAILURE;
+            );
+            // Keep the listener alive only while the TUI runs, propagating errors.
+            tokio::select! {
+                r = tui => {
+                    if let Some(why) = r.map_err(|e| (1, e.to_string()))? {
+                        return Err((1, why));
+                    }
                 }
-                Err(e) => {
-                    eprintln!("bone: {e}");
-                    return ExitCode::FAILURE;
-                }
+                r = async {
+                    let (listener, server) = shared.as_ref().unwrap();
+                    listener.run(server).await
+                }, if shared.is_some() => r.map_err(|e| (1, format!("accept failed: {e}")))?,
             }
         }
     }
-    ExitCode::SUCCESS
+    Ok(())
 }
 
 #[cfg(test)]
@@ -300,6 +327,78 @@ mod tests {
 
     fn parse(args: &[&str]) -> Result<Option<Mode>, String> {
         parse_args(args.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn private_overrides_are_nonempty_and_core_only() {
+        let names = [
+            "BONE_CONFIG_DIR",
+            "BONE_DATA_DIR",
+            "BONE_MODEL",
+            "BONE_BASE_URL",
+            "BONE_API_KEY",
+            "BONE_REASONING_EFFORT",
+            "BONE_SYSTEM_PROMPT",
+            "BONE_APPROVAL",
+            "BONE_DEBUG_HTTP",
+        ];
+        assert!(!private_core(|_| None));
+        assert!(!private_core(|_| Some("".into())));
+        for name in names {
+            assert!(
+                private_core(|key| (key == name).then(|| "value".into())),
+                "{name}"
+            );
+        }
+        assert!(!private_core(
+            |key| (key == "BONE_UNRELATED").then(|| "value".into())
+        ));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_startup_loser_attaches_to_winner() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bone.sock");
+        let (a, b) = tokio::join!(bind_or_connect(&path), bind_or_connect(&path));
+        let (listener, conn) = match (a.unwrap(), b.unwrap()) {
+            (Endpoint::Local(Some(listener)), Endpoint::Attached(conn))
+            | (Endpoint::Attached(conn), Endpoint::Local(Some(listener))) => (listener, conn),
+            _ => panic!("expected one host and one attached client"),
+        };
+        // The attached connection must speak to the winning core, not a second core.
+        let loaded = scripting::load_with(dir.path(), &|key| match key {
+            "BONE_BASE_URL" => Some("http://127.0.0.1:9".into()),
+            "BONE_MODEL" => Some("winner".into()),
+            _ => None,
+        })
+        .unwrap();
+        let server = Server::new(Arc::new(Core::from_loaded(loaded)));
+        let (client, _events) = bone_client::Client::new(conn);
+        tokio::select! {
+            result = listener.run(&server) => panic!("listener stopped: {result:?}"),
+            result = tokio::time::timeout(std::time::Duration::from_secs(5), client.initialize("loser")) => {
+                assert_eq!(result.unwrap().unwrap().server_name, "bone");
+            }
+        }
+        assert!(path.exists());
+        drop(listener);
+        assert!(!path.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn socket_startup_reports_bind_and_connect_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not-a-socket");
+        std::fs::write(&path, "keep me").unwrap();
+        let Err((code, why)) = bind_or_connect(&path).await else {
+            panic!("must not silently start an unshared core");
+        };
+        assert_eq!(code, 1);
+        assert!(why.contains("cannot listen on"), "{why}");
+        assert!(why.contains("cannot connect"), "{why}");
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "keep me");
     }
 
     #[test]

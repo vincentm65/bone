@@ -18,6 +18,7 @@ use crate::keys;
 use crate::options::{self, DynamicKind, DynamicOption, DynamicValue};
 use crate::theme::StyleSpec;
 use ratatui::style::{Color, Modifier};
+use serde_json::Value as Json;
 
 /// A color as `parse_color` reads it back.
 fn fmt_color(c: Color) -> String {
@@ -817,9 +818,9 @@ impl App {
         }
     }
 
-    /// Set the options saved under `tui` (or just `only`), as
-    /// `bone.o.<name> = value`; one that is unknown or wrong is reported.
-    pub fn apply_tui_settings(&mut self, only: Option<&str>) {
+    /// Apply saved TUI options, skipping values unchanged from `previous`.
+    /// Unknown or invalid options are reported, as with `bone.o.<name> = value`.
+    pub fn apply_tui_settings(&mut self, previous: Option<&Json>) {
         let Some(tui) = self
             .settings
             .get("tui")
@@ -836,7 +837,7 @@ impl App {
             .as_deref()
             == Some("bare");
         for (name, value) in tui {
-            if only.is_some_and(|o| o != name) {
+            if previous.is_some_and(|old| value.is_null() || old.get(&name) == Some(&value)) {
                 continue;
             }
             let r = self.with_api(|lua| {
@@ -852,20 +853,9 @@ impl App {
         }
     }
 
-    /// `settings/changed`: keep the copy current and apply TUI changes now.
-    pub fn settings_changed(&mut self, p: bone_proto::methods::SettingsChangedParams) {
-        self.settings = p.settings;
-        if let Some(name) = p.path.strip_prefix("tui.")
-            && !p.value.is_null()
-        {
-            let name = name.to_owned();
-            self.apply_tui_settings(Some(&name));
-        }
-        self.fire(
-            "settings/changed",
-            serde_json::json!({ "path": p.path, "value": p.value }),
-        );
-        self.dirty = true;
+    pub fn update_settings(&mut self, settings: Json) {
+        let previous = std::mem::replace(&mut self.settings, settings);
+        self.apply_tui_settings(Some(&previous["tui"]));
     }
 
     /// Load the Lua configuration again after a file changed, the way

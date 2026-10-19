@@ -123,6 +123,7 @@ impl Env {
             config_dir: Some(self.config.path().to_owned()),
             resume,
             reload_core: true,
+            reconnect: None,
         };
         Headless::start(self.server.connect_in_process(), opts, 80, 24)
             .await
@@ -269,6 +270,7 @@ async fn init_templates_load() {
         config_dir: Some(config.path().to_owned()),
         resume: None,
         reload_core: true,
+        reconnect: None,
     };
     let mut tui = Headless::start(server.connect_in_process(), opts, 80, 24)
         .await
