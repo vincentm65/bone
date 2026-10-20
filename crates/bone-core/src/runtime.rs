@@ -89,12 +89,20 @@ impl Runtime {
             .filter(|&limit| limit > 0)
     }
 
+    /// Call options for a session's pin. A pin still on the default it
+    /// started from keeps the runtime provider itself (env overrides included).
+    pub(crate) fn pinned_options(&self, pin: Option<&Pin>) -> (Option<String>, Json) {
+        let default = self.model_of(None, &Json::Null);
+        match pin {
+            Some(p) if *p != default => (p.0.clone(), json!({ "model": p.1 })),
+            _ => (None, Json::Null),
+        }
+    }
+
     /// The provider for a session locked to `pin`.
     pub fn pinned(&self, pin: &Pin) -> Result<Arc<dyn Provider>, String> {
-        if *pin == self.model_of(None, &Json::Null) {
-            return Ok(self.provider.clone());
-        }
-        self.provider_for(pin.0.as_deref(), &json!({ "model": pin.1 }))
+        let (provider, options) = self.pinned_options(Some(pin));
+        self.provider_for(provider.as_deref(), &options)
     }
 
     /// The configured providers, sorted by name, with `pin` (a session's)

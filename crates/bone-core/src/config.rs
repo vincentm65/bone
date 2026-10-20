@@ -35,7 +35,7 @@ pub struct CompactConfig {
     /// Compact before a model call estimated above this many tokens.
     pub limit: Option<u64>,
     /// The `bone.config.providers` entry that writes summaries (default:
-    /// the one turns use).
+    /// the session's pinned provider and model).
     pub provider: Option<String>,
     /// Instructions for the summary, replacing the built-in ones.
     pub prompt: Option<String>,

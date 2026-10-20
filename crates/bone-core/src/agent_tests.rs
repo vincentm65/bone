@@ -1685,6 +1685,36 @@ async fn compact_summarizes_for_the_model_and_keeps_the_transcript() {
 }
 
 #[tokio::test]
+async fn compaction_uses_the_session_model_unless_explicitly_overridden() {
+    // Entries answer with the model they were called with, so the summary
+    // says who wrote it; the scripted runtime default is what a wrong
+    // choice would have said.
+    for (named, expected) in [("nil", "session-model"), ("\"x\"", "x-default")] {
+        let mut h = Harness::with_lua(
+            &format!(
+                r#"bone.provider.register("echo", {{ complete = function(req)
+                  return {{ content = req.options.model }} end }})
+                bone.config.providers.x = {{ type = "echo", model = "x-default" }}
+                bone.config.providers.y = {{ type = "echo", model = "y-default" }}
+                bone.config.provider = "x"
+                bone.config.compact = {{ provider = {named} }}"#,
+            ),
+            vec![text("runtime default")],
+        )
+        .await;
+        h.start("question").await;
+        h.until::<TurnFinished>().await;
+        let session = h.core.inner.session(&h.session_id).unwrap();
+        let pin = (Some("y".to_owned()), "session-model".to_owned());
+        session.lock().unwrap().pin(pin.clone()).unwrap();
+        h.compact(false).await.unwrap();
+        let s = session.lock().unwrap();
+        assert_eq!(s.summary.as_ref().unwrap().text, expected, "{named}");
+        assert_eq!(s.model, Some(pin));
+    }
+}
+
+#[tokio::test]
 async fn compacting_again_folds_in_the_earlier_summary() {
     let mut h = Harness::with_lua(
         "bone.config.compact = { keep = 1 }",

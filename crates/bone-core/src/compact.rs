@@ -545,7 +545,7 @@ impl Inner {
         reason: &str,
     ) -> Result<SessionCompactedParams, String> {
         let cfg = self.compact_config();
-        let (session_id, plan, generation, messages_len) = {
+        let (session_id, plan, generation, messages_len, pin) = {
             let mut s = session.lock().unwrap();
             if s.compacting {
                 return Err("this session is already being compacted".into());
@@ -557,17 +557,16 @@ impl Inner {
                 plan,
                 s.generation,
                 s.messages.len(),
+                s.model.clone(),
             )
         };
         let _busy = Compacting(session);
         let rt = self.runtime();
-        let can_see_images = cfg
-            .provider
-            .as_ref()
-            .and_then(|n| rt.models.get(n))
-            .unwrap_or(&rt.config.provider)
-            .supports_images
-            != Some(false);
+        let (provider, options) = match cfg.provider.clone() {
+            Some(name) => (Some(name), Value::Null),
+            None => rt.pinned_options(pin.as_ref()),
+        };
+        let can_see_images = rt.supports_images(provider.as_deref(), true);
         // The kept turns are not in the rendered transcript. Say so, or the
         // summary describes the previous request as if it were still current.
         let note = if plan.cut < messages_len {
@@ -599,8 +598,8 @@ older, so quote the findings and the remaining work exactly. Do not list tool na
             }
         }
         let call = ModelCall {
-            provider: cfg.provider.clone(),
-            options: Value::Null,
+            provider,
+            options,
             messages,
             tools: Vec::new(),
             depth: 0,
