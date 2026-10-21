@@ -505,6 +505,7 @@ dependencies = [
  "base64 0.22.1",
  "bone-client",
  "bone-core",
+ "bone-gui",
  "bone-lua",
  "bone-media",
  "bone-proto",

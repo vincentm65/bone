@@ -12,6 +12,7 @@ use bone_tui::RunOptions;
 
 const USAGE: &str = "\
 usage: bone [-r [ID]] [--connect [PATH]]
+       bone --gui [--connect [PATH]]
        bone --headless [--listen [PATH]]
        bone --init
 
@@ -20,6 +21,8 @@ usage: bone [-r [ID]] [--connect [PATH]]
                     serve it at PATH while the TUI is open
   -r, --resume [ID] reopen session ID, or the newest session
   --connect [PATH]  open the TUI on a server started with --listen
+  --gui             open the desktop GUI instead of the TUI, on the same
+                    core (needs a bone built with --features gui)
   --headless        run the core without a UI and serve the bone API
                     (JSON-RPC 2.0, one JSON message per line) on stdin/stdout
   --listen [PATH]   with --headless: serve on a Unix socket (a named pipe on
@@ -53,6 +56,9 @@ enum Mode {
         connect: Option<PathBuf>,
         resume: Option<Option<String>>,
     },
+    Gui {
+        connect: Option<PathBuf>,
+    },
 }
 
 fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Mode>, String> {
@@ -62,11 +68,13 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Mode>, St
     let mut connect = None;
     let mut resume = None;
     let mut init = false;
+    let mut gui = false;
     while let Some(arg) = args.next() {
         let mut value = || args.next_if(|a| !a.starts_with('-'));
         match arg.as_str() {
             "--headless" => headless = true,
             "--init" => init = true,
+            "--gui" => gui = true,
             "--listen" => listen = Some(value().map_or_else(default_socket_path, PathBuf::from)),
             "--connect" => connect = Some(value().map_or_else(default_socket_path, PathBuf::from)),
             "-r" | "--resume" => resume = Some(value()),
@@ -85,6 +93,9 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Mode>, St
         return Ok(Some(Mode::Init));
     }
     if headless {
+        if gui {
+            return Err("--gui and --headless are different ways to run bone".into());
+        }
         if connect.is_some() || resume.is_some() {
             return Err("--connect and --resume are for the TUI, not --headless".into());
         }
@@ -92,6 +103,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Mode>, St
     }
     if listen.is_some() {
         return Err("--listen needs --headless".into());
+    }
+    if gui {
+        if resume.is_some() {
+            return Err("--resume is for the TUI, not --gui".into());
+        }
+        return Ok(Some(Mode::Gui { connect }));
     }
     Ok(Some(Mode::Tui { connect, resume }))
 }
@@ -265,39 +282,17 @@ async fn run(mode: Mode, config_dir: PathBuf) -> StartupResult<()> {
             // Dropping the listener removes the socket file.
         }
         Mode::Tui { connect, resume } => {
-            // Explicit connects never start a core. Plain bone attaches or hosts
-            // the default socket, except when this run has private core settings.
-            let explicit = connect.is_some();
-            let path = connect
-                .or_else(|| (!private_core(|k| std::env::var_os(k))).then(default_socket_path));
-            let endpoint = match &path {
-                Some(path) => match bone_client::connect(path).await {
-                    Ok(conn) => Endpoint::Attached(conn),
-                    Err(e) if explicit => {
-                        return Err((1, format!("cannot connect to {}: {e}", path.display())));
-                    }
-                    Err(_) => bind_or_connect(path).await?,
-                },
-                None => Endpoint::Local(None),
-            };
-            // Loading core.lua is deliberately after deciding whether to attach.
-            let (conn, shared, reload_core) = match endpoint {
-                Endpoint::Attached(conn) => (conn, None, false),
-                Endpoint::Local(listener) => {
-                    let server = server(&config_dir)?;
-                    let conn = server.connect_in_process();
-                    let shared = listener.map(|listener| (listener, server));
-                    (conn, shared, true)
-                }
-            };
-            let cwd = std::env::current_dir()
-                .map(|d| d.to_string_lossy().into_owned())
-                .unwrap_or_else(|_| ".".into());
+            let Attached {
+                conn,
+                shared,
+                reload_core,
+                path,
+            } = attach(connect, &config_dir).await?;
             let tui = bone_tui::run(
                 conn,
                 RunOptions {
                     clipboard_executable: None,
-                    cwd,
+                    cwd: cwd(),
                     config_dir: Some(config_dir),
                     resume,
                     reload_core,
@@ -317,8 +312,95 @@ async fn run(mode: Mode, config_dir: PathBuf) -> StartupResult<()> {
                 }, if shared.is_some() => r.map_err(|e| (1, format!("accept failed: {e}")))?,
             }
         }
+        Mode::Gui { connect } => gui(attach(connect, &config_dir).await?).await?,
     }
     Ok(())
+}
+
+/// A frontend's connection to its core, and the core it hosts, if any.
+struct Attached {
+    conn: Connection,
+    /// The core this process runs, and the socket it serves it on.
+    shared: Option<(Listener, Server)>,
+    /// The core runs in this process, so the frontend may reload it.
+    reload_core: bool,
+    /// The default or `--connect` socket.
+    path: Option<PathBuf>,
+}
+
+/// Connect a frontend to the core at `connect`, or the default socket.
+async fn attach(connect: Option<PathBuf>, config_dir: &Path) -> StartupResult<Attached> {
+    // Explicit connects never start a core. Plain bone attaches or hosts
+    // the default socket, except when this run has private core settings.
+    let explicit = connect.is_some();
+    let path =
+        connect.or_else(|| (!private_core(|k| std::env::var_os(k))).then(default_socket_path));
+    let endpoint = match &path {
+        Some(path) => match bone_client::connect(path).await {
+            Ok(conn) => Endpoint::Attached(conn),
+            Err(e) if explicit => {
+                return Err((1, format!("cannot connect to {}: {e}", path.display())));
+            }
+            Err(_) => bind_or_connect(path).await?,
+        },
+        None => Endpoint::Local(None),
+    };
+    // Loading core.lua is deliberately after deciding whether to attach.
+    Ok(match endpoint {
+        Endpoint::Attached(conn) => Attached {
+            conn,
+            shared: None,
+            reload_core: false,
+            path,
+        },
+        Endpoint::Local(listener) => {
+            let server = server(config_dir)?;
+            let conn = server.connect_in_process();
+            Attached {
+                conn,
+                shared: listener.map(|listener| (listener, server)),
+                reload_core: true,
+                path,
+            }
+        }
+    })
+}
+
+fn cwd() -> String {
+    std::env::current_dir()
+        .map(|d| d.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| ".".into())
+}
+
+/// The GUI blocks its thread, so the shared core is served from a task,
+/// stopped (removing the socket) when the window closes.
+#[cfg(feature = "gui")]
+async fn gui(a: Attached) -> StartupResult<()> {
+    let serving = a.shared.map(|(listener, server)| {
+        tokio::spawn(async move {
+            if let Err(e) = listener.run(&server).await {
+                eprintln!("bone: accept failed: {e}");
+            }
+        })
+    });
+    let opts = bone_gui::GuiOptions {
+        cwd: cwd(),
+        reconnect: if a.reload_core { None } else { a.path },
+    };
+    let r = bone_gui::run(a.conn, opts).await;
+    if let Some(task) = serving {
+        task.abort();
+        let _ = task.await;
+    }
+    r.map_err(|why| (1, why))
+}
+
+#[cfg(not(feature = "gui"))]
+async fn gui(_: Attached) -> StartupResult<()> {
+    Err((
+        2,
+        "this bone was built without the GUI; build it with --features gui".into(),
+    ))
 }
 
 #[cfg(test)]

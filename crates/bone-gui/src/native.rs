@@ -51,7 +51,7 @@ pub async fn run(conn: Connection, opts: GuiOptions) -> Result<(), String> {
     let gui = Gui::connect(conn, opts).await?;
     tokio::task::block_in_place(move || {
         let slot = Cell::new(Some(gui));
-        let mut last = None;
+        let mut failed = Vec::new();
         for (renderer, name) in [
             (eframe::Renderer::Wgpu, "wgpu"),
             (eframe::Renderer::Glow, "OpenGL"),
@@ -74,12 +74,9 @@ pub async fn run(conn: Connection, opts: GuiOptions) -> Result<(), String> {
                 Ok(()) => return Ok(()),
                 // Past window creation there is no GUI left to retry with.
                 Err(e) if started.get() => return Err(e.to_string()),
-                Err(e) => last = Some(format!("{name}: {e}")),
+                Err(e) => failed.push(format!("{name}: {e}")),
             }
         }
-        Err(format!(
-            "cannot open a window ({})",
-            last.unwrap_or_default()
-        ))
+        Err(format!("cannot open a window ({})", failed.join("; ")))
     })
 }

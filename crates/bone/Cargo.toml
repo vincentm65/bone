@@ -12,7 +12,12 @@ bone-proto.workspace = true
 bone-server.workspace = true
 bone-client.workspace = true
 bone-tui.workspace = true
+bone-gui = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
+
+[features]
+# The desktop GUI (`bone --gui`); off by default, so the TUI build is unchanged.
+gui = ["dep:bone-gui"]
 
 [dev-dependencies]
 image.workspace = true
