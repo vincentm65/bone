@@ -264,7 +264,6 @@ impl Keymaps {
         (self.descs.iter()).map(|((ctx, keys), d)| (ctx, keys.as_slice(), d.as_str()))
     }
 
-    #[cfg(test)]
     /// Compatibility lookup for a single key in exactly one context.
     pub fn get(&self, ctx: Context, key: Key) -> Option<&Action> {
         self.maps.get(&(ctx, vec![key]))

@@ -7,7 +7,7 @@ use crate::editor::TextBuffer;
 use crate::layout::BufferId;
 
 #[derive(Clone, Default, PartialEq, Eq)]
-pub(crate) struct Draft {
+pub struct Draft {
     pub text: String,
     pub images: Vec<ImageAttachment>,
     pub pastes: Vec<(String, String)>,
@@ -15,7 +15,7 @@ pub(crate) struct Draft {
 }
 
 #[derive(Default)]
-pub(crate) struct Composer {
+pub struct Composer {
     pub images: Vec<ImageAttachment>,
     pub pastes: Vec<(String, String)>,
     pub epoch: u64,

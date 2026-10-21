@@ -1,17 +1,23 @@
 //! Client for a bone server over any [`Connection`].
 //!
 //! Get a connection from [`connect`], [`spawn`] (a headless server as a
-//! child process over its stdio), or a server's in-process transport.
+//! child process over its stdio), or a server's in-process transport; after
+//! losing a socket server, [`reconnect`] gets a new one.
 //!
 //! [`Client::new`] splits a connection into a request handle and an
 //! [`EventStream`] of server notifications. Requests are typed by
 //! [`Method`]; responses are matched to requests by id.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use bone_proto::methods::{Initialize, InitializeParams, InitializeResult, Shutdown};
+use bone_proto::methods::{
+    AskList, AskRequestedParams, Empty, Initialize, InitializeParams, InitializeResult,
+    SettingsGet, Shutdown,
+};
 use bone_proto::{
     Connection, Message, Method, Notification, PROTOCOL_VERSION, RequestId, RpcError,
 };
@@ -148,6 +154,41 @@ pub async fn connect(path: impl AsRef<std::path::Path>) -> std::io::Result<Conne
     #[cfg(windows)]
     let (r, w) = tokio::io::split(open_pipe(path.as_ref()).await?);
     Ok(bone_proto::transport::framed(r, w))
+}
+
+/// A new connection after the server went away, with the snapshots a client
+/// catches up from: the settings and the open questions.
+pub struct Reconnected {
+    pub client: Client,
+    pub events: EventStream,
+    pub settings: Value,
+    pub asks: Vec<AskRequestedParams>,
+}
+
+/// Connect to `path` again, initialized as `client_name`. Retry with backoff;
+/// dropping this future cancels retries. Fetch snapshots before consuming
+/// notifications, so buffered changes catch them up in order.
+pub async fn reconnect(path: PathBuf, client_name: &'static str) -> Reconnected {
+    let mut wait = Duration::from_millis(250);
+    loop {
+        tokio::time::sleep(wait).await;
+        let attempt = async {
+            let (client, events) = Client::new(connect(&path).await.ok()?);
+            client.initialize(client_name).await.ok()?;
+            let settings = client.request::<SettingsGet>(Empty {}).await.ok()?;
+            let asks = client.request::<AskList>(Empty {}).await.ok()?;
+            Some(Reconnected {
+                client,
+                events,
+                settings,
+                asks,
+            })
+        };
+        if let Ok(Some(connection)) = tokio::time::timeout(Duration::from_secs(5), attempt).await {
+            return connection;
+        }
+        wait = (wait * 2).min(Duration::from_secs(5));
+    }
 }
 
 /// Open a named pipe, waiting while every instance is busy.

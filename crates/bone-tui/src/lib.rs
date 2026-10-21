@@ -11,28 +11,23 @@ mod app;
 mod chat;
 mod clipboard;
 mod commands;
-mod composer;
 mod data;
-mod editor;
 mod headless;
 mod jobs;
-mod keymap;
 mod keys;
 mod layout;
 mod lua;
-mod markdown;
-mod options;
 mod panel;
 mod plugins;
 mod render;
 mod selection;
 mod shellhl;
 mod stats;
-mod term;
 mod terminal;
-mod text;
 mod theme;
 mod ui;
+
+use bone_ui::{composer, editor, keymap, markdown, options, term, text};
 
 #[cfg(test)]
 mod tests;
@@ -47,10 +42,9 @@ use std::time::{Duration, Instant};
 
 use bone_client::{Client, EventStream as ServerEvents};
 use bone_proto::Connection;
-use bone_proto::methods::{AskList, AskRequestedParams, Empty, SettingsGet};
+use bone_proto::methods::{Empty, SettingsGet};
 use crossterm::event::{Event, EventStream, KeyEventKind, MouseButton, MouseEventKind};
 use futures_util::StreamExt;
-use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio::time::sleep_until;
 
@@ -190,15 +184,15 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
                 None => match &reconnect_to {
                     Some(path) => {
                         app.server_lost();
-                        retry = Some(Box::pin(reconnect(path.clone())));
+                        retry = Some(Box::pin(bone_client::reconnect(path.clone(), "bone-tui")));
                     }
                     None => app.server_closed(),
                 },
             },
-            (client, events, settings, asks) = async { retry.as_mut().unwrap().await }, if retry.is_some() => {
+            r = async { retry.as_mut().unwrap().await }, if retry.is_some() => {
                 retry = None;
-                server_events = events;
-                app.reconnected(client, settings, asks);
+                server_events = r.events;
+                app.reconnected(r.client, r.settings, r.asks);
             }
             _ = sleep_until(timeout_at.unwrap_or_else(Instant::now).into()), if timeout_at.is_some() => {
                 app.expire_key_sequence();
@@ -261,26 +255,6 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
     app.shutdown();
     drop(term);
     Ok(app.quit.flatten())
-}
-
-/// Retry with backoff; dropping this future cancels retries. Fetch snapshots
-/// before consuming notifications, so buffered changes catch them up in order.
-async fn reconnect(path: PathBuf) -> (Client, ServerEvents, Value, Vec<AskRequestedParams>) {
-    let mut wait = Duration::from_millis(250);
-    loop {
-        tokio::time::sleep(wait).await;
-        let attempt = async {
-            let (client, events) = Client::new(bone_client::connect(&path).await.ok()?);
-            client.initialize("bone-tui").await.ok()?;
-            let settings = client.request::<SettingsGet>(Empty {}).await.ok()?;
-            let asks = client.request::<AskList>(Empty {}).await.ok()?;
-            Some((client, events, settings, asks))
-        };
-        if let Ok(Some(connection)) = tokio::time::timeout(Duration::from_secs(5), attempt).await {
-            return connection;
-        }
-        wait = (wait * 2).min(Duration::from_secs(5));
-    }
 }
 
 /// What each side's Lua files looked like, as hashes of paths and metadata.
@@ -440,7 +414,7 @@ fn button_name(b: MouseButton) -> &'static str {
 
 fn handle_terminal(app: &mut App, ev: Event) {
     match ev {
-        Event::Key(k) if k.kind != KeyEventKind::Release => app.handle_key(k.into()),
+        Event::Key(k) if k.kind != KeyEventKind::Release => app.handle_key(keys::from_event(k)),
         Event::Paste(text) => app.paste(&text),
         Event::Mouse(m) => {
             let at = (m.column, m.row);
@@ -451,14 +425,14 @@ fn handle_terminal(app: &mut App, ev: Event) {
                 {
                     return;
                 }
-                MouseEventKind::ScrollUp => crate::keys::WHEEL_UP,
-                MouseEventKind::ScrollDown => crate::keys::WHEEL_DOWN,
+                MouseEventKind::ScrollUp => keys::KeyCode::WheelUp,
+                MouseEventKind::ScrollDown => keys::KeyCode::WheelDown,
                 MouseEventKind::Down(b) => return app.mouse("down", button_name(b), at),
                 MouseEventKind::Drag(b) => return app.mouse("drag", button_name(b), at),
                 MouseEventKind::Up(b) => return app.mouse("up", button_name(b), at),
                 _ => return,
             };
-            app.handle_key(crate::keys::Key::new(code, m.modifiers));
+            app.handle_key(keys::Key::new(code, keys::mods(m.modifiers)));
         }
         Event::Resize(width, height) => app.resize(width, height),
         _ => {}

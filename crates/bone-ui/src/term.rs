@@ -3,10 +3,10 @@
 //! screen of the size Lua asks for, and given back as lines of styled text
 //! (`bone.processes.screen`).
 
-use ratatui::style::{Color, Modifier, Style};
+use crate::style::{Color, Modifier, Style};
 
+use crate::model::Item;
 use crate::theme::Theme;
-use crate::ui::Item;
 
 /// Output kept per process, like the core keeps.
 const MAX_TEXT: usize = 1 << 20;

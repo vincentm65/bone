@@ -14,11 +14,11 @@ crossterm.workspace = true
 futures-util.workspace = true
 mlua.workspace = true
 bone-lua.workspace = true
+bone-ui.workspace = true
 ratatui.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["time", "process", "io-util", "fs", "net"] }
 unicode-width.workspace = true
-vt100 = "0.15"
 
 [target.'cfg(any(target_os = "linux", target_os = "macos", windows))'.dependencies]
 arboard = { version = "3.6", features = ["wayland-data-control"] }

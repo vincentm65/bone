@@ -1,6 +1,7 @@
 //! Chat buffers: a session transcript built from protocol events.
 //!
-//! This module only holds data and a render cache. A transcript is a list of
+//! This module only holds data and a render cache (of the frontend's line
+//! type, `L`). A transcript is a list of
 //! *items* (user, reasoning, assistant, tool, notice); how each one looks is
 //! decided elsewhere (Lua views, see `ui.rs`). Rendered lines are cached per
 //! item and redone only when the item, the width or the views change, when
@@ -19,10 +20,9 @@ use bone_proto::methods::{
 use bone_proto::types::{
     ChatMessage, DeltaKind, SessionInfo, ToolCall, TurnId, TurnOutcome, Usage,
 };
-use ratatui::text::Line;
 use serde_json::{Value, json};
 
-use crate::text::{clean, sanitize, truncate, wrap};
+use crate::text::{clean, truncate};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Entry {
@@ -114,8 +114,8 @@ pub struct RenderKey {
     pub prev: Option<Part>,
 }
 
-#[derive(Default)]
-pub struct ChatBuffer {
+/// A transcript and its rendered lines, of type `L`.
+pub struct ChatBuffer<L> {
     /// `None` until the first message creates the session.
     pub session: Option<SessionInfo>,
     pub entries: Vec<Entry>,
@@ -139,7 +139,7 @@ pub struct ChatBuffer {
     /// Bumped on every change to an entry; part of each cache key.
     revs: Vec<u64>,
     next_rev: u64,
-    cache: HashMap<Item, Cached>,
+    cache: HashMap<Item, Cached<L>>,
     /// Items Lua added, by slot (`None` once removed).
     lua_items: Vec<Option<LuaItem>>,
     /// Timing and live output of tool calls, by call id.
@@ -160,9 +160,9 @@ struct ToolMeta {
 }
 
 /// One item's rendered lines and what they were made from.
-struct Cached {
+struct Cached<L> {
     key: RenderKey,
-    lines: Vec<Line<'static>>,
+    lines: Vec<L>,
     /// Chat data the view read while drawing them.
     deps: Vec<Dep>,
     /// Drawn again from this moment (`bone.chat.refresh_in`).
@@ -171,7 +171,30 @@ struct Cached {
     checked: u64,
 }
 
-impl ChatBuffer {
+impl<L> Default for ChatBuffer<L> {
+    fn default() -> Self {
+        ChatBuffer {
+            session: None,
+            entries: Vec::new(),
+            turn: None,
+            starting: false,
+            queue: Vec::new(),
+            queue_paused: false,
+            queue_rev: 0,
+            outcomes: HashMap::new(),
+            ids: Vec::new(),
+            next_id: 0,
+            revs: Vec::new(),
+            next_rev: 0,
+            cache: HashMap::new(),
+            lua_items: Vec::new(),
+            tool_meta: HashMap::new(),
+            message_usage: HashMap::new(),
+        }
+    }
+}
+
+impl<L> ChatBuffer<L> {
     pub fn new(session: Option<SessionInfo>) -> Self {
         ChatBuffer {
             session,
@@ -255,7 +278,6 @@ impl ChatBuffer {
         });
     }
 
-    #[cfg(test)]
     pub fn turn_started(&mut self, turn_id: TurnId, text: &str) {
         self.turn_started_with_images(turn_id, text, Vec::new());
     }
@@ -815,7 +837,7 @@ impl ChatBuffer {
         &mut self,
         item: Item,
         key: RenderKey,
-        lines: Vec<Line<'static>>,
+        lines: Vec<L>,
         deps: Vec<Dep>,
         expires: Option<Instant>,
         checked: u64,
@@ -835,7 +857,7 @@ impl ChatBuffer {
     /// All rendered rows, in order (after `stale` items have been stored).
     /// Lazy, and `skip` steps over whole items, so drawing one screen of a
     /// long chat doesn't walk every row.
-    pub fn rows(&self) -> impl Iterator<Item = &Line<'static>> {
+    pub fn rows(&self) -> impl Iterator<Item = &L> {
         (self.items().into_iter())
             .filter_map(|item| self.cache.get(&item))
             .flat_map(|c| c.lines.iter())
@@ -884,43 +906,11 @@ fn edges(s: &str) -> String {
     s[start..].trim_end().to_owned()
 }
 
-/// The bare rendering used when no Lua view applies: plain wrapped text with
-/// a blank line between items, no colors. Reasoning is hidden (a Lua view
-/// can show it). `first` is whether this is the first item.
-pub fn bare(data: &Value, width: usize, first: bool) -> Vec<Line<'static>> {
-    let s = |k: &str| data[k].as_str().unwrap_or("").to_owned();
-    let text = match data["kind"].as_str().unwrap_or("") {
-        "reasoning" => return Vec::new(),
-        "user" => format!("> {}", s("text")),
-        "tool" => {
-            let mut t = format!("{} {}", s("name"), s("raw_arguments"));
-            if let Some(out) = data["output"].as_str() {
-                t.push('\n');
-                t.push_str(out);
-            }
-            t
-        }
-        "notice" => format!("! {}", s("text")),
-        "queued" => format!("(queued) {}", s("text")),
-        _ => s("text"),
-    };
-    if text.is_empty() {
-        return Vec::new();
-    }
-    let gap = (!first).then(Line::default);
-    gap.into_iter()
-        .chain(
-            sanitize(&text)
-                .split('\n')
-                .flat_map(|l| wrap(l, width))
-                .map(Line::from),
-        )
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    type Chat = ChatBuffer<()>;
 
     fn call(id: &str, args: &str) -> ToolCall {
         ToolCall {
@@ -930,20 +920,11 @@ mod tests {
         }
     }
 
-    /// Render with the bare fallback, like a UI without Lua.
-    fn rows(c: &mut ChatBuffer, width: usize) -> Vec<String> {
-        for (item, index, key) in c.stale(width, (0, 0), Instant::now()) {
-            let lines = bare(&c.item_data(item, index, true), width, index == 1);
-            c.store(item, key, lines, Vec::new(), None, 0);
-        }
-        c.rows().map(|l| l.to_string()).collect()
-    }
-
     #[test]
     fn items_and_data() {
-        let mut c = ChatBuffer::new(None);
+        let mut c = Chat::new(None);
         c.turn_started(1, "hi");
-        let parts = |c: &ChatBuffer| c.items().iter().map(|i| i.part.name()).collect::<Vec<_>>();
+        let parts = |c: &Chat| c.items().iter().map(|i| i.part.name()).collect::<Vec<_>>();
         // Streaming with nothing yet: an empty assistant item.
         c.delta(&MessageDeltaParams {
             session_id: "s".into(),
@@ -999,7 +980,7 @@ mod tests {
 
     #[test]
     fn entries_keep_their_ids_while_a_message_streams() {
-        let mut c = ChatBuffer::new(None);
+        let mut c = Chat::new(None);
         c.turn_started(1, "go");
         c.add_lua("note-1".into(), "note".into(), Default::default());
         c.delta(&MessageDeltaParams {
@@ -1008,7 +989,7 @@ mod tests {
             kind: DeltaKind::Text,
             text: "hi".into(),
         });
-        let keys = |c: &ChatBuffer| -> Vec<String> {
+        let keys = |c: &Chat| -> Vec<String> {
             c.items()
                 .iter()
                 .enumerate()
@@ -1047,68 +1028,5 @@ mod tests {
             outcome: TurnOutcome::Completed,
         });
         assert!(c.outcomes.contains_key(&1));
-    }
-
-    #[test]
-    fn cache_redoes_only_what_changed() {
-        let mut c = ChatBuffer::new(None);
-        c.turn_started(1, "one two three");
-        c.notice("x".into(), false);
-        assert_eq!(rows(&mut c, 40), ["> one two three", "", "! x"]);
-        assert!(c.stale(40, (0, 0), Instant::now()).is_empty());
-        // Width and generation changes redo everything.
-        assert_eq!(c.stale(9, (0, 0), Instant::now()).len(), 2);
-        assert_eq!(c.stale(40, (1, 0), Instant::now()).len(), 2);
-        assert_eq!(rows(&mut c, 9), ["> one two", "three", "", "! x"]);
-        // A change to one entry redoes only its item.
-        c.delta(&MessageDeltaParams {
-            session_id: "s".into(),
-            turn_id: 1,
-            kind: DeltaKind::Text,
-            text: "hey".into(),
-        });
-        assert_eq!(c.stale(9, (0, 0), Instant::now()).len(), 1);
-        assert_eq!(c.row_count(), 4);
-    }
-
-    #[test]
-    fn load_pairs_tool_results() {
-        let mut c = ChatBuffer::new(None);
-        let info = SessionInfo {
-            session_id: "s".into(),
-            cwd: "/".into(),
-            created_at: 0,
-            title: Some("t".into()),
-            parent: None,
-            owner: None,
-        };
-        c.load(
-            info,
-            &[
-                ChatMessage::User {
-                    content: "go".into(),
-                    images: Vec::new(),
-                },
-                ChatMessage::Assistant {
-                    content: String::new(),
-                    reasoning: String::new(),
-                    tool_calls: vec![call("c1", r#"{"command":"x"}"#)],
-                    reasoning_state: None,
-                },
-                ChatMessage::Tool {
-                    images: Vec::new(),
-                    call_id: "c1".into(),
-                    content: "boom".into(),
-                    is_error: true,
-                },
-            ],
-            Some(3),
-        );
-        assert_eq!(
-            rows(&mut c, 40),
-            ["> go", "", r#"shell {"command":"x"}"#, "boom"]
-        );
-        assert_eq!(c.turn.unwrap().turn_id, 3);
-        assert_eq!(c.title(), "t");
     }
 }

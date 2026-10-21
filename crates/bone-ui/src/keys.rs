@@ -1,7 +1,49 @@
 //! Keys and their names: `"ctrl+s"`, `"alt+enter"`, `"shift+tab"`,
 //! `"pageup"`, `"f5"`, `"wheelup"`, or a single character like `"?"`.
+//! Frontends convert their own key events to [`Key`].
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use bitflags::bitflags;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KeyCode {
+    Char(char),
+    F(u8),
+    Enter,
+    Esc,
+    Tab,
+    BackTab,
+    Backspace,
+    Delete,
+    Insert,
+    Up,
+    Down,
+    Left,
+    Right,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    /// The mouse wheel, bound like keys.
+    WheelUp,
+    WheelDown,
+    /// A key with no name here (media keys, lone modifiers...): it never
+    /// matches a binding.
+    Unknown,
+}
+
+bitflags! {
+    #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+    pub struct KeyModifiers: u8 {
+        const SHIFT = 1;
+        const CONTROL = 1 << 1;
+        const ALT = 1 << 2;
+        const SUPER = 1 << 3;
+    }
+}
+
+impl KeyModifiers {
+    pub const NONE: Self = Self::empty();
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Key {
@@ -55,19 +97,9 @@ impl Key {
     }
 }
 
-impl From<KeyEvent> for Key {
-    fn from(e: KeyEvent) -> Self {
-        Key::new(e.code, e.modifiers)
-    }
-}
-
-/// The mouse wheel, bound like keys. Terminals never send these F-keys.
-pub const WHEEL_UP: KeyCode = KeyCode::F(62);
-pub const WHEEL_DOWN: KeyCode = KeyCode::F(63);
-
 const NAMES: &[(&str, KeyCode)] = &[
-    ("wheelup", WHEEL_UP),
-    ("wheeldown", WHEEL_DOWN),
+    ("wheelup", KeyCode::WheelUp),
+    ("wheeldown", KeyCode::WheelDown),
     ("enter", KeyCode::Enter),
     ("esc", KeyCode::Esc),
     ("tab", KeyCode::Tab),
@@ -223,18 +255,5 @@ mod tests {
         assert!(parse_sequence("").is_err());
         assert!(parse_sequence("   ").is_err());
         assert!(parse_sequence("ctrl+x nope").is_err());
-    }
-
-    #[test]
-    fn events_normalize() {
-        let shifted = KeyEvent::new(KeyCode::Char('G'), KeyModifiers::SHIFT);
-        assert_eq!(Key::from(shifted), Key::char('G'));
-        let ctrl = KeyEvent::new(
-            KeyCode::Char('W'),
-            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
-        );
-        assert_eq!(Key::from(ctrl), parse("ctrl+w").unwrap());
-        assert_eq!(Key::char('x').text(), Some('x'));
-        assert_eq!(parse("ctrl+x").unwrap().text(), None);
     }
 }

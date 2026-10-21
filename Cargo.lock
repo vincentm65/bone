@@ -188,6 +188,7 @@ dependencies = [
  "bone-lua",
  "bone-media",
  "bone-proto",
+ "bone-ui",
  "crossterm",
  "futures-util",
  "libc",
@@ -196,6 +197,18 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "unicode-width 0.2.0",
+]
+
+[[package]]
+name = "bone-ui"
+version = "3.0.3"
+dependencies = [
+ "bitflags",
+ "bone-media",
+ "bone-proto",
+ "mlua",
+ "serde_json",
  "unicode-width 0.2.0",
  "vt100",
 ]

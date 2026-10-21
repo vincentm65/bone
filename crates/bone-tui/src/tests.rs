@@ -5652,6 +5652,14 @@ async fn reconnected_refreshes_all_chats_and_processes_and_submits_on_new_client
     assert_eq!(*h.log.lock().unwrap(), old_requests);
 }
 
+/// `bone_client::reconnect` as the TUI calls it, as a tuple.
+async fn reconnect(
+    path: std::path::PathBuf,
+) -> (Client, EventStream, Value, Vec<AskRequestedParams>) {
+    let r = bone_client::reconnect(path, "bone-tui").await;
+    (r.client, r.events, r.settings, r.asks)
+}
+
 #[cfg(unix)]
 async fn reconnect_accept(listener: &tokio::net::UnixListener) -> bone_proto::Connection {
     let (stream, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
@@ -5683,7 +5691,7 @@ async fn reconnect_request(
 async fn reconnect_retries_absent_socket_and_delivers_snapshots_before_buffered_resolution() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("reconnect.sock");
-    let mut retry = Box::pin(crate::reconnect(path.clone()));
+    let mut retry = Box::pin(reconnect(path.clone()));
     // Drive at least the first attempt while no socket exists, retaining the
     // same future when the server subsequently appears.
     assert!(
@@ -5798,7 +5806,7 @@ async fn reconnect_retries_failed_initialize_or_snapshot_without_returning_parti
         };
         let ((_, _, settings, asks), (_, task)) =
             tokio::time::timeout(Duration::from_secs(3), async {
-                tokio::join!(crate::reconnect(path), server)
+                tokio::join!(reconnect(path), server)
             })
             .await
             .expect("failed handshake was not retried");
@@ -5848,7 +5856,7 @@ async fn reconnect_times_out_a_stalled_ask_snapshot_and_retries() {
         (stalled, task)
     };
     let ((_, _, settings, asks), (_, task)) = tokio::time::timeout(Duration::from_secs(9), async {
-        tokio::join!(crate::reconnect(path), server)
+        tokio::join!(reconnect(path), server)
     })
     .await
     .expect("reconnect attempt did not time out");
@@ -5863,7 +5871,7 @@ async fn reconnect_dropping_future_cancels_pending_handshake_and_future_accepts(
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("reconnect.sock");
     let listener = tokio::net::UnixListener::bind(&path).unwrap();
-    let mut retry = Box::pin(crate::reconnect(path));
+    let mut retry = Box::pin(reconnect(path));
     let mut conn = tokio::select! {
         conn = reconnect_accept(&listener) => conn,
         _ = &mut retry => panic!("reconnect returned without a handshake"),
@@ -5892,7 +5900,7 @@ async fn reconnect_dropping_future_cancels_pending_handshake_and_future_accepts(
 async fn reconnect_dropping_future_during_backoff_cancels_future_accepts() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("reconnect.sock");
-    let mut retry = Box::pin(crate::reconnect(path.clone()));
+    let mut retry = Box::pin(reconnect(path.clone()));
     assert!(
         tokio::time::timeout(Duration::from_millis(350), &mut retry)
             .await

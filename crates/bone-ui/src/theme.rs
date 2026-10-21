@@ -8,7 +8,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::sync::LazyLock;
 
-use ratatui::style::{Color, Modifier, Style};
+use crate::style::{Color, Modifier, Style};
 
 #[derive(Debug, Clone, Default)]
 pub struct Theme {

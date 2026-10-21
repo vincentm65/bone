@@ -1,0 +1,15 @@
+[package]
+name = "bone-ui"
+description = "Frontend-neutral bone client UI state: text, markdown, editing, options, styles, keys, chat transcripts, terminal screens"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+bitflags.workspace = true
+bone-media.workspace = true
+bone-proto.workspace = true
+mlua.workspace = true
+serde_json.workspace = true
+unicode-width.workspace = true
+vt100 = "0.15"
