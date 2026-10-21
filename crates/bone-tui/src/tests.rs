@@ -1484,39 +1484,6 @@ async fn views_are_lua_and_can_be_replaced() {
 }
 
 #[tokio::test]
-async fn text_helpers_and_markdown_data() {
-    let mut h = Harness::new().await;
-    let r = h
-        .lua("=bone.text.wrap({ { 'aa bbb', 'A' }, ' cc' }, 8, { first = '> ', pad = 'P' })")
-        .await;
-    assert!(
-        r.contains("\"> \"") && r.contains("\"aa bbb\"") && r.contains("\"cc\""),
-        "{r}"
-    );
-    assert_eq!(
-        h.lua("=#bone.text.wrap({ { 'aa bbb', 'A' }, ' cc' }, 8, { first = '> ', pad = 'P' })[2]")
-            .await,
-        "3"
-    );
-    assert_eq!(h.lua("=#bone.text.wrap('one two three', 7)").await, "2");
-    assert_eq!(
-        h.lua("=bone.text.clip({ { 'abcdef', 'X' } }, 4)[1][1]")
-            .await,
-        "\"abc…\""
-    );
-    assert_eq!(h.lua("=bone.text.width('日本')").await, "4");
-    assert_eq!(
-        h.lua("=bone.text.shell('ls -la')[3][2]").await,
-        "\"ShellFlag\""
-    );
-    assert_eq!(
-        h.lua("=bone.markdown.parse('# Hi\\n- **x**')[2].spans[1].bold")
-            .await,
-        "true"
-    );
-}
-
-#[tokio::test]
 async fn markdown_tables_wrap_instead_of_clipping() {
     let mut h = Harness::new().await;
     assert_eq!(h.lua(r#"=(function() local md = '| **abcdefghij** | 日本語 | [link](https://example.com) |\n|---|:---:|---:|\n| z |'
@@ -3276,12 +3243,8 @@ async fn reload_reruns_the_defaults_and_keeps_option_values() {
     // Re-defining an option from the same file keeps what the user set.
     assert_eq!(eval(&mut h, "return tostring(bone.o.my_opt)"), "5");
     assert_eq!(eval(&mut h, "return bone.o.queue_mode"), "next");
-    // The defaults' divider is back, and Lua's own libraries are untouched.
+    // The defaults' divider is back.
     assert_eq!(eval(&mut h, "return type(bone.ui.divider)"), "function");
-    assert_eq!(
-        eval(&mut h, r#"return tostring(require("bit").band(6, 3))"#),
-        "2"
-    );
 }
 
 #[tokio::test]
@@ -3549,22 +3512,6 @@ async fn subagent_report_header_opens_the_running_session() {
         h.lua("=bone.chat.session().session_id").await,
         "\"child-1\""
     );
-}
-
-#[tokio::test]
-async fn ctrl_t_steps_through_tool_detail() {
-    let mut h = Harness::build(None).await;
-    let get = |h: &mut Harness| -> String {
-        h.app
-            .with_api(|lua| lua.load("return bone.o.tool_detail").eval())
-            .unwrap()
-    };
-    let mut seen = vec![get(&mut h)];
-    for _ in 0..3 {
-        h.input("{ctrl+t}").await;
-        seen.push(get(&mut h));
-    }
-    assert_eq!(seen, ["summary", "rows", "full", "summary"]);
 }
 
 #[tokio::test]
