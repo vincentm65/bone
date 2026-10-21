@@ -15,6 +15,7 @@ bone-server = { path = "crates/bone-server" }
 bone-client = { path = "crates/bone-client" }
 bone-lua = { path = "crates/bone-lua" }
 bone-tui = { path = "crates/bone-tui" }
+bone-gui = { path = "crates/bone-gui" }
 bone-ui = { path = "crates/bone-ui" }
 bone-media = { path = "crates/bone-media" }
 base64 = "0.22"
