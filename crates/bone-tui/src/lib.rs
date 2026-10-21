@@ -21,13 +21,13 @@ mod panel;
 mod plugins;
 mod render;
 mod selection;
-mod shellhl;
+
 mod stats;
 mod terminal;
 mod theme;
 mod ui;
 
-use bone_ui::{composer, editor, keymap, markdown, options, term, text};
+use bone_ui::{composer, editor, keymap, options, term, text};
 
 #[cfg(test)]
 mod tests;
