@@ -4,7 +4,7 @@
 
 use mlua::{Table, Value};
 
-use crate::text::{sanitize, width};
+use crate::text::{sanitize, truncate, width};
 
 const SPINNER: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 
@@ -269,6 +269,50 @@ impl Spinner {
 pub enum Item {
     Text(String, String),
     Fill(String, String),
+}
+
+/// Lay items out in `width_cols` columns, as `(text, group)` spans for the
+/// frontend to style. Fills share the leftover space; text that does not fit
+/// is cut with `…`.
+pub fn layout_items(items: &[Item], width_cols: usize) -> Vec<(String, &str)> {
+    let text_w: usize = items
+        .iter()
+        .map(|i| match i {
+            Item::Text(t, _) => width(t),
+            Item::Fill(..) => 0,
+        })
+        .sum();
+    let fills = items.iter().filter(|i| matches!(i, Item::Fill(..))).count();
+    let spare = width_cols.saturating_sub(text_w);
+    let mut spans = Vec::new();
+    let mut used = 0;
+    let mut fill_i = 0;
+    for item in items {
+        if used >= width_cols {
+            break;
+        }
+        match item {
+            Item::Text(t, hl) => {
+                let room = width_cols - used;
+                let t = if width(t) > room {
+                    truncate(t, room)
+                } else {
+                    t.clone()
+                };
+                used += width(&t);
+                spans.push((t, hl.as_str()));
+            }
+            Item::Fill(ch, hl) => {
+                let n = spare / fills + usize::from(fill_i < spare % fills);
+                fill_i += 1;
+                let n = n.min(width_cols - used);
+                used += n;
+                let ch = ch.chars().next().unwrap_or(' ');
+                spans.push((ch.to_string().repeat(n), hl.as_str()));
+            }
+        }
+    }
+    spans
 }
 
 /// One line: a string or a list of items.

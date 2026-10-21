@@ -1826,4 +1826,20 @@ impl bone_ui::lua::Host for App {
         self.ui_broken.clear();
         self.dirty = true;
     }
+
+    fn has_lua(&self) -> bool {
+        self.lua.is_some()
+    }
+
+    fn ui_broken(&mut self) -> &mut std::collections::HashSet<String> {
+        &mut self.ui_broken
+    }
+
+    fn generation(&self) -> (u64, u64) {
+        (self.views_rev, self.opts_rev)
+    }
+
+    fn chat_expiry(&mut self) -> &mut Option<std::time::Instant> {
+        &mut self.chat_expiry
+    }
 }

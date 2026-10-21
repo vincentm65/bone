@@ -21,10 +21,9 @@ use serde_json::{Value as Json, json};
 pub use bone_ui::model::*;
 
 use crate::app::App;
-use crate::chat::{Item as ChatItem, RenderKey, bare};
+use crate::chat::bare;
 use crate::editor::TextBuffer;
 use crate::layout::BufferId;
-use crate::text::{truncate, width};
 use crate::theme::Theme;
 
 /// A line, or a function of `ctx` returning one.
@@ -38,43 +37,10 @@ fn line_of(lua: &mlua::Lua, v: Value, ctx: &Json, hl: &str) -> mlua::Result<Vec<
 /// Lay items out in `width` columns. Fills share the leftover space; text
 /// that does not fit is cut with `…`.
 pub fn render_items(items: &[Item], width_cols: usize, theme: &Theme) -> Line<'static> {
-    let text_w: usize = items
-        .iter()
-        .map(|i| match i {
-            Item::Text(t, _) => width(t),
-            Item::Fill(..) => 0,
-        })
-        .sum();
-    let fills = items.iter().filter(|i| matches!(i, Item::Fill(..))).count();
-    let spare = width_cols.saturating_sub(text_w);
-    let mut spans = Vec::new();
-    let mut used = 0;
-    let mut fill_i = 0;
-    for item in items {
-        if used >= width_cols {
-            break;
-        }
-        match item {
-            Item::Text(t, hl) => {
-                let room = width_cols - used;
-                let t = if width(t) > room {
-                    truncate(t, room)
-                } else {
-                    t.clone()
-                };
-                used += width(&t);
-                spans.push(Span::styled(t, theme.hl(hl)));
-            }
-            Item::Fill(ch, hl) => {
-                let n = spare / fills + usize::from(fill_i < spare % fills);
-                fill_i += 1;
-                let n = n.min(width_cols - used);
-                used += n;
-                let ch = ch.chars().next().unwrap_or(' ');
-                spans.push(Span::styled(ch.to_string().repeat(n), theme.hl(hl)));
-            }
-        }
-    }
+    let spans: Vec<Span<'static>> = bone_ui::model::layout_items(items, width_cols)
+        .into_iter()
+        .map(|(t, hl)| Span::styled(t, theme.hl(hl)))
+        .collect();
     Line::from(spans)
 }
 
@@ -347,20 +313,7 @@ impl App {
         name: &str,
         body: impl FnOnce(&mlua::Lua) -> mlua::Result<R>,
     ) -> Option<R> {
-        if self.lua.is_none() || self.ui_broken.contains(name) {
-            return None;
-        }
-        match self.with_api(body) {
-            Ok(r) => Some(r),
-            Err(e) => {
-                self.ui_broken.insert(name.to_owned());
-                self.lua_error(
-                    &format!("bone.ui.{name} failed (plain text until it is redefined)"),
-                    &e,
-                );
-                None
-            }
-        }
+        bone_ui::lua::guarded(self, name, body)
     }
 
     /// Call `bone.ui[name](ctx)` for a single row (statusline, divider).
@@ -379,90 +332,13 @@ impl App {
 
     /// Render the stale items of a chat through `bone.ui.views` and cache them.
     pub fn render_chat(&mut self, buf: BufferId, width_cols: usize) {
-        let generation = (self.views_rev, self.opts_rev);
-        // Views that read other chat data are drawn again when it changed.
-        let data = self.data_generation();
-        // Each chat is indexed once, not once per view that read it.
-        let mut chats = std::collections::HashMap::new();
-        let checked: Vec<_> = self.chats[buf]
-            .unchecked_deps(data)
-            .into_iter()
-            .map(|(item, deps)| {
-                let fresh = deps.iter().all(|d| {
-                    let session = &d.filter.session;
-                    let chat = (chats.entry(session.clone()))
-                        .or_insert_with(|| self.indexed(session.as_deref()));
-                    chat.as_ref().map_or(0, |c| c.signature(&d.filter)) == d.sig
-                });
-                (item, fresh)
-            })
-            .collect();
-        for (item, fresh) in checked {
-            if fresh {
-                self.chats[buf].mark_checked(item, data);
-            } else {
-                self.chats[buf].invalidate(item);
-            }
-        }
-        let stale = self.chats[buf].stale(width_cols, generation, std::time::Instant::now());
-        let items = if stale.is_empty() {
-            Vec::new()
-        } else {
-            self.chats[buf].items()
-        };
-        for (item, index, key) in stale {
-            let prev = index
-                .checked_sub(2)
-                .and_then(|p| items.get(p))
-                .map(|p| self.chats[buf].kind_name(p).to_owned());
-            self.render_deps = Some(Vec::new());
-            self.render_expires = None;
-            let lines = self.render_item(buf, item, index, &key, prev);
-            let deps = self.render_deps.take().unwrap_or_default();
-            let expires = self.render_expires.take();
-            self.chats[buf].store(item, key, lines, deps, expires, data);
-        }
-        let expiry = self.chats[buf].next_expiry();
-        self.chat_expiry = self.chat_expiry.into_iter().chain(expiry).min();
-    }
-
-    fn render_item(
-        &mut self,
-        buf: BufferId,
-        item: ChatItem,
-        index: usize,
-        key: &RenderKey,
-        prev: Option<String>,
-    ) -> Vec<Line<'static>> {
-        let data = self.chats[buf].item_data(item, index, true);
-        let kind = self.chats[buf].kind_name(&item).to_owned();
-        let ctx = json!({
-            "width": key.width,
-            "region": "chat",
-            "prev": prev.map(|kind| json!({ "kind": kind })),
-        });
-        let lines = self
-            .guarded(&format!("views.{kind}"), |lua| {
-                let views: Table = lua
-                    .globals()
-                    .get::<Table>("bone")?
-                    .get::<Table>("ui")?
-                    .get("views")?;
-                let Some(f) = views.get::<Option<Function>>(kind.as_str())? else {
-                    return Ok(None);
-                };
-                let v = f.call::<Value>((to_lua(lua, &data)?, to_lua(lua, &ctx)?))?;
-                // nil hides the item.
-                Ok(Some(parse_lines(v)?.unwrap_or_default()))
-            })
-            .flatten();
-        match lines {
-            Some(lines) => lines
-                .iter()
-                .map(|l| render_items(l, key.width, &self.theme))
-                .collect(),
-            None => bare(&data, key.width, key.prev.is_none()),
-        }
+        bone_ui::lua::render_chat(
+            self,
+            buf,
+            width_cols,
+            &|app: &App, items, width| render_items(items, width, &app.theme),
+            &|data, width, first| bare(data, width, first),
+        );
     }
 
     /// A region in a stack of rows (`rows`: sized in rows, up to `height`)

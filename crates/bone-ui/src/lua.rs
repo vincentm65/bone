@@ -4,7 +4,7 @@
 //! own fields as `bone-ui` types, and the services only it has. See
 //! `docs/plans/gui-lua-host.md`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -14,7 +14,7 @@ use bone_proto::methods::ProcessSnapshot;
 use bone_proto::types::ImageAttachment;
 use mlua::{FromLua, FromLuaMulti, Function, IntoLuaMulti, Lua, MultiValue, Table, Value};
 
-use crate::chat::{ChatBuffer, find_chat};
+use crate::chat::{ChatBuffer, Item as ChatItem, RenderKey, find_chat};
 use crate::data::{Dep, Indexed, ItemFilter};
 use crate::keymap::{Action, Context, Keymaps};
 use crate::keys::{self, Key};
@@ -239,6 +239,17 @@ pub trait Host {
     fn chat_view(&self) -> serde_json::Value;
     /// `bone.ui` changed: draw it all again, retrying parts that failed.
     fn refresh_ui(&mut self);
+
+    // Drawing through Lua.
+    /// The Lua state is up.
+    fn has_lua(&self) -> bool;
+    /// `bone.ui` functions that failed, skipped until the UI is refreshed.
+    fn ui_broken(&mut self) -> &mut HashSet<String>;
+    /// Bumped when views, or options and colors, change: part of every
+    /// cached chat row's key.
+    fn generation(&self) -> (u64, u64);
+    /// When the chat on screen next needs drawing for a view's timer.
+    fn chat_expiry(&mut self) -> &mut Option<Instant>;
 }
 
 /// Run shared op `op`, or give `a` back for the frontend's own dispatcher.
@@ -1493,4 +1504,131 @@ fn process_list<H: Host>(h: &mut H, lua: &Lua) -> mlua::Result<MultiValue> {
         .map(|p| serde_json::to_value(p).unwrap_or_default())
         .collect();
     ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
+}
+
+// ---- drawing chats through Lua views ---------------------------------------
+
+/// Run Lua that may fail; a failure is reported once and `name` is skipped
+/// until the UI is refreshed (`bone.ui.refresh`, or redefining it).
+pub fn guarded<H: Host, R>(
+    h: &mut H,
+    name: &str,
+    body: impl FnOnce(&Lua) -> mlua::Result<R>,
+) -> Option<R> {
+    if !h.has_lua() || h.ui_broken().contains(name) {
+        return None;
+    }
+    match h.with_api(body) {
+        Ok(r) => Some(r),
+        Err(e) => {
+            h.ui_broken().insert(name.to_owned());
+            h.lua_error(
+                &format!("bone.ui.{name} failed (plain text until it is redefined)"),
+                &e,
+            );
+            None
+        }
+    }
+}
+
+/// Render the stale items of chat `buf` through `bone.ui.views` at
+/// `width_cols` and cache them. `line` lays out one line of a view's items;
+/// `bare` is an item's rows when no view applies.
+pub fn render_chat<H: Host>(
+    h: &mut H,
+    buf: usize,
+    width_cols: usize,
+    line: &impl Fn(&H, &[crate::model::Item], usize) -> H::Line,
+    bare: &impl Fn(&serde_json::Value, usize, bool) -> Vec<H::Line>,
+) {
+    let generation = h.generation();
+    let c = h.chat_store();
+    // Views that read other chat data are drawn again when it changed.
+    let data = crate::data::generation(c.chats);
+    let checked: Vec<_> = {
+        // Each chat is indexed once, not once per view that read it.
+        let mut chats = HashMap::new();
+        c.chats[buf]
+            .unchecked_deps(data)
+            .into_iter()
+            .map(|(item, deps)| {
+                let fresh = deps.iter().all(|d| {
+                    let session = &d.filter.session;
+                    let chat = (chats.entry(session.clone()))
+                        .or_insert_with(|| c.data_chat(session.as_deref()).map(Indexed::new));
+                    chat.as_ref().map_or(0, |c| c.signature(&d.filter)) == d.sig
+                });
+                (item, fresh)
+            })
+            .collect()
+    };
+    for (item, fresh) in checked {
+        if fresh {
+            c.chats[buf].mark_checked(item, data);
+        } else {
+            c.chats[buf].invalidate(item);
+        }
+    }
+    let stale = c.chats[buf].stale(width_cols, generation, Instant::now());
+    let items = if stale.is_empty() {
+        Vec::new()
+    } else {
+        c.chats[buf].items()
+    };
+    for (item, index, key) in stale {
+        let c = h.chat_store();
+        let prev = index
+            .checked_sub(2)
+            .and_then(|p| items.get(p))
+            .map(|p| c.chats[buf].kind_name(p).to_owned());
+        *c.render_deps = Some(Vec::new());
+        *c.render_expires = None;
+        let lines = render_item(h, buf, item, index, &key, prev, line, bare);
+        let c = h.chat_store();
+        let deps = c.render_deps.take().unwrap_or_default();
+        let expires = c.render_expires.take();
+        c.chats[buf].store(item, key, lines, deps, expires, data);
+    }
+    let expiry = h.chat_store().chats[buf].next_expiry();
+    let at = h.chat_expiry();
+    *at = (*at).into_iter().chain(expiry).min();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_item<H: Host>(
+    h: &mut H,
+    buf: usize,
+    item: ChatItem,
+    index: usize,
+    key: &RenderKey,
+    prev: Option<String>,
+    line: &impl Fn(&H, &[crate::model::Item], usize) -> H::Line,
+    bare: &impl Fn(&serde_json::Value, usize, bool) -> Vec<H::Line>,
+) -> Vec<H::Line> {
+    let c = h.chat_store();
+    let data = c.chats[buf].item_data(item, index, true);
+    let kind = c.chats[buf].kind_name(&item).to_owned();
+    let ctx = serde_json::json!({
+        "width": key.width,
+        "region": "chat",
+        "prev": prev.map(|kind| serde_json::json!({ "kind": kind })),
+    });
+    let lines = guarded(h, &format!("views.{kind}"), |lua| {
+        let views: Table = lua
+            .globals()
+            .get::<Table>("bone")?
+            .get::<Table>("ui")?
+            .get("views")?;
+        let Some(f) = views.get::<Option<Function>>(kind.as_str())? else {
+            return Ok(None);
+        };
+        let v = f.call::<Value>((to_lua(lua, &data)?, to_lua(lua, &ctx)?))?;
+        // nil hides the item.
+        Ok(Some(crate::model::parse_lines(v)?.unwrap_or_default()))
+    })
+    .flatten();
+    match lines {
+        Some(lines) => lines.iter().map(|l| line(h, l, key.width)).collect(),
+        None => bare(&data, key.width, key.prev.is_none()),
+    }
 }

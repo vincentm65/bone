@@ -4,7 +4,7 @@
 use ratatui::text::Line;
 use serde_json::Value;
 
-pub use bone_ui::chat::{Item, RenderKey, RunningTurn};
+pub use bone_ui::chat::RunningTurn;
 
 use crate::text::{sanitize, wrap};
 
