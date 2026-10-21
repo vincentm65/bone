@@ -501,8 +501,7 @@ impl App {
     /// A chat by its session id, or by its number (`bone.chat.session().chat`),
     /// which a new chat has before its session.
     pub(crate) fn chat_by_session(&self, id: &str) -> Option<BufferId> {
-        (self.chats.iter().position(|c| c.session_id() == Some(id)))
-            .or_else(|| id.parse().ok().filter(|&b| b < self.chats.len()))
+        find_chat(&self.chats, id)
     }
 
     pub fn show_chat(&mut self, id: BufferId) {
@@ -1972,39 +1971,16 @@ impl App {
                 }
             };
         }
-        on!(TurnStarted, |p| self.with_chat(&p.session_id, |c| c
-            .turn_started_with_images(
-                p.turn_id,
-                &p.text,
-                p.images.clone()
-            )));
-        on!(MessageDelta, |p| self
-            .with_chat(&p.session_id, |c| c.delta(&p)));
-        on!(MessageCompleted, |p| self
-            .with_chat(&p.session_id, |c| c.message_completed(&p)));
-        on!(ToolStarted, |p| self
-            .with_chat(&p.session_id, |c| c.tool_started(&p)));
-        on!(ToolFinished, |p| self
-            .with_chat(&p.session_id, |c| c.tool_finished(&p)));
+        let chats = &mut self.chats;
+        if bone_ui::chat::apply_event(ev, |id| {
+            let buf = find_chat(chats, id)?;
+            chats.get_mut(buf)
+        }) {
+            self.dirty = true;
+            return;
+        }
         on!(SettingsChanged, |p| self.update_settings(p.settings));
-        on!(ToolOutput, |p| self
-            .with_chat(&p.session_id, |c| c.tool_output(&p)));
         on!(ProcessChanged, |p| self.process_changed(&p));
-        on!(TurnSteered, |p| self.with_chat(&p.session_id, |c| c
-            .steered_with_images(&p.text, p.images.clone())));
-        on!(TurnFinished, |p| self
-            .with_chat(&p.session_id, |c| c.turn_finished(&p)));
-        on!(QueueChanged, |p| self.with_chat(&p.session_id, |c| {
-            c.set_queue(p.items, p.paused);
-            if let Some(error) = p.error {
-                let notice = if p.paused {
-                    format!("Queue paused: {error}. /queue to inspect or resume.")
-                } else {
-                    error
-                };
-                c.notice(notice, true);
-            }
-        }));
         on!(SessionUpdated, |p| self.reload_chat(p.session_id));
         on!(SessionDeleted, |p| self.session_deleted(&p.session_id));
     }
@@ -2198,12 +2174,6 @@ impl App {
         });
     }
 
-    fn with_chat(&mut self, session_id: &str, f: impl FnOnce(&mut ChatBuffer)) {
-        if let Some(buf) = self.chat_by_session(session_id) {
-            f(&mut self.chats[buf]);
-        }
-    }
-
     /// Something is moving on screen (a spinner or elapsed time).
     pub fn animating(&self) -> bool {
         self.chats.iter().any(|c| c.turn.is_some() || c.starting)
@@ -2262,4 +2232,10 @@ fn trim_heap() {
     unsafe {
         libc::malloc_trim(0);
     }
+}
+
+/// The chat showing session `id`, or chat number `id`.
+fn find_chat(chats: &[ChatBuffer], id: &str) -> Option<BufferId> {
+    (chats.iter().position(|c| c.session_id() == Some(id)))
+        .or_else(|| id.parse().ok().filter(|&b| b < chats.len()))
 }

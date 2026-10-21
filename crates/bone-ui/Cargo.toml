@@ -7,6 +7,7 @@ rust-version.workspace = true
 
 [dependencies]
 bitflags.workspace = true
+bone-client.workspace = true
 bone-media.workspace = true
 bone-proto.workspace = true
 mlua.workspace = true

@@ -13,9 +13,11 @@ use std::time::Instant;
 
 use crate::data::Dep;
 
+use bone_client::Event;
 use bone_proto::methods::{
-    MessageCompletedParams, MessageDeltaParams, QueueMode, QueuedMessage, ToolFinishedParams,
-    ToolOutputParams, ToolStartedParams, TurnFinishedParams,
+    MessageCompleted, MessageCompletedParams, MessageDelta, MessageDeltaParams, QueueChanged,
+    QueueMode, QueuedMessage, ToolFinished, ToolFinishedParams, ToolOutput, ToolOutputParams,
+    ToolStarted, ToolStartedParams, TurnFinished, TurnFinishedParams, TurnStarted, TurnSteered,
 };
 use bone_proto::types::{
     ChatMessage, DeltaKind, SessionInfo, ToolCall, TurnId, TurnOutcome, Usage,
@@ -891,6 +893,72 @@ impl<L> ChatBuffer<L> {
             .filter_map(|i| self.cache.get(i))
             .map(|c| c.lines.len())
             .sum()
+    }
+}
+
+/// Apply `ev` if it is a server event that only changes one session's
+/// transcript; `chat` finds that session's open chat (if any). True when
+/// `ev` was such an event, whether or not the chat is open.
+pub fn apply_event<'a, L: 'a>(
+    ev: &Event,
+    chat: impl FnOnce(&str) -> Option<&'a mut ChatBuffer<L>>,
+) -> bool {
+    macro_rules! on {
+        ($n:ty, |$c:ident, $p:ident| $body:expr) => {
+            if let Some(Ok($p)) = ev.parse::<$n>() {
+                if let Some($c) = chat(&$p.session_id) {
+                    $body;
+                }
+                return true;
+            }
+        };
+    }
+    on!(TurnStarted, |c, p| c.turn_started_with_images(
+        p.turn_id,
+        &p.text,
+        p.images.clone()
+    ));
+    on!(MessageDelta, |c, p| c.delta(&p));
+    on!(MessageCompleted, |c, p| c.message_completed(&p));
+    on!(ToolStarted, |c, p| c.tool_started(&p));
+    on!(ToolFinished, |c, p| c.tool_finished(&p));
+    on!(ToolOutput, |c, p| c.tool_output(&p));
+    on!(TurnSteered, |c, p| c
+        .steered_with_images(&p.text, p.images.clone()));
+    on!(TurnFinished, |c, p| c.turn_finished(&p));
+    on!(QueueChanged, |c, p| {
+        c.set_queue(p.items, p.paused);
+        if let Some(error) = p.error {
+            let notice = if p.paused {
+                format!("Queue paused: {error}. /queue to inspect or resume.")
+            } else {
+                error
+            };
+            c.notice(notice, true);
+        }
+    });
+    false
+}
+
+/// What an item says when no Lua view draws it: plain text, empty for
+/// nothing (reasoning is left out; a Lua view can show it). Frontends wrap
+/// it and put a blank line between items.
+pub fn bare_text(data: &Value) -> String {
+    let s = |k: &str| data[k].as_str().unwrap_or("").to_owned();
+    match data["kind"].as_str().unwrap_or("") {
+        "reasoning" => String::new(),
+        "user" => format!("> {}", s("text")),
+        "tool" => {
+            let mut t = format!("{} {}", s("name"), s("raw_arguments"));
+            if let Some(out) = data["output"].as_str() {
+                t.push('\n');
+                t.push_str(out);
+            }
+            t
+        }
+        "notice" => format!("! {}", s("text")),
+        "queued" => format!("(queued) {}", s("text")),
+        _ => s("text"),
     }
 }
 

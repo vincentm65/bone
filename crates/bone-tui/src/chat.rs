@@ -14,22 +14,7 @@ pub type ChatBuffer = bone_ui::chat::ChatBuffer<Line<'static>>;
 /// a blank line between items, no colors. Reasoning is hidden (a Lua view
 /// can show it). `first` is whether this is the first item.
 pub fn bare(data: &Value, width: usize, first: bool) -> Vec<Line<'static>> {
-    let s = |k: &str| data[k].as_str().unwrap_or("").to_owned();
-    let text = match data["kind"].as_str().unwrap_or("") {
-        "reasoning" => return Vec::new(),
-        "user" => format!("> {}", s("text")),
-        "tool" => {
-            let mut t = format!("{} {}", s("name"), s("raw_arguments"));
-            if let Some(out) = data["output"].as_str() {
-                t.push('\n');
-                t.push_str(out);
-            }
-            t
-        }
-        "notice" => format!("! {}", s("text")),
-        "queued" => format!("(queued) {}", s("text")),
-        _ => s("text"),
-    };
+    let text = bone_ui::chat::bare_text(data);
     if text.is_empty() {
         return Vec::new();
     }
