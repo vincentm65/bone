@@ -48,7 +48,7 @@ local function starts(kind, ctx)
   return { {} }
 end
 
--- bone.ui.markdown (Markdown text to lines) is in the base API, tui/api.lua.
+-- bone.ui.markdown (Markdown text to lines) is in the base API, ui/api.lua.
 
 -- A streaming item is drawn in two parts: a settled start, drawn once and
 -- kept, and the rest, drawn every frame, so a long reply doesn't cost more

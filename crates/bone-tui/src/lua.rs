@@ -81,6 +81,7 @@ pub fn init(app: &mut App, config_dir: Option<PathBuf>) {
         .as_deref()
         == Some("bare");
     let files = [
+        "ui/api.lua",
         "tui/api.lua",
         if bare {
             "tui/bare.lua"

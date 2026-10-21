@@ -40,6 +40,7 @@ pub const RUNTIME: &[(&str, &str)] = runtime_files![
     "lua/bone/ui/tray.lua",
     "lua/bone/ui/turn_timing.lua",
     "lua/bone/ui/views.lua",
+    "ui/api.lua",
     "tui/api.lua",
     "tui/defaults.lua",
     "tui/bare.lua",
@@ -685,7 +686,7 @@ pub fn tui_libraries(config_dir: &Path) -> Vec<String> {
     names
 }
 
-/// Copy the built-in TUI files (all but `tui/api.lua` and the core's) to a
+/// Copy the built-in TUI files (all but the base API and the core's) to a
 /// new library, `<config dir>/libraries/<name>/`; `bare` copies only the
 /// bare library's file, as its `tui/defaults.lua`. An existing one is never
 /// touched.
@@ -711,7 +712,7 @@ pub fn create_tui_library(config_dir: &Path, name: &str, bare: bool) -> Result<P
             let rel = match *rel {
                 "tui/bare.lua" if bare => "tui/defaults.lua",
                 _ if bare => continue,
-                "tui/api.lua" | "tui/bare.lua" => continue,
+                "ui/api.lua" | "tui/api.lua" | "tui/bare.lua" => continue,
                 r if r.starts_with("core/") => continue,
                 r => r,
             };
