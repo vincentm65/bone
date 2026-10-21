@@ -74,6 +74,7 @@ pub const DOCS: &[(&str, &str)] = docs_files![
 pub enum Side {
     Core,
     Tui,
+    Gui,
 }
 
 impl Side {
@@ -81,6 +82,7 @@ impl Side {
         match self {
             Side::Core => "core",
             Side::Tui => "tui",
+            Side::Gui => "gui",
         }
     }
 }
@@ -160,11 +162,15 @@ static TUI_CAPABILITIES: &[&str] = &[
     "tui.session",
 ];
 
+/// The GUI's, growing as the shared UI API moves into `bone-ui`.
+static GUI_CAPABILITIES: &[&str] = &["lua", "json", "modules", "fs", "plugins.state", "docs"];
+
 /// Capabilities implemented by a Lua state on this side of bone.
 pub fn capabilities(side: Side) -> &'static [&'static str] {
     match side {
         Side::Core => CORE_CAPABILITIES,
         Side::Tui => TUI_CAPABILITIES,
+        Side::Gui => GUI_CAPABILITIES,
     }
 }
 
@@ -882,7 +888,7 @@ fn setup_require(lua: &Lua, side: Side, config_dir: Option<&Path>) -> mlua::Resu
         let rel = name.replace('.', "/");
         for candidate in [format!("lua/{rel}.lua"), format!("lua/{rel}/init.lua")] {
             let found = match side {
-                Side::Tui => tui_runtime_source(dir.as_deref(), &candidate),
+                Side::Tui | Side::Gui => tui_runtime_source(dir.as_deref(), &candidate),
                 _ => runtime_source(dir.as_deref(), &candidate),
             };
             if let Some((src, chunk_name)) = found {

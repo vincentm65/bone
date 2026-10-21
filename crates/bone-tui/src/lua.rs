@@ -29,6 +29,10 @@ fn fmt_color(c: Color) -> String {
     }
 }
 
+/// What a plugin, the user's config, or a project runs in the TUI, in
+/// order: the UI code it shares with the GUI, then the TUI's own.
+pub const CONFIG_FILES: [&str; 2] = ["ui.lua", "tui.lua"];
+
 const DISPATCH: &str = "bone.dispatch";
 const CALLBACKS: &str = "bone.callbacks";
 
@@ -765,8 +769,8 @@ impl App {
         self.error(format!("{context}: {}", short_error(e)));
     }
 
-    /// Load each plugin's `tui.lua` (as that plugin), then
-    /// `<config dir>/tui.lua`, then a trusted project's `.bone/tui.lua`, then
+    /// Load each plugin's `ui.lua` and `tui.lua` (as that plugin), then
+    /// `<config dir>/ui.lua` and `tui.lua`, then a trusted project's, then
     /// fire `ready`. Where this had errors is remembered for reloads.
     pub fn load_user_config(&mut self) {
         self.load_user_files();
@@ -810,9 +814,10 @@ impl App {
             if bone_lua::tui_library(&dir).as_deref() == Some("bare") {
                 return;
             }
-            let path = dir.join("tui.lua");
-            if let Err(e) = self.with_api(|lua| bone_lua::run_file(lua, &path)) {
-                self.lua_error(&path.display().to_string(), &e);
+            for path in CONFIG_FILES.map(|f| dir.join(f)) {
+                if let Err(e) = self.with_api(|lua| bone_lua::run_file(lua, &path)) {
+                    self.lua_error(&path.display().to_string(), &e);
+                }
             }
             self.load_project();
         }

@@ -135,10 +135,10 @@ impl App {
         }
     }
 
-    /// Run a plugin's `tui.lua` as that plugin. Errors are reported and kept
-    /// in its info; what it set up before failing stays (and unloads).
+    /// Run a plugin's `ui.lua` and `tui.lua` as that plugin. Errors are
+    /// reported and kept in its info; what it set up before failing stays
+    /// (and unloads).
     pub fn load_plugin(&mut self, name: &str, dir: &Path, kind: Kind) {
-        let file = dir.join("tui.lua");
         self.register_plugin(name, dir, kind);
         // Its modules come before the rest (they may be new since startup).
         let lua_dir = dir.join("lua");
@@ -154,16 +154,16 @@ impl App {
         });
         let before = self.with_api(loaded_modules).unwrap_or_default();
         let prev = self.owner.replace(name.to_owned());
-        let r = self.with_api(|lua| bone_lua::run_file(lua, &file));
+        let mut error = None;
+        for file in crate::lua::CONFIG_FILES.map(|f| dir.join(f)) {
+            if let Err(e) = self.with_api(|lua| bone_lua::run_file(lua, &file)) {
+                self.lua_error(&file.display().to_string(), &e);
+                error = Some(bone_lua::short_error(&e));
+                break;
+            }
+        }
         self.owner = prev;
         let after = self.with_api(loaded_modules).unwrap_or_default();
-        let error = match r {
-            Ok(_) => None,
-            Err(e) => {
-                self.lua_error(&file.display().to_string(), &e);
-                Some(bone_lua::short_error(&e))
-            }
-        };
         // Its README is a help page while it is loaded.
         if error.is_none()
             && let Ok(text) = std::fs::read_to_string(dir.join("README.md"))
@@ -423,7 +423,7 @@ impl App {
     }
 
     /// The nearest directory at or above the working directory with a
-    /// `.bone/tui.lua` (that is not the config dir itself).
+    /// `.bone/ui.lua` or `.bone/tui.lua` (that is not the config dir itself).
     pub fn project_root(&self) -> Option<PathBuf> {
         let config = self
             .config_dir
@@ -433,7 +433,8 @@ impl App {
         cwd.ancestors()
             .find(|a| {
                 let d = a.join(".bone");
-                d.join("tui.lua").is_file() && std::fs::canonicalize(&d).ok() != config
+                crate::lua::CONFIG_FILES.iter().any(|f| d.join(f).is_file())
+                    && std::fs::canonicalize(&d).ok() != config
             })
             .map(Path::to_owned)
     }
@@ -503,7 +504,7 @@ impl App {
     pub fn set_project_trust(&mut self, trusted: bool) -> Result<(), String> {
         let root = self
             .project_root()
-            .ok_or("no .bone/tui.lua here or in a parent directory")?;
+            .ok_or("no .bone/ui.lua or .bone/tui.lua here or in a parent directory")?;
         self.set_trusted(&root, trusted)?;
         let loaded = self.plugin(PROJECT).is_some_and(|p| p.loaded);
         if trusted && !loaded {

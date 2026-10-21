@@ -8,6 +8,7 @@ other guides works in a plugin's files unchanged.
 ```text
 ~/.bone/plugins/myplugin/
   core.lua     runs in the core (tools, hooks)
+  ui.lua       UI code shared by the TUI and GUI; runs before tui.lua
   tui.lua      runs in the TUI (keys, commands, tool views)
   lua/         modules for require()
   colors/      colorschemes

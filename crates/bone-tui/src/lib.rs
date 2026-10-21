@@ -303,9 +303,12 @@ enum Watched {
     Tui,
     Core,
     Both,
+    /// The GUI's (`gui.lua`, `runtime/gui/`): neither side here.
+    Gui,
 }
 
-/// `tui.lua`, `colors/` and `runtime/tui/` are the TUI's; `core.lua` and
+/// `ui.lua`, `tui.lua`, `colors/`, `runtime/ui/` and `runtime/tui/` are the
+/// TUI's; `gui.lua` and `runtime/gui/` the GUI's; `core.lua` and
 /// `runtime/core/` the core's, and the same inside a plugin. Modules (`lua/`,
 /// `runtime/lua/`) can be required by either.
 fn side_of(rel: &Path) -> Watched {
@@ -316,9 +319,14 @@ fn side_of(rel: &Path) -> Watched {
         all => all,
     };
     match parts {
-        ["tui.lua"] | ["tui", ..] | ["colors", ..] | ["library"] | ["libraries", ..] => {
-            Watched::Tui
-        }
+        ["ui.lua"]
+        | ["tui.lua"]
+        | ["ui", ..]
+        | ["tui", ..]
+        | ["colors", ..]
+        | ["library"]
+        | ["libraries", ..] => Watched::Tui,
+        ["gui.lua"] | ["gui", ..] => Watched::Gui,
         ["core.lua"] | ["core", ..] => Watched::Core,
         _ => Watched::Both,
     }
@@ -336,7 +344,7 @@ fn lua_snapshot(dir: Option<&Path>, project: Option<&Path>) -> LuaSources {
     let mut files = Vec::new();
     // Only where Lua is loaded from: the config dir also holds sessions
     // and other data that would be walked on every poll.
-    for name in ["tui.lua", "core.lua", "library"] {
+    for name in ["ui.lua", "tui.lua", "core.lua", "library"] {
         let path = dir.join(name);
         if path.is_file() {
             files.push(path);
@@ -358,10 +366,10 @@ fn lua_snapshot(dir: Option<&Path>, project: Option<&Path>) -> LuaSources {
     let mut core = DefaultHasher::new();
     for path in &files {
         let side = side_of(path.strip_prefix(dir).unwrap_or(path));
-        if side != Watched::Core {
+        if matches!(side, Watched::Tui | Watched::Both) {
             hash_file(path, &mut tui);
         }
-        if side != Watched::Tui {
+        if matches!(side, Watched::Core | Watched::Both) {
             hash_file(path, &mut core);
         }
     }
