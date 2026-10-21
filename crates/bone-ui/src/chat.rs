@@ -896,6 +896,12 @@ impl<L> ChatBuffer<L> {
     }
 }
 
+/// The chat showing session `id`, or chat number `id`.
+pub fn find_chat<L>(chats: &[ChatBuffer<L>], id: &str) -> Option<usize> {
+    (chats.iter().position(|c| c.session_id() == Some(id)))
+        .or_else(|| id.parse().ok().filter(|&b| b < chats.len()))
+}
+
 /// Apply `ev` if it is a server event that only changes one session's
 /// transcript; `chat` finds that session's open chat (if any). True when
 /// `ev` was such an event, whether or not the chat is open.

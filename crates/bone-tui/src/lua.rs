@@ -15,7 +15,7 @@ use mlua::{Function, Lua, MultiValue, Table, Value};
 use crate::app::App;
 use crate::keymap::{Action, Builtin, Context};
 use crate::keys;
-use bone_ui::lua::{CALLBACKS, args, context_from_name, err, opt, ret, valid_dynamic_name};
+use bone_ui::lua::{CALLBACKS, args, context_from_name, err, opt, ret};
 use serde_json::Value as Json;
 
 /// What a plugin, the user's config, or a project runs in the TUI, in
@@ -296,54 +296,6 @@ fn pos_out(lua: &Lua, (row, col): crate::editor::Pos) -> mlua::Result<Table> {
     t.set("row", row)?;
     t.set("col", col)?;
     Ok(t)
-}
-
-/// `bone.chat.items` options.
-fn item_filter(opts: &Option<Table>) -> mlua::Result<crate::data::ItemFilter> {
-    let Some(o) = opts else {
-        return Ok(Default::default());
-    };
-    let kind = match o.get::<Value>("kind")? {
-        Value::Nil => None,
-        Value::String(s) => Some(vec![s.to_str()?.to_owned()]),
-        Value::Table(t) => Some(t.sequence_values::<String>().collect::<mlua::Result<_>>()?),
-        other => {
-            return Err(err(format!(
-                "kind is a string or a list of them, not {}",
-                other.type_name()
-            )));
-        }
-    };
-    Ok(crate::data::ItemFilter {
-        kind,
-        around: o.get("around")?,
-        name: o.get("name")?,
-        turn: o.get("turn")?,
-        running: o.get("running")?,
-        error: o.get("error")?,
-        from: o.get("from")?,
-        to: o.get("to")?,
-        first: o.get("first")?,
-        last: o.get("last")?,
-        session: o.get("session")?,
-        full: o.get::<Option<bool>>("full")?.unwrap_or(false),
-    })
-}
-
-/// A table of fields for a Lua chat item, as a JSON object.
-fn lua_fields(v: Value) -> mlua::Result<serde_json::Map<String, serde_json::Value>> {
-    match v {
-        Value::Nil => Ok(Default::default()),
-        Value::Table(_) => match from_lua(&v)? {
-            serde_json::Value::Object(m) => Ok(m),
-            serde_json::Value::Array(a) if a.is_empty() => Ok(Default::default()),
-            _ => Err(err("chat item fields must be a table with string keys")),
-        },
-        other => Err(err(format!(
-            "chat item fields must be a table, not {}",
-            other.type_name()
-        ))),
-    }
 }
 
 /// Field `k` of an optional options table: None when it or the table is nil.
@@ -1675,64 +1627,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             app.ui_expiry = Some(app.ui_expiry.map_or(at, |e| e.min(at)));
             ret(lua, ())
         }
-        "chat_items" => {
-            let opts: Option<Table> = args(lua, a)?;
-            let filter = item_filter(&opts)?;
-            let items = app.chat_query(&filter);
-            // Inside a chat view: what it read decides when it is redrawn.
-            if app.render_deps.is_some() {
-                let sig = app.chat_signature(&filter);
-                if let Some(deps) = &mut app.render_deps {
-                    deps.push(crate::data::Dep { filter, sig });
-                }
-            }
-            ret(lua, to_lua(lua, &serde_json::Value::Array(items))?)
-        }
-        "chat_add" => {
-            let (kind, fields, opts): (String, Value, Option<Table>) = args(lua, a)?;
-            let builtin = [
-                "user",
-                "reasoning",
-                "assistant",
-                "tool",
-                "notice",
-                "queued",
-                "lua",
-            ];
-            if !valid_dynamic_name(&kind) || builtin.contains(&kind.as_str()) {
-                return Err(err(format!(
-                    "a chat item kind is lowercase letters, digits and _, not a built-in kind: {kind:?}"
-                )));
-            }
-            let fields = lua_fields(fields)?;
-            let buf = match opt::<String>(&opts, "session")? {
-                Some(id) => app
-                    .chat_by_session(&id)
-                    .ok_or_else(|| err(format!("no open chat for session {id}")))?,
-                None => app.current,
-            };
-            app.lua_item_seq += 1;
-            let id = format!("{kind}-{}", app.lua_item_seq);
-            app.chats[buf].add_lua(id.clone(), kind, fields);
-            app.dirty = true;
-            ret(lua, id)
-        }
-        "chat_update" => {
-            let (id, fields): (String, Value) = args(lua, a)?;
-            let fields = lua_fields(fields)?;
-            let found = app
-                .chats
-                .iter_mut()
-                .any(|c| c.update_lua(&id, fields.clone()));
-            app.dirty |= found;
-            ret(lua, found)
-        }
-        "chat_remove" => {
-            let id: String = args(lua, a)?;
-            let found = app.chats.iter_mut().any(|c| c.remove_lua(&id));
-            app.dirty |= found;
-            ret(lua, found)
-        }
         "settings_get" => ret(lua, to_lua(lua, &app.settings)?),
         "runtime_overrides" => {
             let list: Vec<serde_json::Value> = app
@@ -1833,54 +1727,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             }
             ret(lua, ())
         }
-        "chat_refresh_in" => {
-            let ms: f64 = args(lua, a)?;
-            if app.render_deps.is_none() {
-                return Err(err("bone.chat.refresh_in only works inside a chat view"));
-            }
-            let at =
-                std::time::Instant::now() + std::time::Duration::from_millis(ms.max(0.0) as u64);
-            app.render_expires = Some(app.render_expires.map_or(at, |e| e.min(at)));
-            ret(lua, ())
-        }
-        "chat_redraw" => {
-            let index: Option<usize> = args(lua, a)?;
-            let current = app.current;
-            app.chats[current].redraw(index);
-            app.dirty = true;
-            ret(lua, ())
-        }
-        "chat_turns" => {
-            let opts: Option<Table> = args(lua, a)?;
-            let session = opt::<String>(&opts, "session")?;
-            // Inside a chat view, turns depend on every item of the chat.
-            if app.render_deps.is_some() {
-                let filter = crate::data::ItemFilter {
-                    session: session.clone(),
-                    ..Default::default()
-                };
-                let sig = app.chat_signature(&filter);
-                if let Some(deps) = &mut app.render_deps {
-                    deps.push(crate::data::Dep { filter, sig });
-                }
-            }
-            let turns = app.chat_turns(session.as_deref());
-            ret(lua, to_lua(lua, &serde_json::Value::Array(turns))?)
-        }
-        "chat_session" => {
-            let opts: Option<Table> = args(lua, a)?;
-            ret(
-                lua,
-                to_lua(
-                    lua,
-                    &app.chat_session(opt::<String>(&opts, "session")?.as_deref()),
-                )?,
-            )
-        }
-        "chat_sessions" => ret(
-            lua,
-            to_lua(lua, &serde_json::Value::Array(app.chat_sessions()))?,
-        ),
         "prompt_info" => {
             let t = lua.create_table()?;
             t.set("text", app.prompt.text())?;
@@ -1976,6 +1822,19 @@ fn normalize_image_lists(value: &mut serde_json::Value) {
 }
 
 impl bone_ui::lua::Host for App {
+    type Line = ratatui::text::Line<'static>;
+
+    fn chat_store(&mut self) -> bone_ui::lua::ChatStore<'_, Self::Line> {
+        bone_ui::lua::ChatStore {
+            chats: &mut self.chats,
+            current: self.current,
+            rendering: self.rendering,
+            render_deps: &mut self.render_deps,
+            render_expires: &mut self.render_expires,
+            lua_item_seq: &mut self.lua_item_seq,
+        }
+    }
+
     fn owners(&mut self) -> bone_ui::lua::Owners<'_> {
         bone_ui::lua::Owners {
             owner: &self.owner,

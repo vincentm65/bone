@@ -6,10 +6,13 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use bone_lua::{from_lua, to_lua};
 use mlua::{FromLua, FromLuaMulti, Function, IntoLuaMulti, Lua, MultiValue, Table, Value};
 
+use crate::chat::{ChatBuffer, find_chat};
+use crate::data::{Dep, Indexed, ItemFilter};
 use crate::keymap::{Action, Context, Keymaps};
 use crate::keys::{self, Key};
 use crate::options::{self, DynamicKind, DynamicOption, DynamicValue, Options};
@@ -65,6 +68,47 @@ pub struct Looks<'a> {
     pub rev: &'a mut u64,
 }
 
+/// The open chats, which one is on screen, and while a chat view draws,
+/// what it read (`render_deps`) and when it asked to be drawn again.
+pub struct ChatStore<'a, L> {
+    pub chats: &'a mut Vec<ChatBuffer<L>>,
+    pub current: usize,
+    /// The chat a view is drawing, which queries default to.
+    pub rendering: Option<usize>,
+    pub render_deps: &'a mut Option<Vec<Dep>>,
+    pub render_expires: &'a mut Option<Instant>,
+    /// Numbers the items Lua adds to chats.
+    pub lua_item_seq: &'a mut u64,
+}
+
+impl<L> ChatStore<'_, L> {
+    /// The chat a query is about: by session id, else the one being drawn
+    /// or on screen. `None` for a session no open chat has.
+    pub fn data_chat(&self, session: Option<&str>) -> Option<&ChatBuffer<L>> {
+        let buf = match session {
+            Some(id) => find_chat(self.chats, id)?,
+            None => self.rendering.unwrap_or(self.current),
+        };
+        self.chats.get(buf)
+    }
+
+    /// See [`Indexed::signature`]; 0 for a chat that isn't open.
+    pub fn signature(&self, f: &ItemFilter) -> u64 {
+        self.data_chat(f.session.as_deref())
+            .map_or(0, |c| Indexed::new(c).signature(f))
+    }
+
+    /// Inside a chat view, remember that it read what `filter` matches.
+    fn read(&mut self, filter: ItemFilter) {
+        if self.render_deps.is_some() {
+            let sig = self.signature(&filter);
+            if let Some(deps) = self.render_deps {
+                deps.push(Dep { filter, sig });
+            }
+        }
+    }
+}
+
 /// The keymaps, and which plugin last mapped each key.
 pub struct KeymapStore<'a> {
     pub keymaps: &'a mut Keymaps,
@@ -105,6 +149,9 @@ pub fn canonical_event(name: &str) -> &str {
 
 /// What shared ops need from a frontend.
 pub trait Host {
+    /// The frontend's rendered line type, cached in its chats.
+    type Line;
+    fn chat_store(&mut self) -> ChatStore<'_, Self::Line>;
     fn owners(&mut self) -> Owners<'_>;
     fn option_store(&mut self) -> OptionStore<'_>;
     fn autocmds(&mut self) -> &mut Vec<Autocmd>;
@@ -180,6 +227,15 @@ pub fn dispatch<H: Host>(
         }
         "colorscheme" => colorscheme_op(h, lua, a),
         "colors_name" => ret(lua, h.looks().colors_name.clone()),
+        "chat_items" => chat_items(h, lua, a),
+        "chat_add" => chat_add(h, lua, a),
+        "chat_update" => chat_update(h, lua, a),
+        "chat_remove" => chat_remove(h, lua, a),
+        "chat_refresh_in" => chat_refresh_in(h, lua, a),
+        "chat_redraw" => chat_redraw(h, lua, a),
+        "chat_turns" => chat_turns(h, lua, a),
+        "chat_session" => chat_session(h, lua, a),
+        "chat_sessions" => chat_sessions(h, lua),
         "on" => on(h, lua, a),
         "off" => off(h, lua, a),
         "command_create" => command_create(h, lua, a),
@@ -1043,4 +1099,175 @@ pub fn colorscheme<H: Host>(h: &mut H, name: &str) -> Result<(), String> {
     *l.rev += 1;
     h.changed();
     Ok(())
+}
+
+// ---- chat data -------------------------------------------------------------
+
+/// `bone.chat.items` options as a filter.
+pub fn item_filter(opts: &Option<Table>) -> mlua::Result<ItemFilter> {
+    let Some(o) = opts else {
+        return Ok(Default::default());
+    };
+    let kind = match o.get::<Value>("kind")? {
+        Value::Nil => None,
+        Value::String(s) => Some(vec![s.to_str()?.to_owned()]),
+        Value::Table(t) => Some(t.sequence_values::<String>().collect::<mlua::Result<_>>()?),
+        other => {
+            return Err(err(format!(
+                "kind is a string or a list of them, not {}",
+                other.type_name()
+            )));
+        }
+    };
+    Ok(ItemFilter {
+        kind,
+        around: o.get("around")?,
+        name: o.get("name")?,
+        turn: o.get("turn")?,
+        running: o.get("running")?,
+        error: o.get("error")?,
+        from: o.get("from")?,
+        to: o.get("to")?,
+        first: o.get("first")?,
+        last: o.get("last")?,
+        session: o.get("session")?,
+        full: o.get::<Option<bool>>("full")?.unwrap_or(false),
+    })
+}
+
+/// A table of fields for a Lua chat item, as a JSON object.
+fn lua_fields(v: Value) -> mlua::Result<serde_json::Map<String, serde_json::Value>> {
+    match v {
+        Value::Nil => Ok(Default::default()),
+        Value::Table(_) => match from_lua(&v)? {
+            serde_json::Value::Object(m) => Ok(m),
+            serde_json::Value::Array(a) if a.is_empty() => Ok(Default::default()),
+            _ => Err(err("chat item fields must be a table with string keys")),
+        },
+        other => Err(err(format!(
+            "chat item fields must be a table, not {}",
+            other.type_name()
+        ))),
+    }
+}
+
+fn chat_items<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let opts: Option<Table> = args(lua, a)?;
+    let filter = item_filter(&opts)?;
+    let mut c = h.chat_store();
+    let items = c
+        .data_chat(filter.session.as_deref())
+        .map_or_else(Vec::new, |chat| Indexed::new(chat).query(&filter));
+    // Inside a chat view: what it read decides when it is redrawn.
+    c.read(filter);
+    ret(lua, to_lua(lua, &serde_json::Value::Array(items))?)
+}
+
+fn chat_add<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let (kind, fields, opts): (String, Value, Option<Table>) = args(lua, a)?;
+    let builtin = [
+        "user",
+        "reasoning",
+        "assistant",
+        "tool",
+        "notice",
+        "queued",
+        "lua",
+    ];
+    if !valid_dynamic_name(&kind) || builtin.contains(&kind.as_str()) {
+        return Err(err(format!(
+            "a chat item kind is lowercase letters, digits and _, not a built-in kind: {kind:?}"
+        )));
+    }
+    let fields = lua_fields(fields)?;
+    let c = h.chat_store();
+    let buf = match opt::<String>(&opts, "session")? {
+        Some(id) => {
+            find_chat(c.chats, &id).ok_or_else(|| err(format!("no open chat for session {id}")))?
+        }
+        None => c.current,
+    };
+    *c.lua_item_seq += 1;
+    let id = format!("{kind}-{}", c.lua_item_seq);
+    c.chats[buf].add_lua(id.clone(), kind, fields);
+    h.changed();
+    ret(lua, id)
+}
+
+fn chat_update<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let (id, fields): (String, Value) = args(lua, a)?;
+    let fields = lua_fields(fields)?;
+    let found = h
+        .chat_store()
+        .chats
+        .iter_mut()
+        .any(|c| c.update_lua(&id, fields.clone()));
+    if found {
+        h.changed();
+    }
+    ret(lua, found)
+}
+
+fn chat_remove<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let id: String = args(lua, a)?;
+    let found = h.chat_store().chats.iter_mut().any(|c| c.remove_lua(&id));
+    if found {
+        h.changed();
+    }
+    ret(lua, found)
+}
+
+fn chat_refresh_in<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let ms: f64 = args(lua, a)?;
+    let c = h.chat_store();
+    if c.render_deps.is_none() {
+        return Err(err("bone.chat.refresh_in only works inside a chat view"));
+    }
+    let at = Instant::now() + Duration::from_millis(ms.max(0.0) as u64);
+    *c.render_expires = Some(c.render_expires.map_or(at, |e| e.min(at)));
+    ret(lua, ())
+}
+
+fn chat_redraw<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let index: Option<usize> = args(lua, a)?;
+    let c = h.chat_store();
+    let current = c.current;
+    c.chats[current].redraw(index);
+    h.changed();
+    ret(lua, ())
+}
+
+fn chat_turns<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let opts: Option<Table> = args(lua, a)?;
+    let session = opt::<String>(&opts, "session")?;
+    let mut c = h.chat_store();
+    // Inside a chat view, turns depend on every item of the chat.
+    c.read(ItemFilter {
+        session: session.clone(),
+        ..Default::default()
+    });
+    let turns = c
+        .data_chat(session.as_deref())
+        .map_or_else(Vec::new, crate::data::turns);
+    ret(lua, to_lua(lua, &serde_json::Value::Array(turns))?)
+}
+
+fn chat_session<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let opts: Option<Table> = args(lua, a)?;
+    let session = opt::<String>(&opts, "session")?;
+    let c = h.chat_store();
+    let v = match c.data_chat(session.as_deref()) {
+        Some(chat) => {
+            let buf = (c.chats.iter()).position(|x| std::ptr::eq(x, chat));
+            crate::data::session(chat, buf, buf == Some(c.current))
+        }
+        None => serde_json::Value::Null,
+    };
+    ret(lua, to_lua(lua, &v)?)
+}
+
+fn chat_sessions<H: Host>(h: &mut H, lua: &Lua) -> mlua::Result<MultiValue> {
+    let c = h.chat_store();
+    let all = crate::data::sessions(c.chats, c.current);
+    ret(lua, to_lua(lua, &serde_json::Value::Array(all))?)
 }

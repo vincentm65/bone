@@ -501,7 +501,7 @@ impl App {
     /// A chat by its session id, or by its number (`bone.chat.session().chat`),
     /// which a new chat has before its session.
     pub(crate) fn chat_by_session(&self, id: &str) -> Option<BufferId> {
-        find_chat(&self.chats, id)
+        bone_ui::chat::find_chat(&self.chats, id)
     }
 
     pub fn show_chat(&mut self, id: BufferId) {
@@ -1973,7 +1973,7 @@ impl App {
         }
         let chats = &mut self.chats;
         if bone_ui::chat::apply_event(ev, |id| {
-            let buf = find_chat(chats, id)?;
+            let buf = bone_ui::chat::find_chat(chats, id)?;
             chats.get_mut(buf)
         }) {
             self.dirty = true;
@@ -2232,10 +2232,4 @@ fn trim_heap() {
     unsafe {
         libc::malloc_trim(0);
     }
-}
-
-/// The chat showing session `id`, or chat number `id`.
-fn find_chat(chats: &[ChatBuffer], id: &str) -> Option<BufferId> {
-    (chats.iter().position(|c| c.session_id() == Some(id)))
-        .or_else(|| id.parse().ok().filter(|&b| b < chats.len()))
 }
