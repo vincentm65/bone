@@ -140,6 +140,17 @@ A typical turn: `turn/started`, then `message/delta`…, `message/completed` (wi
 
 Events are broadcast to all clients. A client that falls more than 8192 events behind loses the oldest ones, so treat `message/completed` and `session/messages` as authoritative over accumulated deltas.
 
+## Multiple clients
+
+Any number of clients (a TUI, a GUI, scripts) can share one core and drive the same sessions. The core owns all session state; what holds between clients:
+
+- **Delivery.** Every event goes to every connection that completed the handshake, in the order the core emitted it. `turn/started` carries the user message, so other clients can show a turn they did not start.
+- **Questions.** The first `ask/respond` for an `ask_id` wins. Later answers, from any client, get `-32602` ("no open question"). Every client hears `ask/resolved` and should close its copy of the question. `ask/list` returns the questions still open, for a client that connected after `ask/requested`.
+- **Submitting.** `turn/start` on a session with a running turn fails with `-32004`. `queue/add` never conflicts: it starts a turn on an idle session and queues otherwise, so clients that may race should use it.
+- **Lag.** A client more than 8192 events behind gets `session/updated` with `reason: "lagged"` and an empty `session_id`. It has missed events and must reload every session it shows.
+- **Resync.** `session/messages` is a complete snapshot of a session: `messages`, `active_turn`, `queue`, and `queue_paused`. With `settings/get` and `ask/list`, it is all a client needs after connecting, reconnecting, or lagging. Fetch the snapshots before handling buffered events, so the events bring them up to date in order.
+- **Not shared.** Prompt drafts, scroll positions, open windows, and Lua items added with `bone.chat.add` belong to each client.
+
 `ProcessSnapshot` contains `id`, `command`, `state` (`running`, `exited`,
 `cancelled`, `timed_out` or `failed`), `running`, `pid`, start/finish times,
 `tail` (the last line of output, escape codes removed), `output_bytes`,
@@ -177,4 +188,4 @@ while let Some(e) = events.recv().await {
 }
 ```
 
-`bone_client::spawn` takes an owned `tokio::process::Command` configured with `--headless` and returns `(Connection, Child)` for a private server; keep the child handle alive while using the connection. `crates/bone-server/examples/chat.rs` is a complete line-mode client.
+`bone_client::spawn` takes an owned `tokio::process::Command` configured with `--headless` and returns `(Connection, Child)` for a private server; keep the child handle alive while using the connection. `bone_client::reconnect(path, client_name)` connects to a socket server again after losing it, retrying with backoff, and returns the new client with its settings and open questions already fetched. `crates/bone-server/examples/chat.rs` is a complete line-mode client.
