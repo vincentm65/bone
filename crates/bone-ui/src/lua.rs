@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use bone_lua::{from_lua, to_lua};
 use mlua::{FromLua, FromLuaMulti, Function, IntoLuaMulti, Lua, MultiValue, Table, Value};
 
 use crate::keymap::Context;
@@ -52,10 +53,51 @@ pub struct OptionStore<'a> {
     pub rev: &'a mut u64,
 }
 
+/// A slash command defined from Lua (`bone.cmd.create`).
+#[derive(Clone)]
+pub struct UserCommand {
+    pub callback: u64,
+    pub desc: String,
+    pub aliases: Vec<String>,
+    pub completion: Option<u64>,
+    pub args: Option<serde_json::Value>,
+}
+
+/// An event handler (`bone.on`).
+pub struct Autocmd {
+    pub id: u64,
+    pub event: String,
+    pub callback: u64,
+}
+
+/// The one name of an event that has aliases.
+pub fn canonical_event(name: &str) -> &str {
+    match name {
+        "prompt" | "prompt_changed" | "prompt/changed" => "prompt/changed",
+        "focus" | "focus_changed" | "focus/changed" => "focus/changed",
+        "ui/resize" | "resize" => "resize",
+        "key/pressed" | "key" => "key",
+        "paste" | "text/pasted" => "paste",
+        "panel" | "panel/opened" | "popup" | "popup/opened" => "panel/opened",
+        "panel/closed" | "popup/closed" => "panel/closed",
+        "panel/updated" | "popup/updated" => "panel/updated",
+        other => other,
+    }
+}
+
 /// What shared ops need from a frontend.
 pub trait Host {
     fn owners(&mut self) -> Owners<'_>;
     fn option_store(&mut self) -> OptionStore<'_>;
+    fn autocmds(&mut self) -> &mut Vec<Autocmd>;
+    fn user_commands(&mut self) -> &mut HashMap<String, UserCommand>;
+    /// Run stored callback `id` with one argument; as `call_callback_multi`.
+    fn call_callback(
+        &mut self,
+        id: u64,
+        context: &str,
+        arg: impl FnOnce(&Lua) -> mlua::Result<Value>,
+    ) -> Option<Value>;
     /// Run stored callback `id` with `args`, as the plugin that owns it; a
     /// failure is reported as `context` and gives `None`.
     fn call_callback_multi(
@@ -84,6 +126,13 @@ pub fn dispatch<H: Host>(
         "opt_info" => opt_info(h, lua, a),
         "opt_apply" => opt_apply(h, lua, a),
         "opt_list" => opt_list(h, lua),
+        "on" => on(h, lua, a),
+        "off" => off(h, lua, a),
+        "command_create" => command_create(h, lua, a),
+        "command_del" => command_del(h, lua, a),
+        "command_list" => command_list(h, lua),
+        "command_find" => command_find(h, lua, a),
+        "command_complete" => command_complete(h, lua, a),
         _ => return Err(a),
     })
 }
@@ -531,4 +580,202 @@ fn opt_list<H: Host>(h: &mut H, lua: &Lua) -> mlua::Result<MultiValue> {
     dynamic.sort();
     all.extend(dynamic);
     ret(lua, all)
+}
+
+// ---- events ----------------------------------------------------------------
+
+/// Run the handlers of `event` with `data`; what they returned.
+pub fn fire<H: Host>(h: &mut H, event: &str, data: serde_json::Value) -> Vec<Value> {
+    let event = canonical_event(event);
+    let cbs: Vec<u64> = h
+        .autocmds()
+        .iter()
+        .filter(|a| a.event == event)
+        .map(|a| a.callback)
+        .collect();
+    let mut out = Vec::new();
+    for cb in cbs {
+        let data = data.clone();
+        if let Some(v) = h.call_callback(cb, &format!("autocmd {event}"), |lua| to_lua(lua, &data))
+        {
+            out.push(v);
+        }
+    }
+    out
+}
+
+pub fn has_autocmd<H: Host>(h: &mut H, event: &str) -> bool {
+    let event = canonical_event(event);
+    h.autocmds().iter().any(|a| a.event == event)
+}
+
+fn on<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let (event, f): (String, Function) = args(lua, a)?;
+    let callback = store_callback(h, lua, f)?;
+    let next = h.owners().next_callback;
+    *next += 1;
+    let id = *next;
+    let event = canonical_event(&event).to_owned();
+    h.autocmds().push(Autocmd {
+        id,
+        event,
+        callback,
+    });
+    own(h, Owned::Autocmd(id));
+    ret(lua, id)
+}
+
+fn off<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let id: u64 = args(lua, a)?;
+    let autocmds = h.autocmds();
+    if let Some(i) = autocmds.iter().position(|a| a.id == id) {
+        let a = autocmds.remove(i);
+        drop_callback(lua, a.callback)?;
+    }
+    ret(lua, ())
+}
+
+// ---- commands --------------------------------------------------------------
+
+fn command_create<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let (name, f, opts): (String, Function, Option<Table>) = args(lua, a)?;
+    let valid = name.starts_with(|c: char| c.is_ascii_lowercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
+    if !valid {
+        return Err(err(format!(
+            "command names are lowercase letters, digits, - and _: {name:?}"
+        )));
+    }
+    let aliases = match opt::<Value>(&opts, "aliases")? {
+        None => Vec::new(),
+        Some(Value::String(alias)) => vec![alias.to_str()?.to_owned()],
+        Some(Value::Table(aliases)) => aliases
+            .sequence_values::<String>()
+            .collect::<mlua::Result<Vec<_>>>()?,
+        Some(other) => {
+            return Err(err(format!(
+                "command aliases must be a string or list, not {}",
+                other.type_name()
+            )));
+        }
+    };
+    let commands = h.user_commands();
+    if commands
+        .iter()
+        .any(|(old_name, old)| old_name != &name && old.aliases.iter().any(|alias| alias == &name))
+    {
+        return Err(err(format!("/{name} is already a user command")));
+    }
+    for (index, alias) in aliases.iter().enumerate() {
+        // Any word without spaces or "/" (so "?" can be /help's).
+        let valid =
+            !alias.is_empty() && !alias.contains(char::is_whitespace) && !alias.contains('/');
+        if !valid {
+            return Err(err(format!("invalid command alias {alias:?}")));
+        }
+        if alias == &name || aliases[..index].contains(alias) {
+            return Err(err(format!("/{alias} is already a command")));
+        }
+        if commands.iter().any(|(old_name, old)| {
+            old_name != &name && (old_name == alias || old.aliases.iter().any(|a| a == alias))
+        }) {
+            return Err(err(format!("/{alias} is already a user command")));
+        }
+    }
+    let args_spec = match opt::<Value>(&opts, "args")? {
+        None => None,
+        Some(Value::Table(spec)) => {
+            let value = from_lua(&Value::Table(spec))?;
+            crate::commands::validate_argument_specs(&value).map_err(err)?;
+            Some(value)
+        }
+        Some(other) => {
+            return Err(err(format!(
+                "command args must be a table, not {}",
+                other.type_name()
+            )));
+        }
+    };
+    let desc = opt::<String>(&opts, "desc")?.unwrap_or_default();
+    let completion = match opt::<Function>(&opts, "complete")? {
+        Some(f) => Some(f),
+        None => opt(&opts, "completion")?,
+    }
+    .map(|f| store_callback(h, lua, f))
+    .transpose()?;
+    let callback = store_callback(h, lua, f)?;
+    own(h, Owned::Command(name.clone(), callback));
+    if let Some(old) = h.user_commands().insert(
+        name,
+        UserCommand {
+            callback,
+            desc,
+            aliases,
+            completion,
+            args: args_spec,
+        },
+    ) {
+        drop_callback(lua, old.callback)?;
+        if let Some(completion) = old.completion {
+            drop_callback(lua, completion)?;
+        }
+    }
+    ret(lua, ())
+}
+
+fn command_del<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let name: String = args(lua, a)?;
+    let commands = h.user_commands();
+    let canonical = commands
+        .iter()
+        .find(|(canonical, command)| {
+            canonical.as_str() == name || command.aliases.iter().any(|alias| alias == &name)
+        })
+        .map(|(canonical, _)| canonical.clone())
+        .ok_or_else(|| err(format!("no user command {name}")))?;
+    let old = commands.remove(&canonical).expect("command found");
+    drop_callback(lua, old.callback)?;
+    if let Some(completion) = old.completion {
+        drop_callback(lua, completion)?;
+    }
+    ret(lua, ())
+}
+
+fn command_list<H: Host>(h: &mut H, lua: &Lua) -> mlua::Result<MultiValue> {
+    let mut list: Vec<serde_json::Value> = h
+        .user_commands()
+        .iter()
+        .map(|(name, c)| {
+            serde_json::json!({
+                "name": name,
+                "desc": c.desc,
+                "aliases": c.aliases,
+                "complete": c.completion.is_some(),
+            })
+        })
+        .collect();
+    list.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
+    ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
+}
+
+fn command_find<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let word: String = args(lua, a)?;
+    let found = h
+        .user_commands()
+        .iter()
+        .find(|(n, c)| n.as_str() == word || c.aliases.iter().any(|x| x == &word))
+        .map(|(n, _)| n.clone());
+    ret(lua, found)
+}
+
+fn command_complete<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let (name, ctx): (String, Value) = args(lua, a)?;
+    let Some(cb) = h.user_commands().get(&name).and_then(|c| c.completion) else {
+        return ret(lua, Value::Nil);
+    };
+    // Errors are reported like any callback's; the menu shows nothing.
+    let r = h.call_callback(cb, "command completion", |_| Ok(ctx));
+    ret(lua, r.unwrap_or(Value::Nil))
 }

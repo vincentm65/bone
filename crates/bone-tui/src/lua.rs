@@ -35,35 +35,8 @@ pub const CONFIG_FILES: [&str; 2] = ["ui.lua", "tui.lua"];
 
 const DISPATCH: &str = "bone.dispatch";
 
-/// A user command defined from Lua.
-#[derive(Clone)]
-pub struct UserCommand {
-    pub callback: u64,
-    pub desc: String,
-    pub aliases: Vec<String>,
-    pub completion: Option<u64>,
-    pub args: Option<serde_json::Value>,
-}
-
-pub struct Autocmd {
-    pub id: u64,
-    pub event: String,
-    pub callback: u64,
-}
-
-fn canonical_event(name: &str) -> &str {
-    match name {
-        "prompt" | "prompt_changed" | "prompt/changed" => "prompt/changed",
-        "focus" | "focus_changed" | "focus/changed" => "focus/changed",
-        "ui/resize" | "resize" => "resize",
-        "key/pressed" | "key" => "key",
-        "paste" | "text/pasted" => "paste",
-        "panel" | "panel/opened" | "popup" | "popup/opened" => "panel/opened",
-        "panel/closed" | "popup/closed" => "panel/closed",
-        "panel/updated" | "popup/updated" => "panel/updated",
-        other => other,
-    }
-}
+use bone_ui::lua::canonical_event;
+pub use bone_ui::lua::{Autocmd, UserCommand};
 
 fn popup_event(p: &crate::app::Popup) -> serde_json::Value {
     serde_json::json!({
@@ -1031,23 +1004,7 @@ impl App {
 
     /// Run `event` autocommands with `data`. Returns their results in order.
     pub fn fire(&mut self, event: &str, data: serde_json::Value) -> Vec<Value> {
-        let event = canonical_event(event);
-        let cbs: Vec<u64> = self
-            .autocmds
-            .iter()
-            .filter(|a| a.event == event)
-            .map(|a| a.callback)
-            .collect();
-        let mut out = Vec::new();
-        for cb in cbs {
-            let data = data.clone();
-            if let Some(v) =
-                self.call_callback(cb, &format!("autocmd {event}"), |lua| to_lua(lua, &data))
-            {
-                out.push(v);
-            }
-        }
-        out
+        bone_ui::lua::fire(self, event, data)
     }
 
     pub fn has_autocmd(&self, event: &str) -> bool {
@@ -1234,132 +1191,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
         "cmd" => {
             let line: String = args(lua, a)?;
             app.execute(&line);
-            ret(lua, ())
-        }
-        "command_create" => {
-            let (name, f, opts): (String, Function, Option<Table>) = args(lua, a)?;
-            let valid = name.starts_with(|c: char| c.is_ascii_lowercase())
-                && name
-                    .chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '_');
-            if !valid {
-                return Err(err(format!(
-                    "command names are lowercase letters, digits, - and _: {name:?}"
-                )));
-            }
-            let aliases = match opt::<Value>(&opts, "aliases")? {
-                None => Vec::new(),
-                Some(Value::String(alias)) => vec![alias.to_str()?.to_owned()],
-                Some(Value::Table(aliases)) => aliases
-                    .sequence_values::<String>()
-                    .collect::<mlua::Result<Vec<_>>>()?,
-                Some(other) => {
-                    return Err(err(format!(
-                        "command aliases must be a string or list, not {}",
-                        other.type_name()
-                    )));
-                }
-            };
-            if app.user_commands.iter().any(|(old_name, old)| {
-                old_name != &name && old.aliases.iter().any(|alias| alias == &name)
-            }) {
-                return Err(err(format!("/{name} is already a user command")));
-            }
-            for (index, alias) in aliases.iter().enumerate() {
-                // Any word without spaces or "/" (so "?" can be /help's).
-                let valid = !alias.is_empty()
-                    && !alias.contains(char::is_whitespace)
-                    && !alias.contains('/');
-                if !valid {
-                    return Err(err(format!("invalid command alias {alias:?}")));
-                }
-                if alias == &name || aliases[..index].contains(alias) {
-                    return Err(err(format!("/{alias} is already a command")));
-                }
-                if app.user_commands.iter().any(|(old_name, old)| {
-                    old_name != &name
-                        && (old_name == alias || old.aliases.iter().any(|a| a == alias))
-                }) {
-                    return Err(err(format!("/{alias} is already a user command")));
-                }
-            }
-            let args_spec = match opt::<Value>(&opts, "args")? {
-                None => None,
-                Some(Value::Table(spec)) => {
-                    let value = from_lua(&Value::Table(spec))?;
-                    crate::commands::validate_argument_specs(&value).map_err(err)?;
-                    Some(value)
-                }
-                Some(other) => {
-                    return Err(err(format!(
-                        "command args must be a table, not {}",
-                        other.type_name()
-                    )));
-                }
-            };
-            let desc = opt::<String>(&opts, "desc")?.unwrap_or_default();
-            let completion = match opt::<Function>(&opts, "complete")? {
-                Some(f) => Some(f),
-                None => opt(&opts, "completion")?,
-            }
-            .map(|f| app.store_callback(lua, f))
-            .transpose()?;
-            let callback = app.store_callback(lua, f)?;
-            app.own(crate::plugins::Owned::Command(name.clone(), callback));
-            if let Some(old) = app.user_commands.insert(
-                name,
-                UserCommand {
-                    callback,
-                    desc,
-                    aliases,
-                    completion,
-                    args: args_spec,
-                },
-            ) {
-                App::drop_callback(lua, old.callback)?;
-                if let Some(completion) = old.completion {
-                    App::drop_callback(lua, completion)?;
-                }
-            }
-            ret(lua, ())
-        }
-        "command_del" => {
-            let name: String = args(lua, a)?;
-            let canonical = app
-                .user_commands
-                .iter()
-                .find(|(canonical, command)| {
-                    canonical.as_str() == name || command.aliases.iter().any(|alias| alias == &name)
-                })
-                .map(|(canonical, _)| canonical.clone())
-                .ok_or_else(|| err(format!("no user command {name}")))?;
-            let old = app.user_commands.remove(&canonical).expect("command found");
-            App::drop_callback(lua, old.callback)?;
-            if let Some(completion) = old.completion {
-                App::drop_callback(lua, completion)?;
-            }
-            ret(lua, ())
-        }
-        "on" => {
-            let (event, f): (String, Function) = args(lua, a)?;
-            let callback = app.store_callback(lua, f)?;
-            app.next_callback += 1;
-            let id = app.next_callback;
-            let event = canonical_event(&event).to_owned();
-            app.autocmds.push(Autocmd {
-                id,
-                event,
-                callback,
-            });
-            app.own(crate::plugins::Owned::Autocmd(id));
-            ret(lua, id)
-        }
-        "off" => {
-            let id: u64 = args(lua, a)?;
-            if let Some(i) = app.autocmds.iter().position(|a| a.id == id) {
-                let a = app.autocmds.remove(i);
-                App::drop_callback(lua, a.callback)?;
-            }
             ret(lua, ())
         }
         "request" => {
@@ -1802,40 +1633,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             ret(lua, ())
         }
         // The command registry, for the Lua `/` menu and commands.
-        "command_list" => {
-            let mut list: Vec<serde_json::Value> = app
-                .user_commands
-                .iter()
-                .map(|(name, c)| {
-                    serde_json::json!({
-                        "name": name,
-                        "desc": c.desc,
-                        "aliases": c.aliases,
-                        "complete": c.completion.is_some(),
-                    })
-                })
-                .collect();
-            list.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-            ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
-        }
-        "command_find" => {
-            let word: String = args(lua, a)?;
-            let found = app
-                .user_commands
-                .iter()
-                .find(|(n, c)| n.as_str() == word || c.aliases.iter().any(|x| x == &word))
-                .map(|(n, _)| n.clone());
-            ret(lua, found)
-        }
-        "command_complete" => {
-            let (name, ctx): (String, Value) = args(lua, a)?;
-            let Some(cb) = app.user_commands.get(&name).and_then(|c| c.completion) else {
-                return ret(lua, Value::Nil);
-            };
-            // Errors are reported like any callback's; the menu shows nothing.
-            let r = app.call_callback(cb, "command completion", |_| Ok(ctx));
-            ret(lua, r.unwrap_or(Value::Nil))
-        }
         "history_add" => {
             let text: String = args(lua, a)?;
             app.history_add(&text);
@@ -2411,6 +2208,23 @@ impl bone_ui::lua::Host for App {
         args: impl FnOnce(&Lua) -> mlua::Result<MultiValue>,
     ) -> Option<MultiValue> {
         App::call_callback_multi(self, id, context, args)
+    }
+
+    fn autocmds(&mut self) -> &mut Vec<Autocmd> {
+        &mut self.autocmds
+    }
+
+    fn user_commands(&mut self) -> &mut std::collections::HashMap<String, UserCommand> {
+        &mut self.user_commands
+    }
+
+    fn call_callback(
+        &mut self,
+        id: u64,
+        context: &str,
+        arg: impl FnOnce(&Lua) -> mlua::Result<Value>,
+    ) -> Option<Value> {
+        App::call_callback(self, id, context, arg)
     }
 
     fn changed(&mut self) {

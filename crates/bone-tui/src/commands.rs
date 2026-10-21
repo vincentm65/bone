@@ -6,7 +6,6 @@
 use serde_json::Value as JsonValue;
 
 use bone_ui::commands::structured_args;
-pub use bone_ui::commands::validate_argument_specs;
 
 use crate::app::App;
 
