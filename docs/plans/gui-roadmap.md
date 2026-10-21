@@ -320,6 +320,15 @@ not all up front.
 **Exit condition:** protocol guarantees documented, the dispatch design
 written, and the conformance harness runs.
 
+**Status:** done except the units, pointer-event, and capability-name
+decisions, which land with the binding groups that need them. The
+guarantees are in `docs/protocol.md` ("Multiple clients"); the design is
+`docs/plans/gui-ui-state.md`. The harness is `crates/bone/tests/conformance.rs`:
+it runs each `tests/ui/*.lua` against a real core in the headless TUI, through
+a `UiDriver` trait the headless GUI will implement too. A script is a chunk,
+or returns a list of steps run with events handled between them; `eq(got,
+want, what)` is its one helper.
+
 ### Phase 1: extract `bone-ui`
 
 Small commits, with TUI test assertions unchanged, in dependency order (see

@@ -63,6 +63,13 @@ impl Headless {
         Ok(())
     }
 
+    /// Run a Lua chunk named `name` with the API bound; its error, if any.
+    pub fn run_lua(&mut self, name: &str, code: &str) -> Result<(), String> {
+        self.app
+            .with_api(|lua| lua.load(code).set_name(name).exec())
+            .map_err(|e| e.to_string())
+    }
+
     pub fn paste(&mut self, text: &str) {
         self.app.paste(text);
     }
