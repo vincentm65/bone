@@ -9,7 +9,8 @@ use std::collections::HashMap;
 use bone_lua::{from_lua, to_lua};
 use mlua::{FromLua, FromLuaMulti, Function, IntoLuaMulti, Lua, MultiValue, Table, Value};
 
-use crate::keymap::Context;
+use crate::keymap::{Action, Context, Keymaps};
+use crate::keys::{self, Key};
 use crate::options::{self, DynamicKind, DynamicOption, DynamicValue, Options};
 
 /// The registry table of Lua functions stored by id (keymaps, commands,
@@ -53,6 +54,12 @@ pub struct OptionStore<'a> {
     pub rev: &'a mut u64,
 }
 
+/// The keymaps, and which plugin last mapped each key.
+pub struct KeymapStore<'a> {
+    pub keymaps: &'a mut Keymaps,
+    pub owner: &'a mut HashMap<(Context, Vec<Key>), String>,
+}
+
 /// A slash command defined from Lua (`bone.cmd.create`).
 #[derive(Clone)]
 pub struct UserCommand {
@@ -90,6 +97,10 @@ pub trait Host {
     fn owners(&mut self) -> Owners<'_>;
     fn option_store(&mut self) -> OptionStore<'_>;
     fn autocmds(&mut self) -> &mut Vec<Autocmd>;
+    fn keymap_store(&mut self) -> KeymapStore<'_>;
+    /// The keymap context that has the keyboard: a focused popup or panel's,
+    /// a focused named context, or `main`.
+    fn context(&self) -> Context;
     fn user_commands(&mut self) -> &mut HashMap<String, UserCommand>;
     /// Run stored callback `id` with one argument; as `call_callback_multi`.
     fn call_callback(
@@ -126,6 +137,11 @@ pub fn dispatch<H: Host>(
         "opt_info" => opt_info(h, lua, a),
         "opt_apply" => opt_apply(h, lua, a),
         "opt_list" => opt_list(h, lua),
+        "keymap_set" => keymap_set(h, lua, a),
+        "keymap_del" => keymap_del(h, lua, a),
+        "keymap_context" => keymap_context(h, lua, a),
+        "keymap_current" => ret(lua, h.context().name().to_owned()),
+        "keymap_list" => keymap_list(h, lua),
         "on" => on(h, lua, a),
         "off" => off(h, lua, a),
         "command_create" => command_create(h, lua, a),
@@ -181,6 +197,45 @@ pub fn own<H: Host>(h: &mut H, what: Owned) {
     let o = h.owners();
     if let Some(owner) = o.owner {
         o.owned.entry(owner.clone()).or_default().push(what);
+    }
+}
+
+/// `opts.context`: a keymap context name (default `main`).
+pub fn context_arg(opts: &Option<Table>) -> mlua::Result<Context> {
+    match opt::<String>(opts, "context")? {
+        None => Ok(Context::Main),
+        Some(c) => Context::from_name(&c).ok_or_else(|| {
+            mlua::Error::runtime(format!(
+                "invalid context {c:?} (use main, popup, or letters, digits, _, - and .)"
+            ))
+        }),
+    }
+}
+
+pub fn context_from_name(name: String) -> mlua::Result<Context> {
+    Context::from_name(&name)
+        .ok_or_else(|| err(format!("invalid context {name:?} (bad context name)")))
+}
+
+/// `opts.fallback` (or `fallbacks`): a context name or a list of them.
+pub fn fallback_arg(opts: &Option<Table>) -> mlua::Result<Option<Vec<Context>>> {
+    let Some(opts) = opts else { return Ok(None) };
+    let value = match opts.get::<Value>("fallback")? {
+        Value::Nil => opts.get::<Value>("fallbacks")?,
+        value => value,
+    };
+    match value {
+        Value::Nil => Ok(None),
+        Value::String(name) => Ok(Some(vec![context_from_name(name.to_str()?.to_owned())?])),
+        Value::Table(table) => table
+            .sequence_values::<String>()
+            .map(|name| name.and_then(context_from_name))
+            .collect::<mlua::Result<Vec<_>>>()
+            .map(Some),
+        other => Err(err(format!(
+            "context fallback must be a name or list, not {}",
+            other.type_name()
+        ))),
     }
 }
 
@@ -778,4 +833,77 @@ fn command_complete<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Resul
     // Errors are reported like any callback's; the menu shows nothing.
     let r = h.call_callback(cb, "command completion", |_| Ok(ctx));
     ret(lua, r.unwrap_or(Value::Nil))
+}
+
+// ---- keymaps ---------------------------------------------------------------
+
+fn keymap_set<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let (key, rhs, opts): (String, Value, Option<Table>) = args(lua, a)?;
+    let ctx = context_arg(&opts)?;
+    let desc: Option<String> = opt(&opts, "desc")?;
+    let action = match rhs {
+        Value::String(s) => Action::parse(&s.to_str()?).map_err(err)?,
+        Value::Function(f) => Action::Lua(store_callback(h, lua, f)?),
+        other => {
+            return Err(err(format!(
+                "keymap action must be a string or function, not {}",
+                other.type_name()
+            )));
+        }
+    };
+    let seq = keys::parse_sequence(&key).map_err(err)?;
+    let owner = h.owners().owner.clone();
+    let k = h.keymap_store();
+    k.keymaps
+        .set(ctx.clone(), &key, action, desc)
+        .map_err(err)?;
+    match owner {
+        Some(owner) => {
+            k.owner.insert((ctx, seq), owner);
+        }
+        None => {
+            k.owner.remove(&(ctx, seq));
+        }
+    }
+    ret(lua, ())
+}
+
+fn keymap_del<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let (key, opts): (String, Option<Table>) = args(lua, a)?;
+    let ctx = context_arg(&opts)?;
+    let k = h.keymap_store();
+    k.keymaps.del(ctx.clone(), &key).map_err(err)?;
+    k.owner
+        .remove(&(ctx, keys::parse_sequence(&key).map_err(err)?));
+    ret(lua, ())
+}
+
+fn keymap_context<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let (name, opts): (String, Option<Table>) = args(lua, a)?;
+    let ctx = context_from_name(name)?;
+    if !h.keymap_store().keymaps.has_context(&ctx) {
+        own(h, Owned::Context(ctx.clone()));
+    }
+    let fallback = fallback_arg(&opts)?;
+    let priority = opt::<i32>(&opts, "priority")?;
+    h.keymap_store()
+        .keymaps
+        .define(ctx, fallback, priority)
+        .map_err(err)?;
+    ret(lua, ())
+}
+
+fn keymap_list<H: Host>(h: &mut H, lua: &Lua) -> mlua::Result<MultiValue> {
+    let k = h.keymap_store();
+    let list: Vec<_> = (k.keymaps.described())
+        .map(|(ctx, seq, desc)| {
+            let keys: Vec<_> = seq.iter().map(keys::format).collect();
+            let owner = k.owner.get(&(ctx.clone(), seq.to_vec()));
+            serde_json::json!({
+                "keys": keys.join(" "), "desc": desc,
+                "context": ctx.name(), "plugin": owner,
+            })
+        })
+        .collect();
+    ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
 }

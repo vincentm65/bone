@@ -16,7 +16,7 @@ use crate::app::App;
 use crate::keymap::{Action, Builtin, Context};
 use crate::keys;
 use crate::theme::StyleSpec;
-use bone_ui::lua::{CALLBACKS, args, err, opt, ret, valid_dynamic_name};
+use bone_ui::lua::{CALLBACKS, args, context_from_name, err, opt, ret, valid_dynamic_name};
 use ratatui::style::{Color, Modifier};
 use serde_json::Value as Json;
 
@@ -1043,43 +1043,6 @@ impl App {
     }
 }
 
-fn context_arg(opts: &Option<Table>) -> mlua::Result<Context> {
-    match opt::<String>(opts, "context")? {
-        None => Ok(Context::Main),
-        Some(c) => Context::from_name(&c).ok_or_else(|| {
-            mlua::Error::runtime(format!(
-                "invalid context {c:?} (use main, popup, or letters, digits, _, - and .)"
-            ))
-        }),
-    }
-}
-
-fn context_from_name(name: String) -> mlua::Result<Context> {
-    Context::from_name(&name)
-        .ok_or_else(|| err(format!("invalid context {name:?} (bad context name)")))
-}
-
-fn fallback_arg(opts: &Option<Table>) -> mlua::Result<Option<Vec<Context>>> {
-    let Some(opts) = opts else { return Ok(None) };
-    let value = match opts.get::<Value>("fallback")? {
-        Value::Nil => opts.get::<Value>("fallbacks")?,
-        value => value,
-    };
-    match value {
-        Value::Nil => Ok(None),
-        Value::String(name) => Ok(Some(vec![context_from_name(name.to_str()?.to_owned())?])),
-        Value::Table(table) => table
-            .sequence_values::<String>()
-            .map(|name| name.and_then(context_from_name))
-            .collect::<mlua::Result<Vec<_>>>()
-            .map(Some),
-        other => Err(err(format!(
-            "context fallback must be a name or list, not {}",
-            other.type_name()
-        ))),
-    }
-}
-
 fn raw_context_arg(opts: &Option<Table>) -> mlua::Result<Option<Context>> {
     opt(opts, "context")?.map(context_from_name).transpose()
 }
@@ -1090,53 +1053,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
         Err(a) => a,
     };
     match op {
-        "keymap_set" => {
-            let (key, rhs, opts): (String, Value, Option<Table>) = args(lua, a)?;
-            let ctx = context_arg(&opts)?;
-            let desc: Option<String> = opt(&opts, "desc")?;
-            let action = match rhs {
-                Value::String(s) => Action::parse(&s.to_str()?).map_err(err)?,
-                Value::Function(f) => Action::Lua(app.store_callback(lua, f)?),
-                other => {
-                    return Err(err(format!(
-                        "keymap action must be a string or function, not {}",
-                        other.type_name()
-                    )));
-                }
-            };
-            let seq = keys::parse_sequence(&key).map_err(err)?;
-            app.keymaps
-                .set(ctx.clone(), &key, action, desc)
-                .map_err(err)?;
-            match app.owner.clone() {
-                Some(owner) => {
-                    app.keymap_owner.insert((ctx, seq), owner);
-                }
-                None => {
-                    app.keymap_owner.remove(&(ctx, seq));
-                }
-            }
-            ret(lua, ())
-        }
-        "keymap_del" => {
-            let (key, opts): (String, Option<Table>) = args(lua, a)?;
-            let ctx = context_arg(&opts)?;
-            app.keymaps.del(ctx.clone(), &key).map_err(err)?;
-            app.keymap_owner
-                .remove(&(ctx, keys::parse_sequence(&key).map_err(err)?));
-            ret(lua, ())
-        }
-        "keymap_context" => {
-            let (name, opts): (String, Option<Table>) = args(lua, a)?;
-            let ctx = context_from_name(name)?;
-            if !app.keymaps.has_context(&ctx) {
-                app.own(crate::plugins::Owned::Context(ctx.clone()));
-            }
-            let fallback = fallback_arg(&opts)?;
-            let priority = opt::<i32>(&opts, "priority")?;
-            app.keymaps.define(ctx, fallback, priority).map_err(err)?;
-            ret(lua, ())
-        }
         "keymap_focus" => {
             let name: Option<String> = args(lua, a)?;
             match name {
@@ -1149,20 +1065,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             let _: () = args(lua, a)?;
             app.clear_context().map_err(err)?;
             ret(lua, ())
-        }
-        "keymap_current" => ret(lua, app.context().name().to_owned()),
-        "keymap_list" => {
-            let list: Vec<_> = (app.keymaps.described())
-                .map(|(ctx, seq, desc)| {
-                    let keys: Vec<_> = seq.iter().map(keys::format).collect();
-                    let owner = app.keymap_owner.get(&(ctx.clone(), seq.to_vec()));
-                    serde_json::json!({
-                        "keys": keys.join(" "), "desc": desc,
-                        "context": ctx.name(), "plugin": owner,
-                    })
-                })
-                .collect();
-            ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
         }
         "keymap_context_del" => {
             let name: String = args(lua, a)?;
@@ -2212,6 +2114,17 @@ impl bone_ui::lua::Host for App {
 
     fn autocmds(&mut self) -> &mut Vec<Autocmd> {
         &mut self.autocmds
+    }
+
+    fn keymap_store(&mut self) -> bone_ui::lua::KeymapStore<'_> {
+        bone_ui::lua::KeymapStore {
+            keymaps: &mut self.keymaps,
+            owner: &mut self.keymap_owner,
+        }
+    }
+
+    fn context(&self) -> Context {
+        App::context(self)
     }
 
     fn user_commands(&mut self) -> &mut std::collections::HashMap<String, UserCommand> {
