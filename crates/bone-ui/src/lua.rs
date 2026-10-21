@@ -5,10 +5,13 @@
 //! `docs/plans/gui-lua-host.md`.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
 use bone_lua::{from_lua, to_lua};
+use bone_proto::methods::ProcessSnapshot;
+use bone_proto::types::ImageAttachment;
 use mlua::{FromLua, FromLuaMulti, Function, IntoLuaMulti, Lua, MultiValue, Table, Value};
 
 use crate::chat::{ChatBuffer, find_chat};
@@ -44,7 +47,7 @@ pub enum Owned {
 /// and stored callback belongs to.
 pub struct Owners<'a> {
     /// `None` for the runtime and the user's config.
-    pub owner: &'a Option<String>,
+    pub owner: &'a mut Option<String>,
     pub callback_owner: &'a mut HashMap<u64, String>,
     pub owned: &'a mut HashMap<String, Vec<Owned>>,
     /// The last id handed out for a stored callback (and autocmds).
@@ -183,6 +186,59 @@ pub trait Host {
     ) -> Option<MultiValue>;
     /// Something on screen may have changed.
     fn changed(&mut self);
+    /// Run `f` as the plugin that owns callback `cb` (or as the user's
+    /// config), so what it creates belongs to that plugin.
+    fn as_owner_of<R>(&mut self, cb: u64, f: impl FnOnce(&mut Self) -> R) -> R
+    where
+        Self: Sized,
+    {
+        let o = self.owners();
+        let owner = o.callback_owner.get(&cb).cloned();
+        let prev = std::mem::replace(o.owner, owner);
+        let r = f(self);
+        *self.owners().owner = prev;
+        r
+    }
+
+    // Services.
+    /// Send a core request; `then` runs on the UI thread with the reply.
+    fn request_raw(
+        &mut self,
+        method: String,
+        params: serde_json::Value,
+        then: impl FnOnce(&mut Self, Result<serde_json::Value, String>) + Send + 'static,
+    ) where
+        Self: Sized;
+    /// Run `fut` in the background; `then` gets its output on the UI thread.
+    fn spawn<T: Send + 'static>(
+        &mut self,
+        fut: impl Future<Output = T> + Send + 'static,
+        then: impl FnOnce(&mut Self, T) + Send + 'static,
+    ) where
+        Self: Sized;
+    /// A plugin is being loaded or unloaded through the core: its files
+    /// change on purpose (the TUI's watcher takes that as no edit).
+    fn plugin_files_changing(&mut self) {}
+    fn info(&mut self, text: String);
+    fn error(&mut self, text: String);
+    /// Report a Lua error from `context`.
+    fn lua_error(&mut self, context: &str, e: &mlua::Error);
+    /// The saved settings, as the core last sent them.
+    fn settings(&self) -> &serde_json::Value;
+    /// The chat `bone.session` is about.
+    fn target_chat(&self) -> Option<usize>;
+    /// The prompt's text, pastes expanded.
+    fn prompt_text(&self) -> String;
+    fn prompt_images(&self) -> Vec<ImageAttachment>;
+    fn set_prompt_images(&mut self, images: Vec<ImageAttachment>) -> Result<(), String>;
+    /// The id of the panel with the keyboard.
+    fn focused_panel(&self) -> Option<String>;
+    /// The managed shell processes of the session on screen.
+    fn process_list(&self) -> Vec<ProcessSnapshot>;
+    /// Where the chat is scrolled, in the frontend's rows (`bone.chat.view`).
+    fn chat_view(&self) -> serde_json::Value;
+    /// `bone.ui` changed: draw it all again, retrying parts that failed.
+    fn refresh_ui(&mut self);
 }
 
 /// Run shared op `op`, or give `a` back for the frontend's own dispatcher.
@@ -236,6 +292,20 @@ pub fn dispatch<H: Host>(
         "chat_turns" => chat_turns(h, lua, a),
         "chat_session" => chat_session(h, lua, a),
         "chat_sessions" => chat_sessions(h, lua),
+        "request" => request(h, lua, a),
+        "wait" => wait(h, lua, a),
+        "notify" => notify(h, lua, a),
+        "settings_get" => json(lua, h.settings()),
+        "session" => session(h, lua),
+        "prompt_get" => ret(lua, h.prompt_text()),
+        "prompt_images" => prompt_images(h, lua, a),
+        "panel_focused" => ret(lua, h.focused_panel()),
+        "ui_refresh" => {
+            h.refresh_ui();
+            ret(lua, ())
+        }
+        "process_list" => process_list(h, lua),
+        "chat_view" => json(lua, &h.chat_view()),
         "on" => on(h, lua, a),
         "off" => off(h, lua, a),
         "command_create" => command_create(h, lua, a),
@@ -255,6 +325,11 @@ pub fn args<T: FromLuaMulti>(lua: &Lua, args: MultiValue) -> mlua::Result<T> {
 
 pub fn ret(lua: &Lua, v: impl IntoLuaMulti) -> mlua::Result<MultiValue> {
     v.into_lua_multi(lua)
+}
+
+/// Return `v` to Lua as a value.
+pub fn json(lua: &Lua, v: &serde_json::Value) -> mlua::Result<MultiValue> {
+    ret(lua, to_lua(lua, v)?)
 }
 
 pub fn err(msg: impl Into<String>) -> mlua::Error {
@@ -1270,4 +1345,152 @@ fn chat_sessions<H: Host>(h: &mut H, lua: &Lua) -> mlua::Result<MultiValue> {
     let c = h.chat_store();
     let all = crate::data::sessions(c.chats, c.current);
     ret(lua, to_lua(lua, &serde_json::Value::Array(all))?)
+}
+
+// ---- the core and the frontend ---------------------------------------------
+
+/// `images = {}` from Lua is an empty object; requests want a list.
+fn normalize_image_lists(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(images) = map.get_mut("images")
+                && images.as_object().is_some_and(|o| o.is_empty())
+            {
+                *images = serde_json::json!([]);
+            }
+            for value in map.values_mut() {
+                normalize_image_lists(value);
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                normalize_image_lists(value);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Call one-shot callback `cb` with a result, `(value)` or `(nil, error)`,
+/// as its owner; then forget it.
+fn deliver<H: Host>(h: &mut H, cb: u64, r: Result<serde_json::Value, String>, context: &str) {
+    let called = h.as_owner_of(cb, |h| {
+        h.with_api(|lua| {
+            let cbs: Table = lua.named_registry_value(CALLBACKS)?;
+            // Gone with a Lua state a reload replaced or rejected.
+            let Some(f) = cbs.get::<Option<Function>>(cb)? else {
+                return Ok(());
+            };
+            cbs.set(cb, Value::Nil)?;
+            match r {
+                Ok(v) => f.call::<()>(to_lua(lua, &v)?),
+                Err(e) => f.call::<()>((Value::Nil, e)),
+            }
+        })
+    });
+    h.owners().callback_owner.remove(&cb);
+    if let Err(e) = called {
+        h.lua_error(context, &e);
+    }
+}
+
+fn request<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let (method, params, f): (String, Value, Option<Function>) = args(lua, a)?;
+    let mut params = from_lua(&params)?;
+    normalize_image_lists(&mut params);
+    let cb = f.map(|f| store_callback(h, lua, f)).transpose()?;
+    let plugin = matches!(
+        method.as_str(),
+        "plugin/load" | "plugin/unload" | "plugin/reload"
+    );
+    // Plugin files changed on purpose, before and in the callback.
+    if plugin {
+        h.plugin_files_changing();
+    }
+    h.request_raw(method.clone(), params, move |h, r| {
+        if plugin {
+            h.plugin_files_changing();
+        }
+        match cb {
+            Some(cb) => deliver(h, cb, r, &format!("{method} callback")),
+            None => {
+                if let Err(e) = r {
+                    h.error(format!("{method}: {e}"));
+                }
+            }
+        }
+    });
+    ret(lua, ())
+}
+
+/// Background work (bone.system, bone.http, bone.defer), then the callback
+/// with the result, or (nil, error).
+fn wait<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let (spec, f): (Value, Option<Function>) = args(lua, a)?;
+    let spec = from_lua(&spec)?;
+    let cb = f.map(|f| store_callback(h, lua, f)).transpose()?;
+    h.spawn(bone_lua::wait::run(spec), move |h, r| match cb {
+        Some(cb) => deliver(h, cb, r, "callback"),
+        None => {
+            if let Err(e) = r {
+                h.error(e);
+            }
+        }
+    });
+    ret(lua, ())
+}
+
+fn notify<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let (msg, level): (String, Option<String>) = args(lua, a)?;
+    if level.as_deref() == Some("error") {
+        h.error(msg);
+    } else {
+        h.info(msg);
+    }
+    ret(lua, ())
+}
+
+fn session<H: Host>(h: &mut H, lua: &Lua) -> mlua::Result<MultiValue> {
+    let target = h.target_chat();
+    let c = h.chat_store();
+    let Some(c) = target.and_then(|b| c.chats.get(b)) else {
+        return ret(lua, Value::Nil);
+    };
+    let Some(s) = &c.session else {
+        return ret(lua, Value::Nil);
+    };
+    let t = lua.create_table()?;
+    t.set("session_id", s.session_id.as_str())?;
+    t.set("cwd", s.cwd.as_str())?;
+    t.set("title", s.title.clone())?;
+    t.set("running", c.turn.is_some())?;
+    ret(lua, t)
+}
+
+fn prompt_images<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    if a.is_empty() {
+        let images = serde_json::to_value(h.prompt_images()).unwrap_or_default();
+        return ret(lua, to_lua(lua, &images)?);
+    }
+    let value: Value = args(lua, a)?;
+    let images: Vec<ImageAttachment> = serde_json::from_value({
+        let value = from_lua(&value)?;
+        if value.as_object().is_some_and(|m| m.is_empty()) {
+            serde_json::json!([])
+        } else {
+            value
+        }
+    })
+    .map_err(|e| err(e.to_string()))?;
+    h.set_prompt_images(images).map_err(err)?;
+    ret(lua, ())
+}
+
+fn process_list<H: Host>(h: &mut H, lua: &Lua) -> mlua::Result<MultiValue> {
+    let list: Vec<serde_json::Value> = h
+        .process_list()
+        .into_iter()
+        .map(|p| serde_json::to_value(p).unwrap_or_default())
+        .collect();
+    ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
 }

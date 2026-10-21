@@ -8,7 +8,7 @@
 
 use std::path::PathBuf;
 
-use bone_lua::{Side, from_lua, short_error, to_lua};
+use bone_lua::{Side, short_error, to_lua};
 use bone_proto::methods::{ProcessCancel, ProcessRef};
 use mlua::{Function, Lua, MultiValue, Table, Value};
 
@@ -838,11 +838,7 @@ impl App {
     /// Run `f` as the plugin that owns callback `cb` (or as the user's
     /// config), so what it creates belongs to that plugin.
     pub fn as_owner_of<R>(&mut self, cb: u64, f: impl FnOnce(&mut App) -> R) -> R {
-        let owner = self.callback_owner.get(&cb).cloned();
-        let prev = std::mem::replace(&mut self.owner, owner);
-        let r = f(self);
-        self.owner = prev;
-        r
+        <App as bone_ui::lua::Host>::as_owner_of(self, cb, f)
     }
 
     /// Forget stored callbacks (outside a Lua call).
@@ -998,89 +994,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             app.execute(&line);
             ret(lua, ())
         }
-        "request" => {
-            let (method, params, f): (String, Value, Option<Function>) = args(lua, a)?;
-            let mut params = from_lua(&params)?;
-            normalize_image_lists(&mut params);
-            let cb = f.map(|f| app.store_callback(lua, f)).transpose()?;
-            // Plugin files changed on purpose, before and in the callback.
-            let rewatch = matches!(
-                method.as_str(),
-                "plugin/load" | "plugin/unload" | "plugin/reload"
-            );
-            app.rewatch |= rewatch;
-            app.request_raw(method.clone(), params, move |app, r| {
-                app.rewatch |= rewatch;
-                let Some(cb) = cb else {
-                    if let Err(e) = r {
-                        app.error(format!("{method}: {e}"));
-                    }
-                    return;
-                };
-                let called = app.as_owner_of(cb, |app| {
-                    app.with_api(|lua| {
-                        let cbs: Table = lua.named_registry_value(CALLBACKS)?;
-                        // Gone with a Lua state a reload replaced or rejected.
-                        let Some(f) = cbs.get::<Option<Function>>(cb)? else {
-                            return Ok(());
-                        };
-                        cbs.set(cb, Value::Nil)?;
-                        match r {
-                            Ok(v) => f.call::<()>(to_lua(lua, &v)?),
-                            Err(e) => f.call::<()>((Value::Nil, e.to_string())),
-                        }
-                    })
-                });
-                app.callback_owner.remove(&cb);
-                if let Err(e) = called {
-                    app.lua_error(&format!("{method} callback"), &e);
-                }
-            });
-            ret(lua, ())
-        }
-        "wait" => {
-            // Background work (bone.system, bone.http, bone.defer), then the
-            // callback with the result, or (nil, error).
-            let (spec, f): (Value, Option<Function>) = args(lua, a)?;
-            let spec = from_lua(&spec)?;
-            let cb = f.map(|f| app.store_callback(lua, f)).transpose()?;
-            app.spawn(bone_lua::wait::run(spec), move |app, r| {
-                let Some(cb) = cb else {
-                    if let Err(e) = r {
-                        app.error(e);
-                    }
-                    return;
-                };
-                let called = app.as_owner_of(cb, |app| {
-                    app.with_api(|lua| {
-                        let cbs: Table = lua.named_registry_value(CALLBACKS)?;
-                        // Gone with a Lua state a reload replaced or rejected.
-                        let Some(f) = cbs.get::<Option<Function>>(cb)? else {
-                            return Ok(());
-                        };
-                        cbs.set(cb, Value::Nil)?;
-                        match r {
-                            Ok(v) => f.call::<()>(to_lua(lua, &v)?),
-                            Err(e) => f.call::<()>((Value::Nil, e)),
-                        }
-                    })
-                });
-                app.callback_owner.remove(&cb);
-                if let Err(e) = called {
-                    app.lua_error("callback", &e);
-                }
-            });
-            ret(lua, ())
-        }
-        "notify" => {
-            let (msg, level): (String, Option<String>) = args(lua, a)?;
-            if level.as_deref() == Some("error") {
-                app.error(msg);
-            } else {
-                app.info(msg);
-            }
-            ret(lua, ())
-        }
         "press" => {
             let name: String = args(lua, a)?;
             app.handle_key(keys::parse(&name).map_err(err)?);
@@ -1112,46 +1025,11 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             app.remove_image(index).map_err(err)?;
             ret(lua, ())
         }
-        "prompt_images" => {
-            if a.is_empty() {
-                return ret(
-                    lua,
-                    to_lua(lua, &serde_json::to_value(app.prompt_images()).unwrap())?,
-                );
-            }
-            let value: Value = args(lua, a)?;
-            let images: Vec<bone_proto::types::ImageAttachment> = serde_json::from_value({
-                let value = from_lua(&value)?;
-                if value.as_object().is_some_and(|m| m.is_empty()) {
-                    serde_json::json!([])
-                } else {
-                    value
-                }
-            })
-            .map_err(|e| err(e.to_string()))?;
-            app.set_prompt_images(images).map_err(err)?;
-            ret(lua, ())
-        }
         "prompt_empty" => ret(lua, app.draft_empty()),
-        "prompt_get" => ret(lua, app.prompt_text()),
         "prompt_set" => {
             let text: String = args(lua, a)?;
             app.set_prompt_text(&text);
             ret(lua, ())
-        }
-        "session" => {
-            let Some(c) = app.target_chat().and_then(|b| app.chat(b)) else {
-                return ret(lua, Value::Nil);
-            };
-            let Some(s) = &c.session else {
-                return ret(lua, Value::Nil);
-            };
-            let t = lua.create_table()?;
-            t.set("session_id", s.session_id.as_str())?;
-            t.set("cwd", s.cwd.as_str())?;
-            t.set("title", s.title.clone())?;
-            t.set("running", c.turn.is_some())?;
-            ret(lua, t)
         }
         "health" => ret(
             lua,
@@ -1347,14 +1225,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
         }
         "job_list" => {
             let list: Vec<serde_json::Value> = app.jobs.list.iter().map(|j| j.status()).collect();
-            ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
-        }
-        "process_list" => {
-            let list: Vec<serde_json::Value> = app
-                .process_list()
-                .into_iter()
-                .map(|p| serde_json::to_value(p).unwrap_or_default())
-                .collect();
             ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
         }
         "process_screen" => {
@@ -1594,7 +1464,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             app.focus_panel(id.as_deref()).map_err(err)?;
             ret(lua, ())
         }
-        "panel_focused" => ret(lua, app.focused_panel().map(|p| p.id.clone())),
         "panel_scroll" => {
             let (id, to): (String, Value) = args(lua, a)?;
             let Some(p) = app.panel_mut(&id) else {
@@ -1614,12 +1483,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             app.dirty = true;
             ret(lua, true)
         }
-        "ui_refresh" => {
-            app.views_rev += 1;
-            app.ui_broken.clear();
-            app.dirty = true;
-            ret(lua, ())
-        }
         "ui_refresh_in" => {
             let ms: f64 = args(lua, a)?;
             let at =
@@ -1627,7 +1490,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             app.ui_expiry = Some(app.ui_expiry.map_or(at, |e| e.min(at)));
             ret(lua, ())
         }
-        "settings_get" => ret(lua, to_lua(lua, &app.settings)?),
         "runtime_overrides" => {
             let list: Vec<serde_json::Value> = app
                 .config_dir
@@ -1698,7 +1560,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 None => ret(lua, Value::Nil),
             }
         }
-        "chat_view" => ret(lua, to_lua(lua, &app.chat_view())?),
         "chat_scroll_to" => {
             let (index, at): (usize, Option<String>) = args(lua, a)?;
             let ok = app.chat_scroll_to(index, at.as_deref().unwrap_or("top"));
@@ -1800,27 +1661,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
     }
 }
 
-fn normalize_image_lists(value: &mut serde_json::Value) {
-    match value {
-        serde_json::Value::Object(map) => {
-            if let Some(images) = map.get_mut("images")
-                && images.as_object().is_some_and(|o| o.is_empty())
-            {
-                *images = serde_json::json!([]);
-            }
-            for value in map.values_mut() {
-                normalize_image_lists(value);
-            }
-        }
-        serde_json::Value::Array(values) => {
-            for value in values {
-                normalize_image_lists(value);
-            }
-        }
-        _ => {}
-    }
-}
-
 impl bone_ui::lua::Host for App {
     type Line = ratatui::text::Line<'static>;
 
@@ -1837,7 +1677,7 @@ impl bone_ui::lua::Host for App {
 
     fn owners(&mut self) -> bone_ui::lua::Owners<'_> {
         bone_ui::lua::Owners {
-            owner: &self.owner,
+            owner: &mut self.owner,
             callback_owner: &mut self.callback_owner,
             owned: &mut self.owned,
             next_callback: &mut self.next_callback,
@@ -1907,6 +1747,82 @@ impl bone_ui::lua::Host for App {
     }
 
     fn changed(&mut self) {
+        self.dirty = true;
+    }
+
+    fn request_raw(
+        &mut self,
+        method: String,
+        params: serde_json::Value,
+        then: impl FnOnce(&mut Self, Result<serde_json::Value, String>) + Send + 'static,
+    ) {
+        App::request_raw(self, method, params, move |app, r| {
+            then(app, r.map_err(|e| e.to_string()))
+        });
+    }
+
+    fn spawn<T: Send + 'static>(
+        &mut self,
+        fut: impl std::future::Future<Output = T> + Send + 'static,
+        then: impl FnOnce(&mut Self, T) + Send + 'static,
+    ) {
+        App::spawn(self, fut, then);
+    }
+
+    fn plugin_files_changing(&mut self) {
+        self.rewatch = true;
+    }
+
+    fn info(&mut self, text: String) {
+        App::info(self, text);
+    }
+
+    fn error(&mut self, text: String) {
+        App::error(self, text);
+    }
+
+    fn lua_error(&mut self, context: &str, e: &mlua::Error) {
+        App::lua_error(self, context, e);
+    }
+
+    fn settings(&self) -> &serde_json::Value {
+        &self.settings
+    }
+
+    fn target_chat(&self) -> Option<usize> {
+        App::target_chat(self)
+    }
+
+    fn prompt_text(&self) -> String {
+        App::prompt_text(self)
+    }
+
+    fn prompt_images(&self) -> Vec<bone_proto::types::ImageAttachment> {
+        App::prompt_images(self).to_vec()
+    }
+
+    fn set_prompt_images(
+        &mut self,
+        images: Vec<bone_proto::types::ImageAttachment>,
+    ) -> Result<(), String> {
+        App::set_prompt_images(self, images)
+    }
+
+    fn focused_panel(&self) -> Option<String> {
+        App::focused_panel(self).map(|p| p.id.clone())
+    }
+
+    fn process_list(&self) -> Vec<bone_proto::methods::ProcessSnapshot> {
+        App::process_list(self)
+    }
+
+    fn chat_view(&self) -> serde_json::Value {
+        App::chat_view(self)
+    }
+
+    fn refresh_ui(&mut self) {
+        self.views_rev += 1;
+        self.ui_broken.clear();
         self.dirty = true;
     }
 }
