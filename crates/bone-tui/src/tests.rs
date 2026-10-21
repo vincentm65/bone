@@ -4677,7 +4677,7 @@ async fn config_provider_compact_limit_saves_numbers_and_resets_empty() {
         }
         h.input("{down}").await;
     }
-    let path = "providers.ds.compact_limit";
+    let path = "providers.qwen.compact_limit";
     h.input("{enter}{ctrl+u}0{enter}").await;
     assert_eq!(
         h.requests("settings/set").last().unwrap(),

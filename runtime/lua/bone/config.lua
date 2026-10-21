@@ -163,7 +163,7 @@ function M.open(want)
   local save_provider_field
   local function load_providers()
     bone.model.list(function(list, err)
-      st.providers = list or {}
+      st.providers = list or {}; if want == "providers" and not st.prov then for i, p in ipairs(st.providers) do if p.current then st.sel = i; break end end end
       if err then
         st.note = { "cannot list providers: " .. tostring(err), "ErrorMsg" }
       end
@@ -449,7 +449,7 @@ function M.open(want)
       end
       bone.settings.set("provider", row.name, function(_, err)
         load_providers()
-        saved_note(err, "using " .. row.name)
+        saved_note(err, "using " .. row.name); if not err and want == "providers" then bone.ui.close(id) end
       end)
     elseif row.kind == "paction" then
       if space then
