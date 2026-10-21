@@ -10,6 +10,7 @@ pub mod editor;
 pub mod keymap;
 pub mod keys;
 pub mod layout;
+pub mod lua;
 pub mod markdown;
 pub mod model;
 pub mod options;

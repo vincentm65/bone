@@ -23,22 +23,7 @@ pub const PROJECT: &str = "project";
 /// The trusted project roots, in `bone.state` (TUI side).
 const TRUSTED: &str = "trusted-projects";
 
-/// Something a plugin created, to remove when it unloads.
-#[derive(Debug, Clone, PartialEq)]
-pub enum Owned {
-    /// A user command, with its callback (it may have been redefined since).
-    Command(String, u64),
-    Autocmd(u64),
-    /// A panel id, with its sequence number (the id may be reused).
-    Panel(String, u64),
-    Popup(u64),
-    Job(u64),
-    Option(String),
-    Raw(u64),
-    Context(Context),
-    /// Its README in `bone._docs`.
-    Doc,
-}
+pub use bone_ui::lua::Owned;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
@@ -95,9 +80,7 @@ fn loaded_modules(lua: &mlua::Lua) -> mlua::Result<Vec<String>> {
 impl App {
     /// Record that the current owner (if a plugin) created `what`.
     pub fn own(&mut self, what: Owned) {
-        if let Some(owner) = &self.owner {
-            self.owned.entry(owner.clone()).or_default().push(what);
-        }
+        bone_ui::lua::own(self, what);
     }
 
     pub fn plugin(&self, name: &str) -> Option<&Plugin> {
