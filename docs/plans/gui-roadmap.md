@@ -105,7 +105,7 @@ Dependencies of the candidate modules for extraction:
 | `chat.rs` | `data`, `text`, ratatui `Line` | keep the line cache and `bare` in the TUI, move the reducer |
 | `term.rs` | `vt100`, ratatui `Style`, `ui::Item` | move after `theme` and `ui`; returns `bone-ui` items |
 | `commands.rs`, `data.rs` | `impl App` blocks | split the pure parts out; the rest stays per frontend |
-| `panel.rs`, `jobs.rs` | `impl App`, ratatui `Frame` | panel/job state moves with `UiState`; drawing stays per frontend |
+| `panel.rs`, `jobs.rs` | `impl App`, ratatui `Frame` | panel/job ops become shared behind `Host`; drawing stays per frontend |
 | `selection.rs`, `render.rs`, `terminal.rs`, `clipboard.rs` | ratatui, crossterm | TUI only |
 
 `ui.rs` is the Lua UI model itself, so it is the extraction that makes
@@ -242,12 +242,11 @@ markdown body text that the GUI wraps itself), behind a capability.
 The Lua bindings are one string-op dispatcher (`dispatch(app, lua, op, args)`
 in `lua.rs`, about 130 ops) lent through `with_api`. That is the seam:
 
-- Carve a `UiState` out of `App` — keymaps and owners, options, commands,
-  chats, callbacks, theme, panels and jobs state — that both frontends embed.
-- `bone_ui::dispatch(state, host, lua, op, args)` handles shared ops against
-  `UiState`, calling a small `Host` trait for what only the frontend knows
-  (redraw, geometry, clipboard, quit). Unknown ops fall through to the
-  frontend's own dispatcher.
+- Each frontend implements a `Host` trait: accessors to the shared state
+  (as `bone-ui` types it stores itself) and the services only it has
+  (calling Lua callbacks, redraw, geometry, clipboard).
+- `bone_ui::lua::dispatch(host, lua, op, args)` handles shared ops; unknown
+  ops fall through to the frontend's own dispatcher.
 - Ops move into the shared dispatcher one group at a time.
 
 ### Processes
@@ -312,7 +311,7 @@ not all up front.
   everyone hears `ask/resolved`), concurrent submits (`turn/start` is `BUSY`,
   `queue/add` queues), lag recovery (`session/updated` with `"lagged"`), and
   the resync snapshot.
-- Write the `UiState`/`Host`/shared-dispatch design (see "Host and
+- Write the `Host`/shared-dispatch design (see "Host and
   dispatch").
 - Decide units, the pointer event shape, and the `ui.*` capability names.
 - Set up the conformance harness against the headless TUI.
@@ -323,7 +322,7 @@ written, and the conformance harness runs.
 **Status:** done except the units, pointer-event, and capability-name
 decisions, which land with the binding groups that need them. The
 guarantees are in `docs/protocol.md` ("Multiple clients"); the design is
-`docs/plans/gui-ui-state.md`. The harness is `crates/bone/tests/conformance.rs`:
+`docs/plans/gui-lua-host.md`. The harness is `crates/bone/tests/conformance.rs`:
 it runs each `tests/ui/*.lua` against a real core in the headless TUI, through
 a `UiDriver` trait the headless GUI will implement too. A script is a chunk,
 or returns a list of steps run with events handled between them; `eq(got,
@@ -425,10 +424,10 @@ Not fixed: the TUI is unchanged in this work.
   call the same `require("bone.ui").setup(opts)` as the TUI. Add the GUI bare
   library.
 - Bind the shared Lua API once in `bone-ui` through the shared dispatcher
-  over `UiState` and `Host`, keeping the `with_api`/`lua.scope` lending
-  pattern. Migrate `lua.rs` one op group at a time (text, options, keymap,
-  prompt, chat data, commands, …) as its state moves to `UiState`; each group
-  is classified in `docs/lua.md` and gets its conformance tests when it moves.
+  over `Host`, keeping the `with_api`/`lua.scope` lending pattern. Migrate
+  `lua.rs` one op group at a time (text, options, keymap, prompt, chat data,
+  commands, …); each group is classified in `docs/lua.md` and gets its
+  conformance tests when it moves.
 - Move the shared parts of `runtime/tui/api.lua` into a shared
   `runtime/ui/api.lua` that both sides load.
 - Lua reload with the TUI's safety rule: build a fresh state, keep the old one

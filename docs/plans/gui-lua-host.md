@@ -1,4 +1,4 @@
-# UiState, Host, and the shared Lua dispatcher
+# Host and the shared Lua dispatcher
 
 Design for Phase 3 of `gui-roadmap.md`: how the Lua API gets one
 implementation used by both frontends.
@@ -15,39 +15,50 @@ re-enter ops.
 
 ## Target
 
+Each frontend keeps its own application struct (`bone-tui::App`,
+`bone-gui::Gui`) and implements one trait:
+
 ```rust
-pub struct App {           // bone-tui; bone-gui has its own
-    pub ui: bone_ui::UiState,
-    pub tui: TuiState,     // implements bone_ui::Host
+pub trait Host {
+    // Shared state, as `bone-ui` types the frontend stores where it likes.
+    fn option_store(&mut self) -> OptionStore<'_>;   // options, dynamic, carried, rev
+    fn owners(&mut self) -> Owners<'_>;              // plugin ownership, callback ids
+    // ...one accessor per migrated group...
+
+    // Services only the frontend can provide.
+    fn call_callback_multi(&mut self, id: u64, context: &str, args: ...) -> Option<MultiValue>;
+    fn changed(&mut self);                           // something to draw
+    // ...geometry, clipboard, redraw timers as their groups move...
 }
 ```
 
-- `bone_ui::UiState` is everything about the client that is not drawing.
-- `bone_ui::Host` is what only the frontend can answer or do.
-- `bone_ui::dispatch(ui, host, lua, op, args) -> Option<Result<..>>`
-  handles the shared ops and returns `None` for ops it does not know; the
-  frontend's own dispatcher handles those (`tui::dispatch`).
-- `with_api` stays the lending point. It splits the borrow
-  (`let App { ui, tui } = self`) and gives both halves to the scope closure.
-
-The split borrow is the reason `Host` is implemented by `TuiState`, not
-`App`: a `Host` method that took `&mut App` could not be called while
-`UiState` is borrowed.
+- `bone_ui::lua::dispatch(host, lua, op, args)` handles the shared ops and
+  hands back the arguments of an op it does not know, for the frontend's own
+  dispatcher.
+- `with_api` stays the lending point: it lends the whole frontend struct, as
+  today.
+- Accessors return bundles of borrows (`OptionStore { options, dynamic, .. }`)
+  over the frontend's own fields, so moving an op group does not move or
+  rename TUI fields.
 
 ### Re-entering Lua
 
 Shared ops run Lua callbacks (`press` runs a keymap, `cmd` runs a command,
-`opt_set` runs the option's `on_change`). Today that is `app.call_callback`, which calls
-`with_api` again. In the split, the shared dispatcher gets a
-`&mut dyn FnMut(&mut UiState, &mut dyn Host, u64, Args)` re-entry hook
-(or `Host::call_callback`), so a nested call borrows the same two halves
-instead of the whole `App`. The first migrated group that fires callbacks
-(options, because of `on_change`) proves this works before the
-rest move.
+`opt_set` runs the option's `on_change`). They do it through
+`Host::call_callback_multi`, which is the frontend's existing
+`call_callback_multi`: it runs as the callback's owner and re-enters
+`with_api` on the whole struct. Nothing is split, so there is no borrow to
+juggle; an accessor's borrows end before a callback runs.
+
+This replaces an earlier draft of this note that split `App` into a shared
+`UiState` and a `TuiState`. The split made re-entry need a two-half borrow
+and would have renamed every TUI field; the accessor trait does neither.
+The tables below still say which state is shared: it is the state the
+accessors expose.
 
 ## What goes where
 
-### `UiState` (shared)
+### Shared (behind `Host` accessors)
 
 | Group | Fields |
 | --- | --- |
@@ -65,7 +76,7 @@ rest move.
 
 `jobs` stays per frontend until the PTY question below is settled.
 
-### `TuiState` (frontend only)
+### Frontend only
 
 `windows`, `chat_views`, `seps`, `placed`, `leaves`, `screen`, `selection`,
 `clipboard`, `clipboard_executable`, `title`, `quit_armed`, `tx`, `cwd`,
@@ -95,14 +106,14 @@ pub trait Host {
 }
 ```
 
-It stays small on purpose: anything that is state goes in `UiState`, and the
-trait only covers questions about the screen and the OS.
+These services sit on `Host` beside the state accessors, added as the groups
+that need them move.
 
 ## The ops
 
-Grouped in the order they migrate. Each group lands as one commit, moving its
-state into `UiState` and its ops into `bone_ui::dispatch`, with its
-`docs/lua.md` entries classified and its conformance tests added.
+Grouped in the order they migrate. Each group lands as one commit, adding
+its `Host` accessors and moving its ops into `bone_ui::lua::dispatch`, with
+its `docs/lua.md` entries classified and its conformance tests added.
 
 | # | Group | Ops | Needs from `Host` |
 | --- | --- | --- | --- |
@@ -131,9 +142,9 @@ and in what `runtime/tui/api.lua` does with the results.
   becomes a `Host` capability (`gui.terminal` arrives later anyway), or
   `jobs.rs` moves to a small shared crate that both frontends depend on.
   Decide when group 12 starts.
-- **Render cache line type.** `UiState.chats` is `Vec<ChatBuffer<L>>`. Making
-  `UiState` generic over `L` is the simplest; a boxed `dyn Any` line cache
-  is the alternative if the generic spreads too far.
+- **Render cache line type.** Chats are `ChatBuffer<L>` with the frontend's
+  line type; the chat accessor is generic over `L` (an associated type on
+  `Host`).
 - **`api.lua` split.** Ops move first; the `bone.*` wrappers in
   `runtime/tui/api.lua` move to `runtime/ui/api.lua` per group, in the same
   commit as the ops they wrap.
