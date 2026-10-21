@@ -386,6 +386,37 @@ Create `crates/bone-gui`:
 
 **Exit condition:** the multi-client tests pass with one TUI and one GUI.
 
+**Status:** done. `crates/bone-gui` (egui/eframe 0.36, Rust 1.95 for that
+crate only), opened with `bone --gui` from a binary built with
+`--features gui`; the default build does not include it.
+`crates/bone-gui/tests/multi_client.rs` covers multi-client cases 1–7 (6
+through a proxy that drops the GUI's connection while the core keeps
+running). Along the way, `bone_ui::chat::apply_event` and `bare_text`
+became shared, so both frontends apply transcript events the same way.
+
+**Toolkit decision: egui.** Against the spike criteria:
+
+| Criterion | Result |
+| --- | --- |
+| Retained tree, Lua not re-run per frame | Yes: rows are cached per item by `rev` in `ChatBuffer<L>`, as in the TUI; frames draw cached rows. |
+| Streaming into a 10k-item transcript at 60 fps | Yes: 10k items, release build, headless (layout, no GPU paint): first frame 10 ms (wraps everything), then 0.6 ms per frame idle or streaming a delta. |
+| Text selection across a long, virtualized transcript | Partly: rows are selectable labels and egui selects across labels, but rows scrolled out of `show_rows` drop out of a selection. Needs a transcript widget that keeps selection by item and offset (Phase 4). |
+| IME | Through winit (untested here: no display). |
+| Bidirectional text | Not supported by egui's text layout; would need `parley` or `cosmic-text` (Phase 4 decision). |
+| Accessibility | AccessKit, on by default in eframe. |
+| Software fallback, diagnostics | wgpu with a low-power adapter by default; wgpu's GL backend covers Mesa's software rasterizer, and eframe's glow renderer is tried if wgpu fails. The renderer is shown in the status line; adapter details are Phase 4. |
+| Linux (X11, Wayland), macOS, Windows | Supported by eframe; only Linux builds have been run. |
+
+Bidirectional text and cross-scroll selection are the two known gaps; both
+sit behind the transcript widget, which the adapter keeps replaceable.
+
+**Found along the way:** the TUI applies replies and server events from two
+channels (`tokio::select!`), so a `session/messages` reply can overtake
+older events still queued and those events are applied on top of the
+snapshot (for example a `message/completed` shown twice after attaching
+while far behind). The GUI uses one ordered channel and does not have this.
+Not fixed: the TUI is unchanged in this work.
+
 ### Phase 3: GUI Lua host
 
 - Add `Side::Gui`, GUI capabilities, and the `ui.lua`/`gui.lua` loader for
