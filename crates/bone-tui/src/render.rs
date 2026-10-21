@@ -40,11 +40,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
     let area = frame.area();
     app.screen = area;
+    crate::stats::mark("pre");
     app.spinner = app.read_spinner();
+    crate::stats::mark("spinner");
     // The Normal group's background (if any) fills the screen.
     frame.render_widget(Block::default().style(app.theme.hl("Normal")), area);
     // Screen-height sidebars reserve a column for the entire main UI.
     let layout = app.layout();
+    crate::stats::mark("layout");
     let mut panels = Vec::new();
     let area = app.allocate_panels(area, true, &layout, &mut panels);
     // Without a "message" leaf, notifications take rows at the bottom.
@@ -65,6 +68,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
 
     let mut plan = Plan::default();
     place(app, &layout, main, &mut plan, &mut Vec::new());
+    crate::stats::mark("place");
     let none = Rect { height: 0, ..main };
     let rect = |leaves: &[(String, Rect)], name: &str| {
         leaves
@@ -129,6 +133,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             "prompt" => cursor = cursor.or(draw_prompt(frame, app, r, buf)),
             _ => draw_line(frame, app, r, buf, kind),
         }
+        crate::stats::mark(kind);
         app.rendering = None;
     }
     // A hidden chat keeps its data but not its rendered lines.
@@ -137,7 +142,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             c.redraw(None);
         }
     }
+    crate::stats::mark("leaves");
     app.paint_panels(frame, &panels);
+    crate::stats::mark("panels");
     for (name, r) in std::mem::take(&mut plan.regions) {
         // Measurement callbacks see available space; painting sees final space.
         if let Some((_, lines)) = app.region_sized(&name, r.width, r.height, true, true) {
@@ -152,6 +159,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             }
         }
     }
+    crate::stats::mark("regions");
     draw_message(frame, app, message);
 
     if !app.popups.is_empty() {
@@ -223,6 +231,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if let Some(s) = &mut app.selection {
         s.highlight(frame.buffer_mut());
     }
+    crate::stats::mark("rest");
 }
 
 /// Where the layout put things.
@@ -442,6 +451,7 @@ fn draw_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect, buf: BufferId) {
     }
     let height = area.height as usize;
     app.render_chat(buf, area.width as usize);
+    crate::stats::mark("render_chat");
     let chat = &app.chats[buf];
     let total = chat.row_count();
     let win = if buf == app.current {

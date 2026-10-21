@@ -95,8 +95,8 @@ impl Headless {
         loop {
             let timeout_at = self.app.key_sequence_deadline();
             tokio::select! {
-                Some(ev) = self.rx.recv() => self.app.apply(ev),
-                Some(ev) = self.events.recv() => self.app.handle_server(ev),
+                Some(ev) = self.rx.recv() => crate::stats::event(|| self.app.apply(ev)),
+                Some(ev) = self.events.recv() => crate::stats::event(|| self.app.handle_server(ev)),
                 _ = tokio::time::sleep_until(timeout_at.unwrap_or_else(Instant::now).into()), if timeout_at.is_some() => {
                     self.app.expire_key_sequence();
                 }
@@ -129,9 +129,11 @@ impl Headless {
     /// trimmed.
     pub fn screen(&mut self) -> String {
         let app = &mut self.app;
+        crate::stats::begin();
         self.terminal
             .draw(|f| crate::render::draw(f, app))
             .expect("in-memory draw");
+        crate::stats::finish();
         let buf = self.terminal.backend().buffer();
         let area = buf.area;
         (0..area.height)

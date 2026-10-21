@@ -27,6 +27,7 @@ mod plugins;
 mod render;
 mod selection;
 mod shellhl;
+mod stats;
 mod term;
 mod terminal;
 mod text;
@@ -176,16 +177,16 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
             biased;
             ev = rx.recv() => {
                 if let Some(ev) = ev {
-                    app.apply(ev);
+                    stats::event(|| app.apply(ev));
                 }
             }
             ev = input.next() => match ev {
-                Some(Ok(ev)) => handle_terminal(&mut app, ev),
+                Some(Ok(ev)) => stats::event(|| handle_terminal(&mut app, ev)),
                 Some(Err(e)) => return Err(e),
                 None => break,
             },
             ev = server_events.recv(), if retry.is_none() => match ev {
-                Some(ev) => app.handle_server(ev),
+                Some(ev) => stats::event(|| app.handle_server(ev)),
                 None => match &reconnect_to {
                     Some(path) => {
                         app.server_lost();
@@ -203,7 +204,9 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
                 app.expire_key_sequence();
             }
             _ = sleep_until(draw_at.unwrap_or_else(Instant::now).into()), if draw_at.is_some() => {
+                stats::begin();
                 term.draw_frame(|f| render::draw(f, &mut app))?;
+                stats::finish();
                 app.dirty = std::mem::take(&mut app.redraw);
                 if let Some(title) = app.ui_title()
                     && app.title.as_ref() != Some(&title)

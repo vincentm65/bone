@@ -23,6 +23,9 @@ type Backend = CrosstermBackend<BufWriter<Stdout>>;
 pub struct Guard {
     terminal: Terminal<Backend>,
     enhanced: bool,
+    /// tmux repaints the whole pane after every synchronized update, which
+    /// sends the outer terminal 30x or more the bytes of the frame itself.
+    sync: bool,
 }
 
 impl std::ops::Deref for Guard {
@@ -58,17 +61,29 @@ pub fn enter() -> io::Result<Guard> {
     let out = BufWriter::with_capacity(256 * 1024, out);
     let mut terminal = Terminal::new(CrosstermBackend::new(out))?;
     terminal.clear()?;
-    Ok(Guard { terminal, enhanced })
+    Ok(Guard {
+        terminal,
+        enhanced,
+        sync: std::env::var_os("TMUX").is_none(),
+    })
 }
 
 impl Guard {
-    /// Draw a frame as one synchronized update, which terminals that support
-    /// it show only once it is complete. The cursor is hidden while cells
-    /// are written (tmux/SSH drop the update, and it would flicker).
+    /// Draw a frame as one synchronized update (outside tmux), which
+    /// terminals that support it show only once it is complete. The cursor
+    /// is hidden while cells are written (SSH can drop the update, and it
+    /// would flicker).
     pub fn draw_frame(&mut self, render: impl FnOnce(&mut ratatui::Frame)) -> io::Result<()> {
-        queue!(self.terminal.backend_mut(), BeginSynchronizedUpdate, Hide)?;
+        if self.sync {
+            queue!(self.terminal.backend_mut(), BeginSynchronizedUpdate)?;
+        }
+        queue!(self.terminal.backend_mut(), Hide)?;
         self.terminal.draw(render)?;
-        execute!(self.terminal.backend_mut(), EndSynchronizedUpdate)
+        crate::stats::mark("draw");
+        if self.sync {
+            execute!(self.terminal.backend_mut(), EndSynchronizedUpdate)?;
+        }
+        Ok(())
     }
 }
 
