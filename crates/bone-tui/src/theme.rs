@@ -4,7 +4,6 @@
 use std::ops::{Deref, DerefMut};
 
 use bone_ui::style::{Color, Modifier, Style};
-pub use bone_ui::theme::StyleSpec;
 
 #[derive(Debug, Clone, Default)]
 pub struct Theme(bone_ui::theme::Theme);

@@ -15,19 +15,8 @@ use mlua::{Function, Lua, MultiValue, Table, Value};
 use crate::app::App;
 use crate::keymap::{Action, Builtin, Context};
 use crate::keys;
-use crate::theme::StyleSpec;
 use bone_ui::lua::{CALLBACKS, args, context_from_name, err, opt, ret, valid_dynamic_name};
-use ratatui::style::{Color, Modifier};
 use serde_json::Value as Json;
-
-/// A color as `parse_color` reads it back.
-fn fmt_color(c: Color) -> String {
-    match c {
-        Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
-        Color::Indexed(n) => n.to_string(),
-        other => format!("{other:?}").to_ascii_lowercase(),
-    }
-}
 
 /// What a plugin, the user's config, or a project runs in the TUI, in
 /// order: the UI code it shares with the GUI, then the TUI's own.
@@ -889,44 +878,6 @@ impl App {
         true
     }
 
-    /// Load a colorscheme: `<config dir>/colors/<name>.lua`, a plugin's
-    /// `colors/<name>.lua`, or the runtime's.
-    pub fn colorscheme(&mut self, name: &str) -> Result<(), String> {
-        if name.is_empty() || name.contains(['/', '\\', '.']) {
-            return Err(format!("bad colorscheme name {name:?}"));
-        }
-        let rel = format!("colors/{name}.lua");
-        let dir = self.config_dir.clone();
-        let mut candidates = Vec::new();
-        if let Some(d) = &dir {
-            candidates.push(d.join(&rel));
-            candidates.extend(bone_lua::plugins(d).into_iter().map(|p| p.join(&rel)));
-        }
-        let (src, chunk) = candidates
-            .iter()
-            .find_map(|p| {
-                std::fs::read_to_string(p)
-                    .ok()
-                    .map(|s| (s, p.display().to_string()))
-            })
-            .or_else(|| bone_lua::tui_runtime_source(dir.as_deref(), &rel))
-            .ok_or_else(|| format!("no colorscheme named {name}"))?;
-        // Its `bone.hl.set` calls replace the previous colorscheme's groups;
-        // the UI's, plugins' and the user's stay. One loaded from inside
-        // another colorscheme adds to it.
-        let saved = self.theme.begin_scheme();
-        let outer = saved.is_some();
-        let loaded = self.with_api(|lua| lua.load(src).set_name(format!("@{chunk}")).exec());
-        self.theme.end_scheme(saved, loaded.is_ok());
-        loaded.map_err(|e| format!("colorscheme {name}: {}", short_error(&e)))?;
-        if outer {
-            self.colors_name = Some(name.to_owned());
-        }
-        self.opts_rev += 1;
-        self.dirty = true;
-        Ok(())
-    }
-
     /// Keep `f` for later; it runs as the plugin that stored it.
     fn store_callback(&mut self, lua: &Lua, f: Function) -> mlua::Result<u64> {
         bone_ui::lua::store_callback(self, lua, f)
@@ -1540,7 +1491,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             app.history_add(&text);
             ret(lua, ())
         }
-        "colors_name" => ret(lua, app.colors_name.clone()),
         "log_tail" => {
             let n: usize = args(lua, a)?;
             let start = app.log.len().saturating_sub(n);
@@ -2000,65 +1950,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             app.dirty = true;
             ret(lua, ())
         }
-        "hl_set" => {
-            let (name, spec): (String, Table) = args(lua, a)?;
-            let spec = StyleSpec {
-                fg: spec.get("fg")?,
-                bg: spec.get("bg")?,
-                bold: spec.get::<Option<bool>>("bold")?.unwrap_or(false),
-                italic: spec.get::<Option<bool>>("italic")?.unwrap_or(false),
-                underline: spec.get::<Option<bool>>("underline")?.unwrap_or(false),
-                strikethrough: spec.get::<Option<bool>>("strikethrough")?.unwrap_or(false),
-                reverse: spec.get::<Option<bool>>("reverse")?.unwrap_or(false),
-                dim: spec.get::<Option<bool>>("dim")?.unwrap_or(false),
-                link: spec.get("link")?,
-            };
-            app.theme
-                .set(&name, &spec)
-                .map_err(|e| err(format!("{name}: {e}")))?;
-            app.opts_rev += 1;
-            app.dirty = true;
-            ret(lua, ())
-        }
-        "hl_get" => {
-            let name: String = args(lua, a)?;
-            let st = app.theme.hl(&name);
-            let t = lua.create_table()?;
-            t.set("fg", st.fg.map(fmt_color))?;
-            t.set("bg", st.bg.map(fmt_color))?;
-            for (key, m) in [
-                ("bold", Modifier::BOLD),
-                ("italic", Modifier::ITALIC),
-                ("underline", Modifier::UNDERLINED),
-                ("strikethrough", Modifier::CROSSED_OUT),
-                ("reverse", Modifier::REVERSED),
-                ("dim", Modifier::DIM),
-            ] {
-                if st.add_modifier.contains(m) {
-                    t.set(key, true)?;
-                }
-            }
-            ret(lua, t)
-        }
-        "hl_reset" => {
-            app.theme.reset();
-            app.opts_rev += 1;
-            app.dirty = true;
-            ret(lua, ())
-        }
-        "hl_names" => ret(
-            lua,
-            app.theme
-                .names()
-                .into_iter()
-                .map(str::to_owned)
-                .collect::<Vec<_>>(),
-        ),
-        "colorscheme" => {
-            let name: String = args(lua, a)?;
-            app.colorscheme(&name).map_err(err)?;
-            ret(lua, ())
-        }
         other => Err(err(format!("unknown bone API operation: {other}"))),
     }
 }
@@ -2125,6 +2016,22 @@ impl bone_ui::lua::Host for App {
 
     fn context(&self) -> Context {
         App::context(self)
+    }
+
+    fn looks(&mut self) -> bone_ui::lua::Looks<'_> {
+        bone_ui::lua::Looks {
+            theme: &mut self.theme,
+            colors_name: &mut self.colors_name,
+            rev: &mut self.opts_rev,
+        }
+    }
+
+    fn config_dir(&self) -> Option<&std::path::Path> {
+        self.config_dir.as_deref()
+    }
+
+    fn with_api<R>(&mut self, body: impl FnOnce(&Lua) -> mlua::Result<R>) -> mlua::Result<R> {
+        App::with_api(self, body)
     }
 
     fn user_commands(&mut self) -> &mut std::collections::HashMap<String, UserCommand> {

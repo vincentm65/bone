@@ -5,6 +5,7 @@
 //! `docs/plans/gui-lua-host.md`.
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use bone_lua::{from_lua, to_lua};
 use mlua::{FromLua, FromLuaMulti, Function, IntoLuaMulti, Lua, MultiValue, Table, Value};
@@ -12,6 +13,8 @@ use mlua::{FromLua, FromLuaMulti, Function, IntoLuaMulti, Lua, MultiValue, Table
 use crate::keymap::{Action, Context, Keymaps};
 use crate::keys::{self, Key};
 use crate::options::{self, DynamicKind, DynamicOption, DynamicValue, Options};
+use crate::style::{Color, Modifier};
+use crate::theme::{StyleSpec, Theme};
 
 /// The registry table of Lua functions stored by id (keymaps, commands,
 /// autocmds, option callbacks...).
@@ -51,6 +54,14 @@ pub struct OptionStore<'a> {
     pub options: &'a mut Options,
     pub dynamic: &'a mut HashMap<String, DynamicOption>,
     pub carried: &'a HashMap<String, DynamicValue>,
+    pub rev: &'a mut u64,
+}
+
+/// The highlight groups, the colorscheme loaded last, and the revision that
+/// cached drawing depends on (shared with the options').
+pub struct Looks<'a> {
+    pub theme: &'a mut Theme,
+    pub colors_name: &'a mut Option<String>,
     pub rev: &'a mut u64,
 }
 
@@ -98,6 +109,12 @@ pub trait Host {
     fn option_store(&mut self) -> OptionStore<'_>;
     fn autocmds(&mut self) -> &mut Vec<Autocmd>;
     fn keymap_store(&mut self) -> KeymapStore<'_>;
+    fn looks(&mut self) -> Looks<'_>;
+    /// Where the user's config, plugins and runtime overrides are.
+    fn config_dir(&self) -> Option<&Path>;
+    /// Run Lua that may call the API again, from inside an op: the API is
+    /// bound afresh for it, as for the frontend's own Lua calls.
+    fn with_api<R>(&mut self, body: impl FnOnce(&Lua) -> mlua::Result<R>) -> mlua::Result<R>;
     /// The keymap context that has the keyboard: a focused popup or panel's,
     /// a focused named context, or `main`.
     fn context(&self) -> Context;
@@ -142,6 +159,27 @@ pub fn dispatch<H: Host>(
         "keymap_context" => keymap_context(h, lua, a),
         "keymap_current" => ret(lua, h.context().name().to_owned()),
         "keymap_list" => keymap_list(h, lua),
+        "hl_set" => hl_set(h, lua, a),
+        "hl_get" => hl_get(h, lua, a),
+        "hl_reset" => {
+            let l = h.looks();
+            l.theme.reset();
+            *l.rev += 1;
+            h.changed();
+            ret(lua, ())
+        }
+        "hl_names" => {
+            let names: Vec<String> = h
+                .looks()
+                .theme
+                .names()
+                .into_iter()
+                .map(str::to_owned)
+                .collect();
+            ret(lua, names)
+        }
+        "colorscheme" => colorscheme_op(h, lua, a),
+        "colors_name" => ret(lua, h.looks().colors_name.clone()),
         "on" => on(h, lua, a),
         "off" => off(h, lua, a),
         "command_create" => command_create(h, lua, a),
@@ -906,4 +944,103 @@ fn keymap_list<H: Host>(h: &mut H, lua: &Lua) -> mlua::Result<MultiValue> {
         })
         .collect();
     ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
+}
+
+// ---- highlights ------------------------------------------------------------
+
+fn hl_set<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let (name, spec): (String, Table) = args(lua, a)?;
+    let spec = StyleSpec {
+        fg: spec.get("fg")?,
+        bg: spec.get("bg")?,
+        bold: spec.get::<Option<bool>>("bold")?.unwrap_or(false),
+        italic: spec.get::<Option<bool>>("italic")?.unwrap_or(false),
+        underline: spec.get::<Option<bool>>("underline")?.unwrap_or(false),
+        strikethrough: spec.get::<Option<bool>>("strikethrough")?.unwrap_or(false),
+        reverse: spec.get::<Option<bool>>("reverse")?.unwrap_or(false),
+        dim: spec.get::<Option<bool>>("dim")?.unwrap_or(false),
+        link: spec.get("link")?,
+    };
+    let l = h.looks();
+    l.theme
+        .set(&name, &spec)
+        .map_err(|e| err(format!("{name}: {e}")))?;
+    *l.rev += 1;
+    h.changed();
+    ret(lua, ())
+}
+
+/// A color as `parse_color` reads it back.
+fn fmt_color(c: Color) -> String {
+    match c {
+        Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+        Color::Indexed(n) => n.to_string(),
+        other => format!("{other:?}").to_ascii_lowercase(),
+    }
+}
+
+fn hl_get<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let name: String = args(lua, a)?;
+    let st = h.looks().theme.hl(&name);
+    let t = lua.create_table()?;
+    t.set("fg", st.fg.map(fmt_color))?;
+    t.set("bg", st.bg.map(fmt_color))?;
+    for (key, m) in [
+        ("bold", Modifier::BOLD),
+        ("italic", Modifier::ITALIC),
+        ("underline", Modifier::UNDERLINED),
+        ("strikethrough", Modifier::CROSSED_OUT),
+        ("reverse", Modifier::REVERSED),
+        ("dim", Modifier::DIM),
+    ] {
+        if st.add_modifier.contains(m) {
+            t.set(key, true)?;
+        }
+    }
+    ret(lua, t)
+}
+
+fn colorscheme_op<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let name: String = args(lua, a)?;
+    colorscheme(h, &name).map_err(err)?;
+    ret(lua, ())
+}
+
+/// Load `colors/<name>.lua`: the user's, then a plugin's, then the
+/// library's or built-in one.
+pub fn colorscheme<H: Host>(h: &mut H, name: &str) -> Result<(), String> {
+    if name.is_empty() || name.contains(['/', '\\', '.']) {
+        return Err(format!("bad colorscheme name {name:?}"));
+    }
+    let rel = format!("colors/{name}.lua");
+    let dir = h.config_dir().map(Path::to_owned);
+    let mut candidates = Vec::new();
+    if let Some(d) = &dir {
+        candidates.push(d.join(&rel));
+        candidates.extend(bone_lua::plugins(d).into_iter().map(|p| p.join(&rel)));
+    }
+    let (src, chunk) = candidates
+        .iter()
+        .find_map(|p| {
+            std::fs::read_to_string(p)
+                .ok()
+                .map(|s| (s, p.display().to_string()))
+        })
+        .or_else(|| bone_lua::tui_runtime_source(dir.as_deref(), &rel))
+        .ok_or_else(|| format!("no colorscheme named {name}"))?;
+    // Its `bone.hl.set` calls replace the previous colorscheme's groups;
+    // the UI's, plugins' and the user's stay. One loaded from inside
+    // another colorscheme adds to it.
+    let saved = h.looks().theme.begin_scheme();
+    let outer = saved.is_some();
+    let loaded = h.with_api(|lua| lua.load(src).set_name(format!("@{chunk}")).exec());
+    h.looks().theme.end_scheme(saved, loaded.is_ok());
+    loaded.map_err(|e| format!("colorscheme {name}: {}", bone_lua::short_error(&e)))?;
+    let l = h.looks();
+    if outer {
+        *l.colors_name = Some(name.to_owned());
+    }
+    *l.rev += 1;
+    h.changed();
+    Ok(())
 }
