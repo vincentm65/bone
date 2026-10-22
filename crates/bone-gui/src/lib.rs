@@ -13,6 +13,7 @@
 mod headless;
 mod lua;
 mod native;
+mod screen;
 mod view;
 
 use std::collections::BTreeMap;
@@ -433,11 +434,10 @@ impl Gui {
         self.status = Some(Status { text, error: true });
     }
 
-    /// Draw the current chat's stale items at `width` columns through the
-    /// Lua views (or plain text without them), and return its row count.
-    pub fn layout_chat(&mut self, width: usize) -> usize {
+    /// Draw chat `buf`'s stale items at `width` columns through the Lua
+    /// views (or plain text without them), and return its row count.
+    pub fn layout_chat(&mut self, buf: usize, width: usize) -> usize {
         let width = width.max(1);
-        let buf = self.current;
         bone_ui::lua::render_chat(
             self,
             buf,

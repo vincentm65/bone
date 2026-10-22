@@ -61,6 +61,8 @@ pub struct LuaSide {
     pub spinner: bone_ui::model::Spinner,
     /// The window's width in columns, as last drawn.
     pub screen_cols: u16,
+    /// Where the layout put things last frame.
+    pub geometry: bone_ui::lua::Geometry,
     /// Every message shown, and the last Lua errors in full.
     pub log: Vec<String>,
     pub lua_errors: Vec<String>,
@@ -483,6 +485,10 @@ impl Host for Gui {
     /// The prompt has the keyboard unless a question is open.
     fn prompt_focused(&self, buf: usize) -> bool {
         buf == self.current && self.asks.is_empty()
+    }
+
+    fn geometry(&self) -> bone_ui::lua::Geometry {
+        self.lua.geometry.clone()
     }
 }
 

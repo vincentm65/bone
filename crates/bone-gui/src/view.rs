@@ -1,14 +1,11 @@
-//! Drawing the GUI with egui, in the bare style: the session list, the
-//! transcript, the prompt and a status line, and questions as they come.
-//! Lua-produced lines are monospace, so a column here is a column in the
-//! TUI.
+//! Drawing the GUI with egui: the session list beside the Lua-laid-out
+//! screen (`screen.rs`), questions as they come, and Lua styles as egui text
+//! formats. Lua-produced lines are monospace, so a column here is a column
+//! in the TUI.
 
 use bone_ui::style::{Color, Modifier, Style};
 use eframe::egui::text::{LayoutJob, TextFormat};
-use eframe::egui::{
-    self, Color32, FontId, Key, KeyboardShortcut, Modifiers, RichText, ScrollArea, Stroke,
-    TextEdit, TextStyle,
-};
+use eframe::egui::{self, Color32, FontId, Key, ScrollArea, Stroke};
 use serde_json::Value;
 
 use crate::{Gui, Row};
@@ -25,8 +22,9 @@ impl Gui {
             .resizable(true)
             .default_size(220.0)
             .show(ui, |ui| self.sessions_ui(ui));
-        egui::Panel::bottom("prompt").show(ui, |ui| self.prompt_ui(ui));
-        egui::CentralPanel::default().show(ui, |ui| self.chat_ui(ui));
+        egui::CentralPanel::default()
+            .frame(egui::Frame::NONE)
+            .show(ui, |ui| self.screen_ui(ui));
         self.question_ui(ui.ctx());
     }
 
@@ -49,60 +47,6 @@ impl Gui {
         if let Some(id) = open {
             self.open_session(&id);
         }
-    }
-
-    fn chat_ui(&mut self, ui: &mut egui::Ui) {
-        let font = FontId::monospace(TextStyle::Monospace.resolve(ui.style()).size);
-        let col = ui.ctx().fonts_mut(|f| f.glyph_width(&font, 'M')).max(1.0);
-        let cols = (ui.available_width() / col).floor() as usize;
-        // A view's timer (`bone.chat.refresh_in`) asks for the next frame.
-        self.lua.chat_expiry = None;
-        let rows = self.layout_chat(cols);
-        if let Some(at) = self.lua.chat_expiry {
-            let wait = at.saturating_duration_since(std::time::Instant::now());
-            ui.ctx().request_repaint_after(wait);
-        }
-        let row_height = ui.text_style_height(&TextStyle::Monospace);
-        ui.spacing_mut().item_spacing.y = 0.0;
-        let chat = &self.chats[self.current];
-        ScrollArea::vertical()
-            .auto_shrink(false)
-            .stick_to_bottom(true)
-            .show_rows(ui, row_height, rows, |ui, range| {
-                for row in chat.rows().skip(range.start).take(range.len()) {
-                    ui.label(row_job(row, &font, ui.visuals()));
-                }
-            });
-    }
-
-    fn prompt_ui(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(4.0);
-        let running = self.running();
-        let edit = TextEdit::multiline(&mut self.draft)
-            .font(TextStyle::Monospace)
-            .desired_rows(2)
-            .desired_width(f32::INFINITY)
-            .hint_text("Message bone (Enter sends, Shift+Enter for a new line)")
-            // Enter sends; Shift+Enter is the newline.
-            .return_key(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter));
-        let response = ui.add(edit);
-        if response.has_focus() && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift) {
-            self.submit();
-        }
-        ui.horizontal(|ui| {
-            if running {
-                ui.spinner();
-                ui.label("working…");
-            }
-            if let Some(s) = &self.status {
-                let color = if s.error {
-                    ui.visuals().error_fg_color
-                } else {
-                    Color32::GRAY
-                };
-                ui.label(RichText::new(&s.text).color(color));
-            }
-        });
     }
 
     /// The oldest open question, as a modal.
@@ -139,7 +83,7 @@ impl Gui {
 }
 
 /// A chat row as text in its styles, one font for all of it.
-fn row_job(row: &Row, font: &FontId, visuals: &egui::Visuals) -> LayoutJob {
+pub(crate) fn row_job(row: &Row, font: &FontId, visuals: &egui::Visuals) -> LayoutJob {
     let mut job = LayoutJob::default();
     for (text, style) in row {
         job.append(text, 0.0, format(style, font, visuals));
@@ -205,7 +149,7 @@ const ANSI: [(u8, u8, u8); 16] = [
 ];
 
 /// `None` for the default color.
-fn color(c: Color) -> Option<Color32> {
+pub(crate) fn color(c: Color) -> Option<Color32> {
     let ansi = |i: usize| {
         let (r, g, b) = ANSI[i];
         Some(Color32::from_rgb(r, g, b))

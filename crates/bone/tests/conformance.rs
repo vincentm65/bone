@@ -64,7 +64,9 @@ impl UiDriver for Fixture {
         self.ui.run_lua(name, code)
     }
 
+    /// Handle events, then draw a frame (which publishes the geometry).
     async fn settle(&mut self) {
         self.ui.settle(Duration::from_millis(20)).await;
+        let _ = self.ui.screen();
     }
 }
