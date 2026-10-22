@@ -577,6 +577,15 @@ fn paint_row(ui: &egui::Ui, cells: &Cells, r: layout::Rect, row: &Row) {
     ui.painter()
         .with_clip_rect(rect)
         .galley(rect.min, galley, Color32::PLACEHOLDER);
+    // Painted text is invisible to screen readers: a row with words gets a
+    // label node (hover only, so clicks still go where they did).
+    let text: String = row.iter().map(|(t, _)| t.as_str()).collect();
+    if text.chars().any(char::is_alphanumeric) {
+        let id = ui.id().with(("cells", r.x, r.y));
+        let resp = ui.interact(rect, id, egui::Sense::hover());
+        let text = text.trim().to_owned();
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Label, true, &text));
+    }
 }
 
 fn rule_color(gui: &Gui, ui: &egui::Ui) -> Color32 {

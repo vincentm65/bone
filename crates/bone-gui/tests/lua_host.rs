@@ -592,3 +592,24 @@ async fn the_desktop_library() {
         "true"
     );
 }
+
+/// What Lua draws reaches screen readers: chat rows, blocks, and the rows
+/// painted in regions (the status line).
+#[tokio::test(flavor = "multi_thread")]
+async fn lua_drawn_rows_are_accessible() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.enable_accesskit();
+    g.gui
+        .run_lua(
+            "t",
+            "bone.ui.statusline = function() return { { 'conf status words', 'StatusLine' } } end
+             bone.chat.add('note', { text = 'a chat row' })",
+        )
+        .unwrap();
+    g.frame();
+    g.frame();
+    let all = g.accessible.join(" | ");
+    assert!(all.contains("conf status words"), "the status line: {all}");
+    assert!(all.contains("a chat row"), "the chat: {all}");
+}

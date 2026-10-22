@@ -15,6 +15,9 @@ pub struct Headless {
     pub gui: Gui,
     /// What was last copied to the clipboard.
     pub copied: Option<String>,
+    /// The text screen readers got last frame, after
+    /// [`Headless::enable_accesskit`].
+    pub accessible: Vec<String>,
     /// When the last frame asked for the next one (`Duration::MAX`: only
     /// on input).
     pub repaint: Duration,
@@ -38,6 +41,7 @@ impl Headless {
             gui: Gui::connect(conn, opts).await?,
             copied: None,
             repaint: Duration::MAX,
+            accessible: Vec::new(),
             ctx: egui::Context::default(),
             size: egui::vec2(width, height),
             events: Vec::new(),
@@ -63,6 +67,11 @@ impl Headless {
         let mut out = self.ctx.run_ui(input, |ui| gui.ui(ui));
         // No renderer takes the font atlas and images.
         out.textures_delta.clear();
+        if let Some(update) = out.platform_output.accesskit_update.take() {
+            self.accessible = (update.nodes.iter())
+                .filter_map(|(_, n)| n.label().or(n.value()).map(str::to_owned))
+                .collect();
+        }
         self.repaint = (out.viewport_output.get(&egui::ViewportId::ROOT))
             .map_or(Duration::MAX, |v| v.repaint_delay);
         for cmd in out.platform_output.commands {
@@ -139,6 +148,12 @@ impl Headless {
                 modifiers: egui::Modifiers::NONE,
             });
         }
+    }
+
+    /// Build the accessibility tree from the next frame, as a screen reader
+    /// asking for it does.
+    pub fn enable_accesskit(&mut self) {
+        self.ctx.enable_accesskit();
     }
 
     /// Drop file `path` on the window in the next frame.
