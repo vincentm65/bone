@@ -1,19 +1,23 @@
--- The desktop library (/gui use desktop): the standard UI, drawn like the
--- bone Android app. Your messages sit in rounded bubbles, answers are
--- proportional text with Markdown laid out by the window, tool calls stay
--- monospace rows, the composer is a card, and the colors are the app's
--- graphite. It is all Lua over the shared UI: the modules are in
--- runtime/lua/bone/desktop/, and ~/.bone/ui.lua and gui.lua run after this.
+-- The desktop library (/gui use desktop): the GUI's own UI, styled after
+-- the bone Android app and apart from the TUI's: its colors (graphite), its
+-- views for every kind of item, tool calls included, its layout, composer,
+-- status bar, sessions sidebar and tray. What it shares with the TUI is
+-- behaviour, not looks: the commands, keys and the `/` menu, and the data
+-- modules (bone.chats, bone.background, bone.usage, bone.timing). It is all
+-- Lua, in runtime/lua/bone/desktop/; ~/.bone/ui.lua and gui.lua run after.
 
--- The standard UI first, then its looks replaced.
-require("bone.ui").setup()
+bone.colorscheme("graphite")
 require("bone.commands")
 require("bone.menu")
 require("bone.keys")
 require("bone.gui")
-require("bone.desktop.theme").setup()
+-- The data the sidebar, tray and status bar draw (tracking from the start).
+require("bone.chats")
+require("bone.background")
 require("bone.desktop.views").setup()
 require("bone.desktop.layout").setup()
+require("bone.desktop.statusline").setup()
+require("bone.desktop.tray").setup()
 
 -- The font every grid line is drawn in (blocks use the window's
 -- proportional font): a monospace font file (empty for the built-in one),

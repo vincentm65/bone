@@ -597,6 +597,44 @@ async fn the_desktop_library() {
              assert(#a.block.paragraphs == 5, 'heading, text, two items, code: ' .. #a.block.paragraphs)",
         )
         .unwrap();
+    // Apart from the TUI's looks: none of its drawing modules are loaded,
+    // and every part draws without an error.
+    for m in [
+        "bone.ui",
+        "bone.ui.views",
+        "bone.ui.layout",
+        "bone.ui.statusline",
+        "bone.ui.tray",
+        "bone.ui.sessions",
+        "bone.ui.turn_timing",
+    ] {
+        let gone = g
+            .gui
+            .eval(&format!("package.loaded['{m}'] == nil"))
+            .unwrap();
+        assert_eq!(gone, "true", "{m} is the TUI's");
+    }
+    g.gui
+        .run_lua(
+            "t",
+            "bone.chat.add('note', { text = 'x' })
+             local t = bone.ui.views.tool({ kind = 'tool', id = 'c1', name = 'shell', arguments = { command = 'ls -la' },
+               done = true, output = 'a\\nb\\nc', is_error = false }, { width = 60 })
+             assert(t.block.paragraphs[1].spans[2].text == 'Ran', 'a card titled by what it did')
+             local e = bone.ui.views.tool({ kind = 'tool', id = 'c2', name = 'edit_file',
+               arguments = { path = 'x.rs', old_string = 'a', new_string = 'b' }, done = true }, { width = 60 })
+             assert(#e.block.paragraphs == 2, 'an edit shows its diff')
+             assert(type(bone.ui.statusline({ width = 80, spinner = '*' })) == 'table', 'a status bar')
+             bone.ui.sessions()",
+        )
+        .unwrap();
+    g.frame();
+    g.frame();
+    assert_eq!(g.gui.eval("bone.ui.panel.focused()").unwrap(), "sessions");
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+    let shown = (g.gui.status.as_ref()).map_or(String::new(), |s| s.text.clone());
+    assert!(!shown.contains("failed"), "{shown}");
+
     g.gui.run_lua("t", "bone.cmd('gui use standard')").unwrap();
     g.frame();
     assert_eq!(

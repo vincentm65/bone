@@ -55,13 +55,18 @@ pub const RUNTIME: &[(&str, &str)] = runtime_files![
     "lua/bone/usage.lua",
     "lua/bone/timing.lua",
     "lua/bone/terminal.lua",
-    "lua/bone/desktop/theme.lua",
+    "lua/bone/desktop/markdown.lua",
     "lua/bone/desktop/views.lua",
+    "lua/bone/desktop/tools.lua",
     "lua/bone/desktop/layout.lua",
+    "lua/bone/desktop/statusline.lua",
+    "lua/bone/desktop/sidebar.lua",
+    "lua/bone/desktop/tray.lua",
     "core/api.lua",
     "core/defaults.lua",
     "colors/black.lua",
     "colors/ansi.lua",
+    "colors/graphite.lua",
 ];
 
 /// The customization guides and the references they point to, embedded.

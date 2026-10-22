@@ -1,86 +1,44 @@
--- The desktop library's chat: your messages in rounded bubbles on the
--- right, answers as full-width proportional text (Markdown laid out by
--- the GUI), reasoning and notices as smaller text, and the standard tool
--- rows (they stay monospace). Each view returns a GUI block with the
--- standard view's lines beside it, which a frontend without blocks draws.
+-- The desktop library's chat, every kind of item drawn for the GUI: your
+-- messages in rounded bubbles on the right, answers as full-width
+-- proportional text (Markdown laid out by the window), reasoning, notices
+-- and queued messages as smaller text, tool calls as cards
+-- (desktop/tools.lua), and each turn's footer. Each view returns a GUI
+-- block; `lines` are a plain fallback for a frontend without blocks.
 -- Replace any of them as bone.ui.views.<kind>.
 local M = {}
 
--- Sizes in points.
-M.text_size = 15
-M.small_size = 13
-M.edge = 16
+local md = require("bone.desktop.markdown")
+local timing = require("bone.timing")
 
-local standard = {}
+local function trim(s)
+  return ((s or ""):gsub("^%s+", ""):gsub("%s+$", ""))
+end
 
--- Markdown spans as block spans: their group, and their flags kept.
-local function spans(list, group)
+-- Plain lines of `text`, for the fallback.
+local function plain(text, group)
   local out = {}
-  for _, s in ipairs(list or {}) do
-    local hl = group
-    if s.link then
-      hl = "MdLink"
-    elseif s.code then
-      hl = "MdCode"
-    elseif s.bold then
-      hl = "MdBold"
-    elseif s.italic then
-      hl = "MdItalic"
-    end
-    out[#out + 1] = { text = s.text, hl = hl, bold = s.bold, italic = s.italic, code = s.code, link = s.link }
+  for line in ((text or "") .. "\n"):gmatch("(.-)\n") do
+    out[#out + 1] = { { line, group or "Normal" } }
   end
   return out
 end
 
--- Markdown text as block paragraphs. Lines of one paragraph join (the GUI
--- wraps them); blank lines are space.
-function M.markdown(text)
-  local out, gap = {}, 0
-  local function add(p)
-    p.gap = (p.gap or 0) + gap
-    gap = 0
-    out[#out + 1] = p
+-- The turn's footer under its last item, as a paragraph.
+local function footer(item, ctx, paras)
+  local text = timing.footer(item, ctx)
+  if text then
+    paras[#paras + 1] = { spans = { { text, "Dim" } }, size = md.small_size, gap = 10 }
   end
-  local last
-  for _, b in ipairs(bone.markdown.parse(text)) do
-    local k = b.kind
-    if k == "paragraph" and last == "paragraph" and #out > 0 then
-      local prev = out[#out].spans
-      prev[#prev + 1] = { text = " ", hl = "Normal" }
-      for _, s in ipairs(spans(b.spans, "Normal")) do prev[#prev + 1] = s end
-    elseif k == "paragraph" then
-      add({ spans = spans(b.spans, "Normal"), gap = #out > 0 and 4 or 0 })
-    elseif k == "heading" then
-      local size = ({ 22, 19, 17 })[b.level] or M.text_size + 1
-      add({ spans = spans(b.spans, "MdHeading"), size = size, gap = #out > 0 and 10 or 0 })
-    elseif k == "item" then
-      local marker = b.ordered and b.marker or "•"
-      local item = { { text = marker .. "  ", hl = "MdBullet" } }
-      for _, s in ipairs(spans(b.spans, "Normal")) do item[#item + 1] = s end
-      add({ spans = item, indent = 10 + 16 * math.floor((b.indent or 0) / 2), gap = 2 })
-    elseif k == "quote" then
-      add({ spans = spans(b.spans, "MdQuote"), indent = 14, gap = 4 })
-    elseif k == "code" then
-      local body = table.concat(b.lines or {}, "\n")
-      add({ spans = { { text = body, hl = "MdCodeBlock" } }, font = "mono", size = M.small_size,
-        bg = "CodeBlock", pad = 8, gap = 6 })
-    elseif k == "table" then
-      for _, row in ipairs(b.rows or {}) do
-        local cells = {}
-        for i, cell in ipairs(row) do
-          if i > 1 then cells[#cells + 1] = { text = "   │   ", hl = "Dim" } end
-          for _, s in ipairs(spans(cell, "Normal")) do cells[#cells + 1] = s end
-        end
-        add({ spans = cells, size = M.small_size, gap = 2 })
-      end
-    elseif k == "rule" then
-      add({ spans = { { text = "⎯⎯⎯⎯⎯⎯⎯⎯", hl = "Dim" } }, gap = 6 })
-    elseif k == "blank" then
-      gap = gap + 6
-    end
-    last = k
+  return paras
+end
+
+local function images(item, paras)
+  for _, image in ipairs(item.images or {}) do
+    paras[#paras + 1] = {
+      spans = { { ("[Image: %s · %d×%d]"):format(image.name, image.width, image.height), "Dim" } },
+      size = md.small_size, gap = 4,
+    }
   end
-  return out
 end
 
 function M.user(item, ctx)
@@ -88,75 +46,99 @@ function M.user(item, ctx)
   for line in ((item.text or "") .. "\n"):gmatch("(.-)\n") do
     paras[#paras + 1] = { spans = { { line, "UserBubble" } } }
   end
-  for _, image in ipairs(item.images or {}) do
-    paras[#paras + 1] = {
-      spans = { { ("[Image: %s · %d×%d]"):format(image.name, image.width, image.height), "Dim" } },
-      size = M.small_size, gap = 4,
-    }
-  end
+  images(item, paras)
+  footer(item, ctx, paras)
   return {
     block = {
-      paragraphs = paras, size = M.text_size, align = "right", max_width = 0.78,
-      bg = "UserBubble", radius = 16, pad = { 10, 14 }, margin = { 14, 6 },
+      paragraphs = paras, size = md.text_size, align = "right", max_width = 0.78,
+      bg = "UserBubble", radius = 16, pad = { 10, 14 }, margin = { 16, 6 },
     },
-    lines = standard.user(item, ctx),
+    lines = plain(item.text, "UserMessage"),
   }
 end
 
 function M.assistant(item, ctx)
-  local text = (item.text or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  local text = trim(item.text)
   local paras
   if text == "" then
-    if not item.streaming then return standard.assistant(item, ctx) end
+    if not item.streaming then return nil end
     paras = { { spans = { { "…", "Dim" } } } }
   else
-    paras = M.markdown(text)
+    paras = md.paragraphs(text)
   end
   if item.streaming and #paras > 0 then
     local last = paras[#paras].spans
     last[#last + 1] = { text = " ▍", hl = "Dim" }
   end
+  footer(item, ctx, paras)
   return {
-    block = { paragraphs = paras, size = M.text_size, pad = { 0, 4 }, margin = { 8, 4 } },
-    lines = standard.assistant(item, ctx),
+    block = { paragraphs = paras, size = md.text_size, pad = { 0, 4 }, margin = { 10, 4 } },
+    lines = plain(text),
   }
 end
 
 function M.reasoning(item, ctx)
-  local lines = standard.reasoning(item, ctx)
-  if not lines then return nil end
-  local text = (item.text or ""):gsub("^%s+", ""):gsub("%s+$", "")
-  local paras = { { spans = { { item.streaming and "Thinking" or "Reasoning", "Dim" } }, size = M.small_size } }
-  for _, p in ipairs(M.markdown(text)) do
-    p.size, p.fg = M.small_size, "Reasoning"
-    for _, s in ipairs(p.spans) do
-      if s.hl == "Normal" then s.hl = "Reasoning" end
-    end
+  local text = trim(item.text)
+  if not bone.o.show_reasoning or text == "" then return nil end
+  local paras = { { spans = { { item.streaming and "Thinking…" or "Reasoning", "Dim" } }, size = md.small_size } }
+  for _, p in ipairs(md.paragraphs(text, "Reasoning")) do
+    p.size = md.small_size
     paras[#paras + 1] = p
   end
+  footer(item, ctx, paras)
   return {
-    block = { paragraphs = paras, pad = { 0, 4 }, margin = { 6, 2 } },
-    lines = lines,
+    block = { paragraphs = paras, pad = { 0, 4 }, margin = { 8, 2 } },
+    lines = plain(text, "Reasoning"),
   }
 end
 
 function M.notice(item, ctx)
-  local hl = item.error and "ErrorMsg" or ((item.text or ""):match("^Worked for") and "Dim" or "Notice")
+  local hl = item.error and "ErrorMsg" or "Notice"
+  local paras = { { spans = { { item.text or "", hl } } } }
+  footer(item, ctx, paras)
+  return {
+    block = { paragraphs = paras, size = md.small_size, pad = { 0, 4 }, margin = { 6, 4 } },
+    lines = plain(item.text, hl),
+  }
+end
+
+-- A compaction (/compact): the chat above it stays.
+function M.compacted(item)
   return {
     block = {
-      paragraphs = { { spans = { { item.text or "", hl } } } },
-      size = M.small_size, pad = { 0, 4 }, margin = { 4, 4 },
+      paragraphs = { { spans = { { "◇ ", "Accent" }, { item.text or "", "Dim" } } } },
+      size = md.small_size, pad = { 0, 4 }, margin = { 10, 10 },
     },
-    lines = standard.notice(item, ctx),
+    lines = plain(item.text, "Dim"),
+  }
+end
+
+-- A message waiting its turn: a faint bubble, and when it goes.
+function M.queued(item)
+  local s = bone.chat.session()
+  local note = s and s.queue_paused and "paused · /queue resume"
+    or item.mode == "steer" and "joins this turn" or "next turn"
+  local paras = {}
+  for line in ((item.text or "") .. "\n"):gmatch("(.-)\n") do
+    paras[#paras + 1] = { spans = { { line, "Dim" } } }
+  end
+  images(item, paras)
+  paras[#paras + 1] = { spans = { { note, "Dim" } }, size = md.small_size - 1, gap = 4 }
+  return {
+    block = {
+      paragraphs = paras, size = md.text_size, align = "right", max_width = 0.78,
+      border = "PromptBorder", radius = 16, pad = { 8, 14 }, margin = { 8, 4 },
+    },
+    lines = plain(item.text, "Dim"),
   }
 end
 
 function M.setup()
   local views = bone.ui.views
-  for _, kind in ipairs({ "user", "assistant", "reasoning", "notice" }) do
-    standard[kind] = views[kind]
+  for _, kind in ipairs({ "user", "assistant", "reasoning", "notice", "compacted", "queued" }) do
     views[kind] = M[kind]
   end
+  views.tool = require("bone.desktop.tools").view
 end
 
 return M
