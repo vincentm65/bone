@@ -85,6 +85,8 @@ pub(crate) enum ChatScroll {
     By(i32),
     Top,
     Bottom,
+    /// To this row at the top.
+    To(usize),
 }
 
 pub struct Gui {

@@ -542,10 +542,8 @@ impl Host for Gui {
         &mut self.processes
     }
 
-    /// Whether the chat on screen is scrolled to the end.
     fn chat_view(&self) -> Json {
-        let follow = self.lua.chat_views.get(&self.current).is_none_or(|v| v.1);
-        serde_json::json!({ "follow": follow })
+        self.chat_view_json()
     }
 
     fn clipboard_copy(&mut self, text: String) {

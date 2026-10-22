@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 
 use bone_proto::methods::{SessionMessages, SessionRef};
-use bone_ui::lua::{Host, args, fire, ret};
+use bone_ui::lua::{Host, args, err, fire, ret};
 use mlua::{Function, Lua, MultiValue, Table, Value};
 
 use crate::{ChatBuffer, Gui};
@@ -38,6 +38,34 @@ pub(crate) fn dispatch(
                 ret(lua, t)
             }
             None => ret(lua, Value::Nil),
+        }),
+        "chat_scroll" => args::<Value>(lua, a).and_then(|by| {
+            gui.chat_scroll = Some(match by {
+                Value::Integer(n) => crate::ChatScroll::By(n as i32),
+                Value::Number(n) => crate::ChatScroll::By(n as i32),
+                Value::String(s) if s.to_str()?.as_ref() == "top" => crate::ChatScroll::Top,
+                Value::String(s) if s.to_str()?.as_ref() == "bottom" => crate::ChatScroll::Bottom,
+                Value::String(s) => {
+                    return Err(err(format!(
+                        "scroll by rows, \"top\" or \"bottom\", not {:?}",
+                        s.to_string_lossy()
+                    )));
+                }
+                other => {
+                    return Err(err(format!(
+                        "scroll by a number, not {}",
+                        other.type_name()
+                    )));
+                }
+            });
+            gui.changed();
+            ret(lua, ())
+        }),
+        "chat_scroll_to" => args::<(usize, Option<String>)>(lua, a).and_then(|(index, at)| {
+            ret(
+                lua,
+                gui.chat_scroll_to(index, at.as_deref().unwrap_or("top")),
+            )
         }),
         // Shown without adding to the log (for showing the log itself).
         "show_message" => args::<String>(lua, a).and_then(|text| {
@@ -127,6 +155,53 @@ impl Gui {
             serde_json::json!({ "session_id": session_id, "chat": buf }),
         );
         self.changed();
+    }
+
+    /// The height of the chat on screen, in rows.
+    fn chat_height(&self) -> usize {
+        (self.lua.geometry.leaves.iter())
+            .find(|(n, _)| n == "chat")
+            .map_or(0, |(_, r)| r.height as usize)
+    }
+
+    /// Scroll the chat so item `index` shows at the top, center or bottom;
+    /// false when there is no such drawn item.
+    pub fn chat_scroll_to(&mut self, index: usize, at: &str) -> bool {
+        let rows = self.chats[self.current].item_rows();
+        let Some(&(_, start, len)) = rows.iter().find(|r| r.0 == index) else {
+            return false;
+        };
+        let height = self.chat_height();
+        let top = match at {
+            "bottom" => (start + len).saturating_sub(height),
+            "center" => (start + len / 2).saturating_sub(height / 2),
+            _ => start,
+        };
+        self.chat_scroll = Some(crate::ChatScroll::To(top));
+        self.changed();
+        true
+    }
+
+    /// `bone.chat.view()`: where the chat on screen is scrolled and which
+    /// items show.
+    pub fn chat_view_json(&self) -> serde_json::Value {
+        let (top, follow) = (self.lua.chat_views.get(&self.current))
+            .copied()
+            .unwrap_or((0, true));
+        let height = self.chat_height();
+        let rows = self.chats[self.current].item_rows();
+        let visible: Vec<usize> = (rows.iter())
+            .filter(|&&(_, start, len)| len > 0 && start < top + height && start + len > top)
+            .map(|&(i, _, _)| i)
+            .collect();
+        serde_json::json!({
+            "top": top,
+            "height": height,
+            "rows": self.chats[self.current].row_count(),
+            "follow": follow,
+            "first": visible.first(),
+            "last": visible.last(),
+        })
     }
 
     /// Run Lua from the prompt: `=expr` shows its value.

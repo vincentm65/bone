@@ -361,6 +361,7 @@ impl Gui {
                 ChatScroll::By(n) => (top as i64 + i64::from(n)).clamp(0, max_top as i64) as usize,
                 ChatScroll::Top => 0,
                 ChatScroll::Bottom => max_top,
+                ChatScroll::To(row) => row.min(max_top),
             };
             pinned = true;
         }
