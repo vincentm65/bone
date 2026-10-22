@@ -25,7 +25,7 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 
 | Key | Does |
 |---|---|
-| `enter` | send (or run a `/command`). While a turn runs, the message is queued: by default it joins that turn at its next step; with `bone.o.queue_mode = "next"` in `tui.lua` it waits for a turn of its own. Queued messages show at the end of the chat |
+| `enter` | send (or run a `/command`). While a turn runs, the message is queued: by default it joins that turn at its next step; with `bone.o.queue_mode = "next"` in `tui.lua` or `gui.lua` it waits for a turn of its own. Queued messages show at the end of the chat |
 | `up` on an empty prompt | edit the last queued message: `enter` saves it in place, `esc` leaves it as it was |
 | `alt+enter`, `shift+enter`, `ctrl+j` | new line |
 | `ctrl+c` | cancel the running turn; else clear the prompt; else press twice to quit |

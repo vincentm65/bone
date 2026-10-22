@@ -1,5 +1,9 @@
 //! Options, set with `bone.o` in Lua.
 
+use std::collections::HashMap;
+
+use bone_proto::methods::QueueMode;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Options {
     /// Show model reasoning in chat buffers.
@@ -89,6 +93,15 @@ impl DynamicValue {
 
     pub fn type_name(&self) -> &'static str {
         self.kind().name()
+    }
+}
+
+/// What a message sent during a turn does by default: the `queue_mode`
+/// option ("steer" or "next"), else steer.
+pub fn queue_mode(dynamic: &HashMap<String, DynamicOption>) -> QueueMode {
+    match dynamic.get("queue_mode").map(|o| &o.value) {
+        Some(DynamicValue::String(m)) if m == "next" => QueueMode::Next,
+        _ => QueueMode::Steer,
     }
 }
 

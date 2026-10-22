@@ -71,7 +71,7 @@ is `"tui"` or `"gui"`.
 An API marked shared has one implementation used by both frontends and is
 checked by the same scripts in each (`tests/ui/`). Its `ui.*` capability is
 reported by every frontend that has it; the TUI also keeps its older `tui.*`
-names. In the GUI, a call to an API it does not have yet raises an error
+names. In the GUI, a call to an API it does not have raises an error
 naming the operation.
 
 | Capability | API | Status |
@@ -88,8 +88,13 @@ naming the operation.
 | `ui.windows` | `bone.ui.popup`/`win`, `update`, `close`, `is_open` | shared |
 | `ui.panels` | `bone.ui.panel` (open, update, lines, close, info, list, focus, scroll) | shared |
 | `ui.input` | keys (windows', panels', raw, keymaps and sequences), `bone.press`, `bone.action`, `bone.ui.actions`, the `mouse` event and what is under it | shared; the GUI's text box edits the prompt itself |
-| — | `bone.api.session`, `prompt_get`/`set`, `bone.prompt.info`/`empty`/`images`, `bone.prompt.history_add`, `bone.processes.list`, `bone.chat.view` | shared ops; the GUI answers with what it has (no prompt images, processes or history yet; its cursor is reported at the end; the chat follows the end) |
-| — | prompt cursor and range editing, jobs, plugin lifecycle and projects, libraries, `bone.chat.at`/`scroll` | TUI only for now |
+| `ui.prompt` | `bone.prompt` (cursor, range and selection edits, `info`, `empty`, `images`, `attach`, `paste`, `history_add`), `bone.api.prompt_get`/`prompt_set`; the `submit`, `prompt/changed`, `paste` and `image/attached` events | shared; the GUI's text box keeps its own cursor and selection, reported to Lua |
+| `ui.jobs` | `bone.job`, `job/*` events, `bone.processes` (`list`, `screen`) | shared |
+| `ui.plugins` | `bone.plugin` (`list`, `load`, `unload`, `reload`, `on_shutdown`, `state`), trusted project config, `bone.library` | shared |
+| `ui.session` | `bone.api.session`, `open_session`, `bone.chat.view`/`at`/`scroll` | shared; the GUI scrolls in pixels and maps to rows |
+| `gui.window`, `gui.notifications`, `gui.dialogs`, `gui.blocks` | `bone.gui` (window, notify, file dialogs, library) and `block` views | GUI only (see `customizing/customizing-gui.md`) |
+
+The TUI and the GUI fire the same local events, including `server/disconnected` and `server/reconnected` (a `--connect` TUI or the GUI lost and regained the server).
 
 ### Ownership and compatibility
 

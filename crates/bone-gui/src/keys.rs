@@ -3,7 +3,7 @@
 //! has something to do with them; typing and editing the prompt stay with
 //! egui's text box, so input methods, selection and native editing work.
 
-use bone_proto::methods::{SessionRef, TurnCancel};
+use bone_proto::methods::{QueueMode, SessionRef, TurnCancel};
 use bone_ui::editor::TextBuffer;
 use bone_ui::keymap::{Action, Builtin, Context};
 use bone_ui::keys::{Key, KeyCode, KeyModifiers};
@@ -345,7 +345,9 @@ impl Gui {
     pub(crate) fn builtin_action(&mut self, b: Builtin) {
         use Builtin::*;
         match b {
-            Submit | QueueSteer | QueueNext => self.submit(),
+            Submit => self.submit(),
+            QueueSteer => self.submit_as(Some(QueueMode::Steer)),
+            QueueNext => self.submit_as(Some(QueueMode::Next)),
             Newline => self.edit_prompt(TextBuffer::newline),
             Up | Down => {
                 self.vertical(b == Up);

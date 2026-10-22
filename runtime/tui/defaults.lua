@@ -10,14 +10,6 @@ require("bone.ui").setup()
 require("bone.commands")
 require("bone.menu")
 
--- Enter during a turn queues the message in the core: "steer" joins the
--- running turn at its next step, "next" waits for a turn of its own. The
--- actions queue_steer and queue_next do one or the other whatever this says.
-bone.o.define("queue_mode", "steer", {
-  desc = "what enter does during a turn: steer or next",
-  choices = { "steer", "next" },
-})
-
 -- ctrl+t steps through bone.o.tool_detail (defined with the views, in
 -- runtime/lua/bone/ui/views.lua).
 local next_detail = { summary = "rows", rows = "full", full = "summary" }
@@ -76,22 +68,5 @@ require("bone.keys")
 -- /rename, /compact and /plugins are in lua/bone/commands.lua.
 
 -- First run: with no model provider at all, /setup opens by itself (unless
--- it was dismissed before; /setup is always there). An empty provider list
--- can still mean one from BONE_BASE_URL, so the core's health check decides.
-bone.on("ready", function()
-  if bone.settings.get("setup.skipped") then
-    return
-  end
-  bone.model.list(function(list)
-    if not list or #list > 0 then
-      return
-    end
-    bone.request("health/check", {}, function(items)
-      for _, it in ipairs(items or {}) do
-        if it.name == "provider" and it.status == "error" then
-          return require("bone.setup").open({ first_run = true })
-        end
-      end
-    end)
-  end)
-end)
+-- it was dismissed before; /setup is always there).
+require("bone.setup").first_run()

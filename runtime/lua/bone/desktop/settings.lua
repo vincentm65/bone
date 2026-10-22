@@ -20,7 +20,7 @@ local function value_text(row, st)
   elseif row.kind == "page" then
     return { "Open  ›", "Accent" }
   elseif row.kind == "plugin" then
-    local where = (row.tui and "TUI" or "") .. (row.tui and row.core and " + " or "") .. (row.core and "core" or "")
+    local where = (row.tui and "GUI" or "") .. (row.tui and row.core and " + " or "") .. (row.core and "core" or "")
     local v = onoff(row.on)
     return { v[1] .. (where ~= "" and ("  ·  " .. where) or "") .. (row.error and ("  ·  " .. row.error) or ""),
       row.error and "ErrorMsg" or v[2] }

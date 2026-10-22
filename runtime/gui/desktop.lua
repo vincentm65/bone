@@ -11,6 +11,8 @@ require("bone.commands")
 require("bone.menu")
 require("bone.keys")
 require("bone.gui")
+-- First run: with no model provider, /setup opens by itself.
+require("bone.setup").first_run()
 -- The data the sidebar, tray and status bar draw (tracking from the start).
 require("bone.chats")
 require("bone.background")

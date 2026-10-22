@@ -7,6 +7,8 @@ require("bone.menu")
 require("bone.keys")
 -- /gui: the GUI's own library (standard, bare, desktop).
 require("bone.gui")
+-- First run: with no model provider, /setup opens by itself.
+require("bone.setup").first_run()
 
 -- The font every line is drawn in: a monospace font file (empty for the
 -- built-in one), and its size in points.

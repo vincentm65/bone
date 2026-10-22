@@ -35,6 +35,29 @@ local function pad(s, w)
   return s .. string.rep(" ", w - n)
 end
 
+--- With no model provider at all, open by itself on `ready`, unless it was
+--- dismissed before. An empty provider list can still mean one from
+--- BONE_BASE_URL, so the core's health check decides.
+function M.first_run()
+  bone.on("ready", function()
+    if bone.settings.get("setup.skipped") then
+      return
+    end
+    bone.model.list(function(list)
+      if not list or #list > 0 then
+        return
+      end
+      bone.request("health/check", {}, function(items)
+        for _, it in ipairs(items or {}) do
+          if it.name == "provider" and it.status == "error" then
+            return M.open({ first_run = true })
+          end
+        end
+      end)
+    end)
+  end)
+end
+
 --- opts: { first_run = true } when it opened by itself.
 function M.open(opts)
   opts = opts or {}

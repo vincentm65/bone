@@ -382,10 +382,16 @@ impl Gui {
         self.refresh_sessions();
     }
 
+    /// Send the prompt to the chat on screen (see [`Gui::submit_as`]).
+    pub fn submit(&mut self) {
+        self.submit_as(None);
+    }
+
     /// Send the prompt to the chat on screen: it starts a turn on an idle
     /// session and queues otherwise, so it never conflicts with another
-    /// client. A new chat's session is created first.
-    pub fn submit(&mut self) {
+    /// client. `mode` is how a queued message joins a running turn (default:
+    /// the `queue_mode` option). A new chat's session is created first.
+    pub fn submit_as(&mut self, mode: Option<QueueMode>) {
         let text = self.expanded().trim().to_owned();
         if text.is_empty() && self.images.is_empty() {
             return;
@@ -393,13 +399,23 @@ impl Gui {
         if self.image_reads > 0 {
             return self.error("an image is still being read".into());
         }
+        let images = self.images.clone();
+        let Some(text) = bone_ui::lua::fire_submit(self, &text, &images) else {
+            self.clear_draft();
+            self.prompt_changed();
+            return;
+        };
+        if text.trim().is_empty() && self.images.is_empty() {
+            return;
+        }
+        let mode = mode.unwrap_or_else(|| bone_ui::options::queue_mode(&self.lua.dynamic_options));
         let images = std::mem::take(&mut self.images);
         self.remember(&text, &images);
         self.clear_draft();
         let buf = self.current;
         self.chats[buf].starting = true;
         match self.chats[buf].session_id().map(str::to_owned) {
-            Some(session_id) => self.queue(buf, session_id, text, images),
+            Some(session_id) => self.queue(buf, session_id, text, images, mode),
             None => {
                 let cwd = Some(self.opts.cwd.clone());
                 self.request::<SessionCreate>(SessionCreateParams { cwd }, move |gui, r| match r {
@@ -411,7 +427,7 @@ impl Gui {
                         if buf == gui.current {
                             bone_ui::lua::processes::request(gui, session_id.clone());
                         }
-                        gui.queue(buf, session_id, text, images);
+                        gui.queue(buf, session_id, text, images, mode);
                     }
                     Err(e) => gui.unsent(buf, text, images, e),
                 });
@@ -419,11 +435,18 @@ impl Gui {
         }
     }
 
-    fn queue(&self, buf: usize, session_id: String, text: String, images: Vec<ImageAttachment>) {
+    fn queue(
+        &self,
+        buf: usize,
+        session_id: String,
+        text: String,
+        images: Vec<ImageAttachment>,
+        mode: QueueMode,
+    ) {
         let params = QueueAddParams {
             session_id,
             text: text.clone(),
-            mode: QueueMode::default(),
+            mode,
             images: images.clone(),
         };
         self.request::<QueueAdd>(params, move |gui, r| match r {
@@ -481,6 +504,7 @@ impl Gui {
             return self.error("the bone server closed the connection".into());
         };
         self.error("lost the bone server; reconnecting…".into());
+        self.fire_event("server/disconnected", serde_json::json!({}));
         let (tx, repaint) = (self.tx.clone(), self.repaint.clone());
         self.rt.spawn(async move {
             let r = bone_client::reconnect(path, "bone-gui").await;
@@ -501,6 +525,7 @@ impl Gui {
         bone_ui::lua::processes::follow(self, current);
         self.forward(r.events);
         self.info("reconnected to the bone server".into());
+        self.fire_event("server/reconnected", serde_json::json!({}));
     }
 
     pub fn info(&mut self, text: String) {

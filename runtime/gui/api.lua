@@ -70,7 +70,7 @@ bone.ui.panel.open = function(spec)
   local rich = take_blocks(spec)
   if rich and not spec.render and not spec.lines then spec.lines = {} end
   local p = panel_open(spec)
-  if rich then bone._gui_blocks[p.id] = rich end
+  bone._gui_blocks[p.id] = rich
   return p
 end
 
@@ -80,7 +80,7 @@ for _, name in ipairs({ "popup", "win" }) do
     local rich = take_blocks(spec)
     if rich and not spec.lines then spec.lines = {} end
     local id = open(spec)
-    if rich then bone._gui_blocks["popup:" .. tostring(id)] = rich end
+    bone._gui_blocks["popup:" .. tostring(id)] = rich
     return id
   end
 end
@@ -90,3 +90,8 @@ bone.ui.update = function(id, spec)
   if rich then bone._gui_blocks["popup:" .. tostring(id)] = rich end
   return update(id, spec)
 end
+
+-- What a closed panel or window drew with goes with it.
+bone.on("panel/closed", function(ev)
+  bone._gui_blocks[ev.kind == "popup" and ("popup:" .. tostring(ev.id)) or ev.id] = nil
+end)

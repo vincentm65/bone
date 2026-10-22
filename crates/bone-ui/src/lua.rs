@@ -988,6 +988,22 @@ pub fn fire<H: Host>(h: &mut H, event: &str, data: serde_json::Value) -> Vec<Val
     out
 }
 
+/// Run the `submit` handlers on a message about to be sent. `None` when one
+/// returned `false` (cancel); else the text to send, as a handler that
+/// returned a string rewrote it.
+pub fn fire_submit<H: Host>(h: &mut H, text: &str, images: &[ImageAttachment]) -> Option<String> {
+    let data = serde_json::json!({ "text": text, "images": images });
+    let mut text = text.to_owned();
+    for v in fire(h, "submit", data) {
+        match v {
+            Value::Boolean(false) => return None,
+            Value::String(s) => text = s.to_string_lossy(),
+            _ => {}
+        }
+    }
+    Some(text)
+}
+
 pub fn has_autocmd<H: Host>(h: &mut H, event: &str) -> bool {
     let event = canonical_event(event);
     h.autocmds().iter().any(|a| a.event == event)

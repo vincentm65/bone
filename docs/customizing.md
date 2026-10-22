@@ -21,7 +21,7 @@ local guide = bone.docs.read("customizing/customizing-tui.md")
 | `~/.bone/core.lua` | the core (server) | providers, system prompt, tools, hooks |
 | `~/.bone/tui.lua` | the TUI | options, keys, commands, colors, panels, chat look |
 | `~/.bone/ui.lua` | the TUI and the GUI | UI config for every frontend; runs before `tui.lua` / `gui.lua` |
-| `~/.bone/gui.lua` | the GUI (`bone --gui`) | the GUI's own config: `bone.gui.window`, `bone.gui.menu`, `bone.o.font` |
+| `~/.bone/gui.lua` | the GUI (`bone --gui`) | the GUI's own config: `bone.gui.window`, `bone.gui.menu`, `bone.o.font` (see `customizing-gui.md`) |
 | `~/.bone/plugins/<name>/` | both sides | `core.lua` + `tui.lua` + `lua/` modules, as a named, reloadable unit |
 | `.bone/tui.lua` in a project | the TUI | project-local config, loaded only after `/plugins trust` |
 | `~/.bone/docs/` | — | these guides, rewritten at startup (edits there are lost) |
@@ -41,6 +41,8 @@ need to open `lua.md` for a call a guide does not show.
 
 - **`customizing/customizing-tui.md`** — change how the TUI looks and behaves: options, keys,
   slash commands, colors, regions, the prompt box, the statusline.
+- **`customizing/customizing-gui.md`** — what is only the desktop GUI's: its libraries
+  (`/gui`, `desktop`), fonts, the window, notifications and rich-text blocks.
 - **`customizing/customizing-panels.md`** — add a panel docked beside the chat (a file list,
   todo list, job viewer).
 - **`customizing/customizing-popups.md`** — popups, pickers, pagers and notifications for

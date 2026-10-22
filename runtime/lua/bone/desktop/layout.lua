@@ -73,6 +73,12 @@ function M.setup()
     render = function()
       local s = bone.api.session()
       if s or bone.chat.session().items > 0 then return {} end
+      if bone.settings.get("setup.skipped") then
+        return {
+          { { "No model provider configured.", "Dim" } },
+          { { "Run /setup to connect one  ·  /health to diagnose setup", "Dim" } },
+        }
+      end
       return {
         { { "What can I help with?", "Normal" } },
         {},

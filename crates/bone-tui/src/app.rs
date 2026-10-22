@@ -973,18 +973,12 @@ impl App {
         if draft.text.trim().is_empty() && draft.images.is_empty() {
             return;
         }
-        for v in self.fire(
-            "submit",
-            serde_json::json!({ "text": draft.text, "images": draft.images }),
-        ) {
-            match v {
-                mlua::Value::Boolean(false) => {
-                    self.clear_prompt();
-                    self.emit_prompt_changed();
-                    return;
-                }
-                mlua::Value::String(s) => draft.text = s.to_string_lossy(),
-                _ => {}
+        match bone_ui::lua::fire_submit(self, &draft.text, &draft.images) {
+            Some(text) => draft.text = text,
+            None => {
+                self.clear_prompt();
+                self.emit_prompt_changed();
+                return;
             }
         }
         if draft.text.trim().is_empty() && draft.images.is_empty() {
@@ -994,7 +988,7 @@ impl App {
         if self.chats[buf].turn.is_some()
             && let Some(session_id) = self.chats[buf].session_id().map(str::to_owned)
         {
-            let mode = mode.unwrap_or_else(|| self.queue_mode());
+            let mode = mode.unwrap_or_else(|| bone_ui::options::queue_mode(&self.dynamic_options));
             self.history_add_draft(draft.clone());
             self.clear_prompt();
             let params = QueueAddParams {
@@ -1523,15 +1517,6 @@ impl App {
 
     pub fn process_list(&self) -> Vec<ProcessSnapshot> {
         self.processes.sorted()
-    }
-
-    /// The default mode for messages sent during a turn: the `queue_mode`
-    /// option ("steer" or "next"), else steer.
-    fn queue_mode(&self) -> QueueMode {
-        match self.dynamic_options.get("queue_mode").map(|o| &o.value) {
-            Some(crate::options::DynamicValue::String(m)) if m == "next" => QueueMode::Next,
-            _ => QueueMode::Steer,
-        }
     }
 
     /// A session was deleted: its chat becomes a fresh one (chats keep their

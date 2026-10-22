@@ -24,7 +24,7 @@ pub fn dispatch<H: Host>(
             args::<(String, Option<String>)>(lua, a).and_then(|(name, from)| {
                 let dir = need_dir()?;
                 let path = if op == "library_create" {
-                    bone_lua::create_tui_library(&dir, &name, from.as_deref() == Some("bare"))
+                    bone_lua::create_tui_library(&dir, &name, from.as_deref().unwrap_or(""))
                 } else {
                     bone_lua::delete_tui_library(&dir, &name)
                 };

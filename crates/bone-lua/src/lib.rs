@@ -84,6 +84,7 @@ macro_rules! docs_files {
 pub const DOCS: &[(&str, &str)] = docs_files![
     "customizing.md",
     "customizing/customizing-tui.md",
+    "customizing/customizing-gui.md",
     "customizing/customizing-panels.md",
     "customizing/customizing-popups.md",
     "customizing/customizing-chat.md",
@@ -196,6 +197,10 @@ static TUI_CAPABILITIES: &[&str] = &[
     "ui.windows",
     "ui.panels",
     "ui.input",
+    "ui.prompt",
+    "ui.jobs",
+    "ui.plugins",
+    "ui.session",
 ];
 
 /// The GUI's: the shared UI API (`ui.*`), growing as more of it moves into
@@ -219,6 +224,10 @@ static GUI_CAPABILITIES: &[&str] = &[
     "ui.windows",
     "ui.panels",
     "ui.input",
+    "ui.prompt",
+    "ui.jobs",
+    "ui.plugins",
+    "ui.session",
     "gui.window",
     "gui.menus",
     "gui.notifications",
@@ -817,11 +826,12 @@ pub fn tui_libraries(config_dir: &Path) -> Vec<String> {
     names
 }
 
-/// Copy the built-in TUI files (all but the base API and the core's) to a
-/// new library, `<config dir>/libraries/<name>/`; `bare` copies only the
-/// bare library's file, as its `tui/defaults.lua`. An existing one is never
-/// touched.
-pub fn create_tui_library(config_dir: &Path, name: &str, bare: bool) -> Result<PathBuf, String> {
+/// Copy the built-in UI files (all but the base API and the core's) to a
+/// new library, `<config dir>/libraries/<name>/`. `base` is `""` for the
+/// standard UI; `bare` copies only the bare library's files, as its
+/// `defaults.lua`; `desktop` is the standard UI with the GUI's desktop
+/// library as its `gui/defaults.lua`. An existing library is never touched.
+pub fn create_tui_library(config_dir: &Path, name: &str, base: &str) -> Result<PathBuf, String> {
     let valid = !name.starts_with('.')
         && !["", "bare", "standard"].contains(&name)
         && name
@@ -829,6 +839,9 @@ pub fn create_tui_library(config_dir: &Path, name: &str, bare: bool) -> Result<P
             .all(|c| c.is_ascii_alphanumeric() || "_-.".contains(c));
     if !valid {
         return Err(format!("bad library name {name:?}"));
+    }
+    if !["", "bare", "desktop"].contains(&base) {
+        return Err(format!("no library to copy named {base}"));
     }
     let root = config_dir.join("libraries");
     let dest = root.join(name);
@@ -840,17 +853,22 @@ pub fn create_tui_library(config_dir: &Path, name: &str, bare: bool) -> Result<P
     let copy = || -> std::io::Result<()> {
         let _ = std::fs::remove_dir_all(&tmp);
         for (rel, src) in RUNTIME {
-            let rel = match *rel {
-                "tui/bare.lua" if bare => "tui/defaults.lua",
-                "gui/bare.lua" if bare => "gui/defaults.lua",
-                // Built-in libraries of their own, not part of a copy.
-                "gui/desktop.lua" => continue,
-                _ if bare => continue,
-                "ui/api.lua" | "tui/api.lua" | "tui/bare.lua" | "gui/api.lua" | "gui/bare.lua" => {
+            let rel = match (base, *rel) {
+                ("bare", "tui/bare.lua") => "tui/defaults.lua",
+                ("bare", "gui/bare.lua") => "gui/defaults.lua",
+                ("bare", _) => continue,
+                ("desktop", "gui/desktop.lua") => "gui/defaults.lua",
+                ("desktop", "gui/defaults.lua") => continue,
+                // A built-in library of its own, not part of a standard copy.
+                (_, "gui/desktop.lua") => continue,
+                (
+                    _,
+                    "ui/api.lua" | "tui/api.lua" | "tui/bare.lua" | "gui/api.lua" | "gui/bare.lua",
+                ) => {
                     continue;
                 }
-                r if r.starts_with("core/") => continue,
-                r => r,
+                (_, r) if r.starts_with("core/") => continue,
+                (_, r) => r,
             };
             let path = tmp.join(rel);
             std::fs::create_dir_all(path.parent().unwrap_or(&tmp))?;
@@ -871,7 +889,9 @@ pub fn delete_tui_library(config_dir: &Path, name: &str) -> Result<PathBuf, Stri
     if !tui_libraries(config_dir).iter().any(|n| n == name) {
         return Err(format!("no library named {name}"));
     }
-    if tui_library(config_dir).as_deref() == Some(name) {
+    if tui_library(config_dir).as_deref() == Some(name)
+        || gui_library(config_dir).as_deref() == Some(name)
+    {
         return Err(format!("{name} is in use; switch to another first"));
     }
     let secs = std::time::SystemTime::now()

@@ -4,6 +4,17 @@
 -- the same in the TUI and the GUI (where egui's text box does the editing
 -- actions itself). Change them from ui.lua with bone.keymap.set.
 
+-- Enter during a turn queues the message in the core: "steer" joins the
+-- running turn at its next step, "next" waits for a turn of its own. The
+-- actions queue_steer and queue_next do one or the other whatever this says.
+-- (A library copy made before this moved still defines it itself.)
+if not pcall(bone.o.info, "queue_mode") then
+  bone.o.define("queue_mode", "steer", {
+    desc = "what enter does during a turn: steer or next",
+    choices = { "steer", "next" },
+  })
+end
+
 local function map(keys, context)
   for key, action in pairs(keys) do
     bone.keymap.set(key, action, { context = context })
@@ -33,7 +44,7 @@ map({
     -- Toggle the model reasoning (live, in the chat, and in the transcript).
     -- The same switch as bone.o.apply("show_reasoning!"); it redraws on its own.
     bone.o.apply("show_reasoning!")
-    bone.settings.set("tui.show_reasoning", bone.o.show_reasoning)
+    bone.settings.set(bone.api_info().side .. ".show_reasoning", bone.o.show_reasoning)
   end,
 
   ["left"] = "left",
