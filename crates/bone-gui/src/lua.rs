@@ -220,7 +220,37 @@ impl Gui {
         if let Some(dir) = &dir {
             self.load_user_files(dir, bare);
         }
+        self.apply_gui_settings(None);
         bone_ui::lua::fire(self, "ready", Json::Null);
+    }
+
+    /// Apply the GUI's saved options (settings.json `gui.<name>`, what
+    /// /config saves here), skipping values unchanged from `previous`.
+    /// Unknown or invalid ones are reported, as `bone.o.<name> = value`.
+    pub(crate) fn apply_gui_settings(&mut self, previous: Option<&Json>) {
+        let Some(gui) = self
+            .settings
+            .get("gui")
+            .and_then(|g| g.as_object())
+            .cloned()
+        else {
+            return;
+        };
+        for (name, value) in gui {
+            if previous.is_some_and(|old| value.is_null() || old.get(&name) == Some(&value)) {
+                continue;
+            }
+            let r = self.with_api(|lua| {
+                let o: Table = lua.globals().get::<Table>("bone")?.get("o")?;
+                o.set(name.as_str(), bone_lua::to_lua(lua, &value)?)
+            });
+            if let Err(e) = r {
+                // A library without that option (bare) just leaves it.
+                if !bone_lua::short_error(&e).contains("unknown option") {
+                    self.lua_error(&format!("settings.json gui.{name}"), &e);
+                }
+            }
+        }
     }
 
     fn load_user_files(&mut self, dir: &Path, bare: bool) {

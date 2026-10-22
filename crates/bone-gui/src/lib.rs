@@ -298,7 +298,8 @@ impl Gui {
         } else if let Some(Ok(p)) = ev.parse::<AskResolved>() {
             self.asks.remove(&p.ask_id);
         } else if let Some(Ok(p)) = ev.parse::<SettingsChanged>() {
-            self.settings = p.settings;
+            let previous = std::mem::replace(&mut self.settings, p.settings);
+            self.apply_gui_settings(Some(&previous["gui"]));
         } else if let Some(Ok(p)) = ev.parse::<SessionUpdated>() {
             // `lagged` (no session): events were missed, so reload them all.
             if p.session_id.is_empty() {
