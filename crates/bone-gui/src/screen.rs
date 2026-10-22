@@ -164,9 +164,17 @@ impl Gui {
             self.message_leaf(ui, &cells, r);
         }
         self.popups_ui(ui, &cells, full);
-        if let Some(at) = self.lua.chat_expiry {
-            let wait = at.saturating_duration_since(std::time::Instant::now());
-            ui.ctx().request_repaint_after(wait);
+        // Timers from Lua ask for the next frame; a due UI timer is used up.
+        let now = std::time::Instant::now();
+        if self.lua.ui_expiry.is_some_and(|at| at <= now) {
+            self.lua.ui_expiry = None;
+        }
+        for at in [self.lua.chat_expiry, self.lua.ui_expiry]
+            .into_iter()
+            .flatten()
+        {
+            ui.ctx()
+                .request_repaint_after(at.saturating_duration_since(now));
         }
     }
 

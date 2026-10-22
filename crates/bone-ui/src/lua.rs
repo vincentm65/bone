@@ -271,6 +271,9 @@ pub trait Host {
     fn generation(&self) -> (u64, u64);
     /// When the chat on screen next needs drawing for a view's timer.
     fn chat_expiry(&mut self) -> &mut Option<Instant>;
+    /// When the UI next needs a frame without redrawing cached chat rows
+    /// (`bone.ui.refresh_in`).
+    fn ui_expiry(&mut self) -> &mut Option<Instant>;
     /// The Lua state, for reading `bone.ui` without calling the API.
     fn lua(&self) -> Option<Lua>;
     /// The spinner's frames (`bone.ui.spinner`), read once per frame.
@@ -390,6 +393,12 @@ pub fn dispatch<H: Host>(
         }),
         "prompt_images" => prompt_images(h, lua, a),
         "panel_focused" => ret(lua, h.focused_panel()),
+        "ui_refresh_in" => args::<f64>(lua, a).and_then(|ms| {
+            let at = Instant::now() + Duration::from_millis(ms.max(0.0) as u64);
+            let e = h.ui_expiry();
+            *e = Some(e.map_or(at, |e| e.min(at)));
+            ret(lua, ())
+        }),
         "ui_refresh" => {
             h.refresh_ui();
             ret(lua, ())

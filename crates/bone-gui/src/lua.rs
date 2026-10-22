@@ -57,6 +57,8 @@ pub struct LuaSide {
     pub render_deps: Option<Vec<Dep>>,
     pub render_expires: Option<Instant>,
     pub chat_expiry: Option<Instant>,
+    /// When `bone.ui.refresh_in` asked for the next frame.
+    pub ui_expiry: Option<Instant>,
     pub lua_item_seq: u64,
     pub spinner: bone_ui::model::Spinner,
     /// The window's width in columns, as last drawn.
@@ -501,6 +503,10 @@ impl Host for Gui {
 
     fn chat_expiry(&mut self) -> &mut Option<Instant> {
         &mut self.lua.chat_expiry
+    }
+
+    fn ui_expiry(&mut self) -> &mut Option<Instant> {
+        &mut self.lua.ui_expiry
     }
 
     fn lua(&self) -> Option<Lua> {

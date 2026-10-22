@@ -1,11 +1,10 @@
-//! Drawing the GUI with egui: the session list beside the Lua-laid-out
-//! screen (`screen.rs`), questions as they come, and Lua styles as egui text
-//! formats. Lua-produced lines are monospace, so a column here is a column
+//! Drawing the GUI with egui: the Lua-laid-out screen (`screen.rs`),
+//! questions as they come, and Lua styles as egui text formats. Lua-produced lines are monospace, so a column here is a column
 //! in the TUI.
 
 use bone_ui::style::{Color, Modifier, Style};
 use eframe::egui::text::{LayoutJob, TextFormat};
-use eframe::egui::{self, Color32, FontId, Key, ScrollArea, Stroke};
+use eframe::egui::{self, Color32, FontId, Key, Stroke};
 use serde_json::Value;
 
 use crate::{Gui, Row};
@@ -19,35 +18,10 @@ impl Gui {
         self.watch_config();
         // Keep polling the config while idle.
         ui.ctx().request_repaint_after(crate::lua::Watcher::EVERY);
-        egui::Panel::left("sessions")
-            .resizable(true)
-            .default_size(220.0)
-            .show(ui, |ui| self.sessions_ui(ui));
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| self.screen_ui(ui));
         self.question_ui(ui.ctx());
-    }
-
-    fn sessions_ui(&mut self, ui: &mut egui::Ui) {
-        if ui.button("New chat").clicked() {
-            self.new_chat();
-        }
-        ui.separator();
-        let current = self.chats[self.current].session_id().map(str::to_owned);
-        let mut open = None;
-        ScrollArea::vertical().show(ui, |ui| {
-            for s in &self.sessions {
-                let title = s.title.as_deref().unwrap_or("[untitled]");
-                let selected = current.as_deref() == Some(s.session_id.as_str());
-                if ui.selectable_label(selected, title).clicked() {
-                    open = Some(s.session_id.clone());
-                }
-            }
-        });
-        if let Some(id) = open {
-            self.open_session(&id);
-        }
     }
 
     /// The oldest open question, as a modal.

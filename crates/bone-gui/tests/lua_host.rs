@@ -175,3 +175,33 @@ async fn the_slash_menu_opens_and_esc_hides_it() {
     assert_eq!(g.gui.draft, "/", "and keeps the text");
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
+
+/// ctrl+o opens the standard sessions panel, which takes the keyboard; esc
+/// gives it back to the prompt.
+#[tokio::test(flavor = "multi_thread")]
+async fn ctrl_o_opens_the_sessions_panel() {
+    use eframe::egui::{Key, Modifiers};
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    g.key(Key::O, Modifiers::CTRL);
+    g.frame();
+    g.frame();
+    let p = g
+        .gui
+        .lua
+        .panels
+        .iter()
+        .find(|p| p.id == "sessions")
+        .expect("open");
+    assert!(p.area.is_some_and(|a| a.width > 0), "drawn");
+    assert_eq!(g.gui.lua.panel_focus.as_deref(), Some("sessions"));
+    g.key(Key::Escape, Modifiers::NONE);
+    g.frame();
+    assert_ne!(
+        g.gui.lua.panel_focus.as_deref(),
+        Some("sessions"),
+        "esc leaves it"
+    );
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}
