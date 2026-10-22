@@ -80,16 +80,6 @@ impl App {
         bone_ui::lua::ui::prompt_ctx(self, width_cols, buf, text)
     }
 
-    /// Run Lua that may fail; a failure is reported once and `name` is
-    /// skipped until the UI is refreshed (`bone.ui.refresh`, or redefining it).
-    pub(crate) fn guarded<R>(
-        &mut self,
-        name: &str,
-        body: impl FnOnce(&mlua::Lua) -> mlua::Result<R>,
-    ) -> Option<R> {
-        bone_ui::lua::guarded(self, name, body)
-    }
-
     /// Call `bone.ui[name](ctx)` for a single row (statusline, divider).
     pub fn ui_items(&mut self, name: &str, ctx: Json, default_hl: &str) -> Option<Vec<Item>> {
         bone_ui::lua::ui::ui_items(self, name, ctx, default_hl)

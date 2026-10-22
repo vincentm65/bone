@@ -1,308 +1,22 @@
-//! Panels: persistent areas that Lua owns, docked beside, above or below the
-//! chat (`bone.ui.panel`). Unlike `bone.ui.win` overlays they take space from
-//! the chat, keep their scroll position, can be hidden and shown again, and
-//! can take the keyboard.
-//!
-//! Lua supplies the content (all of it; Rust scrolls it) and the keys. Rust
-//! sizes and places panels, draws an optional title row, keeps the scroll
-//! position, and routes keys and the mouse wheel. While a panel has the
-//! keyboard its own keys run first, then the `panel` keymap context (or the
-//! panel's own context); the scroll and `dismiss` actions act on the panel,
-//! and unmapped text is ignored rather than typed into the prompt.
+//! Panels in the TUI: their state, sizing and ops are `bone-ui`'s
+//! (`bone_ui::panel`, `bone_ui::lua`); here they meet the TUI's keys, mouse
+//! and painting.
 
 use ratatui::Frame;
 use ratatui::layout::Rect;
 use ratatui::widgets::Paragraph;
-use serde_json::{Value as Json, json};
+
+pub use bone_ui::panel::*;
 
 use crate::app::App;
-use crate::keymap::Context;
 use crate::keys::Key;
-use crate::ui::{Item, render_items};
+use bone_ui::lua::panels as shared;
 
-/// The chat keeps at least this much room; a panel that does not fit is not
-/// drawn this frame.
-pub const MIN_CHAT_COLS: u16 = 20;
-pub const MIN_CHAT_ROWS: u16 = 3;
-/// Default size of a side panel, in columns.
-const SIDE_SIZE: u16 = 30;
-/// Default cap of an `auto` panel: columns for sides, rows for top/bottom.
-const SIDE_MAX: u16 = 40;
-const ROW_MAX: u16 = 10;
-/// Rows the wheel scrolls.
-const WHEEL_ROWS: i64 = 3;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Dock {
-    Left,
-    Right,
-    Top,
-    Bottom,
-}
-
-impl Dock {
-    pub fn parse(s: &str) -> Option<Self> {
-        Some(match s {
-            "left" => Dock::Left,
-            "right" => Dock::Right,
-            "top" => Dock::Top,
-            "bottom" => Dock::Bottom,
-            _ => return None,
-        })
-    }
-
-    pub fn name(self) -> &'static str {
-        match self {
-            Dock::Left => "left",
-            Dock::Right => "right",
-            Dock::Top => "top",
-            Dock::Bottom => "bottom",
-        }
-    }
-
-    /// Sized in columns (beside the chat) rather than rows.
-    fn sideways(self) -> bool {
-        matches!(self, Dock::Left | Dock::Right)
-    }
-
-    /// Placement order: side panels take full-height columns first, then
-    /// top and bottom panels split what is left of the chat column.
-    fn rank(self) -> u8 {
-        match self {
-            Dock::Left => 0,
-            Dock::Right => 1,
-            Dock::Top => 2,
-            Dock::Bottom => 3,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Size {
-    /// Columns or rows.
-    Cells(u16),
-    /// A share of the room on that side, `0 < f < 1`.
-    Fraction(f64),
-    /// Fit the content, up to `max`.
-    Auto,
-}
-
-/// Final frame geometry shared by panel painting and hit testing.
-pub(crate) struct PanelPlacement {
-    pub id: String,
-    pub area: Rect,
-    pub separator: Option<u16>,
-}
-
-#[derive(Clone)]
-pub struct Panel {
-    pub id: String,
-    pub dock: Dock,
-    /// Side panels may span the screen instead of just the chat viewport.
-    pub full_height: bool,
-    /// Side panels draw a `WinSeparator` bar in the column next to the chat;
-    /// without it that column stays blank.
-    pub separator: bool,
-    /// `None`: 30 columns beside the chat, `auto` above or below it.
-    pub size: Option<Size>,
-    pub max: Option<u16>,
-    /// Not drawn when it would get less than this.
-    pub min: u16,
-    /// Lower is placed first (nearer the screen edge); ties go to the older.
-    pub order: i32,
-    pub seq: u64,
-    /// A fixed first row that does not scroll.
-    pub title: Option<String>,
-    /// Callback id of the content: a function(ctx) or a fixed list of lines.
-    pub content: u64,
-    pub keys: Vec<(Key, u64)>,
-    pub on_key: Option<u64>,
-    pub on_close: Option<u64>,
-    pub focusable: bool,
-    /// Keymap context while focused; `None` is `panel`.
-    pub context: Option<Context>,
-    pub hidden: bool,
-    /// Keep the end in view as content grows (until scrolled away from it).
-    pub follow: bool,
-    /// First visible content row.
-    pub top: usize,
-    /// Pinned to the end: `follow` and not scrolled up.
-    pub at_end: bool,
-    /// From the last frame: content rows, visible body rows, and where it was
-    /// drawn (`None` when it did not fit or is hidden).
-    pub rows: usize,
-    pub view: u16,
-    pub area: Option<Rect>,
-}
-
-impl Panel {
-    pub fn new(id: String, seq: u64) -> Self {
-        Panel {
-            id,
-            dock: Dock::Right,
-            full_height: false,
-            separator: true,
-            size: None,
-            max: None,
-            min: 1,
-            order: 0,
-            seq,
-            title: None,
-            content: 0,
-            keys: Vec::new(),
-            on_key: None,
-            on_close: None,
-            focusable: true,
-            context: None,
-            hidden: false,
-            follow: false,
-            top: 0,
-            at_end: false,
-            rows: 0,
-            view: 0,
-            area: None,
-        }
-    }
-
-    fn size(&self) -> Size {
-        self.size.unwrap_or(if self.dock.sideways() {
-            Size::Cells(SIDE_SIZE)
-        } else {
-            Size::Auto
-        })
-    }
-
-    fn max(&self) -> u16 {
-        self.max.unwrap_or(if self.dock.sideways() {
-            SIDE_MAX
-        } else {
-            ROW_MAX
-        })
-    }
-
-    /// The panel as Lua sees it (`info`, and the `panel/*` events).
-    pub fn info(&self, focused: bool) -> Json {
-        let size = match self.size() {
-            Size::Cells(n) => json!(n),
-            Size::Fraction(f) => json!(f),
-            Size::Auto => json!("auto"),
-        };
-        let mut v = json!({
-            "id": self.id,
-            "kind": "panel",
-            "dock": self.dock.name(),
-            "size": size,
-            "order": self.order,
-            "title": self.title,
-            "hidden": self.hidden,
-            "focusable": self.focusable,
-            "focus": focused,
-            "follow": self.follow,
-            "top": self.top,
-            "rows": self.rows,
-            "visible": self.area.is_some(),
-        });
-        if let Some(a) = self.area {
-            v["width"] = json!(a.width);
-            v["height"] = json!(a.height);
-            v["row"] = json!(a.y);
-            v["col"] = json!(a.x);
-        }
-        v
-    }
-
-    /// Scroll the content; clamped on the next draw.
-    pub fn scroll_by(&mut self, by: i64) {
-        let max_top = self.rows.saturating_sub(self.view as usize);
-        self.top = (self.top as i64).saturating_add(by).max(0) as usize;
-        self.at_end = self.follow && self.top >= max_top;
-    }
-
-    pub fn scroll_to(&mut self, end: bool) {
-        if end {
-            self.top = self.rows.saturating_sub(self.view as usize);
-            self.at_end = self.follow;
-        } else {
-            self.top = 0;
-            self.at_end = self.follow && self.rows <= self.view as usize;
-        }
-    }
-
-    fn page(&self) -> i64 {
-        (self.view as i64 - 1).max(1)
-    }
-}
-
-/// Split `room` for a panel docked at `dock` that wants `want` cells, leaving
-/// at least `keep` for the rest. Side panels also take a one-column
-/// separator. Returns the panel's rect and what is left, or `None` when
-/// fewer than `min` cells fit.
-pub fn split(room: Rect, dock: Dock, want: u16, min: u16, keep: u16) -> Option<(Rect, Rect)> {
-    let sep = u16::from(dock.sideways());
-    let total = if dock.sideways() {
-        room.width
-    } else {
-        room.height
-    };
-    let n = want.min(total.saturating_sub(keep + sep));
-    if n == 0 || n < min {
-        return None;
-    }
-    Some(match dock {
-        Dock::Left => (
-            Rect { width: n, ..room },
-            Rect {
-                x: room.x + n + sep,
-                width: room.width - n - sep,
-                ..room
-            },
-        ),
-        Dock::Right => (
-            Rect {
-                x: room.right() - n,
-                width: n,
-                ..room
-            },
-            Rect {
-                width: room.width - n - sep,
-                ..room
-            },
-        ),
-        Dock::Top => (
-            Rect { height: n, ..room },
-            Rect {
-                y: room.y + n,
-                height: room.height - n,
-                ..room
-            },
-        ),
-        Dock::Bottom => (
-            Rect {
-                y: room.bottom() - n,
-                height: n,
-                ..room
-            },
-            Rect {
-                height: room.height - n,
-                ..room
-            },
-        ),
-    })
-}
-
-/// How many cells a panel wants, given the room on its side and (for
-/// `auto`) its content.
-fn wanted(size: Size, max: u16, room: u16, content: impl FnOnce() -> u16) -> u16 {
-    match size {
-        Size::Cells(n) => n,
-        Size::Fraction(f) => (room as f64 * f).round() as u16,
-        Size::Auto => content().min(max),
-    }
-}
+use crate::ui::render_items;
 
 impl App {
     pub fn panel(&self, id: &str) -> Option<&Panel> {
-        self.panels.iter().find(|p| p.id == id)
+        shared::panel(&self.panels, id)
     }
 
     pub fn panel_mut(&mut self, id: &str) -> Option<&mut Panel> {
@@ -312,50 +26,17 @@ impl App {
     /// Panels in placement order: left, right, top, bottom; then `order`,
     /// then age.
     pub fn panels_in_order(&self) -> Vec<&Panel> {
-        let mut v: Vec<&Panel> = self.panels.iter().collect();
-        v.sort_by_key(|p| (p.dock.rank(), p.order, p.seq));
-        v
+        shared::in_order(&self.panels)
     }
 
     /// The panel with the keyboard, if any. A focused popup still comes first.
     pub fn focused_panel(&self) -> Option<&Panel> {
-        let id = self.panel_focus.as_deref()?;
-        self.panel(id).filter(|p| !p.hidden && p.focusable)
-    }
-
-    pub fn panel_info(&self, p: &Panel) -> Json {
-        p.info(self.panel_focus.as_deref() == Some(p.id.as_str()))
+        shared::focused(&self.panels, &self.panel_focus)
     }
 
     /// Give a panel the keyboard, or (`None`) give it back to the prompt.
     pub fn focus_panel(&mut self, id: Option<&str>) -> Result<(), String> {
-        if let Some(id) = id {
-            let p = self.panel(id).ok_or_else(|| format!("no panel {id}"))?;
-            if p.hidden {
-                return Err(format!("panel {id} is hidden"));
-            }
-            if !p.focusable {
-                return Err(format!("panel {id} is not focusable"));
-            }
-        }
-        let before = self.focused_panel().map(|p| p.id.clone());
-        let after = id.map(str::to_owned);
-        if before == after && self.panel_focus == after {
-            return Ok(());
-        }
-        self.flush_pending();
-        self.panel_focus = after;
-        self.emit_focus_changed();
-        self.dirty = true;
-        Ok(())
-    }
-
-    /// Drop the focus if its panel is gone, hidden or no longer focusable.
-    pub fn check_panel_focus(&mut self) {
-        if self.panel_focus.is_some() && self.focused_panel().is_none() {
-            self.panel_focus = None;
-            self.emit_focus_changed();
-        }
+        shared::focus_panel(self, id)
     }
 
     /// Move the keyboard to the next (or previous) focusable panel; the
@@ -409,29 +90,13 @@ impl App {
 
     /// The panel drawn at a screen position.
     fn panel_at(&self, (x, y): (u16, u16)) -> Option<String> {
-        self.panels
-            .iter()
-            .find(|p| {
-                p.area
-                    .is_some_and(|a| x >= a.x && x < a.right() && y >= a.y && y < a.bottom())
-            })
-            .map(|p| p.id.clone())
+        shared::at(&self.panels, x, y).map(|p| p.id.clone())
     }
 
     /// The panel at a screen position and the line of its content there
     /// (from 1; 0 on its title row).
     pub fn panel_hit(&self, at: (u16, u16)) -> Option<(String, usize)> {
-        let id = self.panel_at(at)?;
-        let p = self.panel(&id)?;
-        let area = p.area?;
-        let row = (at.1 - area.y) as usize;
-        let title = usize::from(p.title.is_some());
-        let line = if row < title {
-            0
-        } else {
-            p.top + row - title + 1
-        };
-        Some((id, line))
+        shared::hit(&self.panels, at.0, at.1)
     }
 
     /// The wheel over a panel scrolls it. Returns whether it did.
@@ -507,56 +172,12 @@ impl App {
         false
     }
 
-    /// A panel's content: its function called with `ctx`, or its list.
-    fn panel_content(&mut self, id: &str, content: u64, ctx: Json) -> Vec<Vec<Item>> {
-        self.guarded(&format!("panel.{id}"), |lua| {
-            let v: mlua::Value = lua
-                .named_registry_value::<mlua::Table>("bone.callbacks")?
-                .get(content)?;
-            let v = match v {
-                mlua::Value::Function(f) => f.call::<mlua::Value>(bone_lua::to_lua(lua, &ctx)?)?,
-                v => v,
-            };
-            crate::ui::parse_lines(v)
-        })
-        .flatten()
-        .unwrap_or_default()
-    }
-
-    /// Measure an auto tree leaf. Painting always calls content again with
-    /// the final body dimensions; measurement is deliberately one pass.
+    /// Measure an auto tree leaf (see `bone_ui::lua::panels::measure_panel`).
     pub(crate) fn measure_panel(&mut self, id: &str, width: u16, height: u16, rows: bool) -> u16 {
-        let Some(p) = self.panel(id).cloned().filter(|p| !p.hidden) else {
-            return 0;
-        };
-        let title = u16::from(p.title.is_some());
-        let lines = self.panel_content(
-            id,
-            p.content,
-            self.panel_ctx(&p, width, height.saturating_sub(title)),
-        );
-        if rows {
-            (lines.len().min(u16::MAX as usize) as u16)
-                .saturating_add(title)
-                .min(p.max())
-        } else {
-            lines
-                .iter()
-                .map(|l| crate::ui::items_width(l))
-                .max()
-                .unwrap_or(0)
-                .min(p.max() as usize) as u16
-        }
+        shared::measure_panel(self, id, width, height, rows)
     }
 
-    fn panel_ctx(&self, p: &Panel, width: u16, height: u16) -> Json {
-        json!({ "id": p.id, "spinner": self.spinner.frame(), "dock": p.dock.name(),
-            "width": width, "height": height,
-            "focused": self.focused_panel().is_some_and(|f| f.id == p.id),
-            "top": p.top, "title": p.title })
-    }
-
-    /// Allocate legacy docks without painting. Tree references take precedence.
+    /// Dock the panels the layout does not place into `room`; what is left.
     pub(crate) fn allocate_panels(
         &mut self,
         room: Rect,
@@ -564,207 +185,42 @@ impl App {
         layout: &crate::ui::LayoutNode,
         placements: &mut Vec<PanelPlacement>,
     ) -> Rect {
-        let order: Vec<String> = self
-            .panels_in_order()
-            .into_iter()
-            .map(|p| p.id.clone())
-            .collect();
-        let mut room = room;
-        for id in order {
-            let Some(p) = self.panel(&id).cloned() else {
-                continue;
-            };
-            if p.hidden
-                || layout.contains(&format!("panel:{id}"))
-                || (p.full_height && p.dock.sideways()) != full_height
-            {
-                continue;
-            }
-            let side = p.dock.sideways();
-            let room_len = if side { room.width } else { room.height };
-            let want = wanted(p.size(), p.max(), room_len, || {
-                let w = if side {
-                    p.max().min(room.width)
-                } else {
-                    room.width
-                };
-                let h = if side {
-                    room.height
-                } else {
-                    p.max().min(room.height)
-                };
-                self.measure_panel(&id, w, h, !side)
-            });
-            let keep = if side { MIN_CHAT_COLS } else { MIN_CHAT_ROWS };
-            let Some((area, rest)) = split(room, p.dock, want, p.min.max(1), keep) else {
-                continue;
-            };
-            room = rest;
-            let separator = if side && p.separator {
-                Some(if p.dock == Dock::Left {
-                    area.right()
-                } else {
-                    area.x - 1
-                })
-            } else {
-                None
-            };
-            placements.push(PanelPlacement {
-                id,
-                area,
-                separator,
-            });
-        }
-        room
+        let room = bone_ui::layout::Rect::new(room.x, room.y, room.width, room.height);
+        let r = shared::allocate_panels(self, room, full_height, layout, placements);
+        Rect::new(r.x, r.y, r.width, r.height)
     }
 
     /// Publish every panel rectangle before any final render callback runs.
     pub(crate) fn publish_panels(&mut self, placements: &[PanelPlacement]) {
-        for p in &mut self.panels {
-            p.area = None;
-            p.view = 0;
-        }
-        for placement in placements {
-            if let Some(p) = self.panel_mut(&placement.id) {
-                p.area = Some(placement.area);
-                p.view = placement
-                    .area
-                    .height
-                    .saturating_sub(u16::from(p.title.is_some()));
-            }
-        }
+        shared::publish_panels(self, placements);
     }
 
     pub(crate) fn paint_panels(&mut self, frame: &mut Frame<'_>, placements: &[PanelPlacement]) {
+        let rect = |r: bone_ui::layout::Rect| Rect::new(r.x, r.y, r.width, r.height);
         for placement in placements {
-            let Some(p) = self.panel(&placement.id).cloned().filter(|p| !p.hidden) else {
+            let Some(f) = shared::panel_frame(self, placement) else {
                 continue;
             };
-            let rect = placement.area;
-            let title_h = u16::from(p.title.is_some()).min(rect.height);
-            let body = Rect {
-                y: rect.y + title_h,
-                height: rect.height - title_h,
-                ..rect
-            };
-            let focused = self.focused_panel().is_some_and(|f| f.id == p.id);
-            let lines = self.panel_content(
-                &p.id,
-                p.content,
-                self.panel_ctx(&p, body.width, body.height),
-            );
-            let Some(p) = self.panel_mut(&placement.id) else {
-                continue;
-            };
-            let view = body.height as usize;
-            let max_top = lines.len().saturating_sub(view);
-            if p.follow && p.at_end {
-                p.top = max_top;
-            }
-            p.top = p.top.min(max_top);
-            p.rows = lines.len();
-            let top = p.top;
-            if let Some(t) = p.title.clone().filter(|_| title_h > 0) {
-                let hl = if focused {
-                    "PanelTitleFocus"
-                } else {
-                    "PanelTitle"
-                };
-                let items = [Item::Text(t, hl.into()), Item::Fill(" ".into(), hl.into())];
+            let area = rect(f.area);
+            if let Some(items) = &f.title {
                 frame.render_widget(
-                    Paragraph::new(render_items(&items, rect.width as usize, &self.theme)),
-                    Rect {
-                        height: title_h,
-                        ..rect
-                    },
+                    Paragraph::new(render_items(items, area.width as usize, &self.theme)),
+                    Rect { height: 1, ..area },
                 );
             }
-            let shown: Vec<_> = lines
-                .iter()
-                .skip(top)
-                .take(view)
+            let body = rect(f.body);
+            let shown: Vec<_> = (f.lines.iter())
                 .map(|l| render_items(l, body.width as usize, &self.theme))
                 .collect();
             frame.render_widget(Paragraph::new(shown), body);
-            if let Some(x) = placement.separator {
+            if let Some(x) = f.separator {
                 let style = self.theme.hl("WinSeparator");
-                for y in rect.y..rect.bottom() {
+                for y in area.y..area.bottom() {
                     if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
                         cell.set_symbol("│").set_style(style);
                     }
                 }
             }
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn r(x: u16, y: u16, width: u16, height: u16) -> Rect {
-        Rect {
-            x,
-            y,
-            width,
-            height,
-        }
-    }
-
-    #[test]
-    fn split_docks_and_keeps_room_for_the_chat() {
-        let room = r(0, 0, 100, 20);
-        assert_eq!(
-            split(room, Dock::Left, 30, 1, 20),
-            Some((r(0, 0, 30, 20), r(31, 0, 69, 20)))
-        );
-        assert_eq!(
-            split(room, Dock::Right, 30, 1, 20),
-            Some((r(70, 0, 30, 20), r(0, 0, 69, 20)))
-        );
-        assert_eq!(
-            split(room, Dock::Top, 5, 1, 3),
-            Some((r(0, 0, 100, 5), r(0, 5, 100, 15)))
-        );
-        assert_eq!(
-            split(room, Dock::Bottom, 5, 1, 3),
-            Some((r(0, 15, 100, 5), r(0, 0, 100, 15)))
-        );
-        // Shrinks to leave the chat its minimum, and gives up below `min`.
-        assert_eq!(
-            split(room, Dock::Right, 90, 1, 20).map(|s| s.0.width),
-            Some(79)
-        );
-        assert_eq!(split(r(0, 0, 25, 20), Dock::Left, 30, 10, 20), None);
-        assert_eq!(split(room, Dock::Top, 0, 1, 3), None);
-    }
-
-    #[test]
-    fn sizes() {
-        assert_eq!(wanted(Size::Cells(7), 10, 50, || 0), 7);
-        assert_eq!(wanted(Size::Fraction(0.25), 10, 80, || 0), 20);
-        assert_eq!(wanted(Size::Auto, 10, 80, || 4), 4);
-        assert_eq!(wanted(Size::Auto, 10, 80, || 40), 10);
-    }
-
-    #[test]
-    fn scrolling_clamps_and_follows() {
-        let mut p = Panel::new("p".into(), 1);
-        p.rows = 10;
-        p.view = 4;
-        p.scroll_by(-3);
-        assert_eq!(p.top, 0);
-        p.scroll_by(100);
-        assert_eq!(
-            p.top, 100,
-            "upper bound is clamped against fresh content on draw"
-        );
-        assert!(!p.at_end, "only following panels stick to the end");
-        p.follow = true;
-        p.scroll_to(true);
-        assert!(p.at_end);
-        p.scroll_by(-1);
-        assert!(!p.at_end);
-        assert_eq!(p.top, 5);
     }
 }

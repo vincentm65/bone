@@ -14,6 +14,7 @@ use bone_proto::methods::ProcessSnapshot;
 use bone_proto::types::ImageAttachment;
 use mlua::{FromLua, FromLuaMulti, Function, IntoLuaMulti, Lua, MultiValue, Table, Value};
 
+pub mod panels;
 pub mod state;
 pub mod ui;
 
@@ -276,6 +277,10 @@ pub trait Host {
     fn geometry(&self) -> Geometry;
     /// The open Lua windows.
     fn popups(&mut self) -> &mut Vec<crate::popup::Popup>;
+    /// The panels, and which one has the keyboard.
+    fn panel_store(&mut self) -> panels::PanelStore<'_>;
+    /// Keys typed toward a sequence go through now (the focus is moving).
+    fn flush_keys(&mut self) {}
 }
 
 /// Run shared op `op`, or give `a` back for the frontend's own dispatcher.
@@ -356,7 +361,7 @@ pub fn dispatch<H: Host>(
         "command_find" => command_find(h, lua, a),
         "command_complete" => command_complete(h, lua, a),
         "cmd" => cmd(h, lua, a),
-        _ => return Err(a),
+        _ => return panels::dispatch(h, lua, op, a),
     })
 }
 

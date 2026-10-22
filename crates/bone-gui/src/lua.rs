@@ -65,6 +65,9 @@ pub struct LuaSide {
     pub geometry: bone_ui::lua::Geometry,
     /// Lua windows (`bone.ui.popup`).
     pub popups: Vec<bone_ui::popup::Popup>,
+    /// Lua panels (`bone.ui.panel`); not drawn in the GUI yet.
+    pub panels: Vec<bone_ui::panel::Panel>,
+    pub panel_focus: Option<String>,
     /// Every message shown, and the last Lua errors in full.
     pub log: Vec<String>,
     pub lua_errors: Vec<String>,
@@ -503,6 +506,14 @@ impl Host for Gui {
 
     fn popups(&mut self) -> &mut Vec<bone_ui::popup::Popup> {
         &mut self.lua.popups
+    }
+
+    fn panel_store(&mut self) -> bone_ui::lua::panels::PanelStore<'_> {
+        let l = &mut self.lua;
+        bone_ui::lua::panels::PanelStore {
+            panels: &mut l.panels,
+            focus: &mut l.panel_focus,
+        }
     }
 }
 

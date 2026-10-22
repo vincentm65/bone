@@ -100,7 +100,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
             {
                 panels.push(crate::panel::PanelPlacement {
                     id: id.to_owned(),
-                    area: *r,
+                    area: to_cells(*r),
                     separator: None,
                 });
             } else {
@@ -194,11 +194,9 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         if app.panel(&placement.id).is_some_and(|p| !p.hidden) {
             continue;
         }
-        frame.render_widget(Clear, placement.area);
-        frame.render_widget(
-            Block::default().style(app.theme.hl("Normal")),
-            placement.area,
-        );
+        let area = from_cells(placement.area);
+        frame.render_widget(Clear, area);
+        frame.render_widget(Block::default().style(app.theme.hl("Normal")), area);
         if let Some(p) = app.panel_mut(&placement.id) {
             p.area = None;
             p.view = 0;

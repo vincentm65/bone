@@ -1801,6 +1801,7 @@ impl App {
         // A selection stays inside the panel or layout leaf it starts in.
         let pos = Position::new(at.0, at.1);
         let clip = (self.panels.iter().filter_map(|p| p.area))
+            .map(|a| Rect::new(a.x, a.y, a.width, a.height))
             .chain(self.leaves.iter().map(|(_, r)| *r))
             .find(|r| r.contains(pos))
             .unwrap_or(self.screen);

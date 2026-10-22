@@ -5335,7 +5335,7 @@ async fn flexible_panel_tree_composes_and_publishes_final_geometry() {
     h.screen(80, 24);
     assert_eq!(
         h.app.panel("tree").unwrap().area.unwrap(),
-        ratatui::layout::Rect::new(0, 0, 12, 24)
+        bone_ui::layout::Rect::new(0, 0, 12, 24)
     );
     assert_eq!(h.lua("=panel_w .. ',' .. panel_h").await, "\"12,23\"");
     assert_eq!(h.app.placed[&crate::app::CHAT_WIN].area.x, 13);
