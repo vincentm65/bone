@@ -7,6 +7,7 @@ use bone_ui::style::{Color, Modifier, Style};
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{self, Color32, FontId, Key, Stroke};
 use serde_json::Value;
+use unicode_width::UnicodeWidthChar;
 
 use crate::{Gui, Row};
 
@@ -66,13 +67,53 @@ impl Gui {
     }
 }
 
-/// A chat row as text in its styles, one font for all of it.
-pub(crate) fn row_job(row: &Row, font: &FontId, visuals: &egui::Visuals) -> LayoutJob {
+/// A chat row as text in its styles, one font for all of it, every
+/// character as many cells wide as it is in a terminal (`col` points a
+/// cell): a wide character, or one from a fallback font, is padded or
+/// tucked in after it so the columns after it line up.
+pub(crate) fn row_job(ui: &egui::Ui, row: &Row, font: &FontId, col: f32) -> LayoutJob {
+    let visuals = ui.visuals();
     let mut job = LayoutJob::default();
-    for (text, style) in row {
-        job.append(text, 0.0, format(style, font, visuals));
-    }
+    ui.ctx().fonts_mut(|fonts| {
+        let mut lead = 0.0;
+        for (text, style) in row {
+            let format = format(style, font, visuals);
+            let mut start = 0;
+            // A character with the zero-width ones after it (combining
+            // marks) is one cluster; the monospace font's own are one cell.
+            let mut chars = text.char_indices().peekable();
+            while let Some((i, c)) = chars.next() {
+                let mut end = i + c.len_utf8();
+                while let Some((j, m)) =
+                    chars.next_if(|&(_, m)| !m.is_ascii() && m.width() == Some(0))
+                {
+                    end = j + m.len_utf8();
+                }
+                let cluster = &text[i..end];
+                if cluster.is_ascii() {
+                    continue;
+                }
+                let gap = c.width().unwrap_or(0) as f32 * col - advance(fonts, font, cluster);
+                if gap.abs() > 0.01 {
+                    job.append(&text[start..end], lead, format.clone());
+                    (start, lead) = (end, gap);
+                }
+            }
+            if start < text.len() {
+                job.append(&text[start..], lead, format);
+                lead = 0.0;
+            }
+        }
+    });
     job
+}
+
+/// How far `cluster` moves the text along, in whichever fonts draw it
+/// (egui keeps the layouts of recent frames).
+fn advance(fonts: &mut egui::epaint::text::FontsView<'_>, font: &FontId, cluster: &str) -> f32 {
+    let galley = fonts.layout_no_wrap(cluster.to_owned(), font.clone(), Color32::WHITE);
+    let glyphs = galley.rows.iter().flat_map(|r| r.glyphs.iter());
+    glyphs.map(|g| g.advance_width).sum()
 }
 
 fn format(style: &Style, font: &FontId, visuals: &egui::Visuals) -> TextFormat {
@@ -222,5 +263,44 @@ impl Gui {
         // Cached rows were wrapped for the old cell size.
         self.lua.views_rev += 1;
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Where each glyph of `text` starts, in cells.
+    fn columns(text: &str) -> Vec<(char, f32)> {
+        let ctx = egui::Context::default();
+        let mut out = Vec::new();
+        let mut frame = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let font = FontId::monospace(14.0);
+            let col = ui.ctx().fonts_mut(|f| f.glyph_width(&font, 'M'));
+            let row = vec![(text.to_owned(), Style::default())];
+            let galley = ui.painter().layout_job(row_job(ui, &row, &font, col));
+            let glyphs = galley.rows.iter().flat_map(|r| r.glyphs.iter());
+            out = glyphs.map(|g| (g.chr, g.pos.x / col)).collect();
+        });
+        frame.textures_delta.clear();
+        out
+    }
+
+    /// `text`'s characters start at these cells, give or take the pixel
+    /// rounding egui does.
+    fn assert_columns(text: &str, want: &[f32]) {
+        let got = columns(text);
+        let near =
+            got.len() == want.len() && got.iter().zip(want).all(|((_, g), w)| (g - w).abs() < 0.15);
+        assert!(near, "{text:?}: {got:?}, not {want:?}");
+    }
+
+    #[test]
+    fn wide_and_fallback_characters_keep_the_columns() {
+        // An emoji is two cells; box drawing comes from a fallback font.
+        assert_columns("😀ab", &[0.0, 2.0, 3.0]);
+        assert_columns("a─┼b", &[0.0, 1.0, 2.0, 3.0]);
+        assert_columns("ab😀😀c", &[0.0, 1.0, 2.0, 4.0, 6.0]);
+        assert_columns("e\u{301}x", &[0.0, 1.0, 1.0]);
     }
 }

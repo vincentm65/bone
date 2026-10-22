@@ -316,7 +316,7 @@ impl Gui {
         };
         let (rows, top) = self.layout_chat(buf, r.width as usize, view);
         let chat = &self.chats[buf];
-        let font = cells.font.clone();
+        let (font, col) = (cells.font.clone(), cells.col);
         let out = ui
             .scope_builder(UiBuilder::new().max_rect(cells.rect(r)), |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
@@ -330,7 +330,7 @@ impl Gui {
                 }
                 area.show_rows(ui, cells.row, rows, |ui, range| {
                     for row in chat.rows().skip(range.start).take(range.len()) {
-                        ui.label(row_job(row, &font, ui.visuals()));
+                        ui.label(row_job(ui, row, &font, col));
                     }
                 })
             })
@@ -475,7 +475,7 @@ fn paint_row(ui: &egui::Ui, cells: &Cells, r: layout::Rect, row: &Row) {
     }
     let galley = ui
         .painter()
-        .layout_job(row_job(row, &cells.font, ui.visuals()));
+        .layout_job(row_job(ui, row, &cells.font, cells.col));
     let rect = cells.rect(r);
     ui.painter()
         .with_clip_rect(rect)

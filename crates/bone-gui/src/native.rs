@@ -45,8 +45,7 @@ impl eframe::App for App {
         }
         let Some(gui) = &mut self.gui else { return };
         gui.ui(ui);
-        let title =
-            (gui.window_title.clone()).unwrap_or_else(|| format!("{} — bone", gui.title()));
+        let title = (gui.window_title.clone()).unwrap_or_else(|| format!("{} — bone", gui.title()));
         if title != self.title {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));
@@ -114,7 +113,10 @@ pub async fn run(conn: Connection, opts: GuiOptions) -> Result<(), String> {
 fn open(slot: &Rc<RefCell<Option<Gui>>>) -> Result<(), String> {
     // Opened again, the window keeps its size.
     let size = slot.borrow().as_ref().and_then(|g| {
-        let (w, h) = (g.window_info["width"].as_f64()?, g.window_info["height"].as_f64()?);
+        let (w, h) = (
+            g.window_info["width"].as_f64()?,
+            g.window_info["height"].as_f64()?,
+        );
         (w > 0.0 && h > 0.0).then_some([w as f32, h as f32])
     });
     let mut failed = Vec::new();
@@ -140,7 +142,9 @@ fn open(slot: &Rc<RefCell<Option<Gui>>>) -> Result<(), String> {
                     None => (name.to_owned(), false),
                 };
                 if software {
-                    gui.error(format!("no GPU in use: drawing in software with {renderer}"));
+                    gui.error(format!(
+                        "no GPU in use: drawing in software with {renderer}"
+                    ));
                 } else {
                     gui.info(format!("drawing with {renderer}"));
                 }
