@@ -164,10 +164,35 @@ static TUI_CAPABILITIES: &[&str] = &[
     "plugins.lifecycle",
     "tui.project",
     "tui.session",
+    // The API shared with the GUI, by the same names there.
+    "ui.options",
+    "ui.events",
+    "ui.commands",
+    "ui.keymaps",
+    "ui.themes",
+    "ui.chat_data",
+    "ui.views",
+    "ui.request",
 ];
 
-/// The GUI's, growing as the shared UI API moves into `bone-ui`.
-static GUI_CAPABILITIES: &[&str] = &["lua", "json", "modules", "fs", "plugins.state", "docs"];
+/// The GUI's: the shared UI API (`ui.*`), growing as more of it moves into
+/// `bone-ui`.
+static GUI_CAPABILITIES: &[&str] = &[
+    "lua",
+    "json",
+    "modules",
+    "fs",
+    "plugins.state",
+    "docs",
+    "ui.options",
+    "ui.events",
+    "ui.commands",
+    "ui.keymaps",
+    "ui.themes",
+    "ui.chat_data",
+    "ui.views",
+    "ui.request",
+];
 
 /// Capabilities implemented by a Lua state on this side of bone.
 pub fn capabilities(side: Side) -> &'static [&'static str] {

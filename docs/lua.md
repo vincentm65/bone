@@ -59,6 +59,34 @@ The current capability names include `core.config`, `core.tools`,
 `tui.session`. Both sides also report `lua`, `json`, `modules` and `fs`.
 Capability names describe the contract, not the internal Rust module layout.
 
+### Frontends: the shared UI API
+
+The TUI and the desktop GUI (`bone --gui`) load the same Lua UI API,
+`runtime/ui/api.lua`, then their own (`runtime/tui/api.lua`,
+`runtime/gui/api.lua`), the defaults, and your config: each plugin's
+`ui.lua` then `tui.lua` or `gui.lua`, then `~/.bone/ui.lua` and `tui.lua`
+or `gui.lua`. Put UI code meant for both in `ui.lua`. `bone.api_info().side`
+is `"tui"` or `"gui"`.
+
+An API marked shared has one implementation used by both frontends and is
+checked by the same scripts in each (`tests/ui/`). Its `ui.*` capability is
+reported by every frontend that has it; the TUI also keeps its older `tui.*`
+names. In the GUI, a call to an API it does not have yet raises an error
+naming the operation.
+
+| Capability | API | Status |
+|---|---|---|
+| `ui.options` | `bone.o`: get, set, `define`, `del`, `names`, `info`, `apply`, `list` | shared |
+| `ui.events` | `bone.on`, `bone.off`; server events and `ready` | shared |
+| `ui.commands` | `bone.cmd` (running, `create`, `del`, `list`, `find`, `complete`), typed arguments, `/model` | shared |
+| `ui.keymaps` | `bone.keymap.set`, `del`, `context`, `list`, `current` | shared; `focus`, `clear`, `del_context` and `raw` are TUI-only for now |
+| `ui.themes` | `bone.hl`, `bone.colorscheme`, `bone.api.colors_name` | shared |
+| `ui.chat_data` | `bone.chat.items`, `add`, `update`, `remove`, `turns`, `session`, `sessions`, `redraw`, `refresh_in` | shared |
+| `ui.views` | `bone.ui.views` drawing chat items, `bone.ui.refresh` | shared |
+| `ui.request` | `bone.request`, `bone.system`, `bone.http`, `bone.defer`, `bone.notify`, `bone.settings` | shared |
+| — | `bone.api.session`, `prompt_get`, `bone.prompt.images`, `bone.processes.list`, `bone.chat.view`, `bone.ui.panel.focused` | shared ops; the GUI answers with what it has (no images, processes or panels yet; the chat follows the end) |
+| — | windows and popups, panels, regions, layout, statusline, prompt editing, jobs, plugins and projects, libraries, `bone.chat.at`/`scroll`, `bone.ui.geometry` | TUI only for now |
+
 ### Ownership and compatibility
 
 The core remains the authority for sessions, turns, providers, tools and
