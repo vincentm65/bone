@@ -20,3 +20,7 @@ require("bone.desktop.layout").setup()
 -- and its size in points.
 bone.o.define("font", "", { desc = "monospace font file for the GUI (empty: built in)" })
 bone.o.define("font_size", 14, { desc = "GUI font size in points", type = "number" })
+-- The proportional text's faces (font files; empty: the system's sans).
+bone.o.define("font_sans", "", { desc = "proportional font file for the GUI (empty: the system's)" })
+bone.o.define("font_sans_bold", "", { desc = "its bold face (empty: the system's)" })
+bone.o.define("font_sans_italic", "", { desc = "its italic face (empty: the system's)" })

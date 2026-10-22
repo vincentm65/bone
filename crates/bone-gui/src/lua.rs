@@ -81,7 +81,10 @@ pub struct LuaSide {
     pub chat_views: HashMap<usize, (usize, bool)>,
     pub dragging: bool,
     /// The font file and size applied last (`bone.o.font`, `font_size`).
-    pub fonts: Option<(String, f32)>,
+    pub fonts: Option<(String, f32, [String; 3])>,
+    /// Whether the proportional font has a bold and an italic face
+    /// (`sans-bold`, `sans-italic`); without them bold is a brighter color.
+    pub faces: (bool, bool),
     /// The menu bar Lua set (`bone.gui.menu`).
     pub menus: Vec<(String, Vec<crate::window::MenuItem>)>,
     /// Text copied before there was a window to copy it with (headless).
@@ -601,8 +604,8 @@ impl Host for Gui {
             item("plugins", "warn", failed.join("\n"))
         });
         let font = match self.lua.fonts.as_ref() {
-            Some((file, size)) if !file.is_empty() => format!("{file}, {size} pt"),
-            Some((_, size)) => format!("built-in monospace, {size} pt"),
+            Some((file, size, _)) if !file.is_empty() => format!("{file}, {size} pt"),
+            Some((_, size, _)) => format!("built-in monospace, {size} pt"),
             None => "not applied yet".into(),
         };
         out.push(item("font", "ok", font));

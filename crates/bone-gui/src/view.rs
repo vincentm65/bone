@@ -340,25 +340,66 @@ impl Gui {
             Some(DynamicValue::Integer(n)) => *n as f32,
             _ => 14.0,
         };
-        let want = (text("font"), size.clamp(6.0, 72.0));
+        let sans = ["font_sans", "font_sans_bold", "font_sans_italic"].map(text);
+        let want = (text("font"), size.clamp(6.0, 72.0), sans);
         if self.lua.fonts.as_ref() == Some(&want) {
             return false;
         }
         let mut fonts = egui::FontDefinitions::default();
-        if !want.0.is_empty() {
-            match std::fs::read(&want.0) {
+        let mut add = |name: &str, path: &str| -> bool {
+            match std::fs::read(path) {
                 Ok(bytes) => {
-                    fonts.font_data.insert(
-                        "user".into(),
-                        std::sync::Arc::new(egui::FontData::from_owned(bytes)),
-                    );
-                    if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
-                        mono.insert(0, "user".into());
-                    }
+                    let data = std::sync::Arc::new(egui::FontData::from_owned(bytes));
+                    fonts.font_data.insert(name.into(), data);
+                    true
                 }
-                Err(e) => self.error(format!("cannot read font {}: {e}", want.0)),
+                Err(_) => false,
+            }
+        };
+        let mut errors = Vec::new();
+        let user = !want.0.is_empty() && add("user", &want.0);
+        if !want.0.is_empty() && !user {
+            errors.push(want.0.clone());
+        }
+        // The proportional faces: the options' files, else the system's.
+        let mut faces = [false; 3];
+        for (i, (opt, found)) in want.2.iter().zip(system_sans()).enumerate() {
+            let path = if opt.is_empty() {
+                found
+            } else {
+                Some(opt.clone())
+            };
+            if let Some(path) = path {
+                faces[i] = add(["sans", "sans-bold", "sans-italic"][i], &path);
+                if !faces[i] && !opt.is_empty() {
+                    errors.push(path);
+                }
             }
         }
+        if user && let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+            mono.insert(0, "user".into());
+        }
+        let fallback = fonts.families[&egui::FontFamily::Proportional].clone();
+        if faces[0]
+            && let Some(p) = fonts.families.get_mut(&egui::FontFamily::Proportional)
+        {
+            p.insert(0, "sans".into());
+        }
+        let sans = fonts.families[&egui::FontFamily::Proportional].clone();
+        for (i, face) in [(1, "sans-bold"), (2, "sans-italic")] {
+            let mut family = sans.clone();
+            if faces[i] {
+                family.insert(0, face.into());
+            }
+            family.extend(fallback.iter().cloned());
+            fonts
+                .families
+                .insert(egui::FontFamily::Name(face.into()), family);
+        }
+        for path in errors {
+            self.error(format!("cannot read font {path}"));
+        }
+        self.lua.faces = (faces[1], faces[2]);
         ctx.set_fonts(fonts);
         ctx.all_styles_mut(|style| {
             if let Some(f) = style.text_styles.get_mut(&egui::TextStyle::Monospace) {
@@ -412,4 +453,51 @@ mod tests {
         assert_columns("ab😀😀c", &[0.0, 1.0, 2.0, 4.0, 6.0]);
         assert_columns("e\u{301}x", &[0.0, 1.0, 1.0]);
     }
+}
+
+/// The system's sans-serif regular, bold and italic font files, where the
+/// usual ones are (Noto, DejaVu, Liberation; Arial on macOS, Segoe UI on
+/// Windows).
+fn system_sans() -> [Option<String>; 3] {
+    let sets: &[[&str; 3]] = &[
+        [
+            "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/noto/NotoSans-Bold.ttf",
+            "/usr/share/fonts/noto/NotoSans-Italic.ttf",
+        ],
+        [
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Italic.ttf",
+        ],
+        [
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans-Oblique.ttf",
+        ],
+        [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
+        ],
+        [
+            "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
+            "/usr/share/fonts/liberation/LiberationSans-Italic.ttf",
+        ],
+        [
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
+            "/System/Library/Fonts/Supplemental/Arial Italic.ttf",
+        ],
+        [
+            "C:\\Windows\\Fonts\\segoeui.ttf",
+            "C:\\Windows\\Fonts\\segoeuib.ttf",
+            "C:\\Windows\\Fonts\\segoeuii.ttf",
+        ],
+    ];
+    let set = sets.iter().find(|s| std::path::Path::new(s[0]).exists());
+    set.map_or([None, None, None], |s| {
+        s.map(|p| std::path::Path::new(p).exists().then(|| p.to_owned()))
+    })
 }

@@ -171,15 +171,23 @@ impl Gui {
             let style = self.lua.theme.hl(group);
             let m = style.add_modifier;
             let code = s["code"] == true;
+            let bold = s["bold"] == true || m.contains(Modifier::BOLD);
+            let italic = s["italic"] == true || m.contains(Modifier::ITALIC);
+            let (has_bold, has_italic) = self.lua.faces;
             let family = if code || font == "mono" {
                 FontFamily::Monospace
+            } else if bold && has_bold {
+                FontFamily::Name("sans-bold".into())
+            } else if italic && has_italic {
+                FontFamily::Name("sans-italic".into())
             } else {
                 FontFamily::Proportional
             };
+            let slanted = family == FontFamily::Name("sans-italic".into());
             let size = num(&s["size"], if code { size * 0.92 } else { size });
             let mut color = style.fg.and_then(color).unwrap_or(Color32::from_gray(0xee));
-            if s["bold"] == true || m.contains(Modifier::BOLD) {
-                // egui's bundled fonts have no bold face: bold is brighter.
+            if bold && !(has_bold && family != FontFamily::Monospace) {
+                // Without a bold face, bold is a brighter color.
                 color = color.lerp_to_gamma(Color32::WHITE, 0.35);
             }
             if m.contains(Modifier::DIM) {
@@ -206,7 +214,8 @@ impl Gui {
                     font_id: FontId::new(size, family),
                     color,
                     background,
-                    italics: s["italic"] == true || m.contains(Modifier::ITALIC),
+                    // A real italic face needs no slant.
+                    italics: italic && !slanted,
                     underline,
                     ..Default::default()
                 },
@@ -279,12 +288,12 @@ impl Block {
         size
     }
 
-    /// Draw it with its top-left at `at`, in a chat `width` points wide.
-    pub fn paint(&self, painter: &egui::Painter, at: egui::Pos2, width: f32) {
-        let ctx = painter.ctx().clone();
-        let size = self.measure(&ctx, width);
-        let layout = self.layout.lock().unwrap().clone();
-        let Some(layout) = layout else { return };
+    /// Draw it with its top-left at `at`, in a chat `width` points wide:
+    /// its box, then its paragraphs as selectable text. Returns what the
+    /// pointer did to its text (`None` with no text on screen).
+    pub fn show(&self, ui: &mut egui::Ui, at: egui::Pos2, width: f32) -> Option<egui::Response> {
+        let size = self.measure(ui.ctx(), width);
+        let layout = self.layout.lock().unwrap().clone()?;
         let x = if self.right {
             at.x + width - size.x
         } else {
@@ -294,6 +303,7 @@ impl Block {
             egui::pos2(x, at.y + self.margin.0),
             egui::vec2(size.x, size.y - self.margin.0 - self.margin.1),
         );
+        let painter = ui.painter().clone();
         if let Some(bg) = self.bg {
             painter.rect_filled(boxed, self.radius, bg);
         }
@@ -306,7 +316,8 @@ impl Block {
             );
         }
         let mut y = boxed.min.y + self.pad.0;
-        for (p, g) in self.paras.iter().zip(&layout.galleys) {
+        let mut hits: Option<egui::Response> = None;
+        for (i, (p, g)) in self.paras.iter().zip(&layout.galleys).enumerate() {
             y += p.gap;
             let left = boxed.min.x + self.pad.1 + p.indent;
             if let Some(bg) = p.bg {
@@ -316,12 +327,21 @@ impl Block {
                 );
                 painter.rect_filled(r, 6.0, bg);
             }
-            painter.galley(
-                egui::pos2(left + p.pad, y + p.pad),
-                g.clone(),
-                Color32::PLACEHOLDER,
-            );
+            // A child placed by hand: the chat's rows keep their layout.
+            let rect = egui::Rect::from_min_size(egui::pos2(left + p.pad, y + p.pad), g.size());
+            let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect).id_salt((
+                "block para",
+                at.x as i32,
+                at.y as i32,
+                i,
+            )));
+            let resp = child.add(egui::Label::new(g.clone()).selectable(true));
+            hits = Some(match hits {
+                Some(h) => h.union(resp),
+                None => resp,
+            });
             y += g.size().y + 2.0 * p.pad;
         }
+        hits
     }
 }

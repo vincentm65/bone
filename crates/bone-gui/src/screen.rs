@@ -400,7 +400,13 @@ impl Gui {
                                 );
                                 if *part == 0 || n == 0 {
                                     let top = rect.min - vec2(0.0, *part as f32 * cells.row);
-                                    block.paint(ui.painter(), top, width);
+                                    // Its images show on hover, as a row's do.
+                                    if let Some(resp) = block.show(ui, top, width)
+                                        && (resp.hovered() || resp.clicked())
+                                    {
+                                        let at = range.start + n - part;
+                                        gui.chat_image_row(chat, at, &block.text(), &resp);
+                                    }
                                 }
                             }
                         }
