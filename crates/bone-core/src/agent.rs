@@ -37,7 +37,8 @@ const TOOL_CANCEL_GRACE: Duration = Duration::from_millis(500);
 const TURN_END_CANCEL_GRACE: Duration = Duration::from_secs(1);
 
 const DEFAULT_SYSTEM_PROMPT: &str = "You are bone, a coding assistant. Find the relevant code \
-yourself with rg (rg --files to list files) and read it before editing. Keep changes minimal and \
+yourself with rg (rg --files to list files) and read it before editing. Read a file in one \
+call, then edit or answer; do not page through it or keep searching. Keep changes minimal and \
 answers concise.\n\n\
 For requests about bone itself, first read docs/customizing.md in the bone config directory \
 (default ~/.bone).";

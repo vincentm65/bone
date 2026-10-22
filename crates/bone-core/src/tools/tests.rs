@@ -43,7 +43,7 @@ async fn write_read_edit() {
     .unwrap();
     assert_eq!(
         out,
-        "two\n\n[showing lines 2-2 of 3; use offset to read more]\n"
+        "two\n\n[showing lines 2-2 of 3; 1 line not shown. Raise limit instead of another small read.]\n"
     );
 
     let err = call(
@@ -190,7 +190,7 @@ async fn plain_read_partial_pagination_and_end_behavior() {
     .unwrap();
     assert_eq!(
         out,
-        "  second\t\n\n\n[showing lines 2-3 of 4; use offset to read more]\n"
+        "  second\t\n\n\n[showing lines 2-3 of 4; 1 line not shown. Raise limit instead of another small read.]\n"
     );
     let out = call(
         &ctx,
@@ -213,7 +213,7 @@ async fn plain_read_partial_pagination_and_end_behavior() {
     .unwrap();
     assert_eq!(
         out,
-        "first\n\n[showing lines 1-1 of 4; use offset to read more]\n"
+        "first\n\n[showing lines 1-1 of 4; 3 lines not shown. Raise limit instead of another small read.]\n"
     );
 }
 
@@ -260,7 +260,7 @@ async fn plain_read_default_limit_is_2000_lines() {
         .unwrap();
     assert_eq!(
         out,
-        format!("{first}\n[showing lines 1-2000 of 2001; use offset to read more]\n")
+        format!("{first}\n[showing lines 1-2000 of 2001; 1 line not shown]\n")
     );
     let out = call(
         &ctx,

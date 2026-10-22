@@ -449,6 +449,16 @@ impl Proxy {
     }
 }
 
+/// Serve `server` at `sock` until the task is aborted.
+#[cfg(unix)]
+async fn serve(
+    server: Server,
+    sock: std::path::PathBuf,
+) -> tokio::task::JoinHandle<std::io::Result<()>> {
+    let listener = bone_server::Listener::bind(&sock).await.unwrap();
+    tokio::spawn(async move { listener.run(&server).await })
+}
+
 /// A server that restarts (a new process on the same data) comes back with
 /// the session from disk; the GUI reconnects at the same path, reloads its
 /// chat, and drives the new server.
@@ -457,10 +467,6 @@ impl Proxy {
 async fn a_restarted_server_gives_back_the_session() {
     let e = env(vec![text("first answer")], Ask::No).await;
     let dir = tempfile::tempdir().unwrap();
-    let serve = |server: Server, sock: std::path::PathBuf| async move {
-        let listener = bone_server::Listener::bind(&sock).await.unwrap();
-        tokio::spawn(async move { listener.run(&server).await })
-    };
     let first = dir.path().join("first.sock");
     let task = serve(e.server.clone(), first.clone()).await;
     let gui_sock = dir.path().join("gui.sock");
