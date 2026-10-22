@@ -106,6 +106,39 @@ local function state_of(entry, installed)
   return "installed"
 end
 
+--- Which frontends a package's UI runs in: its catalog entry's
+--- `frontends` list when it has one, else what its files say (ui.lua is
+--- both, tui.lua and gui.lua one each). Returns the list and whether it has
+--- a core half.
+function M.frontends(entry)
+  local core, ui, tui, gui = false, false, false, false
+  for _, f in ipairs(entry.files or {}) do
+    core = core or f.path == "core.lua"
+    ui = ui or f.path == "ui.lua"
+    tui = tui or f.path == "tui.lua"
+    gui = gui or f.path == "gui.lua"
+  end
+  if type(entry.frontends) == "table" then
+    return entry.frontends, core
+  end
+  local list = {}
+  if ui or tui then list[#list + 1] = "tui" end
+  if ui or gui then list[#list + 1] = "gui" end
+  return list, core
+end
+
+--- A short label of where a package runs: "both", "tui", "gui", or "core".
+function M.supports(entry)
+  if entry.kind == "tui" then
+    return "tui"
+  end
+  local list, core = M.frontends(entry)
+  if #list == 2 then
+    return "both"
+  end
+  return list[1] or (core and "core" or "")
+end
+
 --- A package's display name: its catalog title ("Git Diff"), else its name.
 function M.label(entry)
   return type(entry.title) == "string" and entry.title ~= "" and entry.title or entry.name
@@ -174,12 +207,14 @@ local function backup_dir()
   return tmp and ((bone.config_dir or (os.getenv("HOME") .. "/.bone")) .. "/plugins-backup/" .. tmp), err
 end
 
--- Load, reload or unload a package's halves now.
+-- Load, reload or unload a package's halves now: the core's, and this
+-- frontend's (its ui.lua, or tui.lua / gui.lua).
 local function switch(name, files, on, cb)
+  local side = bone.api_info().side
   local has_core, has_tui, tui_error = false, false
   for _, f in ipairs(files or {}) do
     has_core = has_core or f.path == "core.lua"
-    has_tui = has_tui or f.path == "tui.lua"
+    has_tui = has_tui or f.path == "ui.lua" or f.path == side .. ".lua"
   end
   if has_tui then
     local loaded = false
@@ -463,7 +498,8 @@ function M.open()
       prefix[#prefix + 1] = { "] ", "Dim" }
       prefix[#prefix + 1] = { pad(M.label(e), name_w), row_hl }
       prefix[#prefix + 1] = { pad(e.version or "", 8), muted_hl }
-      prefix[#prefix + 1] = { bone.text.truncate(e.description or "", math.max(w - name_w - 13, 1)), muted_hl }
+      prefix[#prefix + 1] = { pad(M.supports(e), 6), muted_hl }
+      prefix[#prefix + 1] = { bone.text.truncate(e.description or "", math.max(w - name_w - 19, 1)), muted_hl }
       out[#out + 1] = prefix
     end
     out[#out + 1] = ""
