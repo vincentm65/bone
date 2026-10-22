@@ -15,15 +15,16 @@ impl ReadFile {
         ReadFile(ToolSpec {
             name: "read_file".into(),
             description: "Read a text file or view a PNG, JPEG or WebP image. Images are returned \
-                          as pixels; text is plain text without per-line prefixes. Line ranges apply \
-                          only to text; use offset/limit for large files."
+                          as pixels; text is plain text without per-line prefixes. Returns up to 2000 \
+                          lines. Pass offset and limit only to reread a span you already know, not to \
+                          page through a file."
                 .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "File path, absolute or relative to the working directory." },
-                    "offset": { "type": "integer", "minimum": 1, "description": "First line to read (1-based). Default 1." },
-                    "limit": { "type": "integer", "minimum": 1, "description": "Maximum lines to read. Default 2000." }
+                    "offset": { "type": "integer", "minimum": 1, "description": "First line to read (1-based). Default 1. Not for walking a file." },
+                    "limit": { "type": "integer", "minimum": 1, "description": "Maximum lines to read. Default 2000. Do not set a small limit and call again." }
                 },
                 "required": ["path"]
             }),
@@ -109,8 +110,22 @@ impl Tool for ReadFile {
             }
             let end = (start - 1).saturating_add(limit).min(total);
             if end < total {
+                let rest = total - end;
+                let unread = if rest == 1 {
+                    "1 line not shown".to_owned()
+                } else {
+                    format!("{rest} lines not shown")
+                };
+                // A short window used to say "use offset to read more", and models
+                // obeyed by rereading the file 40 lines at a time. A large window
+                // only needs the fact; a small one should be widened, not continued.
+                let advice = if limit < DEFAULT_LIMIT {
+                    ". Raise limit instead of another small read"
+                } else {
+                    ""
+                };
                 out.push_str(&format!(
-                    "\n[showing lines {start}-{end} of {total}; use offset to read more]\n"
+                    "\n[showing lines {start}-{end} of {total}; {unread}{advice}]\n"
                 ));
             }
             Ok(out.into())

@@ -318,8 +318,11 @@ local function read_rows(text, args)
     return { { text = text, notice = true } }
   end
   local ls, notice = lines(text), nil
-  if #ls > 1 and ls[#ls - 1] == "" and
-      ls[#ls]:match("^%[showing lines %d+%-%d+ of %d+; use offset to read more%]$") then
+  local notice_line = ls[#ls]
+  if #ls > 1 and ls[#ls - 1] == "" and notice_line and (
+      notice_line:match("^%[showing lines %d+%-%d+ of %d+; use offset to read more%]$")
+      or notice_line:match("^%[showing lines %d+%-%d+ of %d+; %d+ lines? not shown")
+    ) then
     notice = table.remove(ls)
     table.remove(ls)
   end
