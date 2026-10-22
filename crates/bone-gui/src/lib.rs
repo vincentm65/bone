@@ -17,6 +17,7 @@ mod keys;
 mod lua;
 mod native;
 mod preview;
+mod prompt;
 mod screen;
 mod view;
 mod window;
@@ -111,6 +112,8 @@ pub struct Gui {
     draft_epoch: u64,
     /// The core's shell processes of the chat on screen.
     pub(crate) processes: bone_ui::lua::processes::Processes,
+    /// The prompt's cursor, selection and history.
+    pub(crate) prompt: crate::prompt::PromptState,
     /// The drafts of the chats not on screen.
     drafts: std::collections::HashMap<usize, (String, Vec<ImageAttachment>)>,
     pub status: Option<Status>,
@@ -174,6 +177,7 @@ impl Gui {
             image_reads: 0,
             draft_epoch: 0,
             processes: Default::default(),
+            prompt: Default::default(),
             drafts: Default::default(),
             status: None,
             closed: false,
@@ -368,7 +372,7 @@ impl Gui {
     /// session and queues otherwise, so it never conflicts with another
     /// client. A new chat's session is created first.
     pub fn submit(&mut self) {
-        let text = self.draft.trim().to_owned();
+        let text = self.expanded().trim().to_owned();
         if text.is_empty() && self.images.is_empty() {
             return;
         }
@@ -376,6 +380,7 @@ impl Gui {
             return self.error("an image is still being read".into());
         }
         let images = std::mem::take(&mut self.images);
+        self.remember(&text, &images);
         self.clear_draft();
         let buf = self.current;
         self.chats[buf].starting = true;
@@ -430,6 +435,8 @@ impl Gui {
         self.draft.clear();
         self.images.clear();
         self.draft_epoch += 1;
+        self.prompt.pastes.clear();
+        self.cursor_to_end();
     }
 
     /// A prompt that did not go out comes back to the draft.

@@ -34,7 +34,6 @@ use bone_ui::lua::input::{self, KeyState};
 
 /// A second ctrl+c within this long quits.
 const QUIT_WINDOW: Duration = Duration::from_secs(2);
-const PASTE_PLACEHOLDER_THRESHOLD: usize = 500;
 
 pub const CHAT_WIN: WindowId = 0;
 pub const PROMPT_WIN: WindowId = 1;
@@ -766,12 +765,9 @@ impl App {
             Context::Main | Context::Named(_) if self.focused_panel().is_none() => {
                 self.composer.history_pos = None;
                 let text = text.replace("\r\n", "\n").replace('\r', "\n");
-                if text.chars().count() > PASTE_PLACEHOLDER_THRESHOLD {
-                    let token = format!(
-                        "[Pasted text #{} +{} chars]",
-                        self.composer.pastes.len() + 1,
-                        text.chars().count()
-                    );
+                if text.chars().count() > bone_ui::composer::PASTE_PLACEHOLDER_THRESHOLD {
+                    let token =
+                        bone_ui::composer::paste_token(self.composer.pastes.len() + 1, &text);
                     self.prompt.insert_str(&token);
                     self.composer.pastes.push((token, text));
                 } else {

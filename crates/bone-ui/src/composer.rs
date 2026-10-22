@@ -6,6 +6,15 @@ use bone_proto::types::ImageAttachment;
 use crate::editor::TextBuffer;
 use crate::layout::BufferId;
 
+/// A paste longer than this many characters goes in the prompt as a short
+/// placeholder (`[Pasted text #1 +900 chars]`), expanded when it is sent.
+pub const PASTE_PLACEHOLDER_THRESHOLD: usize = 500;
+
+/// The placeholder for paste number `n` of `text`.
+pub fn paste_token(n: usize, text: &str) -> String {
+    format!("[Pasted text #{n} +{} chars]", text.chars().count())
+}
+
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct Draft {
     pub text: String,

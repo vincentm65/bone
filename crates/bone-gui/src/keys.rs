@@ -4,6 +4,7 @@
 //! egui's text box, so input methods, selection and native editing work.
 
 use bone_proto::methods::{SessionRef, TurnCancel};
+use bone_ui::editor::TextBuffer;
 use bone_ui::keymap::{Action, Builtin, Context};
 use bone_ui::keys::{Key, KeyCode, KeyModifiers};
 use bone_ui::lua::{Host, input};
@@ -111,6 +112,11 @@ impl Gui {
         match self.lua.keymaps.lookup(&ctx, &[k]).action {
             Some(Action::Builtin(b)) if native && NATIVE.contains(&b) => {
                 if input::lua_action(self, b) {
+                    Route::Done
+                } else if matches!(b, Builtin::Up | Builtin::Down) {
+                    // The line above or below, else the history, as the
+                    // TUI does: the text box never sees them.
+                    self.vertical(b == Builtin::Up);
                     Route::Done
                 } else {
                     Route::Native
@@ -221,6 +227,10 @@ impl Gui {
                         _ => keep.push(ev),
                     }
                 }
+                egui::Event::Paste(t) if self.prompt_has_keys() => {
+                    let t = t.clone();
+                    self.paste(&t);
+                }
                 egui::Event::Text(t) => {
                     let keys: Vec<Key> = t.chars().map(Key::char).collect();
                     if keys.iter().any(|k| self.engine_wants(*k)) {
@@ -285,21 +295,17 @@ impl Gui {
     /// `prompt/changed`, when the prompt's text is not what was last
     /// reported (the cursor is at its end: the text box keeps its own).
     pub(crate) fn prompt_changed(&mut self) {
-        if (&self.draft, &self.images) == (&self.lua.last_prompt.0, &self.lua.last_prompt.1) {
+        let (cursor, selection) = self.cursor_json();
+        let state = (self.draft.clone(), self.images.clone(), cursor, selection);
+        if state == self.lua.last_prompt {
             return;
         }
-        self.lua.last_prompt = (self.draft.clone(), self.images.clone());
-        let row = self.draft.split('\n').count() - 1;
-        let col = self
-            .draft
-            .rsplit('\n')
-            .next()
-            .map_or(0, |l| l.chars().count());
+        self.lua.last_prompt = state.clone();
         let data = serde_json::json!({
-            "text": self.draft,
-            "images": self.images,
-            "cursor": { "row": row, "col": col },
-            "selection": null,
+            "text": state.0,
+            "images": state.1,
+            "cursor": state.2,
+            "selection": state.3,
         });
         self.fire_event("prompt/changed", data);
     }
@@ -334,7 +340,21 @@ impl Gui {
         use Builtin::*;
         match b {
             Submit | QueueSteer | QueueNext => self.submit(),
-            Newline => self.draft.push('\n'),
+            Newline => self.edit_prompt(TextBuffer::newline),
+            Up | Down => {
+                self.vertical(b == Up);
+            }
+            Left => self.edit_prompt(TextBuffer::left),
+            Right => self.edit_prompt(TextBuffer::right),
+            WordLeft => self.edit_prompt(TextBuffer::word_back),
+            WordRight => self.edit_prompt(TextBuffer::word_forward),
+            LineStart => self.edit_prompt(TextBuffer::line_start),
+            LineEnd => self.edit_prompt(TextBuffer::line_end),
+            Backspace => self.backspace(),
+            Delete => self.edit_prompt(TextBuffer::delete),
+            DeleteWord => self.edit_prompt(TextBuffer::delete_word_back),
+            DeleteToStart => self.edit_prompt(TextBuffer::delete_to_line_start),
+            DeleteToEnd => self.edit_prompt(TextBuffer::delete_to_line_end),
             Dismiss => {
                 self.clear_draft();
                 self.prompt_changed();
@@ -361,6 +381,15 @@ impl Gui {
             ScrollBottom => self.chat_scroll = Some(crate::ChatScroll::Bottom),
             _ => {}
         }
+    }
+
+    /// An editing action run by Lua or a key sequence (the text box does
+    /// the ones typed straight at it).
+    fn edit_prompt(&mut self, f: impl FnOnce(&mut TextBuffer)) {
+        let mut t = self.buffer();
+        f(&mut t);
+        self.set_buffer(&t);
+        self.prompt_changed();
     }
 
     /// Rows of the chat on screen, for a page key.

@@ -87,7 +87,12 @@ pub struct LuaSide {
     /// Text copied before there was a window to copy it with (headless).
     pub copied: Option<String>,
     /// The prompt's text as `prompt/changed` last reported it.
-    pub last_prompt: (String, Vec<ImageAttachment>),
+    pub last_prompt: (
+        String,
+        Vec<ImageAttachment>,
+        serde_json::Value,
+        serde_json::Value,
+    ),
     /// The known plugins and their shutdown hooks.
     pub plugins: Vec<bone_ui::lua::plugins::Plugin>,
     pub shutdown_hooks: Vec<(Option<String>, u64)>,
@@ -309,6 +314,7 @@ fn dispatch(gui: &mut Gui, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
         Ok(r) => r,
         Err(a) => (crate::images::dispatch(gui, lua, op, a.clone()))
             .or_else(|| crate::chats::dispatch(gui, lua, op, a.clone()))
+            .or_else(|| crate::prompt::dispatch(gui, lua, op, a.clone()))
             .or_else(|| crate::window::dispatch(gui, lua, op, a))
             .unwrap_or_else(|| Err(err(format!("{op}: not available in the GUI yet")))),
     }
@@ -464,7 +470,7 @@ impl Host for Gui {
     }
 
     fn prompt_text(&self) -> String {
-        self.draft.clone()
+        self.expanded()
     }
 
     fn prompt_images(&self) -> Vec<ImageAttachment> {
@@ -492,6 +498,8 @@ impl Host for Gui {
 
     fn set_prompt_text(&mut self, text: &str) {
         self.draft = text.to_owned();
+        self.prompt.pastes.clear();
+        self.cursor_to_end();
         Gui::prompt_changed(self);
     }
 
@@ -499,17 +507,22 @@ impl Host for Gui {
     fn prompt_info(&mut self, lua: &Lua) -> mlua::Result<Table> {
         let t = lua.create_table()?;
         let lines: Vec<String> = self.draft.split('\n').map(str::to_owned).collect();
-        let cursor = lua.create_table()?;
-        cursor.set("row", lines.len() - 1)?;
-        cursor.set("col", lines.last().map_or(0, |l| l.chars().count()))?;
+        let buf = self.buffer();
         t.set("text", self.draft.as_str())?;
         t.set(
             "images",
             bone_lua::to_lua(lua, &serde_json::json!(self.images))?,
         )?;
         t.set("lines", lines)?;
-        t.set("cursor", cursor)?;
-        t.set("history", false)?;
+        t.set("cursor", crate::prompt::pos_out(lua, buf.cursor())?)?;
+        t.set("history", self.browsing_history())?;
+        if let Some((a, b)) = buf.selection() {
+            let sel = lua.create_table()?;
+            sel.set("start", crate::prompt::pos_out(lua, a)?)?;
+            sel.set("end", crate::prompt::pos_out(lua, b)?)?;
+            sel.set("text", buf.range_text(a, b))?;
+            t.set("selection", sel)?;
+        }
         Ok(t)
     }
 
@@ -517,8 +530,9 @@ impl Host for Gui {
         self.draft.is_empty() && self.images.is_empty() && self.image_reads == 0
     }
 
-    /// The GUI keeps no prompt history yet.
-    fn history_add(&mut self, _: &str) {}
+    fn history_add(&mut self, text: &str) {
+        self.remember(text, &[]);
+    }
 
     fn process_list(&self) -> Vec<ProcessSnapshot> {
         self.processes.sorted()

@@ -146,6 +146,11 @@ impl Headless {
         self.dropped.push(Arc::new(Dropped(path)));
     }
 
+    /// Paste `text` in the next frame.
+    pub fn paste(&mut self, text: &str) {
+        self.events.push(egui::Event::Paste(text.to_owned()));
+    }
+
     /// Type `text` in the next frame.
     pub fn text(&mut self, text: &str) {
         self.events.push(egui::Event::Text(text.to_owned()));

@@ -3,7 +3,7 @@
 //! frontend against a real core. A script is a chunk, or returns a list of
 //! steps (functions) run in order with the frontend's events handled
 //! between them; a step that sets `__click = { x, y }` has that cell clicked
-//! before the next. A script fails by raising an error; `eq(got, want,
+//! before the next, and one that sets `__paste = text` has that pasted. A script fails by raising an error; `eq(got, want,
 //! what)` is the one helper.
 
 use std::path::{Path, PathBuf};
@@ -15,6 +15,8 @@ pub trait UiDriver {
     fn eval(&mut self, expr: &str) -> Result<String, String>;
     /// Press and release the left button over character cell `(x, y)`.
     fn click(&mut self, x: u16, y: u16);
+    /// Paste `text`, as the terminal or window would.
+    fn paste(&mut self, text: &str);
     async fn settle(&mut self);
 }
 
@@ -54,6 +56,12 @@ pub async fn run_script(ui: &mut impl UiDriver, path: &Path) -> Result<(), Strin
             let cell = |v: &str| v.parse::<u16>().map_err(|e| e.to_string());
             ui.click(cell(x)?, cell(y)?);
             ui.run_lua("=click", "__click = nil")?;
+            ui.settle().await;
+        }
+        let pasted = ui.eval("__paste or ''")?;
+        if !pasted.is_empty() {
+            ui.paste(&pasted);
+            ui.run_lua("=paste", "__paste = nil")?;
             ui.settle().await;
         }
     }

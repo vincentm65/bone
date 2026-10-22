@@ -500,7 +500,9 @@ impl Gui {
             .fg
             .and_then(color)
             .unwrap_or(Color32::from_rgb(0x66, 0x66, 0x66));
+        self.sync_cursor(ui.ctx(), true);
         let mut edit = TextEdit::multiline(&mut self.draft)
+            .id(crate::prompt::edit_id())
             .font(cells.font.clone())
             .frame(egui::Frame::NONE)
             .desired_width(f32::from(edit_area.width) * cells.col)
@@ -512,9 +514,10 @@ impl Gui {
             edit = edit.text_color(fg);
         }
         let response = ui.put(cells.rect(edit_area), edit);
-        if response.changed() {
-            self.prompt_changed();
-        }
+        self.sync_cursor(ui.ctx(), false);
+        // Typing, or only moving the cursor: the event says which.
+        self.prompt_changed();
+        let _ = response.changed();
         if self.asks.is_empty()
             && !response.has_focus()
             && !ui.ctx().memory(|m| m.focused().is_some())
@@ -525,9 +528,12 @@ impl Gui {
 
     /// Chat `buf`'s prompt text: the draft on screen, else empty.
     fn prompt_of(&self, buf: usize) -> TextBuffer {
-        let mut t = TextBuffer::default();
         if buf == self.current {
-            t.set_text(&self.draft);
+            return self.buffer();
+        }
+        let mut t = TextBuffer::default();
+        if let Some((draft, _)) = self.drafts.get(&buf) {
+            t.set_text(draft);
         }
         t
     }

@@ -30,6 +30,10 @@ impl UiDriver for Fixture {
         self.ui.click(x, y);
     }
 
+    fn paste(&mut self, text: &str) {
+        self.ui.paste(text);
+    }
+
     fn run_lua(&mut self, name: &str, code: &str) -> Result<(), String> {
         self.ui.gui.run_lua(name, code)
     }
