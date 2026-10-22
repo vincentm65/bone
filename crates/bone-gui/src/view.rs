@@ -15,7 +15,12 @@ impl Gui {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let _ = self.repaint.set(ui.ctx().clone());
         self.pump();
-        self.apply_fonts(ui.ctx());
+        // New fonts take effect on a fresh pass: lay nothing out with the
+        // old cell size.
+        if self.apply_fonts(ui.ctx()) {
+            ui.ctx().request_discard("fonts changed");
+            return;
+        }
         self.route_keys(ui.ctx());
         self.watch_config();
         // Keep polling the config while idle.
@@ -174,8 +179,9 @@ fn indexed(n: u8) -> Color32 {
 }
 
 impl Gui {
-    /// `bone.o.font` and `bone.o.font_size`, applied when they change.
-    fn apply_fonts(&mut self, ctx: &egui::Context) {
+    /// `bone.o.font` and `bone.o.font_size`, applied when they change;
+    /// true when they did.
+    fn apply_fonts(&mut self, ctx: &egui::Context) -> bool {
         let text = |name: &str| match self.lua.dynamic_options.get(name).map(|o| &o.value) {
             Some(DynamicValue::String(s)) => s.clone(),
             _ => String::new(),
@@ -187,7 +193,7 @@ impl Gui {
         };
         let want = (text("font"), size.clamp(6.0, 72.0));
         if self.lua.fonts.as_ref() == Some(&want) {
-            return;
+            return false;
         }
         let mut fonts = egui::FontDefinitions::default();
         if !want.0.is_empty() {
@@ -213,5 +219,6 @@ impl Gui {
         self.lua.fonts = Some(want);
         // Cached rows were wrapped for the old cell size.
         self.lua.views_rev += 1;
+        true
     }
 }
