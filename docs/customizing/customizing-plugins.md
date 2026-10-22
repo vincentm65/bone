@@ -8,8 +8,9 @@ other guides works in a plugin's files unchanged.
 ```text
 ~/.bone/plugins/myplugin/
   core.lua     runs in the core (tools, hooks)
-  ui.lua       UI code shared by the TUI and GUI; runs before tui.lua
-  tui.lua      runs in the TUI (keys, commands, tool views)
+  ui.lua       runs in every frontend (the TUI and the GUI), first
+  tui.lua      runs in the TUI only, after ui.lua
+  gui.lua      runs in the GUI only (bone --gui), after ui.lua
   lua/         modules for require()
   colors/      colorschemes
   manifest.json  optional: a settings page in /config
@@ -25,6 +26,39 @@ it. `bone.plugins` lists the loaded names. Installing is just copying or
 `git clone`-ing into `~/.bone/plugins/`.
 
 The [Bone catalog](https://github.com/vincentm65/bone-catalog) is the source of installable packages. Use `/catalog` to install and update them, or read packages such as `mcp`, `skill`, `usage`, `themes` and `review` for API usage. None is installed by default.
+
+## The TUI and the GUI
+
+The TUI and the desktop GUI run the same Lua UI API, with one
+implementation, so most UI code belongs in `ui.lua` and works in both:
+keymaps, commands, options, events, colors, chat views and data, the
+layout and regions, windows (`bone.ui.popup`), panels (`bone.ui.panel`),
+`mouse` handlers and `bone.request`. Lay things out in character units
+(columns and rows); the GUI draws Lua's lines in a monospace font, so a
+column is a column in both.
+
+Put what only one frontend has in its own file, or check for it:
+
+```lua
+-- in ui.lua: shared, with a GUI-only extra
+bone.cmd.create("todo", open_todo, { desc = "the todo panel" })
+if bone.has_capability("gui.menus") then
+  bone.gui.menu({ { "Todo", { { "Open", "/todo" } } } })
+end
+```
+
+`bone.api_info().side` is `"tui"` or `"gui"`, and `bone.has_capability`
+answers for this frontend: the shared API is `ui.*` (`ui.keymaps`,
+`ui.panels`, …), the GUI's own is `gui.*` (`gui.window`, `gui.menus`), and
+the TUI also reports its older `tui.*` names. In the GUI, a call to an API
+it does not have yet raises an error naming it; `docs/lua.md` lists what is
+shared.
+
+`bone.plugin.list()` says what each plugin has: `core` (a `core.lua`) and
+`frontends` (`{ "tui", "gui" }` for a `ui.lua`, or the ones with their own
+file). The catalog shows the same (`both`, `tui`, `gui`, or `core`), from a
+package's files or an explicit `"frontends": ["tui", "gui"]` in its
+`catalog.json` entry.
 
 ## State
 
@@ -92,11 +126,12 @@ For confirmation, a core hook calls `bone.ask({ kind = "confirm", text = "Procee
 
 ## Project config
 
-A project can carry TUI config in `.bone/tui.lua` (and modules in
-`.bone/lua/`). bone looks for it in the working directory and its parents,
+A project can carry UI config in `.bone/ui.lua`, `.bone/tui.lua` or
+`.bone/gui.lua` (and modules in `.bone/lua/`), each run by the frontends
+it is for. bone looks for it in the working directory and its parents,
 but Lua has full trust, so it only runs after you trust that directory:
 `/plugins trust` runs it now and on later starts there, `/plugins untrust`
-unloads it and forgets the trust, and `/plugins list` lists it (as `project`). It
-loads after your own `tui.lua`, as a plugin named `project`, so it can be
+unloads it and forgets the trust, and `/plugins list` lists it (as `project`). Trust is
+kept once for both frontends. It loads after your own config, as a plugin named `project`, so it can be
 unloaded like any other. `bone.project.info()` returns `{ root, file,
 trusted, loaded }` or nil.

@@ -526,6 +526,26 @@ jobs, and an AccessKit pass over the Lua-drawn rows.
 **Exit condition:** a plugin can cleanly support core-only, TUI-only, GUI-only,
 or shared UI behavior, and the catalog says which.
 
+**Status:** done. Plugin lifecycle is shared (`bone_ui::lua::plugins`): a
+plugin's files run as their owner in each frontend (`ui.lua`, then
+`tui.lua` or `gui.lua`), unloading removes what it made, and a trusted
+project's `.bone/` runs the same way (trust is kept once for both).
+`bone.plugin.list()` reports `core` and `frontends` per plugin, and the
+catalog shows `both`/`tui`/`gui`/`core` from a package's files or a
+`frontends` field in `catalog.json`, and loads this frontend's half on
+install (`tests/ui/plugins.lua`, `tests/ui/catalog.lua`). `/health` is the
+same page in both, with each frontend's checks (the GUI's: renderer and
+adapter, connection, Lua, plugins, font). The GUI's own API is `bone.gui`
+(`gui.window`, `gui.menus`), reported only there; copying to the
+clipboard is shared. `docs/customizing/customizing-plugins.md` explains
+writing a plugin for both frontends.
+
+Not done here: porting catalog packages from `tui.lua` to `ui.lua` happens
+in the bone-catalog repository; native OS notifications and file dialogs
+need new dependencies (for example `notify-rust`, `rfd`) and wait for that
+decision; the `gui.terminal` widget, images, and an AccessKit pass over
+Lua-drawn rows are left for Phase 6.
+
 ### Phase 6: production hardening
 
 - Reconnect and server restart tests; Lua reload and plugin unload tests in

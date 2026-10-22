@@ -20,7 +20,8 @@ local guide = bone.docs.read("customizing/customizing-tui.md")
 |---|---|---|
 | `~/.bone/core.lua` | the core (server) | providers, system prompt, tools, hooks |
 | `~/.bone/tui.lua` | the TUI | options, keys, commands, colors, panels, chat look |
-| `~/.bone/ui.lua` | the TUI (and the GUI as it gains the shared API) | UI config meant for every frontend; runs before `tui.lua` |
+| `~/.bone/ui.lua` | the TUI and the GUI | UI config for every frontend; runs before `tui.lua` / `gui.lua` |
+| `~/.bone/gui.lua` | the GUI (`bone --gui`) | the GUI's own config: `bone.gui.window`, `bone.gui.menu`, `bone.o.font` |
 | `~/.bone/plugins/<name>/` | both sides | `core.lua` + `tui.lua` + `lua/` modules, as a named, reloadable unit |
 | `.bone/tui.lua` in a project | the TUI | project-local config, loaded only after `/plugins trust` |
 | `~/.bone/docs/` | — | these guides, rewritten at startup (edits there are lost) |
