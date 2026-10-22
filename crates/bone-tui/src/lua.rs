@@ -670,43 +670,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             });
             ret(lua, true)
         }
-        "plugin_current" => {
-            let Some(name) = app.owner.clone() else {
-                return ret(lua, Value::Nil);
-            };
-            let info = app
-                .plugin(&name)
-                .map(|p| p.info())
-                .unwrap_or_else(|| serde_json::json!({ "name": name }));
-            ret(lua, to_lua(lua, &info)?)
-        }
-        "plugin_list" => {
-            let list: Vec<serde_json::Value> = app.plugins.iter().map(|p| p.info()).collect();
-            ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
-        }
-        "plugin_load" | "plugin_unload" | "plugin_reload" => {
-            let name: String = args(lua, a)?;
-            if app.owner.as_deref() == Some(name.as_str()) && op != "plugin_load" {
-                return Err(err(format!(
-                    "plugin {name} cannot unload itself while it runs"
-                )));
-            }
-            app.rewatch = true;
-            match op {
-                "plugin_load" => app.load_plugin_by_name(&name),
-                "plugin_unload" => app.unload_plugin(&name),
-                _ => app.reload_plugin(&name),
-            }
-            .map_err(err)?;
-            ret(lua, ())
-        }
-        "plugin_on_shutdown" => {
-            let f: Function = args(lua, a)?;
-            let cb = app.store_callback(lua, f)?;
-            app.shutdown_hooks.push((app.owner.clone(), cb));
-            ret(lua, ())
-        }
-        // The command registry, for the Lua `/` menu and commands.
         "log_tail" => {
             let n: usize = args(lua, a)?;
             let start = app.log.len().saturating_sub(n);
@@ -729,15 +692,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             app.source(&path);
             ret(lua, ())
         }
-        "project_trust" => {
-            let on: bool = args(lua, a)?;
-            app.set_project_trust(on).map_err(err)?;
-            ret(lua, ())
-        }
-        "project_info" => match app.project_info() {
-            Some(info) => ret(lua, to_lua(lua, &info)?),
-            None => ret(lua, Value::Nil),
-        },
         "runtime_overrides" => {
             let list: Vec<serde_json::Value> = app
                 .config_dir
@@ -1137,6 +1091,26 @@ impl bone_ui::lua::Host for App {
             hit["index"].as_u64()? as usize,
             hit["line"].as_u64()? as usize,
         ))
+    }
+
+    fn plugin_store(&mut self) -> bone_ui::lua::plugins::PluginStore<'_> {
+        bone_ui::lua::plugins::PluginStore {
+            plugins: &mut self.plugins,
+            shutdown_hooks: &mut self.shutdown_hooks,
+        }
+    }
+
+    fn config_files(&self) -> &'static [&'static str] {
+        &CONFIG_FILES
+    }
+
+    fn cwd(&self) -> &str {
+        &self.cwd
+    }
+
+    fn cancel_job(&mut self, id: u64) -> Vec<u64> {
+        App::cancel_job(self, id);
+        self.jobs.forget_callbacks(id)
     }
 
     fn panel_store(&mut self) -> bone_ui::lua::panels::PanelStore<'_> {

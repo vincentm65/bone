@@ -18,6 +18,12 @@ struct App {
 }
 
 impl eframe::App for App {
+    /// Every plugin's shutdown hooks, and its saved state, before the
+    /// window goes.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        bone_ui::lua::plugins::run_shutdown(&mut self.gui, None);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.gui.ui(ui);
         let title = format!("{} — bone", self.gui.title());

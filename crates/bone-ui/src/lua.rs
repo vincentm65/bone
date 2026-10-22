@@ -16,6 +16,7 @@ use mlua::{FromLua, FromLuaMulti, Function, IntoLuaMulti, Lua, MultiValue, Table
 
 pub mod input;
 pub mod panels;
+pub mod plugins;
 pub mod state;
 pub mod ui;
 
@@ -295,6 +296,17 @@ pub trait Host {
     fn chat_at(&self, x: u16, y: u16) -> Option<(usize, usize)>;
     /// The panels, and which one has the keyboard.
     fn panel_store(&mut self) -> panels::PanelStore<'_>;
+    /// The known plugins and their shutdown hooks.
+    fn plugin_store(&mut self) -> plugins::PluginStore<'_>;
+    /// What a plugin, the user's config or a project runs in this
+    /// frontend, in order: `ui.lua`, then its own (`tui.lua`, `gui.lua`).
+    fn config_files(&self) -> &'static [&'static str];
+    /// Where this frontend runs, for finding a project's `.bone/`.
+    fn cwd(&self) -> &str;
+    /// Stop job `id` without calling back; the callbacks it held.
+    fn cancel_job(&mut self, _id: u64) -> Vec<u64> {
+        Vec::new()
+    }
     /// Keys typed toward a sequence go through now (the focus is moving).
     fn flush_keys(&mut self)
     where
@@ -422,7 +434,9 @@ pub fn dispatch<H: Host>(
         "command_complete" => command_complete(h, lua, a),
         "cmd" => cmd(h, lua, a),
         _ => {
-            return panels::dispatch(h, lua, op, a).or_else(|a| input::dispatch(h, lua, op, a));
+            return panels::dispatch(h, lua, op, a)
+                .or_else(|a| input::dispatch(h, lua, op, a))
+                .or_else(|a| plugins::dispatch(h, lua, op, a));
         }
     })
 }

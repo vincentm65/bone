@@ -79,6 +79,9 @@ pub struct LuaSide {
     pub fonts: Option<(String, f32)>,
     /// The prompt's text as `prompt/changed` last reported it.
     pub last_prompt: String,
+    /// The known plugins and their shutdown hooks.
+    pub plugins: Vec<bone_ui::lua::plugins::Plugin>,
+    pub shutdown_hooks: Vec<(Option<String>, u64)>,
     /// Lua panels (`bone.ui.panel`).
     pub panels: Vec<bone_ui::panel::Panel>,
     pub panel_focus: Option<String>,
@@ -201,18 +204,19 @@ impl Gui {
                     .collect()
             })
             .unwrap_or_default();
+        use bone_ui::lua::plugins::{self, Kind};
         for plugin in bone_lua::plugins(dir) {
             let name = bone_lua::plugin_name(&plugin);
             if disabled.contains(&name) {
-                continue;
+                plugins::register_plugin(self, &name, &plugin, Kind::Plugin);
+            } else {
+                plugins::load_plugin(self, &name, &plugin, Kind::Plugin);
             }
-            let prev = self.lua.owner.replace(name);
-            self.run_files(&plugin);
-            self.lua.owner = prev;
         }
         // Bare is the plain UI: the user's files would build a full one.
         if !bare {
             self.run_files(dir);
+            plugins::load_project(self);
         }
     }
 
@@ -595,6 +599,22 @@ impl Host for Gui {
 
     fn builtin_action(&mut self, b: bone_ui::keymap::Builtin) {
         Gui::builtin_action(self, b);
+    }
+
+    fn plugin_store(&mut self) -> bone_ui::lua::plugins::PluginStore<'_> {
+        let l = &mut self.lua;
+        bone_ui::lua::plugins::PluginStore {
+            plugins: &mut l.plugins,
+            shutdown_hooks: &mut l.shutdown_hooks,
+        }
+    }
+
+    fn config_files(&self) -> &'static [&'static str] {
+        &CONFIG_FILES
+    }
+
+    fn cwd(&self) -> &str {
+        &self.opts.cwd
     }
 
     fn panel_store(&mut self) -> bone_ui::lua::panels::PanelStore<'_> {
