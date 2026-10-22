@@ -10,6 +10,7 @@
 //! draws it, `native.rs` opens the window, and [`Headless`] drives it
 //! without one.
 
+mod chats;
 mod headless;
 mod images;
 mod keys;
@@ -75,6 +76,16 @@ pub struct Status {
     pub error: bool,
 }
 
+/// A key asked the chat on screen to move. The scroll area applies it
+/// on the next frame (egui owns the offset).
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ChatScroll {
+    /// Rows down (negative scrolls toward the start).
+    By(i32),
+    Top,
+    Bottom,
+}
+
 pub struct Gui {
     client: Arc<Client>,
     rt: Handle,
@@ -98,6 +109,8 @@ pub struct Gui {
     pub images: Vec<ImageAttachment>,
     image_reads: usize,
     draft_epoch: u64,
+    /// The drafts of the chats not on screen.
+    drafts: std::collections::HashMap<usize, (String, Vec<ImageAttachment>)>,
     pub status: Option<Status>,
     /// The server went away and it is not coming back.
     pub closed: bool,
@@ -110,6 +123,11 @@ pub struct Gui {
     viewport: Vec<eframe::egui::ViewportCommand>,
     /// Width (in columns) the current chat's rows were last wrapped at.
     wrapped_at: usize,
+    /// Move the chat on screen, from a key, before the next frame draws.
+    pub(crate) chat_scroll: Option<ChatScroll>,
+    /// `opts_rev` last applied to egui's theme, so a colorscheme change
+    /// restyles menus and dialogs without rewriting the style every frame.
+    visuals_rev: Option<u64>,
     /// A free-text answer being typed to the open question.
     answer_draft: String,
     /// The Lua state and what the Lua API keeps.
@@ -153,6 +171,7 @@ impl Gui {
             images: Vec::new(),
             image_reads: 0,
             draft_epoch: 0,
+            drafts: Default::default(),
             status: None,
             closed: false,
             renderer: None,
@@ -160,6 +179,8 @@ impl Gui {
             window_title: None,
             viewport: Vec::new(),
             wrapped_at: 0,
+            chat_scroll: None,
+            visuals_rev: None,
             answer_draft: String::new(),
             lua: Default::default(),
             previews: Default::default(),
@@ -284,28 +305,12 @@ impl Gui {
             .position(|c| c.session_id() == Some(session_id))
     }
 
-    /// Show session `id`, loading it into a chat the first time.
-    pub fn open_session(&mut self, id: &str) {
-        if let Some(buf) = self.chat_of(id) {
-            self.current = buf;
-            return;
-        }
-        // Reuse an untouched new chat rather than piling them up.
-        let c = &self.chats[self.current];
-        if !(c.session.is_none() && c.entries.is_empty() && !c.starting) {
-            self.chats.push(ChatBuffer::new(None));
-            self.current = self.chats.len() - 1;
-        }
-        let buf = self.current;
-        self.load(buf, id.to_owned());
-    }
-
     /// A new, unsaved chat; the session is created by its first message.
     pub fn new_chat(&mut self) {
         let c = &self.chats[self.current];
         if c.session.is_some() || !c.entries.is_empty() {
             self.chats.push(ChatBuffer::new(None));
-            self.current = self.chats.len() - 1;
+            self.show_chat(self.chats.len() - 1);
         }
     }
 
