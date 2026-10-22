@@ -174,6 +174,10 @@ static TUI_CAPABILITIES: &[&str] = &[
     "ui.chat_data",
     "ui.views",
     "ui.request",
+    "ui.layout",
+    "ui.windows",
+    "ui.panels",
+    "ui.input",
 ];
 
 /// The GUI's: the shared UI API (`ui.*`), growing as more of it moves into
@@ -193,6 +197,10 @@ static GUI_CAPABILITIES: &[&str] = &[
     "ui.chat_data",
     "ui.views",
     "ui.request",
+    "ui.layout",
+    "ui.windows",
+    "ui.panels",
+    "ui.input",
 ];
 
 /// Capabilities implemented by a Lua state on this side of bone.

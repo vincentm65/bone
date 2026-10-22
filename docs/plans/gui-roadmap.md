@@ -483,6 +483,35 @@ Phase 5 (plugins, projects).
 keymaps, and a mouse handler behaves the same in both frontends, verified by
 the conformance suite.
 
+**Status:** done; `tests/ui/frontend.lua` is the exit check (the runner can
+click: a step sets `__click = { x, y }`). Shared in `bone-ui`: the layout
+solver (`bone_ui::layout::place` over a `Measure` trait, character units),
+reading `bone.ui` (layout, regions, statusline, prompt spec, popup lines),
+the prompt box's geometry, `bone.ui.geometry`, windows (`bone_ui::popup`:
+state, placement, ops), panels (`bone_ui::panel` and `lua::panels`: state,
+docking, measuring, per-frame content, ops), the key engine
+(`lua::input`: windows', panels', raw and keymap keys, sequences,
+`bone.ui.actions`, contexts), and the `mouse` event with what is under it.
+The TUI draws and handles input exactly as before through these.
+
+The GUI lays its window out with `bone.ui.layout` and draws every leaf,
+window and docked panel; the standard sessions panel (`ctrl+o`), the slash
+commands and the `/` menu run there, so its own sidebar is gone. Keys go to
+the shared engine when it has something to do with them and otherwise to
+egui's text box (input methods, selection and native editing); Lua's
+`bone.ui.actions` see editing keys first. Pointer presses, drags and the
+wheel become the same `mouse` events by character cell. `bone.o.font` and
+`font_size` set the font; the status line names the renderer and adapter
+and warns about a software one.
+
+Moved from `tui/defaults.lua` into the standard library (frontend-neutral,
+the TUI unchanged): the standard key bindings (`bone/keys.lua`), and
+`bone.ui.sessions`, `help` and `suggestions` (into `bone.ui.setup`).
+
+Left for later: the GUI's prompt cursor and range editing ops (its text box
+keeps its own cursor), prompt images and history, chat scrolling from keys,
+jobs, and an AccessKit pass over the Lua-drawn rows.
+
 ### Phase 5: plugin and configuration ecosystem
 
 - GUI support in plugin manifests and catalog metadata.

@@ -79,13 +79,17 @@ naming the operation.
 | `ui.options` | `bone.o`: get, set, `define`, `del`, `names`, `info`, `apply`, `list` | shared |
 | `ui.events` | `bone.on`, `bone.off`; server events and `ready` | shared |
 | `ui.commands` | `bone.cmd` (running, `create`, `del`, `list`, `find`, `complete`), typed arguments, `/model` | shared |
-| `ui.keymaps` | `bone.keymap.set`, `del`, `context`, `list`, `current` | shared; `focus`, `clear`, `del_context` and `raw` are TUI-only for now |
+| `ui.keymaps` | `bone.keymap.set`, `del`, `context`, `list`, `current`, `focus`, `clear`, `del_context`, `raw`, `raw_del` | shared |
 | `ui.themes` | `bone.hl`, `bone.colorscheme`, `bone.api.colors_name` | shared |
 | `ui.chat_data` | `bone.chat.items`, `add`, `update`, `remove`, `turns`, `session`, `sessions`, `redraw`, `refresh_in` | shared |
 | `ui.views` | `bone.ui.views` drawing chat items, `bone.ui.refresh` | shared |
 | `ui.request` | `bone.request`, `bone.system`, `bone.http`, `bone.defer`, `bone.notify`, `bone.settings` | shared |
-| — | `bone.api.session`, `prompt_get`, `bone.prompt.images`, `bone.processes.list`, `bone.chat.view`, `bone.ui.panel.focused` | shared ops; the GUI answers with what it has (no images, processes or panels yet; the chat follows the end) |
-| — | windows and popups, panels, regions, layout, statusline, prompt editing, jobs, plugins and projects, libraries, `bone.chat.at`/`scroll`, `bone.ui.geometry` | TUI only for now |
+| `ui.layout` | `bone.ui.layout`, regions, `bone.ui.statusline`/`divider`, `bone.ui.prompt` (its box), `bone.ui.geometry` (character units), `bone.ui.refresh_in` | shared |
+| `ui.windows` | `bone.ui.popup`/`win`, `update`, `close`, `is_open` | shared |
+| `ui.panels` | `bone.ui.panel` (open, update, lines, close, info, list, focus, scroll) | shared |
+| `ui.input` | keys (windows', panels', raw, keymaps and sequences), `bone.press`, `bone.action`, `bone.ui.actions`, the `mouse` event and what is under it | shared; the GUI's text box edits the prompt itself |
+| — | `bone.api.session`, `prompt_get`/`set`, `bone.prompt.info`/`empty`/`images`, `bone.prompt.history_add`, `bone.processes.list`, `bone.chat.view` | shared ops; the GUI answers with what it has (no prompt images, processes or history yet; its cursor is reported at the end; the chat follows the end) |
+| — | prompt cursor and range editing, jobs, plugin lifecycle and projects, libraries, `bone.chat.at`/`scroll` | TUI only for now |
 
 ### Ownership and compatibility
 
