@@ -9,3 +9,8 @@ for _, name in ipairs({
   eq(bone.has_capability(name), true, name)
 end
 eq(bone.has_capability("ui.no_such_feature"), false, "unknown names")
+
+-- What only one frontend has is reported only there.
+eq(bone.has_capability("gui.window"), side == "gui", "gui.window")
+eq(bone.has_capability("gui.menus"), side == "gui", "gui.menus")
+eq(bone.has_capability("tui.keymaps"), side == "tui", "the TUI's older names")

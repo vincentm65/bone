@@ -16,6 +16,7 @@ mod lua;
 mod native;
 mod screen;
 mod view;
+mod window;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -95,6 +96,11 @@ pub struct Gui {
     pub closed: bool,
     /// What draws the window: the renderer and adapter (`None` headless).
     pub renderer: Option<String>,
+    /// The window as Lua sees it (`bone.gui.window_info`), the title Lua
+    /// set, and window changes to send on the next frame.
+    pub window_info: Value,
+    pub window_title: Option<String>,
+    viewport: Vec<eframe::egui::ViewportCommand>,
     /// Width (in columns) the current chat's rows were last wrapped at.
     wrapped_at: usize,
     /// A free-text answer being typed to the open question.
@@ -140,6 +146,9 @@ impl Gui {
             status: None,
             closed: false,
             renderer: None,
+            window_info: Value::Null,
+            window_title: None,
+            viewport: Vec::new(),
             wrapped_at: 0,
             answer_draft: String::new(),
             lua: Default::default(),

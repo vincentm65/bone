@@ -287,3 +287,40 @@ async fn health_shows_the_guis_checks() {
     assert!(open, "a page opened");
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
+
+/// bone.gui: the window and a menu bar, only in the GUI.
+#[tokio::test(flavor = "multi_thread")]
+async fn lua_sets_the_window_and_a_menu_bar() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    g.gui
+        .run_lua(
+            "t",
+            "bone.gui.window({ title = 'conf title', maximized = true })",
+        )
+        .unwrap();
+    g.frame();
+    assert_eq!(g.gui.window_title.as_deref(), Some("conf title"));
+    let w = g.gui.eval("bone.gui.window_info().width").unwrap();
+    assert_eq!(w, "1000");
+    g.gui
+        .run_lua(
+            "t",
+            "bone.gui.menu({ { 'File', { { 'New chat', 'new_session' }, '-', { 'Help', '/help' }, { 'Hi', function() end } } } })",
+        )
+        .unwrap();
+    assert_eq!(g.gui.lua.menus.len(), 1);
+    assert_eq!(g.gui.lua.menus[0].1.len(), 4);
+    assert!(
+        g.gui
+            .run_lua(
+                "t",
+                "bone.gui.menu({ { 'X', { { 'bad', 'not_an_action' } } } })"
+            )
+            .is_err()
+    );
+    g.gui.run_lua("t", "bone.gui.menu({})").unwrap();
+    assert!(g.gui.lua.menus.is_empty());
+    g.frame();
+}

@@ -261,6 +261,8 @@ pub trait Host {
     fn chat_view(&self) -> serde_json::Value;
     /// `bone.ui` changed: draw it all again, retrying parts that failed.
     fn refresh_ui(&mut self);
+    /// Put `text` on the system clipboard.
+    fn clipboard_copy(&mut self, text: String);
     /// This frontend's checks for `/health`: `{ name, status, message }`.
     fn frontend_health(&self) -> Vec<serde_json::Value>;
 
@@ -411,6 +413,10 @@ pub fn dispatch<H: Host>(
         "prompt_images" => prompt_images(h, lua, a),
         "panel_focused" => ret(lua, h.focused_panel()),
         "health" => json(lua, &serde_json::Value::Array(h.frontend_health())),
+        "clipboard_copy" => args::<String>(lua, a).and_then(|text| {
+            h.clipboard_copy(text);
+            ret(lua, ())
+        }),
         "ui_refresh_in" => args::<f64>(lua, a).and_then(|ms| {
             let at = Instant::now() + Duration::from_millis(ms.max(0.0) as u64);
             let e = h.ui_expiry();

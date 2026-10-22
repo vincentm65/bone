@@ -25,6 +25,8 @@ impl Gui {
         self.watch_config();
         // Keep polling the config while idle.
         ui.ctx().request_repaint_after(crate::lua::Watcher::EVERY);
+        self.window_ui(ui.ctx());
+        self.menu_ui(ui);
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE)
             .show(ui, |ui| self.screen_ui(ui));

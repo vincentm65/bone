@@ -26,7 +26,8 @@ impl eframe::App for App {
 
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.gui.ui(ui);
-        let title = format!("{} — bone", self.gui.title());
+        let title = (self.gui.window_title.clone())
+            .unwrap_or_else(|| format!("{} — bone", self.gui.title()));
         if title != self.title {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::Title(title.clone()));

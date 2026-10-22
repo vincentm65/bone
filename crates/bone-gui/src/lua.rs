@@ -77,6 +77,10 @@ pub struct LuaSide {
     pub dragging: bool,
     /// The font file and size applied last (`bone.o.font`, `font_size`).
     pub fonts: Option<(String, f32)>,
+    /// The menu bar Lua set (`bone.gui.menu`).
+    pub menus: Vec<(String, Vec<crate::window::MenuItem>)>,
+    /// Text copied before there was a window to copy it with (headless).
+    pub copied: Option<String>,
     /// The prompt's text as `prompt/changed` last reported it.
     pub last_prompt: String,
     /// The known plugins and their shutdown hooks.
@@ -297,7 +301,8 @@ impl Gui {
 fn dispatch(gui: &mut Gui, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<MultiValue> {
     match bone_ui::lua::dispatch(gui, lua, op, a) {
         Ok(r) => r,
-        Err(_) => Err(err(format!("{op}: not available in the GUI yet"))),
+        Err(a) => crate::window::dispatch(gui, lua, op, a)
+            .unwrap_or_else(|| Err(err(format!("{op}: not available in the GUI yet")))),
     }
 }
 
@@ -502,6 +507,13 @@ impl Host for Gui {
     /// The transcript always follows the end in the GUI for now.
     fn chat_view(&self) -> Json {
         serde_json::json!({ "follow": true })
+    }
+
+    fn clipboard_copy(&mut self, text: String) {
+        match self.repaint.get() {
+            Some(ctx) => ctx.copy_text(text),
+            None => self.lua.copied = Some(text),
+        }
     }
 
     /// The GUI's checks: what draws it, its connection, Lua, plugins, and

@@ -201,6 +201,8 @@ static GUI_CAPABILITIES: &[&str] = &[
     "ui.windows",
     "ui.panels",
     "ui.input",
+    "gui.window",
+    "gui.menus",
 ];
 
 /// Capabilities implemented by a Lua state on this side of bone.
