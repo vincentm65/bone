@@ -87,7 +87,7 @@ pub struct LuaSide {
     /// Text copied before there was a window to copy it with (headless).
     pub copied: Option<String>,
     /// The prompt's text as `prompt/changed` last reported it.
-    pub last_prompt: String,
+    pub last_prompt: (String, Vec<ImageAttachment>),
     /// The known plugins and their shutdown hooks.
     pub plugins: Vec<bone_ui::lua::plugins::Plugin>,
     pub shutdown_hooks: Vec<(Option<String>, u64)>,
@@ -306,7 +306,8 @@ impl Gui {
 fn dispatch(gui: &mut Gui, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<MultiValue> {
     match bone_ui::lua::dispatch(gui, lua, op, a) {
         Ok(r) => r,
-        Err(a) => crate::window::dispatch(gui, lua, op, a)
+        Err(a) => (crate::images::dispatch(gui, lua, op, a.clone()))
+            .or_else(|| crate::window::dispatch(gui, lua, op, a))
             .unwrap_or_else(|| Err(err(format!("{op}: not available in the GUI yet")))),
     }
 }
@@ -464,13 +465,23 @@ impl Host for Gui {
         self.draft.clone()
     }
 
-    /// The GUI's prompt has no images yet.
     fn prompt_images(&self) -> Vec<ImageAttachment> {
-        Vec::new()
+        self.images.clone()
     }
 
-    fn set_prompt_images(&mut self, _: Vec<ImageAttachment>) -> Result<(), String> {
-        Err("images in the prompt are not available in the GUI yet".into())
+    fn set_prompt_images(&mut self, images: Vec<ImageAttachment>) -> Result<(), String> {
+        if images.len() > bone_media::MAX_IMAGES {
+            return Err("a message can contain at most 8 images".into());
+        }
+        if images.iter().map(|i| i.bytes).sum::<u64>() > bone_media::MAX_MESSAGE_IMAGE_BYTES {
+            return Err("message images exceed the 40 MiB limit".into());
+        }
+        if images.iter().any(|i| i.data.is_some()) {
+            return Err("use attachment/upload before attaching image references".into());
+        }
+        self.images = images;
+        Gui::prompt_changed(self);
+        Ok(())
     }
 
     fn focused_panel(&self) -> Option<String> {
@@ -490,7 +501,10 @@ impl Host for Gui {
         cursor.set("row", lines.len() - 1)?;
         cursor.set("col", lines.last().map_or(0, |l| l.chars().count()))?;
         t.set("text", self.draft.as_str())?;
-        t.set("images", lua.create_table()?)?;
+        t.set(
+            "images",
+            bone_lua::to_lua(lua, &serde_json::json!(self.images))?,
+        )?;
         t.set("lines", lines)?;
         t.set("cursor", cursor)?;
         t.set("history", false)?;
@@ -498,7 +512,7 @@ impl Host for Gui {
     }
 
     fn prompt_empty(&self) -> bool {
-        self.draft.is_empty()
+        self.draft.is_empty() && self.images.is_empty() && self.image_reads == 0
     }
 
     /// The GUI keeps no prompt history yet.
@@ -509,9 +523,10 @@ impl Host for Gui {
         Vec::new()
     }
 
-    /// The transcript always follows the end in the GUI for now.
+    /// Whether the chat on screen is scrolled to the end.
     fn chat_view(&self) -> Json {
-        serde_json::json!({ "follow": true })
+        let follow = self.lua.chat_views.get(&self.current).is_none_or(|v| v.1);
+        serde_json::json!({ "follow": follow })
     }
 
     fn clipboard_copy(&mut self, text: String) {

@@ -11,6 +11,7 @@
 //! without one.
 
 mod headless;
+mod images;
 mod keys;
 mod lua;
 mod native;
@@ -32,7 +33,7 @@ use bone_proto::methods::{
     SessionDeleted, SessionList, SessionMessages, SessionRef, SessionUpdated, SettingsChanged,
     SettingsGet,
 };
-use bone_proto::types::SessionInfo;
+use bone_proto::types::{ImageAttachment, SessionInfo};
 use bone_ui::chat::RunningTurn;
 use bone_ui::style::Style;
 use bone_ui::text::{sanitize, wrap};
@@ -89,8 +90,13 @@ pub struct Gui {
     /// Questions waiting for an answer, by id (oldest first).
     pub asks: BTreeMap<u64, AskRequestedParams>,
     pub settings: Value,
-    /// The prompt's text.
+    /// The prompt's text and images, the image reads under way, and the
+    /// draft's number (a new one when it is sent or cleared, so a late
+    /// image does not join the next).
     pub draft: String,
+    pub images: Vec<ImageAttachment>,
+    image_reads: usize,
+    draft_epoch: u64,
     pub status: Option<Status>,
     /// The server went away and it is not coming back.
     pub closed: bool,
@@ -143,6 +149,9 @@ impl Gui {
             asks: asks.into_iter().map(|a| (a.ask_id, a)).collect(),
             settings,
             draft: String::new(),
+            images: Vec::new(),
+            image_reads: 0,
+            draft_epoch: 0,
             status: None,
             closed: false,
             renderer: None,
@@ -344,14 +353,18 @@ impl Gui {
     /// client. A new chat's session is created first.
     pub fn submit(&mut self) {
         let text = self.draft.trim().to_owned();
-        if text.is_empty() {
+        if text.is_empty() && self.images.is_empty() {
             return;
         }
-        self.draft.clear();
+        if self.image_reads > 0 {
+            return self.error("an image is still being read".into());
+        }
+        let images = std::mem::take(&mut self.images);
+        self.clear_draft();
         let buf = self.current;
         self.chats[buf].starting = true;
         match self.chats[buf].session_id().map(str::to_owned) {
-            Some(session_id) => self.queue(buf, session_id, text),
+            Some(session_id) => self.queue(buf, session_id, text, images),
             None => {
                 let cwd = Some(self.opts.cwd.clone());
                 self.request::<SessionCreate>(SessionCreateParams { cwd }, move |gui, r| match r {
@@ -360,20 +373,20 @@ impl Gui {
                         if let Some(c) = gui.chats.get_mut(buf) {
                             c.session = Some(info);
                         }
-                        gui.queue(buf, session_id, text);
+                        gui.queue(buf, session_id, text, images);
                     }
-                    Err(e) => gui.unsent(buf, text, e),
+                    Err(e) => gui.unsent(buf, text, images, e),
                 });
             }
         }
     }
 
-    fn queue(&self, buf: usize, session_id: String, text: String) {
+    fn queue(&self, buf: usize, session_id: String, text: String, images: Vec<ImageAttachment>) {
         let params = QueueAddParams {
             session_id,
             text: text.clone(),
             mode: QueueMode::default(),
-            images: Vec::new(),
+            images: images.clone(),
         };
         self.request::<QueueAdd>(params, move |gui, r| match r {
             Ok(r) => {
@@ -389,18 +402,26 @@ impl Gui {
                     }
                 }
             }
-            Err(e) => gui.unsent(buf, text, e),
+            Err(e) => gui.unsent(buf, text, images, e),
         });
     }
 
+    /// Empty the prompt, text and images.
+    pub(crate) fn clear_draft(&mut self) {
+        self.draft.clear();
+        self.images.clear();
+        self.draft_epoch += 1;
+    }
+
     /// A prompt that did not go out comes back to the draft.
-    fn unsent(&mut self, buf: usize, text: String, e: String) {
+    fn unsent(&mut self, buf: usize, text: String, images: Vec<ImageAttachment>, e: String) {
         if let Some(c) = self.chats.get_mut(buf) {
             c.starting = false;
         }
         if self.draft.is_empty() {
             self.draft = text;
         }
+        self.images.splice(0..0, images);
         self.error(format!("not sent: {e}"));
     }
 

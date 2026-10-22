@@ -3,6 +3,7 @@
 //! values for their renderer.
 
 pub mod chat;
+pub mod clipboard;
 pub mod commands;
 pub mod composer;
 pub mod data;

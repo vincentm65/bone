@@ -1778,7 +1778,11 @@ fn visible_first<L>(
     while (1..=items.len()).contains(&i) && rows < view.height.max(1) {
         on_screen.insert(i);
         rows += chat.cached_rows(&items[i - 1]).unwrap_or(1);
-        i = if view.follow && anchor.is_none() { i - 1 } else { i + 1 };
+        i = if view.follow && anchor.is_none() {
+            i - 1
+        } else {
+            i + 1
+        };
     }
     let mut stale = stale;
     stale.sort_by_key(|&(_, index, _)| (!on_screen.contains(&index), index.abs_diff(from)));

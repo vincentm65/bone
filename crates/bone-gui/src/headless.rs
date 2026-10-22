@@ -2,6 +2,8 @@
 //! drawing code, laid out into an in-memory frame of a given size. Used by
 //! the multi-client and conformance tests.
 
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use bone_proto::Connection;
@@ -11,10 +13,13 @@ use crate::{Gui, GuiOptions};
 
 pub struct Headless {
     pub gui: Gui,
+    /// What was last copied to the clipboard.
+    pub copied: Option<String>,
     ctx: egui::Context,
     size: egui::Vec2,
     /// Input for the next frame, as the window would send it.
     events: Vec<egui::Event>,
+    dropped: Vec<egui::DroppedFileHandle>,
     /// The display's physical pixels per logical point.
     scale: f32,
 }
@@ -28,9 +33,11 @@ impl Headless {
     ) -> Result<Self, String> {
         Ok(Headless {
             gui: Gui::connect(conn, opts).await?,
+            copied: None,
             ctx: egui::Context::default(),
             size: egui::vec2(width, height),
             events: Vec::new(),
+            dropped: Vec::new(),
             scale: 1.0,
         })
     }
@@ -40,6 +47,7 @@ impl Headless {
         let mut input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, self.size)),
             events: std::mem::take(&mut self.events),
+            dropped_files: std::mem::take(&mut self.dropped),
             ..Default::default()
         };
         input
@@ -51,6 +59,11 @@ impl Headless {
         let mut out = self.ctx.run_ui(input, |ui| gui.ui(ui));
         // No renderer takes the font atlas and images.
         out.textures_delta.clear();
+        for cmd in out.platform_output.commands {
+            if let egui::OutputCommand::CopyText(text) = cmd {
+                self.copied = Some(text);
+            }
+        }
     }
 
     /// Handle replies and server events until nothing has happened for
@@ -122,6 +135,11 @@ impl Headless {
         }
     }
 
+    /// Drop file `path` on the window in the next frame.
+    pub fn drop_file(&mut self, path: PathBuf) {
+        self.dropped.push(Arc::new(Dropped(path)));
+    }
+
     /// Type `text` in the next frame.
     pub fn text(&mut self, text: &str) {
         self.events.push(egui::Event::Text(text.to_owned()));
@@ -131,5 +149,19 @@ impl Headless {
     pub fn send(&mut self, text: &str) {
         self.gui.draft = text.to_owned();
         self.gui.submit();
+    }
+}
+
+/// A file dropped on the window.
+#[derive(Debug)]
+struct Dropped(PathBuf);
+
+impl egui::DroppedFile for Dropped {
+    fn path(&self) -> &Path {
+        &self.0
+    }
+
+    fn bytes(&self) -> Result<Vec<u8>, String> {
+        std::fs::read(&self.0).map_err(|e| e.to_string())
     }
 }

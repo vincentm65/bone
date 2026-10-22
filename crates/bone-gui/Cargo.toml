@@ -7,8 +7,10 @@ edition.workspace = true
 rust-version = "1.95"
 
 [dependencies]
+base64.workspace = true
 bone-client.workspace = true
 bone-lua.workspace = true
+bone-media.workspace = true
 bone-proto.workspace = true
 bone-ui.workspace = true
 eframe = { version = "=0.36.1", features = ["glow"] }

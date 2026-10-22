@@ -556,9 +556,11 @@ dependencies = [
 name = "bone-gui"
 version = "3.0.3"
 dependencies = [
+ "base64 0.22.1",
  "bone-client",
  "bone-core",
  "bone-lua",
+ "bone-media",
  "bone-proto",
  "bone-server",
  "bone-tui",
@@ -646,8 +648,11 @@ dependencies = [
  "bone-lua",
  "bone-media",
  "bone-proto",
+ "libc",
  "mlua",
  "serde_json",
+ "tempfile",
+ "tokio",
  "unicode-width 0.2.0",
  "vt100",
 ]

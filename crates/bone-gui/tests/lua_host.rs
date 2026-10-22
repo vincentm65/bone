@@ -366,3 +366,58 @@ async fn resizing_and_hidpi() {
     );
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
+
+/// Images join the prompt from `/attach` and from a file dropped on the
+/// window, Lua sees them, and they go out with the message; Lua's copy
+/// reaches the clipboard.
+#[tokio::test(flavor = "multi_thread")]
+async fn images_in_the_prompt_and_the_clipboard() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let png = bone_media::from_rgba(2, 1, &[255, 0, 0, 255, 0, 255, 0, 255]).unwrap();
+    std::fs::write(work.path().join("a.png"), &png.bytes).unwrap();
+    std::fs::write(work.path().join("b.png"), &png.bytes).unwrap();
+    std::fs::write(
+        config.path().join("gui.lua"),
+        "bone.on('prompt/changed', function(ev) seen = #ev.images end)",
+    )
+    .unwrap();
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    g.gui.run_lua("t", "bone.cmd('attach a.png')").unwrap();
+    g.drop_file(work.path().join("b.png"));
+    let two = |gui: &bone_gui::Gui| gui.images.len() == 2;
+    g.wait_for(Duration::from_secs(5), two).await.unwrap();
+    assert_eq!(g.gui.eval("#bone.prompt.images()").unwrap(), "2");
+    assert_eq!(g.gui.eval("seen").unwrap(), "2");
+    // Both reads run at once, so either may come first.
+    let mut names: Vec<_> = g.gui.images.iter().map(|i| i.name.clone()).collect();
+    names.sort();
+    assert_eq!(names, ["a.png", "b.png"]);
+
+    g.gui.run_lua("t", "bone.cmd('detach 1')").unwrap();
+    assert_eq!(g.gui.images.len(), 1);
+    let left = g.gui.images[0].name.clone();
+    // An image alone is a message.
+    g.gui.submit();
+    assert!(g.gui.images.is_empty());
+    let sent = |gui: &bone_gui::Gui| {
+        let data = gui.chats[0]
+            .items()
+            .first()
+            .map(|&i| gui.chats[0].item_data(i, 1, true));
+        data.is_some_and(|d| d["images"][0]["name"] == left.as_str())
+    };
+    g.wait_for(Duration::from_secs(5), sent).await.unwrap();
+
+    // Not an image: an error, and nothing attached.
+    std::fs::write(work.path().join("c.png"), "not a png").unwrap();
+    g.gui.run_lua("t", "bone.prompt.attach('c.png')").unwrap();
+    g.settle(Duration::from_millis(100)).await;
+    assert!(g.gui.images.is_empty());
+
+    g.gui
+        .run_lua("t", "bone.clipboard.copy('copied text')")
+        .unwrap();
+    g.frame();
+    assert_eq!(g.copied.as_deref(), Some("copied text"));
+}

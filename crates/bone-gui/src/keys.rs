@@ -12,7 +12,7 @@ use eframe::egui;
 use crate::Gui;
 
 /// Actions egui's text box does itself while the prompt has the keyboard.
-const NATIVE: [Builtin; 15] = [
+const NATIVE: [Builtin; 14] = [
     Builtin::Left,
     Builtin::Right,
     Builtin::Up,
@@ -27,7 +27,6 @@ const NATIVE: [Builtin; 15] = [
     Builtin::DeleteToStart,
     Builtin::DeleteToEnd,
     Builtin::Newline,
-    Builtin::PasteClipboard,
 ];
 
 enum Route {
@@ -286,10 +285,10 @@ impl Gui {
     /// `prompt/changed`, when the prompt's text is not what was last
     /// reported (the cursor is at its end: the text box keeps its own).
     pub(crate) fn prompt_changed(&mut self) {
-        if self.draft == self.lua.last_prompt {
+        if (&self.draft, &self.images) == (&self.lua.last_prompt.0, &self.lua.last_prompt.1) {
             return;
         }
-        self.lua.last_prompt = self.draft.clone();
+        self.lua.last_prompt = (self.draft.clone(), self.images.clone());
         let row = self.draft.split('\n').count() - 1;
         let col = self
             .draft
@@ -298,7 +297,7 @@ impl Gui {
             .map_or(0, |l| l.chars().count());
         let data = serde_json::json!({
             "text": self.draft,
-            "images": [],
+            "images": self.images,
             "cursor": { "row": row, "col": col },
             "selection": null,
         });
@@ -337,9 +336,11 @@ impl Gui {
             Submit | QueueSteer | QueueNext => self.submit(),
             Newline => self.draft.push('\n'),
             Dismiss => {
-                self.draft.clear();
+                self.clear_draft();
+                self.prompt_changed();
                 self.status = None;
             }
+            PasteClipboard => self.paste_clipboard(),
             Interrupt => self.interrupt(),
             Quit => self.closed = true,
             QuitIfEmpty if self.draft.is_empty() => self.closed = true,

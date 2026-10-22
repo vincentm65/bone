@@ -23,6 +23,7 @@ impl Gui {
             return;
         }
         self.route_keys(ui.ctx());
+        self.dropped_files(ui.ctx());
         self.watch_config();
         // Keep polling the config while idle.
         ui.ctx().request_repaint_after(crate::lua::Watcher::EVERY);
