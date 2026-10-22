@@ -112,8 +112,6 @@ fn pos_out(lua: &Lua, (row, col): crate::editor::Pos) -> mlua::Result<Table> {
     Ok(t)
 }
 
-/// Field `k` of an optional options table: None when it or the table is nil.
-
 impl App {
     /// Run Lua with the API bound to this app.
     pub fn with_api<R>(&mut self, body: impl FnOnce(&Lua) -> mlua::Result<R>) -> mlua::Result<R> {
