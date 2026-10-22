@@ -520,9 +520,12 @@ impl Host for Gui {
     /// The GUI keeps no prompt history yet.
     fn history_add(&mut self, _: &str) {}
 
-    /// The GUI does not follow processes yet.
     fn process_list(&self) -> Vec<ProcessSnapshot> {
-        Vec::new()
+        self.processes.sorted()
+    }
+
+    fn processes(&mut self) -> &mut bone_ui::lua::processes::Processes {
+        &mut self.processes
     }
 
     /// Whether the chat on screen is scrolled to the end.

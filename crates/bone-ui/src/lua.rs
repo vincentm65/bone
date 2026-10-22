@@ -17,6 +17,7 @@ use mlua::{FromLua, FromLuaMulti, Function, IntoLuaMulti, Lua, MultiValue, Table
 pub mod input;
 pub mod panels;
 pub mod plugins;
+pub mod processes;
 pub mod state;
 pub mod ui;
 
@@ -257,6 +258,8 @@ pub trait Host {
     fn focused_panel(&self) -> Option<String>;
     /// The managed shell processes of the session on screen.
     fn process_list(&self) -> Vec<ProcessSnapshot>;
+    /// What is kept of them (see `processes`).
+    fn processes(&mut self) -> &mut processes::Processes;
     /// Where the chat is scrolled, in the frontend's rows (`bone.chat.view`).
     fn chat_view(&self) -> serde_json::Value;
     /// `bone.ui` changed: draw it all again, retrying parts that failed.
@@ -447,6 +450,7 @@ pub fn dispatch<H: Host>(
         _ => {
             return panels::dispatch(h, lua, op, a)
                 .or_else(|a| input::dispatch(h, lua, op, a))
+                .or_else(|a| processes::dispatch(h, lua, op, a))
                 .or_else(|a| plugins::dispatch(h, lua, op, a));
         }
     })
@@ -1834,7 +1838,7 @@ fn render_item<H: Host>(
 // ---- running commands ------------------------------------------------------
 
 /// Send typed request `M`; `then` gets its typed result on the UI thread.
-fn request_typed<H: Host, M: bone_proto::Method>(
+pub(crate) fn request_typed<H: Host, M: bone_proto::Method>(
     h: &mut H,
     params: M::Params,
     then: impl FnOnce(&mut H, Result<M::Result, String>) + Send + 'static,

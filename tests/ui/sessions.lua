@@ -1,8 +1,9 @@
 -- Sessions in chats, the message log and running Lua, the same in every
 -- frontend: a session opens in a chat of its own (shown or not), the chat
 -- on screen reports it, and each chat keeps its own draft.
-local made, shown = {}, {}
+local made, shown, procs = {}, {}, {}
 bone.on("chat/shown", function(ev) shown[#shown + 1] = ev end)
+bone.on("processes/changed", function(ev) procs[#procs + 1] = ev end)
 bone.request("session/create", {}, function(r) made.a = r.session_id end)
 
 return {
@@ -29,6 +30,9 @@ return {
   end,
   function()
     eq(bone.chat.session().session_id, made.b, "switched")
+    -- The tray follows the chat on screen: its processes were asked for.
+    assert(#procs > 0, "processes/changed for the chat shown")
+    eq(#bone.processes.list(), 0, "a new session runs nothing")
     bone.api.show("shown, not logged")
     local log = bone.api.log(50)
     for _, line in ipairs(log) do

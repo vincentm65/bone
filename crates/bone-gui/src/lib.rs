@@ -31,9 +31,9 @@ use bone_proto::Connection;
 use bone_proto::Method;
 use bone_proto::methods::{
     AskList, AskRequested, AskRequestedParams, AskResolved, AskRespond, AskRespondParams, Empty,
-    QueueAdd, QueueAddParams, QueueMode, SessionCreate, SessionCreateParams, SessionCreated,
-    SessionDeleted, SessionList, SessionMessages, SessionRef, SessionUpdated, SettingsChanged,
-    SettingsGet,
+    ProcessChanged, QueueAdd, QueueAddParams, QueueMode, SessionCreate, SessionCreateParams,
+    SessionCreated, SessionDeleted, SessionList, SessionMessages, SessionRef, SessionUpdated,
+    SettingsChanged, SettingsGet,
 };
 use bone_proto::types::{ImageAttachment, SessionInfo};
 use bone_ui::chat::RunningTurn;
@@ -109,6 +109,8 @@ pub struct Gui {
     pub images: Vec<ImageAttachment>,
     image_reads: usize,
     draft_epoch: u64,
+    /// The core's shell processes of the chat on screen.
+    pub(crate) processes: bone_ui::lua::processes::Processes,
     /// The drafts of the chats not on screen.
     drafts: std::collections::HashMap<usize, (String, Vec<ImageAttachment>)>,
     pub status: Option<Status>,
@@ -171,6 +173,7 @@ impl Gui {
             images: Vec::new(),
             image_reads: 0,
             draft_epoch: 0,
+            processes: Default::default(),
             drafts: Default::default(),
             status: None,
             closed: false,
@@ -271,7 +274,9 @@ impl Gui {
         }) {
             return;
         }
-        if let Some(Ok(p)) = ev.parse::<AskRequested>() {
+        if let Some(Ok(p)) = ev.parse::<ProcessChanged>() {
+            bone_ui::lua::processes::changed(self, &p);
+        } else if let Some(Ok(p)) = ev.parse::<AskRequested>() {
             self.asks.insert(p.ask_id, p);
         } else if let Some(Ok(p)) = ev.parse::<AskResolved>() {
             self.asks.remove(&p.ask_id);
@@ -343,14 +348,17 @@ impl Gui {
         }
     }
 
+    /// A session was deleted: its chat becomes a fresh one (chats keep
+    /// their places, which pending replies rely on).
     fn session_deleted(&mut self, id: &str) {
+        if self.processes.session.as_deref() == Some(id) {
+            bone_ui::lua::processes::clear(self);
+        }
         if let Some(buf) = self.chat_of(id) {
-            self.chats.remove(buf);
-            if self.chats.is_empty() {
-                self.chats.push(ChatBuffer::new(None));
-            }
-            if self.current >= buf && self.current > 0 {
-                self.current -= 1;
+            self.chats[buf] = ChatBuffer::new(None);
+            if buf == self.current {
+                self.show_chat(buf);
+                self.info("session deleted".into());
             }
         }
         self.refresh_sessions();
@@ -380,6 +388,9 @@ impl Gui {
                         let session_id = info.session_id.clone();
                         if let Some(c) = gui.chats.get_mut(buf) {
                             c.session = Some(info);
+                        }
+                        if buf == gui.current {
+                            bone_ui::lua::processes::request(gui, session_id.clone());
                         }
                         gui.queue(buf, session_id, text, images);
                     }
@@ -464,6 +475,9 @@ impl Gui {
         self.asks = r.asks.into_iter().map(|a| (a.ask_id, a)).collect();
         self.reload_all();
         self.refresh_sessions();
+        bone_ui::lua::processes::clear(self);
+        let current = self.chats[self.current].session_id().map(str::to_owned);
+        bone_ui::lua::processes::follow(self, current);
         self.forward(r.events);
         self.info("reconnected to the bone server".into());
     }

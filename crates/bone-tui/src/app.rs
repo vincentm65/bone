@@ -145,17 +145,8 @@ pub struct App {
     pub panel_focus: Option<String>,
     /// Streaming jobs from Lua (`bone.job`).
     pub jobs: crate::jobs::Jobs,
-    /// Core-managed shell processes, keyed by process id.
-    pub processes: HashMap<String, ProcessSnapshot>,
-    /// Terminal views' output, by process id (see `term.rs`).
-    pub terms: HashMap<String, crate::term::Term>,
-    /// The size each process's terminal was last successfully given
-    /// (`process/resize`).
-    term_sizes: HashMap<String, (u16, u16)>,
-    /// Resize requests currently in flight, by process id.
-    term_resize_pending: HashMap<String, (u16, u16)>,
-    pub processes_version: u64,
-    pub processes_session: Option<String>,
+    /// Core-managed shell processes of the chat on screen.
+    pub processes: bone_ui::lua::processes::Processes,
     /// Text highlighted with the mouse.
     pub selection: Option<crate::selection::Selection>,
     /// Text to put on the system clipboard after the next draw.
@@ -261,12 +252,7 @@ impl App {
             panels: Vec::new(),
             panel_focus: None,
             jobs: Default::default(),
-            processes: HashMap::new(),
-            terms: HashMap::new(),
-            term_sizes: HashMap::new(),
-            term_resize_pending: HashMap::new(),
-            processes_version: 0,
-            processes_session: None,
+            processes: Default::default(),
             selection: None,
             clipboard: None,
             composer: Composer::default(),
@@ -1523,147 +1509,24 @@ impl App {
             return;
         }
         on!(SettingsChanged, |p| self.update_settings(p.settings));
-        on!(ProcessChanged, |p| self.process_changed(&p));
+        on!(ProcessChanged, |p| bone_ui::lua::processes::changed(
+            self, &p
+        ));
         on!(SessionUpdated, |p| self.reload_chat(p.session_id));
         on!(SessionDeleted, |p| self.session_deleted(&p.session_id));
     }
 
-    fn process_changed(&mut self, p: &ProcessChangedParams) {
-        if self.processes_session.as_deref() != Some(p.session_id.as_str()) {
-            return;
-        }
-        self.processes_version = self.processes_version.max(p.version);
-        self.processes
-            .insert(p.process.id.clone(), p.process.clone());
-        // Only views being drawn keep output.
-        if let (Some(c), Some(t)) = (&p.chunk, self.terms.get_mut(&p.process.id)) {
-            t.chunk(c.offset, &c.data);
-        }
-    }
-
-    /// `bone.processes.screen`: a process's terminal at `rows` × `cols`,
-    /// scrolled back `scroll` rows. Starts reading its output the first
-    /// time (the lines come once it arrives) and resizes a running
-    /// process's terminal to match.
-    pub fn process_screen(
-        &mut self,
-        id: &str,
-        rows: u16,
-        cols: u16,
-        scroll: usize,
-    ) -> (Vec<Vec<crate::ui::Item>>, usize, usize) {
-        let Some(session_id) = self.processes_session.clone() else {
-            return (Vec::new(), 0, 0);
-        };
-        let running = self
-            .processes
-            .get(id)
-            .is_some_and(|p| p.running && p.terminal);
-        let size = (cols, rows);
-        if running
-            && self.term_sizes.get(id) != Some(&size)
-            && self.term_resize_pending.get(id) != Some(&size)
-        {
-            let pid = id.to_owned();
-            self.term_resize_pending.insert(pid.clone(), size);
-            self.request::<ProcessResize>(
-                ProcessResizeParams {
-                    session_id: session_id.clone(),
-                    id: pid.clone(),
-                    cols,
-                    rows,
-                },
-                move |app, result| {
-                    // A newer size may have been requested while this one
-                    // was in flight. Do not clear or overwrite its state.
-                    if app.term_resize_pending.get(&pid) == Some(&size) {
-                        app.term_resize_pending.remove(&pid);
-                    }
-                    if result.is_ok() {
-                        app.term_sizes.insert(pid, size);
-                    }
-                },
-            );
-        }
-        let term = self.terms.entry(id.to_owned()).or_default();
-        if term.stale && !term.reading {
-            term.begin_read();
-            let pid = id.to_owned();
-            self.request::<ProcessRead>(
-                ProcessReadParams {
-                    session_id,
-                    id: id.to_owned(),
-                    from: 0,
-                },
-                move |app, r| {
-                    if let Some(t) = app.terms.get_mut(&pid) {
-                        match r {
-                            Ok(out) => t.finish_read(out.offset, &out.data),
-                            Err(e) => {
-                                t.fail_read();
-                                app.error(format!("cannot read {pid}: {e}"));
-                            }
-                        }
-                    }
-                    app.dirty = true;
-                },
-            );
-        }
-        let term = self.terms.get_mut(id).unwrap();
-        term.lines(rows, cols, scroll, &mut self.theme)
-    }
-
     /// Forget the tray's shells (a chat with no session, or a deleted one).
     fn clear_processes(&mut self) {
-        if self.processes_session.is_none() && self.processes.is_empty() {
-            return;
-        }
-        self.processes.clear();
-        self.terms.clear();
-        self.term_sizes.clear();
-        self.term_resize_pending.clear();
-        self.processes_version = 0;
-        self.processes_session = None;
-        self.fire(
-            "processes/changed",
-            serde_json::json!({ "version": 0, "processes": [] }),
-        );
+        bone_ui::lua::processes::clear(self);
     }
 
     pub fn request_processes(&mut self, session_id: String) {
-        if self.processes_session.as_deref() != Some(session_id.as_str()) {
-            self.clear_processes();
-        }
-        self.processes_session = Some(session_id.clone());
-        self.request::<ProcessesGet>(
-            SessionRef {
-                session_id: session_id.clone(),
-            },
-            move |app, r| {
-                // Older/embedded servers may not implement process snapshots;
-                // the chat remains fully usable without the optional pane.
-                // A reply for a chat no longer on screen is stale.
-                if let Ok(r) = r
-                    && app.processes_session.as_deref() == Some(session_id.as_str())
-                {
-                    app.processes_version = r.version;
-                    app.processes = r.processes.into_iter().map(|p| (p.id.clone(), p)).collect();
-                    app.fire(
-                        "processes/changed",
-                        serde_json::json!({
-                            "version": app.processes_version,
-                            "processes": app.process_list(),
-                        }),
-                    );
-                }
-            },
-        );
+        bone_ui::lua::processes::request(self, session_id);
     }
 
     pub fn process_list(&self) -> Vec<ProcessSnapshot> {
-        let mut processes: Vec<_> = self.processes.values().cloned().collect();
-        processes.sort_by_key(|p| (p.started_at_ms, p.id.len(), p.id.clone()));
-        processes
+        self.processes.sorted()
     }
 
     /// The default mode for messages sent during a turn: the `queue_mode`
@@ -1678,7 +1541,7 @@ impl App {
     /// A session was deleted: its chat becomes a fresh one (chats keep their
     /// places, which pending replies rely on).
     fn session_deleted(&mut self, session_id: &str) {
-        if self.processes_session.as_deref() == Some(session_id) {
+        if self.processes.session.as_deref() == Some(session_id) {
             self.clear_processes();
         }
         let Some(buf) = self.chat_by_session(session_id) else {
@@ -1719,8 +1582,7 @@ impl App {
 
     /// Something is moving on screen (a spinner or elapsed time).
     pub fn animating(&self) -> bool {
-        self.chats.iter().any(|c| c.turn.is_some() || c.starting)
-            || self.processes.values().any(|p| p.running)
+        self.chats.iter().any(|c| c.turn.is_some() || c.starting) || self.processes.any_running()
     }
 
     pub fn server_closed(&mut self) {

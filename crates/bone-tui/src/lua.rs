@@ -9,11 +9,11 @@
 use std::path::PathBuf;
 
 use bone_lua::{Side, short_error, to_lua};
-use bone_proto::methods::{ProcessCancel, ProcessRef};
 use mlua::{Function, Lua, MultiValue, Table, Value};
 
 use crate::app::App;
 use crate::keymap::{Builtin, Context};
+use bone_ui::lua::processes::{screen_size, screen_table};
 use bone_ui::lua::{CALLBACKS, args, err, opt, ret};
 use serde_json::Value as Json;
 
@@ -182,46 +182,6 @@ fn job_spec(cmd: Value, opts: &Option<Table>) -> mlua::Result<crate::jobs::Spec>
         timeout,
         pty,
     })
-}
-
-/// `{ width, height, scroll }` of a terminal screen: (rows, cols, scroll),
-/// the size defaulting to `size`.
-fn screen_size(opts: &Option<Table>, size: (u16, u16)) -> mlua::Result<(u16, u16, usize)> {
-    let get =
-        |k: &str| -> mlua::Result<Option<i64>> { opts.as_ref().map_or(Ok(None), |t| t.get(k)) };
-    Ok((
-        get("height")?.map_or(size.0, |h| h.clamp(1, 500) as u16),
-        get("width")?.map_or(size.1, |w| w.clamp(1, 1000) as u16),
-        get("scroll")?.unwrap_or(0).max(0) as usize,
-    ))
-}
-
-/// What `bone.processes.screen` and `job:screen` give: the screen's lines as
-/// `{ { text, group }, … }` rows, and how far it is scrolled back.
-fn screen_table(
-    lua: &Lua,
-    lines: &[Vec<crate::ui::Item>],
-    scroll: usize,
-    max: usize,
-) -> mlua::Result<Table> {
-    let out = lua.create_table()?;
-    for (i, line) in lines.iter().enumerate() {
-        let l = lua.create_table()?;
-        for (j, item) in line.iter().enumerate() {
-            if let crate::ui::Item::Text(text, group) = item {
-                l.set(
-                    j + 1,
-                    lua.create_sequence_from([text.as_str(), group.as_str()])?,
-                )?;
-            }
-        }
-        out.set(i + 1, l)?;
-    }
-    let r = lua.create_table()?;
-    r.set("lines", out)?;
-    r.set("scroll", scroll)?;
-    r.set("max", max)?;
-    Ok(r)
 }
 
 impl App {
@@ -617,12 +577,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             let list: Vec<serde_json::Value> = app.jobs.list.iter().map(|j| j.status()).collect();
             ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
         }
-        "process_screen" => {
-            let (id, opts): (String, Option<mlua::Table>) = args(lua, a)?;
-            let (rows, cols, scroll) = screen_size(&opts, (24, 80))?;
-            let (lines, scroll, max) = app.process_screen(&id, rows, cols, scroll);
-            ret(lua, screen_table(lua, &lines, scroll, max)?)
-        }
         "job_screen" => {
             let (id, opts): (u64, Option<mlua::Table>) = args(lua, a)?;
             // Without a size it stays the size it is.
@@ -642,24 +596,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 }
             }
             ret(lua, r)
-        }
-        "process_refresh" => {
-            if let Some(session_id) = app.current_session_id() {
-                app.request_processes(session_id);
-            }
-            ret(lua, ())
-        }
-        "process_cancel" => {
-            let id: String = args(lua, a)?;
-            let Some(session_id) = app.current_session_id() else {
-                return ret(lua, false);
-            };
-            app.request::<ProcessCancel>(ProcessRef { session_id, id }, |app, result| {
-                if let Err(e) = result {
-                    app.error(format!("cannot cancel shell process: {e}"));
-                }
-            });
-            ret(lua, true)
         }
         "log_tail" => {
             let n: usize = args(lua, a)?;
@@ -988,6 +924,10 @@ impl bone_ui::lua::Host for App {
 
     fn process_list(&self) -> Vec<bone_proto::methods::ProcessSnapshot> {
         App::process_list(self)
+    }
+
+    fn processes(&mut self) -> &mut bone_ui::lua::processes::Processes {
+        &mut self.processes
     }
 
     fn chat_view(&self) -> serde_json::Value {

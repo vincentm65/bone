@@ -93,6 +93,7 @@ impl Gui {
                     c.load(r.info, &r.messages, r.active_turn);
                     c.set_queue(r.queue, r.queue_paused);
                     if buf == gui.current {
+                        bone_ui::lua::processes::request(gui, session_id.clone());
                         let ev = serde_json::json!({ "session_id": session_id, "chat": buf });
                         fire(gui, "chat/shown", ev);
                     }
@@ -118,6 +119,8 @@ impl Gui {
             self.prompt_changed();
         }
         let session_id = self.chats[buf].session_id().map(str::to_owned);
+        // The tray's shells are the chat on screen's.
+        bone_ui::lua::processes::follow(self, session_id.clone());
         fire(
             self,
             "chat/shown",
