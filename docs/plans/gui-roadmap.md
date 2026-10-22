@@ -589,12 +589,10 @@ characters keep the cell grid; the prompt takes images (`/attach`, dropped
 files, alt+v or `/paste`; egui keeps ctrl+v for text), and a row naming an
 image previews it on hover and opens it on click.
 
-Left:
-- move `bone.job` and core process tracking (`bone.processes.screen`, the
-  tray) from `bone-tui` to `bone-ui`, then `gui.terminal` on top of them;
-- an AccessKit pass over Lua-drawn rows;
-- native notifications and file dialogs (needs the dependency decision
-  above).
+Since then (Phases 7 and 8): `bone.job` and the process tracking moved to
+`bone-ui`; `/term` opens terminals in panels; AccessKit labels cover the
+rows Lua paints; notifications and file dialogs are in (`notify-rust`,
+`rfd` through the XDG portal).
 
 ### Phase 7: parity with the TUI
 
@@ -620,10 +618,12 @@ monospace tool rows, a card composer, a menu bar. It is Lua
 building block: a view may return a `block` of rich text the GUI wraps and
 boxes itself, with `lines` for a frontend that does not draw blocks.
 
-**Status:** first version. Next: a bold face (egui's bundled fonts have
-none), text selection and image previews inside blocks, the sessions
-sidebar and the tray in the same style, and making `desktop` the GUI's
-default once it covers everything.
+**Status:** done, and the GUI's default: with no `/gui use` choice the
+GUI draws `desktop` (`/gui use standard` is the TUI's look). Real bold and
+italic come from the system's sans faces (or `font_sans*`); block text is
+selectable and previews its images; the sessions sidebar and tray take the
+panel surfaces; Edit ▸ Attach image… uses the system's dialog, and an
+answer that finishes in the background notifies.
 
 ## Explicit non-goals for the first milestone
 
