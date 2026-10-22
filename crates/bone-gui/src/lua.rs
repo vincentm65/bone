@@ -65,7 +65,7 @@ pub struct LuaSide {
     pub geometry: bone_ui::lua::Geometry,
     /// Lua windows (`bone.ui.popup`).
     pub popups: Vec<bone_ui::popup::Popup>,
-    /// Lua panels (`bone.ui.panel`); not drawn in the GUI yet.
+    /// Lua panels (`bone.ui.panel`).
     pub panels: Vec<bone_ui::panel::Panel>,
     pub panel_focus: Option<String>,
     /// Every message shown, and the last Lua errors in full.
@@ -320,10 +320,15 @@ impl Host for Gui {
         }
     }
 
-    /// A focused window has the keyboard (its own keys, then `popup`).
+    /// What has the keyboard: a focused window (`popup`), a focused panel
+    /// (its context, or `panel`), else the prompt.
     fn context(&self) -> Context {
         if bone_ui::popup::focused(&self.lua.popups).is_some() {
             Context::Popup
+        } else if let Some(p) =
+            bone_ui::lua::panels::focused(&self.lua.panels, &self.lua.panel_focus)
+        {
+            p.context.clone().unwrap_or(Context::Panel)
         } else {
             Context::Main
         }
@@ -438,9 +443,8 @@ impl Host for Gui {
         Err("images in the prompt are not available in the GUI yet".into())
     }
 
-    /// The GUI has no panels yet.
     fn focused_panel(&self) -> Option<String> {
-        None
+        bone_ui::lua::panels::focused(&self.lua.panels, &self.lua.panel_focus).map(|p| p.id.clone())
     }
 
     /// The GUI does not follow processes yet.
@@ -498,6 +502,7 @@ impl Host for Gui {
         buf == self.current
             && self.asks.is_empty()
             && bone_ui::popup::focused(&self.lua.popups).is_none()
+            && self.focused_panel().is_none()
     }
 
     fn geometry(&self) -> bone_ui::lua::Geometry {

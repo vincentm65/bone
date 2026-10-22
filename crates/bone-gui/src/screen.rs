@@ -8,8 +8,10 @@ use bone_ui::chat::find_chat;
 use bone_ui::editor::TextBuffer;
 use bone_ui::layout::{self, Measure, Plan, kind};
 use bone_ui::lua::Geometry;
+use bone_ui::lua::panels;
 use bone_ui::lua::ui as lua_ui;
 use bone_ui::model::Item;
+use bone_ui::panel::PanelPlacement;
 use bone_ui::prompt::Insets;
 use eframe::egui::{
     self, Color32, FontId, Key, KeyboardShortcut, Modifiers, Pos2, ScrollArea, Stroke, TextEdit,
@@ -67,15 +69,18 @@ impl Gui {
         }
         let layout = lua_ui::layout(self);
         let full = layout::Rect::new(0, 0, cols, rows);
+        // Screen-height side panels take their columns from everything.
+        let mut docked = Vec::new();
+        let room = panels::allocate_panels(self, full, true, &layout, &mut docked);
         // Without a "message" leaf, notifications take rows at the bottom.
         let msg_rows = if layout.contains("message") {
             0
         } else {
-            self.message_rows(full)
+            self.message_rows(room)
         };
         let main = layout::Rect {
-            height: rows.saturating_sub(msg_rows),
-            ..full
+            height: room.height.saturating_sub(msg_rows),
+            ..room
         };
         let mut plan = Plan::default();
         layout::place(
@@ -85,6 +90,27 @@ impl Gui {
             &mut plan,
             &mut Vec::new(),
         );
+        // Docked panels go beside the chat; the layout's own panel leaves
+        // where it put them.
+        for (name, r) in &mut plan.leaves {
+            if name == "chat" {
+                *r = panels::allocate_panels(self, *r, false, &layout, &mut docked);
+            }
+            if let Some(id) = name.strip_prefix("panel:") {
+                let shown = panels::panel(&self.lua.panels, id).is_some_and(|p| !p.hidden);
+                if shown && r.width > 0 && r.height > 0 && !docked.iter().any(|p| p.id == id) {
+                    docked.push(PanelPlacement {
+                        id: id.to_owned(),
+                        area: *r,
+                        separator: None,
+                    });
+                } else {
+                    r.width = 0;
+                    r.height = 0;
+                }
+            }
+        }
+        panels::publish_panels(self, &docked);
         self.lua.geometry = Geometry {
             leaves: plan.leaves.clone(),
             seps: (plan.seps.iter())
@@ -132,14 +158,53 @@ impl Gui {
                 paint_row(ui, &cells, layout::Rect::new(x, y, 1, 1), &row);
             }
         }
+        self.panels_ui(ui, &cells, &docked);
         if msg_rows > 0 {
-            let r = layout::Rect::new(0, main.bottom(), cols, msg_rows);
+            let r = layout::Rect::new(room.x, main.bottom(), room.width, msg_rows);
             self.message_leaf(ui, &cells, r);
         }
         self.popups_ui(ui, &cells, full);
         if let Some(at) = self.lua.chat_expiry {
             let wait = at.saturating_duration_since(std::time::Instant::now());
             ui.ctx().request_repaint_after(wait);
+        }
+    }
+
+    /// Each placed panel: its title row, the content in view, and a
+    /// separator bar beside a side panel.
+    fn panels_ui(&mut self, ui: &egui::Ui, cells: &Cells, docked: &[PanelPlacement]) {
+        let fill = (self.lua.theme.hl("Normal").bg)
+            .and_then(color)
+            .unwrap_or(ui.visuals().panel_fill);
+        let sep = self.lua.theme.hl("WinSeparator");
+        for placement in docked {
+            let Some(f) = panels::panel_frame(self, placement) else {
+                continue;
+            };
+            ui.painter().rect_filled(cells.rect(f.area), 0.0, fill);
+            if let Some(items) = &f.title {
+                let row = self.styled(items, f.area.width as usize);
+                paint_row(
+                    ui,
+                    cells,
+                    layout::Rect {
+                        height: 1,
+                        ..f.area
+                    },
+                    &row,
+                );
+            }
+            self.lines_at(ui, cells, f.body, &f.lines);
+            if let Some(x) = f.separator {
+                for y in f.area.y..f.area.bottom() {
+                    paint_row(
+                        ui,
+                        cells,
+                        layout::Rect::new(x, y, 1, 1),
+                        &vec![("│".into(), sep)],
+                    );
+                }
+            }
         }
     }
 
@@ -388,9 +453,8 @@ fn paint_row(ui: &egui::Ui, cells: &Cells, r: layout::Rect, row: &Row) {
 struct Measurer<'a>(&'a mut Gui);
 
 impl Measure for Measurer<'_> {
-    /// The GUI has no panels yet.
-    fn panel_hidden(&self, _: &str) -> bool {
-        true
+    fn panel_hidden(&self, id: &str) -> bool {
+        panels::panel(&self.0.lua.panels, id).is_none_or(|p| p.hidden)
     }
 
     fn prompt_height(&mut self, name: &str, width: u16) -> u16 {
@@ -413,8 +477,8 @@ impl Measure for Measurer<'_> {
         self.0.message_rows(area)
     }
 
-    fn panel_size(&mut self, _: &str, _: u16, _: u16, _: bool) -> u16 {
-        0
+    fn panel_size(&mut self, id: &str, width: u16, height: u16, rows: bool) -> u16 {
+        panels::measure_panel(self.0, id, width, height, rows)
     }
 
     fn region_size(&mut self, name: &str, width: u16, height: u16, rows: bool) -> Option<u16> {
