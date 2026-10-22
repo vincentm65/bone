@@ -68,7 +68,7 @@ function M.assistant(item, ctx)
   end
   if item.streaming and #paras > 0 then
     local last = paras[#paras].spans
-    last[#last + 1] = { text = " ▍", hl = "Dim" }
+    last[#last + 1] = { text = " …", hl = "Dim" }
   end
   footer(item, ctx, paras)
   return {
@@ -106,7 +106,7 @@ end
 function M.compacted(item)
   return {
     block = {
-      paragraphs = { { spans = { { "◇ ", "Accent" }, { item.text or "", "Dim" } } } },
+      paragraphs = { { spans = { { "— ", "Dim" }, { item.text or "", "Dim" } } } },
       size = md.small_size, pad = { 0, 4 }, margin = { 10, 10 },
     },
     lines = plain(item.text, "Dim"),

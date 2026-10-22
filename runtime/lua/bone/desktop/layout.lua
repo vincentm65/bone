@@ -120,7 +120,7 @@ function M.setup()
     render = function()
       local out = {}
       for i, image in ipairs(bone.prompt.images()) do
-        out[#out + 1] = { { ("   ▣  %s  ·  %d×%d    /detach %d"):format(image.name, image.width, image.height, i), "Dim" } }
+        out[#out + 1] = { { ("   Image %d:  %s  ·  %d×%d    /detach %d"):format(i, image.name, image.width, image.height, i), "Dim" } }
       end
       return out
     end,

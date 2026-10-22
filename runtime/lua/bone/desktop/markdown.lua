@@ -71,7 +71,7 @@ function M.paragraphs(text, group)
         add({ spans = cells, size = M.small_size, gap = i == 1 and 4 or 2 })
       end
     elseif k == "rule" then
-      add({ spans = { { text = "⎯⎯⎯⎯⎯⎯⎯⎯", hl = "Dim" } }, gap = 6 })
+      add({ spans = { { text = "———", hl = "Dim" } }, gap = 6 })
     elseif k == "blank" then
       gap = gap + 6
     end

@@ -53,7 +53,7 @@ local function render(ctx)
     { "Chats", st.page == "chats" and "PanelAccent" or "PanelDim" },
     { "     ", "Panel" },
     { "Processes" .. (jobs > 0 and (" " .. jobs) or ""), st.page == "running" and "PanelAccent" or "PanelDim" },
-    pad("", math.max(0, w - 18 - #tostring(jobs)), "Panel"),
+    { fill = " ", hl = "Panel" },
   })
   st.tab_line = #out
   blank()
@@ -62,7 +62,7 @@ local function render(ctx)
   st.items = rows
   st.sel = math.max(1, math.min(st.sel, #rows))
   if st.page == "chats" then
-    text("⌕  " .. (st.query == "" and "Search chats" or st.query), st.query == "" and "PanelDim" or "Panel")
+    text(st.query == "" and "Search chats…" or ("Search: " .. st.query), st.query == "" and "PanelDim" or "Panel")
     blank()
   end
   if #rows == 0 then

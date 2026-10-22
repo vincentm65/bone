@@ -85,7 +85,8 @@ end
 
 function M.view(item, ctx)
   local running, failed = not item.done, item.is_error
-  local mark = running and { "● ", "ToolRunning" } or failed and { "✗ ", "ToolError" } or { "✓ ", "ToolDone" }
+  -- Marks the proportional fonts all have.
+  local mark = running and { "•  ", "ToolRunning" } or failed and { "×  ", "ToolError" } or { "•  ", "ToolDone" }
   local label = M.labels[item.name] or item.name
   local title = {
     { text = mark[1], hl = mark[2] },
