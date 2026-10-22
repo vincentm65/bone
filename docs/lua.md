@@ -56,7 +56,7 @@ The current capability names include `core.config`, `core.tools`,
 `tui.local_events`, `tui.commands`, `tui.command_specs`, `tui.options`,
 `tui.dynamic_options`, `tui.request`, `tui.prompt`, `tui.prompt_edit`, `tui.chat`, `tui.chat_data`, `tui.windows`,
 `tui.panels`, `tui.regions`, `tui.views`, `tui.pickers`, `tui.themes`, `tui.jobs`, `jobs.streaming` and
-`tui.session`. Both sides also report `lua`, `json`, `modules` and `fs`.
+`tui.session`. Both sides also report `lua`, `json`, `modules` and `fs`. The GUI reports `jobs.streaming`, `plugins.lifecycle` and the shared `ui.*` names below instead of the `tui.*` ones.
 Capability names describe the contract, not the internal Rust module layout.
 
 ### Frontends: the shared UI API
@@ -92,6 +92,13 @@ naming the operation.
 | `ui.jobs` | `bone.job`, `job/*` events, `bone.processes` (`list`, `screen`) | shared |
 | `ui.plugins` | `bone.plugin` (`list`, `load`, `unload`, `reload`, `on_shutdown`, `state`), trusted project config, `bone.library` | shared |
 | `ui.session` | `bone.api.session`, `open_session`, `bone.chat.view`/`at`/`scroll` | shared; the GUI scrolls in pixels and maps to rows |
+| `ui.local_events` | the local `prompt/changed`, `focus/changed`, `resize`, `key`, `paste` and `panel/*` events | shared |
+| `ui.command_specs` | command aliases, completion callbacks and typed arguments | shared |
+| `ui.dynamic_options` | `bone.o.define` options with defaults, choices, `on_change` and deletion | shared |
+| `ui.pickers` | `bone.ui.select` | shared |
+| `ui.model` | `bone.model` (`list`, `complete`) | shared |
+| `ui.rpc` | `bone.rpc.call` into core Lua | shared |
+| `ui.project` | `bone.project` (`info`, `trust`) | shared |
 | `gui.window`, `gui.notifications`, `gui.dialogs`, `gui.blocks` | `bone.gui` (window, notify, file dialogs, library) and `block` views | GUI only (see `customizing/customizing-gui.md`) |
 
 The TUI and the GUI fire the same local events, including `server/disconnected` and `server/reconnected` (a `--connect` TUI or the GUI lost and regained the server).

@@ -43,17 +43,16 @@ impl UiDriver for Fixture {
     }
 }
 
-/// A core with an unreachable provider, and a headless GUI on it with the
-/// standard library.
-async fn gui() -> Fixture {
+/// A core with an unreachable provider, and a headless GUI on it with
+/// `library`.
+async fn gui(library: &str) -> Fixture {
     let config = tempfile::tempdir().unwrap();
     std::fs::write(
         config.path().join("core.lua"),
         r#"bone.config.providers.fake = { base_url = "http://127.0.0.1:9", model = "fake" }"#,
     )
     .unwrap();
-    // The shared defaults, as the TUI draws them: what parity is about.
-    std::fs::write(config.path().join("gui-library"), "standard\n").unwrap();
+    std::fs::write(config.path().join("gui-library"), format!("{library}\n")).unwrap();
     let work = tempfile::tempdir().unwrap();
     let loaded = scripting::load_with(config.path(), &|_| None).unwrap();
     let server = Server::new(Arc::new(Core::from_loaded(loaded)));
@@ -72,8 +71,26 @@ async fn gui() -> Fixture {
     }
 }
 
+/// The shared defaults, as the TUI draws them: what parity is about.
 #[tokio::test(flavor = "multi_thread")]
 async fn shared_api_in_the_gui() {
-    let failures = runner::run_all(gui).await;
+    let failures = runner::run_all(|| gui("standard")).await;
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
+}
+
+/// The same scripts under the library the GUI draws by default.
+#[tokio::test(flavor = "multi_thread")]
+async fn shared_api_in_the_desktop_library() {
+    let mut failures = Vec::new();
+    for path in runner::scripts() {
+        // It asserts which library is drawn.
+        if path.ends_with("libraries.lua") {
+            continue;
+        }
+        let mut ui = gui("desktop").await;
+        if let Err(e) = runner::run_script(&mut ui, &path).await {
+            failures.push(format!("{}: {e}", path.display()));
+        }
+    }
     assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }

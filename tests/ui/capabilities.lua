@@ -6,6 +6,8 @@ for _, name in ipairs({
   "ui.themes", "ui.chat_data", "ui.views", "ui.request",
   "ui.layout", "ui.windows", "ui.panels", "ui.input",
   "ui.prompt", "ui.jobs", "ui.plugins", "ui.session",
+  "ui.local_events", "ui.command_specs", "ui.dynamic_options", "ui.pickers",
+  "ui.model", "ui.rpc", "ui.project", "jobs.streaming", "plugins.lifecycle",
 }) do
   eq(bone.has_capability(name), true, name)
 end

@@ -5703,6 +5703,8 @@ async fn reconnect_retries_absent_socket_and_delivers_snapshots_before_buffered_
     let ask = approval(17, "shell", json!({"command": "true"}));
     let settings = json!({ "tui": { "prompt_max_height": 6 }, "marker": "snapshot" });
     let log = Log::default();
+    // Accepts, then yields the spawned server's handle (aborted below).
+    #[allow(clippy::async_yields_async)]
     let server = async {
         let conn = reconnect_accept(&listener).await;
         reconnect_server(
