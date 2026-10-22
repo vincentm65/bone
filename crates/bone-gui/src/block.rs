@@ -353,7 +353,8 @@ impl Block {
                     egui::pos2(left, y),
                     egui::vec2(boxed.max.x - self.pad.1 - left, g.size().y + 2.0 * p.pad),
                 );
-                painter.rect_filled(r, 6.0, bg);
+                // A band of text lines (no padding) runs edge to edge.
+                painter.rect_filled(r, if p.pad > 0.0 { 6.0 } else { 0.0 }, bg);
             }
             // A child placed by hand: the chat's rows keep their layout.
             let rect = egui::Rect::from_min_size(egui::pos2(left + p.pad, y + p.pad), g.size());

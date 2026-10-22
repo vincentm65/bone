@@ -58,18 +58,37 @@ function M.paragraphs(text, group)
       add({ spans = { { text = body, hl = "MdCodeBlock" } }, font = "mono", size = M.small_size,
         bg = "CodeBlock", pad = 8, gap = 6 })
     elseif k == "table" then
-      for i, row in ipairs(b.rows or {}) do
-        local cells = {}
+      -- Monospace, cells padded to their column's width: proportional text
+      -- cannot line up.
+      local widths = {}
+      for _, row in ipairs(b.rows or {}) do
         for j, cell in ipairs(row) do
-          if j > 1 then cells[#cells + 1] = { text = "   │   ", hl = "Dim" } end
-          local hl = (b.header and i == 1) and "MdTableHeader" or "MdTable"
-          for _, s in ipairs(M.spans(cell, hl)) do
-            s.bold = s.bold or (b.header and i == 1)
-            cells[#cells + 1] = s
-          end
+          local w = 0
+          for _, s in ipairs(cell) do w = w + bone.text.width(s.text) end
+          widths[j] = math.max(widths[j] or 0, w)
         end
-        add({ spans = cells, size = M.small_size, gap = i == 1 and 4 or 2 })
       end
+      local spans = {}
+      for i, row in ipairs(b.rows or {}) do
+        local head = b.header and i == 1
+        local hl = head and "MdTableHeader" or "MdTable"
+        if i > 1 then spans[#spans + 1] = { text = "\n", hl = hl } end
+        for j, cell in ipairs(row) do
+          if j > 1 then spans[#spans + 1] = { text = " │ ", hl = "Dim" } end
+          local w = 0
+          for _, s in ipairs(M.spans(cell, hl)) do
+            s.bold = s.bold or head
+            w = w + bone.text.width(s.text)
+            spans[#spans + 1] = s
+          end
+          local pad = (widths[j] or w) - w
+          local align = b.align and b.align[j] or "l"
+          local left = align == "r" and pad or (align == "c" and math.floor(pad / 2) or 0)
+          if left > 0 then table.insert(spans, #spans - #cell + 1, { text = (" "):rep(left), hl = hl }) end
+          if pad - left > 0 and j < #row then spans[#spans + 1] = { text = (" "):rep(pad - left), hl = hl } end
+        end
+      end
+      add({ spans = spans, font = "mono", size = M.small_size, gap = 6 })
     elseif k == "rule" then
       add({ spans = { { text = "———", hl = "Dim" } }, gap = 6 })
     elseif k == "blank" then

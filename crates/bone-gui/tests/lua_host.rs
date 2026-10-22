@@ -605,7 +605,7 @@ async fn the_desktop_library() {
              assert(t.block.paragraphs[1].spans[2].text == 'Ran', 'a card titled by what it did')
              local e = bone.ui.views.tool({ kind = 'tool', id = 'c2', name = 'edit_file',
                arguments = { path = 'x.rs', old_string = 'a', new_string = 'b' }, done = true }, { width = 60 })
-             assert(#e.block.paragraphs == 2, 'an edit shows its diff')
+             assert(#e.block.paragraphs == 3, 'an edit shows its diff, a band per row')
              assert(type(bone.ui.statusline({ width = 80, spinner = '*' })) == 'table', 'a status bar')
              bone.ui.sessions()",
         )

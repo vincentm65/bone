@@ -386,6 +386,18 @@ impl Gui {
                 }
             }
         }
+        // Symbols the text faces lack (box drawing, arrows, braille): every
+        // family ends with whichever of these the system has.
+        for (i, path) in system_symbols().iter().enumerate() {
+            let name = format!("symbols{i}");
+            if add(&name, path) {
+                for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+                    if let Some(f) = fonts.families.get_mut(&family) {
+                        f.push(name.clone());
+                    }
+                }
+            }
+        }
         if user && let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
             mono.insert(0, "user".into());
         }
@@ -424,6 +436,22 @@ impl Gui {
         self.lua.views_rev += 1;
         true
     }
+}
+
+/// Fonts with the symbol blocks the sans faces lack, where the usual ones are.
+fn system_symbols() -> Vec<String> {
+    [
+        "/usr/share/fonts/TTF/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/noto/NotoSansSymbols2-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+        "/System/Library/Fonts/Apple Symbols.ttf",
+        "C:\\Windows\\Fonts\\seguisym.ttf",
+    ]
+    .into_iter()
+    .filter(|p| std::path::Path::new(p).exists())
+    .map(str::to_owned)
+    .collect()
 }
 
 /// The system's sans-serif regular, bold and italic font files, where the
