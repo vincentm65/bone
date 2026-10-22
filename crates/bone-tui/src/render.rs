@@ -21,14 +21,17 @@ use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
-use unicode_width::UnicodeWidthChar;
 
 use crate::app::{App, CHAT_WIN, Level, PROMPT_WIN};
+#[cfg(test)]
 use crate::editor::TextBuffer;
 use crate::layout::{BufferId, Placed, Window};
 use crate::text::{sanitize, width};
-use crate::ui::{Border, Item, LayoutNode, PromptSpec, items_width, render_items};
+use crate::ui::{Border, Item, LayoutNode, render_items};
 use bone_ui::layout::{self, BUILTIN, kind};
+#[cfg(test)]
+use bone_ui::prompt::prompt_rows;
+use bone_ui::prompt::{Insets, prompt_layout};
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     // Consume due UI timers before Lua draws, so render callbacks can rearm
@@ -297,15 +300,7 @@ impl layout::Measure for Measurer<'_> {
         let text = app.prompt_of(buf);
         let ctx = app.prompt_ctx(width, buf, &text);
         let spec = app.prompt_spec(&ctx);
-        let insets = Insets::of(&spec, width);
-        let text = prompt_rows(&text, insets.text_width).0.len();
-        let max = spec
-            .max_rows
-            .unwrap_or(app.options.prompt_max_height)
-            .max(spec.min_rows);
-        (text.clamp(spec.min_rows, max).min(u16::MAX as usize) as u16)
-            .saturating_add(insets.top)
-            .saturating_add(insets.bottom)
+        bone_ui::prompt::natural_height(&spec, &text, width, app.options.prompt_max_height)
     }
 
     fn line_defined(&self, name: &str) -> bool {
@@ -375,43 +370,6 @@ fn draw_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect, buf: BufferId) {
             Paragraph::new(lines).alignment(ratatui::layout::Alignment::Center),
             centered,
         );
-    }
-}
-
-/// What the prompt box takes around its text, and the text's width.
-struct Insets {
-    /// Rows above the text: the top edge (border or `top` line), padding.
-    top: u16,
-    bottom: u16,
-    /// Columns beside it: border, padding.
-    left: u16,
-    right: u16,
-    /// Columns before each text row: the prefix (or continuation).
-    gutter: usize,
-    text_width: usize,
-}
-
-impl Insets {
-    fn of(spec: &PromptSpec, width_cols: u16) -> Self {
-        let b = spec.border.as_ref();
-        let side = |on: fn(&Border) -> bool| u16::from(b.is_some_and(on));
-        let top = u16::from(b.is_some_and(|b| b.top) || spec.has_top) + spec.pad_rows;
-        let bottom = u16::from(b.is_some_and(|b| b.bottom) || spec.has_bottom) + spec.pad_rows;
-        let left = side(|b| b.left) + spec.pad_cols;
-        let right = side(|b| b.right) + spec.pad_cols;
-        let gutter =
-            items_width(&spec.prefix).max(spec.continuation.as_deref().map_or(0, items_width));
-        let text_width = (width_cols as usize)
-            .saturating_sub((left + right) as usize + gutter)
-            .max(1);
-        Insets {
-            top,
-            bottom,
-            left,
-            right,
-            gutter,
-            text_width,
-        }
     }
 }
 
@@ -662,53 +620,6 @@ fn draw_edge(
         let l = render_items(items, mid.width as usize, theme);
         frame.render_widget(Paragraph::new(l), mid);
     }
-}
-
-/// Char-wrap prompt text (so cursor mapping stays exact). Returns the rows and
-/// the cursor's (row, column).
-pub fn prompt_rows(t: &TextBuffer, width: usize) -> (Vec<String>, (usize, usize)) {
-    let (rows, cursor) = prompt_layout(t, width);
-    (rows.into_iter().map(|r| r.0).collect(), cursor)
-}
-
-/// A wrapped prompt row: its text, and the line and column it starts at.
-type PromptRow = (String, usize, usize);
-
-/// `prompt_rows`, with where each row starts in the text.
-fn prompt_layout(t: &TextBuffer, width: usize) -> (Vec<PromptRow>, (usize, usize)) {
-    let width = width.max(1);
-    let (crow, ccol) = t.cursor();
-    let mut rows = Vec::new();
-    let mut cursor = (0, 0);
-    for (li, line) in t.lines().iter().enumerate() {
-        let mut row = String::new();
-        let mut start = 0;
-        let mut w = 0;
-        for (ci, c) in line.chars().enumerate() {
-            let cw = c.width().unwrap_or(0);
-            if w + cw > width {
-                rows.push((std::mem::take(&mut row), li, start));
-                start = ci;
-                w = 0;
-            }
-            if li == crow && ci == ccol {
-                cursor = (rows.len(), w);
-            }
-            row.push(c);
-            w += cw;
-        }
-        if li == crow && ccol >= line.chars().count() {
-            // Cursor after the last char; wrap if the row is full.
-            if w >= width {
-                rows.push((std::mem::take(&mut row), li, start));
-                start = line.chars().count();
-                w = 0;
-            }
-            cursor = (rows.len(), w);
-        }
-        rows.push((row, li, start));
-    }
-    (rows, cursor)
 }
 
 /// Chat `buf`'s statusline or divider row.

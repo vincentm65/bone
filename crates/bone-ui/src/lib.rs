@@ -14,6 +14,7 @@ pub mod lua;
 pub mod markdown;
 pub mod model;
 pub mod options;
+pub mod prompt;
 pub mod shellhl;
 pub mod style;
 pub mod term;
