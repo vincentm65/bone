@@ -827,11 +827,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 None => ret(lua, false),
             }
         }
-        "cmd" => {
-            let line: String = args(lua, a)?;
-            app.execute(&line);
-            ret(lua, ())
-        }
         "press" => {
             let name: String = args(lua, a)?;
             app.handle_key(keys::parse(&name).map_err(err)?);

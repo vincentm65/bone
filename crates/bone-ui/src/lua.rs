@@ -326,6 +326,7 @@ pub fn dispatch<H: Host>(
         "command_list" => command_list(h, lua),
         "command_find" => command_find(h, lua, a),
         "command_complete" => command_complete(h, lua, a),
+        "cmd" => cmd(h, lua, a),
         _ => return Err(a),
     })
 }
@@ -1633,4 +1634,112 @@ fn render_item<H: Host>(
         Some(lines) => lines.iter().map(|l| line(h, l, key.width)).collect(),
         None => bare(&data, key.width, key.prev.is_none()),
     }
+}
+
+// ---- running commands ------------------------------------------------------
+
+/// Send typed request `M`; `then` gets its typed result on the UI thread.
+fn request_typed<H: Host, M: bone_proto::Method>(
+    h: &mut H,
+    params: M::Params,
+    then: impl FnOnce(&mut H, Result<M::Result, String>) + Send + 'static,
+) {
+    let params = match serde_json::to_value(params) {
+        Ok(p) => p,
+        Err(e) => return then(h, Err(e.to_string())),
+    };
+    h.request_raw(M::METHOD.to_owned(), params, move |h, r| {
+        let r = r.and_then(|v| serde_json::from_value(v).map_err(|e| e.to_string()));
+        then(h, r)
+    });
+}
+
+fn cmd<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let line: String = args(lua, a)?;
+    execute(h, &line);
+    ret(lua, ())
+}
+
+/// Run a command line (with or without the leading `/`): `/model`, or a
+/// command Lua defined, with its arguments parsed by its spec.
+pub fn execute<H: Host>(h: &mut H, line: &str) {
+    let line = line.trim().trim_start_matches('/');
+    let (word, args) = line.split_once(char::is_whitespace).unwrap_or((line, ""));
+    let args = args.trim();
+    if word == "model" {
+        return model_command(h, args);
+    }
+    let Some((name, cmd)) = h
+        .user_commands()
+        .iter()
+        .find(|(canonical, command)| {
+            canonical.as_str() == word || command.aliases.iter().any(|alias| alias == word)
+        })
+        .map(|(name, command)| (name.clone(), command.clone()))
+    else {
+        return h.error(format!("Unknown command /{word}"));
+    };
+    let raw_args = args.to_owned();
+    let parsed = match crate::commands::structured_args(cmd.args.as_ref(), args) {
+        Ok(parsed) => parsed,
+        Err(e) => return h.error(e),
+    };
+    let argv = serde_json::Value::Array(
+        args.split_whitespace()
+            .map(|arg| serde_json::Value::String(arg.to_owned()))
+            .collect(),
+    );
+    h.call_callback(cmd.callback, &format!("/{name}"), |lua| {
+        let t = lua.create_table()?;
+        t.set("args", raw_args)?;
+        t.set("argv", to_lua(lua, &argv)?)?;
+        t.set("command", name.as_str())?;
+        if let Some(parsed) = parsed {
+            let value = to_lua(lua, &parsed)?;
+            t.set("arguments", value.clone())?;
+            // `parsed` is an explicit alias for plugins that prefer not to
+            // overload the word "arguments".
+            t.set("parsed", value)?;
+        }
+        Ok(Value::Table(t))
+    });
+}
+
+/// `/model`: show the current provider's model, or set it.
+fn model_command<H: Host>(h: &mut H, args: &str) {
+    use bone_proto::methods::{MaybeSession, ModelList, SettingSet, SettingsSet};
+    let c = h.chat_store();
+    let session_id = c.chats[c.current].session_id().map(str::to_owned);
+    let args = args.to_owned();
+    request_typed::<H, ModelList>(
+        h,
+        MaybeSession {
+            session_id: session_id.clone(),
+        },
+        move |h, r| {
+            let models = match r {
+                Ok(models) => models,
+                Err(e) => return h.error(format!("cannot list models: {e}")),
+            };
+            let Some(current) = models.into_iter().find(|model| model.current) else {
+                return h.error("no model provider is configured".into());
+            };
+            if args.is_empty() {
+                return h.info(format!("{} ({})", current.model, current.name));
+            }
+            let model = args.clone();
+            request_typed::<H, SettingsSet>(
+                h,
+                SettingSet {
+                    path: format!("providers.{}.model", current.name),
+                    value: serde_json::Value::String(args),
+                    session_id,
+                },
+                move |h, r| match r {
+                    Ok(_) => h.info(format!("model: {} ({})", model, current.name)),
+                    Err(e) => h.error(format!("cannot set model: {e}")),
+                },
+            );
+        },
+    );
 }
