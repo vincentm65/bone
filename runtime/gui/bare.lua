@@ -38,6 +38,7 @@ bone.keymap.set("ctrl+c", "interrupt", { context = "panel" })
 -- The standard commands (/tui switches back), without the / menu:
 -- enter on "/name args" runs the command instead of sending it.
 require("bone.commands")
+require("bone.gui")
 bone.ui.actions.submit = function()
   local line = bone.prompt.get():match("^%s*/(%S.*)$")
   if not line or not bone.cmd.find(line:match("^%S+")) then

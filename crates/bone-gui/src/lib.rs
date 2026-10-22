@@ -120,6 +120,9 @@ pub struct Gui {
     pub(crate) prompt: crate::prompt::PromptState,
     /// `/tui use` switched libraries from this one: reload next frame.
     pub(crate) library_prev: Option<String>,
+    /// `/gui use` switched the GUI's library from this one (none chosen
+    /// before: `None` inside).
+    pub(crate) gui_library_prev: Option<Option<String>>,
     /// The drafts of the chats not on screen.
     drafts: std::collections::HashMap<usize, (String, Vec<ImageAttachment>)>,
     pub status: Option<Status>,
@@ -185,6 +188,7 @@ impl Gui {
             processes: Default::default(),
             prompt: Default::default(),
             library_prev: None,
+            gui_library_prev: None,
             drafts: Default::default(),
             status: None,
             closed: false,

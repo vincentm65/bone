@@ -194,10 +194,11 @@ impl Gui {
         // Bare loads its own small file in place of the standard UI's.
         let library = dir.as_deref().and_then(|d| bone_lua::library(d, Side::Gui));
         let bare = library.as_deref() == Some("bare");
-        let defaults = if bare {
-            "gui/bare.lua"
-        } else {
-            "gui/defaults.lua"
+        // A built-in library is a defaults file of its own.
+        let defaults = match library.as_deref() {
+            Some("bare") => "gui/bare.lua",
+            Some("desktop") => "gui/desktop.lua",
+            _ => "gui/defaults.lua",
         };
         for rel in ["ui/api.lua", "gui/api.lua", defaults] {
             let r = self.with_api(|lua| {

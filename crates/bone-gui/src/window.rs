@@ -33,6 +33,38 @@ pub(crate) fn dispatch(
             args::<Table>(lua, a).and_then(|spec| window(gui, &spec).and_then(|()| ret(lua, ())))
         }
         "gui_window_info" => json(lua, &gui.window_info),
+        "gui_library_info" => {
+            let dir = gui.opts.config_dir.clone();
+            let active = (dir.as_deref())
+                .and_then(|d| bone_lua::library(d, bone_lua::Side::Gui))
+                .unwrap_or_else(|| "standard".into());
+            let custom: Vec<String> = (dir.as_deref())
+                .map(|d| {
+                    let has_gui = |n: &String| d.join("libraries").join(n).join("gui").is_dir();
+                    bone_lua::tui_libraries(d)
+                        .into_iter()
+                        .filter(has_gui)
+                        .collect()
+                })
+                .unwrap_or_default();
+            json(
+                lua,
+                &serde_json::json!({
+                    "active": active,
+                    "builtin": bone_lua::GUI_LIBRARIES,
+                    "custom": custom,
+                }),
+            )
+        }
+        "gui_library_use" => args::<String>(lua, a).and_then(|name| {
+            let dir =
+                (gui.opts.config_dir.clone()).ok_or_else(|| err("there is no config directory"))?;
+            let prev = bone_lua::gui_library(&dir);
+            bone_lua::set_gui_library(&dir, &name).map_err(err)?;
+            gui.gui_library_prev = Some(prev);
+            Host::changed(gui);
+            ret(lua, ())
+        }),
         "gui_menu" => {
             args::<Table>(lua, a).and_then(|spec| menu(gui, lua, &spec).and_then(|()| ret(lua, ())))
         }

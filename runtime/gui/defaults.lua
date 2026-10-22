@@ -5,6 +5,8 @@ require("bone.ui").setup()
 require("bone.commands")
 require("bone.menu")
 require("bone.keys")
+-- /gui: the GUI's own library (standard, bare, desktop).
+require("bone.gui")
 
 -- The font every line is drawn in: a monospace font file (empty for the
 -- built-in one), and its size in points.

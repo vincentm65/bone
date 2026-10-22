@@ -21,4 +21,17 @@ bone.gui = {
   menu = function(menus)
     api("gui_menu", menus or {})
   end,
+  --- The GUI's library, separate from the TUI's (/gui): info() →
+  --- { active, builtin = { names }, custom = { names with a gui/ folder } };
+  --- use(name) switches to `standard`, `bare`, a built-in one (`desktop`)
+  --- or a custom one and loads the GUI's Lua again, going back if it does
+  --- not load.
+  library = {
+    info = function()
+      return api("gui_library_info")
+    end,
+    use = function(name)
+      api("gui_library_use", name)
+    end,
+  },
 }

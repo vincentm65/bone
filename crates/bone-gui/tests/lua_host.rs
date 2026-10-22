@@ -549,3 +549,46 @@ async fn a_view_block_is_wrapped_rich_text() {
         "the GUI draws the block, not the lines"
     );
 }
+
+/// `/gui use desktop` loads the built-in desktop library on its own, apart
+/// from the TUI's choice: its views draw blocks, and it loads cleanly.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_desktop_library() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    g.gui.run_lua("t", "bone.cmd('gui use desktop')").unwrap();
+    g.frame();
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+    assert_eq!(
+        g.gui.eval("bone.gui.library.info().active").unwrap(),
+        "desktop"
+    );
+    assert!(
+        !config.path().join("library").exists(),
+        "the TUI's choice is untouched"
+    );
+    g.gui
+        .run_lua(
+            "t",
+            "bone.chat.add('note', { text = 'x' })
+             local v = bone.ui.views.user({ kind = 'user', text = 'hello there' }, { width = 60 })
+             assert(v.block and v.block.align == 'right', 'a bubble')
+             assert(v.lines and #v.lines > 0, 'lines for the TUI')
+             local a = bone.ui.views.assistant({ kind = 'assistant', text = '# Title\\n\\nSome **bold** text.\\n\\n- one\\n- two\\n\\n```\\ncode\\n```' }, { width = 60 })
+             assert(#a.block.paragraphs == 5, 'heading, text, two items, code: ' .. #a.block.paragraphs)",
+        )
+        .unwrap();
+    g.gui.run_lua("t", "bone.cmd('gui use standard')").unwrap();
+    g.frame();
+    assert_eq!(
+        g.gui.eval("bone.gui.library.info().active").unwrap(),
+        "standard"
+    );
+    assert_eq!(
+        g.gui
+            .eval("bone.ui.views.user({ kind = 'user', text = 'hi' }, { width = 40 }).block == nil")
+            .unwrap(),
+        "true"
+    );
+}

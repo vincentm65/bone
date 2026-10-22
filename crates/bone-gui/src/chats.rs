@@ -207,13 +207,21 @@ impl Gui {
     /// Load the UI with the library `/tui use` chose; a library that does
     /// not load is not kept as the choice.
     pub(crate) fn switch_library(&mut self) {
-        let Some(prev) = self.library_prev.take() else {
-            return;
-        };
-        if !self.reload_lua()
+        if let Some(prev) = self.library_prev.take()
+            && !self.reload_lua()
             && let Some(dir) = self.opts.config_dir.clone()
         {
             let _ = bone_lua::set_tui_library(&dir, &prev);
+        }
+        // `/gui use`: back to the one before (or to none chosen).
+        if let Some(prev) = self.gui_library_prev.take()
+            && !self.reload_lua()
+            && let Some(dir) = self.opts.config_dir.clone()
+        {
+            let _ = match prev {
+                Some(name) => bone_lua::set_gui_library(&dir, &name),
+                None => std::fs::remove_file(dir.join("gui-library")).map_err(|e| e.to_string()),
+            };
         }
     }
 
