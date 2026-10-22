@@ -20,6 +20,7 @@ mod native;
 mod preview;
 mod prompt;
 mod screen;
+mod system;
 mod view;
 mod window;
 

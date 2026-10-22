@@ -18,6 +18,8 @@ mlua.workspace = true
 serde_json.workspace = true
 unicode-width.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
+notify-rust = "4.18.2"
+rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 
 [dev-dependencies]
 bone-core.workspace = true

@@ -21,6 +21,20 @@ bone.gui = {
   menu = function(menus)
     api("gui_menu", menus or {})
   end,
+  --- A desktop notification (gui.notifications).
+  notify = function(title, body)
+    api("gui_notify", title, body)
+  end,
+  --- The system's file dialogs (gui.dialogs): opts = { title, dir,
+  --- filters = { { "Images", { "png", "jpg" } } }, multiple (open), name
+  --- (save) }; then(path) gets the path, a list with `multiple`, or nil
+  --- when cancelled.
+  open_file = function(opts, then_)
+    api("gui_open_file", opts or {}, then_)
+  end,
+  save_file = function(opts, then_)
+    api("gui_save_file", opts or {}, then_)
+  end,
   --- The GUI's library, separate from the TUI's (/gui): info() →
   --- { active, builtin = { names }, custom = { names with a gui/ folder } };
   --- use(name) switches to `standard`, `bare`, a built-in one (`desktop`)

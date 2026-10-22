@@ -325,6 +325,7 @@ fn dispatch(gui: &mut Gui, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
         Err(a) => (crate::images::dispatch(gui, lua, op, a.clone()))
             .or_else(|| crate::chats::dispatch(gui, lua, op, a.clone()))
             .or_else(|| crate::prompt::dispatch(gui, lua, op, a.clone()))
+            .or_else(|| crate::system::dispatch(gui, lua, op, a.clone()))
             .or_else(|| crate::window::dispatch(gui, lua, op, a))
             .unwrap_or_else(|| Err(err(format!("{op}: not available in the GUI yet")))),
     }
