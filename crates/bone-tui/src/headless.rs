@@ -70,6 +70,22 @@ impl Headless {
             .map_err(|e| e.to_string())
     }
 
+    /// A Lua expression's value, as a string.
+    pub fn eval(&mut self, expr: &str) -> Result<String, String> {
+        self.app
+            .with_api(|lua| {
+                lua.load(format!("return tostring({expr})"))
+                    .eval::<String>()
+            })
+            .map_err(|e| e.to_string())
+    }
+
+    /// Press and release the left button over cell `(x, y)`.
+    pub fn click(&mut self, x: u16, y: u16) {
+        self.app.mouse("down", "left", (x, y));
+        self.app.mouse("up", "left", (x, y));
+    }
+
     pub fn paste(&mut self, text: &str) {
         self.app.paste(text);
     }

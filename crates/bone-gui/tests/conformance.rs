@@ -22,6 +22,14 @@ struct Fixture {
 }
 
 impl UiDriver for Fixture {
+    fn eval(&mut self, expr: &str) -> Result<String, String> {
+        self.ui.gui.eval(expr)
+    }
+
+    fn click(&mut self, x: u16, y: u16) {
+        self.ui.click(x, y);
+    }
+
     fn run_lua(&mut self, name: &str, code: &str) -> Result<(), String> {
         self.ui.gui.run_lua(name, code)
     }

@@ -2,14 +2,19 @@
 //! (`#[path]`-included): each `tests/ui/*.lua` script runs in a headless
 //! frontend against a real core. A script is a chunk, or returns a list of
 //! steps (functions) run in order with the frontend's events handled
-//! between them. It fails by raising an error; `eq(got, want, what)` is the
-//! one helper.
+//! between them; a step that sets `__click = { x, y }` has that cell clicked
+//! before the next. A script fails by raising an error; `eq(got, want,
+//! what)` is the one helper.
 
 use std::path::{Path, PathBuf};
 
 /// What the runner needs from a frontend's headless driver.
 pub trait UiDriver {
     fn run_lua(&mut self, name: &str, code: &str) -> Result<(), String>;
+    /// A Lua expression's value, as a string.
+    fn eval(&mut self, expr: &str) -> Result<String, String>;
+    /// Press and release the left button over character cell `(x, y)`.
+    fn click(&mut self, x: u16, y: u16);
     async fn settle(&mut self);
 }
 
@@ -43,6 +48,14 @@ pub async fn run_script(ui: &mut impl UiDriver, path: &Path) -> Result<(), Strin
             &format!("__steps[{step}]()"),
         )?;
         ui.settle().await;
+        // A step that set `__click = { x, y }` gets that cell clicked.
+        let at = ui.eval("__click and (__click[1] .. ' ' .. __click[2]) or ''")?;
+        if let Some((x, y)) = at.split_once(' ') {
+            let cell = |v: &str| v.parse::<u16>().map_err(|e| e.to_string());
+            ui.click(cell(x)?, cell(y)?);
+            ui.run_lua("=click", "__click = nil")?;
+            ui.settle().await;
+        }
     }
     Ok(())
 }

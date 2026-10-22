@@ -234,6 +234,15 @@ impl Gui {
         bone_ui::lua::state::lend(self, &lua, dispatch, body)
     }
 
+    /// A Lua expression's value, as a string.
+    pub fn eval(&mut self, expr: &str) -> Result<String, String> {
+        self.with_api(|lua| {
+            lua.load(format!("return tostring({expr})"))
+                .eval::<String>()
+        })
+        .map_err(|e| e.to_string())
+    }
+
     /// Run a Lua chunk named `name`; its error, if any.
     pub fn run_lua(&mut self, name: &str, code: &str) -> Result<(), String> {
         self.with_api(|lua| lua.load(code).set_name(name).exec())
