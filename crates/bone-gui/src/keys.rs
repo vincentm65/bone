@@ -227,7 +227,11 @@ impl Gui {
                         _ => keep.push(ev),
                     }
                 }
-                egui::Event::Paste(t) if self.prompt_has_keys() => {
+                // To the prompt, or to Lua's paste event (a focused
+                // panel's, such as a terminal's).
+                egui::Event::Paste(t)
+                    if self.prompt_has_keys() || self.focused_panel().is_some() =>
+                {
                     let t = t.clone();
                     self.paste(&t);
                 }

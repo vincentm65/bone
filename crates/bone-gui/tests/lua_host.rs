@@ -613,3 +613,50 @@ async fn lua_drawn_rows_are_accessible() {
     assert!(all.contains("conf status words"), "the status line: {all}");
     assert!(all.contains("a chat row"), "the chat: {all}");
 }
+
+/// `/term` opens a terminal in a panel: the program's screen draws there,
+/// and the keys typed while it has the keyboard go to the program.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_terminal_in_a_panel() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    g.gui.run_lua("t", "bone.cmd('term cat')").unwrap();
+    g.frame();
+    assert_eq!(g.gui.eval("bone.ui.panel.focused()").unwrap(), "term1");
+    g.text("typed into it");
+    g.key(eframe::egui::Key::Enter, eframe::egui::Modifiers::NONE);
+    let screen = |g: &mut Headless| {
+        g.gui
+            .eval(
+                "(function() local s = require('bone.terminal').job('term1'):screen()
+                  local t = {} for _, l in ipairs(s and s.lines or {}) do
+                    for _, i in ipairs(l) do t[#t + 1] = i[1] end t[#t + 1] = '\\n' end
+                  return table.concat(t) end)()",
+            )
+            .unwrap()
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        g.settle(Duration::from_millis(30)).await;
+        let s = screen(&mut g);
+        // cat echoes the line back: the typed text shows twice.
+        if s.matches("typed into it").count() >= 2 {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the terminal shows: {s}"
+        );
+    }
+    assert_eq!(
+        g.gui.draft, "",
+        "the keys went to the terminal, not the prompt"
+    );
+    g.gui.run_lua("t", "bone.cmd('term close')").unwrap();
+    g.frame();
+    assert_eq!(
+        g.gui.eval("bone.ui.panel.get('term1') == nil").unwrap(),
+        "true"
+    );
+}
