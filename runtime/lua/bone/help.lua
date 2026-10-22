@@ -2,6 +2,8 @@
 -- Commands come from the live registry, including user and plugin commands.
 -- Enter prepares a command in the prompt, or opens documentation above this
 -- browser; closing the document returns to the same search and selection.
+-- The content (M.list, M.find) is every frontend's; M.open and M.topic
+-- draw it for the TUI.
 
 local M = {}
 
@@ -29,20 +31,26 @@ local function doc_sections()
   return out
 end
 
-local function open_section(secs, best)
+M.file = file
+M.sections = doc_sections
+
+--- Section `best` of `secs` with its subsections: text, title.
+function M.section(secs, best)
   local s, lines = secs[best], {}
   for i = best, #secs do
     if i > best and (secs[i].doc ~= s.doc or secs[i].level <= s.level) then break end
     for _, l in ipairs(secs[i].lines) do lines[#lines + 1] = l end
   end
-  return bone.ui.pager(table.concat(lines, "\n"), { title = file(s.doc) .. ": " .. s.title })
+  return table.concat(lines, "\n"), file(s.doc) .. ": " .. s.title
 end
 
-function M.topic(topic)
+--- The documentation about `topic` (a guide's name, or the section that
+--- best matches): text, title; nil when there is none.
+function M.find(topic)
   local t = topic:lower():match("^%s*(.-)%s*$")
   for _, d in ipairs(bone._docs) do
     if d.name:lower() == t then
-      return bone.ui.pager(d.text, { title = file(d) })
+      return d.text, file(d)
     end
   end
   local secs = doc_sections()
@@ -64,15 +72,23 @@ function M.topic(topic)
     end
   end
   if not best then
-    return bone.notify("no help for " .. topic .. " (try /help lua or /help usage)", "error")
+    return nil
   end
   -- The section with its subsections.
-  return open_section(secs, best)
+  return M.section(secs, best)
+end
+
+function M.topic(topic)
+  local text, title = M.find(topic)
+  if not text then
+    return bone.notify("no help for " .. topic .. " (try /help lua or /help usage)", "error")
+  end
+  return bone.ui.pager(text, { title = title })
 end
 
 -- The default shortcuts, grouped by what you are doing. Keep these in sync
 -- with tui/defaults.lua; user mappings can replace the defaults.
-local KEYS = {
+M.KEYS = {
   { "enter", "send a message; during a turn, queue it", "Messaging" },
   { "ctrl+v / super+v / alt+v", "paste clipboard screenshot or text (Command+V on macOS if forwarded; alt+v on Windows; /paste if intercepted)", "Messaging" },
   { "alt+enter / shift+enter / ctrl+j", "insert a new line", "Messaging" },
@@ -109,9 +125,12 @@ local KEYS = {
   { "esc in a panel", "return focus to the prompt", "Panels" },
 }
 
-function M.open()
-  local st = { tab = 1, query = "", sel = 1, rows = 1 }
-  local tabs = { "Commands", "Keys", "Docs" }
+--- The tabs of the browser.
+M.TABS = { "Commands", "Keys", "Docs" }
+
+--- The entries of tab `tab` (1 commands, 2 keys, 3 docs) that match every
+--- word of `query`: { label, desc, meta, command | section | doc | topic }.
+function M.list(tab, query)
   local docs = {}
   local sections = doc_sections()
   for _, d in ipairs(bone._docs) do
@@ -123,7 +142,7 @@ function M.open()
     docs[#docs + 1] = { label = s.title:gsub("`", ""), desc = "Read this section of " .. file(s.doc), meta = file(s.doc), section = i }
   end
   local keys, guide = {}, {}
-  for _, k in ipairs(KEYS) do
+  for _, k in ipairs(M.KEYS) do
     keys[#keys + 1] = { label = k[1], desc = k[2], meta = k[3] .. " · default shortcut", topic = "keys" }
   end
   -- Mappings given a desc (plugins' and your own).
@@ -135,31 +154,57 @@ function M.open()
     keys[#keys + 1] = { label = k.keys, desc = k.desc, meta = (k.plugin or "your config") .. ctx, doc = guide[k.plugin or ""], topic = "keys" }
   end
 
-  local function matches()
-    local all = {}
-    if st.tab == 1 then
+  local all = {}
+  do
+    if tab == 1 then
       for _, c in ipairs(bone.cmd.list()) do
         local aliases = #c.aliases > 0 and ("aliases: " .. table.concat(c.aliases, ", ")) or "Slash command"
         all[#all + 1] = { label = "/" .. c.name, desc = c.desc or "", meta = aliases, command = c.name }
       end
-    elseif st.tab == 2 then
+    elseif tab == 2 then
       all = keys
     else
       all = docs
     end
-    local out = {}
-    for _, it in ipairs(all) do
-      local text = (it.label .. " " .. it.desc .. " " .. it.meta):lower()
-      local match = true
-      for word in st.query:lower():gmatch("%S+") do
-        if not text:find(word, 1, true) then
-          match = false
-          break
-        end
+  end
+  local out = {}
+  for _, it in ipairs(all) do
+    local text = (it.label .. " " .. it.desc .. " " .. it.meta):lower()
+    local match = true
+    for word in (query or ""):lower():gmatch("%S+") do
+      if not text:find(word, 1, true) then
+        match = false
+        break
       end
-      if match then out[#out + 1] = it end
     end
-    return out
+    if match then out[#out + 1] = it end
+  end
+  return out
+end
+
+--- Open entry `it` of M.list: a command goes in the prompt; documentation
+--- goes to read(text, title). Returns whether the browser should close.
+function M.choose(it, read)
+  if it and it.command then
+    bone.prompt.set("/" .. it.command .. " ")
+    return true
+  elseif it and it.section then
+    -- Use this exact section, rather than searching a duplicate heading.
+    read(M.section(doc_sections(), it.section))
+  elseif it and it.doc then
+    read(it.doc.text, file(it.doc))
+  elseif it then
+    local text, title = M.find(it.topic)
+    if text then read(text, title) end
+  end
+  return false
+end
+
+function M.open()
+  local st = { tab = 1, query = "", sel = 1, rows = 1 }
+  local tabs = M.TABS
+  local function matches()
+    return M.list(st.tab, st.query)
   end
 
   -- Clip spans before boxing so long descriptions and narrow terminals
@@ -256,18 +301,10 @@ function M.open()
     elseif k == "end" then
       st.sel = math.max(1, #list)
     elseif k == "enter" then
-      local it = list[st.sel]
-      if it and it.command then
-        bone.ui.close(id)
-        bone.prompt.set("/" .. it.command .. " ")
-      elseif it and it.section then
-        -- Use this exact section, rather than searching a duplicate heading.
-        open_section(sections, it.section)
-      elseif it and it.doc then
-        bone.ui.pager(it.doc.text, { title = file(it.doc) })
-      elseif it then
-        M.topic(it.topic)
-      end
+      local close = M.choose(list[st.sel], function(text, title)
+        bone.ui.pager(text, { title = title })
+      end)
+      if close then bone.ui.close(id) end
     elseif bone.text.edit(st.query, k) then
       st.query, st.sel = bone.text.edit(st.query, k), 1
     else
