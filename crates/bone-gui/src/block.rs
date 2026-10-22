@@ -14,7 +14,8 @@
 //!   lines = { … } }  -- for a frontend that does not draw blocks
 //! ```
 //!
-//! A paragraph also takes `font`, `size`, `fg` (its spans' default group),
+//! `fill = true` makes a box span the width allowed even when its text is
+//! shorter (a card, a field). A paragraph also takes `font`, `size`, `fg` (its spans' default group),
 //! `gap` (points before it), `indent`, and `bg` with `pad` (a code block's
 //! box). A span is `{ text, group }` or `{ text =, hl =, bold, italic,
 //! code, size }`. Sizes are points.
@@ -33,6 +34,8 @@ pub struct Block {
     paras: Vec<Para>,
     right: bool,
     max_width: f32,
+    /// Span the width allowed even with a background (a card, a field).
+    fill: bool,
     bg: Option<Color32>,
     border: Option<Color32>,
     radius: f32,
@@ -142,6 +145,7 @@ impl Gui {
             paras,
             right: spec["align"] == "right",
             max_width: num(&spec["max_width"], 1.0).clamp(0.1, 1.0),
+            fill: spec["fill"] == true,
             bg: group("bg", true),
             border: group("border", false),
             radius: num(&spec["radius"], 0.0),
@@ -271,7 +275,7 @@ impl Block {
         }
         // A box with a background spans the paragraphs' widest line; text
         // with none keeps the whole width (a code block inside still fits).
-        let box_w = if self.bg.is_some() || self.border.is_some() {
+        let box_w = if (self.bg.is_some() || self.border.is_some()) && !self.fill {
             w + 2.0 * self.pad.1
         } else {
             width * self.max_width
