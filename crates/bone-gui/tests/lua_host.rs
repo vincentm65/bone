@@ -77,6 +77,25 @@ async fn the_bare_library_draws_plain_text() {
         .unwrap();
     g.frame();
     assert_eq!(g.gui.transcript(), "plain words");
+
+    // The basic keys and the slash commands: enter runs a command, and
+    // sends anything else.
+    use eframe::egui::{Key, Modifiers};
+    g.gui
+        .run_lua("t", "bone.cmd.create('ping', function() pinged = true end)")
+        .unwrap();
+    g.text("/ping");
+    g.frame();
+    g.key(Key::Enter, Modifiers::NONE);
+    g.frame();
+    assert_eq!(g.gui.eval("pinged").unwrap(), "true");
+    assert_eq!(g.gui.draft, "");
+    g.text("hello");
+    g.frame();
+    g.key(Key::Enter, Modifiers::NONE);
+    g.frame();
+    assert_eq!(g.gui.draft, "");
+    assert!(g.gui.running(), "submitted");
 }
 
 #[tokio::test(flavor = "multi_thread")]
