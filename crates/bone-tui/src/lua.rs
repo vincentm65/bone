@@ -538,10 +538,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             app.remove_image(index).map_err(err)?;
             ret(lua, ())
         }
-        "health" => ret(
-            lua,
-            to_lua(lua, &serde_json::Value::Array(app.tui_health()))?,
-        ),
         "open_session" => {
             // No session: a new chat (for a window to show).
             let (id, show): (Option<String>, Option<bool>) = args(lua, a)?;
@@ -1033,6 +1029,10 @@ impl bone_ui::lua::Host for App {
 
     fn history_add(&mut self, text: &str) {
         App::history_add(self, text);
+    }
+
+    fn frontend_health(&self) -> Vec<serde_json::Value> {
+        self.tui_health()
     }
 
     fn refresh_ui(&mut self) {

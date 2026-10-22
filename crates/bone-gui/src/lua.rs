@@ -504,6 +504,55 @@ impl Host for Gui {
         serde_json::json!({ "follow": true })
     }
 
+    /// The GUI's checks: what draws it, its connection, Lua, plugins, and
+    /// its font.
+    fn frontend_health(&self) -> Vec<Json> {
+        let item = |name: &str, status: &str, message: String| serde_json::json!({ "name": name, "status": status, "message": message });
+        let mut out = Vec::new();
+        out.push(match &self.renderer {
+            Some(r) if r.contains("(Cpu)") || r.to_lowercase().contains("llvmpipe") => item(
+                "renderer",
+                "warn",
+                format!("{r}: drawing in software, no GPU"),
+            ),
+            Some(r) => item("renderer", "ok", r.clone()),
+            None => item("renderer", "ok", "headless (no window)".into()),
+        });
+        out.push(match (&self.opts.reconnect, self.closed) {
+            (_, true) => item(
+                "connection",
+                "error",
+                "the server closed the connection".into(),
+            ),
+            (Some(path), _) => item(
+                "connection",
+                "ok",
+                format!("{} (reconnects if it goes away)", path.display()),
+            ),
+            (None, _) => item("connection", "ok", "the core runs in this process".into()),
+        });
+        out.push(match self.lua.lua_errors.last() {
+            Some(e) => item("lua", "warn", format!("last error: {e}")),
+            None => item("lua", "ok", "no errors".into()),
+        });
+        let failed: Vec<String> = (self.lua.plugins.iter())
+            .filter_map(|p| p.error.as_ref().map(|e| format!("{}: {e}", p.name)))
+            .collect();
+        let loaded = self.lua.plugins.iter().filter(|p| p.loaded).count();
+        out.push(if failed.is_empty() {
+            item("plugins", "ok", format!("{loaded} loaded"))
+        } else {
+            item("plugins", "warn", failed.join("\n"))
+        });
+        let font = match self.lua.fonts.as_ref() {
+            Some((file, size)) if !file.is_empty() => format!("{file}, {size} pt"),
+            Some((_, size)) => format!("built-in monospace, {size} pt"),
+            None => "not applied yet".into(),
+        };
+        out.push(item("font", "ok", font));
+        out
+    }
+
     fn refresh_ui(&mut self) {
         self.lua.views_rev += 1;
         self.lua.ui_broken.clear();

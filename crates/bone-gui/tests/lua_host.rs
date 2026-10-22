@@ -269,3 +269,21 @@ async fn the_font_size_option_sizes_the_cells() {
         "a missing font is reported"
     );
 }
+
+/// /health opens its page with the GUI's own checks.
+#[tokio::test(flavor = "multi_thread")]
+async fn health_shows_the_guis_checks() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    let names = g
+        .gui
+        .eval("(function() local n = {} for _, it in ipairs(bone.api.health()) do n[#n + 1] = it.name end return table.concat(n, ',') end)()")
+        .unwrap();
+    assert_eq!(names, "renderer,connection,lua,plugins,font");
+    g.gui.run_lua("t", "bone.cmd('/health')").unwrap();
+    g.settle(std::time::Duration::from_millis(100)).await;
+    let open = !g.gui.lua.popups.is_empty() || !g.gui.lua.panels.is_empty();
+    assert!(open, "a page opened");
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}
