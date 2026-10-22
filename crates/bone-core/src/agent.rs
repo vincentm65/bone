@@ -36,10 +36,14 @@ const TOOL_CANCEL_GRACE: Duration = Duration::from_millis(500);
 /// Grace for cleanup hooks on cancelled turns only.
 const TURN_END_CANCEL_GRACE: Duration = Duration::from_secs(1);
 
-const DEFAULT_SYSTEM_PROMPT: &str = "You are bone, a coding assistant. Keep changes minimal and \
-answers concise. Use read_file to examine a file instead of cat, sed, or head.\n\n\
-Read docs/customizing.md in the bone config directory (default ~/.bone; TUI: \
-docs/customizing/customizing-tui.md) only when asked how to configure or extend bone.";
+const DEFAULT_SYSTEM_PROMPT: &str = "You are bone, a coding assistant working in the \
+user's terminal. Use the tools to inspect files, make changes and run commands. Search with rg \
+before reading large files, then use read_file offset/limit for focused sections. Read files before \
+editing them; group independent hunks in one edit_file call. Keep changes minimal and focused, \
+and keep answers concise.\n\n\
+If the user wants to change or customize bone itself, first read the \
+customization docs in the bone config directory (default ~/.bone) under \
+docs/customizing.md.";
 
 const CANCELLED: &str = "Cancelled by the user before this tool call ran.";
 
