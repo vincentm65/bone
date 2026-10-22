@@ -15,6 +15,8 @@ pub struct Headless {
     size: egui::Vec2,
     /// Input for the next frame, as the window would send it.
     events: Vec<egui::Event>,
+    /// The display's physical pixels per logical point.
+    scale: f32,
 }
 
 impl Headless {
@@ -29,16 +31,22 @@ impl Headless {
             ctx: egui::Context::default(),
             size: egui::vec2(width, height),
             events: Vec::new(),
+            scale: 1.0,
         })
     }
 
     /// Lay out one frame, as the window would draw it.
     pub fn frame(&mut self) {
-        let input = egui::RawInput {
+        let mut input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, self.size)),
             events: std::mem::take(&mut self.events),
             ..Default::default()
         };
+        input
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .native_pixels_per_point = Some(self.scale);
         let gui = &mut self.gui;
         let mut out = self.ctx.run_ui(input, |ui| gui.ui(ui));
         // No renderer takes the font atlas and images.
@@ -70,6 +78,16 @@ impl Headless {
             }
             self.settle(Duration::from_millis(20)).await;
         }
+    }
+
+    /// The window's size in logical points, from the next frame.
+    pub fn resize(&mut self, width: f32, height: f32) {
+        self.size = egui::vec2(width, height);
+    }
+
+    /// The display's scale (2.0 for a HiDPI screen), from the next frame.
+    pub fn set_scale(&mut self, scale: f32) {
+        self.scale = scale;
     }
 
     /// Press `key` with `modifiers` in the next frame.

@@ -63,6 +63,11 @@ impl Gui {
         let cols = (area.width() / cells.col).floor().max(1.0) as u16;
         let rows = (area.height() / cells.row).floor().max(1.0) as u16;
         self.lua.screen_cols = cols;
+        if self.lua.screen_size != (cols, rows) {
+            self.lua.screen_size = (cols, rows);
+            let size = serde_json::json!({ "width": cols, "height": rows });
+            self.fire_event("resize", size);
+        }
         self.lua.spinner = lua_ui::read_spinner(self);
         // The Normal group's background (if any) fills the screen.
         if let Some(bg) = self.lua.theme.hl("Normal").bg.and_then(color) {

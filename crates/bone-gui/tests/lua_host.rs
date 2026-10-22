@@ -324,3 +324,45 @@ async fn lua_sets_the_window_and_a_menu_bar() {
     assert!(g.gui.lua.menus.is_empty());
     g.frame();
 }
+
+/// A narrower window has fewer columns, re-wraps the chat and fires
+/// `resize`; a HiDPI display keeps the layout, which is in logical units.
+#[tokio::test(flavor = "multi_thread")]
+async fn resizing_and_hidpi() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::write(
+        config.path().join("gui.lua"),
+        "bone.on('resize', function(ev) resized = ev.width .. 'x' .. ev.height end)",
+    )
+    .unwrap();
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    g.frame();
+    let long = "word ".repeat(120);
+    g.gui
+        .run_lua(
+            "t",
+            &format!("bone.chat.add('note', {{ text = '{long}' }})"),
+        )
+        .unwrap();
+    g.frame();
+    let cols = g.gui.lua.screen_cols;
+    let rows = g.gui.chats[0].row_count();
+
+    g.resize(500.0, 700.0);
+    g.frame();
+    let narrow = g.gui.lua.screen_cols;
+    assert!(narrow < cols * 6 / 10, "{cols} -> {narrow} columns");
+    assert!(g.gui.chats[0].row_count() > rows, "the chat re-wrapped");
+    let resized = g.gui.eval("resized").unwrap();
+    assert_eq!(resized, format!("{narrow}x{}", g.gui.lua.screen_size.1));
+
+    g.set_scale(2.0);
+    g.frame();
+    g.frame();
+    assert_eq!(
+        g.gui.lua.screen_cols, narrow,
+        "the same columns on a 2x display"
+    );
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}

@@ -61,8 +61,10 @@ pub struct LuaSide {
     pub ui_expiry: Option<Instant>,
     pub lua_item_seq: u64,
     pub spinner: bone_ui::model::Spinner,
-    /// The window's width in columns, as last drawn.
+    /// The window's width in columns, as last drawn, and its size in
+    /// columns and rows as `resize` last reported it.
     pub screen_cols: u16,
+    pub screen_size: (u16, u16),
     /// Where the layout put things last frame.
     pub geometry: bone_ui::lua::Geometry,
     /// Lua windows (`bone.ui.popup`).
