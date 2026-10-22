@@ -15,6 +15,7 @@ mod images;
 mod keys;
 mod lua;
 mod native;
+mod preview;
 mod screen;
 mod view;
 mod window;
@@ -115,6 +116,8 @@ pub struct Gui {
     pub lua: crate::lua::LuaSide,
     /// Notices edits to the Lua config, to reload it.
     watcher: Option<crate::lua::Watcher>,
+    /// Images read to be shown, and the one open in a window.
+    previews: crate::preview::Previews,
 }
 
 impl Gui {
@@ -162,6 +165,7 @@ impl Gui {
             answer_draft: String::new(),
             lua: Default::default(),
             watcher: None,
+            previews: Default::default(),
         };
         gui.forward(events);
         gui.refresh_sessions();

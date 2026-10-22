@@ -33,6 +33,7 @@ impl Gui {
             .frame(egui::Frame::NONE)
             .show(ui, |ui| self.screen_ui(ui));
         self.question_ui(ui.ctx());
+        self.preview_ui(ui.ctx());
     }
 
     /// The oldest open question, as a modal.
@@ -106,6 +107,14 @@ pub(crate) fn row_job(ui: &egui::Ui, row: &Row, font: &FontId, col: f32) -> Layo
             }
         }
     });
+    // An empty row is still a line tall.
+    if job.text.is_empty() {
+        job.append(
+            " ",
+            0.0,
+            TextFormat::simple(font.clone(), Color32::TRANSPARENT),
+        );
+    }
     job
 }
 

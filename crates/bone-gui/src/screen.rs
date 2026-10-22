@@ -32,9 +32,12 @@ pub(crate) struct Cells {
 impl Cells {
     pub fn of(ui: &egui::Ui) -> Self {
         let font = FontId::monospace(TextStyle::Monospace.resolve(ui.style()).size);
-        let (col, row) = ui
-            .ctx()
-            .fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
+        let (col, row) = ui.ctx().fonts_mut(|f| {
+            // A row is as tall as a line of text is laid out, so rows
+            // stacked one after another stay on the cell grid.
+            let line = f.layout_no_wrap("M".into(), font.clone(), egui::Color32::WHITE);
+            (f.glyph_width(&font, 'M'), line.size().y)
+        });
         Cells {
             origin: ui.max_rect().min,
             col: col.max(1.0),
@@ -281,7 +284,17 @@ impl Gui {
     fn lines_at(&self, ui: &egui::Ui, cells: &Cells, r: layout::Rect, lines: &[Vec<Item>]) {
         for (i, items) in lines.iter().take(r.height as usize).enumerate() {
             let at = layout::Rect::new(r.x, r.y + i as u16, r.width, 1);
-            paint_row(ui, cells, at, &self.styled(items, r.width as usize));
+            let row = self.styled(items, r.width as usize);
+            paint_row(ui, cells, at, &row);
+            // A row naming an image in the prompt shows it.
+            if !self.images.is_empty() {
+                let text: String = row.iter().map(|(t, _)| t.as_str()).collect();
+                if self.images.iter().any(|i| text.contains(&i.name)) {
+                    let id = ui.id().with(("image row", at.x, at.y));
+                    let resp = ui.interact(cells.rect(at), id, egui::Sense::click());
+                    self.image_row(&resp, &text, &self.images);
+                }
+            }
         }
     }
 
@@ -315,7 +328,7 @@ impl Gui {
             follow,
         };
         let (rows, top) = self.layout_chat(buf, r.width as usize, view);
-        let chat = &self.chats[buf];
+        let (gui, chat) = (&*self, &self.chats[buf]);
         let (font, col) = (cells.font.clone(), cells.col);
         let out = ui
             .scope_builder(UiBuilder::new().max_rect(cells.rect(r)), |ui| {
@@ -329,8 +342,12 @@ impl Gui {
                     area = area.vertical_scroll_offset(top as f32 * cells.row);
                 }
                 area.show_rows(ui, cells.row, rows, |ui, range| {
-                    for row in chat.rows().skip(range.start).take(range.len()) {
-                        ui.label(row_job(ui, row, &font, col));
+                    let rows = chat.rows().skip(range.start).take(range.len());
+                    for (n, row) in rows.enumerate() {
+                        let resp = ui.label(row_job(ui, row, &font, col));
+                        if resp.hovered() || resp.clicked() {
+                            gui.chat_image_row(chat, range.start + n, row, &resp);
+                        }
                     }
                 })
             })

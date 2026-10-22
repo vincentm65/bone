@@ -409,6 +409,22 @@ async fn images_in_the_prompt_and_the_clipboard() {
     };
     g.wait_for(Duration::from_secs(5), sent).await.unwrap();
 
+    // Its row in the chat opens it when clicked.
+    let id = g.gui.chats[0].item_data(g.gui.chats[0].items()[0], 1, true)["images"][0]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let row = (g.gui.transcript().lines())
+        .position(|l| l.contains(&format!("[Image: {left}")))
+        .expect("the image's row");
+    let chat = (g.gui.lua.geometry.leaves.iter())
+        .find(|(n, _)| n == "chat")
+        .map(|(_, r)| *r)
+        .unwrap();
+    g.click(chat.x + 4, chat.y + (row - g.gui.lua.chat_top) as u16);
+    let shown = |gui: &bone_gui::Gui| gui.image_shown(&id);
+    g.wait_for(Duration::from_secs(5), shown).await.unwrap();
+
     // Not an image: an error, and nothing attached.
     std::fs::write(work.path().join("c.png"), "not a png").unwrap();
     g.gui.run_lua("t", "bone.prompt.attach('c.png')").unwrap();

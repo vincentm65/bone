@@ -86,6 +86,21 @@ pub fn from_rgba(width: usize, height: usize, bytes: &[u8]) -> Result<PngImage, 
     encode(image::DynamicImage::ImageRgba8(img))
 }
 
+/// A normalized PNG as RGBA pixels, scaled down to fit `max_side` (for a
+/// frontend to draw): width, height, pixels.
+pub fn to_rgba(png: &[u8], max_side: u32) -> Result<(u32, u32, Vec<u8>), String> {
+    let (width, height) = png_dimensions(png)?;
+    let img = image::load_from_memory_with_format(png, image::ImageFormat::Png)
+        .map_err(|e| format!("cannot decode image: {e}"))?;
+    let img = if width.max(height) > max_side {
+        img.thumbnail(max_side, max_side)
+    } else {
+        img
+    };
+    let rgba = img.into_rgba8();
+    Ok((rgba.width(), rgba.height(), rgba.into_raw()))
+}
+
 fn encode(img: image::DynamicImage) -> Result<PngImage, String> {
     let width = img.width();
     let height = img.height();
