@@ -582,12 +582,17 @@ Lua-drawn rows are left for Phase 6.
 - **Docs:** `docs/architecture.md` describes `bone-ui`, `bone-gui` and the
   `Host` design.
 
+Since then: the chat renders the visible items first and the rest within a
+25 ms frame budget (first frame 27 ms for 4000 items); a lost GPU device
+reopens the window with the same session; wide, fallback and combining
+characters keep the cell grid; the prompt takes images (`/attach`, dropped
+files, alt+v or `/paste`; egui keeps ctrl+v for text), and a row naming an
+image previews it on hover and opens it on click.
+
 Left:
-- lazy (visible-only) Lua rendering for long sessions;
-- recovering from device loss when eframe exposes it;
-- tests for text shaping, images and clipboard in the GUI;
-- the `gui.terminal` widget, images, and an AccessKit pass over Lua-drawn
-  rows;
+- move `bone.job` and core process tracking (`bone.processes.screen`, the
+  tray) from `bone-tui` to `bone-ui`, then `gui.terminal` on top of them;
+- an AccessKit pass over Lua-drawn rows;
 - native notifications and file dialogs (needs the dependency decision
   above).
 
