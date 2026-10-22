@@ -557,6 +557,40 @@ Lua-drawn rows are left for Phase 6.
 - Linux, macOS, and Windows packaging.
 - Architecture, Lua, plugin, and protocol documentation.
 
+**Status:** mostly done.
+- **Restart:** `bone-gui/tests/multi_client.rs` runs a TUI and a GUI on one
+  server, and restarts the server under a GUI that reconnects and gets its
+  session back. Lua reload and plugin unload were covered in Phases 3 and 5,
+  in both frontends.
+- **Resize and HiDPI:** the GUI fires `resize` when its cell grid changes.
+  `lua_host.rs` checks that a resized window and a 2x scale give the right
+  columns and rows.
+- **Renderer:** wgpu is tried first, then Glow, and the adapter is reported
+  in `/health` with a warning for a software adapter. egui-wgpu already
+  reconfigures an outdated surface and recreates a lost one. eframe 0.36
+  does not expose device loss, so losing the device is fatal and the next
+  launch picks a renderer again.
+- **Performance:** measured headless with the standard Lua views on 4000
+  items: the first frame takes 385 ms, idle frames 0.48 ms, and frames while
+  streaming 1.37 ms. The first frame is slow because every item renders
+  through Lua once. The TUI does the same, so rendering only the visible
+  items would help both frontends.
+- **Packaging:** `scripts/dist.sh --gui` builds
+  `dist/bone-gui-<version>-<target>.tar.gz`, and `.github/workflows/gui-build.yml`
+  builds and tests the GUI binary on Linux, macOS and Windows as artifacts.
+  The npm packages keep the TUI-only binary.
+- **Docs:** `docs/architecture.md` describes `bone-ui`, `bone-gui` and the
+  `Host` design.
+
+Left:
+- lazy (visible-only) Lua rendering for long sessions;
+- recovering from device loss when eframe exposes it;
+- tests for text shaping, images and clipboard in the GUI;
+- the `gui.terminal` widget, images, and an AccessKit pass over Lua-drawn
+  rows;
+- native notifications and file dialogs (needs the dependency decision
+  above).
+
 ## Explicit non-goals for the first milestone
 
 - Rewriting `bone-tui`; extraction is moves only.
