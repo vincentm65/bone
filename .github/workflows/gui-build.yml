@@ -1,0 +1,54 @@
+name: gui-build
+
+# The bone binary with the desktop GUI (`--features gui`, opened with
+# `bone --gui`), for every platform. It is built and uploaded as an artifact,
+# not published: the npm packages ship the TUI-only binary.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: bone
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary: bone
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            binary: bone
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary: bone
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: bone.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+      - name: window system headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libgl1-mesa-dev
+      - name: build
+        shell: bash
+        run: cargo build --release --locked -p bone --features gui --target ${{ matrix.target }}
+      - name: test the GUI headless
+        shell: bash
+        run: cargo test --locked -p bone-gui --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bone-gui-${{ matrix.target }}
+          path: target/${{ matrix.target }}/release/${{ matrix.binary }}

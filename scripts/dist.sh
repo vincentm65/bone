@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 # Build a release tarball: dist/bone-<version>-<target>.tar.gz containing the
-# binary (with its Lua runtime built in), docs.
+# binary (with its Lua runtime built in), docs. With --gui, the binary also has
+# the desktop GUI (`bone --gui`), as dist/bone-gui-<version>-<target>.tar.gz.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
-cargo build --release --locked -p bone
+features=()
+prefix=bone
+if [ "${1:-}" = "--gui" ]; then
+  features=(--features gui)
+  prefix=bone-gui
+fi
+cargo build --release --locked -p bone "${features[@]}"
 version="$(target/release/bone --version | awk '{print $2}')"
 target="$(rustc -vV | sed -n 's/^host: //p')"
-name="bone-$version-$target"
+name="$prefix-$version-$target"
 stage="dist/$name"
 rm -rf "$stage"
 mkdir -p "$stage"
