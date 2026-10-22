@@ -438,6 +438,36 @@ Not fixed: the TUI is unchanged in this work.
 GUI-specific changes to `runtime/lua/bone/ui/`, and the conformance suite
 passes in both frontends for everything classified shared so far.
 
+**Status:** done. The shared dispatcher is `bone_ui::lua` over a `Host`
+trait (`docs/plans/gui-lua-host.md`; it replaced the `UiState` split):
+options, events, commands (and running them, `/model` included), keymaps
+(set/del/context/list/current), highlights and colorschemes, chat data,
+core requests and background work, and the small frontend services
+(session, prompt text, processes, chat view, refresh). The Lua state setup,
+the API lending, and drawing chat items through Lua views (`render_chat`,
+`guarded`, `layout_items`) are shared too. `runtime/tui/api.lua` became
+`runtime/ui/api.lua`, loaded by both; `runtime/tui/api.lua` and
+`runtime/gui/api.lua` are each side's own (empty for now).
+
+The GUI loads `ui/api.lua`, `gui/api.lua`, `gui/defaults.lua` (the same
+`require("bone.ui").setup()`) or `gui/bare.lua`, plugins' and the user's
+`ui.lua` and `gui.lua`, fires `ready`, draws its transcript through the
+standard views, and reloads with the TUI's rule. Every `tests/ui/*.lua`
+script passes in both frontends through one runner (`tests/ui/runner.rs`);
+`ui.*` capabilities name the shared groups (both frontends; the TUI keeps
+its `tui.*` names), classified in `docs/lua.md`.
+
+The one change under `runtime/lua/bone/ui/` was frontend-neutral: the
+`tool_detail` option the views read moved from `tui/defaults.lua` into
+`views.lua`.
+
+Still per frontend, and not yet in the GUI (each raises "`<op>`: not
+available in the GUI yet" there): popups and windows, panels, regions,
+layout, the statusline and prompt drawing, prompt editing, jobs, plugin
+lifecycle and projects, libraries, key focus and raw interception, and
+cell geometry. Those are Phase 4 (layout, panels, popups, input) and
+Phase 5 (plugins, projects).
+
 ### Phase 4: layout, panels, popups, and native input
 
 - Shared layout tree and solver over character units in `bone-ui`; the GUI
