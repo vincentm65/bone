@@ -1,0 +1,3 @@
+-- The GUI's own Lua API, loaded after runtime/ui/api.lua (the API every
+-- frontend shares) and before runtime/gui/defaults.lua and ~/.bone/gui.lua.
+-- Empty for now: what the GUI exposes is the shared API.

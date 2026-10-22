@@ -3,13 +3,15 @@
 //! Lua-produced lines are monospace, so a column here is a column in the
 //! TUI.
 
+use bone_ui::style::{Color, Modifier, Style};
+use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{
-    self, Color32, FontId, Key, KeyboardShortcut, Modifiers, RichText, ScrollArea, TextEdit,
-    TextStyle,
+    self, Color32, FontId, Key, KeyboardShortcut, Modifiers, RichText, ScrollArea, Stroke,
+    TextEdit, TextStyle,
 };
 use serde_json::Value;
 
-use crate::Gui;
+use crate::{Gui, Row};
 
 impl Gui {
     /// Draw one frame into `ui` (the whole window).
@@ -50,7 +52,13 @@ impl Gui {
         let font = FontId::monospace(TextStyle::Monospace.resolve(ui.style()).size);
         let col = ui.ctx().fonts_mut(|f| f.glyph_width(&font, 'M')).max(1.0);
         let cols = (ui.available_width() / col).floor() as usize;
+        // A view's timer (`bone.chat.refresh_in`) asks for the next frame.
+        self.lua.chat_expiry = None;
         let rows = self.layout_chat(cols);
+        if let Some(at) = self.lua.chat_expiry {
+            let wait = at.saturating_duration_since(std::time::Instant::now());
+            ui.ctx().request_repaint_after(wait);
+        }
         let row_height = ui.text_style_height(&TextStyle::Monospace);
         ui.spacing_mut().item_spacing.y = 0.0;
         let chat = &self.chats[self.current];
@@ -59,7 +67,7 @@ impl Gui {
             .stick_to_bottom(true)
             .show_rows(ui, row_height, rows, |ui, range| {
                 for row in chat.rows().skip(range.start).take(range.len()) {
-                    ui.label(RichText::new(row).font(font.clone()));
+                    ui.label(row_job(row, &font, ui.visuals()));
                 }
             });
     }
@@ -123,6 +131,120 @@ impl Gui {
         });
         if let Some(a) = answer {
             self.answer(ask_id, a);
+        }
+    }
+}
+
+/// A chat row as text in its styles, one font for all of it.
+fn row_job(row: &Row, font: &FontId, visuals: &egui::Visuals) -> LayoutJob {
+    let mut job = LayoutJob::default();
+    for (text, style) in row {
+        job.append(text, 0.0, format(style, font, visuals));
+    }
+    job
+}
+
+fn format(style: &Style, font: &FontId, visuals: &egui::Visuals) -> TextFormat {
+    let m = style.add_modifier;
+    let mut fg = style.fg.and_then(color).unwrap_or(visuals.text_color());
+    let mut bg = style.bg.and_then(color).unwrap_or(Color32::TRANSPARENT);
+    if m.contains(Modifier::REVERSED) {
+        let back = if bg == Color32::TRANSPARENT {
+            visuals.panel_fill
+        } else {
+            bg
+        };
+        (fg, bg) = (back, fg);
+    }
+    if m.contains(Modifier::DIM) {
+        fg = fg.gamma_multiply(0.6);
+    }
+    // egui's bundled fonts have no bold face: bold is a brighter color.
+    if m.contains(Modifier::BOLD) {
+        fg = fg.lerp_to_gamma(visuals.strong_text_color(), 0.5);
+    }
+    let line = |on: bool| {
+        if on {
+            Stroke::new(1.0, fg)
+        } else {
+            Stroke::NONE
+        }
+    };
+    TextFormat {
+        font_id: font.clone(),
+        color: fg,
+        background: bg,
+        italics: m.contains(Modifier::ITALIC),
+        underline: line(m.contains(Modifier::UNDERLINED)),
+        strikethrough: line(m.contains(Modifier::CROSSED_OUT)),
+        ..Default::default()
+    }
+}
+
+/// The 16 ANSI colors, as a dark terminal shows them.
+const ANSI: [(u8, u8, u8); 16] = [
+    (0x1d, 0x1f, 0x21),
+    (0xcc, 0x66, 0x66),
+    (0xb5, 0xbd, 0x68),
+    (0xf0, 0xc6, 0x74),
+    (0x81, 0xa2, 0xbe),
+    (0xb2, 0x94, 0xbb),
+    (0x8a, 0xbe, 0xb7),
+    (0xc5, 0xc8, 0xc6),
+    (0x66, 0x66, 0x66),
+    (0xd5, 0x4e, 0x53),
+    (0xb9, 0xca, 0x4a),
+    (0xe7, 0xc5, 0x47),
+    (0x7a, 0xa6, 0xda),
+    (0xc3, 0x97, 0xd8),
+    (0x70, 0xc0, 0xb1),
+    (0xea, 0xea, 0xea),
+];
+
+/// `None` for the default color.
+fn color(c: Color) -> Option<Color32> {
+    let ansi = |i: usize| {
+        let (r, g, b) = ANSI[i];
+        Some(Color32::from_rgb(r, g, b))
+    };
+    match c {
+        Color::Reset => None,
+        Color::Black => ansi(0),
+        Color::Red => ansi(1),
+        Color::Green => ansi(2),
+        Color::Yellow => ansi(3),
+        Color::Blue => ansi(4),
+        Color::Magenta => ansi(5),
+        Color::Cyan => ansi(6),
+        Color::Gray => ansi(7),
+        Color::DarkGray => ansi(8),
+        Color::LightRed => ansi(9),
+        Color::LightGreen => ansi(10),
+        Color::LightYellow => ansi(11),
+        Color::LightBlue => ansi(12),
+        Color::LightMagenta => ansi(13),
+        Color::LightCyan => ansi(14),
+        Color::White => ansi(15),
+        Color::Rgb(r, g, b) => Some(Color32::from_rgb(r, g, b)),
+        Color::Indexed(n) => Some(indexed(n)),
+    }
+}
+
+/// The xterm 256-color palette.
+fn indexed(n: u8) -> Color32 {
+    match n {
+        0..=15 => {
+            let (r, g, b) = ANSI[n as usize];
+            Color32::from_rgb(r, g, b)
+        }
+        16..=231 => {
+            let n = n - 16;
+            let level = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
+            Color32::from_rgb(level(n / 36), level(n / 6 % 6), level(n % 6))
+        }
+        232..=255 => {
+            let v = 8 + (n - 232) * 10;
+            Color32::from_rgb(v, v, v)
         }
     }
 }

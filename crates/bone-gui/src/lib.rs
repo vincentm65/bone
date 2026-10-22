@@ -11,6 +11,7 @@
 //! without one.
 
 mod headless;
+mod lua;
 mod native;
 mod view;
 
@@ -30,6 +31,7 @@ use bone_proto::methods::{
 };
 use bone_proto::types::SessionInfo;
 use bone_ui::chat::RunningTurn;
+use bone_ui::style::Style;
 use bone_ui::text::{sanitize, wrap};
 use serde_json::Value;
 use tokio::runtime::Handle;
@@ -38,8 +40,8 @@ use tokio::sync::mpsc;
 pub use crate::headless::Headless;
 pub use crate::native::run;
 
-/// One wrapped row of a chat item, as drawn.
-pub type Row = String;
+/// One row of a chat item, as drawn: text in styles.
+pub type Row = Vec<(String, Style)>;
 pub type ChatBuffer = bone_ui::chat::ChatBuffer<Row>;
 
 pub struct GuiOptions {
@@ -48,6 +50,9 @@ pub struct GuiOptions {
     /// The socket to connect to again if the server goes away; `None` for
     /// an in-process server, which cannot.
     pub reconnect: Option<PathBuf>,
+    /// Where the user's config, plugins and runtime overrides live; `None`
+    /// runs the built-in UI only.
+    pub config_dir: Option<PathBuf>,
 }
 
 /// Work for the UI thread: a reply, a server event, or a new connection.
@@ -90,6 +95,8 @@ pub struct Gui {
     wrapped_at: usize,
     /// A free-text answer being typed to the open question.
     answer_draft: String,
+    /// The Lua state and what the Lua API keeps.
+    pub lua: crate::lua::LuaSide,
 }
 
 impl Gui {
@@ -111,7 +118,7 @@ impl Gui {
             .await
             .map_err(|e| e.to_string())?;
         let (tx, rx) = mpsc::unbounded_channel();
-        let gui = Gui {
+        let mut gui = Gui {
             client: Arc::new(client),
             rt: Handle::current(),
             tx,
@@ -128,9 +135,11 @@ impl Gui {
             closed: false,
             wrapped_at: 0,
             answer_draft: String::new(),
+            lua: Default::default(),
         };
         gui.forward(events);
         gui.refresh_sessions();
+        gui.load_lua();
         Ok(gui)
     }
 
@@ -197,8 +206,14 @@ impl Gui {
     }
 
     /// A server event, as the TUI handles it: transcript events through the
-    /// shared reducer, the rest here.
+    /// shared reducer, the rest here; then Lua's handlers of it.
     pub fn handle_event(&mut self, ev: &Event) {
+        self.apply_event(ev);
+        let data = ev.params.clone().unwrap_or(Value::Null);
+        self.fire_event(&ev.method, data);
+    }
+
+    fn apply_event(&mut self, ev: &Event) {
         let chats = &mut self.chats;
         if bone_ui::chat::apply_event(ev, |id| {
             chats.iter_mut().find(|c| c.session_id() == Some(id))
@@ -414,25 +429,37 @@ impl Gui {
         self.status = Some(Status { text, error: true });
     }
 
-    /// Wrap the current chat's stale items at `width` columns, as the TUI
-    /// draws them without Lua views, and return its row count.
+    /// Draw the current chat's stale items at `width` columns through the
+    /// Lua views (or plain text without them), and return its row count.
     pub fn layout_chat(&mut self, width: usize) -> usize {
         let width = width.max(1);
-        let chat = &mut self.chats[self.current];
-        for (item, index, key) in chat.stale(width, (0, 0), Instant::now()) {
-            let data = chat.item_data(item, index, true);
-            let rows = bare_rows(&data, width, key.prev.is_none());
-            chat.store(item, key, rows, Vec::new(), None, 0);
-        }
+        let buf = self.current;
+        bone_ui::lua::render_chat(
+            self,
+            buf,
+            width,
+            &|gui: &Gui, items, width| {
+                bone_ui::model::layout_items(items, width)
+                    .into_iter()
+                    .map(|(t, hl)| (t, gui.lua.theme.hl(hl)))
+                    .collect()
+            },
+            &|data, width, first| {
+                bare_rows(data, width, first)
+                    .into_iter()
+                    .map(|r| vec![(r, Style::default())])
+                    .collect()
+            },
+        );
         self.wrapped_at = width;
-        chat.row_count()
+        self.chats[buf].row_count()
     }
 
     /// The current chat as text, one row per line (after `layout_chat`).
     pub fn transcript(&self) -> String {
-        let rows: Vec<&str> = self.chats[self.current]
+        let rows: Vec<String> = self.chats[self.current]
             .rows()
-            .map(String::as_str)
+            .map(|r| r.iter().map(|(t, _)| t.as_str()).collect())
             .collect();
         rows.join("\n")
     }
@@ -468,6 +495,12 @@ impl Gui {
             .unwrap_or_default()
     }
 
+    /// The last Lua errors in full (empty when the configuration loaded
+    /// cleanly).
+    pub fn lua_errors(&self) -> &[String] {
+        &self.lua.lua_errors
+    }
+
     /// The width the current chat was last wrapped at.
     pub fn wrapped_at(&self) -> usize {
         self.wrapped_at
@@ -476,7 +509,7 @@ impl Gui {
 
 /// Without Lua views: the item's bare text, wrapped, after a blank row
 /// unless it comes first. The same rows as the TUI's bare rendering.
-fn bare_rows(data: &Value, width: usize, first: bool) -> Vec<Row> {
+fn bare_rows(data: &Value, width: usize, first: bool) -> Vec<String> {
     let text = bone_ui::chat::bare_text(data);
     if text.is_empty() {
         return Vec::new();

@@ -44,6 +44,9 @@ pub const RUNTIME: &[(&str, &str)] = runtime_files![
     "tui/api.lua",
     "tui/defaults.lua",
     "tui/bare.lua",
+    "gui/api.lua",
+    "gui/defaults.lua",
+    "gui/bare.lua",
     "core/api.lua",
     "core/defaults.lua",
     "colors/black.lua",
@@ -711,8 +714,11 @@ pub fn create_tui_library(config_dir: &Path, name: &str, bare: bool) -> Result<P
         for (rel, src) in RUNTIME {
             let rel = match *rel {
                 "tui/bare.lua" if bare => "tui/defaults.lua",
+                "gui/bare.lua" if bare => "gui/defaults.lua",
                 _ if bare => continue,
-                "ui/api.lua" | "tui/api.lua" | "tui/bare.lua" => continue,
+                "ui/api.lua" | "tui/api.lua" | "tui/bare.lua" | "gui/api.lua" | "gui/bare.lua" => {
+                    continue;
+                }
                 r if r.starts_with("core/") => continue,
                 r => r,
             };

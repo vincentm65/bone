@@ -1,0 +1,2 @@
+-- The bare library in the GUI: no standard UI. Without Lua views the GUI
+-- draws each item as plain text; ~/.bone/ui.lua and gui.lua are not loaded.

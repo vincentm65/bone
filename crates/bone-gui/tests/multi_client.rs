@@ -148,10 +148,18 @@ impl Env {
         let opts = GuiOptions {
             cwd: self.cwd(),
             reconnect: None,
+            config_dir: Some(self.config.path().to_owned()),
         };
-        bone_gui::Headless::start(self.server.connect_in_process(), opts, 1000.0, 700.0)
+        let gui = bone_gui::Headless::start(self.server.connect_in_process(), opts, 1000.0, 700.0)
             .await
-            .unwrap()
+            .unwrap();
+        // The standard library loads in the GUI as it does in the TUI.
+        assert!(
+            gui.gui.lua_errors().is_empty(),
+            "{:?}",
+            gui.gui.lua_errors()
+        );
+        gui
     }
 
     fn cwd(&self) -> String {
@@ -210,11 +218,16 @@ async fn events_arrive_in_order() {
     let mut gui = e.gui().await;
     let mut tui = e.tui().await;
     gui.send("run something");
-    gui.wait_for(WAIT, |g| g.transcript().contains("all done") && idle(g))
-        .await
-        .unwrap();
+    gui.wait_for(WAIT, |g| {
+        g.transcript().contains("Ran 1 shell command")
+            && g.transcript().contains("all done")
+            && idle(g)
+    })
+    .await
+    .unwrap();
     let live = gui.gui.transcript();
-    let order: Vec<_> = ["> run something", "shell", "tool-ran", "all done"]
+    // Drawn by the standard views, as in the TUI: tools collapsed.
+    let order: Vec<_> = ["run something", "Ran 1 shell command", "all done"]
         .iter()
         .map(|s| {
             live.find(s)
@@ -266,7 +279,10 @@ async fn a_question_answered_in_one_client_closes_in_the_other() {
     gui.wait_for(WAIT, |g| g.transcript().contains("finished") && idle(g))
         .await
         .unwrap();
-    assert!(gui.gui.transcript().contains("allowed"));
+    // The summary types itself out over a few frames.
+    gui.wait_for(WAIT, |g| g.transcript().contains("Ran 1 shell command"))
+        .await
+        .unwrap();
     // The core no longer has it either: a late answer is refused.
     gui.gui.answer(ask.ask_id, json!("allow"));
     gui.wait_for(WAIT, |g| g.status.as_ref().is_some_and(|s| s.error))
@@ -325,6 +341,7 @@ async fn reconnecting_restores_everything() {
     let opts = GuiOptions {
         cwd: e.cwd(),
         reconnect: Some(gui_sock.clone()),
+        config_dir: Some(e.config.path().to_owned()),
     };
     let conn = bone_client::connect(&gui_sock).await.unwrap();
     let mut gui = bone_gui::Headless::start(conn, opts, 1000.0, 700.0)
@@ -364,7 +381,7 @@ async fn reconnecting_restores_everything() {
             && c.turn.is_some()
             && c.queue.len() == 1
             && !g.asks.is_empty()
-            && g.transcript().contains("> start a turn")
+            && g.transcript().contains("start a turn")
     })
     .await
     .unwrap_or_else(|t| panic!("not restored:\n{t}"));
@@ -381,11 +398,12 @@ async fn reconnecting_restores_everything() {
     })
     .await
     .unwrap();
-    let t = gui.gui.transcript();
-    assert!(
-        t.contains("approved") && t.contains("> steer from tui"),
-        "{t}"
-    );
+    gui.wait_for(WAIT, |g| {
+        let t = g.transcript();
+        t.contains("Ran 1 shell command") && t.contains("steer from tui")
+    })
+    .await
+    .unwrap_or_else(|t| panic!("{t}"));
 }
 
 /// Forwards connections from one socket to another; `cut` drops the ones

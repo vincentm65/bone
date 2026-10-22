@@ -558,11 +558,13 @@ version = "3.0.3"
 dependencies = [
  "bone-client",
  "bone-core",
+ "bone-lua",
  "bone-proto",
  "bone-server",
  "bone-tui",
  "bone-ui",
  "eframe",
+ "mlua",
  "serde_json",
  "tempfile",
  "tokio",

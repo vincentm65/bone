@@ -312,7 +312,7 @@ async fn run(mode: Mode, config_dir: PathBuf) -> StartupResult<()> {
                 }, if shared.is_some() => r.map_err(|e| (1, format!("accept failed: {e}")))?,
             }
         }
-        Mode::Gui { connect } => gui(attach(connect, &config_dir).await?).await?,
+        Mode::Gui { connect } => gui(attach(connect, &config_dir).await?, config_dir).await?,
     }
     Ok(())
 }
@@ -375,7 +375,7 @@ fn cwd() -> String {
 /// The GUI blocks its thread, so the shared core is served from a task,
 /// stopped (removing the socket) when the window closes.
 #[cfg(feature = "gui")]
-async fn gui(a: Attached) -> StartupResult<()> {
+async fn gui(a: Attached, config_dir: PathBuf) -> StartupResult<()> {
     let serving = a.shared.map(|(listener, server)| {
         tokio::spawn(async move {
             if let Err(e) = listener.run(&server).await {
@@ -386,6 +386,7 @@ async fn gui(a: Attached) -> StartupResult<()> {
     let opts = bone_gui::GuiOptions {
         cwd: cwd(),
         reconnect: if a.reload_core { None } else { a.path },
+        config_dir: Some(config_dir),
     };
     let r = bone_gui::run(a.conn, opts).await;
     if let Some(task) = serving {
@@ -396,7 +397,7 @@ async fn gui(a: Attached) -> StartupResult<()> {
 }
 
 #[cfg(not(feature = "gui"))]
-async fn gui(_: Attached) -> StartupResult<()> {
+async fn gui(_: Attached, _: PathBuf) -> StartupResult<()> {
     Err((
         2,
         "this bone was built without the GUI; build it with --features gui".into(),
