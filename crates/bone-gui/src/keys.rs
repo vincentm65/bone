@@ -216,6 +216,8 @@ impl Gui {
                         .and_then(|(x, y)| bone_ui::lua::panels::at(&self.lua.panels, x, y))
                         .map(|p| p.id.clone());
                     match panel {
+                        // Rich content scrolls itself.
+                        Some(id) if self.lua.rich_keys.contains(&id) => keep.push(ev),
                         Some(id) if delta.y != 0.0 => {
                             let rows = bone_ui::panel::WHEEL_ROWS;
                             let by = if delta.y > 0.0 { -rows } else { rows };

@@ -716,3 +716,38 @@ async fn a_terminal_in_a_panel() {
         "true"
     );
 }
+
+/// A panel opened with `blocks` draws them as rich text in place of lines,
+/// and a click on one reaches its `on_block`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_panel_of_blocks() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    g.gui
+        .run_lua(
+            "t",
+            "bone.ui.panel.open({ id = 'rich', dock = 'left', size = 30,
+               blocks = function(ctx)
+                 seen_width = ctx.width
+                 local out = {}
+                 for i = 1, 3 do
+                   out[i] = { id = i, selected = i == 2, block = {
+                     paragraphs = { { spans = { { 'card ' .. i, 'Normal' } } } },
+                     bg = 'Selection', radius = 10, pad = { 30, 12 }, margin = { 4, 4 } } }
+                 end
+                 return out
+               end,
+               on_block = function(id) clicked = id end })",
+        )
+        .unwrap();
+    g.frame();
+    g.frame();
+    assert!(g.gui.eval("seen_width").unwrap().parse::<f32>().unwrap() > 100.0);
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+    // The first card is near the top of the panel: click it.
+    g.click(5, 2);
+    g.frame();
+    g.frame();
+    assert_eq!(g.gui.eval("clicked").unwrap(), "1");
+}

@@ -19,6 +19,7 @@ mod lua;
 mod native;
 mod preview;
 mod prompt;
+mod rich;
 mod screen;
 mod system;
 mod view;

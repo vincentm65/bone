@@ -49,3 +49,44 @@ bone.gui = {
     end,
   },
 }
+
+--- Rich content for panels and windows (gui.blocks). A spec for
+--- bone.ui.panel.open, bone.ui.popup or bone.ui.win may give
+---   blocks = function(ctx) return { { id = …, block = {…}, selected = bool }, … } end
+--- with ctx = { width, height } (points) and `block` as a chat view's
+--- (see the GUI's blocks); the GUI stacks them in a scroll area of its
+--- own, keeping the selected one in view, and runs on_block(id) when one
+--- is clicked. Keys, focus and closing stay the panel's or window's.
+bone._gui_blocks = {}
+local function take_blocks(spec)
+  if type(spec) ~= "table" or not spec.blocks then return nil end
+  local rich = { blocks = spec.blocks, on_block = spec.on_block }
+  spec.blocks, spec.on_block = nil, nil
+  return rich
+end
+
+local panel_open = bone.ui.panel.open
+bone.ui.panel.open = function(spec)
+  local rich = take_blocks(spec)
+  if rich and not spec.render and not spec.lines then spec.lines = {} end
+  local p = panel_open(spec)
+  if rich then bone._gui_blocks[p.id] = rich end
+  return p
+end
+
+for _, name in ipairs({ "popup", "win" }) do
+  local open = bone.ui[name]
+  bone.ui[name] = function(spec)
+    local rich = take_blocks(spec)
+    if rich and not spec.lines then spec.lines = {} end
+    local id = open(spec)
+    if rich then bone._gui_blocks["popup:" .. tostring(id)] = rich end
+    return id
+  end
+end
+local update = bone.ui.update
+bone.ui.update = function(id, spec)
+  local rich = take_blocks(spec)
+  if rich then bone._gui_blocks["popup:" .. tostring(id)] = rich end
+  return update(id, spec)
+end

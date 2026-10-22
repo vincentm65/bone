@@ -79,6 +79,10 @@ pub struct LuaSide {
     /// Each chat's first row in view and whether it is scrolled to the end,
     /// last frame.
     pub chat_views: HashMap<usize, (usize, bool)>,
+    /// Panels and windows drawn with rich content last frame (the wheel
+    /// scrolls them as egui does), and the selected block of each.
+    pub rich_keys: HashSet<String>,
+    pub rich_selected: HashMap<String, String>,
     pub dragging: bool,
     /// The font file and size applied last (`bone.o.font`, `font_size`).
     pub fonts: Option<(String, f32, [String; 3])>,

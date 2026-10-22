@@ -130,7 +130,7 @@ impl Gui {
         )
     }
 
-    fn block(&self, spec: &Value) -> Block {
+    pub(crate) fn block(&self, spec: &Value) -> Block {
         let font = spec["font"].as_str().unwrap_or("sans");
         let size = num(&spec["size"], 15.0);
         let fg = spec["fg"].as_str().unwrap_or("Normal");
@@ -291,7 +291,13 @@ impl Block {
     /// Draw it with its top-left at `at`, in a chat `width` points wide:
     /// its box, then its paragraphs as selectable text. Returns what the
     /// pointer did to its text (`None` with no text on screen).
-    pub fn show(&self, ui: &mut egui::Ui, at: egui::Pos2, width: f32) -> Option<egui::Response> {
+    pub fn show(
+        &self,
+        ui: &mut egui::Ui,
+        at: egui::Pos2,
+        width: f32,
+        selectable: bool,
+    ) -> Option<egui::Response> {
         let size = self.measure(ui.ctx(), width);
         let layout = self.layout.lock().unwrap().clone()?;
         let x = if self.right {
@@ -335,7 +341,12 @@ impl Block {
                 at.y as i32,
                 i,
             )));
-            let resp = child.add(egui::Label::new(g.clone()).selectable(true));
+            let label = egui::Label::new(g.clone()).selectable(selectable);
+            let resp = child.add(if selectable {
+                label
+            } else {
+                label.sense(egui::Sense::hover())
+            });
             hits = Some(match hits {
                 Some(h) => h.union(resp),
                 None => resp,

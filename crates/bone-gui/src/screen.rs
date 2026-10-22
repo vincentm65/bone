@@ -63,6 +63,7 @@ impl Gui {
     pub(crate) fn screen_ui(&mut self, ui: &mut egui::Ui) {
         let cells = Cells::of(ui);
         self.lua.cells = Some((cells.origin.x, cells.origin.y, cells.col, cells.row));
+        self.lua.rich_keys.clear();
         let area = ui.max_rect();
         let cols = (area.width() / cells.col).floor().max(1.0) as u16;
         let rows = (area.height() / cells.row).floor().max(1.0) as u16;
@@ -189,7 +190,7 @@ impl Gui {
     /// Each placed panel: its title row, the content in view, and a
     /// separator beside a side panel. The fill is a step off the canvas
     /// so a docked column reads as a sidebar.
-    fn panels_ui(&mut self, ui: &egui::Ui, cells: &Cells, docked: &[PanelPlacement]) {
+    fn panels_ui(&mut self, ui: &mut egui::Ui, cells: &Cells, docked: &[PanelPlacement]) {
         let fill = lifted_color(
             (self.lua.theme.hl("Normal").bg)
                 .and_then(color)
@@ -212,7 +213,10 @@ impl Gui {
                     &row,
                 );
             }
-            self.lines_at(ui, cells, f.body, &f.lines);
+            // Rich content (`blocks`) in place of its lines.
+            if !self.rich_ui(ui, &placement.id, cells.rect(f.body)) {
+                self.lines_at(ui, cells, f.body, &f.lines);
+            }
             if let Some(x) = f.separator {
                 vline(
                     ui,
@@ -225,7 +229,7 @@ impl Gui {
 
     /// Lua windows over everything, bottom first, where the shared
     /// placement put them: the same anchors as the TUI's.
-    fn popups_ui(&mut self, ui: &egui::Ui, cells: &Cells, screen: layout::Rect) {
+    fn popups_ui(&mut self, ui: &mut egui::Ui, cells: &Cells, screen: layout::Rect) {
         if self.lua.popups.is_empty() {
             return;
         }
@@ -257,11 +261,17 @@ impl Gui {
             spread: 0,
             color: Color32::from_black_alpha(80),
         };
-        for (_, r, lines) in bone_ui::lua::layout_popups(self, &anchors) {
+        for (id, r, lines) in bone_ui::lua::layout_popups(self, &anchors) {
             let rect = cells.rect(r);
-            ui.painter().add(shadow.as_shape(rect, 0));
-            ui.painter().rect_filled(rect, 0.0, card);
-            self.lines_at(ui, cells, r, &lines);
+            let key = format!("popup:{id}");
+            let rich = self.has_blocks(&key);
+            // A rich window is a rounded card with room around its blocks.
+            let radius = if rich { 12.0 } else { 0.0 };
+            ui.painter().add(shadow.as_shape(rect, radius as u8));
+            ui.painter().rect_filled(rect, radius, card);
+            if !(rich && self.rich_ui(ui, &key, rect.shrink(12.0))) {
+                self.lines_at(ui, cells, r, &lines);
+            }
         }
     }
 
@@ -401,7 +411,7 @@ impl Gui {
                                 if *part == 0 || n == 0 {
                                     let top = rect.min - vec2(0.0, *part as f32 * cells.row);
                                     // Its images show on hover, as a row's do.
-                                    if let Some(resp) = block.show(ui, top, width)
+                                    if let Some(resp) = block.show(ui, top, width, true)
                                         && (resp.hovered() || resp.clicked())
                                     {
                                         let at = range.start + n - part;
