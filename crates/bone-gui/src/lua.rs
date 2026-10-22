@@ -65,6 +65,8 @@ pub struct LuaSide {
     pub geometry: bone_ui::lua::Geometry,
     /// Lua windows (`bone.ui.popup`).
     pub popups: Vec<bone_ui::popup::Popup>,
+    /// Where the keyboard is and the key sequence in progress.
+    pub input: bone_ui::lua::input::KeyState,
     /// Lua panels (`bone.ui.panel`).
     pub panels: Vec<bone_ui::panel::Panel>,
     pub panel_focus: Option<String>,
@@ -323,15 +325,8 @@ impl Host for Gui {
     /// What has the keyboard: a focused window (`popup`), a focused panel
     /// (its context, or `panel`), else the prompt.
     fn context(&self) -> Context {
-        if bone_ui::popup::focused(&self.lua.popups).is_some() {
-            Context::Popup
-        } else if let Some(p) =
-            bone_ui::lua::panels::focused(&self.lua.panels, &self.lua.panel_focus)
-        {
-            p.context.clone().unwrap_or(Context::Panel)
-        } else {
-            Context::Main
-        }
+        let l = &self.lua;
+        bone_ui::lua::input::context_of(&l.popups, &l.panels, &l.panel_focus, &l.input)
     }
 
     fn looks(&mut self) -> Looks<'_> {
@@ -511,6 +506,30 @@ impl Host for Gui {
 
     fn popups(&mut self) -> &mut Vec<bone_ui::popup::Popup> {
         &mut self.lua.popups
+    }
+
+    fn key_state(&mut self) -> &mut bone_ui::lua::input::KeyState {
+        &mut self.lua.input
+    }
+
+    fn key_starting(&mut self) {
+        self.changed();
+    }
+
+    fn dismiss_message(&mut self) {
+        self.status = None;
+    }
+
+    fn type_key(&mut self, ctx: &Context, key: Key) {
+        Gui::type_key(self, ctx, key);
+    }
+
+    fn interrupt(&mut self) {
+        Gui::interrupt(self);
+    }
+
+    fn builtin_action(&mut self, b: bone_ui::keymap::Builtin) {
+        Gui::builtin_action(self, b);
     }
 
     fn panel_store(&mut self) -> bone_ui::lua::panels::PanelStore<'_> {

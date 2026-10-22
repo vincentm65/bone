@@ -14,13 +14,14 @@ use bone_proto::methods::ProcessSnapshot;
 use bone_proto::types::ImageAttachment;
 use mlua::{FromLua, FromLuaMulti, Function, IntoLuaMulti, Lua, MultiValue, Table, Value};
 
+pub mod input;
 pub mod panels;
 pub mod state;
 pub mod ui;
 
 use crate::chat::{ChatBuffer, Item as ChatItem, RenderKey, find_chat};
 use crate::data::{Dep, Indexed, ItemFilter};
-use crate::keymap::{Action, Context, Keymaps};
+use crate::keymap::{Action, Builtin, Context, Keymaps};
 use crate::keys::{self, Key};
 use crate::options::{self, DynamicKind, DynamicOption, DynamicValue, Options};
 use crate::style::{Color, Modifier};
@@ -280,7 +281,35 @@ pub trait Host {
     /// The panels, and which one has the keyboard.
     fn panel_store(&mut self) -> panels::PanelStore<'_>;
     /// Keys typed toward a sequence go through now (the focus is moving).
-    fn flush_keys(&mut self) {}
+    fn flush_keys(&mut self)
+    where
+        Self: Sized,
+    {
+        input::flush_pending(self);
+    }
+
+    // Keys (see `input`).
+    /// Where the keyboard is and the key sequence in progress.
+    fn key_state(&mut self) -> &mut input::KeyState;
+    /// A key arrived, before anything handles it.
+    fn key_starting(&mut self) {}
+    /// A key or action is done: the prompt may have changed.
+    fn prompt_changed(&mut self) {}
+    /// Keys outside a window clear a shown message.
+    fn dismiss_message(&mut self) {}
+    /// A key no keymap took, in context `ctx`: text goes to the prompt
+    /// while it has the keyboard.
+    fn type_key(&mut self, ctx: &Context, key: Key);
+    /// ctrl+c with nothing else to do.
+    fn interrupt(&mut self);
+    /// Before any part of built-in action `b` runs.
+    fn builtin_starting(&mut self, _b: Builtin) {}
+    /// What `b` does to a selection in the prompt; true if that was all.
+    fn builtin_on_selection(&mut self, _b: Builtin) -> bool {
+        false
+    }
+    /// What built-in action `b` does when neither a panel nor Lua took it.
+    fn builtin_action(&mut self, b: Builtin);
 }
 
 /// Run shared op `op`, or give `a` back for the frontend's own dispatcher.
@@ -361,7 +390,9 @@ pub fn dispatch<H: Host>(
         "command_find" => command_find(h, lua, a),
         "command_complete" => command_complete(h, lua, a),
         "cmd" => cmd(h, lua, a),
-        _ => return panels::dispatch(h, lua, op, a),
+        _ => {
+            return panels::dispatch(h, lua, op, a).or_else(|a| input::dispatch(h, lua, op, a));
+        }
     })
 }
 

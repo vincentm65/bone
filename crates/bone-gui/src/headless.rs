@@ -13,6 +13,8 @@ pub struct Headless {
     pub gui: Gui,
     ctx: egui::Context,
     size: egui::Vec2,
+    /// Input for the next frame, as the window would send it.
+    events: Vec<egui::Event>,
 }
 
 impl Headless {
@@ -26,6 +28,7 @@ impl Headless {
             gui: Gui::connect(conn, opts).await?,
             ctx: egui::Context::default(),
             size: egui::vec2(width, height),
+            events: Vec::new(),
         })
     }
 
@@ -33,6 +36,7 @@ impl Headless {
     pub fn frame(&mut self) {
         let input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, self.size)),
+            events: std::mem::take(&mut self.events),
             ..Default::default()
         };
         let gui = &mut self.gui;
@@ -66,6 +70,24 @@ impl Headless {
             }
             self.settle(Duration::from_millis(20)).await;
         }
+    }
+
+    /// Press `key` with `modifiers` in the next frame.
+    pub fn key(&mut self, key: egui::Key, modifiers: egui::Modifiers) {
+        for pressed in [true, false] {
+            self.events.push(egui::Event::Key {
+                key,
+                physical_key: None,
+                pressed,
+                repeat: false,
+                modifiers,
+            });
+        }
+    }
+
+    /// Type `text` in the next frame.
+    pub fn text(&mut self, text: &str) {
+        self.events.push(egui::Event::Text(text.to_owned()));
     }
 
     /// Type `text` into the prompt and send it, as Enter does.

@@ -10,7 +10,6 @@
 mod app;
 mod chat;
 mod clipboard;
-mod commands;
 mod data;
 mod headless;
 mod jobs;

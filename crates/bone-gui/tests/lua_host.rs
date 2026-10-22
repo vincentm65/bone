@@ -113,3 +113,39 @@ async fn a_reload_with_a_new_error_keeps_the_config_in_use() {
         .run_lua("t", "assert(marker == 'third', marker)")
         .unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn keys_reach_lua_and_typing_reaches_the_prompt() {
+    use eframe::egui::{Key, Modifiers};
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::write(
+        config.path().join("gui.lua"),
+        "bone.keymap.set('ctrl+k', function() pressed = (pressed or 0) + 1 end)",
+    )
+    .unwrap();
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+
+    // A mapped key goes to Lua, not the text box.
+    g.key(Key::K, Modifiers::CTRL);
+    g.frame();
+    g.gui
+        .run_lua("t", "assert(pressed == 1, tostring(pressed))")
+        .unwrap();
+    assert_eq!(g.gui.draft, "");
+
+    // Typing is the text box's.
+    g.text("hello");
+    g.frame();
+    assert_eq!(g.gui.draft, "hello");
+    // An editing key stays native: backspace deletes in the text box.
+    g.key(Key::Backspace, Modifiers::NONE);
+    g.frame();
+    assert_eq!(g.gui.draft, "hell");
+
+    // Enter is the standard keymap's submit.
+    g.key(Key::Enter, Modifiers::NONE);
+    g.frame();
+    assert_eq!(g.gui.draft, "");
+    assert!(g.gui.running(), "submitted");
+}

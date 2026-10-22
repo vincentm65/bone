@@ -420,9 +420,6 @@ impl Gui {
         {
             response.request_focus();
         }
-        if response.has_focus() && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift) {
-            self.submit();
-        }
     }
 
     /// Chat `buf`'s prompt text: the draft on screen, else empty.

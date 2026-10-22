@@ -94,6 +94,134 @@ pub fn hit(panels: &[Panel], x: u16, y: u16) -> Option<(String, usize)> {
     Some((p.id.clone(), line))
 }
 
+/// A focused panel's own keys: `keys[name](panel)`, then `on_key(name, panel)`.
+/// Returns whether the key was used.
+pub fn panel_key<H: Host>(h: &mut H, id: &str, key: crate::keys::Key) -> bool {
+    let Some((own, on_key)) = panel(h.panel_store().panels, id).map(|p| {
+        (
+            p.keys.iter().find(|(k, _)| *k == key).map(|(_, cb)| *cb),
+            p.on_key,
+        )
+    }) else {
+        return false;
+    };
+    if let Some(cb) = own {
+        let id = id.to_owned();
+        h.call_callback(cb, "panel key", |lua| panel_handle(lua, &id));
+        h.changed();
+        return true;
+    }
+    if let Some(cb) = on_key {
+        let name = crate::keys::format(&key);
+        let id = id.to_owned();
+        let r = h.call_callback_multi(cb, "panel on_key", |lua| {
+            Ok(vec![
+                Value::String(lua.create_string(&name)?),
+                panel_handle(lua, &id)?,
+            ]
+            .into())
+        });
+        h.changed();
+        // nil or false passes the key on to the keymaps.
+        return !matches!(
+            r.as_ref().and_then(|v| v.front()),
+            None | Some(Value::Nil | Value::Boolean(false))
+        );
+    }
+    false
+}
+
+/// Scroll and dismiss while a panel has the keyboard. Returns whether `b`
+/// applied to the panel.
+pub fn panel_builtin<H: Host>(h: &mut H, b: crate::keymap::Builtin) -> bool {
+    use crate::keymap::Builtin::*;
+    use crate::panel::WHEEL_ROWS;
+    let Some(id) = h.focused_panel() else {
+        return false;
+    };
+    if b == Dismiss {
+        let _ = focus_panel(h, None);
+        return true;
+    }
+    let Some(p) = h.panel_store().panels.iter_mut().find(|p| p.id == id) else {
+        return false;
+    };
+    match b {
+        Up => p.scroll_by(-1),
+        Down => p.scroll_by(1),
+        ScrollUp => p.scroll_by(-WHEEL_ROWS),
+        ScrollDown => p.scroll_by(WHEEL_ROWS),
+        PageUp => p.scroll_by(-p.page()),
+        PageDown => p.scroll_by(p.page()),
+        ScrollTop => p.scroll_to(false),
+        ScrollBottom => p.scroll_to(true),
+        _ => return false,
+    }
+    h.changed();
+    true
+}
+
+/// Move the keyboard to the next (or previous) focusable panel. The prompt
+/// (`None`) is part of the cycle.
+pub fn cycle_focus<H: Host>(h: &mut H, forward: bool) {
+    let mut ring: Vec<Option<String>> = vec![None];
+    let ids: Vec<String> = in_order(h.panel_store().panels)
+        .into_iter()
+        .filter(|p| p.focusable && !p.hidden)
+        .map(|p| p.id.clone())
+        .collect();
+    ring.extend(ids.into_iter().map(Some));
+    let now = h.focused_panel();
+    let i = ring.iter().position(|r| *r == now).unwrap_or(0);
+    let n = ring.len();
+    let next = ring[if forward {
+        (i + 1) % n
+    } else {
+        (i + n - 1) % n
+    }]
+    .clone();
+    let _ = focus_panel(h, next.as_deref());
+}
+
+/// A click focuses the focusable panel under it, or the prompt when the
+/// click is on the prompt. A focused window keeps the keyboard.
+pub fn click<H: Host>(h: &mut H, x: u16, y: u16) {
+    if crate::popup::focused(h.popups()).is_some() {
+        return;
+    }
+    let id = at(h.panel_store().panels, x, y).map(|p| p.id.clone());
+    match id {
+        Some(id) if panel(h.panel_store().panels, &id).is_some_and(|p| p.focusable) => {
+            let _ = focus_panel(h, Some(&id));
+        }
+        Some(_) => {}
+        None => {
+            let in_prompt = h.geometry().leaves.iter().any(|(name, r)| {
+                crate::layout::kind(name) == "prompt" && r.height > 0 && r.contains(x, y)
+            });
+            if in_prompt {
+                let _ = focus_panel(h, None);
+            }
+        }
+    }
+}
+
+/// The wheel over a panel scrolls it. Returns whether it did.
+pub fn wheel<H: Host>(h: &mut H, x: u16, y: u16, up: bool) -> bool {
+    use crate::panel::WHEEL_ROWS;
+    if crate::popup::focused(h.popups()).is_some() {
+        return false;
+    }
+    let Some(id) = at(h.panel_store().panels, x, y).map(|p| p.id.clone()) else {
+        return false;
+    };
+    if let Some(p) = h.panel_store().panels.iter_mut().find(|p| p.id == id) {
+        p.scroll_by(if up { -WHEEL_ROWS } else { WHEEL_ROWS });
+    }
+    h.changed();
+    true
+}
+
 /// The panel as Lua sees it (`info`, and the `panel/*` events).
 pub fn panel_info<H: Host>(h: &mut H, p: &Panel) -> Json {
     let s = h.panel_store();

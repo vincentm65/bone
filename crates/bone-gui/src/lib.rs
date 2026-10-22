@@ -11,6 +11,7 @@
 //! without one.
 
 mod headless;
+mod keys;
 mod lua;
 mod native;
 mod screen;

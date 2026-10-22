@@ -9,7 +9,6 @@ use ratatui::widgets::Paragraph;
 pub use bone_ui::panel::*;
 
 use crate::app::App;
-use crate::keys::Key;
 use bone_ui::lua::panels as shared;
 
 use crate::ui::render_items;
@@ -23,12 +22,6 @@ impl App {
         self.panels.iter_mut().find(|p| p.id == id)
     }
 
-    /// Panels in placement order: left, right, top, bottom; then `order`,
-    /// then age.
-    pub fn panels_in_order(&self) -> Vec<&Panel> {
-        shared::in_order(&self.panels)
-    }
-
     /// The panel with the keyboard, if any. A focused popup still comes first.
     pub fn focused_panel(&self) -> Option<&Panel> {
         shared::focused(&self.panels, &self.panel_focus)
@@ -37,55 +30,6 @@ impl App {
     /// Give a panel the keyboard, or (`None`) give it back to the prompt.
     pub fn focus_panel(&mut self, id: Option<&str>) -> Result<(), String> {
         shared::focus_panel(self, id)
-    }
-
-    /// Move the keyboard to the next (or previous) focusable panel; the
-    /// prompt is part of the cycle.
-    pub fn cycle_focus(&mut self, forward: bool) {
-        let mut ring: Vec<Option<String>> = vec![None];
-        ring.extend(
-            self.panels_in_order()
-                .into_iter()
-                .filter(|p| p.focusable && !p.hidden)
-                .map(|p| Some(p.id.clone())),
-        );
-        let now = self.focused_panel().map(|p| p.id.clone());
-        let i = ring.iter().position(|r| *r == now).unwrap_or(0);
-        let n = ring.len();
-        let next = ring[if forward {
-            (i + 1) % n
-        } else {
-            (i + n - 1) % n
-        }]
-        .clone();
-        let _ = self.focus_panel(next.as_deref());
-    }
-
-    /// Scroll and dismiss actions while a panel has the keyboard. Returns
-    /// whether `b` applied to the panel.
-    pub fn panel_builtin(&mut self, b: crate::keymap::Builtin) -> bool {
-        use crate::keymap::Builtin::*;
-        let Some(id) = self.focused_panel().map(|p| p.id.clone()) else {
-            return false;
-        };
-        if b == Dismiss {
-            let _ = self.focus_panel(None);
-            return true;
-        }
-        let p = self.panel_mut(&id).expect("focused panel");
-        match b {
-            Up => p.scroll_by(-1),
-            Down => p.scroll_by(1),
-            ScrollUp => p.scroll_by(-WHEEL_ROWS),
-            ScrollDown => p.scroll_by(WHEEL_ROWS),
-            PageUp => p.scroll_by(-p.page()),
-            PageDown => p.scroll_by(p.page()),
-            ScrollTop => p.scroll_to(false),
-            ScrollBottom => p.scroll_to(true),
-            _ => return false,
-        }
-        self.dirty = true;
-        true
     }
 
     /// The panel drawn at a screen position.
@@ -133,43 +77,6 @@ impl App {
                 }
             }
         }
-    }
-
-    /// A focused panel's own keys: `keys[name](panel)`, then
-    /// `on_key(name, panel)`. Returns whether the key was used.
-    pub fn panel_key(&mut self, id: &str, key: Key) -> bool {
-        let Some((own, on_key)) = self.panel(id).map(|p| {
-            (
-                p.keys.iter().find(|(k, _)| *k == key).map(|(_, cb)| *cb),
-                p.on_key,
-            )
-        }) else {
-            return false;
-        };
-        if let Some(cb) = own {
-            let id = id.to_owned();
-            self.call_callback(cb, "panel key", |lua| crate::lua::panel_handle(lua, &id));
-            self.dirty = true;
-            return true;
-        }
-        if let Some(cb) = on_key {
-            let name = crate::keys::format(&key);
-            let id = id.to_owned();
-            let r = self.call_callback_multi(cb, "panel on_key", |lua| {
-                Ok(vec![
-                    mlua::Value::String(lua.create_string(&name)?),
-                    crate::lua::panel_handle(lua, &id)?,
-                ]
-                .into())
-            });
-            self.dirty = true;
-            // nil or false passes the key on to the keymaps.
-            return !matches!(
-                r.as_ref().and_then(|v| v.front()),
-                None | Some(mlua::Value::Nil | mlua::Value::Boolean(false))
-            );
-        }
-        false
     }
 
     /// Measure an auto tree leaf (see `bone_ui::lua::panels::measure_panel`).

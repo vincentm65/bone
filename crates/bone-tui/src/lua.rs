@@ -13,9 +13,8 @@ use bone_proto::methods::{ProcessCancel, ProcessRef};
 use mlua::{Function, Lua, MultiValue, Table, Value};
 
 use crate::app::App;
-use crate::keymap::{Action, Builtin, Context};
-use crate::keys;
-use bone_ui::lua::{CALLBACKS, args, context_from_name, err, opt, ret};
+use crate::keymap::{Builtin, Context};
+use bone_ui::lua::{CALLBACKS, args, err, opt, ret};
 use serde_json::Value as Json;
 
 /// What a plugin, the user's config, or a project runs in the TUI, in
@@ -23,7 +22,6 @@ use serde_json::Value as Json;
 pub const CONFIG_FILES: [&str; 2] = ["ui.lua", "tui.lua"];
 
 use bone_ui::lua::canonical_event;
-pub use bone_ui::lua::panels::panel_handle;
 pub use bone_ui::lua::{Autocmd, UserCommand};
 
 /// Create the TUI Lua state with the runtime API and default keymaps.
@@ -515,65 +513,12 @@ impl App {
     }
 }
 
-fn raw_context_arg(opts: &Option<Table>) -> mlua::Result<Option<Context>> {
-    opt(opts, "context")?.map(context_from_name).transpose()
-}
-
 fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<MultiValue> {
     let a = match bone_ui::lua::dispatch(app, lua, op, a) {
         Ok(r) => return r,
         Err(a) => a,
     };
     match op {
-        "keymap_focus" => {
-            let name: Option<String> = args(lua, a)?;
-            match name {
-                Some(name) => app.focus_context(context_from_name(name)?).map_err(err)?,
-                None => app.clear_context().map_err(err)?,
-            }
-            ret(lua, ())
-        }
-        "keymap_clear" => {
-            let _: () = args(lua, a)?;
-            app.clear_context().map_err(err)?;
-            ret(lua, ())
-        }
-        "keymap_context_del" => {
-            let name: String = args(lua, a)?;
-            let ctx = context_from_name(name)?;
-            app.delete_context(&ctx).map_err(err)?;
-            ret(lua, ())
-        }
-        "keymap_raw" => {
-            let (f, opts): (Function, Option<Table>) = args(lua, a)?;
-            let context = raw_context_arg(&opts)?;
-            let callback = app.store_callback(lua, f)?;
-            let id = app.add_raw_interceptor(callback, context);
-            app.own(crate::plugins::Owned::Raw(id));
-            ret(lua, id)
-        }
-        "keymap_raw_del" => {
-            let id: u64 = args(lua, a)?;
-            match app.remove_raw_interceptor(id) {
-                Some(callback) => {
-                    App::drop_callback(lua, callback)?;
-                    ret(lua, true)
-                }
-                None => ret(lua, false),
-            }
-        }
-        "press" => {
-            let name: String = args(lua, a)?;
-            app.handle_key(keys::parse(&name).map_err(err)?);
-            ret(lua, ())
-        }
-        "action" => {
-            let name: String = args(lua, a)?;
-            let b =
-                Builtin::from_name(&name).ok_or_else(|| err(format!("unknown action: {name}")))?;
-            app.run(Action::Builtin(b));
-            ret(lua, ())
-        }
         "clipboard_paste" => {
             app.paste_clipboard();
             ret(lua, ())
@@ -1194,8 +1139,45 @@ impl bone_ui::lua::Host for App {
         }
     }
 
-    fn flush_keys(&mut self) {
-        self.flush_pending();
+    fn key_state(&mut self) -> &mut bone_ui::lua::input::KeyState {
+        &mut self.input
+    }
+
+    fn key_starting(&mut self) {
+        self.dirty = true;
+        self.selection = None;
+    }
+
+    fn prompt_changed(&mut self) {
+        self.emit_prompt_changed();
+    }
+
+    fn dismiss_message(&mut self) {
+        if self.message.is_some() {
+            self.message = None;
+        }
+    }
+
+    fn type_key(&mut self, ctx: &Context, key: crate::keys::Key) {
+        App::type_key(self, ctx, key);
+    }
+
+    fn interrupt(&mut self) {
+        App::interrupt(self);
+    }
+
+    fn builtin_starting(&mut self, b: Builtin) {
+        if b != Builtin::Interrupt {
+            self.quit_armed = None;
+        }
+    }
+
+    fn builtin_on_selection(&mut self, b: Builtin) -> bool {
+        App::builtin_on_selection(self, b)
+    }
+
+    fn builtin_action(&mut self, b: Builtin) {
+        App::builtin_action(self, b);
     }
 
     fn geometry(&self) -> bone_ui::lua::Geometry {

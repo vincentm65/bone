@@ -15,6 +15,7 @@ impl Gui {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let _ = self.repaint.set(ui.ctx().clone());
         self.pump();
+        self.route_keys(ui.ctx());
         self.watch_config();
         // Keep polling the config while idle.
         ui.ctx().request_repaint_after(crate::lua::Watcher::EVERY);

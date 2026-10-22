@@ -23,13 +23,14 @@ use tokio::sync::mpsc;
 use crate::chat::{ChatBuffer, RunningTurn};
 use crate::composer::{Composer, Draft};
 use crate::editor::TextBuffer;
-use crate::keymap::{Action, Builtin, Context, Keymaps};
+use crate::keymap::{Builtin, Context, Keymaps};
 use crate::keys::Key;
 use crate::layout::{BufferId, Placed, Window, WindowId};
 use crate::lua::{Autocmd, UserCommand};
 use crate::options::{DynamicOption, Options};
 use crate::panel::Panel;
 use crate::theme::Theme;
+use bone_ui::lua::input::{self, KeyState};
 
 /// A second ctrl+c within this long quits.
 const QUIT_WINDOW: Duration = Duration::from_secs(2);
@@ -39,13 +40,6 @@ pub const CHAT_WIN: WindowId = 0;
 pub const PROMPT_WIN: WindowId = 1;
 
 pub use bone_ui::popup::Popup;
-
-#[derive(Debug, Clone)]
-struct RawInterceptor {
-    id: u64,
-    callback: u64,
-    context: Option<Context>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Level {
@@ -68,16 +62,10 @@ type PromptState = (
 pub(crate) struct LuaSide {
     lua: Option<Lua>,
     keymaps: Keymaps,
-    focused_context: Option<Context>,
-    pending_keys: Vec<Key>,
-    pending_action: Option<Action>,
-    pending_context: Option<Context>,
-    pending_since: Option<Instant>,
-    raw_interceptors: Vec<RawInterceptor>,
+    input: KeyState,
     dynamic_options: HashMap<String, DynamicOption>,
     user_commands: HashMap<String, UserCommand>,
     autocmds: Vec<Autocmd>,
-    in_actions: Vec<Builtin>,
     owner: Option<String>,
     callback_owner: HashMap<u64, String>,
     owned: HashMap<String, Vec<crate::plugins::Owned>>,
@@ -123,13 +111,8 @@ pub struct App {
     pub leaves: Vec<(String, ratatui::layout::Rect)>,
     pub screen: Rect,
     pub keymaps: Keymaps,
-    /// The explicitly focused named context (popup focus still takes precedence).
-    focused_context: Option<Context>,
-    pending_keys: Vec<Key>,
-    pending_action: Option<Action>,
-    pending_context: Option<Context>,
-    pending_since: Option<Instant>,
-    raw_interceptors: Vec<RawInterceptor>,
+    /// Where the keyboard is and the key sequence in progress.
+    pub input: KeyState,
     pub message: Option<(String, Level)>,
     /// Every message shown (`bone.api.log`).
     pub log: Vec<String>,
@@ -180,7 +163,7 @@ pub struct App {
     composer: Composer,
     pub(crate) clipboard_executable: Option<PathBuf>,
     last_prompt_state: PromptState,
-    quit_armed: Option<Instant>,
+    pub(crate) quit_armed: Option<Instant>,
     pub dirty: bool,
     /// Draw once more after this frame: something drawn earlier in it
     /// (a region) saw state the frame then changed.
@@ -191,9 +174,6 @@ pub struct App {
     pub next_callback: u64,
     pub user_commands: HashMap<String, UserCommand>,
     pub autocmds: Vec<Autocmd>,
-    /// Builtin actions whose `bone.ui.actions` handler is running (so a
-    /// handler that runs its own action gets the built-in one).
-    in_actions: Vec<Builtin>,
     /// The plugin whose code is running (loading, or one of its callbacks);
     /// `None` for the runtime and the user's config.
     pub owner: Option<String>,
@@ -260,12 +240,7 @@ impl App {
             leaves: Vec::new(),
             screen: Rect::default(),
             keymaps: Keymaps::default(),
-            focused_context: None,
-            pending_keys: Vec::new(),
-            pending_action: None,
-            pending_context: None,
-            pending_since: None,
-            raw_interceptors: Vec::new(),
+            input: KeyState::default(),
             message: None,
             log: Vec::new(),
             options: Options::default(),
@@ -306,7 +281,6 @@ impl App {
             next_callback: 0,
             user_commands: HashMap::new(),
             autocmds: Vec::new(),
-            in_actions: Vec::new(),
             owner: None,
             callback_owner: HashMap::new(),
             owned: HashMap::new(),
@@ -338,16 +312,10 @@ impl App {
         use std::mem::swap;
         swap(&mut self.lua, &mut side.lua);
         swap(&mut self.keymaps, &mut side.keymaps);
-        swap(&mut self.focused_context, &mut side.focused_context);
-        swap(&mut self.pending_keys, &mut side.pending_keys);
-        swap(&mut self.pending_action, &mut side.pending_action);
-        swap(&mut self.pending_context, &mut side.pending_context);
-        swap(&mut self.pending_since, &mut side.pending_since);
-        swap(&mut self.raw_interceptors, &mut side.raw_interceptors);
+        swap(&mut self.input, &mut side.input);
         swap(&mut self.dynamic_options, &mut side.dynamic_options);
         swap(&mut self.user_commands, &mut side.user_commands);
         swap(&mut self.autocmds, &mut side.autocmds);
-        swap(&mut self.in_actions, &mut side.in_actions);
         swap(&mut self.owner, &mut side.owner);
         swap(&mut self.callback_owner, &mut side.callback_owner);
         swap(&mut self.owned, &mut side.owned);
@@ -749,10 +717,6 @@ impl App {
         );
     }
 
-    pub(crate) fn emit_focus_changed(&mut self) {
-        bone_ui::lua::emit_focus_changed(self);
-    }
-
     pub fn resize(&mut self, width: u16, height: u16) {
         if self.screen.width == width && self.screen.height == height {
             self.dirty = true;
@@ -773,56 +737,11 @@ impl App {
     /// panel's (`panel` or its own context), then a named context selected
     /// by Lua, then `main`.
     pub fn context(&self) -> Context {
-        if self.focused_popup().is_some() {
-            Context::Popup
-        } else if let Some(p) = self.focused_panel() {
-            p.context.clone().unwrap_or(Context::Panel)
-        } else {
-            self.focused_context.clone().unwrap_or(Context::Main)
-        }
-    }
-
-    pub fn focus_context(&mut self, ctx: Context) -> Result<(), String> {
-        match &ctx {
-            Context::Main => return self.clear_context(),
-            Context::Popup => return Err("popup context is controlled by focused windows".into()),
-            Context::Panel => return Err("panel context is controlled by focused panels".into()),
-            Context::Named(_) if !self.keymaps.has_context(&ctx) => {
-                return Err(format!("unknown context {}", ctx.name()));
-            }
-            Context::Named(_) => {}
-        }
-        self.flush_pending();
-        self.focused_context = Some(ctx);
-        self.emit_focus_changed();
-        self.dirty = true;
-        Ok(())
-    }
-
-    pub fn clear_context(&mut self) -> Result<(), String> {
-        self.flush_pending();
-        self.focused_context = None;
-        self.emit_focus_changed();
-        self.dirty = true;
-        Ok(())
-    }
-
-    pub fn delete_context(&mut self, ctx: &Context) -> Result<(), String> {
-        if !self.keymaps.has_context(ctx) {
-            return Err(format!("unknown context {}", ctx.name()));
-        }
-        if self.focused_context.as_ref() == Some(ctx) {
-            self.flush_pending();
-            self.focused_context = None;
-            self.emit_focus_changed();
-        }
-        self.keymaps.remove_context(ctx)?;
-        self.dirty = true;
-        Ok(())
+        input::context_of(&self.popups, &self.panels, &self.panel_focus, &self.input)
     }
 
     pub fn key_sequence_deadline(&self) -> Option<Instant> {
-        self.pending_since
+        (self.input.pending_since)
             .map(|since| since + Duration::from_millis(self.options.timeoutlen))
     }
 
@@ -830,130 +749,14 @@ impl App {
     /// has passed. This is called by the terminal loop even when nothing is
     /// being redrawn.
     pub fn expire_key_sequence(&mut self) -> bool {
-        if self
-            .key_sequence_deadline()
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
-            self.flush_pending();
-            self.dirty = true;
-            true
-        } else {
-            false
-        }
+        input::expire_key_sequence(self)
     }
 
     pub fn handle_key(&mut self, key: Key) {
-        self.dirty = true;
-        self.selection = None;
-        let ctx = self.context();
-        self.fire(
-            "key",
-            serde_json::json!({
-                "key": crate::keys::format(&key),
-                "context": ctx.name(),
-            }),
-        );
-        if self
-            .pending_context
-            .as_ref()
-            .is_some_and(|pending| pending != &ctx)
-        {
-            self.flush_pending();
-        }
-        self.dispatch_key(key, true);
-        self.emit_prompt_changed();
+        input::handle_key(self, key);
     }
 
-    fn dispatch_key(&mut self, key: Key, allow_raw: bool) {
-        let ctx = self.context();
-        if ctx == Context::Popup {
-            return self.popup_key(key, allow_raw);
-        }
-        if self.message.is_some() {
-            self.message = None;
-        }
-        // A focused panel's own keys come first (not in the middle of a
-        // key sequence).
-        if self.pending_keys.is_empty()
-            && let Some(id) = self.focused_panel().map(|p| p.id.clone())
-            && self.panel_key(&id, key)
-        {
-            return;
-        }
-        let ctx = self.context();
-        if ctx == Context::Popup {
-            // A panel key opened a popup; the key was used.
-            return;
-        }
-        if allow_raw && self.raw_intercepts(&ctx, key) {
-            self.discard_pending();
-            return;
-        }
-        self.keymap_key(ctx, key);
-    }
-
-    fn keymap_key(&mut self, ctx: Context, key: Key) {
-        let had_pending = !self.pending_keys.is_empty();
-        let mut sequence = self.pending_keys.clone();
-        sequence.push(key);
-        let lookup = self.keymaps.lookup(&ctx, &sequence);
-
-        if lookup.prefix {
-            self.set_pending(sequence, lookup.action, ctx);
-            return;
-        }
-
-        if let Some(action) = lookup.action {
-            self.discard_pending();
-            // A Lua function on ctrl+c that errors (or passes the key on)
-            // must not leave bone without a way to quit.
-            if let Action::Lua(id) = action
-                && sequence == [Key::ctrl_c()]
-            {
-                match self.call_callback(id, "keymap", |_| Ok(mlua::Value::Nil)) {
-                    None | Some(mlua::Value::Boolean(false)) => self.interrupt(),
-                    Some(_) => {}
-                }
-                return;
-            }
-            if !self.dispatch_action(action) {
-                self.replay_literal(&ctx, &sequence);
-            }
-            return;
-        }
-
-        if !had_pending {
-            // Keys all come from Lua. If its config is broken and nothing maps
-            // ctrl+c here, it still interrupts (directly, not through Lua), so
-            // bone can be quit.
-            if key == Key::ctrl_c() {
-                return self.interrupt();
-            }
-            self.unmapped_in_context(&ctx, key);
-            return;
-        }
-
-        let (pending, fallback, pending_ctx) = self.take_pending();
-        if let Some(action) = fallback {
-            if !self.dispatch_action(action) && self.context() == pending_ctx {
-                self.replay_literal(&pending_ctx, &pending);
-            }
-        } else if self.context() == pending_ctx {
-            // A prefix with no exact fallback is literal when the next key
-            // proves it was not a sequence.
-            self.replay_literal(&pending_ctx, &pending);
-        }
-        // The mismatching key was not consumed by the failed sequence.
-        self.dispatch_key(key, false);
-    }
-
-    fn replay_literal(&mut self, ctx: &Context, keys: &[Key]) {
-        for &key in keys {
-            self.unmapped_in_context(ctx, key);
-        }
-    }
-
-    fn unmapped_in_context(&mut self, ctx: &Context, key: Key) {
+    pub(crate) fn type_key(&mut self, ctx: &Context, key: Key) {
         let Some(c) = key.text() else { return };
         // Text goes to the prompt only while it has the keyboard.
         match ctx {
@@ -994,126 +797,32 @@ impl App {
         self.emit_prompt_changed();
     }
 
-    pub fn run(&mut self, action: Action) {
-        self.dirty = true;
-        let _ = self.dispatch_action(action);
-        self.emit_prompt_changed();
-    }
-
-    fn dispatch_action(&mut self, action: Action) -> bool {
-        self.dirty = true;
-        match action {
-            Action::Builtin(b) => {
-                self.builtin(b);
-                true
-            }
-            Action::Command(cmd) => {
-                self.execute(&cmd);
-                true
-            }
-            Action::Lua(id) => !matches!(
-                self.call_callback(id, "keymap", |_| Ok(mlua::Value::Nil)),
-                Some(mlua::Value::Boolean(false))
-            ),
-        }
-    }
-
-    fn set_pending(&mut self, keys: Vec<Key>, action: Option<Action>, ctx: Context) {
-        self.pending_keys = keys;
-        self.pending_action = action;
-        self.pending_context = Some(ctx);
-        self.pending_since = Some(Instant::now());
-    }
-
-    fn take_pending(&mut self) -> (Vec<Key>, Option<Action>, Context) {
-        let keys = std::mem::take(&mut self.pending_keys);
-        let action = self.pending_action.take();
-        let ctx = self.pending_context.take().unwrap_or(Context::Main);
-        self.pending_since = None;
-        (keys, action, ctx)
-    }
-
-    fn discard_pending(&mut self) {
-        self.pending_keys.clear();
-        self.pending_action = None;
-        self.pending_context = None;
-        self.pending_since = None;
-    }
-
     pub(crate) fn flush_pending(&mut self) {
-        if self.pending_keys.is_empty() {
-            self.discard_pending();
-            return;
-        }
-        let (keys, action, ctx) = self.take_pending();
-        if let Some(action) = action
-            && !self.dispatch_action(action)
-            && self.context() == ctx
-        {
-            self.replay_literal(&ctx, &keys);
-        }
-        self.emit_prompt_changed();
+        input::flush_pending(self);
     }
 
-    pub fn add_raw_interceptor(&mut self, callback: u64, context: Option<Context>) -> u64 {
-        self.next_callback += 1;
-        let id = self.next_callback;
-        self.raw_interceptors.push(RawInterceptor {
-            id,
-            callback,
-            context,
-        });
-        id
-    }
-
-    pub fn remove_raw_interceptor(&mut self, id: u64) -> Option<u64> {
-        let i = self.raw_interceptors.iter().position(|raw| raw.id == id)?;
-        Some(self.raw_interceptors.remove(i).callback)
-    }
-
-    fn raw_intercepts(&mut self, ctx: &Context, key: Key) -> bool {
-        let name = crate::keys::format(&key);
-        let callbacks: Vec<u64> = self
-            .raw_interceptors
-            .iter()
-            .filter(|raw| raw.context.as_ref().is_none_or(|wanted| wanted == ctx))
-            .map(|raw| raw.callback)
-            .collect();
-        callbacks.into_iter().any(|callback| {
-            matches!(
-                self.call_callback(callback, "raw key", |lua| {
-                    Ok(mlua::Value::String(lua.create_string(&name)?))
-                }),
-                Some(mlua::Value::Boolean(true))
-            )
-        })
-    }
-
-    fn builtin(&mut self, b: Builtin) {
+    /// What `b` does to a selection in the prompt: deleting removes it,
+    /// moving drops it. True when that was all.
+    pub(crate) fn builtin_on_selection(&mut self, b: Builtin) -> bool {
         use Builtin::*;
-        if b != Interrupt {
-            self.quit_armed = None;
-        }
-        // Scrolling and dismiss act on a focused panel.
-        if self.panel_builtin(b) {
-            return;
-        }
-        // Deleting removes a prompt selection; moving drops it.
         if self.prompt.selection().is_some() {
             match b {
                 Backspace | Delete | DeleteWord | DeleteToStart | DeleteToEnd => {
                     self.prompt.delete_selection();
-                    return;
+                    return true;
                 }
                 Left | Right | Up | Down | WordLeft | WordRight | LineStart | LineEnd
                 | Complete | Dismiss => self.prompt.clear_selection(),
                 _ => {}
             }
         }
-        // Lua may handle it (bone.ui.actions[name]; the / command menu does).
-        if self.lua_action(b) {
-            return;
-        }
+        false
+    }
+
+    /// What a built-in action does in the TUI, when neither a panel nor Lua
+    /// took it.
+    pub(crate) fn builtin_action(&mut self, b: Builtin) {
+        use Builtin::*;
         match b {
             PasteClipboard => self.paste_clipboard(),
             Submit => self.submit(None),
@@ -1167,41 +876,10 @@ impl App {
             }
             NewSession => self.new_session(),
             Sessions => self.open_picker(),
-            FocusNext => self.cycle_focus(true),
-            FocusPrev => self.cycle_focus(false),
+            FocusNext => input::cycle_focus(self, true),
+            FocusPrev => input::cycle_focus(self, false),
             FocusPrompt => {
                 let _ = self.focus_panel(None);
-            }
-        }
-    }
-
-    /// Run `bone.ui.actions[name]` for a builtin action, if Lua set one.
-    /// Returns whether it handled the action (it returned true).
-    fn lua_action(&mut self, b: Builtin) -> bool {
-        if self.lua.is_none() || self.in_actions.contains(&b) {
-            return false;
-        }
-        self.in_actions.push(b);
-        let name = b.name();
-        let r = self.with_api(|lua| {
-            let ui: mlua::Table = lua.globals().get::<mlua::Table>("bone")?.get("ui")?;
-            let Some(actions) = ui.get::<Option<mlua::Table>>("actions")? else {
-                return Ok(false);
-            };
-            let Some(f) = actions.get::<Option<mlua::Function>>(name)? else {
-                return Ok(false);
-            };
-            Ok(matches!(
-                f.call::<mlua::Value>(())?,
-                mlua::Value::Boolean(true)
-            ))
-        });
-        self.in_actions.retain(|x| *x != b);
-        match r {
-            Ok(handled) => handled,
-            Err(e) => {
-                self.lua_error(&format!("bone.ui.actions.{name}"), &e);
-                false
             }
         }
     }
@@ -1277,7 +955,7 @@ impl App {
 
     /// ctrl+c: cancel the turn, else clear the prompt, else quit on the
     /// second press.
-    fn interrupt(&mut self) {
+    pub(crate) fn interrupt(&mut self) {
         if self.chats[self.current].turn.is_some()
             && let Some(session_id) = self.chats[self.current].session_id().map(str::to_owned)
         {
@@ -1839,54 +1517,6 @@ impl App {
     /// The topmost window that takes the keyboard.
     pub fn focused_popup(&self) -> Option<&Popup> {
         bone_ui::popup::focused(&self.popups)
-    }
-
-    fn popup_key(&mut self, key: Key, allow_raw: bool) {
-        let Some((guard, own, on_key)) = self.focused_popup().map(|top| {
-            (
-                top.opened.elapsed() < top.guard,
-                top.keys
-                    .iter()
-                    .find(|(mapped, _)| *mapped == key)
-                    .map(|(_, cb)| *cb),
-                top.on_key,
-            )
-        }) else {
-            return;
-        };
-        if guard {
-            self.discard_pending();
-            return;
-        }
-        if let Some(cb) = own {
-            self.discard_pending();
-            self.call_callback(cb, "popup key", |_| Ok(mlua::Value::Nil));
-            return;
-        }
-        if let Some(cb) = on_key {
-            let name = crate::keys::format(&key);
-            let r = self.call_callback(cb, "popup on_key", |lua| {
-                Ok(mlua::Value::String(lua.create_string(&name)?))
-            });
-            self.dirty = true;
-            // Returning nil or false passes the key on to the keymaps.
-            if !matches!(
-                r,
-                None | Some(mlua::Value::Nil | mlua::Value::Boolean(false))
-            ) {
-                self.discard_pending();
-                return;
-            }
-        }
-        let ctx = self.context();
-        if ctx != Context::Popup {
-            return self.dispatch_key(key, false);
-        }
-        if allow_raw && self.raw_intercepts(&ctx, key) {
-            self.discard_pending();
-            return;
-        }
-        self.keymap_key(ctx, key);
     }
 
     // ---- server events -------------------------------------------------------
