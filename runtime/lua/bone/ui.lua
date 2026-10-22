@@ -2,6 +2,25 @@
 -- modules and can be replaced from ~/.bone/lua or a plugin.
 local M = {}
 
+-- /health: this frontend's checks, then the core's (over the protocol).
+local MARK = { ok = { "✓ ", "DiffAdd" }, warn = { "! ", "WarningMsg" }, error = { "✗ ", "ErrorMsg" } }
+
+local function health_lines(title, items, out)
+  out[#out + 1] = { { title, "Accent" } }
+  for _, it in ipairs(items) do
+    local m = MARK[it.status] or MARK.warn
+    local rows = {}
+    for line in (tostring(it.message) .. "\n"):gmatch("(.-)\n") do
+      rows[#rows + 1] = line
+    end
+    out[#out + 1] = { m, { it.name .. ": ", "Normal" }, { rows[1] or "", "Dim" } }
+    for i = 2, #rows do
+      out[#out + 1] = { { "    " .. rows[i], "Dim" } }
+    end
+  end
+  out[#out + 1] = {}
+end
+
 function M.setup(opts)
   opts = opts or {}
   -- Reasoning is hidden by default (the option's default); only an
@@ -57,6 +76,25 @@ function M.setup(opts)
       }
     end
     return lines
+  end
+
+  function bone.ui.health()
+    local mine = bone.api.health()
+    for _, it in ipairs(bone._run_health()) do
+      mine[#mine + 1] = it
+    end
+    local lines = {}
+    health_lines(bone.api_info().side:upper(), mine, lines)
+    local pager = bone.ui.pager({ unpack(lines), { { "Core: checking…", "Dim" } } }, { title = "Health" })
+    bone.request("health/check", {}, function(core, err)
+      local all = { unpack(lines) }
+      if err then
+        health_lines("Core", { { name = "core", status = "error", message = err } }, all)
+      else
+        health_lines("Core", core or {}, all)
+      end
+      pager:set(all)
+    end)
   end
   return M
 end
