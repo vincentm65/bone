@@ -27,7 +27,8 @@ use crate::app::{App, CHAT_WIN, Level, PROMPT_WIN};
 use crate::editor::TextBuffer;
 use crate::layout::{BufferId, Placed, Window};
 use crate::text::{sanitize, width};
-use crate::ui::{Border, Item, LayoutNode, PromptSpec, Size, items_width, render_items};
+use crate::ui::{Border, Item, LayoutNode, PromptSpec, items_width, render_items};
+use bone_ui::layout::{self, BUILTIN, kind};
 
 pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     // Consume due UI timers before Lua draws, so render callbacks can rearm
@@ -66,8 +67,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         ..area
     };
 
-    let mut plan = Plan::default();
-    place(app, &layout, main, &mut plan, &mut Vec::new());
+    let mut plan = place(app, &layout, main);
     crate::stats::mark("place");
     let none = Rect { height: 0, ..main };
     let rect = |leaves: &[(String, Rect)], name: &str| {
@@ -234,29 +234,13 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     crate::stats::mark("rest");
 }
 
-/// Where the layout put things.
+/// Where the layout put things, in the TUI's rects.
 #[derive(Default)]
 struct Plan {
-    /// Every leaf and its area.
     leaves: Vec<(String, Rect)>,
-    /// Regions to paint at their final dimensions.
     regions: Vec<(String, Rect)>,
-    /// Column separators: x, the split's area, the symbol, and the path
-    /// (1-based child indexes) to the column after it.
     seps: Vec<(u16, Rect, String, Vec<usize>)>,
 }
-
-/// What a leaf is: `panel`, a built-in, or (anything else) a region. Built-ins
-/// other than `message` take `:<session id>` for that session's chat.
-fn kind(name: &str) -> &str {
-    name.split(':').next().unwrap_or(name)
-}
-
-fn is_region(name: &str) -> bool {
-    !BUILTIN.contains(&kind(name)) && kind(name) != "panel"
-}
-
-const BUILTIN: [&str; 5] = ["chat", "prompt", "divider", "statusline", "message"];
 
 /// A chat's own leaf and the chat it shows: bare for the chat on screen.
 fn scoped(app: &App, name: &str) -> Option<(&'static str, BufferId)> {
@@ -267,170 +251,79 @@ fn scoped(app: &App, name: &str) -> Option<(&'static str, BufferId)> {
     }
 }
 
-/// Panel-only subtrees disappear when every referenced panel is hidden or missing.
-fn empty_panels(app: &App, node: &LayoutNode) -> bool {
-    match node {
-        LayoutNode::Leaf { name, .. } => name
-            .strip_prefix("panel:")
-            .is_some_and(|id| app.panel(id).is_none_or(|p| p.hidden)),
-        LayoutNode::Split { children, .. } => children.iter().all(|c| empty_panels(app, c)),
+fn to_cells(r: Rect) -> layout::Rect {
+    layout::Rect::new(r.x, r.y, r.width, r.height)
+}
+
+fn from_cells(r: layout::Rect) -> Rect {
+    Rect::new(r.x, r.y, r.width, r.height)
+}
+
+/// Lay `node` out in `area` with the shared solver, measuring with `app`.
+fn place(app: &mut App, node: &LayoutNode, area: Rect) -> Plan {
+    let mut plan = layout::Plan::default();
+    layout::place(
+        &mut Measurer(app),
+        node,
+        to_cells(area),
+        &mut plan,
+        &mut Vec::new(),
+    );
+    let rects = |v: Vec<(String, layout::Rect)>| {
+        v.into_iter()
+            .map(|(n, r)| (n, from_cells(r)))
+            .collect::<Vec<_>>()
+    };
+    Plan {
+        leaves: rects(plan.leaves),
+        regions: rects(plan.regions),
+        seps: (plan.seps.into_iter())
+            .map(|(x, r, sep, path)| (x, from_cells(r), sep, path))
+            .collect(),
     }
 }
-/// Lay `node` out in `area`. In a split, fixed and percent sizes come first,
-/// then natural sizes (the prompt, one-row statusline and divider, the
-/// message line, then regions, which leave a filling sibling at least 3
-/// rows), and filling children share the rest.
-fn place(app: &mut App, node: &LayoutNode, area: Rect, plan: &mut Plan, path: &mut Vec<usize>) {
-    let LayoutNode::Split {
-        rows,
-        sep,
-        children,
-        ..
-    } = node
-    else {
-        if let LayoutNode::Leaf { name, .. } = node {
-            plan.leaves.push((name.clone(), area));
-            if is_region(name) {
-                plan.regions.push((name.clone(), area));
-            }
-        }
-        return;
-    };
-    let rows = *rows;
-    let n = children.len();
-    // Separators go only between columns that have something in them; room
-    // for the most there could be is kept back while sizing regions.
-    let sep = sep.as_ref().filter(|_| !rows);
-    let most_seps = if sep.is_some() {
-        n.saturating_sub(1) as u16
-    } else {
-        0
-    };
-    let total = if rows { area.height } else { area.width };
-    let cross = if rows { area.width } else { area.height };
-    let mut sizes: Vec<Option<u16>> = vec![None; n];
-    fn leaf(c: &LayoutNode) -> Option<&str> {
-        match c {
-            LayoutNode::Leaf { name, .. } => Some(name),
-            _ => None,
-        }
+
+/// What the layout asks while it sizes leaves.
+struct Measurer<'a>(&'a mut App);
+
+impl layout::Measure for Measurer<'_> {
+    fn panel_hidden(&self, id: &str) -> bool {
+        self.0.panel(id).is_none_or(|p| p.hidden)
     }
-    for (i, c) in children.iter().enumerate() {
-        sizes[i] = match (c.size(), leaf(c).map(kind)) {
-            _ if empty_panels(app, c) => Some(0),
-            (Size::Cells(v), _) => Some(v),
-            (Size::Percent(p), _) => Some((u32::from(total) * u32::from(p) / 100) as u16),
-            (Size::Auto, Some("prompt")) => {
-                let buf = leaf(c)
-                    .and_then(|n| scoped(app, n))
-                    .map_or(app.current, |s| s.1);
-                let width = if rows { cross } else { total };
-                let text = app.prompt_of(buf);
-                let ctx = app.prompt_ctx(width, buf, &text);
-                let spec = app.prompt_spec(&ctx);
-                let insets = Insets::of(&spec, width);
-                let text = prompt_rows(&text, insets.text_width).0.len();
-                let max = spec
-                    .max_rows
-                    .unwrap_or(app.options.prompt_max_height)
-                    .max(spec.min_rows);
-                let h = (text.clamp(spec.min_rows, max).min(u16::MAX as usize) as u16)
-                    .saturating_add(insets.top)
-                    .saturating_add(insets.bottom);
-                Some(if rows {
-                    h.min(total.saturating_sub(1))
-                } else {
-                    total / 2
-                })
-            }
-            (Size::Auto, Some(name @ ("divider" | "statusline"))) => {
-                Some(u16::from(app.ui_defined(name)))
-            }
-            (Size::Auto, Some("message")) => Some(message_rows(app, area)),
-            _ => None,
-        };
+
+    fn prompt_height(&mut self, name: &str, width: u16) -> u16 {
+        let app = &mut *self.0;
+        let buf = scoped(app, name).map_or(app.current, |s| s.1);
+        let text = app.prompt_of(buf);
+        let ctx = app.prompt_ctx(width, buf, &text);
+        let spec = app.prompt_spec(&ctx);
+        let insets = Insets::of(&spec, width);
+        let text = prompt_rows(&text, insets.text_width).0.len();
+        let max = spec
+            .max_rows
+            .unwrap_or(app.options.prompt_max_height)
+            .max(spec.min_rows);
+        (text.clamp(spec.min_rows, max).min(u16::MAX as usize) as u16)
+            .saturating_add(insets.top)
+            .saturating_add(insets.bottom)
     }
-    let fills = children
-        .iter()
-        .enumerate()
-        .filter(|(i, c)| {
-            sizes[*i].is_none()
-                && !(c.size() == Size::Auto && leaf(c).is_some_and(|n| !BUILTIN.contains(&kind(n))))
-        })
-        .count();
-    let mut used = sizes
-        .iter()
-        .flatten()
-        .fold(0u16, |sum, n| sum.saturating_add(*n));
-    let keep = if fills > 0 && rows { 3 } else { 0 };
-    let mut spare = total.saturating_sub(used.saturating_add(keep).saturating_add(most_seps));
-    for (i, c) in children.iter().enumerate() {
-        if sizes[i].is_some() || c.size() != Size::Auto {
-            continue;
-        }
-        let Some(name) = leaf(c).filter(|n| !BUILTIN.contains(&kind(n))) else {
-            continue;
-        };
-        let (avail_w, avail_h) = if rows { (cross, spare) } else { (total, cross) };
-        sizes[i] = Some(if let Some(id) = name.strip_prefix("panel:") {
-            app.measure_panel(id, avail_w, avail_h, rows).min(spare)
-        } else {
-            match app.region_sized(name, avail_w, avail_h, rows, false) {
-                Some((size, _)) => size.min(spare),
-                None => 0,
-            }
-        });
-        let size = sizes[i].unwrap_or(0);
-        spare = spare.saturating_sub(size);
-        used = used.saturating_add(size);
+
+    fn line_defined(&self, name: &str) -> bool {
+        self.0.ui_defined(name)
     }
-    let fill_count = sizes.iter().filter(|s| s.is_none()).count() as u16;
-    let shown = sizes.iter().filter(|s| s.is_none_or(|v| v > 0)).count() as u16;
-    let seps = if sep.is_some() {
-        shown.saturating_sub(1)
-    } else {
-        0
-    };
-    let left = total.saturating_sub(used.saturating_add(seps));
-    let mut extra = if fill_count > 0 { left % fill_count } else { 0 };
-    let mut at = if rows { area.y } else { area.x };
-    let end = if rows { area.bottom() } else { area.right() };
-    let mut shown_before = false;
-    for (i, c) in children.iter().enumerate() {
-        let mut size = sizes[i].unwrap_or_else(|| {
-            let share = left / fill_count.max(1) + u16::from(extra > 0);
-            extra = extra.saturating_sub(1);
-            share
-        });
-        if let Some(sep) = sep
-            && size > 0
-            && shown_before
-            && at < end
-        {
-            let mut to = path.clone();
-            to.push(i + 1);
-            plan.seps.push((at, area, sep.clone(), to));
-            at += 1;
-        }
-        shown_before |= size > 0;
-        size = size.min(end.saturating_sub(at));
-        let r = if rows {
-            Rect {
-                y: at,
-                height: size,
-                ..area
-            }
-        } else {
-            Rect {
-                x: at,
-                width: size,
-                ..area
-            }
-        };
-        path.push(i + 1);
-        place(app, c, r, plan, path);
-        path.pop();
-        at += size;
+
+    fn message_rows(&self, area: layout::Rect) -> u16 {
+        message_rows(self.0, from_cells(area))
+    }
+
+    fn panel_size(&mut self, id: &str, width: u16, height: u16, rows: bool) -> u16 {
+        self.0.measure_panel(id, width, height, rows)
+    }
+
+    fn region_size(&mut self, name: &str, width: u16, height: u16, rows: bool) -> Option<u16> {
+        self.0
+            .region_sized(name, width, height, rows, false)
+            .map(|(size, _)| size)
     }
 }
 
