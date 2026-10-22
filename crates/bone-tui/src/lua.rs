@@ -25,20 +25,6 @@ pub const CONFIG_FILES: [&str; 2] = ["ui.lua", "tui.lua"];
 use bone_ui::lua::canonical_event;
 pub use bone_ui::lua::{Autocmd, UserCommand};
 
-fn popup_event(p: &crate::app::Popup) -> serde_json::Value {
-    serde_json::json!({
-        "id": p.id,
-        "kind": "popup",
-        "focus": p.focus,
-        "anchor": p.anchor,
-        "z": p.z,
-        "width": p.width,
-        "height": p.height,
-        "row": p.row,
-        "col": p.col,
-    })
-}
-
 /// Create the TUI Lua state with the runtime API and default keymaps.
 /// What identifies a load error across reloads: where it happened and what
 /// it said, with numbers blanked so the same error on another line (after an
@@ -98,89 +84,6 @@ pub fn init(app: &mut App, config_dir: Option<PathBuf>) {
             app.lua_error(&format!("runtime/{rel}"), &e);
         }
     }
-}
-
-/// Set the fields of a window that `spec` names (for opening and
-/// `bone.ui.update`). Replaced callbacks are released.
-fn apply_win_spec(
-    app: &mut App,
-    lua: &Lua,
-    p: &mut crate::app::Popup,
-    spec: &Table,
-) -> mlua::Result<()> {
-    fn err(m: impl std::fmt::Display) -> mlua::Error {
-        mlua::Error::runtime(m)
-    }
-    match spec.get::<Value>("lines")? {
-        Value::Nil => {}
-        v @ (Value::Function(_) | Value::Table(_)) => {
-            if p.lines != 0 {
-                App::drop_callback(lua, p.lines)?;
-            }
-            app.next_callback += 1;
-            p.lines = app.next_callback;
-            lua.named_registry_value::<Table>(CALLBACKS)?
-                .set(p.lines, v)?;
-        }
-        _ => return Err(err("window lines must be a list or a function")),
-    }
-    if let Some(t) = spec.get::<Option<Table>>("keys")? {
-        for (_, cb) in p.keys.drain(..) {
-            App::drop_callback(lua, cb)?;
-        }
-        for pair in t.pairs::<String, Function>() {
-            let (name, f) = pair?;
-            let key = keys::parse(&name).map_err(err)?;
-            p.keys.push((key, app.store_callback(lua, f)?));
-        }
-    }
-    if let Some(f) = spec.get::<Option<Function>>("on_key")? {
-        if let Some(cb) = p.on_key.take() {
-            App::drop_callback(lua, cb)?;
-        }
-        p.on_key = Some(app.store_callback(lua, f)?);
-    }
-    if let Some(focus) = spec.get::<Option<bool>>("focus")? {
-        p.focus = focus;
-    }
-    if let Some(anchor) = spec.get::<Option<String>>("anchor")? {
-        if !matches!(anchor.as_str(), "screen" | "chat" | "prompt") {
-            return Err(err(format!(
-                "unknown anchor {anchor:?} (screen, chat or prompt)"
-            )));
-        }
-        p.anchor = anchor;
-    }
-    if let Some(z) = spec.get::<Option<i32>>("z")? {
-        p.z = z;
-    }
-    if let Some(ms) = spec.get::<Option<u64>>("guard")? {
-        p.guard = std::time::Duration::from_millis(ms);
-    }
-    // Size and position: a number sets, false goes back to automatic.
-    let num = |k: &str| -> mlua::Result<Option<Option<i64>>> {
-        Ok(match spec.get::<Value>(k)? {
-            Value::Nil => None,
-            Value::Boolean(false) => Some(None),
-            Value::Integer(n) => Some(Some(n)),
-            Value::Number(n) => Some(Some(n as i64)),
-            _ => return Err(err(format!("window {k} must be a number or false"))),
-        })
-    };
-    if let Some(v) = num("width")? {
-        p.width = v.map(|n| n.clamp(0, u16::MAX as i64) as u16);
-    }
-    if let Some(v) = num("height")? {
-        p.height = v.map(|n| n.clamp(0, u16::MAX as i64) as u16);
-    }
-    if let Some(v) = num("row")? {
-        p.row = v.map(|n| n as i32);
-    }
-    if let Some(v) = num("col")? {
-        p.col = v.map(|n| n as i32);
-    }
-    app.dirty = true;
-    Ok(())
 }
 
 /// The Lua handle of panel `id` (`bone.ui.panel._handle`), passed to its
@@ -879,90 +782,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 }
             };
             ret(lua, buf)
-        }
-        "popup_open" => {
-            let spec: Table = args(lua, a)?;
-            let old_focus = app.focused_popup().map(|p| p.id);
-            app.next_callback += 1;
-            let mut p = crate::app::Popup {
-                id: app.next_callback,
-                focus: false,
-                anchor: "screen".into(),
-                z: 0,
-                lines: 0,
-                keys: Vec::new(),
-                on_key: None,
-                width: None,
-                height: None,
-                row: None,
-                col: None,
-                rect: None,
-                opened: std::time::Instant::now(),
-                guard: std::time::Duration::ZERO,
-            };
-            if !matches!(
-                spec.get::<Value>("lines")?,
-                Value::Function(_) | Value::Table(_)
-            ) {
-                return Err(err("a window needs lines: a list or a function"));
-            }
-            apply_win_spec(app, lua, &mut p, &spec)?;
-            let id = p.id;
-            let event = popup_event(&p);
-            app.own(crate::plugins::Owned::Popup(id));
-            app.popups.push(p);
-            app.fire("panel/opened", event);
-            if old_focus != app.focused_popup().map(|p| p.id) {
-                app.emit_focus_changed();
-            }
-            app.dirty = true;
-            ret(lua, id)
-        }
-        "popup_update" => {
-            let (id, spec): (u64, Table) = args(lua, a)?;
-            let Some(i) = app.popups.iter().position(|p| p.id == id) else {
-                return ret(lua, false);
-            };
-            let old_focus = app.focused_popup().map(|p| p.id);
-            let mut p = app.popups.remove(i);
-            p.rect = None;
-            if let Err(error) = apply_win_spec(app, lua, &mut p, &spec) {
-                app.popups.insert(i, p);
-                return Err(error);
-            }
-            let event = popup_event(&p);
-            app.popups.insert(i, p);
-            app.fire("panel/updated", event);
-            if old_focus != app.focused_popup().map(|p| p.id) {
-                app.emit_focus_changed();
-            }
-            app.dirty = true;
-            ret(lua, true)
-        }
-        "popup_is_open" => {
-            let id: u64 = args(lua, a)?;
-            ret(lua, app.popups.iter().any(|p| p.id == id))
-        }
-        "popup_close" => {
-            let id: u64 = args(lua, a)?;
-            if let Some(i) = app.popups.iter().position(|p| p.id == id) {
-                let old_focus = app.focused_popup().map(|p| p.id);
-                let p = app.popups.remove(i);
-                let event = popup_event(&p);
-                App::drop_callback(lua, p.lines)?;
-                if let Some(cb) = p.on_key {
-                    App::drop_callback(lua, cb)?;
-                }
-                for (_, cb) in p.keys {
-                    App::drop_callback(lua, cb)?;
-                }
-                app.fire("panel/closed", event);
-                if old_focus != app.focused_popup().map(|p| p.id) {
-                    app.emit_focus_changed();
-                }
-                app.dirty = true;
-            }
-            ret(lua, ())
         }
         "job_start" => {
             let (cmd, opts): (Value, Option<Table>) = args(lua, a)?;
@@ -1669,6 +1488,10 @@ impl bone_ui::lua::Host for App {
 
     fn prompt_focused(&self, buf: usize) -> bool {
         buf == self.current && self.focused_popup().is_none() && self.focused_panel().is_none()
+    }
+
+    fn popups(&mut self) -> &mut Vec<bone_ui::popup::Popup> {
+        &mut self.popups
     }
 
     fn geometry(&self) -> bone_ui::lua::Geometry {

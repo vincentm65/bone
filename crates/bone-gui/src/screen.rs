@@ -136,9 +136,41 @@ impl Gui {
             let r = layout::Rect::new(0, main.bottom(), cols, msg_rows);
             self.message_leaf(ui, &cells, r);
         }
+        self.popups_ui(ui, &cells, full);
         if let Some(at) = self.lua.chat_expiry {
             let wait = at.saturating_duration_since(std::time::Instant::now());
             ui.ctx().request_repaint_after(wait);
+        }
+    }
+
+    /// Lua windows over everything, bottom first, where the shared
+    /// placement put them: the same anchors as the TUI's.
+    fn popups_ui(&mut self, ui: &egui::Ui, cells: &Cells, screen: layout::Rect) {
+        if self.lua.popups.is_empty() {
+            return;
+        }
+        let leaf = |name: &str| {
+            (self.lua.geometry.leaves.iter())
+                .find(|(n, r)| n == name && r.width > 0)
+                .map(|(_, r)| *r)
+        };
+        let chat = leaf("chat").unwrap_or(screen);
+        let prompt_top = leaf("prompt").map_or(screen.bottom(), |r| r.y);
+        let anchors = bone_ui::popup::Anchors {
+            screen,
+            chat,
+            prompt: layout::Rect {
+                y: chat.y,
+                height: prompt_top.saturating_sub(chat.y),
+                ..screen
+            },
+        };
+        let fill = (self.lua.theme.hl("Normal").bg)
+            .and_then(color)
+            .unwrap_or(ui.visuals().panel_fill);
+        for (_, r, lines) in bone_ui::lua::layout_popups(self, &anchors) {
+            ui.painter().rect_filled(cells.rect(r), 0.0, fill);
+            self.lines_at(ui, cells, r, &lines);
         }
     }
 

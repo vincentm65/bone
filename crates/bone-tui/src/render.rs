@@ -171,14 +171,14 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         } else {
             main.bottom()
         };
-        let anchors = Anchors {
-            screen: app.screen,
-            chat: chat_area,
-            prompt: Rect {
+        let anchors = bone_ui::popup::Anchors {
+            screen: to_cells(app.screen),
+            chat: to_cells(chat_area),
+            prompt: to_cells(Rect {
                 y: chat_top,
                 height: prompt_top.saturating_sub(chat_top),
                 ..prompt_area
-            },
+            }),
         };
         draw_popups(frame, app, &anchors);
         if app.focused_popup().is_some() {
@@ -655,63 +655,14 @@ fn draw_message(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
 }
 
-/// The areas windows can be placed in.
-struct Anchors {
-    screen: Rect,
-    chat: Rect,
-    /// Everything above the prompt.
-    prompt: Rect,
-}
-
-/// Lua windows, bottom first. Lua draws every cell inside; Rust sizes,
-/// places and clears behind them.
-fn draw_popups(frame: &mut Frame<'_>, app: &mut App, anchors: &Anchors) {
-    // Skipped/zero-sized windows must not keep bounds from an earlier frame.
-    for p in &mut app.popups {
-        p.rect = None;
-    }
-    let order: Vec<crate::app::Popup> = app.popups_in_order().into_iter().cloned().collect();
-    for p in order {
-        let (id, lines_cb, width, height, row, col, anchor) =
-            (p.id, p.lines, p.width, p.height, p.row, p.col, p.anchor);
-        let area = match anchor.as_str() {
-            "chat" => anchors.chat,
-            "prompt" => anchors.prompt,
-            _ => anchors.screen,
-        };
-        if area.width == 0 || area.height == 0 {
-            continue;
-        }
-        // Above the prompt, windows sit right on it unless told otherwise.
-        let row = row.or((anchor == "prompt").then_some(-1));
-        let avail_w = width.unwrap_or(area.width).min(area.width);
-        let avail_h = height.unwrap_or(area.height).min(area.height);
-        let lines = app.popup_lines(id, lines_cb, avail_w, avail_h);
-        let w = width.unwrap_or_else(|| lines.iter().map(|l| l.width()).max().unwrap_or(0) as u16);
-        let h = height.unwrap_or(lines.len() as u16);
-        let (w, h) = (w.min(area.width), h.min(area.height));
-        if w == 0 || h == 0 {
-            continue;
-        }
-        let place = |at: Option<i32>, size: u16, total: u16| -> u16 {
-            let free = total - size;
-            match at {
-                None => free / 2,
-                Some(n) if n < 0 => free.saturating_sub((-n - 1) as u16),
-                Some(n) => (n as u16).min(free),
-            }
-        };
-        let rect = Rect {
-            x: area.x + place(col.or((anchor == "prompt").then_some(0)), w, area.width),
-            y: area.y + place(row, h, area.height),
-            width: w,
-            height: h,
-        };
-        // A render callback may have closed the window.
-        let Some(p) = app.popups.iter_mut().find(|p| p.id == id) else {
-            continue;
-        };
-        p.rect = Some(rect);
+/// Lua windows, bottom first, where the shared placement put them. Lua
+/// draws every cell inside; Rust clears behind them.
+fn draw_popups(frame: &mut Frame<'_>, app: &mut App, anchors: &bone_ui::popup::Anchors) {
+    for (_, r, lines) in bone_ui::lua::layout_popups(app, anchors) {
+        let rect = from_cells(r);
+        let lines: Vec<Line> = (lines.iter())
+            .map(|l| render_items(l, rect.width as usize, &app.theme))
+            .collect();
         frame.render_widget(Clear, rect);
         frame.render_widget(Paragraph::new(lines).style(app.theme.hl("Normal")), rect);
     }

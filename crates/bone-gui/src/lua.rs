@@ -63,6 +63,8 @@ pub struct LuaSide {
     pub screen_cols: u16,
     /// Where the layout put things last frame.
     pub geometry: bone_ui::lua::Geometry,
+    /// Lua windows (`bone.ui.popup`).
+    pub popups: Vec<bone_ui::popup::Popup>,
     /// Every message shown, and the last Lua errors in full.
     pub log: Vec<String>,
     pub lua_errors: Vec<String>,
@@ -315,8 +317,13 @@ impl Host for Gui {
         }
     }
 
+    /// A focused window has the keyboard (its own keys, then `popup`).
     fn context(&self) -> Context {
-        Context::Main
+        if bone_ui::popup::focused(&self.lua.popups).is_some() {
+            Context::Popup
+        } else {
+            Context::Main
+        }
     }
 
     fn looks(&mut self) -> Looks<'_> {
@@ -482,13 +489,20 @@ impl Host for Gui {
         self.lua.screen_cols
     }
 
-    /// The prompt has the keyboard unless a question is open.
+    /// The prompt has the keyboard unless a question or a focused window
+    /// is open.
     fn prompt_focused(&self, buf: usize) -> bool {
-        buf == self.current && self.asks.is_empty()
+        buf == self.current
+            && self.asks.is_empty()
+            && bone_ui::popup::focused(&self.lua.popups).is_none()
     }
 
     fn geometry(&self) -> bone_ui::lua::Geometry {
         self.lua.geometry.clone()
+    }
+
+    fn popups(&mut self) -> &mut Vec<bone_ui::popup::Popup> {
+        &mut self.lua.popups
     }
 }
 

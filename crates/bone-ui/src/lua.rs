@@ -274,6 +274,8 @@ pub trait Host {
     /// Where each layout leaf, and each column separator (with the path to
     /// the column after it), was drawn last frame, in character units.
     fn geometry(&self) -> Geometry;
+    /// The open Lua windows.
+    fn popups(&mut self) -> &mut Vec<crate::popup::Popup>;
 }
 
 /// Run shared op `op`, or give `a` back for the frontend's own dispatcher.
@@ -342,6 +344,10 @@ pub fn dispatch<H: Host>(
         "process_list" => process_list(h, lua),
         "chat_view" => json(lua, &h.chat_view()),
         "geometry" => json(lua, &geometry(&h.geometry())),
+        "popup_open" => popup_open(h, lua, a),
+        "popup_update" => popup_update(h, lua, a),
+        "popup_is_open" => popup_is_open(h, lua, a),
+        "popup_close" => popup_close(h, lua, a),
         "on" => on(h, lua, a),
         "off" => off(h, lua, a),
         "command_create" => command_create(h, lua, a),
@@ -1787,4 +1793,211 @@ fn geometry(g: &Geometry) -> serde_json::Value {
         })
         .collect();
     serde_json::json!({ "leaves": leaves, "seps": seps })
+}
+
+// ---- windows ---------------------------------------------------------------
+
+use crate::popup::{self, Popup};
+
+/// The focus moved: `focus/changed` with what has the keyboard.
+pub fn emit_focus_changed<H: Host>(h: &mut H) {
+    let data = serde_json::json!({
+        "context": h.context().name(),
+        "popup": popup::focused(h.popups()).is_some(),
+        "panel": h.focused_panel(),
+    });
+    fire(h, "focus/changed", data);
+}
+
+fn focused_popup<H: Host>(h: &mut H) -> Option<u64> {
+    popup::focused(h.popups()).map(|p| p.id)
+}
+
+/// Set the fields of a window that `spec` names (for opening and
+/// `bone.ui.update`). Replaced callbacks are released.
+fn apply_win_spec<H: Host>(h: &mut H, lua: &Lua, p: &mut Popup, spec: &Table) -> mlua::Result<()> {
+    match spec.get::<Value>("lines")? {
+        Value::Nil => {}
+        v @ (Value::Function(_) | Value::Table(_)) => {
+            if p.lines != 0 {
+                drop_callback(lua, p.lines)?;
+            }
+            let next = h.owners().next_callback;
+            *next += 1;
+            p.lines = *next;
+            lua.named_registry_value::<Table>(CALLBACKS)?
+                .set(p.lines, v)?;
+        }
+        _ => return Err(err("window lines must be a list or a function")),
+    }
+    if let Some(t) = spec.get::<Option<Table>>("keys")? {
+        for (_, cb) in p.keys.drain(..) {
+            drop_callback(lua, cb)?;
+        }
+        for pair in t.pairs::<String, Function>() {
+            let (name, f) = pair?;
+            let key = keys::parse(&name).map_err(err)?;
+            p.keys.push((key, store_callback(h, lua, f)?));
+        }
+    }
+    if let Some(f) = spec.get::<Option<Function>>("on_key")? {
+        if let Some(cb) = p.on_key.take() {
+            drop_callback(lua, cb)?;
+        }
+        p.on_key = Some(store_callback(h, lua, f)?);
+    }
+    if let Some(focus) = spec.get::<Option<bool>>("focus")? {
+        p.focus = focus;
+    }
+    if let Some(anchor) = spec.get::<Option<String>>("anchor")? {
+        if !matches!(anchor.as_str(), "screen" | "chat" | "prompt") {
+            return Err(err(format!(
+                "unknown anchor {anchor:?} (screen, chat or prompt)"
+            )));
+        }
+        p.anchor = anchor;
+    }
+    if let Some(z) = spec.get::<Option<i32>>("z")? {
+        p.z = z;
+    }
+    if let Some(ms) = spec.get::<Option<u64>>("guard")? {
+        p.guard = Duration::from_millis(ms);
+    }
+    // Size and position: a number sets, false goes back to automatic.
+    let num = |k: &str| -> mlua::Result<Option<Option<i64>>> {
+        Ok(match spec.get::<Value>(k)? {
+            Value::Nil => None,
+            Value::Boolean(false) => Some(None),
+            Value::Integer(n) => Some(Some(n)),
+            Value::Number(n) => Some(Some(n as i64)),
+            _ => return Err(err(format!("window {k} must be a number or false"))),
+        })
+    };
+    if let Some(v) = num("width")? {
+        p.width = v.map(|n| n.clamp(0, u16::MAX as i64) as u16);
+    }
+    if let Some(v) = num("height")? {
+        p.height = v.map(|n| n.clamp(0, u16::MAX as i64) as u16);
+    }
+    if let Some(v) = num("row")? {
+        p.row = v.map(|n| n as i32);
+    }
+    if let Some(v) = num("col")? {
+        p.col = v.map(|n| n as i32);
+    }
+    h.changed();
+    Ok(())
+}
+
+fn popup_open<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let spec: Table = args(lua, a)?;
+    let old_focus = focused_popup(h);
+    let next = h.owners().next_callback;
+    *next += 1;
+    let mut p = Popup::new(*next);
+    if !matches!(
+        spec.get::<Value>("lines")?,
+        Value::Function(_) | Value::Table(_)
+    ) {
+        return Err(err("a window needs lines: a list or a function"));
+    }
+    apply_win_spec(h, lua, &mut p, &spec)?;
+    let id = p.id;
+    let event = p.event();
+    own(h, Owned::Popup(id));
+    h.popups().push(p);
+    fire(h, "panel/opened", event);
+    if old_focus != focused_popup(h) {
+        emit_focus_changed(h);
+    }
+    h.changed();
+    ret(lua, id)
+}
+
+fn popup_update<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let (id, spec): (u64, Table) = args(lua, a)?;
+    let Some(i) = h.popups().iter().position(|p| p.id == id) else {
+        return ret(lua, false);
+    };
+    let old_focus = focused_popup(h);
+    let mut p = h.popups().remove(i);
+    p.rect = None;
+    if let Err(error) = apply_win_spec(h, lua, &mut p, &spec) {
+        h.popups().insert(i, p);
+        return Err(error);
+    }
+    let event = p.event();
+    h.popups().insert(i, p);
+    fire(h, "panel/updated", event);
+    if old_focus != focused_popup(h) {
+        emit_focus_changed(h);
+    }
+    h.changed();
+    ret(lua, true)
+}
+
+fn popup_is_open<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let id: u64 = args(lua, a)?;
+    ret(lua, h.popups().iter().any(|p| p.id == id))
+}
+
+fn popup_close<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiValue> {
+    let id: u64 = args(lua, a)?;
+    if let Some(i) = h.popups().iter().position(|p| p.id == id) {
+        let old_focus = focused_popup(h);
+        let p = h.popups().remove(i);
+        let event = p.event();
+        drop_callback(lua, p.lines)?;
+        if let Some(cb) = p.on_key {
+            drop_callback(lua, cb)?;
+        }
+        for (_, cb) in p.keys {
+            drop_callback(lua, cb)?;
+        }
+        fire(h, "panel/closed", event);
+        if old_focus != focused_popup(h) {
+            emit_focus_changed(h);
+        }
+        h.changed();
+    }
+    ret(lua, ())
+}
+
+/// Size and place every window, bottom first, recording where each went;
+/// what to paint, in that order: its id, area and lines.
+pub fn layout_popups<H: Host>(
+    h: &mut H,
+    anchors: &popup::Anchors,
+) -> Vec<(u64, crate::layout::Rect, Vec<Vec<crate::model::Item>>)> {
+    // Skipped or zero-sized windows must not keep bounds from an earlier frame.
+    for p in h.popups().iter_mut() {
+        p.rect = None;
+    }
+    let order: Vec<Popup> = popup::in_order(h.popups()).into_iter().cloned().collect();
+    let mut out = Vec::new();
+    for p in order {
+        let placed = popup::place(&p, anchors, |w, height| {
+            let lines = ui::popup_lines(h, p.id, p.lines, w, height);
+            let width = (lines.iter())
+                .map(|l| {
+                    crate::model::layout_items(l, w as usize)
+                        .iter()
+                        .map(|(t, _)| crate::text::width(t))
+                        .sum::<usize>()
+                })
+                .max()
+                .unwrap_or(0) as u16;
+            (lines, width)
+        });
+        let Some((rect, lines)) = placed else {
+            continue;
+        };
+        // A render callback may have closed the window.
+        let Some(q) = h.popups().iter_mut().find(|q| q.id == p.id) else {
+            continue;
+        };
+        q.rect = Some(rect);
+        out.push((p.id, rect, lines));
+    }
+    out
 }

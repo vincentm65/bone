@@ -38,37 +38,7 @@ const PASTE_PLACEHOLDER_THRESHOLD: usize = 500;
 pub const CHAT_WIN: WindowId = 0;
 pub const PROMPT_WIN: WindowId = 1;
 
-/// A window opened from Lua (`bone.ui.win`, `bone.ui.popup`). Lua draws
-/// everything inside it; Rust only places it and clears behind it. The
-/// topmost focused one has the keyboard: its own keys first, then the
-/// `popup` keymaps.
-#[derive(Clone)]
-pub struct Popup {
-    pub id: u64,
-    /// Takes the keyboard while open.
-    pub focus: bool,
-    /// What `row`/`col` are relative to: "screen", "chat" or "prompt" (the
-    /// space above the prompt, so row -1 sits right on it).
-    pub anchor: String,
-    /// Higher is drawn on top; ties go to the newer one.
-    pub z: i32,
-    /// Callback id of the lines: a function(ctx) or a fixed list.
-    pub lines: u64,
-    pub keys: Vec<(Key, u64)>,
-    /// Called with the key name for keys `keys` does not name.
-    pub on_key: Option<u64>,
-    /// Size; `None` fits the lines.
-    pub width: Option<u16>,
-    pub height: Option<u16>,
-    /// Position; `None` centers, negative counts from the bottom/right.
-    pub row: Option<i32>,
-    pub col: Option<i32>,
-    /// Actual last-rendered bounds; absent until drawn or after an update.
-    pub rect: Option<Rect>,
-    pub opened: Instant,
-    /// Keys within this long after opening are ignored.
-    pub guard: Duration,
-}
+pub use bone_ui::popup::Popup;
 
 #[derive(Debug, Clone)]
 struct RawInterceptor {
@@ -780,14 +750,7 @@ impl App {
     }
 
     pub(crate) fn emit_focus_changed(&mut self) {
-        self.fire(
-            "focus/changed",
-            serde_json::json!({
-                "context": self.context().name(),
-                "popup": self.focused_popup().is_some(),
-                "panel": self.focused_panel().map(|p| p.id.clone()),
-            }),
-        );
+        bone_ui::lua::emit_focus_changed(self);
     }
 
     pub fn resize(&mut self, width: u16, height: u16) {
@@ -1867,24 +1830,14 @@ impl App {
 
     // ---- popups --------------------------------------------------------------
 
-    /// Windows in drawing order, bottom first.
-    pub fn popups_in_order(&self) -> Vec<&Popup> {
-        let mut v: Vec<&Popup> = self.popups.iter().collect();
-        v.sort_by_key(|p| (p.z, p.id));
-        v
-    }
-
     /// The topmost rendered window under a screen cell, focused or not.
     pub fn popup_hit(&self, at: (u16, u16)) -> Option<&Popup> {
-        self.popups
-            .iter()
-            .filter(|p| p.rect.is_some_and(|r| r.contains(at.into())))
-            .max_by_key(|p| (p.z, p.id))
+        bone_ui::popup::hit(&self.popups, at.0, at.1)
     }
 
     /// The topmost window that takes the keyboard.
     pub fn focused_popup(&self) -> Option<&Popup> {
-        self.popups_in_order().into_iter().rev().find(|p| p.focus)
+        bone_ui::popup::focused(&self.popups)
     }
 
     fn popup_key(&mut self, key: Key, allow_raw: bool) {

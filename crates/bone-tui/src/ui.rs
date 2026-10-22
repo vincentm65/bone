@@ -126,20 +126,6 @@ impl App {
                 .collect(),
         ))
     }
-
-    /// A popup's lines: its function called with `{ width }`, or its list.
-    pub fn popup_lines(
-        &mut self,
-        id: u64,
-        cb: u64,
-        width_cols: u16,
-        height: u16,
-    ) -> Vec<Line<'static>> {
-        bone_ui::lua::ui::popup_lines(self, id, cb, width_cols, height)
-            .iter()
-            .map(|l| render_items(l, width_cols as usize, &self.theme))
-            .collect()
-    }
 }
 
 #[cfg(test)]
