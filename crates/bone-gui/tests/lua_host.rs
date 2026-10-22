@@ -481,8 +481,8 @@ async fn images_in_the_prompt_and_the_clipboard() {
     assert_eq!(g.copied.as_deref(), Some("copied text"));
 }
 
-/// `/tui use` loads the UI again with the library chosen, and one made for
-/// the terminal (no `gui/` folder) leaves the GUI's UI standard.
+/// `/tui use` loads the UI again with the library chosen, and one without
+/// GUI files (no `gui/` folder) leaves the GUI's UI standard.
 #[tokio::test(flavor = "multi_thread")]
 async fn choosing_a_library_reloads_the_gui() {
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -493,8 +493,10 @@ async fn choosing_a_library_reloads_the_gui() {
     assert_eq!(g.gui.eval("next(bone.ui.views) == nil").unwrap(), "true");
     assert_eq!(g.gui.eval("bone.library.info().drawn").unwrap(), "bare");
 
-    // A terminal library: chosen, but the GUI stays standard.
+    // A library made for the terminal only (made before libraries had GUI
+    // files, or with them deleted): chosen, but the GUI stays standard.
     g.gui.run_lua("t", "bone.library.create('mine')").unwrap();
+    std::fs::remove_dir_all(config.path().join("libraries/mine/gui")).unwrap();
     g.gui.run_lua("t", "bone.library.use('mine')").unwrap();
     g.frame();
     assert_eq!(g.gui.eval("bone.library.info().active").unwrap(), "mine");
