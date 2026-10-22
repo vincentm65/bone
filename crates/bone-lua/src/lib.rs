@@ -697,11 +697,40 @@ pub fn tui_library(config_dir: &Path) -> Option<String> {
     (!name.is_empty() && name != "standard").then(|| name.to_owned())
 }
 
+/// The library frontend `side` draws with. The TUI's is the one chosen
+/// with `/tui`; the GUI takes it only if it is `bare` or has files for the
+/// GUI (a `gui/` directory), so a library made for the terminal leaves the
+/// GUI standard.
+pub fn library(config_dir: &Path, side: Side) -> Option<String> {
+    let name = tui_library(config_dir)?;
+    match side {
+        Side::Tui => Some(name),
+        Side::Gui if name == "bare" => Some(name),
+        Side::Gui => (config_dir
+            .join("libraries")
+            .join(&name)
+            .join("gui")
+            .is_dir())
+        .then_some(name),
+        Side::Core => None,
+    }
+}
+
 /// Like [`runtime_source`], for the TUI: the chosen library's copy of `rel`
 /// comes first. A file the library lacks is the standard one.
 pub fn tui_runtime_source(config_dir: Option<&Path>, rel: &str) -> Option<(String, String)> {
+    frontend_runtime_source(config_dir, Side::Tui, rel)
+}
+
+/// Like [`runtime_source`], for frontend `side`: its library's copy of
+/// `rel` (see [`library`]) comes first.
+pub fn frontend_runtime_source(
+    config_dir: Option<&Path>,
+    side: Side,
+    rel: &str,
+) -> Option<(String, String)> {
     if let Some(dir) = config_dir
-        && let Some(name) = tui_library(dir)
+        && let Some(name) = library(dir, side)
     {
         let path = dir.join("libraries").join(name).join(rel);
         if let Ok(src) = std::fs::read_to_string(&path) {
@@ -931,7 +960,7 @@ fn setup_require(lua: &Lua, side: Side, config_dir: Option<&Path>) -> mlua::Resu
         let rel = name.replace('.', "/");
         for candidate in [format!("lua/{rel}.lua"), format!("lua/{rel}/init.lua")] {
             let found = match side {
-                Side::Tui | Side::Gui => tui_runtime_source(dir.as_deref(), &candidate),
+                Side::Tui | Side::Gui => frontend_runtime_source(dir.as_deref(), side, &candidate),
                 _ => runtime_source(dir.as_deref(), &candidate),
             };
             if let Some((src, chunk_name)) = found {

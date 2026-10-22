@@ -1104,6 +1104,10 @@ impl bone_ui::lua::Host for App {
         &CONFIG_FILES
     }
 
+    fn side(&self) -> bone_lua::Side {
+        bone_lua::Side::Tui
+    }
+
     fn cwd(&self) -> &str {
         &self.cwd
     }

@@ -181,7 +181,8 @@ impl Gui {
             Err(e) => return self.lua_error("lua", &e),
         }
         // Bare loads its own small file in place of the standard UI's.
-        let bare = dir.as_deref().and_then(bone_lua::tui_library).as_deref() == Some("bare");
+        let library = dir.as_deref().and_then(|d| bone_lua::library(d, Side::Gui));
+        let bare = library.as_deref() == Some("bare");
         let defaults = if bare {
             "gui/bare.lua"
         } else {
@@ -189,7 +190,7 @@ impl Gui {
         };
         for rel in ["ui/api.lua", "gui/api.lua", defaults] {
             let r = self.with_api(|lua| {
-                let (src, name) = bone_lua::tui_runtime_source(dir.as_deref(), rel)
+                let (src, name) = bone_lua::frontend_runtime_source(dir.as_deref(), Side::Gui, rel)
                     .ok_or_else(|| err(format!("missing runtime file {rel}")))?;
                 lua.load(src).set_name(format!("@{name}")).exec()
             });
@@ -694,6 +695,10 @@ impl Host for Gui {
         &CONFIG_FILES
     }
 
+    fn side(&self) -> bone_lua::Side {
+        bone_lua::Side::Gui
+    }
+
     fn cwd(&self) -> &str {
         &self.opts.cwd
     }
@@ -720,7 +725,7 @@ pub fn lua_sources(dir: &Path) -> u64 {
     for sub in ["lua", "runtime", "colors"] {
         collect_lua_files(&dir.join(sub), &mut files);
     }
-    if let Some(name) = bone_lua::tui_library(dir) {
+    if let Some(name) = bone_lua::library(dir, Side::Gui) {
         collect_lua_files(&dir.join("libraries").join(name), &mut files);
     }
     for plugin in bone_lua::plugins(dir) {

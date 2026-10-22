@@ -305,6 +305,8 @@ pub trait Host {
     /// What a plugin, the user's config or a project runs in this
     /// frontend, in order: `ui.lua`, then its own (`tui.lua`, `gui.lua`).
     fn config_files(&self) -> &'static [&'static str];
+    /// Which frontend this is: whose library it draws with.
+    fn side(&self) -> bone_lua::Side;
     /// Where this frontend runs, for finding a project's `.bone/`.
     fn cwd(&self) -> &str;
     /// Stop job `id` without calling back; the callbacks it held.
@@ -1290,7 +1292,7 @@ pub fn colorscheme<H: Host>(h: &mut H, name: &str) -> Result<(), String> {
                 .ok()
                 .map(|s| (s, p.display().to_string()))
         })
-        .or_else(|| bone_lua::tui_runtime_source(dir.as_deref(), &rel))
+        .or_else(|| bone_lua::frontend_runtime_source(dir.as_deref(), h.side(), &rel))
         .ok_or_else(|| format!("no colorscheme named {name}"))?;
     // Its `bone.hl.set` calls replace the previous colorscheme's groups;
     // the UI's, plugins' and the user's stay. One loaded from inside
