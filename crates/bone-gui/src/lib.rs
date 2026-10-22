@@ -448,13 +448,20 @@ impl Gui {
     }
 
     /// Draw chat `buf`'s stale items at `width` columns through the Lua
-    /// views (or plain text without them), and return its row count.
-    pub fn layout_chat(&mut self, buf: usize, width: usize) -> usize {
+    /// views (or plain text without them), those in `view` first, and return
+    /// its row count and the top row that keeps the same text at the top.
+    pub fn layout_chat(
+        &mut self,
+        buf: usize,
+        width: usize,
+        view: bone_ui::lua::ChatView,
+    ) -> (usize, usize) {
         let width = width.max(1);
-        bone_ui::lua::render_chat(
+        let top = bone_ui::lua::render_chat(
             self,
             buf,
             width,
+            view,
             &|gui: &Gui, items, width| {
                 bone_ui::model::layout_items(items, width)
                     .into_iter()
@@ -469,7 +476,7 @@ impl Gui {
             },
         );
         self.wrapped_at = width;
-        self.chats[buf].row_count()
+        (self.chats[buf].row_count(), top)
     }
 
     /// The current chat as text, one row per line (after `layout_chat`).

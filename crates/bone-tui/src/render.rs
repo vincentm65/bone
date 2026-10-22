@@ -336,7 +336,17 @@ fn draw_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect, buf: BufferId) {
         return;
     }
     let height = area.height as usize;
-    app.render_chat(buf, area.width as usize);
+    let win = if buf == app.current {
+        &app.windows[&CHAT_WIN]
+    } else {
+        app.chat_views.entry(buf).or_default()
+    };
+    let view = bone_ui::lua::ChatView {
+        top: win.top,
+        height,
+        follow: win.follow,
+    };
+    let top = app.render_chat(buf, area.width as usize, view);
     crate::stats::mark("render_chat");
     let chat = &app.chats[buf];
     let total = chat.row_count();
@@ -345,6 +355,7 @@ fn draw_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect, buf: BufferId) {
     } else {
         app.chat_views.entry(buf).or_default()
     };
+    win.top = top;
     let max_top = total.saturating_sub(height);
     if win.follow || win.top >= max_top {
         win.top = max_top;

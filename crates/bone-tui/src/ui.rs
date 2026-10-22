@@ -85,15 +85,23 @@ impl App {
         bone_ui::lua::ui::ui_items(self, name, ctx, default_hl)
     }
 
-    /// Render the stale items of a chat through `bone.ui.views` and cache them.
-    pub fn render_chat(&mut self, buf: BufferId, width_cols: usize) {
+    /// Render the stale items of a chat through `bone.ui.views` and cache
+    /// them, those in `view` first; the top row that keeps the same text at
+    /// the top.
+    pub fn render_chat(
+        &mut self,
+        buf: BufferId,
+        width_cols: usize,
+        view: bone_ui::lua::ChatView,
+    ) -> usize {
         bone_ui::lua::render_chat(
             self,
             buf,
             width_cols,
+            view,
             &|app: &App, items, width| render_items(items, width, &app.theme),
             &|data, width, first| bare(data, width, first),
-        );
+        )
     }
 
     /// A region, sized and drawn (see `bone_ui::lua::ui::region_sized`).

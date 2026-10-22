@@ -308,28 +308,39 @@ impl Gui {
 
     /// Chat `buf` in `r`, scrolled to follow the end.
     fn chat_leaf(&mut self, ui: &mut egui::Ui, cells: &Cells, r: layout::Rect, buf: usize) {
-        let rows = self.layout_chat(buf, r.width as usize);
+        let (was, follow) = self.lua.chat_views.get(&buf).copied().unwrap_or((0, true));
+        let view = bone_ui::lua::ChatView {
+            top: was,
+            height: r.height as usize,
+            follow,
+        };
+        let (rows, top) = self.layout_chat(buf, r.width as usize, view);
         let chat = &self.chats[buf];
         let font = cells.font.clone();
-        let offset = ui
+        let out = ui
             .scope_builder(UiBuilder::new().max_rect(cells.rect(r)), |ui| {
                 ui.spacing_mut().item_spacing.y = 0.0;
-                ScrollArea::vertical()
+                let mut area = ScrollArea::vertical()
                     .id_salt(("chat", buf))
                     .auto_shrink(false)
-                    .stick_to_bottom(true)
-                    .show_rows(ui, cells.row, rows, |ui, range| {
-                        for row in chat.rows().skip(range.start).take(range.len()) {
-                            ui.label(row_job(row, &font, ui.visuals()));
-                        }
-                    })
-                    .state
-                    .offset
-                    .y
+                    .stick_to_bottom(true);
+                // Rows drawn above the screen keep its text where it was.
+                if top != was && !follow {
+                    area = area.vertical_scroll_offset(top as f32 * cells.row);
+                }
+                area.show_rows(ui, cells.row, rows, |ui, range| {
+                    for row in chat.rows().skip(range.start).take(range.len()) {
+                        ui.label(row_job(row, &font, ui.visuals()));
+                    }
+                })
             })
             .inner;
+        let offset = out.state.offset.y;
+        let end = out.content_size.y - out.inner_rect.height();
+        let top = (offset / cells.row).floor().max(0.0) as usize;
+        (self.lua.chat_views).insert(buf, (top, offset >= end - cells.row / 2.0));
         if buf == self.current {
-            self.lua.chat_top = (offset / cells.row).floor().max(0.0) as usize;
+            self.lua.chat_top = top;
         }
     }
 

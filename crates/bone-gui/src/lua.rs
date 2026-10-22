@@ -76,6 +76,9 @@ pub struct LuaSide {
     pub cells: Option<(f32, f32, f32, f32)>,
     /// The first chat row in view, and a pointer button held for dragging.
     pub chat_top: usize,
+    /// Each chat's first row in view and whether it is scrolled to the end,
+    /// last frame.
+    pub chat_views: HashMap<usize, (usize, bool)>,
     pub dragging: bool,
     /// The font file and size applied last (`bone.o.font`, `font_size`).
     pub fonts: Option<(String, f32)>,

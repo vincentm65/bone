@@ -856,6 +856,11 @@ impl<L> ChatBuffer<L> {
         );
     }
 
+    /// How many rows item `item` had when it was last rendered.
+    pub fn cached_rows(&self, item: &Item) -> Option<usize> {
+        self.cache.get(item).map(|c| c.lines.len())
+    }
+
     /// All rendered rows, in order (after `stale` items have been stored).
     /// Lazy, and `skip` steps over whole items, so drawing one screen of a
     /// long chat doesn't walk every row.

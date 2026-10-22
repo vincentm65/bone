@@ -1653,16 +1653,33 @@ pub fn guarded<H: Host, R>(
     }
 }
 
+/// What part of a chat is on screen: its first row, how many rows, and
+/// whether it follows the end.
+#[derive(Clone, Copy, Debug)]
+pub struct ChatView {
+    pub top: usize,
+    pub height: usize,
+    pub follow: bool,
+}
+
+/// How long one frame spends rendering items that are not on screen; the
+/// rest wait for the next frame, so opening a long session stays quick.
+const RENDER_BUDGET: Duration = Duration::from_millis(25);
+
 /// Render the stale items of chat `buf` through `bone.ui.views` at
-/// `width_cols` and cache them. `line` lays out one line of a view's items;
-/// `bare` is an item's rows when no view applies.
+/// `width_cols` and cache them: the ones on screen (`view`) first, then the
+/// others nearest to them, for up to [`RENDER_BUDGET`]; if some are left
+/// the chat asks for another frame. `line` lays out one line of a view's
+/// items; `bare` is an item's rows when no view applies. Returns the top
+/// row that keeps the same text at the top of the screen.
 pub fn render_chat<H: Host>(
     h: &mut H,
     buf: usize,
     width_cols: usize,
+    view: ChatView,
     line: &impl Fn(&H, &[crate::model::Item], usize) -> H::Line,
     bare: &impl Fn(&serde_json::Value, usize, bool) -> Vec<H::Line>,
-) {
+) -> usize {
     let generation = h.generation();
     let c = h.chat_store();
     // Views that read other chat data are drawn again when it changed.
@@ -1697,7 +1714,17 @@ pub fn render_chat<H: Host>(
     } else {
         c.chats[buf].items()
     };
-    for (item, index, key) in stale {
+    let anchor = (!view.follow)
+        .then(|| c.chats[buf].item_at_row(view.top))
+        .flatten();
+    let (stale, visible) = visible_first(&c.chats[buf], &items, stale, view, anchor);
+    let start = Instant::now();
+    let mut pending = false;
+    for (n, (item, index, key)) in stale.into_iter().enumerate() {
+        if n >= visible && start.elapsed() >= RENDER_BUDGET {
+            pending = true;
+            break;
+        }
         let c = h.chat_store();
         let prev = index
             .checked_sub(2)
@@ -1712,8 +1739,51 @@ pub fn render_chat<H: Host>(
         c.chats[buf].store(item, key, lines, deps, expires, data);
     }
     let expiry = h.chat_store().chats[buf].next_expiry();
+    let now = pending.then(Instant::now);
     let at = h.chat_expiry();
-    *at = (*at).into_iter().chain(expiry).min();
+    *at = (*at).into_iter().chain(expiry).chain(now).min();
+    // Rows drawn above the top move it down by as many.
+    let rows = h.chat_store().chats[buf].item_rows();
+    anchor
+        .and_then(|(index, line)| {
+            let &(_, start, len) = rows.iter().find(|r| r.0 == index)?;
+            Some(start + (line - 1).min(len.saturating_sub(1)))
+        })
+        .unwrap_or(view.top)
+}
+
+/// `stale` reordered so the items on screen come first, then the rest by
+/// how far they are from the screen; and how many are on screen. Where an
+/// item has no rows yet, it is taken to be one row.
+fn visible_first<L>(
+    chat: &ChatBuffer<L>,
+    items: &[ChatItem],
+    stale: Vec<(ChatItem, usize, RenderKey)>,
+    view: ChatView,
+    anchor: Option<(usize, usize)>,
+) -> (Vec<(ChatItem, usize, RenderKey)>, usize) {
+    if stale.is_empty() {
+        return (stale, 0);
+    }
+    // Indexes are 1-based. Following, the screen ends at the last item;
+    // otherwise it starts at the item at the top.
+    let from = match anchor {
+        Some((index, _)) => index,
+        None if view.follow => items.len(),
+        None => 1,
+    };
+    let mut on_screen = HashSet::new();
+    let mut rows = 0;
+    let mut i = from;
+    while (1..=items.len()).contains(&i) && rows < view.height.max(1) {
+        on_screen.insert(i);
+        rows += chat.cached_rows(&items[i - 1]).unwrap_or(1);
+        i = if view.follow && anchor.is_none() { i - 1 } else { i + 1 };
+    }
+    let mut stale = stale;
+    stale.sort_by_key(|&(_, index, _)| (!on_screen.contains(&index), index.abs_diff(from)));
+    let visible = stale.iter().filter(|s| on_screen.contains(&s.1)).count();
+    (stale, visible)
 }
 
 #[allow(clippy::too_many_arguments)]
