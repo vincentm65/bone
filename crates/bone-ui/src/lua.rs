@@ -290,6 +290,9 @@ pub trait Host {
     fn geometry(&self) -> Geometry;
     /// The open Lua windows.
     fn popups(&mut self) -> &mut Vec<crate::popup::Popup>;
+    /// The chat item at cell `(x, y)` and the line of it there (both from
+    /// 1), from where the chat on screen is scrolled.
+    fn chat_at(&self, x: u16, y: u16) -> Option<(usize, usize)>;
     /// The panels, and which one has the keyboard.
     fn panel_store(&mut self) -> panels::PanelStore<'_>;
     /// Keys typed toward a sequence go through now (the focus is moving).

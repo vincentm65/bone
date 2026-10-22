@@ -205,3 +205,41 @@ async fn ctrl_o_opens_the_sessions_panel() {
     );
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
+
+/// A click reaches Lua's mouse handlers with what is under it, and focuses
+/// the panel it lands on.
+#[tokio::test(flavor = "multi_thread")]
+async fn clicks_reach_lua_with_what_is_under_them() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::write(
+        config.path().join("gui.lua"),
+        r#"
+        clicks = {}
+        bone.on("mouse", function(ev)
+          if ev.action == "down" then
+            clicks[#clicks + 1] = (ev.region or "-") .. ":" .. tostring(ev.panel)
+          end
+        end)
+        bone.ui.panel.open({ id = "conf_click", dock = "right", size = 10, lines = { "x" } })
+        "#,
+    )
+    .unwrap();
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    let prompt = (g.gui.lua.geometry.leaves.iter())
+        .find(|(n, _)| n == "prompt")
+        .map(|(_, r)| *r)
+        .unwrap();
+    g.click(prompt.x + 2, prompt.y + 1);
+    g.frame();
+    let p = g.gui.lua.panels[0].area.unwrap();
+    g.click(p.x + 1, p.y);
+    g.frame();
+    g.gui
+        .run_lua("t", "assert(clicks[1] == 'prompt:nil', clicks[1])")
+        .unwrap();
+    g.gui
+        .run_lua("t", "assert(clicks[2] == '-:conf_click', clicks[2])")
+        .unwrap();
+    assert_eq!(g.gui.lua.panel_focus.as_deref(), Some("conf_click"));
+}

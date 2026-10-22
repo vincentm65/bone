@@ -37,12 +37,6 @@ impl App {
         shared::at(&self.panels, x, y).map(|p| p.id.clone())
     }
 
-    /// The panel at a screen position and the line of its content there
-    /// (from 1; 0 on its title row).
-    pub fn panel_hit(&self, at: (u16, u16)) -> Option<(String, usize)> {
-        shared::hit(&self.panels, at.0, at.1)
-    }
-
     /// The wheel over a panel scrolls it. Returns whether it did.
     pub fn panel_wheel(&mut self, at: (u16, u16), up: bool) -> bool {
         if self.focused_popup().is_some() {

@@ -85,6 +85,25 @@ impl Headless {
         }
     }
 
+    /// Press and release the left button over character cell `(x, y)` (as
+    /// laid out last frame) in the next frame.
+    pub fn click(&mut self, x: u16, y: u16) {
+        let (ox, oy, col, row) = self.gui.lua.cells.expect("a frame was drawn");
+        let pos = egui::pos2(
+            ox + (f32::from(x) + 0.5) * col,
+            oy + (f32::from(y) + 0.5) * row,
+        );
+        self.events.push(egui::Event::PointerMoved(pos));
+        for pressed in [true, false] {
+            self.events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            });
+        }
+    }
+
     /// Type `text` in the next frame.
     pub fn text(&mut self, text: &str) {
         self.events.push(egui::Event::Text(text.to_owned()));

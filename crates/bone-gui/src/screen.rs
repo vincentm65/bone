@@ -58,6 +58,7 @@ impl Gui {
     /// Lay the window out with `bone.ui.layout` and draw every leaf.
     pub(crate) fn screen_ui(&mut self, ui: &mut egui::Ui) {
         let cells = Cells::of(ui);
+        self.lua.cells = Some((cells.origin.x, cells.origin.y, cells.col, cells.row));
         let area = ui.max_rect();
         let cols = (area.width() / cells.col).floor().max(1.0) as u16;
         let rows = (area.height() / cells.row).floor().max(1.0) as u16;
@@ -305,18 +306,26 @@ impl Gui {
         let rows = self.layout_chat(buf, r.width as usize);
         let chat = &self.chats[buf];
         let font = cells.font.clone();
-        ui.scope_builder(UiBuilder::new().max_rect(cells.rect(r)), |ui| {
-            ui.spacing_mut().item_spacing.y = 0.0;
-            ScrollArea::vertical()
-                .id_salt(("chat", buf))
-                .auto_shrink(false)
-                .stick_to_bottom(true)
-                .show_rows(ui, cells.row, rows, |ui, range| {
-                    for row in chat.rows().skip(range.start).take(range.len()) {
-                        ui.label(row_job(row, &font, ui.visuals()));
-                    }
-                });
-        });
+        let offset = ui
+            .scope_builder(UiBuilder::new().max_rect(cells.rect(r)), |ui| {
+                ui.spacing_mut().item_spacing.y = 0.0;
+                ScrollArea::vertical()
+                    .id_salt(("chat", buf))
+                    .auto_shrink(false)
+                    .stick_to_bottom(true)
+                    .show_rows(ui, cells.row, rows, |ui, range| {
+                        for row in chat.rows().skip(range.start).take(range.len()) {
+                            ui.label(row_job(row, &font, ui.visuals()));
+                        }
+                    })
+                    .state
+                    .offset
+                    .y
+            })
+            .inner;
+        if buf == self.current {
+            self.lua.chat_top = (offset / cells.row).floor().max(0.0) as usize;
+        }
     }
 
     /// Chat `buf`'s prompt box: background, border and edge lines from

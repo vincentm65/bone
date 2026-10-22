@@ -151,6 +151,7 @@ impl Gui {
         if !self.asks.is_empty() {
             return;
         }
+        let hover = ctx.input(|i| i.pointer.hover_pos());
         let events = ctx.input_mut(|i| std::mem::take(&mut i.events));
         let mut keep = Vec::new();
         for ev in events {
@@ -170,6 +171,57 @@ impl Gui {
                     },
                     None => keep.push(ev),
                 },
+                egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed,
+                    ..
+                } => {
+                    let Some(at) = self.cell_at(*pos) else {
+                        keep.push(ev);
+                        continue;
+                    };
+                    let name = match button {
+                        egui::PointerButton::Primary => "left",
+                        egui::PointerButton::Secondary => "right",
+                        egui::PointerButton::Middle => "middle",
+                        _ => "other",
+                    };
+                    self.lua.dragging = *pressed && name == "left";
+                    let m = input::mouse(self, if *pressed { "down" } else { "up" }, name, at);
+                    if m.handled || m.popup {
+                        continue;
+                    }
+                    if *pressed && name == "left" {
+                        self.click(at);
+                    }
+                    keep.push(ev);
+                }
+                egui::Event::PointerMoved(pos) if self.lua.dragging => {
+                    if let Some(at) = self.cell_at(*pos)
+                        && input::mouse(self, "drag", "left", at).handled
+                    {
+                        continue;
+                    }
+                    keep.push(ev);
+                }
+                egui::Event::MouseWheel { delta, .. } => {
+                    let panel = hover
+                        .and_then(|p| self.cell_at(p))
+                        .and_then(|(x, y)| bone_ui::lua::panels::at(&self.lua.panels, x, y))
+                        .map(|p| p.id.clone());
+                    match panel {
+                        Some(id) if delta.y != 0.0 => {
+                            let rows = bone_ui::panel::WHEEL_ROWS;
+                            let by = if delta.y > 0.0 { -rows } else { rows };
+                            if let Some(p) = self.lua.panels.iter_mut().find(|p| p.id == id) {
+                                p.scroll_by(by);
+                            }
+                            self.changed();
+                        }
+                        _ => keep.push(ev),
+                    }
+                }
                 egui::Event::Text(t) => {
                     let keys: Vec<Key> = t.chars().map(Key::char).collect();
                     if keys.iter().any(|k| self.engine_wants(*k)) {
@@ -187,6 +239,33 @@ impl Gui {
             keep.append(&mut i.events);
             i.events = keep;
         });
+    }
+
+    /// The character cell at a pointer position.
+    fn cell_at(&self, pos: egui::Pos2) -> Option<(u16, u16)> {
+        let (ox, oy, col, row) = self.lua.cells?;
+        let (x, y) = ((pos.x - ox) / col, (pos.y - oy) / row);
+        (x >= 0.0 && y >= 0.0).then_some((x as u16, y as u16))
+    }
+
+    /// A left press nothing took: it focuses the panel under it, or the
+    /// prompt.
+    fn click(&mut self, (x, y): (u16, u16)) {
+        let under =
+            bone_ui::lua::panels::at(&self.lua.panels, x, y).map(|p| (p.id.clone(), p.focusable));
+        match under {
+            Some((id, true)) => {
+                let _ = bone_ui::lua::panels::focus_panel(self, Some(&id));
+            }
+            Some(_) => {}
+            None => {
+                let in_prompt = (self.lua.geometry.leaves.iter())
+                    .any(|(n, r)| n == "prompt" && r.contains(x, y));
+                if in_prompt {
+                    let _ = bone_ui::lua::panels::focus_panel(self, None);
+                }
+            }
+        }
     }
 
     /// ctrl+c with nothing else to do: stop the turn on screen.

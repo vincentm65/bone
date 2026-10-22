@@ -556,3 +556,49 @@ pub fn lua_action<H: Host>(h: &mut H, b: Builtin) -> bool {
         }
     }
 }
+
+/// What became of a pointer event.
+pub struct Mouse {
+    /// A `mouse` handler returned true.
+    pub handled: bool,
+    /// It was over a window, which owns it even if its handler closed it.
+    pub popup: bool,
+}
+
+/// A pointer press, drag or release at cell `at`: Lua's `mouse` handlers
+/// get it with what is under it (a window and the cell in it; or the chat
+/// item and line, the layout leaf and the cell in it, and a panel and its
+/// line). The frontend does its default when neither took it.
+pub fn mouse<H: Host>(h: &mut H, action: &str, button: &str, at: (u16, u16)) -> Mouse {
+    let (x, y) = at;
+    let mut ev = serde_json::json!({ "action": action, "button": button, "x": x, "y": y });
+    let popup_hit = popup::hit(h.popups(), x, y).map(|p| (p.id, p.rect.unwrap_or_default()));
+    if let Some((id, r)) = popup_hit {
+        ev["popup"] = id.into();
+        ev["popup_row"] = (y - r.y + 1).into();
+        ev["popup_col"] = (x - r.x + 1).into();
+        ev["popup_focused"] = (popup::focused(h.popups()).map(|p| p.id) == Some(id)).into();
+    } else {
+        if let Some((index, line)) = h.chat_at(x, y) {
+            ev["index"] = index.into();
+            ev["line"] = line.into();
+        }
+        // The layout leaf under it, with row and column from 1.
+        if let Some((name, r)) = h.geometry().leaves.iter().find(|(_, r)| r.contains(x, y)) {
+            ev["region"] = name.clone().into();
+            ev["row"] = (y - r.y + 1).into();
+            ev["col"] = (x - r.x + 1).into();
+        }
+        if let Some((id, line)) = panels::hit(h.panel_store().panels, x, y) {
+            ev["panel"] = id.into();
+            ev["panel_line"] = line.into();
+        }
+    }
+    let handled = fire(h, "mouse", ev)
+        .iter()
+        .any(|v| matches!(v, Value::Boolean(true)));
+    Mouse {
+        handled,
+        popup: popup_hit.is_some(),
+    }
+}

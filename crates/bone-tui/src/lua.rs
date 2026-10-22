@@ -1131,6 +1131,14 @@ impl bone_ui::lua::Host for App {
         &mut self.popups
     }
 
+    fn chat_at(&self, x: u16, y: u16) -> Option<(usize, usize)> {
+        let hit = App::chat_at(self, (x, y))?;
+        Some((
+            hit["index"].as_u64()? as usize,
+            hit["line"].as_u64()? as usize,
+        ))
+    }
+
     fn panel_store(&mut self) -> bone_ui::lua::panels::PanelStore<'_> {
         bone_ui::lua::panels::PanelStore {
             panels: &mut self.panels,

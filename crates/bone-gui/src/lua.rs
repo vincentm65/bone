@@ -69,6 +69,12 @@ pub struct LuaSide {
     pub popups: Vec<bone_ui::popup::Popup>,
     /// Where the keyboard is and the key sequence in progress.
     pub input: bone_ui::lua::input::KeyState,
+    /// Where character cells were last frame: origin, column width, row
+    /// height (logical pixels).
+    pub cells: Option<(f32, f32, f32, f32)>,
+    /// The first chat row in view, and a pointer button held for dragging.
+    pub chat_top: usize,
+    pub dragging: bool,
     /// The prompt's text as `prompt/changed` last reported it.
     pub last_prompt: String,
     /// Lua panels (`bone.ui.panel`).
@@ -541,6 +547,15 @@ impl Host for Gui {
 
     fn popups(&mut self) -> &mut Vec<bone_ui::popup::Popup> {
         &mut self.lua.popups
+    }
+
+    fn chat_at(&self, x: u16, y: u16) -> Option<(usize, usize)> {
+        let (_, r) = (self.lua.geometry.leaves.iter()).find(|(n, _)| n == "chat")?;
+        if !r.contains(x, y) {
+            return None;
+        }
+        let row = self.lua.chat_top + (y - r.y) as usize;
+        self.chats[self.current].item_at_row(row)
     }
 
     fn key_state(&mut self) -> &mut bone_ui::lua::input::KeyState {
