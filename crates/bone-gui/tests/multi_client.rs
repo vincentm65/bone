@@ -407,31 +407,35 @@ async fn reconnecting_restores_everything() {
 }
 
 /// Forwards connections from one socket to another; `cut` drops the ones
-/// open now and keeps accepting new ones.
+/// open now and keeps accepting new ones, and `retarget` sends new ones to
+/// another socket (a restarted server).
 #[cfg(unix)]
 struct Proxy {
     open: Arc<Mutex<Vec<tokio::task::JoinHandle<()>>>>,
+    to: Arc<Mutex<std::path::PathBuf>>,
 }
 
 #[cfg(unix)]
 impl Proxy {
     fn start(from: &Path, to: &Path) -> Proxy {
         let listener = tokio::net::UnixListener::bind(from).unwrap();
-        let to = to.to_owned();
+        let target = Arc::new(Mutex::new(to.to_owned()));
         let open: Arc<Mutex<Vec<_>>> = Arc::default();
-        let tasks = open.clone();
+        let (tasks, to) = (open.clone(), target.clone());
         tokio::spawn(async move {
             loop {
                 let (mut a, _) = listener.accept().await.unwrap();
-                let to = to.clone();
+                let to = to.lock().unwrap().clone();
                 let task = tokio::spawn(async move {
-                    let mut b = tokio::net::UnixStream::connect(&to).await.unwrap();
+                    let Ok(mut b) = tokio::net::UnixStream::connect(&to).await else {
+                        return;
+                    };
                     let _ = tokio::io::copy_bidirectional(&mut a, &mut b).await;
                 });
                 tasks.lock().unwrap().push(task);
             }
         });
-        Proxy { open }
+        Proxy { open, to: target }
     }
 
     fn cut(&self) {
@@ -439,4 +443,77 @@ impl Proxy {
             task.abort();
         }
     }
+
+    fn retarget(&self, to: &Path) {
+        *self.to.lock().unwrap() = to.to_owned();
+    }
+}
+
+/// A server that restarts (a new process on the same data) comes back with
+/// the session from disk; the GUI reconnects at the same path, reloads its
+/// chat, and drives the new server.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_restarted_server_gives_back_the_session() {
+    let e = env(vec![text("first answer")], Ask::No).await;
+    let dir = tempfile::tempdir().unwrap();
+    let serve = |server: Server, sock: std::path::PathBuf| async move {
+        let listener = bone_server::Listener::bind(&sock).await.unwrap();
+        tokio::spawn(async move { listener.run(&server).await })
+    };
+    let first = dir.path().join("first.sock");
+    let task = serve(e.server.clone(), first.clone()).await;
+    let gui_sock = dir.path().join("gui.sock");
+    let proxy = Proxy::start(&gui_sock, &first);
+    let opts = GuiOptions {
+        cwd: e.cwd(),
+        reconnect: Some(gui_sock.clone()),
+        config_dir: Some(e.config.path().to_owned()),
+    };
+    let conn = bone_client::connect(&gui_sock).await.unwrap();
+    let mut gui = bone_gui::Headless::start(conn, opts, 1000.0, 700.0)
+        .await
+        .unwrap();
+    gui.send("before the restart");
+    gui.wait_for(WAIT, |g| g.transcript().contains("first answer") && idle(g))
+        .await
+        .unwrap();
+    let id = session_of(&gui.gui);
+
+    // The server goes away; a new one starts on the same config and data.
+    task.abort();
+    proxy.cut();
+    let url = fake_model(vec![text("after the restart")]).await;
+    std::fs::write(
+        e.config.path().join("core.lua"),
+        format!(r#"bone.config.providers.fake = {{ base_url = "{url}", model = "fake" }}"#),
+    )
+    .unwrap();
+    let loaded = scripting::load_with(e.config.path(), &|_| None).unwrap();
+    let second = dir.path().join("second.sock");
+    let _task = serve(
+        Server::new(Arc::new(Core::from_loaded(loaded))),
+        second.clone(),
+    )
+    .await;
+    proxy.retarget(&second);
+
+    gui.wait_for(WAIT, |g| {
+        g.status
+            .as_ref()
+            .is_some_and(|s| s.text.contains("reconnected"))
+    })
+    .await
+    .unwrap();
+    gui.wait_for(WAIT, |g| g.transcript().contains("first answer"))
+        .await
+        .unwrap_or_else(|t| panic!("the session did not come back:\n{t}"));
+    assert_eq!(session_of(&gui.gui), id);
+    assert!(idle(&gui.gui), "no turn survives a restart");
+    gui.send("and now");
+    gui.wait_for(WAIT, |g| {
+        g.transcript().contains("after the restart") && idle(g)
+    })
+    .await
+    .unwrap();
 }
