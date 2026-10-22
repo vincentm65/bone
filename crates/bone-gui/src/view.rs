@@ -416,45 +416,6 @@ impl Gui {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Where each glyph of `text` starts, in cells.
-    fn columns(text: &str) -> Vec<(char, f32)> {
-        let ctx = egui::Context::default();
-        let mut out = Vec::new();
-        let mut frame = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let font = FontId::monospace(14.0);
-            let col = ui.ctx().fonts_mut(|f| f.glyph_width(&font, 'M'));
-            let row = vec![(text.to_owned(), Style::default())];
-            let galley = ui.painter().layout_job(row_job(ui, &row, &font, col));
-            let glyphs = galley.rows.iter().flat_map(|r| r.glyphs.iter());
-            out = glyphs.map(|g| (g.chr, g.pos.x / col)).collect();
-        });
-        frame.textures_delta.clear();
-        out
-    }
-
-    /// `text`'s characters start at these cells, give or take the pixel
-    /// rounding egui does.
-    fn assert_columns(text: &str, want: &[f32]) {
-        let got = columns(text);
-        let near =
-            got.len() == want.len() && got.iter().zip(want).all(|((_, g), w)| (g - w).abs() < 0.15);
-        assert!(near, "{text:?}: {got:?}, not {want:?}");
-    }
-
-    #[test]
-    fn wide_and_fallback_characters_keep_the_columns() {
-        // An emoji is two cells; box drawing comes from a fallback font.
-        assert_columns("😀ab", &[0.0, 2.0, 3.0]);
-        assert_columns("a─┼b", &[0.0, 1.0, 2.0, 3.0]);
-        assert_columns("ab😀😀c", &[0.0, 1.0, 2.0, 4.0, 6.0]);
-        assert_columns("e\u{301}x", &[0.0, 1.0, 1.0]);
-    }
-}
-
 /// The system's sans-serif regular, bold and italic font files, where the
 /// usual ones are (Noto, DejaVu, Liberation; Arial on macOS, Segoe UI on
 /// Windows).
@@ -500,4 +461,43 @@ fn system_sans() -> [Option<String>; 3] {
     set.map_or([None, None, None], |s| {
         s.map(|p| std::path::Path::new(p).exists().then(|| p.to_owned()))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Where each glyph of `text` starts, in cells.
+    fn columns(text: &str) -> Vec<(char, f32)> {
+        let ctx = egui::Context::default();
+        let mut out = Vec::new();
+        let mut frame = ctx.run_ui(egui::RawInput::default(), |ui| {
+            let font = FontId::monospace(14.0);
+            let col = ui.ctx().fonts_mut(|f| f.glyph_width(&font, 'M'));
+            let row = vec![(text.to_owned(), Style::default())];
+            let galley = ui.painter().layout_job(row_job(ui, &row, &font, col));
+            let glyphs = galley.rows.iter().flat_map(|r| r.glyphs.iter());
+            out = glyphs.map(|g| (g.chr, g.pos.x / col)).collect();
+        });
+        frame.textures_delta.clear();
+        out
+    }
+
+    /// `text`'s characters start at these cells, give or take the pixel
+    /// rounding egui does.
+    fn assert_columns(text: &str, want: &[f32]) {
+        let got = columns(text);
+        let near =
+            got.len() == want.len() && got.iter().zip(want).all(|((_, g), w)| (g - w).abs() < 0.15);
+        assert!(near, "{text:?}: {got:?}, not {want:?}");
+    }
+
+    #[test]
+    fn wide_and_fallback_characters_keep_the_columns() {
+        // An emoji is two cells; box drawing comes from a fallback font.
+        assert_columns("😀ab", &[0.0, 2.0, 3.0]);
+        assert_columns("a─┼b", &[0.0, 1.0, 2.0, 3.0]);
+        assert_columns("ab😀😀c", &[0.0, 1.0, 2.0, 4.0, 6.0]);
+        assert_columns("e\u{301}x", &[0.0, 1.0, 1.0]);
+    }
 }
