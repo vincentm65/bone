@@ -2,6 +2,7 @@
 //! questions as they come, and Lua styles as egui text formats. Lua-produced lines are monospace, so a column here is a column
 //! in the TUI.
 
+use bone_ui::options::DynamicValue;
 use bone_ui::style::{Color, Modifier, Style};
 use eframe::egui::text::{LayoutJob, TextFormat};
 use eframe::egui::{self, Color32, FontId, Key, Stroke};
@@ -14,6 +15,7 @@ impl Gui {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let _ = self.repaint.set(ui.ctx().clone());
         self.pump();
+        self.apply_fonts(ui.ctx());
         self.route_keys(ui.ctx());
         self.watch_config();
         // Keep polling the config while idle.
@@ -168,5 +170,48 @@ fn indexed(n: u8) -> Color32 {
             let v = 8 + (n - 232) * 10;
             Color32::from_rgb(v, v, v)
         }
+    }
+}
+
+impl Gui {
+    /// `bone.o.font` and `bone.o.font_size`, applied when they change.
+    fn apply_fonts(&mut self, ctx: &egui::Context) {
+        let text = |name: &str| match self.lua.dynamic_options.get(name).map(|o| &o.value) {
+            Some(DynamicValue::String(s)) => s.clone(),
+            _ => String::new(),
+        };
+        let size = match self.lua.dynamic_options.get("font_size").map(|o| &o.value) {
+            Some(DynamicValue::Number(n)) => *n as f32,
+            Some(DynamicValue::Integer(n)) => *n as f32,
+            _ => 14.0,
+        };
+        let want = (text("font"), size.clamp(6.0, 72.0));
+        if self.lua.fonts.as_ref() == Some(&want) {
+            return;
+        }
+        let mut fonts = egui::FontDefinitions::default();
+        if !want.0.is_empty() {
+            match std::fs::read(&want.0) {
+                Ok(bytes) => {
+                    fonts.font_data.insert(
+                        "user".into(),
+                        std::sync::Arc::new(egui::FontData::from_owned(bytes)),
+                    );
+                    if let Some(mono) = fonts.families.get_mut(&egui::FontFamily::Monospace) {
+                        mono.insert(0, "user".into());
+                    }
+                }
+                Err(e) => self.error(format!("cannot read font {}: {e}", want.0)),
+            }
+        }
+        ctx.set_fonts(fonts);
+        ctx.all_styles_mut(|style| {
+            if let Some(f) = style.text_styles.get_mut(&egui::TextStyle::Monospace) {
+                f.size = want.1;
+            }
+        });
+        self.lua.fonts = Some(want);
+        // Cached rows were wrapped for the old cell size.
+        self.lua.views_rev += 1;
     }
 }

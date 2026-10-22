@@ -75,6 +75,8 @@ pub struct LuaSide {
     /// The first chat row in view, and a pointer button held for dragging.
     pub chat_top: usize,
     pub dragging: bool,
+    /// The font file and size applied last (`bone.o.font`, `font_size`).
+    pub fonts: Option<(String, f32)>,
     /// The prompt's text as `prompt/changed` last reported it.
     pub last_prompt: String,
     /// Lua panels (`bone.ui.panel`).

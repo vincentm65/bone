@@ -1,6 +1,7 @@
 //! The window. Drawn with wgpu, preferring the integrated GPU (low power)
 //! unless `WGPU_POWER_PREF` says otherwise, and with OpenGL (glow) if wgpu
-//! cannot start; the renderer in use is shown in the status line.
+//! cannot start; the renderer in use (and a software one) is shown in the
+//! status line.
 
 use std::cell::Cell;
 
@@ -60,10 +61,25 @@ pub async fn run(conn: Connection, opts: GuiOptions) -> Result<(), String> {
             let r = eframe::run_native(
                 "bone",
                 options(renderer),
-                Box::new(|_cc| {
+                Box::new(|cc| {
                     started.set(true);
                     let mut gui = slot.take().expect("the GUI starts once");
-                    gui.info(format!("drawing with {name}"));
+                    let (renderer, software) = match &cc.wgpu_render_state {
+                        Some(rs) => {
+                            let i = rs.adapter.get_info();
+                            let software = i.device_type == eframe::wgpu::DeviceType::Cpu;
+                            (format!("{name} on {} ({:?})", i.name, i.backend), software)
+                        }
+                        None => (name.to_owned(), false),
+                    };
+                    if software {
+                        gui.error(format!(
+                            "no GPU in use: drawing in software with {renderer}"
+                        ));
+                    } else {
+                        gui.info(format!("drawing with {renderer}"));
+                    }
+                    gui.renderer = Some(renderer);
                     Ok(Box::new(App {
                         gui,
                         title: String::new(),

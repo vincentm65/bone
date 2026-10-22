@@ -93,6 +93,8 @@ pub struct Gui {
     pub status: Option<Status>,
     /// The server went away and it is not coming back.
     pub closed: bool,
+    /// What draws the window: the renderer and adapter (`None` headless).
+    pub renderer: Option<String>,
     /// Width (in columns) the current chat's rows were last wrapped at.
     wrapped_at: usize,
     /// A free-text answer being typed to the open question.
@@ -137,6 +139,7 @@ impl Gui {
             draft: String::new(),
             status: None,
             closed: false,
+            renderer: None,
             wrapped_at: 0,
             answer_draft: String::new(),
             lua: Default::default(),

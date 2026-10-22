@@ -243,3 +243,29 @@ async fn clicks_reach_lua_with_what_is_under_them() {
         .unwrap();
     assert_eq!(g.gui.lua.panel_focus.as_deref(), Some("conf_click"));
 }
+
+/// bone.o.font_size sets the size of the character cells.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_font_size_option_sizes_the_cells() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    g.frame();
+    let (_, _, col, row) = g.gui.lua.cells.unwrap();
+    g.gui.run_lua("t", "bone.o.font_size = 28").unwrap();
+    g.frame();
+    g.frame();
+    let (_, _, col2, row2) = g.gui.lua.cells.unwrap();
+    assert!(
+        col2 > col * 1.5 && row2 > row * 1.5,
+        "{col}x{row} -> {col2}x{row2}"
+    );
+    g.gui
+        .run_lua("t", "bone.o.font = '/no/such/font.ttf'")
+        .unwrap();
+    g.frame();
+    assert!(
+        g.gui.status.as_ref().is_some_and(|s| s.error),
+        "a missing font is reported"
+    );
+}
