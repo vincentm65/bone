@@ -715,6 +715,11 @@ impl Host for Gui {
         bone_lua::Side::Gui
     }
 
+    fn library_changed(&mut self, prev: String) {
+        self.library_prev = Some(prev);
+        self.changed();
+    }
+
     fn cwd(&self) -> &str {
         &self.opts.cwd
     }

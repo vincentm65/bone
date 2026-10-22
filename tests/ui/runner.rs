@@ -37,12 +37,23 @@ pub async fn run_script(ui: &mut impl UiDriver, path: &Path) -> Result<(), Strin
     // On the chunk's first line, so error line numbers match the file.
     ui.run_lua(&name, &format!("__steps = (function(...) {source}\nend)()"))?;
     ui.settle().await;
-    for step in 1.. {
-        let last = format!(
+    // Counted now: a step that loads the UI again must not end the script
+    // early by losing the rest.
+    let steps: usize = ui
+        .eval("type(__steps) == 'table' and #__steps or 0")?
+        .parse()
+        .map_err(|e| format!("{e}"))?;
+    for step in 1..=steps {
+        let there = format!(
             "if type(__steps) ~= 'table' or __steps[{step}] == nil then error('{DONE}', 0) end"
         );
-        match ui.run_lua("=steps", &last) {
-            Err(e) if e.contains(DONE) => break,
+        match ui.run_lua("=steps", &there) {
+            Err(e) if e.contains(DONE) => {
+                return Err(format!(
+                    "{}: step {step} was lost (the Lua state went?)",
+                    path.display()
+                ));
+            }
             r => r?,
         }
         ui.run_lua(

@@ -204,6 +204,19 @@ impl Gui {
         })
     }
 
+    /// Load the UI with the library `/tui use` chose; a library that does
+    /// not load is not kept as the choice.
+    pub(crate) fn switch_library(&mut self) {
+        let Some(prev) = self.library_prev.take() else {
+            return;
+        };
+        if !self.reload_lua()
+            && let Some(dir) = self.opts.config_dir.clone()
+        {
+            let _ = bone_lua::set_tui_library(&dir, &prev);
+        }
+    }
+
     /// Run Lua from the prompt: `=expr` shows its value.
     pub fn exec_lua(&mut self, code: &str) {
         let (code, show) = match code.strip_prefix('=') {

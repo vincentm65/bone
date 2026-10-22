@@ -619,69 +619,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             app.source(&path);
             ret(lua, ())
         }
-        "runtime_overrides" => {
-            let list: Vec<serde_json::Value> = app
-                .config_dir
-                .as_deref()
-                .map(bone_lua::runtime_overrides)
-                .unwrap_or_default()
-                .into_iter()
-                .map(|(path, same)| serde_json::json!({ "path": path, "same": same }))
-                .collect();
-            ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
-        }
-        "runtime_reset" => {
-            let (rel, stamp): (String, Option<String>) = args(lua, a)?;
-            let dir = app
-                .config_dir
-                .clone()
-                .ok_or_else(|| err("there is no config directory"))?;
-            // One backup folder per reset (or per `/runtime reset all`).
-            let stamp = stamp.unwrap_or_else(|| {
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs())
-                    .to_string()
-            });
-            let backup = dir.join("runtime-backup").join(&stamp);
-            let to = bone_lua::reset_runtime_file(&dir, &rel, &backup).map_err(err)?;
-            ret(lua, to.to_string_lossy().into_owned())
-        }
-        "library_info" => {
-            let dir = app.config_dir.as_deref();
-            let info = serde_json::json!({
-                "active": dir.and_then(bone_lua::tui_library).unwrap_or_else(|| "standard".into()),
-                "custom": dir.map(bone_lua::tui_libraries).unwrap_or_default(),
-                "dir": dir.map(|d| d.join("libraries").to_string_lossy().into_owned()),
-            });
-            ret(lua, to_lua(lua, &info)?)
-        }
-        "library_create" | "library_delete" => {
-            let (name, from): (String, Option<String>) = args(lua, a)?;
-            let dir = app
-                .config_dir
-                .clone()
-                .ok_or_else(|| err("there is no config directory"))?;
-            let path = if op == "library_create" {
-                bone_lua::create_tui_library(&dir, &name, from.as_deref() == Some("bare"))
-            } else {
-                bone_lua::delete_tui_library(&dir, &name)
-            };
-            ret(lua, path.map_err(err)?.to_string_lossy().into_owned())
-        }
-        "library_use" => {
-            let name: String = args(lua, a)?;
-            let dir = app
-                .config_dir
-                .clone()
-                .ok_or_else(|| err("there is no config directory"))?;
-            let prev = bone_lua::tui_library(&dir).unwrap_or_else(|| "standard".into());
-            bone_lua::set_tui_library(&dir, &name).map_err(err)?;
-            app.library_prev = Some(prev);
-            // Not from inside this callback: the reload replaces its state.
-            app.reload_requested = true;
-            ret(lua, ())
-        }
         "chat_at" => {
             let (x, y): (u16, u16) = args(lua, a)?;
             match app.chat_at((x, y)) {
@@ -1046,6 +983,12 @@ impl bone_ui::lua::Host for App {
 
     fn side(&self) -> bone_lua::Side {
         bone_lua::Side::Tui
+    }
+
+    fn library_changed(&mut self, prev: String) {
+        self.library_prev = Some(prev);
+        // Not from inside the op: the reload replaces its state.
+        self.reload_requested = true;
     }
 
     fn cwd(&self) -> &str {

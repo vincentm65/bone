@@ -17,6 +17,7 @@ impl Gui {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let _ = self.repaint.set(ui.ctx().clone());
         self.pump();
+        self.switch_library();
         // New fonts take effect on a fresh pass: lay nothing out with the
         // old cell size.
         if self.apply_fonts(ui.ctx()) {

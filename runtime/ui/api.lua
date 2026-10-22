@@ -941,13 +941,15 @@ bone.runtime = {
   end,
 }
 
---- TUI libraries (/tui): the standard UI, bare (none), or your editable
+--- UI libraries (/tui): the standard UI, bare (none), or your editable
 --- copies in the config dir's libraries/. bone.library.info() →
---- { active, custom = { names }, dir }; create(name, from) copies the
+--- { active, drawn, custom = { names }, dir }: `drawn` is the one this
+--- frontend uses (the GUI uses a copy only if it has a gui/ folder, else
+--- the standard UI); create(name, from) copies the
 --- standard files (or, with from = "bare", the bare one) to a new one and
 --- returns its folder; delete(name) moves one not in use aside; use(name)
 --- switches to it (`standard`, `bare` or a copy's name) and reloads the
---- TUI's Lua, going back if it does not load.
+--- frontend's Lua, going back if it does not load.
 bone.library = {
   info = function()
     return api("library_info")
