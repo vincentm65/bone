@@ -64,7 +64,7 @@ impl Gui {
         &self,
         chat: &crate::ChatBuffer,
         row: usize,
-        text: &crate::Row,
+        text: &str,
         resp: &egui::Response,
     ) {
         let Some((index, _)) = chat.item_at_row(row) else {
@@ -76,8 +76,7 @@ impl Gui {
         let images = chat.item_data(item, index, false)["images"].take();
         let images: Vec<ImageAttachment> = serde_json::from_value(images).unwrap_or_default();
         if !images.is_empty() {
-            let text: String = text.iter().map(|(t, _)| t.as_str()).collect();
-            self.image_row(resp, &text, &images);
+            self.image_row(resp, text, &images);
         }
     }
 

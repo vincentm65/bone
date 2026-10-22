@@ -515,3 +515,37 @@ async fn choosing_a_library_reloads_the_gui() {
     assert_eq!(g.gui.eval("mine_loaded").unwrap(), "true");
     assert_eq!(g.gui.eval("bone.library.info().drawn").unwrap(), "mine");
 }
+
+/// A view's `block` is rich text the GUI wraps itself, as many rows as it
+/// needs; its `lines` are for a frontend that does not draw blocks.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_view_block_is_wrapped_rich_text() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    let long = "word ".repeat(200);
+    g.gui
+        .run_lua(
+            "t",
+            &format!(
+                r#"bone.ui.views.conf_block = function(item)
+                  return {{ block = {{
+                      paragraphs = {{ {{ spans = {{ {{ item.text, "Normal" }} }} }}, {{ spans = {{ "second" }}, gap = 6 }} }},
+                      bg = "UserMessage", radius = 12, pad = {{ 8, 12 }}, align = "right", max_width = 0.8,
+                    }}, lines = {{ {{ {{ "fallback", "Normal" }} }} }} }}
+                end
+                bone.chat.add("conf_block", {{ text = "{long}" }})"#
+            ),
+        )
+        .unwrap();
+    g.frame();
+    g.frame();
+    let rows = g.gui.chats[0].row_count();
+    assert!(rows > 3, "a long paragraph wraps over several rows: {rows}");
+    let t = g.gui.transcript();
+    assert!(t.contains("word word") && t.contains("second"), "{t}");
+    assert!(
+        !t.contains("fallback"),
+        "the GUI draws the block, not the lines"
+    );
+}

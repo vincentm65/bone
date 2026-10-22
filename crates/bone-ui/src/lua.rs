@@ -292,6 +292,11 @@ pub trait Host {
     fn jobs_running(&self) -> usize;
     /// The `bone.job` jobs.
     fn jobs(&mut self) -> &mut crate::jobs::Jobs;
+    /// A view's `block` (a frontend's own drawing, such as the GUI's rich
+    /// text) as rows `width` columns wide; `None` draws its `lines` instead.
+    fn view_block(&mut self, _block: &serde_json::Value, _width: usize) -> Option<Vec<Self::Line>> {
+        None
+    }
     /// Where job tasks report: each event is to reach `jobs::event` on the
     /// UI thread.
     fn job_sink(&self) -> crate::jobs::Sink;
@@ -1841,12 +1846,28 @@ fn render_item<H: Host>(
             return Ok(None);
         };
         let v = f.call::<Value>((to_lua(lua, &data)?, to_lua(lua, &ctx)?))?;
+        // A frontend's own block (`{ block = …, lines = … }`): the lines are
+        // for a frontend that does not draw it.
+        if let Value::Table(t) = &v
+            && let Some(block) = t.get::<Option<Value>>("block")?
+        {
+            let block = bone_lua::from_lua(&block)?;
+            let lines = crate::model::parse_lines(t.get("lines")?)?.unwrap_or_default();
+            return Ok(Some((Some(block), lines)));
+        }
         // nil hides the item.
-        Ok(Some(crate::model::parse_lines(v)?.unwrap_or_default()))
+        Ok(Some((
+            None,
+            crate::model::parse_lines(v)?.unwrap_or_default(),
+        )))
     })
     .flatten();
     match lines {
-        Some(lines) => lines.iter().map(|l| line(h, l, key.width)).collect(),
+        Some((Some(block), lines)) => match h.view_block(&block, key.width) {
+            Some(rows) => rows,
+            None => lines.iter().map(|l| line(h, l, key.width)).collect(),
+        },
+        Some((None, lines)) => lines.iter().map(|l| line(h, l, key.width)).collect(),
         None => bare(&data, key.width, key.prev.is_none()),
     }
 }

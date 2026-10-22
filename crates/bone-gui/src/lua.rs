@@ -27,7 +27,7 @@ use bone_ui::theme::Theme;
 use mlua::{Function, Lua, MultiValue, Table, Value};
 use serde_json::Value as Json;
 
-use crate::{Gui, Msg, Row, wake};
+use crate::{Gui, Msg, wake};
 
 /// What a plugin, the user's config, or a project runs in the GUI, in
 /// order: the UI code it shares with the TUI, then the GUI's own.
@@ -327,9 +327,9 @@ fn dispatch(gui: &mut Gui, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
 }
 
 impl Host for Gui {
-    type Line = Row;
+    type Line = crate::ChatRow;
 
-    fn chat_store(&mut self) -> ChatStore<'_, Row> {
+    fn chat_store(&mut self) -> ChatStore<'_, crate::ChatRow> {
         ChatStore {
             chats: &mut self.chats,
             current: self.current,
@@ -643,6 +643,10 @@ impl Host for Gui {
     }
 
     /// The GUI runs no `bone.job` jobs yet.
+    fn view_block(&mut self, block: &Json, width: usize) -> Option<Vec<crate::ChatRow>> {
+        self.block_rows(block, width)
+    }
+
     fn jobs_running(&self) -> usize {
         self.lua.jobs.running()
     }

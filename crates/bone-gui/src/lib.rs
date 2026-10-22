@@ -10,6 +10,7 @@
 //! draws it, `native.rs` opens the window, and [`Headless`] drives it
 //! without one.
 
+mod block;
 mod chats;
 mod headless;
 mod images;
@@ -49,7 +50,8 @@ pub use crate::native::run;
 
 /// One row of a chat item, as drawn: text in styles.
 pub type Row = Vec<(String, Style)>;
-pub type ChatBuffer = bone_ui::chat::ChatBuffer<Row>;
+pub type ChatBuffer = bone_ui::chat::ChatBuffer<ChatRow>;
+pub use crate::block::ChatRow;
 
 pub struct GuiOptions {
     /// Where new sessions start.
@@ -518,15 +520,17 @@ impl Gui {
             width,
             view,
             &|gui: &Gui, items, width| {
-                bone_ui::model::layout_items(items, width)
-                    .into_iter()
-                    .map(|(t, hl)| (t, gui.lua.theme.hl(hl)))
-                    .collect()
+                ChatRow::Text(
+                    bone_ui::model::layout_items(items, width)
+                        .into_iter()
+                        .map(|(t, hl)| (t, gui.lua.theme.hl(hl)))
+                        .collect(),
+                )
             },
             &|data, width, first| {
                 bare_rows(data, width, first)
                     .into_iter()
-                    .map(|r| vec![(r, Style::default())])
+                    .map(|r| ChatRow::Text(vec![(r, Style::default())]))
                     .collect()
             },
         );
@@ -536,10 +540,7 @@ impl Gui {
 
     /// The current chat as text, one row per line (after `layout_chat`).
     pub fn transcript(&self) -> String {
-        let rows: Vec<String> = self.chats[self.current]
-            .rows()
-            .map(|r| r.iter().map(|(t, _)| t.as_str()).collect())
-            .collect();
+        let rows: Vec<String> = self.chats[self.current].rows().map(ChatRow::text).collect();
         rows.join("\n")
     }
 

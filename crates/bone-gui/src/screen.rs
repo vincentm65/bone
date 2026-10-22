@@ -20,7 +20,7 @@ use eframe::egui::{
 };
 
 use crate::view::{color, row_job};
-use crate::{ChatScroll, Gui, Row};
+use crate::{ChatRow, ChatScroll, Gui, Row};
 
 /// Where character cells are on screen.
 pub(crate) struct Cells {
@@ -380,10 +380,29 @@ impl Gui {
                 }
                 area.show_rows(ui, cells.row, rows, |ui, range| {
                     let rows = chat.rows().skip(range.start).take(range.len());
+                    let width = ui.available_width();
                     for (n, row) in rows.enumerate() {
-                        let resp = ui.label(row_job(ui, row, &font, col));
-                        if resp.hovered() || resp.clicked() {
-                            gui.chat_image_row(chat, range.start + n, row, &resp);
+                        match row {
+                            ChatRow::Text(row) => {
+                                let resp = ui.label(row_job(ui, row, &font, col));
+                                if resp.hovered() || resp.clicked() {
+                                    let text: String =
+                                        row.iter().map(|(t, _)| t.as_str()).collect();
+                                    gui.chat_image_row(chat, range.start + n, &text, &resp);
+                                }
+                            }
+                            // A block draws on its first row in view, over
+                            // the rows it takes.
+                            ChatRow::Block { block, part, .. } => {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    vec2(width, cells.row),
+                                    egui::Sense::hover(),
+                                );
+                                if *part == 0 || n == 0 {
+                                    let top = rect.min - vec2(0.0, *part as f32 * cells.row);
+                                    block.paint(ui.painter(), top, width);
+                                }
+                            }
                         }
                     }
                 })
