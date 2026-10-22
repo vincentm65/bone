@@ -124,9 +124,9 @@ async fn a_reload_with_a_new_error_keeps_the_config_in_use() {
     // An edit is picked up by itself once it has settled.
     std::fs::write(&file, "bone.o.define('conf_n', 1)\nmarker = 'third'").unwrap();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    while !g.gui.watch_config() {
+    while g.gui.eval("marker").unwrap() != "third" {
         assert!(tokio::time::Instant::now() < deadline, "edit not noticed");
-        tokio::time::sleep(Duration::from_millis(50)).await;
+        g.settle(Duration::from_millis(50)).await;
     }
     g.gui
         .run_lua("t", "assert(marker == 'third', marker)")

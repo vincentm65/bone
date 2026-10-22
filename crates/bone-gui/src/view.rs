@@ -24,9 +24,6 @@ impl Gui {
         }
         self.route_keys(ui.ctx());
         self.dropped_files(ui.ctx());
-        self.watch_config();
-        // Keep polling the config while idle.
-        ui.ctx().request_repaint_after(crate::lua::Watcher::EVERY);
         self.window_ui(ui.ctx());
         self.menu_ui(ui);
         egui::CentralPanel::default()
@@ -268,6 +265,9 @@ impl Gui {
             if let Some(f) = style.text_styles.get_mut(&egui::TextStyle::Monospace) {
                 f.size = want.1;
             }
+            // A blinking cursor is a frame every half second, and each runs
+            // the Lua parts of the screen: the cursor stays still.
+            style.visuals.text_cursor.blink = false;
         });
         self.lua.fonts = Some(want);
         // Cached rows were wrapped for the old cell size.

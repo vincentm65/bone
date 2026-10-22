@@ -15,6 +15,9 @@ pub struct Headless {
     pub gui: Gui,
     /// What was last copied to the clipboard.
     pub copied: Option<String>,
+    /// When the last frame asked for the next one (`Duration::MAX`: only
+    /// on input).
+    pub repaint: Duration,
     ctx: egui::Context,
     size: egui::Vec2,
     /// Input for the next frame, as the window would send it.
@@ -34,6 +37,7 @@ impl Headless {
         Ok(Headless {
             gui: Gui::connect(conn, opts).await?,
             copied: None,
+            repaint: Duration::MAX,
             ctx: egui::Context::default(),
             size: egui::vec2(width, height),
             events: Vec::new(),
@@ -59,6 +63,8 @@ impl Headless {
         let mut out = self.ctx.run_ui(input, |ui| gui.ui(ui));
         // No renderer takes the font atlas and images.
         out.textures_delta.clear();
+        self.repaint = (out.viewport_output.get(&egui::ViewportId::ROOT))
+            .map_or(Duration::MAX, |v| v.repaint_delay);
         for cmd in out.platform_output.commands {
             if let egui::OutputCommand::CopyText(text) = cmd {
                 self.copied = Some(text);

@@ -114,8 +114,6 @@ pub struct Gui {
     answer_draft: String,
     /// The Lua state and what the Lua API keeps.
     pub lua: crate::lua::LuaSide,
-    /// Notices edits to the Lua config, to reload it.
-    watcher: Option<crate::lua::Watcher>,
     /// Images read to be shown, and the one open in a window.
     previews: crate::preview::Previews,
 }
@@ -164,13 +162,14 @@ impl Gui {
             wrapped_at: 0,
             answer_draft: String::new(),
             lua: Default::default(),
-            watcher: None,
             previews: Default::default(),
         };
         gui.forward(events);
         gui.refresh_sessions();
         gui.load_lua();
-        gui.watcher = gui.opts.config_dir.clone().map(crate::lua::Watcher::new);
+        if let Some(dir) = gui.opts.config_dir.clone() {
+            gui.watch_config(dir);
+        }
         Ok(gui)
     }
 
@@ -552,12 +551,26 @@ impl Gui {
 
     /// Reload the Lua config once an edit to it has settled; call every
     /// frame. True when it reloaded (or tried to).
-    pub fn watch_config(&mut self) -> bool {
-        if self.watcher.as_mut().is_some_and(|w| w.poll()) {
-            self.reload_lua();
-            return true;
-        }
-        false
+    /// Poll the Lua config in `dir` in the background, and reload it once
+    /// an edit has settled; the window is only woken for that.
+    fn watch_config(&self, dir: PathBuf) {
+        let (tx, repaint) = (self.tx.clone(), self.repaint.clone());
+        self.rt.spawn(async move {
+            let mut watcher = crate::lua::Watcher::new(dir);
+            loop {
+                tokio::time::sleep(crate::lua::Watcher::EVERY).await;
+                if !watcher.poll() {
+                    continue;
+                }
+                let reload = Msg::Apply(Box::new(|gui: &mut Gui| {
+                    gui.reload_lua();
+                }));
+                if tx.send(reload).is_err() {
+                    return;
+                }
+                wake(&repaint);
+            }
+        });
     }
 
     /// The width the current chat was last wrapped at.

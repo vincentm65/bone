@@ -762,7 +762,6 @@ pub struct Watcher {
     dir: std::path::PathBuf,
     state: u64,
     pending: Option<u64>,
-    last: Instant,
 }
 
 impl Watcher {
@@ -771,19 +770,14 @@ impl Watcher {
             state: lua_sources(&dir),
             dir,
             pending: None,
-            last: Instant::now(),
         }
     }
 
     /// How often to poll.
     pub const EVERY: std::time::Duration = std::time::Duration::from_millis(500);
 
-    /// Poll if it is time; true when an edit has settled.
+    /// Poll (every [`Self::EVERY`]); true when an edit has settled.
     pub fn poll(&mut self) -> bool {
-        if self.last.elapsed() < Self::EVERY {
-            return false;
-        }
-        self.last = Instant::now();
         let next = lua_sources(&self.dir);
         if next == self.state {
             self.pending = None;

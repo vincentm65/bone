@@ -1,5 +1,6 @@
-//! The window. Drawn with wgpu, preferring the integrated GPU (low power)
-//! unless `WGPU_POWER_PREF` says otherwise, and with OpenGL (glow) if wgpu
+//! The window. Drawn with wgpu, preferring the discrete GPU (high
+//! performance: with several, the one driving the display usually is)
+//! unless `WGPU_POWER_PREF` says otherwise (`low` for a laptop's battery), and with OpenGL (glow) if wgpu
 //! cannot start; the renderer in use (and a software one) is shown in the
 //! status line. If the GPU device is lost (a driver reset, an unplugged
 //! GPU), the window closes and opens again on a new one, with the same
@@ -86,7 +87,8 @@ fn options(renderer: eframe::Renderer, size: [f32; 2]) -> eframe::NativeOptions 
         ..Default::default()
     };
     if let WgpuSetup::CreateNew(setup) = &mut opts.wgpu_options.wgpu_setup {
-        setup.power_preference = PowerPreference::from_env().unwrap_or(PowerPreference::LowPower);
+        setup.power_preference =
+            PowerPreference::from_env().unwrap_or(PowerPreference::HighPerformance);
     }
     opts
 }
