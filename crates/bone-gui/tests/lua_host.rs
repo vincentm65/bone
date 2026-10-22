@@ -149,3 +149,29 @@ async fn keys_reach_lua_and_typing_reaches_the_prompt() {
     assert_eq!(g.gui.draft, "");
     assert!(g.gui.running(), "submitted");
 }
+
+/// The standard library's / menu: a region above the prompt that typing
+/// "/" fills and esc hides, as in the TUI.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_slash_menu_opens_and_esc_hides_it() {
+    use eframe::egui::{Key, Modifiers};
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    let menu = |g: &Headless| {
+        (g.gui.lua.geometry.leaves.iter())
+            .find(|(n, _)| n == "above_prompt")
+            .map_or(0, |(_, r)| r.height)
+    };
+    g.frame();
+    assert_eq!(menu(&g), 0);
+    g.text("/");
+    g.frame();
+    g.frame();
+    assert!(menu(&g) > 0, "typing / opens the menu");
+    g.key(Key::Escape, Modifiers::NONE);
+    g.frame();
+    g.frame();
+    assert_eq!(menu(&g), 0, "esc hides it");
+    assert_eq!(g.gui.draft, "/", "and keeps the text");
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}

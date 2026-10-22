@@ -538,12 +538,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             app.remove_image(index).map_err(err)?;
             ret(lua, ())
         }
-        "prompt_empty" => ret(lua, app.draft_empty()),
-        "prompt_set" => {
-            let text: String = args(lua, a)?;
-            app.set_prompt_text(&text);
-            ret(lua, ())
-        }
         "health" => ret(
             lua,
             to_lua(lua, &serde_json::Value::Array(app.tui_health()))?,
@@ -713,11 +707,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             ret(lua, ())
         }
         // The command registry, for the Lua `/` menu and commands.
-        "history_add" => {
-            let text: String = args(lua, a)?;
-            app.history_add(&text);
-            ret(lua, ())
-        }
         "log_tail" => {
             let n: usize = args(lua, a)?;
             let start = app.log.len().saturating_sub(n);
@@ -853,25 +842,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 }
             }
             ret(lua, ())
-        }
-        "prompt_info" => {
-            let t = lua.create_table()?;
-            t.set("text", app.prompt.text())?;
-            t.set(
-                "images",
-                to_lua(lua, &serde_json::to_value(app.prompt_images()).unwrap())?,
-            )?;
-            t.set("lines", app.prompt.lines().to_vec())?;
-            t.set("cursor", pos_out(lua, app.prompt.cursor())?)?;
-            t.set("history", app.prompt_history_active())?;
-            if let Some((a, b)) = app.prompt.selection() {
-                let sel = lua.create_table()?;
-                sel.set("start", pos_out(lua, a)?)?;
-                sel.set("end", pos_out(lua, b)?)?;
-                sel.set("text", app.prompt.range_text(a, b))?;
-                t.set("selection", sel)?;
-            }
-            ret(lua, t)
         }
         "prompt_offset" => {
             let pos: Value = args(lua, a)?;
@@ -1084,6 +1054,38 @@ impl bone_ui::lua::Host for App {
 
     fn chat_view(&self) -> serde_json::Value {
         App::chat_view(self)
+    }
+
+    fn set_prompt_text(&mut self, text: &str) {
+        App::set_prompt_text(self, text);
+    }
+
+    fn prompt_info(&mut self, lua: &Lua) -> mlua::Result<Table> {
+        let t = lua.create_table()?;
+        t.set("text", self.prompt.text())?;
+        t.set(
+            "images",
+            to_lua(lua, &serde_json::to_value(self.prompt_images()).unwrap())?,
+        )?;
+        t.set("lines", self.prompt.lines().to_vec())?;
+        t.set("cursor", pos_out(lua, self.prompt.cursor())?)?;
+        t.set("history", self.prompt_history_active())?;
+        if let Some((a, b)) = self.prompt.selection() {
+            let sel = lua.create_table()?;
+            sel.set("start", pos_out(lua, a)?)?;
+            sel.set("end", pos_out(lua, b)?)?;
+            sel.set("text", self.prompt.range_text(a, b))?;
+            t.set("selection", sel)?;
+        }
+        Ok(t)
+    }
+
+    fn prompt_empty(&self) -> bool {
+        self.draft_empty()
+    }
+
+    fn history_add(&mut self, text: &str) {
+        App::history_add(self, text);
     }
 
     fn refresh_ui(&mut self) {

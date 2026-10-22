@@ -531,7 +531,7 @@ pub fn builtin<H: Host>(h: &mut H, b: Builtin) {
 
 /// Run `bone.ui.actions[name]` for a builtin action, if Lua set one.
 /// Returns whether it handled the action (it returned true).
-fn lua_action<H: Host>(h: &mut H, b: Builtin) -> bool {
+pub fn lua_action<H: Host>(h: &mut H, b: Builtin) -> bool {
     if !h.has_lua() || h.key_state().in_actions.contains(&b) {
         return false;
     }

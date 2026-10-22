@@ -243,6 +243,15 @@ pub trait Host {
     fn prompt_text(&self) -> String;
     fn prompt_images(&self) -> Vec<ImageAttachment>;
     fn set_prompt_images(&mut self, images: Vec<ImageAttachment>) -> Result<(), String>;
+    /// Replace the prompt's text.
+    fn set_prompt_text(&mut self, text: &str);
+    /// `bone.prompt.info()`: text, images, lines, cursor, selection, and
+    /// whether history is being browsed.
+    fn prompt_info(&mut self, lua: &Lua) -> mlua::Result<Table>;
+    /// The prompt has no text and no images.
+    fn prompt_empty(&self) -> bool;
+    /// Remember a sent prompt or command for recall.
+    fn history_add(&mut self, text: &str);
     /// The id of the panel with the keyboard.
     fn focused_panel(&self) -> Option<String>;
     /// The managed shell processes of the session on screen.
@@ -369,6 +378,16 @@ pub fn dispatch<H: Host>(
         "settings_get" => json(lua, h.settings()),
         "session" => session(h, lua),
         "prompt_get" => ret(lua, h.prompt_text()),
+        "prompt_set" => args::<String>(lua, a).and_then(|text| {
+            h.set_prompt_text(&text);
+            ret(lua, ())
+        }),
+        "prompt_info" => h.prompt_info(lua).and_then(|t| ret(lua, t)),
+        "prompt_empty" => ret(lua, h.prompt_empty()),
+        "history_add" => args::<String>(lua, a).and_then(|text| {
+            h.history_add(&text);
+            ret(lua, ())
+        }),
         "prompt_images" => prompt_images(h, lua, a),
         "panel_focused" => ret(lua, h.focused_panel()),
         "ui_refresh" => {

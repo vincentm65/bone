@@ -414,6 +414,9 @@ impl Gui {
             edit = edit.text_color(fg);
         }
         let response = ui.put(cells.rect(edit_area), edit);
+        if response.changed() {
+            self.prompt_changed();
+        }
         if self.asks.is_empty()
             && !response.has_focus()
             && !ui.ctx().memory(|m| m.focused().is_some())

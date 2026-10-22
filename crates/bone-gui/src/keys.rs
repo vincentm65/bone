@@ -30,6 +30,12 @@ const NATIVE: [Builtin; 15] = [
     Builtin::PasteClipboard,
 ];
 
+enum Route {
+    Engine,
+    Done,
+    Native,
+}
+
 /// egui's key and modifiers as bone's key, or `None` for a key bone has no
 /// name for.
 pub fn key(k: egui::Key, m: egui::Modifiers) -> Option<Key> {
@@ -96,6 +102,26 @@ pub fn key(k: egui::Key, m: egui::Modifiers) -> Option<Key> {
 }
 
 impl Gui {
+    /// Where key `k` goes: the engine, nowhere more (Lua already took an
+    /// editing action), or the text box.
+    fn route(&mut self, k: Key) -> Route {
+        let ctx = self.context();
+        let native = ctx != Context::Popup
+            && self.focused_panel().is_none()
+            && self.lua.input.pending_keys.is_empty();
+        match self.lua.keymaps.lookup(&ctx, &[k]).action {
+            Some(Action::Builtin(b)) if native && NATIVE.contains(&b) => {
+                if input::lua_action(self, b) {
+                    Route::Done
+                } else {
+                    Route::Native
+                }
+            }
+            _ if self.engine_wants(k) => Route::Engine,
+            _ => Route::Native,
+        }
+    }
+
     /// Whether the key engine should take `k` rather than the text box.
     fn engine_wants(&mut self, k: Key) -> bool {
         let ctx = self.context();
@@ -137,8 +163,12 @@ impl Gui {
                 } => match key(*k, *modifiers) {
                     // Plain characters arrive as text.
                     Some(k) if k.text().is_some() => keep.push(ev),
-                    Some(k) if self.engine_wants(k) => input::handle_key(self, k),
-                    _ => keep.push(ev),
+                    Some(k) => match self.route(k) {
+                        Route::Engine => input::handle_key(self, k),
+                        Route::Done => {}
+                        Route::Native => keep.push(ev),
+                    },
+                    None => keep.push(ev),
                 },
                 egui::Event::Text(t) => {
                     let keys: Vec<Key> = t.chars().map(Key::char).collect();
@@ -174,6 +204,44 @@ impl Gui {
         });
     }
 
+    /// `prompt/changed`, when the prompt's text is not what was last
+    /// reported (the cursor is at its end: the text box keeps its own).
+    pub(crate) fn prompt_changed(&mut self) {
+        if self.draft == self.lua.last_prompt {
+            return;
+        }
+        self.lua.last_prompt = self.draft.clone();
+        let row = self.draft.split('\n').count() - 1;
+        let col = self
+            .draft
+            .rsplit('\n')
+            .next()
+            .map_or(0, |l| l.chars().count());
+        let data = serde_json::json!({
+            "text": self.draft,
+            "images": [],
+            "cursor": { "row": row, "col": col },
+            "selection": null,
+        });
+        self.fire_event("prompt/changed", data);
+    }
+
+    /// Call `bone.ui[name]()`, a Lua part of the UI.
+    fn call_ui(&mut self, name: &str) {
+        let r = self.with_api(|lua| {
+            let ui: mlua::Table = lua.globals().get::<mlua::Table>("bone")?.get("ui")?;
+            match ui.get::<Option<mlua::Function>>(name)? {
+                Some(f) => f.call::<()>(()).map(|_| true),
+                None => Ok(false),
+            }
+        });
+        match r {
+            Ok(true) => {}
+            Ok(false) => self.error(format!("bone.ui.{name} is not defined")),
+            Err(e) => Host::lua_error(self, &format!("bone.ui.{name}"), &e),
+        }
+    }
+
     /// A key no keymap took goes to the prompt while it has the keyboard.
     pub(crate) fn type_key(&mut self, ctx: &Context, key: Key) {
         let Some(c) = key.text() else { return };
@@ -197,6 +265,7 @@ impl Gui {
             Quit => self.closed = true,
             QuitIfEmpty if self.draft.is_empty() => self.closed = true,
             NewSession => self.new_chat(),
+            Sessions => self.call_ui("sessions"),
             FocusNext => input::cycle_focus(self, true),
             FocusPrev => input::cycle_focus(self, false),
             FocusPrompt => {

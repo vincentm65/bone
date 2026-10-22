@@ -67,6 +67,8 @@ pub struct LuaSide {
     pub popups: Vec<bone_ui::popup::Popup>,
     /// Where the keyboard is and the key sequence in progress.
     pub input: bone_ui::lua::input::KeyState,
+    /// The prompt's text as `prompt/changed` last reported it.
+    pub last_prompt: String,
     /// Lua panels (`bone.ui.panel`).
     pub panels: Vec<bone_ui::panel::Panel>,
     pub panel_focus: Option<String>,
@@ -442,6 +444,33 @@ impl Host for Gui {
         bone_ui::lua::panels::focused(&self.lua.panels, &self.lua.panel_focus).map(|p| p.id.clone())
     }
 
+    fn set_prompt_text(&mut self, text: &str) {
+        self.draft = text.to_owned();
+        Gui::prompt_changed(self);
+    }
+
+    /// The text box keeps its own cursor; this reports the end of the text.
+    fn prompt_info(&mut self, lua: &Lua) -> mlua::Result<Table> {
+        let t = lua.create_table()?;
+        let lines: Vec<String> = self.draft.split('\n').map(str::to_owned).collect();
+        let cursor = lua.create_table()?;
+        cursor.set("row", lines.len() - 1)?;
+        cursor.set("col", lines.last().map_or(0, |l| l.chars().count()))?;
+        t.set("text", self.draft.as_str())?;
+        t.set("images", lua.create_table()?)?;
+        t.set("lines", lines)?;
+        t.set("cursor", cursor)?;
+        t.set("history", false)?;
+        Ok(t)
+    }
+
+    fn prompt_empty(&self) -> bool {
+        self.draft.is_empty()
+    }
+
+    /// The GUI keeps no prompt history yet.
+    fn history_add(&mut self, _: &str) {}
+
     /// The GUI does not follow processes yet.
     fn process_list(&self) -> Vec<ProcessSnapshot> {
         Vec::new()
@@ -518,6 +547,10 @@ impl Host for Gui {
 
     fn dismiss_message(&mut self) {
         self.status = None;
+    }
+
+    fn prompt_changed(&mut self) {
+        Gui::prompt_changed(self);
     }
 
     fn type_key(&mut self, ctx: &Context, key: Key) {
