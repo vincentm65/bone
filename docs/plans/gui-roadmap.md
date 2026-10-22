@@ -625,6 +625,21 @@ selectable and previews its images; the sessions sidebar and tray take the
 panel surfaces; Edit ▸ Attach image… uses the system's dialog, and an
 answer that finishes in the background notifies.
 
+### Phase 9: the GUI's looks apart from the TUI's
+
+`desktop` no longer starts from the TUI's standard UI: it has its own
+colorscheme (`graphite`), views for every kind of item (tool calls as
+cards), layout, composer, status bar, sessions sidebar, tray and `/`
+suggestions (`runtime/lua/bone/desktop/`). The two share behaviour only:
+the commands, keys and `/` menu, and data modules taken out of the TUI's
+drawing code — `bone.chats` (the sidebar's), `bone.background` (the
+tray's), `bone.usage` (the status line's), `bone.timing` (turn footers).
+The TUI draws from the same modules as before. A test checks none of the
+TUI's drawing modules load in the GUI. Looks for one frontend belong in
+its own file (`tui.lua`, `gui.lua`); `ui.lua` is for both.
+
+**Status:** done.
+
 ## Explicit non-goals for the first milestone
 
 - Rewriting `bone-tui`; extraction is moves only.
