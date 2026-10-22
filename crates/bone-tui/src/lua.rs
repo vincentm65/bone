@@ -1674,4 +1674,24 @@ impl bone_ui::lua::Host for App {
     fn chat_expiry(&mut self) -> &mut Option<std::time::Instant> {
         &mut self.chat_expiry
     }
+
+    fn lua(&self) -> Option<Lua> {
+        self.lua.clone()
+    }
+
+    fn spinner(&mut self) -> &mut crate::ui::Spinner {
+        &mut self.spinner
+    }
+
+    fn jobs_running(&self) -> usize {
+        self.jobs.running()
+    }
+
+    fn screen_cols(&self) -> u16 {
+        self.screen.width
+    }
+
+    fn prompt_focused(&self, buf: usize) -> bool {
+        buf == self.current && self.focused_popup().is_none() && self.focused_panel().is_none()
+    }
 }

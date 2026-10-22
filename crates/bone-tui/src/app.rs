@@ -481,10 +481,6 @@ impl App {
 
     // ---- chats ---------------------------------------------------------------
 
-    pub fn chat(&self, id: BufferId) -> Option<&ChatBuffer> {
-        self.chats.get(id)
-    }
-
     pub fn chat_mut(&mut self, id: BufferId) -> Option<&mut ChatBuffer> {
         self.chats.get_mut(id)
     }

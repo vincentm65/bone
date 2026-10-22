@@ -58,6 +58,9 @@ pub struct LuaSide {
     pub render_expires: Option<Instant>,
     pub chat_expiry: Option<Instant>,
     pub lua_item_seq: u64,
+    pub spinner: bone_ui::model::Spinner,
+    /// The window's width in columns, as last drawn.
+    pub screen_cols: u16,
     /// Every message shown, and the last Lua errors in full.
     pub log: Vec<String>,
     pub lua_errors: Vec<String>,
@@ -458,6 +461,28 @@ impl Host for Gui {
 
     fn chat_expiry(&mut self) -> &mut Option<Instant> {
         &mut self.lua.chat_expiry
+    }
+
+    fn lua(&self) -> Option<Lua> {
+        self.lua.state.clone()
+    }
+
+    fn spinner(&mut self) -> &mut bone_ui::model::Spinner {
+        &mut self.lua.spinner
+    }
+
+    /// The GUI runs no `bone.job` jobs yet.
+    fn jobs_running(&self) -> usize {
+        0
+    }
+
+    fn screen_cols(&self) -> u16 {
+        self.lua.screen_cols
+    }
+
+    /// The prompt has the keyboard unless a question is open.
+    fn prompt_focused(&self, buf: usize) -> bool {
+        buf == self.current && self.asks.is_empty()
     }
 }
 

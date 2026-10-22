@@ -3,6 +3,7 @@
 //! the spinner. Frontends draw these; nothing here draws.
 
 use mlua::{Table, Value};
+use serde_json::Value as Json;
 
 use crate::text::{sanitize, truncate, width};
 
@@ -313,6 +314,14 @@ pub fn layout_items(items: &[Item], width_cols: usize) -> Vec<(String, &str)> {
         }
     }
     spans
+}
+
+/// A line, or a function of `ctx` returning one.
+pub fn line_of(lua: &mlua::Lua, v: Value, ctx: &Json, hl: &str) -> mlua::Result<Vec<Item>> {
+    match v {
+        Value::Function(f) => parse_items(f.call::<Value>(bone_lua::to_lua(lua, ctx)?)?, hl),
+        v => parse_items(v, hl),
+    }
 }
 
 /// One line: a string or a list of items.

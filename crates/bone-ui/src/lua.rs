@@ -15,6 +15,7 @@ use bone_proto::types::ImageAttachment;
 use mlua::{FromLua, FromLuaMulti, Function, IntoLuaMulti, Lua, MultiValue, Table, Value};
 
 pub mod state;
+pub mod ui;
 
 use crate::chat::{ChatBuffer, Item as ChatItem, RenderKey, find_chat};
 use crate::data::{Dep, Indexed, ItemFilter};
@@ -252,6 +253,17 @@ pub trait Host {
     fn generation(&self) -> (u64, u64);
     /// When the chat on screen next needs drawing for a view's timer.
     fn chat_expiry(&mut self) -> &mut Option<Instant>;
+    /// The Lua state, for reading `bone.ui` without calling the API.
+    fn lua(&self) -> Option<Lua>;
+    /// The spinner's frames (`bone.ui.spinner`), read once per frame.
+    fn spinner(&mut self) -> &mut crate::model::Spinner;
+    /// How many `bone.job` jobs are running.
+    fn jobs_running(&self) -> usize;
+    /// The width of the whole window, in columns.
+    fn screen_cols(&self) -> u16;
+    /// Chat `buf`'s prompt has the keyboard (it is on screen and no popup
+    /// or panel has it).
+    fn prompt_focused(&self, buf: usize) -> bool;
 }
 
 /// Run shared op `op`, or give `a` back for the frontend's own dispatcher.
