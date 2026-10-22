@@ -153,6 +153,13 @@ pub fn canonical_event(name: &str) -> &str {
     }
 }
 
+/// The last frame's layout, for `bone.ui.geometry` and pointer hits.
+#[derive(Debug, Default, Clone)]
+pub struct Geometry {
+    pub leaves: Vec<(String, crate::layout::Rect)>,
+    pub seps: Vec<(crate::layout::Rect, Vec<usize>)>,
+}
+
 /// What shared ops need from a frontend.
 pub trait Host {
     /// The frontend's rendered line type, cached in its chats.
@@ -264,6 +271,9 @@ pub trait Host {
     /// Chat `buf`'s prompt has the keyboard (it is on screen and no popup
     /// or panel has it).
     fn prompt_focused(&self, buf: usize) -> bool;
+    /// Where each layout leaf, and each column separator (with the path to
+    /// the column after it), was drawn last frame, in character units.
+    fn geometry(&self) -> Geometry;
 }
 
 /// Run shared op `op`, or give `a` back for the frontend's own dispatcher.
@@ -331,6 +341,7 @@ pub fn dispatch<H: Host>(
         }
         "process_list" => process_list(h, lua),
         "chat_view" => json(lua, &h.chat_view()),
+        "geometry" => json(lua, &geometry(&h.geometry())),
         "on" => on(h, lua, a),
         "off" => off(h, lua, a),
         "command_create" => command_create(h, lua, a),
@@ -1754,4 +1765,26 @@ fn model_command<H: Host>(h: &mut H, args: &str) {
             );
         },
     );
+}
+
+/// `bone.ui.geometry()`: the leaves drawn last frame (empty ones left out)
+/// and the column separators.
+fn geometry(g: &Geometry) -> serde_json::Value {
+    let rect = |r: &crate::layout::Rect| serde_json::json!({ "x": r.x, "y": r.y, "width": r.width, "height": r.height });
+    let leaves: Vec<_> = (g.leaves.iter())
+        .filter(|(_, r)| r.width > 0 && r.height > 0)
+        .map(|(name, r)| {
+            let mut v = rect(r);
+            v["name"] = name.clone().into();
+            v
+        })
+        .collect();
+    let seps: Vec<_> = (g.seps.iter())
+        .map(|(r, path)| {
+            let mut v = rect(r);
+            v["path"] = path.clone().into();
+            v
+        })
+        .collect();
+    serde_json::json!({ "leaves": leaves, "seps": seps })
 }

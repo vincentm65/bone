@@ -880,30 +880,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
             };
             ret(lua, buf)
         }
-        "geometry" => {
-            let rect = |r: &ratatui::layout::Rect| {
-                serde_json::json!({
-                    "x": r.x, "y": r.y, "width": r.width, "height": r.height,
-                })
-            };
-            let leaves: Vec<_> = (app.leaves.iter())
-                .filter(|(_, r)| r.width > 0 && r.height > 0)
-                .map(|(name, r)| {
-                    let mut v = rect(r);
-                    v["name"] = name.clone().into();
-                    v
-                })
-                .collect();
-            let seps: Vec<_> = (app.seps.iter())
-                .map(|(r, path)| {
-                    let mut v = rect(r);
-                    v["path"] = path.clone().into();
-                    v
-                })
-                .collect();
-            let g = serde_json::json!({ "leaves": leaves, "seps": seps });
-            ret(lua, to_lua(lua, &g)?)
-        }
         "popup_open" => {
             let spec: Table = args(lua, a)?;
             let old_focus = app.focused_popup().map(|p| p.id);
@@ -1693,5 +1669,18 @@ impl bone_ui::lua::Host for App {
 
     fn prompt_focused(&self, buf: usize) -> bool {
         buf == self.current && self.focused_popup().is_none() && self.focused_panel().is_none()
+    }
+
+    fn geometry(&self) -> bone_ui::lua::Geometry {
+        let cells =
+            |r: &ratatui::layout::Rect| bone_ui::layout::Rect::new(r.x, r.y, r.width, r.height);
+        bone_ui::lua::Geometry {
+            leaves: (self.leaves.iter())
+                .map(|(n, r)| (n.clone(), cells(r)))
+                .collect(),
+            seps: (self.seps.iter())
+                .map(|(r, path)| (cells(r), path.clone()))
+                .collect(),
+        }
     }
 }
