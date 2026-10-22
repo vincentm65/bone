@@ -61,11 +61,84 @@ pub struct LuaSide {
     /// Every message shown, and the last Lua errors in full.
     pub log: Vec<String>,
     pub lua_errors: Vec<String>,
+    /// While the configuration loads: where each error happened and what
+    /// it said, numbers blanked (see `failure_key`).
+    load_errors: Option<Vec<String>>,
+    /// Where the load in use had errors. A reload that fails only there is
+    /// still taken, so an old error cannot pin the old configuration.
+    load_failures: HashSet<String>,
+}
+
+/// What identifies a load error across reloads: where it happened and what
+/// it said, with numbers blanked so the same error on another line (after
+/// an edit above it) still matches.
+fn failure_key(context: &str, message: &str) -> String {
+    let mut key = format!("{context}\n");
+    let mut digits = false;
+    for c in message.chars() {
+        if c.is_ascii_digit() {
+            if !digits {
+                key.push('#');
+            }
+            digits = true;
+        } else {
+            key.push(c);
+            digits = false;
+        }
+    }
+    key
 }
 
 impl Gui {
-    /// Create the Lua state and load the configuration into it.
+    /// Create the Lua state and load the configuration into it, noting
+    /// where it had errors.
     pub(crate) fn load_lua(&mut self) {
+        self.lua.load_errors = Some(Vec::new());
+        self.load_lua_files();
+        self.lua.load_failures = self
+            .lua
+            .load_errors
+            .take()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+    }
+
+    /// Load the configuration again (after its files changed) into a fresh
+    /// state while the current one waits. The new one is taken only if it
+    /// loaded without an error the current one did not also have; otherwise
+    /// the current one stays and the error is shown. Option values carry
+    /// over; the chats, prompt and session are Rust's and stay.
+    pub fn reload_lua(&mut self) -> bool {
+        let carried = (self.lua.dynamic_options.iter())
+            .map(|(name, o)| (name.clone(), o.value.clone()))
+            .collect();
+        let old = std::mem::take(&mut self.lua);
+        // Later than anything cached under the old state.
+        self.lua.views_rev = old.views_rev + 1;
+        self.lua.opts_rev = old.opts_rev + 1;
+        self.lua.carried_options = carried;
+        self.lua.log = old.log.clone();
+        self.lua.load_errors = Some(Vec::new());
+        self.load_lua_files();
+        let errors = self.lua.load_errors.take().unwrap_or_default();
+        if let Some(new) = errors.iter().find(|e| !old.load_failures.contains(*e)) {
+            let new = new.lines().next().unwrap_or_default().to_owned();
+            let rejected = std::mem::replace(&mut self.lua, old);
+            self.lua.log = rejected.log;
+            self.lua.views_rev += 1;
+            Gui::error(
+                self,
+                format!("Lua configuration not reloaded: {new} failed"),
+            );
+            return false;
+        }
+        self.lua.load_failures = errors.into_iter().collect();
+        Gui::info(self, "Lua configuration reloaded".into());
+        true
+    }
+
+    fn load_lua_files(&mut self) {
         let dir = self.opts.config_dir.clone();
         match bone_ui::lua::state::new_state(Side::Gui, dir.as_deref()) {
             Ok(lua) => self.lua.state = Some(lua),
@@ -172,6 +245,9 @@ impl Gui {
     }
 
     fn lua_error(&mut self, context: &str, e: &mlua::Error) {
+        if let Some(errors) = &mut self.lua.load_errors {
+            errors.push(failure_key(context, &bone_lua::short_error(e)));
+        }
         self.lua.lua_errors.push(format!("{context}: {e}"));
         if self.lua.lua_errors.len() > 3 {
             self.lua.lua_errors.remove(0);
@@ -382,5 +458,97 @@ impl Host for Gui {
 
     fn chat_expiry(&mut self) -> &mut Option<Instant> {
         &mut self.lua.chat_expiry
+    }
+}
+
+/// Where the GUI's Lua comes from, as a hash of paths and metadata, to
+/// notice edits by polling. Only what the GUI loads: the user's `ui.lua`
+/// and `gui.lua`, modules, runtime overrides, colorschemes, the library in
+/// use, and plugins.
+pub fn lua_sources(dir: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut files = Vec::new();
+    for name in ["ui.lua", "gui.lua", "library"] {
+        files.push(dir.join(name));
+    }
+    for sub in ["lua", "runtime", "colors"] {
+        collect_lua_files(&dir.join(sub), &mut files);
+    }
+    if let Some(name) = bone_lua::tui_library(dir) {
+        collect_lua_files(&dir.join("libraries").join(name), &mut files);
+    }
+    for plugin in bone_lua::plugins(dir) {
+        collect_lua_files(&plugin, &mut files);
+    }
+    files.sort();
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for path in &files {
+        if let Ok(meta) = std::fs::metadata(path) {
+            path.hash(&mut h);
+            meta.len().hash(&mut h);
+            meta.modified().ok().hash(&mut h);
+        }
+    }
+    h.finish()
+}
+
+/// Every `*.lua` under `dir`, skipping hidden folders.
+fn collect_lua_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if !entry.file_name().to_string_lossy().starts_with('.') {
+                collect_lua_files(&path, out);
+            }
+        } else if path.extension().is_some_and(|e| e == "lua") {
+            out.push(path);
+        }
+    }
+}
+
+/// Polls the config for edits, reporting one only once it has stayed the
+/// same for a whole poll (a file caught halfway through being written, or a
+/// save touching several files, is not loaded).
+pub struct Watcher {
+    dir: std::path::PathBuf,
+    state: u64,
+    pending: Option<u64>,
+    last: Instant,
+}
+
+impl Watcher {
+    pub fn new(dir: std::path::PathBuf) -> Self {
+        Watcher {
+            state: lua_sources(&dir),
+            dir,
+            pending: None,
+            last: Instant::now(),
+        }
+    }
+
+    /// How often to poll.
+    pub const EVERY: std::time::Duration = std::time::Duration::from_millis(500);
+
+    /// Poll if it is time; true when an edit has settled.
+    pub fn poll(&mut self) -> bool {
+        if self.last.elapsed() < Self::EVERY {
+            return false;
+        }
+        self.last = Instant::now();
+        let next = lua_sources(&self.dir);
+        if next == self.state {
+            self.pending = None;
+            return false;
+        }
+        if self.pending != Some(next) {
+            self.pending = Some(next);
+            return false;
+        }
+        self.state = next;
+        self.pending = None;
+        true
     }
 }

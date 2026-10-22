@@ -97,6 +97,8 @@ pub struct Gui {
     answer_draft: String,
     /// The Lua state and what the Lua API keeps.
     pub lua: crate::lua::LuaSide,
+    /// Notices edits to the Lua config, to reload it.
+    watcher: Option<crate::lua::Watcher>,
 }
 
 impl Gui {
@@ -136,10 +138,12 @@ impl Gui {
             wrapped_at: 0,
             answer_draft: String::new(),
             lua: Default::default(),
+            watcher: None,
         };
         gui.forward(events);
         gui.refresh_sessions();
         gui.load_lua();
+        gui.watcher = gui.opts.config_dir.clone().map(crate::lua::Watcher::new);
         Ok(gui)
     }
 
@@ -499,6 +503,16 @@ impl Gui {
     /// cleanly).
     pub fn lua_errors(&self) -> &[String] {
         &self.lua.lua_errors
+    }
+
+    /// Reload the Lua config once an edit to it has settled; call every
+    /// frame. True when it reloaded (or tried to).
+    pub fn watch_config(&mut self) -> bool {
+        if self.watcher.as_mut().is_some_and(|w| w.poll()) {
+            self.reload_lua();
+            return true;
+        }
+        false
     }
 
     /// The width the current chat was last wrapped at.

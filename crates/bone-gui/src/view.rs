@@ -18,6 +18,9 @@ impl Gui {
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let _ = self.repaint.set(ui.ctx().clone());
         self.pump();
+        self.watch_config();
+        // Keep polling the config while idle.
+        ui.ctx().request_repaint_after(crate::lua::Watcher::EVERY);
         egui::Panel::left("sessions")
             .resizable(true)
             .default_size(220.0)
