@@ -1,40 +1,13 @@
 -- Conversation sidebar with a Processes tab for every chat's background work.
+-- The data (what runs, archived, stats, shells) is bone.chats, shared with
+-- other frontends' sidebars; this draws it for the TUI.
 local M = {}
 local panel, state
-local live, touched, versions = {}, {}, {}
-local shells = {}
-local agents = require("bone.agents")
+local chats = require("bone.chats")
+local live, touched = chats.live, chats.touched
 local empty_row = {}
-local archived = bone.state.load("sessions-archived")
--- Set bone.ui.sessions_recent_seconds in tui.lua; read each frame for live changes.
-local function recent_window()
-  return math.max(0, tonumber(bone.ui.sessions_recent_seconds) or 3600)
-end
-
-local function recent_label()
-  local seconds = recent_window()
-  if seconds >= 86400 then return string.format("%gd", seconds / 86400) end
-  if seconds >= 3600 then return string.format("%gh", seconds / 3600) end
-  if seconds >= 60 then return string.format("%gm", seconds / 60) end
-  return string.format("%gs", seconds)
-end
-
-local function count(n)
-  n = tonumber(n) or 0
-  if n >= 1000000 then return string.format("%.1fM", n / 1000000) end
-  if n >= 1000 then return string.format("%.1fk", n / 1000) end
-  return tostring(n)
-end
-
-local function timestamp(at)
-  if at <= 0 then return "" end
-  local age = math.max(0, os.time() - at)
-  if age < 60 then return "now" end
-  if age < 3600 then return math.floor(age / 60) .. "m ago" end
-  if age < 86400 then return math.floor(age / 3600) .. "h ago" end
-  if age < 7 * 86400 then return math.floor(age / 86400) .. "d ago" end
-  return os.date(os.date("%Y", at) == os.date("%Y") and "%b %d" or "%b %d %Y", at)
-end
+local recent_window, recent_label = chats.recent_window, chats.recent_label
+local count, timestamp = chats.count, chats.timestamp
 
 local function setup_colors()
   -- Links follow live theme changes, including custom style modifiers.
@@ -51,40 +24,10 @@ local function setup_colors()
   bone.hl.set("SessionCount", { link = "WarningMsg", bg = background })
 end
 
-local function activity(s)
-  local meta = state.stats[s.session_id]
-  return math.max(touched[s.session_id] or 0, meta and meta.at or s.created_at or 0)
-end
-
 function M.archive_current(id)
-  id = id or (bone.chat.session() or {}).session_id
-  if not id then return end
-  archived[id] = true
-  bone.state.save("sessions-archived", archived)
-  if state then state.filter_dirty = true end
+  chats.archive(id)
 end
-local function jobs()
-  local out = {}
-  for _, p in pairs(shells) do
-    out[#out + 1] = { key = "shell:" .. p.id, shell = p, session_id = p.session_id,
-      title = "$ " .. (p.command or p.id), detail = p.tail or "", started = math.floor((p.started_at_ms or 0) / 1000) }
-  end
-  for _, a in ipairs(agents.list()) do
-    local id = a.id
-    if live[id] then
-      touched[id] = touched[id] or os.time()
-      out[#out + 1] = { key = "agent:" .. id, session_id = id, title = a.name .. " · " .. (a.title or "sub-agent"),
-        detail = "running", started = touched[id] }
-    end
-  end
-  for _, j in ipairs(out) do j.chat = agents.top(j.session_id) end
-  table.sort(out, function(a, b)
-    if a.chat ~= b.chat then return a.chat < b.chat end
-    if a.started ~= b.started then return a.started < b.started end
-    return a.key < b.key
-  end)
-  return out
-end
+local jobs = chats.jobs
 
 local function filter_running()
   local key = state.items[state.selected] and state.items[state.selected].key
@@ -129,29 +72,10 @@ local function filter(reset)
   if state.page == "running" then return filter_running() end
   local selected = not reset and state.items[state.selected]
   local id = selected and selected.session_id or (not reset and state.initial)
-  local now, window = os.time(), recent_window()
-  state.filter_minute, state.filter_window, state.filter_dirty = math.floor(now / 60), window, false
-  state.items = {}
-  local query = state.query:lower()
-  local groups, activities, sizes = {}, {}, { 0, 0 }
-  local running = false
-  for _, s in ipairs(state.all) do
-    if ((s.title or "[untitled]") .. " " .. (s.cwd or "")):lower():find(query, 1, true) then
-      local sid, at = s.session_id, activity(s)
-      local g = not archived[sid] and (live[sid] or at >= now - window) and 1 or 2
-      groups[sid], activities[sid] = g, at
-      sizes[g] = sizes[g] + 1
-      running = running or live[sid]
-      state.items[#state.items + 1] = s
-    end
-  end
-  table.sort(state.items, function(a, b)
-    local ag, bg = groups[a.session_id], groups[b.session_id]
-    if ag ~= bg then return ag < bg end
-    local aa, ba = activities[a.session_id], activities[b.session_id]
-    if aa ~= ba then return aa > ba end
-    return a.session_id < b.session_id
-  end)
+  state.filter_minute, state.filter_window, state.filter_dirty = math.floor(os.time() / 60), recent_window(), false
+  local g = chats.grouped(state.all, state.query, state.stats)
+  state.items = g.items
+  local groups, activities, sizes, running = g.groups, g.activities, g.sizes, g.running
   state.selected = math.min(math.max(1, state.selected), #state.items)
   -- Build content positions once, shared by rendering, reveal and hit testing.
   state.lines, state.hits, state.descriptors, state.rows = {}, {}, {}, {}
@@ -224,12 +148,7 @@ end
 -- x on the Processes page: stop the selected shell or sub-agent.
 local function stop()
   local j = state.items[state.selected]
-  if not j then return end
-  if j.shell then
-    bone.request("process/cancel", { session_id = j.session_id, id = j.shell.id })
-  else
-    bone.request("turn/cancel", { session_id = j.session_id })
-  end
+  if j then chats.stop(j) end
 end
 
 local function move(delta)
@@ -246,11 +165,8 @@ local function render(ctx)
     bone.state.save("sessions-width", { width = ctx.width })
   end
   -- Include starting turns and background chats already known by this TUI.
-  for _, s in ipairs(bone.chat.sessions()) do
-    if s.session_id and s.running and not live[s.session_id] then
-      live[s.session_id] = true
-      state.filter_dirty = true
-    end
+  if chats.note_running() then
+    state.filter_dirty = true
   end
   if state.filter_dirty or state.filter_window ~= recent_window()
       or state.filter_minute ~= math.floor(os.time() / 60) then
@@ -356,29 +272,18 @@ local function render(ctx)
 end
 
 local function refresh_stats(st, p)
-  -- Aggregate separately: joining messages directly to usage multiplies totals.
-  -- A chat's tokens include its agents' (sessions.root).
-  bone.request("store/query", { sql = [[
-    SELECT s.id, s.updated_at, coalesce(u.tokens, 0), coalesce(m.turns, 0)
-    FROM sessions s
-    LEFT JOIN (SELECT coalesce(a.root, a.id) AS chat, sum(input_tokens + output_tokens) AS tokens
-               FROM usage JOIN sessions a ON a.id = usage.session_id GROUP BY chat) u ON u.chat = s.id
-    LEFT JOIN (SELECT session_id, count(*) AS turns FROM messages
-               WHERE role = 'user' GROUP BY session_id) m ON m.session_id = s.id
-  ]] }, function(res, err)
+  chats.fetch_stats(function(stats)
     if state ~= st or not p:is_open() then return end
     st.stats_loading = false
-    if not err and res then
-      for _, r in ipairs(res.rows or {}) do
-        st.stats[r[1]] = { at = r[2], tokens = r[3], turns = r[4] }
-      end
+    if stats then
+      for id, v in pairs(stats) do st.stats[id] = v end
       filter()
     end
   end)
 end
 
 local function refresh_list(st, p)
-  bone.request("session/list", {}, function(list, err)
+  chats.fetch_list(function(all, err)
     if state ~= st or not p:is_open() then return end
     st.loading = false
     if err then
@@ -387,14 +292,7 @@ local function refresh_list(st, p)
       return
     end
     -- Subagents stay in their owner's tray, not in the conversation sidebar.
-    st.all = {}
-    for _, s in ipairs(list or {}) do
-      if s.owner then
-        agents.add(s)
-      else
-        st.all[#st.all + 1] = s
-      end
-    end
+    st.all = all
     filter()
   end)
 end
@@ -439,77 +337,31 @@ function M.open()
   local p = panel
   refresh_list(st, p)
   refresh_stats(st, p)
-  bone.request("processes/list", {}, function(res, err)
-    if err or not res then return end
-    shells = {}
-    for _, proc in ipairs(res.processes or {}) do
-      if proc.running and proc.terminal then shells[proc.id] = proc end
-    end
+  chats.fetch_shells(function()
     if state == st and p:is_open() then filter() end
   end)
-  local before = {}
-  for id, version in pairs(versions) do before[id] = version end
-  bone.request("session/active", {}, function(ids, err)
-    if state ~= st or not p:is_open() or err then return end
-    local active = {}
-    for _, id in ipairs(ids or {}) do active[id] = true end
-    -- Don't overwrite events received while the lookup was in flight.
-    for id in pairs(live) do
-      if versions[id] == before[id] then live[id] = active[id] end
-    end
-    for id in pairs(active) do
-      if versions[id] == before[id] then live[id] = true end
-    end
-    filter()
+  chats.fetch_active(function()
+    if state == st and p:is_open() then filter() end
   end)
 end
 
-local function turn_changed(ev, running)
-  local id = ev.session_id
-  if not id then return end
-  versions[id] = (versions[id] or 0) + 1
-  live[id], touched[id] = running, os.time()
-  if running and archived[id] then
-    archived[id] = nil
-    bone.state.save("sessions-archived", archived)
+chats.watch(function(kind, ev)
+  local open = panel and panel:is_open()
+  if kind == "archived" then
+    if state then state.filter_dirty = true end
+  elseif kind == "turn" then
+    if open then
+      filter()
+      if ev.running then refresh_list(state, panel) end
+      -- The new user message is already persisted before turn/started.
+      -- Refresh on both edges so running conversations aren't one turn behind.
+      refresh_stats(state, panel)
+    end
+  elseif kind == "shells" then
+    if open and state.page == "running" then state.filter_dirty = true end
+  elseif open then
+    refresh_list(state, panel)
   end
-  if panel and panel:is_open() then
-    filter()
-    if running then refresh_list(state, panel) end
-    -- The new user message is already persisted before turn/started.
-    -- Refresh on both edges so running conversations aren't one turn behind.
-    refresh_stats(state, panel)
-  end
-end
-bone.on("turn/started", function(ev) turn_changed(ev, true) end)
-bone.on("turn/finished", function(ev) turn_changed(ev, false) end)
-local function running_changed()
-  if panel and panel:is_open() and state.page == "running" then state.filter_dirty = true end
-end
-bone.on("session/created", function()
-  if panel and panel:is_open() then refresh_list(state, panel) end
-end)
--- Background shells run in pseudo-terminals; foreground ones are tool calls.
-bone.on("process/changed", function(ev)
-  local proc = ev.process or {}
-  if proc.running and proc.terminal then
-    shells[proc.id] = proc
-  elseif not shells[proc.id] then
-    return
-  else
-    shells[proc.id] = nil
-  end
-  running_changed()
-end)
-bone.on("session/updated", function()
-  if panel and panel:is_open() then refresh_list(state, panel) end
-end)
-bone.on("session/deleted", function(ev)
-  live[ev.session_id], touched[ev.session_id] = nil, nil
-  for id, proc in pairs(shells) do
-    if proc.session_id == ev.session_id then shells[id] = nil end
-  end
-  if panel and panel:is_open() then refresh_list(state, panel) end
 end)
 
 bone.on("mouse", function(ev)
