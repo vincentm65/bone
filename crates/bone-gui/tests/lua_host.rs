@@ -631,6 +631,43 @@ async fn the_desktop_library() {
     g.frame();
     g.frame();
     assert_eq!(g.gui.eval("bone.ui.panel.focused()").unwrap(), "sessions");
+
+    // Settings, help and health are the GUI's own windows: each opens,
+    // draws, takes its keys and closes without an error.
+    for (open, keys) in [
+        ("require('bone.config').open()", "down down tab esc"),
+        ("bone.ui.help()", "tab down enter esc esc"),
+        ("bone.ui.health()", "esc"),
+    ] {
+        g.gui.run_lua("t", &format!("win = {open}")).unwrap();
+        g.frame();
+        g.frame();
+        assert_eq!(
+            g.gui.eval("bone.ui.is_open(win)").unwrap(),
+            "true",
+            "{open}"
+        );
+        g.gui
+            .run_lua(
+                "t",
+                &format!("for k in ('{keys}'):gmatch('%S+') do bone.press(k) end"),
+            )
+            .unwrap();
+        g.frame();
+        assert!(
+            g.gui.lua_errors().is_empty(),
+            "{open}: {:?}",
+            g.gui.lua_errors()
+        );
+        let shown = (g.gui.status.as_ref()).map_or(String::new(), |s| s.text.clone());
+        assert!(!shown.contains("failed"), "{open}: {shown}");
+    }
+    assert_eq!(
+        g.gui
+            .eval("require('bone.config') == require('bone.desktop.settings')")
+            .unwrap(),
+        "true"
+    );
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
     let shown = (g.gui.status.as_ref()).map_or(String::new(), |s| s.text.clone());
     assert!(!shown.contains("failed"), "{shown}");

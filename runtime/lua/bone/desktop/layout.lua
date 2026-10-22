@@ -47,30 +47,6 @@ local function suggestions(ctx)
   return lines
 end
 
--- /health: this frontend's checks, then the core's, in a window.
-local MARK = { ok = { "✓  ", "ToolDone" }, warn = { "!  ", "WarningMsg" }, error = { "✗  ", "ErrorMsg" } }
-local function health_lines(title, items, out)
-  out[#out + 1] = { { title, "Accent" } }
-  for _, it in ipairs(items) do
-    local m = MARK[it.status] or MARK.warn
-    out[#out + 1] = { m, { it.name .. "   ", "Normal" }, { (tostring(it.message):gsub("\n.*", "")), "Dim" } }
-  end
-  out[#out + 1] = {}
-end
-
-local function health()
-  local mine = bone.api.health()
-  for _, it in ipairs(bone._run_health()) do mine[#mine + 1] = it end
-  local lines = {}
-  health_lines("This window", mine, lines)
-  local pager = bone.ui.pager({ unpack(lines), { { "Core: checking…", "Dim" } } }, { title = "Health" })
-  bone.request("health/check", {}, function(core, err)
-    local all = { unpack(lines) }
-    health_lines("Core", err and { { name = "core", status = "error", message = err } } or core or {}, all)
-    pager:set(all)
-  end)
-end
-
 function M.setup()
   bone.ui.prompt = {
     prefix = { { "  ", "InputText" } },
@@ -82,12 +58,14 @@ function M.setup()
     min = 1,
   }
   bone.ui.suggestions = suggestions
-  bone.ui.health = health
+  local help = require("bone.desktop.help")
+  bone.ui.health = help.health
   function bone.ui.help(topic)
-    local help = require("bone.help")
     if topic and topic:match("%S") then return help.topic(topic) end
     return help.open()
   end
+  -- Settings: every way in (/config, /settings, /model) opens the GUI's.
+  package.loaded["bone.config"] = require("bone.desktop.settings")
   bone.ui.sessions = require("bone.desktop.sidebar").open
 
   -- A new chat: a welcome in the middle of the chat.
