@@ -732,27 +732,37 @@ pub fn set_gui_library(config_dir: &Path, name: &str) -> Result<(), String> {
     std::fs::write(&path, format!("{name}\n")).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// The library frontend `side` draws with. The TUI's is the one chosen
-/// with `/tui`. The GUI's is the one chosen with `/gui use`; without one it
-/// takes the TUI's only if that is `bare` or has files for the GUI (a
-/// `gui/` directory), so a library made for the terminal leaves the GUI
-/// standard.
+/// The GUI's library when none was chosen with `/gui use`.
+pub const GUI_DEFAULT_LIBRARY: &str = "desktop";
+
+/// The library frontend `side` draws with (`None`: the standard one). The
+/// TUI's is the one chosen with `/tui`. The GUI's is the one chosen with
+/// `/gui use`; without one it takes the TUI's if that is `bare` or has
+/// files for the GUI (a `gui/` directory), and is `desktop` otherwise, so a
+/// library made for the terminal leaves the GUI its own.
 pub fn library(config_dir: &Path, side: Side) -> Option<String> {
     if side == Side::Gui
         && let Some(name) = gui_library(config_dir)
     {
         return (name != "standard").then_some(name);
     }
-    let name = tui_library(config_dir)?;
+    let gui_default = || (side == Side::Gui).then(|| GUI_DEFAULT_LIBRARY.to_owned());
+    let Some(name) = tui_library(config_dir) else {
+        return gui_default();
+    };
     match side {
         Side::Tui => Some(name),
         Side::Gui if name == "bare" => Some(name),
-        Side::Gui => (config_dir
-            .join("libraries")
-            .join(&name)
-            .join("gui")
-            .is_dir())
-        .then_some(name),
+        Side::Gui
+            if config_dir
+                .join("libraries")
+                .join(&name)
+                .join("gui")
+                .is_dir() =>
+        {
+            Some(name)
+        }
+        Side::Gui => gui_default(),
         Side::Core => None,
     }
 }

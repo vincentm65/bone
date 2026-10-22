@@ -11,12 +11,16 @@ use bone_core::scripting;
 use bone_gui::{GuiOptions, Headless};
 use bone_server::Server;
 
+/// A headless GUI with the shared defaults (unless a test chose a library).
 async fn gui(config: &Path, work: &Path) -> Headless {
     std::fs::write(
         config.join("core.lua"),
         r#"bone.config.providers.fake = { base_url = "http://127.0.0.1:9", model = "fake" }"#,
     )
     .unwrap();
+    if !config.join("gui-library").exists() && !config.join("library").exists() {
+        std::fs::write(config.join("gui-library"), "standard\n").unwrap();
+    }
     let loaded = scripting::load_with(config, &|_| None).unwrap();
     let server = Server::new(Arc::new(Core::from_loaded(loaded)));
     let opts = GuiOptions {
@@ -481,11 +485,14 @@ async fn images_in_the_prompt_and_the_clipboard() {
     assert_eq!(g.copied.as_deref(), Some("copied text"));
 }
 
-/// `/tui use` loads the UI again with the library chosen, and one without
-/// GUI files (no `gui/` folder) leaves the GUI's UI standard.
+/// With no GUI library chosen, `/tui use` loads the UI again with the
+/// library chosen, and one without GUI files (no `gui/` folder) leaves the
+/// GUI its own (desktop).
 #[tokio::test(flavor = "multi_thread")]
 async fn choosing_a_library_reloads_the_gui() {
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    // No GUI library chosen: the GUI follows /tui where it can.
+    std::fs::write(config.path().join("gui-library"), "").unwrap();
     let mut g = gui(config.path(), work.path()).await;
     g.frame();
     g.gui.run_lua("t", "bone.library.use('bare')").unwrap();
@@ -500,7 +507,7 @@ async fn choosing_a_library_reloads_the_gui() {
     g.gui.run_lua("t", "bone.library.use('mine')").unwrap();
     g.frame();
     assert_eq!(g.gui.eval("bone.library.info().active").unwrap(), "mine");
-    assert_eq!(g.gui.eval("bone.library.info().drawn").unwrap(), "standard");
+    assert_eq!(g.gui.eval("bone.library.info().drawn").unwrap(), "desktop");
     assert_eq!(
         g.gui.eval("bone.ui.views.assistant ~= nil").unwrap(),
         "true"
@@ -550,12 +557,23 @@ async fn a_view_block_is_wrapped_rich_text() {
     );
 }
 
-/// `/gui use desktop` loads the built-in desktop library on its own, apart
-/// from the TUI's choice: its views draw blocks, and it loads cleanly.
+/// The GUI draws with the desktop library unless another is chosen, and
+/// `/gui use` chooses apart from the TUI's choice: its views draw blocks,
+/// and it loads cleanly.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_desktop_library() {
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    // No choice at all: desktop.
+    std::fs::write(config.path().join("gui-library"), "").unwrap();
     let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    assert_eq!(
+        g.gui.eval("bone.gui.library.info().active").unwrap(),
+        "desktop"
+    );
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+    std::fs::remove_file(config.path().join("gui-library")).unwrap();
+    g.gui.run_lua("t", "bone.cmd('gui use standard')").unwrap();
     g.frame();
     g.gui.run_lua("t", "bone.cmd('gui use desktop')").unwrap();
     g.frame();

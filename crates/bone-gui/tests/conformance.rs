@@ -52,6 +52,8 @@ async fn gui() -> Fixture {
         r#"bone.config.providers.fake = { base_url = "http://127.0.0.1:9", model = "fake" }"#,
     )
     .unwrap();
+    // The shared defaults, as the TUI draws them: what parity is about.
+    std::fs::write(config.path().join("gui-library"), "standard\n").unwrap();
     let work = tempfile::tempdir().unwrap();
     let loaded = scripting::load_with(config.path(), &|_| None).unwrap();
     let server = Server::new(Arc::new(Core::from_loaded(loaded)));

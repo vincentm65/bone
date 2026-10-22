@@ -54,7 +54,10 @@ function M.setup()
   hl("StatusLineDim", { fg = p.dim, bg = p.bg })
   hl("PopupBorder", { fg = p.border })
   hl("PopupTitle", { fg = p.fg, bold = true })
-  hl("Selection", { bg = "#2a3f55" })
+  -- The sessions sidebar and the tray: panel surfaces, the selected card
+  -- raised, as the app's drawer.
+  hl("Selection", { bg = p.raised })
+  bone.ui.sessions_background = p.panel
 end
 
 return M
