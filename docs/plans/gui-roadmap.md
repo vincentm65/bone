@@ -596,6 +596,35 @@ Left:
 - native notifications and file dialogs (needs the dependency decision
   above).
 
+### Phase 7: parity with the TUI
+
+The GUI does what the TUI does, with the shared defaults. Every op the Lua
+API calls exists in the GUI: sessions open in chats of their own (each with
+its draft); the core's processes (the tray), `bone.job`, the library and
+runtime ops are shared code in `bone-ui`; the prompt's cursor, selection,
+editing ops, history and paste placeholders match; Lua can scroll the chat.
+`tests/ui/` covers it in both frontends (`sessions`, `prompt`,
+`scrolling`, `libraries`, `jobs`); the runner can click, paste and wait,
+and fails a script whose steps go with a reload. A TUI library without a
+`gui/` folder no longer replaces the GUI's UI.
+
+**Status:** done.
+
+### Phase 8: the desktop library
+
+A GUI library chosen apart from the TUI's (`/gui use`, `gui-library`), and
+a built-in one, `desktop`, that draws the standard UI like the Android app:
+graphite colors, bubbles for your messages, proportional Markdown answers,
+monospace tool rows, a card composer, a menu bar. It is Lua
+(`runtime/gui/desktop.lua`, `runtime/lua/bone/desktop/`) over one new
+building block: a view may return a `block` of rich text the GUI wraps and
+boxes itself, with `lines` for a frontend that does not draw blocks.
+
+**Status:** first version. Next: a bold face (egui's bundled fonts have
+none), text selection and image previews inside blocks, the sessions
+sidebar and the tray in the same style, and making `desktop` the GUI's
+default once it covers everything.
+
 ## Explicit non-goals for the first milestone
 
 - Rewriting `bone-tui`; extraction is moves only.
