@@ -89,8 +89,6 @@ pub struct LuaSide {
     /// Whether the proportional font has a bold and an italic face
     /// (`sans-bold`, `sans-italic`); without them bold is a brighter color.
     pub faces: (bool, bool),
-    /// The menu bar Lua set (`bone.gui.menu`).
-    pub menus: Vec<(String, Vec<crate::window::MenuItem>)>,
     /// Text copied before there was a window to copy it with (headless).
     pub copied: Option<String>,
     /// The prompt's text as `prompt/changed` last reported it.

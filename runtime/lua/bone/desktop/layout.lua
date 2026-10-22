@@ -1,20 +1,9 @@
 -- The desktop library's screen: the chat, the composer as a rounded card
 -- with attached images and the `/` suggestions above it, the tray and the
 -- status bar under it, the sessions sidebar on the left; a welcome when a
--- chat is empty, /health and help, a menu bar, and a notification when an
+-- chat is empty, /health and help, and a notification when an
 -- answer finishes while the window is in the background.
 local M = {}
-
---- Pick image files to attach with the system's dialog.
-function M.attach()
-  bone.gui.open_file({
-    title = "Attach images",
-    multiple = true,
-    filters = { { "Images", { "png", "jpg", "jpeg", "webp" } } },
-  }, function(paths)
-    for _, p in ipairs(paths or {}) do bone.prompt.attach(p) end
-  end)
-end
 
 -- A turn of the session on screen finished while the window was away.
 local function finished(ev)
@@ -112,31 +101,6 @@ function M.setup()
   bone.ui.layout = { "chat", "input_gap", "above_prompt", "attachments", "prompt", "tray", "statusline" }
 
   bone.on("turn/finished", finished)
-  bone.gui.menu({
-    { "File", {
-      { "New chat", "new_session" },
-      { "Open chat…", "sessions" },
-      { "Terminal", "/term" },
-      "-",
-      { "Quit", "quit" },
-    } },
-    { "Edit", {
-      { "Attach image…", function() M.attach() end },
-      { "Paste image", "paste_clipboard" },
-    } },
-    { "View", {
-      { "Tool detail", function()
-        local next_detail = { summary = "rows", rows = "full", full = "summary" }
-        bone.o.tool_detail = next_detail[bone.o.tool_detail] or "rows"
-      end },
-      { "Reasoning", function() bone.o.apply("show_reasoning!") end },
-      { "Health", "/health" },
-    } },
-    { "Help", {
-      { "Help", "/help" },
-      { "Commands", "/help commands" },
-    } },
-  })
 end
 
 return M

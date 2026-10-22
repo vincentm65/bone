@@ -28,7 +28,7 @@
 | `bone-client` | request/response matching and the event stream, for any transport |
 | `bone-ui` | what both frontends share and is not drawing: chat items, composer, keymaps, options, popups, panels, the layout solver (in character cells), Markdown, themes, and the Lua UI API (`bone.ui`, `runtime/ui/`) behind the `Host` trait |
 | `bone-tui` | the terminal frontend: rendering with ratatui, terminal keys and mouse, terminal views and jobs, `tui.lua` and `bone.tui` |
-| `bone-gui` | the desktop frontend (`bone --gui`, the `gui` feature): an egui/eframe window, native text editing, a menu bar, `gui.lua` and `bone.gui`; a headless mode for tests |
+| `bone-gui` | the desktop frontend (`bone --gui`, the `gui` feature): an egui/eframe window, native text editing, `gui.lua` and `bone.gui`; a headless mode for tests |
 | `bone-media` | bounded image decoding and PNG normalization, shared by core and TUI |
 | `bone-lua` | shared Lua setup: `require` paths, plugins, JSON, helpers, the built-in runtime files |
 | `bone` | the command line |

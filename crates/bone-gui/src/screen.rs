@@ -19,7 +19,7 @@ use eframe::egui::{
     TextStyle, UiBuilder, vec2,
 };
 
-use crate::view::{color, row_job};
+use crate::view::{color, lifted, row_job};
 use crate::{ChatRow, ChatScroll, Gui, Row};
 
 /// Where character cells are on screen.
@@ -191,7 +191,7 @@ impl Gui {
     /// separator beside a side panel. The fill is a step off the canvas
     /// so a docked column reads as a sidebar.
     fn panels_ui(&mut self, ui: &mut egui::Ui, cells: &Cells, docked: &[PanelPlacement]) {
-        let fill = lifted_color(
+        let fill = lifted(
             (self.lua.theme.hl("Normal").bg)
                 .and_then(color)
                 .unwrap_or(ui.visuals().panel_fill),
@@ -252,15 +252,10 @@ impl Gui {
         let fill = (self.lua.theme.hl("Normal").bg)
             .and_then(color)
             .unwrap_or(ui.visuals().panel_fill);
-        // A step off the canvas, with a shadow: the border glyphs stay,
+        // A step off the canvas, with the same shadow as a dialog, so
         // the window does not sit flat on the transcript.
-        let card = lifted_color(fill);
-        let shadow = egui::epaint::Shadow {
-            offset: [0, 6],
-            blur: 16,
-            spread: 0,
-            color: Color32::from_black_alpha(80),
-        };
+        let card = lifted(fill);
+        let shadow = ui.visuals().popup_shadow;
         for (id, r, lines) in bone_ui::lua::layout_popups(self, &anchors) {
             let rect = cells.rect(r);
             let key = format!("popup:{id}");
@@ -275,12 +270,14 @@ impl Gui {
         }
     }
 
-    /// Rows the message line takes in `area`.
+    /// Rows the message line takes in `area`, with a row of air so a
+    /// notice is not flush under the composer or against the window edge.
     fn message_rows(&self, area: layout::Rect) -> u16 {
         match &self.status {
-            Some(s) => (s.text.lines().count().max(1) as u16)
-                .min(area.height / 2)
-                .max(1),
+            Some(s) => {
+                let lines = s.text.lines().count().max(1) as u16;
+                lines.saturating_add(2).min(area.height / 2).max(1)
+            }
             None => 0,
         }
     }
@@ -292,10 +289,16 @@ impl Gui {
         let style = self
             .lua
             .theme
-            .hl(if s.error { "ErrorMsg" } else { "Normal" });
-        for (i, line) in s.text.lines().take(r.height as usize).enumerate() {
-            let at = layout::Rect::new(r.x, r.y + i as u16, r.width, 1);
-            paint_row(ui, cells, at, &vec![(line.to_owned(), style)]);
+            .hl(if s.error { "ErrorMsg" } else { "StatusLineDim" });
+        let lines: Vec<&str> = s.text.lines().take(r.height as usize).collect();
+        if lines.is_empty() {
+            return;
+        }
+        let spare = r.height.saturating_sub(lines.len() as u16);
+        let top = spare / 2;
+        for (i, line) in lines.iter().enumerate() {
+            let at = layout::Rect::new(r.x, r.y + top + i as u16, r.width, 1);
+            paint_row(ui, cells, at, &vec![(line.to_string(), style)]);
         }
     }
 
@@ -610,15 +613,6 @@ fn rule_color(gui: &Gui, ui: &egui::Ui) -> Color32 {
 fn vline(ui: &egui::Ui, rect: egui::Rect, color: Color32) {
     ui.painter()
         .vline(rect.center().x, rect.y_range(), Stroke::new(1.0, color));
-}
-
-/// A step lighter than `c`, so a panel or popup sits off the canvas.
-fn lifted_color(c: Color32) -> Color32 {
-    Color32::from_rgb(
-        c.r().saturating_add(14),
-        c.g().saturating_add(14),
-        c.b().saturating_add(14),
-    )
 }
 
 /// What the layout asks the GUI while it sizes leaves.

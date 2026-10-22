@@ -28,7 +28,7 @@ use eframe::egui::{self, Color32, FontFamily, FontId, Galley, Stroke};
 use serde_json::Value;
 
 use crate::Gui;
-use crate::view::color;
+use crate::view::{color, ink_background};
 
 pub struct Block {
     paras: Vec<Para>,
@@ -159,6 +159,7 @@ impl Gui {
         let font = p["font"].as_str().unwrap_or(font);
         let size = num(&p["size"], size);
         let fg = p["fg"].as_str().unwrap_or(fg);
+        let canvas = self.canvas();
         let mut job = LayoutJob::default();
         for s in p["spans"].as_array().into_iter().flatten() {
             let (text, group) = match s {
@@ -197,33 +198,35 @@ impl Gui {
             if m.contains(Modifier::DIM) {
                 color = color.gamma_multiply(0.6);
             }
-            let background = if code {
-                self.group_color("CodeBlock", true)
-                    .unwrap_or(Color32::from_gray(0x2a))
-            } else {
-                style
-                    .bg
-                    .and_then(crate::view::color)
-                    .unwrap_or(Color32::TRANSPARENT)
-            };
+            let background = span_background(
+                style.bg.and_then(crate::view::color),
+                code,
+                self.group_color("CodeBlock", true),
+                canvas,
+            );
             let underline = if m.contains(Modifier::UNDERLINED) || s["link"].is_string() {
                 Stroke::new(1.0, color)
             } else {
                 Stroke::NONE
             };
-            job.append(
-                text,
-                0.0,
-                TextFormat {
-                    font_id: FontId::new(size, family),
-                    color,
-                    background,
-                    // A real italic face needs no slant.
-                    italics: italic && !slanted,
-                    underline,
-                    ..Default::default()
-                },
-            );
+            let format = TextFormat {
+                font_id: FontId::new(size, family),
+                color,
+                background,
+                // A real italic face needs no slant.
+                italics: italic && !slanted,
+                underline,
+                ..Default::default()
+            };
+            // A code chip needs air beside the glyphs; the background
+            // otherwise hugs the ink.
+            if code && !text.is_empty() {
+                job.append(" ", 0.0, format.clone());
+                job.append(text, 0.0, format.clone());
+                job.append(" ", 0.0, format);
+            } else {
+                job.append(text, 0.0, format);
+            }
         }
         // An empty paragraph is still a line tall.
         if job.text.is_empty() {
@@ -245,6 +248,21 @@ impl Gui {
             bg: p["bg"].as_str().and_then(|g| self.group_color(g, true)),
             pad: num(&p["pad"], 0.0),
         }
+    }
+}
+
+/// A span's glyph background. A code chip keeps its own fill; any other
+/// span follows [`ink_background`].
+fn span_background(
+    style_bg: Option<Color32>,
+    code: bool,
+    code_bg: Option<Color32>,
+    canvas: Color32,
+) -> Color32 {
+    if code {
+        code_bg.unwrap_or(Color32::from_gray(0x2a))
+    } else {
+        ink_background(style_bg, canvas)
     }
 }
 
@@ -358,5 +376,30 @@ impl Block {
             y += g.size().y + 2.0 * p.pad;
         }
         hits
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn canvas_color_is_not_ink_background() {
+        let canvas = Color32::from_rgb(0x12, 0x12, 0x12);
+        let chip = Color32::from_rgb(0x1c, 0x1c, 0x1c);
+        // A code chip replaces the style color, even when that color is the canvas.
+        assert_eq!(
+            span_background(Some(canvas), true, Some(chip), canvas),
+            chip
+        );
+        assert_eq!(
+            span_background(Some(canvas), true, None, canvas),
+            Color32::from_gray(0x2a)
+        );
+        // A non-code span follows the shared rule.
+        assert_eq!(
+            span_background(Some(canvas), false, None, canvas),
+            Color32::TRANSPARENT
+        );
     }
 }

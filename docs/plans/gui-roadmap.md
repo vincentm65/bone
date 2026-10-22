@@ -536,7 +536,7 @@ catalog shows `both`/`tui`/`gui`/`core` from a package's files or a
 install (`tests/ui/plugins.lua`, `tests/ui/catalog.lua`). `/health` is the
 same page in both, with each frontend's checks (the GUI's: renderer and
 adapter, connection, Lua, plugins, font). The GUI's own API is `bone.gui`
-(`gui.window`, `gui.menus`), reported only there; copying to the
+(`gui.window`), reported only there; copying to the
 clipboard is shared. `docs/customizing/customizing-plugins.md` explains
 writing a plugin for both frontends.
 
@@ -613,7 +613,7 @@ and fails a script whose steps go with a reload. A TUI library without a
 A GUI library chosen apart from the TUI's (`/gui use`, `gui-library`), and
 a built-in one, `desktop`, that draws the standard UI like the Android app:
 graphite colors, bubbles for your messages, proportional Markdown answers,
-monospace tool rows, a card composer, a menu bar. It is Lua
+monospace tool rows, a card composer. It is Lua
 (`runtime/gui/desktop.lua`, `runtime/lua/bone/desktop/`) over one new
 building block: a view may return a `block` of rich text the GUI wraps and
 boxes itself, with `lines` for a frontend that does not draw blocks.
@@ -622,8 +622,7 @@ boxes itself, with `lines` for a frontend that does not draw blocks.
 GUI draws `desktop` (`/gui use standard` is the TUI's look). Real bold and
 italic come from the system's sans faces (or `font_sans*`); block text is
 selectable and previews its images; the sessions sidebar and tray take the
-panel surfaces; Edit ▸ Attach image… uses the system's dialog, and an
-answer that finishes in the background notifies.
+panel surfaces, and an answer that finishes in the background notifies.
 
 ### Phase 9: the GUI's looks apart from the TUI's
 

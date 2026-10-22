@@ -7,6 +7,7 @@
 -- gui.<name>. Opened in place of bone.config, so every way in comes here.
 local M = {}
 
+local card = require("bone.desktop.card")
 local SIZE, SMALL = 14, 12
 
 local function value_text(row, st)
@@ -144,20 +145,10 @@ function M.open(want)
     bone.ui.update(id, {})
   end
 
-  -- As big as the window allows, up to a comfortable size.
-  local cols, rows = 100, 34
-  local ok, geo = pcall(bone.ui.geometry)
-  if ok and geo then
-    local w, h = 0, 0
-    for _, l in ipairs(geo.leaves or {}) do
-      w, h = math.max(w, l.x + l.width), math.max(h, l.y + l.height)
-    end
-    if w > 0 then cols = math.min(cols, w - 8) end
-    if h > 0 then rows = math.min(rows, h - 4) end
-  end
+  local w, h = card.size()
   id = bone.ui.popup({
     blocks = blocks, on_block = on_block, on_key = page.on_key,
-    width = math.max(40, cols), height = math.max(12, rows),
+    width = w, height = h,
   })
   paste_event = bone.on("paste", function(ev)
     if ev.context == "popup" then page.paste(ev.text) end

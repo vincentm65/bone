@@ -42,14 +42,14 @@ Put what only one frontend has in its own file, or check for it:
 ```lua
 -- in ui.lua: shared, with a GUI-only extra
 bone.cmd.create("todo", open_todo, { desc = "the todo panel" })
-if bone.has_capability("gui.menus") then
-  bone.gui.menu({ { "Todo", { { "Open", "/todo" } } } })
+if bone.has_capability("gui.notifications") then
+  bone.gui.notify("Todo", "ready")
 end
 ```
 
 `bone.api_info().side` is `"tui"` or `"gui"`, and `bone.has_capability`
 answers for this frontend: the shared API is `ui.*` (`ui.keymaps`,
-`ui.panels`, …), the GUI's own is `gui.*` (`gui.window`, `gui.menus`), and
+`ui.panels`, …), the GUI's own is `gui.*` (`gui.window`, `gui.notifications`), and
 the TUI also reports its older `tui.*` names. In the GUI, a call to an API
 it does not have yet raises an error naming it; `docs/lua.md` lists what is
 shared.

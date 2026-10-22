@@ -108,6 +108,11 @@ impl Gui {
                         ui.scroll_to_rect(r, None);
                     }
                 }
+                // Past the last block, so a card's clip does not cut its
+                // last line when the list is scrolled to the end.
+                if key.starts_with("popup:") {
+                    ui.add_space(12.0);
+                }
             });
         match selected {
             Some(s) => self.lua.rich_selected.insert(key.to_owned(), s),

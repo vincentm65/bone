@@ -1,7 +1,7 @@
 //! Drawing the GUI with egui: the Lua-laid-out screen (`screen.rs`),
 //! questions as they come, and Lua styles as egui text formats. Lua-produced
 //! lines are monospace, so a column here is a column in the TUI. Around that
-//! grid the window has its own chrome: theme, margin, menus and dialogs.
+//! grid the window has its own chrome: theme, margin and dialogs.
 
 use bone_ui::options::DynamicValue;
 use bone_ui::style::{Color, Modifier, Style};
@@ -28,7 +28,6 @@ impl Gui {
         self.route_keys(ui.ctx());
         self.dropped_files(ui.ctx());
         self.window_ui(ui.ctx());
-        self.menu_ui(ui);
         let canvas = self.canvas();
         egui::CentralPanel::default()
             .frame(
@@ -52,7 +51,7 @@ impl Gui {
             .unwrap_or(Color32::from_rgb(0x16, 0x16, 0x16))
     }
 
-    /// Menus, dialogs and scrollbars follow the Lua colors. Once per
+    /// Dialogs and scrollbars follow the Lua colors. Once per
     /// colorscheme: rewriting the style every frame asks for another.
     fn apply_visuals(&mut self, ctx: &egui::Context) {
         if self.visuals_rev == Some(self.lua.opts_rev) {
@@ -92,7 +91,6 @@ impl Gui {
         vis.selection.bg_fill = Color32::from_rgb(0x2a, 0x3f, 0x55);
         vis.selection.stroke.color = accent;
         vis.window_corner_radius = egui::CornerRadius::same(8);
-        vis.menu_corner_radius = egui::CornerRadius::same(6);
         vis.window_stroke = Stroke::new(1.0, rule);
         vis.popup_shadow = egui::epaint::Shadow {
             offset: [0, 8],
@@ -216,7 +214,9 @@ fn advance(fonts: &mut egui::epaint::text::FontsView<'_>, font: &FontId, cluster
 fn format(style: &Style, font: &FontId, visuals: &egui::Visuals) -> TextFormat {
     let m = style.add_modifier;
     let mut fg = style.fg.and_then(color).unwrap_or(visuals.text_color());
-    let mut bg = style.bg.and_then(color).unwrap_or(Color32::TRANSPARENT);
+    // Punch the canvas out first. Reverse then paints a cursor as a solid
+    // block of the text color, on the panel when the style had no mark.
+    let mut bg = ink_background(style.bg.and_then(color), visuals.panel_fill);
     if m.contains(Modifier::REVERSED) {
         let back = if bg == Color32::TRANSPARENT {
             visuals.panel_fill
@@ -251,7 +251,7 @@ fn format(style: &Style, font: &FontId, visuals: &egui::Visuals) -> TextFormat {
 }
 
 /// A step lighter, for a bar or a card on `c`.
-fn lifted(c: Color32) -> Color32 {
+pub(crate) fn lifted(c: Color32) -> Color32 {
     Color32::from_rgb(
         c.r().saturating_add(14),
         c.g().saturating_add(14),
@@ -278,6 +278,16 @@ const ANSI: [(u8, u8, u8); 16] = [
     (0x70, 0xc0, 0xb1),
     (0xea, 0xea, 0xea),
 ];
+
+/// A glyph background. The canvas is the window, not a mark: painting it
+/// punches a hole in a lifted card or panel. A real fill stays. No color
+/// means the surface underneath shows through.
+pub(crate) fn ink_background(bg: Option<Color32>, canvas: Color32) -> Color32 {
+    match bg {
+        Some(c) if c != canvas => c,
+        _ => Color32::TRANSPARENT,
+    }
+}
 
 /// `None` for the default color.
 pub(crate) fn color(c: Color) -> Option<Color32> {
@@ -499,5 +509,49 @@ mod tests {
         assert_columns("a─┼b", &[0.0, 1.0, 2.0, 3.0]);
         assert_columns("ab😀😀c", &[0.0, 1.0, 2.0, 4.0, 6.0]);
         assert_columns("e\u{301}x", &[0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn ink_background_is_the_window_not_a_mark() {
+        let canvas = Color32::from_rgb(0x12, 0x12, 0x12);
+        let bubble = Color32::from_rgb(0x33, 0x33, 0x33);
+        assert_eq!(ink_background(Some(canvas), canvas), Color32::TRANSPARENT);
+        assert_eq!(ink_background(None, canvas), Color32::TRANSPARENT);
+        assert_eq!(ink_background(Some(bubble), canvas), bubble);
+    }
+
+    #[test]
+    fn canvas_background_stays_off_panels() {
+        let canvas = Color32::from_rgb(0x12, 0x12, 0x12);
+        let mut visuals = egui::Visuals::dark();
+        visuals.panel_fill = canvas;
+        let font = FontId::monospace(14.0);
+        let plain = format(
+            &Style::default()
+                .fg(Color::Rgb(0xee, 0xee, 0xee))
+                .bg(Color::Rgb(0x12, 0x12, 0x12)),
+            &font,
+            &visuals,
+        );
+        assert_eq!(plain.background, Color32::TRANSPARENT);
+        let marked = format(
+            &Style::default()
+                .fg(Color::Rgb(0xee, 0xee, 0xee))
+                .bg(Color::Rgb(0x33, 0x33, 0x33)),
+            &font,
+            &visuals,
+        );
+        assert_eq!(marked.background, Color32::from_rgb(0x33, 0x33, 0x33));
+        // A reversed cursor still becomes a solid block of the text color.
+        let cursor = format(
+            &Style::default()
+                .fg(Color::Rgb(0xee, 0xee, 0xee))
+                .bg(Color::Rgb(0x12, 0x12, 0x12))
+                .add_modifier(Modifier::REVERSED),
+            &font,
+            &visuals,
+        );
+        assert_eq!(cursor.background, Color32::from_rgb(0xee, 0xee, 0xee));
+        assert_eq!(cursor.color, canvas);
     }
 }

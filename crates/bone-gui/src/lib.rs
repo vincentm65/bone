@@ -142,7 +142,7 @@ pub struct Gui {
     /// Move the chat on screen, from a key, before the next frame draws.
     pub(crate) chat_scroll: Option<ChatScroll>,
     /// `opts_rev` last applied to egui's theme, so a colorscheme change
-    /// restyles menus and dialogs without rewriting the style every frame.
+    /// restyles dialogs without rewriting the style every frame.
     visuals_rev: Option<u64>,
     /// A free-text answer being typed to the open question.
     answer_draft: String,

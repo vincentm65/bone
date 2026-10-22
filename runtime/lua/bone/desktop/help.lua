@@ -8,20 +8,7 @@ local M = {}
 
 local help = require("bone.help")
 local md = require("bone.desktop.markdown")
-
-local function size()
-  local cols, rows = 100, 34
-  local ok, geo = pcall(bone.ui.geometry)
-  if ok and geo then
-    local w, h = 0, 0
-    for _, l in ipairs(geo.leaves or {}) do
-      w, h = math.max(w, l.x + l.width), math.max(h, l.y + l.height)
-    end
-    if w > 0 then cols = math.min(cols, w - 8) end
-    if h > 0 then rows = math.min(rows, h - 4) end
-  end
-  return math.max(40, cols), math.max(12, rows)
-end
+local card = require("bone.desktop.card")
 
 local function title(text)
   return { paragraphs = { { spans = { { text = text, hl = "Normal", bold = true } }, size = 20 } }, pad = { 4, 10 }, margin = { 0, 6 } }
@@ -34,7 +21,7 @@ end
 --- Read Markdown `text` in a window titled `name`; esc closes it.
 function M.read(text, name)
   local id
-  local w, h = size()
+  local w, h = card.size()
   id = bone.ui.popup({
     width = w, height = h,
     blocks = function()
@@ -124,7 +111,7 @@ function M.open()
     bone.ui.update(id, {})
     return true
   end
-  local w, h = size()
+  local w, h = card.size()
   id = bone.ui.popup({
     width = w, height = h, blocks = blocks, on_key = on_key,
     on_block = function(bid)
@@ -162,7 +149,7 @@ function M.health()
   for _, it in ipairs(bone._run_health()) do mine[#mine + 1] = it end
   local core
   local id
-  local w, h = size()
+  local w, h = card.size()
   id = bone.ui.popup({
     width = w, height = h,
     blocks = function()
