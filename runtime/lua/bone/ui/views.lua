@@ -190,6 +190,18 @@ end
 -- run of calls into one line ("Read 3 files, ran 2 shell commands"), "rows"
 -- is one call per row and "full" shows everything. ctrl+t steps through.
 
+-- How much of each tool call the chat shows: "summary" (one line per run
+-- of calls, edits and failures in full), "rows" (a row per call, output
+-- cut short) or "full" (everything). The views read it, so it is defined
+-- with them, for every frontend.
+bone.o.define("tool_detail", "summary", {
+  desc = "tool calls: summary, rows or full (ctrl+t)",
+  choices = { "summary", "rows", "full" },
+  on_change = function()
+    bone.ui.refresh()
+  end,
+})
+
 local HINT = " (click or ctrl+t)"
 local toggled = {}
 local last_detail

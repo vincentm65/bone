@@ -18,16 +18,8 @@ bone.o.define("queue_mode", "steer", {
   choices = { "steer", "next" },
 })
 
--- How much of each tool call the chat shows: "summary" (one line per run
--- of calls, edits and failures in full), "rows" (a row per call, output
--- cut short) or "full" (everything). ctrl+t steps through them.
-bone.o.define("tool_detail", "summary", {
-  desc = "tool calls: summary, rows or full (ctrl+t)",
-  choices = { "summary", "rows", "full" },
-  on_change = function()
-    bone.ui.refresh()
-  end,
-})
+-- ctrl+t steps through bone.o.tool_detail (defined with the views, in
+-- runtime/lua/bone/ui/views.lua).
 local next_detail = { summary = "rows", rows = "full", full = "summary" }
 bone.keymap.set("ctrl+t", function()
   bone.o.tool_detail = next_detail[bone.o.tool_detail] or "rows"
