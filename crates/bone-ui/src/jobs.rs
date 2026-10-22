@@ -1,20 +1,21 @@
-//! Streaming jobs for TUI Lua (`bone.job`): a process with a handle. Output
-//! reaches Lua as it arrives, the job can be written to, cancelled or timed
-//! out, and its status can be read at any time. The UI never waits on it.
+//! Streaming jobs for frontend Lua (`bone.job`): a process with a handle.
+//! Output reaches Lua as it arrives, the job can be written to, cancelled or
+//! timed out, and its status can be read at any time. The UI never waits on
+//! it. This is the jobs and their tasks; `lua::jobs` is the Lua side.
 //!
 //! Each job runs in its own task, in its own process group, so cancelling
 //! (SIGTERM or SIGHUP, then SIGKILL after a grace period) also stops whatever it
-//! started. The task reports back through the app's event channel in order:
-//! started, output chunks, exited.
+//! started. The task reports to the frontend's [`Sink`] in order: started,
+//! output chunks, exited.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{Value as Json, json};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
-use crate::app::{App, AppEvent};
 use crate::term::Term;
 
 /// After SIGTERM, how long before SIGKILL.
@@ -63,8 +64,20 @@ pub struct Spec {
     pub pty: Option<(u16, u16)>,
 }
 
+/// What a job's task reports, in this order: it started, its output, it
+/// ended.
+pub enum Event {
+    Started(Option<u32>),
+    Output(Stream, Vec<u8>),
+    Exited(Exit),
+}
+
+/// Where a job's tasks report (job id, event); the frontend hands each to
+/// `lua::jobs::event` on its UI thread.
+pub type Sink = Arc<dyn Fn(u64, Event) + Send + Sync>;
+
 /// Requests from the UI to a running job.
-enum Ctl {
+pub(crate) enum Ctl {
     Write(Vec<u8>),
     CloseStdin,
     Cancel,
@@ -100,36 +113,36 @@ impl State {
 
 /// How a job ended, from its task.
 #[derive(Debug, Default)]
-struct Exit {
-    code: Option<i32>,
-    signal: Option<i32>,
-    cancelled: bool,
-    timed_out: bool,
+pub struct Exit {
+    pub(crate) code: Option<i32>,
+    pub(crate) signal: Option<i32>,
+    pub(crate) cancelled: bool,
+    pub(crate) timed_out: bool,
     /// It could not start or could not be waited on.
-    error: Option<String>,
+    pub(crate) error: Option<String>,
 }
 
 /// Output of one stream as the UI sees it.
 #[derive(Default)]
-struct Output {
+pub(crate) struct Output {
     /// Holds an incomplete UTF-8 character at the end of the last chunk.
-    tail: bone_lua::sys::Utf8Decoder,
+    pub(crate) tail: bone_lua::sys::Utf8Decoder,
     /// The incomplete last line, in line mode.
-    line: String,
+    pub(crate) line: String,
     /// Everything so far, for `on_exit` (when buffering).
     kept: String,
     truncated: bool,
-    bytes: u64,
+    pub(crate) bytes: u64,
 }
 
 impl Output {
     /// Decode a chunk, holding back a split character.
-    fn decode(&mut self, chunk: &[u8]) -> String {
+    pub(crate) fn decode(&mut self, chunk: &[u8]) -> String {
         self.bytes += chunk.len() as u64;
         self.tail.decode(chunk)
     }
 
-    fn keep(&mut self, text: &str) {
+    pub(crate) fn keep(&mut self, text: &str) {
         self.kept.push_str(text);
         if self.kept.len() > BUFFER_MAX {
             let mut cut = self.kept.len() - BUFFER_MAX;
@@ -145,22 +158,22 @@ impl Output {
 pub struct Job {
     pub id: u64,
     pub name: Option<String>,
-    command: String,
-    pid: Option<u32>,
-    state: State,
+    pub(crate) command: String,
+    pub(crate) pid: Option<u32>,
+    pub(crate) state: State,
     started: Instant,
-    finished: Option<Instant>,
-    exit: Option<Exit>,
-    ctl: mpsc::UnboundedSender<Ctl>,
+    pub(crate) finished: Option<Instant>,
+    pub(crate) exit: Option<Exit>,
+    pub(crate) ctl: mpsc::UnboundedSender<Ctl>,
     /// Deliver whole lines instead of chunks.
-    lines: bool,
+    pub(crate) lines: bool,
     /// Keep output for `on_exit`.
-    buffer: bool,
-    out: Output,
-    err: Output,
-    on_stdout: Option<u64>,
-    on_stderr: Option<u64>,
-    on_exit: Option<u64>,
+    pub(crate) buffer: bool,
+    pub(crate) out: Output,
+    pub(crate) err: Output,
+    pub(crate) on_stdout: Option<u64>,
+    pub(crate) on_stderr: Option<u64>,
+    pub(crate) on_exit: Option<u64>,
     /// The screen of a `pty` job.
     pub term: Option<Term>,
 }
@@ -170,7 +183,7 @@ impl Job {
         self.state == State::Running
     }
 
-    fn callbacks(&self) -> impl Iterator<Item = u64> {
+    pub(crate) fn callbacks(&self) -> impl Iterator<Item = u64> {
         [self.on_stdout, self.on_stderr, self.on_exit]
             .into_iter()
             .flatten()
@@ -199,7 +212,7 @@ impl Job {
     }
 
     /// What `on_exit` gets: the status plus the kept output.
-    fn result(&self) -> Json {
+    pub(crate) fn result(&self) -> Json {
         let mut v = self.status();
         let e = self.exit.as_ref();
         v["cancelled"] = json!(e.is_some_and(|e| e.cancelled));
@@ -214,7 +227,7 @@ impl Job {
     }
 }
 
-/// The jobs of an app: running ones and the last few finished ones.
+/// The jobs of a frontend: running ones and the last few finished ones.
 #[derive(Default)]
 pub struct Jobs {
     pub list: Vec<Job>,
@@ -226,7 +239,7 @@ impl Jobs {
         self.list.iter().find(|j| j.id == id)
     }
 
-    fn get_mut(&mut self, id: u64) -> Option<&mut Job> {
+    pub(crate) fn get_mut(&mut self, id: u64) -> Option<&mut Job> {
         self.list.iter_mut().find(|j| j.id == id)
     }
 
@@ -246,9 +259,21 @@ impl Jobs {
         self.list.iter().filter(|j| j.running()).count()
     }
 
+    /// Stop every running job, without calling back (the Lua state that
+    /// started them is going).
+    pub fn cancel_all(&mut self) {
+        for j in &mut self.list {
+            (j.on_stdout, j.on_stderr, j.on_exit) = (None, None, None);
+            j.term = None;
+            if j.running() {
+                let _ = j.ctl.send(Ctl::Cancel);
+            }
+        }
+    }
+
     /// Remember a finished job, forgetting the oldest beyond the limit.
     /// Returns the forgotten ids.
-    fn retire(&mut self, id: u64) -> Vec<u64> {
+    pub(crate) fn retire(&mut self, id: u64) -> Vec<u64> {
         self.finished.push_back(id);
         let mut gone = Vec::new();
         while self.finished.len() > FINISHED_KEPT {
@@ -271,18 +296,16 @@ pub struct Callbacks {
     pub on_exit: Option<u64>,
 }
 
-impl App {
-    /// Start a job; its callbacks run on the UI thread as it goes.
-    pub fn start_job(&mut self, spec: Spec, cb: Callbacks) -> u64 {
-        self.next_callback += 1;
-        let id = self.next_callback;
+impl Jobs {
+    /// Start job `id`, reporting to `sink`; its callbacks are in `cb`.
+    pub fn start(&mut self, id: u64, spec: Spec, cb: Callbacks, sink: Sink) {
         let (ctl, ctl_rx) = mpsc::unbounded_channel();
         let command = spec.command.display();
         let term = spec.pty.map(|(rows, cols)| Term::live(rows, cols));
-        self.jobs.list.push(Job {
+        self.list.push(Job {
             id,
             name: cb.name,
-            command: command.clone(),
+            command,
             pid: None,
             state: State::Running,
             started: Instant::now(),
@@ -298,186 +321,12 @@ impl App {
             on_exit: cb.on_exit,
             term,
         });
-        let tx = self.event_sender();
-        tokio::spawn(run(id, spec, ctl_rx, tx));
-        self.dirty = true;
-        id
-    }
-
-    /// Ask a running job to stop, and drop its screen. Returns whether it was
-    /// running.
-    pub fn cancel_job(&mut self, id: u64) -> bool {
-        let Some(j) = self.jobs.get_mut(id) else {
-            return false;
-        };
-        j.term = None;
-        j.running() && j.ctl.send(Ctl::Cancel).is_ok()
-    }
-
-    /// Write to a job's stdin (opened with `stdin = true`).
-    pub fn write_job(&mut self, id: u64, data: Vec<u8>) -> bool {
-        match self.jobs.get(id) {
-            Some(j) if j.running() => j.ctl.send(Ctl::Write(data)).is_ok(),
-            _ => false,
-        }
-    }
-
-    /// A `pty` job's screen at `rows` × `cols` (resizing its terminal to
-    /// that first), scrolled back `scroll` rows: its lines, the scroll, how
-    /// far it could scroll, and the state keys and paste depend on.
-    pub fn job_screen(
-        &mut self,
-        id: u64,
-        rows: u16,
-        cols: u16,
-        scroll: usize,
-    ) -> Option<(Vec<Vec<crate::ui::Item>>, usize, usize, Json)> {
-        let j = self.jobs.get_mut(id)?;
-        let running = j.running();
-        let term = j.term.as_mut()?;
-        if running && term.state().map(|s| s.size()) != Some((rows, cols)) {
-            let _ = j.ctl.send(Ctl::Resize(rows, cols));
-        }
-        let (lines, scroll, max) = term.lines(rows, cols, scroll, &mut self.theme);
-        let s = term.state()?;
-        let (row, col) = s.cursor_position();
-        let state = json!({
-            "cursor": (!s.hide_cursor() && scroll == 0).then_some([row + 1, col + 1]),
-            "title": s.title(),
-            "app_cursor": s.application_cursor(),
-            "bracketed_paste": s.bracketed_paste(),
-            "alt_screen": s.alternate_screen(),
-            "running": running,
-        });
-        Some((lines, scroll, max, state))
-    }
-
-    pub fn close_job_stdin(&mut self, id: u64) -> bool {
-        match self.jobs.get(id) {
-            Some(j) if j.running() => j.ctl.send(Ctl::CloseStdin).is_ok(),
-            _ => false,
-        }
-    }
-
-    fn job_started(&mut self, id: u64, pid: Option<u32>) {
-        let Some(j) = self.jobs.get_mut(id) else {
-            return;
-        };
-        j.pid = pid;
-        let ev = json!({ "id": id, "name": j.name, "cmd": j.command, "pid": pid });
-        self.fire("job/started", ev);
-    }
-
-    fn job_output(&mut self, id: u64, stream: Stream, chunk: &[u8]) {
-        let Some(j) = self.jobs.get_mut(id) else {
-            return;
-        };
-        if let Some(term) = &mut j.term {
-            let reply = term.feed(chunk);
-            if !reply.is_empty() {
-                let _ = j.ctl.send(Ctl::Write(reply));
-            }
-            self.dirty = true;
-            if j.on_stdout.is_none() {
-                j.out.bytes += chunk.len() as u64;
-                return;
-            }
-        }
-        let (out, cb) = match stream {
-            Stream::Stdout => (&mut j.out, j.on_stdout),
-            Stream::Stderr => (&mut j.err, j.on_stderr),
-        };
-        let text = out.decode(chunk);
-        if j.buffer {
-            out.keep(&text);
-        }
-        let pieces = if j.lines {
-            out.line.push_str(&text);
-            split_lines(&mut out.line)
-        } else if text.is_empty() {
-            Vec::new()
-        } else {
-            vec![text]
-        };
-        if let Some(cb) = cb {
-            for piece in pieces {
-                self.job_callback(cb, id, "job output", json!(piece));
-            }
-        }
-    }
-
-    fn job_exited(&mut self, id: u64, exit: Exit) {
-        let Some(j) = self.jobs.get_mut(id) else {
-            return;
-        };
-        // Whatever is left: a split character, a last line without "\n".
-        let mut rest = Vec::new();
-        for (out, cb) in [(&mut j.out, j.on_stdout), (&mut j.err, j.on_stderr)] {
-            let text = out.tail.finish();
-            if j.buffer {
-                out.keep(&text);
-            }
-            let text = if j.lines {
-                out.line.push_str(&text);
-                std::mem::take(&mut out.line)
-            } else {
-                text
-            };
-            if let (Some(cb), false) = (cb, text.is_empty()) {
-                rest.push((cb, text));
-            }
-        }
-        for (cb, text) in rest {
-            self.job_callback(cb, id, "job output", json!(text));
-        }
-        let Some(j) = self.jobs.get_mut(id) else {
-            return;
-        };
-        j.state = if exit.error.is_some() {
-            State::Failed
-        } else if exit.timed_out {
-            State::TimedOut
-        } else if exit.cancelled {
-            State::Cancelled
-        } else {
-            State::Exited
-        };
-        j.finished = Some(Instant::now());
-        j.exit = Some(exit);
-        let result = j.result();
-        if let Some(cb) = j.on_exit {
-            self.job_callback(cb, id, "job on_exit", result.clone());
-        }
-        let callbacks: Vec<u64> = self
-            .jobs
-            .get(id)
-            .map(|j| j.callbacks().collect())
-            .unwrap_or_default();
-        self.release_callbacks(&callbacks);
-        if let Some(j) = self.jobs.get_mut(id) {
-            j.on_stdout = None;
-            j.on_stderr = None;
-            j.on_exit = None;
-        }
-        self.jobs.retire(id);
-        self.fire("job/finished", result);
-        self.dirty = true;
-    }
-
-    /// Call a job callback with `(data, job)`.
-    fn job_callback(&mut self, cb: u64, id: u64, context: &str, data: Json) {
-        self.call_callback_multi(cb, context, |lua| {
-            Ok(vec![
-                bone_lua::to_lua(lua, &data)?,
-                crate::lua::job_handle(lua, id)?,
-            ]
-            .into())
-        });
+        tokio::spawn(run(id, spec, ctl_rx, sink));
     }
 }
 
 /// Take the complete lines (without their "\n" or "\r\n") out of `buf`.
-fn split_lines(buf: &mut String) -> Vec<String> {
+pub(crate) fn split_lines(buf: &mut String) -> Vec<String> {
     let Some(end) = buf.rfind('\n') else {
         return Vec::new();
     };
@@ -488,11 +337,6 @@ fn split_lines(buf: &mut String) -> Vec<String> {
         .collect();
     *buf = rest;
     lines
-}
-
-/// Send work to the UI thread.
-fn send(tx: &mpsc::UnboundedSender<AppEvent>, f: impl FnOnce(&mut App) + Send + 'static) {
-    let _ = tx.send(AppEvent(Box::new(f)));
 }
 
 /// Stops the process group if the job's task ends early (the TUI quits).
@@ -520,20 +364,12 @@ impl Drop for Group {
     }
 }
 
-async fn pump(
-    mut r: impl AsyncRead + Unpin,
-    id: u64,
-    stream: Stream,
-    tx: mpsc::UnboundedSender<AppEvent>,
-) {
+async fn pump(mut r: impl AsyncRead + Unpin, id: u64, stream: Stream, sink: Sink) {
     let mut buf = vec![0u8; 8192];
     loop {
         match r.read(&mut buf).await {
             Ok(0) | Err(_) => return,
-            Ok(n) => {
-                let chunk = buf[..n].to_vec();
-                send(&tx, move |app| app.job_output(id, stream, &chunk));
-            }
+            Ok(n) => sink(id, Event::Output(stream, buf[..n].to_vec())),
         }
     }
 }
@@ -579,12 +415,7 @@ fn attach_pty(_: &mut tokio::process::Command, _: u16, _: u16) -> std::io::Resul
 }
 
 /// The job's task: spawn, pump output, obey the UI, report the end.
-async fn run(
-    id: u64,
-    spec: Spec,
-    mut ctl: mpsc::UnboundedReceiver<Ctl>,
-    tx: mpsc::UnboundedSender<AppEvent>,
-) {
+async fn run(id: u64, spec: Spec, mut ctl: mpsc::UnboundedReceiver<Ctl>, sink: Sink) {
     let mut cmd = match &spec.command {
         Command::Shell(s) => tokio::process::Command::from(bone_lua::sys::shell(s)),
         Command::Argv(argv) => {
@@ -618,21 +449,17 @@ async fn run(
         Ok(c) => c,
         Err(e) => {
             let error = format!("cannot run {}: {e}", spec.command.display());
-            send(&tx, move |app| {
-                app.job_exited(
-                    id,
-                    Exit {
-                        error: Some(error),
-                        ..Default::default()
-                    },
-                )
-            });
+            let exit = Exit {
+                error: Some(error),
+                ..Default::default()
+            };
+            sink(id, Event::Exited(exit));
             return;
         }
     };
     let mut group = Group(child.id(), pty.is_some());
     let pid = child.id();
-    send(&tx, move |app| app.job_started(id, pid));
+    sink(id, Event::Started(pid));
     let (pty_out, stdin, resize) = match pty {
         Some((out, input, resize)) => (Some(out), Some(input), Some(resize)),
         None => (
@@ -660,12 +487,12 @@ async fn run(
         child
             .stdout
             .take()
-            .map(|r| tokio::spawn(pump(r, id, Stream::Stdout, tx.clone()))),
+            .map(|r| tokio::spawn(pump(r, id, Stream::Stdout, sink.clone()))),
         child
             .stderr
             .take()
-            .map(|r| tokio::spawn(pump(r, id, Stream::Stderr, tx.clone()))),
-        pty_out.map(|r| tokio::spawn(pump(r, id, Stream::Stdout, tx.clone()))),
+            .map(|r| tokio::spawn(pump(r, id, Stream::Stderr, sink.clone()))),
+        pty_out.map(|r| tokio::spawn(pump(r, id, Stream::Stdout, sink.clone()))),
         writer,
     ];
     if let Stdin::Text(text) = spec.stdin
@@ -736,10 +563,10 @@ async fn run(
         let _ = tokio::time::timeout(Duration::from_secs(1), &mut r).await;
         r.abort();
     }
-    // Only an interrupted task (the TUI quitting) kills on drop: once the
+    // Only an interrupted task (the frontend quitting) kills on drop: once the
     // leader is reaped its id may be reused.
     group.0 = None;
-    send(&tx, move |app| app.job_exited(id, exit));
+    sink(id, Event::Exited(exit));
 }
 
 #[cfg(test)]

@@ -3,7 +3,9 @@
 //! frontend against a real core. A script is a chunk, or returns a list of
 //! steps (functions) run in order with the frontend's events handled
 //! between them; a step that sets `__click = { x, y }` has that cell clicked
-//! before the next, and one that sets `__paste = text` has that pasted. A script fails by raising an error; `eq(got, want,
+//! before the next, one that sets `__paste = text` has that pasted, and one
+//! that sets `__wait = function` waits (up to five seconds) for it to
+//! return true. A script fails by raising an error; `eq(got, want,
 //! what)` is the one helper.
 
 use std::path::{Path, PathBuf};
@@ -68,6 +70,17 @@ pub async fn run_script(ui: &mut impl UiDriver, path: &Path) -> Result<(), Strin
             ui.click(cell(x)?, cell(y)?);
             ui.run_lua("=click", "__click = nil")?;
             ui.settle().await;
+        }
+        // `__wait`: settle until it holds (a job finishing, a reply).
+        if ui.eval("type(__wait) == 'function'")? == "true" {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while ui.eval("__wait() == true")? != "true" {
+                if std::time::Instant::now() > deadline {
+                    return Err(format!("{}: step {step} waited too long", path.display()));
+                }
+                ui.settle().await;
+            }
+            ui.run_lua("=wait", "__wait = nil")?;
         }
         let pasted = ui.eval("__paste or ''")?;
         if !pasted.is_empty() {

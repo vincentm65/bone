@@ -8,6 +8,7 @@ pub mod commands;
 pub mod composer;
 pub mod data;
 pub mod editor;
+pub mod jobs;
 pub mod keymap;
 pub mod keys;
 pub mod layout;

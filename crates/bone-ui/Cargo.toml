@@ -13,11 +13,11 @@ bone-media.workspace = true
 bone-proto.workspace = true
 mlua.workspace = true
 serde_json.workspace = true
-tokio = { workspace = true, features = ["time", "process", "io-util", "fs"] }
+tokio = { workspace = true, features = ["time", "process", "io-util", "fs", "net"] }
 unicode-width.workspace = true
 vt100 = "0.15"
 
-[target.'cfg(unix)'.dev-dependencies]
+[target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
 [dev-dependencies]

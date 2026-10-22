@@ -15,6 +15,7 @@ use bone_proto::types::ImageAttachment;
 use mlua::{FromLua, FromLuaMulti, Function, IntoLuaMulti, Lua, MultiValue, Table, Value};
 
 pub mod input;
+pub mod jobs;
 pub mod libraries;
 pub mod panels;
 pub mod plugins;
@@ -289,6 +290,11 @@ pub trait Host {
     fn spinner(&mut self) -> &mut crate::model::Spinner;
     /// How many `bone.job` jobs are running.
     fn jobs_running(&self) -> usize;
+    /// The `bone.job` jobs.
+    fn jobs(&mut self) -> &mut crate::jobs::Jobs;
+    /// Where job tasks report: each event is to reach `jobs::event` on the
+    /// UI thread.
+    fn job_sink(&self) -> crate::jobs::Sink;
     /// The width of the whole window, in columns.
     fn screen_cols(&self) -> u16;
     /// Chat `buf`'s prompt has the keyboard (it is on screen and no popup
@@ -317,8 +323,12 @@ pub trait Host {
     /// Where this frontend runs, for finding a project's `.bone/`.
     fn cwd(&self) -> &str;
     /// Stop job `id` without calling back; the callbacks it held.
-    fn cancel_job(&mut self, _id: u64) -> Vec<u64> {
-        Vec::new()
+    fn cancel_job(&mut self, id: u64) -> Vec<u64>
+    where
+        Self: Sized,
+    {
+        jobs::cancel(self, id);
+        self.jobs().forget_callbacks(id)
     }
     /// Keys typed toward a sequence go through now (the focus is moving).
     fn flush_keys(&mut self)
@@ -455,6 +465,7 @@ pub fn dispatch<H: Host>(
             return panels::dispatch(h, lua, op, a)
                 .or_else(|a| input::dispatch(h, lua, op, a))
                 .or_else(|a| processes::dispatch(h, lua, op, a))
+                .or_else(|a| jobs::dispatch(h, lua, op, a))
                 .or_else(|a| libraries::dispatch(h, lua, op, a))
                 .or_else(|a| plugins::dispatch(h, lua, op, a));
         }

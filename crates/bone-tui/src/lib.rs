@@ -12,7 +12,6 @@ mod chat;
 mod clipboard;
 mod data;
 mod headless;
-mod jobs;
 mod keys;
 mod layout;
 mod lua;
@@ -26,7 +25,7 @@ mod terminal;
 mod theme;
 mod ui;
 
-use bone_ui::{composer, editor, keymap, options, term, text};
+use bone_ui::{composer, editor, keymap, options, text};
 
 #[cfg(test)]
 mod tests;

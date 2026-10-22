@@ -74,7 +74,7 @@ pub(crate) struct LuaSide {
     popups: Vec<Popup>,
     panels: Vec<Panel>,
     panel_focus: Option<String>,
-    jobs: crate::jobs::Jobs,
+    jobs: bone_ui::jobs::Jobs,
     theme: Theme,
     colors_name: Option<String>,
     ui_broken: HashSet<String>,
@@ -143,7 +143,7 @@ pub struct App {
     /// The panel with the keyboard (see `focused_panel`).
     pub panel_focus: Option<String>,
     /// Streaming jobs from Lua (`bone.job`).
-    pub jobs: crate::jobs::Jobs,
+    pub jobs: bone_ui::jobs::Jobs,
     /// Core-managed shell processes of the chat on screen.
     pub processes: bone_ui::lua::processes::Processes,
     /// Text highlighted with the mouse.
@@ -328,7 +328,7 @@ impl App {
         let current = self.swap_lua_side(side);
         let jobs: Vec<u64> = self.jobs.list.iter().map(|j| j.id).collect();
         for id in jobs {
-            self.cancel_job(id);
+            bone_ui::lua::jobs::cancel(self, id);
             self.jobs.forget_callbacks(id);
         }
         drop(self.swap_lua_side(current));

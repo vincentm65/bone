@@ -12,11 +12,6 @@ pub use bone_ui::lua::Owned;
 pub use shared::{Kind, Plugin};
 
 impl App {
-    /// Record that the current owner (if a plugin) created `what`.
-    pub fn own(&mut self, what: Owned) {
-        bone_ui::lua::own(self, what);
-    }
-
     pub fn register_plugin(&mut self, name: &str, dir: &Path, kind: Kind) {
         shared::register_plugin(self, name, dir, kind);
     }

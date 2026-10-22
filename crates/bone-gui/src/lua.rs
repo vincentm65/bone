@@ -100,6 +100,8 @@ pub struct LuaSide {
     pub panels: Vec<bone_ui::panel::Panel>,
     pub panel_focus: Option<String>,
     /// Every message shown, and the last Lua errors in full.
+    /// Streaming jobs from Lua (`bone.job`).
+    pub jobs: bone_ui::jobs::Jobs,
     pub log: Vec<String>,
     pub lua_errors: Vec<String>,
     /// While the configuration loads: where each error happened and what
@@ -165,7 +167,8 @@ impl Gui {
         let errors = self.lua.load_errors.take().unwrap_or_default();
         if let Some(new) = errors.iter().find(|e| !old.load_failures.contains(*e)) {
             let new = new.lines().next().unwrap_or_default().to_owned();
-            let rejected = std::mem::replace(&mut self.lua, old);
+            let mut rejected = std::mem::replace(&mut self.lua, old);
+            rejected.jobs.cancel_all();
             self.lua.log = rejected.log;
             self.lua.views_rev += 1;
             Gui::error(
@@ -175,6 +178,9 @@ impl Gui {
             return false;
         }
         self.lua.load_failures = errors.into_iter().collect();
+        // The old state's jobs go with it.
+        let mut old = old;
+        old.jobs.cancel_all();
         Gui::info(self, "Lua configuration reloaded".into());
         true
     }
@@ -638,7 +644,21 @@ impl Host for Gui {
 
     /// The GUI runs no `bone.job` jobs yet.
     fn jobs_running(&self) -> usize {
-        0
+        self.lua.jobs.running()
+    }
+
+    fn jobs(&mut self) -> &mut bone_ui::jobs::Jobs {
+        &mut self.lua.jobs
+    }
+
+    fn job_sink(&self) -> bone_ui::jobs::Sink {
+        let (tx, repaint) = (self.tx.clone(), self.repaint.clone());
+        std::sync::Arc::new(move |id, ev| {
+            let apply = move |gui: &mut Gui| bone_ui::lua::jobs::event(gui, id, ev);
+            if tx.send(crate::Msg::Apply(Box::new(apply))).is_ok() {
+                crate::wake(&repaint);
+            }
+        })
     }
 
     fn screen_cols(&self) -> u16 {

@@ -13,8 +13,7 @@ use mlua::{Function, Lua, MultiValue, Table, Value};
 
 use crate::app::App;
 use crate::keymap::{Builtin, Context};
-use bone_ui::lua::processes::{screen_size, screen_table};
-use bone_ui::lua::{CALLBACKS, args, err, opt, ret};
+use bone_ui::lua::{CALLBACKS, args, err, ret};
 use serde_json::Value as Json;
 
 /// What a plugin, the user's config, or a project runs in the TUI, in
@@ -114,75 +113,6 @@ fn pos_out(lua: &Lua, (row, col): crate::editor::Pos) -> mlua::Result<Table> {
 }
 
 /// Field `k` of an optional options table: None when it or the table is nil.
-/// The Lua handle of job `id` (`bone.job._handle`), passed to its callbacks.
-pub fn job_handle(lua: &Lua, id: u64) -> mlua::Result<Value> {
-    let job: Table = lua.globals().get::<Table>("bone")?.get("job")?;
-    match job.get::<Option<Function>>("_handle")? {
-        Some(f) => f.call(id),
-        None => Ok(Value::Integer(id as i64)),
-    }
-}
-
-/// `bone.job.start(cmd, opts)`: the process to run.
-fn job_spec(cmd: Value, opts: &Option<Table>) -> mlua::Result<crate::jobs::Spec> {
-    use crate::jobs::{Command, Spec, Stdin};
-    let command = match cmd {
-        Value::String(s) => Command::Shell(s.to_str()?.to_owned()),
-        Value::Table(t) => {
-            let argv = t
-                .sequence_values::<String>()
-                .collect::<mlua::Result<Vec<_>>>()?;
-            if argv.is_empty() {
-                return Err(err("a job's argv list is empty"));
-            }
-            Command::Argv(argv)
-        }
-        other => {
-            return Err(err(format!(
-                "a job is a shell command or an argv list, not {}",
-                other.type_name()
-            )));
-        }
-    };
-    let get = |k: &str| -> mlua::Result<Value> {
-        opts.as_ref().map_or(Ok(Value::Nil), |o| o.get::<Value>(k))
-    };
-    let stdin = match get("stdin")? {
-        Value::Nil | Value::Boolean(false) => Stdin::Null,
-        Value::Boolean(true) => Stdin::Open,
-        Value::String(s) => Stdin::Text(s.to_str()?.to_owned()),
-        _ => return Err(err("job stdin is a string or true")),
-    };
-    let env = match get("env")? {
-        Value::Nil => Vec::new(),
-        Value::Table(t) => t
-            .pairs::<String, String>()
-            .collect::<mlua::Result<Vec<_>>>()?,
-        _ => return Err(err("job env is a table of strings")),
-    };
-    let timeout = match get("timeout")? {
-        Value::Nil => None,
-        Value::Integer(ms) if ms > 0 => Some(std::time::Duration::from_millis(ms as u64)),
-        Value::Number(ms) if ms > 0.0 => Some(std::time::Duration::from_millis(ms as u64)),
-        _ => return Err(err("job timeout is a positive number of milliseconds")),
-    };
-    let pty = match get("pty")? {
-        Value::Nil | Value::Boolean(false) => None,
-        Value::Boolean(true) => Some((24, 80)),
-        Value::Table(t) => {
-            screen_size(&Some(t), (24, 80)).map(|(rows, cols, _)| Some((rows, cols)))?
-        }
-        _ => return Err(err("job pty is true or { width, height }")),
-    };
-    Ok(Spec {
-        command,
-        cwd: opt(opts, "cwd")?,
-        env,
-        stdin,
-        timeout,
-        pty,
-    })
-}
 
 impl App {
     /// Run Lua with the API bound to this app.
@@ -361,32 +291,10 @@ impl App {
         true
     }
 
-    /// Keep `f` for later; it runs as the plugin that stored it.
-    fn store_callback(&mut self, lua: &Lua, f: Function) -> mlua::Result<u64> {
-        bone_ui::lua::store_callback(self, lua, f)
-    }
-
     /// Run `f` as the plugin that owns callback `cb` (or as the user's
     /// config), so what it creates belongs to that plugin.
     pub fn as_owner_of<R>(&mut self, cb: u64, f: impl FnOnce(&mut App) -> R) -> R {
         <App as bone_ui::lua::Host>::as_owner_of(self, cb, f)
-    }
-
-    /// Forget stored callbacks (outside a Lua call).
-    pub fn release_callbacks(&mut self, ids: &[u64]) {
-        if ids.is_empty() {
-            return;
-        }
-        let _ = self.with_api(|lua| {
-            for id in ids {
-                App::drop_callback(lua, *id)?;
-            }
-            Ok(())
-        });
-    }
-
-    fn drop_callback(lua: &Lua, id: u64) -> mlua::Result<()> {
-        bone_ui::lua::drop_callback(lua, id)
     }
 
     /// Call a stored callback with one argument built in Lua.
@@ -504,98 +412,6 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
                 }
             };
             ret(lua, buf)
-        }
-        "job_start" => {
-            let (cmd, opts): (Value, Option<Table>) = args(lua, a)?;
-            let spec = job_spec(cmd, &opts)?;
-            let mut stored = Vec::new();
-            let mut callback = |app: &mut App, k: &str| -> mlua::Result<Option<u64>> {
-                match opt(&opts, k)? {
-                    None => Ok(None),
-                    Some(Value::Function(f)) => {
-                        let id = app.store_callback(lua, f)?;
-                        stored.push(id);
-                        Ok(Some(id))
-                    }
-                    Some(_) => Err(err(format!("job {k} must be a function"))),
-                }
-            };
-            let cbs = (|| {
-                Ok::<_, mlua::Error>((
-                    callback(app, "on_stdout")?,
-                    callback(app, "on_stderr")?,
-                    callback(app, "on_exit")?,
-                ))
-            })();
-            let (on_stdout, on_stderr, on_exit) = match cbs {
-                Ok(c) => c,
-                Err(e) => {
-                    for id in stored {
-                        App::drop_callback(lua, id)?;
-                    }
-                    return Err(e);
-                }
-            };
-            let flag = |k: &str| -> mlua::Result<Option<bool>> {
-                opts.as_ref().map_or(Ok(None), |o| o.get(k))
-            };
-            let id = app.start_job(
-                spec,
-                crate::jobs::Callbacks {
-                    name: opt(&opts, "name")?,
-                    lines: flag("lines")?.unwrap_or(false),
-                    // Without output callbacks, keep the output for on_exit.
-                    buffer: flag("buffer")?.unwrap_or(on_stdout.is_none() && on_stderr.is_none()),
-                    on_stdout,
-                    on_stderr,
-                    on_exit,
-                },
-            );
-            app.own(crate::plugins::Owned::Job(id));
-            ret(lua, id)
-        }
-        "job_cancel" => {
-            let id: u64 = args(lua, a)?;
-            ret(lua, app.cancel_job(id))
-        }
-        "job_write" => {
-            let (id, data): (u64, mlua::String) = args(lua, a)?;
-            ret(lua, app.write_job(id, data.as_bytes().to_vec()))
-        }
-        "job_close_stdin" => {
-            let id: u64 = args(lua, a)?;
-            ret(lua, app.close_job_stdin(id))
-        }
-        "job_status" => {
-            let id: u64 = args(lua, a)?;
-            match app.jobs.get(id) {
-                Some(j) => ret(lua, to_lua(lua, &j.status())?),
-                None => ret(lua, Value::Nil),
-            }
-        }
-        "job_list" => {
-            let list: Vec<serde_json::Value> = app.jobs.list.iter().map(|j| j.status()).collect();
-            ret(lua, to_lua(lua, &serde_json::Value::Array(list))?)
-        }
-        "job_screen" => {
-            let (id, opts): (u64, Option<mlua::Table>) = args(lua, a)?;
-            // Without a size it stays the size it is.
-            let size = app
-                .jobs
-                .get(id)
-                .and_then(|j| Some(j.term.as_ref()?.state()?.size()));
-            let (rows, cols, scroll) = screen_size(&opts, size.unwrap_or((24, 80)))?;
-            let Some((lines, scroll, max, state)) = app.job_screen(id, rows, cols, scroll) else {
-                return ret(lua, Value::Nil);
-            };
-            let r = screen_table(lua, &lines, scroll, max)?;
-            if let Value::Table(state) = to_lua(lua, &state)? {
-                for kv in state.pairs::<Value, Value>() {
-                    let (k, v) = kv?;
-                    r.set(k, v)?;
-                }
-            }
-            ret(lua, r)
         }
         "log_tail" => {
             let n: usize = args(lua, a)?;
@@ -995,9 +811,17 @@ impl bone_ui::lua::Host for App {
         &self.cwd
     }
 
-    fn cancel_job(&mut self, id: u64) -> Vec<u64> {
-        App::cancel_job(self, id);
-        self.jobs.forget_callbacks(id)
+    fn jobs(&mut self) -> &mut bone_ui::jobs::Jobs {
+        &mut self.jobs
+    }
+
+    fn job_sink(&self) -> bone_ui::jobs::Sink {
+        let tx = self.event_sender();
+        std::sync::Arc::new(move |id, ev| {
+            let _ = tx.send(crate::app::AppEvent(Box::new(move |app: &mut App| {
+                bone_ui::lua::jobs::event(app, id, ev)
+            })));
+        })
     }
 
     fn panel_store(&mut self) -> bone_ui::lua::panels::PanelStore<'_> {
