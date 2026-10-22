@@ -344,6 +344,30 @@ async fn lua_sets_the_window_and_a_menu_bar() {
     g.frame();
 }
 
+/// pageup leaves the end of a long transcript; ctrl+end goes back.
+#[tokio::test(flavor = "multi_thread")]
+async fn page_keys_scroll_the_chat() {
+    use eframe::egui::{Key, Modifiers};
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    let text = "row\n".repeat(120);
+    g.gui
+        .run_lua(
+            "t",
+            &format!("bone.chat.add('note', {{ text = [[{text}]] }})"),
+        )
+        .unwrap();
+    g.frame();
+    let bottom = g.gui.lua.chat_top;
+    assert!(bottom > 20, "not at the end: {bottom}");
+    g.key(Key::PageUp, Modifiers::NONE);
+    g.frame();
+    assert!(g.gui.lua.chat_top < bottom, "pageup stayed at {bottom}");
+    g.key(Key::End, Modifiers::CTRL);
+    g.frame();
+    assert_eq!(g.gui.lua.chat_top, bottom, "ctrl+end did not return");
+}
+
 /// A narrower window has fewer columns, re-wraps the chat and fires
 /// `resize`; a HiDPI display keeps the layout, which is in logical units.
 #[tokio::test(flavor = "multi_thread")]

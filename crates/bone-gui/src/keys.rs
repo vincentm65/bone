@@ -351,7 +351,30 @@ impl Gui {
             FocusPrompt => {
                 let _ = bone_ui::lua::panels::focus_panel(self, None);
             }
+            // The text box has the arrows; these scroll the chat, as in
+            // the TUI (pageup, shift+up, ctrl+home, the wheel stays egui's).
+            ScrollUp => self.nudge_chat(-3),
+            ScrollDown => self.nudge_chat(3),
+            PageUp => self.nudge_chat(-(self.chat_page() - 2).max(1)),
+            PageDown => self.nudge_chat((self.chat_page() - 2).max(1)),
+            ScrollTop => self.chat_scroll = Some(crate::ChatScroll::Top),
+            ScrollBottom => self.chat_scroll = Some(crate::ChatScroll::Bottom),
             _ => {}
         }
+    }
+
+    /// Rows of the chat on screen, for a page key.
+    fn chat_page(&self) -> i32 {
+        self.lua
+            .geometry
+            .leaves
+            .iter()
+            .find(|(n, r)| n == "chat" && r.height > 0)
+            .map(|(_, r)| i32::from(r.height))
+            .unwrap_or(12)
+    }
+
+    fn nudge_chat(&mut self, rows: i32) {
+        self.chat_scroll = Some(crate::ChatScroll::By(rows));
     }
 }

@@ -1,6 +1,7 @@
 //! Drawing the GUI with egui: the Lua-laid-out screen (`screen.rs`),
-//! questions as they come, and Lua styles as egui text formats. Lua-produced lines are monospace, so a column here is a column
-//! in the TUI.
+//! questions as they come, and Lua styles as egui text formats. Lua-produced
+//! lines are monospace, so a column here is a column in the TUI. Around that
+//! grid the window has its own chrome: theme, margin, menus and dialogs.
 
 use bone_ui::options::DynamicValue;
 use bone_ui::style::{Color, Modifier, Style};
@@ -22,15 +23,102 @@ impl Gui {
             ui.ctx().request_discard("fonts changed");
             return;
         }
+        self.apply_visuals(ui.ctx());
         self.route_keys(ui.ctx());
         self.dropped_files(ui.ctx());
         self.window_ui(ui.ctx());
         self.menu_ui(ui);
+        let canvas = self.canvas();
         egui::CentralPanel::default()
-            .frame(egui::Frame::NONE)
+            .frame(
+                egui::Frame::NONE
+                    .inner_margin(egui::Margin::symmetric(16, 10))
+                    .fill(canvas),
+            )
             .show(ui, |ui| self.screen_ui(ui));
         self.question_ui(ui.ctx());
         self.preview_ui(ui.ctx());
+    }
+
+    /// The window's background: the Normal group's, or a dark canvas when
+    /// a scheme leaves it unset (the bare library).
+    pub(crate) fn canvas(&self) -> Color32 {
+        self.lua
+            .theme
+            .hl("Normal")
+            .bg
+            .and_then(color)
+            .unwrap_or(Color32::from_rgb(0x16, 0x16, 0x16))
+    }
+
+    /// Menus, dialogs and scrollbars follow the Lua colors. Once per
+    /// colorscheme: rewriting the style every frame asks for another.
+    fn apply_visuals(&mut self, ctx: &egui::Context) {
+        if self.visuals_rev == Some(self.lua.opts_rev) {
+            return;
+        }
+        self.visuals_rev = Some(self.lua.opts_rev);
+        let canvas = self.canvas();
+        let raised = lifted(canvas);
+        let fg = self
+            .lua
+            .theme
+            .hl("Normal")
+            .fg
+            .and_then(color)
+            .unwrap_or(Color32::from_rgb(0xee, 0xee, 0xee));
+        let accent = self
+            .lua
+            .theme
+            .hl("Accent")
+            .fg
+            .and_then(color)
+            .unwrap_or(Color32::from_rgb(0xc8, 0xdc, 0xf5));
+        let rule = self
+            .lua
+            .theme
+            .hl("WinSeparator")
+            .fg
+            .and_then(color)
+            .unwrap_or(Color32::from_rgb(0x2c, 0x2c, 0x2c));
+        let mut vis = egui::Visuals::dark();
+        vis.panel_fill = canvas;
+        vis.window_fill = raised;
+        vis.extreme_bg_color = canvas;
+        vis.faint_bg_color = raised;
+        vis.override_text_color = Some(fg);
+        vis.hyperlink_color = accent;
+        vis.selection.bg_fill = Color32::from_rgb(0x2a, 0x3f, 0x55);
+        vis.selection.stroke.color = accent;
+        vis.window_corner_radius = egui::CornerRadius::same(8);
+        vis.menu_corner_radius = egui::CornerRadius::same(6);
+        vis.window_stroke = Stroke::new(1.0, rule);
+        vis.popup_shadow = egui::epaint::Shadow {
+            offset: [0, 8],
+            blur: 18,
+            spread: 0,
+            color: Color32::from_black_alpha(90),
+        };
+        let radius = egui::CornerRadius::same(6);
+        for widget in [
+            &mut vis.widgets.noninteractive,
+            &mut vis.widgets.inactive,
+            &mut vis.widgets.hovered,
+            &mut vis.widgets.active,
+            &mut vis.widgets.open,
+        ] {
+            widget.corner_radius = radius;
+        }
+        vis.widgets.inactive.bg_fill = raised;
+        vis.widgets.hovered.bg_fill = lifted(raised);
+        vis.widgets.active.bg_fill = lifted(lifted(raised));
+        ctx.set_visuals(vis);
+        ctx.style_mut_of(ctx.theme(), |style| {
+            // Over the transcript, not in place of its last column.
+            style.spacing.scroll.floating = true;
+            style.spacing.scroll.bar_width = 8.0;
+            style.spacing.scroll.floating_width = 6.0;
+        });
     }
 
     /// The oldest open question, as a modal.
@@ -42,7 +130,8 @@ impl Gui {
         let options = Gui::question_options(&ask.question);
         let mut answer: Option<Value> = None;
         egui::Modal::new(egui::Id::new(("ask", ask_id))).show(ctx, |ui| {
-            ui.label(text);
+            ui.set_max_width(440.0);
+            ui.label(egui::RichText::new(text).size(15.0));
             ui.add_space(8.0);
             if options.is_empty() {
                 let edit = ui.text_edit_singleline(&mut self.answer_draft);
@@ -158,6 +247,15 @@ fn format(style: &Style, font: &FontId, visuals: &egui::Visuals) -> TextFormat {
         strikethrough: line(m.contains(Modifier::CROSSED_OUT)),
         ..Default::default()
     }
+}
+
+/// A step lighter, for a bar or a card on `c`.
+fn lifted(c: Color32) -> Color32 {
+    Color32::from_rgb(
+        c.r().saturating_add(14),
+        c.g().saturating_add(14),
+        c.b().saturating_add(14),
+    )
 }
 
 /// The 16 ANSI colors, as a dark terminal shows them.

@@ -1,8 +1,9 @@
 //! The window's main area, laid out by `bone.ui.layout` with the shared
 //! solver, in character units: columns of the monospace font's advance
 //! width and rows of its line height. Each leaf is drawn in its rectangle,
-//! as in the TUI: the chat, the prompt box, the statusline and divider,
-//! regions, column separators and the message line.
+//! the chat, the prompt box, the statusline and divider, regions,
+//! column separators and the message line. Rules are hairlines, and a
+//! rounded prompt border is a card, so the window is not a wall of cells.
 
 use bone_ui::chat::find_chat;
 use bone_ui::editor::TextBuffer;
@@ -19,7 +20,7 @@ use eframe::egui::{
 };
 
 use crate::view::{color, row_job};
-use crate::{Gui, Row};
+use crate::{ChatScroll, Gui, Row};
 
 /// Where character cells are on screen.
 pub(crate) struct Cells {
@@ -146,7 +147,8 @@ impl Gui {
             match k {
                 "chat" => self.chat_leaf(ui, &cells, r, buf),
                 "prompt" => self.prompt_leaf(ui, &cells, r, buf),
-                "divider" | "statusline" => self.line_leaf(ui, &cells, r, buf, k),
+                "divider" => self.rule_leaf(ui, &cells, r),
+                "statusline" => self.line_leaf(ui, &cells, r, buf),
                 "message" => self.message_leaf(ui, &cells, r),
                 _ => {}
             }
@@ -160,12 +162,9 @@ impl Gui {
                 self.lines_at(ui, &cells, r, &lines);
             }
         }
-        let sep_style = self.lua.theme.hl("WinSeparator");
-        for (x, a, sep, _) in std::mem::take(&mut plan.seps) {
-            for y in a.y..a.bottom() {
-                let row = vec![(sep.clone(), sep_style)];
-                paint_row(ui, &cells, layout::Rect::new(x, y, 1, 1), &row);
-            }
+        let rule = rule_color(self, ui);
+        for (x, a, _, _) in std::mem::take(&mut plan.seps) {
+            vline(ui, cells.rect(layout::Rect::new(x, a.y, 1, a.height)), rule);
         }
         self.panels_ui(ui, &cells, &docked);
         if msg_rows > 0 {
@@ -188,12 +187,14 @@ impl Gui {
     }
 
     /// Each placed panel: its title row, the content in view, and a
-    /// separator bar beside a side panel.
+    /// separator beside a side panel. The fill is a step off the canvas
+    /// so a docked column reads as a sidebar.
     fn panels_ui(&mut self, ui: &egui::Ui, cells: &Cells, docked: &[PanelPlacement]) {
-        let fill = (self.lua.theme.hl("Normal").bg)
-            .and_then(color)
-            .unwrap_or(ui.visuals().panel_fill);
-        let sep = self.lua.theme.hl("WinSeparator");
+        let fill = lifted_color(
+            (self.lua.theme.hl("Normal").bg)
+                .and_then(color)
+                .unwrap_or(ui.visuals().panel_fill),
+        );
         for placement in docked {
             let Some(f) = panels::panel_frame(self, placement) else {
                 continue;
@@ -213,14 +214,11 @@ impl Gui {
             }
             self.lines_at(ui, cells, f.body, &f.lines);
             if let Some(x) = f.separator {
-                for y in f.area.y..f.area.bottom() {
-                    paint_row(
-                        ui,
-                        cells,
-                        layout::Rect::new(x, y, 1, 1),
-                        &vec![("│".into(), sep)],
-                    );
-                }
+                vline(
+                    ui,
+                    cells.rect(layout::Rect::new(x, f.area.y, 1, f.area.height)),
+                    rule_color(self, ui),
+                );
             }
         }
     }
@@ -250,8 +248,19 @@ impl Gui {
         let fill = (self.lua.theme.hl("Normal").bg)
             .and_then(color)
             .unwrap_or(ui.visuals().panel_fill);
+        // A step off the canvas, with a shadow: the border glyphs stay,
+        // the window does not sit flat on the transcript.
+        let card = lifted_color(fill);
+        let shadow = egui::epaint::Shadow {
+            offset: [0, 6],
+            blur: 16,
+            spread: 0,
+            color: Color32::from_black_alpha(80),
+        };
         for (_, r, lines) in bone_ui::lua::layout_popups(self, &anchors) {
-            ui.painter().rect_filled(cells.rect(r), 0.0, fill);
+            let rect = cells.rect(r);
+            ui.painter().add(shadow.as_shape(rect, 0));
+            ui.painter().rect_filled(rect, 0.0, card);
             self.lines_at(ui, cells, r, &lines);
         }
     }
@@ -306,17 +315,29 @@ impl Gui {
             .collect()
     }
 
-    /// Chat `buf`'s statusline or divider row.
-    fn line_leaf(&mut self, ui: &egui::Ui, cells: &Cells, r: layout::Rect, buf: usize, k: &str) {
-        let hl = if k == "divider" {
-            "WinSeparator"
-        } else {
-            "StatusLine"
-        };
+    /// The divider, as a hairline instead of a row of box-drawing.
+    fn rule_leaf(&self, ui: &egui::Ui, cells: &Cells, r: layout::Rect) {
+        let rect = cells.rect(r);
+        let y = rect.center().y;
+        ui.painter()
+            .hline(rect.x_range(), y, Stroke::new(1.0, rule_color(self, ui)));
+    }
+
+    /// Chat `buf`'s statusline: a full-width bar, then its text.
+    fn line_leaf(&mut self, ui: &egui::Ui, cells: &Cells, r: layout::Rect, buf: usize) {
+        let rect = cells.rect(layout::Rect { height: 1, ..r });
+        if let Some(bg) = self.lua.theme.hl("StatusLine").bg.and_then(color) {
+            ui.painter().rect_filled(rect, 0.0, bg);
+        }
         let ctx = lua_ui::statusline_ctx(self, r.width, buf);
-        let items = lua_ui::ui_items(self, k, ctx, hl).unwrap_or_default();
+        let items = lua_ui::ui_items(self, "statusline", ctx, "StatusLine").unwrap_or_default();
         let row = self.styled(&items, r.width as usize);
         paint_row(ui, cells, layout::Rect { height: 1, ..r }, &row);
+        ui.painter().hline(
+            rect.x_range(),
+            rect.top(),
+            Stroke::new(1.0, rule_color(self, ui)),
+        );
     }
 
     /// Chat `buf` in `r`, scrolled to follow the end.
@@ -327,7 +348,23 @@ impl Gui {
             height: r.height as usize,
             follow,
         };
-        let (rows, top) = self.layout_chat(buf, r.width as usize, view);
+        let (rows, mut top) = self.layout_chat(buf, r.width as usize, view);
+        // A key (pageup, ctrl+end, …) moves this chat. The offset has to
+        // be set on the scroll area: while it is stuck to the end it
+        // would pull a plain assignment back down.
+        let mut pinned = false;
+        if buf == self.current
+            && let Some(scroll) = self.chat_scroll.take()
+        {
+            let max_top = rows.saturating_sub(r.height as usize);
+            top = match scroll {
+                ChatScroll::By(n) => (top as i64 + i64::from(n)).clamp(0, max_top as i64) as usize,
+                ChatScroll::Top => 0,
+                ChatScroll::Bottom => max_top,
+            };
+            pinned = true;
+        }
+        let at_end = top.saturating_add(r.height as usize) >= rows;
         let (gui, chat) = (&*self, &self.chats[buf]);
         let (font, col) = (cells.font.clone(), cells.col);
         let out = ui
@@ -336,9 +373,8 @@ impl Gui {
                 let mut area = ScrollArea::vertical()
                     .id_salt(("chat", buf))
                     .auto_shrink(false)
-                    .stick_to_bottom(true);
-                // Rows drawn above the screen keep its text where it was.
-                if top != was && !follow {
+                    .stick_to_bottom(!pinned || at_end);
+                if pinned || (top != was && !follow) {
                     area = area.vertical_scroll_offset(top as f32 * cells.row);
                 }
                 area.show_rows(ui, cells.row, rows, |ui, range| {
@@ -370,11 +406,22 @@ impl Gui {
         let spec = lua_ui::prompt_spec(self, &ctx);
         let insets = Insets::of(&spec, r.width);
         let px = cells.rect(r);
+        // A rounded border is a card, not the box-drawing glyphs (those
+        // rows stay empty and pad the text). Anything else is a sharp edge.
+        let radius = if spec
+            .border
+            .as_ref()
+            .is_some_and(|b| b.chars[0] == '\u{256d}')
+        {
+            10.0
+        } else {
+            0.0
+        };
         if let Some(bg) = (spec.background.as_deref())
             .and_then(|hl| self.lua.theme.hl(hl).bg)
             .and_then(color)
         {
-            ui.painter().rect_filled(px, 0.0, bg);
+            ui.painter().rect_filled(px, radius, bg);
         }
         if let Some(b) = &spec.border {
             let fg = self.lua.theme.hl(&b.hl).fg.and_then(color);
@@ -382,14 +429,8 @@ impl Gui {
                 1.0,
                 fg.unwrap_or(ui.visuals().widgets.noninteractive.fg_stroke.color),
             );
-            let radius = if b.chars[0] == '╭' { 6.0 } else { 0.0 };
-            let half = vec2(cells.col, cells.row) * 0.5;
-            ui.painter().rect_stroke(
-                egui::Rect::from_min_max(px.min + half, px.max - half),
-                radius,
-                stroke,
-                egui::StrokeKind::Middle,
-            );
+            ui.painter()
+                .rect_stroke(px.shrink(1.0), radius, stroke, egui::StrokeKind::Inside);
         }
         for (edge, y) in [("top", r.y), ("bottom", r.bottom().saturating_sub(1))] {
             let has = if edge == "top" {
@@ -452,12 +493,19 @@ impl Gui {
             })
             .collect();
         let fg = self.lua.theme.hl("Normal").fg.and_then(color);
+        let hint_color = self
+            .lua
+            .theme
+            .hl("Placeholder")
+            .fg
+            .and_then(color)
+            .unwrap_or(Color32::from_rgb(0x66, 0x66, 0x66));
         let mut edit = TextEdit::multiline(&mut self.draft)
             .font(cells.font.clone())
             .frame(egui::Frame::NONE)
             .desired_width(f32::from(edit_area.width) * cells.col)
             .desired_rows(edit_area.height.max(1) as usize)
-            .hint_text(hint)
+            .hint_text(egui::RichText::new(hint).color(hint_color))
             // Enter sends; Shift+Enter is the newline.
             .return_key(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter));
         if let Some(fg) = fg {
@@ -497,6 +545,29 @@ fn paint_row(ui: &egui::Ui, cells: &Cells, r: layout::Rect, row: &Row) {
     ui.painter()
         .with_clip_rect(rect)
         .galley(rect.min, galley, Color32::PLACEHOLDER);
+}
+
+fn rule_color(gui: &Gui, ui: &egui::Ui) -> Color32 {
+    gui.lua
+        .theme
+        .hl("WinSeparator")
+        .fg
+        .and_then(color)
+        .unwrap_or(ui.visuals().widgets.noninteractive.fg_stroke.color)
+}
+
+fn vline(ui: &egui::Ui, rect: egui::Rect, color: Color32) {
+    ui.painter()
+        .vline(rect.center().x, rect.y_range(), Stroke::new(1.0, color));
+}
+
+/// A step lighter than `c`, so a panel or popup sits off the canvas.
+fn lifted_color(c: Color32) -> Color32 {
+    Color32::from_rgb(
+        c.r().saturating_add(14),
+        c.g().saturating_add(14),
+        c.b().saturating_add(14),
+    )
 }
 
 /// What the layout asks the GUI while it sizes leaves.

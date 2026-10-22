@@ -154,27 +154,44 @@ impl Gui {
         }
         let mut chosen = None;
         let menus = &self.lua.menus;
-        egui::Panel::top("menu").show(ui, |ui| {
-            egui::MenuBar::new().ui(ui, |ui| {
-                for (i, (name, items)) in menus.iter().enumerate() {
-                    ui.menu_button(name, |ui| {
-                        for (j, item) in items.iter().enumerate() {
-                            match item {
-                                MenuItem::Separator => {
-                                    ui.separator();
-                                }
-                                MenuItem::Item(label, _) => {
-                                    if ui.button(label).clicked() {
-                                        chosen = Some((i, j));
-                                        ui.close();
+        let bg = self.canvas();
+        let rule = self
+            .lua
+            .theme
+            .hl("WinSeparator")
+            .fg
+            .and_then(crate::view::color)
+            .unwrap_or(egui::Color32::from_rgb(0x2c, 0x2c, 0x2c));
+        egui::Panel::top("menu")
+            .frame(
+                egui::Frame::NONE
+                    .inner_margin(egui::Margin::symmetric(10, 3))
+                    .fill(bg),
+            )
+            .show(ui, |ui| {
+                egui::MenuBar::new().ui(ui, |ui| {
+                    for (i, (name, items)) in menus.iter().enumerate() {
+                        ui.menu_button(name, |ui| {
+                            for (j, item) in items.iter().enumerate() {
+                                match item {
+                                    MenuItem::Separator => {
+                                        ui.separator();
+                                    }
+                                    MenuItem::Item(label, _) => {
+                                        if ui.button(label).clicked() {
+                                            chosen = Some((i, j));
+                                            ui.close();
+                                        }
                                     }
                                 }
                             }
-                        }
-                    });
-                }
+                        });
+                    }
+                });
+                let bar = ui.max_rect();
+                ui.painter()
+                    .hline(bar.x_range(), bar.bottom(), egui::Stroke::new(1.0, rule));
             });
-        });
         let Some((i, j)) = chosen else { return };
         match &self.lua.menus[i].1[j] {
             MenuItem::Item(_, MenuAction::Action(a)) => {
