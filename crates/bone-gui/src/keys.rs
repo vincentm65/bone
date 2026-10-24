@@ -1,7 +1,9 @@
-//! The GUI's keyboard. Keys reach the shared key engine (`bone_ui::lua::
-//! input`: windows', panels' and Lua's keys, keymaps and sequences) when it
-//! has something to do with them; typing and editing the prompt stay with
-//! egui's text box, so input methods, selection and native editing work.
+//! The GUI's keyboard. Keys reach the node with the keyboard focus first
+//! (its `on_key`, tab between nodes), then the shared key engine
+//! (`bone_ui::lua::input`: windows', panels' and Lua's keys, keymaps and
+//! sequences) when it has something to do with them; typing and editing
+//! the prompt stay with egui's text box, so input methods, selection and
+//! native editing work. The pointer is the nodes' (`nodeview`).
 
 use bone_proto::methods::{QueueMode, SessionRef, TurnCancel};
 use bone_ui::editor::TextBuffer;
@@ -106,6 +108,18 @@ impl Gui {
     /// editing action), or the text box.
     fn route(&mut self, k: Key) -> Route {
         let ctx = self.context();
+        // A text input of the view has the keyboard: editing keys are its
+        // own, not the prompt's.
+        if self.view.input_focus.is_some()
+            && ctx != Context::Popup
+            && self.focused_panel().is_none()
+            && matches!(
+                self.lua.keymaps.lookup(&ctx, &[k]).action,
+                Some(Action::Builtin(b)) if NATIVE.contains(&b) || b == Builtin::Submit
+            )
+        {
+            return Route::Native;
+        }
         let native = ctx != Context::Popup
             && self.focused_panel().is_none()
             && self.lua.input.pending_keys.is_empty();
@@ -125,6 +139,78 @@ impl Gui {
             _ if self.engine_wants(k) => Route::Engine,
             _ => Route::Native,
         }
+    }
+
+    /// A key for the node with the keyboard focus: its `on_key`, then tab
+    /// and the arrows move the focus, enter and space click it, esc gives
+    /// the keyboard back to the prompt. Typing goes back to the prompt too,
+    /// except in a modal, which keeps every key it does not pass on.
+    /// Whether the key was used.
+    fn node_key(&mut self, k: Key) -> bool {
+        // A text input with the keyboard edits with it; its `on_key` sees
+        // the other keys first (a search field over a list it moves in).
+        if let Some(input) = self.view.input_focus.clone() {
+            if k.text().is_some() {
+                return false;
+            }
+            let cb = self.view.input_keys.get(&input).copied();
+            let taken = cb.is_some_and(|cb| self.call_key(cb, &bone_ui::keys::format(&k)));
+            if taken {
+                self.view.invalidate();
+            }
+            return taken;
+        }
+        if self.context() == Context::Popup || self.focused_panel().is_some() {
+            return false;
+        }
+        let vs = &mut self.view;
+        if let Some(until) = vs.guard_until {
+            if std::time::Instant::now() < until {
+                return true;
+            }
+            vs.guard_until = None;
+        }
+        let trapped = self.view.trap.is_some();
+        let Some(node) = self.view.focused_node().cloned() else {
+            // A modal with nothing to focus still keeps typing from the
+            // prompt under it.
+            return trapped && k.text().is_some();
+        };
+        let name = bone_ui::keys::format(&k);
+        if let Some(cb) = node.on_key
+            && self.call_key(cb, &name)
+        {
+            self.view.invalidate();
+            return true;
+        }
+        match name.as_str() {
+            "tab" | "down" => self.view.move_focus(true),
+            "shift+tab" | "up" => self.view.move_focus(false),
+            "enter" | "space" => {
+                if let Some(cb) = node.click {
+                    self.activate(cb);
+                }
+            }
+            "esc" if !trapped => self.view.focused = None,
+            _ if k.text().is_some() => {
+                if trapped {
+                    return true;
+                }
+                self.view.focused = None;
+                return false;
+            }
+            // Editing keys would edit a prompt that does not have the
+            // keyboard; the rest (ctrl+c, ctrl+o, ...) are the window's.
+            _ => {
+                let ctx = self.context();
+                return matches!(
+                    self.lua.keymaps.lookup(&ctx, &[k]).action,
+                    Some(Action::Builtin(b)) if NATIVE.contains(&b) || b == Builtin::Submit
+                );
+            }
+        }
+        self.view.invalidate();
+        true
     }
 
     /// Whether the key engine should take `k` rather than the text box.
@@ -152,11 +238,7 @@ impl Gui {
         if let Some(at) = input::key_sequence_deadline(self) {
             ctx.request_repaint_after(at.saturating_duration_since(std::time::Instant::now()));
         }
-        // A question's dialog has the keyboard.
-        if !self.asks.is_empty() {
-            return;
-        }
-        let hover = ctx.input(|i| i.pointer.hover_pos());
+        let node_had_keys = self.view.focused_node().is_some();
         let events = ctx.input_mut(|i| std::mem::take(&mut i.events));
         let mut keep = Vec::new();
         for ev in events {
@@ -167,8 +249,14 @@ impl Gui {
                     modifiers,
                     ..
                 } => match key(*k, *modifiers) {
-                    // Plain characters arrive as text.
-                    Some(k) if k.text().is_some() => keep.push(ev),
+                    // Plain characters arrive as text; while a node has the
+                    // keyboard (and egui's focus) its text is all it gets.
+                    Some(k) if k.text().is_some() => {
+                        if self.view.focused_node().is_none() {
+                            keep.push(ev);
+                        }
+                    }
+                    Some(k) if self.node_key(k) => {}
                     Some(k) => match self.route(k) {
                         Route::Engine => input::handle_key(self, k),
                         Route::Done => {}
@@ -176,70 +264,27 @@ impl Gui {
                     },
                     None => keep.push(ev),
                 },
-                egui::Event::PointerButton {
-                    pos,
-                    button,
-                    pressed,
-                    ..
-                } => {
-                    let Some(at) = self.cell_at(*pos) else {
-                        keep.push(ev);
-                        continue;
-                    };
-                    let name = match button {
-                        egui::PointerButton::Primary => "left",
-                        egui::PointerButton::Secondary => "right",
-                        egui::PointerButton::Middle => "middle",
-                        _ => "other",
-                    };
-                    self.lua.dragging = *pressed && name == "left";
-                    let m = input::mouse(self, if *pressed { "down" } else { "up" }, name, at);
-                    if m.handled || m.popup {
-                        continue;
-                    }
-                    if *pressed && name == "left" {
-                        self.click(at);
-                    }
-                    keep.push(ev);
-                }
-                egui::Event::PointerMoved(pos) if self.lua.dragging => {
-                    if let Some(at) = self.cell_at(*pos)
-                        && input::mouse(self, "drag", "left", at).handled
-                    {
-                        continue;
-                    }
-                    keep.push(ev);
-                }
-                egui::Event::MouseWheel { delta, .. } => {
-                    let panel = hover
-                        .and_then(|p| self.cell_at(p))
-                        .and_then(|(x, y)| bone_ui::lua::panels::at(&self.lua.panels, x, y))
-                        .map(|p| p.id.clone());
-                    match panel {
-                        // Rich content scrolls itself.
-                        Some(id) if self.lua.rich_keys.contains(&id) => keep.push(ev),
-                        Some(id) if delta.y != 0.0 => {
-                            let rows = bone_ui::panel::WHEEL_ROWS;
-                            let by = if delta.y > 0.0 { -rows } else { rows };
-                            if let Some(p) = self.lua.panels.iter_mut().find(|p| p.id == id) {
-                                p.scroll_by(by);
-                            }
-                            self.changed();
-                        }
-                        _ => keep.push(ev),
-                    }
-                }
                 // To the prompt, or to Lua's paste event (a focused
                 // panel's, such as a terminal's).
                 egui::Event::Paste(t)
-                    if self.prompt_has_keys() || self.focused_panel().is_some() =>
+                    if self.view.input_focus.is_none()
+                        && (self.prompt_has_keys() || self.focused_panel().is_some()) =>
                 {
                     let t = t.clone();
                     self.paste(&t);
                 }
                 egui::Event::Text(t) => {
                     let keys: Vec<Key> = t.chars().map(Key::char).collect();
-                    if keys.iter().any(|k| self.engine_wants(*k)) {
+                    if self.view.focused_node().is_some() || self.view.trap.is_some() {
+                        let taken: Vec<bool> = keys.iter().map(|k| self.node_key(*k)).collect();
+                        if taken.iter().all(|t| *t) {
+                            continue;
+                        }
+                    }
+                    // Typing goes to a text input that has the keyboard, even
+                    // inside a window or panel that has the keys.
+                    if self.view.input_focus.is_none() && keys.iter().any(|k| self.engine_wants(*k))
+                    {
                         for k in keys {
                             input::handle_key(self, k);
                         }
@@ -254,32 +299,10 @@ impl Gui {
             keep.append(&mut i.events);
             i.events = keep;
         });
-    }
-
-    /// The character cell at a pointer position.
-    fn cell_at(&self, pos: egui::Pos2) -> Option<(u16, u16)> {
-        let (ox, oy, col, row) = self.lua.cells?;
-        let (x, y) = ((pos.x - ox) / col, (pos.y - oy) / row);
-        (x >= 0.0 && y >= 0.0).then_some((x as u16, y as u16))
-    }
-
-    /// A left press nothing took: it focuses the panel under it, or the
-    /// prompt.
-    fn click(&mut self, (x, y): (u16, u16)) {
-        let under =
-            bone_ui::lua::panels::at(&self.lua.panels, x, y).map(|p| (p.id.clone(), p.focusable));
-        match under {
-            Some((id, true)) => {
-                let _ = bone_ui::lua::panels::focus_panel(self, Some(&id));
-            }
-            Some(_) => {}
-            None => {
-                let in_prompt = (self.lua.geometry.leaves.iter())
-                    .any(|(n, r)| n == "prompt" && r.contains(x, y));
-                if in_prompt {
-                    let _ = bone_ui::lua::panels::focus_panel(self, None);
-                }
-            }
+        // The keyboard came back to the prompt: it has it this frame, so
+        // the key that brought it back is typed there.
+        if node_had_keys && self.view.focused_node().is_none() {
+            ctx.memory_mut(|m| m.request_focus(crate::prompt::edit_id()));
         }
     }
 
@@ -298,20 +321,31 @@ impl Gui {
         });
     }
 
-    /// `prompt/changed`, when the prompt's text is not what was last
-    /// reported (the cursor is at its end: the text box keeps its own).
+    /// `prompt/changed`, when the prompt is not what was last reported.
+    /// The text and cursor are compared first, so an idle frame builds no
+    /// JSON and copies nothing.
     pub(crate) fn prompt_changed(&mut self) {
-        let (cursor, selection) = self.cursor_json();
-        let state = (self.draft.clone(), self.images.clone(), cursor, selection);
-        if state == self.lua.last_prompt {
+        let anchor = self.prompt.anchor;
+        let cursor = self.prompt.cursor;
+        let same = self
+            .lua
+            .last_prompt
+            .as_ref()
+            .is_some_and(|(text, images, a, c)| {
+                text == &self.draft && images == &self.images && *a == anchor && *c == cursor
+            });
+        if same {
             return;
         }
-        self.lua.last_prompt = state.clone();
+        let (cursor_json, selection) = self.cursor_json();
+        self.lua.last_prompt = Some((self.draft.clone(), self.images.clone(), anchor, cursor));
+        // The view may show the prompt's text (the / menu).
+        self.view.invalidate();
         let data = serde_json::json!({
-            "text": state.0,
-            "images": state.1,
-            "cursor": state.2,
-            "selection": state.3,
+            "text": self.draft,
+            "images": self.images,
+            "cursor": cursor_json,
+            "selection": selection,
         });
         self.fire_event("prompt/changed", data);
     }
@@ -374,6 +408,12 @@ impl Gui {
             QuitIfEmpty if self.draft.is_empty() => self.closed = true,
             NewSession => self.new_chat(),
             Sessions => self.call_ui("sessions"),
+            // Through the nodes the keyboard reaches, with the prompt
+            // among them; without any, through the panels.
+            FocusNext | FocusPrev if !self.view.focusables.is_empty() => {
+                self.view.move_focus(b == FocusNext);
+                self.view.invalidate();
+            }
             FocusNext => input::cycle_focus(self, true),
             FocusPrev => input::cycle_focus(self, false),
             FocusPrompt => {
@@ -381,12 +421,9 @@ impl Gui {
             }
             // The text box has the arrows; these scroll the chat, as in
             // the TUI (pageup, shift+up, ctrl+home, the wheel stays egui's).
-            ScrollUp => self.nudge_chat(-3),
-            ScrollDown => self.nudge_chat(3),
-            PageUp => self.nudge_chat(-(self.chat_page() - 2).max(1)),
-            PageDown => self.nudge_chat((self.chat_page() - 2).max(1)),
-            ScrollTop => self.chat_scroll = Some(crate::ChatScroll::Top),
-            ScrollBottom => self.chat_scroll = Some(crate::ChatScroll::Bottom),
+            ScrollUp | ScrollDown | PageUp | PageDown | ScrollTop | ScrollBottom => {
+                self.scroll_view_chat(b);
+            }
             _ => {}
         }
     }
@@ -398,20 +435,5 @@ impl Gui {
         f(&mut t);
         self.set_buffer(&t);
         self.prompt_changed();
-    }
-
-    /// Rows of the chat on screen, for a page key.
-    fn chat_page(&self) -> i32 {
-        self.lua
-            .geometry
-            .leaves
-            .iter()
-            .find(|(n, r)| n == "chat" && r.height > 0)
-            .map(|(_, r)| i32::from(r.height))
-            .unwrap_or(12)
-    }
-
-    fn nudge_chat(&mut self, rows: i32) {
-        self.chat_scroll = Some(crate::ChatScroll::By(rows));
     }
 }

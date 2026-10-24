@@ -65,9 +65,22 @@ function M.open(want)
   })
   local st = page.st
 
-  local function blocks()
-    local out = {}
-    local function add(bid, block, selected) out[#out + 1] = { id = bid, block = block, selected = selected } end
+  local function on_click(i)
+    return function()
+      local list = page.rows()
+      if st.sel == i then page.activate(list[i], false) else st.sel = i end
+      bone.ui.update(id, {})
+    end
+  end
+
+  -- A line of text in the window's padding; `margin` is { above, below }.
+  local function line(spans, size, margin)
+    local m = margin or { 0, 0 }
+    return { spans = spans, size = size, padding = { 4, 10 }, margin = { m[1], 0, m[2], 0 } }
+  end
+
+  local function node()
+    local items = {}
     local t = st.tabs[st.tab]
     local section = t.section or st.tab
     local where = "Settings"
@@ -76,45 +89,57 @@ function M.open(want)
     elseif st.prov then
       where = where .. "  ›  Providers  ›  " .. (st.prov.new and "New provider" or st.prov.name)
     end
-    add("title", { paragraphs = { { spans = { { text = where, hl = "Normal", bold = true } }, size = 20 } },
-      pad = { 4, 10 }, margin = { 0, 4 } })
+    items[#items + 1] = line({ { text = where, hl = "Normal", bold = true } }, 20, { 0, 4 })
     local tabs = {}
     for i = 1, 3 do
       local tab = st.tabs[i]
       if i > 1 then tabs[#tabs + 1] = { text = "        ", hl = "Dim" } end
       tabs[#tabs + 1] = { text = tab.title, hl = i == section and "Normal" or "Dim", bold = i == section }
     end
-    add("tabs", { paragraphs = { { spans = tabs, size = SIZE } }, pad = { 2, 10 }, margin = { 0, 10 } })
+    local bar = line(tabs, SIZE, { 0, 10 })
+    bar.padding = { 2, 10 }
+    if not st.prov and st.tab <= 3 then
+      bar.cursor = "pointer"
+      bar.on_click = function() page.switch_tab(1) bone.ui.update(id, {}) end
+    end
+    items[#items + 1] = bar
 
     local list = page.rows()
     st.sel = math.max(1, math.min(st.sel, math.max(#list, 1)))
     if t.name == "providers" and not st.providers then
-      add("none", { paragraphs = { { spans = { { "Loading…", "Dim" } }, size = SIZE } }, pad = { 6, 10 } })
+      items[#items + 1] = { text = "Loading…", hl = "Dim", size = SIZE, padding = { 6, 10 } }
     elseif #list == 0 then
       local empty = t.name == "plugins" and "No plugins in ~/.bone/plugins" or "Nothing to set here"
-      add("none", { paragraphs = { { spans = { { empty, "Dim" } }, size = SIZE } }, pad = { 6, 10 } })
+      items[#items + 1] = { text = empty, hl = "Dim", size = SIZE, padding = { 6, 10 } }
     end
+    local selected
     for i, r in ipairs(list) do
       local on = i == st.sel
-      local paras = { { spans = { { text = r.label, hl = "Normal", bold = on } }, size = SIZE } }
+      local row = {
+        direction = "column", bg = on and "Selection" or nil, radius = 10, padding = { 8, 12 },
+        margin = { 1, 0, 1, 0 }, cursor = "pointer", on_click = on_click(i),
+        role = "option", selected = on,
+        { text = r.label, hl = "Normal", bold = on, size = SIZE },
+      }
+      local function add(text, hl, size, gap)
+        row[#row + 1] = { text = text, hl = hl, size = size, margin = { gap, 0, 0, 0 } }
+      end
       if on and st.edit then
         local typed = r.type == "secret" and string.rep("•", #st.edit) or st.edit
-        paras[#paras + 1] = { spans = { { typed .. "|", "Accent" } }, size = SIZE - 1, gap = 3 }
+        add(typed .. "|", "Accent", SIZE - 1, 3)
       else
         local v = value_text(r, st)
-        if v then paras[#paras + 1] = { spans = { v }, size = SIZE - 1, gap = 3 } end
+        if v then add(v[1], v[2], SIZE - 1, 3) end
         if r.kind == "option" then
           local saved = bone.settings.get(r.path)
           if saved ~= nil and saved ~= r.value then
-            paras[#paras + 1] = { spans = { { "gui.lua sets " .. tostring(r.value), "Dim" } }, size = SMALL, gap = 2 }
+            add("gui.lua sets " .. tostring(r.value), "Dim", SMALL, 2)
           end
         end
       end
-      if on and r.desc and r.desc ~= "" then
-        paras[#paras + 1] = { spans = { { r.desc, "Dim" } }, size = SMALL, gap = 4 }
-      end
-      add(i, { paragraphs = paras, bg = on and "Selection" or nil, radius = 10, pad = { 8, 12 },
-        margin = { 1, 1 }, fill = true }, on)
+      if on and r.desc and r.desc ~= "" then add(r.desc, "Dim", SMALL, 4) end
+      items[#items + 1] = row
+      if on then selected = #items end
     end
 
     local note
@@ -123,33 +148,13 @@ function M.open(want)
     elseif st.note then
       note = { st.note[1], st.note[2] == "ErrorMsg" and "ErrorMsg" or "Dim" }
     end
-    if note then
-      add("note", { paragraphs = { { spans = { note }, size = SIZE - 1 } }, pad = { 4, 10 }, margin = { 10, 0 } })
-    end
-    add("keys", { paragraphs = { { spans = { { hints(st, t), "Dim" } }, size = SMALL } }, pad = { 4, 10 },
-      margin = { note and 2 or 10, 0 } })
-    return out
-  end
-
-  local function on_block(bid)
-    if bid == "tabs" and not st.prov and st.tab <= 3 then
-      page.switch_tab(1)
-    elseif type(bid) == "number" then
-      local list = page.rows()
-      if st.sel == bid then
-        page.activate(list[bid], false)
-      else
-        st.sel = bid
-      end
-    end
-    bone.ui.update(id, {})
+    if note then items[#items + 1] = line({ note }, SIZE - 1, { 10, 0 }) end
+    items[#items + 1] = line({ { hints(st, t), "Dim" } }, SMALL, { note and 2 or 10, 0 })
+    return require("bone.nodes.popups").list("settings:" .. id, items, selected)
   end
 
   local w, h = card.size()
-  id = bone.ui.popup({
-    blocks = blocks, on_block = on_block, on_key = page.on_key,
-    width = w, height = h,
-  })
+  id = bone.ui.popup({ node = node, on_key = page.on_key, width = w, height = h })
   paste_event = bone.on("paste", function(ev)
     if ev.context == "popup" then page.paste(ev.text) end
   end)

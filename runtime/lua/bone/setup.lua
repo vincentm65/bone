@@ -58,9 +58,11 @@ function M.first_run()
   end)
 end
 
---- opts: { first_run = true } when it opened by itself.
-function M.open(opts)
-  opts = opts or {}
+--- The window's state and what its keys do, drawn by whoever opens it.
+--- opts: { first_run = true } when it opened by itself. `hooks.changed()`
+--- asks for a redraw, `hooks.close(skipped)` closes the window.
+--- Returns { st, opts, rows(), hint(), on_key, paste(text) }.
+function M.page(opts, hooks)
   local catalog = require("bone.catalog")
   local st = {
     step = "welcome",
@@ -79,26 +81,7 @@ function M.open(opts)
       "Run the tests and summarize failures",
     },
   }
-  local id
-  local paste_event
-
-  local function redraw()
-    if id then
-      bone.ui.update(id, {})
-    end
-  end
-
-  local function close(skipped)
-    if paste_event then
-      bone.off(paste_event)
-      paste_event = nil
-    end
-    bone.ui.close(id)
-    if skipped and opts.first_run then
-      bone.settings.set("setup.skipped", true)
-      bone.notify("Setup paused. Run /setup when you’re ready to connect a provider.")
-    end
-  end
+  local redraw, close = hooks.changed, hooks.close
 
   -- The rows of the step on screen: { label, value, key | action }.
   local function rows()
@@ -212,96 +195,6 @@ function M.open(opts)
     end
   end
 
-  local function render(ctx)
-    local w = math.max(ctx.width, 30)
-    local out = { { { fill = "─", hl = "Normal" } } }
-    local titles = {
-      welcome = "Setup",
-      provider = "Setup · 1/3 provider",
-      details = "Setup · 2/3 details",
-      packages = "Setup · 3/3 packages",
-      applying = "Setup",
-      done = "Setup",
-    }
-    out[#out + 1] = " " .. titles[st.step]
-    out[#out + 1] = ""
-    local hint
-    if st.step == "welcome" then
-      out[#out + 1] = "   Welcome to bone. It needs a model provider to talk to: a server on this"
-      out[#out + 1] = "   machine, or a hosted service. This sets one up (saved in ~/.bone/settings.json;"
-      out[#out + 1] = "   your core.lua is not touched) and can install plugins from the catalog."
-      out[#out + 1] = ""
-      out[#out + 1] = "   Customize the TUI: edit ~/.bone/tui.lua for simple changes, or run"
-      out[#out + 1] = "   /tui create personal then /tui use personal for a full editable copy."
-      out[#out + 1] = "   Changes under ~/.bone reload automatically."
-      hint = "enter start · esc " .. (opts.first_run and "not now (/setup later)" or "close")
-    elseif st.step == "applying" or st.step == "done" then
-      for _, l in ipairs(st.log) do
-        out[#out + 1] = "   " .. l
-      end
-      if st.step == "done" then
-        out[#out + 1] = ""
-        out[#out + 1] = "   Bone is ready. Choose something to try:"
-        for i, prompt in ipairs(st.first_prompts) do
-          local mark = i == st.sel and " › " or "   "
-          out[#out + 1] = bone.text.truncate(mark .. prompt, w)
-        end
-        out[#out + 1] = ""
-        hint = "↑↓ choose · enter use prompt · esc close"
-      else
-        hint = "working…"
-      end
-    else
-      local list = rows()
-      st.sel = math.max(1, math.min(st.sel, math.max(#list, 1)))
-      if st.step == "packages" then
-        if st.packages_err then
-          out[#out + 1] = "   the catalog is not reachable (" .. st.packages_err .. "); /catalog later"
-        elseif not st.packages then
-          out[#out + 1] = "   loading the catalog…"
-        end
-      end
-      local label_w = 0
-      for _, r in ipairs(list) do
-        if r.value ~= nil then
-          label_w = math.max(label_w, bone.text.width(r.label))
-        end
-      end
-      label_w = label_w + 3
-      local room = math.max(math.min(14, (ctx.height or 24) - 9), 3)
-      local first = math.max(1, st.sel - room + 1)
-      for i = first, math.min(#list, first + room - 1) do
-        local r = list[i]
-        local mark = i == st.sel and " › " or "   "
-        local text
-        if r.value == nil then
-          text = mark .. r.label
-        elseif i == st.sel and st.edit then
-          local shown = r.key == "key" and string.rep("•", #st.edit) or st.edit
-          text = mark .. pad(r.label, label_w) .. shown .. "▏"
-        else
-          text = mark .. pad(r.label, label_w) .. (r.value ~= "" and r.value or "(empty)")
-        end
-        out[#out + 1] = bone.text.truncate(text, w)
-      end
-      out[#out + 1] = ""
-      local cur = list[st.sel]
-      local note = st.note and ((st.note[2] and "error: " or "") .. st.note[1]) or (cur and cur.hint) or ""
-      out[#out + 1] = bone.text.truncate("   " .. note, w)
-      if st.edit then
-        hint = "enter save · esc cancel"
-      elseif st.step == "provider" then
-        hint = "↑↓ move · enter choose · esc close"
-      elseif st.step == "details" then
-        hint = "↑↓ move · enter edit · esc back"
-      else
-        hint = "↑↓ move · space pick · enter on Continue · esc back"
-      end
-    end
-    out[#out + 1] = bone.text.truncate("   " .. hint, w)
-    return out
-  end
-
   local function on_key(k)
     if st.step == "applying" then
       return true
@@ -384,18 +277,142 @@ function M.open(opts)
       if row.action == "apply" and k == "enter" then
         apply()
       elseif row.package and (k == "space" or k == "enter") then
-        st.picked[row.label] = not st.picked[row.label] or nil
+        st.picked[row.package.name] = not st.picked[row.package.name] or nil
       end
     end
     return true
   end
 
-  id = bone.ui.popup({ lines = render, on_key = on_key, anchor = "prompt" })
-  paste_event = bone.on("paste", function(ev)
-    if ev.context == "popup" and st.edit then
-      st.edit = st.edit .. (ev.text or ""):gsub("[\r\n]", "")
+  --- The keys that do something now.
+  local function hint()
+    if st.step == "welcome" then
+      return "enter start · esc " .. (opts.first_run and "not now (/setup later)" or "close")
+    elseif st.step == "applying" then
+      return "working…"
+    elseif st.step == "done" then
+      return "↑↓ choose · enter use prompt · esc close"
+    elseif st.edit then
+      return "enter save · esc cancel"
+    elseif st.step == "provider" then
+      return "↑↓ move · enter choose · esc close"
+    elseif st.step == "details" then
+      return "↑↓ move · enter edit · esc back"
+    end
+    return "↑↓ move · space pick · enter on Continue · esc back"
+  end
+
+  local function paste(text)
+    if st.edit then
+      st.edit = st.edit .. text:gsub("[\r\n]", "")
       redraw()
     end
+  end
+
+  return { st = st, opts = opts, rows = rows, hint = hint, on_key = on_key, paste = paste }
+end
+
+local function render(page, ctx)
+  local st, opts, rows = page.st, page.opts, page.rows
+  local w = math.max(ctx.width, 30)
+  local out = { { { fill = "─", hl = "Normal" } } }
+  local titles = {
+    welcome = "Setup",
+    provider = "Setup · 1/3 provider",
+    details = "Setup · 2/3 details",
+    packages = "Setup · 3/3 packages",
+    applying = "Setup",
+    done = "Setup",
+  }
+  out[#out + 1] = " " .. titles[st.step]
+  out[#out + 1] = ""
+  if st.step == "welcome" then
+    out[#out + 1] = "   Welcome to bone. It needs a model provider to talk to: a server on this"
+    out[#out + 1] = "   machine, or a hosted service. This sets one up (saved in ~/.bone/settings.json;"
+    out[#out + 1] = "   your core.lua is not touched) and can install plugins from the catalog."
+    out[#out + 1] = ""
+    out[#out + 1] = "   Customize the TUI: edit ~/.bone/tui.lua for simple changes, or run"
+    out[#out + 1] = "   /tui create personal then /tui use personal for a full editable copy."
+    out[#out + 1] = "   Changes under ~/.bone reload automatically."
+  elseif st.step == "applying" or st.step == "done" then
+    for _, l in ipairs(st.log) do
+      out[#out + 1] = "   " .. l
+    end
+    if st.step == "done" then
+      out[#out + 1] = ""
+      out[#out + 1] = "   Bone is ready. Choose something to try:"
+      for i, prompt in ipairs(st.first_prompts) do
+        local mark = i == st.sel and " › " or "   "
+        out[#out + 1] = bone.text.truncate(mark .. prompt, w)
+      end
+      out[#out + 1] = ""
+    end
+  else
+    local list = rows()
+    st.sel = math.max(1, math.min(st.sel, math.max(#list, 1)))
+    if st.step == "packages" then
+      if st.packages_err then
+        out[#out + 1] = "   the catalog is not reachable (" .. st.packages_err .. "); /catalog later"
+      elseif not st.packages then
+        out[#out + 1] = "   loading the catalog…"
+      end
+    end
+    local label_w = 0
+    for _, r in ipairs(list) do
+      if r.value ~= nil then
+        label_w = math.max(label_w, bone.text.width(r.label))
+      end
+    end
+    label_w = label_w + 3
+    local room = math.max(math.min(14, (ctx.height or 24) - 9), 3)
+    local first = math.max(1, st.sel - room + 1)
+    for i = first, math.min(#list, first + room - 1) do
+      local r = list[i]
+      local mark = i == st.sel and " › " or "   "
+      local text
+      if r.value == nil then
+        text = mark .. r.label
+      elseif i == st.sel and st.edit then
+        local shown = r.key == "key" and string.rep("•", #st.edit) or st.edit
+        text = mark .. pad(r.label, label_w) .. shown .. "▏"
+      else
+        text = mark .. pad(r.label, label_w) .. (r.value ~= "" and r.value or "(empty)")
+      end
+      out[#out + 1] = bone.text.truncate(text, w)
+    end
+    out[#out + 1] = ""
+    local cur = list[st.sel]
+    local note = st.note and ((st.note[2] and "error: " or "") .. st.note[1]) or (cur and cur.hint) or ""
+    out[#out + 1] = bone.text.truncate("   " .. note, w)
+  end
+  out[#out + 1] = bone.text.truncate("   " .. page.hint(), w)
+  return out
+end
+
+--- /setup: the page in a window. A library draws it differently by setting
+--- `bone.ui.windows.setup(page)`, which returns the window's spec.
+function M.open(opts)
+  opts = opts or {}
+  local id, paste_event
+  local page = M.page(opts, {
+    changed = function() if id then bone.ui.update(id, {}) end end,
+    close = function(skipped)
+      if paste_event then
+        bone.off(paste_event)
+        paste_event = nil
+      end
+      bone.ui.close(id)
+      if skipped and opts.first_run then
+        bone.settings.set("setup.skipped", true)
+        bone.notify("Setup paused. Run /setup when you’re ready to connect a provider.")
+      end
+    end,
+  })
+  local view = bone.ui.windows.setup
+  local spec = view and view(page) or { lines = function(ctx) return render(page, ctx) end, anchor = "prompt" }
+  spec.on_key = page.on_key
+  id = bone.ui.popup(spec)
+  paste_event = bone.on("paste", function(ev)
+    if ev.context == "popup" then page.paste(ev.text or "") end
   end)
   return id
 end

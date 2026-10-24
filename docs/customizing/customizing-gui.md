@@ -5,13 +5,14 @@ GUI); a plugin's `gui.lua` and `ui.lua` work the same. The GUI is `bone --gui`
 (a build with the `gui` feature). It reloads when a file changes, and a Lua
 error never crashes it: it is shown once and listed by `/health`.
 
-The GUI runs the same Lua UI API as the TUI (keymaps, commands, options,
-events, views, layout, windows, panels), so `customizing-tui.md`,
-`customizing-panels.md`, `customizing-popups.md` and `customizing-chat.md`
-apply to it too; lay things out in character units. This guide is what is
-only the GUI's. Reference: `docs/lua.md` "Frontends: the shared UI API".
-Source: `crates/bone-gui/src/`, the built-in library in
-`runtime/gui/desktop.lua` and `runtime/lua/bone/desktop/`.
+The GUI shares *behavior* with the TUI, not a view: keymaps, commands,
+options, events, plugins and the data Lua reads (chats, processes, usage) are
+the same API, so `customizing-tui.md`'s sections on those apply to it. How the
+window looks is the GUI's alone: Lua describes it as a **tree of nodes** with
+CSS-like styles, and Rust lays it out and paints it. There is no character
+grid. Reference: `docs/lua.md` "Frontends". Source: `crates/bone-gui/src/`
+(`node.rs`, `flex.rs`, `nodeview/` — `mod.rs`, `paint.rs`, `list.rs`, `focus.rs`, `ops.rs`) and the built-in library in
+`runtime/gui/` and `runtime/lua/bone/nodes/`.
 
 ## Libraries
 
@@ -19,17 +20,346 @@ The GUI's library is chosen apart from the TUI's (`/tui`):
 
 ```
 /gui                     list them (● marks the one in use)
-/gui use NAME            standard | bare | desktop | a copy of yours; reloads
-/gui create NAME [base]  copy the standard UI (base: bare or desktop) to edit
+/gui use NAME            desktop | standard | bare | a copy of yours; reloads
+/gui create NAME [base]  copy the desktop UI (base: bare) to edit
 /gui delete NAME         move a copy not in use aside
 ```
 
-`desktop` is the default: graphite colors, bubbles for your messages,
-proportional Markdown answers, tool calls as cards, a card composer.
-`standard` draws what the TUI draws; `bare` is plain text. A copy lives in
+`desktop` is the default (`standard` is the same window): graphite colors,
+bubbles for your messages, proportional Markdown answers, tool calls as
+cards, a card composer, the sessions sidebar, a tray and a status bar. `bare`
+is the same window with every chat item drawn as its text. A copy lives in
 `~/.bone/libraries/NAME/`; its `gui/defaults.lua` is the entry point, and any
 file in it replaces the built-in one of the same path. For one change, a file
-at the same path under `~/.bone/runtime/` does the same without a copy.
+at the same path under `~/.bone/runtime/` does the same without a copy. The
+window itself is `lua/bone/nodes/window.lua`, the chat is
+`lua/bone/nodes.lua`: replace either to draw differently.
+
+## The view: `bone.gui.view`
+
+```lua
+bone.gui.view(function(ctx)          -- ctx = { width, height } in pixels
+  return { direction = "row", padding = 12, gap = 8, bg = "#1c1c1c",
+    { width = 200, radius = 8, bg = "#262626", padding = 8,
+      { text = "bone", bold = true, color = "Accent" } },
+    { grow = 1, { text = "Hello", size = 18 } },
+  }
+end)
+```
+
+Lua builds the tree when something changed (an event, a key, a click, a
+resize, an option, an op that changes the UI, a typed prompt) and not on every
+frame; between those the last tree is laid out again. If your view reads
+something else, call `bone.gui.invalidate()` (now) or `bone.gui.invalidate(ms)`.
+An error in the view is shown once and the window says so until it is fixed.
+
+A node is a table; its array part is its children (a `nil` among them is
+skipped). A node with `text` or `spans` is text; with `input = true` it is the
+prompt's text field; with `list = {...}` it is a long scrolling list;
+otherwise it is a box.
+
+### Boxes and sizes
+
+| Field | |
+|---|---|
+| `direction` | `"column"` (default) or `"row"` |
+| `gap`, `row_gap`, `column_gap` | space between children, px (`gap` is both; `column_gap` is along a row) |
+| `flex_wrap` | a row whose children go on to another line when they run out of room |
+| `align` | the cross axis: `"stretch"` (default), `"start"`, `"center"`, `"end"`; a child's `align_self` overrides it |
+| `justify` | the main axis: `"start"`, `"center"`, `"end"`, `"between"` |
+| `order` | where a child goes among its siblings (default 0) |
+| `width`, `height`, `min_*`, `max_*` | px, `"50%"` of the parent, `"12px"`, `"1.5em"` (the node's font size), `"20vw"`, `"10vh"`, `"calc(50% - 20px)"`, or `"auto"` |
+| `aspect_ratio` | width over height, for the side that is not set |
+| `grow`, `shrink` | share what is left, or give back what is missing (an automatic size shrinks by default) |
+| `padding`, `margin` | `n`, `{ vertical, horizontal }` or `{ top, right, bottom, left }`; a margin may be `"auto"` (`margin = { 0, 0, 0, "auto" }` pushes a child to the end) |
+| `overflow` | `"visible"`, `"hidden"` or `"scroll"` (a column scrolls up and down, a row sideways); `scrollbar = { width, color, radius, inset, show = "auto" \| "hover" \| "hidden" }` |
+| `position = "absolute"` | out of the flow, placed by `top`, `right`, `bottom`, `left` (px or `%`) in its parent, over the others; `z` orders them |
+| `block_input` | takes the pointer from everything under it (a modal's backdrop), and keeps the keyboard focus among the nodes in it |
+
+### Paint
+
+| Field | |
+|---|---|
+| `bg`, `gradient` | a color, or `gradient = { angle = 180, stops = { "#fff", { 0.5, "#888" }, "#000" } }` (CSS angles; a stop is a color or `{ position, color }`) |
+| `radius` | `n`, `{ top, bottom }` or `{ tl, tr, br, bl }` |
+| `border`, `border_color`, `border_style` | `n` or `{ top, right, bottom, left }`; `"solid"`, `"dashed"`, `"dotted"` |
+| `outline` | `{ width, color, offset }`: a line outside the box, over what is around it |
+| `shadow` | `{ blur, spread, dx, dy, color }` or a list of them |
+| `opacity` | 0 to 1, for the node and everything in it |
+| `hover`, `active`, `focus` | `{ bg, gradient, border_color, color, opacity, shadow }`: what changes while the pointer is over the node, pressing it, or it has the keyboard focus. `color` recolors the text in it. Applied by Rust each frame, with no rebuild in Lua |
+| `transition` | `150` (ms) or `{ duration = 150, easing = "ease-out" }` (`linear`, `ease-in`, `ease-out`, `ease-in-out`): the node's background, border color and opacity fade to what they change to (from `hover` and the other states, or when Lua builds the view again) instead of jumping. A color that appears or goes away fades its alpha. Size, margin and padding are not faded: step those in Lua |
+| `tooltip` | text shown while the pointer rests on the node |
+
+Colors are `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `"transparent"`, or the
+name of a highlight group (its background for `bg`, its foreground
+elsewhere), so colorschemes (`bone.colorscheme`, `bone.hl`) still work.
+
+### Text
+
+`text = "…"` or `spans = { "plain", { text = "x", bold = true, hl = "MdCode" } }`;
+`size` (points), `font` (`"sans"`, `"mono"`), `bold`, `italic`, `strike`,
+`color`, `hl` (a highlight group: color, bold, italic, underline),
+`line_height` and `letter_spacing` (px), `text_align`, `wrap` (default true),
+`text_overflow = "ellipsis"` (one line that ends in "…"), `text_shadow = {
+dx, dy, color }` and `selectable` (drag to select, ctrl+c to copy; it takes
+the pointer, so a click handler above it does not see clicks on the text).
+Text style is inherited from the boxes around it. A span also takes `code`,
+`link`, `bg`, `strike`.
+
+### Images
+
+`{ width = 200, radius = 8, image = { id = attachment_id | path = "/x.png",
+width = 640, height = 480, fit = "contain" } }`. The picture comes from an
+attachment the core holds (an item's `images[i].id`) or a file on this
+machine (PNG, JPEG, WebP), read once and kept. `width` and `height` inside
+`image` are the picture's own size in pixels: they give the box its shape
+before the pixels arrive (the node's `aspect_ratio` follows). `fit` is
+`"contain"` (whole, centered), `"cover"` (fills, the overhang cut), `"fill"`
+or `"none"`; the node's `radius`, `shadow` and `border` apply.
+`bone.gui.preview(image)` opens an item's image large over the window (click
+or esc closes); the desktop library does it when you click an image row.
+
+### Text inputs
+
+`{ id = "search", padding = 8, bg = "InputBackground", radius = 8,
+text_input = { placeholder = "Search", value = "", multiline = false,
+max_rows = 6, password = false, focus = false, select = false,
+on_change = function(text) end, on_submit = function(text) end } }`
+
+A text field of its own, edited natively: cursor, selection, IME, paste. It
+keeps its text by `id`; `value` replaces the text when it differs from what Lua
+gave last time. `select` selects its text whenever it takes the keyboard,
+so typing replaces it (a rename field). `bone.gui.input_text(id)` reads it,
+`bone.gui.set_input_text(id, text)` sets it, `bone.gui.focus(id)` gives it the keyboard. `on_submit` is
+enter (ctrl+enter for a multiline field). While it has the keyboard, typing
+and editing keys are its own, even inside a window or panel that has the
+keys. An `on_key(name)` on the node sees every other key first (up, down,
+enter, esc, tab, ctrl+…) and takes it by returning true: the sessions
+sidebar's search field moves in the list under it that way. The prompt is a different node
+(`input = true`) and is left alone.
+
+### Canvas
+
+`{ width = 200, height = 100, canvas = { fps = 0, draw = function(ctx) return
+{ ... } end } }` is a box Lua draws on. `ctx` is `{ width, height, time }`;
+return shapes, coordinates in pixels from the box's top left:
+
+```lua
+local draw = bone.gui.draw
+draw.rect{ x = 10, y = 10, w = 50, h = 30, fill = "#336699", stroke = "#fff", width = 2, radius = 4 }
+draw.circle{ x = 100, y = 50, r = 20, fill = "Accent" }
+draw.line{ x1 = 0, y1 = 0, x2 = 199, y2 = 99, color = "#fff", width = 2 }
+draw.polyline{ points = { { 0, 0 }, { 20, 40 }, { 40, 10 } }, color = "#fa4", width = 2, closed = false, fill = "#fa42" }
+draw.text{ x = 5, y = 90, text = "hello", size = 12, color = "#eee", align = "left", baseline = "top", font = "mono" }
+draw.image{ x = 0, y = 0, w = 64, h = 64, path = "/x.png", radius = 8 }
+```
+
+With `fps = 0` it is drawn once each time the view is built (and when its size
+changes); with `fps = 30` that many times a second, `ctx.time` being seconds
+since the window opened. Colors are hex or highlight groups. Up to 20 000
+shapes a draw; for more (the new-chat dot field) a native node is faster.
+
+### Events and the pointer
+
+`on_click`, `on_double_click`, `on_secondary` (right button) get `{ x, y }`
+inside the node; `on_press` and `on_release` fire as the button goes down and
+up on it; `on_hover(bool)`; `on_scroll(dy)` for the wheel. `cursor` sets the
+pointer: `pointer`, `text`, `grab`, `grabbing`, `move`, `not-allowed`, `wait`,
+`progress`, `crosshair`, `cell`, `help`, `copy`, `zoom-in`, `zoom-out`,
+`ew-resize`, `ns-resize`, `col-resize`, `row-resize` and more. A node with an `id` is
+named for the rest: `bone.gui.scroll(id, to)`.
+
+### The keyboard
+
+The prompt has the keyboard until a node takes it. The keyboard reaches a node
+with `on_key`, `on_click` or a `focus` look (`focusable = false` leaves one
+out, `focusable = true` adds one); ctrl+p (`focus_next`) moves into them in the
+order they are drawn, then tab, shift+tab and the up and down arrows move
+between them. A press on a node with `on_key`, a `focus` look or `focusable =
+true` gives it the focus; a press elsewhere gives it back to the prompt.
+
+While a node has the focus, a key goes to its `on_key(name)` first (`"enter"`,
+`"ctrl+s"`, `"a"`, as `bone.keymap` names them); returning true takes it.
+Otherwise enter and space run its `on_click`, esc gives the keyboard back to
+the prompt, typing goes back to the prompt and is typed there, and the
+window's own keys (ctrl+c, ctrl+o, …) still work. A node reached with the
+keyboard and no `focus` look of its own shows a ring (the `FocusRing` group,
+else `Accent`).
+
+```lua
+{ id = "dialog", autofocus = true, key_guard = 300,
+  on_key = function(k) if k == "esc" then close() end return true end, … }
+```
+
+`autofocus = true` takes the focus each time the node appears; `key_guard`
+(ms) ignores keys for that long after, so an enter meant for the prompt does
+not answer a question that has just come up. Inside a `block_input` box (a
+modal) the focus stays among its nodes and typing does not reach the prompt
+under it. `bone.gui.focus(id)` gives a node or text input the keyboard
+(`nil`: back to the prompt); `bone.gui.focused()` is the id of the node or
+text input that has it. Keymaps (`bone.keymap`) still apply to everything a focused node does
+not take.
+
+### Screen readers
+
+Text is read as it is. A node with `on_click` is a button named by the text in
+it (said once, not again as text). `role` says what else a node is:
+`"button"`, `"link"`, `"checkbox"`, `"radio"`, `"option"` (one of a set to
+choose from, such as a list entry), `"image"`, `"dialog"`, `"text"`, or
+`"none"` (neither it nor its text is read); `label` names it in place of its
+text (an image needs one), and `selected` says whether a checkbox, radio or
+option is on. The node with the keyboard focus has the screen reader's too.
+
+```lua
+{ role = "option", selected = i == sel, on_click = pick, { text = name } }
+{ role = "image", label = "the build graph", image = { path = "/tmp/g.png" } }
+```
+
+### Scrolling
+
+`overflow = "scroll"` with an `id` is a scrolling column (wheel, a thin bar).
+`follow = true` keeps it at its end while content is added there.
+
+```lua
+bone.gui.scroll("log", "end")       -- pixels, "top" or "end"
+bone.gui.scroll_info("log")         -- { offset, max, viewport } or nil
+```
+
+### Long lists
+
+`list` makes only the items in view, so a transcript of thousands of items
+costs Lua nothing while it sits still:
+
+```lua
+{ id = "chat", grow = 1, follow = true,
+  list = { count = n, estimate = 60, gap = 0, key = session_id,
+           item = function(i) return { text = "item " .. i } end } }
+```
+
+`item(i)` (from 1) returns a node; heights are measured as items come into
+view, and a changed `key` (another chat) forgets them. A list's items are made
+again each time Lua builds the view, except with `chat = true` (the chat list
+`bone.nodes.chat` makes): item `i` is then the chat's item `i`, and its node is
+kept, through typing and other rebuilds, until the chat says it changed (its
+data, the views, options or colors, what its view read with `bone.chat.item` or
+`bone.chat.items`, or a `bone.chat.refresh_in` it asked for), as the TUI keeps
+its rows. A view that reads anything else calls `bone.chat.redraw(index)`
+when that changes.
+
+### The prompt's text field
+
+`{ input = true, placeholder = "Message…", size = 15, min_rows = 1, max_rows = 8 }`
+is the native editor of the prompt (cursor, selection, IME, paste, history,
+attachments are the shared ones). It is as tall as its text.
+
+## The chat
+
+`require("bone.nodes").chat(opts)` is the list node for the chat on screen. Its
+items come from `bone.ui.views.<kind>`, as in the TUI, with one difference: a
+view returns `node = <a node>` (or just `lines`, drawn as monospace text). A
+view may also return `click = function() … end` for a click on the item. The
+desktop library's views are built with `require("bone.desktop.markdown")`:
+`nodes(text, group, opts)` lays Markdown out as nodes, `text(spans, opts)` is
+selectable text and `band(spans, opts)` text on a band (a code block, a diff
+row). A span is `{ text = …, hl = … }` or, as a TUI line's are written,
+`{ "text", "Group" }`.
+
+```lua
+bone.ui.views.build = function(item)
+  return { node = { padding = 8, radius = 8, bg = "CodeBlock",
+    { text = item.text, font = "mono", size = 13 } } }
+end
+bone.chat.add("build", { text = "building…" })
+```
+
+`bone.chat.scroll`, `scroll_to` and `view` move and read the chat list.
+
+## Windows over the view
+
+`bone.ui.popup` / `bone.ui.win` work as in the TUI: the same placement rules
+(`anchor`, `row`, `col`, centered by default), the same keys and focus. Their
+sizes and offsets count character cells of the monospace font, as their
+`lines` do; the GUI places them in pixels in the window, the chat or above
+the prompt (no grid is laid over the window). How a window looks is the
+GUI's: `runtime/lua/bone/nodes/popups.lua` draws each one as nodes, and its
+`M.chrome` table is the whole look of the card:
+
+```lua
+local chrome = require("bone.nodes.popups").chrome
+chrome.bg = "#1a1a24"
+chrome.radius = 18
+chrome.border = 0
+chrome.shadow = { blur = 30, dy = 10, color = "#000000c0" }
+chrome.pad = 18                        -- room around a window of nodes
+```
+
+A window of `lines` (a plugin's, written for the TUI) is drawn in the
+monospace font, one text row to a cell row, with the shared keys and no
+pointer: the GUI sends no `mouse` events for it, the chat or the prompt. A
+window that wants the pointer is made of nodes, which take it (`on_click` and
+the others).
+
+With `node = function(ctx) return node end` in place of `lines` (on
+`bone.ui.popup`, `win`, `update`, `bone.ui.panel.open` or `update`; `ctx` is
+`{ width, height }` in pixels) a window or a docked panel draws that node; the
+settings, help, health, setup, catalog, picker and pager windows are these.
+Keys, focus and closing stay the window's. `require("bone.nodes.popups").list(id, nodes, selected)` is a
+scrolling list for one, keeping entry `selected` in view:
+
+```lua
+local id
+id = bone.ui.popup({ width = 60, height = 20, on_key = function(k) … end,
+  node = function(ctx)
+    return require("bone.nodes.popups").list("mine:" .. id, {
+      { text = "Pick one", bold = true },
+      { text = "first", on_click = function() … end },
+    })
+  end })
+```
+
+Replace the file to draw windows differently. Docked panels of `lines` and
+`bone.ui.layout` are the TUI's: the GUI keeps their state but draws nothing
+for them.
+
+## Slots: plugins add to the window
+
+Named places in the window where any `gui.lua` adds nodes, without replacing
+the library:
+
+```lua
+bone.gui.slots.add("statusbar.right", { id = "clock", order = 10,
+  node = function(ctx) return { text = os.date("%H:%M"), hl = "Dim", size = 12 } end })
+bone.gui.slots.remove("statusbar.right", "clock")
+```
+
+`node` is a node or a function returning one (nil for none), run each time the
+window is built; a failing one is skipped and reported once. Lower `order`
+comes first. The desktop window asks for `statusbar.left`, `statusbar.right`,
+`composer.above`, `composer.below`, `chat.top`, `sidebar.top`, `sidebar.bottom`,
+`window.left`, `window.right` and `window.overlay` (absolute nodes over
+everything). A library of yours can ask for others with
+`bone.gui.slots.nodes(name)`.
+
+## Events from the window
+
+`bone.on("drop", function(ev) … end)`: files dropped on the window
+(`ev.paths`); the desktop library attaches images and puts other paths in the
+message, and your handler replaces that. `bone.gui.font("serif", path)`
+registers a font family for `font = "serif"` on any node or span.
+
+## What the window draws itself
+
+The prompt's text field and selectable text are native, so egui draws their
+cursor, selection and corners; they follow the colorscheme: the groups
+`TextSelection` (bg: selected text, fg: its outline), `Cursor` (fg), `Accent`
+(links), `Panel` (raised surfaces), `WinSeparator` (outlines), `Normal`, and
+the options `widget_radius`, `window_radius` and `scroll_line` (pixels one
+scroll-key line moves the chat). A scheme that sets none gets
+dark defaults.
+
+A failing view, or no view, shows `bone.gui.fallback`'s: a plain node tree with
+the error. Replace it with `bone.gui.fallback(function(ctx) return node end)`
+(`ctx.error` is the message).
 
 ## Options
 
@@ -37,50 +367,63 @@ Set in `gui.lua`, or with `/config` (saved as `gui.<name>` in `settings.json`):
 
 ```lua
 bone.o.font = "/path/Mono.ttf"        -- the monospace font (empty: built in)
-bone.o.font_size = 14                 -- points; one cell is one advance wide
+bone.o.font_size = 14                 -- points
 bone.o.font_sans = ""                 -- proportional text (empty: the system's)
 bone.o.font_sans_bold = ""            -- its bold and italic faces
 bone.o.font_sans_italic = ""
 bone.o.queue_mode = "next"            -- as in the TUI: steer or next
+bone.o.opacity = 1                    -- below 1 the window's background is see-through
 ```
+
+`opacity` is read when the window opens, so turning it on (or off) takes a
+restart; within a see-through window it changes live. Only the window's
+background (the `Normal` group's, under the view) is see-through: text, cards
+and bubbles stay opaque. A view that paints its own backgrounds covers it, so
+the standard view, seeing `bone.gui.window_info().opacity` below 1, draws the
+chat on the bare canvas, flush against the sidebar, whose `Panel` takes the
+same alpha. On Linux it needs a compositor, or the background is black; on
+Windows the window is drawn with DirectX 12 on a DirectComposition surface
+(the only wgpu one that can show through), unless `WGPU_BACKEND` or
+`WGPU_DX12_PRESENTATION_SYSTEM` says otherwise. Blur behind the window is the
+compositor's (Hyprland's `decoration:blur`, KWin's rules), not bone's.
 
 ## The window: `bone.gui`
 
 ```lua
 bone.gui.window{ title = "bone", width = 1100, height = 760, maximized = false }
-bone.gui.window_info()                -- { width, height, columns, fullscreen, maximized, focused }
+bone.gui.window_info()                -- { width, height, columns, fullscreen, maximized, focused, opacity }
 bone.gui.notify("bone", "done")       -- a desktop notification (gui.notifications)
 bone.gui.open_file({ title = "Pick", filters = { { "Images", { "png" } } } }, function(path) end)
 bone.gui.save_file({ name = "out.txt" }, function(path) end)   -- gui.dialogs
+bone.gui.status()                     -- the message last shown: { text, error } or nil
+bone.gui.status_clear()
+bone.gui.preview(image)               -- open an attachment (an item's images[i])
 ```
 
-Check `bone.has_capability("gui.window")` before using these from shared code.
+Check `bone.has_capability("gui.nodes")` or `"gui.window"` before using these
+from shared code.
 
-## Rich text: blocks
+Pieces for building one (`bone.nodes.popups`): `title(text)`, `note(text,
+margin, hl)`, `entry(on, children, click)` (a card, raised when selected),
+`button(label, click, primary, on)`, `field(label, value, { on, editing,
+click, hint, empty })` (a labelled box), and `hints("↑↓ move · enter open")`
+(each key as a keycap). `list(id, items, selected, opts)` takes
+`opts.fit = true` (the window is as tall as its entries, not the room it was
+given, and centered) and `opts.footer = node` (stays under the list however
+far it scrolls). The picker, pager and setup windows are made of these.
 
-A chat view may return `block` as well as `lines`. The GUI draws the block
-(wrapped, proportional text in a box) and the TUI draws `lines`, so a view can
-serve both:
+### The windows the runtime opens
+
+`bone.ui.select`, `bone.ui.pager`, `/setup` and `/catalog` are drawn by the
+library: `bone.ui.windows.<select|pager|setup|catalog>` is a function of the
+window's page (its state, and what to call on a press) that returns the
+popup spec, with a `node`. Without one the window is drawn as `lines`. The
+desktop library sets all four (`bone.desktop.pick`, `.setup`, `.catalog`); a
+library of yours can replace any:
 
 ```lua
-bone.ui.views.notice = function(item)
-  return {
-    block = {
-      paragraphs = { { spans = { { "Hello ", "Normal" }, { text = "world", bold = true } } } },
-      size = 15, align = "right", max_width = 0.8,
-      bg = "UserMessage", border = "PromptBorder", radius = 12,
-      pad = { 8, 12 }, margin = { 6, 6 },
-    },
-    lines = { { { "Hello world", "Normal" } } },
-  }
+bone.ui.windows.select = function(page)
+  -- page.st (query, sel, items), page.opts, page.matches(), page.finish(match)
+  return { node = function() return … end, width = 60, height = 20 }
 end
 ```
-
-A span is `{ text, group }` or `{ text =, hl =, bold, italic, code, size }`; a
-paragraph also takes `font`, `size`, `fg`, `gap`, `indent`, and `bg` with
-`pad`. `fill = true` makes a box span the allowed width. Sizes are points.
-
-A panel or window can show blocks too (`gui.blocks`): give `blocks =
-function(ctx) return { { id = …, block = {…}, selected = bool } } end`, with
-`ctx = { width, height }` in points, and `on_block(id)` for a click. Its keys,
-focus and closing stay the panel's or window's.

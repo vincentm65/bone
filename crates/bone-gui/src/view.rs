@@ -1,25 +1,23 @@
-//! Drawing the GUI with egui: the Lua-laid-out screen (`screen.rs`),
-//! questions as they come, and Lua styles as egui text formats. Lua-produced
-//! lines are monospace, so a column here is a column in the TUI. Around that
-//! grid the window has its own chrome: theme, margin and dialogs.
+//! One frame of the GUI with egui: the events and keys taken first, the
+//! colorscheme and fonts applied to what egui draws itself, then the
+//! window, which is Lua's node tree (`nodeview`), or a line saying why
+//! there is none.
 
 use bone_ui::options::DynamicValue;
-use bone_ui::style::{Color, Modifier, Style};
-use eframe::egui::text::{LayoutJob, TextFormat};
-use eframe::egui::{self, Color32, FontId, Key, Stroke};
-use serde_json::Value;
-use unicode_width::UnicodeWidthChar;
+use bone_ui::style::Color;
+use eframe::egui::{self, Color32, Stroke};
 
-use crate::{Gui, Row};
+use crate::Gui;
 
 impl Gui {
     /// Draw one frame into `ui` (the whole window).
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         let _ = self.repaint.set(ui.ctx().clone());
+        self.note_focus(ui.ctx());
         self.pump();
         self.switch_library();
-        // New fonts take effect on a fresh pass: lay nothing out with the
-        // old cell size.
+        // New fonts take effect on a fresh pass: measure nothing with the
+        // old ones.
         if self.apply_fonts(ui.ctx()) {
             ui.ctx().request_discard("fonts changed");
             return;
@@ -29,57 +27,79 @@ impl Gui {
         self.dropped_files(ui.ctx());
         self.window_ui(ui.ctx());
         let canvas = self.canvas();
+        // The node view (`bone.gui.view`) is the whole window.
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::NONE
-                    .inner_margin(egui::Margin::symmetric(16, 10))
-                    .fill(canvas),
-            )
-            .show(ui, |ui| self.screen_ui(ui));
-        self.question_ui(ui.ctx());
-        self.preview_ui(ui.ctx());
+            .frame(egui::Frame::NONE.fill(canvas))
+            .show(ui, |ui| {
+                if !self.view_ui(ui) {
+                    self.no_view_ui(ui);
+                }
+            });
+        self.sweep_previews();
     }
 
     /// The window's background: the Normal group's, or a dark canvas when
-    /// a scheme leaves it unset (the bare library).
+    /// a scheme leaves it unset (the bare library), with the `opacity`
+    /// option's alpha in a see-through window.
     pub(crate) fn canvas(&self) -> Color32 {
-        self.lua
-            .theme
-            .hl("Normal")
-            .bg
-            .and_then(color)
-            .unwrap_or(Color32::from_rgb(0x16, 0x16, 0x16))
+        let c = self
+            .group_color("Normal", true)
+            .unwrap_or(Color32::from_rgb(0x16, 0x16, 0x16));
+        if !self.transparent {
+            return c;
+        }
+        let a = (self.opacity() * 255.0).round() as u8;
+        Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a)
     }
 
-    /// Dialogs and scrollbars follow the Lua colors. Once per
-    /// colorscheme: rewriting the style every frame asks for another.
+    /// The `opacity` option: how much of the window's background covers
+    /// what is behind it, 0 to 1.
+    pub(crate) fn opacity(&self) -> f32 {
+        self.number_option("opacity", 1.0).clamp(0.0, 1.0)
+    }
+
+    /// Group `name`'s background (or foreground), if the colorscheme sets it.
+    pub(crate) fn group_color(&self, name: &str, bg: bool) -> Option<Color32> {
+        let s = self.lua.theme.hl(name);
+        if bg { s.bg } else { s.fg }.and_then(color)
+    }
+
+    /// A number option of the GUI (`bone.o.define`), or `default`.
+    pub(crate) fn number_option(&self, name: &str, default: f32) -> f32 {
+        match self.lua.dynamic_options.get(name).map(|o| &o.value) {
+            Some(DynamicValue::Number(n)) => *n as f32,
+            Some(DynamicValue::Integer(n)) => *n as f32,
+            _ => default,
+        }
+    }
+
+    /// What egui draws itself (the prompt's cursor and selection, the
+    /// selected text, widget corners) follows the colorscheme's groups and
+    /// the GUI's options, with a fallback for a scheme that sets none.
+    /// Once per colorscheme: rewriting the style every frame asks for
+    /// another.
+    ///
+    /// Groups: `Normal` (window and text), `Panel` (raised surfaces),
+    /// `Accent` (links), `TextSelection` (selected text: bg, and fg for its
+    /// outline), `Cursor` (the text cursor), `WinSeparator` (outlines).
+    /// Options: `widget_radius`, `window_radius`.
     fn apply_visuals(&mut self, ctx: &egui::Context) {
         if self.visuals_rev == Some(self.lua.opts_rev) {
             return;
         }
         self.visuals_rev = Some(self.lua.opts_rev);
         let canvas = self.canvas();
-        let raised = lifted(canvas);
+        let raised = self
+            .group_color("Panel", true)
+            .unwrap_or_else(|| lifted(canvas));
         let fg = self
-            .lua
-            .theme
-            .hl("Normal")
-            .fg
-            .and_then(color)
+            .group_color("Normal", false)
             .unwrap_or(Color32::from_rgb(0xee, 0xee, 0xee));
         let accent = self
-            .lua
-            .theme
-            .hl("Accent")
-            .fg
-            .and_then(color)
+            .group_color("Accent", false)
             .unwrap_or(Color32::from_rgb(0xc8, 0xdc, 0xf5));
         let rule = self
-            .lua
-            .theme
-            .hl("WinSeparator")
-            .fg
-            .and_then(color)
+            .group_color("WinSeparator", false)
             .unwrap_or(Color32::from_rgb(0x2c, 0x2c, 0x2c));
         let mut vis = egui::Visuals::dark();
         vis.panel_fill = canvas;
@@ -88,9 +108,14 @@ impl Gui {
         vis.faint_bg_color = raised;
         vis.override_text_color = Some(fg);
         vis.hyperlink_color = accent;
-        vis.selection.bg_fill = Color32::from_rgb(0x2a, 0x3f, 0x55);
-        vis.selection.stroke.color = accent;
-        vis.window_corner_radius = egui::CornerRadius::same(8);
+        vis.selection.bg_fill = self
+            .group_color("TextSelection", true)
+            .unwrap_or(Color32::from_rgb(0x2a, 0x3f, 0x55));
+        vis.selection.stroke.color = self.group_color("TextSelection", false).unwrap_or(accent);
+        vis.text_cursor.stroke.color = self.group_color("Cursor", false).unwrap_or(fg);
+        vis.window_corner_radius = egui::CornerRadius::same(
+            self.number_option("window_radius", 8.0).clamp(0.0, 40.0) as u8,
+        );
         vis.window_stroke = Stroke::new(1.0, rule);
         vis.popup_shadow = egui::epaint::Shadow {
             offset: [0, 8],
@@ -98,7 +123,9 @@ impl Gui {
             spread: 0,
             color: Color32::from_black_alpha(90),
         };
-        let radius = egui::CornerRadius::same(6);
+        let radius = egui::CornerRadius::same(
+            self.number_option("widget_radius", 6.0).clamp(0.0, 40.0) as u8,
+        );
         for widget in [
             &mut vis.widgets.noninteractive,
             &mut vis.widgets.inactive,
@@ -118,135 +145,6 @@ impl Gui {
             style.spacing.scroll.bar_width = 8.0;
             style.spacing.scroll.floating_width = 6.0;
         });
-    }
-
-    /// The oldest open question, as a modal.
-    fn question_ui(&mut self, ctx: &egui::Context) {
-        let Some((&ask_id, ask)) = self.asks.iter().next() else {
-            return;
-        };
-        let text = Gui::question_text(&ask.question);
-        let options = Gui::question_options(&ask.question);
-        let mut answer: Option<Value> = None;
-        egui::Modal::new(egui::Id::new(("ask", ask_id))).show(ctx, |ui| {
-            ui.set_max_width(440.0);
-            ui.label(egui::RichText::new(text).size(15.0));
-            ui.add_space(8.0);
-            if options.is_empty() {
-                let edit = ui.text_edit_singleline(&mut self.answer_draft);
-                let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
-                if ui.button("Answer").clicked() || enter {
-                    answer = Some(Value::String(std::mem::take(&mut self.answer_draft)));
-                }
-            } else {
-                ui.horizontal(|ui| {
-                    for o in &options {
-                        if ui.button(o).clicked() {
-                            answer = Some(Value::String(o.clone()));
-                        }
-                    }
-                });
-            }
-        });
-        if let Some(a) = answer {
-            self.answer(ask_id, a);
-        }
-    }
-}
-
-/// A chat row as text in its styles, one font for all of it, every
-/// character as many cells wide as it is in a terminal (`col` points a
-/// cell): a wide character, or one from a fallback font, is padded or
-/// tucked in after it so the columns after it line up.
-pub(crate) fn row_job(ui: &egui::Ui, row: &Row, font: &FontId, col: f32) -> LayoutJob {
-    let visuals = ui.visuals();
-    let mut job = LayoutJob::default();
-    ui.ctx().fonts_mut(|fonts| {
-        let mut lead = 0.0;
-        for (text, style) in row {
-            let format = format(style, font, visuals);
-            let mut start = 0;
-            // A character with the zero-width ones after it (combining
-            // marks) is one cluster; the monospace font's own are one cell.
-            let mut chars = text.char_indices().peekable();
-            while let Some((i, c)) = chars.next() {
-                let mut end = i + c.len_utf8();
-                while let Some((j, m)) =
-                    chars.next_if(|&(_, m)| !m.is_ascii() && m.width() == Some(0))
-                {
-                    end = j + m.len_utf8();
-                }
-                let cluster = &text[i..end];
-                if cluster.is_ascii() {
-                    continue;
-                }
-                let gap = c.width().unwrap_or(0) as f32 * col - advance(fonts, font, cluster);
-                if gap.abs() > 0.01 {
-                    job.append(&text[start..end], lead, format.clone());
-                    (start, lead) = (end, gap);
-                }
-            }
-            if start < text.len() {
-                job.append(&text[start..], lead, format);
-                lead = 0.0;
-            }
-        }
-    });
-    // An empty row is still a line tall.
-    if job.text.is_empty() {
-        job.append(
-            " ",
-            0.0,
-            TextFormat::simple(font.clone(), Color32::TRANSPARENT),
-        );
-    }
-    job
-}
-
-/// How far `cluster` moves the text along, in whichever fonts draw it
-/// (egui keeps the layouts of recent frames).
-fn advance(fonts: &mut egui::epaint::text::FontsView<'_>, font: &FontId, cluster: &str) -> f32 {
-    let galley = fonts.layout_no_wrap(cluster.to_owned(), font.clone(), Color32::WHITE);
-    let glyphs = galley.rows.iter().flat_map(|r| r.glyphs.iter());
-    glyphs.map(|g| g.advance_width).sum()
-}
-
-fn format(style: &Style, font: &FontId, visuals: &egui::Visuals) -> TextFormat {
-    let m = style.add_modifier;
-    let mut fg = style.fg.and_then(color).unwrap_or(visuals.text_color());
-    // Punch the canvas out first. Reverse then paints a cursor as a solid
-    // block of the text color, on the panel when the style had no mark.
-    let mut bg = ink_background(style.bg.and_then(color), visuals.panel_fill);
-    if m.contains(Modifier::REVERSED) {
-        let back = if bg == Color32::TRANSPARENT {
-            visuals.panel_fill
-        } else {
-            bg
-        };
-        (fg, bg) = (back, fg);
-    }
-    if m.contains(Modifier::DIM) {
-        fg = fg.gamma_multiply(0.6);
-    }
-    // egui's bundled fonts have no bold face: bold is a brighter color.
-    if m.contains(Modifier::BOLD) {
-        fg = fg.lerp_to_gamma(visuals.strong_text_color(), 0.5);
-    }
-    let line = |on: bool| {
-        if on {
-            Stroke::new(1.0, fg)
-        } else {
-            Stroke::NONE
-        }
-    };
-    TextFormat {
-        font_id: font.clone(),
-        color: fg,
-        background: bg,
-        italics: m.contains(Modifier::ITALIC),
-        underline: line(m.contains(Modifier::UNDERLINED)),
-        strikethrough: line(m.contains(Modifier::CROSSED_OUT)),
-        ..Default::default()
     }
 }
 
@@ -279,43 +177,31 @@ const ANSI: [(u8, u8, u8); 16] = [
     (0xea, 0xea, 0xea),
 ];
 
-/// A glyph background. The canvas is the window, not a mark: painting it
-/// punches a hole in a lifted card or panel. A real fill stays. No color
-/// means the surface underneath shows through.
-pub(crate) fn ink_background(bg: Option<Color32>, canvas: Color32) -> Color32 {
-    match bg {
-        Some(c) if c != canvas => c,
-        _ => Color32::TRANSPARENT,
-    }
-}
-
 /// `None` for the default color.
 pub(crate) fn color(c: Color) -> Option<Color32> {
-    let ansi = |i: usize| {
-        let (r, g, b) = ANSI[i];
-        Some(Color32::from_rgb(r, g, b))
+    use Color::*;
+    let ansi = match c {
+        Reset => return None,
+        Rgb(r, g, b) => return Some(Color32::from_rgb(r, g, b)),
+        Indexed(n) => return Some(indexed(n)),
+        Black => 0,
+        Red => 1,
+        Green => 2,
+        Yellow => 3,
+        Blue => 4,
+        Magenta => 5,
+        Cyan => 6,
+        Gray => 7,
+        DarkGray => 8,
+        LightRed => 9,
+        LightGreen => 10,
+        LightYellow => 11,
+        LightBlue => 12,
+        LightMagenta => 13,
+        LightCyan => 14,
+        White => 15,
     };
-    match c {
-        Color::Reset => None,
-        Color::Black => ansi(0),
-        Color::Red => ansi(1),
-        Color::Green => ansi(2),
-        Color::Yellow => ansi(3),
-        Color::Blue => ansi(4),
-        Color::Magenta => ansi(5),
-        Color::Cyan => ansi(6),
-        Color::Gray => ansi(7),
-        Color::DarkGray => ansi(8),
-        Color::LightRed => ansi(9),
-        Color::LightGreen => ansi(10),
-        Color::LightYellow => ansi(11),
-        Color::LightBlue => ansi(12),
-        Color::LightMagenta => ansi(13),
-        Color::LightCyan => ansi(14),
-        Color::White => ansi(15),
-        Color::Rgb(r, g, b) => Some(Color32::from_rgb(r, g, b)),
-        Color::Indexed(n) => Some(indexed(n)),
-    }
+    Some(indexed(ansi))
 }
 
 /// The xterm 256-color palette.
@@ -351,8 +237,13 @@ impl Gui {
             _ => 14.0,
         };
         let sans = ["font_sans", "font_sans_bold", "font_sans_italic"].map(text);
-        let want = (text("font"), size.clamp(6.0, 72.0), sans);
-        if self.lua.fonts.as_ref() == Some(&want) {
+        let want = (
+            text("font"),
+            size.clamp(6.0, 72.0),
+            sans,
+            self.view.bound.extra_fonts.clone(),
+        );
+        if self.view.fonts.as_ref() == Some(&want) {
             return false;
         }
         let mut fonts = egui::FontDefinitions::default();
@@ -418,10 +309,24 @@ impl Gui {
                 .families
                 .insert(egui::FontFamily::Name(face.into()), family);
         }
+        // Families Lua registered: each is its own name, then the fallbacks
+        // (so symbols the font lacks still draw).
+        for (name, path) in &want.3 {
+            let key = format!("lua:{name}");
+            if add(&key, path) {
+                let mut family = vec![key];
+                family.extend(fallback.iter().cloned());
+                fonts
+                    .families
+                    .insert(egui::FontFamily::Name(name.as_str().into()), family);
+            } else {
+                errors.push(path.clone());
+            }
+        }
         for path in errors {
             self.error(format!("cannot read font {path}"));
         }
-        self.lua.faces = (faces[1], faces[2]);
+        self.view.faces = (faces[1], faces[2]);
         ctx.set_fonts(fonts);
         ctx.all_styles_mut(|style| {
             if let Some(f) = style.text_styles.get_mut(&egui::TextStyle::Monospace) {
@@ -431,8 +336,14 @@ impl Gui {
             // the Lua parts of the screen: the cursor stays still.
             style.visuals.text_cursor.blink = false;
         });
-        self.lua.fonts = Some(want);
-        // Cached rows were wrapped for the old cell size.
+        self.view.fonts = Some(want);
+        // The monospace cell is derived from these fonts.  Force the next
+        // frame to measure it again before building Lua's node tree; otherwise
+        // a rebuilt view receives the old `ctx.cell` forever.
+        self.view.cell = None;
+        self.view.screen_size = (0, 0);
+        self.view.screen_cols = 0;
+        // Chat items made with the old fonts are made again.
         self.lua.views_rev += 1;
         true
     }
@@ -499,87 +410,4 @@ fn system_sans() -> [Option<String>; 3] {
     set.map_or([None, None, None], |s| {
         s.map(|p| std::path::Path::new(p).exists().then(|| p.to_owned()))
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Where each glyph of `text` starts, in cells.
-    fn columns(text: &str) -> Vec<(char, f32)> {
-        let ctx = egui::Context::default();
-        let mut out = Vec::new();
-        let mut frame = ctx.run_ui(egui::RawInput::default(), |ui| {
-            let font = FontId::monospace(14.0);
-            let col = ui.ctx().fonts_mut(|f| f.glyph_width(&font, 'M'));
-            let row = vec![(text.to_owned(), Style::default())];
-            let galley = ui.painter().layout_job(row_job(ui, &row, &font, col));
-            let glyphs = galley.rows.iter().flat_map(|r| r.glyphs.iter());
-            out = glyphs.map(|g| (g.chr, g.pos.x / col)).collect();
-        });
-        frame.textures_delta.clear();
-        out
-    }
-
-    /// `text`'s characters start at these cells, give or take the pixel
-    /// rounding egui does.
-    fn assert_columns(text: &str, want: &[f32]) {
-        let got = columns(text);
-        let near =
-            got.len() == want.len() && got.iter().zip(want).all(|((_, g), w)| (g - w).abs() < 0.15);
-        assert!(near, "{text:?}: {got:?}, not {want:?}");
-    }
-
-    #[test]
-    fn wide_and_fallback_characters_keep_the_columns() {
-        // An emoji is two cells; box drawing comes from a fallback font.
-        assert_columns("😀ab", &[0.0, 2.0, 3.0]);
-        assert_columns("a─┼b", &[0.0, 1.0, 2.0, 3.0]);
-        assert_columns("ab😀😀c", &[0.0, 1.0, 2.0, 4.0, 6.0]);
-        assert_columns("e\u{301}x", &[0.0, 1.0, 1.0]);
-    }
-
-    #[test]
-    fn ink_background_is_the_window_not_a_mark() {
-        let canvas = Color32::from_rgb(0x12, 0x12, 0x12);
-        let bubble = Color32::from_rgb(0x33, 0x33, 0x33);
-        assert_eq!(ink_background(Some(canvas), canvas), Color32::TRANSPARENT);
-        assert_eq!(ink_background(None, canvas), Color32::TRANSPARENT);
-        assert_eq!(ink_background(Some(bubble), canvas), bubble);
-    }
-
-    #[test]
-    fn canvas_background_stays_off_panels() {
-        let canvas = Color32::from_rgb(0x12, 0x12, 0x12);
-        let mut visuals = egui::Visuals::dark();
-        visuals.panel_fill = canvas;
-        let font = FontId::monospace(14.0);
-        let plain = format(
-            &Style::default()
-                .fg(Color::Rgb(0xee, 0xee, 0xee))
-                .bg(Color::Rgb(0x12, 0x12, 0x12)),
-            &font,
-            &visuals,
-        );
-        assert_eq!(plain.background, Color32::TRANSPARENT);
-        let marked = format(
-            &Style::default()
-                .fg(Color::Rgb(0xee, 0xee, 0xee))
-                .bg(Color::Rgb(0x33, 0x33, 0x33)),
-            &font,
-            &visuals,
-        );
-        assert_eq!(marked.background, Color32::from_rgb(0x33, 0x33, 0x33));
-        // A reversed cursor still becomes a solid block of the text color.
-        let cursor = format(
-            &Style::default()
-                .fg(Color::Rgb(0xee, 0xee, 0xee))
-                .bg(Color::Rgb(0x12, 0x12, 0x12))
-                .add_modifier(Modifier::REVERSED),
-            &font,
-            &visuals,
-        );
-        assert_eq!(cursor.background, Color32::from_rgb(0xee, 0xee, 0xee));
-        assert_eq!(cursor.color, canvas);
-    }
 }

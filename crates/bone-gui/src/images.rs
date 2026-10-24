@@ -1,4 +1,4 @@
-//! Images in the prompt: read from a file (`/attach`, or dropped on the
+//! Images in the prompt: read from a file (`/attach`, the "+" dialog, or dropped on the
 //! window) or the clipboard (`paste_clipboard`, through the helper process
 //! of `bone_ui::clipboard`), uploaded to the core, and sent with the next
 //! message. egui pastes the clipboard's text itself on ctrl+v, so an image
@@ -17,14 +17,14 @@ use mlua::{Lua, MultiValue};
 
 use crate::Gui;
 
-/// The image ops; `None` for an op that is not one of them.
+/// The image ops. `Err(a)` hands the arguments to the next dispatcher.
 pub(crate) fn dispatch(
     gui: &mut Gui,
     lua: &Lua,
     op: &str,
     a: MultiValue,
-) -> Option<mlua::Result<MultiValue>> {
-    Some(match op {
+) -> Result<mlua::Result<MultiValue>, MultiValue> {
+    Ok(match op {
         "clipboard_paste" => {
             gui.paste_clipboard();
             ret(lua, ())
@@ -41,7 +41,7 @@ pub(crate) fn dispatch(
             gui.prompt_changed();
             ret(lua, ())
         }),
-        _ => return None,
+        _ => return Err(a),
     })
 }
 
@@ -63,11 +63,47 @@ impl Gui {
         self.read_image(Input::Clipboard);
     }
 
-    /// Files dropped on the window this frame are attached.
+    /// Files dropped on the window this frame: the `drop` event to Lua, or
+    /// (with no handler) images are attached and any other file's path goes
+    /// into the message for the agent to read.
     pub(crate) fn dropped_files(&mut self, ctx: &egui::Context) {
         let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        if dropped.is_empty() {
+            return;
+        }
+        // Lua decides what a drop means (`bone.on("drop", fn)`): the desktop
+        // library attaches the files. With no handler, this does.
+        if bone_ui::lua::has_autocmd(self, "drop") {
+            let paths: Vec<String> = dropped
+                .iter()
+                .map(|f| f.path().to_string_lossy().into_owned())
+                .collect();
+            self.fire_event("drop", serde_json::json!({ "paths": paths }));
+            return;
+        }
         for f in dropped {
-            self.attach_file(f.path().to_owned());
+            let path = f.path().to_owned();
+            let image = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
+                ["png", "jpg", "jpeg", "webp"]
+                    .iter()
+                    .any(|i| e.eq_ignore_ascii_case(i))
+            });
+            if image {
+                self.attach_file(path);
+                continue;
+            }
+            let name = path.display().to_string();
+            let name = if name.contains(char::is_whitespace) {
+                format!("\"{name}\"")
+            } else {
+                name
+            };
+            if !(self.draft.is_empty() || self.draft.ends_with(char::is_whitespace)) {
+                self.draft.push(' ');
+            }
+            self.draft.push_str(&name);
+            self.draft.push(' ');
+            self.prompt_changed();
         }
     }
 

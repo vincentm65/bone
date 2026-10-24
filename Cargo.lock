@@ -572,7 +572,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "unicode-width 0.2.0",
 ]
 
 [[package]]

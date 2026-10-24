@@ -33,14 +33,14 @@ pub(crate) struct PromptState {
     saved: Option<(String, Vec<ImageAttachment>)>,
 }
 
-/// These ops; `None` for an op that is not one of them.
+/// These ops. `Err(a)` hands the arguments to the next dispatcher.
 pub(crate) fn dispatch(
     gui: &mut Gui,
     lua: &Lua,
     op: &str,
     a: MultiValue,
-) -> Option<mlua::Result<MultiValue>> {
-    Some(match op {
+) -> Result<mlua::Result<MultiValue>, MultiValue> {
+    Ok(match op {
         "prompt_edit" => args::<(String, Value, Value, Option<String>)>(lua, a)
             .and_then(|(op, x, y, text)| edit(gui, &op, x, y, text).and_then(|()| ret(lua, ()))),
         "prompt_get_range" => args::<(Value, Value)>(lua, a).and_then(|(from, to)| {
@@ -55,7 +55,7 @@ pub(crate) fn dispatch(
             let t = gui.buffer();
             ret(lua, pos_out(lua, pos_arg(&t, pos)?)?)
         }),
-        _ => return None,
+        _ => return Err(a),
     })
 }
 

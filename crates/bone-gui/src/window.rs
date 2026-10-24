@@ -13,12 +13,12 @@ pub(crate) fn dispatch(
     lua: &Lua,
     op: &str,
     a: MultiValue,
-) -> Option<mlua::Result<MultiValue>> {
-    Some(match op {
+) -> Result<mlua::Result<MultiValue>, MultiValue> {
+    Ok(match op {
         "gui_window" => {
             args::<Table>(lua, a).and_then(|spec| window(gui, &spec).and_then(|()| ret(lua, ())))
         }
-        "gui_window_info" => json(lua, &gui.window_info),
+        "gui_window_info" => window_info(lua, gui),
         "gui_library_info" => {
             let dir = gui.opts.config_dir.clone();
             let active = (dir.as_deref())
@@ -51,8 +51,42 @@ pub(crate) fn dispatch(
             Host::changed(gui);
             ret(lua, ())
         }),
-        _ => return None,
+        _ => return Err(a),
     })
+}
+
+/// `bone.gui.window_info()` as a Lua table, without a JSON round-trip.
+fn window_info(lua: &Lua, gui: &Gui) -> mlua::Result<MultiValue> {
+    let info = &gui.window_info;
+    let t = lua.create_table()?;
+    let num = |k: &str| -> mlua::Result<()> {
+        let Some(n) = info.get(k).and_then(|v| v.as_f64()) else {
+            return Ok(());
+        };
+        if n.fract() == 0.0 && (0.0..i64::MAX as f64).contains(&n) {
+            t.set(k, n as i64)?;
+        } else {
+            t.set(k, n)?;
+        }
+        Ok(())
+    };
+    num("width")?;
+    num("height")?;
+    num("columns")?;
+    num("rows")?;
+    num("opacity")?;
+    for k in ["fullscreen", "maximized", "focused"] {
+        if let Some(b) = info.get(k).and_then(|v| v.as_bool()) {
+            t.set(k, b)?;
+        }
+    }
+    if let Some((w, h)) = gui.view.cell {
+        let cell = lua.create_table()?;
+        cell.set("w", w)?;
+        cell.set("h", h)?;
+        t.set("cell", cell)?;
+    }
+    ret(lua, t)
 }
 
 /// `bone.gui.window{ title, width, height, fullscreen, maximized,
@@ -106,7 +140,10 @@ impl Gui {
             "fullscreen": fullscreen.unwrap_or(false),
             "maximized": maximized.unwrap_or(false),
             "focused": focused.unwrap_or(true),
-            "columns": self.lua.screen_cols,
+            "columns": self.view.screen_cols,
+            "rows": self.view.screen_size.1,
+            "cell": self.view.cell.map(|(w, h)| serde_json::json!({ "w": w, "h": h })),
+            "opacity": if self.transparent { self.opacity() } else { 1.0 },
         });
         for cmd in std::mem::take(&mut self.viewport) {
             ctx.send_viewport_cmd(cmd);

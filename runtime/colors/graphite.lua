@@ -4,8 +4,10 @@
 local p = {
   bg = "#121212", panel = "#1c1c1c", raised = "#2c2c2c", border = "#3a3a3a",
   fg = "#eeeeee", muted = "#b8b8b8", dim = "#8a8a8a",
-  blue = "#d4d4d4", green = "#9bd5b0", yellow = "#e8c184", red = "#ffb0b7",
-  purple = "#cfbaf3", cyan = "#a5d6e4", orange = "#f0b98b",
+  -- Accent and code match the TUI black palette's light blue.
+  blue = "#c8dcf5", path = "#abc4e3",
+  green = "#9bd5b0", yellow = "#e8c184", orange = "#f0b98b", red = "#ffb0b7",
+  purple = "#cfbaf3", cyan = "#a5d6e4",
   bubble = "#333333",
   diff_add = "#7ee787", diff_add_bg = "#172b23", diff_del = "#ff7b72", diff_del_bg = "#34212a",
 }
@@ -23,6 +25,9 @@ hl("InputText", { fg = p.fg, bg = p.panel })
 hl("InputPrompt", { fg = p.muted, bg = p.panel })
 hl("PromptBorder", { fg = p.border })
 hl("Placeholder", { fg = p.dim })
+-- What the window draws itself: the prompt's cursor, selected text.
+hl("TextSelection", { fg = p.blue, bg = "#2f3a4a" })
+hl("Cursor", { fg = p.fg })
 hl("Reasoning", { fg = p.muted, italic = true })
 hl("ToolName", { fg = p.fg, bold = true })
 hl("ToolArgs", { fg = p.muted })
@@ -46,12 +51,12 @@ hl("ShellOperator", { fg = p.muted })
 hl("MdHeading", { fg = p.fg, bold = true })
 hl("MdBold", { fg = p.fg, bold = true })
 hl("MdItalic", { fg = p.fg, italic = true })
-hl("MdCode", { fg = p.orange })
+hl("MdCode", { fg = p.path })
 hl("MdCodeBlock", { fg = p.fg })
 hl("CodeBlock", { fg = p.fg, bg = p.panel })
 hl("MdQuote", { fg = p.muted, italic = true })
 hl("MdBullet", { fg = p.muted })
-hl("MdLink", { fg = p.cyan, underline = true })
+hl("MdLink", { fg = p.path, underline = true })
 hl("MdTable", { fg = p.fg })
 hl("MdTableHeader", { fg = p.fg, bold = true })
 hl("Notice", { fg = p.yellow })
@@ -70,3 +75,8 @@ hl("PanelAccent", { fg = p.fg, bg = p.panel, bold = true })
 hl("PanelSelected", { fg = p.fg, bg = p.raised, bold = true })
 hl("PanelSelectedDim", { fg = p.muted, bg = p.raised })
 hl("PanelRunning", { fg = p.yellow, bg = p.panel })
+-- A chat's state in the sessions sidebar: running, waiting for an
+-- approval, finished while you were elsewhere.
+hl("SessionRunning", { fg = p.yellow })
+hl("SessionWaiting", { fg = p.orange })
+hl("SessionUnread", { fg = p.fg })

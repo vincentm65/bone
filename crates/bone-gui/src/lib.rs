@@ -6,27 +6,34 @@
 //! core only through a [`bone_client::Client`], so it runs the same against
 //! an in-process server or a socket, next to a TUI on the same core.
 //!
-//! [`Gui`] is the client state and logic, independent of egui; `view.rs`
-//! draws it, `native.rs` opens the window, and [`Headless`] drives it
+//! [`Gui`] is the client state and logic; `view.rs` draws a frame of it,
+//! which is Lua's node tree (`node.rs`, laid out by `flex.rs`, painted by
+//! `nodeview`), `native.rs` opens the window, and [`Headless`] drives it
 //! without one.
 
-mod block;
+mod canvas;
 mod chats;
+mod field;
+mod flex;
 mod headless;
 mod images;
 mod keys;
 mod lua;
 mod native;
+mod node;
+mod nodeview;
 mod preview;
+mod profile;
 mod prompt;
-mod rich;
-mod screen;
 mod system;
 mod view;
 mod window;
 
+pub use profile::{enable as enable_profile, report as profile_report, reset as profile_reset};
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
@@ -41,8 +48,6 @@ use bone_proto::methods::{
 };
 use bone_proto::types::{ImageAttachment, SessionInfo};
 use bone_ui::chat::RunningTurn;
-use bone_ui::style::Style;
-use bone_ui::text::{sanitize, wrap};
 use serde_json::Value;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
@@ -50,10 +55,9 @@ use tokio::sync::mpsc;
 pub use crate::headless::Headless;
 pub use crate::native::run;
 
-/// One row of a chat item, as drawn: text in styles.
-pub type Row = Vec<(String, Style)>;
-pub type ChatBuffer = bone_ui::chat::ChatBuffer<ChatRow>;
-pub use crate::block::ChatRow;
+/// A chat. The line cache is `()`: the GUI draws items as nodes and uses
+/// the shared cache only to ask `stale_key` which of them changed.
+pub type ChatBuffer = bone_ui::chat::ChatBuffer<()>;
 
 pub struct GuiOptions {
     /// Where new sessions start.
@@ -79,18 +83,18 @@ enum Msg {
 pub struct Status {
     pub text: String,
     pub error: bool,
+    /// When it was shown, so a view can let it fade.
+    pub at: Instant,
 }
 
-/// A key asked the chat on screen to move. The scroll area applies it
-/// on the next frame (egui owns the offset).
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum ChatScroll {
-    /// Rows down (negative scrolls toward the start).
-    By(i32),
-    Top,
-    Bottom,
-    /// To this row at the top.
-    To(usize),
+impl Status {
+    pub fn new(text: String, error: bool) -> Self {
+        Status {
+            text,
+            error,
+            at: Instant::now(),
+        }
+    }
 }
 
 pub struct Gui {
@@ -132,22 +136,30 @@ pub struct Gui {
     pub closed: bool,
     /// What draws the window: the renderer and adapter (`None` headless).
     pub renderer: Option<String>,
+    /// The window was opened see-through (`opacity` below 1 then), so its
+    /// background can take the option's alpha.
+    pub transparent: bool,
     /// The window as Lua sees it (`bone.gui.window_info`), the title Lua
     /// set, and window changes to send on the next frame.
     pub window_info: Value,
     pub window_title: Option<String>,
     viewport: Vec<eframe::egui::ViewportCommand>,
-    /// Width (in columns) the current chat's rows were last wrapped at.
-    wrapped_at: usize,
-    /// Move the chat on screen, from a key, before the next frame draws.
-    pub(crate) chat_scroll: Option<ChatScroll>,
     /// `opts_rev` last applied to egui's theme, so a colorscheme change
     /// restyles dialogs without rewriting the style every frame.
     visuals_rev: Option<u64>,
-    /// A free-text answer being typed to the open question.
-    answer_draft: String,
     /// The Lua state and what the Lua API keeps.
     pub lua: crate::lua::LuaSide,
+    /// What the node view keeps between frames; it outlives Lua reloads.
+    pub view: crate::nodeview::ViewState,
+    /// The draft last measured, shared with the frame's font metrics so an
+    /// idle frame does not copy it.
+    draft_rc: Rc<str>,
+    /// Hash of the Lua sources last seen, and whether a check is running.
+    /// `None` until the window is first focused.
+    config_hash: Option<u64>,
+    config_checking: bool,
+    /// The window had the focus last frame, so gaining it can be told apart.
+    was_focused: bool,
     /// Images read to be shown, and the one open in a window.
     previews: crate::preview::Previews,
 }
@@ -195,22 +207,22 @@ impl Gui {
             status: None,
             closed: false,
             renderer: None,
+            transparent: false,
             window_info: Value::Null,
             window_title: None,
             viewport: Vec::new(),
-            wrapped_at: 0,
-            chat_scroll: None,
             visuals_rev: None,
-            answer_draft: String::new(),
             lua: Default::default(),
+            view: Default::default(),
             previews: Default::default(),
+            draft_rc: Rc::from(""),
+            config_hash: None,
+            config_checking: false,
+            was_focused: false,
         };
         gui.forward(events);
         gui.refresh_sessions();
         gui.load_lua();
-        if let Some(dir) = gui.opts.config_dir.clone() {
-            gui.watch_config(dir);
-        }
         Ok(gui)
     }
 
@@ -268,6 +280,7 @@ impl Gui {
     }
 
     fn handle(&mut self, msg: Msg) {
+        self.view.invalidate();
         match msg {
             Msg::Apply(f) => f(self),
             Msg::Event(ev) => self.handle_event(&ev),
@@ -529,51 +542,17 @@ impl Gui {
     }
 
     pub fn info(&mut self, text: String) {
-        self.status = Some(Status { text, error: false });
+        self.status = Some(Status::new(text, false));
     }
 
     pub fn error(&mut self, text: String) {
-        self.status = Some(Status { text, error: true });
+        self.status = Some(Status::new(text, true));
     }
 
-    /// Draw chat `buf`'s stale items at `width` columns through the Lua
-    /// views (or plain text without them), those in `view` first, and return
-    /// its row count and the top row that keeps the same text at the top.
-    pub fn layout_chat(
-        &mut self,
-        buf: usize,
-        width: usize,
-        view: bone_ui::lua::ChatView,
-    ) -> (usize, usize) {
-        let width = width.max(1);
-        let top = bone_ui::lua::render_chat(
-            self,
-            buf,
-            width,
-            view,
-            &|gui: &Gui, items, width| {
-                ChatRow::Text(
-                    bone_ui::model::layout_items(items, width)
-                        .into_iter()
-                        .map(|(t, hl)| (t, gui.lua.theme.hl(hl)))
-                        .collect(),
-                )
-            },
-            &|data, width, first| {
-                bare_rows(data, width, first)
-                    .into_iter()
-                    .map(|r| ChatRow::Text(vec![(r, Style::default())]))
-                    .collect()
-            },
-        );
-        self.wrapped_at = width;
-        (self.chats[buf].row_count(), top)
-    }
-
-    /// The current chat as text, one row per line (after `layout_chat`).
+    /// The chat items in view, as text, a line to each piece of it (after a
+    /// frame).
     pub fn transcript(&self) -> String {
-        let rows: Vec<String> = self.chats[self.current].rows().map(ChatRow::text).collect();
-        rows.join("\n")
+        self.view.transcript()
     }
 
     /// The current chat's title, for the window.
@@ -586,74 +565,51 @@ impl Gui {
         c.turn.is_some() || c.starting
     }
 
-    /// A question's text, as most hooks write it.
-    pub fn question_text(q: &Value) -> String {
-        ["title", "text", "message", "prompt"]
-            .iter()
-            .find_map(|k| q[k].as_str())
-            .map_or_else(|| q.to_string(), str::to_owned)
-    }
-
-    /// The answers a question offers, if it lists them.
-    pub fn question_options(q: &Value) -> Vec<String> {
-        ["options", "choices"]
-            .iter()
-            .find_map(|k| q[k].as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(str::to_owned))
-                    .collect()
-            })
-            .unwrap_or_default()
-    }
-
     /// The last Lua errors in full (empty when the configuration loaded
     /// cleanly).
     pub fn lua_errors(&self) -> &[String] {
         &self.lua.lua_errors
     }
 
-    /// Reload the Lua config once an edit to it has settled; call every
-    /// frame. True when it reloaded (or tried to).
-    /// Poll the Lua config in `dir` in the background, and reload it once
-    /// an edit has settled; the window is only woken for that.
-    fn watch_config(&self, dir: PathBuf) {
+    /// The window gained the focus: look for a saved edit to the Lua
+    /// config. Checking on focus, not on a timer, so an idle window does
+    /// not walk the file tree. The first focus only records the hash.
+    pub(crate) fn note_focus(&mut self, ctx: &eframe::egui::Context) {
+        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+        let gained = focused && !self.was_focused;
+        self.was_focused = focused;
+        if gained {
+            self.check_config();
+        }
+    }
+
+    fn check_config(&mut self) {
+        if self.config_checking {
+            return;
+        }
+        let Some(dir) = self.opts.config_dir.clone() else {
+            return;
+        };
+        self.config_checking = true;
         let (tx, repaint) = (self.tx.clone(), self.repaint.clone());
         self.rt.spawn(async move {
-            let mut watcher = crate::lua::Watcher::new(dir);
-            loop {
-                tokio::time::sleep(crate::lua::Watcher::EVERY).await;
-                if !watcher.poll() {
-                    continue;
+            let hash = tokio::task::spawn_blocking(move || crate::lua::lua_sources(&dir))
+                .await
+                .unwrap_or(0);
+            let _ = tx.send(Msg::Apply(Box::new(move |gui: &mut Gui| {
+                gui.config_checking = false;
+                match gui.config_hash {
+                    Some(prev) if prev != hash => {
+                        gui.config_hash = Some(hash);
+                        gui.reload_lua();
+                    }
+                    None => gui.config_hash = Some(hash),
+                    _ => {}
                 }
-                let reload = Msg::Apply(Box::new(|gui: &mut Gui| {
-                    gui.reload_lua();
-                }));
-                if tx.send(reload).is_err() {
-                    return;
-                }
-                wake(&repaint);
-            }
+            })));
+            wake(&repaint);
         });
     }
-
-    /// The width the current chat was last wrapped at.
-    pub fn wrapped_at(&self) -> usize {
-        self.wrapped_at
-    }
-}
-
-/// Without Lua views: the item's bare text, wrapped, after a blank row
-/// unless it comes first. The same rows as the TUI's bare rendering.
-fn bare_rows(data: &Value, width: usize, first: bool) -> Vec<String> {
-    let text = bone_ui::chat::bare_text(data);
-    if text.is_empty() {
-        return Vec::new();
-    }
-    let gap = (!first).then(String::new);
-    gap.into_iter()
-        .chain(sanitize(&text).split('\n').flat_map(|l| wrap(l, width)))
-        .collect()
 }
 
 fn wake(repaint: &OnceLock<eframe::egui::Context>) {

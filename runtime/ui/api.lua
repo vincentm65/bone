@@ -562,7 +562,11 @@ end
 
 local views, view_store = watched()
 local tool_views, tool_view_store = watched()
-bone.ui = { views = views, tool_views = tool_views, regions = {} }
+--- `windows`: how a library draws the windows the runtime opens itself
+--- (select, pager, setup, catalog): `windows.<name> = function(page)`
+--- returns the window's spec (`node` or `lines`, size, anchor); without
+--- one the window is drawn as `lines`.
+bone.ui = { views = views, tool_views = tool_views, regions = {}, windows = {} }
 
 --- Remove every view, tool view, region, action and the statusline,
 --- divider, prompt and layout: a blank screen to build on (Rust draws plain
@@ -1171,7 +1175,12 @@ function bone.ui.select(items, opts)
     return true
   end
 
-  id = bone.ui.popup({ lines = render, on_key = on_key })
+  local page = { st = st, opts = opts, matches = matches, finish = finish }
+  local view = bone.ui.windows.select
+  local spec = view and view(page) or { lines = render }
+  spec.on_key = spec.on_key or on_key
+  id = bone.ui.popup(spec)
+  page.id = id
 
   function handle:set_items(new)
     st.items, st.loading = new or {}, false
@@ -1371,7 +1380,12 @@ function bone.ui.pager(content, opts)
     return true
   end
 
-  id = bone.ui.popup({ lines = render, on_key = on_key })
+  local page = { opts = opts, content = function() return content end, close = function() bone.ui.close(id) end }
+  local view = bone.ui.windows.pager
+  local spec = view and view(page) or { lines = render }
+  spec.on_key = spec.on_key or on_key
+  id = bone.ui.popup(spec)
+  page.id = id
   local handle = {}
   function handle:set(new)
     content, top = new, 0

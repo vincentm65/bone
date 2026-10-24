@@ -84,14 +84,14 @@ naming the operation.
 | `ui.chat_data` | `bone.chat.items`, `add`, `update`, `remove`, `turns`, `session`, `sessions`, `redraw`, `refresh_in` | shared |
 | `ui.views` | `bone.ui.views` drawing chat items, `bone.ui.refresh` | shared |
 | `ui.request` | `bone.request`, `bone.system`, `bone.http`, `bone.defer`, `bone.notify`, `bone.settings` | shared |
-| `ui.layout` | `bone.ui.layout`, regions, `bone.ui.statusline`/`divider`, `bone.ui.prompt` (its box), `bone.ui.geometry` (character units), `bone.ui.refresh_in` | shared |
+| `ui.layout` | `bone.ui.layout`, regions, `bone.ui.statusline`/`divider`, `bone.ui.prompt` (its box), `bone.ui.geometry` (character units), `bone.ui.refresh_in` | TUI only: the GUI draws a node tree (`gui.nodes`) |
 | `ui.windows` | `bone.ui.popup`/`win`, `update`, `close`, `is_open` | shared |
-| `ui.panels` | `bone.ui.panel` (open, update, lines, close, info, list, focus, scroll) | shared |
-| `ui.input` | keys (windows', panels', raw, keymaps and sequences), `bone.press`, `bone.action`, `bone.ui.actions`, the `mouse` event and what is under it | shared; the GUI's text box edits the prompt itself |
+| `ui.panels` | `bone.ui.panel` (open, update, lines, close, info, list, focus, scroll) | TUI only; the GUI keeps their state and the library docks panels of `blocks` |
+| `ui.input` | keys (windows', panels', raw, keymaps and sequences), `bone.press`, `bone.action`, `bone.ui.actions`, the `mouse` event and what is under it | shared; the GUI's text box edits the prompt itself, and it sends no `mouse` events (nodes take the pointer) |
 | `ui.prompt` | `bone.prompt` (cursor, range and selection edits, `info`, `empty`, `images`, `attach`, `paste`, `history_add`), `bone.api.prompt_get`/`prompt_set`; the `submit`, `prompt/changed`, `paste` and `image/attached` events | shared; the GUI's text box keeps its own cursor and selection, reported to Lua |
 | `ui.jobs` | `bone.job`, `job/*` events, `bone.processes` (`list`, `screen`) | shared |
 | `ui.plugins` | `bone.plugin` (`list`, `load`, `unload`, `reload`, `on_shutdown`, `state`), trusted project config, `bone.library` | shared |
-| `ui.session` | `bone.api.session`, `open_session`, `bone.chat.view`/`at`/`scroll` | shared; the GUI scrolls in pixels and maps to rows |
+| `ui.session` | `bone.api.session`, `open_session`, `bone.chat.view`/`at`/`scroll` | shared; the GUI scrolls in pixels (a row is 20 px) and `at` finds nothing |
 | `ui.local_events` | the local `prompt/changed`, `focus/changed`, `resize`, `key`, `paste` and `panel/*` events | shared |
 | `ui.command_specs` | command aliases, completion callbacks and typed arguments | shared |
 | `ui.dynamic_options` | `bone.o.define` options with defaults, choices, `on_change` and deletion | shared |
@@ -99,7 +99,7 @@ naming the operation.
 | `ui.model` | `bone.model` (`list`, `complete`) | shared |
 | `ui.rpc` | `bone.rpc.call` into core Lua | shared |
 | `ui.project` | `bone.project` (`info`, `trust`) | shared |
-| `gui.window`, `gui.notifications`, `gui.dialogs`, `gui.blocks` | `bone.gui` (window, notify, file dialogs, library) and `block` views | GUI only (see `customizing/customizing-gui.md`) |
+| `gui.nodes`, `gui.window`, `gui.notifications`, `gui.dialogs`, `gui.window_nodes` | `bone.gui` (`view`, scroll, window, notify, file dialogs, library), node views, and windows and panels drawn as nodes (`node = fn` in their spec) | GUI only (see `customizing/customizing-gui.md`) |
 
 The TUI and the GUI fire the same local events, including `server/disconnected` and `server/reconnected` (a `--connect` TUI or the GUI lost and regained the server).
 
@@ -838,9 +838,10 @@ bone.now()                              -- milliseconds since the epoch
 - `bone.ui.sessions()`: the agents sidebar (`ctrl+o`, `/sessions`), implemented in `runtime/lua/bone/ui/sessions.lua` with `bone.ui.panel`. The Chats tab groups sessions into Recent (running or active within one hour by default, configurable with `bone.ui.sessions_recent_seconds`) and History; running sessions show animated `ctx.spinner`. `/archive` moves the current session to History and starts a new one. The Processes tab lists every chat's background shells and running sub-agents; `enter` opens their chat, `x` stops one. Sub-agent sessions are omitted from Chats but can also be opened from their owner's tray. Lists titles, activity timestamps, input + output tokens and user-turn counts; supports filtering, keyboard navigation and click-to-open. Switching keeps the panel visible and focuses the prompt. Initial running status comes from `session/active`, then turn events maintain it. Drag the blank column at its right edge to change its width (remembered across starts; `bone.ui.sessions_width` sets the default). Replace it to change how sessions are listed.
 - `bone.ui.suggestions(ctx)` → lines: draws the `/` menu (see Commands) right above the prompt, with the closest match nearest the input. `ctx = { items = { { name, desc } }, selected, width, height }`. Set it to `nil` for no list (tab still completes).
 - `bone.api.open_session(id)`: show a session (also accepts a chat number).
+- `bone.ui.windows.<select|pager|setup|catalog> = function(page)` is how a library draws what the runtime opens itself: it returns the popup spec (`node` or `lines`, size, anchor); the desktop library sets all four, and without one the window is drawn as `lines`.
 - `bone.ui.pager(content, { title, width, height })` → handle: scrollable text in a focused window. `content` is a string (wrapped; `#` lines are headings) or a list of lines. `up`/`down`/wheel, `pageup`/`pagedown`, `home`/`end`, `esc` or `q` closes. `handle:set(content)`, `handle:close()`.
 - `bone.ui.help(topic)` and `bone.ui.health()`: what `/help {topic}` and `/health` call (in `runtime/tui/defaults.lua`). With no topic, `bone.ui.help()` opens the searchable Commands / Keys / Docs popup. Its browser and topic lookup live in `runtime/lua/bone/help.lua`; override `~/.bone/runtime/lua/bone/help.lua` to customize it. The docs (usage, Lua, protocol, architecture, customization guides and loaded plugins' READMEs) are in `bone._docs`; the TUI's built-in checks come from `bone.api.health()`.
-- `bone.ui.geometry()` → `{ leaves = { { name, x, y, width, height } }, seps = { { x, y, width, height, path } } }`: where the last frame put each layout leaf and column separator. A separator's `path` is the 1-based child indexes from `bone.ui.layout` to the column after it, so a mouse handler can resize the split it belongs to.
+- `bone.ui.geometry()` (TUI only; part of `ui.layout`, which the GUI does not have) → `{ leaves = { { name, x, y, width, height } }, seps = { { x, y, width, height, path } } }`: where the last frame put each layout leaf and column separator. A separator's `path` is the 1-based child indexes from `bone.ui.layout` to the column after it, so a mouse handler can resize the split it belongs to.
 - `bone.ui.box(lines, { title, title_hl, border_hl, width, pad, chars })` → the lines inside a rounded border (`PopupBorder`/`PopupTitle` by default). Only used if you call it.
 
 ### Jobs

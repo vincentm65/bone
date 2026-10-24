@@ -10,6 +10,8 @@ use bone_core::scripting;
 use bone_gui::{GuiOptions, Headless};
 use bone_server::Server;
 
+// `run_all` is for the frontends that run every script.
+#[allow(dead_code)]
 #[path = "../../../tests/ui/runner.rs"]
 mod runner;
 
@@ -71,20 +73,20 @@ async fn gui(library: &str) -> Fixture {
     }
 }
 
-/// The shared defaults, as the TUI draws them: what parity is about.
+/// The scripts that are about the TUI's cell layout: regions, docked cell
+/// panels, the chat's row scroll. The GUI draws a node tree, so what they
+/// check (where a cell went) has no meaning there; the TUI runs them.
+const CELL_LAYOUT: [&str; 4] = ["frontend.lua", "layout.lua", "panels.lua", "scrolling.lua"];
+
+/// The shared behaviour (events, commands, keymaps, options, prompt,
+/// popups, plugins, jobs...) under the library the GUI draws by default.
 #[tokio::test(flavor = "multi_thread")]
 async fn shared_api_in_the_gui() {
-    let failures = runner::run_all(|| gui("standard")).await;
-    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
-}
-
-/// The same scripts under the library the GUI draws by default.
-#[tokio::test(flavor = "multi_thread")]
-async fn shared_api_in_the_desktop_library() {
     let mut failures = Vec::new();
     for path in runner::scripts() {
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
         // It asserts which library is drawn.
-        if path.ends_with("libraries.lua") {
+        if name == "libraries.lua" || CELL_LAYOUT.contains(&name) {
             continue;
         }
         let mut ui = gui("desktop").await;

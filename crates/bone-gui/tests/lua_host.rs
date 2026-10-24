@@ -80,7 +80,8 @@ async fn the_bare_library_draws_plain_text() {
         .run_lua("t", "bone.chat.add('note', { text = 'plain words' })")
         .unwrap();
     g.frame();
-    assert_eq!(g.gui.transcript(), "plain words");
+    g.frame();
+    assert!(g.painted.iter().any(|(t, _)| t.contains("plain words")));
 
     // The basic keys and the slash commands: enter runs a command, and
     // sends anything else.
@@ -125,8 +126,14 @@ async fn a_reload_with_a_new_error_keeps_the_config_in_use() {
         .run_lua("t", "assert(bone.o.conf_n == 5, 'the value carries over')")
         .unwrap();
 
-    // An edit is picked up by itself once it has settled.
+    // The first focus only records the sources. An edit is noticed
+    // when the window comes back to the front.
+    g.frame();
+    g.settle(Duration::from_millis(100)).await;
     std::fs::write(&file, "bone.o.define('conf_n', 1)\nmarker = 'third'").unwrap();
+    g.set_focused(false);
+    g.frame();
+    g.set_focused(true);
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while g.gui.eval("marker").unwrap() != "third" {
         assert!(tokio::time::Instant::now() < deadline, "edit not noticed");
@@ -173,7 +180,6 @@ async fn keys_reach_lua_and_typing_reaches_the_prompt() {
     assert!(g.gui.running(), "submitted");
 }
 
-/// The standard library's / menu: a region above the prompt that typing
 /// "/" fills and esc hides, as in the TUI.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_slash_menu_opens_and_esc_hides_it() {
@@ -181,28 +187,28 @@ async fn the_slash_menu_opens_and_esc_hides_it() {
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut g = gui(config.path(), work.path()).await;
     let menu = |g: &Headless| {
-        (g.gui.lua.geometry.leaves.iter())
-            .find(|(n, _)| n == "above_prompt")
-            .map_or(0, |(_, r)| r.height)
+        g.painted
+            .iter()
+            .any(|(t, _)| t.len() > 1 && t.len() < 20 && t.starts_with('/'))
     };
     g.frame();
-    assert_eq!(menu(&g), 0);
+    assert!(!menu(&g));
     g.text("/");
     g.frame();
     g.frame();
-    assert!(menu(&g) > 0, "typing / opens the menu");
+    assert!(menu(&g), "typing / opens the menu");
     g.key(Key::Escape, Modifiers::NONE);
     g.frame();
     g.frame();
-    assert_eq!(menu(&g), 0, "esc hides it");
+    assert!(!menu(&g), "esc hides it");
     assert_eq!(g.gui.draft, "/", "and keeps the text");
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 
-/// ctrl+o opens the standard sessions panel, which takes the keyboard; esc
-/// gives it back to the prompt.
+/// ctrl+o opens the sessions sidebar, which takes the keyboard; esc gives
+/// it back to the prompt.
 #[tokio::test(flavor = "multi_thread")]
-async fn ctrl_o_opens_the_sessions_panel() {
+async fn ctrl_o_opens_the_sessions_sidebar() {
     use eframe::egui::{Key, Modifiers};
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut g = gui(config.path(), work.path()).await;
@@ -210,61 +216,54 @@ async fn ctrl_o_opens_the_sessions_panel() {
     g.key(Key::O, Modifiers::CTRL);
     g.frame();
     g.frame();
-    let p = g
-        .gui
-        .lua
-        .panels
-        .iter()
-        .find(|p| p.id == "sessions")
-        .expect("open");
-    assert!(p.area.is_some_and(|a| a.width > 0), "drawn");
-    assert_eq!(g.gui.lua.panel_focus.as_deref(), Some("sessions"));
+    assert!(g.painted.iter().any(|(t, _)| t == "Processes"), "drawn");
+    g.frame();
+    assert_eq!(
+        g.gui.eval("bone.gui.focused()").unwrap(),
+        "sidebar-search",
+        "its search field has the keyboard"
+    );
     g.key(Key::Escape, Modifiers::NONE);
     g.frame();
-    assert_ne!(
-        g.gui.lua.panel_focus.as_deref(),
-        Some("sessions"),
+    g.frame();
+    assert_eq!(
+        g.gui.eval("tostring(bone.gui.focused())").unwrap(),
+        "nil",
         "esc leaves it"
     );
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 
-/// A click reaches Lua's mouse handlers with what is under it, and focuses
-/// the panel it lands on.
+/// A click reaches the handler of the node under it, and only that one;
+/// the pointer over a node calls its hover handler.
 #[tokio::test(flavor = "multi_thread")]
-async fn clicks_reach_lua_with_what_is_under_them() {
+async fn clicks_reach_the_node_under_them() {
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     std::fs::write(
         config.path().join("gui.lua"),
-        r#"
+        r##"
         clicks = {}
-        bone.on("mouse", function(ev)
-          if ev.action == "down" then
-            clicks[#clicks + 1] = (ev.region or "-") .. ":" .. tostring(ev.panel)
-          end
+        bone.gui.view(function()
+          return { direction = "row",
+            { width = 100, height = 100, bg = "#222", on_click = function(p) clicks[#clicks + 1] = "a" .. math.floor(p.x) end },
+            { width = 100, height = 100, bg = "#333", on_click = function() clicks[#clicks + 1] = "b" end,
+              on_hover = function(on) hovered = on end },
+          }
         end)
-        bone.ui.panel.open({ id = "conf_click", dock = "right", size = 10, lines = { "x" } })
-        "#,
+        "##,
     )
     .unwrap();
     let mut g = gui(config.path(), work.path()).await;
     g.frame();
-    let prompt = (g.gui.lua.geometry.leaves.iter())
-        .find(|(n, _)| n == "prompt")
-        .map(|(_, r)| *r)
-        .unwrap();
-    g.click(prompt.x + 2, prompt.y + 1);
     g.frame();
-    let p = g.gui.lua.panels[0].area.unwrap();
-    g.click(p.x + 1, p.y);
+    g.click_at(30.0, 50.0);
     g.frame();
-    g.gui
-        .run_lua("t", "assert(clicks[1] == 'prompt:nil', clicks[1])")
-        .unwrap();
-    g.gui
-        .run_lua("t", "assert(clicks[2] == '-:conf_click', clicks[2])")
-        .unwrap();
-    assert_eq!(g.gui.lua.panel_focus.as_deref(), Some("conf_click"));
+    g.click_at(150.0, 50.0);
+    g.frame();
+    g.frame();
+    assert_eq!(g.gui.eval("table.concat(clicks, ',')").unwrap(), "a30,b");
+    assert_eq!(g.gui.eval("hovered").unwrap(), "true");
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 
 /// bone.o.font_size sets the size of the character cells.
@@ -274,11 +273,11 @@ async fn the_font_size_option_sizes_the_cells() {
     let mut g = gui(config.path(), work.path()).await;
     g.frame();
     g.frame();
-    let (_, _, col, row) = g.gui.lua.cells.unwrap();
+    let (col, row) = g.gui.view.cell.unwrap();
     g.gui.run_lua("t", "bone.o.font_size = 28").unwrap();
     g.frame();
     g.frame();
-    let (_, _, col2, row2) = g.gui.lua.cells.unwrap();
+    let (col2, row2) = g.gui.view.cell.unwrap();
     assert!(
         col2 > col * 1.5 && row2 > row * 1.5,
         "{col}x{row} -> {col2}x{row2}"
@@ -343,19 +342,40 @@ async fn page_keys_scroll_the_chat() {
             &format!("bone.chat.add('note', {{ text = [[{text}]] }})"),
         )
         .unwrap();
-    g.frame();
-    let bottom = g.gui.lua.chat_top;
-    assert!(bottom > 20, "not at the end: {bottom}");
+    for _ in 0..4 {
+        g.frame();
+    }
+    let offset = |g: &mut Headless| {
+        g.gui
+            .eval("bone.gui.scroll_info('chat').offset")
+            .unwrap()
+            .parse::<f32>()
+            .unwrap()
+    };
+    let max = g
+        .gui
+        .eval("bone.gui.scroll_info('chat').max")
+        .unwrap()
+        .parse::<f32>()
+        .unwrap();
+    assert!(
+        max > 200.0 && offset(&mut g) == max,
+        "at the end: {} of {max}",
+        offset(&mut g)
+    );
     g.key(Key::PageUp, Modifiers::NONE);
     g.frame();
-    assert!(g.gui.lua.chat_top < bottom, "pageup stayed at {bottom}");
+    g.frame();
+    assert!(offset(&mut g) < max, "pageup stayed at {max}");
     g.key(Key::End, Modifiers::CTRL);
     g.frame();
-    assert_eq!(g.gui.lua.chat_top, bottom, "ctrl+end did not return");
+    g.frame();
+    assert_eq!(offset(&mut g), max, "ctrl+end did not return");
 }
 
-/// A narrower window has fewer columns, re-wraps the chat and fires
-/// `resize`; a HiDPI display keeps the layout, which is in logical units.
+/// A narrower window has fewer columns and fires `resize` (in columns and
+/// rows, as in the TUI); a HiDPI display keeps the layout, which is in
+/// logical units.
 #[tokio::test(flavor = "multi_thread")]
 async fn resizing_and_hidpi() {
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -367,30 +387,20 @@ async fn resizing_and_hidpi() {
     let mut g = gui(config.path(), work.path()).await;
     g.frame();
     g.frame();
-    let long = "word ".repeat(120);
-    g.gui
-        .run_lua(
-            "t",
-            &format!("bone.chat.add('note', {{ text = '{long}' }})"),
-        )
-        .unwrap();
-    g.frame();
-    let cols = g.gui.lua.screen_cols;
-    let rows = g.gui.chats[0].row_count();
+    let cols = g.gui.view.screen_cols;
 
     g.resize(500.0, 700.0);
     g.frame();
-    let narrow = g.gui.lua.screen_cols;
+    let narrow = g.gui.view.screen_cols;
     assert!(narrow < cols * 6 / 10, "{cols} -> {narrow} columns");
-    assert!(g.gui.chats[0].row_count() > rows, "the chat re-wrapped");
     let resized = g.gui.eval("resized").unwrap();
-    assert_eq!(resized, format!("{narrow}x{}", g.gui.lua.screen_size.1));
+    assert_eq!(resized, format!("{narrow}x{}", g.gui.view.screen_size.1));
 
     g.set_scale(2.0);
     g.frame();
     g.frame();
     assert_eq!(
-        g.gui.lua.screen_cols, narrow,
+        g.gui.view.screen_cols, narrow,
         "the same columns on a 2x display"
     );
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
@@ -443,14 +453,14 @@ async fn images_in_the_prompt_and_the_clipboard() {
         .as_str()
         .unwrap()
         .to_owned();
-    let row = (g.gui.transcript().lines())
-        .position(|l| l.contains(&format!("[Image: {left}")))
-        .expect("the image's row");
-    let chat = (g.gui.lua.geometry.leaves.iter())
-        .find(|(n, _)| n == "chat")
-        .map(|(_, r)| *r)
-        .unwrap();
-    g.click(chat.x + 4, chat.y + (row - g.gui.lua.chat_top) as u16);
+    for _ in 0..4 {
+        g.frame();
+    }
+    let at = (g.painted.iter())
+        .find(|(t, _)| t.contains(&format!("[Image: {left}")))
+        .expect("the image's row")
+        .1;
+    g.click_at(at.center().x, at.center().y);
     let shown = |gui: &bone_gui::Gui| gui.image_shown(&id);
     g.wait_for(Duration::from_secs(5), shown).await.unwrap();
 
@@ -505,10 +515,10 @@ async fn choosing_a_library_reloads_the_gui() {
     assert_eq!(g.gui.eval("bone.library.info().drawn").unwrap(), "mine");
 }
 
-/// A view's `block` is rich text the GUI wraps itself, as many rows as it
-/// needs; its `lines` are for a frontend that does not draw blocks.
+/// A view's `node` is rich text the GUI wraps itself; its `lines` are for
+/// a frontend that does not draw nodes.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_view_block_is_wrapped_rich_text() {
+async fn a_view_node_is_wrapped_rich_text() {
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut g = gui(config.path(), work.path()).await;
     g.frame();
@@ -517,30 +527,39 @@ async fn a_view_block_is_wrapped_rich_text() {
         .run_lua(
             "t",
             &format!(
-                r#"bone.ui.views.conf_block = function(item)
-                  return {{ block = {{
-                      paragraphs = {{ {{ spans = {{ {{ item.text, "Normal" }} }} }}, {{ spans = {{ "second" }}, gap = 6 }} }},
-                      bg = "UserMessage", radius = 12, pad = {{ 8, 12 }}, align = "right", max_width = 0.8,
+                r#"bone.ui.views.conf_node = function(item)
+                  return {{ node = {{ direction = "row", justify = "end",
+                      {{ bg = "UserMessage", radius = 12, padding = {{ 8, 12 }}, max_width = "80%",
+                        {{ spans = {{ {{ item.text, "Normal" }} }} }}, {{ text = "second", margin = {{ 6, 0, 0, 0 }} }} }},
                     }}, lines = {{ {{ {{ "fallback", "Normal" }} }} }} }}
                 end
-                bone.chat.add("conf_block", {{ text = "{long}" }})"#
+                bone.chat.add("conf_node", {{ text = "{long}" }})"#
             ),
         )
         .unwrap();
-    g.frame();
-    g.frame();
-    let rows = g.gui.chats[0].row_count();
-    assert!(rows > 3, "a long paragraph wraps over several rows: {rows}");
-    let t = g.gui.transcript();
-    assert!(t.contains("word word") && t.contains("second"), "{t}");
+    for _ in 0..4 {
+        g.frame();
+    }
+    let long = g
+        .painted
+        .iter()
+        .find(|(t, _)| t.contains("word word"))
+        .expect("the paragraph")
+        .1;
     assert!(
-        !t.contains("fallback"),
-        "the GUI draws the block, not the lines"
+        long.height() > 60.0,
+        "a long paragraph wraps over several lines: {long:?}"
+    );
+    assert!(long.width() <= 0.8 * 1000.0, "within max_width: {long:?}");
+    assert!(g.painted.iter().any(|(t, _)| t.contains("second")));
+    assert!(
+        !g.painted.iter().any(|(t, _)| t.contains("fallback")),
+        "the GUI draws the node, not the lines"
     );
 }
 
 /// The GUI draws with the desktop library unless another is chosen, and
-/// `/gui use` chooses apart from the TUI's choice: its views draw blocks,
+/// `/gui use` chooses apart from the TUI's choice: its views draw nodes,
 /// and it loads cleanly.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_desktop_library() {
@@ -573,10 +592,10 @@ async fn the_desktop_library() {
             "t",
             "bone.chat.add('note', { text = 'x' })
              local v = bone.ui.views.user({ kind = 'user', text = 'hello there' }, { width = 60 })
-             assert(v.block and v.block.align == 'right', 'a bubble')
+             assert(v.node and v.node.justify == 'end', 'a bubble on the right')
              assert(v.lines and #v.lines > 0, 'lines for the TUI')
              local a = bone.ui.views.assistant({ kind = 'assistant', text = '# Title\\n\\nSome **bold** text.\\n\\n- one\\n- two\\n\\n```\\ncode\\n```' }, { width = 60 })
-             assert(#a.block.paragraphs == 5, 'heading, text, two items, code: ' .. #a.block.paragraphs)",
+             assert(#a.node == 5, 'heading, text, two items, code: ' .. #a.node)",
         )
         .unwrap();
     // Apart from the TUI's looks: none of its drawing modules are loaded,
@@ -602,17 +621,39 @@ async fn the_desktop_library() {
             "bone.chat.add('note', { text = 'x' })
              local t = bone.ui.views.tool({ kind = 'tool', id = 'c1', name = 'shell', arguments = { command = 'ls -la' },
                done = true, output = 'a\\nb\\nc', is_error = false }, { width = 60 })
-             assert(t.block.paragraphs[1].spans[2].text == 'Ran', 'a card titled by what it did')
+             assert(t.node[1].spans[2].text == 'Ran', 'a card titled by what it did')
              local e = bone.ui.views.tool({ kind = 'tool', id = 'c2', name = 'edit_file',
                arguments = { path = 'x.rs', old_string = 'a', new_string = 'b' }, done = true }, { width = 60 })
-             assert(#e.block.paragraphs == 3, 'an edit shows its diff, a band per row')
-             assert(type(bone.ui.statusline({ width = 80, spinner = '*' })) == 'table', 'a status bar')
+             assert(#e.node == 2, 'title and one code block, not a band per line')
+             local block = e.node[2]
+             assert(block.bg == 'CodeBlock' and block.radius == 8, 'one dark rounded block')
+             assert(block[1].radius == nil and block[1].bg == 'DiffDelete', 'a flat highlighted removal')
+             assert(block[2].bg == 'DiffAdd' and block[2][1].text == '  + b', 'the addition')
+             local function edit(id, old, new)
+               return bone.ui.views.tool({ kind = 'tool', id = id, name = 'edit_file', done = true,
+                 arguments = { path = 'x.rs', old_string = old, new_string = new } }, { width = 80 }).node[2]
+             end
+             local ctx = edit('c3', 'fn a()\\n  keep\\n  old\\n  tail\\nend', 'fn a()\\n  keep\\n  new\\n  tail\\nend')
+             assert(#ctx == 6, 'context around the change, got ' .. #ctx)
+             assert(ctx[1][1].hl == 'Dim' and ctx[1].bg == nil and ctx[1][1].text == '    fn a()', 'grey context')
+             assert(ctx[2][1].text == '      keep' and ctx[2][1].hl == 'Dim', 'grey context')
+             assert(ctx[3].bg == 'DiffDelete' and ctx[3][1].text == '  -   old', 'highlighted removal')
+             assert(ctx[4].bg == 'DiffAdd' and ctx[4][1].text == '  +   new', 'highlighted addition')
+             assert(ctx[5][1].hl == 'Dim' and ctx[6][1].text == '    end', 'grey context after')
+             local mid = edit('c4', 'keep\\nold\\nmid\\nold2\\nkeep2', 'keep\\nnew\\nmid\\nnew2\\nkeep2')
+             assert(#mid == 7 and mid[4][1].hl == 'Dim' and mid[4][1].text == '    mid', 'unchanged line once, in grey')
+             assert(mid[3].bg == 'DiffAdd' and mid[5].bg == 'DiffDelete', 'the two changes stay highlighted')
+             local far = edit('c5',
+               table.concat({'a','b','c','d','e','f','g','h','i','j','k','l','m','n','o'}, '\\n'),
+               table.concat({'a','B','c','d','e','f','g','h','i','j','k','l','m','N','o'}, '\\n'))
+             assert(far[7][1].text == '···' and far[7][1].hl == 'Dim' and far[7].bg == nil, 'a gap in the context')
+             assert(far[6][1].text == '    e' and far[8][1].text == '    k', 'context resumes after the gap')
              bone.ui.sessions()",
         )
         .unwrap();
     g.frame();
     g.frame();
-    assert_eq!(g.gui.eval("bone.ui.panel.focused()").unwrap(), "sessions");
+    assert_eq!(g.gui.eval("bone.gui.focused()").unwrap(), "sidebar-search");
 
     // Settings, help and health are the GUI's own windows: each opens,
     // draws, takes its keys and closes without an error.
@@ -654,22 +695,18 @@ async fn the_desktop_library() {
     let shown = (g.gui.status.as_ref()).map_or(String::new(), |s| s.text.clone());
     assert!(!shown.contains("failed"), "{shown}");
 
+    // `standard` is the same window: the GUI has no look of the TUI's.
     g.gui.run_lua("t", "bone.cmd('gui use standard')").unwrap();
     g.frame();
     assert_eq!(
         g.gui.eval("bone.gui.library.info().active").unwrap(),
         "standard"
     );
-    assert_eq!(
-        g.gui
-            .eval("bone.ui.views.user({ kind = 'user', text = 'hi' }, { width = 40 }).block == nil")
-            .unwrap(),
-        "true"
-    );
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 
-/// What Lua draws reaches screen readers: chat rows, blocks, and the rows
-/// painted in regions (the status line).
+/// What the node view draws reaches screen readers: chat text and the
+/// text painted in boxes.
 #[tokio::test(flavor = "multi_thread")]
 async fn lua_drawn_rows_are_accessible() {
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -678,15 +715,14 @@ async fn lua_drawn_rows_are_accessible() {
     g.gui
         .run_lua(
             "t",
-            "bone.ui.statusline = function() return { { 'conf status words', 'StatusLine' } } end
-             bone.chat.add('note', { text = 'a chat row' })",
+            "bone.chat.add('note', { text = 'a chat row' })
+             bone.gui.view(function() return { { text = 'conf status words' } } end)",
         )
         .unwrap();
     g.frame();
     g.frame();
     let all = g.accessible.join(" | ");
-    assert!(all.contains("conf status words"), "the status line: {all}");
-    assert!(all.contains("a chat row"), "the chat: {all}");
+    assert!(all.contains("conf status words"), "painted text: {all}");
 }
 
 /// `/term` opens a terminal in a panel: the program's screen draws there,
@@ -736,10 +772,10 @@ async fn a_terminal_in_a_panel() {
     );
 }
 
-/// A panel opened with `blocks` draws them as rich text in place of lines,
-/// and a click on one reaches its `on_block`.
+/// A panel opened with `node` draws it in place of lines, and a click on a
+/// node in it reaches its `on_click`.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_panel_of_blocks() {
+async fn a_panel_of_nodes() {
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut g = gui(config.path(), work.path()).await;
     g.frame();
@@ -747,17 +783,15 @@ async fn a_panel_of_blocks() {
         .run_lua(
             "t",
             "bone.ui.panel.open({ id = 'rich', dock = 'left', size = 30,
-               blocks = function(ctx)
+               node = function(ctx)
                  seen_width = ctx.width
-                 local out = {}
+                 local out = { direction = 'column' }
                  for i = 1, 3 do
-                   out[i] = { id = i, selected = i == 2, block = {
-                     paragraphs = { { spans = { { 'card ' .. i, 'Normal' } } } },
-                     bg = 'Selection', radius = 10, pad = { 30, 12 }, margin = { 4, 4 } } }
+                   out[i] = { bg = 'Selection', radius = 10, padding = { 30, 12 }, margin = { 4, 0, 4, 0 },
+                     on_click = function() clicked = i end, { text = 'card ' .. i } }
                  end
                  return out
-               end,
-               on_block = function(id) clicked = id end })",
+               end })",
         )
         .unwrap();
     g.frame();
@@ -769,4 +803,59 @@ async fn a_panel_of_blocks() {
     g.frame();
     g.frame();
     assert_eq!(g.gui.eval("clicked").unwrap(), "1");
+}
+
+/// `/rename` updates the open chat's title and the sidebar row. Renaming
+/// from the sidebar's field already refreshed the list; the command must too.
+#[tokio::test(flavor = "multi_thread")]
+async fn rename_command_updates_the_session_title() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    g.gui
+        .run_lua(
+            "t",
+            r#"
+            bone.request("session/create", {}, function(info, err)
+              assert(not err, tostring(err))
+              bone.api.open_session(info.session_id)
+            end)
+            "#,
+        )
+        .unwrap();
+    g.wait_for(Duration::from_secs(5), |gui| {
+        gui.chats[gui.current].session_id().is_some()
+    })
+    .await
+    .unwrap();
+    g.gui.run_lua("t", "bone.ui.sessions()").unwrap();
+    g.settle(Duration::from_millis(200)).await;
+    g.gui
+        .run_lua("t", "bone.cmd('/rename First Title')")
+        .unwrap();
+    g.wait_for(Duration::from_secs(5), |gui| gui.title() == "First Title")
+        .await
+        .unwrap();
+    g.settle(Duration::from_millis(300)).await;
+    assert!(
+        g.painted.iter().any(|(t, _)| t == "First Title"),
+        "first title missing: {:?}",
+        g.painted.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>()
+    );
+    g.gui
+        .run_lua("t", "bone.cmd('/rename Second Title')")
+        .unwrap();
+    g.wait_for(Duration::from_secs(5), |gui| gui.title() == "Second Title")
+        .await
+        .unwrap();
+    g.settle(Duration::from_millis(400)).await;
+    let painted: Vec<_> = g.painted.iter().map(|(t, _)| t.clone()).collect();
+    assert!(
+        painted.iter().any(|t| t == "Second Title"),
+        "sidebar kept the old title; painted {painted:?}"
+    );
+    assert!(
+        !painted.iter().any(|t| t == "First Title"),
+        "old title still shown; painted {painted:?}"
+    );
 }

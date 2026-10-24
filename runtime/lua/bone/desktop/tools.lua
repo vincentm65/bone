@@ -9,6 +9,7 @@
 local M = {}
 
 local md = require("bone.desktop.markdown")
+local nodes = require("bone.nodes")
 local timing = require("bone.timing")
 
 local GUTTER_MAX = 5 -- shell output rows before the first 2, "⋮ +N", last 2
@@ -38,8 +39,27 @@ local function args_of(item)
   return type(item.arguments) == "table" and item.arguments or {}
 end
 
--- What the call acted on, relative to the session's folder.
-local function target(item)
+-- A path cut to `max` characters in the middle ("/tmp/…/dir/file.txt"),
+-- the file name kept.
+local function shorten(v, max)
+  if #v <= max then return v end
+  local segs = {}
+  for seg in v:gmatch("[^/]+") do segs[#segs + 1] = seg end
+  local lead = v:sub(1, 1) == "/" and "/" or ""
+  if #segs < 3 or #segs[#segs] + #lead + #segs[1] + 4 > max then
+    return "…" .. v:sub(-(max - 1))
+  end
+  local tail, i = { segs[#segs] }, #segs - 1
+  while i > 1 and #lead + #segs[1] + 3 + #table.concat(tail, "/") + #segs[i] + 1 <= max do
+    table.insert(tail, 1, segs[i])
+    i = i - 1
+  end
+  return lead .. segs[1] .. "/…/" .. table.concat(tail, "/")
+end
+
+-- What the call acted on, relative to the session's folder; a path cut to
+-- `max` characters when there is one.
+local function target(item, max)
   local a = args_of(item)
   for _, k in ipairs(KEYS) do
     if type(a[k]) == "string" and a[k] ~= "" then
@@ -47,6 +67,7 @@ local function target(item)
       local s = bone.chat.session()
       local prefix = ((s and s.cwd) or ""):gsub("/$", "") .. "/"
       if #prefix > 1 and v:sub(1, #prefix) == prefix then v = v:sub(#prefix + 1) end
+      if max and (k == "path" or k == "file_path") then v = shorten(v, max) end
       return v
     end
   end
@@ -136,22 +157,110 @@ local function read_summary(rows)
   return "lines " .. first .. "-" .. last .. " · " .. n .. " read"
 end
 
--- Only the lines that changed: drop lines shared at the start and end.
-local function diff_lines(old, new)
-  local a, b = lines(old), lines(new)
+-- Unchanged lines kept around a change. A longer gap is a hunk break.
+local CONTEXT = 3
+-- Past this many line pairs, fall back to one hunk instead of a full diff.
+local DIFF_LIMIT = 200000
+
+local function common_edges(a, b)
   local s = 0
   while s < #a and s < #b and a[s + 1] == b[s + 1] do s = s + 1 end
   local e = 0
   while e < #a - s and e < #b - s and a[#a - e] == b[#b - e] do e = e + 1 end
+  return s, e
+end
+
+-- Line diff, deletions before additions where a line was replaced.
+local function lcs_rows(a, b)
+  local n, m = #a, #b
+  local len = {}
+  for i = 0, n do
+    local row, prev = {}, len[i - 1]
+    len[i] = row
+    for j = 0, m do
+      if i == 0 or j == 0 then
+        row[j] = 0
+      elseif a[i] == b[j] then
+        row[j] = prev[j - 1] + 1
+      else
+        local up, left = prev[j], row[j - 1]
+        row[j] = up > left and up or left
+      end
+    end
+  end
+  local rev, i, j = {}, n, m
+  while i > 0 or j > 0 do
+    if i > 0 and j > 0 and a[i] == b[j] then
+      rev[#rev + 1] = { sign = " ", text = a[i] }
+      i, j = i - 1, j - 1
+    elseif j > 0 and (i == 0 or len[i][j - 1] >= len[i - 1][j]) then
+      rev[#rev + 1] = { sign = "+", text = b[j] }
+      j = j - 1
+    else
+      rev[#rev + 1] = { sign = "-", text = a[i] }
+      i = i - 1
+    end
+  end
   local rows = {}
-  for i = s + 1, #a - e do rows[#rows + 1] = { sign = "-", text = a[i] } end
-  for i = s + 1, #b - e do rows[#rows + 1] = { sign = "+", text = b[i] } end
+  for k = #rev, 1, -1 do rows[#rows + 1] = rev[k] end
   return rows
+end
+
+-- Changes, with CONTEXT lines around each. One omitted line is shown (an
+-- ellipsis would be no shorter); a longer omission is "···".
+local function trim_context(rows)
+  local keep, any = {}, false
+  for i, r in ipairs(rows) do
+    if r.sign ~= " " then
+      any = true
+      for j = math.max(1, i - CONTEXT), math.min(#rows, i + CONTEXT) do keep[j] = true end
+    end
+  end
+  if not any then return {} end
+  local out, skipped = {}, {}
+  for i, r in ipairs(rows) do
+    if keep[i] then
+      if #out > 0 and #skipped > 1 then
+        out[#out + 1] = { separator = true }
+      elseif #out > 0 and #skipped == 1 then
+        out[#out + 1] = skipped[1]
+      end
+      skipped = {}
+      out[#out + 1] = r
+    else
+      skipped[#skipped + 1] = r
+    end
+  end
+  return out
+end
+
+-- Changed lines, with a little unchanged text around them in sign " ".
+local function diff_lines(old, new)
+  local a, b = lines(old), lines(new)
+  local s, e = common_edges(a, b)
+  local ma, mb = {}, {}
+  for i = s + 1, #a - e do ma[#ma + 1] = a[i] end
+  for i = s + 1, #b - e do mb[#mb + 1] = b[i] end
+  if #ma == 0 and #mb == 0 then return {} end
+  local mid
+  if #ma * #mb <= DIFF_LIMIT then
+    mid = lcs_rows(ma, mb)
+  else
+    mid = {}
+    for _, t in ipairs(ma) do mid[#mid + 1] = { sign = "-", text = t } end
+    for _, t in ipairs(mb) do mid[#mid + 1] = { sign = "+", text = t } end
+  end
+  local rows = {}
+  for i = math.max(1, s - CONTEXT + 1), s do rows[#rows + 1] = { sign = " ", text = a[i] } end
+  for _, r in ipairs(mid) do rows[#rows + 1] = r end
+  local tail = #a - e
+  for i = tail + 1, math.min(#a, tail + CONTEXT) do rows[#rows + 1] = { sign = " ", text = a[i] } end
+  return trim_context(rows)
 end
 
 -- ---- rows ------------------------------------------------------------------
 -- A body is a list of rows, each a list of spans; it is drawn as one
--- monospace block.
+-- monospace band.
 
 local function row(text, hl)
   return { { text = (text:gsub("\t", "    ")), hl = hl } }
@@ -182,19 +291,19 @@ local function text_rows(text, hl)
   return out
 end
 
--- Rows as a monospace block paragraph.
-local function block(rows)
+-- Rows as one monospace band.
+local function band(rows)
   local spans = {}
   for i, r in ipairs(rows) do
     if i > 1 then spans[#spans + 1] = { text = "\n", hl = "ToolOutput" } end
     for _, s in ipairs(r) do spans[#spans + 1] = s end
   end
-  return { spans = spans, font = "mono", size = md.small_size - 1, bg = "CodeBlock", pad = 8, gap = 6 }
+  return md.band(spans, { size = md.small_size - 1, gap = 6 })
 end
 
--- An edit's changed lines: "- old", "+ new", and a separator
--- between the edits of a batch.
-local function diff_rows(args, from)
+-- An edit's changed lines: "- old", "+ new", grey context around them,
+-- and a separator between the edits of a batch.
+local function diff_rows(args)
   local edits = type(args.edits) == "table" and args.edits
     or (type(args.old_string) == "string" and { args })
     or nil
@@ -203,40 +312,55 @@ local function diff_rows(args, from)
     if i > 1 then rows[#rows + 1] = { separator = true } end
     for _, r in ipairs(diff_lines(e.old_string or "", e.new_string or "")) do
       rows[#rows + 1] = r
-      if r.sign == "+" then plus = plus + 1 else minus = minus + 1 end
+      if r.sign == "+" then plus = plus + 1 elseif r.sign == "-" then minus = minus + 1 end
     end
     all = all or e.replace_all == true
   end
   return rows, plus, minus, #(edits or {}), all
 end
 
--- A diff as paragraphs, one per row, each a band across the whole width in
--- the theme's DiffAdd / DiffDelete colors; "···" between the edits of a
--- batch. Cut to `cap` rows unless expanded.
-local function diff_paras(rows, cap, expanded)
-  local shown, cut = rows, 0
+-- One dark code block. Changed rows are highlighted flat across the width
+-- (no radius of their own: that scalloped every line). Unchanged rows stay
+-- the block's color, in grey. "···" between hunks. Cut to `cap` rows unless
+-- expanded.
+local function diff_nodes(rows, cap, expanded)
+  if #rows == 0 then return {} end
+  local shown, cut = {}, 0
   if not expanded and #rows > cap then
-    shown, cut = { table.unpack(rows, 1, cap) }, #rows - cap
+    for i = 1, cap do shown[i] = rows[i] end
+    cut = #rows - cap
+  else
+    shown = rows
   end
   local size = md.small_size - 1
-  local out = {}
-  for i, r in ipairs(shown) do
-    local p
+  -- Vertical padding covers the corner curve, so a highlighted row's square
+  -- background never paints over the block's rounded corners.
+  local block = {
+    direction = "column", bg = "CodeBlock", radius = 8,
+    padding = { 8, 0 }, margin = { 6, 0, 0, 0 },
+    font = "mono", size = size,
+  }
+  local function add(text, hl, bg, py)
+    block[#block + 1] = {
+      bg = bg, padding = { py or 1, 12 },
+      { text = text, hl = hl, font = "mono", size = size, selectable = true },
+    }
+  end
+  for _, r in ipairs(shown) do
     if r.separator then
-      p = { spans = { { text = "  ···", hl = "Dim" } }, font = "mono", size = size, bg = "CodeBlock" }
+      add("···", "Dim", nil, 6)
     else
-      local group = r.sign == "+" and "DiffAdd" or "DiffDelete"
-      local text = "  " .. r.sign .. " " .. r.text:gsub("\t", "    ")
-      p = { spans = { { text = text, hl = group } }, font = "mono", size = size, bg = group }
+      local hl, bg, gutter = "Dim", nil, "    "
+      if r.sign == "+" then
+        hl, bg, gutter = "DiffAdd", "DiffAdd", "  + "
+      elseif r.sign == "-" then
+        hl, bg, gutter = "DiffDelete", "DiffDelete", "  - "
+      end
+      add(gutter .. r.text:gsub("\t", "    "), hl, bg)
     end
-    p.gap = i == 1 and 6 or 0
-    out[#out + 1] = p
   end
-  if cut > 0 then
-    out[#out + 1] = { spans = { { text = "  ⋮ +" .. plural(cut, "line") .. HINT, hl = "Dim" } },
-      font = "mono", size = size, bg = "CodeBlock" }
-  end
-  return out
+  if cut > 0 then add("⋮ +" .. plural(cut, "line") .. HINT, "Dim", nil, 4) end
+  return { block }
 end
 
 -- ---- cards -----------------------------------------------------------------
@@ -266,14 +390,15 @@ local function mark(item)
   return { text = item.is_error and "×  " or "•  ", hl = item.is_error and "ToolError" or "ToolDone" }
 end
 
---- The paragraphs of one call: its title, then its body. `expanded`: all of
---- the output, not the folded form.
-local function card(item, expanded)
+--- The nodes of one call: its title, then its body. `expanded`: all of the
+--- output, not the folded form.
+local function card(item, expanded, width)
   local failed = item.is_error
   local a = args_of(item)
   local name = item.name
   local label = M.labels[name] or name
-  local what = target(item)
+  -- Room for the label, the extras and the mark besides the path.
+  local what = target(item, not expanded and math.min(60, math.max(24, width - 40)) or nil)
   local title = { mark(item), { text = label, hl = "ToolName", bold = true } }
   if what ~= "" then
     title[#title + 1] = { text = "  " .. what, hl = name == "shell" and "ShellProgram" or "ToolPath" }
@@ -282,7 +407,7 @@ local function card(item, expanded)
     title[#title + 1] = { text = "  " .. text, hl = hl or "Dim" }
   end
 
-  local body, paras = nil, nil -- rows as one block; or paragraphs as they are
+  local body, paras = nil, nil -- rows as one band; or nodes as they are
   local out = item.output or ""
   local ok = item.done and not failed
   if failed then
@@ -310,7 +435,7 @@ local function card(item, expanded)
     if ok and expanded then
       local rows = {}
       for _, l in ipairs(content) do rows[#rows + 1] = { sign = "+", text = l } end
-      paras = diff_paras(rows, #rows, true)
+      paras = diff_nodes(rows, #rows, true)
     end
   elseif name == "edit_file" then
     local rows, plus, minus, n, all = diff_rows(a)
@@ -320,15 +445,14 @@ local function card(item, expanded)
       title[#title + 1] = { text = " -" .. minus, hl = "DiffDelete" }
       if n > 1 then extra(plural(n, "edit")) end
       if all then extra("replace all") end
-      paras = diff_paras(rows, EDIT_MAX, expanded)
+      paras = diff_nodes(rows, EDIT_MAX, expanded)
     end
   elseif name == "subagent" then
     if ok then
       paras = {}
-      for i, p in ipairs(md.paragraphs(out, "ToolOutput")) do
+      for i, n in ipairs(md.nodes(out, "ToolOutput", { size = md.small_size, indent = 14 })) do
         if not expanded and i > AGENT_MAX then break end
-        p.size, p.indent = md.small_size, (p.indent or 0) + 14
-        paras[#paras + 1] = p
+        paras[#paras + 1] = n
       end
     end
   elseif ok then
@@ -338,8 +462,8 @@ local function card(item, expanded)
   if item.duration_ms and item.duration_ms >= 1000 then
     extra(bone.util.duration(item.duration_ms / 1000))
   end
-  local result = { { spans = title, size = md.small_size } }
-  if body and #body > 0 then result[#result + 1] = block(body) end
+  local result = { md.text(title, { size = md.small_size }) }
+  if body and #body > 0 then result[#result + 1] = band(body) end
   for _, p in ipairs(paras or {}) do result[#result + 1] = p end
   return result
 end
@@ -396,7 +520,7 @@ end
 --- In "summary": the line for the first call of a stretch (the calls between
 --- edits, reasoning aside); nil for the rest; false when this
 --- call is not folded. A click on the line opens every call of it.
-local function summary_paragraphs(item)
+local function summary_nodes(item, width)
   if not item.index or not foldable(item) then return false end
   local i = item.index - 1
   local before = bone.chat.item(i)
@@ -414,13 +538,13 @@ local function summary_paragraphs(item)
   end
   local running = false
   for _, t in ipairs(stretch) do running = running or not t.done end
-  local paras = { { spans = {
+  local paras = { md.text({
     { text = "•  ", hl = running and "ToolRunning" or "ToolDone" },
     { text = summary(stretch), hl = "ToolArgs" },
-  }, size = md.small_size } }
+  }, { size = md.small_size }) }
   if toggled[tool_key(item)] then
     for _, t in ipairs(stretch) do
-      for _, p in ipairs(card(bone.chat.item(t.index, { full = true }), true)) do
+      for _, p in ipairs(card(bone.chat.item(t.index, { full = true }), true, width)) do
         paras[#paras + 1] = p
       end
     end
@@ -431,41 +555,30 @@ end
 function M.view(item, ctx)
   local mode = detail()
   local paras = false
-  if mode == "summary" then paras = summary_paragraphs(item) end
+  if mode == "summary" then paras = summary_nodes(item, ctx.width) end
   if paras == nil then return nil end
   if paras == false then
     local expanded = mode == "full"
     if toggled[tool_key(item)] then expanded = not expanded end
-    paras = card(item, expanded)
+    paras = card(item, expanded, ctx.width)
   end
   local text = timing.footer(item, ctx)
   if text then
-    paras[#paras + 1] = { spans = { { text, "Dim" } }, size = md.small_size, gap = 10 }
+    paras[#paras + 1] = md.text({ { text, "Dim" } }, { size = md.small_size, gap = 10 })
   end
   local fallback = { { { (M.labels[item.name] or item.name) .. " " .. target(item), "ToolName" } } }
-  return {
-    block = { paragraphs = paras, pad = { 2, 4 }, margin = { 4, 2 } },
-    lines = fallback,
-  }
+  local node = { direction = "column", padding = { 2, 4 }, margin = { 4, 0, 2, 0 } }
+  nodes.append(node, paras)
+  return { node = node, lines = fallback, click = function() M.toggle(item) end }
 end
 
--- A click on a call opens or folds it; on a summary, every call of it.
-local press
-bone.on("mouse", function(ev)
-  local down = press
-  press = ev.action == "down" and not ev.popup and not ev.panel and ev or nil
-  if ev.action ~= "up" or ev.button ~= "left" or not down or down.index ~= ev.index
-      or not ev.index or ev.popup or ev.panel then
-    return
-  end
-  local item = bone.chat.item(ev.index)
-  if not item or item.kind ~= "tool" then return end
+--- Open or fold a call (a summary: every call of it).
+function M.toggle(item)
   detail() -- local choices end when ctrl+t changes the level
   local key = tool_key(item)
   toggled[key] = not toggled[key] or nil
-  bone.chat.redraw(ev.index)
-  return true
-end)
+  bone.chat.redraw(item.index)
+end
 
 -- ctrl+t: every call one step more (or less) detailed.
 local next_detail = { summary = "rows", rows = "full", full = "summary" }

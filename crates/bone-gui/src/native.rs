@@ -56,6 +56,12 @@ impl eframe::App for App {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
     }
+
+    /// The window's background is the canvas the GUI fills it with, which
+    /// is see-through with `opacity` below 1.
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        [0.0; 4]
+    }
 }
 
 /// Set `lost` when `device` is lost, and ask for a frame to act on it.
@@ -78,17 +84,32 @@ fn watch_device(device: &eframe::wgpu::Device, lost: &Arc<AtomicBool>, ctx: &egu
     }));
 }
 
-fn options(renderer: eframe::Renderer, size: [f32; 2]) -> eframe::NativeOptions {
+fn options(renderer: eframe::Renderer, size: [f32; 2], transparent: bool) -> eframe::NativeOptions {
     let mut opts = eframe::NativeOptions {
         renderer,
         viewport: egui::ViewportBuilder::default()
             .with_title("bone")
-            .with_inner_size(size),
+            .with_inner_size(size)
+            .with_transparent(transparent),
         ..Default::default()
     };
     if let WgpuSetup::CreateNew(setup) = &mut opts.wgpu_options.wgpu_setup {
         setup.power_preference =
             PowerPreference::from_env().unwrap_or(PowerPreference::HighPerformance);
+        // On Windows only DX12 on a DirectComposition visual can show
+        // through (an HWND swapchain, and Vulkan, are opaque); the env
+        // variables still choose.
+        #[cfg(windows)]
+        if transparent {
+            use eframe::wgpu::{Backends, Dx12SwapchainKind};
+            let d = &mut setup.instance_descriptor;
+            if Backends::from_env().is_none() {
+                d.backends = Backends::DX12;
+            }
+            if Dx12SwapchainKind::from_env().is_none() {
+                d.backend_options.dx12.presentation_system = Dx12SwapchainKind::DxgiFromVisual;
+            }
+        }
     }
     opts
 }
@@ -121,6 +142,9 @@ fn open(slot: &Rc<RefCell<Option<Gui>>>) -> Result<(), String> {
         );
         (w > 0.0 && h > 0.0).then_some([w as f32, h as f32])
     });
+    // See-through only if asked for when the window opens: an opaque
+    // window draws faster, and works without a compositor.
+    let transparent = slot.borrow().as_ref().is_some_and(|g| g.opacity() < 1.0);
     let mut failed = Vec::new();
     for (renderer, name) in [
         (eframe::Renderer::Wgpu, "wgpu"),
@@ -129,7 +153,7 @@ fn open(slot: &Rc<RefCell<Option<Gui>>>) -> Result<(), String> {
         let started = Cell::new(false);
         let r = eframe::run_native(
             "bone",
-            options(renderer, size.unwrap_or([960.0, 720.0])),
+            options(renderer, size.unwrap_or([960.0, 720.0]), transparent),
             Box::new(|cc| {
                 started.set(true);
                 let mut gui = slot.borrow_mut().take().expect("a GUI to open");
@@ -151,8 +175,9 @@ fn open(slot: &Rc<RefCell<Option<Gui>>>) -> Result<(), String> {
                     gui.info(format!("drawing with {renderer}"));
                 }
                 gui.renderer = Some(renderer);
+                gui.transparent = transparent;
                 // A window opened again is drawn with new fonts.
-                gui.lua.fonts = None;
+                gui.view.fonts = None;
                 Ok(Box::new(App {
                     gui: Some(gui),
                     title: String::new(),

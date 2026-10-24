@@ -148,6 +148,9 @@ pub struct ChatBuffer<L> {
     tool_meta: HashMap<String, ToolMeta>,
     /// Token usage of a model message, by the id of its first entry.
     message_usage: HashMap<usize, Usage>,
+    /// Data generation `check_chat_deps` last walked. Unchanged data has
+    /// nothing new to check.
+    pub(crate) deps_at: Option<u64>,
 }
 
 /// Live output keeps at most this many bytes, the latest.
@@ -192,6 +195,7 @@ impl<L> Default for ChatBuffer<L> {
             lua_items: Vec::new(),
             tool_meta: HashMap::new(),
             message_usage: HashMap::new(),
+            deps_at: None,
         }
     }
 }
@@ -807,6 +811,40 @@ impl<L> ChatBuffer<L> {
         self.cache.values().filter_map(|c| c.expires).min()
     }
 
+    /// The earliest time after `now` a cached item asked to be drawn again.
+    pub fn next_expiry_after(&self, now: Instant) -> Option<Instant> {
+        (self.cache.values())
+            .filter_map(|c| c.expires)
+            .filter(|at| *at > now)
+            .min()
+    }
+
+    /// The key item `index` (0-based in `items`) would be cached under, when
+    /// its cached entry is missing or out of date. `None` when those lines
+    /// are still good. [`Self::stale`] walks every item through this, so
+    /// there is one definition of freshness.
+    pub fn stale_key(
+        &self,
+        items: &[Item],
+        index: usize,
+        width: usize,
+        generation: (u64, u64),
+        now: Instant,
+    ) -> Option<RenderKey> {
+        let item = items.get(index)?;
+        let key = RenderKey {
+            width,
+            rev: self.item_rev(item),
+            generation,
+            prev: index.checked_sub(1).map(|p| items[p].part),
+        };
+        let fresh = self
+            .cache
+            .get(item)
+            .is_some_and(|c| c.key == key && c.expires.is_none_or(|e| e > now));
+        (!fresh).then_some(key)
+    }
+
     /// Items whose cached lines are missing or out of date, with their key.
     pub fn stale(
         &self,
@@ -815,22 +853,12 @@ impl<L> ChatBuffer<L> {
         now: Instant,
     ) -> Vec<(Item, usize, RenderKey)> {
         let items = self.items();
-        let rev = |item: &Item| self.item_rev(item);
         items
             .iter()
             .enumerate()
             .filter_map(|(i, item)| {
-                let key = RenderKey {
-                    width,
-                    rev: rev(item),
-                    generation,
-                    prev: i.checked_sub(1).map(|p| items[p].part),
-                };
-                let fresh = self
-                    .cache
-                    .get(item)
-                    .is_some_and(|c| c.key == key && c.expires.is_none_or(|e| e > now));
-                (!fresh).then_some((*item, i + 1, key))
+                self.stale_key(&items, i, width, generation, now)
+                    .map(|key| (*item, i + 1, key))
             })
             .collect()
     }

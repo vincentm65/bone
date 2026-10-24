@@ -31,11 +31,12 @@ The [Bone catalog](https://github.com/vincentm65/bone-catalog) is the source of 
 
 The TUI and the desktop GUI run the same Lua UI API, with one
 implementation, so most UI code belongs in `ui.lua` and works in both:
-keymaps, commands, options, events, colors, chat views and data, the
-layout and regions, windows (`bone.ui.popup`), panels (`bone.ui.panel`),
-`mouse` handlers and `bone.request`. Lay things out in character units
-(columns and rows); the GUI draws Lua's lines in a monospace font, so a
-column is a column in both.
+keymaps, commands, options, events, colors, chat data, windows
+(`bone.ui.popup`) and `bone.request`. How the window looks is not shared:
+the TUI draws character cells (layout, regions, panels, chat views as
+`lines`) and the GUI draws a tree of nodes (`bone.gui.view`). A window's
+`lines` are drawn in both, in a monospace font (in the GUI without the
+pointer: give a window `node = fn` to take it).
 
 Put what only one frontend has in its own file, or check for it:
 

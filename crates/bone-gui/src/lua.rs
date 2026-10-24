@@ -61,50 +61,21 @@ pub struct LuaSide {
     pub ui_expiry: Option<Instant>,
     pub lua_item_seq: u64,
     pub spinner: bone_ui::model::Spinner,
-    /// The window's width in columns, as last drawn, and its size in
-    /// columns and rows as `resize` last reported it.
-    pub screen_cols: u16,
-    pub screen_size: (u16, u16),
-    /// Where the layout put things last frame.
-    pub geometry: bone_ui::lua::Geometry,
     /// Lua windows (`bone.ui.popup`).
     pub popups: Vec<bone_ui::popup::Popup>,
     /// Where the keyboard is and the key sequence in progress.
     pub input: bone_ui::lua::input::KeyState,
-    /// Where character cells were last frame: origin, column width, row
-    /// height (logical pixels).
-    pub cells: Option<(f32, f32, f32, f32)>,
-    /// The first chat row in view, and a pointer button held for dragging.
-    pub chat_top: usize,
-    /// Each chat's first row in view and whether it is scrolled to the end,
-    /// last frame.
-    pub chat_views: HashMap<usize, (usize, bool)>,
-    /// Panels and windows drawn with rich content last frame (the wheel
-    /// scrolls them as egui does), and the selected block of each.
-    pub rich_keys: HashSet<String>,
-    pub rich_selected: HashMap<String, String>,
-    pub dragging: bool,
-    /// The font file and size applied last (`bone.o.font`, `font_size`).
-    pub fonts: Option<(String, f32, [String; 3])>,
-    /// Whether the proportional font has a bold and an italic face
-    /// (`sans-bold`, `sans-italic`); without them bold is a brighter color.
-    pub faces: (bool, bool),
     /// Text copied before there was a window to copy it with (headless).
     pub copied: Option<String>,
-    /// The prompt's text as `prompt/changed` last reported it.
-    pub last_prompt: (
-        String,
-        Vec<ImageAttachment>,
-        serde_json::Value,
-        serde_json::Value,
-    ),
+    /// The prompt as `prompt/changed` last reported it: text, images,
+    /// anchor and cursor. `None` until the first report.
+    pub last_prompt: Option<(String, Vec<ImageAttachment>, usize, usize)>,
     /// The known plugins and their shutdown hooks.
     pub plugins: Vec<bone_ui::lua::plugins::Plugin>,
     pub shutdown_hooks: Vec<(Option<String>, u64)>,
     /// Lua panels (`bone.ui.panel`).
     pub panels: Vec<bone_ui::panel::Panel>,
     pub panel_focus: Option<String>,
-    /// Every message shown, and the last Lua errors in full.
     /// Streaming jobs from Lua (`bone.job`).
     pub jobs: bone_ui::jobs::Jobs,
     pub log: Vec<String>,
@@ -161,6 +132,7 @@ impl Gui {
         let carried = (self.lua.dynamic_options.iter())
             .map(|(name, o)| (name.clone(), o.value.clone()))
             .collect();
+        let bound = self.view.unbind();
         let old = std::mem::take(&mut self.lua);
         // Later than anything cached under the old state.
         self.lua.views_rev = old.views_rev + 1;
@@ -176,6 +148,7 @@ impl Gui {
             rejected.jobs.cancel_all();
             self.lua.log = rejected.log;
             self.lua.views_rev += 1;
+            self.view.bound = bound;
             Gui::error(
                 self,
                 format!("Lua configuration not reloaded: {new} failed"),
@@ -352,21 +325,27 @@ impl Gui {
 
 /// `bone._api` in the GUI: the shared ops, then the GUI's own.
 fn dispatch(gui: &mut Gui, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<MultiValue> {
-    match bone_ui::lua::dispatch(gui, lua, op, a) {
-        Ok(r) => r,
-        Err(a) => (crate::images::dispatch(gui, lua, op, a.clone()))
-            .or_else(|| crate::chats::dispatch(gui, lua, op, a.clone()))
-            .or_else(|| crate::prompt::dispatch(gui, lua, op, a.clone()))
-            .or_else(|| crate::system::dispatch(gui, lua, op, a.clone()))
-            .or_else(|| crate::window::dispatch(gui, lua, op, a))
-            .unwrap_or_else(|| Err(err(format!("{op}: not available in the GUI yet")))),
+    // A window's or panel's content as nodes is the GUI's to keep.
+    if matches!(
+        op,
+        "popup_open" | "popup_update" | "panel_open" | "panel_update"
+    ) {
+        return crate::nodeview::window_spec(gui, lua, op, a);
     }
+    bone_ui::lua::dispatch(gui, lua, op, a)
+        .or_else(|a| crate::nodeview::dispatch(gui, lua, op, a))
+        .or_else(|a| crate::images::dispatch(gui, lua, op, a))
+        .or_else(|a| crate::chats::dispatch(gui, lua, op, a))
+        .or_else(|a| crate::prompt::dispatch(gui, lua, op, a))
+        .or_else(|a| crate::system::dispatch(gui, lua, op, a))
+        .or_else(|a| crate::window::dispatch(gui, lua, op, a))
+        .unwrap_or_else(|_| Err(err(format!("{op}: not available in the GUI yet"))))
 }
 
 impl Host for Gui {
-    type Line = crate::ChatRow;
+    type Line = ();
 
-    fn chat_store(&mut self) -> ChatStore<'_, crate::ChatRow> {
+    fn chat_store(&mut self) -> ChatStore<'_, ()> {
         ChatStore {
             chats: &mut self.chats,
             current: self.current,
@@ -457,6 +436,7 @@ impl Host for Gui {
     }
 
     fn changed(&mut self) {
+        self.view.invalidate();
         wake(&self.repaint);
     }
 
@@ -636,9 +616,9 @@ impl Host for Gui {
         } else {
             item("plugins", "warn", failed.join("\n"))
         });
-        let font = match self.lua.fonts.as_ref() {
-            Some((file, size, _)) if !file.is_empty() => format!("{file}, {size} pt"),
-            Some((_, size, _)) => format!("built-in monospace, {size} pt"),
+        let font = match self.view.fonts.as_ref() {
+            Some((file, size, _, _)) if !file.is_empty() => format!("{file}, {size} pt"),
+            Some((_, size, _, _)) => format!("built-in monospace, {size} pt"),
             None => "not applied yet".into(),
         };
         out.push(item("font", "ok", font));
@@ -679,11 +659,6 @@ impl Host for Gui {
         &mut self.lua.spinner
     }
 
-    /// The GUI runs no `bone.job` jobs yet.
-    fn view_block(&mut self, block: &Json, width: usize) -> Option<Vec<crate::ChatRow>> {
-        self.block_rows(block, width)
-    }
-
     fn jobs_running(&self) -> usize {
         self.lua.jobs.running()
     }
@@ -703,33 +678,20 @@ impl Host for Gui {
     }
 
     fn screen_cols(&self) -> u16 {
-        self.lua.screen_cols
+        self.view.screen_cols
     }
 
-    /// The prompt has the keyboard unless a question or a focused window
-    /// is open.
+    /// The prompt has the keyboard unless a question, a focused window or
+    /// a node with the focus has it.
     fn prompt_focused(&self, buf: usize) -> bool {
         buf == self.current
-            && self.asks.is_empty()
             && bone_ui::popup::focused(&self.lua.popups).is_none()
             && self.focused_panel().is_none()
-    }
-
-    fn geometry(&self) -> bone_ui::lua::Geometry {
-        self.lua.geometry.clone()
+            && self.view.focused_node().is_none()
     }
 
     fn popups(&mut self) -> &mut Vec<bone_ui::popup::Popup> {
         &mut self.lua.popups
-    }
-
-    fn chat_at(&self, x: u16, y: u16) -> Option<(usize, usize)> {
-        let (_, r) = (self.lua.geometry.leaves.iter()).find(|(n, _)| n == "chat")?;
-        if !r.contains(x, y) {
-            return None;
-        }
-        let row = self.lua.chat_top + (y - r.y) as usize;
-        self.chats[self.current].item_at_row(row)
     }
 
     fn key_state(&mut self) -> &mut bone_ui::lua::input::KeyState {
@@ -839,43 +801,5 @@ fn collect_lua_files(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
         } else if path.extension().is_some_and(|e| e == "lua") {
             out.push(path);
         }
-    }
-}
-
-/// Polls the config for edits, reporting one only once it has stayed the
-/// same for a whole poll (a file caught halfway through being written, or a
-/// save touching several files, is not loaded).
-pub struct Watcher {
-    dir: std::path::PathBuf,
-    state: u64,
-    pending: Option<u64>,
-}
-
-impl Watcher {
-    pub fn new(dir: std::path::PathBuf) -> Self {
-        Watcher {
-            state: lua_sources(&dir),
-            dir,
-            pending: None,
-        }
-    }
-
-    /// How often to poll.
-    pub const EVERY: std::time::Duration = std::time::Duration::from_millis(500);
-
-    /// Poll (every [`Self::EVERY`]); true when an edit has settled.
-    pub fn poll(&mut self) -> bool {
-        let next = lua_sources(&self.dir);
-        if next == self.state {
-            self.pending = None;
-            return false;
-        }
-        if self.pending != Some(next) {
-            self.pending = Some(next);
-            return false;
-        }
-        self.state = next;
-        self.pending = None;
-        true
     }
 }

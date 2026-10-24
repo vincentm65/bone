@@ -26,9 +26,9 @@
 | `bone-core` | everything authoritative: sessions (JSONL files), the agent loop, built-in and Lua providers, tools, hooks and `bone.ask`, `core.lua` |
 | `bone-server` | hosts a core for any number of connections: stdio, Unix socket, Windows named pipe, in-process |
 | `bone-client` | request/response matching and the event stream, for any transport |
-| `bone-ui` | what both frontends share and is not drawing: chat items, composer, keymaps, options, popups, panels, the layout solver (in character cells), Markdown, themes, and the Lua UI API (`bone.ui`, `runtime/ui/`) behind the `Host` trait |
+| `bone-ui` | what both frontends share and is not drawing: chat items, composer, keymaps, options, popups, panels, the TUI's layout solver (in character cells), Markdown, themes, and the Lua UI API (`bone.ui`, `runtime/ui/`) behind the `Host` trait |
 | `bone-tui` | the terminal frontend: rendering with ratatui, terminal keys and mouse, terminal views and jobs, `tui.lua` and `bone.tui` |
-| `bone-gui` | the desktop frontend (`bone --gui`, the `gui` feature): an egui/eframe window, native text editing, `gui.lua` and `bone.gui`; a headless mode for tests |
+| `bone-gui` | the desktop frontend (`bone --gui`, the `gui` feature): an egui/eframe window that draws a tree of nodes from Lua (`node.rs`, `flex.rs`, `nodeview/`: `mod.rs`, `paint.rs`, `list.rs`, `focus.rs`, `ops.rs`), native text editing, `gui.lua` and `bone.gui`; a headless mode for tests |
 | `bone-media` | bounded image decoding and PNG normalization, shared by core and TUI |
 | `bone-lua` | shared Lua setup: `require` paths, plugins, JSON, helpers, the built-in runtime files |
 | `bone` | the command line |
@@ -39,7 +39,7 @@
 - **The core is authoritative.** The TUI keeps only view state (scroll position, prompt text, open popups). Transcripts, turns and open questions live in the core, which is why several UIs stay in sync.
 - **Lua states are never shared.** Core Lua runs on its own thread (`bone-lua`); tools, hooks and the system prompt reach it through a job channel, so a slow Lua tool only blocks other Lua work. Each frontend's Lua runs on its UI thread. Each API call gets the live UI state through a scoped function for the duration of the call, so Lua can't hold dangling references and nested calls are safe.
 - **Rust draws, Lua decides.** The TUI's Rust code holds the session as data (items: user, reasoning, assistant, tool, notice), wraps text, caches rendered lines per item, scrolls and paints. Every look-and-feel decision (spacing, prefixes, colors, Markdown, tool views, regions around the chat, statusline) is a Lua function, and an item is only re-rendered when it, the width, or the views change. Without Lua, Rust draws plain text.
-- **One UI API, two frontends.** `bone_ui::lua` implements the shared ops (options, events, commands, keymaps, themes, views, layout, windows, panels, input, plugins) once, against the `Host` trait that `bone_tui::App` and `bone_gui::Gui` implement: accessors for their state, and services such as callbacks, requests and the clipboard. Each frontend adds its own ops (`bone.tui`, `bone.gui`) and raises a clear error for ones it lacks. Layout is in character cells in both; the GUI uses a monospace font, so a cell is a column. A plugin's `ui.lua` runs in both, and its `tui.lua` or `gui.lua` only in that frontend.
+- **One UI API, two frontends.** `bone_ui::lua` implements the shared ops (options, events, commands, keymaps, themes, views, layout, windows, panels, input, plugins) once, against the `Host` trait that `bone_tui::App` and `bone_gui::Gui` implement: accessors for their state, and services such as callbacks, requests and the clipboard. Each frontend adds its own ops (`bone.tui`, `bone.gui`) and raises a clear error for ones it lacks. The two frontends share behavior, not a view: the TUI lays out and draws in character cells (`bone.ui.layout`, regions, `lines`), and the GUI draws a CSS-like tree of nodes Lua returns from `bone.gui.view` (flex boxes in pixels, text, a native prompt field, scrolling lists). A plugin's `ui.lua` (commands, keys, options, events, data, `bone.ui.popup`) runs in both, and its `tui.lua` or `gui.lua` only in that frontend.
 - **Defaults are Lua.** Keys, views, the statusline, the divider and colorschemes are files in `runtime/`, compiled into the binary. `~/.bone/runtime/<same path>` replaces any of them.
 
 ## UI layout and providers
@@ -74,6 +74,6 @@ The TUI reads native clipboard pixels in a short-lived helper process; a ten-sec
 - `bone-server/tests`: client ↔ server ↔ core, including the HTTP provider against a fake SSE server.
 - `bone/tests/headless.rs`: the real binary over stdio and sockets.
 - `bone/tests/tui.rs`: the standard TUI driven headlessly (`bone_tui::Headless`) against a real core and a fake model, with screen and interaction assertions.
-- `tests/ui/*.lua`: conformance scripts for the shared Lua UI API, run in both frontends (`bone/tests/conformance.rs`, `bone-gui/tests/conformance.rs`).
-- `bone-gui/tests`: the GUI driven headlessly (`bone_gui::Headless`, egui without a window): Lua hosting, keys, clicks, resizing and HiDPI, and several clients (TUI and GUI) on one server, including a server restart.
+- `tests/ui/*.lua`: conformance scripts for the shared Lua UI API, run in both frontends (`bone/tests/conformance.rs`, `bone-gui/tests/conformance.rs`); the four about the TUI's cell layout (`frontend`, `layout`, `panels`, `scrolling`) run only in the TUI.
+- `bone-gui/tests`: the GUI driven headlessly (`bone_gui::Headless`, egui without a window): Lua hosting, the node view (layout, scrolling, lists, painted output), keys, clicks, resizing and HiDPI, and several clients (TUI and GUI) on one server, including a server restart.
 - `bone/tests/images.rs`: image upload, model payloads, persistence/restart, queue editing, draft races, compaction, and optional native clipboard through a separate headless process.

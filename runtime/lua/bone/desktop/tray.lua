@@ -9,7 +9,6 @@ local M = {}
 local bg = require("bone.background")
 local CONTEXT = "desktop_tray"
 local ui = { page = "agents", sel = 1 }
-local hits = {}
 
 local function focused()
   return bone.keymap.current() == CONTEXT
@@ -62,60 +61,62 @@ local function switch(by)
   ui.sel = 1
 end
 
-local function row(r, width, active)
-  local live = r.status == "running"
-  local glyph = live and { "●", "PanelRunning" } or bg.GLYPH[r.status] or { "·", "Dim" }
-  local time = r.time or bg.duration((r.finished_at or bone.now()) - (r.started_at or bone.now()))
-  local base = active and "PanelSelected" or "Normal"
-  local line = { { active and "  › " or "    ", base }, { glyph[1] .. "  ", glyph[2] } }
-  if r.name then line[#line + 1] = { r.name .. "   ", live and "Accent" or "Dim" } end
-  line[#line + 1] = { bone.text.truncate(r.title or "", math.floor(width * 0.4)) .. "   ", live and base or "Dim" }
-  if r.detail and r.detail ~= "" then
-    line[#line + 1] = { bone.text.truncate(r.detail, math.max(0, math.floor(width * 0.35))), "Dim" }
-  end
-  line[#line + 1] = { fill = " ", hl = base }
-  line[#line + 1] = { time .. "  ", "Dim" }
-  return line
-end
-
-local function render(ctx)
-  hits = {}
+--- The tray as a node (the node view): nil when nothing is running.
+function M.node()
   local all = rows_of()
   if #all.queue + #all.agents + #all.shells == 0 then
     leave()
     return nil
   end
-  local active = focused()
   if #all[ui.page] == 0 then ui.page = bg.filled()[1] or ui.page end
-  local head = { { "  ", "Normal" } }
+  local active = focused()
+  local head = { direction = "row", gap = 18, padding = { 2, 0, 4, 0 }, align = "center" }
   local back = bg.back_label()
   if back then
-    head[#head + 1] = { back .. "     ", "Accent" }
-    hits.back = true
+    head[#head + 1] = { text = back, hl = "Accent", size = 13, cursor = "pointer", on_click = bg.back }
   end
   for _, pg in ipairs(bg.PAGES) do
     local rows = all[pg[1]]
     if pg[1] ~= "queue" or #rows > 0 then
       local n = bg.running(rows)
-      head[#head + 1] = { pg[2] .. " " .. (n > 0 and n or #rows), ui.page == pg[1] and "StatusLine" or "Dim" }
-      head[#head + 1] = { "     ", "Normal" }
+      local name = pg[1]
+      head[#head + 1] = {
+        text = pg[2] .. " " .. (n > 0 and n or #rows), size = 13, cursor = "pointer",
+        hl = ui.page == name and "StatusLine" or "Dim", bold = ui.page == name,
+        on_click = function() ui.page, ui.sel = name, 1 end,
+      }
     end
   end
-  head[#head + 1] = { fill = " ", hl = "Normal" }
-  head[#head + 1] = { active and "enter open · c cancel · esc  " or "↓ to manage  ", "Dim" }
-  local out = { head }
+  head[#head + 1] = { grow = 1 }
+  head[#head + 1] = { text = active and "enter open · c cancel · esc" or "↓ to manage", hl = "Dim", size = 12 }
+  local out = { direction = "column", head }
   local rows = all[ui.page]
-  local room = math.max(ctx.height - 1, 1)
-  local first = math.max(1, math.min(ui.sel - room + 1, #rows - room + 1))
-  for i = first, math.min(#rows, first + room - 1) do
-    out[#out + 1] = row(rows[i], ctx.width, active and i == ui.sel)
-    hits[#out] = i
+  ui.sel = math.max(1, math.min(ui.sel, #rows))
+  for i = 1, math.min(#rows, 6) do
+    local r = rows[i]
+    local live = r.status == "running"
+    local glyph = live and { "●", "PanelRunning" } or bg.GLYPH[r.status] or { "·", "Dim" }
+    local time = r.time or bg.duration((r.finished_at or bone.now()) - (r.started_at or bone.now()))
+    local on = active and i == ui.sel
+    local line = {
+      direction = "row", gap = 8, align = "center", padding = { 3, 8, 3, 8 }, radius = 8,
+      bg = on and "Selection" or nil, cursor = "pointer", hover = { bg = "InputBackground" }, transition = 120,
+      on_click = function() ui.sel = i; open(r) end,
+      { text = glyph[1], hl = glyph[2], size = 13 },
+    }
+    if r.name then line[#line + 1] = { text = r.name, hl = live and "Accent" or "Dim", size = 13 } end
+    line[#line + 1] = { text = r.title or "", hl = live and "Normal" or "Dim", size = 13, wrap = false, shrink = 1, max_width = "45%", overflow = "hidden" }
+    if r.detail and r.detail ~= "" then
+      line[#line + 1] = { text = r.detail, hl = "Dim", size = 12, wrap = false, shrink = 1, overflow = "hidden" }
+    end
+    line[#line + 1] = { grow = 1 }
+    line[#line + 1] = { text = time, hl = "Dim", size = 12 }
+    out[#out + 1] = line
   end
   return out
 end
 
 function M.setup()
-  bone.ui.regions.tray = { size = "auto", max = 7, render = render }
   bone.keymap.context(CONTEXT, { fallback = "main" })
   local keys = {
     up = function() if ui.sel <= 1 then leave() else ui.sel = ui.sel - 1 end end,
@@ -154,17 +155,6 @@ function M.setup()
     return true
   end
   bone.on("prompt/changed", function() if focused() then leave() end end)
-  bone.on("mouse", function(ev)
-    if ev.region ~= "tray" or ev.button ~= "left" or ev.action ~= "down" then return end
-    local i = hits[ev.row or 0]
-    if i then
-      ui.sel = i
-      open(bg.rows(ui.page)[i])
-    elseif ev.row == 1 and hits.back then
-      bg.back()
-    end
-    return true
-  end)
 end
 
 return M

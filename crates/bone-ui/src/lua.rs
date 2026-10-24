@@ -307,12 +307,18 @@ pub trait Host {
     fn prompt_focused(&self, buf: usize) -> bool;
     /// Where each layout leaf, and each column separator (with the path to
     /// the column after it), was drawn last frame, in character units.
-    fn geometry(&self) -> Geometry;
+    /// The GUI has no cell layout, so this is empty there.
+    fn geometry(&self) -> Geometry {
+        Geometry::default()
+    }
     /// The open Lua windows.
     fn popups(&mut self) -> &mut Vec<crate::popup::Popup>;
     /// The chat item at cell `(x, y)` and the line of it there (both from
-    /// 1), from where the chat on screen is scrolled.
-    fn chat_at(&self, x: u16, y: u16) -> Option<(usize, usize)>;
+    /// 1), from where the chat on screen is scrolled. The GUI's node view
+    /// has no cells under the pointer, so this is `None` there.
+    fn chat_at(&self, _x: u16, _y: u16) -> Option<(usize, usize)> {
+        None
+    }
     /// The panels, and which one has the keyboard.
     fn panel_store(&mut self) -> panels::PanelStore<'_>;
     /// The known plugins and their shutdown hooks.
@@ -1709,24 +1715,21 @@ pub struct ChatView {
 /// rest wait for the next frame, so opening a long session stays quick.
 const RENDER_BUDGET: Duration = Duration::from_millis(25);
 
-/// Render the stale items of chat `buf` through `bone.ui.views` at
-/// `width_cols` and cache them: the ones on screen (`view`) first, then the
-/// others nearest to them, for up to [`RENDER_BUDGET`]; if some are left
-/// the chat asks for another frame. `line` lays out one line of a view's
-/// items; `bare` is an item's rows when no view applies. Returns the top
-/// row that keeps the same text at the top of the screen.
-pub fn render_chat<H: Host>(
-    h: &mut H,
-    buf: usize,
-    width_cols: usize,
-    view: ChatView,
-    line: &impl Fn(&H, &[crate::model::Item], usize) -> H::Line,
-    bare: &impl Fn(&serde_json::Value, usize, bool) -> Vec<H::Line>,
-) -> usize {
-    let generation = h.generation();
-    let c = h.chat_store();
+/// Forget the cached items of chat `buf` whose view read chat data that has
+/// changed since (`bone.chat.items` and `bone.chat.item` record what a view
+/// read); returns the data generation they were checked at.
+pub fn check_chat_deps<H: Host>(h: &mut H, buf: usize) -> u64 {
     // Views that read other chat data are drawn again when it changed.
-    let data = crate::data::generation(c.chats);
+    // Unchanged since the last walk: nothing cached can have gone stale.
+    let data = crate::data::generation(h.chat_store().chats);
+    if h.chat_store()
+        .chats
+        .get(buf)
+        .is_some_and(|c| c.deps_at == Some(data))
+    {
+        return data;
+    }
+    let c = h.chat_store();
     let checked: Vec<_> = {
         // Each chat is indexed once, not once per view that read it.
         let mut chats = HashMap::new();
@@ -1751,6 +1754,27 @@ pub fn render_chat<H: Host>(
             c.chats[buf].invalidate(item);
         }
     }
+    c.chats[buf].deps_at = Some(data);
+    data
+}
+
+/// Render the stale items of chat `buf` through `bone.ui.views` at
+/// `width_cols` and cache them: the ones on screen (`view`) first, then the
+/// others nearest to them, for up to [`RENDER_BUDGET`]; if some are left
+/// the chat asks for another frame. `line` lays out one line of a view's
+/// items; `bare` is an item's rows when no view applies. Returns the top
+/// row that keeps the same text at the top of the screen.
+pub fn render_chat<H: Host>(
+    h: &mut H,
+    buf: usize,
+    width_cols: usize,
+    view: ChatView,
+    line: &impl Fn(&H, &[crate::model::Item], usize) -> H::Line,
+    bare: &impl Fn(&serde_json::Value, usize, bool) -> Vec<H::Line>,
+) -> usize {
+    let generation = h.generation();
+    let data = check_chat_deps(h, buf);
+    let c = h.chat_store();
     let stale = c.chats[buf].stale(width_cols, generation, Instant::now());
     let items = if stale.is_empty() {
         Vec::new()

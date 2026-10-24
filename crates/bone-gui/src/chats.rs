@@ -1,6 +1,6 @@
 //! Chats and messages for Lua, as the TUI has them: opening a session in a
 //! chat (`bone.chat.open`, the sessions sidebar) and showing a chat with its
-//! own draft, the chat item under a cell, the message log, and running Lua
+//! own draft, the message log, and running Lua
 //! from the prompt (`/lua`, `bone.api.source`).
 
 use std::path::PathBuf;
@@ -9,16 +9,17 @@ use bone_proto::methods::{SessionMessages, SessionRef};
 use bone_ui::lua::{Host, args, err, fire, ret};
 use mlua::{Function, Lua, MultiValue, Table, Value};
 
+use crate::nodeview::ChatMove;
 use crate::{ChatBuffer, Gui};
 
-/// These ops; `None` for an op that is not one of them.
+/// These ops. `Err(a)` hands the arguments to the next dispatcher.
 pub(crate) fn dispatch(
     gui: &mut Gui,
     lua: &Lua,
     op: &str,
     a: MultiValue,
-) -> Option<mlua::Result<MultiValue>> {
-    Some(match op {
+) -> Result<mlua::Result<MultiValue>, MultiValue> {
+    Ok(match op {
         // No session: a new chat (for a window to show).
         "open_session" => args::<(Option<String>, Option<bool>)>(lua, a).and_then(|(id, show)| {
             let buf = match id {
@@ -39,12 +40,14 @@ pub(crate) fn dispatch(
             }
             None => ret(lua, Value::Nil),
         }),
+        // Rows down (negative is up), "top" or "bottom": the chat list
+        // moves by lines of text.
         "chat_scroll" => args::<Value>(lua, a).and_then(|by| {
-            gui.chat_scroll = Some(match by {
-                Value::Integer(n) => crate::ChatScroll::By(n as i32),
-                Value::Number(n) => crate::ChatScroll::By(n as i32),
-                Value::String(s) if s.to_str()?.as_ref() == "top" => crate::ChatScroll::Top,
-                Value::String(s) if s.to_str()?.as_ref() == "bottom" => crate::ChatScroll::Bottom,
+            let to = match by {
+                Value::Integer(n) => ChatMove::By(n as f32),
+                Value::Number(n) => ChatMove::By(n as f32),
+                Value::String(s) if s.to_str()?.as_ref() == "top" => ChatMove::Top,
+                Value::String(s) if s.to_str()?.as_ref() == "bottom" => ChatMove::Bottom,
                 Value::String(s) => {
                     return Err(err(format!(
                         "scroll by rows, \"top\" or \"bottom\", not {:?}",
@@ -57,8 +60,8 @@ pub(crate) fn dispatch(
                         other.type_name()
                     )));
                 }
-            });
-            gui.changed();
+            };
+            gui.move_chat(to);
             ret(lua, ())
         }),
         "chat_scroll_to" => args::<(usize, Option<String>)>(lua, a).and_then(|(index, at)| {
@@ -69,7 +72,7 @@ pub(crate) fn dispatch(
         }),
         // Shown without adding to the log (for showing the log itself).
         "show_message" => args::<String>(lua, a).and_then(|text| {
-            gui.status = (!text.is_empty()).then_some(crate::Status { text, error: false });
+            gui.status = (!text.is_empty()).then_some(crate::Status::new(text, false));
             gui.changed();
             ret(lua, ())
         }),
@@ -85,7 +88,7 @@ pub(crate) fn dispatch(
             gui.source(&path);
             ret(lua, ())
         }),
-        _ => return None,
+        _ => return Err(a),
     })
 }
 
@@ -157,51 +160,25 @@ impl Gui {
         self.changed();
     }
 
-    /// The height of the chat on screen, in rows.
-    fn chat_height(&self) -> usize {
-        (self.lua.geometry.leaves.iter())
-            .find(|(n, _)| n == "chat")
-            .map_or(0, |(_, r)| r.height as usize)
-    }
-
-    /// Scroll the chat so item `index` shows at the top, center or bottom;
-    /// false when there is no such drawn item.
+    /// Scroll the chat so item `index` (from 1) shows at the top, center
+    /// or bottom; false when it is not in the list.
     pub fn chat_scroll_to(&mut self, index: usize, at: &str) -> bool {
-        let rows = self.chats[self.current].item_rows();
-        let Some(&(_, start, len)) = rows.iter().find(|r| r.0 == index) else {
+        let Some((start, len, viewport)) = self.item_span(index) else {
             return false;
         };
-        let height = self.chat_height();
         let top = match at {
-            "bottom" => (start + len).saturating_sub(height),
-            "center" => (start + len / 2).saturating_sub(height / 2),
+            "bottom" => start + len - viewport,
+            "center" => start + len / 2.0 - viewport / 2.0,
             _ => start,
         };
-        self.chat_scroll = Some(crate::ChatScroll::To(top));
-        self.changed();
+        self.move_chat(ChatMove::To(top.max(0.0)));
         true
     }
 
-    /// `bone.chat.view()`: where the chat on screen is scrolled and which
-    /// items show.
+    /// `bone.chat.view()`: where the chat on screen is scrolled (pixels)
+    /// and which items show.
     pub fn chat_view_json(&self) -> serde_json::Value {
-        let (top, follow) = (self.lua.chat_views.get(&self.current))
-            .copied()
-            .unwrap_or((0, true));
-        let height = self.chat_height();
-        let rows = self.chats[self.current].item_rows();
-        let visible: Vec<usize> = (rows.iter())
-            .filter(|&&(_, start, len)| len > 0 && start < top + height && start + len > top)
-            .map(|&(i, _, _)| i)
-            .collect();
-        serde_json::json!({
-            "top": top,
-            "height": height,
-            "rows": self.chats[self.current].row_count(),
-            "follow": follow,
-            "first": visible.first(),
-            "last": visible.last(),
-        })
+        self.chat_view()
     }
 
     /// Load the UI with the library `/tui use` chose; a library that does

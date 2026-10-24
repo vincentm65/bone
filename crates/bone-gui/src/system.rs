@@ -16,8 +16,8 @@ pub(crate) fn dispatch(
     lua: &Lua,
     op: &str,
     a: MultiValue,
-) -> Option<mlua::Result<MultiValue>> {
-    Some(match op {
+) -> Result<mlua::Result<MultiValue>, MultiValue> {
+    Ok(match op {
         "gui_notify" => args::<(String, Option<String>)>(lua, a).and_then(|(title, body)| {
             notify(gui, title, body.unwrap_or_default());
             ret(lua, ())
@@ -50,7 +50,7 @@ pub(crate) fn dispatch(
                 ret(lua, ())
             })
         }
-        _ => return None,
+        _ => return Err(a),
     })
 }
 

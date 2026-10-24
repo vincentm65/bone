@@ -367,7 +367,13 @@ local function pad(s, w)
   return s .. string.rep(" ", w - n)
 end
 
-function M.open()
+local ORDER = { update = 1, installed = 2, available = 3 }
+M.HEAD = { update = "Updates", installed = "Installed", available = "Available" }
+
+--- The catalog's state and what its keys do, drawn by whoever opens it:
+--- `hooks.changed()` asks for a redraw, `hooks.close()` closes the window.
+--- Returns { st, rows(), selected_rows(list), note(), hint(), on_key }.
+function M.page(hooks)
   local st = {
     entries = nil,
     err = nil,
@@ -379,13 +385,7 @@ function M.open()
     busy = false,
     progress = nil,
   }
-  local id
-
-  local function redraw()
-    if id then
-      bone.ui.update(id, {})
-    end
-  end
+  local redraw = hooks.changed
 
   local function load(note)
     st.entries, st.err = nil, nil
@@ -409,8 +409,6 @@ function M.open()
     end)
   end
 
-  local ORDER = { update = 1, installed = 2, available = 3 }
-  local HEAD = { update = "Updates", installed = "Installed", available = "Available" }
   local function rows()
     local list = {}
     for _, e in ipairs(st.entries or {}) do
@@ -441,91 +439,31 @@ function M.open()
     return e.state == "available" or e.state == "update"
   end
 
-  local function render(ctx)
-    local w = math.max(ctx.width, 30)
-    local out = { { { fill = "─", hl = "WinSeparator" } } }
-    local list = rows()
-    local selected = selected_rows(list)
-    local updates = 0
-    for _, item in ipairs(list) do
-      if item.state == "update" then
-        updates = updates + 1
-      end
-    end
-    out[#out + 1] = {
-      { " Catalog  ", "Accent" },
-      { bone.text.truncate(M.source(), w - 11), "Dim" },
-    }
-    out[#out + 1] = {
-      { (" Updates: %d"):format(updates), "Accent" },
-      { (" · Selected: %d"):format(#selected), "Dim" },
-    }
-    out[#out + 1] = {
-      { "   " },
-      { "Plugins", st.page == "plugin" and "Accent" or "Dim" },
-      { "   " },
-      { "TUIs", st.page == "tui" and "Accent" or "Dim" },
-    }
-    out[#out + 1] = ""
-    st.sel = math.max(1, math.min(st.sel, math.max(#list, 1)))
-    if st.err then
-      out[#out + 1] = { { "   error: " .. st.err, "ErrorMsg" } }
-    elseif not st.entries then
-      out[#out + 1] = { { "   loading…", "Dim" } }
-    elseif #list == 0 then
-      out[#out + 1] = { { st.page == "tui" and "   no TUIs in the catalog" or "   the catalog is empty", "Dim" } }
-    end
-    local name_w = 0
-    for _, e in ipairs(list) do
-      name_w = math.max(name_w, bone.text.width(M.label(e)))
-    end
-    name_w = name_w + 3
-    local room = math.max(math.min(16, (ctx.height or 24) - 10), 3)
-    local first = math.max(1, st.sel - room + 1)
-    local last_state
-    for i = first, math.min(#list, first + room - 1) do
-      local e = list[i]
-      if e.state ~= last_state then
-        out[#out + 1] = { { "   " .. HEAD[e.state], "MdHeading" } }
-        last_state = e.state
-      end
-      local cursor = i == st.sel and "›" or " "
-      local check = st.selected[e.name] and "x" or " "
-      local row_hl = i == st.sel and "Selection" or "Normal"
-      local muted_hl = i == st.sel and "Selection" or "Dim"
-      local prefix = { { cursor, i == st.sel and "Accent" or "Dim" }, { "[", "Dim" } }
-      prefix[#prefix + 1] = { check, st.selected[e.name] and "Accent" or "Dim" }
-      prefix[#prefix + 1] = { "] ", "Dim" }
-      prefix[#prefix + 1] = { pad(M.label(e), name_w), row_hl }
-      prefix[#prefix + 1] = { pad(e.version or "", 8), muted_hl }
-      prefix[#prefix + 1] = { pad(M.supports(e), 6), muted_hl }
-      prefix[#prefix + 1] = { bone.text.truncate(e.description or "", math.max(w - name_w - 19, 1)), muted_hl }
-      out[#out + 1] = prefix
-    end
-    out[#out + 1] = ""
-    local e = list[st.sel]
-    local note = st.ask and st.ask.text
+  --- What happened, or what is asked: the line under the list.
+  local function note()
+    return st.ask and st.ask.text
       or (st.note and ((st.note[2] and "error: " or "") .. st.note[1]))
       or (st.progress and ("installing %d/%d…"):format(st.progress.done, st.progress.total))
       or (st.busy and "working…")
       or ""
-    out[#out + 1] = { { bone.text.truncate("   " .. note, w), st.ask and "Accent" or "Dim" } }
-    local hint
+  end
+
+  --- The keys that do something now.
+  local function hint()
+    local e = rows()[st.sel]
     if st.ask then
-      hint = "y yes · n no"
+      return "y yes · n no"
     elseif st.busy then
-      hint = "working…"
-    elseif e and #selected > 0 then
-      hint = "space toggle · enter install selected · a all · n clear · u scan · x remove · tab page · esc close"
+      return "working…"
+    elseif e and #selected_rows(rows()) > 0 then
+      return "space toggle · enter install selected · a all · n clear · u scan · x remove · tab page · esc close"
     elseif e and e.state == "available" then
-      hint = "↑↓ move · space select · enter install · a all · u scan · tab page · esc close"
+      return "↑↓ move · space select · enter install · a all · u scan · tab page · esc close"
     elseif e then
-      hint = "↑↓ move · space select · enter " .. (e.state == "update" and "update" or "reinstall") .. " · a all · u scan · x remove · tab page · esc close"
-    else
-      hint = "r refresh · tab page · esc close"
+      return "↑↓ move · space select · enter " .. (e.state == "update" and "update" or "reinstall")
+        .. " · a all · u scan · x remove · tab page · esc close"
     end
-    out[#out + 1] = { { "   " .. hint, "Dim" } }
-    return out
+    return "r refresh · tab page · esc close"
   end
 
   local function done(what)
@@ -586,7 +524,7 @@ function M.open()
     end
     st.note = nil
     if k == "esc" or k == "q" or k == "ctrl+c" then
-      bone.ui.close(id)
+      hooks.close()
     elseif k == "up" or k == "k" or k == "wheelup" then
       st.sel = math.max(1, st.sel - 1)
     elseif k == "down" or k == "j" or k == "wheeldown" then
@@ -638,7 +576,90 @@ function M.open()
   end
 
   load()
-  id = bone.ui.popup({ lines = render, on_key = on_key, anchor = "prompt" })
+  return { st = st, rows = rows, selected_rows = selected_rows, note = note, hint = hint, on_key = on_key }
+end
+
+local function render(page, ctx)
+  local st, rows, selected_rows = page.st, page.rows, page.selected_rows
+  local w = math.max(ctx.width, 30)
+  local out = { { { fill = "─", hl = "WinSeparator" } } }
+  local list = rows()
+  local selected = selected_rows(list)
+  local updates = 0
+  for _, item in ipairs(list) do
+    if item.state == "update" then
+      updates = updates + 1
+    end
+  end
+  out[#out + 1] = {
+    { " Catalog  ", "Accent" },
+    { bone.text.truncate(M.source(), w - 11), "Dim" },
+  }
+  out[#out + 1] = {
+    { (" Updates: %d"):format(updates), "Accent" },
+    { (" · Selected: %d"):format(#selected), "Dim" },
+  }
+  out[#out + 1] = {
+    { "   " },
+    { "Plugins", st.page == "plugin" and "Accent" or "Dim" },
+    { "   " },
+    { "TUIs", st.page == "tui" and "Accent" or "Dim" },
+  }
+  out[#out + 1] = ""
+  st.sel = math.max(1, math.min(st.sel, math.max(#list, 1)))
+  if st.err then
+    out[#out + 1] = { { "   error: " .. st.err, "ErrorMsg" } }
+  elseif not st.entries then
+    out[#out + 1] = { { "   loading…", "Dim" } }
+  elseif #list == 0 then
+    out[#out + 1] = { { st.page == "tui" and "   no TUIs in the catalog" or "   the catalog is empty", "Dim" } }
+  end
+  local name_w = 0
+  for _, e in ipairs(list) do
+    name_w = math.max(name_w, bone.text.width(M.label(e)))
+  end
+  name_w = name_w + 3
+  local room = math.max(math.min(16, (ctx.height or 24) - 10), 3)
+  local first = math.max(1, st.sel - room + 1)
+  local last_state
+  for i = first, math.min(#list, first + room - 1) do
+    local e = list[i]
+    if e.state ~= last_state then
+      out[#out + 1] = { { "   " .. M.HEAD[e.state], "MdHeading" } }
+      last_state = e.state
+    end
+    local cursor = i == st.sel and "›" or " "
+    local check = st.selected[e.name] and "x" or " "
+    local row_hl = i == st.sel and "Selection" or "Normal"
+    local muted_hl = i == st.sel and "Selection" or "Dim"
+    local prefix = { { cursor, i == st.sel and "Accent" or "Dim" }, { "[", "Dim" } }
+    prefix[#prefix + 1] = { check, st.selected[e.name] and "Accent" or "Dim" }
+    prefix[#prefix + 1] = { "] ", "Dim" }
+    prefix[#prefix + 1] = { pad(M.label(e), name_w), row_hl }
+    prefix[#prefix + 1] = { pad(e.version or "", 8), muted_hl }
+    prefix[#prefix + 1] = { pad(M.supports(e), 6), muted_hl }
+    prefix[#prefix + 1] = { bone.text.truncate(e.description or "", math.max(w - name_w - 19, 1)), muted_hl }
+    out[#out + 1] = prefix
+  end
+  out[#out + 1] = ""
+  local e = list[st.sel]
+  out[#out + 1] = { { bone.text.truncate("   " .. page.note(), w), st.ask and "Accent" or "Dim" } }
+  out[#out + 1] = { { "   " .. page.hint(), "Dim" } }
+  return out
+end
+
+--- /catalog: the page in a window. A library draws it differently by
+--- setting `bone.ui.windows.catalog(page)`, which returns the window's spec.
+function M.open()
+  local id
+  local page = M.page({
+    changed = function() if id then bone.ui.update(id, {}) end end,
+    close = function() bone.ui.close(id) end,
+  })
+  local view = bone.ui.windows.catalog
+  local spec = view and view(page) or { lines = function(ctx) return render(page, ctx) end, anchor = "prompt" }
+  spec.on_key = page.on_key
+  id = bone.ui.popup(spec)
   return id
 end
 
