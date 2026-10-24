@@ -59,7 +59,7 @@ const STREAM_EVERY: Duration = Duration::from_millis(50);
 /// A chat list's items this frame (see `Gui::chat_items`). Built only when
 /// a visible item is missing from the cache.
 struct ChatItems {
-    items: Vec<bone_ui::chat::Item>,
+    items: Rc<[bone_ui::chat::Item]>,
     kept: HashMap<bone_ui::chat::Item, Rc<Node>>,
     used: HashMap<bone_ui::chat::Item, Rc<Node>>,
     data: u64,

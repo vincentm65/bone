@@ -8,7 +8,9 @@
 //! chat data the view read has changed (see [`Dep`]), or when the view asked
 //! to be drawn again later.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::time::Instant;
 
 use crate::data::Dep;
@@ -142,6 +144,8 @@ pub struct ChatBuffer<L> {
     revs: Vec<u64>,
     next_rev: u64,
     cache: HashMap<Item, Cached<L>>,
+    /// The renderable items, rebuilt only when their order or membership changes.
+    item_order: RefCell<Option<Rc<[Item]>>>,
     /// Items Lua added, by slot (`None` once removed).
     lua_items: Vec<Option<LuaItem>>,
     /// Timing and live output of tool calls, by call id.
@@ -192,6 +196,7 @@ impl<L> Default for ChatBuffer<L> {
             revs: Vec::new(),
             next_rev: 0,
             cache: HashMap::new(),
+            item_order: RefCell::new(None),
             lua_items: Vec::new(),
             tool_meta: HashMap::new(),
             message_usage: HashMap::new(),
@@ -220,6 +225,7 @@ impl<L> ChatBuffer<L> {
     }
 
     fn push(&mut self, e: Entry) {
+        self.invalidate_items();
         self.entries.push(e);
         self.next_id += 1;
         self.ids.push(self.next_id);
@@ -228,6 +234,7 @@ impl<L> ChatBuffer<L> {
     }
 
     fn pop(&mut self) {
+        self.invalidate_items();
         self.entries.pop();
         self.revs.pop();
         if let Some(id) = self.ids.pop() {
@@ -245,6 +252,10 @@ impl<L> ChatBuffer<L> {
         self.revs[i] = self.next_rev;
     }
 
+    fn invalidate_items(&mut self) {
+        *self.item_order.borrow_mut() = None;
+    }
+
     // ---- building the transcript ---------------------------------------------
 
     /// Replace everything with a loaded transcript.
@@ -259,6 +270,7 @@ impl<L> ChatBuffer<L> {
         self.ids.clear();
         self.revs.clear();
         self.cache.clear();
+        self.invalidate_items();
         self.lua_items.clear();
         self.tool_meta.clear();
         self.message_usage.clear();
@@ -310,6 +322,8 @@ impl<L> ChatBuffer<L> {
     }
 
     pub fn delta(&mut self, d: &MessageDeltaParams) {
+        let existing = self.entries.len().checked_sub(1);
+        let before = existing.map(|i| self.entry_parts(i));
         let i = match self.entries.last() {
             Some(Entry::Assistant {
                 streaming: true, ..
@@ -333,6 +347,9 @@ impl<L> ChatBuffer<L> {
             }
         }
         self.touch(i);
+        if before.is_some_and(|parts| parts != self.entry_parts(i)) {
+            self.invalidate_items();
+        }
     }
 
     /// The final message replaces whatever streamed (deltas may have been
@@ -460,10 +477,14 @@ impl<L> ChatBuffer<L> {
                 }
             )
         }) {
+            let before = self.entry_parts(i);
             if let Entry::Assistant { streaming, .. } = &mut self.entries[i] {
                 *streaming = false;
             }
             self.touch(i);
+            if before != self.entry_parts(i) {
+                self.invalidate_items();
+            }
         }
         if let Some(user) = self
             .entries
@@ -497,6 +518,9 @@ impl<L> ChatBuffer<L> {
     /// The core's queue for this session changed.
     pub fn set_queue(&mut self, queue: Vec<QueuedMessage>, paused: bool) {
         if queue != self.queue || paused != self.queue_paused {
+            if queue.len() != self.queue.len() {
+                self.invalidate_items();
+            }
             self.queue = queue;
             self.queue_paused = paused;
             self.next_rev += 1;
@@ -510,8 +534,18 @@ impl<L> ChatBuffer<L> {
 
     // ---- items ---------------------------------------------------------------
 
-    /// The transcript as renderable items, in order.
-    pub fn items(&self) -> Vec<Item> {
+    /// The transcript as renderable items, in order. The allocation is shared
+    /// by readers until the transcript's structure changes.
+    pub fn items(&self) -> Rc<[Item]> {
+        if let Some(items) = self.item_order.borrow().as_ref().cloned() {
+            return items;
+        }
+        let items: Rc<[Item]> = self.build_items().into();
+        *self.item_order.borrow_mut() = Some(Rc::clone(&items));
+        items
+    }
+
+    fn build_items(&self) -> Vec<Item> {
         let mut out = Vec::new();
         // Lua items in the order they go: by anchor, then as added.
         let mut lua: Vec<(usize, usize)> = self
@@ -565,6 +599,33 @@ impl<L> ChatBuffer<L> {
             part: Part::Queued,
         }));
         out
+    }
+
+    fn entry_parts(&self, i: usize) -> [Option<Part>; 2] {
+        let mut parts = [None; 2];
+        let mut n = 0;
+        let mut add = |part| {
+            parts[n] = Some(part);
+            n += 1;
+        };
+        match &self.entries[i] {
+            Entry::User(..) => add(Part::User),
+            Entry::Assistant {
+                text,
+                reasoning,
+                streaming,
+            } => {
+                if !reasoning.trim().is_empty() {
+                    add(Part::Reasoning);
+                }
+                if !text.trim().is_empty() || (*streaming && reasoning.trim().is_empty()) {
+                    add(Part::Assistant);
+                }
+            }
+            Entry::Tool { .. } => add(Part::Tool),
+            Entry::Notice { .. } => add(Part::Notice),
+        }
+        parts
     }
 
     /// What `bone.chat.items` filters on besides kind and position, read
@@ -721,6 +782,7 @@ impl<L> ChatBuffer<L> {
 
     /// Add a Lua item after the transcript as it is now.
     pub fn add_lua(&mut self, id: String, kind: String, data: serde_json::Map<String, Value>) {
+        self.invalidate_items();
         self.next_rev += 1;
         self.lua_items.push(Some(LuaItem {
             id,
@@ -761,6 +823,7 @@ impl<L> ChatBuffer<L> {
         else {
             return false;
         };
+        self.invalidate_items();
         self.lua_items[slot] = None;
         // Reclaim trailing slots so add/remove churn (toasts, progress) doesn't grow it.
         while let Some(None) = self.lua_items.last() {
@@ -893,8 +956,10 @@ impl<L> ChatBuffer<L> {
     /// Lazy, and `skip` steps over whole items, so drawing one screen of a
     /// long chat doesn't walk every row.
     pub fn rows(&self) -> impl Iterator<Item = &L> {
-        (self.items().into_iter())
-            .filter_map(|item| self.cache.get(&item))
+        let items = self.items().to_vec();
+        items
+            .into_iter()
+            .filter_map(move |item| self.cache.get(&item))
             .flat_map(|c| c.lines.iter())
     }
 

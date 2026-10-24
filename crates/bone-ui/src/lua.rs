@@ -1776,11 +1776,7 @@ pub fn render_chat<H: Host>(
     let data = check_chat_deps(h, buf);
     let c = h.chat_store();
     let stale = c.chats[buf].stale(width_cols, generation, Instant::now());
-    let items = if stale.is_empty() {
-        Vec::new()
-    } else {
-        c.chats[buf].items()
-    };
+    let items = c.chats[buf].items();
     let anchor = (!view.follow)
         .then(|| c.chats[buf].item_at_row(view.top))
         .flatten();

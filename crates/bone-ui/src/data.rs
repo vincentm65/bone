@@ -46,7 +46,7 @@ pub struct Dep {
 /// A chat's items and their turns, built once for many queries.
 pub struct Indexed<'a, L> {
     chat: &'a ChatBuffer<L>,
-    items: Vec<Item>,
+    items: std::rc::Rc<[Item]>,
     turns: Vec<usize>,
 }
 

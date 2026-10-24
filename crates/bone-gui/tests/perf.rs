@@ -272,5 +272,68 @@ async fn desktop_frames() {
     g.gui
         .run_lua("t", "require('bone.desktop.sidebar').open()")
         .unwrap();
+    // Exercise list bookkeeping independently of Lua/Markdown rendering.
+    let chat = &mut g.gui.chats[0];
+    for n in 0..5000 {
+        let turn = (1000 + n) as u64;
+        chat.turn_started(turn, "show the next row");
+        chat.message_completed(&MessageCompletedParams {
+            session_id: "s".into(),
+            turn_id: turn,
+            message: ChatMessage::Assistant {
+                content: format!("row {n}"),
+                reasoning: String::new(),
+                tool_calls: vec![],
+                reasoning_state: None,
+            },
+            usage: None,
+        });
+        chat.turn_finished(&TurnFinishedParams {
+            session_id: "s".into(),
+            turn_id: turn,
+            outcome: TurnOutcome::Completed,
+        });
+    }
+    g.gui.view.invalidate();
+    for _ in 0..4 {
+        g.frame();
+    }
+    g.gui
+        .run_lua("t", "bone.gui.scroll('chat', 'end')")
+        .unwrap();
+    for _ in 0..3 {
+        g.frame();
+    }
+    bench(&mut g, "list-10000-idle-end", 2, 20, |_| {});
+    g.gui
+        .run_lua("t", "bone.gui.scroll('chat', 'top')")
+        .unwrap();
+    for _ in 0..3 {
+        g.frame();
+    }
+    bench(&mut g, "list-10000-idle-top", 2, 20, |_| {});
+
+    g.gui.chats[0].turn_started(100000, "stream a large transcript");
+    g.gui.chats[0].delta(&bone_proto::methods::MessageDeltaParams {
+        session_id: "s".into(),
+        turn_id: 100000,
+        kind: bone_proto::types::DeltaKind::Text,
+        text: "initial streaming text".into(),
+    });
+    g.gui.view.invalidate();
+    for _ in 0..4 {
+        g.frame();
+    }
+    bench(&mut g, "list-10000-streaming", 1, 12, |g| {
+        g.gui.chats[0].delta(&bone_proto::methods::MessageDeltaParams {
+            session_id: "s".into(),
+            turn_id: 100000,
+            kind: bone_proto::types::DeltaKind::Text,
+            text: " more streaming text".into(),
+        });
+        g.gui.view.invalidate();
+        std::thread::sleep(Duration::from_millis(1));
+    });
+
     bench(&mut g, "sidebar-slide", 0, 16, |_| {});
 }
