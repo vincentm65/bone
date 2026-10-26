@@ -12,9 +12,8 @@
 --   local term = require("bone.terminal")
 --   term.open({ id = "logs", dock = "right", size = 0.5 }, { cmd = "tail -f log" })
 
--- Keep the public table and the original open trampoline across plugin reloads.
--- Windows holds this table and wraps open; replacing it would strand its wrapper
--- on an unloaded generation. This is deliberately not persisted plugin state.
+-- Keep the public facade across reloads, including callers holding open.
+-- This is deliberately not persisted plugin state.
 local M = bone._gui_term_module or {}
 if M._active then return M end -- A dependency can evict package.loaded while we run.
 bone._gui_term_module = M
@@ -138,6 +137,34 @@ local function render(id, t, ctx)
   return lines
 end
 
+-- Node panels use pixels; the PTY and render() still use character cells.
+local function node(id, t, ctx)
+  local cell = ctx.cell or bone.gui.window_info().cell or { w = 8, h = 18 }
+  local lines = render(id, t, {
+    width = math.max(1, math.floor(ctx.width / cell.w)),
+    height = math.max(1, math.floor(ctx.height / cell.h)),
+    focused = ctx.focused,
+  })
+  local out = { direction = "column", overflow = "hidden" }
+  local normal = bone.hl.get("Normal") or {}
+  for _, line in ipairs(lines) do
+    local spans = {}
+    for i, item in ipairs(line) do
+      local span = { text = item[1], hl = item[2], bg = item[2] ~= "Normal" and item[2] or nil }
+      -- Node spans do not apply the TUI's reverse modifier.
+      if item[2] == "TermCursor" then
+        span.color, span.bg = normal.bg or "#161616", normal.fg or "#eeeeee"
+      end
+      spans[i] = span
+    end
+    out[#out + 1] = {
+      height = cell.h, line_height = cell.h, font = "mono", size = bone.o.font_size or 14,
+      wrap = false, spans = #spans > 0 and spans or { " " },
+    }
+  end
+  return out
+end
+
 local function on_key(id, t, key)
   if not active or terms[id] ~= t then
     return false
@@ -237,8 +264,10 @@ function M._open(spec, opts)
   terms[id] = t
   last = id
   p.focusable = true
+  p.title = p.title or "terminal · " .. (type(opts.cmd) == "table" and table.concat(opts.cmd, " ") or opts.cmd or os.getenv("SHELL") or "/bin/sh")
   if p.focus == nil then p.focus = true end
   p.render = function(ctx) return render(id, t, ctx) end
+  p.node = function(ctx) return node(id, t, ctx) end
   p.on_key = function(key) return on_key(id, t, key) end
   local on_close = p.on_close
   p.on_close = function(panel)
@@ -246,8 +275,14 @@ function M._open(spec, opts)
     release(id, t)
     if on_close then on_close(panel) end
   end
-  local ok, panel = pcall(bone.ui.panel.open, p)
+  local ok, panel = pcall(function()
+    local panel = bone.ui.panel.open(p)
+    local attach = not spec and require("bone.nodes.window").attach_panel
+    if attach then attach(id) end
+    return panel
+  end)
   if not ok then
+    pcall(bone.ui.panel.close, id)
     release(id, t)
     error(panel, 0)
   end

@@ -49,7 +49,6 @@ pub const RUNTIME: &[(&str, &str)] = runtime_files![
     "gui/api.lua",
     "gui/defaults.lua",
     "gui/bare.lua",
-    "gui/desktop.lua",
     "lua/bone/gui.lua",
     "lua/bone/chats.lua",
     "lua/bone/background.lua",
@@ -57,13 +56,17 @@ pub const RUNTIME: &[(&str, &str)] = runtime_files![
     "lua/bone/timing.lua",
     "lua/bone/terminal.lua",
     "lua/bone/desktop/markdown.lua",
-    "lua/bone/desktop/card.lua",
     "lua/bone/desktop/views.lua",
     "lua/bone/desktop/tools.lua",
     "lua/bone/desktop/attach.lua",
     "lua/bone/nodes.lua",
     "lua/bone/nodes/window.lua",
+    "lua/bone/nodes/style.lua",
+    "lua/bone/nodes/widgets.lua",
     "lua/bone/nodes/popups.lua",
+    "lua/bone/nodes/composer.lua",
+    "lua/bone/nodes/statusbar.lua",
+    "lua/bone/nodes/overlays.lua",
     "lua/bone/nodes/library.lua",
     "lua/bone/desktop/sidebar.lua",
     "lua/bone/desktop/tray.lua",
@@ -750,22 +753,18 @@ pub fn tui_library(config_dir: &Path) -> Option<String> {
 
 /// The GUI's own library, chosen with `/gui use` and kept in
 /// `<config dir>/gui-library`: `None` when none was chosen (the GUI then
-/// follows `/tui`, see [`library`]), else `standard`, `bare`, the built-in
-/// `desktop`, or a copy under `libraries/`.
+/// follows `/tui`, see [`library`]), else `standard`, `bare`, or a copy
+/// under `libraries/`.
 pub fn gui_library(config_dir: &Path) -> Option<String> {
     let name = std::fs::read_to_string(config_dir.join("gui-library")).ok()?;
     let name = name.trim();
     (!name.is_empty()).then(|| name.to_owned())
 }
 
-/// The libraries built into the GUI besides the standard one and bare.
-pub const GUI_LIBRARIES: &[&str] = &["desktop"];
-
-/// Choose the GUI's library: `standard`, `bare`, a built-in one (`desktop`)
-/// or a copy under `libraries/` that has GUI files.
+/// Choose the GUI's library: `standard`, `bare` or a copy under
+/// `libraries/` that has GUI files.
 pub fn set_gui_library(config_dir: &Path, name: &str) -> Result<(), String> {
     let known = ["standard", "bare"].contains(&name)
-        || GUI_LIBRARIES.contains(&name)
         || config_dir.join("libraries").join(name).join("gui").is_dir();
     if !known {
         return Err(format!("no GUI library named {name}"));
@@ -774,13 +773,10 @@ pub fn set_gui_library(config_dir: &Path, name: &str) -> Result<(), String> {
     std::fs::write(&path, format!("{name}\n")).map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// The GUI's library when none was chosen with `/gui use`.
-pub const GUI_DEFAULT_LIBRARY: &str = "desktop";
-
 /// The library frontend `side` draws with (`None`: the standard one). The
 /// TUI's is the one chosen with `/tui`. The GUI's is the one chosen with
 /// `/gui use`; without one it takes the TUI's if that is `bare` or has
-/// files for the GUI (a `gui/` directory), and is `desktop` otherwise, so a
+/// files for the GUI (a `gui/` directory), and is standard otherwise, so a
 /// library made for the terminal leaves the GUI its own.
 pub fn library(config_dir: &Path, side: Side) -> Option<String> {
     if side == Side::Gui
@@ -788,10 +784,7 @@ pub fn library(config_dir: &Path, side: Side) -> Option<String> {
     {
         return (name != "standard").then_some(name);
     }
-    let gui_default = || (side == Side::Gui).then(|| GUI_DEFAULT_LIBRARY.to_owned());
-    let Some(name) = tui_library(config_dir) else {
-        return gui_default();
-    };
+    let name = tui_library(config_dir)?;
     match side {
         Side::Tui => Some(name),
         Side::Gui if name == "bare" => Some(name),
@@ -804,8 +797,7 @@ pub fn library(config_dir: &Path, side: Side) -> Option<String> {
         {
             Some(name)
         }
-        Side::Gui => gui_default(),
-        Side::Core => None,
+        Side::Gui | Side::Core => None,
     }
 }
 
@@ -850,8 +842,7 @@ pub fn tui_libraries(config_dir: &Path) -> Vec<String> {
 /// Copy the built-in UI files (all but the base API and the core's) to a
 /// new library, `<config dir>/libraries/<name>/`. `base` is `""` for the
 /// standard UI; `bare` copies only the bare library's files, as its
-/// `defaults.lua`; `desktop` is the standard UI with the GUI's desktop
-/// library as its `gui/defaults.lua`. An existing library is never touched.
+/// `defaults.lua`. An existing library is never touched.
 pub fn create_tui_library(config_dir: &Path, name: &str, base: &str) -> Result<PathBuf, String> {
     let valid = !name.starts_with('.')
         && !["", "bare", "standard"].contains(&name)
@@ -861,7 +852,7 @@ pub fn create_tui_library(config_dir: &Path, name: &str, base: &str) -> Result<P
     if !valid {
         return Err(format!("bad library name {name:?}"));
     }
-    if !["", "bare", "desktop"].contains(&base) {
+    if !["", "bare"].contains(&base) {
         return Err(format!("no library to copy named {base}"));
     }
     let root = config_dir.join("libraries");
@@ -878,10 +869,6 @@ pub fn create_tui_library(config_dir: &Path, name: &str, base: &str) -> Result<P
                 ("bare", "tui/bare.lua") => "tui/defaults.lua",
                 ("bare", "gui/bare.lua") => "gui/defaults.lua",
                 ("bare", _) => continue,
-                ("desktop", "gui/desktop.lua") => "gui/defaults.lua",
-                ("desktop", "gui/defaults.lua") => continue,
-                // A built-in library of its own, not part of a standard copy.
-                (_, "gui/desktop.lua") => continue,
                 (
                     _,
                     "ui/api.lua" | "tui/api.lua" | "tui/bare.lua" | "gui/api.lua" | "gui/bare.lua",

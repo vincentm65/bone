@@ -64,12 +64,7 @@ impl Gui {
                 Sense::click_and_drag(),
             );
         }
-        if let Some(id) = p
-            .node
-            .id
-            .as_deref()
-            .filter(|id| ["chat", "prompt"].contains(id))
-        {
+        if let Some(id) = p.node.id.as_deref() {
             frame.leaves.push((id.to_owned(), r));
         }
         let (mut hovered, mut pressed, mut sensed) = (false, false, false);
@@ -112,7 +107,9 @@ impl Gui {
             || role.is_some())
             && visible.is_positive()
         {
-            let sense = if h.clicks() || wants_focus || s.active.is_some() {
+            let sense = if h.drag.is_some() {
+                Sense::click_and_drag()
+            } else if h.clicks() || wants_focus || s.active.is_some() {
                 Sense::click()
             } else {
                 Sense::hover()
@@ -144,7 +141,10 @@ impl Gui {
             // as last frame found (see after the children).
             hovered = resp.hovered()
                 || (self.view.hover.contains(&key) && ui.rect_contains_pointer(visible));
-            pressed = resp.is_pointer_button_down_on();
+            // A `mouse` handler took the gesture (`route_pointer`): the node
+            // hears none of it.
+            let quiet = self.view.mouse_taken != super::MouseTaken::No;
+            pressed = resp.is_pointer_button_down_on() && !quiet;
             if hovered {
                 if let Some(icon) = s.cursor.as_deref().and_then(cursor_icon) {
                     ui.ctx().set_cursor_icon(icon);
@@ -162,31 +162,49 @@ impl Gui {
                         x: q.x - r.min.x,
                         y: q.y - r.min.y,
                     });
-            let was = self.view.pressed.contains(&key);
+            let was = self.view.pressed.contains(&key) && !quiet;
+            let clicked = resp.clicked() && !quiet;
             if pressed {
                 frame.pressed.insert(key.clone());
                 if let (Some(f), false) = (h.press, was) {
                     frame.events.push((f, pos.clone()));
                 }
-            } else if was || resp.clicked() {
+            } else if was || clicked {
                 // Down and up within one frame are both still heard.
                 if let (Some(f), false) = (h.press, was) {
                     frame.events.push((f, pos.clone()));
                 }
-                if let Some(f) = h.release {
-                    frame.events.push((f, pos.clone()));
+            }
+            // Motion and release can arrive together (a quick drag between
+            // frames). egui has already ended capture then, so `dragged()`
+            // is false. Deliver the final position before `on_release`.
+            let released_drag = was
+                && ui.input(|i| i.pointer.primary_released() && i.pointer.is_decidedly_dragging());
+            if let (Some(f), true) = (h.drag, (resp.dragged() && !quiet) || released_drag) {
+                let moved = ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO);
+                if let (true, Some(q)) = (moved, ui.input(|i| i.pointer.interact_pos())) {
+                    frame.events.push((f, Arg::Pos { x: q.x, y: q.y }));
                 }
+            }
+            if !pressed
+                && (was || clicked)
+                && let Some(f) = h.release
+            {
+                frame.events.push((f, pos.clone()));
             }
             let at = resp
                 .interact_pointer_pos()
                 .map_or((0.0, 0.0), |q| (q.x - r.min.x, q.y - r.min.y));
-            if let (Some(f), true) = (h.click, resp.clicked()) {
+            if let (Some(f), true) = (h.click, clicked) {
                 frame.events.push((f, Arg::Pos { x: at.0, y: at.1 }));
             }
-            if let (Some(f), true) = (h.double_click, resp.double_clicked()) {
+            if let (Some(f), true) = (h.double_click, resp.double_clicked() && !quiet) {
                 frame.events.push((f, Arg::Pos { x: at.0, y: at.1 }));
             }
-            if let (Some(f), true) = (h.secondary, resp.secondary_clicked()) {
+            if let (Some(f), true) = (h.secondary, resp.secondary_clicked() && !quiet) {
+                frame.events.push((f, Arg::Pos { x: at.0, y: at.1 }));
+            }
+            if let (Some(f), true) = (h.middle, resp.middle_clicked() && !quiet) {
                 frame.events.push((f, Arg::Pos { x: at.0, y: at.1 }));
             }
             if let Some(tip) = &s.tooltip {
@@ -387,12 +405,6 @@ impl Gui {
                     self.image_ui(ui, &painter, inner, corners, i);
                 }
             }
-            Kind::Field(f) => {
-                if visible.is_positive() && crate::field::paint(&painter, r, f, s.radius.max()) {
-                    ui.ctx()
-                        .request_repaint_after(std::time::Duration::from_secs_f32(1.0 / f.fps));
-                }
-            }
             Kind::Box => {
                 for (n, c) in p.children.iter().enumerate() {
                     let child = path
@@ -405,7 +417,7 @@ impl Gui {
                     self.scrollbar(ui, &painter, id, p);
                 }
             }
-            Kind::List(_) => {
+            Kind::List(l) => {
                 if let Some(id) = &p.node.id {
                     // Keyed by the item's place in the list, not in the
                     // window: scrolling must not renumber what is in view.
@@ -416,7 +428,10 @@ impl Gui {
                             let at = path
                                 .wrapping_mul(0x517cc1b727220a95)
                                 .wrapping_add((first + n) as u64 + 1);
-                            let key = format!("{id}/{}", first + n);
+                            // Include the list key so a rebuilt chat cannot
+                            // reuse a transition/egui id for another chat's
+                            // item at the same index.
+                            let key = format!("{id}:{}/{}", l.key, first + n);
                             self.paint(ui, fonts, c, clip, at, Some(&key), lists, frame, tint);
                         }
                     }
@@ -558,7 +573,7 @@ impl Gui {
                 )
             } else {
                 egui::Rect::from_min_size(
-                    egui::pos2(view.max.x - style.width - style.inset, start),
+                    egui::pos2(rect.max.x - style.width - style.inset, start),
                     egui::vec2(style.width, len),
                 )
             }
@@ -569,7 +584,10 @@ impl Gui {
         let track = if sideways {
             egui::Rect::from_min_max(egui::pos2(view.min.x, view.max.y - grab), view.max)
         } else {
-            egui::Rect::from_min_max(egui::pos2(view.max.x - grab, view.min.y), view.max)
+            egui::Rect::from_min_max(
+                egui::pos2(rect.max.x - grab - style.inset, view.min.y),
+                egui::pos2(rect.max.x - style.inset, view.max.y),
+            )
         };
         let resp = ui.interact(track, drag_id, Sense::click_and_drag());
         let along = |q: egui::Pos2| if sideways { q.x } else { q.y };
@@ -656,6 +674,7 @@ impl Gui {
             .frame(egui::Frame::NONE)
             .desired_width(area.width())
             .password(t.password)
+            .interactive(!t.read_only)
             .text_color(rgba(t.text.color))
             .hint_text(egui::RichText::new(&t.placeholder).color(hint));
         let resp = ui.put(area, edit);
@@ -666,7 +685,11 @@ impl Gui {
             // One thing has the keyboard: a focused node would take egui's
             // focus back every frame (for screen readers).
             (vs.focus_request, vs.focused) = (None, None);
-            resp.request_focus();
+            // Asking again would reset the keys it keeps for itself (the
+            // arrows) for a frame, in which egui moves the focus with them.
+            if !resp.has_focus() {
+                resp.request_focus();
+            }
             if t.select {
                 let mut state =
                     egui::text_edit::TextEditState::load(ui.ctx(), id).unwrap_or_default();
@@ -775,9 +798,28 @@ impl Gui {
         let rows = (area.height() / fonts.ctx.fonts_mut(|f| f.row_height(&font)))
             .floor()
             .max(1.0) as usize;
+        // `bone.ui.prompt_highlight`: styles over ranges of the text, and
+        // ghost text after the cursor.
+        let cols = self
+            .view
+            .cell
+            .map_or(80, |(w, _)| (area.width() / w) as u16);
+        let marks = self.prompt_marks(cols);
+        let base = egui::TextFormat {
+            font_id: font.clone(),
+            color: rgba(i.text.color),
+            ..Default::default()
+        };
+        let styles: Vec<(usize, usize, usize, egui::TextFormat)> = (marks.ranges.iter())
+            .map(|m| (m.row, m.from, m.to, self.mark_format(&m.hl, &base)))
+            .collect();
+        let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
+            let job = highlighted(buf.as_str(), &base, &styles, wrap);
+            ui.fonts_mut(|f| f.layout_job(job))
+        };
         let edit = TextEdit::multiline(&mut self.draft)
             .id(crate::prompt::edit_id())
-            .font(font)
+            .font(font.clone())
             .frame(egui::Frame::NONE)
             .desired_width(area.width())
             .desired_rows(rows)
@@ -785,13 +827,46 @@ impl Gui {
             .hint_text(egui::RichText::new(&i.placeholder).color(hint))
             // Enter sends; Shift+Enter is the newline.
             .return_key(KeyboardShortcut::new(Modifiers::SHIFT, Key::Enter));
-        let response = ui.put(area, edit);
+        let edit = if styles.is_empty() {
+            edit
+        } else {
+            edit.layouter(&mut layouter)
+        };
+        let layout = egui::Layout::centered_and_justified(egui::Direction::TopDown);
+        let out = ui
+            .scope_builder(egui::UiBuilder::new().max_rect(area).layout(layout), |ui| {
+                edit.show(ui)
+            })
+            .inner;
+        let response = out.response.response.clone();
+        // Ghost text when the cursor is at the end of its line.
+        if let (Some(ghost), Some(range)) = (marks.ghost.as_deref(), out.cursor_range)
+            && response.has_focus()
+            && !ghost.is_empty()
+            && range.is_empty()
+            && self.cursor_at_line_end(range.primary.index.into())
+        {
+            let at = out.galley.pos_from_cursor(range.primary);
+            let color = (self.group(&marks.ghost_hl, false)).map_or(hint, rgba);
+            let line = ghost.lines().next().unwrap_or_default();
+            ui.painter().with_clip_rect(out.text_clip_rect).text(
+                out.galley_pos + at.min.to_vec2(),
+                egui::Align2::LEFT_TOP,
+                line,
+                font,
+                color,
+            );
+        }
         // A click on the prompt gives it the keyboard back from a panel.
         if response.clicked() && self.focused_panel().is_some() {
             let _ = bone_ui::lua::panels::focus_panel(self, None);
         }
         self.sync_cursor(ui.ctx(), false);
         self.prompt_changed();
+        // Typed this frame: the highlights follow on the next.
+        if !self.marks_fresh() {
+            ui.ctx().request_repaint();
+        }
         // A node with the keyboard focus has the keys, not the prompt.
         if self.view.focused_node().is_some() {
             response.surrender_focus();
@@ -799,6 +874,70 @@ impl Gui {
             response.request_focus();
         }
     }
+}
+
+impl Gui {
+    /// How a `prompt_highlight` range in group `hl` is drawn over `base`.
+    fn mark_format(&self, hl: &str, base: &egui::TextFormat) -> egui::TextFormat {
+        let s = self.style(hl);
+        let color = s.fg.map_or(base.color, rgba);
+        egui::TextFormat {
+            color,
+            background: self.group(hl, true).map_or(Color32::TRANSPARENT, rgba),
+            italics: s.italic,
+            underline: if s.underline {
+                Stroke::new(1.0, color)
+            } else {
+                Stroke::NONE
+            },
+            ..base.clone()
+        }
+    }
+
+    /// Whether char offset `at` of the prompt ends its line.
+    fn cursor_at_line_end(&self, at: usize) -> bool {
+        self.draft.chars().nth(at).is_none_or(|c| c == '\n')
+    }
+}
+
+/// `text` laid out in `base`, with `marks` (row, chars from..to, format)
+/// over it; a later mark wins where two meet.
+fn highlighted(
+    text: &str,
+    base: &egui::TextFormat,
+    marks: &[(usize, usize, usize, egui::TextFormat)],
+    wrap: f32,
+) -> egui::text::LayoutJob {
+    // The format of each char: a mark's index, or none for the base.
+    let mut by_char: Vec<Option<usize>> = vec![None; text.chars().count()];
+    let mut starts = vec![0];
+    let mut lens = Vec::new();
+    for line in text.split('\n') {
+        let len = line.chars().count();
+        lens.push(len);
+        starts.push(starts.last().copied().unwrap_or(0) + len + 1);
+    }
+    for (k, (row, from, to, _)) in marks.iter().enumerate() {
+        let (Some(&start), Some(&len)) = (starts.get(*row), lens.get(*row)) else {
+            continue;
+        };
+        let (a, b) = ((*from).min(len), (*to).min(len));
+        if a < b {
+            by_char[start + a..start + b].fill(Some(k));
+        }
+    }
+    let mut job = egui::text::LayoutJob::default();
+    let format = |m: Option<usize>| m.map_or(base, |k| &marks[k].3).clone();
+    let mut run = (0, by_char.first().copied().flatten());
+    for (i, (byte, _)) in text.char_indices().enumerate() {
+        if by_char[i] != run.1 {
+            job.append(&text[run.0..byte], 0.0, format(run.1));
+            run = (byte, by_char[i]);
+        }
+    }
+    job.append(&text[run.0..], 0.0, format(run.1));
+    job.wrap.max_width = wrap;
+    job
 }
 
 fn widget_type(r: node::Role) -> egui::WidgetType {

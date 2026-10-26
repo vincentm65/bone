@@ -90,6 +90,7 @@ impl Headless {
         viewport.native_pixels_per_point = Some(self.scale);
         viewport.focused = Some(self.focused);
         let gui = &mut self.gui;
+        gui.route_pointer(&mut input);
         let started = std::time::Instant::now();
         let mut out = self.ctx.run_ui(input, |ui| gui.ui(ui));
         self.ui_secs = started.elapsed().as_secs_f64();
@@ -267,6 +268,12 @@ impl Headless {
             phase: egui::TouchPhase::Move,
             modifiers: egui::Modifiers::NONE,
         });
+    }
+
+    /// Send any input event in the next frame (another button, the wheel
+    /// with keys held).
+    pub fn event(&mut self, ev: egui::Event) {
+        self.events.push(ev);
     }
 
     /// Type `text` into the prompt and send it, as Enter does.

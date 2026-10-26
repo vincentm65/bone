@@ -55,12 +55,19 @@ function M.item(item, ctx)
 end
 
 --- The chat on screen as a list node. opts: node fields for the list
---- (padding, grow, ...); `id` defaults to "chat".
+--- (padding, grow, ...); `id` defaults to "chat". `chat = n` shows chat
+--- number `n` instead (bone.chat.open), as list `chat:<n>` while it is
+--- not the chat on screen; its views read that chat.
 function M.chat(opts)
   opts = opts or {}
-  local node = { id = "chat", grow = 1, follow = true }
-  for k, v in pairs(opts) do node[k] = v end
-  local s = bone.chat.session()
+  local other = opts.chat
+  local here = bone.chat.session()
+  if other ~= nil and here and here.chat == other then other = nil end
+  local node = { id = other and ("chat:" .. other) or "chat", grow = 1, follow = true }
+  for k, v in pairs(opts) do
+    if k ~= "chat" then node[k] = v end
+  end
+  local s = other and bone.chat.session({ session = tostring(other) }) or here
   local n = s and s.items or 0
   -- Views are told their width in character cells, as in the TUI.
   -- The window passes the cell it was built with; anyone else asks.
@@ -75,9 +82,9 @@ function M.chat(opts)
     estimate = 60,
     key = s and s.session_id or ("new" .. tostring(s and s.chat or "")),
     -- Each item's node is kept until the chat says the item changed.
-    chat = true,
+    chat = other or true,
     item = function(i)
-      local item = bone.chat.item(i, { full = true })
+      local item = bone.chat.item(i, { full = true, session = other and tostring(other) or nil })
       if not item then return { height = 0 } end
       return M.item(item, { width = width, region = "chat" })
     end,

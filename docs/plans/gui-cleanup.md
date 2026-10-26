@@ -20,7 +20,6 @@ cargo test -p bone-gui --release --test perf -- --ignored --nocapture
 | Scenario | ms / frame |
 |---|---|
 | welcome screen, idle | 0.02 |
-| welcome, animation tick (20 fps) | 1.3 |
 | chat idle / scroll (24 turns, ~100 items) | 0.06 / 0.2 |
 | typing | 0.25 |
 | streaming | 0.2 |
@@ -43,7 +42,6 @@ loop bound in `fill` raised).
 | 5 | Small per-frame allocations (fonts, hits, paths, transcript) | perf | -15 |
 | 6 | Config watcher polls the file tree every 500 ms, blocking | idle cost | -40 |
 | 7 | A running turn rebuilds the whole tree 10 times a second | idle cost | -3 |
-| 8 | Welcome field redraws at 20 fps | none | 0 |
 | 9 | Dead code and stale comments | cruft | -60 |
 | 10 | The chat cache is used as a "changed?" flag | structure | 0 |
 | 11 | Windows and panels are still sized in character cells | structure | 0 to -300 |
@@ -216,12 +214,6 @@ changes. It needs an explicit size (one monospace cell, which the tree can get
 from #15). If that is judged more awkward than the saving, leave it; this is
 the lowest-value item here.
 
-## 8. The welcome field
-
-Already optimized (value-noise lattice precomputed, mesh reused between ticks,
-`field-noise` ~1.1 ms per tick at 20 fps) and only drawn on the welcome
-screen. **No change.**
-
 ---
 
 ## 9. Dead code and stale comments
@@ -243,9 +235,8 @@ Concrete deletions, none behavioral:
   last Lua errors in full." above `jobs`; and `watch_config`'s doc, which
   begins with the description of a function that no longer exists ("Reload
   the Lua config… call every frame").
-- Clippy: `thread_local` initializers in `field.rs:246` and `profile.rs:12`
-  can be `const`; `nodeview.rs:2298` has a collapsible `if`; `field.rs:369`
-  test uses `.iter().any(|d| *d == 0)` for `.contains(&0)`.
+- Clippy: the `thread_local` initializer in `profile.rs:12` can be `const`;
+  `nodeview.rs:2298` has a collapsible `if`.
 - `panel_node` in `nodes/window.lua` passes `height = 800` to panel content.
   Pass the real window height (from #15's `ctx`) or omit it.
 - `docs/plans/gui-vs-tui.md:65` still cites `screen.rs`; the deleted-files
@@ -384,7 +375,6 @@ cell-mouse emulation (`popup_mouse`, `gui_popup_mouse`, mouse mapping in
 `lines_window`) is gone. A plugin's `lines` window still draws, as plain
 monospace text without the pointer.
 
-Not done: #8 (no change intended).
 Source lines in `crates/bone-gui/src` are 10,005, against 10,115 when this
 round began; the first round of this plan had grown them, and the remaining
 large cut is #11.

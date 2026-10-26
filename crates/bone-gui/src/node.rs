@@ -49,12 +49,6 @@ pub struct Corners {
     pub bl: f32,
 }
 
-impl Corners {
-    pub fn max(&self) -> f32 {
-        self.tl.max(self.tr).max(self.br).max(self.bl)
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum BorderStyle {
     #[default]
@@ -342,9 +336,14 @@ impl Style {
 pub struct Handlers {
     pub click: Option<u64>,
     pub secondary: Option<u64>,
+    /// `on_middle{ x, y }`: a click with the middle button.
+    pub middle: Option<u64>,
     pub double_click: Option<u64>,
     pub press: Option<u64>,
     pub release: Option<u64>,
+    /// `on_drag{ x, y }`: the pointer, in the window, while the button is
+    /// held on the node and it moves.
+    pub drag: Option<u64>,
     pub hover: Option<u64>,
     pub scroll: Option<u64>,
     /// `on_key(name)`: a key while the node has the focus; true takes it.
@@ -394,9 +393,11 @@ impl Handlers {
         let clicks = [
             self.click,
             self.secondary,
+            self.middle,
             self.double_click,
             self.press,
             self.release,
+            self.drag,
         ];
         clicks.iter().any(Option::is_some)
     }
@@ -514,6 +515,7 @@ pub struct TextInput {
     pub min_rows: usize,
     pub max_rows: usize,
     pub password: bool,
+    pub read_only: bool,
     /// Takes the keyboard when it first appears.
     pub focus: bool,
     /// Its text is selected when it takes the keyboard (typing replaces
@@ -543,34 +545,8 @@ pub struct List {
     /// Item `i` is the chat's item `i` (`bone.nodes.chat`): its node is
     /// kept, through rebuilds too, until the chat says it changed.
     pub chat: bool,
-}
-
-/// A field of drifting dots: `field = { colors = { "#070707", … },
-/// pitch = 5, size = 2.2, scale = 1, speed = 1, fps = 20 }`. It has no
-/// size of its own; make it fill a box (`position = "absolute"` with all
-/// four edges 0).
-#[derive(Clone, Debug)]
-pub struct Field {
-    /// Dark to light: the noise picks one for each dot.
-    pub colors: Vec<Rgba>,
-    /// Pixels between dots, and the side of one.
-    pub pitch: f32,
-    pub size: f32,
-    /// Bigger is finer weather; speed 0 stops it; fps is how often it
-    /// draws (0: once).
-    pub scale: f32,
-    pub speed: f32,
-    pub fps: f32,
-    /// Which corners follow the box's `radius`: `"none"`, `"top"`, `"all"`.
-    pub round: Round,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub enum Round {
-    #[default]
-    None,
-    Top,
-    All,
+    /// `chat = n`: chat buffer `n` rather than the chat on screen.
+    pub buffer: Option<usize>,
 }
 
 /// Where an image's pixels are: an attachment the core holds (an item's
@@ -620,7 +596,6 @@ pub enum Kind {
     Text(Text),
     Input(Input),
     List(List),
-    Field(Field),
     Image(Image),
     TextInput(TextInput),
     Canvas(Canvas),
@@ -766,7 +741,6 @@ names! {
         "button" => Button, "link" => Link, "checkbox" => Checkbox, "radio" => Radio,
         "option" => Option, "image" => Image, "dialog" => Dialog, "text" => Text, "none" => None
     }
-    Round { "none" => None, "top" => Top, "all" => All }
     Fit { "contain" => Contain, "cover" => Cover, "fill" => Fill, "none" => None }
     TextAlign { "left" => Left, "center" => Center, "right" => Right }
     Easing {
@@ -1253,9 +1227,11 @@ pub fn parse(
     let handlers = Handlers {
         click: p.on("on_click", sink)?,
         secondary: p.on("on_secondary", sink)?,
+        middle: p.on("on_middle", sink)?,
         double_click: p.on("on_double_click", sink)?,
         press: p.on("on_press", sink)?,
         release: p.on("on_release", sink)?,
+        drag: p.on("on_drag", sink)?,
         hover: p.on("on_hover", sink)?,
         scroll: p.on("on_scroll", sink)?,
         key: p.on("on_key", sink)?,
@@ -1280,27 +1256,16 @@ pub fn parse(
             item: l.get("item")?.ok_or("list: item must be a function")?,
             total: 0.0,
             fit: l.get("fit")?.unwrap_or(false),
-            chat: l.get("chat")?.unwrap_or(false),
-        })
-    } else if let Some(f) = p.sub("field")? {
-        let mut palette = Vec::new();
-        if let Some(list) = f.get::<Table>("colors")? {
-            for c in list.sequence_values::<String>() {
-                let c = c.map_err(le)?;
-                palette.push(
-                    color(colors, &c, true)
-                        .ok_or_else(|| format!("field colors: unknown {c:?}"))?,
-                );
-            }
-        }
-        Kind::Field(Field {
-            colors: palette,
-            pitch: f.get("pitch")?.unwrap_or(5.0),
-            size: f.get("size")?.unwrap_or(2.2),
-            scale: f.get("scale")?.unwrap_or(1.0),
-            speed: f.get("speed")?.unwrap_or(1.0),
-            fps: f.get("fps")?.unwrap_or(20.0),
-            round: f.choice("round")?.unwrap_or_default(),
+            chat: !matches!(
+                l.raw("chat"),
+                None | Some(Value::Nil | Value::Boolean(false))
+            ),
+            buffer: match l.raw("chat") {
+                Some(Value::Integer(n)) => usize::try_from(*n).ok(),
+                Some(Value::Number(n)) if *n >= 0.0 => Some(*n as usize),
+                Some(Value::Boolean(_) | Value::Nil) | None => None,
+                Some(_) => return Err("list: chat must be true or a chat number".into()),
+            },
         })
     } else if let Some(i) = p.sub("image")? {
         let source = match (i.get::<String>("id")?, i.get::<String>("path")?) {
@@ -1337,6 +1302,7 @@ pub fn parse(
             min_rows: ti.get("min_rows")?.unwrap_or(1),
             max_rows: ti.get("max_rows")?.unwrap_or(6),
             password: ti.get("password")?.unwrap_or(false),
+            read_only: ti.get("read_only")?.unwrap_or(false),
             focus: ti.get("focus")?.unwrap_or(false),
             select: ti.get("select")?.unwrap_or(false),
             on_change: ti.on("on_change", sink)?,

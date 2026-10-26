@@ -207,6 +207,26 @@ pub fn handle_key<H: Host>(h: &mut H, key: Key) {
     h.prompt_changed();
 }
 
+/// A key a frontend's native text editor handles itself (typing, and the
+/// editing keys it does natively): the `key` event and raw interceptors see
+/// it as they see every other key. Whether an interceptor took it, in which
+/// case the editor must not.
+pub fn native_key<H: Host>(h: &mut H, key: Key) -> bool {
+    h.key_starting();
+    let ctx = h.context();
+    fire(
+        h,
+        "key",
+        serde_json::json!({ "key": keys::format(&key), "context": ctx.name() }),
+    );
+    if !raw_intercepts(h, &ctx, key) {
+        return false;
+    }
+    discard_pending(h);
+    h.prompt_changed();
+    true
+}
+
 /// Run an action as a key would.
 pub fn run<H: Host>(h: &mut H, action: Action) {
     h.changed();
@@ -570,8 +590,24 @@ pub struct Mouse {
 /// item and line, the layout leaf and the cell in it, and a panel and its
 /// line). The frontend does its default when neither took it.
 pub fn mouse<H: Host>(h: &mut H, action: &str, button: &str, at: (u16, u16)) -> Mouse {
+    mouse_at(h, action, button, at, None)
+}
+
+/// `mouse`, from a frontend that also knows the pointer in pixels (`px`,
+/// `py` in the event).
+pub fn mouse_at<H: Host>(
+    h: &mut H,
+    action: &str,
+    button: &str,
+    at: (u16, u16),
+    pixels: Option<(f32, f32)>,
+) -> Mouse {
     let (x, y) = at;
     let mut ev = serde_json::json!({ "action": action, "button": button, "x": x, "y": y });
+    if let Some((px, py)) = pixels {
+        ev["px"] = px.into();
+        ev["py"] = py.into();
+    }
     let popup_hit = popup::hit(h.popups(), x, y).map(|p| (p.id, p.rect.unwrap_or_default()));
     if let Some((id, r)) = popup_hit {
         ev["popup"] = id.into();

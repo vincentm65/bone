@@ -7,15 +7,9 @@ local M = {}
 
 local md = require("bone.desktop.markdown")
 local nodes = require("bone.nodes")
-local card = require("bone.desktop.card")
-local popups = require("bone.nodes.popups")
-local title, note, entry, hints = popups.title, popups.note, popups.entry, popups.hints
-
--- A card at most `cols` by `rows` cells, as the window allows.
-local function size(cols, rows)
-  local w, h = card.size()
-  return math.min(w, cols), math.min(h, rows)
-end
+local style = require("bone.nodes.style")
+local widgets = require("bone.nodes.widgets")
+local title, note, entry, hints = widgets.title, widgets.note, widgets.entry, widgets.hints
 
 --- The picker's spec for `page` (bone.ui.windows.select): a heading, a
 --- search field, the matches, and the keys.
@@ -27,11 +21,11 @@ function M.select(page)
     st.sel = math.max(1, math.min(st.sel, math.max(#list, 1)))
     local items = {}
     if opts.prompt then
-      items[#items + 1] = { text = opts.prompt, hl = "Normal", bold = true, size = 17, padding = { 2, 8 }, margin = { 0, 0, 10, 0 } }
+      items[#items + 1] = { text = opts.prompt, hl = "Normal", bold = true, size = style.size.lead, padding = { 2, 8 }, margin = { 0, 0, 10, 0 } }
     end
     items[#items + 1] = {
-      text = st.query == "" and "Search…" or (st.query .. "▏"), size = 14, hl = st.query == "" and "Dim" or "Normal",
-      bg = "InputBackground", radius = 10, padding = { 8, 12 }, margin = { 0, 0, 10, 0 },
+      text = st.query == "" and "Search…" or (st.query .. "▏"), size = style.size.body, hl = st.query == "" and "Dim" or "Normal",
+      bg = "InputBackground", radius = style.radius.lg, padding = { 8, 12 }, margin = { 0, 0, 10, 0 },
       border = 1, border_color = "Accent",
     }
     if st.loading then
@@ -41,17 +35,16 @@ function M.select(page)
     end
     local selected
     for i, m in ipairs(list) do
-      items[#items + 1] = entry(i == st.sel, { { text = m.text, hl = "Normal", bold = i == st.sel, size = 14 } },
+      items[#items + 1] = entry(i == st.sel, { { text = m.text, hl = "Normal", bold = i == st.sel, size = style.size.body } },
         function() page.finish(m) end)
       if i == st.sel then selected = #items end
     end
     local footer = opts.footer == nil and "↑↓ move · enter open · esc close" or opts.footer
-    return popups.list("select:" .. page.id, items, selected,
+    return widgets.list("select:" .. page.id, items, selected,
       { fit = true, footer = footer and hints(footer, { 10, 0 }) or nil })
   end
 
-  local w, h = size(opts.width or 56, math.max(opts.height or 22, 12))
-  return { node = node, width = w, height = h }
+  return { node = node }
 end
 
 --- The pager's spec for `page` (bone.ui.windows.pager). Its keys scroll the
@@ -73,7 +66,7 @@ function M.pager(page)
     end
     local items = { body }
     if opts.title then table.insert(items, 1, title(opts.title)) end
-    return popups.list(list, items, nil, { fit = true, footer = hints("↑↓ scroll · esc close", { 8, 0 }) })
+    return widgets.list(list, items, nil, { fit = true, footer = hints("↑↓ scroll · esc close", { 8, 0 }) })
   end
 
   local function on_key(k)
@@ -95,8 +88,7 @@ function M.pager(page)
     return true
   end
 
-  local w, h = size(opts.width or 100, opts.height or 36)
-  return { node = node, width = w, height = h, on_key = on_key }
+  return { node = node, on_key = on_key }
 end
 
 return M

@@ -176,8 +176,9 @@ fn requests() {
     exchange::<SessionActive>(5, Empty {}, vec![SID.into()]);
     exchange::<SessionMessages>(
         6,
-        SessionRef {
+        SessionMessagesParams {
             session_id: SID.into(),
+            tail: None,
         },
         SessionMessagesResult {
             info: info(),
@@ -208,6 +209,7 @@ fn requests() {
             active_turn: None,
             queue: vec![queued(4, QueueMode::Next, "then update the README")],
             queue_paused: false,
+            omitted_turns: 0,
         },
     );
     exchange::<AttachmentUpload>(

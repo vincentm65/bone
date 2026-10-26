@@ -1,9 +1,7 @@
 //! The canvas node: Lua draws on a box. Its `draw` function returns a list
 //! of shapes (`bone.gui.draw.rect{…}`, `circle`, `line`, `polyline`, `text`,
 //! `image`); this reads them and paints them in the box, so a custom effect,
-//! a chart or a pattern is Lua with no engine change. Tens of thousands of
-//! shapes a frame are too many to make in Lua: that is what a native node
-//! (the dot field) is for.
+//! a chart or a pattern is Lua with no engine change.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -73,11 +71,14 @@ impl Gui {
         let size = (rect.width(), rect.height());
         let now = Instant::now();
         let started = *self.view.bound.canvases.started.get_or_insert(now);
+        // A frame up to half a period early is on time: frames come with
+        // the display, a little either side of 1/fps, and a strict test
+        // draws every other one (or every two, then three).
         let due = match self.view.bound.canvases.drawn.get(key) {
             None => true,
             Some(d) => {
                 d.size != size
-                    || (fps > 0.0 && now.duration_since(d.at) >= Duration::from_secs_f32(1.0 / fps))
+                    || (fps > 0.0 && now.duration_since(d.at) >= Duration::from_secs_f32(0.5 / fps))
             }
         };
         if due {

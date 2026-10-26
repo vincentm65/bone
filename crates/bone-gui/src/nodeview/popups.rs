@@ -1,5 +1,6 @@
-//! Lua's windows (`bone.ui.popup`, `win`) in the node view: sized in
-//! monospace cells, placed in pixels, and drawn by Lua as nodes.
+//! Lua's windows (`bone.ui.popup`, `win`) in the node view. A window of
+//! `lines` is sized in monospace cells and placed in pixels. A window with
+//! a node callback is given its anchor instead, and Lua sizes the card.
 
 use bone_ui::lua::drop_callback;
 use eframe::egui::{self, Color32, FontId};
@@ -46,18 +47,33 @@ impl Gui {
             self.view.invalidate();
             ui.ctx().request_repaint();
         }
+        // Panel callbacks use their last allocated size. Correct the initial
+        // estimate (and resizes) on the next build; positions alone do not
+        // affect their content. A zero-basis growing panel keeps this stable.
+        fn panel_sizes(
+            leaves: &[(String, egui::Rect)],
+        ) -> impl Iterator<Item = (&str, egui::Vec2)> {
+            leaves
+                .iter()
+                .filter(|(id, _)| id.starts_with("panel:"))
+                .map(|(id, rect)| (id.as_str(), rect.size()))
+        }
+        let panels_changed = !panel_sizes(&self.view.leaves).eq(panel_sizes(&leaves));
         self.view.area = Some(area);
         self.view.leaves = leaves;
         // Windows are placed by the next build, which asks for them.
-        if first {
+        if first || panels_changed {
             self.view.invalidate();
+            ui.ctx().request_repaint();
         }
     }
 
-    /// Place every window (`bone.ui.popup` and `win`) with the TUI's rules,
-    /// in pixels: its size in cells of the monospace font, centered in its
-    /// anchor or `row`/`col` cells from its edges. Lua draws them as nodes
-    /// (`bone.nodes.popups`), in a look of its own.
+    /// Place every window (`bone.ui.popup` and `win`). A window of `lines`
+    /// follows the TUI: its size in cells of the monospace font, centered in
+    /// its anchor or `row`/`col` cells from its edges, returned in pixels. A
+    /// window with a node callback is not placed in cells: `x`/`y`/`w`/`h`
+    /// are the anchor in pixels and `bounds` is true. Lua draws both
+    /// (`bone.nodes.popups`).
     pub(crate) fn popups_for_lua(&mut self, lua: &Lua) -> mlua::Result<mlua::Table> {
         self.forget_window_nodes(lua)?;
         let out = lua.create_table()?;
@@ -95,6 +111,37 @@ impl Gui {
                 "prompt" => above_prompt,
                 _ => screen,
             };
+            // A node window is not measured in cells. The anchor is the room
+            // the card may occupy; Lua sizes and centers the card inside it.
+            if let Some(cb) = self
+                .view
+                .bound
+                .window_nodes
+                .get(&format!("popup:{}", p.id))
+                .copied()
+            {
+                if let Some(q) = self.lua.popups.iter_mut().find(|q| q.id == p.id) {
+                    // The anchor, in cells, for what reads the cell rect back.
+                    q.rect = Some(bone_ui::layout::Rect::new(
+                        ((area.min.x - screen.min.x) / col).round() as u16,
+                        ((area.min.y - screen.min.y) / row).round() as u16,
+                        (area.width() / col).floor() as u16,
+                        (area.height() / row).floor() as u16,
+                    ));
+                }
+                let t = lua.create_table()?;
+                t.set("id", p.id)?;
+                t.set("x", area.min.x)?;
+                t.set("y", area.min.y)?;
+                t.set("w", area.width())?;
+                t.set("h", area.height())?;
+                t.set("bounds", true)?;
+                t.set("z", p.z)?;
+                t.set("focus", p.focus)?;
+                t.set("node", self.stored_function(lua, cb)?)?;
+                out.push(t)?;
+                continue;
+            }
             let (cols, rows) = (
                 (area.width() / col).floor() as u16,
                 (area.height() / row).floor() as u16,

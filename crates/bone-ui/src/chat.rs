@@ -130,6 +130,12 @@ pub struct ChatBuffer<L> {
     pub queue: Vec<QueuedMessage>,
     /// The queue waits (after a cancel or a restart) until resumed.
     pub queue_paused: bool,
+    /// The session being loaded into this chat, until it arrives.
+    pub loading: Option<String>,
+    /// User messages before the first entry that were not loaded (only a
+    /// session's latest messages, `session/messages` with `tail`). Entries
+    /// before the first user message belong to that turn.
+    pub omitted_turns: usize,
     /// Bumped when the queue changes; the cache key of queued items.
     queue_rev: u64,
     /// How finished turns ended, by the id of their user message's entry.
@@ -159,6 +165,9 @@ pub struct ChatBuffer<L> {
 
 /// Live output keeps at most this many bytes, the latest.
 const LIVE_MAX: usize = 64 * 1024;
+/// Coalesce rapid streaming deltas so the bottom-following viewport does not
+/// jump for every token.
+const STREAM_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
 
 #[derive(Debug, Default, Clone)]
 struct ToolMeta {
@@ -176,6 +185,8 @@ struct Cached<L> {
     deps: Vec<Dep>,
     /// Drawn again from this moment (`bone.chat.refresh_in`).
     expires: Option<Instant>,
+    /// A changed streaming item is held until this time before it is rendered.
+    stream_until: Option<Instant>,
     /// The data generation `deps` were last found current at.
     checked: u64,
 }
@@ -189,6 +200,8 @@ impl<L> Default for ChatBuffer<L> {
             starting: false,
             queue: Vec::new(),
             queue_paused: false,
+            loading: None,
+            omitted_turns: 0,
             queue_rev: 0,
             outcomes: HashMap::new(),
             ids: Vec::new(),
@@ -266,6 +279,8 @@ impl<L> ChatBuffer<L> {
         active_turn: Option<TurnId>,
     ) {
         self.session = Some(info);
+        self.loading = None;
+        self.omitted_turns = 0;
         self.entries.clear();
         self.ids.clear();
         self.revs.clear();
@@ -874,9 +889,40 @@ impl<L> ChatBuffer<L> {
         self.cache.values().filter_map(|c| c.expires).min()
     }
 
+    /// The earliest pending streaming redraw after `now`.
+    pub fn next_stream_expiry_after(&self, now: Instant) -> Option<Instant> {
+        self.cache
+            .iter()
+            .filter_map(|(item, c)| {
+                (c.key.rev != self.item_rev(item))
+                    .then_some(c.stream_until)
+                    .flatten()
+                    .filter(|at| *at > now)
+            })
+            .min()
+    }
+
+    /// Whether a changed running item is already covered by the streaming
+    /// redraw cadence.
+    pub fn streaming_redraw_deferred(&self, now: Instant) -> bool {
+        let Some(item) = self
+            .items()
+            .iter()
+            .rev()
+            .copied()
+            .find(|item| self.item_status(*item).1)
+        else {
+            return false;
+        };
+        self.cache.get(&item).is_some_and(|c| {
+            c.key.rev != self.item_rev(&item) && c.stream_until.is_some_and(|at| at > now)
+        })
+    }
+
     /// The earliest time after `now` a cached item asked to be drawn again.
     pub fn next_expiry_after(&self, now: Instant) -> Option<Instant> {
-        (self.cache.values())
+        self.cache
+            .values()
             .filter_map(|c| c.expires)
             .filter(|at| *at > now)
             .min()
@@ -886,13 +932,14 @@ impl<L> ChatBuffer<L> {
     /// its cached entry is missing or out of date. `None` when those lines
     /// are still good. [`Self::stale`] walks every item through this, so
     /// there is one definition of freshness.
-    pub fn stale_key(
+    fn stale_key_with(
         &self,
         items: &[Item],
         index: usize,
         width: usize,
         generation: (u64, u64),
         now: Instant,
+        defer_streaming: bool,
     ) -> Option<RenderKey> {
         let item = items.get(index)?;
         let key = RenderKey {
@@ -901,11 +948,53 @@ impl<L> ChatBuffer<L> {
             generation,
             prev: index.checked_sub(1).map(|p| items[p].part),
         };
-        let fresh = self
-            .cache
-            .get(item)
-            .is_some_and(|c| c.key == key && c.expires.is_none_or(|e| e > now));
+        let fresh = self.cache.get(item).is_some_and(|c| {
+            if c.key == key {
+                c.expires.is_none_or(|e| e > now)
+            } else {
+                // A streaming delta changes only the item's revision. Keep
+                // the old rows briefly; the next frame at the cadence still
+                // follows the end, but does not shuffle the whole transcript
+                // upward for every token.
+                defer_streaming
+                    && self.item_status(*item).1
+                    && c.key.width == key.width
+                    && c.key.generation == key.generation
+                    && c.key.prev == key.prev
+                    && c.expires.is_none_or(|at| at > now)
+                    && c.stream_until.is_some_and(|at| at > now)
+            }
+        });
         (!fresh).then_some(key)
+    }
+
+    pub fn stale_key(
+        &self,
+        items: &[Item],
+        index: usize,
+        width: usize,
+        generation: (u64, u64),
+        now: Instant,
+    ) -> Option<RenderKey> {
+        self.stale_key_with(items, index, width, generation, now, false)
+    }
+
+    /// The same as [`Self::stale`], but coalesces rapid streaming changes.
+    pub fn stale_streaming(
+        &self,
+        width: usize,
+        generation: (u64, u64),
+        now: Instant,
+    ) -> Vec<(Item, usize, RenderKey)> {
+        let items = self.items();
+        items
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| {
+                self.stale_key_with(&items, i, width, generation, now, true)
+                    .map(|key| (*item, i + 1, key))
+            })
+            .collect()
     }
 
     /// Items whose cached lines are missing or out of date, with their key.
@@ -935,6 +1024,10 @@ impl<L> ChatBuffer<L> {
         expires: Option<Instant>,
         checked: u64,
     ) {
+        let stream_until = self
+            .item_status(item)
+            .1
+            .then(|| Instant::now() + STREAM_EVERY);
         self.cache.insert(
             item,
             Cached {
@@ -942,6 +1035,7 @@ impl<L> ChatBuffer<L> {
                 lines,
                 deps,
                 expires,
+                stream_until,
                 checked,
             },
         );

@@ -34,6 +34,15 @@ bone.gui = {
   scroll_info = function(id)
     return api("gui_scroll_info", id)
   end,
+  --- { x, y, w, h } in pixels: where the node with this `id` was drawn
+  --- last frame, or nil.
+  rect = function(id)
+    return api("gui_rect", id)
+  end,
+  --- The unsent text in the composer of chat number `chat`.
+  draft = function(chat)
+    return api("gui_draft", chat)
+  end,
   --- Lua builds the node view's tree when something changed (an event, a
   --- key, a click, an option, a resize, an op that changes the UI); call
   --- this when your view reads something else: now, or in `ms`.
@@ -105,9 +114,8 @@ bone.gui = {
     api("gui_save_file", opts or {}, then_)
   end,
   --- The GUI's library, separate from the TUI's (/gui): info() →
-  --- { active, builtin = { names }, custom = { names with a gui/ folder } };
-  --- use(name) switches to `standard`, `bare`, a built-in one (`desktop`)
-  --- or a custom one and loads the GUI's Lua again, going back if it does
+  --- { active, custom = { names with a gui/ folder } }; use(name) switches
+  --- to `standard`, `bare` or a custom one and loads the GUI's Lua again, going back if it does
   --- not load.
   library = {
     info = function()
@@ -139,7 +147,7 @@ bone.gui.fallback(function(ctx)
     bg = "#161616", padding = 28, direction = "column", gap = 10,
     { text = "bone has no working view", size = 20, bold = true, color = "#ffffff" },
     { text = ctx.error or "", color = "#ffb0b7", size = 14, selectable = true, font = "mono" },
-    { text = "Fix the file named above and save it: the window reloads when you come back to it. /gui use desktop goes back to the built-in one.",
+    { text = "Fix the file named above and save it: the window reloads when you come back to it. /gui use standard goes back to the built-in one.",
       color = "#9a9a9a", size = 13 },
   }
 end)

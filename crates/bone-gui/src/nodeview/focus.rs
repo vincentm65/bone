@@ -8,6 +8,10 @@ use crate::Gui;
 
 use super::{Arg, Focusable, ViewState};
 
+/// A wheel key's worth of travel, in points: a mouse wheel's notch (a
+/// line) is one.
+const WHEEL_STEP: f32 = 50.0;
+
 impl ViewState {
     /// Move the focus to the next (or previous) node the keyboard reaches;
     /// out of a modal, the prompt is one of them.
@@ -124,7 +128,10 @@ impl Gui {
     }
 
     /// The wheel: the innermost scroll container under the pointer that can
-    /// move that way takes it, else the first `on_scroll`.
+    /// move that way takes it, else the first `on_scroll`. With neither
+    /// under the pointer it is the `wheelup` / `wheeldown` key, as in the
+    /// TUI; so is the wheel with ctrl or alt held, which egui does not
+    /// scroll with, unless an `on_scroll` takes it.
     pub(super) fn wheel(&mut self, ctx: &egui::Context) {
         let (dx, dy, shift) = ctx.input(|i| {
             (
@@ -133,15 +140,47 @@ impl Gui {
                 i.modifiers.shift,
             )
         });
+        // This frame's wheel events: their travel in points, and the keys
+        // held.
+        let (raw_dy, mods) = ctx.input(|i| {
+            let mut out = (0.0, None);
+            for e in &i.events {
+                if let egui::Event::MouseWheel {
+                    unit,
+                    delta,
+                    modifiers,
+                    ..
+                } = e
+                {
+                    let k = match unit {
+                        egui::MouseWheelUnit::Point => 1.0,
+                        egui::MouseWheelUnit::Line => WHEEL_STEP,
+                        egui::MouseWheelUnit::Page => WHEEL_STEP * 10.0,
+                    };
+                    out = (out.0 + delta.y * k, Some(*modifiers));
+                }
+            }
+            out
+        });
         let Some(pos) = ctx
             .input(|i| i.pointer.hover_pos())
-            .filter(|_| dx != 0.0 || dy != 0.0)
+            .filter(|_| dx != 0.0 || dy != 0.0 || mods.is_some())
         else {
             return;
         };
+        let m = mods.unwrap_or_default();
+        let held = m.ctrl || m.alt || m.command || m.mac_cmd;
+        let speed = self.number_option("wheel_speed", 1.0).clamp(0.1, 10.0);
+        let (dx, dy) = (dx * speed, dy * speed);
+        // What `on_scroll` gets: egui's smooth travel, or with ctrl or alt
+        // the wheel's own.
+        let on_dy = if held { raw_dy * speed } else { dy };
         let hits = std::mem::take(&mut self.view.hits);
         let mut taken_scroll = false;
+        // Something under the pointer scrolls with the wheel.
+        let mut owned = false;
         for hit in hits.iter().rev().filter(|h| h.rect.contains(pos)) {
+            owned |= hit.on_scroll.is_some() || (hit.scroll.is_some() && !held);
             let mut taken = false;
             // A row moves with the sideways wheel, or the wheel with shift.
             let amount = match (hit.sideways, dx != 0.0, shift) {
@@ -159,8 +198,15 @@ impl Gui {
                 s.offset = to;
                 s.target = None;
             }
-            if let Some(f) = hit.on_scroll {
-                self.call_handlers(vec![(f, Arg::Delta(dy))]);
+            if let (Some(f), true) = (hit.on_scroll, on_dy != 0.0 || dx != 0.0) {
+                self.call_handlers(vec![(
+                    f,
+                    Arg::Scroll {
+                        dy: on_dy,
+                        dx,
+                        mods: m,
+                    },
+                )]);
                 taken = true;
             }
             if taken {
@@ -172,7 +218,43 @@ impl Gui {
         self.view.hits = hits;
         if taken_scroll {
             ctx.request_repaint();
+        } else if !owned && raw_dy != 0.0 {
+            self.wheel_keys(raw_dy, m);
         }
+    }
+
+    /// Wheel travel nothing scrolled with, as `wheelup` / `wheeldown` keys:
+    /// one a line (a mouse wheel's notch), a trackpad's a step of points.
+    fn wheel_keys(&mut self, dy: f32, m: egui::Modifiers) {
+        use bone_ui::keys::{Key, KeyCode, KeyModifiers};
+        let mut rest = self.view.wheel_rest;
+        if rest * dy < 0.0 {
+            rest = 0.0;
+        }
+        rest += dy;
+        let mut mods = KeyModifiers::NONE;
+        for (on, flag) in [
+            (m.ctrl, KeyModifiers::CONTROL),
+            (m.alt, KeyModifiers::ALT),
+            (m.shift, KeyModifiers::SHIFT),
+            (m.mac_cmd, KeyModifiers::SUPER),
+        ] {
+            if on {
+                mods |= flag;
+            }
+        }
+        let mut keys = 0;
+        while rest.abs() >= WHEEL_STEP && keys < 10 {
+            let code = if rest > 0.0 {
+                KeyCode::WheelUp
+            } else {
+                KeyCode::WheelDown
+            };
+            rest -= WHEEL_STEP.copysign(rest);
+            keys += 1;
+            bone_ui::lua::input::handle_key(self, Key::new(code, mods));
+        }
+        self.view.wheel_rest = if keys == 10 { 0.0 } else { rest };
     }
 
     pub(super) fn call_handlers(&mut self, events: Vec<(u64, Arg)>) {
@@ -187,7 +269,15 @@ impl Gui {
                 match arg {
                     Arg::Text(s) => f.call::<()>(s),
                     Arg::Bool(b) => f.call::<()>(b),
-                    Arg::Delta(d) => f.call::<()>(d),
+                    Arg::Scroll { dy, dx, mods } => {
+                        let t = lua.create_table()?;
+                        t.set("dx", dx)?;
+                        t.set("ctrl", mods.ctrl)?;
+                        t.set("alt", mods.alt)?;
+                        t.set("shift", mods.shift)?;
+                        t.set("super", mods.mac_cmd)?;
+                        f.call::<()>((dy, t))
+                    }
                     Arg::Pos { x, y } => {
                         let t = lua.create_table()?;
                         t.set("x", x)?;

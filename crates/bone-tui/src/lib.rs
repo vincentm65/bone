@@ -108,7 +108,6 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
     let reconnect_to = opts.reconnect.clone();
     let (mut app, mut server_events, mut rx, resume) = connect(conn, "bone-tui", opts).await?;
     let mut retry = None;
-    app.note_runtime_overrides();
     // Updates to bone or its plugins: checked in the background, once.
     app.exec_lua(r#"require("bone.update").check()"#);
     let mut watched_project = app.project_dir();

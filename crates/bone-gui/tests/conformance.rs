@@ -89,7 +89,7 @@ async fn shared_api_in_the_gui() {
         if name == "libraries.lua" || CELL_LAYOUT.contains(&name) {
             continue;
         }
-        let mut ui = gui("desktop").await;
+        let mut ui = gui("standard").await;
         if let Err(e) = runner::run_script(&mut ui, &path).await {
             failures.push(format!("{}: {e}", path.display()));
         }

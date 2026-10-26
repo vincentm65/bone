@@ -1,15 +1,16 @@
 # Customizing the TUI's look and behavior
 
-Where: `~/.bone/tui.lua` (global) or `.bone/tui.lua` in a project (loaded only
-after `/plugins trust`). A Lua error never crashes bone; it is shown once and
-listed by `/health`. The TUI reloads when a file changes, so you can edit and
-watch. With nothing defined, Rust draws a plain-text chat and a bare prompt;
-everything else is Lua.
+Where: `~/.bone/ui.lua` then `~/.bone/tui.lua` (global), and in a project
+`.bone/ui.lua` then `.bone/tui.lua` (loaded only after `/plugins trust`;
+`ui.lua` runs first in both). A Lua error never crashes bone; it is shown
+once and listed by `/health`. The TUI reloads when a file changes, so you
+can edit and watch. With nothing defined, Rust draws a plain-text chat and a
+bare prompt; everything else is Lua.
 
 Reference: `docs/lua.md` sections "TUI (`tui.lua`)" and "Drawing the screen".
 Source: `crates/bone-tui/src/` (`lua.rs` the API, `ui.rs` the drawing model,
-`render.rs` the layout, `keymap.rs` keys, `theme.rs` colors); the defaults are
-`runtime/tui/defaults.lua` and `runtime/lua/bone/ui/`.
+`render.rs` the layout, `theme.rs` colors) and `crates/bone-ui/src/keymap.rs`
+(keys); the defaults are `runtime/tui/defaults.lua` and `runtime/lua/bone/ui/`.
 
 ## Options
 
@@ -228,7 +229,7 @@ Helpers: `bone.text.wrap(spans, width, { first, rest, pad })`,
 
 - **standard**: the full UI. Most people never change this.
 - **bare**: plain chat and prompt, the basic keys and every command. It
-  skips `~/.bone/tui.lua` and the project's.
+  skips `ui.lua` and `tui.lua`, in `~/.bone/` and in the project.
 - **your copies**, in `~/.bone/libraries/NAME/`: `/tui create NAME` copies
   standard's files, `/tui create NAME bare` starts from bare instead. Edit
   them (saves reload live), then `/tui use NAME`. A file a copy lacks is
@@ -238,7 +239,10 @@ Helpers: `bone.text.wrap(spans, width, { first, rest, pad })`,
 `/tui delete NAME` moves a copy you are not using to
 `libraries/.deleted-NAME-…/`. A switch that fails to load keeps the UI you
 had. If a copy breaks so badly `/tui` is gone, delete `~/.bone/library` to
-go back to standard. Plugins work in every library.
+go back to standard. Plugins work in every library. With no explicit GUI
+choice (`~/.bone/gui-library`, from `/gui use`), `/tui` also selects what the
+GUI draws when the choice is `bare` or a copy that has a `gui/` directory;
+otherwise the GUI stays on standard.
 
 ## Overriding the runtime
 

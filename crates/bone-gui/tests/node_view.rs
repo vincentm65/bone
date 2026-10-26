@@ -9,6 +9,8 @@ use std::time::Duration;
 use bone_core::Core;
 use bone_core::scripting;
 use bone_gui::{GuiOptions, Headless};
+use bone_proto::methods::{MessageCompletedParams, TurnFinishedParams};
+use bone_proto::types::{ChatMessage, TurnOutcome};
 use bone_server::Server;
 
 /// A headless GUI with the shared defaults (unless a test chose a library).
@@ -31,6 +33,269 @@ async fn gui(config: &Path, work: &Path) -> Headless {
     Headless::start(server.connect_in_process(), opts, 1000.0, 700.0)
         .await
         .unwrap()
+}
+
+/// The composer grows on the first wrap, using the width left beside
+/// its attach button, and shrinks again without overflowing its card.
+#[tokio::test(flavor = "multi_thread")]
+async fn composer_contains_input_at_each_wrap() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.resize(400.0, 700.0);
+    for chars in (1..=100).chain((0..100).rev()) {
+        g.gui
+            .run_lua("t", &format!("bone.prompt.set(string.rep('a', {chars}))"))
+            .unwrap();
+        g.frame();
+        g.frame();
+        g.gui
+            .run_lua(
+                "t",
+                r#"
+          local card = assert(bone.gui.rect('prompt'))
+          local input = assert(bone.gui.rect('composer-input'))
+          assert(input.y >= card.y + 10, 'input overflows the top of the card')
+          assert(input.y + input.h <= card.y + card.h - 10, 'input overflows the bottom of the card')
+          if not first_height then first_height = card.h end
+          if card.h > first_height then grew = true end
+        "#,
+            )
+            .unwrap_or_else(|e| panic!("{chars} characters: {e}"));
+    }
+    assert_eq!(g.gui.eval("tostring(grew)").unwrap(), "true");
+    assert_eq!(
+        g.gui
+            .eval("tostring(bone.gui.rect('prompt').h == first_height)")
+            .unwrap(),
+        "true"
+    );
+}
+
+/// The canvas supplies the picker's 50% opacity only once; the chat keeps
+/// its opaque rounded surface and shadow, without an outline.
+#[tokio::test(flavor = "multi_thread")]
+async fn translucent_picker_does_not_stack_backgrounds() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.gui
+        .run_lua(
+            "t",
+            r##"
+      assert(bone.o.opacity == 0.9)
+      local info = bone.gui.window_info
+      bone.gui.window_info = function() return { opacity = 0.5 } end
+      local sidebar = require('bone.desktop.sidebar')
+      sidebar.slide_ms = 1
+      sidebar.open()
+      local root = require('bone.nodes.window').view({ width = 1000, height = 700 })
+      bone.gui.window_info = info
+      local function walk(node, f)
+        if type(node) ~= 'table' then return nil end
+        local hit = f(node)
+        if hit then return hit end
+        for _, child in ipairs(node) do
+          local found = walk(child, f)
+          if found then return found end
+        end
+      end
+      -- Docks and the sidebar sit inside the root, not at a fixed index.
+      local main = walk(root, function(n)
+        if n.overflow == 'hidden' and n.shadow and n.radius == 16 then return n end
+      end)
+      local side = walk(root, function(n)
+        if n[1] and n[1].id == 'sessions' then return n end
+      end)
+      assert(root.bg == nil, 'root must not cover the translucent canvas')
+      assert(side and side.bg == nil, 'sidebar must not stack alpha over the canvas')
+      assert(main and main.radius == 16 and main.shadow, 'keep rounded chat and shadow')
+      assert(main.border == nil, 'no chat outline')
+      assert(main.bg:match('^#%x%x%x%x%x%x$'), 'chat stays opaque')
+    "##,
+        )
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn switching_chats_keeps_each_scroll_position() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    let fill = |chat: &mut bone_gui::ChatBuffer, name: &str| {
+        for i in 0..40 {
+            let turn = i as u64 + 1;
+            chat.turn_started(turn, &format!("{name} user {i}"));
+            chat.message_completed(&MessageCompletedParams {
+                session_id: name.into(),
+                turn_id: turn,
+                message: ChatMessage::Assistant {
+                    content: format!("{name} reply {i}"),
+                    reasoning: String::new(),
+                    tool_calls: vec![],
+                    reasoning_state: None,
+                },
+                usage: None,
+            });
+            chat.turn_finished(&TurnFinishedParams {
+                session_id: name.into(),
+                turn_id: turn,
+                outcome: TurnOutcome::Completed,
+            });
+        }
+    };
+    fill(&mut g.gui.chats[0], "one");
+    g.gui.chats.push(bone_gui::ChatBuffer::new(None));
+    fill(&mut g.gui.chats[1], "two");
+    g.gui.view.invalidate();
+    for _ in 0..4 {
+        g.frame();
+    }
+
+    g.gui.run_lua("t", "bone.gui.scroll('chat', 200)").unwrap();
+    g.frame();
+    let first = g.gui.eval("bone.gui.scroll_info('chat').offset").unwrap();
+    assert!(first.parse::<f32>().unwrap() > 0.0);
+
+    g.gui.show_chat(1);
+    g.frame();
+    g.gui.run_lua("t", "bone.gui.scroll('chat', 100)").unwrap();
+    g.frame();
+    let second = g.gui.eval("bone.gui.scroll_info('chat').offset").unwrap();
+    assert!(second.parse::<f32>().unwrap() > 0.0);
+
+    g.gui.show_chat(0);
+    g.frame();
+    let restored = g.gui.eval("bone.gui.scroll_info('chat').offset").unwrap();
+    assert_eq!(restored, first);
+}
+
+/// `bone.nodes.chat{ chat = n }` draws another chat as list `chat:<n>`, its
+/// views reading that chat; once it comes on screen, the list it had is
+/// the `chat` list.
+#[tokio::test(flavor = "multi_thread")]
+async fn another_chat_draws_beside_the_one_on_screen() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.gui.chats.push(bone_gui::ChatBuffer::new(None));
+    g.gui
+        .run_lua(
+            "t",
+            r##"
+      bone.ui.views.probe = function(item)
+        return { lines = { item.text .. " in " .. bone.chat.session().chat } }
+      end
+      bone.chat.add('probe', { text = 'first' })
+      local nodes = require('bone.nodes')
+      bone.gui.view(function(ctx)
+        return { direction = "row",
+          nodes.chat({ chat = 0, width = 0, grow = 1 }),
+          nodes.chat({ chat = 1, width = 0, grow = 1 }),
+        }
+      end)
+    "##,
+        )
+        .unwrap();
+    g.gui.show_chat(1);
+    g.gui
+        .run_lua("t", "bone.chat.add('probe', { text = 'second' })")
+        .unwrap();
+    g.gui.show_chat(0);
+    for _ in 0..3 {
+        g.frame();
+    }
+    let at = |g: &Headless, s: &str| (g.painted.iter()).find(|(t, _)| t.contains(s)).map(|p| p.1);
+    let (a, b) = (
+        at(&g, "first in 0").unwrap(),
+        at(&g, "second in 1").unwrap(),
+    );
+    assert!(a.min.x < b.min.x);
+    g.gui
+        .run_lua("t", "assert(bone.gui.scroll_info('chat:1'))")
+        .unwrap();
+
+    g.gui.show_chat(1);
+    g.gui
+        .run_lua(
+            "t",
+            "assert(bone.gui.scroll_info('chat:1') == nil and bone.gui.scroll_info('chat:0'))",
+        )
+        .unwrap();
+    for _ in 0..3 {
+        g.frame();
+    }
+    assert!(at(&g, "first in 0").is_some() && at(&g, "second in 1").is_some());
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}
+
+/// Tiled chats keep their composer and status bar geometry across focus,
+/// including wrapped drafts; clicking an inactive editor activates its chat.
+#[tokio::test(flavor = "multi_thread")]
+async fn tiled_composers_stay_put_when_focus_changes() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.gui.chats.push(bone_gui::ChatBuffer::new(None));
+    g.gui.chats[1].turn_started(1, "running");
+    g.gui
+        .run_lua(
+            "t",
+            r#"
+      local window = require('bone.nodes.window')
+      local bar = require('bone.nodes.statusbar').node
+      require('bone.nodes.statusbar').node = function(session, cell)
+        assert(session and session.chat ~= nil)
+        local node = bar(session, cell)
+        node.id = 'status-' .. session.chat
+        return node
+      end
+      bone.gui.view(function(ctx)
+        local root = { direction = 'row' }
+        for n = 0, 1 do
+          root[#root + 1] = window.column(ctx, { chat = n, width = ctx.width / 2,
+            on_focus = function() bone.api.open_session(tostring(n)) end })
+        end
+        return root
+      end)
+      function geometry(n)
+        local here = bone.chat.session().chat == n
+        local input = bone.gui.rect('composer-input' .. (here and '' or n))
+        local bar = bone.gui.rect('status-' .. n)
+        return table.concat({ input.x, input.y, input.w, input.h, bar.x, bar.y, bar.w, bar.h }, ',')
+      end
+    "#,
+        )
+        .unwrap();
+    for draft in ["", "first line\nsecond line", &"wrapped draft ".repeat(150)] {
+        g.gui.show_chat(0);
+        g.gui
+            .run_lua(
+                "t",
+                &format!("bone.prompt.set({})", serde_json::to_string(draft).unwrap()),
+            )
+            .unwrap();
+        for _ in 0..3 {
+            g.frame();
+        }
+        let before = [
+            g.gui.eval("geometry(0)").unwrap(),
+            g.gui.eval("geometry(1)").unwrap(),
+        ];
+        g.gui.show_chat(1);
+        for _ in 0..3 {
+            g.frame();
+            assert_eq!(g.gui.eval("geometry(0)").unwrap(), before[0]);
+            assert_eq!(g.gui.eval("geometry(1)").unwrap(), before[1]);
+        }
+        let x = g.gui.eval("(function() local r = bone.gui.rect('composer-input0'); return r.x + r.w / 2 end)()").unwrap().parse().unwrap();
+        let y = g.gui.eval("(function() local r = bone.gui.rect('composer-input0'); return r.y + r.h / 2 end)()").unwrap().parse().unwrap();
+        g.click_at(x, y);
+        for _ in 0..3 {
+            g.frame();
+        }
+        assert_eq!(g.gui.eval("bone.chat.session().chat").unwrap(), "0");
+        assert_eq!(g.gui.eval("bone.prompt.get()").unwrap(), draft);
+        g.text("x");
+        g.frame();
+        assert!(g.gui.eval("bone.prompt.get()").unwrap().contains('x'));
+    }
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -122,7 +387,7 @@ async fn a_long_list_makes_only_the_items_in_view() {
 #[tokio::test(flavor = "multi_thread")]
 async fn the_nodes_library_draws_the_chat() {
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    std::fs::write(config.path().join("gui-library"), "desktop\n").unwrap();
+    std::fs::write(config.path().join("gui-library"), "standard\n").unwrap();
     let mut g = gui(config.path(), work.path()).await;
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
     g.frame();
@@ -251,6 +516,186 @@ async fn a_question_from_the_core_is_a_modal_dialog() {
     assert!(!text(&g, "Allow shell?"), "closed when answered elsewhere");
 }
 
+/// A node-only modal takes keys before the panel underneath it, including
+/// its opening guard; paste must not reach a terminal's global paste hook.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_modal_takes_keys_before_a_focused_panel() {
+    use eframe::egui::{Key, Modifiers};
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.gui
+        .run_lua(
+            "t",
+            r#"
+      panel_keys, pastes, modal_keys = {}, {}, {}
+      shortcuts, clicks = 0, 0
+      bone.keymap.set('ctrl+g', function() shortcuts = shortcuts + 1 end, { context = 'panel' })
+      bone.ui.panel.open({ id = 'terminal', dock = 'bottom', focusable = true,
+        lines = { 'terminal' }, on_key = function(k)
+          if k == 'ctrl+g' then return false end
+          panel_keys[#panel_keys + 1] = k
+          return true
+        end })
+      bone.ui.panel.focus('terminal')
+      bone.on('paste', function(ev) pastes[#pastes + 1] = ev.text end)
+      modal = false
+      bone.gui.view(function()
+        if not modal then return { text = 'terminal' } end
+        if modal == 'empty' then return { block_input = true, text = 'Empty modal' } end
+        return { block_input = true,
+          { id = 'dialog', autofocus = true, key_guard = 150,
+            on_key = function(k)
+              modal_keys[#modal_keys + 1] = k
+              return k == 'left' or k == 'enter'
+            end,
+            { text = 'Modal dialog' } },
+          { id = 'other', text = 'Other', on_click = function() clicks = clicks + 1 end },
+        }
+      end)
+    "#,
+        )
+        .unwrap();
+    g.frame();
+    g.frame();
+    // Ordinary panel input, including paste, still uses the shared engine.
+    g.text("x");
+    g.key(Key::ArrowLeft, Modifiers::NONE);
+    g.paste("panel paste");
+    g.frame();
+    assert_eq!(
+        g.gui.eval("table.concat(panel_keys, ',')").unwrap(),
+        "x,left"
+    );
+    assert_eq!(g.gui.eval("pastes[1]").unwrap(), "panel paste");
+
+    g.gui
+        .run_lua("t", "modal = true; bone.gui.invalidate()")
+        .unwrap();
+    g.frame();
+    g.frame();
+    assert_eq!(g.gui.eval("bone.gui.focused()").unwrap(), "dialog");
+    assert_eq!(g.gui.eval("bone.ui.panel.focused()").unwrap(), "terminal");
+    g.text("g");
+    g.key(Key::Enter, Modifiers::NONE);
+    g.paste("guarded paste");
+    g.frame();
+    assert_eq!(g.gui.eval("#modal_keys").unwrap(), "0", "opening guard");
+    assert_eq!(g.gui.eval("#panel_keys").unwrap(), "2");
+    assert_eq!(g.gui.eval("#pastes").unwrap(), "1");
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    g.text("z"); // The callback declines it, but the modal still traps it.
+    g.key(Key::ArrowLeft, Modifiers::NONE);
+    g.key(Key::Enter, Modifiers::NONE);
+    g.paste("modal paste");
+    g.frame();
+    assert_eq!(
+        g.gui.eval("table.concat(modal_keys, ',')").unwrap(),
+        "z,left,enter"
+    );
+    assert_eq!(g.gui.eval("#panel_keys").unwrap(), "2");
+    assert_eq!(g.gui.eval("#pastes").unwrap(), "1");
+    assert_eq!(g.gui.draft, "", "the prompt is also untouched");
+
+    // Declined editing keys stay trapped; tab and arrows navigate the modal.
+    g.key(Key::ArrowRight, Modifiers::NONE);
+    g.key(Key::Backspace, Modifiers::NONE);
+    g.key(Key::Escape, Modifiers::NONE);
+    g.key(Key::Tab, Modifiers::NONE);
+    g.frame();
+    assert_eq!(g.gui.eval("bone.gui.focused()").unwrap(), "other");
+    g.key(Key::Enter, Modifiers::NONE);
+    g.key(Key::ArrowUp, Modifiers::NONE);
+    g.frame();
+    assert_eq!(g.gui.eval("clicks").unwrap(), "1");
+    assert_eq!(g.gui.eval("bone.gui.focused()").unwrap(), "dialog");
+    assert_eq!(g.gui.eval("#panel_keys").unwrap(), "2");
+
+    // Non-editing shortcuts declined by the modal still reach the engine.
+    g.key(Key::G, Modifiers::CTRL);
+    g.frame();
+    assert_eq!(g.gui.eval("shortcuts").unwrap(), "1");
+
+    // A modal without focusable nodes also shields the underlying terminal.
+    g.gui
+        .run_lua("t", "modal = 'empty'; bone.gui.invalidate()")
+        .unwrap();
+    g.frame();
+    g.frame();
+    assert_eq!(g.gui.eval("tostring(bone.gui.focused())").unwrap(), "nil");
+    g.text("empty");
+    for key in [Key::ArrowLeft, Key::Enter, Key::Tab, Key::Escape] {
+        g.key(key, Modifiers::NONE);
+    }
+    g.paste("empty modal paste");
+    g.frame();
+    assert_eq!(g.gui.eval("#panel_keys").unwrap(), "2");
+    assert_eq!(g.gui.eval("#pastes").unwrap(), "1");
+
+    g.gui
+        .run_lua("t", "modal = false; bone.gui.invalidate()")
+        .unwrap();
+    g.frame();
+    g.frame();
+    g.text("y");
+    g.key(Key::ArrowRight, Modifiers::NONE);
+    g.paste("panel again");
+    g.frame();
+    assert_eq!(
+        g.gui.eval("table.concat(panel_keys, ',')").unwrap(),
+        "x,left,y,right"
+    );
+    assert_eq!(g.gui.eval("pastes[2]").unwrap(), "panel again");
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}
+
+/// A modal text field keeps native editing and paste even while a terminal
+/// remains the shared engine's focused panel.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_modal_text_field_edits_before_a_focused_panel() {
+    use eframe::egui::{Key, Modifiers};
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.gui
+        .run_lua(
+            "t",
+            r#"
+      panel_keys, pastes, value = {}, {}, ''
+      bone.ui.panel.open({ id = 'terminal', dock = 'bottom', focusable = true,
+        lines = { 'terminal' }, on_key = function(k)
+          panel_keys[#panel_keys + 1] = k
+          return true
+        end })
+      bone.ui.panel.focus('terminal')
+      bone.on('paste', function(ev) pastes[#pastes + 1] = ev.text end)
+      bone.gui.view(function()
+        return { block_input = true,
+          { id = 'search', width = 300, height = 40, text_input = {
+            focus = true, on_change = function(text) value = text end,
+          } },
+        }
+      end)
+    "#,
+        )
+        .unwrap();
+    for _ in 0..3 {
+        g.frame();
+    }
+    g.text("abc");
+    g.frame();
+    g.key(Key::ArrowLeft, Modifiers::NONE);
+    g.frame();
+    g.key(Key::Backspace, Modifiers::NONE);
+    g.frame();
+    g.paste("X");
+    g.frame();
+    assert_eq!(g.gui.eval("value").unwrap(), "aXc");
+    assert_eq!(g.gui.eval("#panel_keys").unwrap(), "0");
+    assert_eq!(g.gui.eval("#pastes").unwrap(), "0");
+    assert_eq!(g.gui.eval("bone.ui.panel.focused()").unwrap(), "terminal");
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}
+
 /// A click anywhere on a sidebar row reaches the row, on its text too.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_sidebar_rows_take_clicks_on_their_text() {
@@ -278,6 +723,97 @@ async fn the_sidebar_rows_take_clicks_on_their_text() {
         "nil",
         "the click reached the row"
     );
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}
+
+/// Drag capture survives a Lua rebuild and a paint-only drop preview. Drag
+/// positions are window-relative, release positions remain node-relative.
+#[tokio::test(flavor = "multi_thread")]
+async fn dragging_survives_rebuilds_and_releases_outside_the_node() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.gui
+        .run_lua(
+            "t",
+            r##"
+      moves, releases, order = {}, {}, {}
+      bone.gui.view(function()
+        return { padding = 40,
+          { id = 'area', grow = 1,
+            { id = 'title', width = 300, height = 28, bg = '#333',
+              { text = 'Drag this title' },
+              on_press = function() bone.gui.invalidate() end,
+              on_drag = function(p)
+                moves[#moves + 1] = p
+                order[#order + 1] = 'drag'
+                bone.gui.invalidate()
+              end,
+              on_release = function(p)
+                releases[#releases + 1] = p
+                order[#order + 1] = 'release'
+                bone.gui.invalidate()
+              end,
+            },
+            #moves > 0 and { position = 'absolute', left = 400, top = 100,
+              width = 200, height = 200, border = 2, border_color = '#48f', z = 20 } or nil,
+          },
+        }
+      end)
+    "##,
+        )
+        .unwrap();
+    g.frame();
+    g.frame();
+    g.button_at(100.0, 50.0, true);
+    g.frame();
+    for x in [500.0, 550.0, 600.0] {
+        g.hover_at(x, 200.0);
+        g.frame();
+        g.frame(); // rebuilt tree, and no movement while still held
+    }
+    // Release somewhere other than the last drag position, over the overlay.
+    g.button_at(620.0, 220.0, false);
+    g.frame();
+    g.frame();
+    g.gui
+        .run_lua(
+            "t",
+            r##"
+      local r = assert(bone.gui.rect('area'))
+      assert(r.x == 40 and r.y == 40)
+      assert(#moves == 4 and moves[1].x == 500 and moves[3].x == 600 and moves[3].y == 200)
+      assert(moves[4].x == 620 and moves[4].y == 220)
+      assert(#releases == 1 and releases[1].x == 580 and releases[1].y == 180)
+      assert(table.concat(order, ',') == 'drag,drag,drag,drag,release')
+      moves, releases, order = {}, {}, {}
+    "##,
+        )
+        .unwrap();
+    // No held-motion frame at all: movement and up arrive in one frame.
+    g.button_at(100.0, 50.0, true);
+    g.frame();
+    g.button_at(620.0, 220.0, false);
+    g.frame();
+    g.frame();
+    g.gui
+        .run_lua(
+            "t",
+            r##"
+      assert(#moves == 1 and moves[1].x == 620 and moves[1].y == 220)
+      assert(#releases == 1 and table.concat(order, ',') == 'drag,release')
+      moves, releases, order = {}, {}, {}
+    "##,
+        )
+        .unwrap();
+    // Small click jitter is not a drag, even on a release-motion frame.
+    g.button_at(100.0, 50.0, true);
+    g.frame();
+    g.button_at(101.0, 51.0, false);
+    g.frame();
+    g.frame();
+    g.gui
+        .run_lua("t", "assert(#moves == 0 and #releases == 1)")
+        .unwrap();
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 

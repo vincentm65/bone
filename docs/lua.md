@@ -1,17 +1,19 @@
 # Lua in bone
 
-bone runs two separate LuaJIT states, one per side:
+bone runs a separate LuaJIT state for the core and for each frontend:
 
 | File | Runs in | Controls |
 |---|---|---|
 | `~/.bone/core.lua` | the core (server) | providers, system prompt, tools, hooks |
-| `~/.bone/tui.lua` | the TUI | options, keys, commands, colors, events |
+| `~/.bone/ui.lua` | each frontend (TUI and GUI) | shared options, keys, commands, colors, events |
+| `~/.bone/tui.lua` | the TUI | terminal-specific behavior and appearance |
+| `~/.bone/gui.lua` | the GUI (`bone --gui`) | desktop-specific behavior and node views |
 
-`$BONE_CONFIG_DIR` replaces `~/.bone`. The two states never share Lua values; they talk only through the bone protocol. Lua has full trust (no sandbox). Tool calls run without asking; asking first is a customization using `bone.ask` (see below).
+`$BONE_CONFIG_DIR` replaces `~/.bone`. These states never share Lua values; frontends communicate with the core through the bone protocol. Lua has full trust (no sandbox). Tool calls run without asking; asking first is a customization using `bone.ask` (see below).
 
 Numbering, everywhere: indexes into lists start at 1, as in Lua (chat item `index`, `first`/`last`, `from`/`to`); positions start at 0 (screen cells `x`, `y`; prompt `row`, `col` and highlight ranges). Chat buffer numbers also start at 0; they are identifiers, not list indexes. Settings are fields you assign (`bone.ui.statusline = fn`, `bone.ui.layout = {…}`, `bone.ui.spinner = {…}`, `bone.o.name = value`); actions are calls (`bone.chat.add`, `bone.ui.popup`, `bone.notify`).
 
-Load order on each side: `runtime/<side>/api.lua`, then `runtime/<side>/defaults.lua`, then plugins and your file. The runtime is built into the binary, and any runtime file can be replaced by putting a file at the same path under `~/.bone/runtime/` (for example `~/.bone/runtime/tui/defaults.lua` drops every default keymap). A replacement hides every later change to the built-in file, so prefer changing pieces from your config; when you do replace a file, start from the built-in one and change only what you need:
+The core loads `runtime/core/api.lua`, `runtime/core/defaults.lua`, plugins, then `core.lua`. Each frontend loads `runtime/ui/api.lua`, its own API and defaults, plugins, then your `ui.lua` and frontend-specific file, followed by trusted project config. `bare` skips the user and project files, not plugins. Saved options apply before user config in the TUI but after it in the GUI (see [Settings](#settings)). The runtime is built into the binary. A frontend's active library takes precedence over `~/.bone/runtime/<same path>`, which takes precedence over the built-in copy (for example `~/.bone/runtime/tui/defaults.lua` replaces the TUI defaults when no library file overrides it). A replacement hides every later change to the built-in file, so prefer changing pieces from your config; when you do replace a file, start from the built-in one and change only what you need:
 
 ```lua
 -- ~/.bone/runtime/lua/bone/ui/layout.lua
@@ -24,9 +26,9 @@ end
 return M
 ```
 
-`bone.builtin(name)` runs the built-in version of a module (`"bone.ui.layout"`) or file (`"tui/defaults.lua"`) and returns what it returns. Bone never writes into `~/.bone/runtime/`, so your copies are safe from updates. `/runtime` lists them (and which are still identical to the built-in), and `/runtime reset FILE` or `/runtime reset all` goes back to the built-in versions: your copies are moved to `~/.bone/runtime-backup/<time>/`, not deleted, and the TUI reloads by itself. The TUI mentions overrides at startup and `/health` lists them.
+`bone.builtin(name)` runs the built-in version of a module (`"bone.ui.layout"`) or file (`"tui/defaults.lua"`) and returns what it returns. Bone never writes into `~/.bone/runtime/`, so your copies are safe from updates. `/runtime` lists them (and which are still identical to the built-in), and `/runtime reset FILE` or `/runtime reset all` goes back to the built-in versions: your copies are moved to `~/.bone/runtime-backup/<time>/`, not deleted, and the TUI reloads by itself. `/runtime` lists overrides, and `/health` includes them.
 
-`require("x.y")` finds `~/.bone/lua/x/y.lua` (or `x/y/init.lua`), then each plugin's `lua/`, then the runtime's `lua/` modules. In the TUI, an active custom library's files in `~/.bone/libraries/<name>/` take precedence over `~/.bone/runtime/` and the built-in runtime; missing files fall back to those. See [TUI libraries](#tui-libraries) below.
+`require("x.y")` finds `~/.bone/lua/x/y.lua` (or `x/y/init.lua`), then each plugin's `lua/`, then the runtime's `lua/` modules. In either frontend, an active custom library's files in `~/.bone/libraries/<name>/` take precedence over `~/.bone/runtime/` and the built-in runtime; missing files fall back to those. See [TUI libraries](#tui-libraries) below and [GUI libraries](customizing/customizing-gui.md#libraries).
 
 ## Extension contract (API v1)
 
@@ -46,17 +48,17 @@ local info = bone.api_info()
 `bone.api_version` changes only for a breaking change to an existing API
 meaning or call shape. New functions, fields, events and capabilities are
 additive. Plugins should test `bone.has_capability(name)` before using a
-newer extension point rather than comparing `bone.version`. The core and TUI
+newer extension point rather than comparing `bone.version`. Core and frontend
 states are separate; a capability in one state does not make it available in
-the other.
+another.
 
 The current capability names include `core.config`, `core.tools`,
 `core.hooks`, `core.providers`, `core.jobs`, `core.http_stream`, `core.ask`,
-`core.health`, `core.ready`, `core.reload`, `core.hooks.system`, `core.hooks.context`, `core.hooks.errors`, `core.hooks.stream`, `core.hooks.session`, `core.session_write`, `core.queue`, `core.model`, `core.mcp`, `core.rpc`, `plugins.state` (both sides), and, in the TUI, `plugins.lifecycle`, `tui.project`, `tui.model`, `tui.rpc`, `tui.keymaps`, `tui.input`, `tui.events`,
+`core.health`, `core.ready`, `core.reload`, `core.hooks.system`, `core.hooks.context`, `core.hooks.errors`, `core.hooks.stream`, `core.hooks.session`, `core.session_write`, `core.queue`, `core.model`, `core.mcp`, `core.rpc`, `plugins.state` (core and frontends), and, in the TUI, `plugins.lifecycle`, `tui.project`, `tui.model`, `tui.rpc`, `tui.keymaps`, `tui.input`, `tui.events`,
 `tui.local_events`, `tui.commands`, `tui.command_specs`, `tui.options`,
 `tui.dynamic_options`, `tui.request`, `tui.prompt`, `tui.prompt_edit`, `tui.chat`, `tui.chat_data`, `tui.windows`,
 `tui.panels`, `tui.regions`, `tui.views`, `tui.pickers`, `tui.themes`, `tui.jobs`, `jobs.streaming` and
-`tui.session`. Both sides also report `lua`, `json`, `modules` and `fs`. The GUI reports `jobs.streaming`, `plugins.lifecycle` and the shared `ui.*` names below instead of the `tui.*` ones.
+`tui.session`. All states also report `lua`, `json`, `modules` and `fs`. The GUI reports `jobs.streaming`, `plugins.lifecycle` and the shared `ui.*` names below instead of the `tui.*` ones.
 Capability names describe the contract, not the internal Rust module layout.
 
 ### Frontends: the shared UI API
@@ -84,10 +86,10 @@ naming the operation.
 | `ui.chat_data` | `bone.chat.items`, `add`, `update`, `remove`, `turns`, `session`, `sessions`, `redraw`, `refresh_in` | shared |
 | `ui.views` | `bone.ui.views` drawing chat items, `bone.ui.refresh` | shared |
 | `ui.request` | `bone.request`, `bone.system`, `bone.http`, `bone.defer`, `bone.notify`, `bone.settings` | shared |
-| `ui.layout` | `bone.ui.layout`, regions, `bone.ui.statusline`/`divider`, `bone.ui.prompt` (its box), `bone.ui.geometry` (character units), `bone.ui.refresh_in` | TUI only: the GUI draws a node tree (`gui.nodes`) |
+| `ui.layout` | `bone.ui.layout`, regions, `bone.ui.statusline`/`divider`, `bone.ui.prompt` (its box), `bone.ui.geometry` (character units), `bone.ui.refresh_in` | TUI only: the GUI draws a node tree (`gui.nodes`); its standard library takes `bone.ui.statusline` and `bone.ui.prompt`'s placeholder, prefix, min and max, and its prompt `bone.ui.prompt_highlight` |
 | `ui.windows` | `bone.ui.popup`/`win`, `update`, `close`, `is_open` | shared |
-| `ui.panels` | `bone.ui.panel` (open, update, lines, close, info, list, focus, scroll) | TUI only; the GUI keeps their state and the library docks panels of `blocks` |
-| `ui.input` | keys (windows', panels', raw, keymaps and sequences), `bone.press`, `bone.action`, `bone.ui.actions`, the `mouse` event and what is under it | shared; the GUI's text box edits the prompt itself, and it sends no `mouse` events (nodes take the pointer) |
+| `ui.panels` | `bone.ui.panel` (open, update, lines, close, info, list, focus, scroll) | TUI only; the GUI keeps their state and the library docks panels drawn as nodes (`node = fn`) |
+| `ui.input` | keys (windows', panels', raw, keymaps and sequences), `bone.press`, `bone.action`, `bone.ui.actions`, the `mouse` event and what is under it | shared; the GUI's text box edits the prompt itself (raw interceptors and the `key` event still see its keys), and its `mouse` events carry the cell and pixels but no chat item or layout leaf |
 | `ui.prompt` | `bone.prompt` (cursor, range and selection edits, `info`, `empty`, `images`, `attach`, `paste`, `history_add`), `bone.api.prompt_get`/`prompt_set`; the `submit`, `prompt/changed`, `paste` and `image/attached` events | shared; the GUI's text box keeps its own cursor and selection, reported to Lua |
 | `ui.jobs` | `bone.job`, `job/*` events, `bone.processes` (`list`, `screen`) | shared |
 | `ui.plugins` | `bone.plugin` (`list`, `load`, `unload`, `reload`, `on_shutdown`, `state`), trusted project config, `bone.library` | shared |
@@ -101,12 +103,12 @@ naming the operation.
 | `ui.project` | `bone.project` (`info`, `trust`) | shared |
 | `gui.nodes`, `gui.window`, `gui.notifications`, `gui.dialogs`, `gui.window_nodes` | `bone.gui` (`view`, scroll, window, notify, file dialogs, library), node views, and windows and panels drawn as nodes (`node = fn` in their spec) | GUI only (see `customizing/customizing-gui.md`) |
 
-The TUI and the GUI fire the same local events, including `server/disconnected` and `server/reconnected` (a `--connect` TUI or the GUI lost and regained the server).
+The TUI and the GUI fire the same local event names, including `server/disconnected` and `server/reconnected` for socket clients. Their reload lifecycle differs: TUI `ready` receives `{ reload = true, panels }` after a file reload, whereas GUI `ready` has no data at startup or after reload. GUI file reloads do not run outgoing shutdown hooks or save plugin state. See [GUI reloading](customizing/customizing-gui.md#reloading) for the watched files and limitations.
 
 ### Ownership and compatibility
 
 The core remains the authority for sessions, turns, providers, tools and
-protocol state. TUI Lua can render, handle input, and make protocol requests,
+protocol state. Frontend Lua can render, handle input, and make protocol requests,
 but it cannot become a second session authority. A Lua error is reported to
 the user and does not crash the process.
 
@@ -136,7 +138,7 @@ the running version provides a capability before using it.
 | Panels | `bone.ui.win` is a Lua-drawn overlay, and regions/views customize the existing chat layout. Both keep working unchanged. | Persistent panels with IDs, docking, sizing, scrolling, focus, render/key callbacks and lifecycle events are available through `tui.panels` (`bone.ui.panel`). |
 | Prompt and chat | `bone.api.prompt_get`/`prompt_set` read and replace the whole prompt; `bone.chat.items({ kind, last })` lists the on-screen chat's items. | Cursor, range and selection edits (`tui.prompt_edit`, `bone.prompt`) and structured read-only items, turns and sessions with filters (`tui.chat_data`) are available. The TUI stays a prompt, not a file editor. |
 | Jobs | TUI `bone.system`, `bone.http` and `bone.defer` run one background operation and invoke a callback. Core waits are coroutine-based and turn cancellation stops them. | Streaming jobs with handles, stdout/stderr callbacks (chunks or lines), stdin writes, cancellation of the whole process group, timeouts, exit results, status and `job/*` events are available in the TUI through `jobs.streaming` (`bone.job`). |
-| Plugin state | Folder plugins load in name order between runtime defaults and the user's config; `bone.plugins` reports names and `.`/`_` folders are disabled. | In the TUI, plugins own what they create; `bone.plugin.on_shutdown`, load/unload/reload (`/plugins`), auto-saved `bone.plugin.state` and trusted project config (`/plugins trust`) are available through `plugins.lifecycle` and `tui.project`. Both sides have `bone.state` and `bone.plugin.current()` (`plugins.state`). |
+| Plugin state | Folder plugins load in name order between runtime defaults and the user's config; `bone.plugins` reports names and `.`/`_` folders are disabled. | In both frontends, plugins own what they create; `bone.plugin.on_shutdown`, load/unload/reload (`/plugins`), auto-saved `bone.plugin.state` and trusted project config (`/plugins trust`) are available through `plugins.lifecycle` and `ui.project` (also `tui.project` in the TUI). File-reload lifecycle differs; see above. Core and frontends have `bone.state` and `bone.plugin.current()` (`plugins.state`). |
 
 The existing detailed sections describe both the compatibility calls and the
 new additive APIs. A plugin may use a compatibility API today and opt into
@@ -149,22 +151,24 @@ A plugin is a folder in `~/.bone/plugins/`:
 ```text
 ~/.bone/plugins/myplugin/
   core.lua     runs in the core (tools, hooks)
-  tui.lua      runs in the TUI (keys, commands, tool views)
+  ui.lua       runs in each frontend (shared keys, commands, events)
+  tui.lua      runs in the TUI after ui.lua (terminal views)
+  gui.lua      runs in the GUI after ui.lua (node views)
   lua/         modules for require()
   colors/      colorschemes
 ```
 
 The [Bone catalog](https://github.com/vincentm65/bone-catalog) is the source of installable plugins. Use `/catalog` for packages such as `mcp`, `skill`, `usage`, `themes` and `review`; none is installed by default.
 
-Every part is optional. Plugins load in name order, after the runtime defaults and before your own `core.lua` / `tui.lua`, so your config can change anything a plugin set up. Rename a folder to start with `_` or `.` to disable it. `bone.plugins` lists the loaded names. Install published packages with `/catalog`. Your own plugins can be placed directly in `~/.bone/plugins/`.
+Every part is optional. Plugins load in name order, after the runtime defaults and before your own config (`core.lua`, or `ui.lua` then `tui.lua` / `gui.lua`), so your config can change anything a plugin set up. Rename a folder to start with `_` or `.` to disable it. `bone.plugins` lists the loaded names. Install published packages with `/catalog`. Your own plugins can be placed directly in `~/.bone/plugins/`.
 
 ### Plugin lifecycle and state
 
-`bone.plugin.current()` is `{ name, dir, kind }` while a plugin's file runs (on both sides; in the TUI also while any of its callbacks run), else nil.
+`bone.plugin.current()` is `{ name, dir, kind }` while a plugin's file runs, and in either frontend while its owned callbacks run, else nil.
 
-`bone.state.load(name)` returns the table saved under `name` (empty if none) and `bone.state.save(name, value)` saves one, as JSON in `~/.bone/state/<side>/<name>.json`. Names are letters, digits, `_`, `-` and `.`. Both sides have it; each side has its own files. With `{ shared = true }` as the last argument both sides use `~/.bone/state/shared/<name>.json`, which is how a plugin's core and TUI halves can share settings (a save replaces the file atomically; the last writer wins).
+`bone.state.load(name)` returns the table saved under `name` (empty if none) and `bone.state.save(name, value)` saves one, as JSON in `~/.bone/state/<side>/<name>.json`. Names are letters, digits, `_`, `-` and `.`. Core, TUI and GUI have it, with separate `core`, `tui` and `gui` directories. With `{ shared = true }` as the last argument they use `~/.bone/state/shared/<name>.json`, which is how a plugin's core and frontend halves can share settings (a save replaces the file atomically; the last writer wins).
 
-In the TUI a plugin owns what it creates while its `tui.lua` or one of its callbacks runs: keymaps, user commands, `bone.on` handlers, panels, windows, jobs, dynamic options, raw key interceptors and new keymap contexts. Unloading it removes all of that (a key or command the user has since redefined is left alone), cancels its running jobs without calling back, and forgets the modules it `require`d, so loading it again runs fresh code. Anything else it changed (views, highlights, `bone.ui` fields) is for its shutdown hook to undo.
+In either frontend a plugin owns what it creates while its `ui.lua`, frontend-specific file or one of its callbacks runs: keymaps, user commands, `bone.on` handlers, panels, windows, jobs, dynamic options, raw key interceptors and new keymap contexts. Unloading it removes all of that (a key or command the user has since redefined is left alone), cancels its running jobs without calling back, and forgets the modules it `require`d, so loading it again runs fresh code. Anything else it changed (views, highlights, `bone.ui` fields) is for its shutdown hook to undo.
 
 ```lua
 -- in plugins/todo/tui.lua
@@ -178,13 +182,15 @@ bone.plugin.on_shutdown(function() ... end)  -- unload, reload and quit
 - `bone.plugin.state(name)` returns a table that is loaded once and saved when its plugin unloads and when bone quits; `bone.plugin.save_state(name)` saves it now. `name` defaults to the current plugin.
 - Events: `plugin/loaded` and `plugin/unloaded` with the plugin's info.
 
+Explicit plugin unload/reload and frontend quit run shutdown hooks and save plugin state. TUI file reloads also do this; GUI file reloads currently do neither. Save important changes as they happen with `bone.plugin.save_state()` rather than relying on a GUI reload to persist them.
+
 ### Project config
 
-A project can carry TUI config in `.bone/tui.lua` (and modules in `.bone/lua/`). bone looks for it in the working directory and its parents, but Lua has full trust, so it only runs after you trust that directory: `/plugins trust` runs it now and on later starts there, `/plugins untrust` unloads it and forgets the trust, and `/plugins list` lists it (as `project`). Until then bone says that there is one. It loads after your own `tui.lua`, as a plugin named `project`, so it can be unloaded like any other. `bone.project.info()` returns `{ root, file, trusted, loaded }` or nil.
+A project can carry `.bone/ui.lua`, then `.bone/tui.lua` or `.bone/gui.lua` for the respective frontend (and modules in `.bone/lua/`). bone looks in the working directory and its parents, but Lua has full trust, so these files run only after you trust that directory: `/plugins trust` runs them now and on later starts there, `/plugins untrust` unloads them and forgets the trust, and `/plugins list` lists the project (as `project`). Trust is shared by both frontends. Project config loads after your own config as a plugin named `project`, so it can be unloaded like any other; `bare` skips it. `bone.project.info()` returns `{ root, file, trusted, loaded }` or nil. The TUI watches trusted project files for changes; the GUI currently does not.
 
 ## Shared
 
-- `bone.side`: `"core"` or `"tui"`. `bone.version`, `bone.config_dir`.
+- `bone.side`: `"core"`, `"tui"` or `"gui"`. `bone.version`, `bone.config_dir`.
 - `bone.json.encode(value)`, `bone.json.decode(string)`. `bone.json.null` represents JSON null in a Lua table (unlike `nil`, which removes its key).
 - `bone.inspect(value)`: readable dump of any value.
 - `bone.util`: `split(s, sep)`, `trim(s)`, `startswith(s, prefix)`, `extend(t1, t2, ...)`, `front_matter(text)` → `meta, body` for Markdown files that start with `---` / `key: value` lines / `---`.
@@ -193,7 +199,7 @@ A project can carry TUI config in `.bone/tui.lua` (and modules in `.bone/lua/`).
 
 ### Settings
 
-`~/.bone/settings.json` holds the choices made in the app, as opposed to `core.lua` and `tui.lua`, which are yours and which bone never writes. The core owns the file: it checks each change, writes the file whole, and tells every client (`settings/changed`), so several TUIs stay in step. Delete the file to go back to the defaults; if it is not valid JSON, bone ignores it, says so, and refuses to change it until you fix it.
+`~/.bone/settings.json` holds the choices made in the app, as opposed to `core.lua`, `ui.lua`, `tui.lua` and `gui.lua`, which are yours and which bone never writes. The core owns the file: it checks each change, writes the file whole, and tells every client (`settings/changed`), so connected frontends receive the changes. Delete the file to go back to the defaults; if it is not valid JSON, bone ignores it, says so, and refuses to change it until you fix it.
 
 ```json
 {
@@ -206,13 +212,14 @@ A project can carry TUI config in `.bone/tui.lua` (and modules in `.bone/lua/`).
 ```
 
 - `provider` picks the default provider, over `core.lua`'s own `bone.config.provider`. Sessions keep their selected provider and model; choosing a provider or explicitly setting the selected provider's model through the TUI also updates the session on screen, not other sessions. Resetting a model field changes the configured default, not an existing session's saved selection. `providers.<name>.<field>` changes one field of a provider (`model`, `base_url`, `type`, `api`, `reasoning_effort`, `stream_usage`, `replay_reasoning`, `supports_images`, `compact_limit`, `headers`, `body`, `cache`, `api_key_env`), over what `core.lua` gives it; `providers.<name>` as a whole (`{ base_url, model, … }`) adds a provider that `core.lua` does not have, as `/setup` and `/config` do. So `core.lua` defines providers and their defaults, settings change and add them, and `BONE_*` environment variables override both for one run. Changing any of this reloads the core's configuration at once, and is undone if that fails (an unknown provider is refused). A provider's key is the one saved in `~/.bone/secrets.json` (`secrets/set`; readable only by you, never sent back to clients, never in `settings.json`), else its `api_key_env` variable, else `core.lua`'s. Adding a provider while `settings.json` names none also chooses it. With no provider at all the core still starts, and turns say to run `/setup`; with several and none chosen it asks you to choose.
-- `tui.<option>` sets a TUI option after the defaults and plugins, before your `tui.lua`, which runs last and wins. `ctrl+t` and `ctrl+r` save their choice here.
+- `tui.<option>` sets a TUI option after the defaults and plugins, before your `ui.lua`, `tui.lua` and trusted project config, which can override it. `ctrl+t` and `ctrl+r` save their choice here.
+- `gui.<option>` sets a GUI option after the defaults, plugins, user `ui.lua` / `gui.lua` and trusted project config, so the saved value wins at load time. Reset a conflicting saved value in `/config`, then reload the GUI configuration or restart: the next load uses your Lua assignment. The reset itself sets the live option to its default, not to the value in your Lua file.
 - `catalog.url` is where `/catalog` gets packages (below).
 - Anything else is free for plugins: a plugin keeps its settings under its own name (`web_search.num_results`).
 
 `/setup` adds a provider in three steps: what kind (a server on this machine, OpenAI, Anthropic, DeepSeek, OpenRouter, or any OpenAI-compatible service), its name, URL, model and key (typed hidden, saved in `secrets.json`, or the variable that holds it), and optionally packages from the catalog. It opens by itself when bone starts with no provider; dismissing it is remembered (`setup.skipped`), and `/setup` brings it back. It never writes `core.lua`.
 
-`/catalog` has two pages, Plugins and TUIs (`tab` switches), each listing its packages as Updates (an installed file differs), Installed and Available. Use space to check packages, `a` to check every available/update, `n` to clear checks, and Enter to install the selection in one pass. `u` scans installed files for updates, `r` refreshes the index, and `x` removes a package (moved to `~/.bone/plugins-backup/`); install and update operations ask first because a package's Lua runs with your permissions. Packages come from `catalog.url`: a URL (by default `https://raw.githubusercontent.com/vincentm65/bone-catalog/refs/heads/main`) or a local folder (`~/projects/bone-catalog`), holding `catalog.json` and `plugins/<name>/…` (and `tuis/<name>/…`) as the repository's root does. Every file is checked against the SHA-256 in `catalog.json` before anything is installed, and a new package loads at once. In Lua: `require("bone.catalog")` has `index(cb)`, `install(entry, cb)`, `remove(name, cb)` and `open()`. Both sides also have `bone.sha256(text)`, `bone.fs.mkdir(dir)` and `bone.fs.write(path, text)` (whole, atomically).
+`/catalog` has two pages, Plugins and TUIs (`tab` switches), each listing its packages as Updates (an installed file differs), Installed and Available. Use space to check packages, `a` to check every available/update, `n` to clear checks, and Enter to install the selection in one pass. `u` scans installed files for updates, `r` refreshes the index, and `x` removes a package (moved to `~/.bone/plugins-backup/`); install and update operations ask first because a package's Lua runs with your permissions. Packages come from `catalog.url`: a URL (by default `https://raw.githubusercontent.com/vincentm65/bone-catalog/refs/heads/main`) or a local folder (`~/projects/bone-catalog`), holding `catalog.json` and `plugins/<name>/…` (and `tuis/<name>/…`) as the repository's root does. Every file is checked against the SHA-256 in `catalog.json` before anything is installed, and a new package loads at once. In Lua: `require("bone.catalog")` has `index(cb)`, `install(entry, cb)`, `remove(name, cb)` and `open()`. Core and frontends also have `bone.sha256(text)`, `bone.fs.mkdir(dir)` and `bone.fs.write(path, text)` (whole, atomically).
 
 `/config` (or `/settings`) has three fixed sections: **General** with Compaction and every TUI option (space or enter toggles a boolean or cycles a choice, enter edits a number or text, `r` resets to the default; an option your `tui.lua` sets anyway is marked), **Providers** (enter uses one; `e` edits one: model, URL, type, API, reasoning effort, image support, stream usage, reasoning replay, compaction limit, API key and key variable, each saved at once, `r` resetting a field to `core.lua`'s and "Undo changes" all of them; `a` adds a provider, `d` deletes one you added), **Plugins** (space switches one off or on, both halves, and it stays that way: `plugins.disabled`; Enter opens declared settings, Esc returns to the selected list row). Tab switches sections from a list, not from a detail page. A plugin declares them in its `manifest.json`, which also works for a core-only plugin:
 
@@ -222,9 +229,9 @@ A project can carry TUI config in `.bone/tui.lua` (and modules in `.bone/lua/`).
     "default": 5, "min": 1, "max": 10, "desc": "when the model does not ask for a number" } ] }
 ```
 
-or from its `tui.lua` with `bone.settings.page{ name = "myplugin", title = "My plugin", fields = { … } }` (the same field shape: `key`, `label`, `type` = `"boolean"`, `"integer"`, `"number"` or `"string"`, `choices`, `default`, `min`, `max`, `desc`). Values are saved as `<name>.<key>`, and the plugin reads them with `bone.settings.get` (falling back to its default). `require("bone.config").open(tab)` opens a section or detail page by name or title.
+or from its `ui.lua`, `tui.lua` or `gui.lua` with `bone.settings.page{ name = "myplugin", title = "My plugin", fields = { … } }` (the same field shape: `key`, `label`, `type` = `"boolean"`, `"integer"`, `"number"` or `"string"`, `choices`, `default`, `min`, `max`, `desc`). Values are saved as `<name>.<key>`, and the plugin reads them with `bone.settings.get` (falling back to its default). `require("bone.config").open(tab)` opens a section or detail page by name or title.
 
-In the TUI: `bone.settings.get(path)`, `bone.settings.all()`, `bone.settings.set(path, value, cb)` and `bone.settings.reset(path, cb)` (paths are dotted, `cb(all, err)` gets every setting after the change), and the `settings/changed` event `{ path, value }`. In the core, `bone.settings.get(path)` and `bone.settings.all()` read the file (changes go through a client).
+In either frontend: `bone.settings.get(path)`, `bone.settings.all()`, `bone.settings.set(path, value, cb)` and `bone.settings.reset(path, cb)` (paths are dotted, `cb(all, err)` gets every setting after the change), and the `settings/changed` event `{ path, value }`. In the core, `bone.settings.get(path)` and `bone.settings.all()` read the file (changes go through a client).
 
 ## Core (`core.lua`)
 
@@ -533,7 +540,7 @@ The TUI has no modes: keys go to the prompt, and while a focused window is open 
 
 ### TUI libraries
 
-`/tui` chooses the standard library, `bare` (plain UI), or a custom copy in `~/.bone/libraries/<name>/`. `/tui create NAME` copies the built-in TUI runtime files for editing; `/tui create NAME bare` starts with only bare defaults. `/tui use NAME` switches and reloads, reverting if loading fails; `/tui delete NAME` moves an inactive copy aside rather than deleting it. `/catalog` also installs shared libraries (kind `tui`) into `libraries/`; they are yours to edit, and show as an update only when the catalog's `version` is newer than the installed `manifest.json`. Library files win over runtime overrides in the TUI, but do not change the core's runtime. Missing files fall back to runtime overrides, then built-ins; `bone.builtin` always reads the built-in copy.
+`/tui` chooses the standard library, `bare` (plain UI), or a custom copy in `~/.bone/libraries/<name>/`. `/tui create NAME` copies the built-in UI runtime files (including GUI files) for editing; `/tui create NAME bare` starts with only bare defaults. `/tui use NAME` switches and reloads, reverting if loading fails; `/tui delete NAME` moves an inactive copy aside rather than deleting it. `/catalog` also installs shared libraries (kind `tui`) into `libraries/`; they are yours to edit, and show as an update only when the catalog's `version` is newer than the installed `manifest.json`. Library files win over runtime overrides in the TUI, but do not change the core's runtime. Missing files fall back to runtime overrides, then built-ins; `bone.builtin` always reads the built-in copy.
 
 ```lua
 bone.library.info()                  -- { active, custom = { names }, dir }
@@ -542,11 +549,13 @@ bone.library.use("myui")             -- or "standard", "bare"
 bone.library.delete("old-ui")        -- cannot delete the active library; returns backup folder
 ```
 
-Selecting `bare` still loads plugins and saved TUI options, but skips the user's `tui.lua` and trusted project config. A custom library created from bare defaults does load those configs.
+Selecting `bare` still loads plugins and saved TUI options, but skips the user's `ui.lua`, `tui.lua` and trusted project config. A custom library created from bare defaults does load those configs.
+
+The GUI has its own `/gui` selector. Until a GUI choice is saved in `~/.bone/gui-library`, it follows `/tui` when that library is `bare` or a copy containing a `gui/` directory; otherwise it uses `standard`. See [GUI libraries](customizing/customizing-gui.md#libraries).
 
 ### Reloading
 
-The TUI watches the Lua it loads (`tui.lua`, `lua/`, `colors/`, `runtime/`, the plugins that load, and a trusted project's `.bone/`) and reloads it when a file changes and then stays the same for one more check (a quarter of a second), so a file caught halfway through being saved is not loaded. It reloads the way it starts: a fresh Lua state runs the runtime, the defaults, the plugins, `tui.lua` and the `ready` handlers, so deleting a line really removes what it made and edited modules load anew. Options keep the values you gave them; the session, chats (with items you added), prompt and history are untouched.
+The TUI watches the Lua it loads (`ui.lua`, `tui.lua`, `lua/`, `colors/`, `runtime/`, the plugins that load, and a trusted project's `.bone/`) and reloads it when a file changes and then stays the same for one more check (a quarter of a second), so a file caught halfway through being saved is not loaded. It reloads the way it starts: a fresh Lua state runs the runtime, the defaults, the plugins, user `ui.lua` / `tui.lua`, trusted project config and the `ready` handlers, so deleting a line really removes what it made and edited modules load anew. Options keep the values you gave them; the session, chats (with items you added), prompt and history are untouched.
 
 The new state loads while the current one keeps running, and it is taken only if loading it raised no Lua error the current one did not also have (the same file and message; only line numbers may differ). Otherwise the current configuration and the built-in options stay as they were, the error is shown (and listed by `/health`), and the next save tries again; requests the failed load already sent to the core are not undone. When it is taken, the old state's `bone.plugin.on_shutdown` hooks run and it is dropped with everything it made (keymaps, commands, event handlers, popups, panels, running `bone.job`s, colors), and replies to its requests are ignored. `bone.plugin.state` tables are saved before the new state loads, so it reads them; what a shutdown hook writes into one during a reload is saved but not seen by the new state, so save plugin state as it changes rather than in `on_shutdown`. Panels do not carry over; `ready` gets `{ reload = true, panels = { … } }`, the ids of the panels that were open, so a plugin can open its panel again.
 
@@ -702,7 +711,7 @@ bone.off(id)
 ```
 
 - Every server notification, by method, with its params: `turn/started`, `turn/steered`, `message/delta`, `message/completed`, `tool/started`, `tool/output`, `tool/finished`, `ask/requested`, `ask/resolved`, `turn/finished`.
-- `ready`: after `tui.lua` has run. After a reload its data is `{ reload = true, panels }` (see [Reloading](#reloading-1)); at startup it has none.
+- `ready`: after config and saved options have loaded. At startup it has no data. After a TUI file reload its data is `{ reload = true, panels }` (see [Reloading](#reloading-1)); in the GUI it has no data after reload either.
 - `submit`: `{ text }` before a message is sent. Return `false` to cancel, or a string to send instead.
 
 
@@ -838,7 +847,7 @@ bone.now()                              -- milliseconds since the epoch
 - `bone.ui.sessions()`: the agents sidebar (`ctrl+o`, `/sessions`), implemented in `runtime/lua/bone/ui/sessions.lua` with `bone.ui.panel`. The Chats tab groups sessions into Recent (running or active within one hour by default, configurable with `bone.ui.sessions_recent_seconds`) and History; running sessions show animated `ctx.spinner`. `/archive` moves the current session to History and starts a new one. The Processes tab lists every chat's background shells and running sub-agents; `enter` opens their chat, `x` stops one. Sub-agent sessions are omitted from Chats but can also be opened from their owner's tray. Lists titles, activity timestamps, input + output tokens and user-turn counts; supports filtering, keyboard navigation and click-to-open. Switching keeps the panel visible and focuses the prompt. Initial running status comes from `session/active`, then turn events maintain it. Drag the blank column at its right edge to change its width (remembered across starts; `bone.ui.sessions_width` sets the default). Replace it to change how sessions are listed.
 - `bone.ui.suggestions(ctx)` → lines: draws the `/` menu (see Commands) right above the prompt, with the closest match nearest the input. `ctx = { items = { { name, desc } }, selected, width, height }`. Set it to `nil` for no list (tab still completes).
 - `bone.api.open_session(id)`: show a session (also accepts a chat number).
-- `bone.ui.windows.<select|pager|setup|catalog> = function(page)` is how a library draws what the runtime opens itself: it returns the popup spec (`node` or `lines`, size, anchor); the desktop library sets all four, and without one the window is drawn as `lines`.
+- `bone.ui.windows.<select|pager|setup|catalog> = function(page)` is how a library draws what the runtime opens itself: it returns the popup spec (`node` or `lines`, size, anchor); the standard library sets all four, and without one the window is drawn as `lines`.
 - `bone.ui.pager(content, { title, width, height })` → handle: scrollable text in a focused window. `content` is a string (wrapped; `#` lines are headings) or a list of lines. `up`/`down`/wheel, `pageup`/`pagedown`, `home`/`end`, `esc` or `q` closes. `handle:set(content)`, `handle:close()`.
 - `bone.ui.help(topic)` and `bone.ui.health()`: what `/help {topic}` and `/health` call (in `runtime/tui/defaults.lua`). With no topic, `bone.ui.help()` opens the searchable Commands / Keys / Docs popup. Its browser and topic lookup live in `runtime/lua/bone/help.lua`; override `~/.bone/runtime/lua/bone/help.lua` to customize it. The docs (usage, Lua, protocol, architecture, customization guides and loaded plugins' READMEs) are in `bone._docs`; the TUI's built-in checks come from `bone.api.health()`.
 - `bone.ui.geometry()` (TUI only; part of `ui.layout`, which the GUI does not have) → `{ leaves = { { name, x, y, width, height } }, seps = { { x, y, width, height, path } } }`: where the last frame put each layout leaf and column separator. A separator's `path` is the 1-based child indexes from `bone.ui.layout` to the column after it, so a mouse handler can resize the split it belongs to.
@@ -1093,7 +1102,7 @@ bone.ui.layout = { { cols = { win(""), win(":" .. b) }, sep = "│" } }
 - The bare leaves are the chat on screen: the prompt you type in, the scroll keys, mouse selection, `bone.chat.at`/`view` and docked panels. Another chat's prompt shows its draft, which is yours to type into once it is on screen (`bone.api.open_session`). Each chat keeps its own scroll position and scrolls with the wheel.
 - Each leaf shows once per chat. A leaf for a session no chat has open is blank until `bone.chat.open` loads it.
 - While a leaf draws, `bone.chat` calls without `session` read its chat, and `ctx.session` is its session. Views see `ctx.region == "chat"` in every window.
-- The catalog's `windows` plugin builds tiled windows on this (splits, focus, resizing and moving with keys or the mouse).
+- The catalog's `windows` plugin builds tiled windows on this (splits, focus, resizing and moving with keys or the mouse); in the desktop app it draws the same windows as nodes (`bone.nodes.chat{ chat = n }`, see [the GUI guide](customizing/customizing-gui.md#more-than-one-chat)).
 
 #### Panels: docked areas you own
 

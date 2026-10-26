@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use bone_client::{Client, EventStream};
 use bone_proto::methods::*;
-use bone_proto::types::{ChatMessage, DeltaKind, ToolCall, TurnOutcome, Usage};
+use bone_proto::types::{ChatMessage, DeltaKind, SessionInfo, ToolCall, TurnOutcome, Usage};
 use bone_proto::{Message, Notification, RpcError, transport};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -1372,6 +1372,86 @@ async fn default_tool_views() {
         "{error:?}"
     );
     assert!(error.iter().any(|row| row.contains("failed")), "{error:?}");
+}
+
+#[tokio::test]
+async fn rapid_streaming_deltas_do_not_redraw_every_token() {
+    let (mut h, _dir) = Harness::with_config(
+        r#"
+        bone.ui.layout = { "chat" }
+        renders = 0
+        bone.ui.views.user = function(item) return { { { item.text, "Normal" } } } end
+        bone.ui.views.assistant = function(item)
+          renders = renders + 1
+          return { { { item.text, "Normal" } } }
+        end
+        "#,
+    )
+    .await;
+    for n in 0..12 {
+        h.app.chats[0].turn_started(n + 1, "old question");
+        h.app.chats[0].message_completed(&MessageCompletedParams {
+            session_id: "s-new".into(),
+            turn_id: n + 1,
+            message: ChatMessage::Assistant {
+                content: "old answer".into(),
+                reasoning: String::new(),
+                tool_calls: vec![],
+                reasoning_state: None,
+            },
+            usage: None,
+        });
+        h.app.chats[0].turn_finished(&finished("s-new", TurnOutcome::Completed));
+    }
+    h.screen(80, 10);
+    h.app
+        .with_api(|lua| lua.load("renders = 0").exec())
+        .unwrap();
+    h.app.chats[0].session = Some(SessionInfo {
+        session_id: "s-new".into(),
+        cwd: "/work".into(),
+        created_at: 0,
+        title: None,
+        parent: None,
+        owner: None,
+    });
+    h.app.chats[0].turn_started(100, "new question");
+    h.app.chats[0].delta(&MessageDeltaParams {
+        session_id: "s-new".into(),
+        turn_id: 100,
+        kind: DeltaKind::Text,
+        text: "token-0 ".into(),
+    });
+    h.app.dirty = true;
+    h.screen(80, 10);
+    h.app.dirty = false;
+    let delta = MessageDeltaParams {
+        session_id: "s-new".into(),
+        turn_id: 100,
+        kind: DeltaKind::Text,
+        text: "token-1 ".into(),
+    };
+    h.app.autocmds.clear();
+    h.app.handle_server(bone_client::Event {
+        method: MessageDelta::METHOD.into(),
+        params: Some(serde_json::to_value(&delta).unwrap()),
+    });
+    assert!(h.app.chats[0].streaming_redraw_deferred(std::time::Instant::now()));
+    assert!(!h.app.dirty, "a deferred token should not force a frame");
+    h.screen(80, 10);
+    for n in 2..20 {
+        h.app.chats[0].delta(&MessageDeltaParams {
+            session_id: "s-new".into(),
+            turn_id: 100,
+            kind: DeltaKind::Text,
+            text: format!("token-{n} "),
+        });
+        h.app.dirty = true;
+        h.screen(80, 10);
+    }
+    let renders: i64 = h.app.with_api(|lua| lua.globals().get("renders")).unwrap();
+    assert!(renders > 0);
+    assert!(renders < 20, "rendered {renders} times for 20 deltas");
 }
 
 #[tokio::test]
@@ -4310,7 +4390,7 @@ async fn reload_starts_a_fresh_lua_state() {
 }
 
 #[tokio::test]
-async fn runtime_overrides_can_extend_the_builtin_and_are_reported() {
+async fn runtime_overrides_can_extend_the_builtin_and_are_listed_in_health() {
     let dir = tempfile::tempdir().unwrap();
     let ui = dir.path().join("runtime/lua/bone/ui");
     std::fs::create_dir_all(&ui).unwrap();
@@ -4349,12 +4429,6 @@ async fn runtime_overrides_can_extend_the_builtin_and_are_reported() {
     assert!(
         health.contains("lua/bone/ui/statusline.lua (same as built-in)"),
         "{health}"
-    );
-    h.app.note_runtime_overrides();
-    assert!(
-        h.message().contains("2 runtime files overridden"),
-        "{}",
-        h.message()
     );
     let e = h
         .app

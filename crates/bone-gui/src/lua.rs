@@ -165,6 +165,13 @@ impl Gui {
 
     fn load_lua_files(&mut self) {
         let dir = self.opts.config_dir.clone();
+        // The sources as loaded now: the watcher reloads for a change after
+        // this, not for this one (a library just switched to).
+        if let Some(dir) = dir.as_deref()
+            && self.config_hash.is_some()
+        {
+            self.config_hash = Some(lua_sources(dir));
+        }
         match bone_ui::lua::state::new_state(Side::Gui, dir.as_deref()) {
             Ok(lua) => self.lua.state = Some(lua),
             Err(e) => return self.lua_error("lua", &e),
@@ -172,11 +179,10 @@ impl Gui {
         // Bare loads its own small file in place of the standard UI's.
         let library = dir.as_deref().and_then(|d| bone_lua::library(d, Side::Gui));
         let bare = library.as_deref() == Some("bare");
-        // A built-in library is a defaults file of its own.
-        let defaults = match library.as_deref() {
-            Some("bare") => "gui/bare.lua",
-            Some("desktop") => "gui/desktop.lua",
-            _ => "gui/defaults.lua",
+        let defaults = if bare {
+            "gui/bare.lua"
+        } else {
+            "gui/defaults.lua"
         };
         for rel in ["ui/api.lua", "gui/api.lua", defaults] {
             let r = self.with_api(|lua| {
@@ -489,7 +495,7 @@ impl Host for Gui {
     }
 
     fn target_chat(&self) -> Option<usize> {
-        Some(self.current)
+        Some(self.lua.rendering.unwrap_or(self.current))
     }
 
     fn prompt_text(&self) -> String {

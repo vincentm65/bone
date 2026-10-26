@@ -53,7 +53,7 @@ pub struct Indexed<'a, L> {
 impl<'a, L> Indexed<'a, L> {
     pub fn new(chat: &'a ChatBuffer<L>) -> Self {
         let items = chat.items();
-        let turns = turns_of(&items);
+        let turns = turns_of(&items, chat.omitted_turns);
         Indexed { chat, items, turns }
     }
 
@@ -130,9 +130,10 @@ impl<'a, L> Indexed<'a, L> {
     }
 }
 
-/// Turn number of each item: 0 before the first user message, then 1, 2, …
-fn turns_of(items: &[Item]) -> Vec<usize> {
-    let mut n = 0;
+/// Turn number of each item: `before` (the turns not loaded) until the
+/// first user message, then one more at each.
+fn turns_of(items: &[Item], before: usize) -> Vec<usize> {
+    let mut n = before;
     items
         .iter()
         .map(|i| {
@@ -164,10 +165,10 @@ pub fn generation<L>(chats: &[ChatBuffer<L>]) -> u64 {
 /// The turns of a chat: each user message and what followed it.
 pub fn turns<L>(chat: &ChatBuffer<L>) -> Vec<Json> {
     let items = chat.items();
-    let turns = turns_of(&items);
+    let turns = turns_of(&items, chat.omitted_turns);
     let count = turns.last().copied().unwrap_or(0);
     let running = chat.turn.is_some() || chat.starting;
-    (1..=count)
+    (chat.omitted_turns + 1..=count)
         .map(|t| {
             let members: Vec<(usize, &Item)> = items
                 .iter()
@@ -207,7 +208,8 @@ pub fn session<L>(chat: &ChatBuffer<L>, buf: Option<usize>, current: bool) -> Js
         None => json!({}),
     };
     v["title"] = json!(chat.title());
-    v["new"] = json!(chat.session.is_none());
+    v["new"] = json!(chat.session.is_none() && chat.loading.is_none());
+    v["loading"] = json!(chat.loading);
     v["chat"] = json!(buf);
     v["current"] = json!(current);
     v["running"] = json!(chat.turn.is_some() || chat.starting);
@@ -218,7 +220,13 @@ pub fn session<L>(chat: &ChatBuffer<L>, buf: Option<usize>, current: bool) -> Js
         |t| json!({ "id": t.turn_id, "elapsed_ms": t.started.elapsed().as_millis() as u64 }),
     );
     v["items"] = json!(items.len());
-    v["turns"] = json!(turns_of(&items).last().copied().unwrap_or(0));
+    v["turns"] = json!(
+        turns_of(&items, chat.omitted_turns)
+            .last()
+            .copied()
+            .unwrap_or(0)
+    );
+    v["omitted_turns"] = json!(chat.omitted_turns);
     v
 }
 
@@ -253,6 +261,6 @@ mod tests {
             item(Part::User),
             item(Part::Assistant),
         ];
-        assert_eq!(turns_of(&items), [0, 1, 1, 2, 2]);
+        assert_eq!(turns_of(&items, 0), [0, 1, 1, 2, 2]);
     }
 }

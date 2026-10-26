@@ -23,6 +23,7 @@ pub(crate) struct ListState {
     /// Which heights are measured, not the list's estimate.
     measured: Vec<bool>,
     gap: f32,
+    estimate: f32,
     width: f32,
     pub(super) nodes: HashMap<usize, Rc<Node>>,
     /// A chat list's items made last frame, by chat item: kept while the
@@ -38,6 +39,21 @@ impl ListState {
     pub(crate) fn drop_nodes(&mut self) {
         self.nodes.clear();
         self.chat.clear();
+    }
+
+    /// `n` items came before the first: they take their estimate until
+    /// measured, and what was in view keeps its place (the offset moves).
+    pub(crate) fn prepend(&mut self, n: usize, scroll: Option<&mut Scroll>) {
+        let est = self.estimate.max(1.0);
+        self.heights.splice(0..0, std::iter::repeat_n(est, n));
+        self.measured.splice(0..0, std::iter::repeat_n(false, n));
+        // Made nodes go by index.
+        self.nodes.clear();
+        if let Some(sc) = scroll {
+            let moved = n as f32 * (est + self.gap);
+            sc.offset += moved;
+            sc.max += moved;
+        }
     }
 }
 
@@ -59,6 +75,8 @@ const STREAM_EVERY: Duration = Duration::from_millis(50);
 /// A chat list's items this frame (see `Gui::chat_items`). Built only when
 /// a visible item is missing from the cache.
 struct ChatItems {
+    /// The chat buffer the list shows.
+    buf: usize,
     items: Rc<[bone_ui::chat::Item]>,
     kept: HashMap<bone_ui::chat::Item, Rc<Node>>,
     used: HashMap<bone_ui::chat::Item, Rc<Node>>,
@@ -76,9 +94,11 @@ fn handler_ids(n: &Node, out: &mut Vec<u64>) {
         [
             h.click,
             h.secondary,
+            h.middle,
             h.double_click,
             h.press,
             h.release,
+            h.drag,
             h.hover,
             h.scroll,
             h.key,
@@ -174,7 +194,7 @@ impl Gui {
         }
         st.heights.resize(l.count, est);
         st.measured.resize(l.count, false);
-        st.gap = l.gap;
+        (st.gap, st.estimate) = (l.gap, est);
         let width = p.inner.w;
         if (st.width - width).abs() > 0.5 {
             // Another width wraps differently: what was seen is a guess.
@@ -220,6 +240,8 @@ impl Gui {
             }
         };
 
+        let buf = l.buffer.unwrap_or(self.current);
+        let is_chat = l.chat && buf < self.chats.len();
         let mut nodes = Vec::new();
         let mut cached = std::mem::take(&mut st.nodes);
         // The whole transcript is read only when a visible item is missing.
@@ -232,10 +254,10 @@ impl Gui {
             let prev = cached.remove(&i);
             let item = match prev.clone() {
                 Some(n) if !rebuilt => n,
-                _ if l.chat => {
+                _ if is_chat => {
                     if chat.is_none() {
                         let kept = std::mem::take(&mut st.chat);
-                        chat = Some(self.chat_items(width, kept, st.streamed.take()));
+                        chat = Some(self.chat_items(buf, width, kept, st.streamed.take()));
                     }
                     self.chat_item(l, i, base, sink, chat.as_mut().unwrap())
                 }
@@ -276,7 +298,7 @@ impl Gui {
             // An item that asked to be drawn again (`bone.chat.refresh_in`)
             // wakes the view then; one out of view waits to come back.
             let now = Instant::now();
-            let next = self.chats[self.current].next_expiry_after(now);
+            let next = (self.chats.get(buf)).and_then(|c| c.next_expiry_after(now));
             self.lua.chat_expiry = self.lua.chat_expiry.into_iter().chain(next).min();
         }
         let total = st.heights.iter().sum::<f32>() + gap * l.count.saturating_sub(1) as f32;
@@ -284,6 +306,9 @@ impl Gui {
         let follow = p.node.style.follow;
         sc.offset = if follow && at_end { max } else { offset }.clamp(0.0, max);
         (sc.max, sc.viewport) = (max, viewport);
+        if is_chat && buf == self.current && sc.offset < viewport {
+            self.load_earlier();
+        }
 
         // Where each item sits on screen.
         let mut rects = Vec::with_capacity(nodes.len());
@@ -316,16 +341,17 @@ impl Gui {
     /// `refresh_in`), and the nodes made last frame.
     fn chat_items(
         &mut self,
+        buf: usize,
         width: f32,
         kept: HashMap<bone_ui::chat::Item, Rc<Node>>,
         streamed: Option<(bone_ui::chat::Item, Instant)>,
     ) -> ChatItems {
-        let buf = self.current;
         let generation = Host::generation(self);
         let data = bone_ui::lua::check_chat_deps(self, buf);
         let now = Instant::now();
         let items = self.chats[buf].items();
         ChatItems {
+            buf,
             items,
             kept,
             used: HashMap::new(),
@@ -348,23 +374,18 @@ impl Gui {
         sink: &Sink,
         chat: &mut ChatItems,
     ) -> Rc<Node> {
+        let buf = chat.buf;
         let Some(&item) = chat.items.get(i) else {
-            return self.make_item(l, i, base, sink);
+            return self.chat_make_item(buf, l, i, base, sink);
         };
-        let key = self.chats[self.current].stale_key(
-            &chat.items,
-            i,
-            chat.width,
-            chat.generation,
-            chat.now,
-        );
+        let key = self.chats[buf].stale_key(&chat.items, i, chat.width, chat.generation, chat.now);
         // Changed, but only just made, and still running: keep it a moment.
         let wait = chat.streamed.and_then(|(it, at)| {
             let due = at + STREAM_EVERY;
             (it == item && key.is_some() && chat.now < due).then_some(due)
         });
         if let Some(due) = wait
-            && self.chats[self.current].item_status(item).1
+            && self.chats[buf].item_status(item).1
             && let Some(node) = chat.kept.remove(&item)
         {
             let wake = &mut self.view.wake;
@@ -391,15 +412,31 @@ impl Gui {
         }
         self.lua.render_deps = Some(Vec::new());
         self.lua.render_expires = None;
-        let node = self.make_item(l, i, base, sink);
-        if self.chats[self.current].item_status(item).1 {
+        let node = self.chat_make_item(buf, l, i, base, sink);
+        if self.chats[buf].item_status(item).1 {
             chat.streamed = Some((item, chat.now));
         }
         let deps = self.lua.render_deps.take().unwrap_or_default();
         let expires = self.lua.render_expires.take();
         if let Some(key) = key {
-            self.chats[self.current].store(item, key, Vec::new(), deps, expires, chat.data);
+            self.chats[buf].store(item, key, Vec::new(), deps, expires, chat.data);
         }
+        node
+    }
+
+    /// Item `i` of a list of chat `buf`: chat queries without a session
+    /// read that chat while its view runs.
+    fn chat_make_item(
+        &mut self,
+        buf: usize,
+        l: &List,
+        i: usize,
+        base: &TextStyle,
+        sink: &Sink,
+    ) -> Rc<Node> {
+        let was = self.lua.rendering.replace(buf);
+        let node = self.make_item(l, i, base, sink);
+        self.lua.rendering = was;
         node
     }
 

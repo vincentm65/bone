@@ -1775,7 +1775,7 @@ pub fn render_chat<H: Host>(
     let generation = h.generation();
     let data = check_chat_deps(h, buf);
     let c = h.chat_store();
-    let stale = c.chats[buf].stale(width_cols, generation, Instant::now());
+    let stale = c.chats[buf].stale_streaming(width_cols, generation, Instant::now());
     let items = c.chats[buf].items();
     let anchor = (!view.follow)
         .then(|| c.chats[buf].item_at_row(view.top))
@@ -1801,7 +1801,13 @@ pub fn render_chat<H: Host>(
         let expires = c.render_expires.take();
         c.chats[buf].store(item, key, lines, deps, expires, data);
     }
-    let expiry = h.chat_store().chats[buf].next_expiry();
+    let expiry = {
+        let chat = &h.chat_store().chats[buf];
+        chat.next_expiry()
+            .into_iter()
+            .chain(chat.next_stream_expiry_after(Instant::now()))
+            .min()
+    };
     let now = pending.then(Instant::now);
     let at = h.chat_expiry();
     *at = (*at).into_iter().chain(expiry).chain(now).min();

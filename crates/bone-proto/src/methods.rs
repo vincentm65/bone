@@ -297,9 +297,25 @@ method!(
     SessionActive, "session/active", Empty => Vec<SessionId>
 );
 method!(
-    /// A session's full transcript (loaded from disk if needed).
-    SessionMessages, "session/messages", SessionRef => SessionMessagesResult
+    /// A session's transcript (loaded from disk if needed): all of it, or
+    /// with `tail` its latest turns.
+    SessionMessages, "session/messages", SessionMessagesParams => SessionMessagesResult
 );
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionMessagesParams {
+    pub session_id: SessionId,
+    /// About the last this-many messages, from the start of their first
+    /// turn; a turn much longer than that is cut inside, though not between
+    /// a tool call and its result. Zero sends no messages (the rest of the
+    /// result still comes). A core that does not know it sends everything.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tail: Option<usize>,
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SessionCreateParams {
@@ -326,6 +342,10 @@ pub struct SessionMessagesResult {
     /// The queue waits for `queue/resume` or a new message.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub queue_paused: bool,
+    /// User messages before `messages` that `tail` left out: the turn
+    /// `messages` starts in, when they do not start with one.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub omitted_turns: usize,
 }
 
 method!(

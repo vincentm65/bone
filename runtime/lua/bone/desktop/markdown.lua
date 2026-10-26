@@ -4,19 +4,21 @@
 -- library's chat is made of.
 local M = {}
 
-M.text_size = 15
-M.small_size = 13
+local style = require("bone.nodes.style")
+
+M.text_size = style.size.text
+M.small_size = style.size.caption
 
 --- Selectable text of `spans` (`{ text, hl, ... }` or `{ "text", "Group" }`).
 --- opts: size, font, hl (the group of the text around the spans), gap (px
 --- above) and indent (px on the left).
 function M.text(spans, opts)
   opts = opts or {}
-  return {
+  return style.finish({
     spans = spans, size = opts.size, font = opts.font, hl = opts.hl, selectable = true,
     margin = (opts.gap or 0) > 0 and { opts.gap, 0, 0, 0 } or nil,
     padding = (opts.indent or 0) > 0 and { 0, 0, 0, opts.indent } or nil,
-  }
+  })
 end
 
 --- Text on a band across the width (a code block, a row of a diff): opts as
@@ -25,12 +27,12 @@ end
 function M.band(spans, opts)
   opts = opts or {}
   local pad = opts.pad or 8
-  return {
-    bg = opts.bg or "CodeBlock", radius = opts.radius or 6,
+  return style.finish({
+    bg = opts.bg or "CodeBlock", radius = opts.radius or style.radius.sm,
     padding = { pad, pad, pad, pad + (opts.indent or 0) },
     margin = (opts.gap or 0) > 0 and { opts.gap, 0, 0, 0 } or nil,
     M.text(spans, { size = opts.size, font = opts.font or "mono" }),
-  }
+  })
 end
 
 -- Markdown spans as node spans: their group, and their flags kept.
@@ -84,37 +86,27 @@ local function paragraphs(text, group)
       local body = table.concat(b.lines or {}, "\n")
       add({ spans = { { text = body, hl = "MdCodeBlock" } }, size = M.small_size, band = true, gap = 6 })
     elseif k == "table" then
-      -- Monospace, cells padded to their column's width: proportional text
-      -- cannot line up.
-      local widths = {}
-      for _, row in ipairs(b.rows or {}) do
-        for j, cell in ipairs(row) do
-          local w = 0
-          for _, s in ipairs(cell) do w = w + bone.text.width(s.text) end
-          widths[j] = math.max(widths[j] or 0, w)
-        end
-      end
-      local spans = {}
+      -- One padded line wraps in the pane and piles the next cell onto it.
+      -- Each cell is its own text, so a long note wraps inside its column.
+      local col = { direction = "column", gap = 8 }
       for i, row in ipairs(b.rows or {}) do
         local head = b.header and i == 1
-        local hl = head and "MdTableHeader" or "MdTable"
-        if i > 1 then spans[#spans + 1] = { text = "\n", hl = hl } end
+        local line = { direction = "row", gap = 16, align = "start" }
         for j, cell in ipairs(row) do
-          if j > 1 then spans[#spans + 1] = { text = " │ ", hl = "Dim" } end
-          local w = 0
-          for _, s in ipairs(M.spans(cell, hl)) do
-            s.bold = s.bold or head
-            w = w + bone.text.width(s.text)
-            spans[#spans + 1] = s
-          end
-          local pad = (widths[j] or w) - w
-          local align = b.align and b.align[j] or "l"
-          local left = align == "r" and pad or (align == "c" and math.floor(pad / 2) or 0)
-          if left > 0 then table.insert(spans, #spans - #cell + 1, { text = (" "):rep(left), hl = hl }) end
-          if pad - left > 0 and j < #row then spans[#spans + 1] = { text = (" "):rep(pad - left), hl = hl } end
+          local spans = M.spans(cell, head and "MdTableHeader" or "MdTable")
+          for _, s in ipairs(spans) do s.bold = s.bold or head end
+          local node = {
+            spans = #spans > 0 and spans or { { text = "", hl = "MdTable" } },
+            size = M.small_size, selectable = true,
+          }
+          if j == #row and #row > 1 then node.grow = 1
+          elseif j == 1 then node.width = 168
+          else node.width = 260 end
+          line[#line + 1] = node
         end
+        col[#col + 1] = line
       end
-      add({ spans = spans, font = "mono", size = M.small_size, gap = 6 })
+      add({ node = col, gap = 6 })
     elseif k == "rule" then
       add({ spans = { { text = "———", hl = "Dim" } }, gap = 6 })
     elseif k == "blank" then
@@ -132,9 +124,14 @@ function M.nodes(text, group, opts)
   opts = opts or {}
   local out = {}
   for _, p in ipairs(paragraphs(text, group)) do
-    local o = { size = opts.size or p.size, font = p.font, gap = p.gap,
-      indent = (p.indent or 0) + (opts.indent or 0) }
-    out[#out + 1] = p.band and M.band(p.spans, o) or M.text(p.spans, o)
+    if p.node then
+      if (p.gap or 0) > 0 then p.node.margin = { p.gap, 0, 0, 0 } end
+      out[#out + 1] = style.finish(p.node)
+    else
+      local o = { size = opts.size or p.size, font = p.font, gap = p.gap,
+        indent = (p.indent or 0) + (opts.indent or 0) }
+      out[#out + 1] = p.band and M.band(p.spans, o) or M.text(p.spans, o)
+    end
   end
   return out
 end

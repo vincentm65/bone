@@ -4,8 +4,9 @@
 //! from the prompt (`/lua`, `bone.api.source`).
 
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
 
-use bone_proto::methods::{SessionMessages, SessionRef};
+use bone_proto::methods::{SessionMessages, SessionMessagesParams, SessionMessagesResult};
 use bone_ui::lua::{Host, args, err, fire, ret};
 use mlua::{Function, Lua, MultiValue, Table, Value};
 
@@ -92,11 +93,19 @@ pub(crate) fn dispatch(
     })
 }
 
+/// A chat opens with about its latest this-many messages; the rest load
+/// when it is scrolled near its start.
+pub(crate) const TAIL: usize = 60;
+
+/// How long a chat is on screen before its earlier turns may load.
+const EARLIER_AFTER: Duration = Duration::from_millis(400);
+
 impl Gui {
     /// Session `session_id` in a chat, loaded the first time; shown when
     /// `show`. Returns the chat.
     pub fn open_session(&mut self, session_id: String, show: bool) -> usize {
-        if let Some(buf) = self.chat_of(&session_id) {
+        // A chat's number does too, for a chat without a session yet.
+        if let Some(buf) = bone_ui::chat::find_chat(&self.chats, &session_id) {
             if show {
                 self.show_chat(buf);
             }
@@ -104,40 +113,115 @@ impl Gui {
         }
         // Reuse an untouched new chat rather than piling them up.
         let c = &self.chats[self.current];
-        let untouched = c.session.is_none() && c.entries.is_empty() && !c.starting;
+        let untouched =
+            c.session.is_none() && c.loading.is_none() && c.entries.is_empty() && !c.starting;
         let buf = if show && untouched && self.draft.is_empty() && self.images.is_empty() {
             self.current
         } else {
             self.chats.push(ChatBuffer::new(None));
             self.chats.len() - 1
         };
+        // Not a blank new chat while it comes.
+        self.chats[buf].loading = Some(session_id.clone());
         if show {
             self.show_chat(buf);
         }
-        self.request::<SessionMessages>(SessionRef { session_id }, move |gui, r| {
-            let Some(c) = gui.chats.get_mut(buf) else {
-                return;
-            };
-            match r {
-                Ok(r) => {
-                    let session_id = r.info.session_id.clone();
-                    c.load(r.info, &r.messages, r.active_turn);
-                    c.set_queue(r.queue, r.queue_paused);
-                    if buf == gui.current {
-                        bone_ui::lua::processes::request(gui, session_id.clone());
-                        let ev = serde_json::json!({ "session_id": session_id, "chat": buf });
-                        fire(gui, "chat/shown", ev);
-                    }
+        let params = SessionMessagesParams {
+            session_id,
+            tail: Some(TAIL),
+        };
+        self.request::<SessionMessages>(params, move |gui, r| match r {
+            Ok(r) => {
+                let session_id = r.info.session_id.clone();
+                gui.apply_messages(buf, r);
+                if buf == gui.current {
+                    bone_ui::lua::processes::request(gui, session_id.clone());
+                    let ev = serde_json::json!({ "session_id": session_id, "chat": buf });
+                    fire(gui, "chat/shown", ev);
                 }
-                Err(e) => c.notice(format!("cannot load session: {e}"), true),
+            }
+            Err(e) => {
+                if let Some(c) = gui.chats.get_mut(buf) {
+                    c.loading = None;
+                    c.notice(format!("cannot load session: {e}"), true);
+                }
             }
         });
         buf
     }
 
+    /// Chat `buf`'s transcript from the core, in place of what it had.
+    /// Turns it gains at the start (its earlier history) go above what is
+    /// in view.
+    pub(crate) fn apply_messages(&mut self, buf: usize, r: SessionMessagesResult) {
+        let _load = crate::profile::Span::start("chat-load");
+        let Some(c) = self.chats.get_mut(buf) else {
+            return;
+        };
+        let id = r.info.session_id.as_str();
+        if c.loading.as_deref().is_some_and(|l| l != id) {
+            return; // the chat was given another session since
+        }
+        let same = c.session_id() == Some(id);
+        let (omitted, len) = (c.omitted_turns, c.items().len());
+        c.load(r.info, &r.messages, r.active_turn);
+        c.set_queue(r.queue, r.queue_paused);
+        c.omitted_turns = r.omitted_turns;
+        let added = c.items().len().saturating_sub(len);
+        if same && r.omitted_turns < omitted && added > 0 {
+            let v = &mut self.view;
+            let id = chat_list_id(buf, self.current);
+            if let Some(st) = v.lists.get_mut(&id) {
+                let scroll = v.scroll.get_mut(&id);
+                st.prepend(added, scroll);
+            }
+        }
+        self.view.invalidate();
+    }
+
+    /// The chat on screen is scrolled near its start: load the turns it
+    /// left out. Not at once on showing it, so arrowing through chats
+    /// loads only their tails.
+    pub(crate) fn load_earlier(&mut self) {
+        let buf = self.current;
+        let c = &self.chats[buf];
+        let Some(session_id) = c.session_id().map(str::to_owned) else {
+            return;
+        };
+        if c.omitted_turns == 0 || self.earlier.contains(&buf) {
+            return;
+        }
+        let due = self.shown_at + EARLIER_AFTER;
+        if Instant::now() < due {
+            let wake = &mut self.view.wake;
+            *wake = Some(wake.map_or(due, |w| w.min(due)));
+            return;
+        }
+        self.earlier.insert(buf);
+        let params = SessionMessagesParams {
+            session_id,
+            tail: None,
+        };
+        self.request::<SessionMessages>(params, move |gui, r| {
+            gui.earlier.remove(&buf);
+            if let Ok(r) = r {
+                gui.apply_messages(buf, r);
+            }
+        });
+    }
+
     /// Put chat `buf` on screen. Each chat keeps its own draft.
     pub fn show_chat(&mut self, buf: usize) {
         if buf != self.current {
+            // `chat` is the chat on screen; another chat's measured rows,
+            // rendered nodes and scroll offset are kept as `chat:<n>`, the
+            // list that shows it elsewhere (`bone.nodes.chat{ chat = n }`).
+            let (old, new) = (format!("chat:{}", self.current), format!("chat:{buf}"));
+            let v = &mut self.view;
+            for map in [&mut v.lists as &mut dyn Swap, &mut v.scroll] {
+                map.swap_out("chat", &old);
+                map.swap_out(&new, "chat");
+            }
             let draft = (
                 std::mem::take(&mut self.draft),
                 std::mem::take(&mut self.images),
@@ -147,6 +231,7 @@ impl Gui {
             // An image still being read was for the draft left behind.
             self.draft_epoch += 1;
             self.current = buf;
+            self.shown_at = Instant::now();
             self.prompt_changed();
         }
         let session_id = self.chats[buf].session_id().map(str::to_owned);
@@ -231,5 +316,28 @@ impl Gui {
             Ok(false) => self.error(format!("no such file: {}", path.display())),
             Err(e) => self.lua_error(&path.display().to_string(), &e),
         }
+    }
+}
+
+/// The id of the list that shows chat `buf` while `current` is on screen.
+pub(crate) fn chat_list_id(buf: usize, current: usize) -> String {
+    if buf == current {
+        "chat".into()
+    } else {
+        format!("chat:{buf}")
+    }
+}
+
+/// Moving one id's entry to another in the view's maps by id.
+trait Swap {
+    fn swap_out(&mut self, from: &str, to: &str);
+}
+
+impl<T> Swap for std::collections::HashMap<String, T> {
+    fn swap_out(&mut self, from: &str, to: &str) {
+        match self.remove(from) {
+            Some(v) => self.insert(to.to_owned(), v),
+            None => self.remove(to),
+        };
     }
 }

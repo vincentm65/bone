@@ -13,6 +13,7 @@ use bone_ui::lua::{Host, input};
 use eframe::egui;
 
 use crate::Gui;
+use crate::nodeview::MouseTaken;
 
 /// Actions egui's text box does itself while the prompt has the keyboard.
 const NATIVE: [Builtin; 14] = [
@@ -103,16 +104,42 @@ pub fn key(k: egui::Key, m: egui::Modifiers) -> Option<Key> {
     Some(Key::new(code, mods))
 }
 
+/// The `mouse` event's name for a button.
+fn button_name(b: egui::PointerButton) -> &'static str {
+    match b {
+        egui::PointerButton::Primary => "left",
+        egui::PointerButton::Secondary => "right",
+        egui::PointerButton::Middle => "middle",
+        egui::PointerButton::Extra1 => "back",
+        egui::PointerButton::Extra2 => "forward",
+    }
+}
+
+/// A key that also arrives as text (a character, with shift at most).
+fn typed(k: Key) -> bool {
+    matches!(k.code, KeyCode::Char(_)) && (k.mods - KeyModifiers::SHIFT).is_empty()
+}
+
 impl Gui {
     /// Where key `k` goes: the engine, nowhere more (Lua already took an
     /// editing action), or the text box.
     fn route(&mut self, k: Key) -> Route {
+        // A modal's native editor uses editing bindings even if the shared
+        // engine still sees the terminal's context underneath it.
+        let trapped = self.view.trap.is_some();
         let ctx = self.context();
+        // Shared popup handlers own navigation, even when their node card
+        // also traps focus. Only node-only modals use prompt bindings.
+        let ctx = if trapped && ctx != Context::Popup {
+            Context::Main
+        } else {
+            ctx
+        };
+        let native = ctx != Context::Popup && (trapped || self.focused_panel().is_none());
         // A text input of the view has the keyboard: editing keys are its
         // own, not the prompt's.
         if self.view.input_focus.is_some()
-            && ctx != Context::Popup
-            && self.focused_panel().is_none()
+            && native
             && matches!(
                 self.lua.keymaps.lookup(&ctx, &[k]).action,
                 Some(Action::Builtin(b)) if NATIVE.contains(&b) || b == Builtin::Submit
@@ -120,12 +147,10 @@ impl Gui {
         {
             return Route::Native;
         }
-        let native = ctx != Context::Popup
-            && self.focused_panel().is_none()
-            && self.lua.input.pending_keys.is_empty();
+        let native = native && self.lua.input.pending_keys.is_empty();
         match self.lua.keymaps.lookup(&ctx, &[k]).action {
             Some(Action::Builtin(b)) if native && NATIVE.contains(&b) => {
-                if input::lua_action(self, b) {
+                if input::native_key(self, k) || input::lua_action(self, b) {
                     Route::Done
                 } else if matches!(b, Builtin::Up | Builtin::Down) {
                     // The line above or below, else the history, as the
@@ -137,6 +162,8 @@ impl Gui {
                 }
             }
             _ if self.engine_wants(k) => Route::Engine,
+            // A key that types arrives again as text, and is seen there.
+            _ if native && !typed(k) && input::native_key(self, k) => Route::Done,
             _ => Route::Native,
         }
     }
@@ -150,7 +177,9 @@ impl Gui {
         // A text input with the keyboard edits with it; its `on_key` sees
         // the other keys first (a search field over a list it moves in).
         if let Some(input) = self.view.input_focus.clone() {
-            if k.text().is_some() {
+            // Ctrl+C interrupts the chat, even when a desktop text input has
+            // egui's focus; do not let its key callback consume the shortcut.
+            if k == Key::ctrl_c() || k.text().is_some() {
                 return false;
             }
             let cb = self.view.input_keys.get(&input).copied();
@@ -160,7 +189,10 @@ impl Gui {
             }
             return taken;
         }
-        if self.context() == Context::Popup || self.focused_panel().is_some() {
+        let trapped = self.view.trap.is_some();
+        // Node-only modals sit above the shared windows and panels without
+        // changing their focus. Their guard and keys still take precedence.
+        if !trapped && (self.context() == Context::Popup || self.focused_panel().is_some()) {
             return false;
         }
         let vs = &mut self.view;
@@ -170,11 +202,41 @@ impl Gui {
             }
             vs.guard_until = None;
         }
-        let trapped = self.view.trap.is_some();
+        // A focused window handles keys in its own `on_key`. The node card
+        // traps the pointer (`block_input`); focus movement here would eat
+        // typing, arrows and esc before that handler sees them.
+        if trapped && self.context() == Context::Popup {
+            if let Some(node) = self.view.focused_node().cloned()
+                && let Some(cb) = node.on_key
+                && self.call_key(cb, &bone_ui::keys::format(&k))
+            {
+                self.view.invalidate();
+                return true;
+            }
+            return false;
+        }
+        // Use the prompt's editing bindings, not the panel underneath:
+        // terminal contexts need not bind left, delete, enter, etc.
+        let ctx = if trapped {
+            Context::Main
+        } else {
+            self.context()
+        };
+        let editing = matches!(
+            self.lua.keymaps.lookup(&ctx, &[k]).action,
+            Some(Action::Builtin(b)) if NATIVE.contains(&b) || b == Builtin::Submit
+                || (trapped && b == Builtin::PasteClipboard)
+        );
+        // Plain typing and navigation stay in the modal even if unbound.
+        // Modified shortcuts and function keys may still reach the window.
+        let modal_key = trapped
+            && !matches!(k.code, KeyCode::F(_) | KeyCode::Unknown)
+            && !k
+                .mods
+                .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT | KeyModifiers::SUPER);
         let Some(node) = self.view.focused_node().cloned() else {
-            // A modal with nothing to focus still keeps typing from the
-            // prompt under it.
-            return trapped && k.text().is_some();
+            // Even an empty modal must not send input to what's underneath.
+            return trapped && (modal_key || editing);
         };
         let name = bone_ui::keys::format(&k);
         if let Some(cb) = node.on_key
@@ -201,13 +263,7 @@ impl Gui {
             }
             // Editing keys would edit a prompt that does not have the
             // keyboard; the rest (ctrl+c, ctrl+o, ...) are the window's.
-            _ => {
-                let ctx = self.context();
-                return matches!(
-                    self.lua.keymaps.lookup(&ctx, &[k]).action,
-                    Some(Action::Builtin(b)) if NATIVE.contains(&b) || b == Builtin::Submit
-                );
-            }
+            _ => return modal_key || editing,
         }
         self.view.invalidate();
         true
@@ -215,6 +271,11 @@ impl Gui {
 
     /// Whether the key engine should take `k` rather than the text box.
     fn engine_wants(&mut self, k: Key) -> bool {
+        // egui's text edit treats Ctrl+C as copy; the shared key engine owns
+        // it so the configured interrupt action can stop the current chat.
+        if k == Key::ctrl_c() {
+            return true;
+        }
         let ctx = self.context();
         if ctx == Context::Popup || self.focused_panel().is_some() {
             return true;
@@ -241,6 +302,7 @@ impl Gui {
         let node_had_keys = self.view.focused_node().is_some();
         let events = ctx.input_mut(|i| std::mem::take(&mut i.events));
         let mut keep = Vec::new();
+        let mut alt_text: Option<char> = None;
         for ev in events {
             match &ev {
                 egui::Event::Key {
@@ -252,18 +314,47 @@ impl Gui {
                     // Plain characters arrive as text; while a node has the
                     // keyboard (and egui's focus) its text is all it gets.
                     Some(k) if k.text().is_some() => {
+                        alt_text = None;
                         if self.view.focused_node().is_none() {
                             keep.push(ev);
                         }
                     }
-                    Some(k) if self.node_key(k) => {}
-                    Some(k) => match self.route(k) {
-                        Route::Engine => input::handle_key(self, k),
-                        Route::Done => {}
-                        Route::Native => keep.push(ev),
-                    },
+                    Some(k) => {
+                        alt_text = None;
+                        let taken = if self.node_key(k) {
+                            true
+                        } else {
+                            match self.route(k) {
+                                Route::Engine => {
+                                    input::handle_key(self, k);
+                                    true
+                                }
+                                Route::Done => true,
+                                Route::Native => false,
+                            }
+                        };
+                        // winit also emits Text for Alt+letter. Once its key
+                        // was handled, that text is not another key (notably
+                        // Alt+W must not resolve Alt+W W). Leave AltGr and
+                        // composed/nonmatching text alone.
+                        if taken
+                            && modifiers.alt
+                            && !modifiers.ctrl
+                            && !modifiers.mac_cmd
+                            && let KeyCode::Char(c) = k.code
+                        {
+                            alt_text = Some(c);
+                        }
+                        if !taken {
+                            keep.push(ev);
+                        }
+                    }
                     None => keep.push(ev),
                 },
+                // A modal without a text field has nowhere to paste. Do not
+                // fire the global paste hook of a terminal underneath it.
+                egui::Event::Paste(_)
+                    if self.view.trap.is_some() && self.view.input_focus.is_none() => {}
                 // To the prompt, or to Lua's paste event (a focused
                 // panel's, such as a terminal's).
                 egui::Event::Paste(t)
@@ -274,6 +365,16 @@ impl Gui {
                     self.paste(&t);
                 }
                 egui::Event::Text(t) => {
+                    if let Some(c) = alt_text.take() {
+                        let mut chars = t.chars();
+                        if chars
+                            .next()
+                            .is_some_and(|text| text.eq_ignore_ascii_case(&c))
+                            && chars.next().is_none()
+                        {
+                            continue;
+                        }
+                    }
                     let keys: Vec<Key> = t.chars().map(Key::char).collect();
                     if self.view.focused_node().is_some() || self.view.trap.is_some() {
                         let taken: Vec<bool> = keys.iter().map(|k| self.node_key(*k)).collect();
@@ -287,6 +388,16 @@ impl Gui {
                     {
                         for k in keys {
                             input::handle_key(self, k);
+                        }
+                    } else if self.view.input_focus.is_none() && self.view.trap.is_none() {
+                        // Typed into the prompt: the key event and raw
+                        // interceptors see each character first.
+                        let rest: String = (t.chars().zip(keys))
+                            .filter(|(_, k)| !input::native_key(self, *k))
+                            .map(|(c, _)| c)
+                            .collect();
+                        if !rest.is_empty() {
+                            keep.push(egui::Event::Text(rest));
                         }
                     } else {
                         keep.push(ev);
@@ -304,6 +415,87 @@ impl Gui {
         if node_had_keys && self.view.focused_node().is_none() {
             ctx.memory_mut(|m| m.request_focus(crate::prompt::edit_id()));
         }
+    }
+
+    /// Lua's `mouse` handlers see every press, drag and release first; one
+    /// that returns true takes the rest of the gesture from the nodes and
+    /// egui's widgets. This is the frame's raw input, before egui reads it:
+    /// once egui has seen a press, it has clicked or dragged with it.
+    pub fn route_pointer(&mut self, raw: &mut egui::RawInput) {
+        if self.view.mouse_held.is_none() {
+            self.view.mouse_taken = MouseTaken::No;
+        }
+        for mut ev in std::mem::take(&mut raw.events) {
+            match &mut ev {
+                egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed: true,
+                    ..
+                } => {
+                    if self.pointer_event("down", button_name(*button), *pos) {
+                        self.view.mouse_taken = MouseTaken::Whole;
+                        continue;
+                    }
+                    self.view.mouse_seen = Some(*pos);
+                }
+                // egui ends a press it saw, where it last saw the pointer.
+                egui::Event::PointerButton {
+                    pos,
+                    button,
+                    pressed: false,
+                    ..
+                } => {
+                    let taken = self.pointer_event("up", button_name(*button), *pos);
+                    match self.view.mouse_taken {
+                        MouseTaken::Whole => continue,
+                        MouseTaken::No if !taken => self.view.mouse_seen = Some(*pos),
+                        _ => {
+                            self.view.mouse_taken = MouseTaken::Rest;
+                            *pos = self.view.mouse_seen.unwrap_or(*pos);
+                        }
+                    }
+                }
+                egui::Event::PointerMoved(pos) => {
+                    if let Some(button) = self.view.mouse_held.map(|(b, _)| b)
+                        && self.pointer_event("drag", button, *pos)
+                        && self.view.mouse_taken == MouseTaken::No
+                    {
+                        self.view.mouse_taken = MouseTaken::Rest;
+                    }
+                    if self.view.mouse_taken == MouseTaken::Rest {
+                        continue;
+                    }
+                    self.view.mouse_seen = Some(*pos);
+                }
+                _ => {}
+            }
+            raw.events.push(ev);
+        }
+    }
+
+    /// A pointer press, drag or release at `pos` for Lua's `mouse` event, in
+    /// character cells as the TUI has it (and `px`, `py` in pixels). A drag
+    /// is sent when it reaches another cell. Whether a handler took it.
+    fn pointer_event(&mut self, action: &str, button: &'static str, pos: egui::Pos2) -> bool {
+        let (Some((cw, ch)), Some(area)) = (self.view.cell, self.view.area) else {
+            return false;
+        };
+        let cell = (
+            ((pos.x - area.min.x) / cw).max(0.0) as u16,
+            ((pos.y - area.min.y) / ch).max(0.0) as u16,
+        );
+        match action {
+            "down" => self.view.mouse_held = Some((button, cell)),
+            "up" => self.view.mouse_held = None,
+            _ if self.view.mouse_held == Some((button, cell)) => return false,
+            _ => self.view.mouse_held = Some((button, cell)),
+        }
+        let m = input::mouse_at(self, action, button, cell, Some((pos.x, pos.y)));
+        if m.handled {
+            self.view.invalidate();
+        }
+        m.handled
     }
 
     /// ctrl+c with nothing else to do: stop the turn on screen.

@@ -479,7 +479,7 @@ async fn images_in_the_prompt_and_the_clipboard() {
 
 /// With no GUI library chosen, `/tui use` loads the UI again with the
 /// library chosen, and one without GUI files (no `gui/` folder) leaves the
-/// GUI its own (desktop).
+/// GUI its own (standard).
 #[tokio::test(flavor = "multi_thread")]
 async fn choosing_a_library_reloads_the_gui() {
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -499,7 +499,7 @@ async fn choosing_a_library_reloads_the_gui() {
     g.gui.run_lua("t", "bone.library.use('mine')").unwrap();
     g.frame();
     assert_eq!(g.gui.eval("bone.library.info().active").unwrap(), "mine");
-    assert_eq!(g.gui.eval("bone.library.info().drawn").unwrap(), "desktop");
+    assert_eq!(g.gui.eval("bone.library.info().drawn").unwrap(), "standard");
     assert_eq!(
         g.gui.eval("bone.ui.views.assistant ~= nil").unwrap(),
         "true"
@@ -558,30 +558,32 @@ async fn a_view_node_is_wrapped_rich_text() {
     );
 }
 
-/// The GUI draws with the desktop library unless another is chosen, and
+/// The GUI draws with the standard library unless another is chosen, and
 /// `/gui use` chooses apart from the TUI's choice: its views draw nodes,
 /// and it loads cleanly.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_desktop_library() {
+async fn the_standard_library() {
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    // No choice at all: desktop.
+    // No choice at all: standard.
     std::fs::write(config.path().join("gui-library"), "").unwrap();
     let mut g = gui(config.path(), work.path()).await;
     g.frame();
     assert_eq!(
         g.gui.eval("bone.gui.library.info().active").unwrap(),
-        "desktop"
+        "standard"
     );
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
     std::fs::remove_file(config.path().join("gui-library")).unwrap();
     g.gui.run_lua("t", "bone.cmd('gui use standard')").unwrap();
     g.frame();
-    g.gui.run_lua("t", "bone.cmd('gui use desktop')").unwrap();
+    g.gui.run_lua("t", "bone.cmd('gui use bare')").unwrap();
+    g.frame();
+    g.gui.run_lua("t", "bone.cmd('gui use standard')").unwrap();
     g.frame();
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
     assert_eq!(
         g.gui.eval("bone.gui.library.info().active").unwrap(),
-        "desktop"
+        "standard"
     );
     assert!(
         !config.path().join("library").exists(),
@@ -705,6 +707,50 @@ async fn the_desktop_library() {
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn settings_window_receives_arrow_keys() {
+    use eframe::egui::{Key, Modifiers};
+
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    g.gui
+        .run_lua(
+            "t",
+            "local pages = require('bone.settings_page')
+             local new = pages.new
+             pages.new = function(...)
+               local page = new(...)
+               settings_state = page.st
+               return page
+             end
+             win = require('bone.config').open()",
+        )
+        .unwrap();
+    g.frame();
+    g.frame();
+    for (key, expected) in [
+        (Key::ArrowDown, "1:2"),
+        (Key::ArrowUp, "1:1"),
+        (Key::ArrowRight, "2:1"),
+        (Key::ArrowLeft, "1:1"),
+    ] {
+        g.key(key, Modifiers::NONE);
+        g.frame();
+        assert_eq!(
+            g.gui
+                .eval("settings_state.tab .. ':' .. settings_state.sel")
+                .unwrap(),
+            expected,
+            "{key:?} should navigate settings"
+        );
+    }
+    g.key(Key::Escape, Modifiers::NONE);
+    g.frame();
+    assert_eq!(g.gui.eval("bone.ui.is_open(win)").unwrap(), "false");
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}
+
 /// What the node view draws reaches screen readers: chat text and the
 /// text painted in boxes.
 #[tokio::test(flavor = "multi_thread")]
@@ -752,24 +798,426 @@ async fn a_terminal_in_a_panel() {
         g.settle(Duration::from_millis(30)).await;
         let s = screen(&mut g);
         // cat echoes the line back: the typed text shows twice.
-        if s.matches("typed into it").count() >= 2 {
+        let painted = g
+            .painted
+            .iter()
+            .map(|(text, _)| text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        if s.matches("typed into it").count() >= 2 && painted.matches("typed into it").count() >= 2
+        {
             break;
         }
         assert!(
             std::time::Instant::now() < deadline,
-            "the terminal shows: {s}"
+            "the terminal screen: {s}; actually painted: {painted}"
         );
     }
     assert_eq!(
         g.gui.draft, "",
         "the keys went to the terminal, not the prompt"
     );
+    g.gui.run_lua("t", r#"
+        local window = require('bone.nodes.window')
+        local cell = bone.gui.window_info().cell
+        local function cursor()
+          local tree = window.panel('term1', { width = 400, height = 180, cell = cell })
+          for _, row in ipairs(tree[1][1]) do
+            assert(row.font == 'mono' and row.height == cell.h and row.line_height == cell.h and not row.wrap)
+            for _, span in ipairs(row.spans) do
+              if type(span) == 'table' and span.hl == 'TermCursor' then
+                local normal = bone.hl.get('Normal') or {}
+                assert(span.bg == (normal.fg or '#eeeeee') and span.color == (normal.bg or '#161616'),
+                  'node spans need explicit reversed colors for a visible cursor')
+                return true
+              end
+            end
+          end
+          return false
+        end
+        assert(cursor(), 'focused terminal cursor')
+        bone.ui.panel.focus(nil)
+        assert(not cursor(), 'no cursor without keyboard focus')
+    "#).unwrap();
+    // A click in the terminal gives its existing panel the keyboard again.
+    g.frame();
+    let terminal = g
+        .painted
+        .iter()
+        .find(|(text, _)| text.contains("typed into it"))
+        .unwrap()
+        .1;
+    g.click_at(terminal.center().x, terminal.center().y);
+    g.frame();
+    g.frame();
+    assert_eq!(g.gui.eval("bone.ui.panel.focused()").unwrap(), "term1");
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
     g.gui.run_lua("t", "bone.cmd('term close')").unwrap();
     g.frame();
     assert_eq!(
         g.gui.eval("bone.ui.panel.get('term1') == nil").unwrap(),
         "true"
     );
+}
+
+/// Both spellings of the terminal shortcut open, release and refocus the
+/// same visible panel, through the GUI's real keyboard path.
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_shortcuts_focus_the_visible_panel() {
+    use eframe::egui::{Key, Modifiers};
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    for key in [Key::CloseBracket, Key::Num5] {
+        g.key(key, Modifiers::CTRL);
+        g.frame();
+        g.frame();
+        assert_eq!(g.gui.eval("bone.ui.panel.focused()").unwrap(), "term1");
+        g.gui
+            .run_lua(
+                "t",
+                r#"
+            require('bone.terminal').job('term1'):write("printf 'shortcut-visible\\n'\r")
+        "#,
+            )
+            .unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            g.settle(Duration::from_millis(30)).await;
+            if g.painted
+                .iter()
+                .any(|(text, _)| text.contains("shortcut-visible"))
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "terminal text was not painted"
+            );
+        }
+        g.key(key, Modifiers::CTRL);
+        g.frame();
+        assert_eq!(
+            g.gui.eval("bone.ui.panel.focused() == nil").unwrap(),
+            "true"
+        );
+        g.key(key, Modifiers::CTRL);
+        g.frame();
+        assert_eq!(g.gui.eval("bone.ui.panel.focused()").unwrap(), "term1");
+        assert_eq!(g.gui.eval("#bone.ui.panel.list()").unwrap(), "1");
+        g.gui.run_lua("t", "bone.cmd('term close')").unwrap();
+        g.frame();
+    }
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}
+
+/// winit can emit both an Alt-modified key and its text. The text must
+/// not become the second key of a window-manager prefix (Alt+W then W).
+#[tokio::test(flavor = "multi_thread")]
+async fn alt_prefix_does_not_consume_its_own_text() {
+    use eframe::egui::{Key, Modifiers};
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    g.gui.run_lua("t", r#"
+        cycled = 0
+        local term = require('bone.terminal')
+        term.passthrough['alt+w'] = true
+        for _, context in ipairs({ 'main', 'panel' }) do
+          bone.keymap.set('alt+w w', function() cycled = cycled + 1 end, { context = context })
+          bone.keymap.set('alt+w t', function() term.open(nil, { cmd = 'cat' }) end, { context = context })
+        end
+    "#).unwrap();
+    for panel_count in 1..=2 {
+        g.key(Key::W, Modifiers::ALT);
+        g.text("w");
+        g.frame();
+        assert_eq!(g.gui.eval("cycled").unwrap(), "0");
+        g.text("t");
+        g.frame();
+        assert_eq!(
+            g.gui.eval("#bone.ui.panel.list()").unwrap(),
+            panel_count.to_string()
+        );
+    }
+    // An explicit second W still resolves the cycle binding.
+    g.key(Key::W, Modifiers::ALT);
+    g.text("w");
+    g.frame();
+    g.text("w");
+    g.frame();
+    assert_eq!(g.gui.eval("cycled").unwrap(), "1");
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}
+
+/// Every dock renders node content; fractions size the dock in pixels,
+/// while top/bottom cell sizes use rows rather than columns.
+#[tokio::test(flavor = "multi_thread")]
+async fn node_panels_on_all_four_docks() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    g.gui
+        .run_lua(
+            "t",
+            r#"
+        for _, side in ipairs({ 'left', 'right', 'top', 'bottom' }) do
+          local dock = side
+          bone.ui.panel.open({ id = dock, dock = dock, size = 0.2,
+            node = function(ctx)
+              assert(ctx.width > 0 and ctx.height > 0 and ctx.cell)
+              return { text = 'dock-' .. dock }
+            end })
+        end
+        local window = require('bone.nodes.window')
+        local ctx = { width = 1000, height = 700, cell = { w = 8, h = 18 } }
+        assert(window.docked('left', ctx)[1].width == 200)
+        assert(window.docked('bottom', ctx)[1].height == 140)
+        bone.ui.panel.update('top', { size = 3 })
+        assert(window.docked('top', ctx)[1].height == 3 * 18 + 16)
+    "#,
+        )
+        .unwrap();
+    g.frame();
+    g.frame();
+    for side in ["left", "right", "top", "bottom"] {
+        let text = format!("dock-{side}");
+        let (_, rect) = g
+            .painted
+            .iter()
+            .find(|(t, _)| t == &text)
+            .unwrap_or_else(|| panic!("missing {text}: {:?}", g.painted));
+        assert!(
+            rect.min.x >= 0.0 && rect.min.y >= 0.0 && rect.max.x <= 1000.0 && rect.max.y <= 700.0,
+            "{side} was outside the window: {rect:?}"
+        );
+    }
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}
+
+/// Opposing docks cannot reserve more than the available axis. The panel
+/// callbacks converge on the padded allocation, not their original request.
+#[tokio::test(flavor = "multi_thread")]
+async fn oversized_opposing_docks_fit_the_window() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.gui
+        .run_lua(
+            "t",
+            r#"
+        local window = require('bone.nodes.window')
+        require('bone.desktop.sidebar').node = function() return nil, 0 end
+        window.area = function(ctx)
+          dock_area = ctx
+          return { grow = 1, height = 0 }
+        end
+        dock_seen = {}
+        for _, side in ipairs({ 'left', 'right', 'top', 'bottom' }) do
+          local id = side
+          bone.ui.panel.open({ id = id, dock = id, size = 0.75,
+            node = function(ctx)
+              dock_seen[id] = ctx
+              return { text = id }
+            end })
+        end
+    "#,
+        )
+        .unwrap();
+    g.frame();
+    g.frame();
+    g.gui
+        .run_lua(
+            "t",
+            r#"
+        assert(dock_area.width == 0 and dock_area.height == 0)
+        for id, seen in pairs(dock_seen) do
+          local r = assert(bone.gui.rect('panel:' .. id))
+          assert(math.abs(seen.width - r.w) < 0.01, id)
+          assert(math.abs(seen.height - r.h) < 0.01, id)
+          assert(seen.width >= 0 and seen.height >= 0, id)
+        end
+        assert(dock_seen.left.width == 738 and dock_seen.right.width == 238)
+        assert(dock_seen.top.height == 509 and dock_seen.bottom.height == 159)
+    "#,
+        )
+        .unwrap();
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}
+
+/// The area width includes the sidebar overlap and the chat's outer margin;
+/// callers get precisely the room the flex solver gives the area node.
+#[tokio::test(flavor = "multi_thread")]
+async fn window_area_accounts_for_sidebar_and_margin() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.gui.run_lua("t", r#"
+        local window = require('bone.nodes.window')
+        local sidebar = require('bone.desktop.sidebar')
+        sidebar.under = 20
+        sidebar.node = function() return { width = 300 }, 1 end
+        window.area = function(ctx)
+          sidebar_area = ctx
+          return { id = 'test-area', grow = 1, height = 0 }
+        end
+        bone.ui.panel.open({ id = 'left', dock = 'left', size = 0.1, node = function() return {} end })
+        bone.ui.panel.open({ id = 'top', dock = 'top', size = 0.2, node = function() return {} end })
+    "#).unwrap();
+    g.frame();
+    g.frame();
+    g.gui
+        .run_lua(
+            "t",
+            r#"
+        local r = assert(bone.gui.rect('test-area'))
+        assert(sidebar_area.width == 612 and sidebar_area.height == 560)
+        assert(math.abs(sidebar_area.width - r.w) < 0.01, sidebar_area.width .. ' ~= ' .. r.w)
+        assert(math.abs(sidebar_area.height - r.h) < 0.01, sidebar_area.height .. ' ~= ' .. r.h)
+    "#,
+        )
+        .unwrap();
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}
+
+/// A window manager embeds a focusable panel without docking it twice.
+#[tokio::test(flavor = "multi_thread")]
+async fn node_panel_can_be_embedded() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    g.gui
+        .run_lua(
+            "t",
+            r#"
+        local window = require('bone.nodes.window')
+        bone.ui.panel.open({ id = 'embedded', dock = 'bottom', focusable = true,
+          node = function(ctx)
+            assert(ctx.id == 'embedded')
+            seen_panel = { width = ctx.width, height = ctx.height }
+            panel_builds = (panel_builds or 0) + 1
+            assert(ctx.focused == (bone.ui.panel.focused() == 'embedded'))
+            return { text = 'embedded-content' }
+          end })
+        window.embedded.embedded = true
+        assert(#window.docked('bottom', { width = 1000, height = 700 }) == 0)
+        bone.gui.view(function(ctx)
+          local node = window.panel('embedded', { width = 320, height = 120, cell = ctx.cell })
+          assert(node.id == 'panel:embedded' and node.width == nil and node.height == 0 and node.grow == 1)
+          assert(node.bg == nil and node.padding == nil and node.border == nil)
+          return { direction = 'column', padding = { 10, 20, 30, 40 },
+            { height = 50 }, node }
+        end)
+        function check_panel_size()
+          local r = assert(bone.gui.rect('panel:embedded'))
+          assert(math.abs(seen_panel.width - r.w) < 0.01, seen_panel.width .. ' ~= ' .. r.w)
+          assert(math.abs(seen_panel.height - r.h) < 0.01, seen_panel.height .. ' ~= ' .. r.h)
+          return true
+        end
+    "#,
+        )
+        .unwrap();
+    g.frame();
+    g.frame();
+    assert!(g.painted.iter().any(|(text, _)| text == "embedded-content"));
+    assert_eq!(g.gui.eval("check_panel_size()").unwrap(), "true");
+    assert_eq!(g.gui.eval("seen_panel.width").unwrap(), "940");
+    assert_eq!(g.gui.eval("seen_panel.height").unwrap(), "610");
+    let builds = g.gui.eval("panel_builds").unwrap();
+    for _ in 0..4 {
+        g.frame();
+    }
+    assert_eq!(
+        g.gui.eval("panel_builds").unwrap(),
+        builds,
+        "layout must settle"
+    );
+    g.resize(800.0, 500.0);
+    g.frame();
+    g.frame();
+    assert_eq!(g.gui.eval("check_panel_size()").unwrap(), "true");
+    assert_eq!(g.gui.eval("seen_panel.width").unwrap(), "740");
+    assert_eq!(g.gui.eval("seen_panel.height").unwrap(), "410");
+    g.click_at(160.0, 100.0);
+    g.frame();
+    assert_eq!(g.gui.eval("bone.ui.panel.focused()").unwrap(), "embedded");
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}
+
+/// Embedding is a reservation, not panel ownership: stale or repeated
+/// releases cannot detach a newer manager, and no release closes the panel.
+#[tokio::test(flavor = "multi_thread")]
+async fn embedded_panel_release_is_owned_and_idempotent() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.gui.run_lua("t", r#"
+        local window = require('bone.nodes.window')
+        assert(window.attach_panel == nil)
+        bone.ui.panel.open({ id = 'owned', dock = 'left', node = function() return { text = 'owned' } end })
+        local first = window.embed('owned')
+        local second = window.embed('owned')
+        first()
+        assert(window.embedded.owned)
+        assert(#window.docked('left', { width = 1000, height = 700 }) == 0)
+        second()
+        second()
+        assert(not window.embedded.owned and bone.ui.panel.get('owned'))
+        assert(#window.docked('left', { width = 1000, height = 700 }) == 1)
+        local third = window.embed('owned')
+        first()
+        second()
+        assert(window.embedded.owned)
+        third()
+        window.embedded.owned = true -- legacy callers still suppress docking
+        assert(#window.docked('left', { width = 1000, height = 700 }) == 0)
+        window.embedded.owned = nil
+    "#).unwrap();
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}
+
+/// A manager may keep a panel in its tree while the shared API hides it.
+#[tokio::test(flavor = "multi_thread")]
+async fn hidden_embedded_panel_is_not_rendered() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.gui
+        .run_lua(
+            "t",
+            r#"
+        local window = require('bone.nodes.window')
+        hidden_builds = 0
+        bone.ui.panel.open({ id = 'hidden', dock = 'bottom', node = function()
+          hidden_builds = hidden_builds + 1
+          return { text = 'hide-me' }
+        end })
+        release_hidden = window.embed('hidden')
+        bone.gui.view(function(ctx)
+          return { direction = 'column', window.panel('hidden', ctx) }
+        end)
+    "#,
+        )
+        .unwrap();
+    g.frame();
+    g.frame();
+    assert!(g.painted.iter().any(|(text, _)| text == "hide-me"));
+    g.gui
+        .run_lua("t", "bone.ui.panel.get('hidden'):hide()")
+        .unwrap();
+    let builds = g.gui.eval("hidden_builds").unwrap();
+    for _ in 0..3 {
+        g.frame();
+    }
+    assert_eq!(g.gui.eval("hidden_builds").unwrap(), builds);
+    assert!(!g.painted.iter().any(|(text, _)| text == "hide-me"));
+    assert_eq!(
+        g.gui.eval("bone.gui.rect('panel:hidden') == nil").unwrap(),
+        "true"
+    );
+    g.gui
+        .run_lua("t", "bone.ui.panel.get('hidden'):show()")
+        .unwrap();
+    g.frame();
+    g.frame();
+    assert!(g.painted.iter().any(|(text, _)| text == "hide-me"));
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 
 /// A panel opened with `node` draws it in place of lines, and a click on a
@@ -858,4 +1306,43 @@ async fn rename_command_updates_the_session_title() {
         !painted.iter().any(|t| t == "First Title"),
         "old title still shown; painted {painted:?}"
     );
+}
+
+/// Implicit terminals opt into generic pane placement; explicit docks do not.
+/// Placement failure closes the process/panel without replacing the public API.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_uses_the_panel_attachment_hook() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.gui
+        .run_lua(
+            "t",
+            r#"
+        local window, term = require('bone.nodes.window'), require('bone.terminal')
+        local original = term.open
+        local releases = {}
+        window.attach_panel = function(id)
+          attached = (attached or 0) + 1
+          assert(bone.gui.panel_node(id), 'node registered before attachment')
+          releases[id] = window.embed(id)
+        end
+        local tiled = term.open(nil, { cmd = 'cat' })
+        assert(attached == 1 and window.embedded[tiled.id] and original == term.open)
+        assert(tiled:info().title:match('cat'))
+        local docked = term.open({ id = 'explicit' }, { cmd = 'cat' })
+        assert(attached == 1 and not window.embedded.explicit)
+        term.close(docked.id)
+        term.close(tiled.id)
+        releases[tiled.id]()
+        window.attach_panel = function() error('reject placement') end
+        local ok, err = pcall(term.open, nil, { cmd = 'cat' })
+        assert(not ok and tostring(err):match('reject placement'))
+        assert(not bone.ui.panel.get('term1') and not term.job('term1'))
+        assert(original == term.open)
+        window.attach_panel = nil
+    "#,
+        )
+        .unwrap();
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }

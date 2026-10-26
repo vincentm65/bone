@@ -9,21 +9,20 @@ local M = {}
 local help = require("bone.help")
 local md = require("bone.desktop.markdown")
 local nodes = require("bone.nodes")
-local card = require("bone.desktop.card")
-local popups = require("bone.nodes.popups")
+local style = require("bone.nodes.style")
+local widgets = require("bone.nodes.widgets")
 
-local title, note, entry = popups.title, popups.note, popups.entry
+local title, note, entry, hints = widgets.title, widgets.note, widgets.entry, widgets.hints
 
 --- Read Markdown `text` in a window titled `name`; esc closes it.
 function M.read(text, name)
   local id
-  local w, h = card.size()
   id = bone.ui.popup({
-    width = w, height = h,
     node = function()
       local body = { direction = "column", size = md.text_size, padding = { 0, 10 } }
       nodes.append(body, md.nodes(text or ""))
-      return popups.list("read:" .. id, { title(name or "Help"), body, note("wheel  scroll     esc  close") })
+      return widgets.list("read:" .. id, { title(name or "Help"), body },
+        nil, { footer = hints("wheel scroll · esc close", { 10, 0 }) })
     end,
     on_key = function(k)
       if k == "esc" or k == "q" or k == "ctrl+c" then bone.ui.close(id) end
@@ -55,27 +54,25 @@ function M.open()
     list = help.list(st.tab, st.query)
     st.sel = math.max(1, math.min(st.sel, math.max(1, #list)))
     local items = { title("Help") }
-    local tabs = {}
-    for i, t in ipairs(help.TABS) do
-      if i > 1 then tabs[#tabs + 1] = { text = "        ", hl = "Dim" } end
-      tabs[#tabs + 1] = { text = t, hl = i == st.tab and "Normal" or "Dim", bold = i == st.tab }
-    end
-    items[#items + 1] = { spans = tabs, size = 14, padding = { 2, 10 }, margin = { 0, 0, 8, 0 },
-      cursor = "pointer", on_click = function() on_key("tab") end }
+    items[#items + 1] = widgets.tabs(help.TABS, st.tab, function(i)
+      st.tab, st.query, st.sel = i, "", 1
+      bone.ui.update(id, {})
+    end)
     items[#items + 1] = {
-      text = st.query == "" and "Type to search…" or st.query, hl = st.query == "" and "Dim" or "Normal",
-      size = 13, bg = "InputBackground", radius = 10, padding = { 7, 12 }, margin = { 0, 0, 8, 0 },
+      text = st.query == "" and "Type to search…" or (st.query .. "▏"), hl = st.query == "" and "Dim" or "Normal",
+      size = style.size.caption, bg = "InputBackground", radius = style.radius.lg, padding = { 7, 12 },
+      margin = { 0, 0, 8, 0 },
     }
     if #list == 0 then items[#items + 1] = note("No matches.", { 4, 4 }) end
     local selected
     for i, it in ipairs(list) do
       local on = i == st.sel
       local lines = {
-        { text = it.label, hl = it.command and "Accent" or "Normal", bold = on, size = 14 },
-        { text = st.tab == 3 and it.meta or it.desc, hl = "Dim", size = 12, margin = { 3, 0, 0, 0 } },
+        { text = it.label, hl = it.command and "Accent" or "Normal", bold = on, size = style.size.body },
+        { text = st.tab == 3 and it.meta or it.desc, hl = "Dim", size = style.size.small, margin = { 3, 0, 0, 0 } },
       }
       if on and st.tab ~= 3 and it.meta ~= "" then
-        lines[#lines + 1] = { text = it.meta, hl = "Dim", size = 11, margin = { 3, 0, 0, 0 } }
+        lines[#lines + 1] = { text = it.meta, hl = "Dim", size = style.size.micro, margin = { 3, 0, 0, 0 } }
       end
       items[#items + 1] = entry(on, lines, function()
         if st.sel == i then choose(i) else st.sel = i end
@@ -83,8 +80,8 @@ function M.open()
       end)
       if on then selected = #items end
     end
-    items[#items + 1] = note("tab  section     ↑↓  move     enter  open     esc  close")
-    return popups.list("help:" .. id, items, selected)
+    return widgets.list("help:" .. id, items, selected,
+      { footer = hints("tab section · ↑↓ move · enter open · esc close", { 10, 0 }) })
   end
   function on_key(k)
     if k == "esc" or k == "ctrl+c" then
@@ -108,21 +105,20 @@ function M.open()
     bone.ui.update(id, {})
     return true
   end
-  local w, h = card.size()
-  id = bone.ui.popup({ width = w, height = h, node = node, on_key = on_key })
+  id = bone.ui.popup({ node = node, on_key = on_key })
   return id
 end
 
 -- /health: this window's checks, then the core's.
 local MARK = { ok = { "•", "ToolDone" }, warn = { "!", "WarningMsg" }, error = { "×", "ErrorMsg" } }
 local function checks(name, items, out)
-  out[#out + 1] = { text = name, hl = "Normal", bold = true, size = 15, padding = { 2, 10 }, margin = { 8, 0, 4, 0 } }
+  out[#out + 1] = { text = name, hl = "Normal", bold = true, size = style.size.text, padding = { 2, 10 }, margin = { 8, 0, 4, 0 } }
   for _, it in ipairs(items) do
     local m = MARK[it.status] or MARK.warn
     out[#out + 1] = {
-      direction = "column", bg = "Panel", radius = 10, padding = { 7, 12 }, margin = { 1, 0, 1, 0 },
-      { spans = { { text = m[1] .. "   ", hl = m[2], bold = true }, { text = it.name, hl = "Normal", bold = true } }, size = 14 },
-      { text = tostring(it.message), hl = "Dim", size = 12, margin = { 2, 0, 0, 0 }, padding = { 0, 0, 0, 22 } },
+      direction = "column", bg = "Panel", radius = style.radius.lg, padding = { 7, 12 }, margin = { 1, 0, 1, 0 },
+      { spans = { { text = m[1] .. "   ", hl = m[2], bold = true }, { text = it.name, hl = "Normal", bold = true } }, size = style.size.body },
+      { text = tostring(it.message), hl = "Dim", size = style.size.small, margin = { 2, 0, 0, 0 }, padding = { 0, 0, 0, 22 } },
     }
   end
 end
@@ -132,9 +128,7 @@ function M.health()
   for _, it in ipairs(bone._run_health()) do mine[#mine + 1] = it end
   local core
   local id
-  local w, h = card.size()
   id = bone.ui.popup({
-    width = w, height = h,
     node = function()
       local items = { title("Health") }
       checks("This window", mine, items)
@@ -143,8 +137,7 @@ function M.health()
       else
         items[#items + 1] = note("Core: checking…", { 8, 0 })
       end
-      items[#items + 1] = note("esc  close")
-      return popups.list("health:" .. id, items)
+      return widgets.list("health:" .. id, items, nil, { footer = hints("esc close", { 10, 0 }) })
     end,
     on_key = function(k)
       if k == "esc" or k == "q" or k == "ctrl+c" then bone.ui.close(id) end

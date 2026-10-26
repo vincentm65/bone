@@ -7,6 +7,8 @@
 local M = {}
 
 local bg = require("bone.background")
+local style = require("bone.nodes.style")
+local widgets = require("bone.nodes.widgets")
 local CONTEXT = "desktop_tray"
 local ui = { page = "agents", sel = 1 }
 
@@ -73,22 +75,22 @@ function M.node()
   local head = { direction = "row", gap = 18, padding = { 2, 0, 4, 0 }, align = "center" }
   local back = bg.back_label()
   if back then
-    head[#head + 1] = { text = back, hl = "Accent", size = 13, cursor = "pointer", on_click = bg.back }
+    head[#head + 1] = widgets.link(back, bg.back)
   end
   for _, pg in ipairs(bg.PAGES) do
     local rows = all[pg[1]]
     if pg[1] ~= "queue" or #rows > 0 then
       local n = bg.running(rows)
       local name = pg[1]
-      head[#head + 1] = {
-        text = pg[2] .. " " .. (n > 0 and n or #rows), size = 13, cursor = "pointer",
+      head[#head + 1] = widgets.press({
+        text = pg[2] .. " " .. (n > 0 and n or #rows), size = style.size.caption,
         hl = ui.page == name and "StatusLine" or "Dim", bold = ui.page == name,
-        on_click = function() ui.page, ui.sel = name, 1 end,
-      }
+        role = "option", selected = ui.page == name, hover = { color = "StatusLine" },
+      }, function() ui.page, ui.sel = name, 1 end, "option", false)
     end
   end
   head[#head + 1] = { grow = 1 }
-  head[#head + 1] = { text = active and "enter open · c cancel · esc" or "↓ to manage", hl = "Dim", size = 12 }
+  head[#head + 1] = { text = active and "enter open · c cancel · esc" or "↓ to manage", hl = "Dim", size = style.size.small }
   local out = { direction = "column", head }
   local rows = all[ui.page]
   ui.sel = math.max(1, math.min(ui.sel, #rows))
@@ -98,19 +100,19 @@ function M.node()
     local glyph = live and { "●", "PanelRunning" } or bg.GLYPH[r.status] or { "·", "Dim" }
     local time = r.time or bg.duration((r.finished_at or bone.now()) - (r.started_at or bone.now()))
     local on = active and i == ui.sel
-    local line = {
-      direction = "row", gap = 8, align = "center", padding = { 3, 8, 3, 8 }, radius = 8,
-      bg = on and "Selection" or nil, cursor = "pointer", hover = { bg = "InputBackground" }, transition = 120,
-      on_click = function() ui.sel = i; open(r) end,
-      { text = glyph[1], hl = glyph[2], size = 13 },
-    }
-    if r.name then line[#line + 1] = { text = r.name, hl = live and "Accent" or "Dim", size = 13 } end
-    line[#line + 1] = { text = r.title or "", hl = live and "Normal" or "Dim", size = 13, wrap = false, shrink = 1, max_width = "45%", overflow = "hidden" }
+    local line = style.finish(widgets.press({
+      direction = "row", gap = 8, align = "center", padding = { 3, 8, 3, 8 }, radius = style.radius.md,
+      bg = on and "Selection" or nil, hover = { bg = "InputBackground" }, selected = on,
+      transition = style.motion.slow,
+      { text = glyph[1], hl = glyph[2], size = style.size.caption },
+    }, function() ui.sel = i; open(r) end, "option", false))
+    if r.name then line[#line + 1] = { text = r.name, hl = live and "Accent" or "Dim", size = style.size.caption } end
+    line[#line + 1] = { text = r.title or "", hl = live and "Normal" or "Dim", size = style.size.caption, wrap = false, shrink = 1, max_width = "45%", overflow = "hidden" }
     if r.detail and r.detail ~= "" then
-      line[#line + 1] = { text = r.detail, hl = "Dim", size = 12, wrap = false, shrink = 1, overflow = "hidden" }
+      line[#line + 1] = { text = r.detail, hl = "Dim", size = style.size.small, wrap = false, shrink = 1, overflow = "hidden" }
     end
     line[#line + 1] = { grow = 1 }
-    line[#line + 1] = { text = time, hl = "Dim", size = 12 }
+    line[#line + 1] = { text = time, hl = "Dim", size = style.size.small }
     out[#out + 1] = line
   end
   return out

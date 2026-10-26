@@ -141,9 +141,32 @@ pub(crate) fn dispatch(
                 ret(lua, true)
             })
         }
-        // gui_popups() -> the windows of bone.ui.popup / win, placed: each
-        // { id, x, y, w, h (pixels), z, focus, lines = { { { text, hl } } } },
-        // with `cell = { w, h }`, the monospace cell they are laid out in.
+        // gui_rect(id) -> { x, y, w, h } (pixels), where the node with that
+        // id was last frame, or nil.
+        "gui_rect" => args::<String>(lua, a).and_then(|id| {
+            let found = (gui.view.leaves.iter()).find(|(n, _)| *n == id);
+            match found {
+                Some((_, r)) => bone_ui::lua::json(
+                    lua,
+                    &serde_json::json!({ "x": r.min.x, "y": r.min.y, "w": r.width(), "h": r.height() }),
+                ),
+                None => ret(lua, Value::Nil),
+            }
+        }),
+        // gui_draft(chat) -> the unsent text of chat number `chat`.
+        "gui_draft" => args::<usize>(lua, a).and_then(|buf| {
+            let text = if buf == gui.current {
+                gui.draft.clone()
+            } else {
+                gui.drafts.get(&buf).map(|d| d.0.clone()).unwrap_or_default()
+            };
+            ret(lua, text)
+        }),
+        // gui_popups() -> the windows of bone.ui.popup / win. A window of
+        // lines is { id, x, y, w, h (pixels), z, focus, lines }, placed in
+        // cells. A window with a node adds `node` and `bounds = true`, and
+        // x/y/w/h are the anchor, not the card. `cell = { w, h }` is the
+        // monospace cell lines windows are laid out in.
         "gui_popups" => gui
             .popups_for_lua(lua)
             .map(|t| MultiValue::from_vec(vec![Value::Table(t)])),

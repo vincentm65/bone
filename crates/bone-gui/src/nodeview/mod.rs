@@ -146,6 +146,19 @@ pub type FontWant = (String, f32, [String; 3], Vec<(String, String)>);
 /// offsets, measured list heights, the focus). Lua builds the tree only when
 /// something changed (`dirty`); between those the last tree is laid out
 /// again, so a long transcript costs Lua nothing while it sits still.
+/// Whether Lua's `mouse` handlers took the press, drag or release under
+/// way from the nodes and egui's widgets.
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MouseTaken {
+    #[default]
+    No,
+    /// At the press: egui never sees the button go down.
+    Whole,
+    /// After egui saw the press: it sees no more motion, then the release
+    /// where the pointer last was for it, and the nodes hear none of it.
+    Rest,
+}
+
 #[derive(Default)]
 pub struct ViewState {
     pub(crate) bound: Bound,
@@ -195,14 +208,23 @@ pub struct ViewState {
     /// Inputs that have taken the keyboard on appearing (`focus = true`).
     pub(in crate::nodeview) focused_once: std::collections::HashSet<String>,
     pub size: (f32, f32),
-    /// The window's area, and where the nodes named `chat` and `prompt`
-    /// were: what Lua's windows are placed in.
+    /// The window's area, and where each node with an id was: windows
+    /// anchor to `chat` and `prompt`, and `bone.gui.rect` reads any.
     pub(crate) area: Option<egui::Rect>,
     pub(crate) leaves: Vec<(String, egui::Rect)>,
     /// The colorscheme and options last built with.
     rev: u64,
     /// When `bone.gui.invalidate(ms)` wants the next build.
-    wake: Option<std::time::Instant>,
+    pub(crate) wake: Option<std::time::Instant>,
+    /// The button held for the `mouse` event and the cell it was last at.
+    pub(crate) mouse_held: Option<(&'static str, (u16, u16))>,
+    /// Whether a `mouse` handler took the gesture under way, and where
+    /// egui last saw the pointer (see `route_pointer`).
+    pub(crate) mouse_taken: MouseTaken,
+    pub(crate) mouse_seen: Option<egui::Pos2>,
+    /// Wheel travel not scrolled yet that is short of a `wheelup` or
+    /// `wheeldown` key, in points.
+    pub(crate) wheel_rest: f32,
 }
 
 impl ViewState {
@@ -253,8 +275,16 @@ impl ViewState {
 pub(in crate::nodeview) enum Arg {
     Text(String),
     Bool(bool),
-    Pos { x: f32, y: f32 },
-    Delta(f32),
+    Pos {
+        x: f32,
+        y: f32,
+    },
+    /// `on_scroll(dy, { dx, ctrl, alt, shift, super })`.
+    Scroll {
+        dy: f32,
+        dx: f32,
+        mods: egui::Modifiers,
+    },
 }
 
 pub(in crate::nodeview) fn rgba(c: Rgba) -> Color32 {
@@ -416,7 +446,11 @@ impl Metrics for Fonts {
     fn text_input(&self, t: &node::TextInput, max_width: Option<f32>) -> Size {
         let font = FontId::new(t.text.size, self.family(&t.text));
         let rows = if t.multiline {
-            let text = self.texts.get(&t.id).map_or("", |s| s.as_ref());
+            let text = if t.read_only {
+                t.value.as_deref().unwrap_or("")
+            } else {
+                self.texts.get(&t.id).map_or("", |s| s.as_ref())
+            };
             let job = LayoutJob::simple(
                 format!("{text} "),
                 font.clone(),
@@ -522,8 +556,8 @@ pub(in crate::nodeview) struct Frame {
     pub(in crate::nodeview) tweened: std::collections::HashSet<String>,
     /// The text input with the keyboard.
     pub(in crate::nodeview) input_focus: Option<String>,
-    /// Where the nodes named `chat` and `prompt` are, for windows that
-    /// anchor to them.
+    /// Where each node with an id is (windows anchor to `chat` and
+    /// `prompt`).
     pub(in crate::nodeview) leaves: Vec<(String, egui::Rect)>,
     pub(in crate::nodeview) focusables: Vec<Focusable>,
     pub(in crate::nodeview) input_keys: HashMap<String, u64>,
@@ -616,6 +650,8 @@ impl Gui {
         if rebuilt {
             self.view.bound.prev_sink = (self.view.bound.sink.take()).map(|s| s.table);
             self.view.bound.canvases.clear();
+            // What Lua highlights in the prompt may have changed too.
+            self.prompt.marks_for = None;
         }
         self.view.bound.sink = Some(sink.clone());
         let _build = crate::profile::Span::start(if rebuilt { "build" } else { "build-skip" });

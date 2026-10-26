@@ -1086,28 +1086,34 @@ impl App {
         if show {
             self.show_chat(buf);
         }
-        self.request::<SessionMessages>(SessionRef { session_id }, move |app, r| {
-            match r {
-                Ok(r) => {
-                    let session_id = r.info.session_id.clone();
-                    if let Some(c) = app.chat_mut(buf) {
-                        c.load(r.info, &r.messages, r.active_turn);
-                        c.set_queue(r.queue, r.queue_paused);
+        self.request::<SessionMessages>(
+            SessionMessagesParams {
+                session_id,
+                tail: None,
+            },
+            move |app, r| {
+                match r {
+                    Ok(r) => {
+                        let session_id = r.info.session_id.clone();
+                        if let Some(c) = app.chat_mut(buf) {
+                            c.load(r.info, &r.messages, r.active_turn);
+                            c.set_queue(r.queue, r.queue_paused);
+                        }
+                        if buf == app.current {
+                            app.request_processes(session_id.clone());
+                            let ev = serde_json::json!({ "session_id": session_id, "chat": buf });
+                            app.fire("chat/shown", ev);
+                        }
                     }
-                    if buf == app.current {
-                        app.request_processes(session_id.clone());
-                        let ev = serde_json::json!({ "session_id": session_id, "chat": buf });
-                        app.fire("chat/shown", ev);
+                    Err(e) => {
+                        if let Some(c) = app.chat_mut(buf) {
+                            c.notice(format!("cannot load session: {e}"), true);
+                        }
                     }
                 }
-                Err(e) => {
-                    if let Some(c) = app.chat_mut(buf) {
-                        c.notice(format!("cannot load session: {e}"), true);
-                    }
-                }
-            }
-            trim_heap();
-        });
+                trim_heap();
+            },
+        );
         buf
     }
 
@@ -1253,21 +1259,6 @@ impl App {
             ));
         }
         out
-    }
-
-    /// At startup: say when runtime overrides hide built-in files.
-    pub fn note_runtime_overrides(&mut self) {
-        let n = self
-            .config_dir
-            .as_deref()
-            .map(|d| bone_lua::runtime_overrides(d).len())
-            .unwrap_or(0);
-        if n > 0 {
-            self.info(format!(
-                "{n} runtime file{} overridden in runtime/ (they hide built-in updates; see /runtime)",
-                if n == 1 { "" } else { "s" }
-            ));
-        }
     }
 
     /// Resume a session at startup: `None` for the newest one.
@@ -1495,7 +1486,15 @@ impl App {
             let buf = bone_ui::chat::find_chat(chats, id)?;
             chats.get_mut(buf)
         }) {
-            self.dirty = true;
+            let deferred = if let Some(Ok(p)) = ev.parse::<MessageDelta>() {
+                self.chats.get(self.current).is_some_and(|chat| {
+                    chat.session_id() == Some(p.session_id.as_str())
+                        && chat.streaming_redraw_deferred(Instant::now())
+                })
+            } else {
+                false
+            };
+            self.dirty |= !deferred;
             return;
         }
         on!(SettingsChanged, |p| self.update_settings(p.settings));
@@ -1550,15 +1549,21 @@ impl App {
         let Some(buf) = self.chat_by_session(&session_id) else {
             return;
         };
-        self.request::<SessionMessages>(SessionRef { session_id }, move |app, r| match r {
-            Ok(r) => {
-                if let Some(c) = app.chat_mut(buf) {
-                    c.load(r.info, &r.messages, r.active_turn);
-                    c.set_queue(r.queue, r.queue_paused);
+        self.request::<SessionMessages>(
+            SessionMessagesParams {
+                session_id,
+                tail: None,
+            },
+            move |app, r| match r {
+                Ok(r) => {
+                    if let Some(c) = app.chat_mut(buf) {
+                        c.load(r.info, &r.messages, r.active_turn);
+                        c.set_queue(r.queue, r.queue_paused);
+                    }
                 }
-            }
-            Err(e) => app.error(format!("cannot reload session: {e}")),
-        });
+                Err(e) => app.error(format!("cannot reload session: {e}")),
+            },
+        );
     }
 
     /// Something is moving on screen (a spinner or elapsed time).

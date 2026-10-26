@@ -11,6 +11,7 @@ local M = {}
 local md = require("bone.desktop.markdown")
 local nodes = require("bone.nodes")
 local timing = require("bone.timing")
+local style = require("bone.nodes.style")
 
 local GUTTER_MAX = 5 -- shell output rows before the first 2, "⋮ +N", last 2
 local PREVIEW_MAX = 5 -- other output rows
@@ -336,15 +337,15 @@ local function diff_nodes(rows, cap, expanded)
   -- Vertical padding covers the corner curve, so a highlighted row's square
   -- background never paints over the block's rounded corners.
   local block = {
-    direction = "column", bg = "CodeBlock", radius = 8,
+    direction = "column", bg = "CodeBlock", radius = style.radius.md,
     padding = { 8, 0 }, margin = { 6, 0, 0, 0 },
     font = "mono", size = size,
   }
   local function add(text, hl, bg, py)
-    block[#block + 1] = {
+    block[#block + 1] = style.finish({
       bg = bg, padding = { py or 1, 12 },
       { text = text, hl = hl, font = "mono", size = size, selectable = true },
-    }
+    })
   end
   for _, r in ipairs(shown) do
     if r.separator then
@@ -360,7 +361,7 @@ local function diff_nodes(rows, cap, expanded)
     end
   end
   if cut > 0 then add("⋮ +" .. plural(cut, "line") .. HINT, "Dim", nil, 4) end
-  return { block }
+  return { style.finish(block) }
 end
 
 -- ---- cards -----------------------------------------------------------------
@@ -390,9 +391,48 @@ local function mark(item)
   return { text = item.is_error and "×  " or "•  ", hl = item.is_error and "ToolError" or "ToolDone" }
 end
 
+-- A TUI line (a string, `{ "text", "Group" }`, `{ fill = … }`) as spans.
+local function line_spans(line, hl)
+  if type(line) == "string" then return { { text = line, hl = hl } } end
+  local out = {}
+  for _, s in ipairs(line or {}) do
+    if type(s) == "string" then
+      out[#out + 1] = { text = s, hl = hl }
+    elseif type(s) == "table" and s.fill == nil then
+      out[#out + 1] = { text = s.text or s[1] or "", hl = s.hl or s[2] or hl }
+    end
+  end
+  return out
+end
+
+-- A call `bone.ui.tool_views[name]` draws: its `title` (a line, or a list
+-- of them) in the window's font, and its `lines` in monospace under it;
+-- or a `node` of its own.
+local function custom_card(item, content)
+  if content.node then return { content.node } end
+  -- A list of lines, as the TUI tells them from one line.
+  local title = content.title or item.name
+  if not (type(title) == "table" and type(title[1]) == "table" and type(title[1][1]) == "table") then
+    title = { title }
+  end
+  local result = {}
+  for i, t in ipairs(title) do
+    local spans = line_spans(t, "ToolName")
+    if i == 1 then table.insert(spans, 1, mark(item)) end
+    result[#result + 1] = md.text(spans, { size = md.small_size })
+  end
+  local rows = {}
+  for _, l in ipairs(content.lines or {}) do rows[#rows + 1] = line_spans(l, "ToolOutput") end
+  if #rows > 0 then result[#result + 1] = band(rows) end
+  return result
+end
+
 --- The nodes of one call: its title, then its body. `expanded`: all of the
 --- output, not the folded form.
 local function card(item, expanded, width)
+  local custom = bone.ui.tool_views[item.name]
+  local content = custom and custom(item, { width = width, region = "chat", tool_expanded = expanded })
+  if content then return custom_card(item, content) end
   local failed = item.is_error
   local a = args_of(item)
   local name = item.name
@@ -567,7 +607,7 @@ function M.view(item, ctx)
     paras[#paras + 1] = md.text({ { text, "Dim" } }, { size = md.small_size, gap = 10 })
   end
   local fallback = { { { (M.labels[item.name] or item.name) .. " " .. target(item), "ToolName" } } }
-  local node = { direction = "column", padding = { 2, 4 }, margin = { 4, 0, 2, 0 } }
+  local node = style.finish({ direction = "column", padding = { 2, 4 }, margin = { 4, 0, 2, 0 } })
   nodes.append(node, paras)
   return { node = node, lines = fallback, click = function() M.toggle(item) end }
 end

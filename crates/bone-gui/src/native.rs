@@ -57,6 +57,12 @@ impl eframe::App for App {
         }
     }
 
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        if let Some(gui) = &mut self.gui {
+            gui.route_pointer(raw_input);
+        }
+    }
+
     /// The window's background is the canvas the GUI fills it with, which
     /// is see-through with `opacity` below 1.
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
@@ -96,6 +102,20 @@ fn options(renderer: eframe::Renderer, size: [f32; 2], transparent: bool) -> efr
     if let WgpuSetup::CreateNew(setup) = &mut opts.wgpu_options.wgpu_setup {
         setup.power_preference =
             PowerPreference::from_env().unwrap_or(PowerPreference::HighPerformance);
+        // On Wayland the compositor's frame callbacks already keep frames
+        // to the display's rate; FIFO waits again on top of them and misses
+        // refreshes (one in twenty, on NVIDIA at 160 Hz). Mailbox does not.
+        // Only Vulkan offers it (wgpu's GL surfaces are FIFO only, and
+        // asking there is an error), so wgpu is Vulkan only and OpenGL is
+        // left to glow; the env variable still chooses.
+        #[cfg(target_os = "linux")]
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            use eframe::wgpu::{Backends, PresentMode};
+            if Backends::from_env().is_none() {
+                setup.instance_descriptor.backends = Backends::VULKAN;
+                opts.wgpu_options.surface.present_mode = PresentMode::Mailbox;
+            }
+        }
         // On Windows only DX12 on a DirectComposition visual can show
         // through (an HWND swapchain, and Vulkan, are opaque); the env
         // variables still choose.
@@ -118,6 +138,7 @@ fn options(renderer: eframe::Renderer, size: [f32; 2], transparent: bool) -> efr
 /// the main thread, inside a multi-threaded Tokio runtime.
 pub async fn run(conn: Connection, opts: GuiOptions) -> Result<(), String> {
     let gui = Gui::connect(conn, opts).await?;
+    gui.watch_config();
     tokio::task::block_in_place(move || {
         let slot = Rc::new(RefCell::new(Some(gui)));
         // A window that loses its device this many times stays closed.
@@ -171,8 +192,6 @@ fn open(slot: &Rc<RefCell<Option<Gui>>>) -> Result<(), String> {
                     gui.error(format!(
                         "no GPU in use: drawing in software with {renderer}"
                     ));
-                } else {
-                    gui.info(format!("drawing with {renderer}"));
                 }
                 gui.renderer = Some(renderer);
                 gui.transparent = transparent;

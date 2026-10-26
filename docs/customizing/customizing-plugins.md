@@ -20,9 +20,9 @@ Every part is optional. A `README.md` is the plugin's help page while it
 is loaded: `/help <name>` opens it and the help browser lists it under Docs.
 Give its keys a `desc` (`bone.keymap.set(key, fn, { desc = "…" })`) and they
 are listed under Keys. Plugins load in name order, after the runtime
-defaults and before your own `core.lua` / `tui.lua`, so your config can change
-anything a plugin set up. Rename a folder to start with `_` or `.` to disable
-it. `bone.plugins` lists the loaded names. Installing is just copying or
+defaults and before your own `core.lua`, `ui.lua`, `tui.lua` and `gui.lua`,
+so your config can change anything a plugin set up. Rename a folder to start
+with `_` or `.` to disable it. `bone.plugins` lists the loaded names. Installing is just copying or
 `git clone`-ing into `~/.bone/plugins/`.
 
 The [Bone catalog](https://github.com/vincentm65/bone-catalog) is the source of installable packages. Use `/catalog` to install and update them, or read packages such as `mcp`, `skill`, `usage`, `themes` and `review` for API usage. None is installed by default.
@@ -35,8 +35,10 @@ keymaps, commands, options, events, colors, chat data, windows
 (`bone.ui.popup`) and `bone.request`. How the window looks is not shared:
 the TUI draws character cells (layout, regions, panels, chat views as
 `lines`) and the GUI draws a tree of nodes (`bone.gui.view`). A window's
-`lines` are drawn in both, in a monospace font (in the GUI without the
-pointer: give a window `node = fn` to take it).
+`lines` are drawn in both, in a monospace font. The GUI still emits the
+shared `mouse` event over those rows, but they are not pointer targets:
+`on_click` and the other node handlers exist only when the window has
+`node = fn`.
 
 Put what only one frontend has in its own file, or check for it:
 
@@ -64,31 +66,40 @@ package's files or an explicit `"frontends": ["tui", "gui"]` in its
 ## State
 
 ```lua
--- in plugins/todo/tui.lua
-local st = bone.plugin.state()            -- ~/.bone/state/tui/todo.json, saved on unload and quit
+-- in plugins/todo/tui.lua  (gui.lua writes state/gui/, core.lua state/core/)
+local st = bone.plugin.state()            -- ~/.bone/state/tui/todo.json
 st.items = st.items or {}
-bone.plugin.on_shutdown(function() ... end)  -- unload, reload and quit
+bone.plugin.on_shutdown(function() ... end)  -- explicit unload, reload and quit
 ```
 
-`bone.state.load(name)` / `bone.state.save(name, value)` are the raw form
-(JSON in `~/.bone/state/<side>/<name>.json`); `bone.plugin.state(name)` wraps
-them with automatic saving. Both sides have it; each side has its own files.
-With `{ shared = true }` as the last argument both sides use
-`~/.bone/state/shared/<name>.json`, which is how a plugin's core and TUI
-halves share settings.
+`bone.state.load(name)` / `bone.state.save(name, value)` are the raw form:
+JSON at `~/.bone/state/core/`, `state/tui/` or `state/gui/` (`<name>.json`).
+`bone.plugin.state(name)` wraps that file. Each of the core, the TUI and the
+GUI has its own. With `{ shared = true }` as the last argument every side
+uses `~/.bone/state/shared/<name>.json`, which is how a plugin's core and
+frontend halves share settings.
 
-A plugin owns what it creates while its file or one of its callbacks runs:
-keymaps, user commands, `bone.on` handlers, panels, windows, jobs, dynamic
-options, raw key interceptors and new keymap contexts. Unloading it removes
-all of that (a key or command the user has since redefined is left alone),
-cancels its running jobs without calling back, and forgets the modules it
-`require`d, so loading it again runs fresh code. Anything else it changed
-(views, highlights, `bone.ui` fields) is for its shutdown hook to undo.
-Panels do not carry over a reload: on `ready` with `reload = true`,
-`ev.panels` lists the ids that were open, so reopen yours.
+A plugin owns what it creates while its file runs, or while any of its
+callbacks run, in either frontend: keymaps, user commands, `bone.on`
+handlers, panels, windows, jobs, dynamic options, raw key interceptors and
+new keymap contexts. An explicit unload, reload or quit (closing the TUI, or
+the GUI window) is that lifecycle: `on_shutdown` runs, `bone.plugin.state` is
+saved, and what it owns is removed (a key or command the user has since
+redefined is left alone). Its running jobs are cancelled without calling
+back, and the modules it `require`d are forgotten, so loading it again runs
+fresh code. Anything else it changed (views, highlights, `bone.ui` fields) is
+for its shutdown hook to undo.
 
-`bone.plugin.current()` is `{ name, dir, kind }` while the plugin's file runs
-(or in the TUI, while any of its callbacks run), else nil.
+A watched-file reload is not that unload. On the TUI it does save state and
+run shutdown hooks, and panels do not carry over: `ready` is
+`{ reload = true, panels }`, the ids that were open, so reopen yours. That
+payload is TUI only. The GUI's file reload does not run shutdown hooks, does
+not save state, and fires `ready` with no payload; the hooks and the save run
+when the window closes. Save important state as it changes with
+`bone.plugin.save_state()` rather than relying on a GUI file reload.
+
+`bone.plugin.current()` is `{ name, dir, kind }` while the plugin's file or
+one of its callbacks runs, in either frontend, else nil.
 
 Loading at runtime: `bone.plugin.load(name)`, `bone.plugin.unload(name)`,
 `bone.plugin.reload(name)`; also `/plugins load|unload|reload name`. A plugin
@@ -106,7 +117,7 @@ Declare a settings page in `manifest.json` (works for core-only plugins too):
     "desc": "when the model does not ask for a number" } ] }
 ```
 
-or from `tui.lua` with `bone.settings.page{ name = "myplugin", title =
+or from `ui.lua`, `tui.lua` or `gui.lua` with `bone.settings.page{ name = "myplugin", title =
 "My plugin", fields = { … } }` (same field shape). Values are saved as
 `<name>.<key>` in `settings.json` and read with `bone.settings.get` (falling
 back to the default). `require("bone.config").open(tab)` opens the page on a
@@ -114,16 +125,16 @@ tab.
 
 ## Two halves
 
-The common shape of a plugin is a core half (a tool, or hooks) and a TUI half
-(showing what the core does): they talk through the protocol.
+The common shape of a plugin is a core half (a tool, or hooks) and a
+frontend half (the TUI, the GUI, or both, showing what the core does): they
+talk through the protocol.
 
-- The core exposes a function to the TUI with `bone.rpc.register(name, fn)`;
-  the TUI calls it with `bone.rpc.call(name, args, cb)` (for the session on
-  screen).
-- The core emits questions and events; the TUI reacts with `bone.on` and
+- The core exposes a function with `bone.rpc.register(name, fn)`; a frontend
+  calls it with `bone.rpc.call(name, args, cb)` (for the session on screen).
+- The core emits questions and events; the frontend reacts with `bone.on` and
   answers with `bone.request(method, params, cb)`.
 
-For confirmation, a core hook calls `bone.ask({ kind = "confirm", text = "Proceed?" })`. A TUI handler listens for `ask/requested` and replies with `ask/respond`; see the minimal paired examples in [lua.md](../lua.md#asking-the-user) and the popup guide.
+For confirmation, a core hook calls `bone.ask({ kind = "confirm", text = "Proceed?" })`. A frontend handler listens for `ask/requested` and replies with `ask/respond`; see the minimal paired examples in [lua.md](../lua.md#asking-the-user) and the popup guide.
 
 ## Project config
 

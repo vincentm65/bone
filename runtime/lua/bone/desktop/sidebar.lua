@@ -16,13 +16,41 @@ local M = {}
 
 local chats = require("bone.chats")
 local nodes = require("bone.nodes")
+local style = require("bone.nodes.style")
+local widgets = require("bone.nodes.widgets")
+
+-- Keep the drawer 75% opaque over the window background. The window's root
+-- is Normal, so this is visible even when the window itself is opaque.
+-- Older schemes may not define Panel, so keep a visible fallback.
+local function see_through()
+  local a = bone.gui.window_info().opacity or 1
+  return a < 1
+end
+
+-- A see-through window is already one sheet of alpha. Another fill here
+-- would stack on it, so the drawer stays clear and the canvas shows through.
+local function panel_bg()
+  if see_through() then return nil end
+  local bg = (bone.hl.get("Panel") or {}).bg
+  local normal = (bone.hl.get("Normal") or {}).bg
+  if bg and bg ~= normal then return style.alpha("Panel", "bf", "bg", bg) end
+  return style.dark() and "#1c1c1cbf" or "#ebebebbf"
+end
+
 local ID = "sessions"
 local SEARCH = "sidebar-search"
-M.width = 280
+M.width = tonumber(bone.state.load("sidebar-width")) or 280
+M.min_width, M.max_width = 200, 520
+-- Under this window width it floats over the chat instead of pushing it.
+M.overlay_below = 760
+-- How far the drawer reaches under the chat's rounded corners, so they show
+-- its fill rather than the window behind.
+M.under = style.radius.round
 
 local ROW = { group = 30, card = 48, none = 40 }
 
 local open = false
+local overlaid = false -- drawn over the chat (a narrow window), not beside it
 local st = {
   page = "chats", query = "", sel = 1, all = {}, stats = {}, loading = false,
   rows = {}, items = {}, version = 0,
@@ -177,13 +205,15 @@ local function refresh()
   end)
 end
 
-local function choose(i)
+local function choose(i, keep_keys)
   local r = st.items[i]
   if not r or not r.session_id then return end
   st.sel = i
   unread[r.session_id] = nil
-  bone.gui.focus(nil)
   bone.api.open_session(r.session_id)
+  if keep_keys and not overlaid then take_keys() else bone.gui.focus(nil) end
+  -- Over the chat it has done its job: let the chat show.
+  if overlaid then open = false end
   compute()
   redraw()
 end
@@ -236,6 +266,16 @@ end
 local function select(i)
   st.sel = math.max(1, math.min(#st.items, i))
   reveal()
+  if st.page == "chats" then
+    local r = st.items[st.sel]
+    if r and r.session_id then
+      unread[r.session_id] = nil
+      bone.api.open_session(r.session_id)
+    end
+  end
+  -- open_session can replace/rebuild the GUI view; refresh the drawer so
+  -- its keyboard focus and selection remain visible.
+  take_keys()
   redraw()
 end
 
@@ -290,9 +330,6 @@ end
 
 -- ---- nodes ------------------------------------------------------------------
 
--- A faint tint under the pointer, below the selected row's.
-local HOVER = "#ffffff0a"
-
 -- Running dots breathe: the phase flips on a timer while one is shown.
 local pulse = false
 local pulse_at = 0
@@ -312,34 +349,17 @@ local function dot(state)
     waiting = group("SessionWaiting", "ErrorMsg"),
     unread = group("SessionUnread", "Normal"),
   })[state]
-  return {
+  return style.finish({
     text = "●", hl = hl, size = state == "unread" and 7 or 8,
     opacity = state == "running" and (breathing() and 1 or 0.35) or 1,
     transition = state == "running" and { duration = 850, easing = "ease-in-out" } or nil,
     tooltip = ({ running = "Running", waiting = "Waiting for your approval", unread = "New since you looked" })[state],
-  }
-end
-
--- One half of the page switch.
-local function segment(text, page)
-  local on = st.page == page
-  return {
-    text = text, size = 12.5, bold = on, hl = on and "Normal" or "Dim",
-    padding = { 4, 12 }, radius = 6, bg = on and "Selection" or nil,
-    hover = not on and { color = "Normal" } or nil, transition = 120, cursor = "pointer",
-    role = "option", selected = on,
-    on_click = function() if not on then switch_page() end end,
-  }
+  })
 end
 
 -- A small glyph button shown over a row.
 local function action(glyph, label, fn, on)
-  return {
-    text = glyph, size = 13, hl = on and "Normal" or "Dim", label = label, tooltip = label,
-    width = 22, height = 22, radius = 6, text_align = "center", padding = { 2, 0 },
-    cursor = "pointer", hover = { bg = "Selection", color = "Normal" }, transition = 80,
-    on_click = fn,
-  }
+  return widgets.icon_button(glyph, label, fn, { hl = on and "Normal" or "Dim" })
 end
 
 local function row(i)
@@ -347,10 +367,10 @@ local function row(i)
   if not r then return { height = 0 } end
   if r.kind == "group" then
     return { height = ROW.group, direction = "row", align = "end", padding = { 0, 10, 6, 10 },
-      { text = r.text:upper(), hl = "Dim", size = 10.5, bold = true, letter_spacing = 0.8 } }
+      { text = r.text:upper(), hl = "Dim", size = style.size.micro, bold = true, letter_spacing = 0.8 } }
   elseif r.kind == "none" then
     return { height = ROW.none, direction = "row", align = "center", justify = "center",
-      { text = r.text, hl = "Dim", size = 12.5 } }
+      { text = r.text, hl = "Dim", size = style.size.caption } }
   end
   local on = r.item == st.sel
   local current = r.id and r.id == (bone.chat.session() or {}).session_id
@@ -358,9 +378,9 @@ local function row(i)
   local title = { direction = "row", gap = 6, align = "center", height = 22 }
   title[#title + 1] = dot(r.state)
   if r.id and st.renaming == r.id then
-    title[#title + 1] = {
-      id = "sidebar-rename", grow = 1, size = 13.5, hl = "Normal", bg = "Normal",
-      radius = 5, padding = { 1, 6 }, border = 1, border_color = "PromptBorder",
+    title[#title + 1] = style.finish({
+      id = "sidebar-rename", grow = 1, size = style.size.body, hl = "Normal", bg = "Normal",
+      radius = style.radius.sm - 1, padding = { 1, 6 }, border = 1, border_color = "PromptBorder",
       on_key = function(k)
         if k == "esc" then st.renaming = nil take_keys() redraw() return true end
         return false
@@ -369,10 +389,10 @@ local function row(i)
         value = r.title, select = true,
         on_submit = function(text) rename(r.id, text) end,
       },
-    }
+    })
   else
     title[#title + 1] = {
-      text = r.title, size = 13.5, bold = current or r.state == "unread",
+      text = r.title, size = style.size.body, bold = current or r.state == "unread",
       hl = (on or current or r.state == "unread") and "Normal" or nil,
       text_overflow = "ellipsis", grow = 1, shrink = 1,
     }
@@ -382,50 +402,46 @@ local function row(i)
         function() toggle_pin(id) end, r.pinned)
       title[#title + 1] = action("✎", "Rename", function() start_rename(id) end)
     else
-      title[#title + 1] = { text = r.time or "", hl = "Dim", size = 11, wrap = false }
+      title[#title + 1] = { text = r.time or "", hl = "Dim", size = style.size.micro, wrap = false }
     end
   end
   local meta = r.state == "waiting"
-    and { text = "Waiting for approval", hl = group("SessionWaiting", "ErrorMsg"), size = 11.5 }
-    or { text = r.meta, hl = "Dim", size = 11.5, text_overflow = "ellipsis", shrink = 1 }
-  return {
+    and { text = "Waiting for approval", hl = group("SessionWaiting", "ErrorMsg"), size = style.size.small }
+    or { text = r.meta, hl = "Dim", size = style.size.small, text_overflow = "ellipsis", shrink = 1 }
+  return style.finish({
     height = ROW.card - 2, margin = { 1, 0, 1, 0 }, direction = "column", justify = "center", gap = 2,
-    padding = { 0, 10 }, radius = 8, cursor = "pointer",
-    bg = on and "Selection" or nil, hover = not on and { bg = HOVER } or nil, transition = 100,
+    padding = { 0, 10 }, radius = style.radius.md, cursor = "pointer", role = "option", selected = on,
+    bg = on and "Selection" or nil, hover = not on and { bg = style.hover() } or nil, transition = style.motion.base,
     on_hover = r.id and function(inside)
       if inside then st.hover = r.id elseif st.hover == r.id then st.hover = nil end
       redraw()
     end or nil,
     on_click = function()
       if st.page == "running" then
-        st.sel = r.item
-        redraw()
+        select(r.item)
       elseif st.renaming ~= r.id then
-        choose(r.item)
+        choose(r.item, true)
       end
     end,
     title,
     meta,
-  }
+  })
 end
 
 -- The project filter: what it shows, and the menu under it while open.
 local function project_filter()
   local name = st.project and folder(st.project) or "All projects"
-  return {
-    direction = "row", align = "center", gap = 6, padding = { 5, 10 }, radius = 8,
-    cursor = "pointer", hover = { bg = HOVER }, transition = 100,
-    role = "button", label = "Project: " .. name,
-    on_click = function() st.menu = not st.menu redraw() end,
-    { text = name, size = 12.5, hl = st.project and "Normal" or "Dim", text_overflow = "ellipsis", shrink = 1 },
+  return widgets.press({
+    direction = "row", align = "center", gap = 6, padding = { 5, 10 }, radius = style.radius.md,
+    label = "Project: " .. name,
+    { text = name, size = style.size.caption, hl = st.project and "Normal" or "Dim", text_overflow = "ellipsis", shrink = 1 },
     { text = st.menu and "▴" or "▾", size = 10, hl = "Dim" },
     { grow = 1 },
-    st.project and {
-      text = "×", size = 13, hl = "Dim", padding = { 0, 4 }, radius = 5, label = "All projects",
-      hover = { color = "Normal" }, cursor = "pointer",
-      on_click = function() set_project(nil) end,
-    } or nil,
-  }
+    st.project and widgets.press({
+      text = "×", size = style.size.caption, hl = "Dim", padding = { 0, 4 }, radius = style.radius.sm - 1,
+      label = "All projects", hover = { color = "Normal" },
+    }, function() set_project(nil) end) or nil,
+  }, function() st.menu = not st.menu redraw() end)
 end
 
 local function project_menu()
@@ -433,23 +449,22 @@ local function project_menu()
   local menu = {
     -- Under the filter: the padding, the header and the filter above it.
     position = "absolute", left = 10, right = 10, top = 86, z = 30,
-    bg = "Panel", radius = 10, border = 1, border_color = "PromptBorder", padding = 4,
-    shadow = { blur = 18, dy = 6, color = "#00000070" }, direction = "column", max_height = 360,
+    bg = "Panel", radius = style.radius.lg, border = 1, border_color = "PromptBorder", padding = 4,
+    shadow = style.shadow.menu, direction = "column", max_height = 360,
     overflow = "scroll", id = "sidebar-projects",
   }
   local function item(label, count, cwd)
     local on = st.project == cwd
-    return {
-      direction = "row", align = "center", gap = 8, padding = { 6, 10 }, radius = 6,
-      bg = on and "Selection" or nil, hover = not on and { bg = HOVER } or nil, cursor = "pointer",
-      role = "option", selected = on,
-      on_click = function() set_project(cwd) end,
-      { text = label, size = 12.5, hl = on and "Normal" or nil, text_overflow = "ellipsis", grow = 1, shrink = 1 },
-      count and { text = tostring(count), size = 11, hl = "Dim" } or nil,
-    }
+    return widgets.press({
+      direction = "row", align = "center", gap = 8, padding = { 6, 10 }, radius = style.radius.sm,
+      bg = on and "Selection" or nil, selected = on,
+      { text = label, size = style.size.caption, hl = on and "Normal" or nil, text_overflow = "ellipsis", grow = 1, shrink = 1 },
+      count and { text = tostring(count), size = style.size.micro, hl = "Dim" } or nil,
+    }, function() set_project(cwd) end, "option", not on)
   end
   menu[#menu + 1] = item("All projects", #st.all, nil)
   for _, p in ipairs(projects()) do menu[#menu + 1] = item(p.name, p.count, p.cwd) end
+  style.finish(menu)
   -- A click anywhere else closes it.
   return {
     position = "absolute", left = 0, right = 0, top = 0, bottom = 0, z = 29, block_input = true,
@@ -458,40 +473,82 @@ local function project_menu()
   }
 end
 
--- It slides out from under the chat: how far, 0 to 1, and when that was
--- last moved.
-local slide = { at = 0, last = nil }
-M.slide_ms = 200
+-- It slides out from under the chat: how far, 0 to 1, and the slide under
+-- way: where it set off from, where to, when, and the frame before.
+local slide = { at = 0, from = 0, to = 0, started = 0, last = 0 }
+M.slide_ms = 120
+-- The most a frame moves it, in ms of the slide.
+local FRAME_MAX = 17
+-- How far right of the pointer the width handle's edge was when pressed.
+local grab
 
---- How far the sidebar is out, 0 (closed) to 1 (open), moved toward where
---- it is going by the time since last asked; asks for frames until there.
+--- How far the sidebar is out, 0 (closed) to 1 (open), by the clock since
+--- it set off; asks for frames until there. A slow frame (the first lays
+--- out the whole list) moves it no more than a 60 Hz one would, so it is
+--- not over before it is seen. Turned back halfway, it takes half as
+--- long. The first frame is a frame in, so it moves at once.
 local function progress()
   local want = open and 1 or 0
   local now = bone.now()
-  if slide.at == want then
-    slide.last = nil
-    return want
+  if slide.to ~= want then
+    slide.from, slide.to, slide.started, slide.last = slide.at, want, now - 16, now
   end
-  local dt = slide.last and math.min(now - slide.last, 50) or 16
+  if slide.at == want then return want end
+  slide.started = slide.started + math.max(0, now - slide.last - FRAME_MAX)
   slide.last = now
-  local step = dt / M.slide_ms
-  slide.at = want > slide.at and math.min(want, slide.at + step) or math.max(want, slide.at - step)
-  bone.gui.invalidate(16)
+  local span = M.slide_ms * math.abs(slide.to - slide.from)
+  local k = span > 0 and math.min(1, (now - slide.started) / span) or 1
+  slide.at = slide.from + (slide.to - slide.from) * k
+  -- Built again next frame, in step with the display; a 16 ms timer
+  -- beats against it and drops frames.
+  bone.gui.invalidate()
   return slide.at
 end
 
 --- The sidebar as a node and how far out it is (nil, 0 while it is
 --- closed). Its width follows that; the content keeps its own, so it is
---- uncovered rather than squeezed.
-function M.node()
+--- uncovered rather than squeezed. In a window narrower than
+--- `M.overlay_below` (`ctx.width`) it floats over the chat, on a backdrop
+--- that closes it, and the third value is that backdrop; the distance is 0,
+--- as the chat gives up no room to it.
+function M.node(ctx)
   local p = progress()
-  if p <= 0 then return nil, 0 end
+  if p <= 0 then
+    overlaid = false
+    return nil, 0
+  end
   local ease = 1 - (1 - p) ^ 3
   local inner = M.content()
   inner.width = M.width
-  return {
-    width = math.floor(M.width * ease), overflow = "hidden", direction = "row", inner,
-  }, ease
+  overlaid = ctx ~= nil and (ctx.width or math.huge) < M.overlay_below
+  local under = overlaid and 0 or math.floor(M.under * ease)
+  -- Its right edge is a handle: drag it to set the width (kept between runs).
+  -- The drag is in the window, which a panel on the left may start before
+  -- the sidebar; the edge stays as far from the pointer as where it was
+  -- grabbed.
+  local handle = {
+    position = "absolute", top = 0, bottom = 0, right = under, width = 6, z = 1, cursor = "col-resize",
+    on_press = function(pos) grab = 6 - pos.x end,
+    on_drag = function(pos)
+      local left = (bone.gui.rect(ID) or { x = 0 }).x
+      local w = math.floor(pos.x - left + (grab or 3))
+      w = math.max(M.min_width, math.min(M.max_width, w))
+      if w ~= M.width then M.width = w redraw() end
+    end,
+    on_release = function() bone.state.save("sidebar-width", M.width) end,
+  }
+  local drawer = {
+    width = math.floor(M.width * ease) + under, overflow = "hidden", direction = "row", bg = panel_bg(), inner, handle,
+  }
+  if not overlaid then return style.finish(drawer), ease end
+  drawer.position, drawer.left, drawer.top, drawer.bottom, drawer.z = "absolute", 0, 0, 0, 8
+  drawer.bg = see_through() and nil or "Panel"
+  drawer.shadow = style.shadow.card
+  local backdrop = style.finish({
+    position = "absolute", left = 0, right = 0, top = 0, bottom = 0, z = 7,
+    bg = style.scrim.dialog, opacity = ease, on_click = close,
+  })
+  return style.finish(drawer), 0, backdrop
 end
 
 --- The sidebar's own content.
@@ -503,26 +560,21 @@ function M.content()
     direction = "column", padding = { 12, 10, 0, 10 }, gap = 8,
     -- The page switch, and a new chat beside it.
     { direction = "row", align = "center", gap = 8, padding = { 4, 2, 2, 2 },
-      { direction = "row", gap = 2, padding = 2, radius = 8, bg = "Normal",
-        segment("Chats", "chats"),
-        segment("Processes" .. (#jobs > 0 and ("  " .. #jobs) or ""), "running") },
+      widgets.segmented({ "Chats", "Processes" .. (#jobs > 0 and ("  " .. #jobs) or "") },
+        st.page == "chats" and 1 or 2, switch_page, { bg = "Normal" }),
       { grow = 1 },
-      { width = 28, height = 28, radius = 7, direction = "row", justify = "center", align = "center",
-        cursor = "pointer", hover = { bg = "Selection" }, transition = 100,
-        tooltip = "New chat (ctrl+n)", label = "New chat",
-        on_click = function()
-          bone.gui.focus(nil)
-          bone.action("new_session")
-        end,
-        { text = "+", size = 17, hl = "Normal" } },
+      widgets.icon_button("+", "New chat (ctrl+n)", function()
+        bone.gui.focus(nil)
+        bone.action("new_session")
+      end, { box = 28, size = style.size.lead, hl = "Normal", radius = style.radius.md }),
     },
   }
   if st.page == "chats" then
     out[#out + 1] = project_filter()
-    out[#out + 1] = {
-      id = SEARCH, bg = "Normal", radius = 8, padding = { 6, 10 }, margin = { -4, 0, 0, 0 },
+    out[#out + 1] = style.finish({
+      id = SEARCH, bg = "Normal", radius = style.radius.md, padding = { 6, 10 }, margin = { -4, 0, 0, 0 },
       border = 1, border_color = "PromptBorder",
-      size = 13, hl = "Normal", on_key = on_key,
+      size = style.size.caption, hl = "Normal", on_key = on_key,
       text_input = {
         placeholder = "Search", value = st.query,
         on_change = function(text)
@@ -532,7 +584,7 @@ function M.content()
           redraw()
         end,
       },
-    }
+    })
   end
   nodes.append(out, bone.gui.slots.nodes("sidebar.top"))
   out[#out + 1] = {
@@ -554,12 +606,23 @@ function M.open()
   end
   open, st.loading, st.sel = true, true, 1
   compute()
+  -- Start navigation from the conversation already on screen. Up/down then
+  -- previews the adjacent conversation instead of jumping from the top.
+  local current = (bone.chat.session() or {}).session_id
+  if current then
+    for i, chat in ipairs(st.items) do
+      if chat.session_id == current then st.sel = i break end
+    end
+  end
   take_keys()
   refresh()
   chats.fetch_shells(function() compute() redraw() end)
   chats.fetch_active(function() compute() redraw() end)
   redraw()
 end
+
+--- Close the sidebar.
+M.close = close
 
 --- Whether it is open, and whether it has the keyboard.
 function M.is_open() return open end

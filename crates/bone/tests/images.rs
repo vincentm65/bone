@@ -229,7 +229,10 @@ impl Env {
             .unwrap();
         assert_eq!(STANDARD.decode(data.data).unwrap(), self.png);
         let messages = client
-            .request::<SessionMessages>(SessionRef { session_id })
+            .request::<SessionMessages>(SessionMessagesParams {
+                session_id,
+                tail: None,
+            })
             .await
             .unwrap();
         (Arc::new(client), messages)
@@ -257,8 +260,9 @@ async fn image_only_send_persists_and_survives_restart() {
     let id = env.id().await;
     let stored = env
         .client
-        .request::<SessionMessages>(SessionRef {
+        .request::<SessionMessages>(SessionMessagesParams {
             session_id: id.clone(),
+            tail: None,
         })
         .await
         .unwrap();
@@ -327,8 +331,9 @@ async fn queued_image_edit_reaches_next_model_call() {
     let id = env.id().await;
     let queued = env
         .client
-        .request::<SessionMessages>(SessionRef {
+        .request::<SessionMessages>(SessionMessagesParams {
             session_id: id.clone(),
+            tail: None,
         })
         .await
         .unwrap();
@@ -340,7 +345,10 @@ async fn queued_image_edit_reaches_next_model_call() {
     tui.settle(Duration::from_millis(30)).await;
     let queued = env
         .client
-        .request::<SessionMessages>(SessionRef { session_id: id })
+        .request::<SessionMessages>(SessionMessagesParams {
+            session_id: id,
+            tail: None,
+        })
         .await
         .unwrap();
     assert_eq!(queued.queue[0].text, "check screenshot changed");
@@ -398,8 +406,9 @@ async fn compaction_summarizer_receives_images_and_retains_original_transcript()
     assert!(result.await.unwrap().is_ok());
     let stored = env
         .client
-        .request::<SessionMessages>(SessionRef {
+        .request::<SessionMessages>(SessionMessagesParams {
             session_id: env.id().await,
+            tail: None,
         })
         .await
         .unwrap();
@@ -526,7 +535,10 @@ end)
     assert!(queued["id"].is_number());
     let stored = env
         .client
-        .request::<SessionMessages>(SessionRef { session_id })
+        .request::<SessionMessages>(SessionMessagesParams {
+            session_id,
+            tail: None,
+        })
         .await
         .unwrap();
     assert!(stored.queue[0].text.is_empty());
@@ -569,8 +581,9 @@ async fn queued_image_capability_failure_is_visible_paused_and_recoverable() {
     .unwrap();
     let state = env
         .client
-        .request::<SessionMessages>(SessionRef {
+        .request::<SessionMessages>(SessionMessagesParams {
             session_id: id.clone(),
+            tail: None,
         })
         .await
         .unwrap();
@@ -641,8 +654,9 @@ async fn read_file_images_reach_provider_and_survive_restart_without_source_file
         std::fs::remove_file(env.work.path().join(filename)).unwrap();
         let stored = env
             .client
-            .request::<SessionMessages>(SessionRef {
+            .request::<SessionMessages>(SessionMessagesParams {
                 session_id: id.clone(),
+                tail: None,
             })
             .await
             .unwrap();
@@ -681,8 +695,9 @@ async fn read_file_images_reach_provider_and_survive_restart_without_source_file
         tokio::time::timeout(WAIT, async {
             loop {
                 let state = client
-                    .request::<SessionMessages>(SessionRef {
+                    .request::<SessionMessages>(SessionMessagesParams {
                         session_id: id.clone(),
+                        tail: None,
                     })
                     .await
                     .unwrap();
@@ -817,8 +832,9 @@ async fn read_file_image_errors_are_tool_errors_and_text_only_models_keep_runnin
         .unwrap();
         let stored = env
             .client
-            .request::<SessionMessages>(SessionRef {
+            .request::<SessionMessages>(SessionMessagesParams {
                 session_id: env.id().await,
+                tail: None,
             })
             .await
             .unwrap();

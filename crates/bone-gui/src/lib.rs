@@ -13,7 +13,6 @@
 
 mod canvas;
 mod chats;
-mod field;
 mod flex;
 mod headless;
 mod images;
@@ -43,8 +42,8 @@ use bone_proto::Method;
 use bone_proto::methods::{
     AskList, AskRequested, AskRequestedParams, AskResolved, AskRespond, AskRespondParams, Empty,
     ProcessChanged, QueueAdd, QueueAddParams, QueueMode, SessionCreate, SessionCreateParams,
-    SessionCreated, SessionDeleted, SessionList, SessionMessages, SessionRef, SessionUpdated,
-    SettingsChanged, SettingsGet,
+    SessionCreated, SessionDeleted, SessionList, SessionMessages, SessionMessagesParams,
+    SessionUpdated, SettingsChanged, SettingsGet,
 };
 use bone_proto::types::{ImageAttachment, SessionInfo};
 use bone_ui::chat::RunningTurn;
@@ -106,8 +105,11 @@ pub struct Gui {
     repaint: Arc<OnceLock<eframe::egui::Context>>,
     opts: GuiOptions,
     pub chats: Vec<ChatBuffer>,
-    /// The chat on screen.
+    /// The chat on screen, and since when.
     pub current: usize,
+    shown_at: Instant,
+    /// Chats whose earlier turns are being loaded.
+    earlier: std::collections::HashSet<usize>,
     /// The core's sessions, newest first, without owned (sub-agent) ones.
     pub sessions: Vec<SessionInfo>,
     /// Questions waiting for an answer, by id (oldest first).
@@ -199,6 +201,8 @@ impl Gui {
             images: Vec::new(),
             image_reads: 0,
             draft_epoch: 0,
+            shown_at: Instant::now(),
+            earlier: Default::default(),
             processes: Default::default(),
             prompt: Default::default(),
             library_prev: None,
@@ -350,19 +354,21 @@ impl Gui {
         }
     }
 
+    /// Load chat `buf` again: as much of it as it had.
     fn load(&self, buf: usize, session_id: String) {
-        self.request::<SessionMessages>(SessionRef { session_id }, move |gui, r| {
-            let Some(c) = gui.chats.get_mut(buf) else {
-                return;
-            };
-            match r {
-                Ok(r) => {
-                    c.load(r.info, &r.messages, r.active_turn);
-                    c.set_queue(r.queue, r.queue_paused);
+        let partial = self.chats.get(buf).is_some_and(|c| c.omitted_turns > 0);
+        let tail = partial.then_some(chats::TAIL);
+        self.request::<SessionMessages>(
+            SessionMessagesParams { session_id, tail },
+            move |gui, r| match r {
+                Ok(r) => gui.apply_messages(buf, r),
+                Err(e) => {
+                    if let Some(c) = gui.chats.get_mut(buf) {
+                        c.notice(format!("cannot load session: {e}"), true);
+                    }
                 }
-                Err(e) => c.notice(format!("cannot load session: {e}"), true),
-            }
-        });
+            },
+        );
     }
 
     fn reload(&self, session_id: &str) {
@@ -572,8 +578,8 @@ impl Gui {
     }
 
     /// The window gained the focus: look for a saved edit to the Lua
-    /// config. Checking on focus, not on a timer, so an idle window does
-    /// not walk the file tree. The first focus only records the hash.
+    /// config at once (the window also watches it, `watch_config`). The
+    /// first focus only records the hash.
     pub(crate) fn note_focus(&mut self, ctx: &eframe::egui::Context) {
         let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
         let gained = focused && !self.was_focused;
@@ -598,19 +604,64 @@ impl Gui {
                 .unwrap_or(0);
             let _ = tx.send(Msg::Apply(Box::new(move |gui: &mut Gui| {
                 gui.config_checking = false;
-                match gui.config_hash {
-                    Some(prev) if prev != hash => {
-                        gui.config_hash = Some(hash);
-                        gui.reload_lua();
-                    }
-                    None => gui.config_hash = Some(hash),
-                    _ => {}
-                }
+                gui.config_seen(hash);
             })));
             wake(&repaint);
         });
     }
+
+    /// The Lua sources hash `hash` now: reload if they changed since last
+    /// seen and `bone.o.autoreload` is on. With it off the change is only
+    /// noted, so turning it on again compares from then, as in the TUI.
+    fn config_seen(&mut self, hash: u64) {
+        match self.config_hash {
+            Some(prev) if prev != hash => {
+                self.config_hash = Some(hash);
+                if self.lua.options.autoreload {
+                    self.reload_lua();
+                }
+            }
+            None => self.config_hash = Some(hash),
+            _ => {}
+        }
+    }
+
+    /// Watch the Lua sources while the window is open, so a saved edit
+    /// reloads without coming back to the window (the window's own loop;
+    /// a headless GUI checks on focus only).
+    pub(crate) fn watch_config(&self) {
+        let Some(dir) = self.opts.config_dir.clone() else {
+            return;
+        };
+        let (tx, repaint) = (self.tx.clone(), self.repaint.clone());
+        self.rt.spawn(async move {
+            let mut last = None;
+            let mut tick = tokio::time::interval(CONFIG_POLL);
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            loop {
+                tick.tick().await;
+                let dir = dir.clone();
+                let Ok(hash) =
+                    tokio::task::spawn_blocking(move || crate::lua::lua_sources(&dir)).await
+                else {
+                    continue;
+                };
+                if last == Some(hash) {
+                    continue;
+                }
+                last = Some(hash);
+                let seen = Box::new(move |gui: &mut Gui| gui.config_seen(hash));
+                if tx.send(Msg::Apply(seen)).is_err() {
+                    return;
+                }
+                wake(&repaint);
+            }
+        });
+    }
 }
+
+/// How often the window looks for saved edits to the Lua sources.
+const CONFIG_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
 fn wake(repaint: &OnceLock<eframe::egui::Context>) {
     if let Some(ctx) = repaint.get() {

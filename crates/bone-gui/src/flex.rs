@@ -117,7 +117,7 @@ fn measure(n: &Node, avail: Option<f32>, definite: bool, m: &dyn Metrics) -> Siz
         Kind::Image(i) => m.image(i, content_avail),
         Kind::TextInput(t) => m.text_input(t, content_avail),
         Kind::List(l) if l.fit => Size { w: 0.0, h: l.total },
-        Kind::List(_) | Kind::Field(_) | Kind::Canvas(_) => Size::default(),
+        Kind::List(_) | Kind::Canvas(_) => Size::default(),
         Kind::Box => {
             let sizes: Vec<(Size, Edges)> = n
                 .children
@@ -157,11 +157,33 @@ fn measure(n: &Node, avail: Option<f32>, definite: bool, m: &dyn Metrics) -> Siz
                         h: height + s.cross_gap() * (lines as f32 - 1.0).max(0.0),
                     }
                 }
-                Direction::Row => Size {
-                    w: sizes.iter().map(|x| outer(x).0).sum::<f32>()
-                        + gap * sizes.len().saturating_sub(1) as f32,
-                    h: sizes.iter().map(|x| outer(x).1).fold(0.0, f32::max),
-                },
+                Direction::Row => {
+                    let width = sizes.iter().map(|x| outer(x).0).sum::<f32>()
+                        + gap * sizes.len().saturating_sub(1) as f32;
+                    let height = if let Some(room) = content_avail {
+                        // Measure at the same widths placement will use, not
+                        // at the full row width offered to each child above.
+                        let items: Vec<_> = n
+                            .children
+                            .iter()
+                            .filter(|c| !c.style.absolute)
+                            .zip(&sizes)
+                            .map(|(c, (z, mg))| (c, z.w, mg.horizontal()))
+                            .collect();
+                        let widths = flex_sizes(&items, room, gap, true);
+                        items
+                            .iter()
+                            .zip(widths)
+                            .map(|((c, _, _), w)| natural_at(c, w, m).h + c.style.margin.vertical())
+                            .fold(0.0, f32::max)
+                    } else {
+                        sizes.iter().map(|x| outer(x).1).fold(0.0, f32::max)
+                    };
+                    Size {
+                        w: width,
+                        h: height,
+                    }
+                }
                 Direction::Column => Size {
                     w: sizes.iter().map(|x| outer(x).0).fold(0.0, f32::max),
                     h: sizes.iter().map(|x| outer(x).1).sum::<f32>()
@@ -185,6 +207,39 @@ fn measure(n: &Node, avail: Option<f32>, definite: bool, m: &dyn Metrics) -> Siz
         w: clamp(w, s.min_width, s.max_width, base_w),
         h: clamp(h, s.min_height, s.max_height, 0.0),
     }
+}
+
+/// Share the main-axis room identically during measurement and placement.
+/// Each item is its node, base size and total main-axis margin.
+fn flex_sizes(items: &[(&Node, f32, f32)], room: f32, gap: f32, row: bool) -> Vec<f32> {
+    let used: f32 = items.iter().map(|(_, size, margin)| size + margin).sum();
+    let free = room - used - gap * items.len().saturating_sub(1) as f32;
+    let grow: f32 = items.iter().map(|(n, _, _)| n.style.grow).sum();
+    let weight = |(n, size, _): &(&Node, f32, f32)| {
+        let cs = &n.style;
+        let auto = if row { cs.width } else { cs.height } == Dim::Auto;
+        cs.shrink.unwrap_or(if auto { 1.0 } else { 0.0 }) * size
+    };
+    let shrink: f32 = items.iter().map(weight).sum();
+    items
+        .iter()
+        .map(|item @ (n, size, _)| {
+            let cs = &n.style;
+            let delta = if free > 0.0 && grow > 0.0 {
+                free * cs.grow / grow
+            } else if free < 0.0 && shrink > 0.0 {
+                free * weight(item) / shrink
+            } else {
+                0.0
+            };
+            let (min, max) = if row {
+                (cs.min_width, cs.max_width)
+            } else {
+                (cs.min_height, cs.max_height)
+            };
+            clamp(size + delta, min, max, room)
+        })
+        .collect()
 }
 
 /// Lay `n` out in the border box `rect`.
@@ -321,33 +376,16 @@ pub fn place<'a>(n: &'a Node, rect: Rect, m: &dyn Metrics) -> Placed<'a> {
         let slice = &mut items[line.clone()];
         let count = slice.len();
         let gaps = main_gap * count.saturating_sub(1) as f32;
-        let used: f32 = slice.iter().map(|i| main_of(i) + margin_main(i)).sum();
-        let free = room - used - gaps;
-        let grow: f32 = slice.iter().map(|i| i.node.style.grow).sum();
-        let weight = |i: &Item| {
-            let cs = &i.node.style;
-            let auto = if row { cs.width } else { cs.height } == Dim::Auto;
-            cs.shrink.unwrap_or(if auto { 1.0 } else { 0.0 }) * main_of(i)
-        };
-        let shrink: f32 = slice.iter().map(weight).sum();
-        let deltas: Vec<f32> = slice
+        let bases: Vec<_> = slice
             .iter()
-            .map(|i| {
-                if free > 0.0 && grow > 0.0 {
-                    free * i.node.style.grow / grow
-                } else if free < 0.0 && shrink > 0.0 {
-                    free * weight(i) / shrink
-                } else {
-                    0.0
-                }
-            })
+            .map(|i| (i.node, main_of(i), margin_main(i)))
             .collect();
-        for (i, d) in slice.iter_mut().zip(deltas) {
-            let cs = &i.node.style;
+        let sizes = flex_sizes(&bases, room, main_gap, row);
+        for (i, size) in slice.iter_mut().zip(sizes) {
             if row {
-                i.w = clamp(i.w + d, cs.min_width, cs.max_width, inner.w);
+                i.w = size;
             } else {
-                i.h = clamp(i.h + d, cs.min_height, cs.max_height, inner.h);
+                i.h = size;
             }
         }
         // A row's heights are known only now that its widths are final.
@@ -734,6 +772,27 @@ mod tests {
         // 100 wide: the 40 stays, the text gets 60 and wraps to two lines.
         assert_eq!(p.children[1].rect.w, 40.0);
         assert_eq!(p.children[0].rect.w, 60.0);
+    }
+
+    #[test]
+    fn a_rows_natural_height_uses_its_flexed_widths() {
+        for chars in 1..=18 {
+            let n = tree(&format!(
+                "{{ {{ direction = 'row', gap = 10, padding = 5, align = 'end', {{ width = 30, height = 20 }}, {{ text = '{}', grow = 1 }} }} }}",
+                "a".repeat(chars)
+            ));
+            // 110 - 10 padding - 30 button - 10 gap = 60 for text.
+            let height = 10.0 + ((chars as f32 / 6.0).ceil() * 20.0);
+            let size = natural_at(&n, 110.0, &Fixed);
+            assert_eq!(size.h, height, "{chars} characters");
+            let p = lay(&n, 110.0, size.h);
+            let row = &p.children[0];
+            let text = &row.children[1];
+            assert_eq!(text.rect.w, 60.0);
+            assert_eq!(row.rect.h, height);
+            assert!(text.rect.y >= row.inner.y);
+            assert!(text.rect.y + text.rect.h <= row.inner.y + row.inner.h);
+        }
     }
 
     #[test]

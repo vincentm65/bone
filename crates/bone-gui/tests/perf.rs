@@ -17,7 +17,7 @@ async fn gui(config: &Path, work: &Path) -> Headless {
         r#"bone.config.providers.fake = { base_url = "http://127.0.0.1:9", model = "fake" }"#,
     )
     .unwrap();
-    std::fs::write(config.join("gui-library"), "desktop\n").unwrap();
+    std::fs::write(config.join("gui-library"), "standard\n").unwrap();
     let loaded = scripting::load_with(config, &|_| None).unwrap();
     let server = Server::new(std::sync::Arc::new(Core::from_loaded(loaded)));
     let opts = GuiOptions {
@@ -75,8 +75,7 @@ fn shell_out() -> String {
         .join("\n")
 }
 
-fn fill(g: &mut Headless) {
-    let chat = &mut g.gui.chats[0];
+fn fill_chat(chat: &mut bone_gui::ChatBuffer) {
     for n in 0..24 {
         let turn = (n + 1) as u64;
         chat.turn_started(turn, &format!("please look at item {n} and explain it"));
@@ -116,6 +115,10 @@ fn fill(g: &mut Headless) {
             outcome: TurnOutcome::Completed,
         });
     }
+}
+
+fn fill(g: &mut Headless) {
+    fill_chat(&mut g.gui.chats[0]);
     g.gui.view.invalidate();
 }
 
@@ -167,19 +170,24 @@ async fn desktop_frames() {
 
     bench(&mut g, "welcome", 3, 20, |_| {});
 
-    // A real animation tick: the field redraws at its fps, so wait one out.
-    // Back-to-back frames above reuse the mesh, which is the other case.
-    bench(&mut g, "welcome-tick", 1, 8, |_| {
-        std::thread::sleep(Duration::from_millis(55));
-    });
-
-    // Composing the first message, while the field is still up.
+    // Composing the first message, with the welcome still up.
     bench(&mut g, "welcome-type", 1, 20, |g| {
         g.text("a");
     });
     g.gui.draft.clear();
 
     fill(&mut g);
+    // A second populated buffer makes the switch benchmark exercise the
+    // same visible-row work as a real history switch.
+    g.gui.chats.push(bone_gui::ChatBuffer::new(None));
+    fill_chat(&mut g.gui.chats[1]);
+    g.gui.view.invalidate();
+    for _ in 0..4 {
+        g.frame();
+    }
+    bench(&mut g, "chat-switch", 2, 20, |g| {
+        g.gui.show_chat(if g.gui.current == 0 { 1 } else { 0 });
+    });
     // Land on the latest items, then sit.
     for _ in 0..6 {
         g.frame();

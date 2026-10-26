@@ -29,9 +29,19 @@
 | `bone-ui` | what both frontends share and is not drawing: chat items, composer, keymaps, options, popups, panels, the TUI's layout solver (in character cells), Markdown, themes, and the Lua UI API (`bone.ui`, `runtime/ui/`) behind the `Host` trait |
 | `bone-tui` | the terminal frontend: rendering with ratatui, terminal keys and mouse, terminal views and jobs, `tui.lua` and `bone.tui` |
 | `bone-gui` | the desktop frontend (`bone --gui`, the `gui` feature): an egui/eframe window that draws a tree of nodes from Lua (`node.rs`, `flex.rs`, `nodeview/`: `mod.rs`, `paint.rs`, `list.rs`, `focus.rs`, `ops.rs`), native text editing, `gui.lua` and `bone.gui`; a headless mode for tests |
-| `bone-media` | bounded image decoding and PNG normalization, shared by core and TUI |
+| `bone-media` | bounded image decoding and PNG normalization, shared by the core and both frontends |
 | `bone-lua` | shared Lua setup: `require` paths, plugins, JSON, helpers, the built-in runtime files |
 | `bone` | the command line |
+
+## Startup
+
+`bone` and `bone --gui` both call `attach`. With no `--connect`, and no private core override, they use the default socket (`$XDG_RUNTIME_DIR/bone3/bone.sock`, falling back to the temporary directory's `bone3-$USER/bone.sock`, or `\\.\pipe\bone3-USERNAME` on Windows): connect if a server is already listening, otherwise bind it and host the core in this process. That hosted socket lives only as long as the UI. The TUI serves it until the TUI exits; the GUI's task is aborted when the window closes. Dropping the listener removes the socket. Another frontend can attach for that lifetime.
+
+An explicit `--connect [PATH]` (the default path when `PATH` is omitted) never starts a core. If the connect fails, that is an error. `core.lua` is loaded only after the attach-or-host choice, so a process that attaches does not apply its own core config.
+
+A nonempty `BONE_CONFIG_DIR`, `BONE_DATA_DIR`, `BONE_MODEL`, `BONE_BASE_URL`, `BONE_API_KEY`, `BONE_REASONING_EFFORT`, `BONE_SYSTEM_PROMPT`, `BONE_APPROVAL` or `BONE_DEBUG_HTTP` skips the default socket. The core stays in-process and is not served. Those variables do not turn an explicit `--connect` into a host.
+
+`bone --headless --listen [PATH]` is a different lifetime: it binds and serves until SIGINT or SIGTERM, with no UI. `--listen` without `--headless` is an error. `--headless` alone serves stdin/stdout.
 
 ## Rules
 
@@ -40,11 +50,15 @@
 - **Lua states are never shared.** Core Lua runs on its own thread (`bone-lua`); tools, hooks and the system prompt reach it through a job channel, so a slow Lua tool only blocks other Lua work. Each frontend's Lua runs on its UI thread. Each API call gets the live UI state through a scoped function for the duration of the call, so Lua can't hold dangling references and nested calls are safe.
 - **Rust draws, Lua decides.** The TUI's Rust code holds the session as data (items: user, reasoning, assistant, tool, notice), wraps text, caches rendered lines per item, scrolls and paints. Every look-and-feel decision (spacing, prefixes, colors, Markdown, tool views, regions around the chat, statusline) is a Lua function, and an item is only re-rendered when it, the width, or the views change. Without Lua, Rust draws plain text.
 - **One UI API, two frontends.** `bone_ui::lua` implements the shared ops (options, events, commands, keymaps, themes, views, layout, windows, panels, input, plugins) once, against the `Host` trait that `bone_tui::App` and `bone_gui::Gui` implement: accessors for their state, and services such as callbacks, requests and the clipboard. Each frontend adds its own ops (`bone.tui`, `bone.gui`) and raises a clear error for ones it lacks. The two frontends share behavior, not a view: the TUI lays out and draws in character cells (`bone.ui.layout`, regions, `lines`), and the GUI draws a CSS-like tree of nodes Lua returns from `bone.gui.view` (flex boxes in pixels, text, a native prompt field, scrolling lists). A plugin's `ui.lua` (commands, keys, options, events, data, `bone.ui.popup`) runs in both, and its `tui.lua` or `gui.lua` only in that frontend.
-- **Defaults are Lua.** Keys, views, the statusline, the divider and colorschemes are files in `runtime/`, compiled into the binary. `~/.bone/runtime/<same path>` replaces any of them.
+- **Defaults are Lua.** Keys, views, the statusline, the divider and colorschemes are files in `runtime/`, compiled into the binary. A frontend tries its active library first (`~/.bone/libraries/<name>/`, from `/tui` or `/gui`), then `~/.bone/runtime/<same path>`, then the built-in file. `bone.builtin` always reads the built-in copy. The core does not use a UI library; only a runtime override replaces its files.
 
 ## UI layout and providers
 
-Both frontends can show multiple chats in a Lua-defined row/column layout. `chat`, `prompt`, `divider` and `statusline` refer to the current chat; suffixes such as `chat:2`, `prompt:2` and `statusline:2` select a chat by its zero-based number (or session ID). Each chat keeps its own scroll position and draft, including attachments; prompt and statusline callbacks receive that chat's context. Popups overlay the layout, while docked Lua panels or `panel:<id>` leaves can take focus. The tray renders core-managed shell processes from `process/changed` and `process/read`, sending dimensions with `process/resize`. The optional **term** plugin's `/term` panels instead use local TUI `bone.job` pseudo-terminals (currently Unix only), so their programs run on the TUI's machine even with a remote core.
+The TUI places chats in a character-cell layout (`bone.ui.layout`). Leaves named `chat`, `prompt`, `divider` and `statusline` are the current chat; `chat:2`, `prompt:2` and `statusline:2` select another by its zero-based number or session ID. Each chat keeps its own scroll position and draft, including attachments; prompt and statusline callbacks receive that chat's context. Popups overlay the layout. A docked Lua panel, or a `panel:<id>` leaf, can take focus.
+
+The GUI does not use those leaves. `bone.gui.view` returns a tree of nodes (flex boxes in pixels). The standard window is a sidebar and one chat column (the chat list, composer, tray and status bar); Lua can place more than one column, and each chat still has its own scroll and draft. Panels dock as nodes (`node = fn` on `bone.ui.panel`), not as cell leaves. Popups are nodes, or monospace lines when a window was written with `lines`.
+
+The tray, in both frontends, draws core-managed shell processes from `process/changed` and `process/read`, and sends their size with `process/resize`. Those programs run where the core runs. `/term` is a local pseudo-terminal instead (`bone.job` with `pty`, Unix only), so the program runs on the frontend's machine even when the core is remote. The GUI ships `/term`. On the TUI it comes from the optional **term** plugin. A plugin command of the same name replaces the GUI's.
 
 Built-in providers support Chat Completions (`completions`), OpenAI Responses (`responses`) and Anthropic Messages (`anthropic`); Lua can register other provider types. An explicit `api` overrides automatic selection: `api.openai.com` uses Responses, `api.anthropic.com` uses Anthropic, and a `claude-` model with no URL uses Anthropic's default URL; other endpoints use Chat Completions. A session saves its provider/model selection, initially locked on its first model call. `settings/set` with `session_id` can update that session's selection without moving other sessions; `model/list` with the same ID reports it. Request hooks may override the provider/model for one call without changing the saved selection.
 

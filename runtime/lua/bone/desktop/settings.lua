@@ -7,8 +7,9 @@
 -- gui.<name>. Opened in place of bone.config, so every way in comes here.
 local M = {}
 
-local card = require("bone.desktop.card")
-local SIZE, SMALL = 14, 12
+local style = require("bone.nodes.style")
+local widgets = require("bone.nodes.widgets")
+local SIZE, SMALL = style.size.body, style.size.small
 
 local function value_text(row, st)
   local function onoff(on) return on and { "On", "ToolDone" } or { "Off", "Dim" } end
@@ -44,12 +45,12 @@ local function value_text(row, st)
 end
 
 local function hints(st, t)
-  if st.ask then return "y  yes     n  no" end
-  if st.edit then return "enter  save     esc  cancel" end
-  if t.page or st.prov then return "↑↓  move     enter  change     r  reset     esc  back" end
-  if t.name == "providers" then return "↑↓  move     enter  use     e  edit     a  add     d  delete     tab  section     esc  close" end
-  if t.name == "plugins" then return "↑↓  move     enter  settings     space  on/off     tab  section     esc  close" end
-  return "↑↓  move     enter  change     r  reset     tab  section     esc  close"
+  if st.ask then return "y yes · n no" end
+  if st.edit then return "enter save · esc cancel" end
+  if t.page or st.prov then return "↑↓ move · enter change · r reset · esc back" end
+  if t.name == "providers" then return "↑↓ move · enter use · e edit · a add · d delete · tab section · esc close" end
+  if t.name == "plugins" then return "↑↓ move · enter settings · space on/off · tab section · esc close" end
+  return "↑↓ move · enter change · r reset · tab section · esc close"
 end
 
 function M.open(want)
@@ -89,20 +90,15 @@ function M.open(want)
     elseif st.prov then
       where = where .. "  ›  Providers  ›  " .. (st.prov.new and "New provider" or st.prov.name)
     end
-    items[#items + 1] = line({ { text = where, hl = "Normal", bold = true } }, 20, { 0, 4 })
-    local tabs = {}
-    for i = 1, 3 do
-      local tab = st.tabs[i]
-      if i > 1 then tabs[#tabs + 1] = { text = "        ", hl = "Dim" } end
-      tabs[#tabs + 1] = { text = tab.title, hl = i == section and "Normal" or "Dim", bold = i == section }
-    end
-    local bar = line(tabs, SIZE, { 0, 10 })
-    bar.padding = { 2, 10 }
-    if not st.prov and st.tab <= 3 then
-      bar.cursor = "pointer"
-      bar.on_click = function() page.switch_tab(1) bone.ui.update(id, {}) end
-    end
-    items[#items + 1] = bar
+    items[#items + 1] = line({ { text = where, hl = "Normal", bold = true } }, style.size.title, { 0, 4 })
+    local names = {}
+    for i = 1, 3 do names[i] = st.tabs[i].title end
+    -- Sections change from the top level only, not from inside a page.
+    items[#items + 1] = widgets.tabs(names, section, function(i)
+      if st.prov or st.tab > 3 then return end
+      page.switch_tab(i - st.tab)
+      bone.ui.update(id, {})
+    end, { padding = { 2, 6 } })
 
     local list = page.rows()
     st.sel = math.max(1, math.min(st.sel, math.max(#list, 1)))
@@ -115,21 +111,16 @@ function M.open(want)
     local selected
     for i, r in ipairs(list) do
       local on = i == st.sel
-      local row = {
-        direction = "column", bg = on and "Selection" or nil, radius = 10, padding = { 8, 12 },
-        margin = { 1, 0, 1, 0 }, cursor = "pointer", on_click = on_click(i),
-        role = "option", selected = on,
-        { text = r.label, hl = "Normal", bold = on, size = SIZE },
-      }
+      local row = { { text = r.label, hl = "Normal", bold = on, size = SIZE } }
       local function add(text, hl, size, gap)
         row[#row + 1] = { text = text, hl = hl, size = size, margin = { gap, 0, 0, 0 } }
       end
       if on and st.edit then
         local typed = r.type == "secret" and string.rep("•", #st.edit) or st.edit
-        add(typed .. "|", "Accent", SIZE - 1, 3)
+        add(typed .. "|", "Accent", style.size.caption, 3)
       else
         local v = value_text(r, st)
-        if v then add(v[1], v[2], SIZE - 1, 3) end
+        if v then add(v[1], v[2], style.size.caption, 3) end
         if r.kind == "option" then
           local saved = bone.settings.get(r.path)
           if saved ~= nil and saved ~= r.value then
@@ -138,7 +129,7 @@ function M.open(want)
         end
       end
       if on and r.desc and r.desc ~= "" then add(r.desc, "Dim", SMALL, 4) end
-      items[#items + 1] = row
+      items[#items + 1] = widgets.entry(on, row, on_click(i))
       if on then selected = #items end
     end
 
@@ -148,13 +139,12 @@ function M.open(want)
     elseif st.note then
       note = { st.note[1], st.note[2] == "ErrorMsg" and "ErrorMsg" or "Dim" }
     end
-    if note then items[#items + 1] = line({ note }, SIZE - 1, { 10, 0 }) end
-    items[#items + 1] = line({ { hints(st, t), "Dim" } }, SMALL, { note and 2 or 10, 0 })
-    return require("bone.nodes.popups").list("settings:" .. id, items, selected)
+    if note then items[#items + 1] = line({ note }, style.size.caption, { 10, 0 }) end
+    return widgets.list("settings:" .. id, items, selected,
+      { footer = widgets.hints(hints(st, t), { note and 2 or 10, 0 }) })
   end
 
-  local w, h = card.size()
-  id = bone.ui.popup({ node = node, on_key = page.on_key, width = w, height = h })
+  id = bone.ui.popup({ node = node, on_key = page.on_key })
   paste_event = bone.on("paste", function(ev)
     if ev.context == "popup" then page.paste(ev.text) end
   end)

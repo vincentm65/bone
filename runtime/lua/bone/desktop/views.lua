@@ -10,6 +10,7 @@ local M = {}
 local md = require("bone.desktop.markdown")
 local nodes = require("bone.nodes")
 local timing = require("bone.timing")
+local style = require("bone.nodes.style")
 
 local function trim(s)
   return ((s or ""):gsub("^%s+", ""):gsub("%s+$", ""))
@@ -37,9 +38,12 @@ local function box(children, o)
   for _, c in ipairs(children) do node[#node + 1] = c end
   if not (o.bg or o.border) then
     node.margin = margin
-    return node
+    return style.finish(node)
   end
-  return { direction = "row", justify = o.right and "end" or "start", align = "start", margin = margin, node }
+  return style.finish({
+    direction = "row", justify = o.right and "end" or "start", align = "start", margin = margin,
+    style.finish(node),
+  })
 end
 
 -- The turn's footer under its last item.
@@ -75,7 +79,7 @@ function M.user(item, ctx)
   return {
     node = box(out, {
       size = md.text_size, right = true, max_width = "78%",
-      bg = "UserBubble", radius = 16, pad = { 10, 14 }, margin = { 16, 6 },
+      bg = "UserBubble", radius = style.radius.round, pad = { 10, 14 }, margin = { 16, 6 },
     }),
     lines = plain(item.text, "UserMessage"),
   }
@@ -91,8 +95,13 @@ function M.assistant(item, ctx)
     out = md.nodes(text)
   end
   if item.streaming and #out > 0 then
+    -- A table has no text of its own to end on: the dots go under it.
     local last = md.spans_of(out[#out])
-    last[#last + 1] = { text = " …", hl = "Dim" }
+    if last then
+      last[#last + 1] = { text = " …", hl = "Dim" }
+    else
+      out[#out + 1] = md.text({ { "…", "Dim" } })
+    end
   end
   footer(item, ctx, out)
   return {
@@ -143,7 +152,7 @@ function M.queued(item)
   return {
     node = box(out, {
       size = md.text_size, right = true, max_width = "78%",
-      border = "PromptBorder", radius = 16, pad = { 8, 14 }, margin = { 8, 4 },
+      border = "PromptBorder", radius = style.radius.round, pad = { 8, 14 }, margin = { 8, 4 },
     }),
     lines = plain(item.text, "Dim"),
   }

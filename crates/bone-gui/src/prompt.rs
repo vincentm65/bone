@@ -5,6 +5,7 @@
 use bone_proto::types::ImageAttachment;
 use bone_ui::editor::{Pos, TextBuffer};
 use bone_ui::lua::{args, err, ret};
+use bone_ui::model::PromptMarks;
 use eframe::egui;
 use mlua::{Lua, MultiValue, Table, Value};
 
@@ -27,6 +28,10 @@ pub(crate) struct PromptState {
     pub moved: bool,
     /// Long pastes, as (placeholder in the text, what was pasted).
     pub pastes: Vec<(String, String)>,
+    /// `bone.ui.prompt_highlight`'s styles and ghost text, and the text,
+    /// anchor and cursor they were asked for (None: ask again).
+    pub marks: PromptMarks,
+    pub marks_for: Option<(String, usize, usize)>,
     history: Vec<(String, Vec<ImageAttachment>)>,
     /// The entry recalled, and the draft that was there before.
     history_pos: Option<usize>,
@@ -289,6 +294,31 @@ impl Gui {
         }
         self.set_buffer(&t);
         self.prompt_changed();
+    }
+
+    /// `bone.ui.prompt_highlight` for the prompt as it is now: asked again
+    /// only when its text, cursor or selection changed, or the view was
+    /// built again (options, colors, a reload).
+    pub(crate) fn prompt_marks(&mut self, width_cols: u16) -> PromptMarks {
+        if !self.marks_fresh() {
+            self.prompt.marks = if self.draft.is_empty() {
+                PromptMarks::default()
+            } else {
+                let text = self.buffer();
+                let ctx = bone_ui::lua::ui::prompt_ctx(self, width_cols, self.current, &text);
+                bone_ui::lua::ui::prompt_highlight(self, &ctx)
+            };
+            let p = &mut self.prompt;
+            p.marks_for = Some((self.draft.clone(), p.anchor, p.cursor));
+        }
+        self.prompt.marks.clone()
+    }
+
+    /// Whether the marks were asked for the prompt as it is now.
+    pub(crate) fn marks_fresh(&self) -> bool {
+        let p = &self.prompt;
+        (p.marks_for.as_ref())
+            .is_some_and(|(t, a, c)| t == &self.draft && *a == p.anchor && *c == p.cursor)
     }
 
     /// Whether up or down is recalling history now.

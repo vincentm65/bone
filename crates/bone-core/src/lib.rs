@@ -34,10 +34,10 @@ use bone_proto::methods::{
     QueueMove, QueueRemove, QueueResume, QueueUpdate, SecretSet, SecretsList, SecretsSet,
     SessionActive, SessionCompact, SessionCompactParams, SessionCreate, SessionCreateParams,
     SessionCreated, SessionDelete, SessionDeleted, SessionList, SessionMessages,
-    SessionMessagesResult, SessionRef, SessionRename, SessionRenameParams, SessionUpdated,
-    SessionUpdatedParams, SettingPath, SettingSet, SettingsChanged, SettingsChangedParams,
-    SettingsGet, SettingsReset, SettingsSet, StoreQuery, StoreQueryParams, TurnCancel, TurnStart,
-    TurnStartParams, TurnStartResult, TurnSteer, TurnSteerParams,
+    SessionMessagesParams, SessionMessagesResult, SessionRef, SessionRename, SessionRenameParams,
+    SessionUpdated, SessionUpdatedParams, SettingPath, SettingSet, SettingsChanged,
+    SettingsChangedParams, SettingsGet, SettingsReset, SettingsSet, StoreQuery, StoreQueryParams,
+    TurnCancel, TurnStart, TurnStartParams, TurnStartResult, TurnSteer, TurnSteerParams,
 };
 use bone_proto::types::{ImageAttachment, SessionInfo};
 use bone_proto::{Method, Notification, RpcError};
@@ -1065,18 +1065,43 @@ impl Core {
         Ok(())
     }
 
-    fn session_messages(&self, params: SessionRef) -> Result<SessionMessagesResult, RpcError> {
+    fn session_messages(
+        &self,
+        params: SessionMessagesParams,
+    ) -> Result<SessionMessagesResult, RpcError> {
         let session = self
             .inner
             .session(&params.session_id)
             .map_err(session_error)?;
         let s = session.lock().unwrap();
+        use bone_proto::types::ChatMessage;
+        let is_user = |m: &ChatMessage| matches!(m, ChatMessage::User { .. });
+        // The last `tail` messages, from the start of their first turn; a
+        // turn too long for that is cut, though not between a tool call
+        // and its result.
+        let len = s.messages.len();
+        let from = match params.tail {
+            Some(0) => len,
+            Some(tail) if tail < len => {
+                let at = len - tail;
+                let turn = s.messages[..=at].iter().rposition(is_user).unwrap_or(0);
+                if len - turn <= 3 * tail {
+                    turn
+                } else {
+                    (s.messages[..=at].iter())
+                        .rposition(|m| !matches!(m, ChatMessage::Tool { .. }))
+                        .unwrap_or(0)
+                }
+            }
+            _ => 0,
+        };
         Ok(SessionMessagesResult {
             queue: s.queue.clone(),
             queue_paused: s.queue_paused,
             info: s.info.clone(),
-            messages: s.messages.clone(),
+            messages: s.messages[from..].to_vec(),
             active_turn: s.active.as_ref().map(|a| a.turn_id),
+            omitted_turns: s.messages[..from].iter().filter(|m| is_user(m)).count(),
         })
     }
 

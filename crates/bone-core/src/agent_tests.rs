@@ -233,8 +233,9 @@ impl Harness {
         }
     }
     async fn transcript(&self) -> Vec<ChatMessage> {
-        self.call::<SessionMessages>(SessionRef {
+        self.call::<SessionMessages>(SessionMessagesParams {
             session_id: self.session_id.clone(),
+            tail: None,
         })
         .await
         .unwrap()
@@ -1362,8 +1363,9 @@ async fn lua_tools_run_owned_child_sessions() {
     assert_eq!(tool_result(&t[2]).0, "completed:child answer|c1");
     // The child keeps its transcript and owner on disk.
     let child: SessionMessagesResult = h
-        .call::<SessionMessages>(SessionRef {
+        .call::<SessionMessages>(SessionMessagesParams {
             session_id: created.session_id.clone(),
+            tail: None,
         })
         .await
         .unwrap();
@@ -2031,7 +2033,11 @@ async fn sessions_can_be_renamed_and_deleted() {
     h.until::<TurnFinished>().await;
     h.call::<SessionDelete>(msgs(&sid)).await.unwrap();
     assert_eq!(h.until::<SessionDeleted>().await.session_id, sid);
-    assert!(h.call::<SessionMessages>(msgs(&sid)).await.is_err());
+    let all = SessionMessagesParams {
+        session_id: sid.clone(),
+        tail: None,
+    };
+    assert!(h.call::<SessionMessages>(all).await.is_err());
     assert!(
         !h._data
             .path()
@@ -2255,8 +2261,9 @@ async fn a_cancelled_turn_pauses_the_queue_until_resumed() {
     h.cancel().await;
     h.until::<TurnFinished>().await;
     let state = h
-        .call::<SessionMessages>(SessionRef {
+        .call::<SessionMessages>(SessionMessagesParams {
             session_id: h.session_id.clone(),
+            tail: None,
         })
         .await
         .unwrap();
@@ -2389,8 +2396,9 @@ async fn queue_add_hooks_rewrite_or_refuse() {
     h.until::<TurnStarted>().await;
     h.queue("more", QueueMode::Steer).await;
     let state = h
-        .call::<SessionMessages>(SessionRef {
+        .call::<SessionMessages>(SessionMessagesParams {
             session_id: h.session_id.clone(),
+            tail: None,
         })
         .await
         .unwrap();

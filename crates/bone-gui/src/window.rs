@@ -37,7 +37,6 @@ pub(crate) fn dispatch(
                 lua,
                 &serde_json::json!({
                     "active": active,
-                    "builtin": bone_lua::GUI_LIBRARIES,
                     "custom": custom,
                 }),
             )
