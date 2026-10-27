@@ -10,6 +10,27 @@ use crate::layout::BufferId;
 /// placeholder (`[Pasted text #1 +900 chars]`), expanded when it is sent.
 pub const PASTE_PLACEHOLDER_THRESHOLD: usize = 500;
 
+/// Pasted text as the prompt keeps it: `\n` line ends (also for `\r\n`,
+/// `\r` and the Unicode line and paragraph separators), tabs kept, other
+/// control and [invisible](crate::text::invisible) characters dropped.
+pub fn clean_paste(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '\r' => {
+                chars.next_if_eq(&'\n');
+                out.push('\n');
+            }
+            '\n' | '\u{85}' | '\u{2028}' | '\u{2029}' => out.push('\n'),
+            '\t' => out.push('\t'),
+            c if c.is_control() || crate::text::invisible(c) => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
 /// The placeholder for paste number `n` of `text`.
 pub fn paste_token(n: usize, text: &str) -> String {
     format!("[Pasted text #{n} +{} chars]", text.chars().count())

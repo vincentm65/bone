@@ -615,7 +615,7 @@ impl App {
                         .get_mut(&buf)
                         .filter(|d| d.epoch == epoch)
                     {
-                        draft.text.push_str(&text);
+                        draft.text.push_str(&bone_ui::composer::clean_paste(&text));
                     }
                 }
                 Err(e) => {
@@ -764,7 +764,7 @@ impl App {
         match self.context() {
             Context::Main | Context::Named(_) if self.focused_panel().is_none() => {
                 self.composer.history_pos = None;
-                let text = text.replace("\r\n", "\n").replace('\r', "\n");
+                let text = bone_ui::composer::clean_paste(text);
                 if text.chars().count() > bone_ui::composer::PASTE_PLACEHOLDER_THRESHOLD {
                     let token =
                         bone_ui::composer::paste_token(self.composer.pastes.len() + 1, &text);

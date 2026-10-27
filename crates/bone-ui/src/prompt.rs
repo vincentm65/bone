@@ -65,11 +65,13 @@ pub fn prompt_layout(t: &TextBuffer, width: usize) -> (Vec<PromptRow>, (usize, u
         let mut start = 0;
         let mut w = 0;
         for (ci, c) in line.chars().enumerate() {
-            let cw = glyph_width(c, w);
+            let mut cw = glyph_width(c, w);
             if w + cw > width {
                 rows.push((std::mem::take(&mut row), li, start));
                 start = ci;
                 w = 0;
+                // A tab is as wide as it is where it now starts.
+                cw = glyph_width(c, 0);
             }
             if li == crow && ci == ccol {
                 cursor = (rows.len(), w);

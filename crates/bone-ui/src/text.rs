@@ -7,8 +7,22 @@ const TAB_WIDTH: usize = 4;
 /// Drop the emoji presentation selector: widths count chars one by one.
 const VS16: char = '\u{FE0F}';
 
+/// Invisible format characters: soft hyphens, zero-width spaces, word
+/// joiners, byte order marks, bidi marks and tags. Terminals disagree on
+/// their width (tmux draws a soft hyphen one column wide, ratatui none),
+/// which shifts the rest of the row over whatever is beside it. Web pages
+/// and spreadsheets are full of them. The zero-width joiner stays: emoji
+/// sequences need it.
+pub fn invisible(c: char) -> bool {
+    matches!(c,
+        '\u{AD}' | '\u{61C}' | '\u{180E}' | '\u{200B}' | '\u{200E}' | '\u{200F}'
+        | '\u{202A}'..='\u{202E}' | '\u{2060}'..='\u{2064}' | '\u{2066}'..='\u{2069}'
+        | '\u{FEFF}' | '\u{FFF9}'..='\u{FFFB}' | '\u{E0000}'..='\u{E007F}')
+}
+
 /// Make text safe to put in terminal cells: strip ANSI escape sequences,
-/// control characters and the emoji selector, expand tabs. Newlines are kept.
+/// control characters, invisible characters and the emoji selector, expand
+/// tabs. Newlines are kept.
 pub fn sanitize(s: &str) -> String {
     sanitize_at(s, 0)
 }
@@ -29,7 +43,7 @@ pub fn sanitize_at(s: &str, mut col: usize) -> String {
                 col += n;
             }
             '\r' | VS16 => {}
-            c if c.is_control() => {}
+            c if c.is_control() || invisible(c) => {}
             c => {
                 out.push(c);
                 col += c.width().unwrap_or(0);
@@ -44,7 +58,7 @@ pub fn glyph(c: char, col: usize) -> (char, usize) {
     match c {
         '\t' => (' ', TAB_WIDTH - col % TAB_WIDTH),
         VS16 => (c, 0),
-        c if c.is_control() => (c, 0),
+        c if c.is_control() || invisible(c) => (c, 0),
         c => (c, 1),
     }
 }

@@ -253,7 +253,7 @@ impl Gui {
             return;
         }
         self.prompt.history_pos = None;
-        let text = text.replace("\r\n", "\n").replace('\r', "\n");
+        let text = bone_ui::composer::clean_paste(text);
         let insert = if text.chars().count() > bone_ui::composer::PASTE_PLACEHOLDER_THRESHOLD {
             let token = bone_ui::composer::paste_token(self.prompt.pastes.len() + 1, &text);
             self.prompt.pastes.push((token.clone(), text));
