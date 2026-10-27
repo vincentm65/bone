@@ -1,10 +1,9 @@
 //! The prompt box's geometry: what its border, padding and prefix take,
 //! how its text wraps, and how tall it wants to be.
 
-use unicode_width::UnicodeWidthChar;
-
 use crate::editor::TextBuffer;
 use crate::model::{Border, PromptSpec, items_width};
+use crate::text::glyph_width;
 
 /// Rows and columns around the prompt's text, and the width left for it.
 /// What the prompt box takes around its text, and the text's width.
@@ -44,8 +43,9 @@ impl Insets {
     }
 }
 
-/// Char-wrap prompt text (so cursor mapping stays exact). Returns the rows and
-/// the cursor's (row, column).
+/// Char-wrap prompt text (so cursor mapping stays exact), each char as wide
+/// as its [`glyph`](crate::text::glyph). Returns the rows and the cursor's
+/// (row, column).
 pub fn prompt_rows(t: &TextBuffer, width: usize) -> (Vec<String>, (usize, usize)) {
     let (rows, cursor) = prompt_layout(t, width);
     (rows.into_iter().map(|r| r.0).collect(), cursor)
@@ -65,7 +65,7 @@ pub fn prompt_layout(t: &TextBuffer, width: usize) -> (Vec<PromptRow>, (usize, u
         let mut start = 0;
         let mut w = 0;
         for (ci, c) in line.chars().enumerate() {
-            let cw = c.width().unwrap_or(0);
+            let cw = glyph_width(c, w);
             if w + cw > width {
                 rows.push((std::mem::take(&mut row), li, start));
                 start = ci;

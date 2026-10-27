@@ -26,7 +26,7 @@ use crate::app::{App, CHAT_WIN, Level, PROMPT_WIN};
 #[cfg(test)]
 use crate::editor::TextBuffer;
 use crate::layout::{BufferId, Placed, Window};
-use crate::text::{sanitize, width};
+use crate::text::{glyph, glyph_width, sanitize, sanitize_at, width};
 use crate::ui::{Border, Item, LayoutNode, render_items};
 use bone_ui::layout::{self, BUILTIN, kind};
 #[cfg(test)]
@@ -546,16 +546,21 @@ fn draw_prompt(
                         *s = selected;
                     }
                 }
-                let mut k = 0;
+                let (mut k, mut col) = (0, 0);
                 while k < chars.len() {
                     let mut j = k + 1;
                     while j < chars.len() && styles[j] == styles[k] {
                         j += 1;
                     }
-                    spans.push(Span::styled(
-                        chars[k..j].iter().collect::<String>(),
-                        styles[k],
-                    ));
+                    let shown: String = chars[k..j]
+                        .iter()
+                        .flat_map(|&c| {
+                            let (g, n) = glyph(c, col);
+                            col += glyph_width(c, col);
+                            std::iter::repeat_n(g, n)
+                        })
+                        .collect();
+                    spans.push(Span::styled(shown, styles[k]));
                     k = j;
                 }
                 // Ghost text after the cursor, at the end of its line.
@@ -564,7 +569,7 @@ fn draw_prompt(
                     && let Some(ghost) = marks.ghost.as_deref().filter(|g| !g.is_empty())
                 {
                     spans.push(Span::styled(
-                        ghost.lines().next().unwrap_or("").to_owned(),
+                        sanitize_at(ghost.lines().next().unwrap_or(""), col),
                         theme.hl(&marks.ghost_hl),
                     ));
                 }

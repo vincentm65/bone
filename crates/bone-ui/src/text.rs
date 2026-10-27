@@ -4,11 +4,17 @@ use unicode_width::UnicodeWidthChar;
 
 const TAB_WIDTH: usize = 4;
 
-/// Make text safe to put in terminal cells: strip ANSI escape sequences and
-/// control characters, expand tabs. Newlines are kept.
+/// Drop the emoji presentation selector: widths count chars one by one.
+const VS16: char = '\u{FE0F}';
+
+/// Make text safe to put in terminal cells: strip ANSI escape sequences,
+/// control characters and the emoji selector, expand tabs. Newlines are kept.
 pub fn sanitize(s: &str) -> String {
+    sanitize_at(s, 0)
+}
+
+pub fn sanitize_at(s: &str, mut col: usize) -> String {
     let mut out = String::with_capacity(s.len());
-    let mut col = 0;
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
         match c {
@@ -22,7 +28,7 @@ pub fn sanitize(s: &str) -> String {
                 out.extend(std::iter::repeat_n(' ', n));
                 col += n;
             }
-            '\r' => {}
+            '\r' | VS16 => {}
             c if c.is_control() => {}
             c => {
                 out.push(c);
@@ -31,6 +37,22 @@ pub fn sanitize(s: &str) -> String {
         }
     }
     out
+}
+
+/// How a char of text being edited is drawn, as `(char, times)`.
+pub fn glyph(c: char, col: usize) -> (char, usize) {
+    match c {
+        '\t' => (' ', TAB_WIDTH - col % TAB_WIDTH),
+        VS16 => (c, 0),
+        c if c.is_control() => (c, 0),
+        c => (c, 1),
+    }
+}
+
+/// The columns [`glyph`] takes at `col`.
+pub fn glyph_width(c: char, col: usize) -> usize {
+    let (g, n) = glyph(c, col);
+    g.width().unwrap_or(0) * n
 }
 
 fn skip_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
