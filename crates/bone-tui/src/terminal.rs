@@ -156,12 +156,55 @@ impl Guard {
             queue!(self.terminal.backend_mut(), BeginSynchronizedUpdate)?;
         }
         queue!(self.terminal.backend_mut(), Hide)?;
-        self.terminal.draw(render)?;
+        self.terminal.draw(|f| {
+            render(f);
+            widen(f.buffer_mut());
+        })?;
         crate::stats::mark("draw");
         if self.sync {
             execute!(self.terminal.backend_mut(), EndSynchronizedUpdate)?;
         }
         Ok(())
+    }
+}
+
+/// Symbols ratatui's width table (Unicode 15, pinned) has one column wide
+/// and newer ones, which tmux and up to date terminals use, two: emoji
+/// modifier bases, trigrams, newer emoji.
+fn wide_now(c: char) -> bool {
+    matches!(c,
+        '\u{261D}' | '\u{2630}'..='\u{2637}' | '\u{268A}'..='\u{268F}' | '\u{26F9}'
+        | '\u{270C}'..='\u{270D}' | '\u{31E4}'..='\u{31E5}' | '\u{3248}'..='\u{324F}'
+        | '\u{1F3CB}'..='\u{1F3CC}' | '\u{1F574}'..='\u{1F575}' | '\u{1F590}' | '\u{1F6D8}'
+        | '\u{1FA89}'..='\u{1FA8F}' | '\u{1FABE}' | '\u{1FAC6}'..='\u{1FACD}'
+        | '\u{1FADC}'..='\u{1FADF}' | '\u{1FAE9}'..='\u{1FAEF}')
+}
+
+/// Draw [`wide_now`] symbols as the terminal will: over a blank after
+/// them, which is then skipped as a wide char's second cell; else as a
+/// box. Otherwise the terminal's second column covers the next cell, which
+/// ratatui does not know to repaint.
+fn widen(buf: &mut ratatui::buffer::Buffer) {
+    let area = buf.area;
+    for y in area.top()..area.bottom() {
+        let mut x = area.left();
+        while x < area.right() {
+            let mut chars = buf[(x, y)].symbol().chars();
+            let (Some(c), None) = (chars.next(), chars.next()) else {
+                x += 1;
+                continue;
+            };
+            if wide_now(c) {
+                let room = x + 1 < area.right() && buf[(x + 1, y)].symbol() == " ";
+                if room {
+                    buf[(x + 1, y)].set_skip(true);
+                    x += 1;
+                } else {
+                    buf[(x, y)].set_char('□');
+                }
+            }
+            x += 1;
+        }
     }
 }
 
