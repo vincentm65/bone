@@ -85,6 +85,14 @@ impl<'a, L> Indexed<'a, L> {
         // `from`/`to` narrow the walk itself: a one-item query is one step.
         let lo = lo.max(f.from.map_or(0, |from| from.saturating_sub(1)));
         let hi = hi.min(f.to.unwrap_or(usize::MAX));
+        // Turns only grow along the chat: a turn's items are found, not walked to.
+        let (lo, hi) = match f.turn {
+            Some(t) => (
+                lo.max(self.turns.partition_point(|&n| n < t)),
+                hi.min(self.turns.partition_point(|&n| n <= t)),
+            ),
+            None => (lo, hi),
+        };
         (lo..hi.max(lo))
             .filter(move |&n| kind_ok(&items[n]) && f.turn.is_none_or(|t| self.turns[n] == t))
     }

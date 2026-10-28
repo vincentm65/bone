@@ -348,6 +348,9 @@ async fn reconnecting_restores_everything() {
     let mut gui = bone_gui::Headless::start(conn, opts, 1000.0, 700.0)
         .await
         .unwrap();
+    // The checks read the steered turn's first half, which folds once the
+    // turn is over.
+    gui.gui.run_lua("test", "bone.o.fold_turns = false").unwrap();
     let mut tui = e.tui().await;
 
     gui.send("start a turn");

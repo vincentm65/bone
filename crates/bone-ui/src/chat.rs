@@ -9,7 +9,7 @@
 //! to be drawn again later.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -22,7 +22,7 @@ use bone_proto::methods::{
     ToolStarted, ToolStartedParams, TurnFinished, TurnFinishedParams, TurnStarted, TurnSteered,
 };
 use bone_proto::types::{
-    ChatMessage, DeltaKind, SessionInfo, ToolCall, TurnId, TurnOutcome, Usage,
+    ChatMessage, DeltaKind, SessionInfo, ToolCall, ToolTiming, TurnId, TurnOutcome, Usage,
 };
 use serde_json::{Value, json};
 
@@ -173,6 +173,8 @@ const STREAM_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
 struct ToolMeta {
     started_at: Option<u64>,
     duration_ms: Option<u64>,
+    /// The model's writing before it ran (its reply's first call only).
+    generation_ms: Option<u64>,
     /// What `tool/output` sent while it ran.
     live: String,
 }
@@ -311,6 +313,18 @@ impl<L> ChatBuffer<L> {
         });
     }
 
+    /// When the loaded transcript's tool calls ran (`session/messages`
+    /// `tool_times`), as the live events would have told. Right after `load`,
+    /// before anything is drawn from it.
+    pub fn set_tool_times(&mut self, times: &BTreeMap<String, ToolTiming>) {
+        for (call_id, t) in times {
+            let meta = self.tool_meta.entry(call_id.clone()).or_default();
+            meta.started_at = Some(t.started_at);
+            meta.duration_ms = Some(t.duration_ms);
+            meta.generation_ms = t.generation_ms;
+        }
+    }
+
     pub fn turn_started(&mut self, turn_id: TurnId, text: &str) {
         self.turn_started_with_images(turn_id, text, Vec::new());
     }
@@ -412,10 +426,9 @@ impl<L> ChatBuffer<L> {
 
     pub fn tool_started(&mut self, t: &ToolStartedParams) {
         if t.started_at.is_some() {
-            self.tool_meta
-                .entry(t.call.id.clone())
-                .or_default()
-                .started_at = t.started_at;
+            let meta = self.tool_meta.entry(t.call.id.clone()).or_default();
+            meta.started_at = t.started_at;
+            meta.generation_ms = t.generation_ms;
             self.touch_tool(&t.call.id);
         }
         let known = self
@@ -746,6 +759,7 @@ impl<L> ChatBuffer<L> {
                     "done": output.is_some(),
                     "started_at": meta.and_then(|m| m.started_at),
                     "duration_ms": meta.and_then(|m| m.duration_ms),
+                    "generation_ms": meta.and_then(|m| m.generation_ms),
                 });
                 if full {
                     d["raw_arguments"] = json!(clean(&call.arguments));

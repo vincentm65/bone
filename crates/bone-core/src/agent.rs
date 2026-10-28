@@ -18,7 +18,7 @@ use bone_proto::methods::{
     TurnFinished, TurnFinishedParams, TurnStarted, TurnStartedParams, TurnSteered,
 };
 use bone_proto::types::{
-    ChatMessage, DeltaKind, ReasoningState, ToolCall, TurnId, TurnOutcome, Usage,
+    ChatMessage, DeltaKind, ReasoningState, ToolCall, ToolTiming, TurnId, TurnOutcome, Usage,
 };
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
@@ -394,6 +394,10 @@ impl Turn<'_> {
                 .attachments
                 .hydrate(messages)
                 .map_err(Stop::Failed)?;
+            // Where the model's writing began: after the last reasoning it
+            // streamed, else at the start of the call (its time, without the
+            // reasoning, goes with the reply's first tool call).
+            let mut writing_from;
             let completion = loop {
                 if !self.rt.supports_images(served.0.as_deref(), has_images) {
                     return Err(Stop::Failed(
@@ -401,6 +405,7 @@ impl Turn<'_> {
                     ));
                 }
                 attempt += 1;
+                writing_from = std::time::Instant::now();
                 let mut text = String::new();
                 let mut reasoning = String::new();
                 let result = {
@@ -412,6 +417,7 @@ impl Turn<'_> {
                             }
                             Delta::Reasoning(t) => {
                                 reasoning.push_str(&t);
+                                writing_from = std::time::Instant::now();
                                 (DeltaKind::Reasoning, t)
                             }
                         };
@@ -526,6 +532,7 @@ impl Turn<'_> {
                 // Losing a usage record is not worth failing the turn.
                 let _ = self.session.lock().unwrap().usage(record);
             }
+            let generation_ms = writing_from.elapsed().as_millis() as u64;
             let (mut content, mut reasoning, mut calls) = (
                 completion.content,
                 completion.reasoning,
@@ -595,36 +602,54 @@ impl Turn<'_> {
                     }
                 }
                 let batch = &calls[i..end];
-                for call in batch {
+                let started_at = unix_ms();
+                // The reply's writing goes with its first call only.
+                let generated = |n: usize| (i + n == 0).then_some(generation_ms);
+                for (n, call) in batch.iter().enumerate() {
                     self.inner.emit::<ToolStarted>(ToolStartedParams {
                         session_id: self.session_id.clone(),
                         turn_id: self.turn_id,
                         call: call.clone(),
-                        started_at: Some(unix_ms()),
+                        started_at: Some(started_at),
+                        generation_ms: generated(n),
                     });
                 }
                 let results = futures_util::future::join_all(batch.iter().map(|call| async move {
                     let began = std::time::Instant::now();
                     let (output, is_error, images) = self.run_tool(call).await;
+                    let duration_ms = began.elapsed().as_millis() as u64;
                     self.inner.emit::<ToolFinished>(ToolFinishedParams {
                         session_id: self.session_id.clone(),
                         turn_id: self.turn_id,
                         call_id: call.id.clone(),
                         output: output.clone(),
                         is_error,
-                        duration_ms: Some(began.elapsed().as_millis() as u64),
+                        duration_ms: Some(duration_ms),
                     });
-                    (output, is_error, images)
+                    (output, is_error, images, duration_ms)
                 }))
                 .await;
-                // The transcript keeps the calls' order.
-                for (call, (output, is_error, images)) in batch.iter().zip(results) {
-                    self.record(ChatMessage::Tool {
+                // The transcript keeps the calls' order; the file keeps when
+                // each ran, for clients that load the session later.
+                for (n, (call, (output, is_error, images, duration_ms))) in
+                    batch.iter().zip(results).enumerate()
+                {
+                    let msg = ChatMessage::Tool {
                         call_id: call.id.clone(),
                         content: output,
                         images,
                         is_error,
-                    })?;
+                    };
+                    let timing = ToolTiming {
+                        started_at,
+                        duration_ms,
+                        generation_ms: generated(n),
+                    };
+                    self.session
+                        .lock()
+                        .unwrap()
+                        .push_timed(msg, timing)
+                        .map_err(|e| Stop::Failed(format!("cannot save session: {e}")))?;
                 }
                 i = end;
             }

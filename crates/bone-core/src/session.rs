@@ -9,7 +9,7 @@
 //! (`bone.session.compact`; the earlier records stay in the file).
 
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use bone_proto::methods::{QueueMode, QueuedMessage};
-use bone_proto::types::{ChatMessage, SessionId, SessionInfo, SessionOwner, TurnId};
+use bone_proto::types::{ChatMessage, SessionId, SessionInfo, SessionOwner, ToolTiming, TurnId};
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
@@ -56,6 +56,17 @@ pub(crate) struct Line {
     /// Unix seconds; missing in files from before it was kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub at: Option<u64>,
+    /// On a tool result: when its call ran. Beside the record rather than in
+    /// it, so the transcript (and what providers get) stays as it was, and
+    /// older cores reading the file skip it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timing: Option<ToolTiming>,
+}
+
+/// Only a line's `timing`, read when it has one.
+#[derive(Deserialize)]
+struct TimingOf {
+    timing: Option<ToolTiming>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -129,6 +140,8 @@ pub struct Session {
     pub queue_paused: bool,
     /// The model it is locked to; `None` until its first turn or change.
     pub model: Option<Pin>,
+    /// When its tool calls ran, by call id (those recorded with times).
+    pub tool_times: BTreeMap<String, ToolTiming>,
     next_turn: TurnId,
     next_queue: u64,
     file: File,
@@ -172,6 +185,17 @@ impl Session {
             self.info.title = title_of(&msg);
         }
         let written = write_record(&mut self.file, Record::Message(msg.clone()));
+        self.messages.push(msg);
+        self.reindex();
+        written
+    }
+
+    /// `push` a tool result with when its call ran.
+    pub fn push_timed(&mut self, msg: ChatMessage, timing: ToolTiming) -> std::io::Result<()> {
+        if let ChatMessage::Tool { call_id, .. } = &msg {
+            self.tool_times.insert(call_id.clone(), timing);
+        }
+        let written = write_line(&mut self.file, Record::Message(msg.clone()), Some(timing));
         self.messages.push(msg);
         self.reindex();
         written
@@ -417,6 +441,7 @@ impl SessionStore {
             good_len,
             users,
             model,
+            tool_times,
         } = match read_file(&path, usize::MAX) {
             Ok(r) => r,
             Err(SessionError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -435,6 +460,7 @@ impl SessionStore {
         // Turn ids count every user message ever written (compacted ones
         // too), so they stay unique across reloads.
         let session = self.open(info, messages, summary, model, users, file);
+        session.lock().unwrap().tool_times = tool_times;
         Ok(self.keep(id, session))
     }
 
@@ -474,6 +500,7 @@ impl SessionStore {
             active: None,
             safe_point: false,
             model,
+            tool_times: BTreeMap::new(),
             next_turn: users as TurnId,
             next_queue,
             file,
@@ -684,6 +711,7 @@ struct Loaded {
     /// User messages in the whole file, before checkpoints too.
     users: usize,
     model: Option<Pin>,
+    tool_times: BTreeMap<String, ToolTiming>,
 }
 
 /// Read a session file, stopping after `max_user` user messages (enough to
@@ -713,6 +741,7 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
         good_len: line.len() as u64,
         users: 0,
         model: None,
+        tool_times: BTreeMap::new(),
     };
     for n in 2.. {
         line.clear();
@@ -726,6 +755,12 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
                     loaded.info.title = title_of(&msg);
                 }
                 let is_user = matches!(msg, ChatMessage::User { .. });
+                if let ChatMessage::Tool { call_id, .. } = &msg
+                    && line.contains("\"timing\"")
+                    && let Ok(TimingOf { timing: Some(t) }) = serde_json::from_str(&line)
+                {
+                    loaded.tool_times.insert(call_id.clone(), t);
+                }
                 loaded.messages.push(msg);
                 loaded.good_len += line.len() as u64;
                 if is_user {
@@ -764,9 +799,14 @@ fn now() -> u64 {
 }
 
 pub(crate) fn write_record(file: &mut File, record: Record) -> std::io::Result<()> {
+    write_line(file, record, None)
+}
+
+fn write_line(file: &mut File, record: Record, timing: Option<ToolTiming>) -> std::io::Result<()> {
     let line = Line {
         record,
         at: Some(now()),
+        timing,
     };
     let mut line = serde_json::to_vec(&line).map_err(std::io::Error::other)?;
     line.push(b'\n');

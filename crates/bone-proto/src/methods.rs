@@ -6,8 +6,11 @@
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
+use std::collections::BTreeMap;
+
 use crate::types::{
-    AskId, ChatMessage, DeltaKind, SessionId, SessionInfo, ToolCall, TurnId, TurnOutcome, Usage,
+    AskId, ChatMessage, DeltaKind, SessionId, SessionInfo, ToolCall, ToolTiming, TurnId,
+    TurnOutcome, Usage,
 };
 
 /// The lifecycle state of a managed shell process.
@@ -346,6 +349,10 @@ pub struct SessionMessagesResult {
     /// `messages` starts in, when they do not start with one.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub omitted_turns: usize,
+    /// When the tool calls in `messages` ran, by call id: those recorded
+    /// with their results (not calls from before cores kept times).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub tool_times: BTreeMap<String, ToolTiming>,
 }
 
 method!(
@@ -1043,6 +1050,11 @@ pub struct ToolStartedParams {
     /// When it started, in milliseconds since the Unix epoch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at: Option<u64>,
+    /// How long the model spent writing its reply before this call ran:
+    /// from the end of its reasoning (or the start of the model call, when
+    /// none streamed) to the reply's end. Only on the reply's first call.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

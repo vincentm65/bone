@@ -165,6 +165,7 @@ impl Gui {
         let same = c.session_id() == Some(id);
         let (omitted, len) = (c.omitted_turns, c.items().len());
         c.load(r.info, &r.messages, r.active_turn);
+        c.set_tool_times(&r.tool_times);
         c.set_queue(r.queue, r.queue_paused);
         c.omitted_turns = r.omitted_turns;
         let added = c.items().len().saturating_sub(len);

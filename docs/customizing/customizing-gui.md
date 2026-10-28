@@ -65,6 +65,7 @@ at the same path under `~/.bone/runtime/` does the same without a copy. The
 window itself is `lua/bone/nodes/window.lua`, the chat is
 `lua/bone/nodes.lua`: replace either to draw differently. The window is made
 of files of its own, each replaceable: `nodes/composer.lua`, `statusbar.lua`,
+`toolstrip.lua` (a turn's tool calls as a timeline, drawn in the chat),
 `overlays.lua` (the toast, the core's questions, a large image), `popups.lua`
 (Lua's windows), and `desktop/sidebar.lua` and `tray.lua`.
 
@@ -505,7 +506,28 @@ bone.o.font_sans_italic = ""
 bone.o.queue_mode = "next"            -- as in the TUI: steer or next
 bone.o.wheel_speed = 1.6              -- wheel travel, times the system's (0.1–10)
 bone.o.opacity = 0.9                  -- standard library; bare is 1. See below
+bone.o.tool_strip = true              -- standard library: each turn's tool call timeline
+bone.o.fold_turns = true              -- standard library: earlier turns as one row each
 ```
+
+The tool strip, under your message, draws its turn as one bar: a segment per tool
+call as wide as it ran, the model's thinking between calls as fine dots and
+its answer at the end. Each kind has a highlight group of its own, also used
+by the TUI's toolstrip plugin, quiet by brightness: `ToolStripRead` (faint),
+`ToolStripCommand` and `ToolStripAgent` (brighter), `ToolStripAnswer` (nearly
+white), `ToolStripEdit` (green), `ToolStripFail` (red), `ToolStripLive` (a
+running call, breathing amber) and `ToolStripWait` (one waiting on an answer,
+outlined in blue); a colorscheme or
+`bone.hl.set` that defines one keeps its color. A segment's tooltip says
+what it did; a click scrolls the chat to it. Calls run before cores kept
+their times (`session/messages` `tool_times`) get equal shares.
+
+With `fold_turns`, every turn before the last folds into one row: your
+message, that turn's strip and how long it took; its calls and answer are
+hidden. A click on the row opens the turn, a click on a segment opens it at
+that call. An open turn has its strip under your message, and "Fold" while
+it is not the last (`desktop/views.lua`; `require("bone.desktop.views").open_turn(n, on)`
+opens or folds turn `n`).
 
 `opacity` is read when the window opens. Below 1 the window is created
 see-through, so turning that on or off takes a restart; inside a window

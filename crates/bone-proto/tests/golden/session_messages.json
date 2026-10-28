@@ -50,7 +50,14 @@
           "mode": "next",
           "text": "then update the README"
         }
-      ]
+      ],
+      "tool_times": {
+        "call_1": {
+          "duration_ms": 2400,
+          "generation_ms": 800,
+          "started_at": 1700000000000
+        }
+      }
     }
   }
 ]

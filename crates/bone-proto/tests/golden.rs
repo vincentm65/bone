@@ -210,6 +210,15 @@ fn requests() {
             queue: vec![queued(4, QueueMode::Next, "then update the README")],
             queue_paused: false,
             omitted_turns: 0,
+            tool_times: [(
+                "call_1".to_owned(),
+                ToolTiming {
+                    started_at: 1_700_000_000_000,
+                    duration_ms: 2400,
+                    generation_ms: Some(800),
+                },
+            )]
+            .into(),
         },
     );
     exchange::<AttachmentUpload>(
@@ -660,6 +669,7 @@ fn events() {
         turn_id: 1,
         call: call(),
         started_at: Some(1_767_225_600_000),
+        generation_ms: Some(800),
     });
     event::<ToolFinished>(ToolFinishedParams {
         session_id: SID.into(),

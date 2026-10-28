@@ -1095,6 +1095,15 @@ impl Core {
             }
             _ => 0,
         };
+        let tool_times = s.messages[from..]
+            .iter()
+            .filter_map(|m| match m {
+                ChatMessage::Tool { call_id, .. } => {
+                    s.tool_times.get(call_id).map(|t| (call_id.clone(), *t))
+                }
+                _ => None,
+            })
+            .collect();
         Ok(SessionMessagesResult {
             queue: s.queue.clone(),
             queue_paused: s.queue_paused,
@@ -1102,6 +1111,7 @@ impl Core {
             messages: s.messages[from..].to_vec(),
             active_turn: s.active.as_ref().map(|a| a.turn_id),
             omitted_turns: s.messages[..from].iter().filter(|m| is_user(m)).count(),
+            tool_times,
         })
     }
 

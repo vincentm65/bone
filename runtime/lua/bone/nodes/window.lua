@@ -2,7 +2,8 @@
 -- latest", the composer, tray and status bar under it, the sessions
 -- sidebar, docked panels, and what floats over them. Everything is a node;
 -- the pieces are files of their own (bone.nodes.composer, .statusbar,
--- .overlays, .popups, bone.desktop.sidebar, .tray), so replace one, or
+-- .overlays, .popups, bone.desktop.sidebar, .tray),
+-- so replace one, or
 -- this file, to draw the window differently.
 local M = {}
 

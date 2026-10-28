@@ -55,6 +55,17 @@ impl ChatMessage {
     }
 }
 
+/// When a tool call ran: Unix milliseconds it started, and how long it took;
+/// and how long the model spent writing the reply it came in, after its
+/// reasoning (`tool/started`'s `generation_ms`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolTiming {
+    pub started_at: u64,
+    pub duration_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_ms: Option<u64>,
+}
+
 /// Reasoning a provider returns sealed (OpenAI's encrypted reasoning items),
 /// replayed on later calls so the model keeps its thinking. Only the model
 /// that wrote it can read it.

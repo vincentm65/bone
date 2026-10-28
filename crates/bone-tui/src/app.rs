@@ -1097,6 +1097,7 @@ impl App {
                         let session_id = r.info.session_id.clone();
                         if let Some(c) = app.chat_mut(buf) {
                             c.load(r.info, &r.messages, r.active_turn);
+                            c.set_tool_times(&r.tool_times);
                             c.set_queue(r.queue, r.queue_paused);
                         }
                         if buf == app.current {
@@ -1558,6 +1559,7 @@ impl App {
                 Ok(r) => {
                     if let Some(c) = app.chat_mut(buf) {
                         c.load(r.info, &r.messages, r.active_turn);
+                        c.set_tool_times(&r.tool_times);
                         c.set_queue(r.queue, r.queue_paused);
                     }
                 }

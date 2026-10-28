@@ -4118,6 +4118,7 @@ async fn tool_items_carry_live_output_timing_and_usage() {
         turn_id: 1,
         call,
         started_at: Some(1_000),
+        generation_ms: None,
     })
     .await;
     for text in ["compiling a\n", "compiling b\n"] {

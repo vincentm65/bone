@@ -1,6 +1,7 @@
 -- The desktop library's tool calls, folded the way the TUI's are
 -- (bone.o.tool_detail, ctrl+t, a click): "summary" folds each run of calls
--- into one line ("Read 3 files, ran 2 shell commands"), "rows" is a card per
+-- into one line ("Read 3 files, ran 2 shell commands") that a click opens
+-- to a folded card per call, each opened in turn by a click; "rows" is a card per
 -- call with its output cut short (shell output to its first and last two
 -- lines, other output to its first five), "full" shows everything. Edits
 -- always show their diff and failures their output. A card is a title (a
@@ -74,6 +75,7 @@ local function target(item, max)
   end
   return ""
 end
+M.target = target
 
 -- ---- text ------------------------------------------------------------------
 
@@ -385,6 +387,11 @@ local function tool_key(item)
   return (s and s.session_id or "") .. ":" .. tostring(item.key or item.id)
 end
 
+-- A summary line's own key: its first call can be opened on its own too.
+local function run_key(item)
+  return tool_key(item) .. ":run"
+end
+
 -- A mark the proportional fonts all have.
 local function mark(item)
   if not item.done then return { text = "•  ", hl = "ToolRunning" } end
@@ -578,15 +585,23 @@ local function summary_nodes(item, width)
   end
   local running = false
   for _, t in ipairs(stretch) do running = running or not t.done end
+  local open = toggled[run_key(item)]
   local paras = { md.text({
-    { text = "•  ", hl = running and "ToolRunning" or "ToolDone" },
+    { text = open and "▾  " or "▸  ", hl = running and "ToolRunning" or "ToolDone" },
     { text = summary(stretch), hl = "ToolArgs" },
   }, { size = md.small_size }) }
-  if toggled[tool_key(item)] then
+  -- Open, the run is a card per call, folded; a click opens one in full.
+  if open then
     for _, t in ipairs(stretch) do
-      for _, p in ipairs(card(bone.chat.item(t.index, { full = true }), true, width)) do
-        paras[#paras + 1] = p
-      end
+      local call = bone.chat.item(t.index, { full = true })
+      local key = tool_key(call)
+      local one = style.finish({
+        direction = "column", padding = { 2, 6, 2, 14 }, radius = style.radius.md, cursor = "pointer",
+        hover = { bg = style.hover() }, transition = style.motion.base,
+        on_click = function() M.toggle(item, key) end,
+      })
+      nodes.append(one, card(call, toggled[key] or false, width))
+      paras[#paras + 1] = one
     end
   end
   return paras
@@ -597,6 +612,7 @@ function M.view(item, ctx)
   local paras = false
   if mode == "summary" then paras = summary_nodes(item, ctx.width) end
   if paras == nil then return nil end
+  local key = paras and run_key(item) or tool_key(item)
   if paras == false then
     local expanded = mode == "full"
     if toggled[tool_key(item)] then expanded = not expanded end
@@ -609,13 +625,14 @@ function M.view(item, ctx)
   local fallback = { { { (M.labels[item.name] or item.name) .. " " .. target(item), "ToolName" } } }
   local node = style.finish({ direction = "column", padding = { 2, 4 }, margin = { 4, 0, 2, 0 } })
   nodes.append(node, paras)
-  return { node = node, lines = fallback, click = function() M.toggle(item) end }
+  return { node = node, lines = fallback, click = function() M.toggle(item, key) end }
 end
 
---- Open or fold a call (a summary: every call of it).
-function M.toggle(item)
+--- Open or fold a call, or with `key` what that key names in the item (a
+--- summary line, one call of an open summary).
+function M.toggle(item, key)
   detail() -- local choices end when ctrl+t changes the level
-  local key = tool_key(item)
+  key = key or tool_key(item)
   toggled[key] = not toggled[key] or nil
   bone.chat.redraw(item.index)
 end
