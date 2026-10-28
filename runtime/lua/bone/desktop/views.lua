@@ -118,10 +118,12 @@ local function folded(item)
   return not open[turn_key(item.turn)]
 end
 
---- Open (`on`) or fold turn `n` of the chat on screen.
+--- Open (`on`) or fold turn `n` of the chat on screen. The view stays
+--- where it is, even at the end, where the chat would follow it.
 function M.open_turn(n, on)
   open[turn_key(n)] = on or nil
   bone.chat.redraw()
+  bone.chat.scroll(0)
 end
 
 -- Open turn `n` at the item a segment stands for.

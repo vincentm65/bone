@@ -51,6 +51,8 @@ pub(crate) struct Scroll {
     pub viewport: f32,
     /// Where Lua asked to go (`bone.gui.scroll`), taken next frame.
     pub target: Option<Target>,
+    /// This frame went where Lua asked: a list does not follow its end over it.
+    pub held: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -503,7 +505,9 @@ fn apply_scroll(p: &mut Placed, state: &mut HashMap<String, Scroll>) {
         let viewport = if sideways { p.inner.w } else { p.inner.h };
         let max = (content - viewport).max(0.0);
         let at_end = s.offset >= s.max - 1.0;
-        s.offset = match s.target.take() {
+        let target = s.target.take();
+        s.held = matches!(target, Some(Target::To(_)));
+        s.offset = match target {
             Some(Target::To(y)) => y,
             Some(Target::End) => max,
             None if p.node.style.follow && at_end => max,
