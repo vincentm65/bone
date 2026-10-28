@@ -174,6 +174,12 @@ impl Turn<'_> {
         }
     }
 
+    /// Whether hooks for `name` are registered: events that carry the
+    /// whole transcript are only built for them.
+    fn has_hook(&self, name: &str) -> bool {
+        self.rt.scripting.as_deref().is_some_and(|s| s.has_hook(name))
+    }
+
     /// [`turn_hooks`](Self::turn_hooks) at a safe point: between model
     /// calls, where Lua may change the transcript (`bone.session`).
     async fn safe_hooks(&self, name: &str, event: Value) -> Result<Option<Value>, Stop> {
@@ -276,6 +282,9 @@ impl Turn<'_> {
                 content: system.clone(),
             };
             let compact = self.compact_config();
+            // The context the limit was checked against, when it was not
+            // compacted after: no await between, so it is still current.
+            let mut checked = None;
             if let Some(limit) = compact.limit {
                 // Proactive estimates describe the session's pinned provider,
                 // not a one-call request override or a previous retry target.
@@ -291,24 +300,32 @@ impl Turn<'_> {
                     .lock()
                     .unwrap()
                     .set_replays_reasoning(provider.replays_reasoning());
-                let over = {
+                let (over, all) = {
                     let s = self.session.lock().unwrap();
                     let mut all = vec![system.clone()];
                     all.extend(s.context());
-                    crate::compact::tokens(&s, &all) > limit
-                        && crate::compact::can_compact(&s, compact.keep)
+                    let over = crate::compact::tokens(&s, &all) > limit
+                        && crate::compact::can_compact(&s, compact.keep);
+                    (over, all)
                 };
                 if over {
                     self.compact("limit").await?;
+                } else {
+                    checked = Some(all);
                 }
             }
-            let mut messages = vec![system];
-            messages.extend(self.session.lock().unwrap().context());
-            let ev = json!({ "session_id": self.session_id, "messages": messages });
-            if let Some(ev) = self.safe_hooks("context", ev).await? {
-                messages = messages_from_lua(&ev["messages"], &messages).map_err(|e| {
-                    Stop::Failed(format!("context hook returned bad messages: {e}"))
-                })?;
+            let mut messages = checked.unwrap_or_else(|| {
+                let mut all = vec![system];
+                all.extend(self.session.lock().unwrap().context());
+                all
+            });
+            if self.has_hook("context") {
+                let ev = json!({ "session_id": self.session_id, "messages": messages });
+                if let Some(ev) = self.safe_hooks("context", ev).await? {
+                    messages = messages_from_lua(&ev["messages"], &messages).map_err(|e| {
+                        Stop::Failed(format!("context hook returned bad messages: {e}"))
+                    })?;
+                }
             }
             let mut tools: Vec<ToolSpec> = self.rt.tools.specs().to_vec();
             // MCP tools, unless a built-in or Lua tool has the name.
@@ -317,14 +334,18 @@ impl Turn<'_> {
                     tools.push(t);
                 }
             }
-            let ev = json!({
-                "session_id": self.session_id,
-                "messages": messages,
-                "tools": tools,
-            });
             let mut use_provider = None;
             let mut use_model = None;
-            if let Some(ev) = self.safe_hooks("request", ev).await? {
+            let ev = self.has_hook("request").then(|| {
+                json!({
+                    "session_id": self.session_id,
+                    "messages": messages,
+                    "tools": tools,
+                })
+            });
+            if let Some(ev) = ev
+                && let Some(ev) = self.safe_hooks("request", ev).await?
+            {
                 use_provider = ev["provider"].as_str().map(str::to_owned);
                 use_model = ev["model"].as_str().map(str::to_owned);
                 messages = messages_from_lua(&ev["messages"], &messages).map_err(|e| {
@@ -367,16 +388,14 @@ impl Turn<'_> {
             } else {
                 self.rt.pinned(&served).map_err(Stop::Failed)?
             };
-            let hydrated = self
+            let has_images = messages.iter().any(|m| !m.images().is_empty());
+            let messages = self
                 .inner
                 .attachments
-                .hydrate(&messages)
+                .hydrate(messages)
                 .map_err(Stop::Failed)?;
             let completion = loop {
-                if !self.rt.supports_images(
-                    served.0.as_deref(),
-                    messages.iter().any(|m| !m.images().is_empty()),
-                ) {
+                if !self.rt.supports_images(served.0.as_deref(), has_images) {
                     return Err(Stop::Failed(
                         "this model does not support images; select a vision model".into(),
                     ));
@@ -408,7 +427,7 @@ impl Turn<'_> {
                     };
                     let req = CompletionRequest {
                         session_id: &self.session_id,
-                        messages: &hydrated,
+                        messages: &messages,
                         tools: &tools,
                         depth: 0,
                     };

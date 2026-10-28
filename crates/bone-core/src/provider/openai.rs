@@ -174,7 +174,10 @@ pub(super) async fn send(
 ) -> Result<reqwest::Response, ProviderError> {
     let mut attempt = 1;
     loop {
-        let mut req = http.post(url).json(body);
+        let mut req = http
+            .post(url)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(encode(body));
         for (name, value) in headers {
             req = req.header(name, value);
         }
@@ -201,6 +204,28 @@ pub(super) async fn send(
         tokio::time::sleep(Duration::from_secs(1 << (attempt - 1))).await;
         attempt += 1;
     }
+}
+
+/// `body` as JSON, in a buffer allocated once at its final size. It holds
+/// the whole transcript; grown by doubling, it would leave a trail of freed
+/// blocks on every call.
+fn encode(body: &Value) -> Vec<u8> {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0 += b.len();
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut n = Count(0);
+    // A `Value` always serializes: its keys are strings.
+    let _ = serde_json::to_writer(&mut n, body);
+    let mut out = Vec::with_capacity(n.0);
+    let _ = serde_json::to_writer(&mut out, body);
+    out
 }
 
 fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> Value {

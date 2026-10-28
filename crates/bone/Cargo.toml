@@ -15,6 +15,9 @@ bone-tui.workspace = true
 bone-gui = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
 
+[target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
+libc.workspace = true
+
 [features]
 # The desktop GUI (`bone --gui`); off by default, so the TUI build is unchanged.
 gui = ["dep:bone-gui"]

@@ -113,7 +113,33 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Mode>, St
     Ok(Some(Mode::Tui { connect, resume }))
 }
 
+/// Keep glibc's malloc from holding on to memory bone has freed. Every
+/// model call builds and drops copies of the whole transcript, each a
+/// little larger than the last; with an arena per thread and a mmap
+/// threshold that rises after each large free, those copies are carved
+/// from the heap and never returned, so a long session's RSS grows to
+/// several times what it uses. A fixed threshold sends large blocks to
+/// mmap, which gives them back when freed. `MALLOC_*` variables set by the
+/// user win.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn tune_malloc() {
+    for (var, param, value) in [
+        ("MALLOC_ARENA_MAX", libc::M_ARENA_MAX, 2),
+        ("MALLOC_MMAP_THRESHOLD_", libc::M_MMAP_THRESHOLD, 128 << 10),
+        ("MALLOC_TRIM_THRESHOLD_", libc::M_TRIM_THRESHOLD, 128 << 10),
+    ] {
+        if std::env::var_os(var).is_none() {
+            // SAFETY: called first thing in `main`, before other threads.
+            unsafe { libc::mallopt(param, value) };
+        }
+    }
+}
+
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+fn tune_malloc() {}
+
 fn main() -> ExitCode {
+    tune_malloc();
     if std::env::args_os().len() == 2
         && std::env::args_os()
             .nth(1)

@@ -295,7 +295,7 @@ impl Inner {
             return Err("this model does not support images; select a vision model".into());
         }
         let session_id = call.session_id.unwrap_or_default();
-        let messages = self.attachments.hydrate(&call.messages)?;
+        let messages = self.attachments.hydrate(call.messages)?;
         let req = CompletionRequest {
             session_id: &session_id,
             messages: &messages,

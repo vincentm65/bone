@@ -161,8 +161,7 @@ impl AttachmentStore {
         Ok(())
     }
 
-    pub fn hydrate(&self, messages: &[ChatMessage]) -> Result<Vec<ChatMessage>, String> {
-        let mut messages = messages.to_vec();
+    pub fn hydrate(&self, mut messages: Vec<ChatMessage>) -> Result<Vec<ChatMessage>, String> {
         for msg in &mut messages {
             if let Some(images) = msg.images_mut() {
                 self.resolve(images, true)?;
@@ -199,7 +198,7 @@ mod tests {
         assert_eq!(image.mime_type, "image/png");
         assert!(image.bytes > 0);
         let hydrated = store
-            .hydrate(&[ChatMessage::User {
+            .hydrate(vec![ChatMessage::User {
                 content: String::new(),
                 images: vec![image],
             }])
