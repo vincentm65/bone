@@ -511,9 +511,10 @@ bone.o.fold_turns = true              -- standard library: earlier turns as one 
 ```
 
 The tool strip, under your message, draws its turn as one bar: a segment per tool
-call as wide as it ran, the model's thinking between calls as fine dots and
-its answer at the end. Each kind has a highlight group of its own, also used
-by the TUI's toolstrip plugin, quiet by brightness: `ToolStripRead` (faint),
+call, duration-weighted while it runs and equal-width for historic turns; the
+model's thinking between calls is fine dots and its answer is at the end. Each
+kind has a highlight group of its own, also used by the TUI's toolstrip plugin,
+quiet by brightness: `ToolStripRead` (faint),
 `ToolStripCommand` and `ToolStripAgent` (brighter), `ToolStripAnswer` (nearly
 white), `ToolStripEdit` (green), `ToolStripFail` (red), `ToolStripLive` (a
 running call, breathing amber) and `ToolStripWait` (one waiting on an answer,
