@@ -35,7 +35,7 @@ end
 function M.title(text)
   return style.finish({
     text = text, hl = "Normal", bold = true, size = style.size.title,
-    padding = { 4, 10 }, margin = style.margin(0, 6),
+    padding = { 2, 8 }, margin = style.margin(0, 4),
   })
 end
 
@@ -82,12 +82,21 @@ function M.surface(o)
   }, o))
 end
 
+--- A card floating on the window: the composer's look (its fill, border
+--- and corners) with a soft shadow. The sidebar and docked panels are these.
+function M.card(o)
+  return style.finish(extend({
+    direction = "column", bg = "InputBackground", border = 1, border_color = "PromptBorder",
+    radius = style.radius.round, shadow = style.shadow.bubble,
+  }, o))
+end
+
 --- An entry: a card, raised when it is the selected one; `click` runs when
 --- it is pressed.
 function M.entry(on, children, click)
   local node = {
     direction = "column", bg = on and "Selection" or nil, radius = style.radius.lg,
-    padding = { 7, 12 }, margin = { 1, 0, 1, 0 }, role = "option", selected = on,
+    padding = { 5, 10 }, role = "option", selected = on,
     transition = style.motion.base,
     hover = click and not on and { bg = style.hover() } or nil,
   }
@@ -124,6 +133,20 @@ function M.icon_button(glyph, label, click, o)
   return style.finish(M.press(extend(node, o), click, "button", false))
 end
 
+--- An on/off switch: a track with a knob, the accent's fill when `on`.
+--- `click` runs when it is pressed.
+function M.switch(on, click)
+  local fill = on and style.alpha("Accent", "ff", "fg", "TextSelection") or "Selection"
+  local node = style.finish({
+    width = 28, height = 16, radius = 8, padding = 2, shrink = 0, bg = fill,
+    direction = "row", justify = on and "end" or "start", align = "center",
+    role = "checkbox", selected = on, transition = style.motion.slow,
+    { width = 12, height = 12, radius = 6, bg = style.alpha("Normal", "ff", "fg", "Normal") },
+  })
+  if click then M.press(node, click, "checkbox", false) end
+  return node
+end
+
 --- A check mark in front of an option: a glyph node.
 function M.checkbox(on, o)
   return extend({
@@ -137,6 +160,30 @@ function M.check_span(on)
   return { text = on and "☑  " or "☐  ", hl = on and "Accent" or "Dim" }
 end
 
+--- A checklist: `items` are { text, state = "todo", "active" or "done" }.
+--- A dot for one to do, an accent arrow and bold text for the active one, a
+--- green check and struck-through grey text for one done.
+local CHECK = {
+  todo = { mark = "·", hl = "Dim" },
+  active = { mark = "▸", hl = "Accent" },
+  done = { mark = "✓", hl = "DiffAdd" },
+}
+function M.checklist(items, o)
+  local list = extend({ direction = "column", gap = 3 }, o)
+  for _, it in ipairs(items) do
+    local done, active = it.state == "done", it.state == "active"
+    local c = CHECK[it.state] or CHECK.todo
+    list[#list + 1] = {
+      direction = "row", gap = 6, align = "start", role = "checkbox", selected = done,
+      { text = c.mark, hl = c.hl, bold = done or nil, font = "mono", size = style.size.body,
+        width = 14, wrap = false, shrink = 0 },
+      { text = tostring(it.text or ""), hl = done and "Dim" or "Normal", size = style.size.body,
+        bold = active or nil, strike = done or nil, grow = 1, width = 0 },
+    }
+  end
+  return style.finish(list)
+end
+
 -- One choice of a set, as a node.
 local function segment(text, on, pick, o)
   return style.finish(M.press(extend({
@@ -148,20 +195,23 @@ local function segment(text, on, pick, o)
 end
 
 --- A switch between a few views, joined in one rounded box. `names` are
---- the labels; `pick(i)` runs for one that is not the current.
+--- the labels; `pick(i)` runs for one that is not the current. `o.item`
+--- replaces fields of each choice (a smaller `size` and `padding`).
 function M.segmented(names, current, pick, o)
+  local item = o and o.item
   local row = extend({
     direction = "row", gap = 2, padding = 2, radius = style.radius.md, bg = "Normal",
   }, o)
+  row.item = nil
   for i, name in ipairs(names) do
-    row[#row + 1] = segment(name, i == current, function() pick(i) end)
+    row[#row + 1] = segment(name, i == current, function() pick(i) end, item)
   end
   return style.finish(row)
 end
 
 --- Tabs along the top of a window: the current one raised.
 function M.tabs(names, current, pick, o)
-  local row = extend({ direction = "row", gap = 4, padding = { 2, 6 }, margin = style.margin(0, 8) }, o)
+  local row = extend({ direction = "row", gap = 4, padding = { 0, 4 }, margin = style.margin(0, 6) }, o)
   for i, name in ipairs(names) do
     row[#row + 1] = segment(name, i == current, function() pick(i) end,
       { size = style.size.body, padding = { 5, 12 } })
@@ -187,6 +237,21 @@ function M.field(label, value, o)
   })
 end
 
+--- A fixed space under a list, two lines tall: what the selected entry is,
+--- what just happened, or a question. Text (`hl`, Dim by default) or a node.
+--- The same height whatever it holds, so moving through the list never moves
+--- the list.
+function M.detail(content, hl)
+  local node = { height = 2 * math.ceil(style.size.small * 1.35) + 8, padding = { 4, 8 }, overflow = "hidden",
+    direction = "column", justify = "center", shrink = 0 }
+  if type(content) == "table" then
+    node[1] = content
+  elseif content and content ~= "" then
+    node[1] = { text = content, hl = hl or "Dim", size = style.size.small }
+  end
+  return style.finish(node)
+end
+
 -- ---- key hints --------------------------------------------------------------
 
 -- What reads as a key in a hint ("enter open"), besides a single letter,
@@ -204,10 +269,10 @@ end
 --- A row of key hints from a line such as "↑↓ move · enter open · esc
 --- close": each key a small keycap, then what it does.
 function M.hints(text, margin)
-  local m = margin or { 14, 0 }
+  local m = margin or { 8, 0 }
   local row = {
-    direction = "row", flex_wrap = true, gap = 16, row_gap = 6, align = "center",
-    padding = { 4, 10 }, margin = style.margin(m[1], m[2]),
+    direction = "row", flex_wrap = true, gap = 14, row_gap = 4, align = "center",
+    padding = { 2, 8 }, margin = style.margin(m[1], m[2]),
   }
   for part in (text .. " · "):gmatch("(.-) · ") do
     local key, what = part:match("^(%S+)%s+(.*)$")
@@ -225,6 +290,65 @@ function M.hints(text, margin)
   return style.finish(row)
 end
 
+-- ---- code -------------------------------------------------------------------
+
+--- A diff as one block of monospace rows: `rows` are { sign = "+", "-" or
+--- " ", text, old, new } (old and new are line numbers, shown with
+--- `o.numbers`), { separator = true } ("···" between hunks), or { text, hl }
+--- with no sign (a hunk header, a note; Dim by default). Changed rows are
+--- highlighted flat across the block, unchanged ones grey. `o.cap` cuts it
+--- to that many rows, with how many more under them, unless `o.expanded`.
+function M.diff(rows, o)
+  o = o or {}
+  if #rows == 0 then return nil end
+  local shown, cut = rows, 0
+  if o.cap and not o.expanded and #rows > o.cap then
+    shown, cut = {}, #rows - o.cap
+    for i = 1, o.cap do shown[i] = rows[i] end
+  end
+  local size = o.size or style.size.small
+  local digits = 1
+  if o.numbers then
+    for _, r in ipairs(shown) do
+      digits = math.max(digits, #tostring(r.old or ""), #tostring(r.new or ""))
+    end
+  end
+  -- Vertical padding covers the corner curve, so a highlighted row's square
+  -- background never paints over a rounded card around the block.
+  local block = { direction = "column", padding = { 6, 0 }, font = "mono", size = size }
+  local function add(text, hl, bg, py)
+    block[#block + 1] = style.finish({
+      bg = bg, padding = { py or 1, 12 },
+      { text = text, hl = hl, font = "mono", size = size, selectable = true },
+    })
+  end
+  for _, r in ipairs(shown) do
+    if r.separator then
+      add("···", "Dim", nil, 6)
+    elseif not r.sign then
+      add(tostring(r.text or ""):gsub("\t", "    "), r.hl or "Dim", nil, 4)
+    else
+      local hl, mark = "Dim", " "
+      if r.sign == "+" then hl, mark = "DiffAdd", "+" elseif r.sign == "-" then hl, mark = "DiffDelete", "-" end
+      local bg = mark ~= " " and hl or nil
+      local text = tostring(r.text or ""):gsub("\t", "    ")
+      if o.numbers then
+        -- The numbers stay put; the code beside them wraps.
+        block[#block + 1] = style.finish({
+          direction = "row", align = "start", bg = bg, padding = { 1, 12 },
+          { text = string.format("%" .. digits .. "s %" .. digits .. "s %s ", r.old or "", r.new or "", mark),
+            hl = bg and hl or "Dim", font = "mono", size = size, wrap = false, shrink = 0 },
+          { text = text, hl = hl, font = "mono", size = size, grow = 1, width = 0, selectable = true },
+        })
+      else
+        add("  " .. mark .. " " .. text, hl, bg)
+      end
+    end
+  end
+  if cut > 0 then add("⋯ " .. cut .. " more line" .. (cut == 1 and "" or "s"), "Dim", nil, 4) end
+  return style.finish(block)
+end
+
 -- ---- lists ------------------------------------------------------------------
 
 local shown = {} -- list id -> the entry last scrolled into view
@@ -233,7 +357,8 @@ local shown = {} -- list id -> the entry last scrolled into view
 --- `selected` (an index) kept in view; `id` names it. `opts.fit`: the
 --- window is as tall as its entries, not the room it was given.
 --- `opts.footer`: a node that stays under the list (the keys), however far
---- it scrolls.
+--- it scrolls. `opts.estimate`: an entry's height in pixels before it is
+--- measured (56); near the real one, a `fit` window opens at its size.
 function M.list(id, items, selected, opts)
   opts = opts or {}
   if selected and shown[id] ~= selected then
@@ -242,7 +367,7 @@ function M.list(id, items, selected, opts)
   end
   local list = {
     id = id, grow = 1, fit = opts.fit,
-    list = { count = #items, estimate = 56, key = id, item = function(i) return items[i] end, fit = opts.fit },
+    list = { count = #items, estimate = opts.estimate or 56, key = id, item = function(i) return items[i] end, fit = opts.fit },
   }
   if not opts.footer then return list end
   opts.footer.shrink = 0

@@ -72,7 +72,8 @@ impl Gui {
     /// follows the TUI: its size in cells of the monospace font, centered in
     /// its anchor or `row`/`col` cells from its edges, returned in pixels. A
     /// window with a node callback is not placed in cells: `x`/`y`/`w`/`h`
-    /// are the anchor in pixels and `bounds` is true. Lua draws both
+    /// are the anchor in pixels, `bounds` is true, and `want_w`/`want_h` are
+    /// its `width`/`height` in pixels when it gave them. Lua draws both
     /// (`bone.nodes.popups`).
     pub(crate) fn popups_for_lua(&mut self, lua: &Lua) -> mlua::Result<mlua::Table> {
         self.forget_window_nodes(lua)?;
@@ -136,6 +137,13 @@ impl Gui {
                 t.set("w", area.width())?;
                 t.set("h", area.height())?;
                 t.set("bounds", true)?;
+                // The size it asked for, in pixels: room beyond the usual cap.
+                if let Some(w) = p.width {
+                    t.set("want_w", f32::from(w) * col)?;
+                }
+                if let Some(h) = p.height {
+                    t.set("want_h", f32::from(h) * row)?;
+                }
                 t.set("z", p.z)?;
                 t.set("focus", p.focus)?;
                 t.set("node", self.stored_function(lua, cb)?)?;

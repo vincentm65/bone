@@ -20,12 +20,10 @@ function M.select(page)
     local list = page.matches()
     st.sel = math.max(1, math.min(st.sel, math.max(#list, 1)))
     local items = {}
-    if opts.prompt then
-      items[#items + 1] = { text = opts.prompt, hl = "Normal", bold = true, size = style.size.lead, padding = { 2, 8 }, margin = { 0, 0, 10, 0 } }
-    end
+    if opts.prompt then items[#items + 1] = title(opts.prompt) end
     items[#items + 1] = {
       text = st.query == "" and "Search…" or (st.query .. "▏"), size = style.size.body, hl = st.query == "" and "Dim" or "Normal",
-      bg = "InputBackground", radius = style.radius.lg, padding = { 8, 12 }, margin = { 0, 0, 10, 0 },
+      bg = "InputBackground", radius = style.radius.lg, padding = { 6, 10 }, margin = { 0, 0, 6, 0 },
       border = 1, border_color = "Accent",
     }
     if st.loading then
@@ -40,8 +38,9 @@ function M.select(page)
       if i == st.sel then selected = #items end
     end
     local footer = opts.footer == nil and "↑↓ move · enter open · esc close" or opts.footer
-    return widgets.list("select:" .. page.id, items, selected,
-      { fit = true, footer = footer and hints(footer, { 10, 0 }) or nil })
+    -- The one dialog size, however many match.
+    return style.as_dialog(widgets.list("select:" .. page.id, items, selected,
+      { estimate = 28, footer = footer and hints(footer) or nil }))
   end
 
   return { node = node }
@@ -66,7 +65,7 @@ function M.pager(page)
     end
     local items = { body }
     if opts.title then table.insert(items, 1, title(opts.title)) end
-    return widgets.list(list, items, nil, { fit = true, footer = hints("↑↓ scroll · esc close", { 8, 0 }) })
+    return widgets.list(list, items, nil, { fit = true, footer = hints("↑↓ scroll · esc close") })
   end
 
   local function on_key(k)

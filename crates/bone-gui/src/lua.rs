@@ -19,7 +19,7 @@ use bone_ui::data::Dep;
 use bone_ui::keymap::{Context, Keymaps};
 use bone_ui::keys::Key;
 use bone_ui::lua::{
-    Autocmd, CALLBACKS, ChatStore, Host, KeymapStore, Looks, OptionStore, Owned, Owners,
+    Autocmd, CALLBACKS, ChatStore, Geometry, Host, KeymapStore, Looks, OptionStore, Owned, Owners,
     UserCommand, err,
 };
 use bone_ui::options::{DynamicOption, DynamicValue, Options};
@@ -685,6 +685,33 @@ impl Host for Gui {
 
     fn screen_cols(&self) -> u16 {
         self.view.screen_cols
+    }
+
+    fn geometry(&self) -> Geometry {
+        // GUI nodes are laid out in pixels, while the shared mouse API uses
+        // character cells. Publish panel node bounds in that coordinate
+        // space so terminal mouse forwarding can use the same event path as
+        // the TUI.
+        let (Some(area), Some((cw, ch))) = (self.view.area, self.view.cell) else {
+            return Geometry::default();
+        };
+        let leaves = self
+            .view
+            .leaves
+            .iter()
+            .filter(|(id, _)| id.starts_with("panel:"))
+            .map(|(id, r)| {
+                let x = ((r.min.x - area.min.x) / cw).max(0.0) as u16;
+                let y = ((r.min.y - area.min.y) / ch).max(0.0) as u16;
+                let width = (r.width() / cw).ceil().max(0.0) as u16;
+                let height = (r.height() / ch).ceil().max(0.0) as u16;
+                (id.clone(), bone_ui::layout::Rect::new(x, y, width, height))
+            })
+            .collect();
+        Geometry {
+            leaves,
+            seps: Vec::new(),
+        }
     }
 
     /// The prompt has the keyboard unless a question, a focused window or

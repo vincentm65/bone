@@ -424,17 +424,36 @@ fn handle_terminal(app: &mut App, ev: Event) {
         Event::Mouse(m) => {
             let at = (m.column, m.row);
             let code = match m.kind {
-                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
-                    if app.panel_wheel(at, m.kind == MouseEventKind::ScrollUp)
-                        || app.chat_wheel(at, m.kind == MouseEventKind::ScrollUp) =>
-                {
+                MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                    let up = m.kind == MouseEventKind::ScrollUp;
+                    if app.mouse("wheel", if up { "up" } else { "down" }, at)
+                        || app.panel_wheel(at, up)
+                        || app.chat_wheel(at, up)
+                    {
+                        return;
+                    }
+                    if up {
+                        keys::KeyCode::WheelUp
+                    } else {
+                        keys::KeyCode::WheelDown
+                    }
+                }
+                MouseEventKind::Down(b) => {
+                    app.mouse("down", button_name(b), at);
                     return;
                 }
-                MouseEventKind::ScrollUp => keys::KeyCode::WheelUp,
-                MouseEventKind::ScrollDown => keys::KeyCode::WheelDown,
-                MouseEventKind::Down(b) => return app.mouse("down", button_name(b), at),
-                MouseEventKind::Drag(b) => return app.mouse("drag", button_name(b), at),
-                MouseEventKind::Up(b) => return app.mouse("up", button_name(b), at),
+                MouseEventKind::Drag(b) => {
+                    app.mouse("drag", button_name(b), at);
+                    return;
+                }
+                MouseEventKind::Up(b) => {
+                    app.mouse("up", button_name(b), at);
+                    return;
+                }
+                MouseEventKind::Moved => {
+                    app.mouse("move", "", at);
+                    return;
+                }
                 _ => return,
             };
             app.handle_key(keys::Key::new(code, keys::mods(m.modifiers)));

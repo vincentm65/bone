@@ -99,29 +99,33 @@ impl Selection {
 /// sequence, which this returns for the caller to print. With a local
 /// display, also `wl-copy` or `xclip`. Commands run in the background.
 pub fn copy(text: &str) -> Option<String> {
-    let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty());
-    let mut cmds: Vec<&[&str]> = Vec::new();
-    let tmux = env("TMUX").is_some();
-    if tmux {
-        cmds.push(&["tmux", "load-buffer", "-w", "-"]);
-    }
-    if env("SSH_CONNECTION").is_none() {
-        if env("WAYLAND_DISPLAY").is_some() {
-            cmds.push(&["wl-copy"]);
-        } else if env("DISPLAY").is_some() {
-            cmds.push(&["xclip", "-selection", "clipboard"]);
-        }
-    }
-    let owned: Vec<Vec<String>> = cmds
-        .iter()
-        .map(|c| c.iter().map(|s| s.to_string()).collect())
-        .collect();
+    let tmux = std::env::var_os("TMUX").is_some_and(|v| !v.is_empty());
     let data = text.to_owned();
     std::thread::spawn(move || {
         use std::io::Write;
         use std::process::{Command, Stdio};
-        for cmd in owned {
-            let child = Command::new(&cmd[0])
+        let vars = bone_ui::clipboard::display_env();
+        let set = |k: &str| vars.iter().any(|(key, v)| *key == k && v.is_some());
+        let mut cmds: Vec<&[&str]> = Vec::new();
+        if tmux {
+            cmds.push(&["tmux", "load-buffer", "-w", "-"]);
+        }
+        if !set("SSH_CONNECTION") {
+            if set("WAYLAND_DISPLAY") {
+                cmds.push(&["wl-copy"]);
+            } else if set("DISPLAY") {
+                cmds.push(&["xclip", "-selection", "clipboard"]);
+            }
+        }
+        for cmd in cmds {
+            let mut command = Command::new(cmd[0]);
+            for (key, value) in &vars {
+                match value {
+                    Some(value) => command.env(key, value),
+                    None => command.env_remove(key),
+                };
+            }
+            let child = command
                 .args(&cmd[1..])
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())

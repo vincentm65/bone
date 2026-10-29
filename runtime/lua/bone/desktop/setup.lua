@@ -1,5 +1,5 @@
 -- The desktop library's /setup (and the window that opens by itself on a
--- first run): a card sized to its step, a welcome with buttons, then the
+-- first run): a card the size of every dialog, a welcome with buttons, then the
 -- provider as a card to choose, its details as a form, and the plugins to
 -- add. The steps, their rows and what keys do are bone.setup's page; this
 -- draws it.
@@ -25,25 +25,25 @@ local function steps(st)
       hl = i == at and "Accent" or (done and "ToolDone" or "Dim"), bold = i == at,
     }
   end
-  return { spans = spans, size = style.size.small, padding = { 4, 10 }, margin = { 0, 0, 10, 0 } }
+  return { spans = spans, size = style.size.small, padding = { 2, 8 }, margin = { 0, 0, 6, 0 } }
 end
 
 -- A heading and a line under it.
 local function heading(text, sub, hl)
   return {
-    direction = "column", padding = { 4, 10 }, margin = { 0, 0, 10, 0 },
-    { text = text, hl = hl or "Normal", bold = true, size = style.size.display },
-    sub and { text = sub, hl = "Dim", size = style.size.body, margin = { 6, 0, 0, 0 } } or nil,
+    direction = "column", padding = { 2, 8 }, margin = { 0, 0, 6, 0 },
+    { text = text, hl = hl or "Normal", bold = true, size = style.size.title },
+    sub and { text = sub, hl = "Dim", size = style.size.body, margin = { 2, 0, 0, 0 } } or nil,
   }
 end
 
 local function paragraph(text)
-  return { text = text, hl = "Normal", size = style.size.body, padding = { 4, 10 }, margin = { 0, 0, 10, 0 } }
+  return { text = text, hl = "Normal", size = style.size.body, padding = { 2, 8 }, margin = { 0, 0, 6, 0 } }
 end
 
 -- Buttons side by side.
 local function buttons(...)
-  return { direction = "row", gap = 10, margin = { 16, 0, 0, 0 }, padding = { 0, 4 }, ... }
+  return { direction = "row", gap = 8, margin = { 10, 0, 0, 0 }, padding = { 0, 4 }, ... }
 end
 
 -- A preset's name, and what is under it: the machine or the address.
@@ -82,7 +82,7 @@ function M.view(page)
         .. "This sets one up and can add plugins from the catalog. It is saved in ~/.bone/settings.json; "
         .. "your core.lua is not touched."))
       add({ text = "Make this window yours with ~/.bone/gui.lua, or /gui create personal for a full copy.",
-        hl = "Dim", size = style.size.small, padding = { 4, 10 } })
+        hl = "Dim", size = style.size.small, padding = { 2, 8 } })
       add(buttons(button("Get started", press("enter"), true),
         button(page.opts.first_run and "Not now" or "Close", press("esc"))))
     elseif st.step == "applying" or st.step == "done" then
@@ -92,7 +92,7 @@ function M.view(page)
         add({ text = l, hl = l:match("^error") and "ErrorMsg" or "Dim", size = style.size.caption, padding = { 2, 10 } })
       end
       if done then
-        add({ text = "Try asking", hl = "Dim", size = style.size.small, padding = { 2, 10 }, margin = { 14, 0, 4, 0 } })
+        add({ text = "Try asking", hl = "Dim", size = style.size.small, padding = { 2, 8 }, margin = { 8, 0, 2, 0 } })
         for i, prompt in ipairs(st.first_prompts) do
           local on = i == st.sel
           add(entry(on, { { text = prompt, hl = "Normal", bold = on, size = style.size.body } }, click(i)), on)
@@ -109,7 +109,7 @@ function M.view(page)
         add(entry(on, { {
           direction = "row", align = "center", gap = 8,
           { grow = 1, direction = "column",
-            { text = name, hl = "Normal", bold = true, size = style.size.text },
+            { text = name, hl = "Normal", bold = true, size = style.size.body },
             { text = aside, hl = "Dim", size = style.size.small, margin = { 2, 0, 0, 0 } } },
           { text = "›", hl = on and "Accent" or "Dim", size = style.size.lead },
         } }, click(i)), on)
@@ -152,7 +152,8 @@ function M.view(page)
         add({ text = st.note[1], hl = st.note[2] and "ErrorMsg" or "Dim", size = style.size.caption, padding = { 2, 10 } })
       end
     end
-    return widgets.list("setup", items, selected, { fit = true, footer = hints(page.hint(), { 8, 0 }) })
+    -- The one dialog size, whichever step it shows.
+    return style.as_dialog(widgets.list("setup", items, selected, { estimate = 40, footer = hints(page.hint()) }))
   end
 
   return { node = node }

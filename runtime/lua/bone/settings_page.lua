@@ -13,7 +13,9 @@
 -- local page = require("bone.settings_page").new(tab, { scope = "gui",
 --   changed = redraw, close = close }) gives page.st (the state: tabs, tab,
 -- sel, edit, note, ask, prov, providers), page.rows(), page.on_key(key),
--- page.activate(row, space), page.switch_tab(by) and page.paste(text).
+-- page.activate(row, space), page.set(row, value), page.switch_tab(by) and
+-- page.paste(text). `/` searches the rows in view (st.query; st.search while
+-- it is being typed): each word must be in a row's name, value or text.
 local M = {}
 
 local function text_width(s)
@@ -79,7 +81,8 @@ local function manifest_pages(titles)
   local pages = {}
   local dir = bone.config_dir and (bone.config_dir .. "/plugins")
   for _, e in ipairs(dir and bone.fs.list(dir) or {}) do
-    if e.type == "dir" then
+    -- Hidden ones are not plugins: a catalog install stages in .NAME.*.staging.
+    if e.type == "dir" and e.name:sub(1, 1) ~= "." then
       local f = io.open(dir .. "/" .. e.name .. "/manifest.json")
       if f then
         local text = f:read("*a")
@@ -131,6 +134,8 @@ function M.new(want, opts)
     tab = 1,
     sel = 1,
     edit = nil, -- the text being typed into a field
+    query = "", -- what the rows in view are filtered by
+    search = false, -- true while the query is being typed
     note = nil, -- a line under the rows: what happened, or an error
     providers = nil, -- from model/list, nil while loading
     prov = nil, -- the provider being edited: { name, new, draft }
@@ -290,7 +295,7 @@ function M.new(want, opts)
     return rows
   end
 
-  local function rows()
+  local function all_rows()
     local t = st.tabs[st.tab]
     if t.name == "general" then
       local out = option_rows(opts.scope)
@@ -317,6 +322,36 @@ function M.new(want, opts)
       return plugin_rows()
     end
     return field_rows(t.page)
+  end
+
+  -- What a search looks in: the row's name, its value and what it says.
+  local function haystack(r)
+    local parts = {}
+    for _, k in ipairs({ "label", "name", "desc", "model", "url", "path" }) do
+      if type(r[k]) == "string" then parts[#parts + 1] = r[k] end
+    end
+    if r.value ~= nil and type(r.value) ~= "table" and r.type ~= "secret" then parts[#parts + 1] = tostring(r.value) end
+    return table.concat(parts, " "):lower()
+  end
+
+  -- The rows in view, those the query matches. A search belongs to the
+  -- section, page or provider it was typed in; elsewhere it starts empty.
+  local function rows()
+    local where = st.tab .. ":" .. (st.prov and (st.prov.name or "+") or "")
+    if st.search_where ~= where then
+      st.query, st.search, st.search_where = "", false, where
+    end
+    local list = all_rows()
+    if st.query == "" then return list end
+    local out = {}
+    for _, r in ipairs(list) do
+      local text, match = haystack(r), true
+      for word in st.query:lower():gmatch("%S+") do
+        if not text:find(word, 1, true) then match = false break end
+      end
+      if match then out[#out + 1] = r end
+    end
+    return out
   end
 
   local function saved_note(err, ok_text)
@@ -592,6 +627,28 @@ function M.new(want, opts)
       return true
     end
     st.note = nil
+    if st.search then
+      -- Typing filters; the arrows move among the matches, enter acts on
+      -- one, esc drops the search.
+      if k == "esc" then
+        st.query, st.search, st.sel = "", false, 1
+        return true
+      elseif k == "enter" then
+        st.search = false
+        activate(row, false)
+        return true
+      elseif k ~= "up" and k ~= "down" and k ~= "pageup" and k ~= "pagedown" and k ~= "wheelup" and k ~= "wheeldown" then
+        local q = bone.text.edit(st.query, k)
+        if q then st.query, st.sel = q, 1 end
+        return true
+      end
+    elseif k == "/" then
+      st.search, st.sel = true, 1
+      return true
+    elseif k == "esc" and st.query ~= "" then
+      st.query, st.sel = "", 1
+      return true
+    end
     if st.tab > 3 and (k == "esc" or k == "q") then
       local page = st.tab
       st.tab = st.tabs[page].section
@@ -659,11 +716,24 @@ function M.new(want, opts)
     rows = rows,
     on_key = on_key,
     activate = activate,
+    --- Give a row (an option, a field or a provider's field) `value`, as
+    --- a choice picked with the pointer does.
+    set = function(row, value)
+      if row.kind == "pfield" then
+        save_provider_field(row, value)
+      else
+        save(row, value)
+      end
+    end,
     switch_tab = switch_tab,
     --- Text pasted while a field is being typed into.
     paste = function(text)
       if st.edit then
         st.edit = st.edit .. (text or ""):gsub("[\r\n]", "")
+        redraw()
+        return true
+      elseif st.search then
+        st.query, st.sel = st.query .. (text or ""):gsub("[\r\n]", " "), 1
         redraw()
         return true
       end

@@ -408,7 +408,9 @@ With `node = function(ctx) return node end` in place of `lines` (on
 `bone.ui.popup`, `win`, `update`, `bone.ui.panel.open` or `update`; `ctx` is
 `{ width, height }` in pixels) a window or a docked panel draws that node; the
 settings, help, health, setup, catalog, picker and pager windows are these.
-Keys, focus and closing stay the window's. `require("bone.nodes.popups").list(id, nodes, selected)` is a
+Its content box is at most 880 by 680 pixels, or larger when its `width` and
+`height` (in cells) ask for more; `width = 10000, height = 10000` takes the
+whole anchor. Keys, focus and closing stay the window's. `require("bone.nodes.popups").list(id, nodes, selected)` is a
 scrolling list for one, keeping entry `selected` in view:
 
 ```lua
@@ -426,7 +428,13 @@ id = bone.ui.popup({ on_key = function(k) … end,
 
 Replace the file to draw windows differently. Docked panels of `lines` and
 `bone.ui.layout` are the TUI's: the GUI keeps their state but draws nothing
-for them. Node panels can dock on all four sides. The built-in `/term`
+for them. Node panels can dock on all four sides, each a floating card; the GUI draws a panel's
+`title` over it. A bottom panel stands over the composer, at its width, as
+the terminal's stand over the prompt. One above or below the chat with
+`size = "auto"` (the default there) is as tall as its content, up to `max` rows. A plugin draws
+its content from `bone.nodes.widgets` (below) to look like the rest of the
+window, with a plain fallback where that library is not loaded:
+`local ok, widgets = pcall(require, "bone.nodes.widgets")`. The built-in `/term`
 (`/term <command>`) opens a terminal; `ctrl+]` or `ctrl+5` opens/refocuses it,
 and the same key inside returns to the prompt.
 
@@ -571,11 +579,24 @@ children, click)` (a card, raised when selected), `button(label, click,
 primary, on, o)`, `field(label, value, { on, editing, click, hint, empty })`
 (a labelled box), `hints("↑↓ move · enter open")` (each key as a keycap) and
 `list(id, items, selected, opts)`, which takes `opts.fit = true` (the window is
-as tall as its entries, not the room it was given, and centered) and
-`opts.footer = node` (stays under the list however far it scrolls). Also
+as tall as its entries, not the room it was given, and centered),
+`opts.estimate` (an entry's height in pixels before it is measured; near the
+real one, a `fit` window opens at its size) and `opts.footer = node` (stays
+under the list however far it scrolls). A window's content may also set
+`max_width` and `max_height` (pixels) to make the card smaller;
+`bone.nodes.style.as_dialog(node)` sets them to `style.dialog`, the one size
+settings, the catalog, setup, the picker and help share. Also
 `icon_button(glyph, label, click, o)`, `link(text, click)`, `pill(text)`,
-`tabs(names, current, pick)`, `segmented(names, current, pick)`,
-`checkbox(on)`, `surface(o)` (a raised card), `divider()` and
+`tabs(names, current, pick)`, `segmented(names, current, pick, o)` (`o.item`
+replaces fields of each choice), `switch(on, click)` (an on/off toggle),
+`detail(text or node, hl)` (a fixed two-line space under a list for the
+selected entry's description, a note or a question, so the entries never
+change height as the selection moves),
+`checkbox(on)`, `card(o)` (the floating card of the composer, sidebar and docked
+panels), `checklist(items)` (`{ text, state = "todo"|"active"|"done" }`),
+`diff(rows, { cap, expanded, numbers })` (rows `{ sign = "+"|"-"|" ", text,
+old, new }`, `{ separator = true }` or a `{ text, hl }` note; the look of an
+edit's diff in the chat), `surface(o)` (a raised card), `divider()` and
 `spinner(size)`. Whatever answers a press gets the pointer cursor, a name for
 screen readers, a hover look and a fade from `widgets.press(node, click)`; an
 `o` table replaces any field of the node a widget makes.

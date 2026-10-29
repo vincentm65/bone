@@ -69,18 +69,20 @@ local function lines_window(p, cell)
   return node
 end
 
--- The content box of a node window is at most this, and at most the
--- anchor minus the card's padding.
+-- The content box of a node window is at most this, or the `width` and
+-- `height` it asked for when larger, and at most the anchor minus the
+-- card's padding.
 local CONTENT_W, CONTENT_H = 880, 680
 
 -- A window of nodes: its `node` function's, in the card's padding.
--- `bounds`: x/y/w/h are the anchor, not the card.
+-- `bounds`: x/y/w/h are the anchor, not the card; `want_w`/`want_h` the
+-- size it asked for, in pixels.
 local function node_window(p)
   local c = M.chrome
   local inner_w, inner_h
   if p.bounds then
-    inner_w = math.max(0, math.min(p.w - 2 * c.pad, CONTENT_W))
-    inner_h = math.max(0, math.min(p.h - 2 * c.pad, CONTENT_H))
+    inner_w = math.max(0, math.min(p.w - 2 * c.pad, math.max(CONTENT_W, p.want_w or 0)))
+    inner_h = math.max(0, math.min(p.h - 2 * c.pad, math.max(CONTENT_H, p.want_h or 0)))
   else
     inner_w = p.w - 2 * c.pad
     inner_h = p.h - 2 * c.pad
@@ -91,8 +93,11 @@ local function node_window(p)
   end
   local inner = content and { grow = 1, direction = "column", content } or nil
   if p.bounds then
-    local card_w = math.min(p.w, inner_w + 2 * c.pad)
-    local card_h = math.min(p.h, inner_h + 2 * c.pad)
+    -- Content with a `max_width` or `max_height` makes the card smaller.
+    local want_w = content and tonumber(content.max_width) or inner_w
+    local want_h = content and tonumber(content.max_height) or inner_h
+    local card_w = math.min(p.w, math.min(inner_w, want_w) + 2 * c.pad)
+    local card_h = math.min(p.h, math.min(inner_h, want_h) + 2 * c.pad)
     local box = card({ x = 0, y = 0, w = card_w, h = card_h, z = 0 },
       { direction = "column", padding = c.pad, inner })
     -- Centered in the anchor. The size is already inside it; a `fit`
@@ -136,25 +141,26 @@ function M.menu(spec)
   local function draw()
     local list = items()
     local rows = { M.title(spec.title) }
-    if spec.note then rows[#rows + 1] = M.note(spec.note, { 0, 12 }) end
+    if spec.note then rows[#rows + 1] = M.note(spec.note, { 0, 6 }) end
     local at
     for i, it in ipairs(list) do
       local heading = {
         direction = "row", justify = "between", align = "center",
-        { text = it.label, size = style.size.lead, bold = i == selected, hl = "Normal" },
+        { text = it.label, size = style.size.body, bold = i == selected, hl = "Normal" },
         it.badge and widgets.pill(it.badge) or nil,
       }
       local row = M.entry(i == selected, {
         heading,
-        it.detail and { text = it.detail, size = style.size.body, hl = "Dim", margin = { 5, 0, 0, 0 } } or nil,
+        it.detail and { text = it.detail, size = style.size.small, hl = "Dim", margin = { 2, 0, 0, 0 } } or nil,
       }, function() spec.choose(i) end)
-      row.padding = { 13, 18 }
       rows[#rows + 1] = row
       if i == selected then at = #rows end
     end
-    if #list == 0 then rows[#rows + 1] = M.note(spec.empty or "Nothing here.", { 8, 0 }) end
-    return M.list("menu:" .. id, rows, at,
-      { footer = spec.hints and M.hints(spec.hints, { 10, 0 }) or nil })
+    if #list == 0 then rows[#rows + 1] = M.note(spec.empty or "Nothing here.", { 4, 0 }) end
+    local view = M.list("menu:" .. id, rows, at,
+      { fit = true, estimate = 44, footer = spec.hints and M.hints(spec.hints) or nil })
+    view.max_width = 640
+    return view
   end
   id = bone.ui.popup({
     node = draw,

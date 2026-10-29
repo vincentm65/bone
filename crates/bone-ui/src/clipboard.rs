@@ -1,6 +1,7 @@
 //! Reading an image (or text) for the prompt: from a file, or from the
 //! clipboard through a disposable helper process (`bone --clipboard-read`),
 //! so a native hang can be killed. Both frontends use it.
+use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
@@ -26,10 +27,16 @@ pub async fn read(input: Input, executable: Option<PathBuf>) -> Result<Content, 
         Input::Clipboard => {
             let executable = executable
                 .map(Ok)
-                .unwrap_or_else(std::env::current_exe)
+                .unwrap_or_else(running_exe)
                 .map_err(|e| format!("cannot locate clipboard helper: {e}"))?;
             let mut cmd = Command::new(executable);
             cmd.arg("--clipboard-read");
+            for (key, value) in display_env() {
+                match value {
+                    Some(value) => cmd.env(key, value),
+                    None => cmd.env_remove(key),
+                };
+            }
             // Avoid opening a console window for the helper on Windows.
             #[cfg(windows)]
             cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
@@ -39,6 +46,52 @@ pub async fn read(input: Input, executable: Option<PathBuf>) -> Result<Content, 
             .await
             .map_err(|_| "image file read timed out")?,
     }
+}
+
+/// The running binary. On Linux `/proc/self/exe` still execs it after the
+/// file was replaced (a rebuild or reinstall), when `current_exe` names a
+/// path that no longer exists.
+fn running_exe() -> std::io::Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    if std::path::Path::new("/proc/self/exe").exists() {
+        return Ok(PathBuf::from("/proc/self/exe"));
+    }
+    std::env::current_exe()
+}
+
+/// The variables that decide which clipboard is reachable, `None` when
+/// unset. Inside tmux a pane's shell keeps the environment it started with,
+/// which goes stale once the session is attached from elsewhere (the local
+/// desktop after SSH, or the reverse), so tmux's session environment wins.
+pub fn display_env() -> Vec<(&'static str, Option<OsString>)> {
+    const KEYS: [&str; 3] = ["WAYLAND_DISPLAY", "DISPLAY", "SSH_CONNECTION"];
+    let tmux = std::env::var_os("TMUX")
+        .filter(|v| !v.is_empty())
+        .and_then(|_| {
+            std::process::Command::new("tmux")
+                .arg("show-environment")
+                .stdin(Stdio::null())
+                .stderr(Stdio::null())
+                .output()
+                .ok()
+        })
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+    KEYS.into_iter()
+        .map(|key| {
+            let session = tmux.lines().find_map(|line| {
+                if line.strip_prefix('-') == Some(key) {
+                    Some(None)
+                } else {
+                    let value = line.strip_prefix(key)?.strip_prefix('=')?;
+                    Some(Some(OsString::from(value)))
+                }
+            });
+            let value = session.unwrap_or_else(|| std::env::var_os(key));
+            (key, value.filter(|v| !v.is_empty()))
+        })
+        .collect()
 }
 
 async fn file(path: PathBuf) -> Result<Content, String> {

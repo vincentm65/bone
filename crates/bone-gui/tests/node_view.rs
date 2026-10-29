@@ -73,6 +73,43 @@ async fn composer_contains_input_at_each_wrap() {
     );
 }
 
+/// The welcome copy and composer retain usable bounds on phone-sized windows.
+#[tokio::test(flavor = "multi_thread")]
+async fn narrow_new_session_scales_its_welcome_and_composer() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    for width in [200.0, 120.0, 80.0, 40.0] {
+        g.resize(width, 700.0);
+        for _ in 0..3 {
+            g.frame();
+        }
+        let geometry = g
+            .gui
+            .eval("(function() local p=bone.gui.rect('prompt'); local i=bone.gui.rect('composer-input'); return table.concat({p.x,p.w,i.x,i.w},',') end)()")
+            .unwrap();
+        let values: Vec<f32> = geometry.split(',').map(|v| v.parse().unwrap()).collect();
+        assert!(
+            values[0] >= 0.0 && values[0] + values[1] <= width,
+            "{width}: {geometry}"
+        );
+        assert!(
+            values[2] >= values[0] && values[2] + values[3] <= values[0] + values[1],
+            "{width}: {geometry}"
+        );
+        assert!(values[3] > 0.0, "{width}: input collapsed: {geometry}");
+        let title = g
+            .painted
+            .iter()
+            .find(|(text, _)| text.contains("New session"))
+            .map(|(_, rect)| *rect)
+            .expect("new-session welcome is painted");
+        assert!(
+            title.min.x >= 0.0 && title.max.x <= width,
+            "{width}: {title:?}"
+        );
+    }
+}
+
 /// The canvas supplies the picker's 50% opacity only once; the chat keeps
 /// its opaque surface, without an outline, and the sidebar is a card on it.
 #[tokio::test(flavor = "multi_thread")]

@@ -14,6 +14,7 @@ local md = require("bone.desktop.markdown")
 local nodes = require("bone.nodes")
 local timing = require("bone.timing")
 local style = require("bone.nodes.style")
+local widgets = require("bone.nodes.widgets")
 
 local GUTTER_MAX = 5 -- shell output rows before the first 2, "⋯ N more", last 2
 local PREVIEW_MAX = 5 -- other output rows
@@ -326,44 +327,10 @@ local function diff_rows(args)
   return rows, plus, minus, #(edits or {}), all
 end
 
--- A card's body of diff rows. Changed rows are highlighted flat across the
--- card (no radius of their own: that scalloped every line). Unchanged rows
--- stay the card's color, in grey. "···" between hunks. Cut to `cap` rows
+-- A card's body of diff rows (bone.nodes.widgets.diff), cut to `cap` rows
 -- unless expanded.
 local function diff_nodes(rows, cap, expanded)
-  if #rows == 0 then return {} end
-  local shown, cut = {}, 0
-  if not expanded and #rows > cap then
-    for i = 1, cap do shown[i] = rows[i] end
-    cut = #rows - cap
-  else
-    shown = rows
-  end
-  local size = md.small_size - 1
-  -- Vertical padding covers the corner curve, so a highlighted row's square
-  -- background never paints over the card's rounded corners.
-  local block = { direction = "column", padding = { 6, 0 }, font = "mono", size = size }
-  local function add(text, hl, bg, py)
-    block[#block + 1] = style.finish({
-      bg = bg, padding = { py or 1, 12 },
-      { text = text, hl = hl, font = "mono", size = size, selectable = true },
-    })
-  end
-  for _, r in ipairs(shown) do
-    if r.separator then
-      add("···", "Dim", nil, 6)
-    else
-      local hl, bg, gutter = "Dim", nil, "    "
-      if r.sign == "+" then
-        hl, bg, gutter = "DiffAdd", "DiffAdd", "  + "
-      elseif r.sign == "-" then
-        hl, bg, gutter = "DiffDelete", "DiffDelete", "  - "
-      end
-      add(gutter .. r.text:gsub("\t", "    "), hl, bg)
-    end
-  end
-  if cut > 0 then add("⋯ " .. cut .. " more line" .. (cut == 1 and "" or "s"), "Dim", nil, 4) end
-  return { style.finish(block) }
+  return { widgets.diff(rows, { cap = cap, expanded = expanded, size = md.small_size - 1 }) }
 end
 
 -- ---- cards -----------------------------------------------------------------

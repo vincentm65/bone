@@ -122,6 +122,10 @@ function M.open(want)
       if row.error then
         add("  " .. row.error, "ErrorMsg")
       end
+      -- Enter opens its settings page.
+      if row.page then
+        add("  ›", KEY)
+      end
     elseif row.type == "boolean" then
       switch_into(add, row.value)
     elseif row.choices and #row.choices > 0 then
@@ -196,7 +200,12 @@ function M.open(want)
       end
       out[#out + 1] = items
     end
-    out[#out + 1] = ""
+    -- The search, in the line under the tabs (blank without one).
+    if st.search or st.query ~= "" then
+      out[#out + 1] = { { "    / ", KEY }, { st.query, "Normal" }, { st.search and "▏" or "", KEY } }
+    else
+      out[#out + 1] = ""
+    end
 
     local label_w = 0
     for _, r in ipairs(list) do
@@ -210,6 +219,8 @@ function M.open(want)
     local body_start = #out
     if t.name == "providers" and not st.providers then
       out[#out + 1] = { { "    loading…", MUTED } }
+    elseif #list == 0 and st.query ~= "" then
+      out[#out + 1] = { { "    no matches", MUTED } }
     elseif #list == 0 then
       out[#out + 1] = { { "    " .. (t.name == "plugins" and "no plugins in ~/.bone/plugins" or "nothing to set here"), MUTED } }
     end
@@ -267,18 +278,20 @@ function M.open(want)
     local hint
     if st.ask then
       hint = { { "y", "yes" }, { "n", "no" } }
+    elseif st.search then
+      hint = { { "↑↓", "move" }, { "enter", "choose" }, { "esc", "clear" } }
     elseif st.edit then
       hint = { { "enter", "save" }, { "esc", "cancel" } }
     elseif t.page then
-      hint = { { "↑↓", "move" }, { "enter", "change" }, { "r", "reset" }, { "esc", "back" } }
+      hint = { { "↑↓", "move" }, { "/", "search" }, { "enter", "change" }, { "r", "reset" }, { "esc", "back" } }
     elseif t.name == "providers" and st.prov then
-      hint = { { "↑↓", "move" }, { "enter", "change" }, { "r", "reset to core.lua" }, { "esc", "back" } }
+      hint = { { "↑↓", "move" }, { "/", "search" }, { "enter", "change" }, { "r", "reset to core.lua" }, { "esc", "back" } }
     elseif t.name == "providers" then
-      hint = { { "↑↓", "move" }, { "enter", "use" }, { "e", "edit" }, { "a", "add" }, { "d", "delete" }, { "tab", "section" }, { "esc", "close" } }
+      hint = { { "↑↓", "move" }, { "/", "search" }, { "enter", "use" }, { "e", "edit" }, { "a", "add" }, { "d", "delete" }, { "tab", "section" }, { "esc", "close" } }
     elseif t.name == "plugins" then
-      hint = { { "↑↓", "move" }, { "enter", "settings" }, { "space", "on/off" }, { "tab", "section" }, { "esc", "close" } }
+      hint = { { "↑↓", "move" }, { "/", "search" }, { "enter", "settings" }, { "space", "on/off" }, { "tab", "section" }, { "esc", "close" } }
     else
-      hint = { { "↑↓", "move" }, { "enter", "change" }, { "r", "reset" }, { "tab", "section" }, { "esc", "close" } }
+      hint = { { "↑↓", "move" }, { "/", "search" }, { "enter", "change" }, { "r", "reset" }, { "tab", "section" }, { "esc", "close" } }
     end
     items, add = line(w)
     hints_into(add, hint)

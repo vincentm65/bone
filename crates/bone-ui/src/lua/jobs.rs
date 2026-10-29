@@ -159,12 +159,26 @@ pub fn screen<H: Host>(
     let (lines, scroll, max) = term.lines(rows, cols, scroll, h.looks().theme);
     let state = term.state().map(|s| {
         let (row, col) = s.cursor_position();
+        let mouse = match s.mouse_protocol_mode() {
+            vt100::MouseProtocolMode::None => "none",
+            vt100::MouseProtocolMode::Press => "press",
+            vt100::MouseProtocolMode::PressRelease => "press_release",
+            vt100::MouseProtocolMode::ButtonMotion => "button_motion",
+            vt100::MouseProtocolMode::AnyMotion => "any_motion",
+        };
+        let mouse_encoding = match s.mouse_protocol_encoding() {
+            vt100::MouseProtocolEncoding::Default => "default",
+            vt100::MouseProtocolEncoding::Utf8 => "utf8",
+            vt100::MouseProtocolEncoding::Sgr => "sgr",
+        };
         json!({
             "cursor": (!s.hide_cursor() && scroll == 0).then_some([row + 1, col + 1]),
             "title": s.title(),
             "app_cursor": s.application_cursor(),
             "bracketed_paste": s.bracketed_paste(),
             "alt_screen": s.alternate_screen(),
+            "mouse": mouse,
+            "mouse_encoding": mouse_encoding,
             "running": running,
         })
     });

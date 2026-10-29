@@ -43,6 +43,16 @@ M.shadow = {
   bubble = { blur = 16, dy = 4, color = "#00000038" },
 }
 
+--- The size of a dialog (settings, the catalog, setup, a picker, help), in
+--- pixels: one size for all of them, kept while what they hold changes.
+M.dialog = { width = 680, height = 540 }
+
+--- Content `node` of a window, made the size of a dialog.
+function M.as_dialog(node)
+  node.max_width, node.max_height = M.dialog.width, M.dialog.height
+  return node
+end
+
 --- The dimmed backdrops behind a dialog and behind a large image.
 M.scrim = { dialog = "#00000099", image = "#000000d8" }
 

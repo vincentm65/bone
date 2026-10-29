@@ -459,7 +459,7 @@ end
 -- It opens out from the window's edge: how far, 0 to 1, and the slide under
 -- way: where it set off from, where to, when, and the frame before.
 local slide = { at = 0, from = 0, to = 0, started = 0, last = 0 }
-M.slide_ms = 120
+M.slide_ms = 24 -- 5× faster than the original 120 ms
 -- The most a frame moves it, in ms of the slide.
 local FRAME_MAX = 17
 -- How far right of the pointer the width handle's edge was when pressed.
@@ -519,8 +519,7 @@ function M.node(ctx)
   }
   local card = {
     id = CARD, width = math.floor(M.width * ease), overflow = "hidden", direction = "row",
-    bg = "InputBackground", border = 1, border_color = "PromptBorder", radius = style.radius.round,
-    shadow = style.shadow.bubble, opacity = ease, inner, handle,
+    opacity = ease, inner, handle,
   }
   if overlaid then
     card.position, card.left, card.top, card.bottom, card.z = "absolute", M.inset, M.inset, M.inset, 8
@@ -529,10 +528,10 @@ function M.node(ctx)
       position = "absolute", left = 0, right = 0, top = 0, bottom = 0, z = 7,
       bg = style.scrim.dialog, opacity = ease, on_click = close,
     })
-    return style.finish(card), 0, backdrop
+    return widgets.card(card), 0, backdrop
   end
   card.margin = { M.inset, 0, M.inset, math.floor(M.inset * ease) }
-  style.finish(card)
+  card = widgets.card(card)
   return card, card.width + (card.margin and card.margin[4] or 0)
 end
 

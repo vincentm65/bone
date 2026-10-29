@@ -106,16 +106,24 @@ function M.node(opts)
   local prefix = not opts.chat and prompt_line("prefix", ctx) or nil
   local p = type(bone.ui.prompt) == "table" and bone.ui.prompt or {}
   local rows = max_rows()
+  -- Stack the attach control above the field when there is not enough room
+  -- for both it and a useful input. The field then gets the full width.
+  local compact = opts.width and opts.width < 240
+  local field_placeholder = placeholder
+  if compact then
+    field_placeholder = opts.width < 96 and "…" or (running and "Message…" or "Message bone…")
+  end
   local card = {
     id = opts.chat and ("prompt:" .. opts.chat) or "prompt", bg = "InputBackground", border = 1, border_color = "PromptBorder",
-    radius = style.radius.round, padding = { 10, 14, 10, 14 }, direction = "row", gap = 10, align = "end",
+    radius = style.radius.round, padding = compact and { 8, 8, 8, 8 } or { 10, 14, 10, 14 },
+    direction = compact and "column" or "row", gap = compact and 6 or 10, align = compact and "stretch" or "end",
     on_press = opts.chat and opts.on_focus or nil,
     widgets.icon_button("+", "Attach files", function() if opts.on_focus then opts.on_focus() end; require("bone.desktop.attach").pick() end,
       { box = 26, size = 20, hl = "Accent", radius = style.radius.md }),
-    { input = not opts.chat, placeholder = placeholder,
-      text_input = opts.chat and { value = bone.gui.draft(opts.chat), placeholder = placeholder, multiline = true, max_rows = rows, read_only = true } or nil,
+    { input = not opts.chat, placeholder = field_placeholder,
+      text_input = opts.chat and { value = bone.gui.draft(opts.chat), placeholder = field_placeholder, multiline = true, max_rows = rows, read_only = true } or nil,
       size = style.size.text, min_rows = tonumber(p.min), max_rows = rows, hl = "InputText", grow = 1,
-      align_self = "center", id = "composer-input" .. (opts.chat or "") },
+      align_self = compact and "stretch" or "center", id = "composer-input" .. (opts.chat or "") },
   }
   if prefix and #prefix > 0 then
     table.insert(card, 2, { spans = prefix, size = style.size.text, hl = "UserPrompt", wrap = false })

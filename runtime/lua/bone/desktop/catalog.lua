@@ -1,6 +1,6 @@
 -- The desktop library's /catalog: plugins and GUIs to browse, install,
 -- update and remove, as a card in the middle of the screen. Each package is
--- an entry (checked to choose several), under Updates, Installed and
+-- a one-line entry (checked to choose several), under Updates, Installed and
 -- Available. The state and keys are bone.catalog's page; this draws it.
 local M = {}
 
@@ -28,7 +28,7 @@ function M.view(page)
     end
     local items = { title("Catalog") }
     items[#items + 1] = note(("%s   ·   %d update%s   ·   %d selected"):format(
-      catalog.source(), updates, updates == 1 and "" or "s", #page.selected_rows(list)), { 0, 6 })
+      catalog.source(), updates, updates == 1 and "" or "s", #page.selected_rows(list)), { 0, 4 })
     -- Two pages: a press on the other one is the tab key.
     items[#items + 1] = widgets.tabs({ "Plugins", "TUIs" }, st.page == "tui" and 2 or 1, function()
       page.on_key("tab")
@@ -43,25 +43,38 @@ function M.view(page)
     local selected, last
     for i, e in ipairs(list) do
       if e.state ~= last then
-        items[#items + 1] = { text = catalog.HEAD[e.state], hl = "MdHeading", bold = true, size = style.size.text,
-          padding = { 2, 10 }, margin = { 8, 0, 2, 0 } }
+        items[#items + 1] = { text = catalog.HEAD[e.state]:upper(), hl = "Dim", bold = true, size = style.size.micro,
+          padding = { 2, 8 }, margin = { 6, 0, 2, 0 } }
         last = e.state
       end
       local on, picked = i == st.sel, st.selected[e.name]
       local meta = (e.version or "") .. (catalog.supports(e) ~= "" and ("  ·  " .. catalog.supports(e)) or "")
-      items[#items + 1] = entry(on, {
-        { spans = {
-            widgets.check_span(picked),
-            { text = catalog.label(e), hl = "Normal", bold = on },
-            { text = meta ~= "" and ("   " .. meta) or "", hl = "Dim" },
-          }, size = style.size.body },
-        { text = e.description or "", hl = "Dim", size = style.size.small, margin = { 3, 0, 0, 0 }, padding = { 0, 0, 0, 22 } },
+      -- One line: the check, the name, its version, and the description cut
+      -- to fit (all of it under the list for the selected one).
+      local row = entry(on, {
+        {
+          direction = "row", align = "center", gap = style.space.md,
+          { spans = { widgets.check_span(picked), { text = catalog.label(e), hl = "Normal", bold = on } },
+            size = style.size.body, wrap = false, shrink = 0 },
+          { text = meta, hl = "Dim", size = style.size.small, wrap = false, shrink = 0 },
+          { text = e.description or "", hl = "Dim", size = style.size.small, grow = 1, width = 0,
+            wrap = false, text_overflow = "ellipsis" },
+        },
       }, click(i))
+      items[#items + 1] = row
       if on then selected = #items end
     end
+    -- Under the list, one space for what happened or the selected package's
+    -- description: rows never change height as the selection moves.
     local status = page.note()
-    if status ~= "" then items[#items + 1] = note(status, { 10, 0 }, st.ask and "Accent" or "Dim") end
-    return widgets.list("catalog", items, selected, { footer = hints(page.hint(), { 8, 0 }) })
+    local current = list[st.sel]
+    local detail = status ~= "" and widgets.detail(status, st.ask and "Accent" or "Dim")
+      or widgets.detail(current and current.description)
+    -- The one dialog size, whichever page it shows.
+    return style.as_dialog(widgets.list("catalog", items, selected, {
+      estimate = 28,
+      footer = { direction = "column", widgets.divider({ margin = { 4, 0, 0, 0 } }), detail, hints(page.hint(), { 0, 0 }) },
+    }))
   end
 
   return { node = node }

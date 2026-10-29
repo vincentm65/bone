@@ -626,8 +626,20 @@ pub fn mouse_at<H: Host>(
             ev["col"] = (x - r.x + 1).into();
         }
         if let Some((id, line)) = panels::hit(h.panel_store().panels, x, y) {
-            ev["panel"] = id.into();
+            ev["panel"] = id.clone().into();
             ev["panel_line"] = line.into();
+            // The content line is useful to widgets that forward pointer
+            // events to an embedded terminal. `panel_line` includes the
+            // panel's scroll offset; these coordinates stay local to the
+            // panel viewport.
+            if let Some(p) = panels::panel(h.panel_store().panels, &id)
+                && let Some(area) = p.area
+            {
+                let title = usize::from(p.title.is_some());
+                let local = y.saturating_sub(area.y) as usize;
+                ev["panel_row"] = (if local < title { 0 } else { local - title + 1 }).into();
+                ev["panel_col"] = (x.saturating_sub(area.x) + 1).into();
+            }
         }
     }
     let handled = fire(h, "mouse", ev)

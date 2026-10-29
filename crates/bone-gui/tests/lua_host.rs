@@ -975,7 +975,8 @@ async fn node_panels_on_all_four_docks() {
         assert(window.docked('left', ctx)[1].width == 200)
         assert(window.docked('bottom', ctx)[1].height == 140)
         bone.ui.panel.update('top', { size = 3 })
-        assert(window.docked('top', ctx)[1].height == 3 * 18 + 16)
+        -- Rows, and the card around them: its inset, padding and border.
+        assert(window.docked('top', ctx)[1].height == 3 * 18 + 34)
     "#,
         )
         .unwrap();
@@ -1013,7 +1014,8 @@ async fn oversized_opposing_docks_fit_the_window() {
           return { grow = 1, height = 0 }
         end
         dock_seen = {}
-        for _, side in ipairs({ 'left', 'right', 'top', 'bottom' }) do
+        -- Bottom panels stand in the chat's column, over the composer.
+        for _, side in ipairs({ 'left', 'right', 'top' }) do
           local id = side
           bone.ui.panel.open({ id = id, dock = id, size = 0.75,
             node = function(ctx)
@@ -1030,15 +1032,15 @@ async fn oversized_opposing_docks_fit_the_window() {
         .run_lua(
             "t",
             r#"
-        assert(dock_area.width == 0 and dock_area.height == 0)
+        assert(dock_area.width == 0 and dock_area.height == 700 - 525)
         for id, seen in pairs(dock_seen) do
           local r = assert(bone.gui.rect('panel:' .. id))
           assert(math.abs(seen.width - r.w) < 0.01, id)
           assert(math.abs(seen.height - r.h) < 0.01, id)
           assert(seen.width >= 0 and seen.height >= 0, id)
         end
-        assert(dock_seen.left.width == 738 and dock_seen.right.width == 238)
-        assert(dock_seen.top.height == 509 and dock_seen.bottom.height == 159)
+        assert(dock_seen.left.width == 712 and dock_seen.right.width == 212)
+        assert(dock_seen.top.height == 491)
     "#,
         )
         .unwrap();

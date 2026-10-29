@@ -1,6 +1,6 @@
 //! Keyboard focus, the wheel, and calling the handlers that fired.
 
-use bone_ui::lua::Host;
+use bone_ui::lua::{Host, input};
 use eframe::egui;
 use mlua::Function;
 
@@ -169,6 +169,20 @@ impl Gui {
             return;
         };
         let m = mods.unwrap_or_default();
+        if let (Some((cw, ch)), Some(area)) = (self.view.cell, self.view.area) {
+            let cell = (
+                ((pos.x - area.min.x) / cw).max(0.0) as u16,
+                ((pos.y - area.min.y) / ch).max(0.0) as u16,
+            );
+            let button = if dy >= 0.0 { "up" } else { "down" };
+            if dy != 0.0
+                && input::mouse_at(self, "wheel", button, cell, Some((pos.x, pos.y))).handled
+            {
+                ctx.input_mut(|i| i.smooth_scroll_delta = egui::Vec2::ZERO);
+                ctx.request_repaint();
+                return;
+            }
+        }
         let held = m.ctrl || m.alt || m.command || m.mac_cmd;
         let speed = self.number_option("wheel_speed", 1.0).clamp(0.1, 10.0);
         let (dx, dy) = (dx * speed, dy * speed);

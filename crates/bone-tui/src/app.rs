@@ -1287,18 +1287,19 @@ impl App {
     /// (with the popup, or underlying chat item and layout leaf). Returning
     /// true takes it; otherwise the left button selects text and focuses
     /// panels, except under popups.
-    pub fn mouse(&mut self, action: &str, button: &str, at: (u16, u16)) {
+    pub fn mouse(&mut self, action: &str, button: &str, at: (u16, u16)) -> bool {
         let m = input::mouse(self, action, button, at);
         // A popup still owns this event if its handler closed it.
         if m.handled || m.popup || button != "left" {
             self.dirty = true;
-            return;
+            return m.handled;
         }
         match action {
             "down" => self.mouse_down(at),
             "drag" => self.mouse_drag(at),
             _ => self.mouse_up(at),
         }
+        m.handled
     }
 
     /// The chat item at screen cell `at`: `{ index, line }`, or None.

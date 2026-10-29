@@ -514,17 +514,28 @@ impl Gui {
         color: Option<Rgba>,
         tr: &node::Transition,
     ) -> Option<Rgba> {
-        // Appearing or going away is a fade of the alpha, in the color
-        // that was there.
+        // Faded premultiplied: each channel weighted by its alpha. Straight
+        // channels would pass through the color of a faint one at half
+        // strength (a hover's white at 4% to a solid gray goes pale gray at
+        // 50%: a flash). Appearing or going away is then a fade of the
+        // alpha, in the color that was there.
         let id = format!("{key}#{prop}");
-        let last = self.view.tweens.get(&id).map(|t| t.to);
-        let target = match (color, last) {
-            (Some(c), _) => [c.0 as f32, c.1 as f32, c.2 as f32, c.3 as f32],
-            (None, Some(l)) => [l[0], l[1], l[2], 0.0],
-            (None, None) => return None,
+        let seen = self.view.tweens.contains_key(&id);
+        let target = match (color, seen) {
+            (Some(c), _) => {
+                let a = c.3 as f32 / 255.0;
+                [c.0 as f32 * a, c.1 as f32 * a, c.2 as f32 * a, c.3 as f32]
+            }
+            (None, true) => [0.0; 4],
+            (None, false) => return None,
         };
         let v = self.fade(ctx, frame, key, prop, target, tr);
-        (v[3] > 0.5).then(|| Rgba(v[0] as u8, v[1] as u8, v[2] as u8, v[3].round() as u8))
+        if v[3] <= 0.5 {
+            return None;
+        }
+        let a = v[3] / 255.0;
+        let channel = |x: f32| (x / a).round().clamp(0.0, 255.0) as u8;
+        Some(Rgba(channel(v[0]), channel(v[1]), channel(v[2]), v[3].round() as u8))
     }
 
     /// A thin bar on the right edge when the content is longer. Drag it, or

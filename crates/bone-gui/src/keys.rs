@@ -457,9 +457,15 @@ impl Gui {
                     }
                 }
                 egui::Event::PointerMoved(pos) => {
-                    if let Some(button) = self.view.mouse_held.map(|(b, _)| b)
-                        && self.pointer_event("drag", button, *pos)
-                        && self.view.mouse_taken == MouseTaken::No
+                    if self.pointer_event(
+                        if self.view.mouse_held.is_some() {
+                            "drag"
+                        } else {
+                            "move"
+                        },
+                        self.view.mouse_held.map(|(b, _)| b).unwrap_or(""),
+                        *pos,
+                    ) && self.view.mouse_taken == MouseTaken::No
                     {
                         self.view.mouse_taken = MouseTaken::Rest;
                     }
@@ -487,7 +493,7 @@ impl Gui {
         );
         match action {
             "down" => self.view.mouse_held = Some((button, cell)),
-            "up" => self.view.mouse_held = None,
+            "up" | "move" => self.view.mouse_held = None,
             _ if self.view.mouse_held == Some((button, cell)) => return false,
             _ => self.view.mouse_held = Some((button, cell)),
         }

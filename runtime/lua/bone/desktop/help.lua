@@ -22,7 +22,7 @@ function M.read(text, name)
       local body = { direction = "column", size = md.text_size, padding = { 0, 10 } }
       nodes.append(body, md.nodes(text or ""))
       return widgets.list("read:" .. id, { title(name or "Help"), body },
-        nil, { footer = hints("wheel scroll · esc close", { 10, 0 }) })
+        nil, { footer = hints("wheel scroll · esc close") })
     end,
     on_key = function(k)
       if k == "esc" or k == "q" or k == "ctrl+c" then bone.ui.close(id) end
@@ -60,8 +60,8 @@ function M.open()
     end)
     items[#items + 1] = {
       text = st.query == "" and "Type to search…" or (st.query .. "▏"), hl = st.query == "" and "Dim" or "Normal",
-      size = style.size.caption, bg = "InputBackground", radius = style.radius.lg, padding = { 7, 12 },
-      margin = { 0, 0, 8, 0 },
+      size = style.size.caption, bg = "InputBackground", radius = style.radius.lg, padding = { 6, 10 },
+      margin = { 0, 0, 6, 0 },
     }
     if #list == 0 then items[#items + 1] = note("No matches.", { 4, 4 }) end
     local selected
@@ -69,19 +69,23 @@ function M.open()
       local on = i == st.sel
       local lines = {
         { text = it.label, hl = it.command and "Accent" or "Normal", bold = on, size = style.size.body },
-        { text = st.tab == 3 and it.meta or it.desc, hl = "Dim", size = style.size.small, margin = { 3, 0, 0, 0 } },
+        { text = st.tab == 3 and it.meta or it.desc, hl = "Dim", size = style.size.small, margin = { 2, 0, 0, 0 } },
       }
-      if on and st.tab ~= 3 and it.meta ~= "" then
-        lines[#lines + 1] = { text = it.meta, hl = "Dim", size = style.size.micro, margin = { 3, 0, 0, 0 } }
-      end
       items[#items + 1] = entry(on, lines, function()
         if st.sel == i then choose(i) else st.sel = i end
         bone.ui.update(id, {})
       end)
       if on then selected = #items end
     end
-    return widgets.list("help:" .. id, items, selected,
-      { footer = hints("tab section · ↑↓ move · enter open · esc close", { 10, 0 }) })
+    -- The selected entry's details under the list, in a space of their own:
+    -- entries never change height as the selection moves.
+    local current = list[st.sel]
+    local detail = widgets.detail(current and st.tab ~= 3 and current.meta ~= "" and current.meta or nil)
+    return style.as_dialog(widgets.list("help:" .. id, items, selected, {
+      estimate = 44,
+      footer = { direction = "column", widgets.divider({ margin = { 4, 0, 0, 0 } }), detail,
+        hints("tab section · ↑↓ move · enter open · esc close", { 0, 0 }) },
+    }))
   end
   function on_key(k)
     if k == "esc" or k == "ctrl+c" then
@@ -112,11 +116,11 @@ end
 -- /health: this window's checks, then the core's.
 local MARK = { ok = { "•", "ToolDone" }, warn = { "!", "WarningMsg" }, error = { "×", "ErrorMsg" } }
 local function checks(name, items, out)
-  out[#out + 1] = { text = name, hl = "Normal", bold = true, size = style.size.text, padding = { 2, 10 }, margin = { 8, 0, 4, 0 } }
+  out[#out + 1] = { text = name:upper(), hl = "Dim", bold = true, size = style.size.micro, padding = { 2, 8 }, margin = { 6, 0, 2, 0 } }
   for _, it in ipairs(items) do
     local m = MARK[it.status] or MARK.warn
     out[#out + 1] = {
-      direction = "column", bg = "Panel", radius = style.radius.lg, padding = { 7, 12 }, margin = { 1, 0, 1, 0 },
+      direction = "column", padding = { 4, 8 },
       { spans = { { text = m[1] .. "   ", hl = m[2], bold = true }, { text = it.name, hl = "Normal", bold = true } }, size = style.size.body },
       { text = tostring(it.message), hl = "Dim", size = style.size.small, margin = { 2, 0, 0, 0 }, padding = { 0, 0, 0, 22 } },
     }
@@ -135,9 +139,9 @@ function M.health()
       if core then
         checks("Core", core, items)
       else
-        items[#items + 1] = note("Core: checking…", { 8, 0 })
+        items[#items + 1] = note("Core: checking…", { 6, 0 })
       end
-      return widgets.list("health:" .. id, items, nil, { footer = hints("esc close", { 10, 0 }) })
+      return style.as_dialog(widgets.list("health:" .. id, items, nil, { estimate = 40, footer = hints("esc close") }))
     end,
     on_key = function(k)
       if k == "esc" or k == "q" or k == "ctrl+c" then bone.ui.close(id) end
