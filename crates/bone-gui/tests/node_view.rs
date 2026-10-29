@@ -56,6 +56,8 @@ async fn composer_contains_input_at_each_wrap() {
           local input = assert(bone.gui.rect('composer-input'))
           assert(input.y >= card.y + 10, 'input overflows the top of the card')
           assert(input.y + input.h <= card.y + card.h - 10, 'input overflows the bottom of the card')
+          assert(math.abs((input.y + input.h / 2) - (card.y + card.h / 2)) < 1,
+            'input is not vertically centered in the card')
           if not first_height then first_height = card.h end
           if card.h > first_height then grew = true end
         "#,
@@ -72,7 +74,7 @@ async fn composer_contains_input_at_each_wrap() {
 }
 
 /// The canvas supplies the picker's 50% opacity only once; the chat keeps
-/// its opaque rounded surface and shadow, without an outline.
+/// its opaque surface, without an outline, and the sidebar is a card on it.
 #[tokio::test(flavor = "multi_thread")]
 async fn translucent_picker_does_not_stack_backgrounds() {
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -100,15 +102,14 @@ async fn translucent_picker_does_not_stack_backgrounds() {
       end
       -- Docks and the sidebar sit inside the root, not at a fixed index.
       local main = walk(root, function(n)
-        if n.overflow == 'hidden' and n.shadow and n.radius == 16 then return n end
-      end)
-      local side = walk(root, function(n)
-        if n[1] and n[1].id == 'sessions' then return n end
+        if n.overflow == 'hidden' and type(n.bg) == 'string' and n.bg:match('^#') then return n end
       end)
       assert(root.bg == nil, 'root must not cover the translucent canvas')
-      assert(side and side.bg == nil, 'sidebar must not stack alpha over the canvas')
-      assert(main and main.radius == 16 and main.shadow, 'keep rounded chat and shadow')
-      assert(main.border == nil, 'no chat outline')
+      assert(main and main.border == nil, 'no chat outline')
+      local side = walk(main, function(n)
+        if n.id == 'sessions-card' then return n end
+      end)
+      assert(side, 'the sidebar sits on the chat, not on the canvas')
       assert(main.bg:match('^#%x%x%x%x%x%x$'), 'chat stays opaque')
     "##,
         )

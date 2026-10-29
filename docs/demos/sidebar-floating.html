@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>bone · floating sidebar concepts</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --canvas: #111316;
+      --surface: #191c21;
+      --surface-2: #20242b;
+      --surface-3: #282d35;
+      --border: #343a45;
+      --text: #f2f4f7;
+      --muted: #a5adb9;
+      --quiet: #737c89;
+      --accent: #a7c7ff;
+      --accent-strong: #78a9ff;
+      --accent-bg: #263a5c;
+      --green: #91d4ad;
+      --shadow: 0 22px 60px #0000008f;
+      --sidebar-width: 300px;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 18% 0%, #263044 0, transparent 33rem),
+        var(--canvas);
+      color: var(--text);
+      font: 14px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, sans-serif;
+    }
+
+    button, input { font: inherit; }
+    button { color: inherit; }
+    button:focus-visible, input:focus-visible { outline: 2px solid var(--accent-strong); outline-offset: 2px; }
+
+    .page {
+      width: min(1200px, calc(100% - 40px));
+      margin: 0 auto;
+      padding: 42px 0 64px;
+    }
+
+    .eyebrow {
+      color: var(--accent);
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+
+    h1 { margin: 8px 0 10px; font-size: clamp(28px, 5vw, 46px); letter-spacing: -.04em; line-height: 1.05; }
+    .intro { max-width: 670px; margin: 0; color: var(--muted); font-size: 16px; }
+
+    .demo-shell {
+      position: relative;
+      isolation: isolate;
+      margin-top: 30px;
+      overflow: hidden;
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      background: #15181d;
+      box-shadow: 0 30px 80px #00000040;
+    }
+
+    .toolbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 14px;
+      padding: 14px 16px;
+      border-bottom: 1px solid var(--border);
+      background: #1b1f25;
+    }
+
+    .toolbar-title { display: flex; align-items: center; gap: 9px; font-weight: 700; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px #91d4ad1a; }
+    .toolbar-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 12px; }
+
+    .segmented { display: inline-flex; padding: 3px; gap: 2px; border: 1px solid var(--border); border-radius: 9px; background: #111419; }
+    .segmented button, .ghost-button {
+      border: 0;
+      border-radius: 6px;
+      padding: 6px 10px;
+      background: transparent;
+      cursor: pointer;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .segmented button:hover, .ghost-button:hover { color: var(--text); background: #ffffff0b; }
+    .segmented button[aria-pressed="true"] { color: var(--text); background: var(--surface-3); box-shadow: inset 0 0 0 1px #ffffff0d; }
+
+    .workspace {
+      position: relative;
+      display: flex;
+      min-height: 590px;
+      overflow: hidden;
+      background: #12151a;
+    }
+
+    /* The chat is a separate surface; the examples below give the sidebar its own lane. */
+    .chat {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex: 1 1 auto;
+      flex-direction: column;
+      min-width: 0;
+      min-height: 590px;
+      padding: 24px clamp(20px, 6vw, 78px) 18px;
+      background: linear-gradient(135deg, #1b2028 0%, #171a20 55%, #14171c 100%);
+      transition: margin-left .24s ease;
+    }
+
+    .chat-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--muted); font-size: 12px; }
+    .chat-header strong { color: var(--text); font-size: 13px; }
+    .status { display: inline-flex; align-items: center; gap: 7px; }
+    .status::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+
+    .messages { display: flex; flex: 1; flex-direction: column; gap: 22px; justify-content: center; max-width: 690px; width: 100%; margin: 0 auto; padding: 28px 0; }
+    .message { max-width: 84%; }
+    .message.user { align-self: flex-end; }
+    .message-label { margin-bottom: 6px; color: var(--quiet); font-size: 11px; }
+    .bubble { padding: 13px 15px; border: 1px solid #ffffff0c; border-radius: 14px; background: #242932; color: #dce1e9; }
+    .user .bubble { background: #30476e; color: #f3f7ff; }
+    .message p { margin: 0; }
+    .message code { padding: 2px 5px; border-radius: 4px; background: #0c0f13a8; color: #c9dcff; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    .composer { display: flex; align-items: end; gap: 10px; width: 100%; max-width: 690px; margin: 0 auto; padding: 11px 12px 11px 14px; border: 1px solid #53617a; border-radius: 16px; background: #1f2734; box-shadow: 0 12px 32px #00000038; }
+    .composer textarea { min-height: 22px; flex: 1; resize: none; border: 0; outline: 0; background: transparent; color: var(--text); }
+    .composer textarea::placeholder { color: #8c98aa; }
+    .send { display: grid; place-items: center; width: 28px; height: 28px; border: 0; border-radius: 9px; background: var(--accent-strong); color: #101a2a; font-weight: 800; cursor: pointer; }
+    .send:hover { filter: brightness(1.12); }
+
+    .sidebar {
+      position: absolute;
+      z-index: 4;
+      top: 0;
+      bottom: 0;
+      left: 0;
+      display: flex;
+      flex-direction: column;
+      width: var(--sidebar-width);
+      padding: 16px 12px 12px;
+      border-right: 1px solid #ffffff12;
+      background: #20252dF2;
+      box-shadow: var(--shadow);
+      transform: translateX(-102%);
+      transition: transform .24s ease, opacity .24s ease;
+    }
+
+    .sidebar.open { transform: translateX(0); }
+    .sidebar-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 14px; }
+    .sidebar-title { font-size: 15px; font-weight: 750; }
+    .new-chat { border: 1px solid #ffffff16; border-radius: 8px; padding: 5px 8px; background: #ffffff08; color: var(--accent); cursor: pointer; }
+    .new-chat:hover { background: #ffffff12; }
+    .search { width: 100%; margin-bottom: 12px; padding: 9px 10px; border: 1px solid #ffffff18; border-radius: 8px; outline: 0; background: #11141980; color: var(--text); }
+    .search:focus { border-color: var(--accent-strong); }
+    .section-label { margin: 7px 8px; color: var(--quiet); font-size: 10px; font-weight: 750; letter-spacing: .1em; text-transform: uppercase; }
+    .session-list { display: flex; flex: 1; flex-direction: column; gap: 3px; overflow: auto; }
+    .session { display: block; width: 100%; padding: 10px 10px; border: 0; border-radius: 8px; background: transparent; text-align: left; cursor: pointer; }
+    .session:hover { background: #ffffff0b; }
+    .session.active { background: #31466b; }
+    .session-name { display: block; overflow: hidden; color: #e3e8f0; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+    .session-meta { display: block; margin-top: 3px; color: var(--quiet); font-size: 11px; }
+    .active .session-meta { color: #b5c8e8; }
+    .sidebar-footer { margin-top: 10px; padding: 10px 8px 0; border-top: 1px solid #ffffff0e; color: var(--quiet); font-size: 11px; }
+
+    .backdrop { position: absolute; z-index: 3; inset: 0; background: #00000075; opacity: 0; pointer-events: none; transition: opacity .24s ease; }
+    .backdrop.visible { opacity: 1; pointer-events: auto; }
+
+    /* These examples all reserve space for the sidebar. The panel keeps the
+       raised, peek-card treatment, but never sits on top of chat content. */
+    .workspace.beside,
+    .workspace.gutter,
+    .workspace.split {
+      display: grid;
+      grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+      gap: 16px;
+      padding: 16px;
+    }
+    .workspace.beside .sidebar,
+    .workspace.gutter .sidebar,
+    .workspace.split .sidebar {
+      position: relative;
+      order: -1;
+      top: auto;
+      bottom: auto;
+      left: auto;
+      width: auto;
+      min-height: 558px;
+      border: 1px solid #ffffff18;
+      border-radius: 14px;
+      transform: none;
+      opacity: 1;
+      box-shadow: var(--shadow);
+    }
+    .workspace.beside .sidebar:not(.open),
+    .workspace.gutter .sidebar:not(.open),
+    .workspace.split .sidebar:not(.open) {
+      transform: translateX(-8px);
+      opacity: 0;
+      visibility: hidden;
+    }
+    .workspace.beside .chat,
+    .workspace.gutter .chat,
+    .workspace.split .chat {
+      min-height: 558px;
+      border: 1px solid #ffffff0d;
+      border-radius: 16px;
+    }
+    .workspace.beside .backdrop,
+    .workspace.gutter .backdrop,
+    .workspace.split .backdrop { display: none; }
+
+    /* A full-height rail: the panel and chat share an edge, with no gap. */
+    .workspace.gutter { gap: 0; padding: 0; }
+    .workspace.gutter .sidebar { border-radius: 0 14px 14px 0; box-shadow: 12px 0 28px #00000035; }
+    .workspace.gutter .chat { border-width: 0 0 0 1px; border-radius: 0; }
+
+    /* A split surface puts the chat first visually, with the session card on
+       the right. It is useful when the sidebar is more of a companion pane. */
+    .workspace.split { grid-template-columns: minmax(0, 1fr) var(--sidebar-width); }
+    .workspace.split .sidebar { order: 2; }
+    .workspace.split .chat { order: 1; }
+
+    .annotation { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 14px; padding: 12px 16px; border-top: 1px solid var(--border); background: #191c21; color: var(--muted); font-size: 12px; }
+    .annotation strong { color: var(--text); }
+    .annotation code { color: var(--accent); font: 11px ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .settings { display: flex; align-items: center; flex-wrap: wrap; gap: 14px; }
+    .settings label { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+    .settings input[type="range"] { width: 100px; accent-color: var(--accent-strong); }
+    .settings input[type="checkbox"] { accent-color: var(--accent-strong); }
+
+    .examples { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 26px; }
+    .example-card { padding: 16px; border: 1px solid var(--border); border-radius: 12px; background: #171a20b8; }
+    .example-card h2 { margin: 0 0 7px; font-size: 14px; }
+    .example-card p { margin: 0; color: var(--muted); font-size: 12px; }
+    .example-card code { display: block; margin-top: 12px; color: var(--accent); font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    @media (max-width: 760px) {
+      .page { width: min(100% - 24px, 1200px); padding-top: 26px; }
+      .toolbar { align-items: flex-start; flex-direction: column; }
+      .workspace { min-height: 610px; }
+      .workspace.beside,
+      .workspace.gutter,
+      .workspace.split { grid-template-columns: 1fr; gap: 12px; padding: 12px; }
+      .workspace.beside .sidebar,
+      .workspace.gutter .sidebar,
+      .workspace.split .sidebar { min-height: 210px; max-height: 250px; border-radius: 14px; }
+      .workspace.split .sidebar { order: 1; }
+      .workspace.split .chat { order: 2; }
+      .chat { min-height: 610px; padding-right: 18px; padding-left: 18px; }
+      .sidebar { width: auto; border: 1px solid #ffffff18; border-radius: 14px; }
+      .examples { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <div class="eyebrow">bone GUI · interaction study</div>
+    <h1>Peek sessions sidebar</h1>
+    <p class="intro">A standalone demo for giving the sessions list a raised, peek-card feel without covering the conversation. Try the three non-overlapping layout examples and resize the panel.</p>
+
+    <section class="demo-shell" aria-label="Floating sidebar demo">
+      <div class="toolbar">
+        <div class="toolbar-title"><span class="dot"></span> bone / project notes</div>
+        <div class="toolbar-controls">
+          <span>Example</span>
+          <div class="segmented" role="group" aria-label="Sidebar layout example">
+            <button type="button" data-mode="beside" aria-pressed="true">Peek beside</button>
+            <button type="button" data-mode="gutter" aria-pressed="false">Gutter</button>
+            <button type="button" data-mode="split" aria-pressed="false">Split</button>
+          </div>
+          <button type="button" class="ghost-button" id="toggle" aria-expanded="true">Hide sidebar</button>
+        </div>
+      </div>
+
+      <div class="workspace beside" id="workspace">
+        <div class="chat">
+          <div class="chat-header">
+            <strong>Design discussion</strong>
+            <span class="status">Ready</span>
+          </div>
+
+          <div class="messages">
+            <article class="message user">
+              <div class="message-label">You · 10:42</div>
+              <div class="bubble"><p>Could the sessions list feel like a peek card without covering the chat?</p></div>
+            </article>
+            <article class="message">
+              <div class="message-label">bone · 10:42</div>
+              <div class="bubble"><p>Yes. Reserve a lane for it, then give the sidebar its own raised surface. The chat never has content underneath the panel.</p></div>
+            </article>
+            <article class="message">
+              <div class="message-label">bone · implementation note</div>
+              <div class="bubble"><p>The sidebar can still feel floating with <code>radius</code> and <code>shadow</code>; it just stays in the layout instead of using an absolute overlay.</p></div>
+            </article>
+          </div>
+
+          <form class="composer" onsubmit="return false">
+            <textarea rows="1" placeholder="Message bone…" aria-label="Message bone"></textarea>
+            <button class="send" type="submit" aria-label="Send">↑</button>
+          </form>
+        </div>
+
+        <div class="backdrop" id="backdrop" aria-hidden="true"></div>
+
+        <aside class="sidebar open" id="sidebar" aria-label="Sessions sidebar">
+          <div class="sidebar-header">
+            <span class="sidebar-title">Sessions</span>
+            <button type="button" class="new-chat" aria-label="New chat">＋ New</button>
+          </div>
+          <input class="search" type="search" placeholder="Search sessions…" aria-label="Search sessions">
+          <div class="section-label">Today</div>
+          <div class="session-list">
+            <button class="session active" type="button"><span class="session-name">Design discussion</span><span class="session-meta">just now · 8 messages</span></button>
+            <button class="session" type="button"><span class="session-name">GUI cleanup ideas</span><span class="session-meta">18 min ago · 23 messages</span></button>
+            <button class="session" type="button"><span class="session-name">Review the tool strip</span><span class="session-meta">1 hour ago · 12 messages</span></button>
+            <button class="session" type="button"><span class="session-name">Release checklist</span><span class="session-meta">yesterday · 31 messages</span></button>
+          </div>
+          <div class="sidebar-footer">Own layout lane · Esc closes</div>
+        </aside>
+      </div>
+
+      <div class="annotation">
+        <div><strong id="mode-name">Peek beside chat</strong> · <span id="mode-description">A raised card sits in a reserved lane; chat content is never underneath it.</span></div>
+        <div class="settings">
+          <label>Width <input id="width" type="range" min="240" max="420" value="300"> <output id="width-value">300px</output></label>
+        </div>
+      </div>
+    </section>
+
+    <section class="examples" aria-label="Implementation examples">
+      <article class="example-card">
+        <h2>1 · Peek beside chat</h2>
+        <p>The closest match to the peek treatment: a raised card with its own lane and a clear gap before the conversation.</p>
+        <code>display: grid;<br>grid-template-columns: 300px 1fr;<br>gap: 16px;</code>
+      </article>
+      <article class="example-card">
+        <h2>2 · Full-height gutter</h2>
+        <p>The panel and chat share an edge. It feels integrated while still keeping the session list out of the chat surface.</p>
+        <code>grid-template-columns: 300px 1fr;<br>gap: 0;<br>shadow: card;</code>
+      </article>
+      <article class="example-card">
+        <h2>3 · Split companion</h2>
+        <p>The chat leads visually and the sessions card becomes a companion pane on the right, still with no overlap.</p>
+        <code>chat: order: 1;<br>sidebar: order: 2;<br>radius: 14px;</code>
+      </article>
+    </section>
+  </main>
+
+  <script>
+    const workspace = document.querySelector('#workspace');
+    const sidebar = document.querySelector('#sidebar');
+    const backdrop = document.querySelector('#backdrop');
+    const toggle = document.querySelector('#toggle');
+    const width = document.querySelector('#width');
+    const widthValue = document.querySelector('#width-value');
+    const modeName = document.querySelector('#mode-name');
+    const modeDescription = document.querySelector('#mode-description');
+
+    const modes = {
+      beside: {
+        name: 'Peek beside chat',
+        description: 'A raised card sits in a reserved lane; chat content is never underneath it.'
+      },
+      gutter: {
+        name: 'Full-height gutter',
+        description: 'The panel and chat share an edge, keeping the session list outside the chat surface.'
+      },
+      split: {
+        name: 'Split companion',
+        description: 'The chat leads visually and the sessions card becomes a companion pane on the right.'
+      }
+    };
+
+    function setOpen(open) {
+      sidebar.classList.toggle('open', open);
+      backdrop.classList.remove('visible');
+      toggle.textContent = open ? 'Hide sidebar' : 'Show sidebar';
+      toggle.setAttribute('aria-expanded', String(open));
+    }
+
+    function setMode(mode) {
+      workspace.classList.remove('beside', 'gutter', 'split');
+      workspace.classList.add(mode);
+      document.querySelectorAll('[data-mode]').forEach(button => {
+        button.setAttribute('aria-pressed', String(button.dataset.mode === mode));
+      });
+      modeName.textContent = modes[mode].name;
+      modeDescription.textContent = modes[mode].description;
+      setOpen(true);
+    }
+
+    toggle.addEventListener('click', () => setOpen(!sidebar.classList.contains('open')));
+    backdrop.addEventListener('click', () => setOpen(false));
+    document.querySelectorAll('[data-mode]').forEach(button => {
+      button.addEventListener('click', () => setMode(button.dataset.mode));
+    });
+    width.addEventListener('input', () => {
+      document.documentElement.style.setProperty('--sidebar-width', width.value + 'px');
+      widthValue.value = width.value + 'px';
+      widthValue.textContent = width.value + 'px';
+    });
+    document.addEventListener('keydown', event => {
+      if (event.key === 'Escape') setOpen(false);
+    });
+    document.querySelectorAll('.session').forEach(session => {
+      session.addEventListener('click', () => {
+        document.querySelectorAll('.session').forEach(item => item.classList.remove('active'));
+        session.classList.add('active');
+        setOpen(false);
+      });
+    });
+  </script>
+</body>
+</html>

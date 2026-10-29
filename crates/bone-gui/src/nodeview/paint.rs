@@ -243,6 +243,9 @@ impl Gui {
             opacity = state.opacity.or(opacity);
             tint = state.color.or(tint);
         }
+        // A border with a color of its own that fades to nothing is not drawn,
+        // rather than drawn in the default gray.
+        let own_border = border_color.is_some();
         // `transition`: what changed is faded in, from where it was.
         let mut bg_rgba = bg;
         if let Some(tr) = s.transition {
@@ -283,10 +286,11 @@ impl Gui {
         } else if let Some(bg) = bg {
             painter.rect_filled(r, corners, rgba(bg));
         }
-        if s.border.top > 0.0
+        if (s.border.top > 0.0
             || s.border.right > 0.0
             || s.border.bottom > 0.0
-            || s.border.left > 0.0
+            || s.border.left > 0.0)
+            && (border_color.is_some() || !own_border)
         {
             let c = border_color.map_or(Color32::GRAY, rgba);
             draw_border(&painter, r, corners, s.border, s.border_style, c);

@@ -623,17 +623,18 @@ async fn the_standard_library() {
             "bone.chat.add('note', { text = 'x' })
              local t = bone.ui.views.tool({ kind = 'tool', id = 'c1', name = 'shell', arguments = { command = 'ls -la' },
                done = true, output = 'a\\nb\\nc', is_error = false }, { width = 60 })
-             assert(t.node[1].spans[2].text == 'Ran', 'a card titled by what it did')
+             assert(t.node[1][1][2].spans[1].text == 'Ran', 'a card titled by what it did')
              local e = bone.ui.views.tool({ kind = 'tool', id = 'c2', name = 'edit_file',
                arguments = { path = 'x.rs', old_string = 'a', new_string = 'b' }, done = true }, { width = 60 })
-             assert(#e.node == 2, 'title and one code block, not a band per line')
-             local block = e.node[2]
-             assert(block.bg == 'CodeBlock' and block.radius == 8, 'one dark rounded block')
+             local card = e.node[1]
+             assert(#e.node == 1 and #card == 3, 'one card: its line, a hairline and one code block, not a band per line')
+             assert(card.bg == 'CodeBlock' and card.radius == 8, 'one dark rounded card')
+             local block = card[3]
              assert(block[1].radius == nil and block[1].bg == 'DiffDelete', 'a flat highlighted removal')
              assert(block[2].bg == 'DiffAdd' and block[2][1].text == '  + b', 'the addition')
              local function edit(id, old, new)
                return bone.ui.views.tool({ kind = 'tool', id = id, name = 'edit_file', done = true,
-                 arguments = { path = 'x.rs', old_string = old, new_string = new } }, { width = 80 }).node[2]
+                 arguments = { path = 'x.rs', old_string = old, new_string = new } }, { width = 80 }).node[1][3]
              end
              local ctx = edit('c3', 'fn a()\\n  keep\\n  old\\n  tail\\nend', 'fn a()\\n  keep\\n  new\\n  tail\\nend')
              assert(#ctx == 6, 'context around the change, got ' .. #ctx)
@@ -1044,8 +1045,8 @@ async fn oversized_opposing_docks_fit_the_window() {
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 
-/// The area width includes the sidebar overlap and the chat's outer margin;
-/// callers get precisely the room the flex solver gives the area node.
+/// The area width is what the sidebar's lane leaves; callers get precisely
+/// the room the flex solver gives the area node.
 #[tokio::test(flavor = "multi_thread")]
 async fn window_area_accounts_for_sidebar_and_margin() {
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -1053,8 +1054,7 @@ async fn window_area_accounts_for_sidebar_and_margin() {
     g.gui.run_lua("t", r#"
         local window = require('bone.nodes.window')
         local sidebar = require('bone.desktop.sidebar')
-        sidebar.under = 20
-        sidebar.node = function() return { width = 300 }, 1 end
+        sidebar.node = function() return { width = 300 }, 300 end
         window.area = function(ctx)
           sidebar_area = ctx
           return { id = 'test-area', grow = 1, height = 0 }
@@ -1069,7 +1069,7 @@ async fn window_area_accounts_for_sidebar_and_margin() {
             "t",
             r#"
         local r = assert(bone.gui.rect('test-area'))
-        assert(sidebar_area.width == 612 and sidebar_area.height == 560)
+        assert(sidebar_area.width == 600 and sidebar_area.height == 560)
         assert(math.abs(sidebar_area.width - r.w) < 0.01, sidebar_area.width .. ' ~= ' .. r.w)
         assert(math.abs(sidebar_area.height - r.h) < 0.01, sidebar_area.height .. ' ~= ' .. r.h)
     "#,

@@ -4,9 +4,10 @@
 -- to a folded card per call, each opened in turn by a click; "rows" is a card per
 -- call with its output cut short (shell output to its first and last two
 -- lines, other output to its first five), "full" shows everything. Edits
--- always show their diff and failures their output. A card is a title (a
--- status mark, what it did, on what) in the window's font, and below it the
--- output, diff or report in monospace.
+-- always show their diff and failures their output. A call with nothing to
+-- show is one line (a status dot, what it did, on what, and its details at
+-- the right); one with output is a card, that line as its head over a
+-- hairline and the output, diff or report in monospace under it.
 local M = {}
 
 local md = require("bone.desktop.markdown")
@@ -14,11 +15,11 @@ local nodes = require("bone.nodes")
 local timing = require("bone.timing")
 local style = require("bone.nodes.style")
 
-local GUTTER_MAX = 5 -- shell output rows before the first 2, "⋮ +N", last 2
+local GUTTER_MAX = 5 -- shell output rows before the first 2, "⋯ N more", last 2
 local PREVIEW_MAX = 5 -- other output rows
 local EDIT_MAX = 24 -- diff rows of an edit
 local AGENT_MAX = 3 -- paragraphs of a sub-agent's report
-local HINT = " (click or ctrl+t)"
+local PAD = { 5, 12 } -- a call's line, and a card's head
 
 if not pcall(bone.o.info, "tool_detail") or not bone.o.info("tool_detail") then
   bone.o.define("tool_detail", "summary", {
@@ -263,28 +264,28 @@ end
 
 -- ---- rows ------------------------------------------------------------------
 -- A body is a list of rows, each a list of spans; it is drawn as one
--- monospace band.
+-- monospace text, so it selects as one.
 
 local function row(text, hl)
   return { { text = (text:gsub("\t", "    ")), hl = hl } }
 end
 
-local function more_row(n, noun, expanded)
-  return { { text = "⋮ +" .. plural(n, noun) .. (expanded and "" or HINT), hl = "Dim" } }
+local function more_row(n)
+  return { { text = "⋯ " .. n .. " more line" .. (n == 1 and "" or "s"), hl = "Dim" } }
 end
 
--- The first and last two rows, "⋮ +N lines" between, unless expanded.
+-- The first and last two rows, "⋯ N more lines" between, unless expanded.
 local function head_tail(rows, expanded)
   if expanded or #rows <= GUTTER_MAX then return rows end
-  return { rows[1], rows[2], more_row(#rows - 4, "line"), rows[#rows - 1], rows[#rows] }
+  return { rows[1], rows[2], more_row(#rows - 4), rows[#rows - 1], rows[#rows] }
 end
 
--- The first `max` rows, "⋮ +N more lines" after them, unless expanded.
+-- The first `max` rows, "⋯ N more lines" after them, unless expanded.
 local function head(rows, max, expanded)
   if expanded or #rows <= max then return rows end
   local out = {}
   for i = 1, max do out[i] = rows[i] end
-  out[#out + 1] = more_row(#rows - max, "more line", expanded)
+  out[#out + 1] = more_row(#rows - max)
   return out
 end
 
@@ -294,14 +295,17 @@ local function text_rows(text, hl)
   return out
 end
 
--- Rows as one monospace band.
+-- Rows as one monospace text, padded as a card's body.
 local function band(rows)
   local spans = {}
   for i, r in ipairs(rows) do
     if i > 1 then spans[#spans + 1] = { text = "\n", hl = "ToolOutput" } end
     for _, s in ipairs(r) do spans[#spans + 1] = s end
   end
-  return md.band(spans, { size = md.small_size - 1, gap = 6 })
+  return style.finish({
+    padding = { 8, 12 },
+    md.text(spans, { size = md.small_size - 1, font = "mono" }),
+  })
 end
 
 -- An edit's changed lines: "- old", "+ new", grey context around them,
@@ -322,10 +326,10 @@ local function diff_rows(args)
   return rows, plus, minus, #(edits or {}), all
 end
 
--- One dark code block. Changed rows are highlighted flat across the width
--- (no radius of their own: that scalloped every line). Unchanged rows stay
--- the block's color, in grey. "···" between hunks. Cut to `cap` rows unless
--- expanded.
+-- A card's body of diff rows. Changed rows are highlighted flat across the
+-- card (no radius of their own: that scalloped every line). Unchanged rows
+-- stay the card's color, in grey. "···" between hunks. Cut to `cap` rows
+-- unless expanded.
 local function diff_nodes(rows, cap, expanded)
   if #rows == 0 then return {} end
   local shown, cut = {}, 0
@@ -337,12 +341,8 @@ local function diff_nodes(rows, cap, expanded)
   end
   local size = md.small_size - 1
   -- Vertical padding covers the corner curve, so a highlighted row's square
-  -- background never paints over the block's rounded corners.
-  local block = {
-    direction = "column", bg = "CodeBlock", radius = style.radius.md,
-    padding = { 8, 0 }, margin = { 6, 0, 0, 0 },
-    font = "mono", size = size,
-  }
+  -- background never paints over the card's rounded corners.
+  local block = { direction = "column", padding = { 6, 0 }, font = "mono", size = size }
   local function add(text, hl, bg, py)
     block[#block + 1] = style.finish({
       bg = bg, padding = { py or 1, 12 },
@@ -362,7 +362,7 @@ local function diff_nodes(rows, cap, expanded)
       add(gutter .. r.text:gsub("\t", "    "), hl, bg)
     end
   end
-  if cut > 0 then add("⋮ +" .. plural(cut, "line") .. HINT, "Dim", nil, 4) end
+  if cut > 0 then add("⋯ " .. cut .. " more line" .. (cut == 1 and "" or "s"), "Dim", nil, 4) end
   return { style.finish(block) }
 end
 
@@ -392,10 +392,41 @@ local function run_key(item)
   return tool_key(item) .. ":run"
 end
 
--- A mark the proportional fonts all have.
-local function mark(item)
-  if not item.done then return { text = "•  ", hl = "ToolRunning" } end
-  return { text = item.is_error and "×  " or "•  ", hl = item.is_error and "ToolError" or "ToolDone" }
+-- The status dot: running, done or failed.
+local function dot(item)
+  local hl = not item.done and "ToolRunning" or (item.is_error and "ToolError" or "ToolDone")
+  return { text = "●", hl = hl, size = 7, wrap = false }
+end
+
+-- A call's line: `lead` (its dot), what it did (`spans`), and `meta` at the
+-- right. Cut to the width unless `wrap`.
+local function line(lead, spans, meta, wrap)
+  local text = md.text(spans, { size = md.small_size })
+  text.shrink = 1
+  if not wrap then text.wrap, text.text_overflow = false, "ellipsis" end
+  local out = { direction = "row", align = "center", gap = 8, padding = PAD, lead, text, { grow = 1 } }
+  if meta and #meta > 0 then
+    local m = md.text(meta, { size = style.size.small })
+    m.wrap = false
+    out[#out + 1] = m
+  end
+  return out
+end
+
+-- A call as a node: its line alone, or a card of it over `body` (nodes)
+-- below a hairline. Outlined under the pointer, as a click opens or folds it.
+local function frame(head, body)
+  local node = {
+    direction = "column", radius = style.radius.md, overflow = "hidden", cursor = "pointer",
+    border = 1, border_color = "transparent", hover = { border_color = "PromptBorder" },
+    transition = style.motion.base, head,
+  }
+  if body and #body > 0 then
+    node.bg = "CodeBlock"
+    node[#node + 1] = { height = 1, bg = style.alpha("PromptBorder", "80", "fg", "#3a3a3a80") }
+    nodes.append(node, body)
+  end
+  return style.finish(node)
 end
 
 -- A TUI line (a string, `{ "text", "Group" }`, `{ fill = … }`) as spans.
@@ -422,16 +453,12 @@ local function custom_card(item, content)
   if not (type(title) == "table" and type(title[1]) == "table" and type(title[1][1]) == "table") then
     title = { title }
   end
-  local result = {}
-  for i, t in ipairs(title) do
-    local spans = line_spans(t, "ToolName")
-    if i == 1 then table.insert(spans, 1, mark(item)) end
-    result[#result + 1] = md.text(spans, { size = md.small_size })
-  end
   local rows = {}
+  for i, t in ipairs(title) do
+    if i > 1 then rows[#rows + 1] = line_spans(t, "ToolName") end
+  end
   for _, l in ipairs(content.lines or {}) do rows[#rows + 1] = line_spans(l, "ToolOutput") end
-  if #rows > 0 then result[#result + 1] = band(rows) end
-  return result
+  return { frame(line(dot(item), line_spans(title[1], "ToolName")), #rows > 0 and { band(rows) } or nil) }
 end
 
 --- The nodes of one call: its title, then its body. `expanded`: all of the
@@ -446,12 +473,15 @@ local function card(item, expanded, width)
   local label = M.labels[name] or name
   -- Room for the label, the extras and the mark besides the path.
   local what = target(item, not expanded and math.min(60, math.max(24, width - 40)) or nil)
-  local title = { mark(item), { text = label, hl = "ToolName", bold = true } }
+  local title = { { text = label, hl = "ToolName", bold = true } }
   if what ~= "" then
     title[#title + 1] = { text = "  " .. what, hl = name == "shell" and "ShellProgram" or "ToolPath" }
   end
+  -- Details at the right, "·" between.
+  local meta = {}
   local function extra(text, hl)
-    title[#title + 1] = { text = "  " .. text, hl = hl or "Dim" }
+    if #meta > 0 then meta[#meta + 1] = { text = " · ", hl = "Dim" } end
+    meta[#meta + 1] = { text = text, hl = hl or "Dim" }
   end
 
   local body, paras = nil, nil -- rows as one band; or nodes as they are
@@ -487,9 +517,8 @@ local function card(item, expanded, width)
   elseif name == "edit_file" then
     local rows, plus, minus, n, all = diff_rows(a)
     if ok or not item.done then
-      title[#title + 1] = { text = "  ", hl = "ToolArgs" }
-      title[#title + 1] = { text = "+" .. plus, hl = "DiffAdd" }
-      title[#title + 1] = { text = " -" .. minus, hl = "DiffDelete" }
+      extra("+" .. plus, "DiffAdd")
+      meta[#meta + 1] = { text = " −" .. minus, hl = "DiffDelete" }
       if n > 1 then extra(plural(n, "edit")) end
       if all then extra("replace all") end
       paras = diff_nodes(rows, EDIT_MAX, expanded)
@@ -497,7 +526,7 @@ local function card(item, expanded, width)
   elseif name == "subagent" then
     if ok then
       paras = {}
-      for i, n in ipairs(md.nodes(out, "ToolOutput", { size = md.small_size, indent = 14 })) do
+      for i, n in ipairs(md.nodes(out, "ToolOutput", { size = md.small_size, indent = 12 })) do
         if not expanded and i > AGENT_MAX then break end
         paras[#paras + 1] = n
       end
@@ -509,10 +538,16 @@ local function card(item, expanded, width)
   if item.duration_ms and item.duration_ms >= 1000 then
     extra(bone.util.duration(item.duration_ms / 1000))
   end
-  local result = { md.text(title, { size = md.small_size }) }
-  if body and #body > 0 then result[#result + 1] = band(body) end
-  for _, p in ipairs(paras or {}) do result[#result + 1] = p end
-  return result
+  local under = {}
+  if body and #body > 0 then under[1] = band(body) end
+  if paras and #paras > 0 then
+    local report = { direction = "column", padding = { 2, 12, 8, 0 } }
+    -- A report is paragraphs; a diff fills the card itself.
+    if name == "subagent" then nodes.append(report, paras) else report = nil end
+    under[#under + 1] = report
+    if not report then nodes.append(under, paras) end
+  end
+  return { frame(line(dot(item), title, meta, expanded), under) }
 end
 
 -- ---- summaries -------------------------------------------------------------
@@ -586,23 +621,23 @@ local function summary_nodes(item, width)
   local running = false
   for _, t in ipairs(stretch) do running = running or not t.done end
   local open = toggled[run_key(item)]
-  local paras = { md.text({
-    { text = open and "▾  " or "▸  ", hl = running and "ToolRunning" or "ToolDone" },
-    { text = summary(stretch), hl = "ToolArgs" },
-  }, { size = md.small_size }) }
-  -- Open, the run is a card per call, folded; a click opens one in full.
+  local chevron = { text = open and "▾" or "▸", hl = running and "ToolRunning" or "ToolDone", size = 10, wrap = false }
+  local paras = { frame(line(chevron, { { text = summary(stretch), hl = "ToolArgs" } })) }
+  -- Open, the run is its calls, folded, on a guide under the chevron; a
+  -- click opens one in full.
   if open then
+    local calls = {
+      direction = "column", gap = 4, margin = { 2, 0, 0, PAD[2] + 4 }, padding = { 0, 0, 0, 8 },
+      border = { 0, 0, 0, 1 }, border_color = "PromptBorder",
+    }
     for _, t in ipairs(stretch) do
       local call = bone.chat.item(t.index, { full = true })
       local key = tool_key(call)
-      local one = style.finish({
-        direction = "column", padding = { 2, 6, 2, 14 }, radius = style.radius.md, cursor = "pointer",
-        hover = { bg = style.hover() }, transition = style.motion.base,
-        on_click = function() M.toggle(item, key) end,
-      })
-      nodes.append(one, card(call, toggled[key] or false, width))
-      paras[#paras + 1] = one
+      local one = card(call, toggled[key] or false, width)[1]
+      one.on_click = function() M.toggle(item, key) end
+      calls[#calls + 1] = one
     end
+    paras[#paras + 1] = style.finish(calls)
   end
   return paras
 end
@@ -623,7 +658,7 @@ function M.view(item, ctx)
     paras[#paras + 1] = md.text({ { text, "Dim" } }, { size = md.small_size, gap = 10 })
   end
   local fallback = { { { (M.labels[item.name] or item.name) .. " " .. target(item), "ToolName" } } }
-  local node = style.finish({ direction = "column", padding = { 2, 4 }, margin = { 4, 0, 2, 0 } })
+  local node = style.finish({ direction = "column", margin = { 3, 0, 3, 0 } })
   nodes.append(node, paras)
   return { node = node, lines = fallback, click = function() M.toggle(item, key) end }
 end

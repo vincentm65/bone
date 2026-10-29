@@ -135,8 +135,7 @@ end
 
 -- ---- the window -----------------------------------------------------------
 
--- The chat remains an opaque rounded surface with its shadow. The sidebar
--- keeps its own near-opaque background, even when the window is see-through.
+-- The chat remains an opaque surface, even when the window is see-through.
 local function see_through()
   local a = bone.gui.window_info().opacity or 1
   return a < 1 and a or nil
@@ -178,20 +177,16 @@ end
 
 function M.view(ctx)
   local sidebar = require("bone.desktop.sidebar")
-  local side, out, backdrop = sidebar.node(ctx)
+  local side, room, backdrop = sidebar.node(ctx)
   local alpha = see_through()
   local chat_bg = alpha and (bone.hl.get("Normal") or {}).bg or "Normal"
-  -- The chat is a rounded surface over the window, which shows grey where
-  -- the sidebar slides out from under it; closed, the chat fills the window.
-  -- A narrow window gives the sidebar no room of its own: it floats over.
-  -- Beside it, the chat lies over its edge (sidebar.under) by the corners.
-  local under = math.floor(sidebar.under * out)
-  local room = (side and not backdrop) and side.width - under or 0
+  -- The chat fills the window. The sidebar is a card on it, in a lane at
+  -- its left that the chat makes room for; a narrow window has no room for
+  -- one, and it floats over.
   local main = style.finish({
-    grow = 1, width = 0, direction = "column", bg = chat_bg, overflow = "hidden",
-    radius = style.radius.round * out, margin = { 0, 8 * out, 0, -under },
-    shadow = out > 0 and style.shadow.surface or nil,
+    grow = 1, width = 0, direction = "row", bg = chat_bg, overflow = "hidden",
   })
+  room = (side and not backdrop) and room or 0
   local width, height = ctx.width, ctx.height
   local left = M.docked("left", ctx, width)
   for _, panel in ipairs(left) do width = width - panel.width end
@@ -202,7 +197,7 @@ function M.view(ctx)
   for _, panel in ipairs(top) do height = height - panel.height end
   local bottom = M.docked("bottom", dock_ctx, height)
   for _, panel in ipairs(bottom) do height = height - panel.height end
-  local area = { width = math.max(0, width - room - 8 * out), height = height, cell = ctx.cell }
+  local area = { width = math.max(0, width - room), height = height, cell = ctx.cell }
   local ok, node = pcall(M.area, area)
   -- A broken replacement leaves the one chat, and says so once.
   if not ok then
@@ -210,15 +205,14 @@ function M.view(ctx)
     M.area_error = node
     node = M.column(area, { width = area.width })
   end
-  main[#main + 1] = node
+  main[#main + 1] = not backdrop and side or nil
+  main[#main + 1] = { grow = 1, width = 0, direction = "column", node }
   local root = { direction = "row", bg = not alpha and "Normal" or nil, hl = "Normal" }
   nodes.append(root, left)
   nodes.append(root, slot("window.left", ctx))
   local center = { grow = 1, width = 0, direction = "column" }
   nodes.append(center, top)
-  local middle = { grow = 1, height = 0, direction = "row" }
-  middle[#middle + 1] = not backdrop and side or nil
-  middle[#middle + 1] = main
+  local middle = { grow = 1, height = 0, direction = "row", main }
   center[#center + 1] = middle
   nodes.append(center, bottom)
   root[#root + 1] = center

@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use bone_proto::Connection;
 use eframe::egui;
-use eframe::egui_wgpu::WgpuSetup;
+use eframe::egui_wgpu::{SurfaceConfig, WgpuSetup};
 use eframe::wgpu::PowerPreference;
 
 use crate::{Gui, GuiOptions};
@@ -99,6 +99,9 @@ fn options(renderer: eframe::Renderer, size: [f32; 2], transparent: bool) -> efr
             .with_transparent(transparent),
         ..Default::default()
     };
+    // One frame in flight, not eframe's two: a frame here is well under a
+    // millisecond of work, so the second only holds input back a refresh.
+    opts.wgpu_options.surface = SurfaceConfig::LOW_LATENCY;
     if let WgpuSetup::CreateNew(setup) = &mut opts.wgpu_options.wgpu_setup {
         setup.power_preference =
             PowerPreference::from_env().unwrap_or(PowerPreference::HighPerformance);

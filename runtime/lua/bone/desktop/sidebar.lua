@@ -1,5 +1,6 @@
--- The sessions sidebar (ctrl+o, /sessions): a drawer on the left, drawn as
--- nodes (bone.nodes.window docks `M.node()`). A Chats / Processes switch
+-- The sessions sidebar (ctrl+o, /sessions): a card on the chat at its left,
+-- in a lane the chat makes room for, drawn as nodes (bone.nodes.window
+-- places `M.node()`). A Chats / Processes switch
 -- with a new-chat button beside it, a project filter and a search field,
 -- then your conversations: pinned ones first, the rest in date groups
 -- (Today, Yesterday, This week, Earlier), a compact row each (title and
@@ -9,7 +10,7 @@
 -- data is bone.chats. The rows are made once when the data changes, and the
 -- list makes nodes only for the ones in view, so a long history costs
 -- nothing. It takes the keyboard as it opens (its search field, or the
--- drawer itself on the Processes page): up/down choose, enter opens, typing
+-- card itself on the Processes page): up/down choose, enter opens, typing
 -- searches, tab changes page, x stops a process, esc goes back to the
 -- prompt, ctrl+o closes; a click opens.
 local M = {}
@@ -19,33 +20,15 @@ local nodes = require("bone.nodes")
 local style = require("bone.nodes.style")
 local widgets = require("bone.nodes.widgets")
 
--- Keep the drawer 75% opaque over the window background. The window's root
--- is Normal, so this is visible even when the window itself is opaque.
--- Older schemes may not define Panel, so keep a visible fallback.
-local function see_through()
-  local a = bone.gui.window_info().opacity or 1
-  return a < 1
-end
-
--- A see-through window is already one sheet of alpha. Another fill here
--- would stack on it, so the drawer stays clear and the canvas shows through.
-local function panel_bg()
-  if see_through() then return nil end
-  local bg = (bone.hl.get("Panel") or {}).bg
-  local normal = (bone.hl.get("Normal") or {}).bg
-  if bg and bg ~= normal then return style.alpha("Panel", "bf", "bg", bg) end
-  return style.dark() and "#1c1c1cbf" or "#ebebebbf"
-end
-
 local ID = "sessions"
 local SEARCH = "sidebar-search"
+local CARD = "sessions-card"
 M.width = tonumber(bone.state.load("sidebar-width")) or 280
 M.min_width, M.max_width = 200, 520
 -- Under this window width it floats over the chat instead of pushing it.
 M.overlay_below = 760
--- How far the drawer reaches under the chat's rounded corners, so they show
--- its fill rather than the window behind.
-M.under = style.radius.round
+-- How far the card stands off the window's edges.
+M.inset = style.space.lg
 
 local ROW = { group = 30, card = 48, none = 40 }
 
@@ -143,8 +126,8 @@ local function compute()
       local state = (is_waiting(id) and "waiting") or (chats.live[id] and "running")
         or (unread[id] and "unread") or nil
       local meta = {}
-      if not st.project then meta[#meta + 1] = folder(s.cwd) end
       local stats = st.stats[id]
+      if not st.project then meta[#meta + 1] = (stats and stats.model) or "No model used" end
       if stats and (stats.tokens or 0) > 0 then meta[#meta + 1] = chats.count(stats.tokens) .. " tokens" end
       if stats and (stats.turns or 0) > 0 and st.project then
         meta[#meta + 1] = stats.turns .. (stats.turns == 1 and " turn" or " turns")
@@ -273,7 +256,7 @@ local function select(i)
       bone.api.open_session(r.session_id)
     end
   end
-  -- open_session can replace/rebuild the GUI view; refresh the drawer so
+  -- open_session can replace/rebuild the GUI view; refresh the card so
   -- its keyboard focus and selection remain visible.
   take_keys()
   redraw()
@@ -302,7 +285,7 @@ local function close()
   redraw()
 end
 
--- Its keys, from the drawer or its search field (which edits with the
+-- Its keys, from the card or its search field (which edits with the
 -- rest).
 local KEYS = {
   esc = function()
@@ -473,7 +456,7 @@ local function project_menu()
   }
 end
 
--- It slides out from under the chat: how far, 0 to 1, and the slide under
+-- It opens out from the window's edge: how far, 0 to 1, and the slide under
 -- way: where it set off from, where to, when, and the frame before.
 local slide = { at = 0, from = 0, to = 0, started = 0, last = 0 }
 M.slide_ms = 120
@@ -505,12 +488,12 @@ local function progress()
   return slide.at
 end
 
---- The sidebar as a node and how far out it is (nil, 0 while it is
---- closed). Its width follows that; the content keeps its own, so it is
---- uncovered rather than squeezed. In a window narrower than
---- `M.overlay_below` (`ctx.width`) it floats over the chat, on a backdrop
---- that closes it, and the third value is that backdrop; the distance is 0,
---- as the chat gives up no room to it.
+--- The sidebar as a node, the room it takes from the chat's row (0 while
+--- it is closed) and, in a window narrower than `M.overlay_below`
+--- (`ctx.width`), the backdrop it floats over the chat on, which closes it;
+--- the room is 0 then. It is a card like the composer: its width follows
+--- how far out it is while the content keeps its own, so it is uncovered
+--- rather than squeezed.
 function M.node(ctx)
   local p = progress()
   if p <= 0 then
@@ -519,36 +502,38 @@ function M.node(ctx)
   end
   local ease = 1 - (1 - p) ^ 3
   local inner = M.content()
-  inner.width = M.width
+  inner.width = M.width - 2 -- inside the card's border
   overlaid = ctx ~= nil and (ctx.width or math.huge) < M.overlay_below
-  local under = overlaid and 0 or math.floor(M.under * ease)
   -- Its right edge is a handle: drag it to set the width (kept between runs).
-  -- The drag is in the window, which a panel on the left may start before
-  -- the sidebar; the edge stays as far from the pointer as where it was
-  -- grabbed.
+  -- The edge stays as far from the pointer as where it was grabbed.
   local handle = {
-    position = "absolute", top = 0, bottom = 0, right = under, width = 6, z = 1, cursor = "col-resize",
+    position = "absolute", top = 0, bottom = 0, right = 0, width = 6, z = 1, cursor = "col-resize",
     on_press = function(pos) grab = 6 - pos.x end,
     on_drag = function(pos)
-      local left = (bone.gui.rect(ID) or { x = 0 }).x
+      local left = (bone.gui.rect(CARD) or { x = 0 }).x
       local w = math.floor(pos.x - left + (grab or 3))
       w = math.max(M.min_width, math.min(M.max_width, w))
       if w ~= M.width then M.width = w redraw() end
     end,
     on_release = function() bone.state.save("sidebar-width", M.width) end,
   }
-  local drawer = {
-    width = math.floor(M.width * ease) + under, overflow = "hidden", direction = "row", bg = panel_bg(), inner, handle,
+  local card = {
+    id = CARD, width = math.floor(M.width * ease), overflow = "hidden", direction = "row",
+    bg = "InputBackground", border = 1, border_color = "PromptBorder", radius = style.radius.round,
+    shadow = style.shadow.bubble, opacity = ease, inner, handle,
   }
-  if not overlaid then return style.finish(drawer), ease end
-  drawer.position, drawer.left, drawer.top, drawer.bottom, drawer.z = "absolute", 0, 0, 0, 8
-  drawer.bg = see_through() and nil or "Panel"
-  drawer.shadow = style.shadow.card
-  local backdrop = style.finish({
-    position = "absolute", left = 0, right = 0, top = 0, bottom = 0, z = 7,
-    bg = style.scrim.dialog, opacity = ease, on_click = close,
-  })
-  return style.finish(drawer), 0, backdrop
+  if overlaid then
+    card.position, card.left, card.top, card.bottom, card.z = "absolute", M.inset, M.inset, M.inset, 8
+    card.shadow = style.shadow.card
+    local backdrop = style.finish({
+      position = "absolute", left = 0, right = 0, top = 0, bottom = 0, z = 7,
+      bg = style.scrim.dialog, opacity = ease, on_click = close,
+    })
+    return style.finish(card), 0, backdrop
+  end
+  card.margin = { M.inset, 0, M.inset, math.floor(M.inset * ease) }
+  style.finish(card)
+  return card, card.width + (card.margin and card.margin[4] or 0)
 end
 
 --- The sidebar's own content.

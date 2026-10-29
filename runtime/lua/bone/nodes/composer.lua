@@ -115,7 +115,7 @@ function M.node(opts)
     { input = not opts.chat, placeholder = placeholder,
       text_input = opts.chat and { value = bone.gui.draft(opts.chat), placeholder = placeholder, multiline = true, max_rows = rows, read_only = true } or nil,
       size = style.size.text, min_rows = tonumber(p.min), max_rows = rows, hl = "InputText", grow = 1,
-      id = "composer-input" .. (opts.chat or "") },
+      align_self = "center", id = "composer-input" .. (opts.chat or "") },
   }
   if prefix and #prefix > 0 then
     table.insert(card, 2, { spans = prefix, size = style.size.text, hl = "UserPrompt", wrap = false })

@@ -35,12 +35,12 @@ M.radius = {
 --- Spaces, in pixels.
 M.space = { xs = 2, sm = 4, md = 8, lg = 12, xl = 16 }
 
---- Shadows: a floating card, a menu, and the chat over the sidebar.
+--- Shadows: a floating card, a menu, and a bubble on the chat (the sidebar).
 M.shadow = {
   card = { blur = 22, dy = 8, color = "#000000a0" },
   menu = { blur = 18, dy = 6, color = "#00000070" },
   big = { blur = 30, dy = 10, color = "#000000c0" },
-  surface = { blur = 24, dx = -2, dy = 0, color = "#00000040" },
+  bubble = { blur = 16, dy = 4, color = "#00000038" },
 }
 
 --- The dimmed backdrops behind a dialog and behind a large image.

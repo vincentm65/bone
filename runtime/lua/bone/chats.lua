@@ -159,12 +159,13 @@ function M.fetch_list(done)
   end)
 end
 
---- Each session's last activity, tokens (its agents' included) and turns:
---- done({ [id] = { at, tokens, turns } } or nil).
+--- Each session's last activity, tokens (its agents' included), turns and
+--- last-used model: done({ [id] = { at, tokens, turns, model } } or nil).
 function M.fetch_stats(done)
   -- Aggregate separately: joining messages directly to usage multiplies totals.
   bone.request("store/query", { sql = [[
-    SELECT s.id, s.updated_at, coalesce(u.tokens, 0), coalesce(m.turns, 0)
+    SELECT s.id, s.updated_at, coalesce(u.tokens, 0), coalesce(m.turns, 0),
+           (SELECT model FROM usage WHERE session_id = s.id ORDER BY at DESC, rowid DESC LIMIT 1)
     FROM sessions s
     LEFT JOIN (SELECT coalesce(a.root, a.id) AS chat, sum(input_tokens + output_tokens) AS tokens
                FROM usage JOIN sessions a ON a.id = usage.session_id GROUP BY chat) u ON u.chat = s.id
@@ -174,7 +175,7 @@ function M.fetch_stats(done)
     if err or not res then return done(nil) end
     local stats = {}
     for _, r in ipairs(res.rows or {}) do
-      stats[r[1]] = { at = r[2], tokens = r[3], turns = r[4] }
+      stats[r[1]] = { at = r[2], tokens = r[3], turns = r[4], model = r[5] }
     end
     done(stats)
   end)
