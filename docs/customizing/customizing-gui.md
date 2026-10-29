@@ -511,9 +511,9 @@ bone.o.fold_turns = true              -- standard library: earlier turns as one 
 ```
 
 The tool strip, under your message, draws its turn as one bar: a segment per tool
-call, duration-weighted while it runs and equal-width for historic turns; the
-model's thinking between calls is fine dots and its answer is at the end. Each
-kind has a highlight group of its own, also used by the TUI's toolstrip plugin,
+call as wide as it ran, the model's thinking between calls as fine dots and
+its answer at the end. Each kind has a highlight group of its own, also used
+by the TUI's toolstrip plugin,
 quiet by brightness: `ToolStripRead` (faint),
 `ToolStripCommand` and `ToolStripAgent` (brighter), `ToolStripAnswer` (nearly
 white), `ToolStripEdit` (green), `ToolStripFail` (red), `ToolStripLive` (a
@@ -527,7 +527,8 @@ With `fold_turns`, every turn before the last folds into one row: your
 message, that turn's strip and how long it took; its calls and answer are
 hidden. A click on the row opens the turn, a click on a segment opens it at
 that call. An open turn has its strip under your message, and "Fold" while
-it is not the last (`desktop/views.lua`; `require("bone.desktop.views").open_turn(n, on)`
+it is not the last; a click anywhere on that strip folds it too, as in the
+TUI (`desktop/views.lua`; `require("bone.desktop.views").open_turn(n, on)`
 opens or folds turn `n`).
 
 `opacity` is read when the window opens. Below 1 the window is created

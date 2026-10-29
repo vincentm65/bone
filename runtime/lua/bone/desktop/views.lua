@@ -79,7 +79,8 @@ end
 -- tool strip, how long it took; its answer and calls are hidden. A click on
 -- the row opens the turn, a click on a segment opens it at that call. An
 -- open turn has its strip under your message, with "Fold" while it is not
--- the last. `bone.o.fold_turns = false` keeps every turn open.
+-- the last; a click on that strip folds it too. `bone.o.fold_turns = false`
+-- keeps every turn open.
 
 local open = {} -- "session:turn" -> true, for folded turns opened by hand
 
@@ -169,14 +170,18 @@ local function turn_header(item)
   local turn, last = turn_of(item.turn)
   if not turn or not bone.o.tool_strip then return nil end
   if turn.running then bone.chat.refresh_in(1000) end -- the time grows
-  local bar, total = strip.bar(bone.chat.session(), turn, nil,
+  -- An earlier turn opened by hand folds again from a click anywhere on its
+  -- bar, as the TUI's does; the last turn's bar scrolls to a segment's item.
+  local foldable = bone.o.fold_turns and not last
+  local function fold_turn() M.open_turn(item.turn, false) end
+  local bar, total = strip.bar(bone.chat.session(), turn, foldable and fold_turn or nil,
     "turn:" .. item.turn, function() bone.chat.redraw(item.index) end)
   -- A plain answer with no time to show needs no strip of its own.
   if not bar or ((turn.tools or 0) == 0 and not total) then return nil end
-  local fold = bone.o.fold_turns and not last and style.finish({
+  local fold = foldable and style.finish({
     text = "Fold", hl = "Dim", size = style.size.small, wrap = false, cursor = "pointer", role = "button",
     padding = { 2, 6 }, radius = style.radius.sm, hover = { bg = style.hover() },
-    on_click = function() M.open_turn(item.turn, false) end,
+    on_click = fold_turn,
   }) or nil
   return style.finish({
     direction = "row", align = "center", gap = 14, padding = { 0, 10 }, margin = { 2, 0, 6, 0 },

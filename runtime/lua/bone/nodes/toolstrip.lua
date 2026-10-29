@@ -1,8 +1,7 @@
 -- A turn's tool strip, drawn by the chat (bone.desktop.views) under your
 -- message or in a folded turn's row: the turn as one bar, a segment per
--- live tool call as wide as it runs (historical calls use equal shares),
--- the model's thinking between them as fine dots, and its answer as the
--- bright segment at the end. Reads are faint,
+-- tool call as wide as it ran, the model's thinking between them as fine
+-- dots, and its answer as the bright segment at the end. Reads are faint,
 -- commands brighter, edits green, failures red, a sub-agent an outline with
 -- a dot; a running call breathes amber, one waiting on an answer is
 -- outlined in blue. A segment's tooltip says what it did; a click scrolls
@@ -310,12 +309,8 @@ function M.bar(s, turn, pick, id, redraw)
       end
     end,
   }
-  -- Historical turns keep their tooltips and timing data, but their visual
-  -- timeline is a sequence of equal shares. Only a running turn is scaled
-  -- by duration.
-  local historical = not turn.running
   for k, seg in ipairs(segs) do
-    bar[#bar + 1] = segment(seg, historical and 1 or math.max(seg.ms, floor), pick, k, info)
+    bar[#bar + 1] = segment(seg, math.max(seg.ms, floor), pick, k, info)
   end
   -- The playhead: a thin line through the segment under the pointer, where
   -- the last frame put it. It takes no pointer of its own.
