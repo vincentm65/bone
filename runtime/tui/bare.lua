@@ -11,7 +11,6 @@ for key, action in pairs({
   ["ctrl+j"] = "newline",
   ["esc"] = "dismiss",
   ["ctrl+c"] = "interrupt",
-  ["ctrl+d"] = "quit_if_empty",
   ["ctrl+o"] = "sessions",
   ["left"] = "left",
   ["right"] = "right",

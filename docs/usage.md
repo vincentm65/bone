@@ -29,7 +29,6 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `up` on an empty prompt | edit the last queued message: `enter` saves it in place, `esc` leaves it as it was |
 | `alt+enter`, `shift+enter`, `ctrl+j` | new line |
 | `ctrl+c` | cancel the running turn; else clear the prompt; else press twice to quit |
-| `ctrl+d` | quit (on an empty prompt) |
 | `ctrl+o` | pick a session to open |
 | `f1` | open the searchable help popup: Commands, Keys and Docs |
 | `down` / `ctrl+b` | the tray below the prompt: queued messages, sub-agents and shell jobs. `down` on an empty prompt moves into it (the Queue page first when anything is queued; `up` from its top row leaves), `tab` switches pages, `enter` opens one (a sub-agent's session in the chat, a shell job as a terminal in the tray), `c` cancels, `esc` goes back; a click does the same. On the Queue page `enter` edits a message, `s` switches it between steer and next (when no turn runs: sends it now), `shift+up`/`shift+down` move it, `d` drops it and `r` resumes a paused queue. `ctrl+b` folds the tray to one line. In a sub-agent's session, `‹ main` in the tray or `esc` on an empty prompt goes back |

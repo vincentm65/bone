@@ -98,7 +98,6 @@ M.KEYS = {
   { "esc", "dismiss suggestions or clear the prompt", "Messaging" },
   { "ctrl+o", "open an earlier session", "Sessions" },
   { "ctrl+n", "start a new session", "Sessions" },
-  { "ctrl+d", "quit on an empty prompt", "Sessions" },
   { "f1", "open this help browser", "Sessions" },
   { "pageup / pagedown", "scroll the conversation or command suggestions", "Reading" },
   { "shift+up / shift+down / wheel", "scroll the conversation or command suggestions", "Reading" },

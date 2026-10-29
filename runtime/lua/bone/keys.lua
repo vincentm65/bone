@@ -36,7 +36,6 @@ map({
   ["tab"] = "complete",
   ["esc"] = "dismiss",
   ["ctrl+c"] = "interrupt",
-  ["ctrl+d"] = "quit_if_empty",
   ["ctrl+o"] = "sessions",
   ["ctrl+n"] = "new_session",
   ["ctrl+p"] = "focus_next",
