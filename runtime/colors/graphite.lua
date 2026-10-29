@@ -1,14 +1,14 @@
--- "graphite": the bone Android app's colors, the desktop library's
--- default. Neutral charcoal surfaces in three levels (background, panel,
--- raised), soft accents. Load with bone.colorscheme("graphite").
+-- "graphite": the desktop library's default. A black window with dark grey
+-- surfaces in two levels (panel, raised), soft accents. Load with
+-- bone.colorscheme("graphite").
 local p = {
-  bg = "#121212", panel = "#1c1c1c", raised = "#2c2c2c", border = "#3a3a3a",
+  bg = "#000000", panel = "#0c0c0c", raised = "#161616", border = "#1c1c1c",
   fg = "#eeeeee", muted = "#b8b8b8", dim = "#8a8a8a",
   -- Accent and code match the TUI black palette's light blue.
   blue = "#c8dcf5", path = "#abc4e3",
   green = "#9bd5b0", yellow = "#e8c184", orange = "#f0b98b", red = "#ffb0b7",
   purple = "#cfbaf3", cyan = "#a5d6e4",
-  bubble = "#333333",
+  bubble = "#121212",
   diff_add = "#7ee787", diff_add_bg = "#172b23", diff_del = "#ff7b72", diff_del_bg = "#34212a",
 }
 
@@ -39,6 +39,7 @@ hl("ToolRunning", { fg = p.yellow })
 hl("ToolError", { fg = p.red })
 hl("ToolDone", { fg = p.green })
 hl("ToolCard", { bg = p.panel })
+hl("Success", { fg = p.green })
 hl("DiffAdd", { fg = p.diff_add, bg = p.diff_add_bg })
 hl("DiffDelete", { fg = p.diff_del, bg = p.diff_del_bg })
 hl("ShellProgram", { fg = p.green })
@@ -62,7 +63,7 @@ hl("MdTableHeader", { fg = p.fg, bold = true })
 hl("Notice", { fg = p.yellow })
 hl("ErrorMsg", { fg = p.red })
 hl("WarningMsg", { fg = p.yellow })
-hl("WinSeparator", { fg = "#262626" })
+hl("WinSeparator", { fg = "#141414" })
 hl("StatusLine", { fg = p.muted, bg = p.bg })
 hl("StatusLineDim", { fg = p.dim, bg = p.bg })
 hl("Selection", { bg = p.raised })

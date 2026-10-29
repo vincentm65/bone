@@ -119,11 +119,14 @@ them.
 bone.colorscheme("ansi")                                  -- "black" (default) or "ansi"
 bone.hl.set("MyGroup", { fg = "#7dcfff", bold = true })   -- fg/bg: #rrggbb, a name, or 0-255
 bone.hl.set("Link2", { link = "ToolError", underline = true })
+bone.hl.set("MyDone", { link = "Success", default = true })  -- under the colorscheme: a scheme may define it
 bone.hl.get("MyGroup")
 bone.hl.names()
 ```
 
-Named groups used by the standard UI: `Normal Dim Accent UserPrompt
+Roles every colorscheme defines, for plugins to color with: `Normal Dim
+Accent Success WarningMsg ErrorMsg Selection DiffAdd DiffDelete`. Named
+groups used by the standard UI: `Normal Dim Accent Success UserPrompt
 UserMessage Reasoning ToolName ToolArgs ToolPath ToolSummary ToolOutput
 ToolGutter ToolRunning ToolError DiffAdd DiffDelete ShellProgram ShellPath
 ShellFlag ShellString ShellVariable ShellComment ShellOperator MdHeading

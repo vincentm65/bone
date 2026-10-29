@@ -40,6 +40,44 @@ shared `mouse` event over those rows, but they are not pointer targets:
 `on_click` and the other node handlers exist only when the window has
 `node = fn`.
 
+### One view for both: elements
+
+A window or panel given `view` in place of `lines`, `render` and `node` is
+drawn by each frontend's library from the same data. The view returns
+elements, which say what something is, never how it looks: no colors, sizes
+or spaces, only a `tone` (`normal`, `dim`, `accent`, `success`, `warning`,
+`error`) and states. The terminal draws them as lines and the desktop app
+with its widgets, each in the look of the window and the colorscheme.
+
+```lua
+local done = false
+bone.ui.panel.open({ id = "steps", dock = "right", title = "Steps", view = function()
+  return { kind = "column",
+    { kind = "checklist", items = { { text = "build", state = done and "done" or "active" } } },
+    { kind = "button", label = "Mark done", on_press = function() done = true end },
+  }
+end })
+```
+
+The kinds are `text`, `row`, `column`, `section`, `list`, `checklist`,
+`button`, `tabs`, `field`, `diff`, `code`, `badge`, `meter`, `spinner`,
+`divider` and `hints`; `runtime/lua/bone/elements.lua` lists their fields.
+What has an `on_press` (and each tab) is a target: a click presses it, in a
+terminal panel too, and in a focused window or panel up/down move a cursor
+through the targets, left/right change tabs, and enter or space press. Up
+from the first target and down from the last scroll the panel, and so do the
+page keys. A view runs each time the frontend draws (every frame in the
+terminal); returning the same table as last time reuses what was drawn, so a
+large view can build its tree only when it changes. `bone.has_capability("ui.elements")`
+says the frontend has them.
+
+Use `lines`/`render` and `node` only for what elements cannot say (a
+terminal, a canvas, a layout of your own), and give both frontends one. Even
+then, color with the colorscheme's groups, never hex. A group of your own is
+`bone.hl.set("MyDone", { link = "Success", default = true })`: under the
+colorscheme, so a scheme can restyle it, and linked, so it follows a scheme
+change.
+
 Put what only one frontend has in its own file, or check for it:
 
 ```lua

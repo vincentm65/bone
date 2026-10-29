@@ -1318,3 +1318,63 @@ async fn transitions_fade_what_changes() {
     g.frame();
     assert_eq!(fill(&g), Some(0));
 }
+
+/// A panel given a `view` docks as nodes: its elements are painted, and a
+/// click on a button presses it.
+#[tokio::test(flavor = "multi_thread")]
+async fn elements_dock_as_nodes_and_take_clicks() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    g.gui
+        .run_lua(
+            "t",
+            r##"
+      pressed = nil
+      bone.ui.panel.open({ id = "els", dock = "right", size = 36, title = "Elements", view = function()
+        return { kind = "column",
+          { kind = "checklist", items = { { text = "first step", state = "done" }, { text = "next step", state = "active" } } },
+          { kind = "list", items = { { text = "an entry", detail = "2m", on = true } } },
+          { kind = "row", { kind = "badge", text = "new" }, { kind = "meter", value = 0.5, label = "half" },
+            { kind = "button", label = "Press me", on_press = function() pressed = true end } },
+          { kind = "diff", rows = { { sign = "+", text = "added line" } } },
+          { kind = "field", label = "Name", value = "", empty = "none" },
+          { kind = "tabs", names = { "One", "Two" }, current = 1, on_select = function() end },
+          { kind = "code", text = "x = 1" }, { kind = "divider" }, { kind = "spinner" },
+          { kind = "hints", text = "enter press" },
+        }
+      end })
+    "##,
+        )
+        .unwrap();
+    for _ in 0..3 {
+        g.frame();
+    }
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+    for text in [
+        "first step",
+        "an entry",
+        "Press me",
+        "added line",
+        "Name",
+        "One",
+    ] {
+        assert!(
+            g.painted.iter().any(|(t, _)| t.contains(text)),
+            "{text} not painted: {:?}",
+            g.painted
+        );
+    }
+    let (_, rect) = g
+        .painted
+        .iter()
+        .find(|(t, _)| t == "Press me")
+        .cloned()
+        .unwrap();
+    g.click_at(rect.center().x, rect.center().y);
+    for _ in 0..2 {
+        g.frame();
+    }
+    assert_eq!(g.gui.eval("pressed").unwrap(), "true");
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}

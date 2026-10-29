@@ -7,7 +7,7 @@ for _, name in ipairs({
   "ui.layout", "ui.windows", "ui.panels", "ui.input",
   "ui.prompt", "ui.jobs", "ui.plugins", "ui.session",
   "ui.local_events", "ui.command_specs", "ui.dynamic_options", "ui.pickers",
-  "ui.model", "ui.rpc", "ui.project", "jobs.streaming", "plugins.lifecycle",
+  "ui.model", "ui.rpc", "ui.project", "ui.elements", "jobs.streaming", "plugins.lifecycle",
 }) do
   -- The GUI draws a node tree: it has no cell layout or docked cell panels.
   local cells = name == "ui.layout" or name == "ui.panels"

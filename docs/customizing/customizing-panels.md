@@ -83,6 +83,11 @@ away from it. A render error is reported once and leaves the panel empty until
 Lines are as everywhere: a string, `{ "text", "Group" }`, or
 `{ fill = "─", hl = "Group" }`.
 
+`view = function(ctx)` in place of `render` returns elements instead, drawn by
+the terminal and the desktop app alike, with a cursor for the keyboard and
+clicks on what can be pressed; see
+[elements](customizing-plugins.md#one-view-for-both-elements).
+
 ## The keyboard
 
 `focus = true` (or `p:focus()`, `bone.ui.panel.focus(id)`, a click on it,

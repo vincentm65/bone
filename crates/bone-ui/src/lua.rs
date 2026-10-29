@@ -1273,6 +1273,7 @@ fn hl_set<H: Host>(h: &mut H, lua: &Lua, a: MultiValue) -> mlua::Result<MultiVal
         reverse: spec.get::<Option<bool>>("reverse")?.unwrap_or(false),
         dim: spec.get::<Option<bool>>("dim")?.unwrap_or(false),
         link: spec.get("link")?,
+        default: spec.get::<Option<bool>>("default")?.unwrap_or(false),
     };
     let l = h.looks();
     l.theme

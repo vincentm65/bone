@@ -98,6 +98,7 @@ naming the operation.
 | `ui.command_specs` | command aliases, completion callbacks and typed arguments | shared |
 | `ui.dynamic_options` | `bone.o.define` options with defaults, choices, `on_change` and deletion | shared |
 | `ui.pickers` | `bone.ui.select` | shared |
+| `ui.elements` | `view = fn` on windows and panels: elements drawn by each frontend's library (`runtime/lua/bone/elements.lua`) | shared |
 | `ui.model` | `bone.model` (`list`, `complete`) | shared |
 | `ui.rpc` | `bone.rpc.call` into core Lua | shared |
 | `ui.project` | `bone.project` (`info`, `trust`) | shared |

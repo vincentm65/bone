@@ -503,9 +503,11 @@ bone.api = {
 --- Keys: fg, bg (#rrggbb, a color name, or 0-255), bold, italic, underline,
 --- strikethrough, reverse, dim, link (start from another group; followed
 --- live, so it tracks the colorscheme; a link to the group's own name starts
---- from the colorscheme's version). Set from a colorscheme file, a group
---- belongs to that colorscheme and goes when another loads; set from
---- anywhere else, it stays across colorscheme loads.
+--- from the colorscheme's version), default. Set from a colorscheme file, a
+--- group belongs to that colorscheme and goes when another loads; set from
+--- anywhere else, it stays across colorscheme loads. `default = true` puts
+--- it under the colorscheme instead: what a plugin's own group is until a
+--- scheme or the user defines it (link it to a role, such as Success).
 bone.hl = {
   set = function(name, spec)
     api("hl_set", name, spec or {})
@@ -513,8 +515,9 @@ bone.hl = {
   get = function(name)
     return api("hl_get", name)
   end,
-  --- Back to the built-in 16-color styles. In a colorscheme file it drops
-  --- only that colorscheme's groups; anywhere else, every group set from Lua.
+  --- Back to the defaults and the built-in 16-color styles. In a colorscheme
+  --- file it drops only that colorscheme's groups; anywhere else, every group
+  --- set from Lua but the defaults.
   reset = function()
     api("hl_reset")
   end,
@@ -627,6 +630,10 @@ end
 ---   guard: ms to ignore keys after opening (so typing can't hit them)
 --- Unhandled keys in a focused window go to the "popup" keymaps (ctrl+c
 --- cancels the turn). Returns an id. bone.ui.box draws a border if you want.
+---   view: function(ctx) -> element, in place of lines (and node): what the
+---          window shows, drawn by each frontend's library (see
+---          runtime/lua/bone/elements.lua); ctx = { focused, columns, rows };
+---          `title` heads it
 --- Where the last frame put things: { leaves = { { name, x, y, width,
 --- height } }, seps = { { x, y, width, height, path } } }. A separator's
 --- `path` leads from bone.ui.layout (1-based child indexes) to the column
@@ -635,8 +642,18 @@ function bone.ui.geometry()
   return api("geometry")
 end
 
+local function elements()
+  return require("bone.elements")
+end
+
 function bone.ui.win(spec)
-  return api("popup_open", spec)
+  if spec.view == nil then
+    return api("popup_open", spec)
+  end
+  local st = elements().win_spec(spec)
+  local id = api("popup_open", spec)
+  elements().keep("win:" .. tostring(id), st)
+  return id
 end
 
 --- A window that takes the keyboard (bone.ui.win with focus = true).
@@ -644,16 +661,21 @@ function bone.ui.popup(spec)
   if spec.focus == nil then
     spec.focus = true
   end
-  return api("popup_open", spec)
+  return bone.ui.win(spec)
 end
 
 --- Change fields of an open window (same fields as bone.ui.win; false
 --- resets width/height/row/col to automatic). Returns false if it is closed.
 function bone.ui.update(id, spec)
+  if spec and spec.view ~= nil then
+    local key = "win:" .. tostring(id)
+    elements().keep(key, elements().win_spec(spec, elements().state(key)))
+  end
   return api("popup_update", id, spec)
 end
 
 function bone.ui.close(id)
+  if package.loaded["bone.elements"] then elements().keep("win:" .. tostring(id), nil) end
   api("popup_close", id)
 end
 
@@ -674,6 +696,9 @@ end
 ---   order: lower is placed nearer the screen edge (default 0)
 ---   render: function(ctx) -> lines, ctx = { id, dock, width, height,
 ---         focused, top, title, spinner }, called every frame; or lines: a list
+---   view: function(ctx) -> element, in place of render (and node): what the
+---         panel shows, drawn by each frontend's library (see
+---         runtime/lua/bone/elements.lua); ctx = { focused, columns, rows }
 ---   title: a row above the content that does not scroll
 ---   follow: keep the end in view as content grows
 ---   focusable (default true), focus: take the keyboard now
@@ -691,14 +716,27 @@ local function panel_handle(id)
   return setmetatable({ id = id }, Panel)
 end
 
+local function panel_update(id, spec)
+  if spec and spec.view ~= nil then
+    local key = "panel:" .. id
+    elements().keep(key, elements().panel_spec(spec, elements().state(key)))
+  end
+  return api("panel_update", id, spec or {})
+end
+
+local function panel_close(id)
+  if package.loaded["bone.elements"] then elements().keep("panel:" .. id, nil) end
+  return api("panel_close", id)
+end
+
 function Panel:update(spec)
-  return api("panel_update", self.id, spec or {})
+  return panel_update(self.id, spec)
 end
 function Panel:set_lines(lines)
   return api("panel_set_lines", self.id, lines)
 end
 function Panel:close()
-  return api("panel_close", self.id)
+  return panel_close(self.id)
 end
 function Panel:focus()
   api("panel_focus", self.id)
@@ -729,7 +767,13 @@ end
 bone.ui.panel = setmetatable({
   _handle = panel_handle,
   open = function(spec)
-    return panel_handle(api("panel_open", spec))
+    if spec.view == nil then
+      return panel_handle(api("panel_open", spec))
+    end
+    local st = elements().panel_spec(spec)
+    local id = api("panel_open", spec)
+    elements().keep("panel:" .. id, st)
+    return panel_handle(id)
   end,
   --- The handle of an open panel, or nil.
   get = function(id)
@@ -741,12 +785,8 @@ bone.ui.panel = setmetatable({
   list = function()
     return api("panel_list")
   end,
-  update = function(id, spec)
-    return api("panel_update", id, spec or {})
-  end,
-  close = function(id)
-    return api("panel_close", id)
-  end,
+  update = panel_update,
+  close = panel_close,
   --- Give a panel the keyboard; nil gives it back to the prompt.
   focus = function(id)
     api("panel_focus", id)
@@ -760,6 +800,13 @@ bone.ui.panel = setmetatable({
     return self.open(spec)
   end,
 })
+
+-- A click on a terminal panel drawn from a view presses what is under it.
+bone.on("mouse", function(ev)
+  if ev.panel and package.loaded["bone.elements"] then
+    return require("bone.elements").mouse(ev)
+  end
+end)
 
 local function spans(line)
   if type(line) == "string" then

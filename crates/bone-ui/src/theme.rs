@@ -1,6 +1,7 @@
 //! Highlight groups.
 //!
 //! Named styles resolve from overrides, then the current colorscheme, then
+//! defaults (groups a library or plugin adds, for a scheme to replace), then
 //! built-in ANSI fallbacks. Loading a scheme replaces only its layer. Links
 //! are followed on every lookup, so they track the current layers; a
 //! self-link starts from the layer below.
@@ -12,8 +13,8 @@ use crate::style::{Color, Modifier, Style};
 
 #[derive(Debug, Clone, Default)]
 pub struct Theme {
-    /// In lookup order: overrides, then the colorscheme.
-    layers: [Layer; 2],
+    /// In lookup order: overrides, then the colorscheme, then defaults.
+    layers: [Layer; 3],
     /// A colorscheme file is running: `set` and `reset` touch its layer.
     loading: bool,
 }
@@ -56,6 +57,7 @@ fn fallback() -> Vec<(&'static str, Style)> {
         ("ToolGutter", fg(Color::DarkGray)),
         ("ToolRunning", fg(Color::DarkGray)),
         ("ToolError", fg(Color::Red)),
+        ("Success", fg(Color::Green)),
         ("DiffAdd", fg(Color::Green)),
         ("DiffDelete", fg(Color::Red)),
         ("ShellProgram", fg(Color::Green)),
@@ -137,11 +139,16 @@ impl Theme {
         FALLBACK.contains_key(name) || self.layers.iter().any(|l| l.contains_key(name))
     }
 
-    /// Define a group from Lua: in the colorscheme's layer while one loads,
-    /// else in the overrides.
+    /// Define a group from Lua: a `default` one under the colorscheme, else
+    /// in the colorscheme's layer while one loads, else in the overrides.
     pub fn set(&mut self, name: &str, spec: &StyleSpec) -> Result<(), String> {
         let group = spec.to_group()?;
-        self.layers[usize::from(self.loading)].insert(name.to_owned(), group);
+        let layer = if spec.default {
+            2
+        } else {
+            usize::from(self.loading)
+        };
+        self.layers[layer].insert(name.to_owned(), group);
         Ok(())
     }
 
@@ -181,15 +188,16 @@ impl Theme {
         }
     }
 
-    /// Back to the fallback colors: in a colorscheme file, its own groups
-    /// go; anywhere else, every group set from Lua.
+    /// Back to the defaults and fallback colors: in a colorscheme file, its
+    /// own groups go; anywhere else, the overrides and the colorscheme's.
     pub fn reset(&mut self) {
-        self.layers[usize::from(self.loading)..]
+        self.layers[usize::from(self.loading)..2]
             .iter_mut()
             .for_each(HashMap::clear);
     }
 
-    /// `name` from layer `from` down (0 overrides, 1 scheme, 2 fallback);
+    /// `name` from layer `from` down (0 overrides, 1 scheme, 2 defaults, 3
+    /// fallback);
     /// `None` when it is undefined or its links never end.
     fn resolve(&self, name: &str, from: usize, depth: usize) -> Option<Style> {
         if depth > MAX_DEPTH {
@@ -260,6 +268,9 @@ pub struct StyleSpec {
     pub dim: bool,
     /// Another group to start from.
     pub link: Option<String>,
+    /// Below the colorscheme: what the group is until a scheme or the user
+    /// defines it.
+    pub default: bool,
 }
 
 impl StyleSpec {

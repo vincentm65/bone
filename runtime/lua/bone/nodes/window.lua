@@ -264,6 +264,11 @@ function M.view(ctx)
   local top
   top, used = M.docked("top", dock_ctx, height)
   height = height - used
+  -- The lanes the docks stand in are the chat's surface too: a see-through
+  -- window would show the desktop around their cards.
+  for _, docks in ipairs({ left, right, top }) do
+    for _, d in ipairs(docks) do d.bg = chat_bg end
+  end
   local area = { width = math.max(0, width - room), height = height, cell = ctx.cell }
   local ok, node = pcall(M.area, area)
   -- A broken replacement leaves the one chat, and says so once.
