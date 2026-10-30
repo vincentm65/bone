@@ -1,6 +1,6 @@
 {
   "name": "bone-agent",
-  "version": "3.0.3",
+  "version": "3.0.4",
   "description": "Bone: a terminal AI coding agent with a Lua-scriptable core and TUI",
   "bin": {
     "bone": "bin/bone.js"
@@ -9,11 +9,11 @@
     "bin"
   ],
   "optionalDependencies": {
-    "bone-agent-linux-x64": "3.0.3",
-    "bone-agent-linux-arm64": "3.0.3",
-    "bone-agent-darwin-x64": "3.0.3",
-    "bone-agent-darwin-arm64": "3.0.3",
-    "bone-agent-windows-x64": "3.0.3"
+    "bone-agent-linux-x64": "3.0.4",
+    "bone-agent-linux-arm64": "3.0.4",
+    "bone-agent-darwin-x64": "3.0.4",
+    "bone-agent-darwin-arm64": "3.0.4",
+    "bone-agent-windows-x64": "3.0.4"
   },
   "engines": {
     "node": ">=18"

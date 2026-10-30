@@ -499,7 +499,7 @@ dependencies = [
 
 [[package]]
 name = "bone"
-version = "3.0.3"
+version = "3.0.4"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -520,7 +520,7 @@ dependencies = [
 
 [[package]]
 name = "bone-client"
-version = "3.0.3"
+version = "3.0.4"
 dependencies = [
  "bone-proto",
  "serde_json",
@@ -530,7 +530,7 @@ dependencies = [
 
 [[package]]
 name = "bone-core"
-version = "3.0.3"
+version = "3.0.4"
 dependencies = [
  "base64 0.22.1",
  "bone-lua",
@@ -554,7 +554,7 @@ dependencies = [
 
 [[package]]
 name = "bone-gui"
-version = "3.0.3"
+version = "3.0.4"
 dependencies = [
  "base64 0.22.1",
  "bone-client",
@@ -576,7 +576,7 @@ dependencies = [
 
 [[package]]
 name = "bone-lua"
-version = "3.0.3"
+version = "3.0.4"
 dependencies = [
  "cc",
  "libc",
@@ -590,14 +590,14 @@ dependencies = [
 
 [[package]]
 name = "bone-media"
-version = "3.0.3"
+version = "3.0.4"
 dependencies = [
  "image",
 ]
 
 [[package]]
 name = "bone-proto"
-version = "3.0.3"
+version = "3.0.4"
 dependencies = [
  "serde",
  "serde_json",
@@ -607,7 +607,7 @@ dependencies = [
 
 [[package]]
 name = "bone-server"
-version = "3.0.3"
+version = "3.0.4"
 dependencies = [
  "bone-client",
  "bone-core",
@@ -620,7 +620,7 @@ dependencies = [
 
 [[package]]
 name = "bone-tui"
-version = "3.0.3"
+version = "3.0.4"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -642,7 +642,7 @@ dependencies = [
 
 [[package]]
 name = "bone-ui"
-version = "3.0.3"
+version = "3.0.4"
 dependencies = [
  "bitflags 2.13.2",
  "bone-client",
