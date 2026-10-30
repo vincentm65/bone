@@ -191,16 +191,16 @@ end
 
 -- A running segment (warm, filled) or one waiting on you (cool, outlined):
 -- breathing on a canvas of its own, so the window is not built again to
--- animate it, with a soft glow of its color.
+-- animate it, with a faint glow of its color.
 local function glowing(group, outlined)
   local fg = (bone.hl.get(group) or {}).fg
   local hex = type(fg) == "string" and fg:match("^#%x%x%x%x%x%x$") and fg or nil
   return {
-    shadow = hex and { blur = 10, spread = 1, color = hex .. "8c" } or nil,
+    shadow = hex and { blur = 4, color = hex .. "26" } or nil,
     canvas = {
       fps = 30,
       draw = function(ctx)
-        local a = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(ctx.time * 4.5))
+        local a = 0.8 + 0.2 * (0.5 + 0.5 * math.sin(ctx.time * 2.5))
         local c = hex and (hex .. string.format("%02x", math.floor(255 * a))) or group
         if outlined then
           return { bone.gui.draw.rect({
@@ -312,7 +312,7 @@ function M.bar(s, turn, pick, id, redraw)
   if at and box then
     bar[#bar + 1] = {
       position = "absolute", top = 0, bottom = 0, left = at.x - box.x + at.w / 2 - 0.75, width = 1.5,
-      radius = 1, bg = ink("ff", "Normal"), shadow = { blur = 6, color = ink("80", "Dim") },
+      radius = 1, bg = ink("ff", "Normal"), shadow = { blur = 3, color = ink("33", "Dim") },
     }
   end
   return bar, total
