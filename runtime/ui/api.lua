@@ -717,9 +717,12 @@ local function panel_handle(id)
 end
 
 local function panel_update(id, spec)
+  local st = package.loaded["bone.elements"] and elements().state("panel:" .. id)
   if spec and spec.view ~= nil then
     local key = "panel:" .. id
-    elements().keep(key, elements().panel_spec(spec, elements().state(key)))
+    elements().keep(key, elements().panel_spec(spec, st))
+  elseif spec and st then
+    elements().drawer_title(spec, st)
   end
   return api("panel_update", id, spec or {})
 end
@@ -801,9 +804,10 @@ bone.ui.panel = setmetatable({
   end,
 })
 
--- A click on a terminal panel drawn from a view presses what is under it.
+-- A click on a terminal panel or window drawn from a view presses what is
+-- under it.
 bone.on("mouse", function(ev)
-  if ev.panel and package.loaded["bone.elements"] then
+  if (ev.panel or ev.popup) and package.loaded["bone.elements"] then
     return require("bone.elements").mouse(ev)
   end
 end)
@@ -1348,8 +1352,8 @@ function bone._run_health()
 end
 
 --- Show text in a scrollable focused window.
----   content: a string (wrapped to fit; lines starting with # are headings)
----            or a list of lines
+---   content: a string (wrapped to fit; lines starting with # are headings),
+---            a list of lines, or an element (see runtime/lua/bone/elements.lua)
 ---   opts: { title, width = 100, height (fit, at most the screen) }
 --- Returns a handle: handle:set(content), handle:close().
 --- Keys: up/down/the wheel scroll, pageup/pagedown/space page, home/end,
@@ -1360,6 +1364,9 @@ function bone.ui.pager(content, opts)
   local id
 
   local function body_lines(width)
+    if type(content) == "table" and content.kind then
+      return (require("bone.elements").lines(content, width, {}, false))
+    end
     if type(content) ~= "string" then
       return content
     end

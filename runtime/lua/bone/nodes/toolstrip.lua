@@ -141,9 +141,8 @@ local function segments(s, turn)
 end
 
 -- Each kind's color is a highlight group of its own (`ToolStripRead`, …),
--- the TUI's toolstrip plugin's names too. Defaults are set only where the
--- colorscheme or config has not: `bone.hl.get` resolves any name, so ask
--- `bone.hl.names` what is defined.
+-- the TUI's toolstrip plugin's names too, set as defaults: a colorscheme or
+-- config that sets them wins.
 -- Quiet by brightness, as the design it comes from: reads faint, commands
 -- and sub-agents brighter, the answer nearly white; only edits, failures,
 -- a running call and one waiting on you have color. Solid, so a terminal
@@ -153,13 +152,7 @@ M.colors = {
   ToolStripFail = "#db7369", ToolStripAgent = "#6b6a68", ToolStripLive = "#ffb46a",
   ToolStripWait = "#7cc4ff", ToolStripAnswer = "#cfcdc9",
 }
-do
-  local defined = {}
-  for _, name in ipairs(bone.hl.names()) do defined[name] = true end
-  for name, fg in pairs(M.colors) do
-    if not defined[name] then bone.hl.set(name, { fg = fg }) end
-  end
-end
+for name, fg in pairs(M.colors) do bone.hl.set(name, { fg = fg, default = true }) end
 
 local function ink(aa, fallback) return style.alpha("Normal", aa, "fg", fallback or "Dim") end
 local function hue(group, aa) return style.alpha(group, aa or "ff", "fg", group) end

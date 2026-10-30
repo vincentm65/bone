@@ -59,6 +59,8 @@ function M.pager(page)
     if type(content) == "string" then
       body = { direction = "column", size = md.text_size, padding = { 0, 10 } }
       nodes.append(body, md.nodes(content))
+    elseif type(content) == "table" and content.kind then
+      body = { direction = "column", padding = { 0, 10 }, require("bone.elements").node(content, {}, {}, false) }
     else
       body = require("bone.nodes").lines_node(content)
       body.padding = { 0, 10 }

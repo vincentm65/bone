@@ -17,15 +17,23 @@ local function cursor(node, on)
   return node
 end
 
+-- A target's node, named so the cursor can be scrolled into view.
+local function target(node, F, el, i)
+  node.id = node.id or F.id(F.n(el, i))
+  return node
+end
+
 local draw
 
 local kinds = {}
 
 function kinds.text(el)
   local strong = el.strong and (el.tone == nil or el.tone == "normal")
-  return style.finish({
+  local node = {
     text = tostring(el.text or ""), hl = group(el.tone), bold = strong or nil, size = style.size.body,
-  })
+  }
+  if el.truncate then node.wrap, node.text_overflow = false, "ellipsis" end
+  return style.finish(node)
 end
 
 local function children(node, el, ctx, F)
@@ -37,8 +45,19 @@ function kinds.column(el, ctx, F)
   return children({ direction = "column", gap = style.space.sm }, el, ctx, F)
 end
 
+-- A text with `truncate` takes the row's room left over, and gives up the rest.
 function kinds.row(el, ctx, F)
-  return children({ direction = "row", gap = style.space.md, align = "center", flex_wrap = true }, el, ctx, F)
+  local one_line = false
+  local node = { direction = "row", gap = style.space.md, align = "center" }
+  for _, child in ipairs(E.children(el)) do
+    local n = draw(child, ctx, F)
+    if n and child.kind == "text" and child.truncate then
+      n.grow, n.width, one_line = 1, 0, true
+    end
+    node[#node + 1] = n
+  end
+  node.flex_wrap = not one_line or nil
+  return node
 end
 
 function kinds.section(el, ctx, F)
@@ -49,19 +68,42 @@ function kinds.section(el, ctx, F)
   return children(node, el, ctx, F)
 end
 
+-- A narrow column beside the rest.
+function kinds.split(el, ctx, F)
+  local kids = E.children(el)
+  return {
+    direction = "row", gap = style.space.lg, align = "start",
+    { width = 240, shrink = 0, direction = "column", draw(kids[1], ctx, F) },
+    { grow = 1, width = 0, direction = "column", draw(kids[2], ctx, F) },
+  }
+end
+
 function kinds.list(el, _, F)
   local items = el.items or {}
   if #items == 0 then
     return el.empty and widgets.note(tostring(el.empty), { 0, 0 }) or nil
   end
+  local owned = E.controlled(el)
   local list = { direction = "column" }
   for i, it in ipairs(items) do
     local line = {
       direction = "row", gap = style.space.md, align = "center",
-      { text = tostring(it.text or ""), hl = group(it.tone), size = style.size.body, grow = 1, width = 0 },
-      it.detail and { text = tostring(it.detail), hl = "Dim", size = style.size.small, wrap = false } or nil,
+      { text = tostring(it.text or ""), hl = group(it.tone), size = style.size.body, grow = 1, width = 0,
+        wrap = false, text_overflow = "ellipsis" },
     }
-    list[#list + 1] = cursor(widgets.entry(it.on == true, { line }, F.press(el, i)), F.at(el, i))
+    for _, b in ipairs(it.badges or {}) do
+      line[#line + 1] = widgets.pill(tostring(b.text or ""), { hl = group(b.tone, "Dim"), bg = "Selection" })
+    end
+    if it.detail then
+      line[#line + 1] = { text = tostring(it.detail), hl = "Dim", size = style.size.small, wrap = false }
+    end
+    local on = it.on == true or (owned and i == el.selected)
+    local node = widgets.entry(on, { line }, F.press(el, i))
+    if (it.depth or 0) > 0 then
+      local pad = node.padding or { 5, 10 }
+      node.padding = { pad[1], pad[2], pad[1], pad[2] + it.depth * 16 }
+    end
+    list[#list + 1] = target(cursor(node, F.at(el, i)), F, el, i)
   end
   return list
 end
@@ -78,7 +120,7 @@ function kinds.checklist(el, _, F)
     local click = F.press(el, i)
     if click then
       widgets.press(row, click, "checkbox")
-      cursor(row, F.at(el, i))
+      target(cursor(row, F.at(el, i)), F, el, i)
       row.radius = style.radius.sm
     end
   end
@@ -86,7 +128,7 @@ function kinds.checklist(el, _, F)
 end
 
 function kinds.button(el, _, F)
-  return widgets.button(tostring(el.label or ""), F.press(el), el.primary, F.at(el))
+  return target(widgets.button(tostring(el.label or ""), F.press(el), el.primary, F.at(el)), F, el)
 end
 
 -- The window's switch between views (the sidebar's Chats/Processes), as
@@ -96,14 +138,14 @@ function kinds.tabs(el, _, F)
     local click = F.press(el, i)
     if click then click() end
   end, { align_self = "start" })
-  for i, tab in ipairs(node) do cursor(tab, F.at(el, i)) end
+  for i, tab in ipairs(node) do target(cursor(tab, F.at(el, i)), F, el, i) end
   return node
 end
 
 function kinds.field(el, _, F)
-  return widgets.field(tostring(el.label or ""), tostring(el.value or ""), {
+  return target(widgets.field(tostring(el.label or ""), tostring(el.value or ""), {
     editing = el.editing, on = F.at(el) or el.editing, hint = el.hint, empty = el.empty, click = F.press(el),
-  })
+  }), F, el)
 end
 
 function kinds.diff(el)
@@ -123,6 +165,13 @@ function kinds.code(el)
     text = tostring(el.text or ""), font = "mono", size = style.size.small, hl = "MdCodeBlock",
     bg = "CodeBlock", radius = style.radius.md, padding = style.pad(6, 10), selectable = true,
   })
+end
+
+function kinds.markdown(el)
+  local md = require("bone.desktop.markdown")
+  local node = { direction = "column", size = md.text_size }
+  for _, n in ipairs(md.nodes(tostring(el.text or "")) or {}) do node[#node + 1] = n end
+  return node
 end
 
 function kinds.badge(el)
@@ -170,7 +219,7 @@ end
 function M.render(tree, ctx, F)
   local node = draw(tree, ctx, F)
   if not node or not F.scroll_id then return node end
-  return { id = F.scroll_id, direction = "column", overflow = "scroll", node }
+  return { id = F.scroll_id, grow = 1, direction = "column", overflow = "scroll", node }
 end
 
 return M

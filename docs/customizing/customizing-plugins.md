@@ -59,14 +59,23 @@ bone.ui.panel.open({ id = "steps", dock = "right", title = "Steps", view = funct
 end })
 ```
 
-The kinds are `text`, `row`, `column`, `section`, `list`, `checklist`,
-`button`, `tabs`, `field`, `diff`, `code`, `badge`, `meter`, `spinner`,
-`divider` and `hints`; `runtime/lua/bone/elements.lua` lists their fields.
-What has an `on_press` (and each tab) is a target: a click presses it, in a
-terminal panel too, and in a focused window or panel up/down move a cursor
-through the targets, left/right change tabs, and enter or space press. Up
-from the first target and down from the last scroll the panel, and so do the
-page keys. A view runs each time the frontend draws (every frame in the
+The kinds are `text`, `row`, `column`, `section`, `split` (a narrow column
+beside the rest), `list`, `checklist`, `button`, `tabs`, `field`, `diff`,
+`code`, `markdown`, `badge`, `meter`, `spinner`, `divider` and `hints`;
+`runtime/lua/bone/elements.lua` lists their fields. What has an `on_press`
+(and each tab) is a target: a click presses it, in the terminal too, and in
+a focused window or panel up/down (or `k`/`j`) move a cursor through the
+targets, left/right change tabs, and enter or space press. Up from the first
+target and down from the last scroll the panel or window, and so do the page
+keys; a window taller than the screen scrolls in the terminal too. While a
+`field` is `editing`, every key is the plugin's.
+
+A list with `selected` and `on_select` keeps a selection its plugin owns (a
+picker, the left side of a `split`): the cursor follows it, moving selects,
+a click selects and a click on the selected entry presses it. Its entries
+take `depth` (a tree) and `badges`, and `on_key` on a list, field or button
+gets the keys the cursor's target does not use. `bone.ui.pager` takes an
+element too, for a long page that scrolls. A view runs each time the frontend draws (every frame in the
 terminal); returning the same table as last time reuses what was drawn, so a
 large view can build its tree only when it changes. `bone.has_capability("ui.elements")`
 says the frontend has them.

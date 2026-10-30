@@ -47,7 +47,7 @@ for _, l in ipairs(lines) do
 end
 text = table.concat(text, "\n")
 eq(text:find("✓ first", 1, true) ~= nil, true, "a done check")
-eq(text:find("[ Go ]", 1, true) ~= nil, true, "a button")
+eq(text:find("[\194\160Go\194\160]", 1, true) ~= nil, true, "a button (never broken across lines)")
 eq(text:find("Name: none", 1, true) ~= nil, true, "an empty field")
 if side == "gui" then
   local node = E.node(tree(), { width = 300, height = 400 }, {}, true)
@@ -65,6 +65,31 @@ for _ = 1, 9 do E.key(st, "down") end
 E.key(st, "space")
 eq(pressed[2], "go", "the cursor stops at the last target")
 eq(E.key({ targets = {} }, "down"), false, "a view with no targets leaves the keys")
+
+-- A list that keeps its plugin's selection: the cursor starts on it, moving
+-- selects, and the list's own keys come first.
+local sel, folded = 2, nil
+local function picker()
+  return { kind = "split",
+    { kind = "list", selected = sel, on_select = function(i) sel = i end,
+      on_key = function(key, i) if key == "left" then folded = i return true end end,
+      items = { { text = "one" }, { text = "two", depth = 1, badges = { { text = "new" } } }, { text = "three" } } },
+    { kind = "column", { kind = "text", text = "a long detail that does not fit", truncate = true },
+      { kind = "markdown", text = "# Title\n\nsome *text*" } },
+  }
+end
+local ps = {}
+local plines = E.lines(picker(), 60, ps, true)
+eq(ps.cursor, 2, "the cursor starts on the selection")
+E.key(ps, "down")
+eq(sel, 3, "moving selects")
+E.lines(picker(), 60, ps, true)
+eq(E.key(ps, "left"), true, "the list's keys")
+eq(folded, 3, "with the entry the cursor is on")
+eq(#plines >= 3, true, "two columns")
+local narrow = E.lines({ kind = "text", text = "a long detail that does not fit", truncate = true }, 10, {}, true)
+eq(#narrow, 1, "a truncated text keeps to one line")
+if side == "gui" then eq(type(E.node(picker(), { width = 400, height = 300 }, {}, true)), "table", "as nodes") end
 
 -- A panel and a window given a view.
 local p = bone.ui.panel.open({ id = "conf_view", dock = "right", size = 24, view = tree, focus = true })
