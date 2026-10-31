@@ -5,7 +5,8 @@
 -- commands brighter, edits green, failures red, a sub-agent an outline with
 -- a dot; a running call breathes amber, one waiting on an answer is
 -- outlined in blue. A segment's tooltip says what it did; a click scrolls
--- the chat to it. `bone.o.tool_strip = false` hides it.
+-- the chat to it. `bone.o.tool_strip = false` hides it, as does turning
+-- the toolstrip plugin off.
 local M = {}
 
 local style = require("bone.nodes.style")
@@ -24,6 +25,28 @@ if not pcall(bone.o.info, "tool_strip") or not bone.o.info("tool_strip") then
     desc = "show each turn's tool calls as a timeline",
     on_change = function() bone.chat.redraw() end,
   })
+end
+
+--- Whether the catalog's toolstrip plugin, which has the strip and the
+--- folded turns in both frontends, is turned off: the chat is then plain,
+--- as the TUI's is without it.
+function M.off()
+  local off = bone.settings.get("plugins.disabled")
+  for _, name in ipairs(type(off) == "table" and off or {}) do
+    if name == "toolstrip" then return true end
+  end
+  return false
+end
+
+--- Whether the chat draws strips: `bone.o.tool_strip`, with the plugin on.
+function M.enabled()
+  return bone.o.tool_strip and not M.off()
+end
+
+for _, ev in ipairs({ "plugin/loaded", "plugin/unloaded" }) do
+  bone.on(ev, function(p)
+    if p.name == "toolstrip" then bone.chat.redraw() end
+  end)
 end
 
 local KINDS = {

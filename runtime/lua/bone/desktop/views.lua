@@ -80,7 +80,7 @@ end
 -- the row opens the turn, a click on a segment opens it at that call. An
 -- open turn has its strip under your message, with "Fold" while it is not
 -- the last; a click on that strip folds it too. `bone.o.fold_turns = false`
--- keeps every turn open.
+-- keeps every turn open, as does turning the toolstrip plugin off.
 
 local open = {} -- "session:turn" -> true, for folded turns opened by hand
 
@@ -108,7 +108,7 @@ end
 -- just before a running turn when a steer cut it short (it ends in a call,
 -- not an answer, and is still going).
 local function folded(item)
-  if not bone.o.fold_turns or not item.turn or item.turn == 0 then return false end
+  if strip.off() or not bone.o.fold_turns or not item.turn or item.turn == 0 then return false end
   local s = bone.chat.session()
   if not s or item.turn >= (s.turns or 0) then return false end
   if s.running and item.turn == s.turns - 1 then
@@ -147,7 +147,7 @@ end
 local function fold_row(item)
   local bar, total = strip.bar(bone.chat.session(), turn_of(item.turn), open_at(item.turn),
     "turn:" .. item.turn, function() bone.chat.redraw(item.index) end)
-  if not bone.o.tool_strip then bar = nil end
+  if not strip.enabled() then bar = nil end
   local text = ((item.text or ""):match("^%s*([^\n]*)") or ""):gsub("%s+", " ")
   if text == "" and item.images and #item.images > 0 then text = "[Image]" end
   return {
@@ -168,7 +168,7 @@ end
 -- nothing to draw.
 local function turn_header(item)
   local turn, last = turn_of(item.turn)
-  if not turn or not bone.o.tool_strip then return nil end
+  if not turn or not strip.enabled() then return nil end
   if turn.running then bone.chat.refresh_in(1000) end -- the time grows
   -- An earlier turn opened by hand folds again from a click anywhere on its
   -- bar, as the TUI's does; the last turn's bar scrolls to a segment's item.
