@@ -384,7 +384,7 @@ end
 -- below a hairline. Outlined under the pointer, as a click opens or folds it.
 local function frame(head, body)
   local node = {
-    direction = "column", radius = style.radius.md, overflow = "hidden", cursor = "pointer",
+    direction = "column", radius = style.radius.md, overflow = "visible", cursor = "pointer",
     border = 1, border_color = "transparent", hover = { border_color = "PromptBorder" },
     transition = style.motion.base, head,
   }
