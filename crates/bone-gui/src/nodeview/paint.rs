@@ -618,26 +618,43 @@ impl Gui {
             } else {
                 len / 2.0
             };
-            ui.data_mut(|d| d.insert_temp(drag_id.with("hold"), hold));
+            // Keep the drag in pointer-delta space. A list can be rebuilt
+            // while the pointer is down; remapping the unchanged pointer
+            // position through a new max would make the thumb jump.
+            let offset_at_pointer = ((along(q) - hold - lo) / room * max).clamp(0.0, max);
+            ui.data_mut(|d| {
+                d.insert_temp(
+                    drag_id.with("start"),
+                    [along(q), offset_at_pointer, max, room],
+                )
+            });
+            offset = offset_at_pointer;
             held = true;
         }
         if held {
             if let Some(q) = ui.input(|i| i.pointer.interact_pos()) {
-                let hold = ui
-                    .data(|d| d.get_temp::<f32>(drag_id.with("hold")))
-                    .unwrap_or(len / 2.0);
-                offset = ((along(q) - hold - lo) / room * max).clamp(0.0, max);
+                if let Some([start_pos, start_offset, start_max, start_room]) =
+                    ui.data(|d| d.get_temp::<[f32; 4]>(drag_id.with("start")))
+                {
+                    offset = (start_offset
+                        + (along(q) - start_pos) / start_room.max(1.0) * start_max)
+                        .clamp(0.0, max);
+                }
             }
             if !ui.input(|i| i.pointer.primary_down()) {
                 held = false;
             }
         }
         ui.data_mut(|d| d.insert_temp(drag_id, held));
-        if offset != s.offset {
-            if let Some(s) = self.view.scroll.get_mut(id) {
+        let changed = self.view.scroll.get(id).is_some_and(|s| offset != s.offset);
+        if let Some(s) = self.view.scroll.get_mut(id) {
+            if changed {
                 s.offset = offset;
                 s.target = None;
             }
+            s.dragging = held;
+        }
+        if changed {
             ui.ctx().request_repaint();
         }
         painter.rect_filled(bar_at(thumb_at(offset)), style.radius, rgba(style.color));

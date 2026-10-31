@@ -203,7 +203,7 @@ impl Gui {
         }
         let sc = scroll.entry(id.to_owned()).or_default();
         let old_max = sc.max;
-        let at_end = !sc.held && sc.offset >= old_max - 1.0;
+        let at_end = !sc.held && !sc.dragging && sc.offset >= old_max - 1.0;
         let viewport = p.inner.h;
         let (mut offset, gap) = (sc.offset, l.gap);
 

@@ -364,6 +364,66 @@ async fn scroll_follow_and_input() {
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 
+/// Content that grows while the chat scrollbar is held must not pull the
+/// thumb back to the end before the next drag event arrives.
+#[tokio::test(flavor = "multi_thread")]
+async fn scrollbar_drag_holds_position_while_following_content_grows() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.gui
+        .run_lua(
+            "t",
+            r##"
+      count = 100
+      bone.gui.view(function()
+        return {
+          { id = "chat", grow = 1, follow = true,
+            list = { count = count, estimate = 30, key = "chat", item = function()
+              return { height = 30, { text = "line" } }
+            end } },
+        }
+      end)
+    "##,
+        )
+        .unwrap();
+    for _ in 0..4 {
+        g.frame();
+    }
+    let before: f32 = g
+        .gui
+        .eval("bone.gui.scroll_info('chat').offset")
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    // Grab the thumb at the bottom and leave the button held.
+    g.button_at(996.0, 650.0, true);
+    g.frame();
+    g.gui
+        .run_lua("t", "count = 110; bone.gui.invalidate()")
+        .unwrap();
+    g.frame();
+
+    let held: f32 = g
+        .gui
+        .eval("bone.gui.scroll_info('chat').offset")
+        .unwrap()
+        .parse()
+        .unwrap();
+    let max: f32 = g
+        .gui
+        .eval("bone.gui.scroll_info('chat').max")
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(
+        held, before,
+        "content growth moved an active scrollbar drag"
+    );
+    assert!(max > held, "the fixture did not grow");
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn a_long_list_makes_only_the_items_in_view() {
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());

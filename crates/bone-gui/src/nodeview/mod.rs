@@ -53,6 +53,9 @@ pub(crate) struct Scroll {
     pub target: Option<Target>,
     /// This frame went where Lua asked: a list does not follow its end over it.
     pub held: bool,
+    /// The pointer is holding this container's scrollbar. Content growth must
+    /// not pull a thumb back to the end while it is being dragged.
+    pub dragging: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -510,7 +513,7 @@ fn apply_scroll(p: &mut Placed, state: &mut HashMap<String, Scroll>) {
         s.offset = match target {
             Some(Target::To(y)) => y,
             Some(Target::End) => max,
-            None if p.node.style.follow && at_end => max,
+            None if p.node.style.follow && at_end && !s.dragging => max,
             None => s.offset,
         }
         .clamp(0.0, max);
