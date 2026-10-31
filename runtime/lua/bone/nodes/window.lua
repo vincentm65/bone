@@ -18,6 +18,9 @@ local tray = require("bone.desktop.tray")
 local function slot(name, ctx) return bone.gui.slots.nodes(name, ctx) end
 
 M.max_width = 1040 -- the chat and composer column, in pixels
+-- The list reserves this much room on its right for its scrollbar. Keep the
+-- composer and bottom docks on the same visual edge as the chat items.
+M.chat_scrollbar_inset = 14
 M.spinner = widgets.spin -- the status bar's: { dots, interval } (ms to go round)
 
 -- ---- docked panels: those drawn as nodes (bone.ui.panel.open{ node = fn }) --
@@ -179,7 +182,8 @@ local function jump()
   local i = bone.gui.scroll_info("chat")
   if not i or i.offset >= i.max - 4 then return nil end
   return {
-    position = "absolute", bottom = 10, left = 0, right = 0, direction = "row", justify = "center",
+    position = "absolute", bottom = 10, left = 0, right = 0, z = 2,
+    direction = "row", justify = "center",
     style.finish(widgets.press(widgets.surface({
       text = "↓  Jump to latest", hl = "Accent", size = style.size.caption,
       padding = { 6, 14, 6, 14 }, radius = style.radius.round,
@@ -193,6 +197,22 @@ end
 local function see_through()
   local a = bone.gui.window_info().opacity or 1
   return a < 1 and a or nil
+end
+
+-- The pixels under the chat's last item, above the composer. The list keeps
+-- them as its bottom padding: at the end of the chat the last line rests
+-- above them, and what scrolls down through them fades into the composer.
+M.chat_fade = 32
+
+-- The fade over that padding, from clear to the chat's surface at the
+-- composer's edge. nil when the scheme's background is not a hex color.
+local function chat_fade(gutter)
+  local clear, solid = style.alpha("Normal", "00", "bg"), style.alpha("Normal", "ff", "bg")
+  if not clear or not solid then return nil end
+  return {
+    position = "absolute", left = gutter, right = gutter, bottom = 0, height = M.chat_fade, z = 1,
+    gradient = { clear, solid },
+  }
 end
 
 --- One chat's column: the chat, with the composer, tray and status bar
@@ -210,26 +230,34 @@ function M.column(ctx, opts)
   local gutter = opts.gutter or (width > M.max_width
     and (width - M.max_width) / 2 or math.min(24, width / 10))
   local content_width = math.max(0, width - 2 * gutter)
+  -- `nodes.chat` keeps a right inset for its scrollbar. Reserve that same
+  -- inset below it so the composer is centered on the usable chat width,
+  -- rather than extending underneath the scrollbar gutter.
+  local scrollbar_inset = content_width >= 240 and M.chat_scrollbar_inset or 0
+  local usable_width = content_width - scrollbar_inset
   local chat = { grow = 1, direction = "column", padding = { 0, gutter, 0, gutter } }
   if here then nodes.append(chat, slot("chat.top", ctx)) end
   chat[#chat + 1] = nodes.chat({
     chat = not here and n or nil,
-    width_px = content_width, cell = ctx.cell, padding = { 14, 14, 14, 0 },
+    width_px = usable_width, cell = ctx.cell, padding = { 14, 14, M.chat_fade, 0 },
   })
   if here then
-    chat[#chat + 1] = welcome(content_width)
+    chat[#chat + 1] = welcome(usable_width)
+    chat[#chat + 1] = chat_fade(gutter)
     chat[#chat + 1] = jump()
   end
-  local below = { direction = "column", padding = { 0, gutter, 12, gutter }, gap = 4 }
+  local below = {
+    direction = "column", padding = { 0, gutter, 12, gutter + scrollbar_inset }, gap = 4,
+  }
   -- Panels docked at the bottom stand over the composer, as in the terminal
   -- they stand over the prompt.
   if here then
-    local docks = M.docked("bottom", { width = width - 2 * gutter, height = ctx.height, cell = ctx.cell },
+    local docks = M.docked("bottom", { width = usable_width, height = ctx.height, cell = ctx.cell },
       ctx.height and ctx.height / 2, true)
     for _, d in ipairs(docks) do d.margin = { 0, 0, 4, 0 } end
     nodes.append(below, docks)
   end
-  below[#below + 1] = composer.node({ session = session, width = content_width,
+  below[#below + 1] = composer.node({ session = session, width = usable_width,
     chat = not here and n or nil, on_focus = opts.on_focus })
   below[#below + 1] = here and tray.node() or nil
   below[#below + 1] = statusbar.node(session, ctx.cell)
