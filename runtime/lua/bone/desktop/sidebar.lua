@@ -391,10 +391,11 @@ local function row(i)
   local meta = r.state == "waiting"
     and { text = "Waiting for approval", hl = group("SessionWaiting", "ErrorMsg"), size = style.size.small }
     or { text = r.meta, hl = "Dim", size = style.size.small, text_overflow = "ellipsis", shrink = 1 }
-  return style.finish({
-    height = ROW.card - 2, margin = { 1, 0, 1, 0 }, direction = "column", justify = "center", gap = 2,
-    padding = { 0, 10 }, radius = style.radius.md, cursor = "pointer", role = "option", selected = on,
-    bg = on and "Selection" or nil, hover = not on and { bg = style.hover() } or nil, transition = style.motion.base,
+  -- The row takes the pointer edge to edge, the card inset in it: across the
+  -- gap between two cards the pointer stays a hand and the row stays lit.
+  return {
+    height = ROW.card, padding = { 1, 0 }, direction = "column",
+    cursor = "pointer", role = "option", selected = on,
     on_hover = r.id and function(inside)
       if inside then st.hover = r.id elseif st.hover == r.id then st.hover = nil end
       redraw()
@@ -406,9 +407,14 @@ local function row(i)
         choose(r.item, true)
       end
     end,
-    title,
-    meta,
-  })
+    style.finish({
+      grow = 1, direction = "column", justify = "center", gap = 2, padding = { 0, 10 },
+      radius = style.radius.md, bg = on and "Selection" or (over and style.hover()) or nil,
+      hover = not on and { bg = style.hover() } or nil, transition = style.motion.base,
+      title,
+      meta,
+    }),
+  }
 end
 
 -- The project filter: what it shows, and the menu under it while open.
