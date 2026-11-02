@@ -50,7 +50,7 @@ local function span_node(span)
   end
   if type(text) ~= "string" then text = text == nil and "" or tostring(text) end
   if type(hl) ~= "string" then hl = "StatusLine" end
-  return { text = text, hl = hl, size = style.size.small, wrap = false }
+  return { text = text, hl = hl, size = style.size.small, wrap = false, text_overflow = "ellipsis" }
 end
 
 -- Spans from `bone.ui.statusline` when that is already a function. Nil means
@@ -90,7 +90,12 @@ end
 function M.node(session, cell)
   local id = session and session.session_id
   local u = usage.of(id)
-  local bar = { direction = "row", padding = { 6, 16, 0, 16 }, gap = 12, align = "center" }
+  -- A narrow window has no room for the whole bar: the pieces that do not
+  -- fit go on a line of their own, and a piece too long for its line is
+  -- cut short with an ellipsis. Nothing is painted over anything else.
+  local bar = {
+    direction = "row", flex_wrap = true, padding = { 6, 16, 0, 16 }, gap = 12, align = "center",
+  }
   local elapsed
   if session and session.running then
     local since = id and (started[id] or os.time())
@@ -116,16 +121,18 @@ function M.node(session, cell)
         direction = "row", gap = 6, align = "center",
         widgets.spinner(math.max(20, cell and cell.h or 20)),
         { text = "Working" .. (elapsed and (" · " .. bone.util.duration(elapsed)) or ""),
-          hl = "StatusLine", size = style.size.small, wrap = false },
+          hl = "StatusLine", size = style.size.small, wrap = false, text_overflow = "ellipsis" },
       }
     end
-    bar[#bar + 1] = { text = u.model or "", hl = "StatusLine", size = style.size.small, wrap = false }
+    bar[#bar + 1] = { text = u.model or "", hl = "StatusLine", size = style.size.small,
+      wrap = false, text_overflow = "ellipsis" }
   end
   nodes.append(bar, slot("statusbar.left"))
   bar[#bar + 1] = { grow = 1 }
   nodes.append(bar, slot("statusbar.right"))
   if not spans then
-    bar[#bar + 1] = { text = totals(u, id), hl = "StatusLineDim", size = style.size.small, wrap = false }
+    bar[#bar + 1] = { text = totals(u, id), hl = "StatusLineDim", size = style.size.small,
+      wrap = false, text_overflow = "ellipsis" }
   end
   return bar
 end

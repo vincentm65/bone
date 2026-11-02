@@ -12,6 +12,7 @@ use bone_gui::{GuiOptions, Headless};
 use bone_proto::methods::{MessageCompletedParams, TurnFinishedParams};
 use bone_proto::types::{ChatMessage, TurnOutcome};
 use bone_server::Server;
+use eframe::egui;
 
 /// A headless GUI with the shared defaults (unless a test chose a library).
 async fn gui(config: &Path, work: &Path) -> Headless {
@@ -107,6 +108,64 @@ async fn narrow_new_session_scales_its_welcome_and_composer() {
             title.min.x >= 0.0 && title.max.x <= width,
             "{width}: {title:?}"
         );
+    }
+}
+
+/// The status bar's pieces (the spinner and what the turn is doing, the
+/// model, the token totals) keep to their own place when the window is
+/// too narrow for them: none of them is painted over another.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_status_bar_pieces_do_not_overlap_when_the_window_is_narrow() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    // The bar on its own, with a model and a usage to show, and a turn
+    // running (the spinner and the time).
+    g.gui
+        .run_lua(
+            "t",
+            r#"
+        local usage = require("bone.usage")
+        usage.of = function()
+          return { model = "claude-sonnet-4-5-20250929", curr = 12000,
+                   input = 40000, output = 2000, cached = 32000 }
+        end
+        local statusbar = require("bone.nodes.statusbar")
+        bone.gui.view(function(ctx)
+          return { width = ctx.width, direction = "column",
+            { statusbar.node({ session_id = "s", running = true }, { w = 8, h = 18 }) } }
+        end)
+      "#,
+        )
+        .unwrap();
+    for width in [1000.0, 700.0, 520.0, 420.0, 360.0, 300.0, 240.0, 180.0] {
+        g.resize(width, 700.0);
+        for _ in 0..3 {
+            g.frame();
+        }
+        let texts: Vec<(&String, egui::Rect)> = g
+            .painted
+            .iter()
+            .filter(|(text, _)| text.chars().any(char::is_alphanumeric))
+            .map(|(text, rect)| (text, *rect))
+            .collect();
+        assert!(texts.len() >= 3, "{width}: the bar is not drawn: {texts:?}");
+        for (i, (text, rect)) in texts.iter().enumerate() {
+            assert!(
+                rect.min.x >= -0.5 && rect.max.x <= width + 0.5,
+                "{width}: {text:?} is out of the window: {rect:?}"
+            );
+            for (other, other_rect) in &texts[i + 1..] {
+                let apart = rect.max.x <= other_rect.min.x + 0.5
+                    || other_rect.max.x <= rect.min.x + 0.5
+                    || rect.max.y <= other_rect.min.y + 0.5
+                    || other_rect.max.y <= rect.min.y + 0.5;
+                assert!(
+                    apart,
+                    "{width}: {text:?} and {other:?} are painted over each other: \
+                     {rect:?} and {other_rect:?}"
+                );
+            }
+        }
     }
 }
 

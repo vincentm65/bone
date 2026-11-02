@@ -343,6 +343,19 @@ impl Gui {
                 let _span = crate::profile::Span::start("text-paint");
                 let galley = fonts.ctx.fonts_mut(|f| f.layout_job(fonts.job(t, width)));
                 drop(_span);
+                // Text wider than its box stays in it: a row too narrow for
+                // its pieces cuts them, rather than painting one over the
+                // next. The height is left alone: a text taller than its
+                // box keeps the lines it has.
+                let text_clip = if galley.size().x > inner.width() {
+                    egui::Rect::from_min_max(
+                        egui::pos2(inner.min.x.max(clip.min.x), clip.min.y),
+                        egui::pos2(inner.max.x.min(clip.max.x), clip.max.y),
+                    )
+                } else {
+                    clip
+                };
+                let painter = ui.painter().with_clip_rect(text_clip);
                 // With an alignment, egui puts the galley's edge, center or
                 // end at the position.
                 let x = match t.align {
@@ -364,7 +377,7 @@ impl Gui {
                             .max_rect(inner)
                             .layout(egui::Layout::top_down(egui::Align::Min)),
                     );
-                    child.set_clip_rect(clip);
+                    child.set_clip_rect(text_clip);
                     child.add(egui::Label::new(job).selectable(true));
                 } else {
                     // Painted text is invisible to screen readers: give it

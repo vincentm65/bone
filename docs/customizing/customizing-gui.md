@@ -359,6 +359,17 @@ it, or a `node` it returns as it is.
 
 `bone.chat.scroll`, `scroll_to` and `view` move and read the chat list.
 
+### The sessions sidebar
+
+`ctrl+o` (or `/sessions`) opens the conversations sidebar: a card beside the
+chat with your conversations — the pinned ones first, then the recent ones (a
+chat that runs, or one touched within the last hour, as in the TUI), then the
+rest by date (Today, Yesterday, This week, Earlier). How long a chat counts
+as recent is `bone.ui.sessions_recent_seconds` (an hour by default; it is the
+TUI's option, set in `ui.lua` or `gui.lua`), and the rows are made again
+each minute, so a chat leaves the group when its time is up. The sidebar is
+`require("bone.desktop.sidebar")`: replace it to draw another one.
+
 ### More than one chat
 
 `chat(opts)` with `chat = n` shows chat number `n` (from `bone.chat.open`, or
@@ -454,6 +465,14 @@ pane, and reveal it again before focusing it.
 Under `require("bone.desktop.sidebar").overlay_below` pixels (760) the
 sessions sidebar floats over the chat on a backdrop that closes it, instead
 of taking room from it; choosing a chat closes it.
+
+A row too narrow for its pieces does not pile them on top of each other:
+the pieces that do not fit go on a line of their own, and a piece too long
+for its line is cut short with an ellipsis (`text_overflow = "ellipsis"`).
+The status bar is such a row: a narrow window shows the model on one line
+and the token totals on the next, rather than the two over each other.
+Text never leaves its own box: a text wider than the box it is given is
+cut at the box's edge.
 
 ## Slots: plugins add to the window
 

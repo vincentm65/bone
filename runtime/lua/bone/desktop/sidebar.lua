@@ -2,10 +2,12 @@
 -- in a lane the chat makes room for, drawn as nodes (bone.nodes.window
 -- places `M.node()`). A Chats / Processes switch
 -- with a new-chat button beside it, a project filter and a search field,
--- then your conversations: pinned ones first, the rest in date groups
--- (Today, Yesterday, This week, Earlier), a compact row each (title and
--- when, then folder and tokens) with a dot for what it needs from you
--- (running, waiting for an approval, finished while you were elsewhere).
+-- then your conversations: pinned ones first, the recent ones next (a chat
+-- that runs, or one touched within the last hour, as in the TUI), then the
+-- rest in date groups (Today, Yesterday, This week, Earlier), a compact
+-- row each (title and when, then folder and tokens) with a dot for what it
+-- needs from you (running, waiting for an approval, finished while you were
+-- elsewhere).
 -- Over a row, pin and rename take the place of its time. The Processes page lists every chat's background work. The
 -- data is bone.chats. The rows are made once when the data changes, and the
 -- list makes nodes only for the ones in view, so a long history costs
@@ -37,6 +39,8 @@ local overlaid = false -- drawn over the chat (a narrow window), not beside it
 local st = {
   page = "chats", query = "", sel = 1, all = {}, stats = {}, loading = false,
   rows = {}, items = {}, version = 0,
+  minute = 0, -- the minute the rows were made in: the recent group ages
+  window = 0, -- the recent window they were made with
   project = nil, -- the folder the list is narrowed to, or nil for all
   menu = false, -- the project menu is open
   hover = nil, -- the row under the pointer (a session id)
@@ -107,10 +111,14 @@ local function compute()
       rows[1] = { kind = "none", text = st.loading and "Loading…"
         or ((st.query == "" and not st.project) and "No chats yet" or "No matching chats") }
     end
-    -- Pinned first, then newest first.
+    -- Pinned first, then the recent ones, then the rest; newest first in
+    -- each group. A chat is recent while it runs or was touched within
+    -- the window (bone.ui.sessions_recent_seconds), as in the TUI.
     table.sort(items, function(a, b)
       local ap, bp = pinned[a.session_id] and 1 or 0, pinned[b.session_id] and 1 or 0
       if ap ~= bp then return ap > bp end
+      local ag, bg = g.groups[a.session_id] or 2, g.groups[b.session_id] or 2
+      if ag ~= bg then return ag < bg end
       local aa, ba = g.activities[a.session_id], g.activities[b.session_id]
       if aa ~= ba then return aa > ba end
       return a.session_id < b.session_id
@@ -118,7 +126,14 @@ local function compute()
     local heading
     for i, s in ipairs(items) do
       local id, at = s.session_id, g.activities[s.session_id]
-      local name = pinned[id] and "Pinned" or date_group(at)
+      local name
+      if pinned[id] then
+        name = "Pinned"
+      elseif (g.groups[id] or 2) == 1 then
+        name = "Recent · last " .. chats.recent_label()
+      else
+        name = date_group(at)
+      end
       if name ~= heading then
         rows[#rows + 1] = { kind = "group", text = name }
         heading = name
@@ -142,6 +157,8 @@ local function compute()
   st.rows, st.items = rows, items
   st.sel = #items == 0 and 0 or math.max(1, math.min(st.sel, #items))
   st.version = st.version + 1
+  st.minute = math.floor(os.time() / 60)
+  st.window = chats.recent_window()
 end
 
 -- The folders there are chats in, the most recently used first:
@@ -545,6 +562,13 @@ end
 function M.content()
   local jobs = chats.jobs()
   if st.page == "running" and #jobs > 0 then bone.gui.invalidate(1000) end
+  -- The recent group ages: a chat leaves it when the window passes, and
+  -- the window itself can change (bone.ui.sessions_recent_seconds), so
+  -- the rows are made again each minute and when it changes (as in the TUI).
+  local minute = math.floor(os.time() / 60)
+  local window = chats.recent_window()
+  if minute ~= st.minute or window ~= st.window then compute() end
+  bone.gui.invalidate((60 - os.time() % 60) * 1000)
   local out = {
     id = ID, on_key = on_key, focus = {},
     direction = "column", padding = { 12, 10, 0, 10 }, gap = 8,

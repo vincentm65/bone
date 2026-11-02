@@ -234,6 +234,54 @@ async fn ctrl_o_opens_the_sessions_sidebar() {
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 
+/// The sidebar groups the recent chats as the TUI does: the ones touched
+/// within the last hour under "Recent · last 1h".
+#[tokio::test(flavor = "multi_thread")]
+async fn the_sidebar_groups_the_recent_chats() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    g.gui
+        .run_lua(
+            "t",
+            r#"
+            bone.request("session/create", {}, function(info, err)
+              assert(not err, tostring(err))
+              bone.api.open_session(info.session_id)
+            end)
+            "#,
+        )
+        .unwrap();
+    g.wait_for(Duration::from_secs(5), |gui| {
+        gui.chats[gui.current].session_id().is_some()
+    })
+    .await
+    .unwrap();
+    g.gui.run_lua("t", "bone.ui.sessions()").unwrap();
+    g.settle(Duration::from_millis(300)).await;
+    g.frame();
+    let painted: Vec<_> = g.painted.iter().map(|(t, _)| t.clone()).collect();
+    assert!(
+        painted.iter().any(|t| t == "RECENT · LAST 1H"),
+        "the recent group is missing; painted {painted:?}"
+    );
+    // The window is the TUI's option.
+    g.gui
+        .run_lua(
+            "t",
+            "bone.ui.sessions_recent_seconds = 1800\nbone.gui.invalidate()",
+        )
+        .unwrap();
+    g.frame();
+    g.frame();
+    let painted: Vec<_> = g.painted.iter().map(|(t, _)| t.clone()).collect();
+    assert!(
+        painted.iter().any(|t| t == "RECENT · LAST 30M"),
+        "the recent group did not follow the window; painted {painted:?}"
+    );
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}
+
 /// A click reaches the handler of the node under it, and only that one;
 /// the pointer over a node calls its hover handler.
 #[tokio::test(flavor = "multi_thread")]
