@@ -987,6 +987,10 @@ end
 
 A *line* is a list of items: `{ "text", "Group" }`, a plain string, or `{ fill = "─", hl = "Group" }` (stretches to fill the row). An empty table is a blank line. Lines longer than the width are cut with `…`.
 
+#### The new-chat screen
+
+While a chat is empty the standard library draws a slowly moving dot field (`runtime/lua/bone/ui/dot_matrix.lua`, which sets its own `NewChatDot1`-`10`, `NewChatTitle` and `NewChatHint` groups) with the hint in the middle. A plugin adds lines under the hint with `bone.ui.new_chat[name] = function(ctx) return lines end`; `ctx.width` is the widest a line may be. Blocks are drawn in name order, each centered after a blank row; one too wide, or too tall for the screen, is left out. The function runs on every frame of the field, so keep it cheap: query in the background and return what you have. A chat too small for the box shows only the plain hint.
+
 #### Views: how each item looks
 
 The transcript is a list of items. Each kind has a view that returns its lines; return `nil` to hide the item.

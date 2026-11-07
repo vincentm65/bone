@@ -569,7 +569,11 @@ local tool_views, tool_view_store = watched()
 --- (select, pager, setup, catalog): `windows.<name> = function(page)`
 --- returns the window's spec (`node` or `lines`, size, anchor); without
 --- one the window is drawn as `lines`.
-bone.ui = { views = views, tool_views = tool_views, regions = {}, windows = {} }
+--- `new_chat`: what plugins add to an empty chat's screen:
+--- `new_chat[name] = function(ctx) return lines end`, ctx = { width } (the
+--- widest a line may be). The standard library draws them under its hint,
+--- in name order; a library without a new-chat screen ignores them.
+bone.ui = { views = views, tool_views = tool_views, regions = {}, windows = {}, new_chat = {} }
 
 --- Remove every view, tool view, region, action and the statusline,
 --- divider, prompt and layout: a blank screen to build on (Rust draws plain
