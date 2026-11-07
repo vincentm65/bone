@@ -1080,11 +1080,12 @@ async fn an_image_node_draws_a_picture_from_a_file() {
                 r##"
       bone.gui.view(function()
         return {{ bg = "#101010", padding = 10, direction = "column",
-          {{ width = 80, radius = 6, image = {{ path = "{}", width = 2, height = 1, fit = "contain" }} }},
+          {{ width = 80, radius = 6, image = {{ path = {}, width = 2, height = 1, fit = "contain" }} }},
         }}
       end)
     "##,
-                path.display()
+                // Quoted for Lua: a Windows path's backslashes are escapes.
+                serde_json::to_string(&path.display().to_string()).unwrap()
             ),
         )
         .unwrap();
