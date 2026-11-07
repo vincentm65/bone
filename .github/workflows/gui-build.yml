@@ -47,7 +47,7 @@ jobs:
         run: cargo build --release --locked -p bone --features gui --target ${{ matrix.target }}
       - name: test the GUI headless
         shell: bash
-        run: cargo test --locked -p bone-gui --target ${{ matrix.target }}
+        run: cargo test --locked --no-fail-fast -p bone-gui --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
           name: bone-gui-${{ matrix.target }}

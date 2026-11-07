@@ -802,6 +802,8 @@ async fn settings_window_receives_arrow_keys() {
 
 /// `/term` opens a terminal in a panel: the program's screen draws there,
 /// and the keys typed while it has the keyboard go to the program.
+// Terminals need Unix for now (`bone_ui::jobs`).
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_terminal_in_a_panel() {
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -891,6 +893,8 @@ async fn a_terminal_in_a_panel() {
 
 /// Both spellings of the terminal shortcut open, release and refocus the
 /// same visible panel, through the GUI's real keyboard path.
+// Terminals need Unix for now (`bone_ui::jobs`).
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn terminal_shortcuts_focus_the_visible_panel() {
     use bone_gui::{Key, Modifiers};
