@@ -57,7 +57,7 @@ function M.view(page)
           { spans = { widgets.check_span(picked), { text = catalog.label(e), hl = "Normal", bold = on } },
             size = style.size.body, wrap = false, shrink = 0 },
           { text = meta, hl = "Dim", size = style.size.small, wrap = false, shrink = 0 },
-          { text = e.description or "", hl = "Dim", size = style.size.small, grow = 1, width = 0,
+          { text = e.blocked or e.description or "", hl = "Dim", size = style.size.small, grow = 1, width = 0,
             wrap = false, text_overflow = "ellipsis" },
         },
       }, click(i))

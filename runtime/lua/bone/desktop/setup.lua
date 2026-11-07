@@ -83,6 +83,10 @@ function M.view(page)
         .. "your core.lua is not touched."))
       add({ text = "Make this window yours with ~/.bone/gui.lua, or /gui create personal for a full copy.",
         hl = "Dim", size = style.size.small, padding = { 2, 8 } })
+      for _, p in ipairs(st.broken or {}) do
+        add({ text = "Plugin " .. p.name .. " was not loaded: " .. p.error, hl = "ErrorMsg",
+          size = style.size.caption, padding = { 2, 8 }, margin = { 6, 0, 0, 0 } })
+      end
       add(buttons(button("Get started", press("enter"), true),
         button(page.opts.first_run and "Not now" or "Close", press("esc"))))
     elseif st.step == "applying" or st.step == "done" then
@@ -113,6 +117,9 @@ function M.view(page)
             { text = aside, hl = "Dim", size = style.size.small, margin = { 2, 0, 0, 0 } } },
           { text = "›", hl = on and "Accent" or "Dim", size = style.size.lead },
         } }, click(i)), on)
+      end
+      if st.note then
+        add({ text = st.note[1], hl = st.note[2] and "ErrorMsg" or "Dim", size = style.size.caption, padding = { 2, 10 } })
       end
     else
       local list = page.rows()

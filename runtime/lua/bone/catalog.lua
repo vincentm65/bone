@@ -85,11 +85,31 @@ local function installed_names(kind)
   return out
 end
 
+--- Why `entry` cannot be installed here, or nil: it needs a newer bone,
+--- or its catalog entry's `os` list (e.g. { "linux", "macos" }) leaves
+--- this system out.
+function M.blocked(entry)
+  if not M.at_least(bone.version, entry.min_bone_version) then
+    return ("needs bone %s or newer (this is %s)"):format(entry.min_bone_version, bone.version)
+  end
+  local here = bone.api_info().os
+  if type(entry.os) == "table" and here then
+    for _, os_name in ipairs(entry.os) do
+      if os_name == here then
+        return nil
+      end
+    end
+    return "does not run on " .. here
+  end
+  return nil
+end
+
 -- "update" when an installed file differs from the catalog's; for a TUI,
 -- which is yours to edit, only when the catalog's version is newer.
+-- "unavailable" when it is not installed and cannot be here (M.blocked).
 local function state_of(entry, installed)
   if not installed[entry.name] then
-    return "available"
+    return M.blocked(entry) and "unavailable" or "available"
   end
   local dir = plugins_dir(entry.kind) .. "/" .. entry.name
   if entry.kind == "tui" then
@@ -162,8 +182,8 @@ function M.at_least(have, need)
   return true
 end
 
---- The catalog's packages, each with .state: "available", "installed" or
---- "update". cb(entries) or cb(nil, err).
+--- The catalog's packages, each with .state: "available", "installed",
+--- "update" or "unavailable" (.blocked says why). cb(entries) or cb(nil, err).
 function M.index(cb)
   fetch("catalog.json", function(text, err)
     if not text then
@@ -178,6 +198,7 @@ function M.index(cb)
     for _, e in ipairs(entries) do
       if not OMIT[e.name] then
         e.state = state_of(e, e.kind == "tui" and installed.tui or installed.plugin)
+        e.blocked = e.state == "unavailable" and M.blocked(e) or nil
         kept[#kept + 1] = e
       end
     end
@@ -367,8 +388,8 @@ local function pad(s, w)
   return s .. string.rep(" ", w - n)
 end
 
-local ORDER = { update = 1, installed = 2, available = 3 }
-M.HEAD = { update = "Updates", installed = "Installed", available = "Available" }
+local ORDER = { update = 1, installed = 2, available = 3, unavailable = 4 }
+M.HEAD = { update = "Updates", installed = "Installed", available = "Available", unavailable = "Not available here" }
 
 --- The catalog's state and what its keys do, drawn by whoever opens it:
 --- `hooks.changed()` asks for a redraw, `hooks.close()` closes the window.
@@ -455,6 +476,8 @@ function M.page(hooks)
       return "y yes · n no"
     elseif st.busy then
       return "working…"
+    elseif e and e.state == "unavailable" then
+      return e.blocked .. " · ↑↓ move · tab page · esc close"
     elseif e and #selected_rows(rows()) > 0 then
       return "space toggle · enter install selected · a all · n clear · u scan · x remove · tab page · esc close"
     elseif e and e.state == "available" then
@@ -496,9 +519,9 @@ function M.page(hooks)
     end
     for _, e in ipairs(entries) do
       redraw()
-      M.install(e, function(ok)
+      M.install(e, function(ok, err)
         if not ok then
-          st.progress.failures[#st.progress.failures + 1] = M.label(e)
+          st.progress.failures[#st.progress.failures + 1] = M.label(e) .. " (" .. tostring(err or "unknown error") .. ")"
         end
         st.progress.done = st.progress.done + 1
         remaining = remaining - 1
@@ -533,6 +556,8 @@ function M.page(hooks)
       st.page, st.sel, st.selected = st.page == "tui" and "plugin" or "tui", 1, {}
     elseif (k == "r" or k == "u") and not st.busy then
       load(k == "u" and "scanning for updates…" or nil)
+    elseif (k == "space" or k == "enter") and e and e.state == "unavailable" then
+      st.note = { M.label(e) .. " " .. e.blocked, true }
     elseif k == "space" and e and not st.busy then
       st.selected[e.name] = not st.selected[e.name] or nil
     elseif k == "a" and not st.busy then
@@ -638,7 +663,7 @@ local function render(page, ctx)
     prefix[#prefix + 1] = { pad(M.label(e), name_w), row_hl }
     prefix[#prefix + 1] = { pad(e.version or "", 8), muted_hl }
     prefix[#prefix + 1] = { pad(M.supports(e), 6), muted_hl }
-    prefix[#prefix + 1] = { bone.text.truncate(e.description or "", math.max(w - name_w - 19, 1)), muted_hl }
+    prefix[#prefix + 1] = { bone.text.truncate(e.blocked or e.description or "", math.max(w - name_w - 19, 1)), muted_hl }
     out[#out + 1] = prefix
   end
   out[#out + 1] = ""
