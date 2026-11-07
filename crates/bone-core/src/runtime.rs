@@ -47,6 +47,8 @@ pub(crate) struct Runtime {
     pub selected: Option<String>,
     /// MCP servers this configuration asks for.
     pub mcp: Vec<crate::mcp::ServerConfig>,
+    /// Plugins whose `core.lua` failed and were left out, with the error.
+    pub plugin_errors: Vec<(String, String)>,
 }
 
 impl Runtime {
@@ -61,6 +63,7 @@ impl Runtime {
             settings_providers: Default::default(),
             selected: None,
             mcp: Vec::new(),
+            plugin_errors: Vec::new(),
         }
     }
 
@@ -238,6 +241,7 @@ impl Runtime {
             settings_providers: loaded.settings_providers,
             selected: loaded.provider_name,
             mcp: loaded.mcp,
+            plugin_errors: loaded.plugin_errors,
         }
     }
 }
@@ -852,10 +856,22 @@ impl Source {
                     loaded: core && !disabled.contains(&name),
                     core,
                     name,
+                    error: None,
                 }
             })
             .collect()
     }
+}
+
+/// `plugins` with the error of each one in `failed`.
+fn mark_failed(mut plugins: Vec<PluginInfo>, failed: &[(String, String)]) -> Vec<PluginInfo> {
+    for p in &mut plugins {
+        if let Some((_, e)) = failed.iter().find(|(n, _)| *n == p.name) {
+            p.loaded = false;
+            p.error = Some(e.clone());
+        }
+    }
+    plugins
 }
 
 /// Which plugins a reload leaves out.
@@ -870,6 +886,15 @@ impl Inner {
     /// The runtime new work uses.
     pub(crate) fn runtime(&self) -> Arc<Runtime> {
         self.runtime.read().unwrap().clone()
+    }
+
+    /// The plugins folder's plugins, with the error of each one the running
+    /// configuration left out because its `core.lua` failed.
+    pub(crate) fn plugins(&self) -> Vec<PluginInfo> {
+        let Some(source) = self.source.as_ref() else {
+            return Vec::new();
+        };
+        mark_failed(source.plugins(), &self.runtime().plugin_errors)
     }
 
     /// Load the configuration again (with `change` applied to the plugins)
@@ -910,7 +935,16 @@ impl Inner {
         })
         .await
         .map_err(|e| format!("loading stopped: {e}"))??;
-        let mut warnings = Vec::new();
+        // Loading a plugin that fails changes nothing: say why.
+        if let Change::Enable(name) = &change
+            && let Some((_, e)) = loaded.plugin_errors.iter().find(|(n, _)| n == name)
+        {
+            return Err(e.clone());
+        }
+        let mut warnings: Vec<String> = (loaded.plugin_errors.iter())
+            .map(|(name, e)| format!("plugin {name} was left out: {e}"))
+            .collect();
+        let failed = loaded.plugin_errors.clone();
         if loaded.config.data_dir != self.data_dir {
             warnings.push(format!(
                 "data_dir changed to {}; sessions stay in {} until bone restarts",
@@ -935,7 +969,7 @@ impl Inner {
         *self.runtime.write().unwrap() = next;
         *source.options.lock().unwrap() = options;
         let result = ReloadResult {
-            plugins: source.plugins(),
+            plugins: mark_failed(source.plugins(), &failed),
             warnings,
         };
         self.emit::<bone_proto::methods::CoreReloaded>(result.clone());

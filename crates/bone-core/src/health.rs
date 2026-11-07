@@ -19,17 +19,23 @@ fn item(name: &str, status: HealthStatus, message: impl Into<String>) -> HealthI
 pub(crate) async fn check(inner: &Inner) -> Vec<HealthItem> {
     use HealthStatus::*;
     let rt = inner.runtime();
+    // Plugins whose core.lua failed, so the running configuration left out.
+    let failed = (rt.plugin_errors.iter())
+        .map(|(name, e)| item(&format!("plugin {name}"), Error, format!("not loaded: {e}")));
     let p = &rt.config.provider;
     if crate::provider::unconfigured(p) {
-        return vec![item(
+        let mut out = vec![item(
             "provider",
             Error,
             "none configured: run /setup, or add one to core.lua",
         )];
+        out.extend(failed);
+        return out;
     }
     let anthropic = crate::provider::api(p) == bone_proto::types::ProviderApi::Anthropic;
     let base_url = crate::provider::base_url(p);
     let mut out = vec![item("provider", Ok, format!("{} at {base_url}", p.model))];
+    out.extend(failed);
 
     let local = ["://localhost", "://127.", "://[::1]", "://0.0.0.0"]
         .iter()

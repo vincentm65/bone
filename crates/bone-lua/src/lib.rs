@@ -341,6 +341,30 @@ pub fn run_user_plugins_except(
     Ok(())
 }
 
+/// [`run_user_plugins_except`], but a plugin that fails does not stop the
+/// rest: each failure is returned with the plugin's name, in load order.
+pub fn run_user_plugins_each(
+    lua: &Lua,
+    config_dir: &Path,
+    file: &str,
+    skip: &dyn Fn(&str) -> bool,
+) -> mlua::Result<Vec<(String, mlua::Error)>> {
+    let mut failed = Vec::new();
+    for plugin in plugins(config_dir) {
+        let name = plugin_name(&plugin);
+        if skip(&name) {
+            continue;
+        }
+        set_loading(lua, Some(&plugin))?;
+        let r = run_file(lua, &plugin.join(file));
+        set_loading(lua, None)?;
+        if let Err(e) = r {
+            failed.push((name, e));
+        }
+    }
+    Ok(failed)
+}
+
 /// A plugin's name: its folder's name.
 pub fn plugin_name(dir: &Path) -> String {
     dir.file_name()
@@ -493,6 +517,8 @@ pub fn new_state(side: Side, config_dir: Option<&Path>) -> mlua::Result<Lua> {
             let info = lua.create_table()?;
             info.set("version", API_VERSION)?;
             info.set("side", side.name())?;
+            // "linux", "macos", "windows"…: catalog packages name the ones they run on.
+            info.set("os", std::env::consts::OS)?;
             info.set("capabilities", capability_table(lua, side)?)?;
             Ok(info)
         })?,

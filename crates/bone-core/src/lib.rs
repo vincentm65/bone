@@ -779,12 +779,7 @@ impl Core {
             }
             PluginList::METHOD => {
                 decode::<PluginList>(params)?;
-                let list = self
-                    .inner
-                    .source
-                    .as_ref()
-                    .map(Source::plugins)
-                    .unwrap_or_default();
+                let list = self.inner.plugins();
                 Ok(serde_json::to_value(list).unwrap_or_default())
             }
             PluginLoad::METHOD | PluginReload::METHOD => {

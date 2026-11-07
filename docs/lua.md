@@ -42,7 +42,8 @@ bone.capabilities["tui.keymaps"]  -- true when this feature exists
 bone.has_capability("tui.panels") -- false for an unknown/unavailable feature
 
 local info = bone.api_info()
--- { version = 1, side = "tui", capabilities = { ... } }
+-- { version = 1, side = "tui", os = "linux", capabilities = { ... } }
+-- os: "linux", "macos" or "windows" (Rust's std::env::consts::OS)
 ```
 
 `bone.api_version` changes only for a breaking change to an existing API

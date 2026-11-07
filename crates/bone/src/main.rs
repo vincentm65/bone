@@ -138,7 +138,20 @@ fn tune_malloc() {
 #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
 fn tune_malloc() {}
 
+/// Windows has no `HOME`, but plugins and the programs bone runs read it
+/// (`os.getenv("HOME")`, `~` paths): give it the user's profile folder.
+fn default_home() {
+    if cfg!(windows)
+        && std::env::var_os("HOME").is_none_or(|h| h.is_empty())
+        && let Some(profile) = std::env::var_os("USERPROFILE").filter(|p| !p.is_empty())
+    {
+        // SAFETY: called first in `main`, before any other thread exists.
+        unsafe { std::env::set_var("HOME", profile) };
+    }
+}
+
 fn main() -> ExitCode {
+    default_home();
     tune_malloc();
     if std::env::args_os().len() == 2
         && std::env::args_os()

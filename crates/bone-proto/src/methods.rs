@@ -689,6 +689,10 @@ pub struct PluginInfo {
     pub core: bool,
     /// Its `core.lua` is part of the running configuration.
     pub loaded: bool,
+    /// Its `core.lua` raised this error, so the running configuration
+    /// left it out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

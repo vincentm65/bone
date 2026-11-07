@@ -49,6 +49,9 @@ pub struct Loaded {
     pub provider_name: Option<String>,
     /// MCP servers to run.
     pub mcp: Vec<crate::mcp::ServerConfig>,
+    /// Plugins whose `core.lua` raised an error and were left out, with
+    /// the error, in load order.
+    pub plugin_errors: Vec<(String, String)>,
 }
 
 /// How to load: which plugins to leave out, and the question ids shared by
@@ -155,6 +158,8 @@ struct Extracted {
     parallel: bool,
     /// `bone.config.compact`.
     compact: crate::config::CompactConfig,
+    /// Plugins whose `core.lua` failed (`bone._plugin_errors`).
+    plugin_errors: Vec<(String, String)>,
 }
 
 /// Run the runtime, plugins and `<config_dir>/core.lua`, then apply `BONE_*`
@@ -230,6 +235,7 @@ pub fn load_with_options(
         settings_providers: ex.settings_providers,
         providers: ex.providers,
         mcp: ex.mcp,
+        plugin_errors: ex.plugin_errors,
     })
 }
 
@@ -1372,7 +1378,24 @@ fn setup(
         .and_then(|b| b.set("_settings", settings))
         .map_err(|e| e.to_string())?;
     run("core/defaults.lua")?;
-    bone_lua::run_user_plugins_except(&lua, dir, "core.lua", &|name| disabled.contains(name))
+    // A plugin that fails is left out, not the whole configuration: the
+    // rest still load, and its error is reported (`bone._plugin_errors`).
+    let failed =
+        bone_lua::run_user_plugins_each(&lua, dir, "core.lua", &|name| disabled.contains(name))
+            .map_err(|e| e.to_string())?;
+    let errors = lua.create_table().map_err(|e| e.to_string())?;
+    for (i, (name, e)) in failed.iter().enumerate() {
+        let entry = lua.create_table().map_err(|e| e.to_string())?;
+        entry.set("name", name.as_str()).map_err(|e| e.to_string())?;
+        // Its first line names the file, line and cause; the traceback
+        // after it is noise in a notice.
+        let first = e.to_string().lines().next().unwrap_or_default().to_owned();
+        entry.set("error", first).map_err(|e| e.to_string())?;
+        errors.set(i + 1, entry).map_err(|e| e.to_string())?;
+    }
+    lua.globals()
+        .get::<Table>("bone")
+        .and_then(|b| b.set("_plugin_errors", errors))
         .map_err(|e| e.to_string())?;
     bone_lua::run_file(&lua, &dir.join("core.lua")).map_err(|e| e.to_string())?;
     apply_saved_providers(&lua, dir).map_err(|e| format!("settings.json providers: {e}"))?;
@@ -1521,7 +1544,15 @@ fn extract(lua: &Lua) -> mlua::Result<Extracted> {
         Some(t) => t.sequence_values::<String>().collect::<mlua::Result<_>>()?,
         None => HashSet::new(),
     };
+    let mut plugin_errors = Vec::new();
+    if let Some(t) = bone.get::<Option<Table>>("_plugin_errors")? {
+        for entry in t.sequence_values::<Table>() {
+            let entry = entry?;
+            plugin_errors.push((entry.get("name")?, entry.get("error")?));
+        }
+    }
     Ok(Extracted {
+        plugin_errors,
         settings_providers,
         lua_providers: bone
             .get::<Table>("_providers")?

@@ -299,11 +299,13 @@ fn requests() {
                 name: "approve".into(),
                 core: true,
                 loaded: true,
+                error: None,
             },
             PluginInfo {
                 name: "style".into(),
                 core: false,
                 loaded: false,
+                error: None,
             },
         ]
     };
@@ -776,6 +778,7 @@ fn events() {
             name: "approve".into(),
             core: true,
             loaded: true,
+            error: None,
         }],
         warnings: vec![],
     });

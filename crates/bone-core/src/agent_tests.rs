@@ -845,12 +845,14 @@ async fn core_plugins_load_and_unload_by_reloading() {
             PluginInfo {
                 name: "p".into(),
                 core: true,
-                loaded: true
+                loaded: true,
+                error: None,
             },
             PluginInfo {
                 name: "ui_only".into(),
                 core: false,
-                loaded: false
+                loaded: false,
+                error: None,
             },
         ]
     );
