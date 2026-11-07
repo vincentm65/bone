@@ -31,16 +31,26 @@ for (const [os, cpu, triple, exe, packageTarget] of targets) {
   const source = host
     ? path.join(root, 'target', 'release', exe)
     : path.join(root, 'target', triple, 'release', exe);
-  const dest = path.join(binDir, exe);
+  // The desktop GUI's binary (`bone --gui`), beside the TUI one.
+  const guiExe = exe.replace(/^bone/, 'bone-gui');
+  const guiSource = path.join(path.dirname(source), guiExe);
 
-  if (!fs.existsSync(source)) {
-    console.error(`missing binary: ${source}`);
-    process.exit(1);
+  // A local (`--host`) package may have no GUI build; a release has both.
+  const binaries = [[source, exe]];
+  if (!host || fs.existsSync(guiSource)) binaries.push([guiSource, guiExe]);
+  for (const [file] of binaries) {
+    if (!fs.existsSync(file)) {
+      console.error(`missing binary: ${file}`);
+      process.exit(1);
+    }
   }
 
   fs.mkdirSync(binDir, { recursive: true });
-  fs.copyFileSync(source, dest);
-  if (os !== 'win32') fs.chmodSync(dest, 0o755);
+  for (const [from, file] of binaries) {
+    const dest = path.join(binDir, file);
+    fs.copyFileSync(from, dest);
+    if (os !== 'win32') fs.chmodSync(dest, 0o755);
+  }
 
   fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
     name,

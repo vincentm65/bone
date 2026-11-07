@@ -27,22 +27,27 @@ jobs:
             target: x86_64-unknown-linux-gnu
             artifact: bone-linux-x64
             binary: bone
+            gui_binary: bone-gui
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             artifact: bone-linux-arm64
             binary: bone
+            gui_binary: bone-gui
           - os: macos-15-intel
             target: x86_64-apple-darwin
             artifact: bone-darwin-x64
             binary: bone
+            gui_binary: bone-gui
           - os: macos-latest
             target: aarch64-apple-darwin
             artifact: bone-darwin-arm64
             binary: bone
+            gui_binary: bone-gui
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             artifact: bone-win32-x64
             binary: bone.exe
+            gui_binary: bone-gui.exe
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -85,10 +90,28 @@ jobs:
         run: |
           mkdir -p artifacts/${{ matrix.target }}/release
           cp target/${{ matrix.target }}/release/${{ matrix.binary }} artifacts/${{ matrix.target }}/release/${{ matrix.binary }}
+      # The desktop GUI is a second binary: the TUI one stays free of the
+      # window system's libraries, so it still starts on a bare server.
+      - name: window system headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev
+      - name: build GUI binary
+        shell: bash
+        run: cargo build --release --locked -p bone --features gui --target ${{ matrix.target }}
+      - name: verify GUI binary identity
+        shell: bash
+        run: |
+          output="$(target/${{ matrix.target }}/release/${{ matrix.binary }} --version)"
+          printf '%s\n' "$output"
+          grep -F "bone ${{ steps.rel.outputs.version }} (${GITHUB_SHA:0:7}" <<<"$output"
+          if grep -F -- "-dirty" <<<"$output"; then echo "binary built from a dirty tree" >&2; exit 1; fi
+      - name: stage GUI binary
+        shell: bash
+        run: cp target/${{ matrix.target }}/release/${{ matrix.binary }} artifacts/${{ matrix.target }}/release/${{ matrix.gui_binary }}
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
-          path: artifacts/${{ matrix.target }}/release/${{ matrix.binary }}
+          path: artifacts/${{ matrix.target }}/release/
 
   publish:
     name: publish npm packages

@@ -44,8 +44,15 @@ try {
   process.exit(1);
 }
 
-const exe = process.platform === 'win32' ? 'bone.exe' : 'bone';
+// The desktop GUI is its own binary, so the TUI one needs no window system
+// libraries (and still starts on a server without a desktop).
+const name = args.includes('--gui') ? 'bone-gui' : 'bone';
+const exe = process.platform === 'win32' ? `${name}.exe` : name;
 const bin = path.join(path.dirname(packageJson), 'bin', exe);
+if (name === 'bone-gui' && !require('node:fs').existsSync(bin)) {
+  console.error(`This bone-agent install has no desktop GUI (${bin}). Try reinstalling bone-agent.`);
+  process.exit(1);
+}
 const result = spawnSync(bin, args, {
   stdio: 'inherit',
   env: { ...process.env, BONE_INSTALL_KIND: 'npm' }
