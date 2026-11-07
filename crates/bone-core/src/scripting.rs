@@ -1389,7 +1389,9 @@ fn setup(
         entry.set("name", name.as_str()).map_err(|e| e.to_string())?;
         // Its first line names the file, line and cause; the traceback
         // after it is noise in a notice.
-        let first = e.to_string().lines().next().unwrap_or_default().to_owned();
+        let text = e.to_string();
+        let first = text.lines().next().unwrap_or_default();
+        let first = first.strip_prefix("runtime error: ").unwrap_or(first).to_owned();
         entry.set("error", first).map_err(|e| e.to_string())?;
         errors.set(i + 1, entry).map_err(|e| e.to_string())?;
     }

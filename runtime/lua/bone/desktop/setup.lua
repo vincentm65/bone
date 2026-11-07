@@ -84,7 +84,7 @@ function M.view(page)
       add({ text = "Make this window yours with ~/.bone/gui.lua, or /gui create personal for a full copy.",
         hl = "Dim", size = style.size.small, padding = { 2, 8 } })
       for _, p in ipairs(st.broken or {}) do
-        add({ text = "Plugin " .. p.name .. " was not loaded: " .. p.error, hl = "ErrorMsg",
+        add({ text = "Plugin " .. p.name .. " was not loaded: " .. require("bone.setup").plain_error(p.error), hl = "ErrorMsg",
           size = style.size.caption, padding = { 2, 8 }, margin = { 6, 0, 0, 0 } })
       end
       add(buttons(button("Get started", press("enter"), true),

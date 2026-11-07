@@ -52,7 +52,7 @@ function M.first_run()
     bone.request("plugin/list", {}, function(list)
       for _, p in ipairs(list or {}) do
         if p.error then
-          bone.notify(("plugin %s was not loaded: %s"):format(p.name, p.error), "error")
+          bone.notify(("plugin %s was not loaded: %s"):format(p.name, M.plain_error(p.error)), "error")
         end
       end
     end)
@@ -529,7 +529,7 @@ local function render(page, ctx)
     out[#out + 1] = "   Changes under ~/.bone reload automatically."
     for _, p in ipairs(st.broken or {}) do
       out[#out + 1] = ""
-      local wrapped = bone.text.wrap({ { "plugin " .. p.name .. " was not loaded: " .. p.error, "ErrorMsg" } }, w,
+      local wrapped = bone.text.wrap({ { "plugin " .. p.name .. " was not loaded: " .. M.plain_error(p.error), "ErrorMsg" } }, w,
         { first = { { "   " } } })
       for i = 1, math.min(#wrapped, 3) do
         out[#out + 1] = wrapped[i]
