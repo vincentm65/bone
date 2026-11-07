@@ -2,10 +2,10 @@
 //! the window (`gui.window`).
 
 use bone_ui::lua::{Host, args, err, json, opt, ret};
-use eframe::egui;
 use mlua::{Lua, MultiValue, Table};
 
 use crate::Gui;
+use crate::backend::WindowCmd;
 
 /// The GUI's own ops; `None` for an op that is not one of them.
 pub(crate) fn dispatch(
@@ -101,19 +101,16 @@ fn window(gui: &mut Gui, spec: &Table) -> mlua::Result<()> {
             .as_f64()
             .zip(gui.window_info["height"].as_f64());
         let (w, h) = now.map_or((960.0, 720.0), |(w, h)| (w as f32, h as f32));
-        let size = egui::vec2(
+        let size = crate::backend::vec2(
             size.0.unwrap_or(w).max(200.0),
             size.1.unwrap_or(h).max(150.0),
         );
-        gui.viewport.push(egui::ViewportCommand::InnerSize(size));
+        gui.viewport.push(WindowCmd::Size(size));
     }
     for (key, cmd) in [
-        (
-            "fullscreen",
-            egui::ViewportCommand::Fullscreen as fn(bool) -> _,
-        ),
-        ("maximized", egui::ViewportCommand::Maximized),
-        ("minimized", egui::ViewportCommand::Minimized),
+        ("fullscreen", WindowCmd::Fullscreen as fn(bool) -> _),
+        ("maximized", WindowCmd::Maximized),
+        ("minimized", WindowCmd::Minimized),
     ] {
         if let Some(on) = opt::<bool>(&some, key)? {
             gui.viewport.push(cmd(on));
@@ -126,14 +123,17 @@ fn window(gui: &mut Gui, spec: &Table) -> mlua::Result<()> {
 impl Gui {
     /// The window's state for `bone.gui.window_info()`, from this frame,
     /// and the window changes Lua asked for.
-    pub(crate) fn window_ui(&mut self, ctx: &egui::Context) {
-        let (rect, fullscreen, maximized, focused) = ctx.input(|i| {
-            let v = i.viewport();
-            (v.inner_rect, v.fullscreen, v.maximized, v.focused)
-        });
-        // Without a native window (headless), egui's own screen.
-        let rect = rect.unwrap_or_else(|| ctx.content_rect());
-        let (w, h) = (rect.width(), rect.height());
+    pub(crate) fn window_ui(
+        &mut self,
+        input: &crate::backend::FrameInput,
+        out: &mut crate::backend::FrameOutput,
+    ) {
+        let (w, h) = (input.screen.width(), input.screen.height());
+        let (fullscreen, maximized, focused) = (
+            Some(input.fullscreen),
+            Some(input.maximized),
+            Some(input.focused),
+        );
         self.window_info = serde_json::json!({
             "width": w, "height": h,
             "fullscreen": fullscreen.unwrap_or(false),
@@ -144,8 +144,6 @@ impl Gui {
             "cell": self.view.cell.map(|(w, h)| serde_json::json!({ "w": w, "h": h })),
             "opacity": if self.transparent { self.opacity() } else { 1.0 },
         });
-        for cmd in std::mem::take(&mut self.viewport) {
-            ctx.send_viewport_cmd(cmd);
-        }
+        out.window.append(&mut self.viewport);
     }
 }

@@ -65,7 +65,8 @@ pub struct LuaSide {
     pub popups: Vec<bone_ui::popup::Popup>,
     /// Where the keyboard is and the key sequence in progress.
     pub input: bone_ui::lua::input::KeyState,
-    /// Text copied before there was a window to copy it with (headless).
+    /// Text Lua copied, for the window to put on the clipboard after the
+    /// frame.
     pub copied: Option<String>,
     /// The prompt as `prompt/changed` last reported it: text, images,
     /// anchor and cursor. `None` until the first report.
@@ -576,10 +577,8 @@ impl Host for Gui {
     }
 
     fn clipboard_copy(&mut self, text: String) {
-        match self.repaint.get() {
-            Some(ctx) => ctx.copy_text(text),
-            None => self.lua.copied = Some(text),
-        }
+        self.lua.copied = Some(text);
+        wake(&self.repaint);
     }
 
     /// The GUI's checks: what draws it, its connection, Lua, plugins, and

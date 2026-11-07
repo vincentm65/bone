@@ -1,20 +1,14 @@
-//! The prompt for Lua, as the TUI has it: the cursor and selection (kept in
-//! step with egui's text box), editing it from Lua (`bone.prompt.insert`,
+//! The prompt for Lua, as the TUI has it: the cursor and selection (the
+//! text field's), editing it from Lua (`bone.prompt.insert`,
 //! `set_range`, `select`, …), and recalling sent messages with up and down.
 
 use bone_proto::types::ImageAttachment;
 use bone_ui::editor::{Pos, TextBuffer};
 use bone_ui::lua::{args, err, ret};
 use bone_ui::model::PromptMarks;
-use eframe::egui;
 use mlua::{Lua, MultiValue, Table, Value};
 
 use crate::Gui;
-
-/// The id of the prompt's text box, whose cursor egui keeps.
-pub(crate) fn edit_id() -> egui::Id {
-    egui::Id::new("bone prompt")
-}
 
 /// What is kept of the prompt besides its text: the cursor and selection,
 /// and the history of sent messages.
@@ -24,8 +18,6 @@ pub(crate) struct PromptState {
     /// start (equal: no selection).
     pub anchor: usize,
     pub cursor: usize,
-    /// Lua moved them: egui's text box takes them on the next frame.
-    pub moved: bool,
     /// Long pastes, as (placeholder in the text, what was pasted).
     pub pastes: Vec<(String, String)>,
     /// `bone.ui.prompt_highlight`'s styles and ghost text, and the text,
@@ -152,37 +144,12 @@ impl Gui {
         };
         self.prompt.anchor = anchor;
         self.prompt.cursor = cursor;
-        self.prompt.moved = true;
     }
 
     /// Put the cursor at the end of the text (after Lua replaced it).
     pub(crate) fn cursor_to_end(&mut self) {
         let end = self.draft.chars().count();
-        (self.prompt.anchor, self.prompt.cursor, self.prompt.moved) = (end, end, true);
-    }
-
-    /// Before the text box draws: the cursor Lua set. After: the one the
-    /// user moved.
-    pub(crate) fn sync_cursor(&mut self, ctx: &egui::Context, before: bool) {
-        let id = edit_id();
-        let Some(mut state) = egui::text_edit::TextEditState::load(ctx, id) else {
-            return;
-        };
-        if before {
-            if !self.prompt.moved {
-                return;
-            }
-            self.prompt.moved = false;
-            let range = egui::text::CCursorRange::two(
-                egui::text::CCursor::new(self.prompt.anchor),
-                egui::text::CCursor::new(self.prompt.cursor),
-            );
-            state.cursor.set_char_range(Some(range));
-            state.store(ctx, id);
-        } else if let Some(r) = state.cursor.char_range() {
-            self.prompt.anchor = r.secondary.index.into();
-            self.prompt.cursor = r.primary.index.into();
-        }
+        (self.prompt.anchor, self.prompt.cursor) = (end, end);
     }
 
     /// The cursor and selection as `prompt/changed` and `bone.prompt.info`

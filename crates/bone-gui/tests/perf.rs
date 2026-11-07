@@ -146,15 +146,12 @@ fn bench(g: &mut Headless, name: &str, warm: usize, n: usize, mut each: impl FnM
     }
     bone_gui::profile_reset();
     let mut samples = Vec::with_capacity(n);
-    let mut tess = Vec::with_capacity(n);
     for _ in 0..n {
         each(g);
         g.frame();
         samples.push(g.ui_secs);
-        tess.push(g.tess_secs);
     }
     println!("{name}: {}", stats(&samples));
-    println!("  tess: {}", stats(&tess));
     println!("  {}", bone_gui::profile_report());
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }

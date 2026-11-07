@@ -6,7 +6,7 @@
             └──┬──────────────┬──────────────────┬──────┘
                │              │                  │
      bone-tui ─┘   bone-gui ──┘                  └── bone-server
-  (terminal, ratatui)  (desktop, egui)          (connections, handshake,
+  (terminal, ratatui)  (desktop, gpui)          (connections, handshake,
                │              │                   event fan-out)
                └── bone-ui ───┘                          │
         (shared UI state, Lua UI API,                bone-core
@@ -28,7 +28,7 @@
 | `bone-client` | request/response matching and the event stream, for any transport |
 | `bone-ui` | what both frontends share and is not drawing: chat items, composer, keymaps, options, popups, panels, the TUI's layout solver (in character cells), Markdown, themes, and the Lua UI API (`bone.ui`, `runtime/ui/`) behind the `Host` trait |
 | `bone-tui` | the terminal frontend: rendering with ratatui, terminal keys and mouse, terminal views and jobs, `tui.lua` and `bone.tui` |
-| `bone-gui` | the desktop frontend (`bone --gui`, the `gui` feature): an egui/eframe window that draws a tree of nodes from Lua (`node.rs`, `flex.rs`, `nodeview/`: `mod.rs`, `paint.rs`, `list.rs`, `focus.rs`, `ops.rs`), native text editing, `gui.lua` and `bone.gui`; a headless mode for tests |
+| `bone-gui` | the desktop frontend (`bone --gui`, the `gui` feature): a GPUI window (`native.rs`) that draws a tree of nodes from Lua (`node.rs`, `flex.rs`, `nodeview/`: `mod.rs`, `paint.rs`, `edit.rs`, `list.rs`, `focus.rs`, `ops.rs`) as a renderer-neutral draw list (`backend/`), its own text editing, `gui.lua` and `bone.gui`; a headless mode for tests |
 | `bone-media` | bounded image decoding and PNG normalization, shared by the core and both frontends |
 | `bone-lua` | shared Lua setup: `require` paths, plugins, JSON, helpers, the built-in runtime files |
 | `bone` | the command line |
@@ -89,5 +89,5 @@ The TUI reads native clipboard pixels in a short-lived helper process; a ten-sec
 - `bone/tests/headless.rs`: the real binary over stdio and sockets.
 - `bone/tests/tui.rs`: the standard TUI driven headlessly (`bone_tui::Headless`) against a real core and a fake model, with screen and interaction assertions.
 - `tests/ui/*.lua`: conformance scripts for the shared Lua UI API, run in both frontends (`bone/tests/conformance.rs`, `bone-gui/tests/conformance.rs`); the four about the TUI's cell layout (`frontend`, `layout`, `panels`, `scrolling`) run only in the TUI.
-- `bone-gui/tests`: the GUI driven headlessly (`bone_gui::Headless`, egui without a window): Lua hosting, the node view (layout, scrolling, lists, painted output), keys, clicks, resizing and HiDPI, and several clients (TUI and GUI) on one server, including a server restart.
+- `bone-gui/tests`: the GUI driven headlessly (`bone_gui::Headless`, frames with no window and fixed-width text): Lua hosting, the node view (layout, scrolling, lists, painted output), keys, clicks, resizing and HiDPI, and several clients (TUI and GUI) on one server, including a server restart.
 - `bone/tests/images.rs`: image upload, model payloads, persistence/restart, queue editing, draft races, compaction, and optional native clipboard through a separate headless process.

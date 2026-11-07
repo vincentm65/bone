@@ -210,11 +210,8 @@ pub(crate) fn dispatch(
             match id {
                 Some(id) => vs.focus_request = Some(id),
                 None => {
-                    (vs.focused, vs.focus_request) = (None, None);
                     // From a text input too.
-                    if let Some(ctx) = gui.repaint.get() {
-                        ctx.memory_mut(|m| m.request_focus(crate::prompt::edit_id()));
-                    }
+                    (vs.focused, vs.focus_request, vs.input_focus) = (None, None, None);
                 }
             }
             gui.view.invalidate();

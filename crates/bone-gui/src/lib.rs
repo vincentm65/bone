@@ -11,6 +11,7 @@
 //! `nodeview`), `native.rs` opens the window, and [`Headless`] drives it
 //! without one.
 
+mod backend;
 mod canvas;
 mod chats;
 mod flex;
@@ -51,6 +52,8 @@ use serde_json::Value;
 use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 
+pub use crate::backend::Rect;
+pub use crate::backend::input::{Button, Event as InputEvent, Key, Modifiers};
 pub use crate::headless::Headless;
 pub use crate::native::run;
 
@@ -102,7 +105,7 @@ pub struct Gui {
     tx: mpsc::UnboundedSender<Msg>,
     rx: mpsc::UnboundedReceiver<Msg>,
     /// Asks the window for a frame when a message arrives.
-    repaint: Arc<OnceLock<eframe::egui::Context>>,
+    repaint: Arc<OnceLock<Waker>>,
     opts: GuiOptions,
     pub chats: Vec<ChatBuffer>,
     /// The chat on screen, and since when.
@@ -145,10 +148,7 @@ pub struct Gui {
     /// set, and window changes to send on the next frame.
     pub window_info: Value,
     pub window_title: Option<String>,
-    viewport: Vec<eframe::egui::ViewportCommand>,
-    /// `opts_rev` last applied to egui's theme, so a colorscheme change
-    /// restyles dialogs without rewriting the style every frame.
-    visuals_rev: Option<u64>,
+    viewport: Vec<crate::backend::WindowCmd>,
     /// The Lua state and what the Lua API keeps.
     pub lua: crate::lua::LuaSide,
     /// What the node view keeps between frames; it outlives Lua reloads.
@@ -215,7 +215,6 @@ impl Gui {
             window_info: Value::Null,
             window_title: None,
             viewport: Vec::new(),
-            visuals_rev: None,
             lua: Default::default(),
             view: Default::default(),
             previews: Default::default(),
@@ -270,6 +269,11 @@ impl Gui {
             changed = true;
         }
         changed
+    }
+
+    /// How the window is asked for a frame when a message arrives.
+    pub(crate) fn set_waker(&self, wake: Waker) {
+        let _ = self.repaint.set(wake);
     }
 
     /// Wait for the next message and handle it; false once none can come.
@@ -580,8 +584,7 @@ impl Gui {
     /// The window gained the focus: look for a saved edit to the Lua
     /// config at once (the window also watches it, `watch_config`). The
     /// first focus only records the hash.
-    pub(crate) fn note_focus(&mut self, ctx: &eframe::egui::Context) {
-        let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+    pub(crate) fn note_focus(&mut self, focused: bool) {
         let gained = focused && !self.was_focused;
         self.was_focused = focused;
         if gained {
@@ -663,8 +666,11 @@ impl Gui {
 /// How often the window looks for saved edits to the Lua sources.
 const CONFIG_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
-fn wake(repaint: &OnceLock<eframe::egui::Context>) {
-    if let Some(ctx) = repaint.get() {
-        ctx.request_repaint();
+/// Asks the window for a frame, from any thread.
+pub(crate) type Waker = Box<dyn Fn() + Send + Sync>;
+
+fn wake(repaint: &OnceLock<Waker>) {
+    if let Some(wake) = repaint.get() {
+        wake();
     }
 }

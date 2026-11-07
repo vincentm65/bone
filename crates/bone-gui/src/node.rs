@@ -287,9 +287,12 @@ pub struct Style {
     pub autofocus: bool,
     /// For screen readers: what the node is, its name (default: its text)
     /// and, for a checkbox or an option, whether it is on. A node with
-    /// `on_click` is a button unless it says otherwise.
+    /// `on_click` is a button unless it says otherwise. Kept for when the
+    /// window has screen readers again (GPUI has none yet).
     pub role: Option<Role>,
+    #[allow(dead_code)]
     pub label: Option<String>,
+    #[allow(dead_code)]
     pub selected: Option<bool>,
     /// Milliseconds after taking the focus that keys are ignored: a key
     /// meant for what was there before (enter, typing) does not answer a

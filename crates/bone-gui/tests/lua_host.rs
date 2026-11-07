@@ -85,7 +85,7 @@ async fn the_bare_library_draws_plain_text() {
 
     // The basic keys and the slash commands: enter runs a command, and
     // sends anything else.
-    use eframe::egui::{Key, Modifiers};
+    use bone_gui::{Key, Modifiers};
     g.gui
         .run_lua("t", "bone.cmd.create('ping', function() pinged = true end)")
         .unwrap();
@@ -146,7 +146,7 @@ async fn a_reload_with_a_new_error_keeps_the_config_in_use() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn keys_reach_lua_and_typing_reaches_the_prompt() {
-    use eframe::egui::{Key, Modifiers};
+    use bone_gui::{Key, Modifiers};
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     std::fs::write(
         config.path().join("gui.lua"),
@@ -183,7 +183,7 @@ async fn keys_reach_lua_and_typing_reaches_the_prompt() {
 /// "/" fills and esc hides, as in the TUI.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_slash_menu_opens_and_esc_hides_it() {
-    use eframe::egui::{Key, Modifiers};
+    use bone_gui::{Key, Modifiers};
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut g = gui(config.path(), work.path()).await;
     let menu = |g: &Headless| {
@@ -209,7 +209,7 @@ async fn the_slash_menu_opens_and_esc_hides_it() {
 /// it back to the prompt.
 #[tokio::test(flavor = "multi_thread")]
 async fn ctrl_o_opens_the_sessions_sidebar() {
-    use eframe::egui::{Key, Modifiers};
+    use bone_gui::{Key, Modifiers};
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut g = gui(config.path(), work.path()).await;
     g.frame();
@@ -380,7 +380,7 @@ async fn lua_sets_the_window() {
 /// pageup leaves the end of a long transcript; ctrl+end goes back.
 #[tokio::test(flavor = "multi_thread")]
 async fn page_keys_scroll_the_chat() {
-    use eframe::egui::{Key, Modifiers};
+    use bone_gui::{Key, Modifiers};
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut g = gui(config.path(), work.path()).await;
     let text = "row\n".repeat(120);
@@ -758,7 +758,7 @@ async fn the_standard_library() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn settings_window_receives_arrow_keys() {
-    use eframe::egui::{Key, Modifiers};
+    use bone_gui::{Key, Modifiers};
 
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut g = gui(config.path(), work.path()).await;
@@ -800,26 +800,6 @@ async fn settings_window_receives_arrow_keys() {
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 
-/// What the node view draws reaches screen readers: chat text and the
-/// text painted in boxes.
-#[tokio::test(flavor = "multi_thread")]
-async fn lua_drawn_rows_are_accessible() {
-    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-    let mut g = gui(config.path(), work.path()).await;
-    g.enable_accesskit();
-    g.gui
-        .run_lua(
-            "t",
-            "bone.chat.add('note', { text = 'a chat row' })
-             bone.gui.view(function() return { { text = 'conf status words' } } end)",
-        )
-        .unwrap();
-    g.frame();
-    g.frame();
-    let all = g.accessible.join(" | ");
-    assert!(all.contains("conf status words"), "painted text: {all}");
-}
-
 /// `/term` opens a terminal in a panel: the program's screen draws there,
 /// and the keys typed while it has the keyboard go to the program.
 #[tokio::test(flavor = "multi_thread")]
@@ -831,7 +811,7 @@ async fn a_terminal_in_a_panel() {
     g.frame();
     assert_eq!(g.gui.eval("bone.ui.panel.focused()").unwrap(), "term1");
     g.text("typed into it");
-    g.key(eframe::egui::Key::Enter, eframe::egui::Modifiers::NONE);
+    g.key(bone_gui::Key::Enter, bone_gui::Modifiers::NONE);
     let screen = |g: &mut Headless| {
         g.gui
             .eval(
@@ -913,7 +893,7 @@ async fn a_terminal_in_a_panel() {
 /// same visible panel, through the GUI's real keyboard path.
 #[tokio::test(flavor = "multi_thread")]
 async fn terminal_shortcuts_focus_the_visible_panel() {
-    use eframe::egui::{Key, Modifiers};
+    use bone_gui::{Key, Modifiers};
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut g = gui(config.path(), work.path()).await;
     g.frame();
@@ -964,7 +944,7 @@ async fn terminal_shortcuts_focus_the_visible_panel() {
 /// not become the second key of a window-manager prefix (Alt+W then W).
 #[tokio::test(flavor = "multi_thread")]
 async fn alt_prefix_does_not_consume_its_own_text() {
-    use eframe::egui::{Key, Modifiers};
+    use bone_gui::{Key, Modifiers};
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut g = gui(config.path(), work.path()).await;
     g.frame();

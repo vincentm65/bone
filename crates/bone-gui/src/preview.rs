@@ -1,6 +1,6 @@
 //! The pictures of the node view (`image = { id | path }`): their pixels are
 //! read once (from the core for an attachment, from disk for a path),
-//! decoded off the UI thread and kept as a texture. Where and how they are
+//! decoded off the UI thread and kept for the window to draw. Where and how they are
 //! shown is Lua's: an image node in a chat item, or the overlay that
 //! `bone.gui.preview` opens.
 
@@ -9,10 +9,12 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
+use std::sync::Arc;
+
 use bone_proto::methods::{AttachmentRead, AttachmentReadParams};
-use eframe::egui;
 
 use crate::Gui;
+use crate::backend::Picture;
 use crate::node::ImageSource;
 
 /// The largest side a texture is decoded at.
@@ -30,7 +32,7 @@ pub(crate) struct Previews {
 enum Preview {
     Loading,
     Ready {
-        tex: egui::TextureHandle,
+        tex: Arc<Picture>,
         bytes: usize,
         last_used: Instant,
     },
@@ -43,7 +45,7 @@ enum Preview {
 /// What an image node can draw now.
 pub(crate) enum Pixels {
     Loading,
-    Ready(egui::TextureHandle),
+    Ready(Arc<Picture>),
     Failed(String),
 }
 
@@ -58,7 +60,7 @@ impl Gui {
     }
 
     /// The pixels of `source`; the first ask starts reading them.
-    pub(crate) fn pixels(&self, ctx: &egui::Context, source: &ImageSource) -> Pixels {
+    pub(crate) fn pixels(&self, source: &ImageSource) -> Pixels {
         let key = source.key();
         let now = Instant::now();
         let known = {
@@ -83,7 +85,7 @@ impl Gui {
             .textures
             .borrow_mut()
             .insert(key.clone(), Preview::Loading);
-        self.load_pixels(ctx, key, source.clone());
+        self.load_pixels(key, source.clone());
         Pixels::Loading
     }
 
@@ -114,19 +116,16 @@ impl Gui {
         }
     }
 
-    fn load_pixels(&self, ctx: &egui::Context, key: String, source: ImageSource) {
-        let ctx = ctx.clone();
+    fn load_pixels(&self, key: String, source: ImageSource) {
         // Decoded off the UI thread: an image can be large.
-        let decode = move |png: Vec<u8>, key: String| {
+        let decode = move |png: Vec<u8>, _key: String| {
             let (w, h, pixels) = bone_media::to_rgba(&png, MAX_SIDE)?;
-            let pixels =
-                egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &pixels);
-            Ok::<_, String>(ctx.load_texture(&key, pixels, egui::TextureOptions::LINEAR))
+            Ok::<_, String>(Arc::new(Picture::new(w, h, pixels)))
         };
-        let finish = |gui: &mut Gui, key: String, r: Result<egui::TextureHandle, String>| {
+        let finish = |gui: &mut Gui, key: String, r: Result<Arc<Picture>, String>| {
             let preview = match r {
                 Ok(tex) => {
-                    let [w, h] = tex.size();
+                    let (w, h) = (tex.width as usize, tex.height as usize);
                     Preview::Ready {
                         bytes: w.saturating_mul(h).saturating_mul(4),
                         last_used: Instant::now(),

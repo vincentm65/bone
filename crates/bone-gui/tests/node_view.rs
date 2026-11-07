@@ -12,7 +12,6 @@ use bone_gui::{GuiOptions, Headless};
 use bone_proto::methods::{MessageCompletedParams, TurnFinishedParams};
 use bone_proto::types::{ChatMessage, TurnOutcome};
 use bone_server::Server;
-use eframe::egui;
 
 /// A headless GUI with the shared defaults (unless a test chose a library).
 async fn gui(config: &Path, work: &Path) -> Headless {
@@ -142,7 +141,7 @@ async fn the_status_bar_pieces_do_not_overlap_when_the_window_is_narrow() {
         for _ in 0..3 {
             g.frame();
         }
-        let texts: Vec<(&String, egui::Rect)> = g
+        let texts: Vec<(&String, bone_gui::Rect)> = g
             .painted
             .iter()
             .filter(|(text, _)| text.chars().any(char::is_alphanumeric))
@@ -677,7 +676,7 @@ async fn a_question_from_the_core_is_a_modal_dialog() {
 /// its opening guard; paste must not reach a terminal's global paste hook.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_node_modal_takes_keys_before_a_focused_panel() {
-    use eframe::egui::{Key, Modifiers};
+    use bone_gui::{Key, Modifiers};
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut g = gui(config.path(), work.path()).await;
     g.gui
@@ -810,7 +809,7 @@ async fn a_node_modal_takes_keys_before_a_focused_panel() {
 /// remains the shared engine's focused panel.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_modal_text_field_edits_before_a_focused_panel() {
-    use eframe::egui::{Key, Modifiers};
+    use bone_gui::{Key, Modifiers};
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut g = gui(config.path(), work.path()).await;
     g.gui
@@ -1177,7 +1176,7 @@ async fn slots_take_a_plugins_nodes_and_drops_are_events() {
 /// of enter, and does not touch the prompt.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_text_input_edits_natively_and_tells_lua() {
-    use eframe::egui::{Key, Modifiers};
+    use bone_gui::{Key, Modifiers};
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut g = gui(config.path(), work.path()).await;
     g.gui

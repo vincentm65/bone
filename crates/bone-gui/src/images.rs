@@ -1,7 +1,7 @@
 //! Images in the prompt: read from a file (`/attach`, the "+" dialog, or dropped on the
 //! window) or the clipboard (`paste_clipboard`, through the helper process
 //! of `bone_ui::clipboard`), uploaded to the core, and sent with the next
-//! message. egui pastes the clipboard's text itself on ctrl+v, so an image
+//! message. The window pastes the clipboard's text itself on ctrl+v, so an image
 //! is pasted with another key bound to `paste_clipboard` (alt+v), or
 //! `/paste`.
 
@@ -12,7 +12,6 @@ use bone_proto::methods::{AttachmentUpload, AttachmentUploadParams};
 use bone_proto::types::ImageAttachment;
 use bone_ui::clipboard::{self, Content, Input};
 use bone_ui::lua::{args, err, ret};
-use eframe::egui;
 use mlua::{Lua, MultiValue};
 
 use crate::Gui;
@@ -66,8 +65,13 @@ impl Gui {
     /// Files dropped on the window this frame: the `drop` event to Lua, or
     /// (with no handler) images are attached and any other file's path goes
     /// into the message for the agent to read.
-    pub(crate) fn dropped_files(&mut self, ctx: &egui::Context) {
-        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+    pub(crate) fn dropped_files(&mut self, input: &crate::backend::FrameInput) {
+        let dropped: Vec<std::path::PathBuf> = (input.events.iter())
+            .filter_map(|e| match e {
+                crate::backend::Event::DroppedFile(p) => Some(p.clone()),
+                _ => None,
+            })
+            .collect();
         if dropped.is_empty() {
             return;
         }
@@ -76,13 +80,12 @@ impl Gui {
         if bone_ui::lua::has_autocmd(self, "drop") {
             let paths: Vec<String> = dropped
                 .iter()
-                .map(|f| f.path().to_string_lossy().into_owned())
+                .map(|f| f.to_string_lossy().into_owned())
                 .collect();
             self.fire_event("drop", serde_json::json!({ "paths": paths }));
             return;
         }
-        for f in dropped {
-            let path = f.path().to_owned();
+        for path in dropped {
             let image = path.extension().and_then(|e| e.to_str()).is_some_and(|e| {
                 ["png", "jpg", "jpeg", "webp"]
                     .iter()

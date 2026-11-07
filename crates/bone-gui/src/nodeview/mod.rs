@@ -14,6 +14,7 @@
 //! [`popups`] (cell-sized windows), [`list`] (virtual lists), [`focus`]
 //! (keyboard and wheel), [`paint`] (drawing) and [`shapes`].
 
+mod edit;
 mod focus;
 mod list;
 mod ops;
@@ -22,23 +23,26 @@ mod popups;
 mod shapes;
 
 pub(crate) use list::{ChatMove, ListState};
+pub(crate) use popups::cell_size;
 pub(crate) use ops::{dispatch, window_spec};
 
 use crate::node::Sink;
 use list::{Windows, set_totals};
-use popups::cell_size;
 use std::collections::HashMap;
 use std::rc::Rc;
 
 use bone_ui::lua::Host;
-use eframe::egui::text::{LayoutJob, TextFormat};
-use eframe::egui::{self, Color32, FontFamily, FontId, Stroke};
 use mlua::Value;
+
+use crate::backend::input::{Event, FrameInput, Modifiers};
+use crate::backend::interact::Pointer;
+use crate::backend::text::{Family, Job, RunStyle, Shaper};
+use crate::backend::{FrameOutput, Rect as Area, Shape, pos};
 
 use crate::Gui;
 use crate::flex::{self, Metrics, Placed, Rect, Size};
 use crate::node::{
-    self, Colors, GroupStyle, Input, Kind, Node, Overflow, Rgba, Text, TextAlign, TextStyle,
+    self, Colors, GroupStyle, Input, Kind, Node, Overflow, Rgba, Text, TextStyle,
 };
 use crate::view::color;
 use bone_ui::style::Modifier;
@@ -56,6 +60,9 @@ pub(crate) struct Scroll {
     /// The pointer is holding this container's scrollbar. Content growth must
     /// not pull a thumb back to the end while it is being dragged.
     pub dragging: bool,
+    /// Where the scrollbar was taken: the pointer along it, the offset,
+    /// the max and the track's free room then.
+    pub grab: Option<[f32; 4]>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -67,7 +74,7 @@ pub(crate) enum Target {
 /// What was under the pointer last frame, for the wheel.
 #[derive(Clone, Debug)]
 pub(crate) struct Hit {
-    pub(in crate::nodeview) rect: egui::Rect,
+    pub(in crate::nodeview) rect: Area,
     pub(in crate::nodeview) scroll: Option<String>,
     /// A row, which the sideways wheel moves.
     pub(in crate::nodeview) sideways: bool,
@@ -89,6 +96,9 @@ pub(crate) struct Focusable {
 /// A text input's text, and the value Lua last gave it.
 pub(crate) struct InputBuf {
     pub text: String,
+    /// The selection's other end and the cursor, in chars.
+    pub anchor: usize,
+    pub cursor: usize,
     /// `text` the last time it changed, for measuring rows without copying.
     measure: Rc<str>,
     pub(in crate::nodeview) pushed: Option<String>,
@@ -98,6 +108,8 @@ impl Default for InputBuf {
     fn default() -> Self {
         InputBuf {
             text: String::new(),
+            anchor: 0,
+            cursor: 0,
             measure: Rc::from(""),
             pushed: None,
         }
@@ -152,14 +164,14 @@ pub type FontWant = (String, f32, [String; 3], Vec<(String, String)>);
 /// something changed (`dirty`); between those the last tree is laid out
 /// again, so a long transcript costs Lua nothing while it sits still.
 /// Whether Lua's `mouse` handlers took the press, drag or release under
-/// way from the nodes and egui's widgets.
+/// way from the nodes.
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MouseTaken {
     #[default]
     No,
-    /// At the press: egui never sees the button go down.
+    /// At the press: the nodes never see the button go down.
     Whole,
-    /// After egui saw the press: it sees no more motion, then the release
+    /// After the nodes saw the press: they see no more motion, then the release
     /// where the pointer last was for it, and the nodes hear none of it.
     Rest,
 }
@@ -215,8 +227,8 @@ pub struct ViewState {
     pub size: (f32, f32),
     /// The window's area, and where each node with an id was: windows
     /// anchor to `chat` and `prompt`, and `bone.gui.rect` reads any.
-    pub(crate) area: Option<egui::Rect>,
-    pub(crate) leaves: Vec<(String, egui::Rect)>,
+    pub(crate) area: Option<Area>,
+    pub(crate) leaves: Vec<(String, Area)>,
     /// The colorscheme and options last built with.
     rev: u64,
     /// When `bone.gui.invalidate(ms)` wants the next build.
@@ -224,9 +236,26 @@ pub struct ViewState {
     /// The button held for the `mouse` event and the cell it was last at.
     pub(crate) mouse_held: Option<(&'static str, (u16, u16))>,
     /// Whether a `mouse` handler took the gesture under way, and where
-    /// egui last saw the pointer (see `route_pointer`).
+    /// the nodes last saw the pointer (see `route_pointer`).
     pub(crate) mouse_taken: MouseTaken,
-    pub(crate) mouse_seen: Option<egui::Pos2>,
+    pub(crate) mouse_seen: Option<crate::backend::Pos>,
+    /// The pointer as the nodes hear it.
+    pub(crate) pointer: Pointer,
+    /// The monospace cell of the fonts applied last, before a frame has
+    /// measured one.
+    pub(crate) mono_cell: Option<(f32, f32)>,
+    /// Text being composed by the input method, in the field with the
+    /// keyboard.
+    pub(crate) preedit: String,
+    /// The text fields' editing state (the prompt's under `""`): where the
+    /// pointer pressed, and how far the field is scrolled.
+    pub(crate) edits: HashMap<String, crate::nodeview::edit::EditState>,
+    /// A text node's selection: its key, and the char range; and the text
+    /// it selects.
+    pub(crate) text_selection: Option<(String, usize, usize)>,
+    pub(crate) selection_text: Option<String>,
+    /// When the pointer came to rest over the node with a tooltip.
+    pub(crate) tooltip_since: Option<(String, std::time::Instant)>,
     /// Wheel travel not scrolled yet that is short of a `wheelup` or
     /// `wheeldown` key, in points.
     pub(crate) wheel_rest: f32,
@@ -288,12 +317,27 @@ pub(in crate::nodeview) enum Arg {
     Scroll {
         dy: f32,
         dx: f32,
-        mods: egui::Modifiers,
+        mods: Modifiers,
     },
 }
 
-pub(in crate::nodeview) fn rgba(c: Rgba) -> Color32 {
-    Color32::from_rgba_unmultiplied(c.0, c.1, c.2, c.3)
+/// What a frame is painted with: its input, the window's text shaper, and
+/// what it leaves for the window.
+pub(crate) struct Fx<'a> {
+    pub input: &'a FrameInput,
+    pub shaper: &'a dyn Shaper,
+    pub out: &'a mut FrameOutput,
+    /// The keys and text left for the text field with the keyboard.
+    pub typed: Vec<Event>,
+    /// How opaque what is painted now is.
+    pub opacity: f32,
+}
+
+impl Fx<'_> {
+    /// Paint `shape`, cut to `clip`, at the opacity painted now.
+    pub fn paint(&mut self, shape: Shape, clip: Area) {
+        self.out.draw.push(shape, clip, self.opacity);
+    }
 }
 
 /// Whether painting `p` looks the node up by a string (handlers, focus,
@@ -319,22 +363,17 @@ pub(in crate::nodeview) fn needs_key(p: &Placed) -> bool {
         || matches!(&p.node.kind, Kind::Text(t) if !t.selectable)
 }
 
-fn lua_rgba(c: Color32) -> Rgba {
-    let [r, g, b, a] = c.to_srgba_unmultiplied();
-    Rgba(r, g, b, a)
-}
-
 impl Colors for Gui {
     fn group(&self, name: &str, bg: bool) -> Option<Rgba> {
         let s = self.lua.theme.hl(name);
-        if bg { s.bg } else { s.fg }.and_then(color).map(lua_rgba)
+        if bg { s.bg } else { s.fg }.and_then(color)
     }
 
     fn style(&self, name: &str) -> GroupStyle {
         let s = self.lua.theme.hl(name);
         let m = s.add_modifier;
         GroupStyle {
-            fg: s.fg.and_then(color).map(lua_rgba),
+            fg: s.fg.and_then(color),
             bold: m.contains(Modifier::BOLD),
             italic: m.contains(Modifier::ITALIC),
             underline: m.contains(Modifier::UNDERLINED),
@@ -343,9 +382,9 @@ impl Colors for Gui {
     }
 }
 
-/// Text measured with egui's fonts.
-pub(in crate::nodeview) struct Fonts {
-    pub(in crate::nodeview) ctx: egui::Context,
+/// Text measured with the window's fonts.
+pub(in crate::nodeview) struct Fonts<'a> {
+    pub(in crate::nodeview) shaper: &'a dyn Shaper,
     /// Whether the proportional font has a bold and an italic face.
     faces: (bool, bool),
     /// The prompt's text, which an input node is as tall as.
@@ -356,118 +395,109 @@ pub(in crate::nodeview) struct Fonts {
     registered: Vec<String>,
 }
 
-impl Fonts {
-    fn family(&self, s: &TextStyle) -> FontFamily {
+/// `c` a step toward white (bold without a bold face).
+fn brighter(c: Rgba) -> Rgba {
+    let up = |v: u8| (f32::from(v) + (255.0 - f32::from(v)) * 0.35).round() as u8;
+    Rgba(up(c.0), up(c.1), up(c.2), c.3)
+}
+
+impl Fonts<'_> {
+    pub(in crate::nodeview) fn family(&self, s: &TextStyle) -> Family {
         let (has_bold, has_italic) = self.faces;
         if let Some(name) = s
             .family
             .as_deref()
             .filter(|n| self.registered.iter().any(|r| r == n))
         {
-            FontFamily::Name(name.into())
+            Family::Named(name.into())
         } else if s.mono {
-            FontFamily::Monospace
+            Family::Mono
         } else if s.bold && has_bold {
-            FontFamily::Name("sans-bold".into())
+            Family::SansBold
         } else if s.italic && has_italic {
-            FontFamily::Name("sans-italic".into())
+            Family::SansItalic
         } else {
-            FontFamily::Proportional
+            Family::Sans
         }
     }
 
-    pub(in crate::nodeview) fn job(&self, t: &Text, width: Option<f32>) -> LayoutJob {
-        let mut job = LayoutJob::default();
-        for s in &t.spans {
-            let st = &s.style;
-            let family = self.family(st);
-            let slanted = family == FontFamily::Name("sans-italic".into());
-            let mut c = rgba(st.color);
-            if st.bold && !st.mono && !self.faces.0 {
-                // Without a bold face, bold is a brighter color.
-                c = c.lerp_to_gamma(Color32::WHITE, 0.35);
-            }
-            if s.dim {
-                c = c.gamma_multiply(0.6);
-            }
-            job.append(
-                &s.text,
-                0.0,
-                TextFormat {
-                    font_id: FontId::new(st.size, family),
-                    color: c,
-                    line_height: st.line_height,
-                    extra_letter_spacing: st.letter_spacing,
-                    strikethrough: if st.strike || s.strike {
-                        Stroke::new(1.0, c)
-                    } else {
-                        Stroke::NONE
-                    },
-                    italics: st.italic && !slanted,
-                    background: s.bg.map_or(Color32::TRANSPARENT, rgba),
-                    underline: if s.underline {
-                        Stroke::new(1.0, c)
-                    } else {
-                        Stroke::NONE
-                    },
-                    ..Default::default()
-                },
-            );
+    /// How span style `st` is drawn.
+    pub(in crate::nodeview) fn run_style(&self, st: &TextStyle) -> RunStyle {
+        let family = self.family(st);
+        let mut color = st.color;
+        if st.bold && !st.mono && !self.faces.0 {
+            // Without a bold face, bold is a brighter color.
+            color = brighter(color);
         }
-        if let Some(w) = width {
-            job.wrap.max_width = w.max(1.0);
-            if t.ellipsis {
-                // One line that ends in "…" where it runs out of room.
-                job.wrap.max_rows = 1;
-                job.wrap.break_anywhere = true;
-                job.wrap.overflow_character = Some('…');
-            }
+        RunStyle {
+            italic: st.italic && family != Family::SansItalic,
+            strike: st.strike,
+            line_height: st.line_height,
+            letter_spacing: st.letter_spacing,
+            ..RunStyle::plain(family, st.size, color)
         }
-        job.halign = match t.align {
-            TextAlign::Left => egui::Align::Min,
-            TextAlign::Center => egui::Align::Center,
-            TextAlign::Right => egui::Align::Max,
+    }
+
+    pub(in crate::nodeview) fn job(&self, t: &Text, width: Option<f32>) -> Job {
+        let mut job = Job {
+            text: String::new(),
+            runs: Vec::new(),
+            wrap: width.map(|w| w.max(1.0)),
+            ellipsis: t.ellipsis && width.is_some(),
+            align: t.align,
+            box_width: None,
         };
+        for s in &t.spans {
+            let mut style = self.run_style(&s.style);
+            if s.dim {
+                style.color.3 = (f32::from(style.color.3) * 0.6).round() as u8;
+            }
+            style.strike |= s.strike;
+            style.underline = s.underline;
+            style.background = s.bg;
+            job.append(&s.text, style);
+        }
         job
     }
 
-    pub(in crate::nodeview) fn font(&self, i: &Input) -> FontId {
-        FontId::new(i.text.size, self.family(&i.text))
+    /// The prompt's or a field's text style.
+    pub(in crate::nodeview) fn field_style(&self, st: &TextStyle) -> RunStyle {
+        RunStyle::plain(self.family(st), st.size, st.color)
+    }
+
+    fn rows(&self, text: &str, style: &TextStyle, max_width: Option<f32>) -> (usize, f32) {
+        let st = self.field_style(style);
+        let line = self.shaper.row_height(&st.family, st.size);
+        let job = Job::simple(format!("{text} "), st, max_width.map(|w| w.max(1.0)));
+        (self.shaper.shape(job).rows.len().max(1), line)
     }
 }
 
-impl Metrics for Fonts {
+impl Metrics for Fonts<'_> {
     fn text(&self, t: &Text, max_width: Option<f32>) -> Size {
         let _span = crate::profile::Span::start("text-measure");
-        let g = self.ctx.fonts_mut(|f| f.layout_job(self.job(t, max_width)));
+        let g = self.shaper.shape(self.job(t, max_width));
         // A pixel of slack: a box as wide as its text must not wrap it when
         // measured again at that width.
         Size {
-            w: g.size().x.ceil() + 1.0,
-            h: g.size().y,
+            w: g.size.x.ceil() + 1.0,
+            h: g.size.y,
         }
     }
 
     fn text_input(&self, t: &node::TextInput, max_width: Option<f32>) -> Size {
-        let font = FontId::new(t.text.size, self.family(&t.text));
-        let rows = if t.multiline {
+        let (rows, line) = if t.multiline {
             let text = if t.read_only {
                 t.value.as_deref().unwrap_or("")
             } else {
                 self.texts.get(&t.id).map_or("", |s| s.as_ref())
             };
-            let job = LayoutJob::simple(
-                format!("{text} "),
-                font.clone(),
-                Color32::WHITE,
-                max_width.map_or(f32::INFINITY, |w| w.max(1.0)),
-            );
-            let rows = self.ctx.fonts_mut(|f| f.layout_job(job).rows.len().max(1));
-            rows.clamp(t.min_rows.max(1), t.max_rows.max(t.min_rows).max(1))
+            let (rows, line) = self.rows(text, &t.text, max_width);
+            (rows.clamp(t.min_rows.max(1), t.max_rows.max(t.min_rows).max(1)), line)
         } else {
-            1
+            let st = self.field_style(&t.text);
+            (1, self.shaper.row_height(&st.family, st.size))
         };
-        let line = self.ctx.fonts_mut(|f| f.row_height(&font));
         Size {
             w: max_width.unwrap_or(0.0),
             h: rows as f32 * line,
@@ -475,19 +505,7 @@ impl Metrics for Fonts {
     }
 
     fn input(&self, i: &Input, max_width: Option<f32>) -> Size {
-        let font = self.font(i);
-        let mut job = LayoutJob::simple(
-            format!("{} ", self.draft),
-            font.clone(),
-            Color32::WHITE,
-            max_width.map_or(f32::INFINITY, |w| w.max(1.0)),
-        );
-        job.wrap.max_width = max_width.map_or(f32::INFINITY, |w| w.max(1.0));
-        let (rows, line) = self.ctx.fonts_mut(|f| {
-            let g = f.layout_job(job);
-            let row_h = f.row_height(&font);
-            (g.rows.len().max(1), row_h)
-        });
+        let (rows, line) = self.rows(&self.draft, &i.text, max_width);
         let rows = rows.clamp(i.min_rows.max(1), i.max_rows.max(i.min_rows).max(1));
         Size {
             w: max_width.unwrap_or(0.0),
@@ -565,7 +583,7 @@ pub(in crate::nodeview) struct Frame {
     pub(in crate::nodeview) input_focus: Option<String>,
     /// Where each node with an id is (windows anchor to `chat` and
     /// `prompt`).
-    pub(in crate::nodeview) leaves: Vec<(String, egui::Rect)>,
+    pub(in crate::nodeview) leaves: Vec<(String, Area)>,
     pub(in crate::nodeview) focusables: Vec<Focusable>,
     pub(in crate::nodeview) input_keys: HashMap<String, u64>,
     /// The `block_input` boxes being drawn, innermost last, and how many
@@ -575,23 +593,24 @@ pub(in crate::nodeview) struct Frame {
     pub(in crate::nodeview) trap: Option<usize>,
     /// The innermost focusable node under a press.
     pub(in crate::nodeview) press_focus: Option<String>,
-    /// How many boxes being drawn have a name for screen readers: the text
-    /// in them is that name, not announced again.
-    pub(in crate::nodeview) named: usize,
+    /// The tooltip of the node under the pointer, and where.
+    pub(in crate::nodeview) tooltip: Option<(String, String)>,
+    /// The text nodes painted, by key: their text and where it was laid
+    /// out, for selecting it with the pointer.
+    pub(in crate::nodeview) texts: Vec<(String, crate::backend::Pos, std::sync::Arc<crate::backend::Shaped>)>,
 }
 
 impl Gui {
     /// Draw the window as Lua's node tree; false when there is none (no
     /// view or fallback set, or both failed).
-    pub(crate) fn view_ui(&mut self, ui: &mut egui::Ui) -> bool {
+    pub(crate) fn view_ui(&mut self, fx: &mut Fx) -> bool {
         let _view = crate::profile::Span::start("view");
         // No view set: the fallback says so (see `bone.gui.fallback`).
         let Some(cb) = self.view.bound.func.or(self.view.bound.fallback) else {
             return false;
         };
         let no_view = self.view.bound.func.is_none();
-        let ctx = ui.ctx().clone();
-        let area = ui.max_rect();
+        let area = fx.input.screen;
         let (w, h) = (area.width(), area.height());
         let vs = &mut self.view;
         if vs.size != (w, h) {
@@ -603,40 +622,36 @@ impl Gui {
             vs.rev = self.lua.opts_rev + self.lua.views_rev;
             vs.dirty = true;
         }
-        if vs.wake.is_some_and(|at| at <= std::time::Instant::now()) {
+        let now = std::time::Instant::now();
+        if vs.wake.is_some_and(|at| at <= now) {
             vs.wake = None;
             vs.dirty = true;
         }
         if let Some(at) = vs.wake {
-            ctx.request_repaint_after(at.saturating_duration_since(std::time::Instant::now()));
+            fx.out.repaint_after(at.saturating_duration_since(now));
         }
         // `bone.ui.refresh_in` and `bone.chat.refresh_in`: a window or an
         // item that changes with the clock asks to be made again. One
         // coming due leaves the other deadline alone.
-        let now = std::time::Instant::now();
         for at in [&mut self.lua.ui_expiry, &mut self.lua.chat_expiry] {
             let Some(t) = *at else { continue };
             if t <= now {
                 *at = None;
                 self.view.dirty = true;
             } else {
-                ctx.request_repaint_after(t - now);
+                fx.out.repaint_after(t - now);
             }
         }
         // Typing, clicks and the like may change what Lua draws.
-        if ctx.input(|i| {
-            i.events.iter().any(|e| {
-                !matches!(
-                    e,
-                    egui::Event::PointerMoved(_)
-                        | egui::Event::MouseWheel { .. }
-                        | egui::Event::PointerGone
-                )
-            })
+        if fx.input.events.iter().any(|e| {
+            !matches!(
+                e,
+                Event::PointerMoved(_) | Event::Wheel { .. } | Event::PointerGone
+            )
         }) {
             self.view.dirty = true;
         }
-        self.wheel(&ctx);
+        self.wheel(fx);
 
         let base = TextStyle {
             color: self
@@ -704,7 +719,7 @@ impl Gui {
             self.draft_rc = Rc::from(self.draft.as_str());
         }
         let fonts = Fonts {
-            ctx: ctx.clone(),
+            shaper: fx.shaper,
             faces: self.view.faces,
             draft: Rc::clone(&self.draft_rc),
             registered: (self.view.bound.extra_fonts.iter())
@@ -742,7 +757,7 @@ impl Gui {
                 &mut windows,
             );
             if again {
-                ctx.request_repaint();
+                fx.out.repaint();
             }
             drop(_realize);
             let _item_place = crate::profile::Span::start("item-place");
@@ -762,7 +777,7 @@ impl Gui {
             self.view.scroll = scroll;
             let _paint = crate::profile::Span::start("paint");
             self.paint(
-                ui,
+                fx,
                 &fonts,
                 &placed,
                 area,
@@ -774,7 +789,9 @@ impl Gui {
             );
             drop(_paint);
         }
-        self.window_units(ui, area, std::mem::take(&mut frame.leaves));
+        self.select_text(fx, &frame.texts);
+        self.tooltip(fx, frame.tooltip.take());
+        self.window_units(fx, area, std::mem::take(&mut frame.leaves));
         // The items in view are kept for the next frame, the rest dropped.
         for (id, win) in windows {
             if let Some(st) = lists.get_mut(&id) {
@@ -785,12 +802,17 @@ impl Gui {
         self.view.bound.tree = Some(tree);
         self.view.hover = frame.hover;
         self.view.pressed = frame.pressed;
-        self.view.input_focus = frame.input_focus;
         let used = std::mem::take(&mut frame.tweened);
         self.view.tweens.retain(|k, _| used.contains(k));
         self.view.hits = frame.hits;
         self.view.input_keys = std::mem::take(&mut frame.input_keys);
-        self.settle_focus(&ctx, frame.focusables, frame.trap, frame.press_focus);
+        // A text input that is not drawn any more has not the keyboard.
+        if let Some(id) = &self.view.input_focus
+            && frame.input_focus.as_ref() != Some(id)
+        {
+            self.view.input_focus = None;
+        }
+        self.settle_focus(fx, frame.focusables, frame.trap, frame.press_focus);
         if !frame.events.is_empty() {
             self.view.dirty = true;
         }
@@ -811,7 +833,7 @@ impl Gui {
         sink: &Sink,
     ) -> Result<Node, String> {
         let (cw, ch) = (self.view.cell)
-            .or_else(|| self.repaint.get().map(cell_size))
+            .or(self.view.mono_cell)
             .unwrap_or((8.0, 16.0));
         let root = Host::call_callback(self, cb, "gui view", |lua| {
             let ctx = lua.create_table()?;
@@ -843,16 +865,23 @@ impl Gui {
     }
 
     /// There is no view (none set, or it failed): say so, in plain text.
-    pub(crate) fn no_view_ui(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn no_view_ui(&mut self, fx: &mut Fx) {
         let why = match &self.view.bound.error {
             Some(e) => format!("The view failed: {e}"),
             None => "No view: set one with bone.gui.view(fn).".to_owned(),
         };
-        ui.add_space(24.0);
-        ui.horizontal(|ui| {
-            ui.add_space(24.0);
-            ui.label(why);
-        });
+        let color = self.group("Normal", false).unwrap_or(TextStyle::default().color);
+        let job = Job::simple(why, RunStyle::plain(Family::Sans, 14.0, color), None);
+        let text = fx.shaper.shape(job);
+        let screen = fx.input.screen;
+        fx.paint(
+            Shape::Text {
+                at: pos(screen.min.x + 24.0, screen.min.y + 24.0),
+                text,
+                color: None,
+            },
+            screen,
+        );
     }
 
     /// The scroll actions (page up, scroll top...) move the node view's

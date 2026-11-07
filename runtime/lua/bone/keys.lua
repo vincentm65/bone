@@ -1,7 +1,7 @@
 -- The standard key bindings, for every frontend: the prompt (the "main"
 -- context), a focused window ("popup") and a focused panel ("panel"). They
 -- name built-in actions, slash commands and Lua functions, so they mean
--- the same in the TUI and the GUI (where egui's text box does the editing
+-- the same in the TUI and the GUI (where the text field does the editing
 -- actions itself). Change them from ui.lua with bone.keymap.set.
 
 -- Enter during a turn queues the message in the core: "steer" joins the

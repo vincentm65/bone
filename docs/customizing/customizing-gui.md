@@ -504,12 +504,11 @@ the face the text would have had, and a native `text_input` does not use it.
 
 ## What the window draws itself
 
-The prompt's text field and selectable text are native, so egui draws their
-cursor, selection and corners; they follow the colorscheme: the groups
-`TextSelection` (bg: selected text, fg: its outline), `Cursor` (fg), `Accent`
-(links), `Panel` (raised surfaces), `WinSeparator` (outlines), `Normal`, and
-the options `widget_radius`, `window_radius` and `scroll_line` (pixels one
-scroll-key line moves the chat). A scheme that sets none gets
+The prompt's text field, text inputs, selectable text and tooltips are drawn
+by the window itself; they follow the colorscheme: the groups
+`TextSelection` (bg: selected text), `Cursor` (fg), `Placeholder` (fg),
+`Panel` and `WinSeparator` (tooltips), `Normal`, and the option
+`scroll_line` (pixels one scroll-key line moves the chat). A scheme that sets none gets
 dark defaults.
 
 A failing view, or no view, shows `bone.gui.fallback`'s: a plain node tree with
@@ -569,9 +568,7 @@ full while the sidebar is closed, rounded and overlapping its edge by the
 corner radius while it is open. A docked sidebar has no fill of its own
 then, so the canvas shows through that column (another fill would stack).
 Text, cards and bubbles stay opaque. On Linux a see-through window needs a
-compositor, or the background is black; on Windows it is DirectX 12 on a
-DirectComposition surface (the only wgpu one that can show through), unless
-`WGPU_BACKEND` or `WGPU_DX12_PRESENTATION_SYSTEM` says otherwise. Blur behind
+compositor, or the background is black. Blur behind
 the window is the compositor's (Hyprland's `decoration:blur`, KWin's rules),
 not bone's.
 

@@ -3,19 +3,18 @@
 //! a node callback is given its anchor instead, and Lua sizes the card.
 
 use bone_ui::lua::drop_callback;
-use eframe::egui::{self, Color32, FontId};
 use mlua::{Lua, Value};
 
 use crate::Gui;
+use crate::backend::text::Shaper;
+use crate::backend::{Rect, Vec2, pos, vec2};
 
-/// A character cell of the monospace font: its advance and the height a
-/// line of it is laid out at.
-pub(crate) fn cell_size(ctx: &egui::Context) -> (f32, f32) {
-    let font = FontId::monospace(egui::TextStyle::Monospace.resolve(&ctx.global_style()).size);
-    let (col, row) = ctx.fonts_mut(|f| {
-        let line = f.layout_no_wrap("M".into(), font.clone(), Color32::WHITE);
-        (f.glyph_width(&font, 'M'), line.size().y)
-    });
+use super::Fx;
+
+/// A character cell of the monospace font at `size`: its advance and the
+/// height a line of it is laid out at.
+pub(crate) fn cell_size(shaper: &dyn Shaper, size: f32) -> (f32, f32) {
+    let (col, row) = shaper.mono_cell(size);
     (col.max(1.0), row.max(1.0))
 }
 
@@ -26,11 +25,11 @@ impl Gui {
     /// are, in pixels.
     pub(super) fn window_units(
         &mut self,
-        ui: &egui::Ui,
-        area: egui::Rect,
-        leaves: Vec<(String, egui::Rect)>,
+        fx: &mut Fx,
+        area: Rect,
+        leaves: Vec<(String, Rect)>,
     ) {
-        let (col, row) = cell_size(ui.ctx());
+        let (col, row) = cell_size(fx.shaper, self.mono_size());
         let first = self.view.cell.is_none();
         self.view.cell = Some((col, row));
         let cols = (area.width() / col).floor().max(1.0) as u16;
@@ -45,14 +44,12 @@ impl Gui {
             // after this frame's tree was built, so ensure that state is
             // reflected on the next frame.
             self.view.invalidate();
-            ui.ctx().request_repaint();
+            fx.out.repaint();
         }
         // Panel callbacks use their last allocated size. Correct the initial
         // estimate (and resizes) on the next build; positions alone do not
         // affect their content. A zero-basis growing panel keeps this stable.
-        fn panel_sizes(
-            leaves: &[(String, egui::Rect)],
-        ) -> impl Iterator<Item = (&str, egui::Vec2)> {
+        fn panel_sizes(leaves: &[(String, Rect)]) -> impl Iterator<Item = (&str, Vec2)> {
             leaves
                 .iter()
                 .filter(|(id, _)| id.starts_with("panel:"))
@@ -64,7 +61,7 @@ impl Gui {
         // Windows are placed by the next build, which asks for them.
         if first || panels_changed {
             self.view.invalidate();
-            ui.ctx().request_repaint();
+            fx.out.repaint();
         }
     }
 
@@ -82,13 +79,13 @@ impl Gui {
             return Ok(out);
         }
         // Before the first frame is drawn the cell is measured here.
-        let Some((col, row)) = self.view.cell.or_else(|| self.repaint.get().map(cell_size)) else {
+        let Some((col, row)) = self.view.cell.or(self.view.mono_cell) else {
             return Ok(out);
         };
         let vs = &self.view;
-        let screen = vs.area.unwrap_or_else(|| {
-            egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(vs.size.0, vs.size.1))
-        });
+        let screen = vs
+            .area
+            .unwrap_or_else(|| Rect::from_min_size(pos(0.0, 0.0), vec2(vs.size.0, vs.size.1)));
         let leaf = |name: &str| {
             (vs.leaves.iter())
                 .find(|(n, r)| n == name && r.width() > 0.0)
@@ -97,9 +94,9 @@ impl Gui {
         let chat = leaf("chat").unwrap_or(screen);
         let prompt_top = leaf("prompt").map_or(screen.max.y, |r| r.min.y);
         // Everything above the prompt, the window's width.
-        let above_prompt = egui::Rect::from_min_max(
-            egui::pos2(screen.min.x, chat.min.y),
-            egui::pos2(screen.max.x, prompt_top.max(chat.min.y)),
+        let above_prompt = Rect::from_min_max(
+            pos(screen.min.x, chat.min.y),
+            pos(screen.max.x, prompt_top.max(chat.min.y)),
         );
         let order: Vec<bone_ui::popup::Popup> = bone_ui::popup::in_order(&self.lua.popups)
             .into_iter()

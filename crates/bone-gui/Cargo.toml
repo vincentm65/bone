@@ -3,7 +3,7 @@ name = "bone-gui"
 description = "Desktop bone client: a native window on the shared bone-ui state"
 version.workspace = true
 edition.workspace = true
-# eframe 0.36 needs 1.95; the rest of the workspace keeps its own minimum.
+# gpui needs a recent toolchain; the rest of the workspace keeps its own minimum.
 rust-version = "1.95"
 
 [dependencies]
@@ -13,8 +13,10 @@ bone-lua.workspace = true
 bone-media.workspace = true
 bone-proto.workspace = true
 bone-ui.workspace = true
-eframe = { version = "=0.36.1", features = ["glow"] }
 gpui = "0.2.2"
+image.workspace = true
+smallvec = "1"
+ttf-parser = "0.25"
 mlua.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }

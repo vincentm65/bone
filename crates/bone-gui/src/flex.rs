@@ -3,7 +3,7 @@
 //! `shrink`, `gap`, `justify` and `align` (`align_self`), `order`, auto
 //! margins, min/max sizes, percentages, aspect ratios, absolute children,
 //! margins, padding and borders. Text is measured through [`Metrics`], so
-//! the solver knows nothing about egui.
+//! the solver knows nothing about the renderer.
 
 use crate::node::{
     Align, Dim, Direction, Edges, Image, Input, Justify, Kind, Node, Overflow, Text, TextInput,
