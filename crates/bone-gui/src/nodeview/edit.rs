@@ -242,7 +242,13 @@ impl crate::Gui {
             }
         }
         let visible = area.intersect(clip);
-        let resp = (self.view.pointer).sense(&format!("field:{key}"), visible, Sense::Drag);
+        // A read-only field leaves the pointer to the node around it (a
+        // tiled chat's draft focuses that chat when pressed).
+        let resp = if look.read_only {
+            Default::default()
+        } else {
+            (self.view.pointer).sense(&format!("field:{key}"), visible, Sense::Drag)
+        };
         if resp.hovered {
             fx.out.cursor = Cursor::Text;
         }

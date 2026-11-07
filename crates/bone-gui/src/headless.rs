@@ -2,26 +2,106 @@
 //! laid out by fixed advances (a char is `size` × 0.6 wide). Used by the
 //! multi-client and conformance tests.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use bone_proto::Connection;
 
-use crate::backend::text::{FixedShaper, FontSet, FontsApplied, Shaper};
+use crate::backend::text::{
+    Family, FixedShaper, FontSet, FontsApplied, Job, Shaped, Shaper, fixed_layout_by,
+};
 use crate::backend::{
     Backend, Button, DrawList, Event, FrameInput, Key, Modifiers, Rect, Shape, pos, vec2,
 };
 use crate::{Gui, GuiOptions};
 
-struct NoWindow;
+/// Fixed advances, except in a Lua-registered family, whose chars take
+/// their widths from its file.
+#[derive(Default)]
+struct NoWindowShaper {
+    /// Per family: each char's advance in ems.
+    families: HashMap<String, HashMap<char, f32>>,
+}
+
+impl Shaper for NoWindowShaper {
+    fn shape(&self, job: Job) -> Arc<Shaped> {
+        let (size, rows) = fixed_layout_by(&job, |style, c| match &style.family {
+            Family::Named(name) => self.families.get(name)?.get(&c).copied(),
+            _ => None,
+        });
+        Arc::new(Shaped {
+            text: job.text.clone(),
+            size,
+            rows,
+            handle: Box::new(job),
+        })
+    }
+
+    fn row_height(&self, family: &Family, size: f32) -> f32 {
+        FixedShaper.row_height(family, size)
+    }
+
+    fn mono_cell(&self, size: f32) -> (f32, f32) {
+        FixedShaper.mono_cell(size)
+    }
+}
+
+/// Each char's advance in ems in font file `bytes`.
+fn advances(bytes: &[u8]) -> Option<HashMap<char, f32>> {
+    let face = ttf_parser::Face::parse(bytes, 0).ok()?;
+    let em = f32::from(face.units_per_em());
+    let mut out = HashMap::new();
+    for c in (' '..='~').chain('\u{a0}'..='\u{17f}') {
+        if let Some(adv) = face.glyph_index(c).and_then(|g| face.glyph_hor_advance(g)) {
+            out.insert(c, f32::from(adv) / em);
+        }
+    }
+    Some(out)
+}
+
+#[derive(Default)]
+struct NoWindow {
+    shaper: NoWindowShaper,
+}
 
 impl Backend for NoWindow {
     fn shaper(&self) -> &dyn Shaper {
-        &FixedShaper
+        &self.shaper
     }
 
-    fn set_fonts(&mut self, _fonts: &FontSet) -> FontsApplied {
-        FontsApplied::default()
+    /// Fonts are read as the window would, so a file that cannot be read
+    /// is reported; only registered families change the layout.
+    fn set_fonts(&mut self, set: &FontSet) -> FontsApplied {
+        let read = |p: &str| std::fs::read(p).ok().and_then(|b| advances(&b));
+        let mut errors = Vec::new();
+        let mut faces = [false; 3];
+        if let Some(p) = &set.mono
+            && read(p).is_none()
+        {
+            errors.push(p.clone());
+        }
+        for (i, p) in set.sans.iter().enumerate() {
+            let Some(p) = p else { continue };
+            match read(p) {
+                Some(_) => faces[i] = true,
+                None => errors.push(p.clone()),
+            }
+        }
+        self.shaper.families.clear();
+        for (name, p) in &set.families {
+            match read(p) {
+                Some(adv) => {
+                    self.shaper.families.insert(name.clone(), adv);
+                }
+                None => errors.push(p.clone()),
+            }
+        }
+        FontsApplied {
+            faces: (faces[1], faces[2]),
+            errors,
+        }
     }
 }
 
@@ -51,6 +131,7 @@ pub struct Headless {
     focused: bool,
     /// Seconds spent in [`Gui::frame`] last [`Headless::frame`].
     pub ui_secs: f64,
+    backend: NoWindow,
 }
 
 impl Headless {
@@ -74,6 +155,7 @@ impl Headless {
             scale: 1.0,
             focused: true,
             ui_secs: 0.0,
+            backend: NoWindow::default(),
         })
     }
 
@@ -85,7 +167,7 @@ impl Headless {
         input.focused = self.focused;
         input.mods = self.mods;
         let started = std::time::Instant::now();
-        let out = self.gui.frame(input, &mut NoWindow);
+        let out = self.gui.frame(input, &mut self.backend);
         self.ui_secs = started.elapsed().as_secs_f64();
         self.painted.clear();
         self.boxes.clear();

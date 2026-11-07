@@ -278,6 +278,12 @@ pub struct FontsApplied {
 /// cell (`size` × 0.6 wide, `size` × 1.25 tall). Wraps at spaces where it
 /// can, else anywhere.
 pub fn fixed_layout(job: &Job) -> (Vec2, Vec<Row>) {
+    fixed_layout_by(job, |_, _| None)
+}
+
+/// [`fixed_layout`] with the advance of some chars known: `advance` gives
+/// a char's width in ems in a run's style, or `None` for the fixed 0.6.
+pub fn fixed_layout_by(job: &Job, advance: impl Fn(&RunStyle, char) -> Option<f32>) -> (Vec2, Vec<Row>) {
     let chars: Vec<(char, f32, f32)> = {
         let mut out = Vec::new();
         for (range, style) in &job.runs {
@@ -285,7 +291,7 @@ pub fn fixed_layout(job: &Job) -> (Vec2, Vec<Row>) {
                 let w = if c == '\n' {
                     0.0
                 } else {
-                    style.size * 0.6 + style.letter_spacing
+                    style.size * advance(style, c).unwrap_or(0.6) + style.letter_spacing
                 };
                 out.push((c, w, style.line_height.unwrap_or(style.size * 1.25)));
             }

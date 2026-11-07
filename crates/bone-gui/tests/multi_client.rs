@@ -304,6 +304,7 @@ async fn a_lagging_gui_reloads_its_chats() {
     // Something only this client has, as if it had applied events wrongly.
     let cur = gui.gui.current;
     gui.gui.chats[cur].notice("stale".into(), false);
+    gui.gui.view.invalidate();
     gui.frame();
     assert!(gui.gui.transcript().contains("stale"));
 
