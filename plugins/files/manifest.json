@@ -1,0 +1,7 @@
+{
+  "title": "Files",
+  "version": "1.0.0",
+  "description": "A file explorer, a file viewer and a text editor for the desktop app: walk the folders, preview Markdown, HTML, PDFs and images, and edit text files",
+  "capabilities": ["command", "tui", "gui"],
+  "min_bone_version": "3.0.4"
+}

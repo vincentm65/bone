@@ -500,8 +500,10 @@ pub fn new_state(side: Side, config_dir: Option<&Path>) -> mlua::Result<Lua> {
     }
     lua.globals().set("bone", &bone)?;
     install_state(&lua, &bone, side, config_dir)?;
-    // bone.fs.list(dir): { { name, type = "file" | "dir" } }, sorted; nil and
-    // an error if it cannot be read.
+    // bone.fs.list(dir): { { name, type = "file" | "dir", size,
+    // modified } }, sorted; nil and an error if it cannot be read. `size` is
+    // in bytes and `modified` is Unix seconds; either may be absent when the
+    // filesystem cannot provide that metadata.
     let fs = lua.create_table()?;
     fs.set(
         "list",
@@ -521,21 +523,35 @@ pub fn new_state(side: Side, config_dir: Option<&Path>) -> mlua::Result<Lua> {
                     );
                 }
             };
-            let mut list: Vec<(String, bool)> = entries
+            let mut list: Vec<(String, bool, Option<u64>, Option<u64>)> = entries
                 .flatten()
                 .map(|e| {
+                    let metadata = e.metadata().ok();
+                    let modified = metadata
+                        .as_ref()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs());
                     (
                         e.file_name().to_string_lossy().into_owned(),
                         e.path().is_dir(),
+                        metadata.as_ref().map(std::fs::Metadata::len),
+                        modified,
                     )
                 })
                 .collect();
             list.sort();
             let out = lua.create_table()?;
-            for (name, is_dir) in list {
+            for (name, is_dir, size, modified) in list {
                 let t = lua.create_table()?;
                 t.set("name", name)?;
                 t.set("type", if is_dir { "dir" } else { "file" })?;
+                if let Some(size) = size {
+                    t.set("size", size)?;
+                }
+                if let Some(modified) = modified {
+                    t.set("modified", modified)?;
+                }
                 out.push(t)?;
             }
             mlua::IntoLuaMulti::into_lua_multi(out, lua)
@@ -1149,6 +1165,25 @@ mod tests {
             lua.load("return bone.side").eval::<String>().unwrap(),
             "tui"
         );
+    }
+
+    #[test]
+    fn fs_list_includes_file_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("note.txt"), b"abc").unwrap();
+        std::fs::create_dir(dir.path().join("folder")).unwrap();
+        let lua = new_state(Side::Tui, None).unwrap();
+        let path = dir.path().to_string_lossy();
+        let (name, size, modified, kind): (String, u64, u64, String) = lua
+            .load(format!(
+                "local x = bone.fs.list({path:?}); return x[2].name, x[2].size, x[2].modified, x[2].type"
+            ))
+            .eval()
+            .unwrap();
+        assert_eq!(name, "note.txt");
+        assert_eq!(size, 3);
+        assert!(modified > 0);
+        assert_eq!(kind, "file");
     }
 
     #[test]

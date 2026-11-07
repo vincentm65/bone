@@ -195,7 +195,7 @@ A project can carry `.bone/ui.lua`, then `.bone/tui.lua` or `.bone/gui.lua` for 
 - `bone.json.encode(value)`, `bone.json.decode(string)`. `bone.json.null` represents JSON null in a Lua table (unlike `nil`, which removes its key).
 - `bone.inspect(value)`: readable dump of any value.
 - `bone.util`: `split(s, sep)`, `trim(s)`, `startswith(s, prefix)`, `extend(t1, t2, ...)`, `front_matter(text)` → `meta, body` for Markdown files that start with `---` / `key: value` lines / `---`.
-- `bone.fs.list(dir)` → `{ { name, type = "file" | "dir" } }`, sorted (`~/` works), or `nil` and an error.
+- `bone.fs.list(dir)` → `{ { name, type = "file" | "dir", size, modified } }`, sorted (`~/` works), or `nil` and an error. `size` is bytes and `modified` is the modification time in Unix seconds; metadata fields may be absent when the filesystem cannot provide them.
 - `bone.docs.list()` → `{ { name, desc } }`, the customization guides (see `docs/customizing.md`); `bone.docs.read(name)` → the guide's text, or `nil` and an error. `name` is the guide's path, such as `customizing/customizing-tui.md`. bone also writes the guides to `~/.bone/docs/` at startup, and the agent's system prompt points it there.
 
 ### Settings
