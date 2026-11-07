@@ -145,8 +145,9 @@ bone.tool.register {
 A Lua tool with the same name as a built-in (`read_file`, `write_file`,
 `edit_file`, `shell`) replaces it. `error()` inside `run` becomes an error
 result for the model. Consecutive read-only calls (`parallel = true`, or
-`readOnlyHint` MCP tools) run at the same time, up to 8; anything else runs in
-order.
+`readOnlyHint` MCP tools) run at the same time, up to 8. The catalog
+`subagent` tool is the exception: its global `subagent.max_concurrent` setting
+controls its fan-out (0 means unlimited). Anything else runs in order.
 
 Inside `run` (and hooks) you can wait without blocking anything else:
 `bone.system(cmd, { cwd, stdin, timeout })` → `{ code, stdout, stderr }`,

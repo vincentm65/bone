@@ -596,7 +596,18 @@ impl Turn<'_> {
                 // call runs on its own, in order.
                 let mut end = i + 1;
                 if self.rt.config.parallel_tools && self.parallel(&calls[i]) {
-                    while end < calls.len() && end - i < MAX_PARALLEL && self.parallel(&calls[end])
+                    // The subagent plugin has its own global concurrency
+                    // limit. Do not impose the generic read-tool batch cap
+                    // on a run consisting of subagent calls, so its setting
+                    // (including 0 = unlimited) actually takes effect.
+                    let subagents = calls[i].name == "subagent";
+                    while end < calls.len()
+                        && self.parallel(&calls[end])
+                        && if subagents {
+                            calls[end].name == "subagent"
+                        } else {
+                            end - i < MAX_PARALLEL
+                        }
                     {
                         end += 1;
                     }
