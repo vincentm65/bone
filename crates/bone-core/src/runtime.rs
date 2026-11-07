@@ -533,6 +533,12 @@ impl Host {
                     Ok(_) => {}
                     Err(broadcast::error::RecvError::Lagged(_)) => {
                         let s = session.lock().unwrap();
+                        if let Some((t, o)) = &s.last_outcome
+                            && *t == turn_id
+                        {
+                            break serde_json::to_value(o).map_err(|e| e.to_string())?;
+                        }
+                        // Ended, and a later turn overwrote the outcome.
                         if s.active.as_ref().map(|a| a.turn_id) != Some(turn_id) {
                             break json!({ "status": "completed" });
                         }
@@ -550,9 +556,8 @@ impl Host {
                 .iter()
                 .rev()
                 .find_map(|m| match m {
-                    ChatMessage::Assistant { content, .. } if !content.is_empty() => {
-                        Some(content.clone())
-                    }
+                    // The closing reply, even empty: earlier text is narration.
+                    ChatMessage::Assistant { content, .. } => Some(content.clone()),
                     ChatMessage::User { .. } => Some(String::new()),
                     _ => None,
                 })
@@ -600,6 +605,10 @@ impl Host {
         let op = spec["op"].as_str().unwrap_or_default();
         // The queue (bone.queue): no turn restrictions, and its own event.
         match op {
+            "info" => {
+                return serde_json::to_value(&session.lock().unwrap().info)
+                    .map_err(|e| e.to_string());
+            }
             "queue_list" => {
                 let s = session.lock().unwrap();
                 return serde_json::to_value(&s.queue).map_err(|e| e.to_string());

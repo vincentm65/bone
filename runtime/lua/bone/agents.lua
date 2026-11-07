@@ -68,11 +68,11 @@ function M.spend(top)
   return n
 end
 
+-- Known at creation, but listed as running only once a turn starts: a
+-- child whose start failed would otherwise show as running forever.
 bone.on("session/created", function(info)
   local a = M.add(info)
-  if a then
-    a.status, a.started_at, a.first_turn = "running", bone.now(), 0
-  end
+  if a then a.first_turn = 0 end
 end)
 
 bone.on("turn/started", function(ev)
@@ -129,6 +129,9 @@ for _, event in ipairs({ "session/compacted", "session/compact_failed", "turn/fi
 end
 
 bone.on("session/deleted", function(ev)
+  for call, id in pairs(by_call) do
+    if id == ev.session_id then by_call[call] = nil end
+  end
   agents[ev.session_id] = nil
 end)
 

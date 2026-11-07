@@ -115,6 +115,7 @@ pub(crate) async fn run_turn(
     };
     let resumed = {
         let mut s = session.lock().unwrap();
+        s.last_outcome = Some((turn_id, outcome.clone()));
         match s.active.take_if(|a| a.turn_id == turn_id) {
             Some(a) => a.after_cancel > 0,
             None => false,
@@ -597,17 +598,15 @@ impl Turn<'_> {
                 let mut end = i + 1;
                 if self.rt.config.parallel_tools && self.parallel(&calls[i]) {
                     // The subagent plugin has its own global concurrency
-                    // limit. Do not impose the generic read-tool batch cap
-                    // on a run consisting of subagent calls, so its setting
-                    // (including 0 = unlimited) actually takes effect.
+                    // limit. Keep subagent calls in batches of their own,
+                    // without the generic read-tool cap, so its setting
+                    // (including 0 = unlimited) actually takes effect even
+                    // when reads and subagent calls share one reply.
                     let subagents = calls[i].name == "subagent";
                     while end < calls.len()
                         && self.parallel(&calls[end])
-                        && if subagents {
-                            calls[end].name == "subagent"
-                        } else {
-                            end - i < MAX_PARALLEL
-                        }
+                        && (calls[end].name == "subagent") == subagents
+                        && (subagents || end - i < MAX_PARALLEL)
                     {
                         end += 1;
                     }

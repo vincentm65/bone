@@ -359,6 +359,9 @@ async fn standard_agents_spend_is_separate_and_scoped_to_root() {
             .unwrap(),
         )
         .await;
+        // Usage only arrives inside a turn; an agent is listed (and its
+        // spend counted) once one starts, not at creation.
+        h.emit::<TurnStarted>(started(id, "go")).await;
     }
     for (id, input, output) in [
         ("child", 100, 10),

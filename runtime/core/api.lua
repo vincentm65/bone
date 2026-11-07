@@ -164,6 +164,7 @@ function bone.system(cmd, opts)
 end
 
 --- A session's transcript, for hooks and tools (they wait without blocking):
+---   bone.session.info(id)              -> its info (title, cwd, owner, …)
 ---   bone.session.messages(id)          -> the full stored transcript
 ---   bone.session.snapshot(id)          -> { info, messages, raw_messages, summary,
 ---                                        model, active_turn, generation }, one snapshot
@@ -196,6 +197,9 @@ local function session_op(op, id, extra)
   local spec = extra or {}
   spec.op, spec.id = op, id
   return wait({ session = spec })
+end
+function bone.session.info(id)
+  return session_op("info", id)
 end
 function bone.session.messages(id)
   return session_op("messages", id)

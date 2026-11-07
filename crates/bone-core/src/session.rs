@@ -130,6 +130,8 @@ pub struct Session {
     /// in the transcript.
     pub generation: u64,
     pub active: Option<ActiveTurn>,
+    /// The last finished turn, for waiters whose turn/finished event lagged.
+    pub last_outcome: Option<(TurnId, bone_proto::types::TurnOutcome)>,
     /// The running turn is between model calls, where Lua may add to the
     /// transcript or compact it (never between tool calls and results).
     pub safe_point: bool,
@@ -498,6 +500,7 @@ impl SessionStore {
             compacting: false,
             generation: 0,
             active: None,
+            last_outcome: None,
             safe_point: false,
             model,
             tool_times: BTreeMap::new(),
