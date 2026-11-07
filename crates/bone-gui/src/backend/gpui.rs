@@ -131,7 +131,9 @@ impl GpuiShaper {
             strikethrough: None,
         };
         let layout = self.text.layout_line(text, px(st.size), &[tr], None);
-        let (ascent, descent) = (f32::from(layout.ascent), f32::from(layout.descent));
+        // The run's own font's metrics, not a fallback's: a row is as tall
+        // as `row_height` says, whatever glyphs it borrows.
+        let (_, ascent, descent) = self.metrics(st);
         // Where each char starts: the first glyph at its byte, else where
         // the line says.
         let mut at: HashMap<usize, f32> = HashMap::new();
@@ -178,10 +180,20 @@ impl GpuiShaper {
 
     /// The height of a line of `st`, and its ascent and descent.
     fn metrics(&self, st: &RunStyle) -> (f32, f32, f32) {
-        let font = self.text.resolve_font(&self.font(st));
-        let a = f32::from(self.text.ascent(font, px(st.size)));
-        let d = f32::from(self.text.descent(font, px(st.size)));
-        (st.line_height.unwrap_or(a + d), a, d)
+        // From a shaped line, as the glyphs are placed: the font's own
+        // figures can disagree with them.
+        let tr = TextRun {
+            len: 2,
+            font: self.font(st),
+            color: hsla(st.color),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let layout = self.text.layout_line("Mg", px(st.size), &[tr], None);
+        let a = f32::from(layout.ascent).abs();
+        let d = f32::from(layout.descent).abs();
+        (st.line_height.unwrap_or((a + d).ceil()), a, d)
     }
 }
 

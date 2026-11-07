@@ -192,6 +192,30 @@ impl Root {
         }
     }
 
+    fn key_down(&mut self, e: &KeyDownEvent, cx: &mut Context<Self>) {
+        let m = mods(&e.keystroke.modifiers);
+        let k = &e.keystroke;
+        self.mods = m;
+        // ctrl+v and shift+insert paste the clipboard's text.
+        let paste = (k.key == "v" && m.command() && !m.alt && !m.shift)
+            || (k.key == "insert" && m.shift && !m.ctrl);
+        if paste && let Some(t) = cx.read_from_clipboard().and_then(|c| c.text()) {
+            self.push(Event::Paste(t.replace("\r\n", "\n")), cx);
+            return;
+        }
+        if let Some(key) = key_of(&k.key) {
+            self.push(
+                Event::Key {
+                    key,
+                    pressed: true,
+                    repeat: e.is_held,
+                    mods: m,
+                },
+                cx,
+            );
+        }
+    }
+
     fn push(&mut self, e: Event, cx: &mut Context<Self>) {
         self.events.push(e);
         cx.notify();
@@ -466,6 +490,30 @@ impl Render for Root {
         div()
             .size_full()
             .track_focus(&self.focus)
+            // Keys go along the focus: they are heard on the focused box.
+            .on_key_down(cx.listener(|root, e: &KeyDownEvent, _window, cx| root.key_down(e, cx)))
+            .on_key_up(cx.listener(|root, e: &KeyUpEvent, _window, cx| {
+                let m = mods(&e.keystroke.modifiers);
+                if let Some(key) = key_of(&e.keystroke.key) {
+                    root.mods = m;
+                    root.push(
+                        Event::Key {
+                            key,
+                            pressed: false,
+                            repeat: false,
+                            mods: m,
+                        },
+                        cx,
+                    );
+                }
+            }))
+            .on_modifiers_changed(cx.listener(|root, e: &ModifiersChangedEvent, _window, cx| {
+                let m = mods(&e.modifiers);
+                if root.mods != m {
+                    root.mods = m;
+                    cx.notify();
+                }
+            }))
             .on_drop(cx.listener(|root, paths: &ExternalPaths, _window, cx| {
                 for p in paths.paths() {
                     root.events.push(Event::DroppedFile(p.clone()));
@@ -490,66 +538,6 @@ impl Render for Root {
 /// of the next frame.
 fn listen(this: &Entity<Root>, window: &mut Window) {
     use gpui::DispatchPhase::Bubble;
-    let r = this.clone();
-    window.on_key_event(move |e: &KeyDownEvent, phase, _window, cx| {
-        if phase != Bubble {
-            return;
-        }
-        let m = mods(&e.keystroke.modifiers);
-        let k = &e.keystroke;
-        // ctrl+v and shift+insert paste the clipboard's text.
-        let paste = (k.key == "v" && m.command() && !m.alt && !m.shift)
-            || (k.key == "insert" && m.shift && !m.ctrl);
-        if paste && let Some(t) = cx.read_from_clipboard().and_then(|c| c.text()) {
-            let t = t.replace("\r\n", "\n");
-            r.update(cx, |root, cx| root.push(Event::Paste(t), cx));
-            return;
-        }
-        let Some(key) = key_of(&k.key) else { return };
-        r.update(cx, |root, cx| {
-            root.mods = m;
-            root.push(
-                Event::Key {
-                    key,
-                    pressed: true,
-                    repeat: e.is_held,
-                    mods: m,
-                },
-                cx,
-            )
-        });
-    });
-    let r = this.clone();
-    window.on_key_event(move |e: &KeyUpEvent, phase, _window, cx| {
-        if phase != Bubble {
-            return;
-        }
-        let m = mods(&e.keystroke.modifiers);
-        if let Some(key) = key_of(&e.keystroke.key) {
-            r.update(cx, |root, cx| {
-                root.mods = m;
-                root.push(
-                    Event::Key {
-                        key,
-                        pressed: false,
-                        repeat: false,
-                        mods: m,
-                    },
-                    cx,
-                )
-            });
-        }
-    });
-    let r = this.clone();
-    window.on_modifiers_changed(move |e: &ModifiersChangedEvent, _window, cx| {
-        let m = mods(&e.modifiers);
-        r.update(cx, |root, cx| {
-            if root.mods != m {
-                root.mods = m;
-                cx.notify();
-            }
-        });
-    });
     let r = this.clone();
     window.on_mouse_event(move |e: &MouseMoveEvent, phase, _window, cx| {
         if phase == Bubble {
