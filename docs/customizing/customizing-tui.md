@@ -127,7 +127,8 @@ bone.hl.names()
 Roles every colorscheme defines, for plugins to color with: `Normal Dim
 Accent Success WarningMsg ErrorMsg Selection DiffAdd DiffDelete`. Named
 groups used by the standard UI: `Normal Dim Accent Success UserPrompt
-UserMessage Reasoning ToolName ToolArgs ToolPath ToolSummary ToolOutput
+UserMessage InputBackground InputText InputPrompt InputAdded InputRemoved
+Reasoning ToolName ToolArgs ToolPath ToolSummary ToolOutput
 ToolGutter ToolRunning ToolError DiffAdd DiffDelete ShellProgram ShellPath
 ShellFlag ShellString ShellVariable ShellComment ShellOperator MdHeading
 MdBold MdItalic MdCode MdCodeBlock MdQuote MdBullet MdLink Notice ErrorMsg
