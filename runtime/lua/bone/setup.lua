@@ -79,7 +79,7 @@ end
 --- ("rpc error -32602: runtime error: …").
 function M.plain_error(err)
   local s = tostring(err or "unknown error")
-  s = s:gsub("^rpc error %-?%d+: ", ""):gsub("^runtime error: ", "")
+  s = s:gsub("rpc error %-?%d+: ", ""):gsub("runtime error: ", "")
   return s
 end
 

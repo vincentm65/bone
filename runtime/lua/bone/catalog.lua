@@ -319,7 +319,9 @@ function M.install(entry, cb)
       return cb(true)
     end
     switch(name, files, true, function(loaded, why)
-      cb(loaded, why and ("installed, but loading failed: " .. tostring(why)) or nil)
+      -- Without the RPC and Lua wrapping ("rpc error -32602: runtime error: …").
+      why = why and tostring(why):gsub("rpc error %-?%d+: ", ""):gsub("runtime error: ", "")
+      cb(loaded, why and ("installed, but loading failed: " .. why) or nil)
     end)
   end
   local function next_file()

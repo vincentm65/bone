@@ -496,6 +496,14 @@ pub fn new_state(side: Side, config_dir: Option<&Path>) -> mlua::Result<Lua> {
     let lua = Lua::new();
     #[cfg(target_os = "android")]
     lua.load("jit.off()").exec()?;
+    // os.getenv reads the process environment, as Rust sees it. The C
+    // runtime's getenv on Windows keeps its own copy from startup, so it
+    // would not see what bone sets later (HOME, from USERPROFILE).
+    let os: Table = lua.globals().get("os")?;
+    os.set(
+        "getenv",
+        lua.create_function(|_, name: String| Ok(std::env::var(name).ok()))?,
+    )?;
     let bone = lua.create_table()?;
     bone.set("side", side.name())?;
     bone.set("version", env!("CARGO_PKG_VERSION"))?;
