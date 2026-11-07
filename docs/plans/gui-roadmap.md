@@ -41,9 +41,9 @@ that behaves differently in the GUI is a bug.
   capabilities.
 - **Extraction is a move, not a rewrite.** Code moved out of `bone-tui` keeps
   its behavior; existing TUI tests pass unchanged.
-- **GPU acceleration is an implementation detail.** Prefer an iGPU through a
-  `wgpu`-backed renderer, but retain a software fallback and never require a
-  specific GPU.
+- **GPU acceleration is an implementation detail.** The renderer (GPUI) uses
+  whatever GPU the window system draws on and redraws only when something
+  changed; never require a specific GPU.
 
 ## Where the code is today
 
@@ -260,20 +260,20 @@ cols/rows; the GUI computes them from the area and font metrics.
 
 ## Toolkit selection
 
-The leading candidate is **egui** (eframe, `wgpu` with the `glow` backend as
-fallback). The TUI already draws a retained Lua tree with an immediate-mode
-renderer — ratatui redraws every frame, Lua output is cached by
-`rev`/`item_rev` — so egui matches `render.rs` most closely, and it has
-AccessKit and IME. `iced` is the alternative. The spike *is* the Phase 2
-vertical slice, not a separate prototype; the main thing it must prove is
-text selection across a long, virtualized transcript. Judge it against:
+The GUI is drawn with **GPUI** (Zed's GPU UI framework, from crates.io). It
+renders instanced quads, shadows, paths and a glyph atlas on the GPU (Vulkan
+on Linux, Metal on macOS, DirectX on Windows) and draws a frame only when
+the view is notified, so an idle window costs nothing. The GUI keeps its
+own backend-neutral core (`crates/bone-gui/src/backend`): a frame's input in
+bone's own types, a draw list of shapes, a text shaper trait, its own
+pointer state machine and its own text field, so the toolkit is replaceable
+and the headless tests run without a window. Judged against:
 
 - driving a retained tree from Lua without re-running Lua callbacks every frame;
 - text selection across a long, virtualized transcript;
 - streaming deltas into a 10k-item transcript at 60 fps;
 - IME and bidirectional text;
-- accessibility (AccessKit or equivalent);
-- software rendering fallback and adapter diagnostics;
+- GPU cost while idle and while streaming;
 - Linux (X11 and Wayland), macOS, and Windows.
 
 The toolkit draws `bone-ui` values; it never owns layout semantics. Keep the
@@ -367,8 +367,7 @@ its old path; ratatui and crossterm conversions live in `bone-tui`'s
 
 ### Phase 2: GUI vertical slice (and toolkit spike)
 
-Start once Phase 1 step 5 (the chat reducer) lands. Build on egui first; if
-the spike criteria fail, switch to `iced` before going further. Record the
+Start once Phase 1 step 5 (the chat reducer) lands. Record the toolkit
 decision here.
 
 Create `crates/bone-gui`:
@@ -385,7 +384,7 @@ Create `crates/bone-gui`:
 
 **Exit condition:** the multi-client tests pass with one TUI and one GUI.
 
-**Status:** done. `crates/bone-gui` (egui/eframe 0.36, Rust 1.95 for that
+**Status:** done. `crates/bone-gui` (GPUI 0.2, Rust 1.95 for that
 crate only), opened with `bone --gui` from a binary built with
 `--features gui`; the default build does not include it.
 `crates/bone-gui/tests/multi_client.rs` covers multi-client cases 1–7 (6
@@ -393,21 +392,20 @@ through a proxy that drops the GUI's connection while the core keeps
 running). Along the way, `bone_ui::chat::apply_event` and `bare_text`
 became shared, so both frontends apply transcript events the same way.
 
-**Toolkit decision: egui.** Against the spike criteria:
+**Toolkit decision: GPUI.** Against the criteria:
 
 | Criterion | Result |
 | --- | --- |
-| Retained tree, Lua not re-run per frame | Yes: rows are cached per item by `rev` in `ChatBuffer<L>`, as in the TUI; frames draw cached rows. |
-| Streaming into a 10k-item transcript at 60 fps | Yes: 10k items, release build, headless (layout, no GPU paint): first frame 10 ms (wraps everything), then 0.6 ms per frame idle or streaming a delta. |
-| Text selection across a long, virtualized transcript | Partly: rows are selectable labels and egui selects across labels, but rows scrolled out of `show_rows` drop out of a selection. Needs a transcript widget that keeps selection by item and offset (Phase 4). |
-| IME | Through winit (untested here: no display). |
-| Bidirectional text | Not supported by egui's text layout; would need `parley` or `cosmic-text` (Phase 4 decision). |
-| Accessibility | AccessKit, on by default in eframe. |
-| Software fallback, diagnostics | wgpu with a low-power adapter by default; wgpu's GL backend covers Mesa's software rasterizer, and eframe's glow renderer is tried if wgpu fails. The renderer is shown in the status line; adapter details are Phase 4. |
-| Linux (X11, Wayland), macOS, Windows | Supported by eframe; only Linux builds have been run. |
+| Retained tree, Lua not re-run per frame | Yes: Lua builds the node tree only when something changed; list items are cached per item by `rev`, as in the TUI. |
+| Streaming into a 10k-item transcript at 60 fps | Yes: headless frames stay in the low milliseconds idle and while streaming (`tests/perf.rs`). |
+| Text selection across a long, virtualized transcript | Partly: drag-selection spans the text painted in view; rows scrolled out of the list drop out of a selection. |
+| IME | Through GPUI's input handler (preedit and commit). |
+| Bidirectional text | Not handled by the GUI's own text layout. |
+| GPU cost | No frame is drawn while nothing changes; about 235 MB of VRAM and a low share of the GPU while typing or streaming. |
+| Linux (X11, Wayland), macOS, Windows | Supported by GPUI; built and tested headless on all three in CI (`gui-build.yml`). |
 
 Bidirectional text and cross-scroll selection are the two known gaps; both
-sit behind the transcript widget, which the adapter keeps replaceable.
+sit behind the transcript widget, which the backend keeps replaceable.
 
 **Found along the way:** the TUI applies replies and server events from two
 channels (`tokio::select!`), so a `session/messages` reply can overtake
@@ -498,7 +496,7 @@ The GUI lays its window out with `bone.ui.layout` and draws every leaf,
 window and docked panel; the standard sessions panel (`ctrl+o`), the slash
 commands and the `/` menu run there, so its own sidebar is gone. Keys go to
 the shared engine when it has something to do with them and otherwise to
-egui's text box (input methods, selection and native editing); Lua's
+the GUI's own text field (input methods, selection and editing); Lua's
 `bone.ui.actions` see editing keys first. Pointer presses, drags and the
 wheel become the same `mouse` events by character cell. `bone.o.font` and
 `font_size` set the font; the status line names the renderer and adapter
@@ -510,7 +508,7 @@ the TUI unchanged): the standard key bindings (`bone/keys.lua`), and
 
 Left for later: the GUI's prompt cursor and range editing ops (its text box
 keeps its own cursor), prompt images and history, chat scrolling from keys,
-jobs, and an AccessKit pass over the Lua-drawn rows.
+and jobs.
 
 ### Phase 5: plugin and configuration ecosystem
 
@@ -543,8 +541,7 @@ writing a plugin for both frontends.
 Not done here: porting catalog packages from `tui.lua` to `ui.lua` happens
 in the bone-catalog repository; native OS notifications and file dialogs
 need new dependencies (for example `notify-rust`, `rfd`) and wait for that
-decision; the `gui.terminal` widget, images, and an AccessKit pass over
-Lua-drawn rows are left for Phase 6.
+decision; the `gui.terminal` widget and images are left for Phase 6.
 
 ### Phase 6: production hardening
 
@@ -565,11 +562,8 @@ Lua-drawn rows are left for Phase 6.
 - **Resize and HiDPI:** the GUI fires `resize` when its cell grid changes.
   `lua_host.rs` checks that a resized window and a 2x scale give the right
   columns and rows.
-- **Renderer:** wgpu is tried first, then Glow, and the adapter is reported
-  in `/health` with a warning for a software adapter. egui-wgpu already
-  reconfigures an outdated surface and recreates a lost one. eframe 0.36
-  does not expose device loss, so losing the device is fatal and the next
-  launch picks a renderer again.
+- **Renderer:** GPUI picks the platform's GPU backend and handles surface
+  changes and device loss itself; `/health` names the renderer.
 - **Performance:** measured headless with the standard Lua views on 4000
   items: the first frame takes 385 ms, idle frames 0.48 ms, and frames while
   streaming 1.37 ms. The first frame is slow because every item renders
@@ -583,15 +577,13 @@ Lua-drawn rows are left for Phase 6.
   `Host` design.
 
 Since then: the chat renders the visible items first and the rest within a
-25 ms frame budget (first frame 27 ms for 4000 items); a lost GPU device
-reopens the window with the same session; wide, fallback and combining
+25 ms frame budget (first frame 27 ms for 4000 items); wide, fallback and combining
 characters keep the cell grid; the prompt takes images (`/attach`, dropped
-files, alt+v or `/paste`; egui keeps ctrl+v for text), and a row naming an
+files, alt+v or `/paste`; ctrl+v pastes text), and a row naming an
 image previews it on hover and opens it on click.
 
 Since then (Phases 7 and 8): `bone.job` and the process tracking moved to
-`bone-ui`; `/term` opens terminals in panels; AccessKit labels cover the
-rows Lua paints; notifications and file dialogs are in (`notify-rust`,
+`bone-ui`; `/term` opens terminals in panels; notifications and file dialogs are in (`notify-rust`,
 `rfd` through the XDG portal).
 
 ### Phase 7: parity with the TUI
@@ -683,5 +675,5 @@ its own file (`tui.lua`, `gui.lua`); `ui.lua` is for both.
   `gui.lua`, rather than silently running incompatible code.
 - **Text rendering complexity.** Use the toolkit's text stack; postpone a
   custom GPU text renderer until profiling justifies it.
-- **GPU availability.** Treat `wgpu` acceleration as opportunistic and show a
-  diagnostic when the fallback is active.
+- **GPU availability.** GPUI needs a GPU backend (Vulkan, Metal or
+  DirectX); `/health` names the renderer in use.

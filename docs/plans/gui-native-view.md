@@ -4,7 +4,7 @@
 
 The GUI stops drawing a character grid. Lua describes the window as a tree of
 nodes with CSS-like styles (flex rows and columns, padding, borders, radii,
-pixel sizes, fonts, images), and Rust lays it out and paints it with egui.
+pixel sizes, fonts, images), and Rust lays it out and paints it with GPUI.
 Everything is customizable from Lua, with no hardcoded chrome.
 
 The TUI and the GUI share the core, the protocol, and the *behavior* layer:
@@ -18,7 +18,7 @@ format. The TUI is unchanged throughout.
 - **Opt-in until it replaces the grid.** `bone.gui.view(fn)` turns the node
   renderer on; without it the old grid screen is drawn, so every phase leaves
   a working GUI.
-- **The layout solver is pure Rust** (no egui), testable with fake text
+- **The layout solver is pure Rust** (no GPUI), testable with fake text
   metrics.
 - **Behavior stays shared.** Keys, commands and options keep working through
   `bone-ui`; the node view only changes how things are laid out and drawn.
@@ -56,7 +56,7 @@ Colors are `#rgb`/`#rrggbb`, or a highlight group name (its background for
 - `node.rs` parses a Lua table into a typed tree and resolves colors.
 - `flex.rs` is the solver: intrinsic sizes, grow/shrink, gaps, alignment,
   min/max, percentages, over a `Metrics` trait for text.
-- `paint.rs` measures text with egui and paints boxes, borders, radii, text
+- `paint.rs` measures text through the backend's shaper and paints boxes, borders, radii, text
   and clipping.
 - `bone.gui.view(fn)` registers the root function (`fn(ctx)` with `ctx =
   { width, height }` in pixels returns the root node); `Gui::ui` draws it
@@ -145,6 +145,7 @@ done: docked panels of `lines` (a `/term` panel) are not drawn in the GUI.
 
 - **Per-frame Lua cost** on large trees: addressed in phase 3; phase 1 only
   proves the model on small views.
-- **Text selection and bidirectional text** remain egui limits.
+- **Bidirectional text** is not handled by the GUI's own text field and
+  selection.
 - **API size**: CSS has a lot of surface. Add fields only when a screen needs
   them.

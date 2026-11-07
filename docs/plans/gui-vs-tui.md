@@ -20,8 +20,8 @@ to change.
 | Layer | TUI only | GUI only |
 |---|---|---|
 | Application struct, `Host` impl | `bone_tui::App` | `bone_gui::Gui` (about 880 lines of accessor plumbing each) |
-| Drawing | ratatui cell buffer; terminal escape handling | egui; proportional text, rounded boxes, images, shadows |
-| Input | crossterm keys and mouse; terminal clipboard helper | winit/egui keys, native text editing, IME, drag and drop |
+| Drawing | ratatui cell buffer; terminal escape handling | GPUI; proportional text, rounded boxes, images, shadows |
+| Input | crossterm keys and mouse; terminal clipboard helper | GPUI keys, the GUI's own text editing, IME, drag and drop |
 | Own Lua ops | `bone.tui` | `bone.gui`: window, notifications, file dialogs, library switch |
 | Own Lua files | `tui.lua`, `runtime/tui/` | `gui.lua`, `runtime/gui/` |
 | Looks (default library) | `runtime/lua/bone/ui/` ("standard") | `runtime/lua/bone/desktop/` ("desktop"), separate colorscheme and views |

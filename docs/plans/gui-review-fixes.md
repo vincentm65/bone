@@ -4,7 +4,7 @@ Date: 2026-10-26. Scope: the working-tree review and subsequent sequential UX
 verification, not the separate GUI cleanup/performance plan.
 
 **Status: all seven fixes are implemented** (working tree, 2026-10-26). Each
-was checked through the headless GUI's normal egui pass or the core's RPC
+was checked through the headless GUI's normal input pass or the core's RPC
 harness with throwaway checks, not committed regression tests. The six visible
 UX scenarios have not been re-run against a new release binary.
 
@@ -127,9 +127,9 @@ Local fixture: `table-stream/` under the UX cache directory.
 
 - `crates/bone-gui/src/keys.rs:352–367`: pointer event routing.
 - `crates/bone-gui/src/view.rs`: `Gui::ui` routing order.
-- `crates/bone-gui/src/nodeview/paint.rs`: egui responses and node callbacks.
+- `crates/bone-gui/src/nodeview/paint.rs`: pointer responses and node callbacks.
 
-Removing handled pointer events from `InputState.events` is too late: egui has
+Removing handled pointer events from `InputState.events` is too late: the toolkit had
 already derived pointer state and interaction results before `route_keys()`
 runs. The return value for intercepted drag events is also ignored.
 
@@ -139,7 +139,7 @@ enabled a `bone.on("mouse", ...)` handler returning true, a second real click
 was seen as down/up by that handler, but all three node counters increased to 2.
 Expected: the node counters stay at 1.
 
-**Repair:** consume events before egui derives interactions, or explicitly
+**Repair:** consume events before pointer interactions are derived, or explicitly
 suppress native/node interaction for consumed gestures. Filtering the event
 vector alone is not sufficient. Preserve coherent press/drag/release state when
 an intercepted gesture starts or ends.
@@ -151,7 +151,7 @@ an intercepted gesture starts or ends.
   but the underlying node does not activate.
 - Cover consumed drags and verify no stuck pressed/capture state after release.
 - Check relevant native text-editor pointer interactions as well as node buttons.
-- Tests must run through egui's normal input pass, not only call the shared mouse
+- Tests must run through the GUI's normal input pass, not only call the shared mouse
   dispatch function directly.
 
 Local fixture: `mouse-intercept/`.

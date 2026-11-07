@@ -940,7 +940,7 @@ async fn terminal_shortcuts_focus_the_visible_panel() {
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 
-/// winit can emit both an Alt-modified key and its text. The text must
+/// The window system can emit both an Alt-modified key and its text. The text must
 /// not become the second key of a window-manager prefix (Alt+W then W).
 #[tokio::test(flavor = "multi_thread")]
 async fn alt_prefix_does_not_consume_its_own_text() {

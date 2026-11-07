@@ -65,8 +65,8 @@ whose file was briefly missing never loads again until restart.
 - Each `Ready` entry records `last_used: Instant` (set in `pixels()`) and its
   byte size (`tex.size()` × 4). After a frame, if the total exceeds a budget
   (`const BUDGET: usize = 256 << 20`), drop the least recently used entries
-  until under it. Dropping the last `TextureHandle` frees the texture in
-  egui, and the next `pixels()` call re-decodes off-thread as it does today.
+  until under it. Dropping the last image handle frees it in the
+  renderer, and the next `pixels()` call re-decodes off-thread as it does today.
 - `Failed` stores its `Instant` and counts as missing after 5 s.
 
 No other file changes: `pixels()` is the only entry point, and the sweep runs
@@ -189,7 +189,7 @@ file is not loaded.
 
 **Proposed change.** This changes behavior, so it needs a decision:
 
-- **Recommended: check on window focus.** When egui reports the window gained
+- **Recommended: check on window focus.** When the window reports it gained
   focus, hash the sources once (in `spawn_blocking`) and reload if changed.
   Editing in another window and clicking back reloads immediately, with no
   timer and no idle wakeups. By then the save has long settled, so `Watcher`'s
@@ -363,7 +363,7 @@ Done and checked (`cargo clippy --workspace --all-targets` clean,
   table once instead of ~90 times per node saved only ~17% of that.
 - **`node.rs` parsing** now reads a table once (`Props`), and names enums once
   (`names!`) instead of at each use: -80 lines.
-- **Canvas** ops are egui shapes made when the draw function's result is read
+- **Canvas** ops are draw-list shapes made when the draw function's result is read
   (`Op::Shape`), not six kinds painted by hand.
 
 #11 turned out to have users: `/setup` (which opens by itself on a first run),
