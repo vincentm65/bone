@@ -1,7 +1,7 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-exclude = ["crates/bone-fake-provider"]
+exclude = ["crates/bone-fake-provider", "crates/bone-gui/vendor/xattr"]
 
 [workspace.package]
 version = "3.0.4"
@@ -38,6 +38,11 @@ similar = "2"
 tempfile = "3"
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v7"] }
+
+# gpui 0.2.2 pulls xattr 0.2, which names libc::ENOATTR, gone on Linux from
+# current libc; the vendored copy uses ENODATA there.
+[patch.crates-io]
+xattr = { path = "crates/bone-gui/vendor/xattr" }
 
 [profile.release]
 lto = "thin"
