@@ -31,6 +31,10 @@ pub(crate) struct ListState {
     chat: HashMap<bone_ui::chat::Item, Rc<Node>>,
     /// The running item made last, and when: see [`STREAM_EVERY`].
     streamed: Option<(bone_ui::chat::Item, Instant)>,
+    /// The total height, kept as it is read every frame: measuring adds
+    /// each change; whatever changes the list's shape drops it. f64, so the
+    /// changes added up do not drift.
+    total: Option<f64>,
 }
 
 impl ListState {
@@ -47,6 +51,7 @@ impl ListState {
         let est = self.estimate.max(1.0);
         self.heights.splice(0..0, std::iter::repeat_n(est, n));
         self.measured.splice(0..0, std::iter::repeat_n(false, n));
+        self.total = None;
         // Made nodes go by index.
         self.nodes.clear();
         if let Some(sc) = scroll {
@@ -54,6 +59,20 @@ impl ListState {
             sc.offset += moved;
             sc.max += moved;
         }
+    }
+
+    /// The list's total height, with estimates for items not measured yet.
+    /// Summed only when not kept, or when `count` is not what is kept.
+    fn total_for(&mut self, count: usize, estimate: f32, gap: f32) -> f32 {
+        let same = count == self.heights.len() && (estimate, gap) == (self.estimate, self.gap);
+        if let (true, Some(t)) = (same, self.total) {
+            return t as f32;
+        }
+        let known: f64 = self.heights.iter().take(count).map(|&h| h as f64).sum();
+        let unknown = count.saturating_sub(self.heights.len()) as f64 * estimate as f64;
+        let t = known + unknown + gap as f64 * count.saturating_sub(1) as f64;
+        self.total = if same { Some(t) } else { self.total };
+        t as f32
     }
 }
 
@@ -129,14 +148,9 @@ pub(super) type Windows = HashMap<String, Window>;
 /// Each list's total height, from what has been measured of it.
 pub(super) fn set_totals(n: &mut Node, lists: &mut HashMap<String, ListState>) {
     if let (Kind::List(l), Some(id)) = (&mut n.kind, &n.id) {
-        let gaps = l.gap * l.count.saturating_sub(1) as f32;
-        l.total = match lists.get(id).filter(|st| st.key == l.key) {
-            Some(st) => {
-                let known: f32 = st.heights.iter().take(l.count).sum();
-                let unknown = l.count.saturating_sub(st.heights.len()) as f32 * l.estimate;
-                known + unknown + gaps
-            }
-            None => l.count as f32 * l.estimate + gaps,
+        l.total = match lists.get_mut(id).filter(|st| st.key == l.key) {
+            Some(st) => st.total_for(l.count, l.estimate.max(1.0), l.gap),
+            None => l.count as f32 * l.estimate + l.gap * l.count.saturating_sub(1) as f32,
         };
     }
     for c in &mut n.children {
@@ -191,6 +205,9 @@ impl Gui {
                 key: l.key.clone(),
                 ..Default::default()
             };
+        }
+        if (st.heights.len(), st.gap, st.estimate) != (l.count, l.gap, est) {
+            st.total = None;
         }
         st.heights.resize(l.count, est);
         st.measured.resize(l.count, false);
@@ -280,6 +297,9 @@ impl Gui {
                 z.h + mg.vertical()
             };
             let delta = height - st.heights[i];
+            if let Some(t) = &mut st.total {
+                *t += delta as f64;
+            }
             if delta.abs() > 0.5 {
                 again = true;
                 if i < pin {
@@ -301,7 +321,7 @@ impl Gui {
             let next = (self.chats.get(buf)).and_then(|c| c.next_expiry_after(now));
             self.lua.chat_expiry = self.lua.chat_expiry.into_iter().chain(next).min();
         }
-        let total = st.heights.iter().sum::<f32>() + gap * l.count.saturating_sub(1) as f32;
+        let total = st.total_for(l.count, est, gap);
         let max = (total - viewport).max(0.0);
         let follow = p.node.style.follow;
         sc.offset = if follow && at_end { max } else { offset }.clamp(0.0, max);

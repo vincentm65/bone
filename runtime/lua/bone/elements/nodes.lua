@@ -174,6 +174,34 @@ function kinds.markdown(el)
   return node
 end
 
+-- A picture, fitted to the room it is drawn in: never larger than its own
+-- pixels, than what holds it, or than most of the pane's height, so the rest
+-- stays reachable (the box keeps the picture's shape). Where its size is not
+-- known, a square the pane's width. With no path, the node says so.
+function kinds.image(el, ctx, F)
+  local w, h = tonumber(el.width) or 0, tonumber(el.height) or 0
+  local room = { math.max(0, math.floor(tonumber(ctx and ctx.width) or 0)),
+    math.max(0, math.floor(tonumber(ctx and ctx.height) or 0)) }
+  local node = {
+    role = "image", label = el.alt and tostring(el.alt) or nil, align_self = "center", max_width = "100%",
+    radius = style.radius.md, bg = "Selection", overflow = "hidden",
+    border = 1, border_color = F.at(el) and "Accent" or "transparent",
+    image = { path = el.path and tostring(el.path), fit = "contain",
+      width = w > 0 and w or nil, height = h > 0 and h or nil },
+  }
+  if w > 0 and h > 0 then
+    local k = math.min(1, room[1] > 0 and room[1] * 0.9 / w or 1, room[2] > 0 and room[2] * 0.8 / h or 1)
+    node.width = math.max(1, math.floor(w * k))
+  else
+    node.aspect_ratio = 1
+    if room[1] > 0 then node.width = math.floor(room[1] * 0.9) end
+    node.max_height = room[2] > 0 and math.floor(room[2] * 0.8) or nil
+  end
+  local click = F.press(el)
+  if click then widgets.press(node, click, "image") end
+  return target(style.finish(node), F, el)
+end
+
 function kinds.badge(el)
   return widgets.pill(tostring(el.text or ""), { hl = group(el.tone, "Accent") })
 end

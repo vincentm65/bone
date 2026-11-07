@@ -300,7 +300,7 @@ impl Gui {
             ctx.request_repaint_after(at.saturating_duration_since(std::time::Instant::now()));
         }
         let node_had_keys = self.view.focused_node().is_some();
-        let events = ctx.input_mut(|i| std::mem::take(&mut i.events));
+        let (events, mods) = ctx.input_mut(|i| (std::mem::take(&mut i.events), i.modifiers));
         let mut keep = Vec::new();
         let mut alt_text: Option<char> = None;
         for ev in events {
@@ -351,6 +351,30 @@ impl Gui {
                     }
                     None => keep.push(ev),
                 },
+                // ctrl+c and ctrl+x reach egui as Copy and Cut, never as
+                // keys. A panel with the keyboard (no text field of its own
+                // focused, no modal over it) hears them as those keys first;
+                // what it does not take, egui gets. Copy and Cut held
+                // without ctrl (cmd+C, the Copy key) stay copy and cut.
+                egui::Event::Copy | egui::Event::Cut
+                    if mods.ctrl
+                        && !mods.mac_cmd
+                        && self.view.trap.is_none()
+                        && self.view.input_focus.is_none()
+                        && self.focused_panel().is_some() =>
+                {
+                    let c = if matches!(ev, egui::Event::Copy) {
+                        egui::Key::C
+                    } else {
+                        egui::Key::X
+                    };
+                    let id = self.focused_panel().unwrap_or_default();
+                    if key(c, mods).is_some_and(|k| input::panel_key(self, &id, k)) {
+                        self.view.invalidate();
+                    } else {
+                        keep.push(ev);
+                    }
+                }
                 // A modal without a text field has nowhere to paste. Do not
                 // fire the global paste hook of a terminal underneath it.
                 egui::Event::Paste(_)

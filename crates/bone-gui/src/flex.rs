@@ -198,7 +198,7 @@ fn measure(n: &Node, avail: Option<f32>, definite: bool, m: &dyn Metrics) -> Siz
     let mut h = explicit_h.unwrap_or(content.h + inset.vertical());
     if let Some(ratio) = s.aspect_ratio.filter(|r| *r > 0.0) {
         match (explicit_w.or(avail.filter(|_| definite)), explicit_h) {
-            (Some(known), None) => h = known / ratio,
+            (Some(known), None) => h = clamp(known, s.min_width, s.max_width, base_w) / ratio,
             (None, Some(known)) => w = known * ratio,
             _ => {}
         }

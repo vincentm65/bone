@@ -24,6 +24,10 @@
 --                        | { text, tone } }, numbers, cap, expanded }
 --   code      { text }
 --   markdown  { text }
+--   image     { path, width, height, alt, detail, on_press }  a picture (its
+--               own width and height give the box its shape); where one
+--               cannot be drawn, `alt` and `detail` say what it is
+--               ("PNG · 1920×1200")
 --   badge     { text, tone }
 --   meter     { value (0 to 1), label, tone }
 --   spinner   {}
@@ -35,10 +39,10 @@
 -- drawn from it, so a large view can build its tree only when it changes.
 --
 -- Tones are normal, dim, accent, success, warning and error. Whatever has an
--- `on_press` (a button, a field, a list or checklist entry) and each tab is
--- a target: a click presses it, and in a focused window or panel of either
--- frontend up/down move a cursor through the targets, left/right change
--- tabs, and enter or space press the one it is on. Up from the first target
+-- `on_press` (a button, a field, a picture, a list or checklist entry) and
+-- each tab is a target: a click presses it, and in a focused window or panel
+-- of either frontend up/down move a cursor through the targets, left/right
+-- change tabs, and enter or space press the one it is on. Up from the first target
 -- and down from the last go on to the panel or window, which scrolls; so do
 -- the page keys. j and k move like down and up, unless a field is being
 -- edited: then every key is the plugin's.
@@ -56,7 +60,8 @@ local M = {}
 M.kinds = {
   text = true, row = true, column = true, section = true, split = true, list = true,
   checklist = true, button = true, tabs = true, field = true, diff = true, code = true,
-  markdown = true, badge = true, meter = true, spinner = true, divider = true, hints = true,
+  markdown = true, image = true, badge = true, meter = true, spinner = true,
+  divider = true, hints = true,
 }
 M.inline = { text = true, badge = true, button = true, spinner = true, meter = true, hints = true }
 
@@ -111,7 +116,7 @@ function M.focus(tree, st, focused)
     if type(el) ~= "table" then return end
     local k = el.kind
     if k == "field" and el.editing then st.editing = true end
-    if k == "button" or k == "field" then
+    if k == "button" or k == "field" or k == "image" then
       if el.on_press then add(el, nil, el.on_press) end
     elseif k == "list" or k == "checklist" then
       local controlled, first = M.controlled(el), #list + 1

@@ -61,7 +61,7 @@ end })
 
 The kinds are `text`, `row`, `column`, `section`, `split` (a narrow column
 beside the rest), `list`, `checklist`, `button`, `tabs`, `field`, `diff`,
-`code`, `markdown`, `badge`, `meter`, `spinner`, `divider` and `hints`;
+`code`, `markdown`, `image`, `badge`, `meter`, `spinner`, `divider` and `hints`;
 `runtime/lua/bone/elements.lua` lists their fields. What has an `on_press`
 (and each tab) is a target: a click presses it, in the terminal too, and in
 a focused window or panel up/down (or `k`/`j`) move a cursor through the

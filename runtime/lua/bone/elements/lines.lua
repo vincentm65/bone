@@ -346,6 +346,17 @@ function block.markdown(el, width, _, out)
   add(out, bone.ui.markdown(tostring(el.text or ""), math.max(width, 1), ""))
 end
 
+-- A picture cannot be drawn in cells: its name, and what the file is.
+-- The lines are targets when the picture can be pressed (opened elsewhere).
+function block.image(el, width, F, out)
+  local on = F.at(el)
+  local start = #out
+  local spans = { { "□ " .. tostring(el.alt or ""), on and "Selection" or group(el.tone, "Dim") } }
+  if el.detail then spans[#spans + 1] = { "  " .. tostring(el.detail), on and "Selection" or "Dim" } end
+  add(out, wrap(spans, width, { pad = on and "Selection" or nil }))
+  for line = start + 1, #out do F.hit(line, F.n(el)) end
+end
+
 function block.divider(_, width, _, out)
   out[#out + 1] = { { string.rep("─", math.max(width, 1)), "WinSeparator" } }
 end

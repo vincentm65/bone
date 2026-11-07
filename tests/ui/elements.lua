@@ -31,6 +31,7 @@ local function tree()
     { kind = "diff", rows = { { sign = "+", text = "added" }, { separator = true }, { sign = "-", text = "gone" } } },
     { kind = "field", label = "Name", value = "", empty = "none" },
     { kind = "code", text = "x = 1" },
+    { kind = "image", path = "photo.png", alt = "a photo", detail = "PNG · 1920×1200" },
     { kind = "divider" }, { kind = "spinner" }, { kind = "hints", text = "↑↓ move · enter press" },
   }
 end
@@ -49,6 +50,7 @@ text = table.concat(text, "\n")
 eq(text:find("✓ first", 1, true) ~= nil, true, "a done check")
 eq(text:find("[\194\160Go\194\160]", 1, true) ~= nil, true, "a button (never broken across lines)")
 eq(text:find("Name: none", 1, true) ~= nil, true, "an empty field")
+eq(text:find("□ a photo", 1, true) ~= nil, true, "a picture, in words")
 if side == "gui" then
   local node = E.node(tree(), { width = 300, height = 400 }, {}, true)
   eq(type(node), "table", "a node")
@@ -65,6 +67,26 @@ for _ = 1, 9 do E.key(st, "down") end
 E.key(st, "space")
 eq(pressed[2], "go", "the cursor stops at the last target")
 eq(E.key({ targets = {} }, "down"), false, "a view with no targets leaves the keys")
+
+-- An image: the desktop draws the picture, a terminal cannot and says what
+-- it is; pressing it is the plugin's own (opening it outside).
+local function picture(on_press)
+  return { kind = "image", path = "photo.png", alt = "a photo", detail = "PNG · 1920×1200",
+    on_press = on_press }
+end
+local pressed2 = {}
+local ist = {}
+local ilines = E.lines(picture(function() pressed2[#pressed2 + 1] = "picture" end), 40, ist, true)
+local one = {}
+for _, s in ipairs(ilines[1] or {}) do one[#one + 1] = type(s) == "table" and (s[1] or "") or s end
+one = table.concat(one)
+one = one:match("^%s*(.-)%s*$") or one
+eq(one, "□ a photo  PNG · 1920×1200", "the fallback line")
+eq(#ist.targets, 1, "a picture that can be pressed is a target")
+if side == "gui" then
+  local node = E.node(picture(nil), { width = 300, height = 400 }, {}, true)
+  eq(node.image ~= nil and node.image.path == "photo.png", true, "the desktop draws the picture")
+end
 
 -- A list that keeps its plugin's selection: the cursor starts on it, moving
 -- selects, and the list's own keys come first.
