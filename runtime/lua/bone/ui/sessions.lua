@@ -12,7 +12,8 @@ local count, timestamp = chats.count, chats.timestamp
 local function setup_colors()
   -- Links follow live theme changes, including custom style modifiers.
   local selection = bone.hl.get("Selection") or {}
-  local background = bone.ui.sessions_background or "#0b0b0b"
+  -- The panel follows the input's surface unless it is told otherwise.
+  local background = bone.ui.sessions_background or (bone.hl.get("InputBackground") or {}).bg or "#141414"
   bone.hl.set("SessionBackground", { link = "Normal", bg = background })
   bone.hl.set("SessionDim", { link = "Dim", bg = background })
   bone.hl.set("SessionAccent", { link = "Accent", bg = background, bold = true })

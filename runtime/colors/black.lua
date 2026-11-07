@@ -12,7 +12,9 @@ local p = {
   path = "#abc4e3",
   variable = "#bb9af7",
   number = "#ff9e64",
-  user_bg = "#0b0b0b",
+  -- The user's message and the input sit on a raised grey, one step above
+  -- the terminal's own background; the panels and the chat stay black.
+  user_bg = "#141414",
   diff_add = "#7ee787",
   diff_add_bg = "#101010",
   diff_del = "#ff7b72",
@@ -27,6 +29,8 @@ hl("UserPrompt", { fg = p.accent, bg = p.user_bg, bold = true })
 hl("UserMessage", { fg = p.fg, bg = p.user_bg })
 hl("InputBackground", { fg = p.fg, bg = p.user_bg })
 hl("InputText", { fg = p.fg, bg = p.user_bg })
+-- The prompt's mark ("›"), on the input's own surface.
+hl("InputPrompt", { fg = p.accent, bg = p.user_bg, bold = true })
 hl("Reasoning", { fg = p.subtle, italic = true })
 hl("ToolName", { fg = p.fg })
 hl("ToolArgs", { fg = p.muted })
@@ -39,6 +43,9 @@ hl("ToolError", { fg = p.error })
 hl("Success", { fg = p.good })
 hl("DiffAdd", { fg = p.diff_add, bg = p.diff_add_bg })
 hl("DiffDelete", { fg = p.diff_del, bg = p.diff_del_bg })
+-- The input's Git change count (+added −removed).
+hl("InputAdded", { fg = p.diff_add, bg = p.user_bg })
+hl("InputRemoved", { fg = p.diff_del, bg = p.user_bg })
 hl("ShellProgram", { fg = p.good })
 hl("ShellPath", { fg = p.path })
 hl("ShellFlag", { fg = p.accent })

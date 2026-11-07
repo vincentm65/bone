@@ -95,6 +95,7 @@ The model can also use `read_file` to view PNG, JPEG and WebP files on the core 
 | `/archive` | move this conversation to History and start a new session |
 | `/term [command]`, `/terminal [command]`, `/term close` | **term plugin:** open a terminal panel on the TUI's machine (Unix), or close it and stop its program |
 | `/sessions`, `/resume` | pick a session to open |
+| `/where` | show the current session's title and directory |
 | `/rename {title}` | give this session a title |
 | `/compact`, `/compact clear` | summarize this session for the model (`compact.keep` controls how many recent turns stay word for word; default 0); the chat and the session file keep everything, and one line notes the tokens saved. Each model call also gets a short handoff of that cut, rebuilt from the transcript and not stored, so a later compaction cannot paraphrase it away. `clear` sends the whole history again. Bone also compacts by itself when the model says the context is too long, or before a call over `compact.limit` (`/config` → General → Compaction), unless the session's selected provider overrides it with `compact_limit` (`/config` → Providers → `e` → Compaction limit): unset inherits the global limit, positive overrides it, and `0` disables proactive compaction without changing overflow retry. The summary provider does not determine this limit; empty input resets the saved override |
 | `/queue`, `/queue clear`, `/queue resume` | list the queued messages, empty the queue, let a paused queue go on (after a cancel, restart or failed queued-turn start) |

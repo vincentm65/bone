@@ -29,6 +29,15 @@ cmd("sessions", function()
   bone.action("sessions")
 end, { desc = "pick a session to open (ctrl+o)", aliases = { "resume" } })
 
+cmd("where", function()
+  local s = bone.api.session()
+  if s then
+    bone.notify((s.title or "untitled") .. " — " .. s.cwd)
+  else
+    bone.notify("new session (not started yet)")
+  end
+end, { desc = "show the current session and directory" })
+
 cmd("quit", function()
   bone.action("quit")
 end, { desc = "quit bone", aliases = { "exit", "q" } })
