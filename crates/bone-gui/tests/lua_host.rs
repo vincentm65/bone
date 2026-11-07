@@ -1155,6 +1155,9 @@ async fn node_panel_can_be_embedded() {
     assert_eq!(g.gui.eval("check_panel_size()").unwrap(), "true");
     assert_eq!(g.gui.eval("seen_panel.width").unwrap(), "940");
     assert_eq!(g.gui.eval("seen_panel.height").unwrap(), "610");
+    // A late reply from the core rebuilds the view too; let those land
+    // first, so what is counted is the layout settling.
+    g.settle(Duration::from_millis(200)).await;
     let builds = g.gui.eval("panel_builds").unwrap();
     for _ in 0..4 {
         g.frame();
