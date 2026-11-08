@@ -891,6 +891,80 @@ async fn a_terminal_in_a_panel() {
     );
 }
 
+/// Windows' terminals are pseudo consoles (ConPTY): a command's screen and
+/// exit code come back, and `/term` runs PowerShell, typed into.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_windows_terminal_runs_the_shell() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    g.gui
+        .run_lua(
+            "t",
+            r#"
+            pty_exit = nil
+            pty_job = bone.job.start({ "cmd", "/c", "echo in a terminal" }, {
+              pty = { width = 40, height = 5 },
+              on_exit = function(r) pty_exit = r end,
+            })
+            function screen_text(job)
+              local s = job and job:screen()
+              local t = {}
+              for _, l in ipairs(s and s.lines or {}) do
+                for _, i in ipairs(l) do t[#t + 1] = i[1] end
+                t[#t + 1] = "\n"
+              end
+              return table.concat(t)
+            end
+            "#,
+        )
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while g.gui.eval("tostring(pty_exit ~= nil)").unwrap() != "true" {
+        g.settle(Duration::from_millis(50)).await;
+        assert!(std::time::Instant::now() < deadline, "the job never ended");
+    }
+    assert_eq!(
+        g.gui.eval("tostring(pty_exit.error)").unwrap(),
+        "nil",
+        "it ran"
+    );
+    assert_eq!(g.gui.eval("tostring(pty_exit.code)").unwrap(), "0");
+    let out = g.gui.eval("screen_text(pty_job) .. (pty_exit.stdout or '')").unwrap();
+    assert!(out.contains("in a terminal"), "the screen: {out}");
+
+    // /term: the default shell, typed into.
+    g.gui.run_lua("t", "bone.cmd('term')").unwrap();
+    g.frame();
+    assert_eq!(g.gui.eval("bone.ui.panel.focused()").unwrap(), "term1");
+    let screen = |g: &mut Headless| {
+        g.gui
+            .eval("screen_text(require('bone.terminal').job('term1'))")
+            .unwrap()
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    // PowerShell takes a while to start: type once its prompt shows.
+    while !screen(&mut g).contains('>') {
+        g.settle(Duration::from_millis(100)).await;
+        assert!(std::time::Instant::now() < deadline, "no prompt: {}", screen(&mut g));
+    }
+    g.text("echo bone$(40+2)");
+    g.key(bone_gui::Key::Enter, bone_gui::Modifiers::NONE);
+    loop {
+        g.settle(Duration::from_millis(100)).await;
+        let s = screen(&mut g);
+        // The answer, not the typed line (which says $(40+2)).
+        if s.contains("bone42") {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the terminal screen: {s}");
+    }
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+    g.gui.run_lua("t", "bone.cmd('term close')").unwrap();
+    g.frame();
+}
+
 /// Both spellings of the terminal shortcut open, release and refocus the
 /// same visible panel, through the GUI's real keyboard path.
 // Terminals need Unix for now (`bone_ui::jobs`).

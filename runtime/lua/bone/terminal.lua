@@ -282,9 +282,32 @@ function M.setup()
   end)
 end
 
+--- The shell a terminal runs when given no command, as an argv list:
+--- $SHELL, else /bin/sh. On Windows $SHELL counts only when it names a file
+--- there (Git Bash sets a Unix one); else PowerShell 7 (pwsh) when it is on
+--- the PATH, then Windows PowerShell, then %ComSpec% (cmd).
+function M.shell()
+  local function file(path)
+    local f = path and path ~= "" and io.open(path, "rb")
+    if f then f:close() return true end
+    return false
+  end
+  local env = os.getenv("SHELL")
+  local windows = package.config:sub(1, 1) == "\\"
+  if not windows then return { (env and env ~= "") and env or "/bin/sh" } end
+  if file(env) then return { env } end
+  for dir in (os.getenv("PATH") or ""):gmatch("[^;]+") do
+    if file(dir .. "\\pwsh.exe") then return { dir .. "\\pwsh.exe", "-NoLogo" } end
+  end
+  local root = os.getenv("SystemRoot") or "C:\\Windows"
+  local ps = root .. "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+  if file(ps) then return { ps, "-NoLogo" } end
+  return { os.getenv("ComSpec") or "cmd.exe" }
+end
+
 --- Open a terminal in a panel. `spec`: panel options over M.defaults (an `id`
 --- of a "panel:<id>" layout leaf puts it there). `opts`: { cmd (a shell
---- command or an argv list; default $SHELL), cwd (default: the session's) }.
+--- command or an argv list; default M.shell()), cwd (default: the session's) }.
 --- Returns the panel's handle; closing the panel stops the program, and the
 --- shell ending closes the panel (a command's output stays until it is closed).
 -- Installed once, so a window manager's saved term_open remains valid.
@@ -319,7 +342,8 @@ function M._open(spec, opts)
   bone.hl.set("TermCursor", { link = "Normal", reverse = true })
   local session = bone.chat.session()
   local t = { scroll = 0 }
-  t.job = bone.job.start(opts.cmd or { os.getenv("SHELL") or "/bin/sh" }, {
+  local shell = M.shell()
+  t.job = bone.job.start(opts.cmd or shell, {
     name = id,
     pty = { width = 80, height = 24 },
     cwd = opts.cwd or (session and session.cwd),
@@ -339,7 +363,7 @@ function M._open(spec, opts)
   terms[id] = t
   last = id
   p.focusable = true
-  p.title = p.title or "terminal · " .. (type(opts.cmd) == "table" and table.concat(opts.cmd, " ") or opts.cmd or os.getenv("SHELL") or "/bin/sh")
+  p.title = p.title or "terminal · " .. (type(opts.cmd) == "table" and table.concat(opts.cmd, " ") or opts.cmd or shell[1]:match("[^/\\\\]+$"))
   if p.focus == nil then p.focus = true end
   p.render = function(ctx) return render(id, t, ctx) end
   p.node = function(ctx) return node(id, t, ctx) end

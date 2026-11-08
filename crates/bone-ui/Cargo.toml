@@ -20,6 +20,10 @@ vt100 = "0.15"
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true
 
+# Terminals on Windows: ConPTY (`jobs::conpty`).
+[target.'cfg(windows)'.dependencies]
+portable-pty = "0.9"
+
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time"] }
