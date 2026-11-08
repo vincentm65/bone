@@ -570,6 +570,7 @@ pub fn connect(
         }
         let program = config.command.clone().unwrap_or_default();
         let mut cmd = tokio::process::Command::new(bone_lua::sys::program(&program));
+        bone_lua::sys::hide_window(cmd.as_std_mut());
         cmd.args(&config.args)
             .envs(config.env.iter())
             .stdin(std::process::Stdio::piped())

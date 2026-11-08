@@ -97,7 +97,8 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev
       - name: build GUI binary
         shell: bash
-        run: cargo build --release --locked -p bone --features gui --target ${{ matrix.target }}
+        # `windowed`: on Windows, bone-gui.exe opens no console window.
+        run: cargo build --release --locked -p bone --features gui,windowed --target ${{ matrix.target }}
       - name: verify GUI binary identity
         shell: bash
         run: |

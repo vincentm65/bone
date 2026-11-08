@@ -25,7 +25,26 @@ want to change.
 
 ## Install
 
-Needs Rust 1.88+ and a C toolchain (LuaJIT is built from source).
+With npm (Linux, macOS and Windows; no toolchain needed):
+
+```sh
+npm install -g bone-agent
+bone                          # the TUI, in your project's folder
+bone --gui                    # the desktop app
+bone desktop                  # add the desktop app to the Start menu,
+                              # Applications or your app menu
+```
+
+`bone desktop` makes a Start menu and desktop shortcut on Windows,
+`~/Applications/Bone.app` on macOS (Spotlight, Launchpad, the Dock) and an
+app menu entry on Linux, all opening the desktop app from this install; it
+starts in your home folder. `bone update` (or the prompt bone shows when a
+new version is out) updates the shortcut's app too. Run `bone desktop`
+again after changing `PATH` or Node version; `bone desktop --remove` takes
+the shortcuts away.
+
+To build from source instead, you need Rust 1.88+ and a C toolchain
+(LuaJIT is built from source).
 
 ```sh
 scripts/install.sh            # builds release, installs ~/.local/bin/bone3

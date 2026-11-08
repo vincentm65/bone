@@ -9,6 +9,30 @@ pub fn shell_name() -> &'static str {
     if cfg!(windows) { "PowerShell" } else { "bash" }
 }
 
+/// Set when the process has no console (the windowed desktop build on
+/// Windows): then each console program it starts would open a console
+/// window of its own, so [`hide_window`] keeps them hidden.
+static NO_CONSOLE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// This process has no console window: the programs it starts get none
+/// either. Call once at startup.
+pub fn set_no_console() {
+    NO_CONSOLE.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// On Windows, when this process has no console ([`set_no_console`]): start
+/// `cmd` without a console window (its output is piped or discarded).
+/// Elsewhere, or with a console, nothing.
+pub fn hide_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    if NO_CONSOLE.load(std::sync::atomic::Ordering::Relaxed) {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::os::windows::process::CommandExt::creation_flags(cmd, CREATE_NO_WINDOW);
+    }
+    #[cfg(not(windows))]
+    let _ = cmd;
+}
+
 /// A command that runs `script` in the shell: `bash -c` on Unix, PowerShell
 /// (`pwsh` when installed) on Windows.
 pub fn shell(script: &str) -> Command {
@@ -21,6 +45,7 @@ pub fn shell(script: &str) -> Command {
     #[cfg(windows)]
     {
         let mut c = Command::new(powershell());
+        hide_window(&mut c);
         c.args([
             "-NoLogo",
             "-NoProfile",
@@ -36,7 +61,9 @@ pub fn shell(script: &str) -> Command {
 fn powershell() -> &'static str {
     static FOUND: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
     FOUND.get_or_init(|| {
-        let pwsh = Command::new("pwsh")
+        let mut probe = Command::new("pwsh");
+        hide_window(&mut probe);
+        let pwsh = probe
             .args(["-NoLogo", "-NoProfile", "-Command", "exit 0"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -80,7 +107,7 @@ pub fn new_group(cmd: &mut Command) {
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(cmd, 0);
     #[cfg(not(unix))]
-    let _ = cmd;
+    hide_window(cmd);
 }
 
 /// Ask a process group started with [`new_group`] to stop (SIGTERM), or hang
@@ -111,7 +138,9 @@ pub fn kill_tree(pid: u32) {
     #[cfg(windows)]
     {
         use std::process::Stdio;
-        let _ = Command::new("taskkill")
+        let mut taskkill = Command::new("taskkill");
+        hide_window(&mut taskkill);
+        let _ = taskkill
             .args(["/PID", &pid.to_string(), "/T", "/F"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

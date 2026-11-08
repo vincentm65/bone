@@ -25,6 +25,9 @@ embed-resource = "3"
 [features]
 # The desktop GUI (`bone --gui`); off by default, so the TUI build is unchanged.
 gui = ["dep:bone-gui"]
+# Windows: no console window (a desktop program). For the npm package's
+# bone-gui.exe, which is only started for the GUI.
+windowed = []
 
 [dev-dependencies]
 image.workspace = true

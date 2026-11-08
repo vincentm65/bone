@@ -1,4 +1,7 @@
 //! `bone` command line.
+// The npm package's desktop binary (`bone-gui.exe`, built with `windowed`)
+// opens no console window when started from a shortcut.
+#![cfg_attr(all(windows, feature = "windowed"), windows_subsystem = "windows")]
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -150,8 +153,29 @@ fn default_home() {
     }
 }
 
+/// Started from inside npm's packages (`bone-agent-*`), by the `bone`
+/// launcher or straight from a desktop shortcut: an npm install, which
+/// updates through npm (`BONE_INSTALL_KIND`, read by bone.update).
+fn npm_install_kind() {
+    if std::env::var_os("BONE_INSTALL_KIND").is_some() {
+        return;
+    }
+    let in_npm = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.canonicalize().ok())
+        .is_some_and(|exe| exe.components().any(|c| c.as_os_str() == "node_modules"));
+    if in_npm {
+        // SAFETY: called first in `main`, before any other thread exists.
+        unsafe { std::env::set_var("BONE_INSTALL_KIND", "npm") };
+    }
+}
+
 fn main() -> ExitCode {
     default_home();
+    npm_install_kind();
+    if cfg!(all(windows, feature = "windowed")) {
+        bone_lua::sys::set_no_console();
+    }
     tune_malloc();
     if std::env::args_os().len() == 2
         && std::env::args_os()

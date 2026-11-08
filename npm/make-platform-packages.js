@@ -52,12 +52,21 @@ for (const [os, cpu, triple, exe, packageTarget] of targets) {
     if (os !== 'win32') fs.chmodSync(dest, 0o755);
   }
 
+  // The app's icon for the shortcut `bone desktop` makes: Bone.app's on
+  // macOS, the app menu's on Linux (Windows takes it from bone-gui.exe).
+  const icon = { darwin: 'icon.icns', linux: 'icon-512.png' }[os];
+  if (icon) {
+    const shareDir = path.join(dir, 'share');
+    fs.mkdirSync(shareDir, { recursive: true });
+    fs.copyFileSync(path.join(root, 'crates', 'bone-gui', 'assets', icon), path.join(shareDir, icon));
+  }
+
   fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
     name,
     version,
     description: `Native Bone binary for bone-agent on ${os} ${cpu}`,
     bin: { bone: `bin/${exe}` },
-    files: ['bin'],
+    files: ['bin', 'share'],
     os: [os],
     cpu: [cpu],
     engines: { node: '>=18' },

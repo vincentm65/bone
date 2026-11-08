@@ -420,6 +420,7 @@ async fn run(id: u64, spec: Spec, mut ctl: mpsc::UnboundedReceiver<Ctl>, sink: S
         Command::Shell(s) => tokio::process::Command::from(bone_lua::sys::shell(s)),
         Command::Argv(argv) => {
             let mut c = tokio::process::Command::new(bone_lua::sys::program(&argv[0]));
+            bone_lua::sys::hide_window(c.as_std_mut());
             c.args(&argv[1..]);
             c
         }
