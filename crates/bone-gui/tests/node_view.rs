@@ -1235,6 +1235,50 @@ async fn a_text_input_edits_natively_and_tells_lua() {
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 
+/// A press outside a text input takes the keyboard from it (as on the
+/// web): Lua sees it go (`bone.gui.focused`), and typing no longer edits it.
+#[tokio::test(flavor = "multi_thread")]
+async fn clicking_away_blurs_a_text_input() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.gui
+        .run_lua(
+            "t",
+            r##"
+      bone.gui.view(function()
+        return { bg = "#101010", padding = 20, direction = "column", gap = 10,
+          { id = "field", width = 300, bg = "#222", padding = 8, text_input = { placeholder = "Name" } },
+          { id = "away", width = 300, height = 80, bg = "#333" },
+        }
+      end)
+    "##,
+        )
+        .unwrap();
+    g.frame();
+    g.frame();
+    let hint = (g.painted.iter())
+        .find(|(t, _)| t == "Name")
+        .expect("the hint")
+        .1;
+    g.click_at(hint.center().x, hint.center().y);
+    g.frame();
+    g.frame();
+    assert_eq!(g.gui.eval("bone.gui.focused()").unwrap(), "field");
+    g.text("ab");
+    g.frame();
+    assert_eq!(g.gui.eval("bone.gui.input_text('field')").unwrap(), "ab");
+    let away = g.gui.eval("(function() local r = bone.gui.rect('away') return r.x + r.w / 2 .. ' ' .. r.y + r.h / 2 end)()").unwrap();
+    let (x, y) = away.split_once(' ').unwrap();
+    g.click_at(x.parse().unwrap(), y.parse().unwrap());
+    g.frame();
+    g.frame();
+    assert_eq!(g.gui.eval("tostring(bone.gui.focused())").unwrap(), "nil", "the click away took it");
+    g.text("cd");
+    g.frame();
+    assert_eq!(g.gui.eval("bone.gui.input_text('field')").unwrap(), "ab", "typing went elsewhere");
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}
+
 /// The sidebar's search is a native text input that has the keyboard when
 /// the sidebar opens: typing filters, even though the panel has the keys.
 #[tokio::test(flavor = "multi_thread")]

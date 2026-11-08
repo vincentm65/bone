@@ -219,7 +219,7 @@ local function choose(i, keep_keys)
 end
 
 local function start_rename(id)
-  st.renaming = id
+  st.renaming, st.rename_focused = id, false
   bone.gui.focus("sidebar-rename")
   redraw()
 end
@@ -231,7 +231,8 @@ local function toggle_pin(id)
   redraw()
 end
 
-local function rename(id, title)
+-- `away`: the field lost the keyboard to a click elsewhere, which keeps it.
+local function rename(id, title, away)
   st.renaming = nil
   title = (title or ""):gsub("^%s+", ""):gsub("%s+$", "")
   if title ~= "" then
@@ -240,7 +241,7 @@ local function rename(id, title)
       refresh()
     end)
   end
-  take_keys()
+  if not away then take_keys() end
   redraw()
 end
 
@@ -377,12 +378,24 @@ local function row(i)
   local over = r.id and st.hover == r.id
   local title = { direction = "row", gap = 6, align = "center", height = 22 }
   title[#title + 1] = dot(r.state)
+  -- The rename field lost the keyboard (a click elsewhere): it ends, and
+  -- keeps what was typed, as a file manager's does.
+  if r.id and st.renaming == r.id then
+    if bone.gui.focused() == "sidebar-rename" then
+      st.rename_focused = true
+    elseif st.rename_focused then
+      local id, text = r.id, bone.gui.input_text("sidebar-rename")
+      if text == r.title then text = nil end -- unchanged: nothing to send
+      st.renaming, st.rename_focused = nil, false
+      bone.defer(0, function() rename(id, text, true) end)
+    end
+  end
   if r.id and st.renaming == r.id then
     title[#title + 1] = style.finish({
       id = "sidebar-rename", grow = 1, size = style.size.body, hl = "Normal", bg = "Normal",
       radius = style.radius.sm - 1, padding = { 1, 6 }, border = 1, border_color = "PromptBorder",
       on_key = function(k)
-        if k == "esc" then st.renaming = nil take_keys() redraw() return true end
+        if k == "esc" then st.renaming, st.rename_focused = nil, false take_keys() redraw() return true end
         return false
       end,
       text_input = {

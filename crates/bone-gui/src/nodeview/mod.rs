@@ -581,6 +581,8 @@ pub(in crate::nodeview) struct Frame {
     pub(in crate::nodeview) tweened: std::collections::HashSet<String>,
     /// The text input with the keyboard.
     pub(in crate::nodeview) input_focus: Option<String>,
+    /// A press landed in a text input (or the prompt) this frame.
+    pub(in crate::nodeview) input_pressed: bool,
     /// Where each node with an id is (windows anchor to `chat` and
     /// `prompt`).
     pub(in crate::nodeview) leaves: Vec<(String, Area)>,
@@ -806,11 +808,17 @@ impl Gui {
         self.view.tweens.retain(|k, _| used.contains(k));
         self.view.hits = frame.hits;
         self.view.input_keys = std::mem::take(&mut frame.input_keys);
-        // A text input that is not drawn any more has not the keyboard.
+        // A text input that is not drawn any more has not the keyboard, nor
+        // has one when a press lands anywhere else (clicking away blurs it,
+        // as on the web): the keyboard goes where the press put it, else
+        // back to the prompt.
         if let Some(id) = &self.view.input_focus
-            && frame.input_focus.as_ref() != Some(id)
+            && (frame.input_focus.as_ref() != Some(id)
+                || (self.view.pointer.primary_pressed() && !frame.input_pressed))
         {
             self.view.input_focus = None;
+            // Lua's view may follow the focus (`bone.gui.focused`).
+            self.view.invalidate();
         }
         self.settle_focus(fx, frame.focusables, frame.trap, frame.press_focus);
         if !frame.events.is_empty() {

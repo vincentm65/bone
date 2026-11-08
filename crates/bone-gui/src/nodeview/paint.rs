@@ -699,6 +699,7 @@ impl Gui {
         if out.pressed {
             // A press on it is not one on the node around it.
             frame.press_focus = None;
+            frame.input_pressed = true;
             vs.input_focus = Some(key.clone());
             vs.focused = None;
         }
@@ -861,6 +862,7 @@ impl Gui {
         (self.prompt.anchor, self.prompt.cursor) = (field.anchor, field.cursor);
         if out.pressed {
             frame.press_focus = None;
+            frame.input_pressed = true;
             self.view.input_focus = None;
         }
         // A click on the prompt gives it the keyboard back from a panel.

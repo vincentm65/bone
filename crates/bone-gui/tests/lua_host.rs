@@ -1345,6 +1345,73 @@ async fn rename_command_updates_the_session_title() {
     );
 }
 
+/// The sidebar's rename field ends when a click lands elsewhere, and keeps
+/// what was typed (as a file manager's does), rather than holding the
+/// keyboard until enter or esc.
+#[tokio::test(flavor = "multi_thread")]
+async fn sidebar_rename_ends_on_a_click_away() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    g.gui
+        .run_lua(
+            "t",
+            r#"
+            bone.request("session/create", {}, function(info, err)
+              assert(not err, tostring(err))
+              bone.api.open_session(info.session_id)
+            end)
+            "#,
+        )
+        .unwrap();
+    g.wait_for(Duration::from_secs(5), |gui| {
+        gui.chats[gui.current].session_id().is_some()
+    })
+    .await
+    .unwrap();
+    g.gui.run_lua("t", "bone.cmd('/rename Old Name')").unwrap();
+    g.wait_for(Duration::from_secs(5), |gui| gui.title() == "Old Name")
+        .await
+        .unwrap();
+    g.gui.run_lua("t", "bone.ui.sessions()").unwrap();
+    g.settle(Duration::from_millis(300)).await;
+    // Hover the row for its actions, then press the pencil.
+    let row = (g.painted.iter())
+        .find(|(t, _)| t == "Old Name")
+        .expect("the row")
+        .1;
+    g.hover_at(row.center().x, row.center().y);
+    for _ in 0..4 {
+        g.frame();
+    }
+    let pencil = (g.painted.iter())
+        .find(|(t, _)| t == "✎")
+        .unwrap_or_else(|| panic!("no rename action: {:?}", g.painted.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>()))
+        .1;
+    g.click_at(pencil.center().x, pencil.center().y);
+    for _ in 0..4 {
+        g.frame();
+    }
+    assert_eq!(g.gui.eval("tostring(bone.gui.focused())").unwrap(), "sidebar-rename");
+    // The old name is selected: typing replaces it.
+    g.text("New Name");
+    for _ in 0..2 {
+        g.frame();
+    }
+    // A click in the chat, well away from the sidebar.
+    g.click_at(800.0, 300.0);
+    g.wait_for(Duration::from_secs(5), |gui| gui.title() == "New Name")
+        .await
+        .unwrap();
+    g.settle(Duration::from_millis(100)).await;
+    assert_ne!(
+        g.gui.eval("tostring(bone.gui.focused())").unwrap(),
+        "sidebar-rename",
+        "the field let the keyboard go"
+    );
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}
+
 /// Implicit terminals opt into generic pane placement; explicit docks do not.
 /// Placement failure closes the process/panel without replacing the public API.
 #[cfg(unix)]
