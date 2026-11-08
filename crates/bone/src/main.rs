@@ -293,10 +293,18 @@ async fn bind_or_connect(path: &Path) -> StartupResult<Endpoint> {
             .await
             .map(Endpoint::Attached)
             .map_err(|connect| {
-                (
-                    1,
-                    format!("cannot listen on {display}: {bind}; cannot connect: {connect}"),
-                )
+                // Another bone serves it, but this one may not connect: on
+                // Windows, one running as another user (or an older bone
+                // running as administrator, before pipes allowed that).
+                let why = if connect.kind() == std::io::ErrorKind::PermissionDenied {
+                    format!(
+                        "another bone is running at {display} that this one may not join (another \
+                         user's, or an older bone run as administrator); quit it and start bone again"
+                    )
+                } else {
+                    format!("cannot listen on {display}: {bind}; cannot connect: {connect}")
+                };
+                (1, why)
             }),
     }
 }
