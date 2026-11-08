@@ -5198,7 +5198,7 @@ async fn setup_adds_a_provider_its_key_and_packages() {
     h.input("{down}{down}{enter}").await; // Continue
     let screen = h.screen(100, 30);
     assert!(
-        screen.contains("3/3 packages") && screen.contains("demo"),
+        screen.contains("3 Packages") && screen.contains("demo"),
         "{screen}"
     );
     h.input("{space}{down}{enter}").await; // pick demo, Continue

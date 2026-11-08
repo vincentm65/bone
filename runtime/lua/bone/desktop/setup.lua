@@ -28,13 +28,18 @@ local function steps(st)
   return { spans = spans, size = style.size.small, padding = { 2, 8 }, margin = { 0, 0, 6, 0 } }
 end
 
--- A heading and a line under it.
-local function heading(text, sub, hl)
+-- A heading and a line under it; `size` defaults to a window's title.
+local function heading(text, sub, hl, size)
   return {
     direction = "column", padding = { 2, 8 }, margin = { 0, 0, 6, 0 },
-    { text = text, hl = hl or "Normal", bold = true, size = style.size.title },
+    { text = text, hl = hl or "Normal", bold = true, size = size or style.size.title },
     sub and { text = sub, hl = "Dim", size = style.size.body, margin = { 2, 0, 0, 0 } } or nil,
   }
+end
+
+-- A label over a group of entries.
+local function section(text)
+  return { text = text:upper(), hl = "Dim", size = style.size.micro, bold = true, padding = { 8, 10, 2, 10 } }
 end
 
 local function paragraph(text)
@@ -46,17 +51,11 @@ local function buttons(...)
   return { direction = "row", gap = 8, margin = { 10, 0, 0, 0 }, padding = { 0, 4 }, ... }
 end
 
--- A preset's name, and what is under it: the machine or the address.
-local function preset(p)
-  local name, aside = p.title:match("^(.-)%s*%((.*)%)$")
-  if name then return name, aside end
-  return p.title, p.base_url ~= "" and p.base_url:match("^%w+://([^/]+)") or "you enter the address yourself"
-end
-
 --- The window's spec for `page` (bone.ui.windows.setup).
 function M.view(page)
   local st = page.st
-  local presets = require("bone.setup").PRESETS
+  local setup = require("bone.setup")
+  local presets = setup.PRESETS
 
   -- A press selects, and acts on what is already selected.
   local function click(i)
@@ -77,26 +76,39 @@ function M.view(page)
     if bar then add(bar) end
 
     if st.step == "welcome" then
-      add(heading("Welcome to bone", "Connect a model and start talking."))
+      add(heading("Welcome to bone", "Connect a model and start talking.", nil, style.size.display))
       add(paragraph("Bone needs a model provider: a server on this machine, or a hosted service. "
         .. "This sets one up and can add plugins from the catalog. It is saved in ~/.bone/settings.json; "
         .. "your core.lua is not touched."))
       add({ text = "Make this window yours with ~/.bone/gui.lua, or /gui create personal for a full copy.",
         hl = "Dim", size = style.size.small, padding = { 2, 8 } })
       for _, p in ipairs(st.broken or {}) do
-        add({ text = "Plugin " .. p.name .. " was not loaded: " .. require("bone.setup").plain_error(p.error), hl = "ErrorMsg",
+        add({ text = "Plugin " .. p.name .. " was not loaded: " .. setup.plain_error(p.error), hl = "ErrorMsg",
           size = style.size.caption, padding = { 2, 8 }, margin = { 6, 0, 0, 0 } })
       end
       add(buttons(button("Get started", press("enter"), true),
         button(page.opts.first_run and "Not now" or "Close", press("esc"))))
     elseif st.step == "applying" or st.step == "done" then
       local done = st.step == "done"
-      add(heading(done and "You're all set" or "Setting things up…", nil, done and "ToolDone" or nil))
-      for _, l in ipairs(st.log) do
-        add({ text = l, hl = l:match("^error") and "ErrorMsg" or "Dim", size = style.size.caption, padding = { 2, 10 } })
+      if done then
+        add(heading("You're all set", nil, "ToolDone"))
+      else
+        add({ direction = "row", align = "center", gap = 10, padding = { 2, 8 }, margin = { 0, 0, 6, 0 },
+          widgets.spinner(18),
+          { text = "Setting things up…", hl = "Normal", bold = true, size = style.size.title } })
+      end
+      -- Each thing done: an accent ▸ while it runs, then a green ✓ (✗ when it failed).
+      for _, e in ipairs(st.log) do
+        local active, failed = e.state == "active", e.state == "error"
+        add({ direction = "row", gap = 6, align = "start", padding = { 1, 10 },
+          { text = active and "▸" or failed and "✗" or "✓", hl = active and "Accent" or failed and "ErrorMsg" or "DiffAdd",
+            bold = true, font = "mono", size = style.size.body, width = 14, wrap = false, shrink = 0 },
+          { text = e.text, hl = active and "Normal" or failed and "ErrorMsg" or "Dim", size = style.size.body,
+            grow = 1, width = 0 } })
       end
       if done then
-        add({ text = "Try asking", hl = "Dim", size = style.size.small, padding = { 2, 8 }, margin = { 8, 0, 2, 0 } })
+        add(widgets.divider({ margin = { 10, 8, 4, 8 } }))
+        add(section("Try asking"))
         for i, prompt in ipairs(st.first_prompts) do
           local on = i == st.sel
           add(entry(on, { { text = prompt, hl = "Normal", bold = on, size = style.size.body } }, click(i)), on)
@@ -109,7 +121,10 @@ function M.view(page)
       st.sel = math.max(1, math.min(st.sel, math.max(#list, 1)))
       for i, r in ipairs(list) do
         local on = i == st.sel
-        local name, aside = preset(presets[r.preset])
+        if r.group ~= (list[i - 1] or {}).group then
+          add(section(r.group))
+        end
+        local name, aside = setup.preset_parts(presets[r.preset])
         add(entry(on, { {
           direction = "row", align = "center", gap = 8,
           { grow = 1, direction = "column",
@@ -137,7 +152,7 @@ function M.view(page)
       for i, r in ipairs(list) do
         local on = i == st.sel
         if r.action then
-          add(buttons(button(st.step == "details" and "Continue" or "Install and finish", click(i), true, on)), on)
+          add(buttons(button(r.label, click(i), true, on)), on)
         elseif r.package then
           local picked = st.picked[r.package.name]
           add(entry(on, { {

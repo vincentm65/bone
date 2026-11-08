@@ -6,33 +6,47 @@
 
 local M = {}
 
+-- `group` heads the presets that share it, in this order.
 M.PRESETS = {
   {
     title = "A server on this machine (llama.cpp, vLLM, tabbyAPI, Ollama, LM Studio)",
     name = "local",
     base_url = "http://localhost:8080/v1",
     model = "",
+    group = "on this machine",
   },
-  { title = "OpenAI", name = "openai", base_url = "https://api.openai.com/v1", model = "", key_env = "OPENAI_API_KEY" },
+  { title = "OpenAI", name = "openai", base_url = "https://api.openai.com/v1", model = "", key_env = "OPENAI_API_KEY",
+    group = "hosted" },
   {
     title = "Anthropic",
     name = "anthropic",
     base_url = "https://api.anthropic.com/v1",
     model = "",
     key_env = "ANTHROPIC_API_KEY",
+    group = "hosted",
   },
-  { title = "DeepSeek", name = "deepseek", base_url = "https://api.deepseek.com/v1", model = "", key_env = "DEEPSEEK_API_KEY" },
-  { title = "OpenRouter", name = "openrouter", base_url = "https://openrouter.ai/api/v1", model = "", key_env = "OPENROUTER_API_KEY" },
+  { title = "DeepSeek", name = "deepseek", base_url = "https://api.deepseek.com/v1", model = "", key_env = "DEEPSEEK_API_KEY",
+    group = "hosted" },
+  { title = "OpenRouter", name = "openrouter", base_url = "https://openrouter.ai/api/v1", model = "",
+    key_env = "OPENROUTER_API_KEY", group = "hosted" },
   -- A plan you already pay for: a catalog plugin talks to it through the
   -- vendor's CLI login. `plugin` is the package, `name` the provider it adds.
   { title = "Codex (your ChatGPT plan, through the Codex CLI's login)", name = "codex", plugin = "codex",
-    login = "codex login" },
+    login = "codex login", group = "a plan you already pay for" },
   { title = "Claude Code (your Claude plan, through the Claude Code CLI's login)", name = "claude_code",
-    plugin = "claude-code", login = "claude auth login" },
+    plugin = "claude-code", login = "claude auth login", group = "a plan you already pay for" },
   { title = "Grok (your SuperGrok or X plan, through the Grok Build CLI's login)", name = "grok", plugin = "grok",
-    login = "grok login" },
-  { title = "Another OpenAI-compatible service", name = "", base_url = "", model = "" },
+    login = "grok login", group = "a plan you already pay for" },
+  { title = "Another OpenAI-compatible service", name = "", base_url = "", model = "", group = "other" },
 }
+
+--- A preset's name, and what goes beside it: the parenthesis of its title,
+--- or the host of its address.
+function M.preset_parts(p)
+  local name, aside = p.title:match("^(.-)%s*%((.*)%)$")
+  if name then return name, aside end
+  return p.title, p.base_url ~= "" and p.base_url:match("^%w+://([^/]+)") or "you enter the address yourself"
+end
 
 local function pad(s, w)
   s = tostring(s or "")
@@ -129,7 +143,7 @@ function M.page(opts, hooks)
     if st.step == "provider" then
       local out = {}
       for i, p in ipairs(M.PRESETS) do
-        out[#out + 1] = { label = p.title, preset = i }
+        out[#out + 1] = { label = p.title, preset = i, group = p.group }
       end
       return out
     elseif st.step == "details" then
@@ -151,8 +165,11 @@ function M.page(opts, hooks)
         { label = "Continue", action = "details_done" },
       }
     elseif st.step == "packages" then
-      local out = {}
+      local out, picked = {}, 0
       for _, e in ipairs(st.packages or {}) do
+        if st.picked[e.name] then
+          picked = picked + 1
+        end
         if e.state == "available" then
           out[#out + 1] = {
             label = catalog.label(e),
@@ -161,7 +178,7 @@ function M.page(opts, hooks)
           }
         end
       end
-      out[#out + 1] = { label = "Continue", action = "apply" }
+      out[#out + 1] = { label = picked > 0 and ("Install %d and finish"):format(picked) or "Finish", action = "apply" }
       return out
     end
     return {}
@@ -170,8 +187,16 @@ function M.page(opts, hooks)
   local function apply()
     st.step = "applying"
     local f = st.form
-    local function say(line)
-      st.log[#st.log + 1] = line
+    -- The log: { text, state = "active", "done" or "error" }. One entry per
+    -- thing done, changed in place when it finishes.
+    local function say(text, state)
+      local e = { text = text, state = state or "done" }
+      st.log[#st.log + 1] = e
+      redraw()
+      return e
+    end
+    local function finish(e, text, state)
+      e.text, e.state = text, state or "done"
       redraw()
     end
     local spec = { base_url = f.base_url, model = f.model, api = f.api }
@@ -191,7 +216,7 @@ function M.page(opts, hooks)
     local function after_key()
       bone.settings.set("provider", f.name, function(_, err)
         if err then
-          say("error: " .. M.plain_error(err))
+          say("error: " .. M.plain_error(err), "error")
         else
           say("using " .. f.name .. (f.model ~= "" and (" (" .. f.model .. ")") or ""))
         end
@@ -200,9 +225,13 @@ function M.page(opts, hooks)
         end
         local remaining = #queue
         for _, e in ipairs(queue) do
-          say("installing " .. catalog.label(e) .. "…")
+          local line = say("installing " .. catalog.label(e) .. "…", "active")
           catalog.install(e, function(ok, err)
-            say(ok and ("installed " .. catalog.label(e)) or ("error: " .. catalog.label(e) .. ": " .. M.plain_error(err)))
+            if ok then
+              finish(line, "installed " .. catalog.label(e))
+            else
+              finish(line, "error: " .. catalog.label(e) .. ": " .. M.plain_error(err), "error")
+            end
             remaining = remaining - 1
             if remaining == 0 then
               finished()
@@ -214,18 +243,24 @@ function M.page(opts, hooks)
     if f.subscription then
       return after_key()
     end
-    say("saving " .. f.name .. "…")
+    local saving = say("saving " .. f.name .. "…", "active")
     bone.settings.set("providers." .. f.name, spec, function(_, err)
       if err then
         st.step = "details"
         st.note = { tostring(err), true }
+        st.log = {}
         return redraw()
       end
+      finish(saving, "saved " .. f.name)
       if f.key == "" then
         return after_key()
       end
       bone.request("secrets/set", { provider = f.name, key = f.key }, function(_, kerr)
-        say(kerr and ("error: the key was not saved: " .. M.plain_error(kerr)) or "saved the key")
+        if kerr then
+          say("error: the key was not saved: " .. M.plain_error(kerr), "error")
+        else
+          say("saved the key")
+        end
         after_key()
       end)
     end)
@@ -492,7 +527,7 @@ function M.page(opts, hooks)
     elseif st.step == "details" then
       return "↑↓ move · enter edit · esc back"
     end
-    return "↑↓ move · space pick · enter on Continue · esc back"
+    return "↑↓ move · space pick · enter on the button · esc back"
   end
 
   local function paste(text)
@@ -505,28 +540,76 @@ function M.page(opts, hooks)
   return { st = st, opts = opts, rows = rows, hint = hint, on_key = on_key, paste = paste }
 end
 
+-- The steps a step bar counts.
+local STEPS = { provider = 1, details = 2, packages = 3 }
+local STEP_NAMES = { "Provider", "Details", "Packages" }
+local SPIN = { "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏" }
+
+-- A line of `hl` text in which `code` spans take the code color.
+local function code_line(text, hl)
+  local line, on = { { "   " } }, false
+  for part in (text .. "`"):gmatch("(.-)`") do
+    if part ~= "" then
+      line[#line + 1] = { part, on and "MdCode" or hl }
+    end
+    on = not on
+  end
+  return line
+end
+
+-- "↑↓ move · enter choose": each key in the accent, what it does dimmed.
+local function hint_line(text)
+  local line = { { "   " } }
+  local first = true
+  for part in (text .. " · "):gmatch("(.-) · ") do
+    if not first then
+      line[#line + 1] = { " · ", "Dim" }
+    end
+    first = false
+    local key, what = part:match("^(%S+)%s+(.*)$")
+    if key and not key:find("…") then
+      line[#line + 1] = { key, "Accent" }
+      line[#line + 1] = { " " .. what, "Dim" }
+    else
+      line[#line + 1] = { part, "Dim" }
+    end
+  end
+  return line
+end
+
 local function render(page, ctx)
   local st, opts, rows = page.st, page.opts, page.rows
   local w = math.max(ctx.width, 30)
-  local out = { { { fill = "─", hl = "Normal" } } }
-  local titles = {
-    welcome = "Setup",
-    provider = "Setup · 1/3 provider",
-    details = "Setup · 2/3 details",
-    packages = "Setup · 3/3 packages",
-    applying = "Setup",
-    done = "Setup",
-  }
-  out[#out + 1] = " " .. titles[st.step]
+  local spin = SPIN[math.floor(bone.now() / 100) % #SPIN + 1]
+  local out = { { { fill = "─", hl = "WinSeparator" } } }
+  local title = { { " Setup", "Accent" } }
+  local at = STEPS[st.step]
+  if at then
+    title[#title + 1] = { "   " }
+    for i, name in ipairs(STEP_NAMES) do
+      if i > 1 then
+        title[#title + 1] = { " ─ ", "Dim" }
+      end
+      if i < at then
+        title[#title + 1] = { "✓ " .. name, "Success" }
+      else
+        title[#title + 1] = { i .. " " .. name, i == at and "Accent" or "Dim" }
+      end
+    end
+  end
+  out[#out + 1] = title
   out[#out + 1] = ""
   if st.step == "welcome" then
-    out[#out + 1] = "   Welcome to bone. It needs a model provider to talk to: a server on this"
-    out[#out + 1] = "   machine, or a hosted service. This sets one up (saved in ~/.bone/settings.json;"
-    out[#out + 1] = "   your core.lua is not touched) and can install plugins from the catalog."
+    out[#out + 1] = { { "   Welcome to bone", "MdHeading" } }
+    out[#out + 1] = { { "   Connect a model and start talking.", "Dim" } }
     out[#out + 1] = ""
-    out[#out + 1] = "   Customize the TUI: edit ~/.bone/tui.lua for simple changes, or run"
-    out[#out + 1] = "   /tui create personal then /tui use personal for a full editable copy."
-    out[#out + 1] = "   Changes under ~/.bone reload automatically."
+    out[#out + 1] = code_line("Bone needs a model provider to talk to: a server on this machine, or a hosted", "Normal")
+    out[#out + 1] = code_line("service. This sets one up and can install plugins from the catalog. It is saved", "Normal")
+    out[#out + 1] = code_line("in `~/.bone/settings.json`; your `core.lua` is not touched.", "Normal")
+    out[#out + 1] = ""
+    out[#out + 1] = code_line("Customize the TUI: edit `~/.bone/tui.lua` for simple changes, or run", "Dim")
+    out[#out + 1] = code_line("`/tui create personal` then `/tui use personal` for a full editable copy.", "Dim")
+    out[#out + 1] = code_line("Changes under ~/.bone reload automatically.", "Dim")
     for _, p in ipairs(st.broken or {}) do
       out[#out + 1] = ""
       local wrapped = bone.text.wrap({ { "plugin " .. p.name .. " was not loaded: " .. M.plain_error(p.error), "ErrorMsg" } }, w,
@@ -536,32 +619,44 @@ local function render(page, ctx)
       end
     end
   elseif st.step == "applying" or st.step == "done" then
-    for _, l in ipairs(st.log) do
-      out[#out + 1] = "   " .. l
+    for _, e in ipairs(st.log) do
+      local mark = e.state == "active" and { spin .. " ", "Accent" }
+        or e.state == "error" and { "✗ ", "ErrorMsg" } or { "✓ ", "Success" }
+      local hl = e.state == "active" and "Normal" or e.state == "error" and "ErrorMsg" or "Dim"
+      out[#out + 1] = { { "   " }, mark, { bone.text.truncate(e.text, w - 5), hl } }
     end
     if st.step == "done" then
       out[#out + 1] = ""
-      out[#out + 1] = "   Bone is ready. Choose something to try:"
+      out[#out + 1] = { { "   " }, { "✓ ", "Success" }, { "Bone is ready.", "MdHeading" } }
+      out[#out + 1] = { { "   Try asking", "Dim" } }
       for i, prompt in ipairs(st.first_prompts) do
-        local mark = i == st.sel and " › " or "   "
-        out[#out + 1] = bone.text.truncate(mark .. prompt, w)
+        local on = i == st.sel
+        out[#out + 1] = {
+          { on and " › " or "   ", on and "Accent" or nil },
+          { bone.text.truncate(prompt, w - 3), on and "Selection" or "Normal" },
+          on and { fill = " ", hl = "Selection" } or nil,
+        }
       end
       out[#out + 1] = ""
+    else
+      bone.ui.refresh_in(100)
     end
   else
     local list = rows()
     st.sel = math.max(1, math.min(st.sel, math.max(#list, 1)))
     if st.step == "packages" then
       if st.packages_err then
-        out[#out + 1] = "   the catalog is not reachable (" .. st.packages_err .. "); /catalog later"
+        out[#out + 1] = { { "   the catalog is not reachable (" .. st.packages_err .. "); /catalog later", "Dim" } }
       elseif not st.packages then
-        out[#out + 1] = "   loading the catalog…"
+        out[#out + 1] = { { "   loading the catalog…", "Dim" } }
       end
     end
     local label_w = 0
     for _, r in ipairs(list) do
-      if r.value ~= nil then
-        label_w = math.max(label_w, bone.text.width(r.label))
+      local label = r.preset and M.preset_parts(M.PRESETS[r.preset]) or r.package and r.label
+        or r.value ~= nil and r.label
+      if label then
+        label_w = math.max(label_w, bone.text.width(label))
       end
     end
     label_w = label_w + 3
@@ -569,30 +664,58 @@ local function render(page, ctx)
     local first = math.max(1, st.sel - room + 1)
     for i = first, math.min(#list, first + room - 1) do
       local r = list[i]
-      local mark = i == st.sel and " › " or "   "
-      local text
-      if r.value == nil then
-        text = mark .. r.label
-      elseif i == st.sel and st.edit then
-        local shown = r.key == "key" and string.rep("•", #st.edit) or st.edit
-        text = mark .. pad(r.label, label_w) .. shown .. "▏"
-      else
-        text = mark .. pad(r.label, label_w) .. (r.value ~= "" and r.value or "(empty)")
+      local on = i == st.sel
+      local body, quiet = on and "Selection" or "Normal", on and "Selection" or "Dim"
+      if r.group and (i == first or list[i - 1].group ~= r.group) then
+        out[#out + 1] = { { "   " .. r.group, "Dim" } }
       end
-      out[#out + 1] = bone.text.truncate(text, w)
+      if r.action then
+        out[#out + 1] = ""
+      end
+      local line = { { on and " › " or "   ", on and "Accent" or nil } }
+      local rest = w - 3 - label_w
+      if r.preset then
+        local name, aside = M.preset_parts(M.PRESETS[r.preset])
+        line[#line + 1] = { pad(name, label_w), body }
+        line[#line + 1] = { bone.text.truncate(aside, math.max(rest, 1)), quiet }
+      elseif r.package then
+        local picked = st.picked[r.package.name]
+        line[#line + 1] = { "[", "Dim" }
+        line[#line + 1] = { picked and "✓" or " ", "Success" }
+        line[#line + 1] = { "] ", "Dim" }
+        line[#line + 1] = { pad(r.label, label_w), body }
+        line[#line + 1] = { bone.text.truncate(r.package.description or "", math.max(rest - 4, 1)), quiet }
+      elseif r.action then
+        line[#line + 1] = { r.label, "Accent" }
+      else
+        local editing = on and st.edit
+        local shown = editing and ((r.key == "key" and string.rep("•", #st.edit) or st.edit) .. "▏")
+          or (r.value ~= "" and r.value or "(empty)")
+        line[#line + 1] = { pad(r.label, label_w), quiet }
+        line[#line + 1] = { bone.text.truncate(shown, math.max(rest, 1)), (r.value == "" and not editing) and quiet or body }
+      end
+      if on then
+        line[#line + 1] = { fill = " ", hl = "Selection" }
+      end
+      out[#out + 1] = line
     end
     out[#out + 1] = ""
     local cur = list[st.sel]
     -- The selected package's whole description; the row shows its start.
     local about = cur and cur.package and cur.package.description
     local note = st.note and ((st.note[2] and "error: " or "") .. st.note[1]) or about or (cur and cur.hint) or ""
-    local wrapped = bone.text.wrap({ { note, st.note and st.note[2] and "ErrorMsg" or "Normal" } }, w,
+    local wrapped = bone.text.wrap({ { note, st.note and st.note[2] and "ErrorMsg" or "Dim" } }, w,
       { first = { { "   " } } })
     for i = 1, math.min(#wrapped, 3) do
       out[#out + 1] = wrapped[i]
     end
   end
-  out[#out + 1] = bone.text.truncate("   " .. page.hint(), w)
+  if st.step == "applying" or st.busy then
+    out[#out + 1] = { { "   " }, { spin, "Accent" }, { " working…", "Dim" } }
+    bone.ui.refresh_in(100)
+  else
+    out[#out + 1] = hint_line(page.hint())
+  end
   return out
 end
 
