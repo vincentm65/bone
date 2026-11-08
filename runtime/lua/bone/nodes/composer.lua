@@ -73,7 +73,9 @@ local function prompt_line(name, ctx)
   for _, s in ipairs(v) do
     if type(s) == "string" or (type(s) == "table" and s.fill == nil) then spans[#spans + 1] = s end
   end
-  return spans
+  -- Nothing to show is no line of its own: the composer's default stays
+  -- (a wrapper such as Prompt Suggestions returns {} when it has nothing).
+  return #spans > 0 and spans or nil
 end
 
 local function spans_text(spans)
