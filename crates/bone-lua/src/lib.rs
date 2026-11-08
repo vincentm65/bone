@@ -67,6 +67,7 @@ pub const RUNTIME: &[(&str, &str)] = runtime_files![
     "lua/bone/desktop/attach.lua",
     "lua/bone/nodes.lua",
     "lua/bone/nodes/window.lua",
+    "lua/bone/nodes/titlebar.lua",
     "lua/bone/nodes/style.lua",
     "lua/bone/nodes/widgets.lua",
     "lua/bone/nodes/popups.lua",

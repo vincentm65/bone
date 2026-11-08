@@ -57,6 +57,9 @@ pub enum WindowCmd {
     Fullscreen(bool),
     Maximized(bool),
     Minimized(bool),
+    /// What the system does on a double click on the title bar (macOS:
+    /// zoom or minimize, as set in its settings).
+    TitlebarDoubleClick,
 }
 
 /// What a frame leaves the window to do.
@@ -75,6 +78,9 @@ pub struct FrameOutput {
     pub title: Option<String>,
     pub close: bool,
     pub window: Vec<WindowCmd>,
+    /// The title bar's parts the window drew itself (`window_control`), in
+    /// paint order: a later one is over an earlier one.
+    pub controls: Vec<(crate::node::WindowControl, Rect)>,
 }
 
 impl FrameOutput {

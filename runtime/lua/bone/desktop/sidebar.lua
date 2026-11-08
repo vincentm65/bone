@@ -545,7 +545,9 @@ function M.node(ctx)
     opacity = ease, inner, handle,
   }
   if overlaid then
-    card.position, card.left, card.top, card.bottom, card.z = "absolute", M.inset, M.inset, M.inset, 8
+    -- Under the title bar the window draws, if it draws one.
+    local below = require("bone.nodes.titlebar").offset()
+    card.position, card.left, card.top, card.bottom, card.z = "absolute", M.inset, M.inset + below, M.inset, 8
     card.shadow = style.shadow.card
     local backdrop = style.finish({
       position = "absolute", left = 0, right = 0, top = 0, bottom = 0, z = 7,

@@ -23,6 +23,10 @@ tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
 notify-rust = "4.18.2"
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 
+# The Dock icon of a bare binary (no app bundle), set at start.
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+
 [dev-dependencies]
 bone-core.workspace = true
 bone-server.workspace = true

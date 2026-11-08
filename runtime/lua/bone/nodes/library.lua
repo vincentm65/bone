@@ -40,6 +40,11 @@ function M.setup(opts)
   -- opaque.
   bone.o.define("opacity", opts.plain and 1 or 0.9, { desc = "window background opacity, 0-1 (on restart)", type = "number" })
 
+  -- macOS and Windows: the window draws its own title bar
+  -- (bone.nodes.titlebar) instead of the system's; takes effect when the
+  -- window opens.
+  bone.o.define("titlebar", true, { desc = "draw the title bar in the window's colors on macOS and Windows (on restart)" })
+
   require("bone.nodes.window").setup({ bare = opts.plain })
 end
 

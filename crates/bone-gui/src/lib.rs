@@ -144,6 +144,9 @@ pub struct Gui {
     /// The window was opened see-through (`opacity` below 1 then), so its
     /// background can take the option's alpha.
     pub transparent: bool,
+    /// The window draws its own title bar (the system's is hidden): how
+    /// the system's part of it looks, `Some` on macOS and Windows.
+    pub titlebar: Option<Titlebar>,
     /// The window as Lua sees it (`bone.gui.window_info`), the title Lua
     /// set, and window changes to send on the next frame.
     pub window_info: Value,
@@ -212,6 +215,7 @@ impl Gui {
             closed: false,
             renderer: None,
             transparent: false,
+            titlebar: None,
             window_info: Value::Null,
             window_title: None,
             viewport: Vec::new(),
@@ -672,5 +676,35 @@ pub(crate) type Waker = Box<dyn Fn() + Send + Sync>;
 fn wake(repaint: &OnceLock<Waker>) {
     if let Some(wake) = repaint.get() {
         wake();
+    }
+}
+
+/// The system's part of a title bar the window draws itself.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Titlebar {
+    /// The traffic lights stay, at the bar's left; the rest is Lua's.
+    Mac,
+    /// Nothing stays: Lua draws minimize, maximize and close too.
+    Windows,
+}
+
+impl Titlebar {
+    /// The title bar this platform can have drawn by the window.
+    pub fn native() -> Option<Titlebar> {
+        if cfg!(target_os = "macos") {
+            Some(Titlebar::Mac)
+        } else if cfg!(windows) {
+            Some(Titlebar::Windows)
+        } else {
+            None
+        }
+    }
+
+    /// Its name for Lua.
+    pub fn name(self) -> &'static str {
+        match self {
+            Titlebar::Mac => "mac",
+            Titlebar::Windows => "windows",
+        }
     }
 }

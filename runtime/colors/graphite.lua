@@ -68,6 +68,8 @@ hl("ErrorMsg", { fg = p.red })
 hl("WarningMsg", { fg = p.yellow })
 hl("WinSeparator", { fg = "#141414" })
 hl("StatusLine", { fg = p.muted, bg = p.bg })
+-- The title bar the window draws on macOS and Windows: the title, the bar.
+hl("TitleBar", { fg = p.dim, bg = p.bg })
 hl("StatusLineDim", { fg = p.dim, bg = p.bg })
 hl("Selection", { bg = p.raised })
 hl("PopupBorder", { fg = p.border })
