@@ -15,20 +15,25 @@ use tokio::net::TcpListener;
 
 const WAIT: Duration = Duration::from_secs(10);
 
-/// Serve one canned SSE body per request.
+/// Serve one canned SSE body per POST request; anything else (setup's
+/// GET /models) gets a 404 and uses no body.
 async fn fake_model(bodies: Vec<String>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/v1", listener.local_addr().unwrap());
     tokio::spawn(async move {
-        for body in bodies {
+        let mut bodies = bodies.into_iter().peekable();
+        while bodies.peek().is_some() {
             let (mut sock, _) = listener.accept().await.unwrap();
             let mut buf = Vec::new();
             let mut chunk = [0u8; 4096];
-            loop {
+            let post = loop {
                 let n = sock.read(&mut chunk).await.unwrap();
                 buf.extend_from_slice(&chunk[..n]);
                 if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
                     let head = String::from_utf8_lossy(&buf[..i]).to_lowercase();
+                    if !head.starts_with("post") {
+                        break false;
+                    }
                     let len: usize = head
                         .lines()
                         .find_map(|l| l.strip_prefix("content-length:"))
@@ -38,12 +43,16 @@ async fn fake_model(bodies: Vec<String>) -> String {
                         let n = sock.read(&mut chunk).await.unwrap();
                         buf.extend_from_slice(&chunk[..n]);
                     }
-                    break;
+                    break true;
                 }
-            }
-            let resp = format!(
-                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{body}"
-            );
+            };
+            let resp = match post {
+                true => format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{}",
+                    bodies.next().unwrap()
+                ),
+                false => "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n".into(),
+            };
             sock.write_all(resp.as_bytes()).await.unwrap();
             sock.shutdown().await.unwrap();
         }

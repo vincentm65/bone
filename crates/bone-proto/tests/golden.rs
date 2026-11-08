@@ -43,8 +43,12 @@ fn check(method: &str, messages: Vec<Message>) {
     }
     let want = std::fs::read_to_string(&path)
         .unwrap_or_else(|_| panic!("missing {}; run with UPDATE_GOLDEN=1", path.display()));
+    // As JSON, not text: building with the desktop GUI turns on serde_json's
+    // `preserve_order`, which keeps keys in insertion order, not sorted.
+    let want_json: Value = serde_json::from_str(&want).unwrap();
     assert_eq!(
-        got, want,
+        wire(&messages),
+        want_json,
         "wire format of {method} changed; if intended, run with UPDATE_GOLDEN=1"
     );
     // And the golden file decodes back to the same messages.
