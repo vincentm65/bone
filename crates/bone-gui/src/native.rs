@@ -147,8 +147,8 @@ struct Root {
     timer: Option<(Instant, Task<()>)>,
     /// Pictures uploaded, by id, and when each was last drawn.
     images: HashMap<u64, (Arc<RenderImage>, Instant)>,
-    /// The title bar's parts the system acts on, from the last frame,
-    /// innermost first (see `controls`).
+    /// The title bar's parts the system acts on, from the last frame, in
+    /// paint order: outermost (the drag area) first.
     controls: Vec<(WindowControl, Rect)>,
     _subscriptions: Vec<Subscription>,
     _messages: Task<()>,
@@ -275,11 +275,12 @@ impl Root {
             }
         }
         // The title bar's parts the system acts on (Windows: dragging, snap
-        // layouts, the caption buttons), placed by the next frame's prepaint
-        // (`controls`). The first found under the pointer wins, so the
-        // innermost (painted last) go first.
-        if self.gui.titlebar == Some(Titlebar::Windows) {
-            self.controls = out.controls.iter().rev().copied().collect();
+        // layouts, the caption buttons), placed by the next frame's prepaint.
+        // When they move (the first frame, a resize), that frame comes at
+        // once, so the system's hit test never waits on the pointer.
+        if self.gui.titlebar == Some(Titlebar::Windows) && self.controls != out.controls {
+            self.controls = out.controls.clone();
+            window.request_animation_frame();
         }
         if out.close {
             cx.quit();
@@ -539,14 +540,7 @@ impl Render for Root {
                 canvas(
                     move |bounds, window, cx| {
                         let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-                        // Hitboxes are placed before the paint: the title
-                        // bar's parts as the last frame drew them.
-                        let controls: Vec<_> = (prepaint.read(cx).controls.iter())
-                            .map(|(area, r)| {
-                                let hit = window.insert_hitbox(self::bounds(*r), HitboxBehavior::Normal);
-                                (control_area(*area), hit)
-                            })
-                            .collect();
+                        let controls = control_hitboxes(&prepaint.read(cx).controls, bounds, window);
                         (hitbox, controls)
                     },
                     move |bounds, (hitbox, controls), window, cx| {
@@ -836,6 +830,52 @@ fn cursor(c: Cursor) -> CursorStyle {
         Cursor::ResizeColumn => S::ResizeColumn,
         Cursor::ResizeRow => S::ResizeRow,
     }
+}
+
+/// The top edge left to the system's resize when the window is not
+/// maximized, in logical pixels (Windows' sizing frame, `SM_CYFRAME`).
+const RESIZE_EDGE: f32 = 4.0;
+
+/// The hitboxes of the title bar's parts the system acts on, placed before
+/// the paint, as the last frame drew them (`parts`, in paint order).
+///
+/// Each one blocks the mouse from what is under it, the root's focus
+/// tracking above all: GPUI moves the focus on a press and marks the press
+/// handled (`prevent_default`), and Windows' backend then keeps a press on
+/// the bar, the caption buttons or a resize edge from the system, which
+/// left the window unable to move, resize, minimize or close. The pointer
+/// events still reach the GUI (its listeners are the window's), so the
+/// buttons' hover keeps working.
+fn control_hitboxes(
+    parts: &[(WindowControl, Rect)],
+    bounds: Bounds<Pixels>,
+    window: &mut Window,
+) -> Vec<(WindowControlArea, Hitbox)> {
+    if parts.is_empty() {
+        return Vec::new();
+    }
+    let edge = if window.is_maximized() || window.is_fullscreen() { 0.0 } else { RESIZE_EDGE };
+    if edge > 0.0 {
+        // The top edge stays the system's (resize), and is no press of ours.
+        let strip = Rect::from_xywh(
+            f32::from(bounds.origin.x),
+            f32::from(bounds.origin.y),
+            f32::from(bounds.size.width),
+            edge,
+        );
+        window.insert_hitbox(self::bounds(strip), HitboxBehavior::BlockMouse);
+    }
+    let top = f32::from(bounds.origin.y) + edge;
+    // In paint order, so the innermost (a caption button in the bar) is on
+    // top and is the one the system finds.
+    (parts.iter())
+        .map(|(area, r)| {
+            let mut r = *r;
+            r.min.y = r.min.y.max(top);
+            let hit = window.insert_hitbox(self::bounds(r), HitboxBehavior::BlockMouse);
+            (control_area(*area), hit)
+        })
+        .collect()
 }
 
 fn control_area(c: WindowControl) -> WindowControlArea {
