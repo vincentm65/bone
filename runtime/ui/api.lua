@@ -720,7 +720,28 @@ local function panel_handle(id)
   return setmetatable({ id = id }, Panel)
 end
 
+-- A size the user set by dragging a dock's edge wins over the size the
+-- panel's owner asks for (a frontend that supports dragging sets
+-- `bone.ui.panel.user_size = function(id) -> size or nil`).
+local function user_sized(id, spec)
+  local f = bone.ui and bone.ui.panel and bone.ui.panel.user_size
+  if id == nil or type(spec) ~= "table" or spec.size == nil or spec.size == "auto" or type(f) ~= "function" then
+    return spec
+  end
+  local n = f(id)
+  if not n then
+    return spec
+  end
+  local copy = {}
+  for k, v in pairs(spec) do
+    copy[k] = v
+  end
+  copy.size = n
+  return copy
+end
+
 local function panel_update(id, spec)
+  spec = user_sized(id, spec)
   local st = package.loaded["bone.elements"] and elements().state("panel:" .. id)
   if spec and spec.view ~= nil then
     local key = "panel:" .. id
@@ -774,6 +795,7 @@ end
 bone.ui.panel = setmetatable({
   _handle = panel_handle,
   open = function(spec)
+    spec = user_sized(spec.id, spec)
     if spec.view == nil then
       return panel_handle(api("panel_open", spec))
     end

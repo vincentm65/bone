@@ -70,3 +70,5 @@ require("bone.keys")
 -- First run: with no model provider at all, /setup opens by itself (unless
 -- it was dismissed before; /setup is always there).
 require("bone.setup").first_run()
+-- Docked panels resize by dragging their border with the chat.
+require("bone.ui.dock_resize")
