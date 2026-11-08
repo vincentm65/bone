@@ -18,6 +18,10 @@ tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
 [target.'cfg(all(target_os = "linux", target_env = "gnu"))'.dependencies]
 libc.workspace = true
 
+[build-dependencies]
+# The Windows icon resource (build.rs).
+embed-resource = "3"
+
 [features]
 # The desktop GUI (`bone --gui`); off by default, so the TUI build is unchanged.
 gui = ["dep:bone-gui"]

@@ -127,6 +127,7 @@ otherwise it is a box.
 | `overflow` | `"visible"`, `"hidden"` or `"scroll"` (a column scrolls up and down, a row sideways); `scrollbar = { width, color, radius, inset, show = "auto" \| "hover" \| "hidden" }` |
 | `position = "absolute"` | out of the flow, placed by `top`, `right`, `bottom`, `left` (px or `%`) in its parent, over the others; `z` orders them |
 | `block_input` | takes the pointer from everything under it (a modal's backdrop), and keeps the keyboard focus among the nodes in it |
+| `window_control` | `"drag"`, `"min"`, `"max"` or `"close"`: a part of the title bar the window draws itself (see [The title bar](#the-title-bar)). The system acts on it: on Windows, dragging, snap layouts and double click on `"drag"`, and the caption buttons. It takes the pointer there, so keep anything clickable outside the `"drag"` part |
 
 ### Paint
 
@@ -572,11 +573,28 @@ compositor, or the background is black. Blur behind
 the window is the compositor's (Hyprland's `decoration:blur`, KWin's rules),
 not bone's.
 
+## The title bar
+
+On macOS and Windows the window hides the system's title bar and draws its
+own (`bone.nodes.titlebar`): the chat's title, small and centered, in the
+window's colors. On macOS the traffic lights stay at its left; on Windows it
+draws the app's mark and its own minimize, maximize and close.
+`bone.gui.window_info().titlebar` is `"mac"` or `"windows"` while it is
+drawn (nil on Linux, in full screen, or with the option off). Its colors are
+the `TitleBar` group's (`fg` the title, `bg` the bar), else `Dim` on the
+window. `bone.o.titlebar = false` keeps the system's bar (on restart).
+
+```lua
+local titlebar = require("bone.nodes.titlebar")
+titlebar.height = 34            -- the macOS traffic lights are placed for 34
+bone.hl.set("TitleBar", { fg = "#8a8a8a", bg = "#000000" })
+```
+
 ## The window: `bone.gui`
 
 ```lua
 bone.gui.window{ title = "bone", width = 1100, height = 760, maximized = false }
-bone.gui.window_info()                -- { width, height, columns, fullscreen, maximized, focused, opacity }
+bone.gui.window_info()                -- { width, height, columns, fullscreen, maximized, focused, opacity, titlebar }
 bone.gui.notify("bone", "done")       -- a desktop notification (gui.notifications)
 bone.gui.open_file({ title = "Pick", filters = { { "Images", { "png" } } } }, function(path) end)
 bone.gui.save_file({ name = "out.txt" }, function(path) end)   -- gui.dialogs

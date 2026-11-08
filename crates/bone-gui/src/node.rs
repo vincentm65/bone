@@ -198,6 +198,18 @@ pub enum Justify {
     Between,
 }
 
+/// What a node is to the window's frame when the window draws its own
+/// title bar (`window_control`): where it is dragged by, and its minimize,
+/// maximize and close buttons. The system acts on them (Windows' snap
+/// layouts, double-click to maximize); elsewhere they do nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowControl {
+    Drag,
+    Min,
+    Max,
+    Close,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub enum Overflow {
     #[default]
@@ -298,6 +310,8 @@ pub struct Style {
     /// meant for what was there before (enter, typing) does not answer a
     /// question that has just come up.
     pub key_guard: f32,
+    /// Part of the title bar the window draws itself (see `WindowControl`).
+    pub window_control: Option<WindowControl>,
     /// Soft shadows under the box: `shadow = { blur, spread, dx, dy, color }`
     /// or a list of those.
     pub shadows: Vec<Shadow>,
@@ -750,6 +764,7 @@ names! {
         "linear" => Linear, "ease-in" => EaseIn, "ease-out" => EaseOut, "ease-in-out" => EaseInOut
     }
     ScrollbarShow { "auto" => Auto, "hover" => Hover, "hidden" => Hidden }
+    WindowControl { "drag" => Drag, "min" => Min, "max" => Max, "close" => Close }
 }
 
 /// A node's table read in one pass: its string keys and their values, and
@@ -1222,6 +1237,7 @@ pub fn parse(
         focusable: p.get("focusable")?,
         autofocus: p.get("autofocus")?.unwrap_or(false),
         key_guard: p.get("key_guard")?.unwrap_or(0.0),
+        window_control: p.choice("window_control")?,
         role: p.choice("role")?,
         label: p.get("label")?,
         selected: p.get("selected")?,

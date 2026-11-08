@@ -15,7 +15,8 @@ use gpui::{
     ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
     MouseUpEvent, NavigationDirection, ParentElement, PathBuilder, Pixels, Render, RenderImage,
     ScrollDelta, ScrollWheelEvent, Styled, Subscription, Task, TitlebarOptions, UTF16Selection,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowOptions, canvas, div, point, px, size,
+    Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowOptions, canvas, div,
+    point, px, size,
 };
 
 use crate::backend::draw::{DrawList, Shape};
@@ -24,7 +25,8 @@ use crate::backend::input::{Button, Event, FrameInput, Key, Modifiers, WheelUnit
 use crate::backend::text::{FontSet, FontsApplied, Shaper};
 use crate::backend::{Backend, Cursor, Rect, WindowCmd, pos, vec2};
 use crate::node::{Corners, Gradient, Rgba};
-use crate::{Gui, GuiOptions};
+use crate::node::WindowControl;
+use crate::{Gui, GuiOptions, Titlebar};
 
 /// The window's side of a frame: GPUI's text system and fonts.
 struct GpuiBackend {
@@ -145,6 +147,9 @@ struct Root {
     timer: Option<(Instant, Task<()>)>,
     /// Pictures uploaded, by id, and when each was last drawn.
     images: HashMap<u64, (Arc<RenderImage>, Instant)>,
+    /// The title bar's parts the system acts on, from the last frame,
+    /// innermost first (see `controls`).
+    controls: Vec<(WindowControl, Rect)>,
     _subscriptions: Vec<Subscription>,
     _messages: Task<()>,
 }
@@ -187,6 +192,7 @@ impl Root {
             ime: None,
             timer: None,
             images: HashMap::new(),
+            controls: Vec::new(),
             _subscriptions: vec![quit, active],
             _messages: messages,
         }
@@ -265,7 +271,15 @@ impl Root {
                 }
                 WindowCmd::Minimized(true) => window.minimize_window(),
                 WindowCmd::Minimized(false) => {}
+                WindowCmd::TitlebarDoubleClick => window.titlebar_double_click(),
             }
+        }
+        // The title bar's parts the system acts on (Windows: dragging, snap
+        // layouts, the caption buttons), placed by the next frame's prepaint
+        // (`controls`). The first found under the pointer wins, so the
+        // innermost (painted last) go first.
+        if self.gui.titlebar == Some(Titlebar::Windows) {
+            self.controls = out.controls.iter().rev().copied().collect();
         }
         if out.close {
             cx.quit();
@@ -486,6 +500,7 @@ impl Focusable for Root {
 impl Render for Root {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let this = cx.entity();
+        let prepaint = this.clone();
         let focus = self.focus.clone();
         div()
             .size_full()
@@ -522,8 +537,22 @@ impl Render for Root {
             }))
             .child(
                 canvas(
-                    |bounds, window, _cx| window.insert_hitbox(bounds, HitboxBehavior::Normal),
-                    move |bounds, hitbox, window, cx| {
+                    move |bounds, window, cx| {
+                        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
+                        // Hitboxes are placed before the paint: the title
+                        // bar's parts as the last frame drew them.
+                        let controls: Vec<_> = (prepaint.read(cx).controls.iter())
+                            .map(|(area, r)| {
+                                let hit = window.insert_hitbox(self::bounds(*r), HitboxBehavior::Normal);
+                                (control_area(*area), hit)
+                            })
+                            .collect();
+                        (hitbox, controls)
+                    },
+                    move |bounds, (hitbox, controls), window, cx| {
+                        for (area, hit) in controls {
+                            window.insert_window_control_hitbox(area, hit);
+                        }
                         listen(&this, window);
                         window.handle_input(&focus, ElementInputHandler::new(bounds, this.clone()), cx);
                         this.update(cx, |root, cx| root.frame(bounds, &hitbox, window, cx));
@@ -809,6 +838,19 @@ fn cursor(c: Cursor) -> CursorStyle {
     }
 }
 
+fn control_area(c: WindowControl) -> WindowControlArea {
+    match c {
+        WindowControl::Drag => WindowControlArea::Drag,
+        WindowControl::Min => WindowControlArea::Min,
+        WindowControl::Max => WindowControlArea::Max,
+        WindowControl::Close => WindowControlArea::Close,
+    }
+}
+
+/// The traffic lights' place on macOS, from the window's top left: in the
+/// middle of the title bar Lua draws (`bone.nodes.titlebar`, 34px tall).
+const TRAFFIC_LIGHTS: (f32, f32) = (13.0, 10.0);
+
 /// Open the GUI on `conn` and run it until the window closes. Call from
 /// the main thread, inside a multi-threaded Tokio runtime.
 pub async fn run(conn: Connection, opts: GuiOptions) -> Result<(), String> {
@@ -826,6 +868,10 @@ fn open(mut gui: Gui) -> Result<(), String> {
     // window draws faster, and works without a compositor.
     let transparent = gui.opacity() < 1.0;
     gui.transparent = transparent;
+    // The window draws its own title bar where the system lets it, unless
+    // the `titlebar` option asks for the system's.
+    let titlebar = Titlebar::native().filter(|_| gui.bool_option("titlebar", true));
+    gui.titlebar = titlebar;
     let mut slot = Some(gui);
     Application::new().run(move |cx: &mut App| {
         let Some(gui) = slot.take() else { return };
@@ -833,8 +879,10 @@ fn open(mut gui: Gui) -> Result<(), String> {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
-                title: Some("bone".into()),
-                ..Default::default()
+                title: Some("New chat".into()),
+                appears_transparent: titlebar.is_some(),
+                traffic_light_position: (titlebar == Some(Titlebar::Mac))
+                    .then(|| point(px(TRAFFIC_LIGHTS.0), px(TRAFFIC_LIGHTS.1))),
             }),
             window_background: if transparent {
                 WindowBackgroundAppearance::Transparent
@@ -856,7 +904,28 @@ fn open(mut gui: Gui) -> Result<(), String> {
             }
         })
         .detach();
+        #[cfg(target_os = "macos")]
+        dock_icon();
         cx.activate(true);
     });
     Ok(())
+}
+
+/// The app's icon in the Dock and the app switcher. A bare binary has
+/// none of its own (an app bundle's `Info.plist` would give it one).
+#[cfg(target_os = "macos")]
+fn dock_icon() {
+    use cocoa::appkit::{NSApp, NSApplication, NSImage};
+    use cocoa::base::nil;
+    use cocoa::foundation::NSData;
+    const PNG: &[u8] = include_bytes!("../assets/icon-512.png");
+    // SAFETY: on the main thread, after the application exists (in the
+    // callback of `Application::run`); the image is retained by AppKit.
+    unsafe {
+        let data = NSData::dataWithBytes_length_(nil, PNG.as_ptr().cast(), PNG.len() as u64);
+        let image = NSImage::initWithData_(NSImage::alloc(nil), data);
+        if image != nil {
+            NSApp().setApplicationIconImage_(image);
+        }
+    }
 }

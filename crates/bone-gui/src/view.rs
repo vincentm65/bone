@@ -49,9 +49,7 @@ impl Gui {
         if let Some(t) = self.lua.copied.take() {
             out.copy = Some(t);
         }
-        out.title = Some(
-            (self.window_title.clone()).unwrap_or_else(|| format!("{} — bone", self.title())),
-        );
+        out.title = Some((self.window_title.clone()).unwrap_or_else(|| self.window_name()));
         out.close = self.closed;
         out
     }
@@ -68,6 +66,23 @@ impl Gui {
         }
         let a = (self.opacity() * 255.0).round() as u8;
         Rgba(c.0, c.1, c.2, a)
+    }
+
+    /// The window's name for the system (the taskbar, the window list):
+    /// the chat's title, or "New chat" before it has one.
+    fn window_name(&self) -> String {
+        let session = self.chats[self.current].session.as_ref();
+        (session.and_then(|s| s.title.clone()))
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| "New chat".into())
+    }
+
+    /// A true-or-false option of the GUI (`bone.o.define`), or `default`.
+    pub(crate) fn bool_option(&self, name: &str, default: bool) -> bool {
+        match self.lua.dynamic_options.get(name).map(|o| &o.value) {
+            Some(DynamicValue::Boolean(b)) => *b,
+            _ => default,
+        }
     }
 
     /// The `opacity` option: how much of the window's background covers

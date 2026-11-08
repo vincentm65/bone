@@ -1,0 +1,3 @@
+// bone.exe's icon: the first icon in the file is the one Explorer, the
+// taskbar and the window show (GPUI loads icon resource 1).
+1 ICON "assets/icon.ico"

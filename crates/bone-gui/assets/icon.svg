@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024">
+  <!-- The app's mark: a prompt's chevron and cursor on a graphite tile.
+       Rendered to icon-512.png (macOS Dock) and ../../bone/assets/icon.ico
+       (Windows) by scripts/icons.sh. -->
+  <defs>
+    <linearGradient id="tile" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#1a1a1a"/>
+      <stop offset="1" stop-color="#0a0a0a"/>
+    </linearGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#tile)"/>
+  <rect x="100.5" y="100.5" width="823" height="823" rx="184.5" fill="none" stroke="#ffffff" stroke-opacity="0.12" stroke-width="3"/>
+  <path d="M318 340 L512 512 L318 684" fill="none" stroke="#c8dcf5" stroke-width="86" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="566" y="630" width="168" height="80" rx="40" fill="#c8dcf5"/>
+</svg>

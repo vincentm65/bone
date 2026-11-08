@@ -65,6 +65,11 @@ impl Gui {
         if let Some(id) = p.node.id.as_deref() {
             frame.leaves.push((id.to_owned(), r));
         }
+        if let Some(area) = s.window_control
+            && visible.is_positive()
+        {
+            fx.out.controls.push((area, visible));
+        }
         let (mut hovered, mut pressed, mut sensed) = (false, false, false);
         let styled = s.hover.is_some() || s.active.is_some() || s.focus.is_some();
         // Asks for the focus: a press gives it, not only tab. A text input

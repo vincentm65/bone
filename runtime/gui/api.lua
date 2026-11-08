@@ -6,13 +6,16 @@ local api = bone._api
 
 bone.gui = {
   --- Change the window: { title, width, height (logical pixels),
-  --- fullscreen, maximized, minimized }; only what is given changes.
+  --- fullscreen, maximized, minimized, titlebar_double_click (do what the
+  --- system does on a double click on the title bar) }; only what is
+  --- given changes.
   window = function(spec)
     api("gui_window", spec or {})
   end,
   --- { width, height (pixels), columns, rows (character cells), cell =
   --- { w, h } (a character cell of the monospace font, in pixels),
-  --- fullscreen, maximized, focused }.
+  --- fullscreen, maximized, focused, titlebar ("mac" or "windows" while
+  --- the window draws its own title bar) }.
   window_info = function()
     return api("gui_window_info")
   end,

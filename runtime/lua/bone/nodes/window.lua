@@ -328,7 +328,31 @@ function M.area(ctx)
   return M.column(ctx, { width = ctx.width })
 end
 
+--- The window: the title bar it draws itself (bone.nodes.titlebar; none
+--- where the system draws one) over the rest (M.body), which starts
+--- under it. What floats (dialogs, popups) is still placed on the whole
+--- window, and a dialog's backdrop dims the bar too.
 function M.view(ctx)
+  local alpha = see_through()
+  local bar = require("bone.nodes.titlebar").node(alpha and (bone.hl.get("Normal") or {}).bg or "Normal")
+  if not bar then return M.body(ctx) end
+  local area = {}
+  for k, v in pairs(ctx) do area[k] = v end
+  area.height = math.max(0, (ctx.height or 0) - bar.height)
+  local root = M.body(area)
+  root.padding = { bar.height, 0, 0, 0 }
+  bar.position, bar.top, bar.left, bar.right, bar.z = "absolute", 0, 0, 0, M.titlebar_z
+  root[#root + 1] = bar
+  return root
+end
+
+-- Over the sidebar floating on a narrow window (and its backdrop), under
+-- dialogs and popups.
+M.titlebar_z = 9
+
+--- Everything under the title bar: the docks, the sidebar, the chat, and
+--- what floats over them. ctx = { width, height, cell } of that area.
+function M.body(ctx)
   local sidebar = require("bone.desktop.sidebar")
   local side, room, backdrop = sidebar.node(ctx)
   local alpha = see_through()

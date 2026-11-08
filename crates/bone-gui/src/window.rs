@@ -79,6 +79,9 @@ fn window_info(lua: &Lua, gui: &Gui) -> mlua::Result<MultiValue> {
             t.set(k, b)?;
         }
     }
+    if let Some(style) = info.get("titlebar").and_then(|v| v.as_str()) {
+        t.set("titlebar", style)?;
+    }
     if let Some((w, h)) = gui.view.cell {
         let cell = lua.create_table()?;
         cell.set("w", w)?;
@@ -89,7 +92,8 @@ fn window_info(lua: &Lua, gui: &Gui) -> mlua::Result<MultiValue> {
 }
 
 /// `bone.gui.window{ title, width, height, fullscreen, maximized,
-/// minimized }`: change what is given (sizes in logical pixels).
+/// minimized, titlebar_double_click }`: change what is given (sizes in
+/// logical pixels).
 fn window(gui: &mut Gui, spec: &Table) -> mlua::Result<()> {
     let some = Some(spec.clone());
     if let Some(title) = opt::<String>(&some, "title")? {
@@ -115,6 +119,9 @@ fn window(gui: &mut Gui, spec: &Table) -> mlua::Result<()> {
         if let Some(on) = opt::<bool>(&some, key)? {
             gui.viewport.push(cmd(on));
         }
+    }
+    if opt::<bool>(&some, "titlebar_double_click")? == Some(true) {
+        gui.viewport.push(WindowCmd::TitlebarDoubleClick);
     }
     Host::changed(gui);
     Ok(())
@@ -143,6 +150,9 @@ impl Gui {
             "rows": self.view.screen_size.1,
             "cell": self.view.cell.map(|(w, h)| serde_json::json!({ "w": w, "h": h })),
             "opacity": if self.transparent { self.opacity() } else { 1.0 },
+            // The bar the window draws itself; none in full screen, where
+            // the system shows its own over the window.
+            "titlebar": self.titlebar.filter(|_| !input.fullscreen).map(|t| t.name()),
         });
         out.window.append(&mut self.viewport);
     }
