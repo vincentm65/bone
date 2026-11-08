@@ -91,13 +91,67 @@ local function chrome(sideways, flush)
   return (flush and 0 or M.dock_inset) + 2 * (sideways and M.dock_pad[2] or M.dock_pad[1]) + 2
 end
 
+-- Sizes set by dragging a dock's edge, in pixels, by panel id (kept
+-- between runs as "dock-size.<id>").
+M.dock_px = {}
+
+-- A state name for panel `id` (state names are letters, digits, _, - and .).
+local function size_key(id)
+  return "dock-size." .. tostring(id):gsub("[^%w_%-%.]", "_")
+end
+-- The least a dragged dock keeps, and the least it leaves the chat.
+M.dock_min, M.chat_min = 160, 320
+
+local function dragged_size(id)
+  if M.dock_px[id] == nil then
+    M.dock_px[id] = tonumber(bone.state.load(size_key(id))) or false
+  end
+  return M.dock_px[id] or nil
+end
+
 local function dock_size(info, ctx, sideways, flush)
   local cell = ctx.cell or bone.gui.window_info().cell or { w = 8, h = 18 }
   local room = sideways and ctx.width or ctx.height
+  local px = info.size ~= "auto" and dragged_size(info.id)
+  if px then return math.max(0, math.min(room, px)) end
   local size = tonumber(info.size)
   if size and size < 1 then return math.max(0, room * size) end
   local cells = size or tonumber(info.max) or (sideways and 30 or 10)
   return math.max(0, math.min(room, cells * (sideways and cell.w or cell.h) + chrome(sideways, flush)))
+end
+
+-- The edge of a dock on `side` that faces the chat, as a handle: drag it
+-- to set the dock's size (kept between runs). The edge stays as far from
+-- the pointer as where it was grabbed. `room` is the window's width (or
+-- height) the dock and the chat share.
+local function edge(side, info, room)
+  local id, sideways = info.id, side == "left" or side == "right"
+  local grab = 0
+  local handle = { position = "absolute", z = 1, cursor = sideways and "col-resize" or "row-resize" }
+  local thick = 6
+  if side == "right" then handle.left, handle.top, handle.bottom, handle.width = 0, 0, 0, thick
+  elseif side == "left" then handle.right, handle.top, handle.bottom, handle.width = 0, 0, 0, thick
+  elseif side == "bottom" then handle.top, handle.left, handle.right, handle.height = 0, 0, 0, thick
+  else handle.bottom, handle.left, handle.right, handle.height = 0, 0, 0, thick end
+  handle.on_press = function(pos) grab = sideways and pos.x or pos.y end
+  handle.on_drag = function(pos)
+    local r = bone.gui.rect("dock:" .. id)
+    if not r then return end
+    local size
+    if side == "right" then size = r.x + r.w - pos.x + grab
+    elseif side == "left" then size = pos.x - r.x + (thick - grab)
+    elseif side == "bottom" then size = r.y + r.h - pos.y + grab
+    else size = pos.y - r.y + (thick - grab) end
+    size = math.floor(math.max(M.dock_min, math.min(room - M.chat_min, size)))
+    if size ~= M.dock_px[id] then
+      M.dock_px[id] = size
+      bone.gui.invalidate()
+    end
+  end
+  handle.on_release = function()
+    if M.dock_px[id] then bone.state.save(size_key(id), M.dock_px[id]) end
+  end
+  return handle
 end
 
 -- The insets of a dock on `side`: away from the window's edges, none
@@ -144,6 +198,10 @@ function M.docked(side, ctx, available, flush)
         width = math.max(0, inner_w), height = math.max(0, inner_h), cell = ctx.cell, auto = auto,
       })
       out[#out][1] = card
+      -- Its inner edge resizes it; an auto-sized one fits its content instead.
+      if not auto and not flush then
+        out[#out][2] = edge(side, info, sideways and ctx.width or ctx.height)
+      end
     end
   end
   return out, used
