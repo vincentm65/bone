@@ -12,20 +12,23 @@ local entry, button, field, hints = widgets.entry, widgets.button, widgets.field
 local STEPS = { provider = 1, details = 2, packages = 3 }
 local NAMES = { "Provider", "Details", "Packages" }
 
--- Where you are: Provider ─ Details ─ Packages.
+-- Where you are: a bar of the steps, the ones done and this one lit, and
+-- "Step 2 of 3 · Details" under it.
 local function steps(st)
   local at = STEPS[st.step]
   if not at then return nil end
-  local spans = {}
-  for i, name in ipairs(NAMES) do
-    if i > 1 then spans[#spans + 1] = { text = "   ─   ", hl = "Dim" } end
-    local done = i < at
-    spans[#spans + 1] = {
-      text = (done and "✓ " or (i .. "  ")) .. name,
-      hl = i == at and "Accent" or (done and "ToolDone" or "Dim"), bold = i == at,
-    }
+  local on = style.alpha("Normal", "ff", "fg", "Normal")
+  local off = style.alpha("PromptBorder", "ff", "fg", "Selection")
+  local bar = { direction = "row", gap = 6, height = 3, margin = { 0, 0, 12, 0 } }
+  for i = 1, #NAMES do
+    bar[#bar + 1] = { grow = 1, width = 0, height = 3, radius = 2, bg = i <= at and on or off }
   end
-  return { spans = spans, size = style.size.small, padding = { 2, style.inset }, margin = { 0, 0, 6, 0 } }
+  return {
+    direction = "column", padding = { 4, style.inset }, margin = { 0, 0, 6, 0 },
+    bar,
+    { text = ("Step %d of %d · %s"):format(at, #NAMES, NAMES[at]), hl = "Dim", size = style.size.small,
+      font = "mono" },
+  }
 end
 
 -- A heading and a line under it; `size` defaults to a window's title.
@@ -39,7 +42,7 @@ end
 
 -- A label over a group of entries.
 local function section(text)
-  return { text = text:upper(), hl = "Dim", size = style.size.micro, bold = true, padding = { 8, style.inset, 2, style.inset } }
+  return { text = text, hl = "Dim", size = style.size.small, medium = true, padding = { 10, style.inset, 4, style.inset } }
 end
 
 local function paragraph(text)
@@ -129,7 +132,7 @@ function M.view(page)
         add(entry(on, { {
           direction = "row", align = "center", gap = 8,
           { grow = 1, direction = "column",
-            { text = name, hl = "Normal", bold = true, size = style.size.body },
+            { text = name, hl = "Normal", medium = true, size = style.size.body },
             { text = aside, hl = "Dim", size = style.size.small, margin = { 2, 0, 0, 0 } } },
           { text = "›", hl = on and "Accent" or "Dim", size = style.size.lead },
         } }, click(i)), on)

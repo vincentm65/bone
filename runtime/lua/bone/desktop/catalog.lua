@@ -43,7 +43,7 @@ function M.view(page)
     local selected, last
     for i, e in ipairs(list) do
       if e.state ~= last then
-        items[#items + 1] = { text = catalog.HEAD[e.state]:upper(), hl = "Dim", bold = true, size = style.size.micro,
+        items[#items + 1] = { text = catalog.HEAD[e.state], hl = "Dim", medium = true, size = style.size.small,
           padding = { 2, style.inset }, margin = { 6, 0, 2, 0 } }
         last = e.state
       end

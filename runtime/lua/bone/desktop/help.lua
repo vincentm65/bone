@@ -53,25 +53,34 @@ function M.open()
   local function node()
     list = help.list(st.tab, st.query)
     st.sel = math.max(1, math.min(st.sel, math.max(1, #list)))
-    local items = { title("Help") }
-    items[#items + 1] = widgets.tabs(help.TABS, st.tab, function(i)
-      st.tab, st.query, st.sel = i, "", 1
-      bone.ui.update(id, {})
-    end)
-    items[#items + 1] = {
-      text = st.query == "" and "Type to search…" or (st.query .. "▏"), hl = st.query == "" and "Dim" or "Normal",
-      -- The same field as the sidebar's search.
-      size = style.size.caption, bg = "Normal", radius = style.radius.md, padding = { 6, style.inset },
-      border = 1, border_color = "PromptBorder", margin = { 0, 0, 6, 0 },
-    }
+    -- The heading with its tabs on one line, then the search: the same
+    -- field as the sidebar's.
+    local head = title("Help")
+    head.grow = 1
+    local items = { { direction = "row", align = "center", margin = { 0, 0, 6, 0 }, head,
+      widgets.tabs(help.TABS, st.tab, function(i)
+        st.tab, st.query, st.sel = i, "", 1
+        bone.ui.update(id, {})
+      end) } }
+    items[#items + 1] = style.finish({
+      direction = "row", align = "center", gap = 8, height = 32, padding = { 0, style.inset },
+      bg = "Normal", radius = style.radius.md, border = 1, border_color = "PromptBorder", margin = { 0, 0, 6, 0 },
+      require("bone.nodes.icons").node("search", { size = 15, hl = "Dim" }),
+      { text = st.query == "" and "Search commands, keys and docs" or (st.query .. "▏"),
+        hl = st.query == "" and "Dim" or "Normal", size = style.size.body, grow = 1, wrap = false },
+    })
     if #list == 0 then items[#items + 1] = note("No matches.", { 4, 4 }) end
     local selected
     for i, it in ipairs(list) do
       local on = i == st.sel
-      local lines = {
-        { text = it.label, hl = it.command and "Accent" or "Normal", bold = false, size = style.size.body },
-        { text = st.tab == 3 and it.meta or it.desc, hl = "Dim", size = style.size.small, margin = { 2, 0, 0, 0 } },
-      }
+      -- One line: the name, and what it does in quiet grey.
+      local lines = { {
+        direction = "row", gap = 12, align = "center", height = 24,
+        { text = it.label, hl = "Normal", size = style.size.body, width = 150, shrink = 0,
+          wrap = false, text_overflow = "ellipsis" },
+        { text = st.tab == 3 and it.meta or it.desc, hl = on and "Muted" or "Dim", size = style.size.body,
+          grow = 1, width = 0, wrap = false, text_overflow = "ellipsis" },
+      } }
       items[#items + 1] = entry(on, lines, function()
         if st.sel == i then choose(i) else st.sel = i end
         bone.ui.update(id, {})
@@ -83,7 +92,7 @@ function M.open()
     local current = list[st.sel]
     local detail = widgets.detail(current and st.tab ~= 3 and current.meta ~= "" and current.meta or nil)
     return style.as_dialog(widgets.list("help:" .. id, items, selected, {
-      estimate = 44,
+      estimate = 34,
       footer = { direction = "column", widgets.divider({ margin = { 4, 0, 0, 0 } }), detail,
         hints("tab section · ↑↓ move · enter open · esc close", { 0, 0 }) },
     }))

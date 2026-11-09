@@ -130,7 +130,7 @@ function M.open(want)
     end
     local names = {}
     for i = 1, 3 do names[i] = st.tabs[i].title end
-    row[#row + 1] = { text = "Settings", hl = "Normal", bold = true, size = style.size.title, grow = 1,
+    row[#row + 1] = { text = "Settings", hl = "Normal", bold = true, size = style.size.lead, grow = 1,
       padding = { 0, 0, 0, style.inset } }
     row[#row + 1] = widgets.tabs(names, section, function(i)
       page.switch_tab(i - st.tab)
@@ -145,10 +145,11 @@ function M.open(want)
     local shown = typing and (st.query .. "▏") or (st.query ~= "" and st.query or "Search")
     return widgets.press({
       -- The same field as the sidebar's and help's search.
-      direction = "row", align = "center", gap = style.space.sm, margin = { 0, 0, 6, 0 }, padding = { 6, style.inset },
+      direction = "row", align = "center", gap = 8, margin = { 0, 0, 6, 0 }, padding = { 0, style.inset }, height = 32,
       bg = "Normal", radius = style.radius.md, border = 1,
-      border_color = typing and "Accent" or "PromptBorder",
-      { text = shown, hl = (typing or st.query ~= "") and "Normal" or "Dim", size = CAPTION, grow = 1, width = 0,
+      border_color = typing and "Muted" or "PromptBorder",
+      require("bone.nodes.icons").node("search", { size = 15, hl = "Dim" }),
+      { text = shown, hl = (typing or st.query ~= "") and "Normal" or "Dim", size = style.size.body, grow = 1, width = 0,
         wrap = false, text_overflow = "ellipsis" },
       st.query ~= "" and widgets.icon_button("✕", "Clear the search", function()
         st.query, st.search, st.sel = "", false, 1
