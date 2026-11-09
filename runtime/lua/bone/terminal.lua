@@ -7,7 +7,7 @@
 -- bone.ui.panel option (dock, size, hidden, …) passes through, or put
 -- "panel:<id>" in bone.ui.layout. While it has the keyboard every key goes to
 -- the program except those in M.escape, which gives the keyboard back to the prompt;
--- wheel and page keys scroll back without mouse reporting; xterm mouse reporting
+-- the wheel and shift+page keys scroll back; xterm mouse reporting
 -- receives clicks, drags and wheel events.
 --
 --   local term = require("bone.terminal")
@@ -184,13 +184,13 @@ local function on_key(id, t, key)
     shift_scroll(t, 3)
   elseif key == "wheeldown" then
     shift_scroll(t, -3)
-  elseif key == "pageup" or key == "shift+pageup" then
+  elseif key == "shift+pageup" or (key == "pageup" and t.scroll > 0) then
     page_scroll(t, 1)
-  elseif key == "pagedown" or key == "shift+pagedown" then
+  elseif key == "shift+pagedown" or (key == "pagedown" and t.scroll > 0) then
     page_scroll(t, -1)
-  elseif key == "ctrl+home" or (key == "home" and (t.screen and t.screen.max or 0) > 0) then
+  elseif key == "ctrl+home" then
     shift_scroll(t, 1e9)
-  elseif key == "ctrl+end" or (key == "end" and (t.screen and t.screen.max or 0) > 0) then
+  elseif key == "ctrl+end" then
     t.scroll = 0
   else
     local bytes = encode(key, t.screen and t.screen.app_cursor)
@@ -240,12 +240,11 @@ local function mouse_code(t, ev)
   if t.screen.mouse_encoding == "sgr" then
     return string.format("\27[<%d;%d;%d%s", code, col, row, action == "up" and "m" or "M")
   end
-  if t.screen.mouse_encoding == "utf8" then
-    return "\27[M" .. utf8.char(32 + code, 32 + col, 32 + row)
+  if t.screen.mouse_encoding == "utf8" then -- LuaJIT has no utf8 library: two bytes past 127
+    local function u(n) return n < 128 and string.char(n) or string.char(192 + math.floor(n / 64), 128 + n % 64) end
+    return "\27[M" .. u(32 + code) .. u(32 + col) .. u(32 + row)
   end
-  col, row = math.min(223, col), math.min(223, row)
-  local suffix = string.char(32 + code, 32 + col, 32 + row)
-  return "\27[M" .. suffix
+  return "\27[M" .. string.char(32 + code, 32 + math.min(223, col), 32 + math.min(223, row))
 end
 
 function M.setup()

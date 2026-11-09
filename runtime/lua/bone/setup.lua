@@ -70,11 +70,11 @@ function M.first_run()
         end
       end
     end)
-    if bone.settings.get("setup.skipped") then
-      return
-    end
+    local skipped = bone.settings.get("setup.skipped")
     bone.model.list(function(list)
-      if not list or #list > 0 then
+      -- A provider since setup was dismissed: the new chat no longer says there is none.
+      if list and #list > 0 and skipped then bone.settings.reset("setup.skipped") end
+      if not list or #list > 0 or skipped then
         return
       end
       bone.request("health/check", {}, function(items)
@@ -735,6 +735,8 @@ function M.open(opts)
       if skipped and opts.first_run then
         bone.settings.set("setup.skipped", true)
         bone.notify("Setup paused. Run /setup when you’re ready to connect a provider.")
+      elseif not skipped and bone.settings.get("setup.skipped") then
+        bone.settings.reset("setup.skipped")
       end
     end,
   })
