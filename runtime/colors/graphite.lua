@@ -20,6 +20,8 @@ local hl = bone.hl.set
 -- Normal's background is the window's.
 hl("Normal", { fg = p.fg, bg = p.bg })
 hl("Dim", { fg = p.dim })
+-- Secondary text: a row that is not the open one, a description.
+hl("Muted", { fg = p.muted })
 -- Accent is emphasis, not a color: the bright grey. Blue is kept for state
 -- (running, focus, selection).
 hl("Accent", { fg = p.fg })
@@ -80,7 +82,9 @@ hl("StatusLineDim", { fg = p.dim, bg = p.bg })
 hl("Selection", { bg = p.raised })
 hl("PopupBorder", { fg = p.border })
 hl("PopupTitle", { fg = p.fg, bold = true })
--- Panels (the sessions sidebar, the tray, suggestions).
+-- The docked sidebar: a step above the window, a hairline at its edge.
+hl("Sidebar", { fg = p.muted, bg = p.side })
+-- Panels (the tray, suggestions).
 hl("Panel", { fg = p.fg, bg = p.panel })
 hl("PanelDim", { fg = p.dim, bg = p.panel })
 hl("PanelAccent", { fg = p.fg, bg = p.panel })
@@ -89,6 +93,6 @@ hl("PanelSelectedDim", { fg = p.muted, bg = p.raised })
 hl("PanelRunning", { fg = p.blue, bg = p.panel })
 -- A chat's state in the sessions sidebar: running, waiting for an
 -- approval, finished while you were elsewhere.
-hl("SessionRunning", { fg = p.blue })
+hl("SessionRunning", { fg = p.fg })
 hl("SessionWaiting", { fg = p.orange })
-hl("SessionUnread", { fg = p.fg })
+hl("SessionUnread", { fg = p.blue })

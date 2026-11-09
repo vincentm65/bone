@@ -116,17 +116,21 @@ function M.button(label, click, primary, on, o)
   }, o), click, "button", false))
 end
 
---- A button that is a glyph: `label` names it for readers and in a tooltip.
---- o: box (side, default 22), size (the glyph's), hl, radius.
+--- A button that is a glyph, or an icon of bone.nodes.icons by name:
+--- `label` names it for readers and in a tooltip.
+--- o: box (side, default 22), size (the glyph's or icon's), hl, radius.
 function M.icon_button(glyph, label, click, o)
   o = o or {}
   local box = o.box or 22
+  local icons = require("bone.nodes.icons")
+  local mark = icons.has(glyph) and icons.node(glyph, { size = o.size or 16, hl = o.hl or "Dim" })
+    or { text = glyph, size = o.size or style.size.caption, hl = o.hl or "Dim" }
   local node = {
     width = box, height = box, radius = o.radius or style.radius.sm,
     direction = "row", justify = "center", align = "center",
     label = label, tooltip = label, transition = style.motion.fast,
     hover = { bg = "Selection", color = "Normal" },
-    { text = glyph, size = o.size or style.size.caption, hl = o.hl or "Dim" },
+    mark,
   }
   o = extend({}, o)
   o.box, o.size, o.hl = nil, nil, nil
@@ -281,6 +285,14 @@ end
 
 --- A row of key hints from a line such as "↑↓ move · enter open · esc
 --- close": each key a small keycap, then what it does.
+--- A key as a small outlined cap ("Ctrl O", "esc").
+function M.keycap(key)
+  return style.finish({
+    text = key, size = style.size.micro, font = "mono", hl = "Dim", wrap = false,
+    border = 1, border_color = "PromptBorder", radius = style.radius.sm - 2, padding = { 1, 5 },
+  })
+end
+
 function M.hints(text, margin)
   local m = margin or { 8, 0 }
   local row = {
@@ -292,8 +304,7 @@ function M.hints(text, margin)
     if key and is_key(key) then
       row[#row + 1] = {
         direction = "row", gap = 6, align = "center",
-        style.finish({ text = key, size = style.size.micro, font = "mono", bg = "Selection", radius = style.radius.sm - 1,
-          padding = { 2, 7 } }),
+        M.keycap(key),
         { text = what, size = style.size.small, hl = "Dim" },
       }
     elseif part ~= "" then

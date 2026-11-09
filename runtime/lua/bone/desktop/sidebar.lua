@@ -1,13 +1,13 @@
--- The sessions sidebar (ctrl+o, /sessions): a card on the chat at its left,
--- in a lane the chat makes room for, drawn as nodes (bone.nodes.window
--- places `M.node()`). A Chats / Processes switch
--- with a new-chat button beside it, a project filter and a search field,
--- then your conversations: pinned ones first, the recent ones next (a chat
--- that runs, or one touched within the last hour, as in the TUI), then the
--- rest in date groups (Today, Yesterday, This week, Earlier), a compact
--- row each (title and when, then folder and tokens) with a dot for what it
--- needs from you (running, waiting for an approval, finished while you were
--- elsewhere).
+-- The sessions sidebar (ctrl+o, /sessions): docked at the window's left
+-- edge on a step-lighter black with a hairline beside the chat (a card over
+-- the chat in a narrow window), drawn as nodes (bone.nodes.window places
+-- `M.node()`). bone's name and a new-chat button, a search field, Chats and
+-- Processes, a project filter, then your conversations: pinned ones first,
+-- the recent ones next (a chat that runs, or one touched within the last
+-- hour, as in the TUI), then the rest in date groups (Today, Yesterday, This
+-- week, Earlier), one line each (title and when; model and tokens in its
+-- tooltip) with a dot for what it needs from you (running, waiting for an
+-- approval, finished while you were elsewhere).
 -- Over a row, pin and rename take the place of its time. The Processes page lists every chat's background work. The
 -- data is bone.chats. The rows are made once when the data changes, and the
 -- list makes nodes only for the ones in view, so a long history costs
@@ -25,14 +25,14 @@ local widgets = require("bone.nodes.widgets")
 local ID = "sessions"
 local SEARCH = "sidebar-search"
 local CARD = "sessions-card"
-M.width = tonumber(bone.state.load("sidebar-width")) or 280
+M.width = tonumber(bone.state.load("sidebar-width")) or 260
 M.min_width, M.max_width = 200, 520
 -- Under this window width it floats over the chat instead of pushing it.
 M.overlay_below = 760
 -- How far the card stands off the window's edges.
 M.inset = style.space.lg
 
-local ROW = { group = 30, card = 48, none = 40 }
+local ROW = { group = 34, card = 32, none = 40 }
 
 local open = false
 local overlaid = false -- drawn over the chat (a narrow window), not beside it
@@ -355,7 +355,7 @@ local function dot(state)
     unread = group("SessionUnread", "Normal"),
   })[state]
   return style.finish({
-    text = "●", hl = hl, size = state == "unread" and 7 or 8,
+    text = "●", hl = hl, size = 7,
     opacity = state == "running" and (breathing() and 1 or 0.35) or 1,
     transition = state == "running" and { duration = 850, easing = "ease-in-out" } or nil,
     tooltip = ({ running = "Running", waiting = "Waiting for your approval", unread = "New since you looked" })[state],
@@ -364,15 +364,16 @@ end
 
 -- A small glyph button shown over a row.
 local function action(glyph, label, fn, on)
-  return widgets.icon_button(glyph, label, fn, { hl = on and "Normal" or "Dim" })
+  return widgets.icon_button(glyph, label, fn, { hl = on and "Normal" or "Dim", size = 13, box = 22,
+    id = "sidebar-" .. label:lower() })
 end
 
 local function row(i)
   local r = st.rows[i]
   if not r then return { height = 0 } end
   if r.kind == "group" then
-    return { height = ROW.group, direction = "row", align = "end", padding = { 0, 10, 6, 10 },
-      { text = r.text:upper(), hl = "Dim", size = style.size.micro, bold = true, letter_spacing = 0.8 } }
+    return { height = ROW.group, direction = "row", align = "end", padding = { 0, 8, 7, 8 },
+      { text = r.text, hl = "Dim", size = style.size.small, medium = true } }
   elseif r.kind == "none" then
     return { height = ROW.none, direction = "row", align = "center", justify = "center",
       { text = r.text, hl = "Dim", size = style.size.caption } }
@@ -380,7 +381,7 @@ local function row(i)
   local on = r.item == st.sel
   local current = r.id and r.id == (bone.chat.session() or {}).session_id
   local over = r.id and st.hover == r.id
-  local title = { direction = "row", gap = 6, align = "center", height = 22 }
+  local title = { direction = "row", gap = 8, align = "center", height = 30 }
   title[#title + 1] = dot(r.state)
   -- The rename field lost the keyboard (a click elsewhere): it ends, and
   -- keeps what was typed, as a file manager's does.
@@ -409,27 +410,27 @@ local function row(i)
     })
   else
     title[#title + 1] = {
-      text = r.title, size = style.size.body, bold = r.state == "unread", -- the current one has its fill
-      hl = (on or current or r.state == "unread") and "Normal" or nil,
-      text_overflow = "ellipsis", grow = 1, shrink = 1,
+      text = r.title, size = style.size.body, medium = r.state == "unread", -- the current one has its fill
+      hl = (on or current or r.state == "unread") and "Normal" or group("Muted", nil),
+      text_overflow = "ellipsis", wrap = false, grow = 1, shrink = 1,
     }
     if over then
       local id = r.id
-      title[#title + 1] = action(r.pinned and "★" or "☆", r.pinned and "Unpin" or "Pin",
+      title[#title + 1] = action("pin", r.pinned and "Unpin" or "Pin",
         function() toggle_pin(id) end, r.pinned)
-      title[#title + 1] = action("✎", "Rename", function() start_rename(id) end)
+      title[#title + 1] = action("edit", "Rename", function() start_rename(id) end)
     else
-      title[#title + 1] = { text = r.time or "", hl = "Dim", size = style.size.micro, wrap = false }
+      title[#title + 1] = { text = r.time or "", hl = "Dim", size = style.size.micro, font = "mono", wrap = false, shrink = 0 }
     end
   end
-  local meta = r.state == "waiting"
-    and { text = "Waiting for approval", hl = group("SessionWaiting", "ErrorMsg"), size = style.size.small }
-    or { text = r.meta, hl = "Dim", size = style.size.small, text_overflow = "ellipsis", shrink = 1 }
+  -- What a row leaves out (the model, the tokens; what it waits for) is its
+  -- tooltip.
+  local tip = r.state == "waiting" and "Waiting for your approval" or (r.meta ~= "" and r.meta or nil)
   -- The row takes the pointer edge to edge, the card inset in it: across the
   -- gap between two cards the pointer stays a hand and the row stays lit.
   return {
     height = ROW.card, padding = { 1, 0 }, direction = "column",
-    cursor = "pointer", role = "option", selected = on,
+    cursor = "pointer", role = "option", selected = on, tooltip = tip,
     on_hover = r.id and function(inside)
       if inside then st.hover = r.id elseif st.hover == r.id then st.hover = nil end
       redraw()
@@ -442,11 +443,10 @@ local function row(i)
       end
     end,
     style.finish({
-      grow = 1, direction = "column", justify = "center", gap = 2, padding = { 0, 10 },
+      grow = 1, direction = "column", justify = "center", padding = { 0, 8 },
       radius = style.radius.md, bg = on and "Selection" or (over and style.hover()) or nil,
       hover = not on and { bg = style.hover() } or nil, transition = style.motion.base,
       title,
-      meta,
     }),
   }
 end
@@ -454,11 +454,13 @@ end
 -- The project filter: what it shows, and the menu under it while open.
 local function project_filter()
   local name = st.project and folder(st.project) or "All projects"
+  local icons = require("bone.nodes.icons")
   return widgets.press({
-    direction = "row", align = "center", gap = 6, padding = { 5, 10 }, radius = style.radius.md,
+    direction = "row", align = "center", gap = 10, height = 30, padding = { 0, 8 }, radius = style.radius.md,
     label = "Project: " .. name,
-    { text = name, size = style.size.caption, hl = st.project and "Normal" or "Dim", text_overflow = "ellipsis", shrink = 1 },
-    { text = st.menu and "▴" or "▾", size = 10, hl = "Dim" },
+    icons.node("folder", { hl = st.project and "Normal" or "Dim" }),
+    { text = name, size = style.size.body, hl = st.project and "Normal" or group("Muted", "Dim"), text_overflow = "ellipsis", wrap = false, shrink = 1 },
+    icons.node(st.menu and "arrow_up" or "chevron_down", { size = 12, hl = "Dim" }),
     { grow = 1 },
     st.project and widgets.press({
       text = "×", size = style.size.caption, hl = "Dim", padding = { 0, 4 }, radius = style.radius.sm - 1,
@@ -471,7 +473,7 @@ local function project_menu()
   if not st.menu then return nil end
   local menu = {
     -- Under the filter: the padding, the header and the filter above it.
-    position = "absolute", left = 10, right = 10, top = 86, z = 30,
+    position = "absolute", left = 8, right = 8, top = 216, z = 30,
     bg = "Panel", radius = style.radius.lg, border = 1, border_color = "PromptBorder", padding = 4,
     shadow = style.shadow.menu, direction = "column", max_height = 360,
     overflow = "scroll", id = "sidebar-projects",
@@ -541,9 +543,9 @@ function M.node(ctx)
     return nil, 0
   end
   local ease = 1 - (1 - p) ^ 3
-  local inner = M.content()
-  inner.width = M.width - 2 -- inside the card's border
   overlaid = ctx ~= nil and (ctx.width or math.huge) < M.overlay_below
+  local inner = M.content()
+  inner.width = M.width - (overlaid and 2 or 1) -- inside the card's border, or beside the hairline
   -- Its right edge is a handle: drag it to set the width (kept between runs).
   -- The edge stays as far from the pointer as where it was grabbed.
   local handle = {
@@ -572,14 +574,15 @@ function M.node(ctx)
     })
     return widgets.card(card), 0, backdrop
   end
-  -- The lane is the whole width from the first frame to the last: the
-  -- chat beside it is laid out once as the card opens (and once as it
-  -- closes), not again on each frame of the slide, which made its right
-  -- edge jump about. The card is uncovered inside the lane.
-  card.margin = { M.inset, M.width - card.width, M.inset, M.inset }
-  card = widgets.card(card)
-  local m = card.margin -- none in the bare look
-  return card, card.width + (m and (m[2] + m[4]) or 0)
+  -- Docked: flush with the window's edges, a step lighter than the chat,
+  -- a hairline between them. The lane is the whole width from the first
+  -- frame to the last, so the chat beside it is laid out once as it opens.
+  local g = bone.hl.get("Sidebar")
+  card.bg = (g and g.bg) and "Sidebar" or "Panel"
+  card.margin = { 0, M.width - card.width, 0, 0 }
+  table.insert(card, #card, { position = "absolute", top = 0, bottom = 0, right = 0, width = 1,
+    bg = style.alpha("WinSeparator", "ff", "fg", "PromptBorder") })
+  return style.finish(card), M.width
 end
 
 --- The sidebar's own content.
@@ -593,36 +596,57 @@ function M.content()
   local window = chats.recent_window()
   if minute ~= st.minute or window ~= st.window then compute() end
   bone.gui.invalidate((60 - os.time() % 60) * 1000)
+  local icons = require("bone.nodes.icons")
+  local muted = group("Muted", "Dim")
+  -- A page of the sidebar, or a place it opens: an icon and a name.
+  local function nav(icon, name, on, click, count)
+    return widgets.press({
+      direction = "row", align = "center", gap = 10, height = 30, padding = { 0, 8 }, radius = style.radius.md,
+      label = name, selected = on,
+      icons.node(icon, { hl = on and "Normal" or "Dim" }),
+      { text = name, size = style.size.body, hl = on and "Normal" or muted, grow = 1 },
+      count and { text = tostring(count), size = style.size.micro, font = "mono", hl = "Dim" } or nil,
+    }, click)
+  end
   local out = {
     id = ID, on_key = on_key, focus = {},
-    direction = "column", padding = { 12, 10, 0, 10 }, gap = 8,
-    -- The page switch, and a new chat beside it.
-    { direction = "row", align = "center", gap = 8, padding = { 4, 2, 2, 2 },
-      widgets.segmented({ "Chats", "Processes" .. (#jobs > 0 and ("  " .. #jobs) or "") },
-        st.page == "chats" and 1 or 2, switch_page, { bg = "Normal" }),
-      { grow = 1 },
-      widgets.icon_button("+", "New chat (ctrl+n)", function()
+    direction = "column", padding = { 0, 8, 0, 8 }, gap = 1,
+    -- bone's name, and a new chat beside it.
+    { direction = "row", align = "center", height = 50, padding = { 0, 2, 0, 8 },
+      { text = "bone", size = style.size.body + 1, bold = true, hl = "Normal", grow = 1 },
+      widgets.icon_button("compose", "New chat", function()
         bone.gui.focus(nil)
         bone.action("new_session")
-      end, { box = 28, size = style.size.lead, hl = "Normal", radius = style.radius.md }),
+      end, { box = 28, size = 16, hl = muted, radius = style.radius.md, id = "sidebar-new" }),
     },
   }
-  if st.page == "chats" then
-    out[#out + 1] = project_filter()
-    out[#out + 1] = style.finish({
-      id = SEARCH, bg = "Normal", radius = style.radius.md, padding = { 6, 10 }, margin = { -4, 0, 0, 0 },
-      border = 1, border_color = "PromptBorder",
-      size = style.size.caption, hl = "Normal", on_key = on_key,
+  -- The search field: an icon, the field, and the key that comes back to it.
+  out[#out + 1] = style.finish({
+    direction = "row", align = "center", gap = 8, height = 32, padding = { 0, 6, 0, 10 }, margin = { 0, 0, 8, 0 },
+    bg = "Normal", radius = style.radius.md, border = 1, border_color = "PromptBorder",
+    cursor = "text", on_click = function() bone.gui.focus(SEARCH) end,
+    icons.node("search", { hl = "Dim", size = 15 }),
+    {
+      id = SEARCH, grow = 1, width = 0, size = style.size.body, hl = "Normal", on_key = on_key,
       text_input = {
         placeholder = "Search", value = st.query,
         on_change = function(text)
+          if st.page ~= "chats" then st.page = "chats" end
           st.query, st.sel = text, 1
           compute()
           bone.gui.scroll("sessions-list", "top")
           redraw()
         end,
       },
-    })
+    },
+    widgets.keycap("Ctrl O"),
+  })
+  out[#out + 1] = nav("chat", "Chats", st.page == "chats", function() if st.page ~= "chats" then switch_page() end end)
+  out[#out + 1] = nav("terminal", "Processes", st.page == "running",
+    function() if st.page ~= "running" then switch_page() end end, #jobs > 0 and #jobs or nil)
+  out[#out + 1] = nav("layers", "Plugins", false, function() require("bone.catalog").open() end)
+  if st.page == "chats" then
+    out[#out + 1] = project_filter()
   end
   nodes.append(out, bone.gui.slots.nodes("sidebar.top"))
   out[#out + 1] = {
@@ -633,10 +657,11 @@ function M.content()
   nodes.append(out, bone.gui.slots.nodes("sidebar.bottom"))
   -- The list fades into the card's foot rather than cutting a row in half
   -- there (as the chat fades into the composer).
-  local clear, solid = style.alpha("InputBackground", "00", "bg"), style.alpha("InputBackground", "ff", "bg")
+  local under = overlaid and "InputBackground" or ((bone.hl.get("Sidebar") or {}).bg and "Sidebar" or "Panel")
+  local clear, solid = style.alpha(under, "00", "bg"), style.alpha(under, "ff", "bg")
   if clear and solid then
     out[#out + 1] = { position = "absolute", left = 0, right = 0, bottom = 0, height = 28, z = 1,
-      gradient = { clear, solid }, radius = { 0, 0, style.radius.round - 1, style.radius.round - 1 } }
+      gradient = { clear, solid }, radius = overlaid and { 0, 0, style.radius.round - 1, style.radius.round - 1 } or nil }
   end
   out[#out + 1] = st.page == "chats" and project_menu() or nil
   return out

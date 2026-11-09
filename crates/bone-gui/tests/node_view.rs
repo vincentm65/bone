@@ -865,11 +865,12 @@ async fn the_sidebar_rows_take_clicks_on_their_text() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(g.gui.eval("bone.gui.focused()").unwrap(), "sidebar-search");
-    let at = (g.painted.iter())
-        .find(|(t, r)| t == "+" && r.min.x < 280.0)
-        .expect("the new chat button")
-        .1;
-    g.click_at(at.center().x, at.center().y);
+    let at = g
+        .gui
+        .eval("(function() local r = bone.gui.rect('sidebar-new') return r and (r.x + r.w / 2) .. ',' .. (r.y + r.h / 2) end)()")
+        .unwrap();
+    let (x, y) = at.split_once(',').expect("the new chat button");
+    g.click_at(x.parse().unwrap(), y.parse().unwrap());
     for _ in 0..3 {
         g.frame();
     }

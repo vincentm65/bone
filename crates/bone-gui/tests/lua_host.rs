@@ -262,7 +262,7 @@ async fn the_sidebar_groups_the_recent_chats() {
     g.frame();
     let painted: Vec<_> = g.painted.iter().map(|(t, _)| t.clone()).collect();
     assert!(
-        painted.iter().any(|t| t == "RECENT · LAST 1H"),
+        painted.iter().any(|t| t == "Recent · last 1h"),
         "the recent group is missing; painted {painted:?}"
     );
     // The window is the TUI's option.
@@ -276,7 +276,7 @@ async fn the_sidebar_groups_the_recent_chats() {
     g.frame();
     let painted: Vec<_> = g.painted.iter().map(|(t, _)| t.clone()).collect();
     assert!(
-        painted.iter().any(|t| t == "RECENT · LAST 30M"),
+        painted.iter().any(|t| t == "Recent · last 30m"),
         "the recent group did not follow the window; painted {painted:?}"
     );
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
@@ -1458,11 +1458,12 @@ async fn sidebar_rename_ends_on_a_click_away() {
     for _ in 0..4 {
         g.frame();
     }
-    let pencil = (g.painted.iter())
-        .find(|(t, _)| t == "✎")
-        .unwrap_or_else(|| panic!("no rename action: {:?}", g.painted.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>()))
-        .1;
-    g.click_at(pencil.center().x, pencil.center().y);
+    let pencil = g
+        .gui
+        .eval("(function() local r = bone.gui.rect('sidebar-rename') return r and (r.x + r.w / 2) .. ',' .. (r.y + r.h / 2) end)()")
+        .unwrap();
+    let (x, y) = pencil.split_once(',').expect("no rename action");
+    g.click_at(x.parse().unwrap(), y.parse().unwrap());
     for _ in 0..4 {
         g.frame();
     }
