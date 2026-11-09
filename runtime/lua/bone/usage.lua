@@ -33,14 +33,17 @@ local function load_model(key)
     for _, model in ipairs(list or {}) do
       if model.current then
         state.info[key].model = model.model or model.name
+        state.info[key].provider = model.name
+        state.info[key].limit = tonumber(model.compact_limit)
         break
       end
     end
   end)
 end
 
---- Session `session_id`'s usage (`nil`: a new chat): { model, input,
---- output, cached, curr } (curr: the last call's context).
+--- Session `session_id`'s usage (`nil`: a new chat): { model, provider,
+--- input, output, cached, curr, limit } (curr: the last call's context;
+--- limit: where it compacts, when the provider sets one).
 function M.of(session_id)
   local key = session_id or ""
   if not state.info[key] then

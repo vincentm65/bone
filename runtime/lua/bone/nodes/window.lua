@@ -372,7 +372,7 @@ function M.column(ctx, opts)
     chat[#chat + 1] = jump()
   end
   local below = {
-    direction = "column", padding = { 0, gutter + scrollbar_inset, 12, gutter }, gap = 4,
+    direction = "column", padding = { 0, gutter + scrollbar_inset, 18, gutter }, gap = 4,
   }
   -- Panels docked at the bottom stand over the composer, as in the terminal
   -- they stand over the prompt.

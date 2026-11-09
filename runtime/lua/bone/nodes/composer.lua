@@ -1,7 +1,9 @@
--- The composer under the chat: the card with its attach button, the
--- prompt's text field and the stop button while a turn runs; the images
--- attached to the message above it, and the / menu over it. Slots:
--- `composer.above` and `composer.below`.
+-- The composer under the chat: a raised card with the prompt's text field
+-- and a toolbar under it (attach, the model, what a running turn is doing,
+-- how full the context is, and send or stop); the images attached to the
+-- message above it, and the / menu over it. Slots: `composer.above`,
+-- `composer.below`, and `composer.tools` (in the toolbar, before the
+-- context).
 local M = {}
 
 local nodes = require("bone.nodes")
@@ -58,6 +60,107 @@ local function stop(session)
   if session.session_id then bone.request("turn/cancel", { session_id = session.session_id }) end
 end
 
+local icons = require("bone.nodes.icons")
+local usage = require("bone.usage")
+
+-- How full the context is, as a ring: a faint track and the used part.
+local function ring(fraction)
+  local draw = bone.gui.draw
+  local f = math.max(0, math.min(1, fraction))
+  return {
+    width = 14, height = 14, shrink = 0,
+    canvas = { draw = function()
+      local out = { draw.circle({ x = 7, y = 7, r = 5.5, stroke = "PromptBorder", width = 2 }) }
+      if f > 0 then
+        local pts, steps = {}, math.max(2, math.ceil(f * 40))
+        for i = 0, steps do
+          local a = -math.pi / 2 + (i / steps) * f * 2 * math.pi
+          pts[#pts + 1] = { 7 + 5.5 * math.cos(a), 7 + 5.5 * math.sin(a) }
+        end
+        out[#out + 1] = draw.polyline({ points = pts, color = f > 0.85 and "WarningMsg" or "Muted", width = 2 })
+      end
+      return out
+    end },
+  }
+end
+
+-- When each running turn started, by session (for "Working · 12s").
+local started = {}
+
+-- The toolbar under the field.
+local function toolbar(opts, running, empty)
+  local session = opts.session
+  local id = session and session.session_id
+  local u = usage.of(id)
+  local muted = (bone.hl.get("Muted") or {}).fg and "Muted" or "Dim"
+  local narrow = opts.width and opts.width < 420
+  local bar = { direction = "row", align = "center", gap = 6, height = 30 }
+  bar[#bar + 1] = widgets.icon_button("plus", "Attach files", function()
+    if opts.on_focus then opts.on_focus() end
+    require("bone.desktop.attach").pick()
+  end, { box = 30, size = 16, hl = muted, radius = 15, id = opts.chat and nil or "composer-attach" })
+  -- The model: an outlined pill that opens the provider page.
+  if u.model and u.model ~= "" and not narrow then
+    local name = (u.provider and u.provider ~= u.model) and (u.provider .. " · " .. u.model) or u.model
+    bar[#bar + 1] = widgets.press(style.finish({
+      direction = "row", align = "center", gap = 6, height = 28, padding = { 0, 8, 0, 10 }, radius = 14, shrink = 1,
+      border = 1, border_color = "PromptBorder", label = "Model: " .. name, tooltip = "Change the model (/provider)",
+      { text = name, size = style.size.small, hl = muted, wrap = false, text_overflow = "ellipsis", shrink = 1 },
+      icons.node("chevron_down", { size = 12, hl = "Dim" }),
+    }), function() require("bone.config").open("providers") end)
+  end
+  if running then
+    local since = id and (started[id] or os.time())
+    if id then started[id] = since end
+    bone.gui.invalidate(1000)
+    bar[#bar + 1] = {
+      direction = "row", gap = 6, align = "center", margin = { 0, 0, 0, 4 }, shrink = 1,
+      widgets.spinner(18),
+      { text = "Working" .. (since and (" · " .. bone.util.duration(os.time() - since)) or ""),
+        hl = muted, size = style.size.small, wrap = false, text_overflow = "ellipsis", shrink = 1 },
+    }
+  elseif id then
+    started[id] = nil
+  end
+  bar[#bar + 1] = { grow = 1 }
+  nodes.append(bar, slot("composer.tools", opts))
+  -- The context: how full, by the compaction limit when there is one.
+  if (u.curr or 0) > 0 and not narrow then
+    local label = bone.util.tokens(u.curr) .. (u.limit and u.limit > 0 and (" / " .. bone.util.tokens(u.limit)) or "")
+    local used = (u.input or 0) + (u.output or 0)
+    local tip = bone.util.tokens(u.curr) .. " in context"
+      .. (used > 0 and (" · " .. bone.util.tokens(used) .. " used") or "")
+      .. ((u.input or 0) > 0 and string.format(" · %.0f%% cached", (u.cached or 0) / u.input * 100) or "")
+    bar[#bar + 1] = {
+      direction = "row", align = "center", gap = 6, margin = { 0, 6, 0, 0 }, tooltip = tip,
+      (u.limit and u.limit > 0) and ring(u.curr / u.limit) or nil,
+      { text = label, size = style.size.micro, font = "mono", hl = "Dim", wrap = false },
+    }
+  end
+  -- Send, or stop while a turn runs: a round button in the text's color.
+  local fg = (bone.hl.get("Normal") or {}).fg and "Normal" or "InputText"
+  local fill = style.alpha(fg, "ff", "fg", "#ededed")
+  local ink = style.alpha("Normal", "ff", "bg", "#000000")
+  if running then
+    bar[#bar + 1] = widgets.press(style.finish({
+      width = 30, height = 30, radius = 15, bg = fill, justify = "center", align = "center",
+      label = "Stop (ctrl+c)", tooltip = "Stop (ctrl+c)", hover = { opacity = 0.85 },
+      icons.node("stop", { size = 14, hl = ink, width = 2 }),
+    }), function() stop(session) end, "button", false)
+  else
+    bar[#bar + 1] = widgets.press(style.finish({
+      width = 30, height = 30, radius = 15, bg = fill, justify = "center", align = "center",
+      opacity = empty and 0.3 or 1, label = "Send (enter)", tooltip = "Send (enter)",
+      hover = not empty and { opacity = 0.85 } or nil,
+      icons.node("arrow_up", { size = 15, hl = ink, width = 2 }),
+    }), function()
+      if opts.chat then if opts.on_focus then opts.on_focus() end return end
+      if not empty then bone.action("submit") end
+    end, "button", false)
+  end
+  return bar
+end
+
 -- `bone.ui.prompt`'s field `name`, shared with the TUI: a line, or a
 -- function of `ctx` returning one; as node spans.
 local function prompt_line(name, ctx)
@@ -103,7 +206,7 @@ function M.node(opts)
     session = opts.session }
   local placeholder = prompt_line("placeholder", ctx)
   placeholder = placeholder and spans_text(placeholder)
-    or (running and "Message bone (queues)…" or "Message bone…")
+    or (running and "Message bone (queues)…" or "Ask bone, or type / for commands")
   local prefix = not opts.chat and prompt_line("prefix", ctx) or nil
   local p = type(bone.ui.prompt) == "table" and bone.ui.prompt or {}
   local rows = max_rows()
@@ -114,26 +217,24 @@ function M.node(opts)
   if compact then
     field_placeholder = opts.width < 96 and "…" or (running and "Message…" or "Message bone…")
   end
-  local card = {
-    id = opts.chat and ("prompt:" .. opts.chat) or "prompt", bg = "InputBackground", border = 1, border_color = "PromptBorder",
-    radius = style.radius.round, padding = compact and { 8, 8, 8, 8 } or { 10, 14, 10, 14 },
-    direction = compact and "column" or "row", gap = compact and 6 or 10, align = compact and "stretch" or "end",
-    on_press = opts.chat and opts.on_focus or nil,
-    widgets.icon_button("+", "Attach files", function() if opts.on_focus then opts.on_focus() end; require("bone.desktop.attach").pick() end,
-      { box = 26, size = 20, hl = "Accent", radius = style.radius.md }),
+  -- The field, with the prompt's prefix before it.
+  local field = { direction = "row", gap = 8, align = "start", padding = { 0, 4, 0, 4 },
     { input = not opts.chat, placeholder = field_placeholder,
       text_input = opts.chat and { value = bone.gui.draft(opts.chat), placeholder = field_placeholder, multiline = true, max_rows = rows, read_only = true } or nil,
-      size = style.size.text, min_rows = tonumber(p.min), max_rows = rows, hl = "InputText", grow = 1,
-      align_self = compact and "stretch" or "center", id = "composer-input" .. (opts.chat or "") },
+      size = style.size.text, min_rows = tonumber(p.min), max_rows = rows, hl = "InputText", grow = 1, width = 0,
+      id = "composer-input" .. (opts.chat or "") },
   }
   if prefix and #prefix > 0 then
-    table.insert(card, 2, { spans = prefix, size = style.size.text, hl = "UserPrompt", wrap = false })
+    table.insert(field, 1, { spans = prefix, size = style.size.text, hl = "UserPrompt", wrap = false })
   end
-  if running then
-    card[#card + 1] = widgets.icon_button("■", "Stop (ctrl+c)", function() stop(opts.session) end,
-      { box = 26, size = style.size.small, hl = "Accent", radius = style.radius.md,
-        bg = "Selection", hover = { opacity = 0.8 } })
-  end
+  local card = {
+    id = opts.chat and ("prompt:" .. opts.chat) or "prompt", bg = "InputBackground", border = 1, border_color = "PromptBorder",
+    radius = style.radius.round, padding = compact and { 8, 8, 8, 8 } or { 12, 10, 10, 12 },
+    direction = "column", gap = compact and 6 or 8, shadow = style.shadow.card,
+    on_press = opts.chat and opts.on_focus or nil,
+    field,
+    toolbar(opts, running, text == ""),
+  }
   -- id is prompt or prompt:N, so the outline stays when plain.
   style.finish(card)
   local col = { direction = "column" }
