@@ -270,7 +270,11 @@ impl Session {
         };
         let tmp = self.queue_path.with_extension("json.tmp");
         let text = serde_json::to_vec(&saved).map_err(std::io::Error::other)?;
-        std::fs::write(&tmp, text)?;
+        // Flushed before the rename, or a crash can leave an empty file in
+        // place of the old queue.
+        let mut f = File::create(&tmp)?;
+        f.write_all(&text)?;
+        f.sync_all()?;
         std::fs::rename(&tmp, &self.queue_path)?;
         self.queue_dirty.set(false);
         Ok(())
@@ -279,7 +283,10 @@ impl Session {
     /// Replace the transcript with `messages`, keeping the old records in
     /// the file behind a checkpoint. A summary of the old transcript goes.
     pub fn compact(&mut self, messages: Vec<ChatMessage>) -> std::io::Result<()> {
-        let written = write_record(&mut self.file, Record::Compact(messages.clone()));
+        // Everything after the checkpoint builds on it: make sure it is on
+        // disk, not only in the page cache, before going on.
+        let written = write_record(&mut self.file, Record::Compact(messages.clone()))
+            .and_then(|()| self.file.sync_data());
         self.messages = messages;
         self.summary = None;
         self.generation += 1;
@@ -290,7 +297,8 @@ impl Session {
     /// Set (or clear) the summary the model gets in place of the
     /// transcript's older part.
     pub fn summarize(&mut self, summary: Option<Summary>) -> std::io::Result<()> {
-        let written = write_record(&mut self.file, Record::Summary(summary.clone()));
+        let written = write_record(&mut self.file, Record::Summary(summary.clone()))
+            .and_then(|()| self.file.sync_data());
         self.summary = summary;
         written
     }
@@ -746,13 +754,17 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
         model: None,
         tool_times: BTreeMap::new(),
     };
+    // Bytes, not a String: a line of binary garbage must not fail the read.
+    let mut buf = Vec::new();
     for n in 2.. {
-        line.clear();
-        if reader.read_line(&mut line)? == 0 {
+        buf.clear();
+        if reader.read_until(b'\n', &mut buf)? == 0 {
             break;
         }
+        let len = buf.len() as u64;
+        let line = String::from_utf8_lossy(&buf);
         match serde_json::from_str::<Record>(&line) {
-            Ok(Record::Usage(_)) => loaded.good_len += line.len() as u64,
+            Ok(Record::Usage(_)) => loaded.good_len += len,
             Ok(Record::Message(msg)) => {
                 if loaded.info.title.is_none() {
                     loaded.info.title = title_of(&msg);
@@ -765,7 +777,7 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
                     loaded.tool_times.insert(call_id.clone(), t);
                 }
                 loaded.messages.push(msg);
-                loaded.good_len += line.len() as u64;
+                loaded.good_len += len;
                 if is_user {
                     loaded.users += 1;
                     if loaded.users >= max_user {
@@ -776,20 +788,29 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
             Ok(Record::Compact(messages)) => {
                 loaded.messages = messages;
                 loaded.summary = None;
-                loaded.good_len += line.len() as u64;
+                loaded.good_len += len;
             }
             Ok(Record::Summary(summary)) => {
                 loaded.summary = summary;
-                loaded.good_len += line.len() as u64;
+                loaded.good_len += len;
             }
             Ok(Record::Model(model)) => {
                 loaded.model = Some(model);
-                loaded.good_len += line.len() as u64;
+                loaded.good_len += len;
             }
             Ok(Record::Session(_)) => return Err(corrupt(format!("second header at line {n}"))),
             // A torn final write (crash mid-append) should not lose the session.
             Err(_) if !line.ends_with('\n') => break,
-            Err(e) => return Err(corrupt(format!("line {n}: {e}"))),
+            // Nor should one damaged line in the middle: skip it and keep
+            // the rest. The file is left as it is; tool calls it leaves
+            // unanswered are closed before the model sees them.
+            Err(e) => {
+                eprintln!("bone: {}: skipped damaged line {n}: {e}", path.display());
+                loaded.good_len += len;
+                // It may have been a user message: count it, since a gap in
+                // turn ids is harmless and a repeat is not.
+                loaded.users += 1;
+            }
         }
     }
     Ok(loaded)
@@ -1047,6 +1068,44 @@ mod tests {
             .unwrap();
         let again = SessionStore::new(dir.path()).get(&id).unwrap();
         assert_eq!(again.lock().unwrap().messages.len(), 2);
+    }
+
+    #[test]
+    fn a_damaged_line_mid_file_is_skipped_not_fatal() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path());
+        let s = store.create("/w".into()).unwrap();
+        let id = s.lock().unwrap().info.session_id.clone();
+        let user = |t: &str| ChatMessage::User {
+            content: t.into(),
+            images: Vec::new(),
+        };
+        s.lock().unwrap().push(user("one")).unwrap();
+        let path = dir.path().join(format!("sessions/{id}.jsonl"));
+        OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(b"\xff\xfe\0{\"kind\":\"mess\n")
+            .unwrap();
+        s.lock().unwrap().push(user("two")).unwrap();
+        drop(s);
+        let len = std::fs::metadata(&path).unwrap().len();
+
+        let fresh = SessionStore::new(dir.path());
+        let s = fresh.get(&id).unwrap();
+        assert_eq!(s.lock().unwrap().messages, [user("one"), user("two")]);
+        // Nothing was cut off the file, and appending still works.
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), len);
+        s.lock().unwrap().push(user("three")).unwrap();
+        drop(s);
+        let again = SessionStore::new(dir.path());
+        assert_eq!(again.get(&id).unwrap().lock().unwrap().messages.len(), 3);
+        // The index read past it too.
+        assert_eq!(
+            rows(&again, "SELECT count(*) FROM messages"),
+            [[serde_json::json!(3)]]
+        );
     }
 
     #[test]

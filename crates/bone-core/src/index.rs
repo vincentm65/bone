@@ -99,6 +99,8 @@ const QUERY_TIME: Duration = Duration::from_secs(5);
 pub struct Index {
     path: PathBuf,
     conn: Mutex<Connection>,
+    /// When a failed sync last checked the database for corruption.
+    checked: Mutex<Option<Instant>>,
 }
 
 type Result<T> = std::result::Result<T, String>;
@@ -108,7 +110,22 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 
 impl Index {
+    /// Open the index; a corrupt one is moved aside and started over (the
+    /// session files fill it again).
     pub fn open(path: &Path) -> Result<Self> {
+        Self::open_once(path).or_else(|e| {
+            // Anything else (busy, permissions) is left alone: another core
+            // may be using this database.
+            if !Connection::open(path).is_ok_and(|c| corrupt(&c)) {
+                return Err(e);
+            }
+            eprintln!("bone: session index is corrupt ({e}); starting it over");
+            quarantine(path);
+            Self::open_once(path)
+        })
+    }
+
+    fn open_once(path: &Path) -> Result<Self> {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(err)?;
         }
@@ -132,13 +149,40 @@ impl Index {
         Ok(Index {
             path: path.to_owned(),
             conn: Mutex::new(conn),
+            checked: Mutex::new(None),
         })
     }
 
     /// Index what was appended to session `id`'s file since last time. A
     /// file that shrank, or was never seen, is indexed from the start.
     /// `renamed` sets the title a rename gave.
+    ///
+    /// A failure checks the database (at most once a minute); a corrupt one
+    /// is moved aside and started over, refilled as sessions are synced.
     pub fn sync(&self, id: &str, path: &Path, renamed: Option<&str>) -> Result<()> {
+        let result = self.sync_once(id, path, renamed);
+        if result.is_err() && self.check_due() && corrupt(&self.conn.lock().unwrap()) {
+            eprintln!("bone: session index is corrupt; starting it over");
+            let mut conn = self.conn.lock().unwrap();
+            // Close the corrupt database before moving it.
+            *conn = Connection::open_in_memory().map_err(err)?;
+            quarantine(&self.path);
+            *conn = Self::open_once(&self.path)?.conn.into_inner().unwrap();
+        }
+        result
+    }
+
+    /// Whether a failure may pay for an integrity check (once a minute).
+    fn check_due(&self) -> bool {
+        let mut checked = self.checked.lock().unwrap();
+        if checked.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+            return false;
+        }
+        *checked = Some(Instant::now());
+        true
+    }
+
+    fn sync_once(&self, id: &str, path: &Path, renamed: Option<&str>) -> Result<()> {
         let mut conn = self.conn.lock().unwrap();
         let tx = conn
             .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -163,16 +207,17 @@ impl Index {
             let mut file = File::open(path).map_err(err)?;
             file.seek(SeekFrom::Start(offset)).map_err(err)?;
             let mut reader = BufReader::new(file);
-            let mut text = String::new();
+            // Bytes, so a damaged (non-UTF-8) line is skipped like any other.
+            let mut text = Vec::new();
             loop {
                 text.clear();
-                let n = reader.read_line(&mut text).map_err(err)?;
+                let n = reader.read_until(b'\n', &mut text).map_err(err)?;
                 // Stop at the end, or at a line still being written.
-                if n == 0 || !text.ends_with('\n') {
+                if n == 0 || !text.ends_with(b"\n") {
                     break;
                 }
                 offset += n as u64;
-                let Ok(line) = serde_json::from_str::<Line>(&text) else {
+                let Ok(line) = serde_json::from_slice::<Line>(&text) else {
                     continue;
                 };
                 let at = line.at.unwrap_or(last_at);
@@ -296,6 +341,27 @@ impl Index {
             out.push(Json::Array(cells));
         }
         Ok(json!({ "columns": columns, "rows": out, "truncated": truncated }))
+    }
+}
+
+/// Whether SQLite finds the database damaged. A check that cannot run for
+/// another reason (busy, say) does not count.
+fn corrupt(conn: &Connection) -> bool {
+    match conn.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0)) {
+        Ok(result) => result != "ok",
+        Err(e) => matches!(
+            e.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseCorrupt | rusqlite::ErrorCode::NotADatabase)
+        ),
+    }
+}
+
+/// Move a broken database aside as `index.db.corrupt` (replacing an older
+/// one) and drop its WAL.
+fn quarantine(path: &Path) {
+    let _ = std::fs::rename(path, path.with_extension("db.corrupt"));
+    for wal in ["db-wal", "db-shm"] {
+        let _ = std::fs::remove_file(path.with_extension(wal));
     }
 }
 
@@ -467,5 +533,38 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn a_corrupt_index_is_moved_aside_and_started_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("index.db");
+        let file = dir.path().join("session.jsonl");
+        std::fs::write(&file, "").unwrap();
+
+        // Not a database at all.
+        std::fs::write(&db, vec![0x55u8; 8192]).unwrap();
+        let index = Index::open(&db).unwrap();
+        index.sync("s", &file, None).unwrap();
+        assert!(dir.path().join("index.db.corrupt").exists());
+
+        // Corrupted while open: a mangled schema, its version bumped so the
+        // index's connection reads it again.
+        let other = Connection::open(&db).unwrap();
+        let v: i64 = other
+            .query_row("PRAGMA schema_version", [], |r| r.get(0))
+            .unwrap();
+        other
+            .execute_batch(&format!(
+                "PRAGMA writable_schema = ON;
+                 UPDATE sqlite_master SET sql = 'nonsense' WHERE name = 'files';
+                 PRAGMA schema_version = {};
+                 PRAGMA writable_schema = OFF;",
+                v + 1
+            ))
+            .unwrap();
+        drop(other);
+        assert!(index.sync("s", &file, None).is_err());
+        index.sync("s", &file, None).unwrap();
     }
 }
