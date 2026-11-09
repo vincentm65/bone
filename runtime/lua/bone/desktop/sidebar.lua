@@ -25,7 +25,7 @@ local widgets = require("bone.nodes.widgets")
 local ID = "sessions"
 local SEARCH = "sidebar-search"
 local CARD = "sessions-card"
-M.width = tonumber(bone.state.load("sidebar-width")) or 260
+M.width = tonumber(bone.state.load("sidebar-width")) or 248
 M.min_width, M.max_width = 200, 520
 -- Under this window width it floats over the chat instead of pushing it.
 M.overlay_below = 760
@@ -451,9 +451,11 @@ local function row(i)
   }
 end
 
--- The project filter: what it shows, and the menu under it while open.
+-- The project filter while one is chosen: its name, and × for all of them.
+-- (The folder button at the top opens the menu.)
 local function project_filter()
-  local name = st.project and folder(st.project) or "All projects"
+  if not st.project then return nil end
+  local name = folder(st.project)
   local icons = require("bone.nodes.icons")
   return widgets.press({
     direction = "row", align = "center", gap = 10, height = 30, padding = { 0, 8 }, radius = style.radius.md,
@@ -473,7 +475,7 @@ local function project_menu()
   if not st.menu then return nil end
   local menu = {
     -- Under the filter: the padding, the header and the filter above it.
-    position = "absolute", left = 8, right = 8, top = 216, z = 30,
+    position = "absolute", left = 8, right = 8, top = 46, z = 30,
     bg = "Panel", radius = style.radius.lg, border = 1, border_color = "PromptBorder", padding = 4,
     shadow = style.shadow.menu, direction = "column", max_height = 360,
     overflow = "scroll", id = "sidebar-projects",
@@ -612,8 +614,10 @@ function M.content()
     id = ID, on_key = on_key, focus = {},
     direction = "column", padding = { 0, 8, 0, 8 }, gap = 1,
     -- bone's name, and a new chat beside it.
-    { direction = "row", align = "center", height = 50, padding = { 0, 2, 0, 8 },
+    { direction = "row", align = "center", gap = 2, height = 50, padding = { 0, 2, 0, 8 },
       { text = "bone", size = style.size.body + 1, bold = true, hl = "Normal", grow = 1 },
+      st.page == "chats" and widgets.icon_button("folder", "Projects", function() st.menu = not st.menu redraw() end,
+        { box = 28, size = 15, hl = st.project and "Normal" or muted, radius = style.radius.md, id = "sidebar-projects-button" }) or nil,
       widgets.icon_button("compose", "New chat", function()
         bone.gui.focus(nil)
         bone.action("new_session")
@@ -623,7 +627,8 @@ function M.content()
   -- The search field: an icon, the field, and the key that comes back to it.
   out[#out + 1] = style.finish({
     direction = "row", align = "center", gap = 8, height = 32, padding = { 0, 6, 0, 10 }, margin = { 0, 0, 8, 0 },
-    bg = "Normal", radius = style.radius.md, border = 1, border_color = "PromptBorder",
+    -- An inset a step above the sidebar's black.
+    bg = style.alpha("WinSeparator", "ff", "fg", "Normal"), radius = style.radius.md, border = 1, border_color = "PromptBorder",
     cursor = "text", on_click = function() bone.gui.focus(SEARCH) end,
     icons.node("search", { hl = "Dim", size = 15 }),
     {
@@ -655,12 +660,28 @@ function M.content()
     list = { count = #st.rows, estimate = ROW.card, key = st.page .. ":" .. st.version, item = row },
   }
   nodes.append(out, bone.gui.slots.nodes("sidebar.bottom"))
+  -- You, and the settings.
+  local user = os.getenv("USER") or os.getenv("USERNAME") or ""
+  out[#out + 1] = style.finish({
+    direction = "row", align = "center", gap = 10, height = 48, shrink = 0, padding = { 0, 2, 0, 4 },
+    margin = { 0, -8, 0, -8 }, border = { 1, 0, 0, 0 }, border_color = "WinSeparator",
+    { width = 0, padding = { 0, 4 } },
+    user ~= "" and style.finish({
+      width = 24, height = 24, radius = 12, border = 1, border_color = "PromptBorder", bg = "Selection",
+      justify = "center", align = "center",
+      { text = user:sub(1, 1):upper(), size = style.size.micro, medium = true, hl = "Normal" },
+    }) or nil,
+    { text = user, size = style.size.body, hl = muted, grow = 1, wrap = false, text_overflow = "ellipsis" },
+    widgets.icon_button("gear", "Settings", function() require("bone.config").open() end,
+      { box = 28, size = 16, hl = muted, radius = style.radius.md, id = "sidebar-settings" }),
+    { width = 4 },
+  })
   -- The list fades into the card's foot rather than cutting a row in half
   -- there (as the chat fades into the composer).
   local under = overlaid and "InputBackground" or ((bone.hl.get("Sidebar") or {}).bg and "Sidebar" or "Panel")
   local clear, solid = style.alpha(under, "00", "bg"), style.alpha(under, "ff", "bg")
   if clear and solid then
-    out[#out + 1] = { position = "absolute", left = 0, right = 0, bottom = 0, height = 28, z = 1,
+    out[#out + 1] = { position = "absolute", left = 0, right = 0, bottom = 48, height = 28, z = 1,
       gradient = { clear, solid }, radius = overlaid and { 0, 0, style.radius.round - 1, style.radius.round - 1 } or nil }
   end
   out[#out + 1] = st.page == "chats" and project_menu() or nil

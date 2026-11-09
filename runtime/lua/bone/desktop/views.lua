@@ -12,6 +12,7 @@ local md = require("bone.desktop.markdown")
 local nodes = require("bone.nodes")
 local timing = require("bone.timing")
 local style = require("bone.nodes.style")
+local widgets = require("bone.nodes.widgets")
 local strip = require("bone.nodes.toolstrip")
 
 local function trim(s)
@@ -48,12 +49,26 @@ local function box(children, o)
   })
 end
 
--- The turn's footer under its last item.
-local function footer(item, ctx, out)
+-- The turn's footer under its last item: on a reply, a quiet copy button,
+-- then how long the turn worked.
+local function footer(item, ctx, out, copy)
   local text = timing.footer(item, ctx)
-  if text then
-    out[#out + 1] = md.text({ { text, "Dim" } }, { size = md.small_size, gap = 10 })
+  if not text then return out end
+  local line = md.text({ { text, "Dim" } }, { size = style.size.small })
+  line.margin = nil
+  if not copy then
+    line.margin = { 10, 0, 0, 0 }
+    out[#out + 1] = line
+    return out
   end
+  out[#out + 1] = {
+    direction = "row", align = "center", gap = 8, margin = { 8, 0, 0, -4 },
+    widgets.icon_button("copy", "Copy the reply", function()
+      bone.clipboard.copy(copy)
+      bone.notify("Copied", "info")
+    end, { box = 26, size = 14, hl = "Dim", radius = style.radius.md }),
+    line,
+  }
   return out
 end
 
@@ -231,7 +246,7 @@ function M.assistant(item, ctx)
       out[#out + 1] = md.text({ { "…", "Dim" } })
     end
   end
-  footer(item, ctx, out)
+  footer(item, ctx, out, not item.streaming and text ~= "" and text or nil)
   return {
     node = box(out, { size = md.text_size, pad = { 0, 4 }, margin = { 10, 4 } }),
     lines = plain(text),

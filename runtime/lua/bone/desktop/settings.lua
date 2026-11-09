@@ -65,6 +65,15 @@ function M.open(want)
     end
   end
 
+  -- A value in an outlined box, as a select reads.
+  local function boxed(value, hl)
+    return style.finish({
+      direction = "row", align = "center", height = 26, padding = { 0, 10 }, shrink = 1, max_width = VALUE,
+      border = 1, border_color = "PromptBorder", radius = style.radius.md,
+      { text = value, size = SMALL, hl = hl or "Normal", wrap = false, text_overflow = "ellipsis", shrink = 1 },
+    })
+  end
+
   -- What a row holds on its right: the control that changes it, or its value.
   local function value_node(r, i, on)
     if on and st.edit then
@@ -106,7 +115,33 @@ function M.open(want)
     elseif r.key == "type" and (r.value == nil or r.value == "") then
       return text("OpenAI-compatible", "Normal")
     elseif r.value == nil or r.value == "" then
-      return text(r.kind == "option" and "unset" or "none")
+      if r.kind == "option" then return boxed("Default", "Dim") end
+      return text("none")
+    elseif r.kind == "option" and type(r.value) == "number" then
+      -- A number steps: − and + either side of it, in one outlined box.
+      local v = r.value
+      local step = (v % 1 ~= 0) and 0.1 or 1
+      local function set(by)
+        return act(i, function()
+          local n = math.floor((v + by) / step + 0.5) * step
+          page.set(r, step < 1 and tonumber(string.format("%.2f", n)) or math.floor(n + 0.5))
+        end)
+      end
+      local function key(glyph, by)
+        return widgets.press(style.finish({ width = 24, height = 24, justify = "center", align = "center",
+          { text = glyph, size = SMALL, hl = "Dim" } }), set(by), "button")
+      end
+      return style.finish({
+        direction = "row", align = "center", height = 26, shrink = 0,
+        border = 1, border_color = "PromptBorder", radius = style.radius.md, overflow = "hidden",
+        key("−", -step),
+        { text = (step < 1 and string.format("%.1f", v) or tostring(math.floor(v))), font = "mono", size = SMALL,
+          hl = "Normal", min_width = 30, text_align = "center", padding = { 0, 6 }, wrap = false,
+          border = { 0, 1, 0, 1 }, border_color = "PromptBorder" },
+        key("+", step),
+      })
+    elseif r.kind == "option" and type(r.value) == "string" then
+      return boxed(tostring(r.value), "Normal")
     end
     return text(tostring(r.value) .. (r.changed and "  · changed" or ""), "Normal")
   end
@@ -132,10 +167,12 @@ function M.open(want)
     for i = 1, 3 do names[i] = st.tabs[i].title end
     row[#row + 1] = { text = "Settings", hl = "Normal", bold = true, size = style.size.lead, grow = 1,
       padding = { 0, 0, 0, style.inset } }
-    row[#row + 1] = widgets.tabs(names, section, function(i)
+    row[#row + 1] = widgets.segmented(names, section, function(i)
       page.switch_tab(i - st.tab)
       refresh()
-    end, { margin = { 0, 0, 0, 0 }, padding = 0 })
+    end)
+    row[#row + 1] = widgets.icon_button("close", "Close (esc)", function() page.on_key("esc"); refresh() end,
+      { box = 28, size = 15, radius = style.radius.md })
     return row
   end
 
@@ -151,10 +188,10 @@ function M.open(want)
       require("bone.nodes.icons").node("search", { size = 15, hl = "Dim" }),
       { text = shown, hl = (typing or st.query ~= "") and "Normal" or "Dim", size = style.size.body, grow = 1, width = 0,
         wrap = false, text_overflow = "ellipsis" },
-      st.query ~= "" and widgets.icon_button("✕", "Clear the search", function()
+      st.query ~= "" and widgets.icon_button("close", "Clear the search", function()
         st.query, st.search, st.sel = "", false, 1
         refresh()
-      end, { box = 16, size = SMALL }) or nil,
+      end, { box = 20, size = 13 }) or (not typing and widgets.keycap("/")) or nil,
     }, function()
       if not st.search then page.on_key("/") end
       refresh()
@@ -190,8 +227,17 @@ function M.open(want)
         {
           direction = "row", align = "center", gap = style.space.md, min_height = 20,
           {
-            text = r.label, size = SIZE, bold = action, grow = 1, width = 0, wrap = false,
-            text_overflow = "ellipsis", hl = danger and "ErrorMsg" or action and "Accent" or "Normal",
+            direction = "column", grow = 1, width = 0,
+            {
+              text = r.kind == "option" and (r.label:sub(1, 1):upper() .. r.label:sub(2)) or r.label,
+              size = SIZE, medium = true, wrap = false,
+              text_overflow = "ellipsis", hl = danger and "ErrorMsg" or "Normal",
+            },
+            -- What it does, under its name.
+            (r.desc and r.desc ~= "" and r.kind ~= "provider") and {
+              text = r.desc:sub(1, 1):upper() .. r.desc:sub(2), size = SMALL, hl = "Dim", wrap = false,
+              text_overflow = "ellipsis", margin = { 2, 0, 0, 0 },
+            } or nil,
           },
           value_node(r, i, on),
           {
@@ -211,8 +257,8 @@ function M.open(want)
       if on then selected = #items end
     end
 
-    -- Under the rows, one space for a question, what happened, or what the
-    -- selected setting does: rows never change height as the selection moves.
+    -- Under the rows, a space for a question or what happened (what a
+    -- setting does is under its name).
     local detail
     if st.ask then
       local small = { size = CAPTION, padding = { 3, 14 } }
@@ -224,14 +270,11 @@ function M.open(want)
       })
     elseif st.note then
       detail = widgets.detail(st.note[1], st.note[2] == "ErrorMsg" and "ErrorMsg" or "Dim")
-    else
-      detail = widgets.detail(list[st.sel] and list[st.sel].desc)
     end
     -- The one dialog size, whichever section or page it shows.
     return style.as_dialog(widgets.list("settings:" .. id, items, selected, {
-      estimate = 30,
-      footer = { direction = "column", widgets.divider({ margin = { 4, 0, 0, 0 } }), detail,
-        widgets.hints(hints(st, t), { 0, 0 }) },
+      estimate = 44,
+      footer = { direction = "column", detail, widgets.hints(hints(st, t), { 0, 0 }) },
     }))
   end
 

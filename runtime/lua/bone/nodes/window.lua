@@ -337,11 +337,13 @@ end
 
 function M.header(session)
   if require("bone.nodes.titlebar").offset() > 0 then return nil end
+  M.menu_nodes = nil
   local icons = require("bone.nodes.icons")
   local sidebar = require("bone.desktop.sidebar")
   local title = title_of(session)
   local muted = (bone.hl.get("Muted") or {}).fg and "Muted" or "Dim"
-  local path = short_path(session and session.cwd)
+  -- A new chat has no folder of its own yet: it starts where bone runs.
+  local path = short_path((session and session.cwd) or os.getenv("PWD"))
   local bar = {
     height = M.header_height, shrink = 0, direction = "row", align = "center", gap = 10,
     padding = { 0, 16, 0, sidebar.is_open() and 20 or 12 },
@@ -355,13 +357,48 @@ function M.header(session)
   if path then
     bar[#bar + 1] = style.finish({
       direction = "row", align = "center", gap = 6, height = 24, padding = { 0, 9, 0, 8 }, shrink = 1,
-      radius = 12, border = 1, border_color = "PromptBorder", tooltip = session.cwd,
+      radius = 12, border = 1, border_color = "PromptBorder", tooltip = (session and session.cwd) or os.getenv("PWD"),
       icons.node("folder", { size = 13, hl = "Dim" }),
       { text = path, size = style.size.small, hl = muted, wrap = false, text_overflow = "ellipsis", shrink = 1 },
     })
   end
+  -- The chat's actions, quiet at the right: a menu of what you can do to it.
+  bar[#bar + 1] = { grow = 1 }
+  if title then
+    bar[#bar + 1] = widgets.icon_button("more", "Chat actions", function()
+      M.chat_menu = not M.chat_menu
+      bone.gui.invalidate()
+    end, { box = 28, size = 16, hl = muted, radius = style.radius.md, id = "header-more" })
+  end
   bar[#bar + 1] = { position = "absolute", left = 0, right = 0, bottom = 0, height = 1,
     bg = style.alpha("WinSeparator", "ff", "fg", "PromptBorder") }
+  if M.chat_menu and title then
+    local function item(icon, label, run, danger)
+      return widgets.press(style.finish({
+        direction = "row", align = "center", gap = 10, height = 32, padding = { 0, 10 }, radius = style.radius.md,
+        icons.node(icon, { size = 15, hl = danger and "ErrorMsg" or "Dim" }),
+        { text = label, size = style.size.body, hl = danger and "ErrorMsg" or "Normal", wrap = false },
+      }), function() M.chat_menu = false run() bone.gui.invalidate() end)
+    end
+    -- Over everything (M.body puts it at the window's top), with a press
+    -- anywhere else closing it.
+    local menu = widgets.surface({
+      position = "absolute", right = 12, top = require("bone.nodes.titlebar").offset() + M.header_height - 4,
+      z = 30, width = 200, padding = 4,
+      shadow = style.shadow.menu,
+      item("edit", "Rename", function()
+        bone.prompt.set("/rename " .. title)
+        bone.gui.focus("composer-input")
+      end),
+      item("compress", "Compact", function() bone.cmd("compact") end),
+      item("archive", "Archive", function() bone.cmd("archive") end, true),
+    })
+    M.menu_nodes = {
+      { position = "absolute", left = 0, top = 0, right = 0, bottom = 0, z = 29,
+        on_click = function() M.chat_menu = false bone.gui.invalidate() end },
+      menu,
+    }
+  end
   return style.finish(bar)
 end
 
@@ -512,6 +549,7 @@ function M.body(ctx)
   nodes.append(root, right)
   root[#root + 1] = backdrop
   root[#root + 1] = backdrop and side or nil
+  nodes.append(root, M.menu_nodes)
   nodes.append(root, overlays.nodes(ctx))
   nodes.append(root, slot("window.overlay", ctx))
   -- Windows of bone.ui.popup / win, over everything.

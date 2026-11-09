@@ -53,31 +53,48 @@ function M.open()
   local function node()
     list = help.list(st.tab, st.query)
     st.sel = math.max(1, math.min(st.sel, math.max(1, #list)))
-    -- The heading with its tabs on one line, then the search: the same
-    -- field as the sidebar's.
-    local head = title("Help")
-    head.grow = 1
-    local items = { { direction = "row", align = "center", margin = { 0, 0, 6, 0 }, head,
-      widgets.tabs(help.TABS, st.tab, function(i)
+    -- A palette: the search is the top line (the tabs at its right), set
+    -- off by a hairline; then one line per entry, and the keys.
+    local icons = require("bone.nodes.icons")
+    local top = style.finish({
+      direction = "row", align = "center", gap = 10, height = 50, shrink = 0,
+      margin = { -6, -style.inset - 4, 4, -style.inset - 4 }, padding = { 0, 10, 0, style.inset + 6 },
+      border = { 0, 0, 1, 0 }, border_color = "WinSeparator",
+      icons.node("search", { size = 16, hl = "Dim" }),
+      { text = st.query == "" and "Search commands, keys and docs" or (st.query .. "▏"),
+        hl = st.query == "" and "Dim" or "Normal", size = style.size.text, grow = 1, width = 0, wrap = false,
+        text_overflow = "ellipsis" },
+      widgets.segmented(help.TABS, st.tab, function(i)
         st.tab, st.query, st.sel = i, "", 1
         bone.ui.update(id, {})
-      end) } }
-    items[#items + 1] = style.finish({
-      direction = "row", align = "center", gap = 8, height = 32, padding = { 0, style.inset },
-      bg = "Normal", radius = style.radius.md, border = 1, border_color = "PromptBorder", margin = { 0, 0, 6, 0 },
-      require("bone.nodes.icons").node("search", { size = 15, hl = "Dim" }),
-      { text = st.query == "" and "Search commands, keys and docs" or (st.query .. "▏"),
-        hl = st.query == "" and "Dim" or "Normal", size = style.size.body, grow = 1, wrap = false },
+      end),
     })
+    local items = {}
     if #list == 0 then items[#items + 1] = note("No matches.", { 4, 4 }) end
-    local selected
+    local selected, group
     for i, it in ipairs(list) do
       local on = i == st.sel
-      -- One line: the name, and what it does in quiet grey.
+      -- Keys come in groups: a quiet heading over each.
+      local g = st.tab == 2 and (it.meta or ""):match("^(.-) · ") or nil
+      if g and g ~= group then
+        items[#items + 1] = { text = g, hl = "Dim", size = style.size.small, medium = true,
+          padding = { 8, style.inset, 4, style.inset } }
+      end
+      group = g
+      local lead
+      if st.tab == 1 then
+        lead = icons.command(it.label, { size = 15, hl = on and "Normal" or "Dim" })
+      elseif st.tab == 3 then
+        lead = icons.node("question", { size = 15, hl = on and "Normal" or "Dim" })
+      end
+      -- One line: an icon, the name (a key as a cap), and what it does.
+      local name = st.tab == 2
+        and { direction = "row", width = 150, shrink = 0, widgets.keycap(it.label) }
+        or { text = it.label, hl = "Normal", size = style.size.body, width = 130, shrink = 0,
+          wrap = false, text_overflow = "ellipsis" }
       local lines = { {
-        direction = "row", gap = 12, align = "center", height = 24,
-        { text = it.label, hl = "Normal", size = style.size.body, width = 150, shrink = 0,
-          wrap = false, text_overflow = "ellipsis" },
+        direction = "row", gap = 10, align = "center", height = 24,
+        lead, name,
         { text = st.tab == 3 and it.meta or it.desc, hl = on and "Muted" or "Dim", size = style.size.body,
           grow = 1, width = 0, wrap = false, text_overflow = "ellipsis" },
       } }
@@ -87,15 +104,11 @@ function M.open()
       end)
       if on then selected = #items end
     end
-    -- The selected entry's details under the list, in a space of their own:
-    -- entries never change height as the selection moves.
-    local current = list[st.sel]
-    local detail = widgets.detail(current and st.tab ~= 3 and current.meta ~= "" and current.meta or nil)
-    return style.as_dialog(widgets.list("help:" .. id, items, selected, {
+    local body = widgets.list("help:" .. id, items, selected, {
       estimate = 34,
-      footer = { direction = "column", widgets.divider({ margin = { 4, 0, 0, 0 } }), detail,
-        hints("tab section · ↑↓ move · enter open · esc close", { 0, 0 }) },
-    }))
+      footer = hints("↑↓ move · enter open · tab section · esc close", { 0, 0 }),
+    })
+    return style.as_dialog({ direction = "column", grow = 1, top, body })
   end
   function on_key(k)
     if k == "esc" or k == "ctrl+c" then
@@ -126,7 +139,7 @@ end
 -- /health: this window's checks, then the core's.
 local MARK = { ok = { "•", "ToolDone" }, warn = { "!", "WarningMsg" }, error = { "×", "ErrorMsg" } }
 local function checks(name, items, out)
-  out[#out + 1] = { text = name:upper(), hl = "Dim", bold = true, size = style.size.micro, padding = { 2, style.inset }, margin = { 6, 0, 2, 0 } }
+  out[#out + 1] = { text = name, hl = "Dim", medium = true, size = style.size.small, padding = { 2, style.inset }, margin = { 6, 0, 2, 0 } }
   for _, it in ipairs(items) do
     local m = MARK[it.status] or MARK.warn
     out[#out + 1] = {

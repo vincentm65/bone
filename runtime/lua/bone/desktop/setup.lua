@@ -42,7 +42,8 @@ end
 
 -- A label over a group of entries.
 local function section(text)
-  return { text = text, hl = "Dim", size = style.size.small, medium = true, padding = { 10, style.inset, 4, style.inset } }
+  return { text = text:sub(1, 1):upper() .. text:sub(2), hl = "Dim", size = style.size.small, medium = true,
+    padding = { 10, style.inset, 6, style.inset } }
 end
 
 local function paragraph(text)
@@ -123,20 +124,32 @@ function M.view(page)
       add(heading("Choose a provider", "Where the model runs."))
       local list = page.rows()
       st.sel = math.max(1, math.min(st.sel, math.max(#list, 1)))
-      for i, r in ipairs(list) do
+      -- The choices two to a row, as outlined cards; the selected one lit.
+      local function card(i)
+        local r = list[i]
+        if not r then return { grow = 1, width = 0 } end
         local on = i == st.sel
-        if r.group ~= (list[i - 1] or {}).group then
-          add(section(r.group))
-        end
         local name, aside = setup.preset_parts(presets[r.preset])
-        add(entry(on, { {
-          direction = "row", align = "center", gap = 8,
-          { grow = 1, direction = "column",
-            { text = name, hl = "Normal", medium = true, size = style.size.body },
-            { text = aside, hl = "Dim", size = style.size.small, margin = { 2, 0, 0, 0 } } },
-          { text = "›", hl = on and "Accent" or "Dim", size = style.size.lead },
-        } }, click(i)), on)
+        return widgets.press(style.finish({
+          grow = 1, width = 0, direction = "column", gap = 2, padding = { 10, 12 }, radius = style.radius.md,
+          border = 1, border_color = on and "Muted" or "PromptBorder", bg = on and "Selection" or nil,
+          role = "option", selected = on,
+          { text = name, hl = "Normal", medium = true, size = style.size.body, wrap = false, text_overflow = "ellipsis" },
+          { text = aside, hl = "Dim", size = style.size.small, wrap = false, text_overflow = "ellipsis" },
+        }), click(i), "option", not on)
       end
+      local i = 1
+      while i <= #list do
+        local r = list[i]
+        if r.group ~= (list[i - 1] or {}).group then add(section(r.group)) end
+        local pair = list[i + 1] and list[i + 1].group == r.group
+        add({ direction = "row", gap = 8, padding = { 0, style.inset - 4 }, margin = { 0, 0, 8, 0 },
+          card(i), pair and card(i + 1) or card(nil) }, st.sel == i or (pair and st.sel == i + 1))
+        i = i + (pair and 2 or 1)
+      end
+      add({ direction = "row", align = "center", gap = 8, padding = { 0, style.inset }, margin = { 8, 0, 0, 0 },
+        { text = "Saved to ~/.bone/settings.json", hl = "Dim", size = style.size.small, grow = 1 },
+        button("Continue", press("enter"), true) })
       if st.note then
         add({ text = st.note[1], hl = st.note[2] and "ErrorMsg" or "Dim", size = style.size.caption, padding = { 2, 10 } })
       end

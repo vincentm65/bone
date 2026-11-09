@@ -211,8 +211,15 @@ end
 function M.nodes()
   local out = {}
   local placed = bone.gui.popups()
+  local dimmed = false
   for _, p in ipairs(placed) do
     if p.node then
+      -- A dialog dims the window behind it, once, under the first one.
+      if not dimmed and not style.plain then
+        dimmed = true
+        out[#out + 1] = { position = "absolute", left = 0, top = 0, right = 0, bottom = 0,
+          z = M.chrome.z + p.z - 1, bg = style.scrim.dialog }
+      end
       out[#out + 1] = node_window(p)
     elseif #p.lines > 0 then
       out[#out + 1] = lines_window(p, placed.cell)

@@ -20,6 +20,15 @@ local shapes = {
   terminal = { { "rect", 2.5, 3.5, 11, 9, 1.5 }, { "poly", { 5, 7, 7, 8.5, 5, 10 } }, { "line", 8.5, 10, 11, 10 } },
   layers = { { "poly", { 3, 5.5, 8, 3, 13, 5.5, 8, 8 }, true }, { "poly", { 3, 8, 8, 10.5, 13, 8 } },
     { "poly", { 3, 10.5, 8, 13, 13, 10.5 } } },
+  archive = { { "rect", 2.5, 3, 11, 3, 1 }, { "poly", { 3.5, 6, 3.5, 12.5, 12.5, 12.5, 12.5, 6 } }, { "line", 6.5, 9, 9.5, 9 } },
+  compress = { { "poly", { 4, 6, 8, 3, 12, 6 } }, { "poly", { 4, 10, 8, 13, 12, 10 } } },
+  pulse = { { "poly", { 2.5, 8, 5, 8, 6.5, 4.5, 9.5, 11.5, 11, 8, 13.5, 8 } } },
+  model = { { "circle", 8, 8, 2.5 }, { "line", 8, 2, 8, 4 }, { "line", 8, 12, 8, 14 }, { "line", 2, 8, 4, 8 },
+    { "line", 12, 8, 14, 8 } },
+  question = { { "circle", 8, 8, 5.5 }, { "poly", { 6.3, 6.5, 6.6, 5.6, 7.4, 5.1, 8.6, 5.1, 9.5, 5.7, 9.7, 6.7, 9.1, 7.5, 8, 8.2, 8, 9.3 } },
+    { "dot", 8, 11, 0.8 } },
+  slash = { { "line", 10, 3, 6, 13 } },
+  upload = { { "line", 8, 13, 8, 7 }, { "poly", { 5, 9.5, 8, 6.5, 11, 9.5 } }, { "line", 4, 3.5, 12, 3.5 } },
   sidebar = { { "rect", 2.5, 3, 11, 10, 2 }, { "line", 6.5, 3, 6.5, 13 } },
   folder = { { "poly", { 2.5, 4.5, 6.5, 4.5, 8, 6, 13.5, 6, 13.5, 12.5, 2.5, 12.5 }, true } },
   chevron_right = { { "poly", { 6, 4, 10, 8, 6, 12 } } },
@@ -40,6 +49,22 @@ local shapes = {
     9, 3, 4, 8, 3, 9.5, 3, 11, 3.6, 12.4, 5, 13.3, 6.5, 13.5, 8, 13 } } },
 }
 
+--- The icon of a slash command, by its name (nil for one without).
+M.commands = {
+  ["?"] = "question", help = "question", new = "plus", clear = "plus", archive = "archive", compact = "compress",
+  context = "clock", sessions = "chat", attach = "attach", detach = "close", catalog = "layers", plugins = "layers",
+  checkhealth = "pulse", health = "pulse", config = "gear", settings = "gear", provider = "model", model = "model",
+  setup = "plus", rename = "edit", paste = "copy", quit = "close", ["codex-usage"] = "upload", diff = "compress",
+  editor = "edit", files = "folder", where = "folder", queue = "clock", runtime = "terminal", tui = "terminal",
+  gui = "sidebar", term = "terminal",
+}
+
+--- The icon node for slash command `name` (a "/" when it has none). o as M.node.
+function M.command(name, o)
+  name = tostring(name or ""):gsub("^/", ""):match("^%S*")
+  return M.node(M.commands[name] or "slash", o)
+end
+
 --- Add or replace icon `name` (shapes on a 16px grid).
 function M.define(name, list) shapes[name] = list end
 
@@ -55,7 +80,13 @@ local function draw_list(list, k, color, width)
     if kind == "circle" then
       out[#out + 1] = d.circle({ x = s[2] * k, y = s[3] * k, r = s[4] * k, stroke = color, width = width })
     elseif kind == "dot" then
-      out[#out + 1] = d.circle({ x = s[2] * k, y = s[3] * k, r = s[4] * k, fill = color })
+      -- A fill names a group's background; a dot is in its text color.
+      local fill = color
+      if not tostring(color):match("^#") then
+        local g = bone.hl.get(color) or {}
+        fill = g.fg or color
+      end
+      out[#out + 1] = d.circle({ x = s[2] * k, y = s[3] * k, r = s[4] * k, fill = fill })
     elseif kind == "line" then
       out[#out + 1] = d.line({ x1 = s[2] * k, y1 = s[3] * k, x2 = s[4] * k, y2 = s[5] * k, color = color, width = width })
     elseif kind == "rect" then

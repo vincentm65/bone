@@ -304,6 +304,8 @@ function M.hints(text, margin)
   }
   for part in (text .. " · "):gmatch("(.-) · ") do
     local key, what = part:match("^(%S+)%s+(.*)$")
+    -- Esc stands apart, at the right.
+    if key and (key == "esc" or key == "Esc") then row[#row + 1] = { grow = 1 } end
     if key and is_key(key) then
       row[#row + 1] = {
         direction = "row", gap = 6, align = "center",
@@ -399,7 +401,11 @@ function M.list(id, items, selected, opts)
     list = { count = #items, estimate = opts.estimate or 56, key = id, item = function(i) return items[i] end, fit = opts.fit },
   }
   if not opts.footer then return list end
+  -- The keys under a hairline, the width of the window.
   opts.footer.shrink = 0
+  opts.footer = { direction = "column", shrink = 0, margin = { 4, -style.inset - 4, 0, -style.inset - 4 },
+    padding = { 6, style.inset + 4, 0, style.inset + 4 }, border = { 1, 0, 0, 0 }, border_color = "WinSeparator",
+    opts.footer }
   -- A dialog's list fades into its footer rather than cutting a row there.
   local clear, solid = style.alpha("Panel", "00", "bg"), style.alpha("Panel", "ff", "bg")
   if clear and solid and not opts.fit then

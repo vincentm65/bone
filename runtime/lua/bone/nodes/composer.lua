@@ -10,6 +10,7 @@ local nodes = require("bone.nodes")
 local menu = require("bone.menu")
 local style = require("bone.nodes.style")
 local widgets = require("bone.nodes.widgets")
+local icons = require("bone.nodes.icons")
 
 local SUGGESTIONS = 8 -- rows of the / menu
 
@@ -45,8 +46,9 @@ local function suggestions()
   for i = first, math.min(n, first + rows - 1) do
     local it, on = items[i], i == menu.selected
     list[#list + 1] = style.finish(widgets.press({
-      direction = "row", gap = 12, align = "center", height = 34, padding = { 0, 10 }, radius = style.radius.md,
+      direction = "row", gap = 10, align = "center", height = 34, padding = { 0, 10 }, radius = style.radius.md,
       bg = on and "Selection" or nil, selected = on,
+      icons.command(it.name, { size = 15, hl = on and "Normal" or "Dim" }),
       { text = "/" .. it.name, size = style.size.body, width = 130, wrap = false, text_overflow = "ellipsis", shrink = 0 },
       { text = it.desc or "", hl = on and "Muted" or "Dim", size = style.size.body, grow = 1, width = 0,
         wrap = false, text_overflow = "ellipsis" },
@@ -73,7 +75,6 @@ local function stop(session)
   if session.session_id then bone.request("turn/cancel", { session_id = session.session_id }) end
 end
 
-local icons = require("bone.nodes.icons")
 local usage = require("bone.usage")
 
 -- How full the context is, as a ring: a faint track and the used part.
@@ -111,13 +112,14 @@ local function toolbar(opts, running, empty)
   bar[#bar + 1] = widgets.icon_button("plus", "Attach files", function()
     if opts.on_focus then opts.on_focus() end
     require("bone.desktop.attach").pick()
-  end, { box = 30, size = 16, hl = muted, radius = 15, id = opts.chat and nil or "composer-attach" })
+  end, { box = 28, size = 16, hl = muted, radius = style.radius.md, id = opts.chat and nil or "composer-attach" })
   -- The model: an outlined pill that opens the provider page.
   if u.model and u.model ~= "" and not narrow then
     local name = (u.provider and u.provider ~= u.model) and (u.provider .. " · " .. u.model) or u.model
     bar[#bar + 1] = widgets.press(style.finish({
-      direction = "row", align = "center", gap = 6, height = 28, padding = { 0, 8, 0, 10 }, radius = 14, shrink = 1,
+      direction = "row", align = "center", gap = 6, height = 28, padding = { 0, 8, 0, 9 }, radius = 14, shrink = 1,
       border = 1, border_color = "PromptBorder", label = "Model: " .. name, tooltip = "Change the model (/provider)",
+      icons.node("model", { size = 13, hl = "Dim" }),
       { text = name, size = style.size.small, hl = muted, wrap = false, text_overflow = "ellipsis", shrink = 1 },
       icons.node("chevron_down", { size = 12, hl = "Dim" }),
     }), function() require("bone.config").open("providers") end)
