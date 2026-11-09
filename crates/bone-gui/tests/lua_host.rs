@@ -1081,8 +1081,8 @@ async fn node_panels_on_all_four_docks() {
         assert(window.docked('left', ctx)[1].width == 200)
         assert(window.docked('bottom', ctx)[1].height == 140)
         bone.ui.panel.update('top', { size = 3 })
-        -- Rows, and the card around them: its inset, padding and border.
-        assert(window.docked('top', ctx)[1].height == 3 * 18 + 34)
+        -- Rows, and the padding and the hairline around them.
+        assert(window.docked('top', ctx)[1].height == 3 * 18 + 2 * window.dock_pad[1] + 1)
     "#,
         )
         .unwrap();
@@ -1145,8 +1145,9 @@ async fn oversized_opposing_docks_fit_the_window() {
           assert(math.abs(seen.height - r.h) < 0.01, id)
           assert(seen.width >= 0 and seen.height >= 0, id)
         end
-        assert(dock_seen.left.width == 712 and dock_seen.right.width == 212)
-        assert(dock_seen.top.height == 491)
+        -- Each is its share less its padding (12 a side) and its hairline.
+        assert(dock_seen.left.width == 725 and dock_seen.right.width == 225)
+        assert(dock_seen.top.height == 500)
     "#,
         )
         .unwrap();

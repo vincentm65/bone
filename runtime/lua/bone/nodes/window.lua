@@ -78,20 +78,25 @@ end
 local function heading(title)
   if type(title) ~= "string" or title == "" then return nil end
   return style.finish({
-    text = title, hl = "PanelTitle", bold = true, size = style.size.caption, wrap = false,
-    text_overflow = "ellipsis", padding = { 0, 4 }, margin = { 0, 0, 6, 0 }, shrink = 0,
+    text = title, hl = "Normal", bold = true, size = style.size.body, wrap = false,
+    text_overflow = "ellipsis", padding = { 0, 4 }, margin = { 2, 0, 10, 0 }, shrink = 0,
   })
 end
 
--- A docked panel is a card (bone.nodes.widgets.card) standing `M.dock_inset`
--- off the window's edges, its content `M.dock_pad` ({ v, h }) inside it.
-M.dock_inset = style.space.lg
-M.dock_pad = { 10, 12 }
+-- A panel docked at the window's side or top is flush with its edges, as
+-- the sidebar is: the sidebar's black, a hairline on the side that faces
+-- the chat, its content `M.dock_pad` ({ v, h }) inside. One over the
+-- composer (`flush`) is a card lined up with it.
+M.dock_inset = 0
+M.dock_pad = { 12, 12 }
 
--- The pixels around a dock's content: the inset, the padding, the border.
+-- The pixels around a dock's content: the padding and the edge.
 local function chrome(sideways, flush)
-  return (flush and 0 or M.dock_inset) + 2 * (sideways and M.dock_pad[2] or M.dock_pad[1]) + 2
+  return 2 * (sideways and M.dock_pad[2] or M.dock_pad[1]) + (flush and 2 or 1)
 end
+
+-- The hairline of a dock on `side`: on the edge toward the chat.
+local EDGE = { left = { 0, 1, 0, 0 }, right = { 0, 0, 0, 1 }, top = { 0, 0, 1, 0 }, bottom = { 1, 0, 0, 0 } }
 
 -- Sizes set by dragging a dock's edge, in pixels, by panel id (kept
 -- between runs as "dock-size.<id>").
@@ -160,6 +165,7 @@ end
 -- toward the chat (its own margins keep it off).
 local function insets(side)
   local i = M.dock_inset
+  if i == 0 then return { 0, 0, 0, 0 } end
   if side == "left" then return { i, 0, i, i } end
   if side == "right" then return { i, i, i, 0 } end
   if side == "top" then return { i, i, 0, i } end
@@ -187,14 +193,26 @@ function M.docked(side, ctx, available, flush)
       local width, height = sideways and size or ctx.width, sideways and ctx.height or size
       local title = heading(info.title)
       local pad = flush and { 0, 0, 0, 0 } or insets(side)
-      local inner_w = width - pad[2] - pad[4] - 2 * M.dock_pad[2] - 2
-      local inner_h = height - pad[1] - pad[3] - 2 * M.dock_pad[1] - 2 - (title and 26 or 0)
+      -- A card has a border all round; a flush dock, its hairline on one edge.
+      local bw = flush and 2 or (sideways and 1 or 0)
+      local bh = flush and 2 or (sideways and 0 or 1)
+      local inner_w = width - pad[2] - pad[4] - 2 * M.dock_pad[2] - bw
+      local inner_h = height - pad[1] - pad[3] - 2 * M.dock_pad[1] - bh - (title and 32 or 0)
       out[#out + 1] = {
         id = id, width = sideways and size or nil,
         height = not sideways and not auto and size or nil, max_height = auto and size or nil,
         direction = "column", padding = pad,
       }
-      local card = widgets.card({ grow = not auto and 1 or nil, padding = M.dock_pad, overflow = "hidden" })
+      local card
+      if flush then
+        card = widgets.card({ grow = not auto and 1 or nil, padding = M.dock_pad, overflow = "hidden" })
+      else
+        card = style.finish({
+          grow = not auto and 1 or nil, direction = "column", padding = M.dock_pad, overflow = "hidden",
+          bg = (bone.hl.get("Sidebar") or {}).bg and "Sidebar" or "Panel",
+          border = EDGE[side], border_color = "WinSeparator",
+        })
+      end
       card[#card + 1] = title
       card[#card + 1] = M.panel(info.id, {
         width = math.max(0, inner_w), height = math.max(0, inner_h), cell = ctx.cell, auto = auto,
@@ -403,7 +421,7 @@ function M.header(session)
 end
 
 --- One chat's column: the chat, with the composer, tray and status bar
---- under it. opts: `width` (pixels), `chat` (a chat number; nil or the chat
+--- under it, and its header (`header = false`: none). opts: `width` (pixels), `chat` (a chat number; nil or the chat
 --- on screen gets the editor, any other its read-only draft), `on_focus` (a
 --- press on that draft), `gutter` (pixels each side; default centers M.max_width).
 function M.column(ctx, opts)
@@ -465,9 +483,11 @@ function M.column(ctx, opts)
     nodes.append(middle, top)
     middle[#middle + 1] = welcome(usable_width, input)
   end
-  -- Each column has its header, so tiled chats keep their places as the
-  -- keyboard moves between them.
-  return { grow = 1, direction = "column", M.header(session), chat, middle, below }
+  -- A column a window manager places (it passes `on_focus`) has the
+  -- manager's title bar instead, unless it asks for `header = true`.
+  local header = opts.header
+  if header == nil then header = opts.on_focus == nil end
+  return { grow = 1, direction = "column", header and M.header(session) or nil, chat, middle, below }
 end
 
 --- The chats beside the sidebar: the chat on screen's column. A plugin

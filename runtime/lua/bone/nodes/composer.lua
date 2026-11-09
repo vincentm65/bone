@@ -229,7 +229,7 @@ function M.node(opts)
   local compact = opts.width and opts.width < 240
   local field_placeholder = placeholder
   if compact then
-    field_placeholder = opts.width < 96 and "…" or (running and "Message…" or "Message bone…")
+    field_placeholder = opts.width < 96 and "…" or (running and "Queue…" or "Ask bone…")
   end
   -- The field, with the prompt's prefix before it.
   local field = { direction = "row", gap = 8, align = "start", padding = { 0, 4, 0, 4 },
