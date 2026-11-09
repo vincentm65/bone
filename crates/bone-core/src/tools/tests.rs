@@ -245,7 +245,7 @@ async fn plain_read_empty_binary_and_lossy_utf8() {
     let out = call(&ctx, "read_file", json!({"path": "lossy.txt"}))
         .await
         .unwrap();
-    assert_eq!(out, "a\u{fffd}b\n");
+    assert_eq!(out, "a\u{ff}b\n");
 }
 
 #[tokio::test]
@@ -466,6 +466,38 @@ fn the_cleaner_settles_progress_lines_and_drops_escapes() {
         c.apply(part, &mut out);
     }
     assert_eq!(out, "ared\nbar 3\nyz\n");
+}
+
+#[tokio::test]
+async fn edits_keep_crlf_and_bytes_that_are_not_utf8() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(&dir);
+    std::fs::write(dir.path().join("a"), b"one\r\ntwo\r\n\x93caf\xe9\x94\r\n").unwrap();
+    // As read_file shows it: no \r, and a legacy file as Windows-1252.
+    let shown = call(&ctx, "read_file", json!({"path": "a"})).await.unwrap();
+    assert_eq!(shown, "one\ntwo\n“café”\n");
+    let edits = json!([{"old_string": "one", "new_string": "1\n1b"},
+        {"old_string": "two\n“café”", "new_string": "2\n‘cafè’"}]);
+    call(&ctx, "edit_file", json!({"path": "a", "edits": edits}))
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(dir.path().join("a")).unwrap(),
+        b"1\r\n1b\r\n2\r\n\x91caf\xe8\x92\r\n"
+    );
+    // Windows-1252 has no 🙂, and UTF-8 with a stray byte is not edited.
+    let edits = json!([{"old_string": "1b", "new_string": "🙂"}]);
+    let err = call(&ctx, "edit_file", json!({"path": "a", "edits": edits})).await;
+    assert!(err.unwrap_err().contains("Windows-1252"));
+    std::fs::write(dir.path().join("b"), b"\xc3\xa9\n\xc3\xbf\xff").unwrap();
+    let shown = call(&ctx, "read_file", json!({"path": "b"})).await.unwrap();
+    assert_eq!(shown, "é\nÿ\u{fffd}\n");
+    let edits = json!([{"old_string": "é", "new_string": "e"}]);
+    assert!(
+        call(&ctx, "edit_file", json!({"path": "b", "edits": edits}))
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]

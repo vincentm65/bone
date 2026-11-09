@@ -87,7 +87,12 @@ impl Tool for ReadFile {
             if bytes[..bytes.len().min(8192)].contains(&0) {
                 return Err(format!("{} looks like a binary file", path.display()));
             }
-            let text = String::from_utf8_lossy(&bytes);
+            // A legacy-encoded file as edit_file edits it; UTF-8 with a
+            // stray byte as before.
+            let text = String::from_utf8(bytes).unwrap_or_else(|e| {
+                super::decode_legacy(e.as_bytes())
+                    .unwrap_or_else(|| String::from_utf8_lossy(e.as_bytes()).into_owned())
+            });
             if text.is_empty() {
                 return Ok(String::from("(empty file)").into());
             }

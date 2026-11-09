@@ -164,12 +164,40 @@ impl Tool for EditFile {
     fn call<'a>(&'a self, args: Value, ctx: &'a ToolContext) -> BoxFuture<'a, ToolResult> {
         Box::pin(async move {
             let args: Args = typed_args(args)?;
-            let (path_arg, edits, legacy) = args.replacements()?;
+            let (path_arg, mut edits, legacy) = args.replacements()?;
             let path = ctx.resolve(&path_arg);
-            let text = tokio::fs::read_to_string(&path)
+            let bytes = tokio::fs::read(&path)
                 .await
                 .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
+            // Edited as read_file shows it: a legacy-encoded file as
+            // Windows-1252, CRLF lines without their \r.
+            let (text, cp1252) = match String::from_utf8(bytes) {
+                Ok(text) => (text, false),
+                Err(e) => (
+                    super::decode_legacy(e.as_bytes()).ok_or_else(|| {
+                        format!(
+                            "cannot read {}: stream did not contain valid UTF-8",
+                            path.display()
+                        )
+                    })?,
+                    true,
+                ),
+            };
+            // A CRLF file gets CRLF line ends; a mixed one where LF text is
+            // not found.
+            let crlf = text.contains("\r\n") && !text.replace("\r\n", "").contains('\n');
+            for e in edits.iter_mut().filter(|e| {
+                !e.old_string.contains('\r')
+                    && (crlf || (text.contains("\r\n") && !text.contains(&e.old_string)))
+            }) {
+                e.old_string = e.old_string.replace('\n', "\r\n");
+                e.new_string = e.new_string.replace("\r\n", "\n").replace('\n', "\r\n");
+            }
             let (updated, count) = apply(&text, &edits, &path.display().to_string())?;
+            let updated = match cp1252 {
+                false => updated.into_bytes(),
+                true => super::encode_legacy(&updated).ok_or_else(|| format!("{} is not UTF-8, so it is edited as Windows-1252, which lacks a character in new_string", path.display()))?,
+            };
             tokio::fs::write(&path, updated)
                 .await
                 .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
