@@ -84,16 +84,27 @@ function M.open()
       end
       group = g
       -- One line: the name (a key as a cap), and what it does.
-      local name = st.tab == 2
-        and { direction = "row", width = 150, shrink = 0, widgets.keycap(it.label) }
-        or { text = it.label, hl = "Normal", size = style.size.body, width = 130, shrink = 0,
-          wrap = false, text_overflow = "ellipsis" }
-      local lines = { {
-        direction = "row", gap = 10, align = "center", height = 24,
-        name,
-        { text = st.tab == 3 and it.meta or it.desc, hl = on and "Muted" or "Dim", size = style.size.body,
-          grow = 1, width = 0, wrap = false, text_overflow = "ellipsis" },
-      } }
+      local lines
+      if st.tab == 3 then
+        -- A doc: its path takes the line, what kind it is quiet at the right.
+        lines = { {
+          direction = "row", gap = 10, align = "center", height = 24,
+          { text = it.label, hl = "Normal", size = style.size.body, grow = 1, width = 0,
+            wrap = false, text_overflow = "ellipsis" },
+          { text = it.meta or "", hl = "Dim", size = style.size.small, wrap = false, shrink = 0 },
+        } }
+      else
+        local name = st.tab == 2
+          and { direction = "row", width = 150, shrink = 0, widgets.keycap(it.label) }
+          or { text = it.label, hl = "Normal", size = style.size.body, width = 130, shrink = 0,
+            wrap = false, text_overflow = "ellipsis" }
+        lines = { {
+          direction = "row", gap = 10, align = "center", height = 24,
+          name,
+          { text = it.desc, hl = on and "Muted" or "Dim", size = style.size.body,
+            grow = 1, width = 0, wrap = false, text_overflow = "ellipsis" },
+        } }
+      end
       items[#items + 1] = entry(on, lines, function()
         if st.sel == i then choose(i) else st.sel = i end
         bone.ui.update(id, {})

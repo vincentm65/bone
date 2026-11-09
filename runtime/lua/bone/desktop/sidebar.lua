@@ -411,7 +411,7 @@ local function row(i)
   else
     title[#title + 1] = {
       text = r.title, size = style.size.body, medium = r.state == "unread", -- the current one has its fill
-      hl = (on or current or r.state == "unread") and "Normal" or group("Muted", nil),
+      hl = ((on and has_keys()) or current or r.state == "unread") and "Normal" or group("Muted", nil),
       text_overflow = "ellipsis", wrap = false, grow = 1, shrink = 1,
     }
     if over then
@@ -444,8 +444,11 @@ local function row(i)
     end,
     style.finish({
       grow = 1, direction = "column", justify = "center", padding = { 0, 8 },
-      radius = style.radius.md, bg = on and "Selection" or (over and style.hover()) or nil,
-      hover = not on and { bg = style.hover() } or nil, transition = style.motion.base,
+      -- The open chat is lit; the keyboard's row only while the list has
+      -- the keyboard (otherwise it would look like the open one).
+      radius = style.radius.md,
+      bg = ((current or (on and has_keys())) and "Selection") or (over and style.hover()) or nil,
+      hover = not (current or (on and has_keys())) and { bg = style.hover() } or nil, transition = style.motion.base,
       title,
     }),
   }

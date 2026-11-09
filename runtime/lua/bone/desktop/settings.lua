@@ -88,7 +88,7 @@ function M.open(want)
       return {
         direction = "row", align = "center", gap = style.space.md, shrink = 1,
         text((r.model or "") .. (r.url and r.url ~= "" and ("  ·  " .. r.url:gsub("^%w+://", "")) or "")),
-        r.current and widgets.pill("IN USE") or nil,
+        r.current and widgets.pill("In use") or nil,
       }
     elseif r.kind == "plugin" then
       local where = (r.tui and "gui" or "") .. (r.tui and r.core and " + " or "") .. (r.core and "core" or "")
