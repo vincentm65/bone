@@ -798,7 +798,7 @@ fn completion(v: &Json) -> Result<crate::provider::Completion, String> {
             let id = c["id"]
                 .as_str()
                 .map(str::to_owned)
-                .unwrap_or_else(|| format!("call_{i}"));
+                .unwrap_or_else(|| crate::provider::fallback_call_id(i));
             Ok(ToolCall {
                 id,
                 name,

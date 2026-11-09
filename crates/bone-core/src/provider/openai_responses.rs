@@ -300,7 +300,7 @@ impl Accumulator {
             .map(|(n, i)| ToolCall {
                 id: i["call_id"]
                     .as_str()
-                    .map_or_else(|| format!("call_{n}"), str::to_owned),
+                    .map_or_else(|| super::fallback_call_id(n), str::to_owned),
                 name: i["name"].as_str().unwrap_or_default().to_owned(),
                 arguments: i["arguments"].as_str().unwrap_or("{}").to_owned(),
             })
