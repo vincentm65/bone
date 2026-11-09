@@ -200,10 +200,11 @@ function M.open(want)
 
   local function node()
     local t = st.tabs[st.tab]
-    local items = { heading(t, t.section or st.tab) }
+    -- The heading and the search stay put over the list, as help's do.
+    local top = { direction = "column", shrink = 0, heading(t, t.section or st.tab), search() }
+    local items = {}
 
     local list = page.rows()
-    items[#items + 1] = search()
     st.sel = math.max(1, math.min(st.sel, math.max(#list, 1)))
     if t.name == "providers" and not st.providers then
       items[#items + 1] = widgets.note("Loading…", { 2, 2 })
@@ -272,10 +273,10 @@ function M.open(want)
       detail = widgets.detail(st.note[1], st.note[2] == "ErrorMsg" and "ErrorMsg" or "Dim")
     end
     -- The one dialog size, whichever section or page it shows.
-    return style.as_dialog(widgets.list("settings:" .. id, items, selected, {
+    return style.as_dialog({ direction = "column", grow = 1, top, widgets.list("settings:" .. id, items, selected, {
       estimate = 44,
       footer = { direction = "column", detail, widgets.hints(hints(st, t), { 0, 0 }) },
-    }))
+    }) })
   end
 
   id = bone.ui.popup({ node = node, on_key = page.on_key })

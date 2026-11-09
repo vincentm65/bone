@@ -30,7 +30,7 @@ function M.view(page)
     items[#items + 1] = note(("%s   ·   %d update%s   ·   %d selected"):format(
       catalog.source(), updates, updates == 1 and "" or "s", #page.selected_rows(list)), { 0, 4 })
     -- Two pages: a press on the other one is the tab key.
-    items[#items + 1] = widgets.tabs({ "Plugins", "TUIs" }, st.page == "tui" and 2 or 1, function()
+    items[#items + 1] = widgets.tabs({ "Plugins", "GUIs" }, st.page == "tui" and 2 or 1, function()
       page.on_key("tab")
     end)
     if st.err then
@@ -38,7 +38,8 @@ function M.view(page)
     elseif not st.entries then
       items[#items + 1] = note("Loading…", { 4, 4 })
     elseif #list == 0 then
-      items[#items + 1] = note(st.page == "tui" and "No TUIs in the catalog" or "The catalog is empty", { 4, 4 })
+      items[#items + 1] = note(st.page == "tui" and "No GUIs in the catalog yet (its libraries are for the terminal: /tui)"
+        or "The catalog is empty", { 4, 4 })
     end
     local selected, last
     for i, e in ipairs(list) do
@@ -73,7 +74,7 @@ function M.view(page)
     -- The one dialog size, whichever page it shows.
     return style.as_dialog(widgets.list("catalog", items, selected, {
       estimate = 28,
-      footer = { direction = "column", widgets.divider({ margin = { 4, 0, 0, 0 } }), detail, hints(page.hint(), { 0, 0 }) },
+      footer = { direction = "column", detail, hints(page.hint(), { 0, 0 }) },
     }))
   end
 

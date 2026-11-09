@@ -49,22 +49,6 @@ local shapes = {
     9, 3, 4, 8, 3, 9.5, 3, 11, 3.6, 12.4, 5, 13.3, 6.5, 13.5, 8, 13 } } },
 }
 
---- The icon of a slash command, by its name (nil for one without).
-M.commands = {
-  ["?"] = "question", help = "question", new = "plus", clear = "plus", archive = "archive", compact = "compress",
-  context = "clock", sessions = "chat", attach = "attach", detach = "close", catalog = "layers", plugins = "layers",
-  checkhealth = "pulse", health = "pulse", config = "gear", settings = "gear", provider = "model", model = "model",
-  setup = "plus", rename = "edit", paste = "copy", quit = "close", ["codex-usage"] = "upload", diff = "compress",
-  editor = "edit", files = "folder", where = "folder", queue = "clock", runtime = "terminal", tui = "terminal",
-  gui = "sidebar", term = "terminal",
-}
-
---- The icon node for slash command `name` (a "/" when it has none). o as M.node.
-function M.command(name, o)
-  name = tostring(name or ""):gsub("^/", ""):match("^%S*")
-  return M.node(M.commands[name] or "slash", o)
-end
-
 --- Add or replace icon `name` (shapes on a 16px grid).
 function M.define(name, list) shapes[name] = list end
 

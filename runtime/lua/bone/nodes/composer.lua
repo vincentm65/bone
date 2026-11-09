@@ -48,7 +48,6 @@ local function suggestions()
     list[#list + 1] = style.finish(widgets.press({
       direction = "row", gap = 10, align = "center", height = 34, padding = { 0, 10 }, radius = style.radius.md,
       bg = on and "Selection" or nil, selected = on,
-      icons.command(it.name, { size = 15, hl = on and "Normal" or "Dim" }),
       { text = "/" .. it.name, size = style.size.body, width = 130, wrap = false, text_overflow = "ellipsis", shrink = 0 },
       { text = it.desc or "", hl = on and "Muted" or "Dim", size = style.size.body, grow = 1, width = 0,
         wrap = false, text_overflow = "ellipsis" },

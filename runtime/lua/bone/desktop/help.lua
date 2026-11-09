@@ -58,7 +58,7 @@ function M.open()
     local icons = require("bone.nodes.icons")
     local top = style.finish({
       direction = "row", align = "center", gap = 10, height = 50, shrink = 0,
-      margin = { -6, -style.inset - 4, 4, -style.inset - 4 }, padding = { 0, 10, 0, style.inset + 6 },
+      margin = { -6, -style.inset - 4, 4, -style.inset - 4 }, padding = { 0, style.inset + 4, 0, style.inset + 6 },
       border = { 0, 0, 1, 0 }, border_color = "WinSeparator",
       icons.node("search", { size = 16, hl = "Dim" }),
       { text = st.query == "" and "Search commands, keys and docs" or (st.query .. "▏"),
@@ -67,7 +67,9 @@ function M.open()
       widgets.segmented(help.TABS, st.tab, function(i)
         st.tab, st.query, st.sel = i, "", 1
         bone.ui.update(id, {})
-      end),
+      end, { align_self = "center" }),
+      widgets.icon_button("close", "Close (esc)", function() bone.ui.close(id) end,
+        { box = 28, size = 15, radius = style.radius.md }),
     })
     local items = {}
     if #list == 0 then items[#items + 1] = note("No matches.", { 4, 4 }) end
@@ -81,20 +83,14 @@ function M.open()
           padding = { 8, style.inset, 4, style.inset } }
       end
       group = g
-      local lead
-      if st.tab == 1 then
-        lead = icons.command(it.label, { size = 15, hl = on and "Normal" or "Dim" })
-      elseif st.tab == 3 then
-        lead = icons.node("question", { size = 15, hl = on and "Normal" or "Dim" })
-      end
-      -- One line: an icon, the name (a key as a cap), and what it does.
+      -- One line: the name (a key as a cap), and what it does.
       local name = st.tab == 2
         and { direction = "row", width = 150, shrink = 0, widgets.keycap(it.label) }
         or { text = it.label, hl = "Normal", size = style.size.body, width = 130, shrink = 0,
           wrap = false, text_overflow = "ellipsis" }
       local lines = { {
         direction = "row", gap = 10, align = "center", height = 24,
-        lead, name,
+        name,
         { text = st.tab == 3 and it.meta or it.desc, hl = on and "Muted" or "Dim", size = style.size.body,
           grow = 1, width = 0, wrap = false, text_overflow = "ellipsis" },
       } }
