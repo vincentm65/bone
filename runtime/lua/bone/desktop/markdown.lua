@@ -135,7 +135,10 @@ local function paragraphs(text, group)
     elseif k == "table" then
       -- One padded line wraps in the pane and piles the next cell onto it.
       -- Each cell is its own text, so a long note wraps inside its column.
-      local col = { direction = "column", gap = 8 }
+      -- Framed: a hairline round it and between its rows, the header row
+      -- on the raised surface in quiet grey.
+      local col = style.finish({ direction = "column", border = 1, border_color = "WinSeparator",
+        radius = style.radius.md, overflow = "hidden" })
       local widths = table_widths(b.rows or {}, M.small_size)
       -- A column of numbers is set flush right, so its digits line up.
       local numeric = {}
@@ -154,12 +157,17 @@ local function paragraphs(text, group)
         end
         numeric[j] = any and all
       end
+      local count = #(b.rows or {})
       for i, row in ipairs(b.rows or {}) do
         local head = b.header and i == 1
-        local line = { direction = "row", gap = 16, align = "start" }
+        local line = style.finish({ direction = "row", gap = 16, align = "start", padding = { 7, 12 },
+          bg = head and "InputBackground" or nil,
+          border = i < count and { 0, 0, 1, 0 } or nil, border_color = i < count and "WinSeparator" or nil })
         for j, cell in ipairs(row) do
-          local spans = M.spans(cell, head and "MdTableHeader" or "MdTable")
-          for _, s in ipairs(spans) do s.bold = s.bold or head end
+          local spans = M.spans(cell, head and "Dim" or "MdTable")
+          if head then
+            for _, s in ipairs(spans) do s.medium, s.hl = true, s.code and s.hl or "Dim" end
+          end
           -- At the text's size, so a cell of (smaller) code lines up with its row.
           table.insert(spans, 1, { text = "\u{200B}", hl = "MdTable" })
           local node = {
@@ -179,6 +187,7 @@ local function paragraphs(text, group)
       -- longest word.
       local least = 0
       for j, w in pairs(widths) do least = least + w.word + (j > 1 and 16 or 0) end
+      least = least + 2 * 12 + 2
       col.grow, col.width, col.min_width = 1, 0, least
       add({ node = { direction = "row", overflow = "scroll", col }, gap = 6 })
     elseif k == "rule" then
