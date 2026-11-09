@@ -15,6 +15,7 @@ mod backend;
 mod canvas;
 mod chats;
 mod flex;
+mod fonts;
 mod headless;
 mod images;
 mod keys;

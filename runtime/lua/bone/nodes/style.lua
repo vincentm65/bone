@@ -13,23 +13,23 @@ local M = {}
 
 --- Font sizes, in points.
 M.size = {
-  micro = 11,   -- section labels, keycaps
-  small = 12,   -- hints, meta lines, quiet text
-  caption = 13, -- secondary rows, tool cards
-  body = 14,    -- controls, list entries
-  text = 15,    -- the chat's text
-  lead = 17,    -- a window's sub-heading
+  micro = 11,   -- keycaps, counts (monospace)
+  small = 12,   -- hints, meta lines, group labels
+  caption = 13, -- secondary rows, tool rows
+  body = 13,    -- the interface: controls, list entries, menus
+  text = 15,    -- the chat's text, a menu's search
+  lead = 15,    -- a dialog's heading
   title = 20,   -- a window's heading
-  display = 24, -- a welcome
+  display = 26, -- the empty chat's greeting
 }
 
 --- Corner radii, in pixels.
 M.radius = {
   sm = 6,    -- a segment, a small button, a keycap
   md = 8,    -- a row, a code block
-  lg = 10,   -- an entry, a field, a button
-  xl = 12,   -- a window, a menu
-  round = 16, -- the composer, a bubble, the chat surface
+  lg = 8,    -- an entry, a field, a button
+  xl = 14,   -- a dialog, a menu
+  round = 20, -- the composer, a bubble
 }
 
 --- Spaces, in pixels.
@@ -40,12 +40,13 @@ M.space = { xs = 2, sm = 4, md = 8, lg = 12, xl = 16 }
 --- start on one line.
 M.inset = 10
 
---- Shadows: a floating card, a menu, and a bubble on the chat (the sidebar).
+--- Shadows. Only what floats casts one (the composer, a menu, a dialog),
+--- and it is the same one.
 M.shadow = {
-  card = { blur = 22, dy = 8, color = "#000000a0" },
-  menu = { blur = 18, dy = 6, color = "#00000070" },
-  big = { blur = 30, dy = 10, color = "#000000c0" },
-  bubble = { blur = 16, dy = 4, color = "#00000038" },
+  card = { blur = 48, dy = 18, color = "#000000b3" },
+  menu = { blur = 48, dy = 18, color = "#000000b3" },
+  big = { blur = 48, dy = 18, color = "#000000b3" },
+  bubble = { blur = 48, dy = 18, color = "#000000b3" },
 }
 
 --- The size of a dialog (settings, the catalog, setup, a picker, help), in
@@ -59,7 +60,7 @@ function M.as_dialog(node)
 end
 
 --- The dimmed backdrops behind a dialog and behind a large image.
-M.scrim = { dialog = "#00000099", image = "#000000d8" }
+M.scrim = { dialog = "#0000009e", image = "#000000d8" }
 
 --- How long things animate, in milliseconds.
 M.motion = { fast = 50, base = 60, slow = 80 }

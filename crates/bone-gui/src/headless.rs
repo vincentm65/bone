@@ -74,7 +74,7 @@ impl Backend for NoWindow {
     /// Fonts are read as the window would, so a file that cannot be read
     /// is reported; only registered families change the layout.
     fn set_fonts(&mut self, set: &FontSet) -> FontsApplied {
-        let read = |p: &str| std::fs::read(p).ok().and_then(|b| advances(&b));
+        let read = |p: &str| crate::fonts::read(p).and_then(|b| advances(&b));
         let mut errors = Vec::new();
         let mut faces = [false; 3];
         if let Some(p) = &set.mono
