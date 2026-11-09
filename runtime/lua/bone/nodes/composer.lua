@@ -39,20 +39,19 @@ local function suggestions()
   local rows = SUGGESTIONS
   local first = math.max(1, math.min(menu.selected - rows + 1, n - rows + 1))
   if menu.selected < first then first = menu.selected end
-  local list = widgets.surface({
-    position = "absolute", left = 0, right = 0, bottom = "100%", z = 5,
-    margin = style.margin(0, 8), padding = style.pad(6, 6),
-  })
+  local list = widgets.surface({ padding = style.pad(6, 6) })
   for i = first, math.min(n, first + rows - 1) do
     local it, on = items[i], i == menu.selected
     list[#list + 1] = style.finish(widgets.press({
       direction = "row", gap = 12, padding = { 5, 10, 5, 10 }, radius = style.radius.md,
       bg = on and "Selection" or nil, selected = on,
-      { text = "/" .. it.name, size = style.size.body, bold = on, width = 140, wrap = false, overflow = "hidden" },
+      { text = "/" .. it.name, size = style.size.body, width = 140, wrap = false, overflow = "hidden" },
       { text = it.desc or "", hl = "Dim", size = style.size.caption, grow = 1, wrap = false, overflow = "hidden" },
     }, function() menu.selected = i; menu.complete() end, "option", not on))
   end
-  return list
+  -- Over the composer with a gap, not touching it (an absolute node's
+  -- margin is not laid out, so the gap is a transparent pad under it).
+  return { position = "absolute", left = 0, right = 0, bottom = "100%", z = 5, padding = { 0, 0, 6, 0 }, list }
 end
 
 local function stop(session)

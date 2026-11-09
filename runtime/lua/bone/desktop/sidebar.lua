@@ -105,7 +105,11 @@ local function compute()
     local current = (bone.chat.session() or {}).session_id
     if current then unread[current] = nil end
     for _, s in ipairs(g.items) do
-      if not st.project or s.cwd == st.project then items[#items + 1] = s end
+      -- A chat with no title has no message in it: nothing to go back to.
+      -- It stays listed while on screen, pinned, running or searched for.
+      local empty = not s.title and st.query == "" and s.session_id ~= current
+        and not pinned[s.session_id] and not chats.live[s.session_id]
+      if not empty and (not st.project or s.cwd == st.project) then items[#items + 1] = s end
     end
     if #items == 0 then
       rows[1] = { kind = "none", text = st.loading and "Loading…"
@@ -405,7 +409,7 @@ local function row(i)
     })
   else
     title[#title + 1] = {
-      text = r.title, size = style.size.body, bold = current or r.state == "unread",
+      text = r.title, size = style.size.body, bold = r.state == "unread", -- the current one has its fill
       hl = (on or current or r.state == "unread") and "Normal" or nil,
       text_overflow = "ellipsis", grow = 1, shrink = 1,
     }
@@ -495,7 +499,7 @@ end
 -- It opens out from the window's edge: how far, 0 to 1, and the slide under
 -- way: where it set off from, where to, when, and the frame before.
 local slide = { at = 0, from = 0, to = 0, started = 0, last = 0 }
-M.slide_ms = 24 -- 5× faster than the original 120 ms
+M.slide_ms = 0 -- no slide: it opens and closes in one frame (a gui.lua can set a time)
 -- The most a frame moves it, in ms of the slide.
 local FRAME_MAX = 17
 -- How far right of the pointer the width handle's edge was when pressed.
@@ -568,9 +572,14 @@ function M.node(ctx)
     })
     return widgets.card(card), 0, backdrop
   end
-  card.margin = { M.inset, 0, M.inset, math.floor(M.inset * ease) }
+  -- The lane is the whole width from the first frame to the last: the
+  -- chat beside it is laid out once as the card opens (and once as it
+  -- closes), not again on each frame of the slide, which made its right
+  -- edge jump about. The card is uncovered inside the lane.
+  card.margin = { M.inset, M.width - card.width, M.inset, M.inset }
   card = widgets.card(card)
-  return card, card.width + (card.margin and card.margin[4] or 0)
+  local m = card.margin -- none in the bare look
+  return card, card.width + (m and (m[2] + m[4]) or 0)
 end
 
 --- The sidebar's own content.
@@ -622,6 +631,13 @@ function M.content()
     list = { count = #st.rows, estimate = ROW.card, key = st.page .. ":" .. st.version, item = row },
   }
   nodes.append(out, bone.gui.slots.nodes("sidebar.bottom"))
+  -- The list fades into the card's foot rather than cutting a row in half
+  -- there (as the chat fades into the composer).
+  local clear, solid = style.alpha("InputBackground", "00", "bg"), style.alpha("InputBackground", "ff", "bg")
+  if clear and solid then
+    out[#out + 1] = { position = "absolute", left = 0, right = 0, bottom = 0, height = 28, z = 1,
+      gradient = { clear, solid }, radius = { 0, 0, style.radius.round - 1, style.radius.round - 1 } }
+  end
   out[#out + 1] = st.page == "chats" and project_menu() or nil
   return out
 end

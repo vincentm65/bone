@@ -35,7 +35,7 @@ end
 function M.title(text)
   return style.finish({
     text = text, hl = "Normal", bold = true, size = style.size.title,
-    padding = { 2, 8 }, margin = style.margin(0, 4),
+    padding = { 2, style.inset }, margin = style.margin(0, 4),
   })
 end
 
@@ -44,7 +44,7 @@ function M.note(text, margin, hl)
   local m = margin or { 10, 0 }
   return style.finish({
     text = text, hl = hl or "Dim", size = style.size.small,
-    padding = { 4, 10 }, margin = style.margin(m[1], m[2]),
+    padding = { 4, style.inset }, margin = style.margin(m[1], m[2]),
   })
 end
 
@@ -211,10 +211,12 @@ end
 
 --- Tabs along the top of a window: the current one raised.
 function M.tabs(names, current, pick, o)
-  local row = extend({ direction = "row", gap = 4, padding = { 0, 4 }, margin = style.margin(0, 6) }, o)
+  -- Each tab's text on the text edge: the first tab's fill starts at the
+  -- list's edge, as an entry's does.
+  local row = extend({ direction = "row", gap = 4, padding = 0, margin = style.margin(0, 6) }, o)
   for i, name in ipairs(names) do
     row[#row + 1] = segment(name, i == current, function() pick(i) end,
-      { size = style.size.body, padding = { 5, 12 } })
+      { size = style.size.body, padding = { 5, style.inset } })
   end
   return style.finish(row)
 end
@@ -229,11 +231,14 @@ function M.field(label, value, o)
     bg = "InputBackground", radius = style.radius.lg, padding = { 6, 12 },
     border = 1, border_color = o.on and "Accent" or "PromptBorder", transition = style.motion.base,
   })
+  -- The label, the box and the hint on the text edge, with the heading
+  -- above and the buttons under the form.
   return style.finish({
-    direction = "column", margin = { 0, 0, 9, 0 }, cursor = o.click and "pointer" or nil, on_click = o.click,
-    style.finish({ text = label, size = style.size.small, hl = o.on and "Accent" or "Dim", margin = { 0, 0, 3, 2 } }),
+    direction = "column", margin = { 0, 0, 9, 0 }, padding = { 0, style.inset },
+    cursor = o.click and "pointer" or nil, on_click = o.click,
+    style.finish({ text = label, size = style.size.small, hl = o.on and "Accent" or "Dim", margin = { 0, 0, 3, 0 } }),
     box,
-    o.on and o.hint and style.finish({ text = o.hint, size = style.size.small, hl = "Dim", margin = { 4, 0, 0, 2 } }) or nil,
+    o.on and o.hint and style.finish({ text = o.hint, size = style.size.small, hl = "Dim", margin = { 4, 0, 0, 0 } }) or nil,
   })
 end
 
@@ -242,11 +247,19 @@ end
 --- The same height whatever it holds, so moving through the list never moves
 --- the list.
 function M.detail(content, hl)
-  local node = { height = 2 * math.ceil(style.size.small * 1.35) + 8, padding = { 4, 8 }, overflow = "hidden",
+  local node = { height = 2 * math.ceil(style.size.small * 1.35) + 8, padding = { 4, style.inset }, overflow = "hidden",
     direction = "column", justify = "center", shrink = 0 }
   if type(content) == "table" then
     node[1] = content
   elseif content and content ~= "" then
+    -- Two lines at most: a longer text is cut at a word with an ellipsis
+    -- rather than spilling a third, half-clipped line over what is under it.
+    -- (Text cannot be measured here; a dialog's width in average chars.)
+    local room = style.dialog.inner or style.dialog.width
+    local fit = math.floor(2 * (room - 2 * style.inset - 40) / (style.size.small * 0.55))
+    if #content > fit then
+      content = content:sub(1, fit):gsub("%s+%S*$", "") .. "…"
+    end
     node[1] = { text = content, hl = hl or "Dim", size = style.size.small }
   end
   return style.finish(node)
@@ -272,7 +285,7 @@ function M.hints(text, margin)
   local m = margin or { 8, 0 }
   local row = {
     direction = "row", flex_wrap = true, gap = 14, row_gap = 4, align = "center",
-    padding = { 2, 8 }, margin = style.margin(m[1], m[2]),
+    padding = { 2, style.inset }, margin = style.margin(m[1], m[2]),
   }
   for part in (text .. " · "):gmatch("(.-) · ") do
     local key, what = part:match("^(%S+)%s+(.*)$")
@@ -367,10 +380,18 @@ function M.list(id, items, selected, opts)
   end
   local list = {
     id = id, grow = 1, fit = opts.fit,
+    -- In a dialog the scrollbar has a lane of its own, off the rows' fills.
+    padding = opts.footer and { 0, 10, 0, 0 } or nil,
     list = { count = #items, estimate = opts.estimate or 56, key = id, item = function(i) return items[i] end, fit = opts.fit },
   }
   if not opts.footer then return list end
   opts.footer.shrink = 0
+  -- A dialog's list fades into its footer rather than cutting a row there.
+  local clear, solid = style.alpha("Panel", "00", "bg"), style.alpha("Panel", "ff", "bg")
+  if clear and solid and not opts.fit then
+    list = { grow = 1, direction = "column", list,
+      { position = "absolute", left = 0, right = 0, bottom = 0, height = 20, z = 1, gradient = { clear, solid } } }
+  end
   return { grow = 1, direction = "column", fit = opts.fit, list, opts.footer }
 end
 

@@ -60,15 +60,16 @@ function M.open()
     end)
     items[#items + 1] = {
       text = st.query == "" and "Type to search…" or (st.query .. "▏"), hl = st.query == "" and "Dim" or "Normal",
-      size = style.size.caption, bg = "InputBackground", radius = style.radius.lg, padding = { 6, 10 },
-      margin = { 0, 0, 6, 0 },
+      -- The same field as the sidebar's search.
+      size = style.size.caption, bg = "Normal", radius = style.radius.md, padding = { 6, style.inset },
+      border = 1, border_color = "PromptBorder", margin = { 0, 0, 6, 0 },
     }
     if #list == 0 then items[#items + 1] = note("No matches.", { 4, 4 }) end
     local selected
     for i, it in ipairs(list) do
       local on = i == st.sel
       local lines = {
-        { text = it.label, hl = it.command and "Accent" or "Normal", bold = on, size = style.size.body },
+        { text = it.label, hl = it.command and "Accent" or "Normal", bold = false, size = style.size.body },
         { text = st.tab == 3 and it.meta or it.desc, hl = "Dim", size = style.size.small, margin = { 2, 0, 0, 0 } },
       }
       items[#items + 1] = entry(on, lines, function()
@@ -116,11 +117,11 @@ end
 -- /health: this window's checks, then the core's.
 local MARK = { ok = { "•", "ToolDone" }, warn = { "!", "WarningMsg" }, error = { "×", "ErrorMsg" } }
 local function checks(name, items, out)
-  out[#out + 1] = { text = name:upper(), hl = "Dim", bold = true, size = style.size.micro, padding = { 2, 8 }, margin = { 6, 0, 2, 0 } }
+  out[#out + 1] = { text = name:upper(), hl = "Dim", bold = true, size = style.size.micro, padding = { 2, style.inset }, margin = { 6, 0, 2, 0 } }
   for _, it in ipairs(items) do
     local m = MARK[it.status] or MARK.warn
     out[#out + 1] = {
-      direction = "column", padding = { 4, 8 },
+      direction = "column", padding = { 4, style.inset },
       { spans = { { text = m[1] .. "   ", hl = m[2], bold = true }, { text = it.name, hl = "Normal", bold = true } }, size = style.size.body },
       { text = tostring(it.message), hl = "Dim", size = style.size.small, margin = { 2, 0, 0, 0 }, padding = { 0, 0, 0, 22 } },
     }

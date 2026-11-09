@@ -114,7 +114,7 @@ function M.open(want)
   -- The heading: the title and the sections, or, on a page of its own, a
   -- way back and where you are.
   local function heading(t, section)
-    local row = { direction = "row", align = "center", gap = style.space.md, padding = { 0, 4 }, margin = { 0, 0, 6, 0 } }
+    local row = { direction = "row", align = "center", gap = style.space.md, padding = { 0, 0, 0, 0 }, margin = { 0, 0, 6, 0 } }
     if t.page or st.prov then
       local here = t.page and t.title or (st.prov.new and "New provider" or st.prov.name)
       row[#row + 1] = widgets.icon_button("‹", "Back", function() page.on_key("esc"); refresh() end,
@@ -130,7 +130,8 @@ function M.open(want)
     end
     local names = {}
     for i = 1, 3 do names[i] = st.tabs[i].title end
-    row[#row + 1] = { text = "Settings", hl = "Normal", bold = true, size = style.size.lead, grow = 1 }
+    row[#row + 1] = { text = "Settings", hl = "Normal", bold = true, size = style.size.title, grow = 1,
+      padding = { 0, 0, 0, style.inset } }
     row[#row + 1] = widgets.tabs(names, section, function(i)
       page.switch_tab(i - st.tab)
       refresh()
@@ -143,10 +144,10 @@ function M.open(want)
     local typing = st.search
     local shown = typing and (st.query .. "▏") or (st.query ~= "" and st.query or "Search")
     return widgets.press({
-      direction = "row", align = "center", gap = style.space.sm, margin = { 0, 0, 6, 0 }, padding = { 3, 8 },
-      bg = "InputBackground", radius = style.radius.sm, border = 1,
+      -- The same field as the sidebar's and help's search.
+      direction = "row", align = "center", gap = style.space.sm, margin = { 0, 0, 6, 0 }, padding = { 6, style.inset },
+      bg = "Normal", radius = style.radius.md, border = 1,
       border_color = typing and "Accent" or "PromptBorder",
-      { text = "⌕", hl = "Dim", size = CAPTION },
       { text = shown, hl = (typing or st.query ~= "") and "Normal" or "Dim", size = CAPTION, grow = 1, width = 0,
         wrap = false, text_overflow = "ellipsis" },
       st.query ~= "" and widgets.icon_button("✕", "Clear the search", function()
@@ -188,7 +189,7 @@ function M.open(want)
         {
           direction = "row", align = "center", gap = style.space.md, min_height = 20,
           {
-            text = r.label, size = SIZE, bold = on or action, grow = 1, width = 0, wrap = false,
+            text = r.label, size = SIZE, bold = action, grow = 1, width = 0, wrap = false,
             text_overflow = "ellipsis", hl = danger and "ErrorMsg" or action and "Accent" or "Normal",
           },
           value_node(r, i, on),

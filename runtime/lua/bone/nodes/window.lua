@@ -273,6 +273,19 @@ local function chat_fade(gutter)
   }
 end
 
+-- The same at the top, shorter: what scrolls up out of the chat fades at
+-- the window's edge instead of being cut there. It covers no more than the
+-- list's top padding, so the first line at the top of a chat is clear.
+M.chat_fade_top = 14
+local function chat_fade_top(gutter)
+  local clear, solid = style.alpha("Normal", "00", "bg"), style.alpha("Normal", "ff", "bg")
+  if not clear or not solid then return nil end
+  return {
+    position = "absolute", left = gutter, right = gutter, top = 0, height = M.chat_fade_top, z = 1,
+    gradient = { solid, clear },
+  }
+end
+
 --- One chat's column: the chat, with the composer, tray and status bar
 --- under it. opts: `width` (pixels), `chat` (a chat number; nil or the chat
 --- on screen gets the editor, any other its read-only draft), `on_focus` (a
@@ -285,8 +298,10 @@ function M.column(ctx, opts)
   local width = opts.width or ctx.width
   -- The usual 24px gutter is comfortable, but would leave no chat column on
   -- a very narrow window. Let it scale down before the composer does.
-  local gutter = opts.gutter or (width > M.max_width
-    and (width - M.max_width) / 2 or math.min(24, width / 10))
+  -- Past M.max_width the column is centered, never with less than that
+  -- gutter (a width just over it would otherwise get almost none).
+  local gutter = opts.gutter
+    or math.max(math.min(24, width / 10), (width - M.max_width) / 2)
   local content_width = math.max(0, width - 2 * gutter)
   -- `nodes.chat` keeps a right inset for its scrollbar. Reserve that same
   -- inset below it so the composer is centered on the usable chat width,
@@ -302,10 +317,11 @@ function M.column(ctx, opts)
   if here then
     chat[#chat + 1] = welcome(usable_width)
     chat[#chat + 1] = chat_fade(gutter)
+    chat[#chat + 1] = chat_fade_top(gutter)
     chat[#chat + 1] = jump()
   end
   local below = {
-    direction = "column", padding = { 0, gutter, 12, gutter + scrollbar_inset }, gap = 4,
+    direction = "column", padding = { 0, gutter + scrollbar_inset, 12, gutter }, gap = 4,
   }
   -- Panels docked at the bottom stand over the composer, as in the terminal
   -- they stand over the prompt.

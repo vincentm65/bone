@@ -360,9 +360,15 @@ local function run_key(item)
 end
 
 -- The status dot: running, done or failed.
+-- A line's lead in a slot of one width, so the labels after a dot and
+-- after a chevron start at the same x.
+local function lead_slot(glyph)
+  return { width = 12, shrink = 0, direction = "row", justify = "center", align = "center", glyph }
+end
+
 local function dot(item)
   local hl = not item.done and "ToolRunning" or (item.is_error and "ToolError" or "ToolDone")
-  return { text = "●", hl = hl, size = 7, wrap = false }
+  return lead_slot({ text = "●", hl = hl, size = 7, wrap = false })
 end
 
 -- A call's line: `lead` (its dot), what it did (`spans`), and `meta` at the
@@ -588,7 +594,8 @@ local function summary_nodes(item, width)
   local running = false
   for _, t in ipairs(stretch) do running = running or not t.done end
   local open = toggled[run_key(item)]
-  local chevron = { text = open and "▾" or "▸", hl = running and "ToolRunning" or "ToolDone", size = 10, wrap = false }
+  local chevron = lead_slot({ text = open and "▾" or "▸", hl = running and "ToolRunning" or "ToolDone",
+    size = 12, wrap = false })
   local paras = { frame(line(chevron, { { text = summary(stretch), hl = "ToolArgs" } })) }
   -- Open, the run is its calls, folded, on a guide under the chevron; a
   -- click opens one in full.

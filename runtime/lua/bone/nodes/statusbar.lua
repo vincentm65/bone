@@ -94,7 +94,8 @@ function M.node(session, cell)
   -- fit go on a line of their own, and a piece too long for its line is
   -- cut short with an ellipsis. Nothing is painted over anything else.
   local bar = {
-    direction = "row", flex_wrap = true, padding = { 6, 16, 0, 16 }, gap = 12, align = "center",
+    -- Inset like the composer's attach "+" above it, so the two read as one edge.
+    direction = "row", flex_wrap = true, padding = { 6, 22, 0, 22 }, gap = 12, align = "center",
   }
   local elapsed
   if session and session.running then

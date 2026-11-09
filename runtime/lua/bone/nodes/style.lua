@@ -35,6 +35,11 @@ M.radius = {
 --- Spaces, in pixels.
 M.space = { xs = 2, sm = 4, md = 8, lg = 12, xl = 16 }
 
+--- The text edge inside a dialog, a menu or a list: where an entry's text
+--- starts in its fill, so a heading, a label, a hint and a row's text all
+--- start on one line.
+M.inset = 10
+
 --- Shadows: a floating card, a menu, and a bubble on the chat (the sidebar).
 M.shadow = {
   card = { blur = 22, dy = 8, color = "#000000a0" },

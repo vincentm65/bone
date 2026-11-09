@@ -1427,6 +1427,11 @@ fn span(v: &Value, colors: &dyn Colors, base: &TextStyle) -> Result<Span, String
     // the colorscheme may not set.
     let mut bg = t.get::<String>("bg")?.and_then(|c| color(colors, &c, true));
     if t.get::<bool>("code")?.unwrap_or(false) {
+        // Monospace has a taller x-height than the text around it: a step
+        // down in size reads as the same size.
+        if t.raw("size").is_none() {
+            style.size = (style.size * 0.9).round();
+        }
         style.mono = true;
         bg = bg.or_else(|| colors.group("CodeBlock", true));
     }

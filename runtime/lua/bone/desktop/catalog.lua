@@ -44,7 +44,7 @@ function M.view(page)
     for i, e in ipairs(list) do
       if e.state ~= last then
         items[#items + 1] = { text = catalog.HEAD[e.state]:upper(), hl = "Dim", bold = true, size = style.size.micro,
-          padding = { 2, 8 }, margin = { 6, 0, 2, 0 } }
+          padding = { 2, style.inset }, margin = { 6, 0, 2, 0 } }
         last = e.state
       end
       local on, picked = i == st.sel, st.selected[e.name]
@@ -54,7 +54,7 @@ function M.view(page)
       local row = entry(on, {
         {
           direction = "row", align = "center", gap = style.space.md,
-          { spans = { widgets.check_span(picked), { text = catalog.label(e), hl = "Normal", bold = on } },
+          { spans = { widgets.check_span(picked), { text = catalog.label(e), hl = "Normal" } },
             size = style.size.body, wrap = false, shrink = 0 },
           { text = meta, hl = "Dim", size = style.size.small, wrap = false, shrink = 0 },
           { text = e.blocked or e.description or "", hl = "Dim", size = style.size.small, grow = 1, width = 0,
