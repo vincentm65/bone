@@ -349,7 +349,10 @@ impl crate::Gui {
         if focused {
             let shown = f.cursor + self.view.preedit.chars().count();
             let (c, line) = shaped.cursor_pos(shown.min(shaped.char_count()));
-            let caret = Rect::from_min_size(at + c.to_vec2(), vec2(2.0, line));
+            // A thin caret, and at a line's start it stands just before the
+            // first glyph (the placeholder's too), not over it.
+            let lead = if c.x < 0.5 { -1.5 } else { 0.0 };
+            let caret = Rect::from_min_size(at + c.to_vec2() + vec2(lead, 0.0), vec2(1.5, line));
             // Ghost text when the cursor ends its line.
             if let Some((ghost, color)) = &look.ghost
                 && !ghost.is_empty()

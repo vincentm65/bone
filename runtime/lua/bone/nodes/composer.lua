@@ -140,7 +140,9 @@ local function toolbar(opts, running, empty)
   nodes.append(bar, slot("composer.tools", opts))
   -- The context: how full, by the compaction limit when there is one.
   if (u.curr or 0) > 0 and not narrow then
-    local label = bone.util.tokens(u.curr) .. (u.limit and u.limit > 0 and (" / " .. bone.util.tokens(u.limit)) or "")
+    -- "100k", not "100.0k".
+    local function k(n) return (bone.util.tokens(n):gsub("%.0([km])$", "%1")) end
+    local label = k(u.curr) .. (u.limit and u.limit > 0 and (" / " .. k(u.limit)) or "")
     local used = (u.input or 0) + (u.output or 0)
     local tip = bone.util.tokens(u.curr) .. " in context"
       .. (used > 0 and (" · " .. bone.util.tokens(used) .. " used") or "")
