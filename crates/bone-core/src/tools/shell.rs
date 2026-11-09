@@ -486,6 +486,18 @@ fn kill(pid: Option<u32>) {
     }
 }
 
+/// Every running job's process group in this process, for [`kill_all_jobs`].
+static LIVE: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+
+/// Kill every running shell job's process tree, for a frontend about to exit
+/// (its runtime will not run the jobs' own cleanup).
+pub fn kill_all_jobs() {
+    LIVE.lock()
+        .unwrap()
+        .drain(..)
+        .for_each(|pid| kill(Some(pid)));
+}
+
 fn group_alive(pid: Option<u32>) -> bool {
     pid.is_none_or(bone_lua::sys::tree_alive)
 }
@@ -581,6 +593,7 @@ async fn run_job(
             Output::Thread(read_blocking(std::fs::File::from(reader)))
         }
     };
+    LIVE.lock().unwrap().extend(pid);
     // Stdin is written on its own task: a command that writes before it
     // reads would otherwise fill its output pipe while this loop waits.
     let mut input = child.stdin.take().map(|mut pipe| {
@@ -635,6 +648,7 @@ async fn run_job(
     if cfg!(unix) || status.is_none() {
         kill(pid);
     }
+    LIVE.lock().unwrap().retain(|p| Some(*p) != pid);
     process.pty.lock().unwrap().take();
     let text = out_decoder.finish();
     record_output(&process, &text, text.len(), &mut cleaner, &mut unsent);

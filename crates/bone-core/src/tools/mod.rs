@@ -8,6 +8,7 @@ mod read_file;
 mod shell;
 mod write_file;
 
+pub use shell::kill_all_jobs;
 pub(crate) use shell::{ProcessRegistry, ProcessState, ProcessView};
 
 use std::path::{Component, PathBuf};

@@ -200,27 +200,47 @@ fn main() -> ExitCode {
         );
     }
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
-    let code = match runtime.block_on(run(mode, config_dir)) {
+    // The TUI and a stdio core end on these signals rather than dying, so
+    // their shell jobs (in process groups of their own) end with them. Not
+    // the GUI: its thread is busy, so a handler would never run. Windows
+    // ends its console's processes itself.
+    let stops = cfg!(unix) && matches!(mode, Mode::Stdio | Mode::Tui { .. });
+    let code = match runtime.block_on(async {
+        // Only when used: a registered handler replaces the default action.
+        match if stops { stop_signal().ok() } else { None } {
+            Some(stop) => tokio::select! { r = run(mode, config_dir) => r, _ = stop => Ok(()) },
+            None => run(mode, config_dir).await,
+        }
+    }) {
         Ok(()) => ExitCode::SUCCESS,
         Err((code, why)) => {
             eprintln!("bone: {why}");
             ExitCode::from(code)
         }
     };
+    bone_core::tools::kill_all_jobs();
     // Stdin's blocking reader thread may still be waiting for input; don't
     // let runtime shutdown wait on it.
     runtime.shutdown_background();
     code
 }
 
-/// Resolves on SIGINT or SIGTERM (Ctrl+C or the console closing on Windows).
+/// Resolves on SIGINT, SIGTERM or SIGHUP (Ctrl+C, or the terminal or
+/// console closing).
 fn stop_signal() -> std::io::Result<impl Future<Output = ()>> {
     #[cfg(unix)]
-    let (mut int, mut term) = {
+    let (mut int, mut term, mut hup) = {
         use tokio::signal::unix::{SignalKind, signal};
+        // One the parent ignores (nohup's SIGHUP) stays ignored.
+        let watch = |kind: SignalKind| {
+            (!bone_lua::sys::signal_ignored(kind.as_raw_value()))
+                .then(|| signal(kind))
+                .transpose()
+        };
         (
-            signal(SignalKind::interrupt())?,
-            signal(SignalKind::terminate())?,
+            watch(SignalKind::interrupt())?,
+            watch(SignalKind::terminate())?,
+            watch(SignalKind::hangup())?,
         )
     };
     #[cfg(windows)]
@@ -229,11 +249,24 @@ fn stop_signal() -> std::io::Result<impl Future<Output = ()>> {
         (ctrl_c()?, ctrl_close()?)
     };
     Ok(async move {
+        #[cfg(unix)]
+        let (int, term, hup) = (recv(&mut int), recv(&mut term), recv(&mut hup));
+        #[cfg(windows)]
+        let (int, term, hup) = (int.recv(), term.recv(), std::future::pending::<()>());
         tokio::select! {
-            _ = int.recv() => {}
-            _ = term.recv() => {}
+            _ = int => {}
+            _ = term => {}
+            _ = hup => {}
         }
     })
+}
+
+#[cfg(unix)]
+async fn recv(signal: &mut Option<tokio::signal::unix::Signal>) {
+    match signal {
+        Some(signal) => drop(signal.recv().await),
+        None => std::future::pending().await,
+    }
 }
 
 /// Private config, sessions or per-run core overrides must not use a shared core.
