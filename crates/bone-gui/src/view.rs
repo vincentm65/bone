@@ -197,15 +197,14 @@ impl Gui {
         if self.view.fonts.as_ref() == Some(&want) {
             return;
         }
-        // The proportional faces: the options' files, else the system's.
-        let system = system_sans();
+        // The proportional faces: the options' files, else the built-in ones.
         let mut faces: [Option<String>; 3] = [None, None, None];
         for (i, opt) in want.2.iter().enumerate() {
-            faces[i] = if opt.is_empty() {
-                system[i].clone()
+            faces[i] = Some(if opt.is_empty() {
+                crate::fonts::SANS[i].to_owned()
             } else {
-                Some(opt.clone())
-            };
+                opt.clone()
+            });
         }
         let set = FontSet {
             mono: (!want.0.is_empty()).then(|| want.0.clone()),
@@ -248,49 +247,3 @@ fn system_symbols() -> Vec<String> {
     .collect()
 }
 
-/// The system's sans-serif regular, bold and italic font files, where the
-/// usual ones are (Noto, DejaVu, Liberation; Arial on macOS, Segoe UI on
-/// Windows).
-fn system_sans() -> [Option<String>; 3] {
-    let sets: &[[&str; 3]] = &[
-        [
-            "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-            "/usr/share/fonts/noto/NotoSans-Bold.ttf",
-            "/usr/share/fonts/noto/NotoSans-Italic.ttf",
-        ],
-        [
-            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
-            "/usr/share/fonts/truetype/noto/NotoSans-Italic.ttf",
-        ],
-        [
-            "/usr/share/fonts/TTF/DejaVuSans.ttf",
-            "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/TTF/DejaVuSans-Oblique.ttf",
-        ],
-        [
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Oblique.ttf",
-        ],
-        [
-            "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
-            "/usr/share/fonts/liberation/LiberationSans-Bold.ttf",
-            "/usr/share/fonts/liberation/LiberationSans-Italic.ttf",
-        ],
-        [
-            "/System/Library/Fonts/Supplemental/Arial.ttf",
-            "/System/Library/Fonts/Supplemental/Arial Bold.ttf",
-            "/System/Library/Fonts/Supplemental/Arial Italic.ttf",
-        ],
-        [
-            "C:\\Windows\\Fonts\\segoeui.ttf",
-            "C:\\Windows\\Fonts\\segoeuib.ttf",
-            "C:\\Windows\\Fonts\\segoeuii.ttf",
-        ],
-    ];
-    let set = sets.iter().find(|s| std::path::Path::new(s[0]).exists());
-    set.map_or([None, None, None], |s| {
-        s.map(|p| std::path::Path::new(p).exists().then(|| p.to_owned()))
-    })
-}

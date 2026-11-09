@@ -6,7 +6,9 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use bone_client::{Client, connect, spawn};
-use bone_proto::methods::{Echo, EchoParams, Echoed, SessionCreate, SessionList};
+use bone_proto::methods::{
+    Echo, EchoParams, Echoed, SessionCreate, SessionCreateParams, SessionList,
+};
 use tokio::process::Command;
 use tokio::time::{sleep, timeout};
 
@@ -242,4 +244,95 @@ async fn core_config_errors_keep_exit_code_two() {
     .unwrap();
     assert_eq!(output.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&output.stderr).contains("BROKEN_CORE"));
+}
+
+#[cfg(target_os = "linux")]
+#[tokio::test]
+async fn signals_end_the_shell_jobs_too() {
+    // Running, not a zombie waiting to be reaped.
+    let running = |pid: &str| {
+        !pid.is_empty()
+            && std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .is_ok_and(|s| !s.rsplit(") ").next().unwrap_or("").starts_with('Z'))
+    };
+    for signal in [libc::SIGHUP, libc::SIGTERM] {
+        let data = tempfile::tempdir().unwrap();
+        // A model that starts a background job, then waits on a foreground one.
+        let lua = r#"local n = 0
+          bone.provider.register("jobs", { complete = function()
+            n = n + 1
+            local cmd = ({ "echo $$ > bg; exec sleep 99", "echo $$ > fg; exec sleep 99" })[n]
+            if not cmd then return { content = "done" } end
+            return { tool_calls = { { id = "c" .. n, name = "shell",
+              arguments = { command = cmd, mode = n == 1 and "start" or nil } } } }
+          end })
+          bone.config.providers.jobs = { type = "jobs", model = "m" }"#;
+        std::fs::write(data.path().join("core.lua"), lua).unwrap();
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_bone"));
+        cmd.env("BONE_CONFIG_DIR", data.path()).arg("--headless");
+        let (conn, mut child) = spawn(cmd).unwrap();
+        let (client, _events) = Client::new(conn);
+        client.initialize("test").await.unwrap();
+        let info = client
+            .request::<SessionCreate>(SessionCreateParams {
+                cwd: Some(data.path().display().to_string()),
+            })
+            .await
+            .unwrap();
+        let turn = serde_json::json!({ "session_id": info.session_id, "text": "go" });
+        client.request_raw("turn/start", turn).await.unwrap();
+        let pid = |f| {
+            std::fs::read_to_string(data.path().join(f))
+                .unwrap_or_default()
+                .trim()
+                .to_owned()
+        };
+        let mut pids = [String::new(), String::new()];
+        for _ in 0..100 {
+            pids = [pid("bg"), pid("fg")];
+            if pids.iter().all(|p| running(p)) {
+                break;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+        assert!(pids.iter().all(|p| running(p)), "jobs never started");
+        // SAFETY: plain syscall on our own child.
+        unsafe { libc::kill(child.id().unwrap() as i32, signal) };
+        timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        sleep(Duration::from_millis(300)).await;
+        let left: Vec<_> = pids.iter().filter(|p| running(p)).collect();
+        for p in &left {
+            // SAFETY: plain syscall; leave nothing behind either way.
+            unsafe { libc::kill(-p.parse::<i32>().unwrap(), libc::SIGKILL) };
+        }
+        assert!(left.is_empty(), "signal {signal}: {left:?} outlived bone");
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn nohup_still_keeps_a_core_running() {
+    let data = tempfile::tempdir().unwrap();
+    let mut cmd = bone(data.path());
+    cmd.arg("--headless").stdin(Stdio::piped());
+    // SAFETY: async-signal-safe; ignores SIGHUP in the child, as nohup does.
+    unsafe {
+        cmd.pre_exec(|| {
+            (libc::signal(libc::SIGHUP, libc::SIG_IGN) != libc::SIG_ERR)
+                .then_some(())
+                .ok_or_else(std::io::Error::last_os_error)
+        })
+    };
+    let mut child = cmd.spawn().unwrap();
+    sleep(Duration::from_millis(500)).await;
+    // SAFETY: plain syscall on our own child.
+    unsafe { libc::kill(child.id().unwrap() as i32, libc::SIGHUP) };
+    sleep(Duration::from_millis(500)).await;
+    assert!(
+        child.try_wait().unwrap().is_none(),
+        "bone exited on an ignored SIGHUP"
+    );
 }

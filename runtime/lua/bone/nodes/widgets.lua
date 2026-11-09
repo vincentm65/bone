@@ -34,8 +34,8 @@ end
 --- A window's heading.
 function M.title(text)
   return style.finish({
-    text = text, hl = "Normal", bold = true, size = style.size.title,
-    padding = { 2, 8 }, margin = style.margin(0, 4),
+    text = text, hl = "Normal", bold = true, size = style.size.lead, letter_spacing = -0.1,
+    padding = { 2, style.inset }, margin = style.margin(0, 6),
   })
 end
 
@@ -44,7 +44,7 @@ function M.note(text, margin, hl)
   local m = margin or { 10, 0 }
   return style.finish({
     text = text, hl = hl or "Dim", size = style.size.small,
-    padding = { 4, 10 }, margin = style.margin(m[1], m[2]),
+    padding = { 4, style.inset }, margin = style.margin(m[1], m[2]),
   })
 end
 
@@ -58,8 +58,8 @@ end
 --- A small label on a tinted chip ("IN USE"). o: hl, bg.
 function M.pill(text, o)
   return style.finish(extend({
-    text = text, size = style.size.micro, bold = true, hl = "Accent", bg = "TextSelection",
-    radius = style.radius.sm, padding = { 3, 7 }, wrap = false,
+    text = text, size = style.size.micro, medium = true, hl = "Muted", bg = "Selection",
+    radius = style.radius.sm, padding = { 2, 7 }, wrap = false,
   }, o))
 end
 
@@ -105,43 +105,50 @@ function M.entry(on, children, click)
   return style.finish(node)
 end
 
---- A button: raised, or `primary` (the accent's tint); `on` rings it, for
---- the one the keyboard is on.
+--- A button: raised, or `primary` (filled in the text's color, the text in
+--- the window's); `on` rings it, for the one the keyboard is on.
 function M.button(label, click, primary, on, o)
+  local fill = primary and style.alpha("Normal", "ff", "fg", "TextSelection") or "Selection"
+  local ink = primary and style.alpha("Normal", "ff", "bg", nil) or nil
   return style.finish(M.press(extend({
-    text = label, size = style.size.body, bold = primary, hl = primary and "Accent" or "Normal",
-    bg = primary and "TextSelection" or "Selection", radius = style.radius.lg, padding = { 8, 18 },
-    border = 1, border_color = on and "Accent" or "transparent",
-    transition = style.motion.slow, hover = { opacity = 0.8 },
+    text = label, size = style.size.body, medium = true, hl = (primary and not ink) and "Accent" or "Normal",
+    color = ink, bg = fill, radius = style.radius.lg, padding = { 7, 14 },
+    border = 1, border_color = on and (primary and "PromptBorder" or "Muted") or "transparent",
+    transition = style.motion.slow, hover = { opacity = 0.85 },
   }, o), click, "button", false))
 end
 
---- A button that is a glyph: `label` names it for readers and in a tooltip.
---- o: box (side, default 22), size (the glyph's), hl, radius.
+--- A button that is a glyph, or an icon of bone.nodes.icons by name:
+--- `label` names it for readers and in a tooltip.
+--- o: box (side, default 22), size (the glyph's or icon's), hl, radius.
 function M.icon_button(glyph, label, click, o)
   o = o or {}
   local box = o.box or 22
+  local icons = require("bone.nodes.icons")
+  local mark = icons.has(glyph) and icons.node(glyph, { size = o.size or 16, hl = o.hl or "Dim" })
+    or { text = glyph, size = o.size or style.size.caption, hl = o.hl or "Dim" }
   local node = {
     width = box, height = box, radius = o.radius or style.radius.sm,
     direction = "row", justify = "center", align = "center",
     label = label, tooltip = label, transition = style.motion.fast,
     hover = { bg = "Selection", color = "Normal" },
-    { text = glyph, size = o.size or style.size.caption, hl = o.hl or "Dim" },
+    mark,
   }
   o = extend({}, o)
   o.box, o.size, o.hl = nil, nil, nil
   return style.finish(M.press(extend(node, o), click, "button", false))
 end
 
---- An on/off switch: a track with a knob, the accent's fill when `on`.
---- `click` runs when it is pressed.
+--- An on/off switch: a track with a knob; on, the track is the text's color
+--- and the knob the window's. `click` runs when it is pressed.
 function M.switch(on, click)
-  local fill = on and style.alpha("Accent", "ff", "fg", "TextSelection") or "Selection"
+  local fill = on and style.alpha("Normal", "ff", "fg", "TextSelection") or style.alpha("PromptBorder", "ff", "fg", "Selection")
+  local knob = on and style.alpha("Normal", "ff", "bg", "Normal") or style.alpha("Dim", "ff", "fg", "Normal")
   local node = style.finish({
-    width = 28, height = 16, radius = 8, padding = 2, shrink = 0, bg = fill,
+    width = 30, height = 18, radius = 9, padding = 2, shrink = 0, bg = fill,
     direction = "row", justify = on and "end" or "start", align = "center",
     role = "checkbox", selected = on, transition = style.motion.slow,
-    { width = 12, height = 12, radius = 6, bg = style.alpha("Normal", "ff", "fg", "Normal") },
+    { width = 14, height = 14, radius = 7, bg = knob },
   })
   if click then M.press(node, click, "checkbox", false) end
   return node
@@ -187,8 +194,8 @@ end
 -- One choice of a set, as a node.
 local function segment(text, on, pick, o)
   return style.finish(M.press(extend({
-    text = text, size = style.size.caption, bold = on, hl = on and "Normal" or "Dim",
-    padding = { 4, 12 }, radius = style.radius.sm, bg = on and "Selection" or nil,
+    text = text, size = style.size.small, medium = on, hl = on and "Normal" or "Muted",
+    padding = { 4, 10 }, radius = style.radius.sm, bg = on and "Selection" or nil,
     hover = not on and { color = "Normal" } or nil, role = "option", selected = on,
     transition = style.motion.slow,
   }, o), function() if not on then pick() end end, "option", false))
@@ -201,6 +208,7 @@ function M.segmented(names, current, pick, o)
   local item = o and o.item
   local row = extend({
     direction = "row", gap = 2, padding = 2, radius = style.radius.md, bg = "Normal",
+    border = 1, border_color = "WinSeparator", align_self = "start",
   }, o)
   row.item = nil
   for i, name in ipairs(names) do
@@ -209,14 +217,15 @@ function M.segmented(names, current, pick, o)
   return style.finish(row)
 end
 
---- Tabs along the top of a window: the current one raised.
+--- Tabs along the top of a window: a segmented switch, the current one
+--- raised.
 function M.tabs(names, current, pick, o)
-  local row = extend({ direction = "row", gap = 4, padding = { 0, 4 }, margin = style.margin(0, 6) }, o)
-  for i, name in ipairs(names) do
-    row[#row + 1] = segment(name, i == current, function() pick(i) end,
-      { size = style.size.body, padding = { 5, 12 } })
-  end
-  return style.finish(row)
+  -- In a row of its own, so a list that stretches its entries does not
+  -- stretch the switch.
+  local seg = M.segmented(names, current, function(i) pick(i) end, o)
+  local margin = seg.margin
+  seg.margin = nil
+  return { direction = "row", margin = margin or style.margin(0, 6), padding = { 0, style.inset - 2 }, seg }
 end
 
 --- A form field: `label` over a box holding `value` (`editing` adds the
@@ -229,11 +238,14 @@ function M.field(label, value, o)
     bg = "InputBackground", radius = style.radius.lg, padding = { 6, 12 },
     border = 1, border_color = o.on and "Accent" or "PromptBorder", transition = style.motion.base,
   })
+  -- The label, the box and the hint on the text edge, with the heading
+  -- above and the buttons under the form.
   return style.finish({
-    direction = "column", margin = { 0, 0, 9, 0 }, cursor = o.click and "pointer" or nil, on_click = o.click,
-    style.finish({ text = label, size = style.size.small, hl = o.on and "Accent" or "Dim", margin = { 0, 0, 3, 2 } }),
+    direction = "column", margin = { 0, 0, 9, 0 }, padding = { 0, style.inset },
+    cursor = o.click and "pointer" or nil, on_click = o.click,
+    style.finish({ text = label, size = style.size.small, hl = o.on and "Accent" or "Dim", margin = { 0, 0, 3, 0 } }),
     box,
-    o.on and o.hint and style.finish({ text = o.hint, size = style.size.small, hl = "Dim", margin = { 4, 0, 0, 2 } }) or nil,
+    o.on and o.hint and style.finish({ text = o.hint, size = style.size.small, hl = "Dim", margin = { 4, 0, 0, 0 } }) or nil,
   })
 end
 
@@ -242,11 +254,19 @@ end
 --- The same height whatever it holds, so moving through the list never moves
 --- the list.
 function M.detail(content, hl)
-  local node = { height = 2 * math.ceil(style.size.small * 1.35) + 8, padding = { 4, 8 }, overflow = "hidden",
+  local node = { height = 2 * math.ceil(style.size.small * 1.35) + 8, padding = { 4, style.inset }, overflow = "hidden",
     direction = "column", justify = "center", shrink = 0 }
   if type(content) == "table" then
     node[1] = content
   elseif content and content ~= "" then
+    -- Two lines at most: a longer text is cut at a word with an ellipsis
+    -- rather than spilling a third, half-clipped line over what is under it.
+    -- (Text cannot be measured here; a dialog's width in average chars.)
+    local room = style.dialog.inner or style.dialog.width
+    local fit = math.floor(2 * (room - 2 * style.inset - 40) / (style.size.small * 0.55))
+    if #content > fit then
+      content = content:sub(1, fit):gsub("%s+%S*$", "") .. "…"
+    end
     node[1] = { text = content, hl = hl or "Dim", size = style.size.small }
   end
   return style.finish(node)
@@ -268,19 +288,28 @@ end
 
 --- A row of key hints from a line such as "↑↓ move · enter open · esc
 --- close": each key a small keycap, then what it does.
+--- A key as a small outlined cap ("Ctrl O", "esc").
+function M.keycap(key)
+  return style.finish({
+    text = key, size = style.size.micro, font = "mono", hl = "Dim", wrap = false,
+    border = 1, border_color = "PromptBorder", radius = style.radius.sm - 2, padding = { 1, 5 },
+  })
+end
+
 function M.hints(text, margin)
   local m = margin or { 8, 0 }
   local row = {
     direction = "row", flex_wrap = true, gap = 14, row_gap = 4, align = "center",
-    padding = { 2, 8 }, margin = style.margin(m[1], m[2]),
+    padding = { 2, style.inset }, margin = style.margin(m[1], m[2]),
   }
   for part in (text .. " · "):gmatch("(.-) · ") do
     local key, what = part:match("^(%S+)%s+(.*)$")
+    -- Esc stands apart, at the right.
+    if key and (key == "esc" or key == "Esc") then row[#row + 1] = { grow = 1 } end
     if key and is_key(key) then
       row[#row + 1] = {
         direction = "row", gap = 6, align = "center",
-        style.finish({ text = key, size = style.size.micro, font = "mono", bg = "Selection", radius = style.radius.sm - 1,
-          padding = { 2, 7 } }),
+        M.keycap(key),
         { text = what, size = style.size.small, hl = "Dim" },
       }
     elseif part ~= "" then
@@ -367,10 +396,22 @@ function M.list(id, items, selected, opts)
   end
   local list = {
     id = id, grow = 1, fit = opts.fit,
+    -- In a dialog the scrollbar has a lane of its own, off the rows' fills.
+    padding = opts.footer and { 0, 10, 0, 0 } or nil,
     list = { count = #items, estimate = opts.estimate or 56, key = id, item = function(i) return items[i] end, fit = opts.fit },
   }
   if not opts.footer then return list end
+  -- The keys under a hairline, the width of the window.
   opts.footer.shrink = 0
+  opts.footer = { direction = "column", shrink = 0, margin = { 4, -style.inset - 4, 0, -style.inset - 4 },
+    padding = { 6, style.inset + 4, 0, style.inset + 4 }, border = { 1, 0, 0, 0 }, border_color = "WinSeparator",
+    opts.footer }
+  -- A dialog's list fades into its footer rather than cutting a row there.
+  local clear, solid = style.alpha("Panel", "00", "bg"), style.alpha("Panel", "ff", "bg")
+  if clear and solid and not opts.fit then
+    list = { grow = 1, direction = "column", list,
+      { position = "absolute", left = 0, right = 0, bottom = 0, height = 20, z = 1, gradient = { clear, solid } } }
+  end
   return { grow = 1, direction = "column", fit = opts.fit, list, opts.footer }
 end
 

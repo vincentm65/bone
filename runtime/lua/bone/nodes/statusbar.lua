@@ -1,15 +1,14 @@
--- The status bar under the composer: the model, what the running turn is
--- doing (the spinner and how long), and the chat's token use. Slots:
--- `statusbar.left` and `statusbar.right`. If `bone.ui.statusline` is already
--- a function, its spans are that text instead. The TUI default is not loaded.
+-- The status bar under the composer. The model, what a running turn is
+-- doing and the context are in the composer's toolbar now, so the bar is
+-- only drawn for what is put in it: `bone.ui.statusline` when that is a
+-- function (its spans), and the slots `statusbar.left` and
+-- `statusbar.right`. Nothing to show is no bar. The TUI default is not
+-- loaded.
 local M = {}
 
 local nodes = require("bone.nodes")
-local usage = require("bone.usage")
-local agents = require("bone.agents")
 local style = require("bone.nodes.style")
 local widgets = require("bone.nodes.widgets")
-local tokens = bone.util.tokens
 
 local function slot(name, ctx) return bone.gui.slots.nodes(name, ctx) end
 
@@ -18,22 +17,6 @@ local started = {}
 
 -- A statusline failure already shown, so a later rebuild does not notify again.
 local reported_error
-
--- "12k context · 40k used · 80% cached · 3k agents".
-local function totals(u, id)
-  local out = {}
-  if (u.curr or 0) > 0 then out[#out + 1] = tokens(u.curr) .. " context" end
-  local total = (u.input or 0) + (u.output or 0)
-  if total > 0 then
-    out[#out + 1] = tokens(total) .. " used"
-    if (u.input or 0) > 0 then
-      out[#out + 1] = string.format("%.0f%% cached", (u.cached or 0) / u.input * 100)
-    end
-  end
-  local spent = id and agents.spend(agents.top(id)) or 0
-  if spent > 0 then out[#out + 1] = tokens(spent) .. " agents" end
-  return table.concat(out, "  ·  ")
-end
 
 -- One statusline span: a string or `{ text, hl }` (`{ "text", "hl" }` too).
 -- `"%="` is a flexible spacer, not text.
@@ -89,12 +72,12 @@ end
 --- is as tall as.
 function M.node(session, cell)
   local id = session and session.session_id
-  local u = usage.of(id)
   -- A narrow window has no room for the whole bar: the pieces that do not
   -- fit go on a line of their own, and a piece too long for its line is
   -- cut short with an ellipsis. Nothing is painted over anything else.
   local bar = {
-    direction = "row", flex_wrap = true, padding = { 6, 16, 0, 16 }, gap = 12, align = "center",
+    -- Inset like the composer's attach "+" above it, so the two read as one edge.
+    direction = "row", flex_wrap = true, padding = { 6, 22, 0, 22 }, gap = 12, align = "center",
   }
   local elapsed
   if session and session.running then
@@ -115,25 +98,14 @@ function M.node(session, cell)
     for _, span in ipairs(spans) do
       bar[#bar + 1] = span_node(span)
     end
-  else
-    if session and session.running then
-      bar[#bar + 1] = {
-        direction = "row", gap = 6, align = "center",
-        widgets.spinner(math.max(20, cell and cell.h or 20)),
-        { text = "Working" .. (elapsed and (" · " .. bone.util.duration(elapsed)) or ""),
-          hl = "StatusLine", size = style.size.small, wrap = false, text_overflow = "ellipsis" },
-      }
-    end
-    bar[#bar + 1] = { text = u.model or "", hl = "StatusLine", size = style.size.small,
-      wrap = false, text_overflow = "ellipsis" }
   end
   nodes.append(bar, slot("statusbar.left"))
-  bar[#bar + 1] = { grow = 1 }
-  nodes.append(bar, slot("statusbar.right"))
-  if not spans then
-    bar[#bar + 1] = { text = totals(u, id), hl = "StatusLineDim", size = style.size.small,
-      wrap = false, text_overflow = "ellipsis" }
+  local right = slot("statusbar.right")
+  if right and #right > 0 then
+    bar[#bar + 1] = { grow = 1 }
+    nodes.append(bar, right)
   end
+  if #bar == 0 then return nil end
   return bar
 end
 

@@ -47,7 +47,7 @@ impl Backend for GpuiBackend {
             if let Some(f) = self.loaded.get(path) {
                 return f.clone();
             }
-            let family = std::fs::read(path).ok().and_then(|bytes| {
+            let family = crate::fonts::read(path).and_then(|bytes| {
                 let name = family_name(&bytes)?;
                 text.add_fonts(vec![bytes.into()]).ok()?;
                 Some(name)
@@ -62,10 +62,14 @@ impl Backend for GpuiBackend {
                 None => errors.push(p.to_owned()),
             },
             None => {
-                if let Some(f) = system_mono().and_then(|p| load(&p)) {
+                if let Some(f) = load(crate::fonts::MONO) {
                     names.mono = f.into();
                 }
             }
+        }
+        // The built-in regular face brings its medium weight along.
+        if set.sans[0].as_deref() == Some(crate::fonts::SANS[0]) {
+            load(crate::fonts::SANS_MEDIUM);
         }
         let mut faces = [false; 3];
         for (i, path) in set.sans.iter().enumerate() {
@@ -113,23 +117,6 @@ fn family_name(bytes: &[u8]) -> Option<String> {
             .find_map(|n| n.to_string())
     };
     find(ttf_parser::name_id::TYPOGRAPHIC_FAMILY).or_else(|| find(ttf_parser::name_id::FAMILY))
-}
-
-/// A monospace font where the usual ones are.
-fn system_mono() -> Option<String> {
-    [
-        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/noto/NotoSansMono-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
-        "/usr/share/fonts/liberation/LiberationMono-Regular.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-        "/System/Library/Fonts/Menlo.ttc",
-        "C:\\Windows\\Fonts\\consola.ttf",
-    ]
-    .into_iter()
-    .find(|p| std::path::Path::new(p).exists())
-    .map(str::to_owned)
 }
 
 /// The window's one view: the GUI, and the input gathered for its next

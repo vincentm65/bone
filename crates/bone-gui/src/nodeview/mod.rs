@@ -416,6 +416,8 @@ impl Fonts<'_> {
             Family::SansBold
         } else if s.italic && has_italic {
             Family::SansItalic
+        } else if s.medium {
+            Family::SansMedium
         } else {
             Family::Sans
         }

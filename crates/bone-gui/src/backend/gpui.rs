@@ -96,9 +96,10 @@ impl GpuiShaper {
             Family::Sans => (self.fonts.sans.clone(), FontWeight::NORMAL, FontStyle::Normal),
             Family::SansBold => (
                 self.fonts.bold.clone().unwrap_or(self.fonts.sans.clone()),
-                FontWeight::BOLD,
+                FontWeight::SEMIBOLD,
                 FontStyle::Normal,
             ),
+            Family::SansMedium => (self.fonts.sans.clone(), FontWeight::MEDIUM, FontStyle::Normal),
             Family::SansItalic => (
                 self.fonts.italic.clone().unwrap_or(self.fonts.sans.clone()),
                 FontWeight::NORMAL,

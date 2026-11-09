@@ -17,7 +17,9 @@ local tray = require("bone.desktop.tray")
 
 local function slot(name, ctx) return bone.gui.slots.nodes(name, ctx) end
 
-M.max_width = 1040 -- the chat and composer column, in pixels
+-- The chat and composer column, in pixels: 720 of text (about 80
+-- characters a line) and the scrollbar's inset beside it.
+M.max_width = 734
 -- The list reserves this much room on its right for its scrollbar. Keep the
 -- composer and bottom docks on the same visual edge as the chat items.
 M.chat_scrollbar_inset = 14
@@ -76,20 +78,25 @@ end
 local function heading(title)
   if type(title) ~= "string" or title == "" then return nil end
   return style.finish({
-    text = title, hl = "PanelTitle", bold = true, size = style.size.caption, wrap = false,
-    text_overflow = "ellipsis", padding = { 0, 4 }, margin = { 0, 0, 6, 0 }, shrink = 0,
+    text = title, hl = "Normal", bold = true, size = style.size.body, wrap = false,
+    text_overflow = "ellipsis", padding = { 0, 4 }, margin = { 2, 0, 10, 0 }, shrink = 0,
   })
 end
 
--- A docked panel is a card (bone.nodes.widgets.card) standing `M.dock_inset`
--- off the window's edges, its content `M.dock_pad` ({ v, h }) inside it.
-M.dock_inset = style.space.lg
-M.dock_pad = { 10, 12 }
+-- A panel docked at the window's side or top is flush with its edges, as
+-- the sidebar is: the sidebar's black, a hairline on the side that faces
+-- the chat, its content `M.dock_pad` ({ v, h }) inside. One over the
+-- composer (`flush`) is a card lined up with it.
+M.dock_inset = 0
+M.dock_pad = { 12, 12 }
 
--- The pixels around a dock's content: the inset, the padding, the border.
+-- The pixels around a dock's content: the padding and the edge.
 local function chrome(sideways, flush)
-  return (flush and 0 or M.dock_inset) + 2 * (sideways and M.dock_pad[2] or M.dock_pad[1]) + 2
+  return 2 * (sideways and M.dock_pad[2] or M.dock_pad[1]) + (flush and 2 or 1)
 end
+
+-- The hairline of a dock on `side`: on the edge toward the chat.
+local EDGE = { left = { 0, 1, 0, 0 }, right = { 0, 0, 0, 1 }, top = { 0, 0, 1, 0 }, bottom = { 1, 0, 0, 0 } }
 
 -- Sizes set by dragging a dock's edge, in pixels, by panel id (kept
 -- between runs as "dock-size.<id>").
@@ -158,6 +165,7 @@ end
 -- toward the chat (its own margins keep it off).
 local function insets(side)
   local i = M.dock_inset
+  if i == 0 then return { 0, 0, 0, 0 } end
   if side == "left" then return { i, 0, i, i } end
   if side == "right" then return { i, i, i, 0 } end
   if side == "top" then return { i, i, 0, i } end
@@ -185,14 +193,26 @@ function M.docked(side, ctx, available, flush)
       local width, height = sideways and size or ctx.width, sideways and ctx.height or size
       local title = heading(info.title)
       local pad = flush and { 0, 0, 0, 0 } or insets(side)
-      local inner_w = width - pad[2] - pad[4] - 2 * M.dock_pad[2] - 2
-      local inner_h = height - pad[1] - pad[3] - 2 * M.dock_pad[1] - 2 - (title and 26 or 0)
+      -- A card has a border all round; a flush dock, its hairline on one edge.
+      local bw = flush and 2 or (sideways and 1 or 0)
+      local bh = flush and 2 or (sideways and 0 or 1)
+      local inner_w = width - pad[2] - pad[4] - 2 * M.dock_pad[2] - bw
+      local inner_h = height - pad[1] - pad[3] - 2 * M.dock_pad[1] - bh - (title and 32 or 0)
       out[#out + 1] = {
         id = id, width = sideways and size or nil,
         height = not sideways and not auto and size or nil, max_height = auto and size or nil,
         direction = "column", padding = pad,
       }
-      local card = widgets.card({ grow = not auto and 1 or nil, padding = M.dock_pad, overflow = "hidden" })
+      local card
+      if flush then
+        card = widgets.card({ grow = not auto and 1 or nil, padding = M.dock_pad, overflow = "hidden" })
+      else
+        card = style.finish({
+          grow = not auto and 1 or nil, direction = "column", padding = M.dock_pad, overflow = "hidden",
+          bg = (bone.hl.get("Sidebar") or {}).bg and "Sidebar" or "Panel",
+          border = EDGE[side], border_color = "WinSeparator",
+        })
+      end
       card[#card + 1] = title
       card[#card + 1] = M.panel(info.id, {
         width = math.max(0, inner_w), height = math.max(0, inner_h), cell = ctx.cell, auto = auto,
@@ -209,30 +229,58 @@ end
 
 -- ---- the chat -------------------------------------------------------------
 
-local function welcome(width)
-  local s = bone.chat.session()
-  if bone.api.session() or (s and (s.items > 0 or s.loading)) then return nil end
-  local title, hint
-  if bone.settings.get("setup.skipped") then
-    title = "No model provider configured."
-    hint = "Run /setup to connect one · /health to diagnose setup"
-  else
-    title = "New session. Type a message and press enter."
-    hint = "/help lists commands · ctrl+o opens an earlier session"
-  end
-  -- Keep the welcome card's chrome from consuming the whole chat column on
-  -- a phone-sized window. Text still wraps, but at a readable size.
+-- Whether chat `s` (a column's) is new: nothing in it yet, nothing running.
+local function is_new(s)
+  if bone.api.session() or not s then return false end
+  return (s.items or 0) == 0 and not s.loading and not s.running
+end
+
+--- What a new chat offers to start with: { label, text = a message to
+--- start, or cmd = a command to run }. A gui.lua can replace them.
+M.suggestions = {
+  { label = "Review my unstaged changes", icon = "check", text = "Review my unstaged changes" },
+  { label = "Find where a function is used", icon = "search", text = "Find where this function is used: " },
+  { label = "Explain a failing test", icon = "terminal", text = "Explain why this test fails: " },
+}
+
+-- A new chat leads with the composer: a short greeting over it, places to
+-- start under it, and the keys that go elsewhere. `input` is the composer.
+local function welcome(width, input)
+  local unset = bone.settings.get("setup.skipped")
   local compact = width < 240
-  local pad = compact and math.min(12, math.max(4, width / 10)) or 28
+  local muted = (bone.hl.get("Muted") or {}).fg and "Muted" or "Dim"
+  local icons = require("bone.nodes.icons")
+  local chips = { direction = "row", flex_wrap = true, justify = "center", gap = 8, row_gap = 8 }
+  local list = unset and {
+    { label = "Connect a model", icon = "plus", cmd = "setup" },
+    { label = "Check the setup", icon = "gear", cmd = "health" },
+  } or M.suggestions
+  for _, it in ipairs(list) do
+    chips[#chips + 1] = widgets.press(style.finish({
+      direction = "row", align = "center", gap = 8, height = 32, padding = { 0, 12 }, radius = 16,
+      border = 1, border_color = "PromptBorder", label = it.label,
+      it.icon and icons.node(it.icon, { size = 14, hl = "Dim" }) or nil,
+      { text = it.label, size = style.size.body, hl = muted, wrap = false },
+    }), function()
+      if it.cmd then bone.cmd(it.cmd) return end
+      bone.prompt.set(it.text or it.label)
+      bone.gui.focus("composer-input")
+    end)
+  end
+  local hints = { direction = "row", flex_wrap = true, justify = "center", gap = 16, row_gap = 4 }
+  for _, h in ipairs({ { "Ctrl O", "earlier chats" }, { "/", "commands" } }) do
+    hints[#hints + 1] = { direction = "row", align = "center", gap = 6, widgets.keycap(h[1]),
+      { text = h[2], size = style.size.small, hl = "Dim", wrap = false } }
+  end
   return {
-    position = "absolute", left = 0, right = 0, top = 0, bottom = 0,
-    direction = "column", justify = "center", align = "center",
-    style.finish(widgets.surface({
-      gap = compact and 4 or 6, align = "center", radius = style.radius.lg, border = 0,
-      padding = { compact and 10 or 14, pad, compact and 10 or 14, pad },
-      { text = title, hl = "Normal", size = compact and style.size.body or style.size.lead, text_align = "center" },
-      { text = hint, hl = "Dim", size = compact and style.size.small or style.size.caption, text_align = "center" },
-    })),
+    grow = 1, direction = "column", justify = "center", align = "center", gap = compact and 12 or 22,
+    padding = { 0, 0, compact and 8 or 40, 0 },
+    { text = unset and "Connect a model to start" or "What are we building?", hl = "Normal",
+      size = compact and style.size.lead or style.size.display, medium = true, text_align = "center",
+      letter_spacing = compact and 0 or -0.4 },
+    { width = width, direction = "column", input },
+    not compact and chips or nil,
+    not compact and hints or nil,
   }
 end
 
@@ -273,8 +321,107 @@ local function chat_fade(gutter)
   }
 end
 
+-- The same at the top, shorter: what scrolls up out of the chat fades at
+-- the window's edge instead of being cut there. It covers no more than the
+-- list's top padding, so the first line at the top of a chat is clear.
+M.chat_fade_top = 14
+local function chat_fade_top(gutter)
+  local clear, solid = style.alpha("Normal", "00", "bg"), style.alpha("Normal", "ff", "bg")
+  if not clear or not solid then return nil end
+  return {
+    position = "absolute", left = gutter, right = gutter, top = 0, height = M.chat_fade_top, z = 1,
+    gradient = { solid, clear },
+  }
+end
+
+--- The header over the chat: the sidebar's button while it is closed, the
+--- chat's title and its folder, a hairline under them. Off where the window
+--- draws a title bar of its own (macOS, Windows), which shows the title.
+M.header_height = 48
+
+local function title_of(session)
+  local t = session and session.title
+  -- None yet: a placeholder ("[new session]", "[untitled]") stays out.
+  if type(t) ~= "string" or not t:match("%S") or t:match("^%[.*%]$") then return nil end
+  return t
+end
+
+local function short_path(cwd)
+  if not cwd or cwd == "" then return nil end
+  local home = os.getenv("HOME")
+  if home and home ~= "" and cwd:sub(1, #home) == home then cwd = "~" .. cwd:sub(#home + 1) end
+  return cwd == "~" and "~/" or cwd
+end
+
+function M.header(session)
+  if require("bone.nodes.titlebar").offset() > 0 then return nil end
+  M.menu_nodes = nil
+  local icons = require("bone.nodes.icons")
+  local sidebar = require("bone.desktop.sidebar")
+  local title = title_of(session)
+  local muted = (bone.hl.get("Muted") or {}).fg and "Muted" or "Dim"
+  -- A new chat has no folder of its own yet: it starts where bone runs.
+  local path = short_path((session and session.cwd) or os.getenv("PWD"))
+  local bar = {
+    height = M.header_height, shrink = 0, direction = "row", align = "center", gap = 10,
+    padding = { 0, 16, 0, sidebar.is_open() and 20 or 12 },
+  }
+  if not sidebar.is_open() then
+    bar[#bar + 1] = widgets.icon_button("sidebar", "Chats (ctrl+o)", function() sidebar.open() end,
+      { box = 28, size = 16, hl = muted, radius = style.radius.md, id = "header-sidebar" })
+  end
+  bar[#bar + 1] = { text = title or "New chat", size = style.size.body, medium = title ~= nil,
+    hl = title and "Normal" or muted, wrap = false, text_overflow = "ellipsis", shrink = 1 }
+  if path then
+    bar[#bar + 1] = style.finish({
+      direction = "row", align = "center", gap = 6, height = 24, padding = { 0, 9, 0, 8 }, shrink = 1,
+      radius = 12, border = 1, border_color = "PromptBorder", tooltip = (session and session.cwd) or os.getenv("PWD"),
+      icons.node("folder", { size = 13, hl = "Dim" }),
+      { text = path, size = style.size.small, hl = muted, wrap = false, text_overflow = "ellipsis", shrink = 1 },
+    })
+  end
+  -- The chat's actions, quiet at the right: a menu of what you can do to it.
+  bar[#bar + 1] = { grow = 1 }
+  if title then
+    bar[#bar + 1] = widgets.icon_button("more", "Chat actions", function()
+      M.chat_menu = not M.chat_menu
+      bone.gui.invalidate()
+    end, { box = 28, size = 16, hl = muted, radius = style.radius.md, id = "header-more" })
+  end
+  bar[#bar + 1] = { position = "absolute", left = 0, right = 0, bottom = 0, height = 1,
+    bg = style.alpha("WinSeparator", "ff", "fg", "PromptBorder") }
+  if M.chat_menu and title then
+    local function item(icon, label, run, danger)
+      return widgets.press(style.finish({
+        direction = "row", align = "center", gap = 10, height = 32, padding = { 0, 10 }, radius = style.radius.md,
+        icons.node(icon, { size = 15, hl = danger and "ErrorMsg" or "Dim" }),
+        { text = label, size = style.size.body, hl = danger and "ErrorMsg" or "Normal", wrap = false },
+      }), function() M.chat_menu = false run() bone.gui.invalidate() end)
+    end
+    -- Over everything (M.body puts it at the window's top), with a press
+    -- anywhere else closing it.
+    local menu = widgets.surface({
+      position = "absolute", right = 12, top = require("bone.nodes.titlebar").offset() + M.header_height - 4,
+      z = 30, width = 200, padding = 4,
+      shadow = style.shadow.menu,
+      item("edit", "Rename", function()
+        bone.prompt.set("/rename " .. title)
+        bone.gui.focus("composer-input")
+      end),
+      item("compress", "Compact", function() bone.cmd("compact") end),
+      item("archive", "Archive", function() bone.cmd("archive") end, true),
+    })
+    M.menu_nodes = {
+      { position = "absolute", left = 0, top = 0, right = 0, bottom = 0, z = 29,
+        on_click = function() M.chat_menu = false bone.gui.invalidate() end },
+      menu,
+    }
+  end
+  return style.finish(bar)
+end
+
 --- One chat's column: the chat, with the composer, tray and status bar
---- under it. opts: `width` (pixels), `chat` (a chat number; nil or the chat
+--- under it, and its header (`header = false`: none). opts: `width` (pixels), `chat` (a chat number; nil or the chat
 --- on screen gets the editor, any other its read-only draft), `on_focus` (a
 --- press on that draft), `gutter` (pixels each side; default centers M.max_width).
 function M.column(ctx, opts)
@@ -285,8 +432,10 @@ function M.column(ctx, opts)
   local width = opts.width or ctx.width
   -- The usual 24px gutter is comfortable, but would leave no chat column on
   -- a very narrow window. Let it scale down before the composer does.
-  local gutter = opts.gutter or (width > M.max_width
-    and (width - M.max_width) / 2 or math.min(24, width / 10))
+  -- Past M.max_width the column is centered, never with less than that
+  -- gutter (a width just over it would otherwise get almost none).
+  local gutter = opts.gutter
+    or math.max(math.min(24, width / 10), (width - M.max_width) / 2)
   local content_width = math.max(0, width - 2 * gutter)
   -- `nodes.chat` keeps a right inset for its scrollbar. Reserve that same
   -- inset below it so the composer is centered on the usable chat width,
@@ -294,18 +443,20 @@ function M.column(ctx, opts)
   local scrollbar_inset = content_width >= 240 and M.chat_scrollbar_inset or 0
   local usable_width = content_width - scrollbar_inset
   local chat = { grow = 1, direction = "column", padding = { 0, gutter, 0, gutter } }
-  if here then nodes.append(chat, slot("chat.top", ctx)) end
+  local new = is_new(session)
+  local top = here and slot("chat.top", ctx) or nil
+  if not new then nodes.append(chat, top) end
   chat[#chat + 1] = nodes.chat({
     chat = not here and n or nil,
     width_px = usable_width, cell = ctx.cell, padding = { 14, 14, M.chat_fade, 0 },
   })
   if here then
-    chat[#chat + 1] = welcome(usable_width)
     chat[#chat + 1] = chat_fade(gutter)
+    chat[#chat + 1] = chat_fade_top(gutter)
     chat[#chat + 1] = jump()
   end
   local below = {
-    direction = "column", padding = { 0, gutter, 12, gutter + scrollbar_inset }, gap = 4,
+    direction = "column", padding = { 0, gutter + scrollbar_inset, 18, gutter }, gap = 4,
   }
   -- Panels docked at the bottom stand over the composer, as in the terminal
   -- they stand over the prompt.
@@ -315,11 +466,28 @@ function M.column(ctx, opts)
     for _, d in ipairs(docks) do d.margin = { 0, 0, 4, 0 } end
     nodes.append(below, docks)
   end
-  below[#below + 1] = composer.node({ session = session, width = usable_width,
+  local input = composer.node({ session = session, width = usable_width,
     chat = not here and n or nil, on_focus = opts.on_focus })
+  if new then
+    -- The chat's list stays (empty, out of the way); the composer moves up
+    -- to the middle with the welcome.
+    chat.grow, chat.height, chat.overflow = 0, 0, "hidden"
+  else
+    below[#below + 1] = input
+  end
   below[#below + 1] = here and tray.node() or nil
   below[#below + 1] = statusbar.node(session, ctx.cell)
-  return { grow = 1, direction = "column", chat, below }
+  local middle = nil
+  if new then
+    middle = { grow = 1, direction = "column", padding = { 0, gutter + scrollbar_inset, 0, gutter } }
+    nodes.append(middle, top)
+    middle[#middle + 1] = welcome(usable_width, input)
+  end
+  -- A column a window manager places (it passes `on_focus`) has the
+  -- manager's title bar instead, unless it asks for `header = true`.
+  local header = opts.header
+  if header == nil then header = opts.on_focus == nil end
+  return { grow = 1, direction = "column", header and M.header(session) or nil, chat, middle, below }
 end
 
 --- The chats beside the sidebar: the chat on screen's column. A plugin
@@ -401,6 +569,7 @@ function M.body(ctx)
   nodes.append(root, right)
   root[#root + 1] = backdrop
   root[#root + 1] = backdrop and side or nil
+  nodes.append(root, M.menu_nodes)
   nodes.append(root, overlays.nodes(ctx))
   nodes.append(root, slot("window.overlay", ctx))
   -- Windows of bone.ui.popup / win, over everything.

@@ -245,7 +245,7 @@ async fn plain_read_empty_binary_and_lossy_utf8() {
     let out = call(&ctx, "read_file", json!({"path": "lossy.txt"}))
         .await
         .unwrap();
-    assert_eq!(out, "a\u{fffd}b\n");
+    assert_eq!(out, "a\u{ff}b\n");
 }
 
 #[tokio::test]
@@ -466,4 +466,96 @@ fn the_cleaner_settles_progress_lines_and_drops_escapes() {
         c.apply(part, &mut out);
     }
     assert_eq!(out, "ared\nbar 3\nyz\n");
+}
+
+#[tokio::test]
+async fn edits_keep_crlf_and_bytes_that_are_not_utf8() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(&dir);
+    std::fs::write(dir.path().join("a"), b"one\r\ntwo\r\n\x93caf\xe9\x94\r\n").unwrap();
+    // As read_file shows it: no \r, and a legacy file as Windows-1252.
+    let shown = call(&ctx, "read_file", json!({"path": "a"})).await.unwrap();
+    assert_eq!(shown, "one\ntwo\n“café”\n");
+    let edits = json!([{"old_string": "one", "new_string": "1\n1b"},
+        {"old_string": "two\n“café”", "new_string": "2\n‘cafè’"}]);
+    call(&ctx, "edit_file", json!({"path": "a", "edits": edits}))
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(dir.path().join("a")).unwrap(),
+        b"1\r\n1b\r\n2\r\n\x91caf\xe8\x92\r\n"
+    );
+    // Windows-1252 has no 🙂, and UTF-8 with a stray byte is not edited.
+    let edits = json!([{"old_string": "1b", "new_string": "🙂"}]);
+    let err = call(&ctx, "edit_file", json!({"path": "a", "edits": edits})).await;
+    assert!(err.unwrap_err().contains("Windows-1252"));
+    std::fs::write(dir.path().join("b"), b"\xc3\xa9\n\xc3\xbf\xff").unwrap();
+    let shown = call(&ctx, "read_file", json!({"path": "b"})).await.unwrap();
+    assert_eq!(shown, "é\nÿ\u{fffd}\n");
+    let edits = json!([{"old_string": "é", "new_string": "e"}]);
+    assert!(
+        call(&ctx, "edit_file", json!({"path": "b", "edits": edits}))
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn reads_are_capped_and_tilde_is_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(&dir);
+    std::fs::write(
+        dir.path().join("wide"),
+        format!("{}\n", "x".repeat(1999)).repeat(3000),
+    )
+    .unwrap();
+    let out = call(&ctx, "read_file", json!({"path": "wide"}))
+        .await
+        .unwrap();
+    assert!(
+        out.len() < 300_000 && out.contains("of 3000"),
+        "{}",
+        out.len()
+    );
+    let home = bone_lua::sys::home_dir().unwrap();
+    assert_eq!(ctx.resolve("~/a"), home.join("a"));
+    assert_eq!(ctx.resolve("~x"), dir.path().join("~x"));
+}
+
+#[tokio::test]
+async fn shell_stdin_cannot_block_output_and_old_jobs_go_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(&dir);
+    // Writes more than a pipe holds before it reads its stdin.
+    let cmd = "head -c 300000 /dev/zero | tr '\\0' y; wc -c";
+    let args = json!({"command": cmd, "stdin": "x".repeat(2_000_000), "timeout_secs": 5});
+    let out = tokio::time::timeout(Duration::from_secs(10), call(&ctx, "shell", args));
+    let out = out.await.expect("stdin blocked the command").unwrap();
+    assert!(
+        out.ends_with("2000000\n[exit code: 0]"),
+        "{}",
+        &out[out.len() - 50..]
+    );
+    for _ in 0..99 {
+        call(&ctx, "shell", json!({"command": "true"}))
+            .await
+            .unwrap();
+    }
+    call(
+        &ctx,
+        "shell",
+        json!({"command": "echo kept", "mode": "start"}),
+    )
+    .await
+    .unwrap();
+    call(&ctx, "shell", json!({"action": "wait", "id": "shell-101"}))
+        .await
+        .unwrap();
+    let status = call(
+        &ctx,
+        "shell",
+        json!({"action": "status", "id": "shell-101"}),
+    )
+    .await;
+    assert!(status.unwrap().contains("kept"));
 }

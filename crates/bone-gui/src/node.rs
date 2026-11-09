@@ -429,6 +429,8 @@ pub struct TextStyle {
     /// A family Lua registered (`bone.gui.font`), over `mono`.
     pub family: Option<String>,
     pub bold: bool,
+    /// Weight 500: emphasis below bold (a label, an open row).
+    pub medium: bool,
     pub italic: bool,
     pub strike: bool,
     /// Pixels from one line to the next (none: the font's own).
@@ -444,6 +446,7 @@ impl Default for TextStyle {
             mono: false,
             family: None,
             bold: false,
+            medium: false,
             italic: false,
             strike: false,
             line_height: None,
@@ -1138,6 +1141,9 @@ fn apply_text(
     if let Some(b) = p.get::<bool>("bold")? {
         text.bold = b;
     }
+    if let Some(b) = p.get::<bool>("medium")? {
+        text.medium = b;
+    }
     if let Some(b) = p.get::<bool>("italic")? {
         text.italic = b;
     }
@@ -1427,6 +1433,11 @@ fn span(v: &Value, colors: &dyn Colors, base: &TextStyle) -> Result<Span, String
     // the colorscheme may not set.
     let mut bg = t.get::<String>("bg")?.and_then(|c| color(colors, &c, true));
     if t.get::<bool>("code")?.unwrap_or(false) {
+        // Monospace has a taller x-height than the text around it: a step
+        // down in size reads as the same size.
+        if t.raw("size").is_none() {
+            style.size = (style.size * 0.9).round();
+        }
         style.mono = true;
         bg = bg.or_else(|| colors.group("CodeBlock", true));
     }

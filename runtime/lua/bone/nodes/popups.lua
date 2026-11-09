@@ -27,6 +27,10 @@ M.chrome = {
   z = 20,
 }
 
+--- Whether a centered dialog takes the composer's edges (its left and its
+--- width) rather than a fixed width in the middle of the window.
+M.align_to_prompt = true
+
 for _, name in ipairs({ "title", "note", "entry", "button", "field", "hints", "list" }) do
   M[name] = widgets[name]
 end
@@ -87,7 +91,17 @@ local function node_window(p)
     inner_w = p.w - 2 * c.pad
     inner_h = p.h - 2 * c.pad
   end
+  -- A dialog stands on the composer's column: its edges are the
+  -- composer's, wherever the chat is (beside the sidebar or not).
+  local prompt = p.bounds and M.align_to_prompt and bone.gui.rect("prompt")
+  if not (prompt and prompt.w >= 320 and prompt.x >= p.x and prompt.x + prompt.w <= p.x + p.w) then
+    prompt = nil
+  end
+  if prompt then inner_w = prompt.w - 2 * c.pad end
+  -- What a dialog's widgets can lay out to (bone.nodes.widgets.detail).
+  style.dialog.inner = prompt and inner_w or nil
   local ok, content = pcall(p.node, { width = inner_w, height = inner_h })
+  style.dialog.inner = nil
   if not ok then
     content = { text = tostring(content), hl = "ErrorMsg", selectable = true }
   end
@@ -98,6 +112,21 @@ local function node_window(p)
     local want_h = content and tonumber(content.max_height) or inner_h
     local card_w = math.min(p.w, math.min(inner_w, want_w) + 2 * c.pad)
     local card_h = math.min(p.h, math.min(inner_h, want_h) + 2 * c.pad)
+    if prompt then
+      -- Its width is the composer's, whatever width it asked for.
+      if content then content.max_width = nil end
+      local box = card({ x = 0, y = 0, w = prompt.w, h = card_h, z = 0 },
+        { direction = "column", padding = c.pad, inner })
+      box.position, box.left, box.top, box.z = nil, nil, nil, nil
+      box.margin = { 0, 0, 0, prompt.x - p.x }
+      if content and content.fit then
+        box.height, box.max_height = nil, card_h
+      end
+      return {
+        position = "absolute", left = p.x, top = p.y, width = p.w, height = p.h, z = c.z + p.z,
+        direction = "column", justify = "center", align = "start", box,
+      }
+    end
     local box = card({ x = 0, y = 0, w = card_w, h = card_h, z = 0 },
       { direction = "column", padding = c.pad, inner })
     -- Centered in the anchor. The size is already inside it; a `fit`
@@ -182,8 +211,15 @@ end
 function M.nodes()
   local out = {}
   local placed = bone.gui.popups()
+  local dimmed = false
   for _, p in ipairs(placed) do
     if p.node then
+      -- A dialog dims the window behind it, once, under the first one.
+      if not dimmed and not style.plain then
+        dimmed = true
+        out[#out + 1] = { position = "absolute", left = 0, top = 0, right = 0, bottom = 0,
+          z = M.chrome.z + p.z - 1, bg = style.scrim.dialog }
+      end
       out[#out + 1] = node_window(p)
     elseif #p.lines > 0 then
       out[#out + 1] = lines_window(p, placed.cell)

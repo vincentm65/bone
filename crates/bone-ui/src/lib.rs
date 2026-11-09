@@ -6,6 +6,8 @@ pub mod chat;
 pub mod clipboard;
 pub mod commands;
 pub mod composer;
+#[cfg(windows)]
+mod conpty;
 pub mod data;
 pub mod editor;
 pub mod jobs;

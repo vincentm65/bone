@@ -35,8 +35,8 @@ async fn gui(config: &Path, work: &Path) -> Headless {
         .unwrap()
 }
 
-/// The composer grows on the first wrap, using the width left beside
-/// its attach button, and shrinks again without overflowing its card.
+/// The composer grows on the first wrap, and shrinks again without
+/// overflowing its card; its toolbar stays under the text.
 #[tokio::test(flavor = "multi_thread")]
 async fn composer_contains_input_at_each_wrap() {
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
@@ -54,10 +54,11 @@ async fn composer_contains_input_at_each_wrap() {
                 r#"
           local card = assert(bone.gui.rect('prompt'))
           local input = assert(bone.gui.rect('composer-input'))
+          local attach = assert(bone.gui.rect('composer-attach'))
           assert(input.y >= card.y + 10, 'input overflows the top of the card')
           assert(input.y + input.h <= card.y + card.h - 10, 'input overflows the bottom of the card')
-          assert(math.abs((input.y + input.h / 2) - (card.y + card.h / 2)) < 1,
-            'input is not vertically centered in the card')
+          assert(attach.y >= input.y + input.h, 'the toolbar is not under the text')
+          assert(attach.y + attach.h <= card.y + card.h, 'the toolbar overflows the card')
           if not first_height then first_height = card.h end
           if card.h > first_height then grew = true end
         "#,
@@ -100,7 +101,7 @@ async fn narrow_new_session_scales_its_welcome_and_composer() {
         let title = g
             .painted
             .iter()
-            .find(|(text, _)| text.contains("New session"))
+            .find(|(text, _)| text.contains("building"))
             .map(|(_, rect)| *rect)
             .expect("new-session welcome is painted");
         assert!(
@@ -117,8 +118,8 @@ async fn narrow_new_session_scales_its_welcome_and_composer() {
 async fn the_status_bar_pieces_do_not_overlap_when_the_window_is_narrow() {
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut g = gui(config.path(), work.path()).await;
-    // The bar on its own, with a model and a usage to show, and a turn
-    // running (the spinner and the time).
+    // The composer's toolbar (where the status bar's pieces are), with a
+    // model and a usage to show, and a turn running (the spinner and the time).
     g.gui
         .run_lua(
             "t",
@@ -128,10 +129,10 @@ async fn the_status_bar_pieces_do_not_overlap_when_the_window_is_narrow() {
           return { model = "claude-sonnet-4-5-20250929", curr = 12000,
                    input = 40000, output = 2000, cached = 32000 }
         end
-        local statusbar = require("bone.nodes.statusbar")
+        local composer = require("bone.nodes.composer")
         bone.gui.view(function(ctx)
           return { width = ctx.width, direction = "column",
-            { statusbar.node({ session_id = "s", running = true }, { w = 8, h = 18 }) } }
+            composer.node({ session = { session_id = "s", running = true }, width = ctx.width }) }
         end)
       "#,
         )
@@ -147,7 +148,9 @@ async fn the_status_bar_pieces_do_not_overlap_when_the_window_is_narrow() {
             .filter(|(text, _)| text.chars().any(char::is_alphanumeric))
             .map(|(text, rect)| (text, *rect))
             .collect();
-        assert!(texts.len() >= 3, "{width}: the bar is not drawn: {texts:?}");
+        // A narrow one keeps the text and the turn, and drops the model and
+        // the context.
+        assert!(texts.len() >= 2, "{width}: the bar is not drawn: {texts:?}");
         for (i, (text, rect)) in texts.iter().enumerate() {
             assert!(
                 rect.min.x >= -0.5 && rect.max.x <= width + 0.5,
@@ -334,13 +337,6 @@ async fn tiled_composers_stay_put_when_focus_changes() {
             "t",
             r#"
       local window = require('bone.nodes.window')
-      local bar = require('bone.nodes.statusbar').node
-      require('bone.nodes.statusbar').node = function(session, cell)
-        assert(session and session.chat ~= nil)
-        local node = bar(session, cell)
-        node.id = 'status-' .. session.chat
-        return node
-      end
       bone.gui.view(function(ctx)
         local root = { direction = 'row' }
         for n = 0, 1 do
@@ -352,7 +348,7 @@ async fn tiled_composers_stay_put_when_focus_changes() {
       function geometry(n)
         local here = bone.chat.session().chat == n
         local input = bone.gui.rect('composer-input' .. (here and '' or n))
-        local bar = bone.gui.rect('status-' .. n)
+        local bar = bone.gui.rect(here and 'prompt' or ('prompt:' .. n))
         return table.concat({ input.x, input.y, input.w, input.h, bar.x, bar.y, bar.w, bar.h }, ',')
       end
     "#,
@@ -560,8 +556,10 @@ async fn the_nodes_library_draws_the_chat() {
              local i = bone.gui.scroll_info('chat'); assert(i, 'no chat list')",
         )
         .unwrap();
-    let hello = (g.painted.iter()).find(|(t, _)| t.contains("hello there"));
-    let hint = (g.painted.iter()).find(|(t, _)| t.contains("Message bone"));
+    // In the chat, under its header (which shows the same words as the title).
+    let hello = (g.painted.iter()).find(|(t, r)| t.contains("hello there") && r.min.y > 60.0);
+    // While the reply runs, the placeholder says a message queues.
+    let hint = (g.painted.iter()).find(|(t, _)| t.contains("Ask bone") || t.contains("Message bone"));
     let (hello, hint) = (
         hello.expect("the message is painted").1,
         hint.expect("the composer is painted").1,
@@ -865,11 +863,12 @@ async fn the_sidebar_rows_take_clicks_on_their_text() {
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(g.gui.eval("bone.gui.focused()").unwrap(), "sidebar-search");
-    let at = (g.painted.iter())
-        .find(|(t, r)| t == "+" && r.min.x < 280.0)
-        .expect("the new chat button")
-        .1;
-    g.click_at(at.center().x, at.center().y);
+    let at = g
+        .gui
+        .eval("(function() local r = bone.gui.rect('sidebar-new') return r and (r.x + r.w / 2) .. ',' .. (r.y + r.h / 2) end)()")
+        .unwrap();
+    let (x, y) = at.split_once(',').expect("the new chat button");
+    g.click_at(x.parse().unwrap(), y.parse().unwrap());
     for _ in 0..3 {
         g.frame();
     }

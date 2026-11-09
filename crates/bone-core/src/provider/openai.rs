@@ -535,7 +535,7 @@ impl Accumulator {
             .into_iter()
             .map(|(index, mut call)| {
                 if call.id.is_empty() {
-                    call.id = format!("call_{index}");
+                    call.id = super::fallback_call_id(index);
                 }
                 call
             })
@@ -572,6 +572,19 @@ mod tests {
     }
 
     #[test]
+    fn calls_without_ids_get_unique_ones_across_replies() {
+        let reply = [
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"name":"shell","arguments":"{}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+            "[DONE]",
+        ];
+        let (first, _) = run(&reply);
+        let (second, _) = run(&reply);
+        assert_ne!(first.tool_calls[0].id, second.tool_calls[0].id);
+        assert!(super::super::fallback_call_id(999).len() <= 40); // OpenAI's limit
+    }
+
+    #[test]
     fn accumulates_text_reasoning_and_tool_calls() {
         let (c, deltas) = run(&[
             r#"{"choices":[{"delta":{"role":"assistant","reasoning_content":"","reasoning":"think"}}]}"#,
@@ -586,6 +599,8 @@ mod tests {
         ]);
         assert_eq!(c.content, "Hi");
         assert_eq!(c.reasoning, "think");
+        let mut c = c;
+        c.tool_calls[1].id.truncate(6); // "call_1" and a unique suffix
         assert_eq!(
             c.tool_calls,
             vec![

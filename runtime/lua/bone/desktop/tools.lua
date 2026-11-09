@@ -360,9 +360,23 @@ local function run_key(item)
 end
 
 -- The status dot: running, done or failed.
+-- A line's lead in a slot of one width, so the labels after a dot and
+-- after a chevron start at the same x.
+local function lead_slot(glyph)
+  return { width = 16, shrink = 0, direction = "row", justify = "center", align = "center", glyph }
+end
+
+local icons = require("bone.nodes.icons")
+
+-- What a call came to as an icon: a check, a cross, or a clock while it runs.
+local function state_icon(running, failed)
+  if running then return icons.node("clock", { size = 14, hl = "ToolRunning" }) end
+  if failed then return icons.node("close", { size = 14, hl = "ToolError" }) end
+  return icons.node("check", { size = 14, hl = "ToolDone" })
+end
+
 local function dot(item)
-  local hl = not item.done and "ToolRunning" or (item.is_error and "ToolError" or "ToolDone")
-  return { text = "●", hl = hl, size = 7, wrap = false }
+  return lead_slot(state_icon(not item.done, item.is_error))
 end
 
 -- A call's line: `lead` (its dot), what it did (`spans`), and `meta` at the
@@ -440,7 +454,7 @@ local function card(item, expanded, width)
   local label = M.labels[name] or name
   -- Room for the label, the extras and the mark besides the path.
   local what = target(item, not expanded and math.min(60, math.max(24, width - 40)) or nil)
-  local title = { { text = label, hl = "ToolName", bold = true } }
+  local title = { { text = label, hl = "ToolName", medium = true } }
   if what ~= "" then
     title[#title + 1] = { text = "  " .. what, hl = name == "shell" and "ShellProgram" or "ToolPath" }
   end
@@ -585,11 +599,30 @@ local function summary_nodes(item, width)
       stretch[#stretch + 1] = t
     end
   end
-  local running = false
-  for _, t in ipairs(stretch) do running = running or not t.done end
+  local running, failed, ms = false, false, 0
+  for _, t in ipairs(stretch) do
+    running = running or not t.done
+    failed = failed or (t.done and t.is_error) or false
+    ms = ms + (t.duration_ms or 0)
+  end
   local open = toggled[run_key(item)]
-  local chevron = { text = open and "▾" or "▸", hl = running and "ToolRunning" or "ToolDone", size = 10, wrap = false }
-  local paras = { frame(line(chevron, { { text = summary(stretch), hl = "ToolArgs" } })) }
+  -- The state, what the run did, how long it took, and a chevron that
+  -- says it opens.
+  local meta = {}
+  if ms >= 100 and not running then
+    meta[#meta + 1] = { text = ms >= 1000 and bone.util.duration(ms / 1000) or (ms .. "ms"), hl = "Dim", font = "mono" }
+  end
+  local text = md.text({ { text = summary(stretch), hl = "ToolArgs" } }, { size = md.small_size })
+  text.shrink, text.wrap, text.text_overflow = 1, false, "ellipsis"
+  local head = { direction = "row", align = "center", gap = 8, padding = PAD,
+    lead_slot(state_icon(running, failed)), text }
+  if #meta > 0 then
+    local m = md.text(meta, { size = style.size.micro })
+    m.wrap = false
+    head[#head + 1] = m
+  end
+  head[#head + 1] = icons.node(open and "chevron_down" or "chevron_right", { size = 13, hl = "Dim" })
+  local paras = { frame(head) }
   -- Open, the run is its calls, folded, on a guide under the chevron; a
   -- click opens one in full.
   if open then

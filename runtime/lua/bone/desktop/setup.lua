@@ -12,26 +12,29 @@ local entry, button, field, hints = widgets.entry, widgets.button, widgets.field
 local STEPS = { provider = 1, details = 2, packages = 3 }
 local NAMES = { "Provider", "Details", "Packages" }
 
--- Where you are: Provider ─ Details ─ Packages.
+-- Where you are: a bar of the steps, the ones done and this one lit, and
+-- "Step 2 of 3 · Details" under it.
 local function steps(st)
   local at = STEPS[st.step]
   if not at then return nil end
-  local spans = {}
-  for i, name in ipairs(NAMES) do
-    if i > 1 then spans[#spans + 1] = { text = "   ─   ", hl = "Dim" } end
-    local done = i < at
-    spans[#spans + 1] = {
-      text = (done and "✓ " or (i .. "  ")) .. name,
-      hl = i == at and "Accent" or (done and "ToolDone" or "Dim"), bold = i == at,
-    }
+  local on = style.alpha("Normal", "ff", "fg", "Normal")
+  local off = style.alpha("PromptBorder", "ff", "fg", "Selection")
+  local bar = { direction = "row", gap = 6, height = 3, margin = { 0, 0, 12, 0 } }
+  for i = 1, #NAMES do
+    bar[#bar + 1] = { grow = 1, width = 0, height = 3, radius = 2, bg = i <= at and on or off }
   end
-  return { spans = spans, size = style.size.small, padding = { 2, 8 }, margin = { 0, 0, 6, 0 } }
+  return {
+    direction = "column", padding = { 4, style.inset }, margin = { 0, 0, 6, 0 },
+    bar,
+    { text = ("Step %d of %d · %s"):format(at, #NAMES, NAMES[at]), hl = "Dim", size = style.size.small,
+      font = "mono" },
+  }
 end
 
 -- A heading and a line under it; `size` defaults to a window's title.
 local function heading(text, sub, hl, size)
   return {
-    direction = "column", padding = { 2, 8 }, margin = { 0, 0, 6, 0 },
+    direction = "column", padding = { 2, style.inset }, margin = { 0, 0, 6, 0 },
     { text = text, hl = hl or "Normal", bold = true, size = size or style.size.title },
     sub and { text = sub, hl = "Dim", size = style.size.body, margin = { 2, 0, 0, 0 } } or nil,
   }
@@ -39,16 +42,18 @@ end
 
 -- A label over a group of entries.
 local function section(text)
-  return { text = text:upper(), hl = "Dim", size = style.size.micro, bold = true, padding = { 8, 10, 2, 10 } }
+  return { text = text:sub(1, 1):upper() .. text:sub(2), hl = "Dim", size = style.size.small, medium = true,
+    padding = { 10, style.inset, 6, style.inset } }
 end
 
 local function paragraph(text)
-  return { text = text, hl = "Normal", size = style.size.body, padding = { 2, 8 }, margin = { 0, 0, 6, 0 } }
+  return { text = text, hl = "Normal", size = style.size.body, padding = { 2, style.inset }, margin = { 0, 0, 6, 0 } }
 end
 
 -- Buttons side by side.
 local function buttons(...)
-  return { direction = "row", gap = 8, margin = { 10, 0, 0, 0 }, padding = { 0, 4 }, ... }
+  -- Inset as the text is, so a button's edge lines up with the lines above.
+  return { direction = "row", gap = 8, margin = { 10, 0, 0, 0 }, padding = { 0, style.inset }, ... }
 end
 
 --- The window's spec for `page` (bone.ui.windows.setup).
@@ -81,10 +86,10 @@ function M.view(page)
         .. "This sets one up and can add plugins from the catalog. It is saved in ~/.bone/settings.json; "
         .. "your core.lua is not touched."))
       add({ text = "Make this window yours with ~/.bone/gui.lua, or /gui create personal for a full copy.",
-        hl = "Dim", size = style.size.small, padding = { 2, 8 } })
+        hl = "Dim", size = style.size.small, padding = { 2, style.inset } })
       for _, p in ipairs(st.broken or {}) do
         add({ text = "Plugin " .. p.name .. " was not loaded: " .. setup.plain_error(p.error), hl = "ErrorMsg",
-          size = style.size.caption, padding = { 2, 8 }, margin = { 6, 0, 0, 0 } })
+          size = style.size.caption, padding = { 2, style.inset }, margin = { 6, 0, 0, 0 } })
       end
       add(buttons(button("Get started", press("enter"), true),
         button(page.opts.first_run and "Not now" or "Close", press("esc"))))
@@ -93,7 +98,7 @@ function M.view(page)
       if done then
         add(heading("You're all set", nil, "ToolDone"))
       else
-        add({ direction = "row", align = "center", gap = 10, padding = { 2, 8 }, margin = { 0, 0, 6, 0 },
+        add({ direction = "row", align = "center", gap = 10, padding = { 2, style.inset }, margin = { 0, 0, 6, 0 },
           widgets.spinner(18),
           { text = "Setting things up…", hl = "Normal", bold = true, size = style.size.title } })
       end
@@ -111,7 +116,7 @@ function M.view(page)
         add(section("Try asking"))
         for i, prompt in ipairs(st.first_prompts) do
           local on = i == st.sel
-          add(entry(on, { { text = prompt, hl = "Normal", bold = on, size = style.size.body } }, click(i)), on)
+          add(entry(on, { { text = prompt, hl = "Normal", size = style.size.body } }, click(i)), on)
         end
         add(buttons(button("Close", press("esc"))))
       end
@@ -119,20 +124,32 @@ function M.view(page)
       add(heading("Choose a provider", "Where the model runs."))
       local list = page.rows()
       st.sel = math.max(1, math.min(st.sel, math.max(#list, 1)))
-      for i, r in ipairs(list) do
+      -- The choices two to a row, as outlined cards; the selected one lit.
+      local function card(i)
+        local r = list[i]
+        if not r then return { grow = 1, width = 0 } end
         local on = i == st.sel
-        if r.group ~= (list[i - 1] or {}).group then
-          add(section(r.group))
-        end
         local name, aside = setup.preset_parts(presets[r.preset])
-        add(entry(on, { {
-          direction = "row", align = "center", gap = 8,
-          { grow = 1, direction = "column",
-            { text = name, hl = "Normal", bold = true, size = style.size.body },
-            { text = aside, hl = "Dim", size = style.size.small, margin = { 2, 0, 0, 0 } } },
-          { text = "›", hl = on and "Accent" or "Dim", size = style.size.lead },
-        } }, click(i)), on)
+        return widgets.press(style.finish({
+          grow = 1, width = 0, direction = "column", gap = 2, padding = { 10, 12 }, radius = style.radius.md,
+          border = 1, border_color = on and "Muted" or "PromptBorder", bg = on and "Selection" or nil,
+          role = "option", selected = on,
+          { text = name, hl = "Normal", medium = true, size = style.size.body, wrap = false, text_overflow = "ellipsis" },
+          { text = aside, hl = "Dim", size = style.size.small, wrap = false, text_overflow = "ellipsis" },
+        }), click(i), "option", not on)
       end
+      local i = 1
+      while i <= #list do
+        local r = list[i]
+        if r.group ~= (list[i - 1] or {}).group then add(section(r.group)) end
+        local pair = list[i + 1] and list[i + 1].group == r.group
+        add({ direction = "row", gap = 8, padding = { 0, style.inset - 4 }, margin = { 0, 0, 8, 0 },
+          card(i), pair and card(i + 1) or card(nil) }, st.sel == i or (pair and st.sel == i + 1))
+        i = i + (pair and 2 or 1)
+      end
+      add({ direction = "row", align = "center", gap = 8, padding = { 0, style.inset }, margin = { 8, 0, 0, 0 },
+        { text = "Saved to ~/.bone/settings.json", hl = "Dim", size = style.size.small, grow = 1 },
+        button("Continue", press("enter"), true) })
       if st.note then
         add({ text = st.note[1], hl = st.note[2] and "ErrorMsg" or "Dim", size = style.size.caption, padding = { 2, 10 } })
       end
@@ -159,7 +176,7 @@ function M.view(page)
             direction = "row", align = "center", gap = 10,
             widgets.checkbox(picked),
             { grow = 1, direction = "column",
-              { text = r.label, hl = "Normal", bold = on, size = style.size.body },
+              { text = r.label, hl = "Normal", size = style.size.body },
               { text = r.package.description or "", hl = "Dim", size = style.size.small, margin = { 2, 0, 0, 0 } } },
           } }, click(i)), on)
         else

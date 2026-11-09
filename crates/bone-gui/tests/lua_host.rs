@@ -262,7 +262,7 @@ async fn the_sidebar_groups_the_recent_chats() {
     g.frame();
     let painted: Vec<_> = g.painted.iter().map(|(t, _)| t.clone()).collect();
     assert!(
-        painted.iter().any(|t| t == "RECENT · LAST 1H"),
+        painted.iter().any(|t| t == "Recent · last 1h"),
         "the recent group is missing; painted {painted:?}"
     );
     // The window is the TUI's option.
@@ -276,7 +276,7 @@ async fn the_sidebar_groups_the_recent_chats() {
     g.frame();
     let painted: Vec<_> = g.painted.iter().map(|(t, _)| t.clone()).collect();
     assert!(
-        painted.iter().any(|t| t == "RECENT · LAST 30M"),
+        painted.iter().any(|t| t == "Recent · last 30m"),
         "the recent group did not follow the window; painted {painted:?}"
     );
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
@@ -891,6 +891,80 @@ async fn a_terminal_in_a_panel() {
     );
 }
 
+/// Windows' terminals are pseudo consoles (ConPTY): a command's screen and
+/// exit code come back, and `/term` runs PowerShell, typed into.
+#[cfg(windows)]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_windows_terminal_runs_the_shell() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.frame();
+    g.gui
+        .run_lua(
+            "t",
+            r#"
+            pty_exit = nil
+            pty_job = bone.job.start({ "cmd", "/c", "echo in a terminal" }, {
+              pty = { width = 40, height = 5 },
+              on_exit = function(r) pty_exit = r end,
+            })
+            function screen_text(job)
+              local s = job and job:screen()
+              local t = {}
+              for _, l in ipairs(s and s.lines or {}) do
+                for _, i in ipairs(l) do t[#t + 1] = i[1] end
+                t[#t + 1] = "\n"
+              end
+              return table.concat(t)
+            end
+            "#,
+        )
+        .unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while g.gui.eval("tostring(pty_exit ~= nil)").unwrap() != "true" {
+        g.settle(Duration::from_millis(50)).await;
+        assert!(std::time::Instant::now() < deadline, "the job never ended");
+    }
+    assert_eq!(
+        g.gui.eval("tostring(pty_exit.error)").unwrap(),
+        "nil",
+        "it ran"
+    );
+    assert_eq!(g.gui.eval("tostring(pty_exit.code)").unwrap(), "0");
+    let out = g.gui.eval("screen_text(pty_job) .. (pty_exit.stdout or '')").unwrap();
+    assert!(out.contains("in a terminal"), "the screen: {out}");
+
+    // /term: the default shell, typed into.
+    g.gui.run_lua("t", "bone.cmd('term')").unwrap();
+    g.frame();
+    assert_eq!(g.gui.eval("bone.ui.panel.focused()").unwrap(), "term1");
+    let screen = |g: &mut Headless| {
+        g.gui
+            .eval("screen_text(require('bone.terminal').job('term1'))")
+            .unwrap()
+    };
+    let deadline = std::time::Instant::now() + Duration::from_secs(30);
+    // PowerShell takes a while to start: type once its prompt shows.
+    while !screen(&mut g).contains('>') {
+        g.settle(Duration::from_millis(100)).await;
+        assert!(std::time::Instant::now() < deadline, "no prompt: {}", screen(&mut g));
+    }
+    g.text("echo bone$(40+2)");
+    g.key(bone_gui::Key::Enter, bone_gui::Modifiers::NONE);
+    loop {
+        g.settle(Duration::from_millis(100)).await;
+        let s = screen(&mut g);
+        // The answer, not the typed line (which says $(40+2)).
+        if s.contains("bone42") {
+            break;
+        }
+        assert!(std::time::Instant::now() < deadline, "the terminal screen: {s}");
+    }
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+    g.gui.run_lua("t", "bone.cmd('term close')").unwrap();
+    g.frame();
+}
+
 /// Both spellings of the terminal shortcut open, release and refocus the
 /// same visible panel, through the GUI's real keyboard path.
 // Terminals need Unix for now (`bone_ui::jobs`).
@@ -1007,8 +1081,8 @@ async fn node_panels_on_all_four_docks() {
         assert(window.docked('left', ctx)[1].width == 200)
         assert(window.docked('bottom', ctx)[1].height == 140)
         bone.ui.panel.update('top', { size = 3 })
-        -- Rows, and the card around them: its inset, padding and border.
-        assert(window.docked('top', ctx)[1].height == 3 * 18 + 34)
+        -- Rows, and the padding and the hairline around them.
+        assert(window.docked('top', ctx)[1].height == 3 * 18 + 2 * window.dock_pad[1] + 1)
     "#,
         )
         .unwrap();
@@ -1071,8 +1145,9 @@ async fn oversized_opposing_docks_fit_the_window() {
           assert(math.abs(seen.height - r.h) < 0.01, id)
           assert(seen.width >= 0 and seen.height >= 0, id)
         end
-        assert(dock_seen.left.width == 712 and dock_seen.right.width == 212)
-        assert(dock_seen.top.height == 491)
+        -- Each is its share less its padding (12 a side) and its hairline.
+        assert(dock_seen.left.width == 725 and dock_seen.right.width == 225)
+        assert(dock_seen.top.height == 500)
     "#,
         )
         .unwrap();
@@ -1384,11 +1459,12 @@ async fn sidebar_rename_ends_on_a_click_away() {
     for _ in 0..4 {
         g.frame();
     }
-    let pencil = (g.painted.iter())
-        .find(|(t, _)| t == "✎")
-        .unwrap_or_else(|| panic!("no rename action: {:?}", g.painted.iter().map(|(t, _)| t.clone()).collect::<Vec<_>>()))
-        .1;
-    g.click_at(pencil.center().x, pencil.center().y);
+    let pencil = g
+        .gui
+        .eval("(function() local r = bone.gui.rect('sidebar-rename') return r and (r.x + r.w / 2) .. ',' .. (r.y + r.h / 2) end)()")
+        .unwrap();
+    let (x, y) = pencil.split_once(',').expect("no rename action");
+    g.click_at(x.parse().unwrap(), y.parse().unwrap());
     for _ in 0..4 {
         g.frame();
     }

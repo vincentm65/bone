@@ -147,6 +147,23 @@ function M.frontends(entry)
   return list, core
 end
 
+--- Whether this is the desktop app (its libraries are GUIs, not TUIs).
+function M.desktop()
+  return bone.gui ~= nil and type(bone.gui.view) == "function"
+end
+
+--- Whether library `entry` draws the desktop app: a gui/ folder, or
+--- "gui" in its `frontends`.
+function M.has_gui(entry)
+  for _, f in ipairs(type(entry.frontends) == "table" and entry.frontends or {}) do
+    if f == "gui" then return true end
+  end
+  for _, f in ipairs(entry.files or {}) do
+    if tostring(f.path):match("^gui/") then return true end
+  end
+  return false
+end
+
 --- A short label of where a package runs: "both", "tui", "gui", or "core".
 function M.supports(entry)
   if entry.kind == "tui" then
@@ -435,7 +452,10 @@ function M.page(hooks)
   local function rows()
     local list = {}
     for _, e in ipairs(st.entries or {}) do
-      if (e.kind == "tui") == (st.page == "tui") then
+      -- The libraries page lists what this app can use: GUIs in the
+      -- desktop app, TUIs in the terminal.
+      if (e.kind == "tui") == (st.page == "tui")
+          and not (e.kind == "tui" and M.desktop() and not M.has_gui(e)) then
         list[#list + 1] = e
       end
     end
@@ -587,7 +607,7 @@ function M.page(hooks)
       st.ask = {
         text = verb .. " " .. M.label(e) .. "? Its Lua runs with your permissions.",
         action = function()
-          M.install(e, done(M.label(e) .. " " .. verb .. "ed" .. (e.kind == "tui" and "; /tui use " .. e.name .. " to switch" or "")))
+          M.install(e, done(M.label(e) .. " " .. verb .. "ed" .. (e.kind == "tui" and ("; /" .. (M.desktop() and "gui" or "tui") .. " use " .. e.name .. " to switch") or "")))
         end,
       }
     elseif k == "x" and e and e.state ~= "available" and not st.busy then

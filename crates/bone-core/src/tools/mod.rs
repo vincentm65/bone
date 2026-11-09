@@ -8,6 +8,7 @@ mod read_file;
 mod shell;
 mod write_file;
 
+pub use shell::kill_all_jobs;
 pub(crate) use shell::{ProcessRegistry, ProcessState, ProcessView};
 
 use std::path::{Component, PathBuf};
@@ -53,6 +54,13 @@ impl ToolContext {
     /// An absolute path, with `.` and `..` worked out so one file has one
     /// name.
     pub fn resolve(&self, path: &str) -> PathBuf {
+        // A leading `~` is the home folder, as in a shell, not a folder named `~`.
+        let path = match (path.strip_prefix('~'), bone_lua::sys::home_dir()) {
+            (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
+                home.join(rest.trim_start_matches(['/', '\\']))
+            }
+            _ => PathBuf::from(path),
+        };
         let mut out = PathBuf::new();
         for part in self.cwd.join(path).components() {
             match part {
@@ -65,6 +73,41 @@ impl ToolContext {
         }
         out
     }
+}
+
+/// Windows-1252's 0x80-0x9F (the rest of its bytes are Latin-1). Its five
+/// unused bytes stand for themselves.
+const CP1252: [char; 32] = [
+    '€', '\u{81}', '‚', 'ƒ', '„', '…', '†', '‡', 'ˆ', '‰', 'Š', '‹', 'Œ', '\u{8d}', 'Ž', '\u{8f}',
+    '\u{90}', '‘', '’', '“', '”', '•', '–', '—', '˜', '™', 'š', '›', 'œ', '\u{9d}', 'ž', 'Ÿ',
+];
+
+/// A file that is not UTF-8 as Windows-1252, a character per byte, when it
+/// is in such a legacy encoding: no multi-byte UTF-8 in it, which would make
+/// it UTF-8 with a stray byte instead.
+pub(crate) fn decode_legacy(bytes: &[u8]) -> Option<String> {
+    if bytes.utf8_chunks().any(|c| !c.valid().is_ascii()) {
+        return None;
+    }
+    Some(
+        bytes
+            .iter()
+            .map(|&b| match b {
+                0x80..=0x9f => CP1252[usize::from(b - 0x80)],
+                _ => char::from(b),
+            })
+            .collect(),
+    )
+}
+
+/// `text` back in Windows-1252, if it has no character that lacks.
+pub(crate) fn encode_legacy(text: &str) -> Option<Vec<u8>> {
+    text.chars()
+        .map(|c| match CP1252.iter().position(|&x| x == c) {
+            Some(i) => Some(0x80 + i as u8),
+            None => u8::try_from(c).ok().filter(|b| !(0x80..=0x9f).contains(b)),
+        })
+        .collect()
 }
 
 /// Text for the model. `Err` marks the result as an error.

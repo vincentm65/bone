@@ -252,6 +252,18 @@ pub fn exit_signal(status: &ExitStatus) -> Option<i32> {
     }
 }
 
+/// Whether the process ignores `signal` (as `nohup` leaves SIGHUP): a handler
+/// for it would undo that.
+#[cfg(unix)]
+pub fn signal_ignored(signal: i32) -> bool {
+    // SAFETY: only reads the current action.
+    let mut old: libc::sigaction = unsafe { std::mem::zeroed() };
+    unsafe {
+        libc::sigaction(signal, std::ptr::null(), &mut old) == 0
+            && old.sa_sigaction == libc::SIG_IGN
+    }
+}
+
 /// The user's home directory (`$HOME`, `%USERPROFILE%` on Windows).
 pub fn home_dir() -> Option<PathBuf> {
     std::env::home_dir().filter(|h| !h.as_os_str().is_empty())

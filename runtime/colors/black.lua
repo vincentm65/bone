@@ -14,7 +14,7 @@ local p = {
   number = "#ff9e64",
   -- The user's message and the input sit on a raised grey, one step above
   -- the terminal's own background; the panels and the chat stay black.
-  user_bg = "#141414",
+  user_bg = "#222222",
   diff_add = "#7ee787",
   diff_add_bg = "#101010",
   diff_del = "#ff7b72",

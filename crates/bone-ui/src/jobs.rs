@@ -19,7 +19,7 @@ use tokio::sync::mpsc;
 use crate::term::Term;
 
 /// After SIGTERM, how long before SIGKILL.
-const KILL_GRACE: Duration = Duration::from_secs(2);
+pub(crate) const KILL_GRACE: Duration = Duration::from_secs(2);
 /// Output kept for `on_exit` per stream; beyond this the start is dropped.
 const BUFFER_MAX: usize = 4 << 20;
 /// Finished jobs remembered for `status`/`list`.
@@ -34,7 +34,7 @@ pub enum Command {
 }
 
 impl Command {
-    fn display(&self) -> String {
+    pub(crate) fn display(&self) -> String {
         match self {
             Command::Shell(s) => s.clone(),
             Command::Argv(v) => v.join(" "),
@@ -59,7 +59,7 @@ pub struct Spec {
     pub env: Vec<(String, String)>,
     pub stdin: Stdin,
     pub timeout: Option<Duration>,
-    /// Run in a pseudo-terminal of (rows, cols) (Unix): its output plays into
+    /// Run in a pseudo-terminal of (rows, cols) (ConPTY on Windows): its output plays into
     /// a screen (`job:screen`) and `job:write` types into it.
     pub pty: Option<(u16, u16)>,
 }
@@ -409,13 +409,19 @@ fn attach_pty(cmd: &mut tokio::process::Command, rows: u16, cols: u16) -> std::i
     Ok((Box::new(out), Box::new(input), Box::new(resize)))
 }
 
+/// Windows' terminals run elsewhere (`conpty::run`).
 #[cfg(not(unix))]
 fn attach_pty(_: &mut tokio::process::Command, _: u16, _: u16) -> std::io::Result<Pty> {
-    Err(std::io::Error::other("terminals need Unix for now"))
+    Err(std::io::Error::other("no pseudo-terminals on this system"))
 }
 
 /// The job's task: spawn, pump output, obey the UI, report the end.
 async fn run(id: u64, spec: Spec, mut ctl: mpsc::UnboundedReceiver<Ctl>, sink: Sink) {
+    // A terminal on Windows is a pseudo console (ConPTY), driven by threads.
+    #[cfg(windows)]
+    if spec.pty.is_some() {
+        return crate::conpty::run(id, spec, ctl, sink).await;
+    }
     let mut cmd = match &spec.command {
         Command::Shell(s) => tokio::process::Command::from(bone_lua::sys::shell(s)),
         Command::Argv(argv) => {

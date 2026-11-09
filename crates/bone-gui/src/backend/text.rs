@@ -16,6 +16,8 @@ use crate::node::{Rgba, TextAlign};
 pub enum Family {
     Sans,
     SansBold,
+    /// Weight 500 of the sans family.
+    SansMedium,
     SansItalic,
     Mono,
     Named(String),

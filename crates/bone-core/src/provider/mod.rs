@@ -7,6 +7,15 @@ pub(crate) mod sse;
 
 pub(crate) use openai::http_client;
 
+/// An id for a tool call the server sent without one. Unique, because a
+/// session's ids must be (`call_0` in every reply would repeat), and short:
+/// OpenAI takes at most 40 characters.
+pub(crate) fn fallback_call_id(n: usize) -> String {
+    // A v7 uuid ends in random bits.
+    let id = uuid::Uuid::now_v7().simple().to_string();
+    format!("call_{n}_{}", &id[20..])
+}
+
 use std::sync::Arc;
 
 use bone_proto::types::{ChatMessage, ProviderApi, ReasoningState, ToolCall, Usage};
