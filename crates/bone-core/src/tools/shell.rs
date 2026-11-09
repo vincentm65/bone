@@ -459,7 +459,8 @@ impl ProcessRegistry {
                 (p.snapshot.lock().unwrap().state != ProcessState::Running).then_some(id.clone())
             })
             .collect();
-        finished.sort();
+        // By number: as strings, "shell-100" would go before "shell-11".
+        finished.sort_by_key(|id| id.trim_start_matches("shell-").parse::<u64>().unwrap_or(0));
         while finished.len() > MAX_COMPLETED {
             jobs.remove(&finished.remove(0));
         }
@@ -580,11 +581,23 @@ async fn run_job(
             Output::Thread(read_blocking(std::fs::File::from(reader)))
         }
     };
-    let mut input = child.stdin.take();
+    // Stdin is written on its own task: a command that writes before it
+    // reads would otherwise fill its output pipe while this loop waits.
+    let mut input = child.stdin.take().map(|mut pipe| {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Vec<u8>>();
+        tokio::spawn(async move {
+            while let Some(data) = rx.recv().await {
+                if pipe.write_all(&data).await.is_err() {
+                    break;
+                }
+            }
+        });
+        tx
+    });
     if let Stdin::Text(text) = stdin
-        && let Some(mut pipe) = input.take()
+        && let Some(tx) = input.take()
     {
-        let _ = pipe.write_all(text.as_bytes()).await;
+        let _ = tx.send(text.into_bytes());
     }
 
     let mut out_decoder = bone_lua::sys::Utf8Decoder::default();
@@ -604,7 +617,7 @@ async fn run_job(
             chunk = rx.next(&mut buf), if pipe_open => match chunk { None => pipe_open = false, Some(bytes) => { let text = out_decoder.decode(&bytes); record_output(&process, &text, bytes.len(), &mut cleaner, &mut unsent); } },
             _ = sleep_until(unsent.due.unwrap_or_else(far)), if unsent.due.is_some() => send_output(&registry, &process, &mut unsent, &output, &process_sink),
             st = child.wait(), if status.is_none() => match st { Ok(st) => { status = Some(st); if kill_at.is_none() { if cfg!(unix) { terminate(pid); } kill_at = Some(Instant::now() + EXIT_GRACE); } }, Err(e) => { error = Some(e.to_string()); break; } },
-            Some(control) = controls.recv(), if kill_at.is_none() => match control { Control::Write(data) => if let Some(pipe) = &mut input { let _ = pipe.write_all(&data).await; }, Control::CloseStdin => input = None, Control::Cancel => { state = ProcessState::Cancelled; terminate(pid); kill_at = Some(Instant::now() + KILL_GRACE); } },
+            Some(control) = controls.recv(), if kill_at.is_none() => match control { Control::Write(data) => if let Some(tx) = &input { let _ = tx.send(data); }, Control::CloseStdin => input = None, Control::Cancel => { state = ProcessState::Cancelled; terminate(pid); kill_at = Some(Instant::now() + KILL_GRACE); } },
             _ = parent_cancel.cancelled(), if kill_at.is_none() => { state = ProcessState::Cancelled; terminate(pid); kill_at = Some(Instant::now() + KILL_GRACE); }
             _ = sleep_until(deadline.unwrap_or_else(far)), if deadline.is_some() && kill_at.is_none() => { state = ProcessState::TimedOut; terminate(pid); kill_at = Some(Instant::now() + KILL_GRACE); }
             _ = sleep_until(kill_at.unwrap_or_else(far)), if kill_at.is_some() && (state != ProcessState::Running || pipe_open || status.is_none() || group_alive(pid)) => { kill(pid); break; }

@@ -467,3 +467,41 @@ fn the_cleaner_settles_progress_lines_and_drops_escapes() {
     }
     assert_eq!(out, "ared\nbar 3\nyz\n");
 }
+
+#[tokio::test]
+async fn shell_stdin_cannot_block_output_and_old_jobs_go_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(&dir);
+    // Writes more than a pipe holds before it reads its stdin.
+    let cmd = "head -c 300000 /dev/zero | tr '\\0' y; wc -c";
+    let args = json!({"command": cmd, "stdin": "x".repeat(2_000_000), "timeout_secs": 5});
+    let out = tokio::time::timeout(Duration::from_secs(10), call(&ctx, "shell", args));
+    let out = out.await.expect("stdin blocked the command").unwrap();
+    assert!(
+        out.ends_with("2000000\n[exit code: 0]"),
+        "{}",
+        &out[out.len() - 50..]
+    );
+    for _ in 0..99 {
+        call(&ctx, "shell", json!({"command": "true"}))
+            .await
+            .unwrap();
+    }
+    call(
+        &ctx,
+        "shell",
+        json!({"command": "echo kept", "mode": "start"}),
+    )
+    .await
+    .unwrap();
+    call(&ctx, "shell", json!({"action": "wait", "id": "shell-101"}))
+        .await
+        .unwrap();
+    let status = call(
+        &ctx,
+        "shell",
+        json!({"action": "status", "id": "shell-101"}),
+    )
+    .await;
+    assert!(status.unwrap().contains("kept"));
+}
