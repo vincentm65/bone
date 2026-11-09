@@ -53,6 +53,13 @@ impl ToolContext {
     /// An absolute path, with `.` and `..` worked out so one file has one
     /// name.
     pub fn resolve(&self, path: &str) -> PathBuf {
+        // A leading `~` is the home folder, as in a shell, not a folder named `~`.
+        let path = match (path.strip_prefix('~'), bone_lua::sys::home_dir()) {
+            (Some(rest), Some(home)) if rest.is_empty() || rest.starts_with(['/', '\\']) => {
+                home.join(rest.trim_start_matches(['/', '\\']))
+            }
+            _ => PathBuf::from(path),
+        };
         let mut out = PathBuf::new();
         for part in self.cwd.join(path).components() {
             match part {

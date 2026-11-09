@@ -501,6 +501,28 @@ async fn edits_keep_crlf_and_bytes_that_are_not_utf8() {
 }
 
 #[tokio::test]
+async fn reads_are_capped_and_tilde_is_home() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = ctx(&dir);
+    std::fs::write(
+        dir.path().join("wide"),
+        format!("{}\n", "x".repeat(1999)).repeat(3000),
+    )
+    .unwrap();
+    let out = call(&ctx, "read_file", json!({"path": "wide"}))
+        .await
+        .unwrap();
+    assert!(
+        out.len() < 300_000 && out.contains("of 3000"),
+        "{}",
+        out.len()
+    );
+    let home = bone_lua::sys::home_dir().unwrap();
+    assert_eq!(ctx.resolve("~/a"), home.join("a"));
+    assert_eq!(ctx.resolve("~x"), dir.path().join("~x"));
+}
+
+#[tokio::test]
 async fn shell_stdin_cannot_block_output_and_old_jobs_go_first() {
     let dir = tempfile::tempdir().unwrap();
     let ctx = ctx(&dir);

@@ -7,6 +7,8 @@ use super::{Tool, ToolContext, ToolResponse, ToolResult, ToolSpec, typed_args};
 
 const DEFAULT_LIMIT: usize = 2000;
 const MAX_LINE_CHARS: usize = 2000;
+/// About 64k tokens: 2000 wide lines would be a million.
+const MAX_BYTES: usize = 256 * 1024;
 
 pub struct ReadFile(ToolSpec);
 
@@ -106,14 +108,19 @@ impl Tool for ReadFile {
                 ));
             }
             let mut out = String::new();
+            let mut shown = 0;
             for line in text.lines().skip(start - 1).take(limit) {
+                if out.len() + line.len().min(4 * MAX_LINE_CHARS) > MAX_BYTES {
+                    break;
+                }
+                shown += 1;
                 let line = match line.char_indices().nth(MAX_LINE_CHARS) {
                     Some((cut, _)) => format!("{} [line truncated]", &line[..cut]),
                     None => line.to_owned(),
                 };
                 out.push_str(&format!("{line}\n"));
             }
-            let end = (start - 1).saturating_add(limit).min(total);
+            let end = start - 1 + shown;
             if end < total {
                 let rest = total - end;
                 let unread = if rest == 1 {
@@ -124,7 +131,9 @@ impl Tool for ReadFile {
                 // A short window used to say "use offset to read more", and models
                 // obeyed by rereading the file 40 lines at a time. A large window
                 // only needs the fact; a small one should be widened, not continued.
-                let advice = if limit < DEFAULT_LIMIT {
+                let advice = if shown < limit {
+                    ". Output is capped at 256 KB; continue with offset"
+                } else if limit < DEFAULT_LIMIT {
                     ". Raise limit instead of another small read"
                 } else {
                     ""
