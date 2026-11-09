@@ -355,6 +355,13 @@ impl Turn<'_> {
                 tools = serde_json::from_value(list(&ev["tools"]))
                     .map_err(|e| Stop::Failed(format!("request hook returned bad tools: {e}")))?;
             }
+            // Schemas from Lua tables come out in Lua's iteration order, which
+            // changes with every Lua state (a restart, a core reload). Sorted,
+            // the tool definitions read the same each time, so the provider's
+            // prompt cache survives them.
+            for t in &mut tools {
+                sort_keys(&mut t.parameters);
+            }
 
             // Tool definitions count toward the provider's input tokens; left
             // out, a short transcript with many tools looks several times
@@ -908,6 +915,18 @@ fn stream_hooks(
     tx
 }
 
+/// Every object in `v`, at any depth, with its keys in sorted order.
+fn sort_keys(v: &mut Value) {
+    match v {
+        Value::Object(o) => {
+            o.sort_keys();
+            o.values_mut().for_each(sort_keys);
+        }
+        Value::Array(a) => a.iter_mut().for_each(sort_keys),
+        _ => {}
+    }
+}
+
 /// Lua has one kind of table: an empty list comes back from a hook as `{}`.
 pub(crate) fn list(v: &Value) -> Value {
     match v {
@@ -996,5 +1015,24 @@ fn reasoning_items(m: &ChatMessage) -> &[Value] {
             ..
         } => &s.items,
         _ => &[],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_schemas_are_sorted_at_every_depth() {
+        let mut v = json!({
+            "type": "object",
+            "properties": { "timeout": { "type": "number", "description": "s" }, "command": { "type": "string" } },
+            "required": ["command"],
+        });
+        sort_keys(&mut v);
+        assert_eq!(
+            v.to_string(),
+            r#"{"properties":{"command":{"type":"string"},"timeout":{"description":"s","type":"number"}},"required":["command"],"type":"object"}"#
+        );
     }
 }
