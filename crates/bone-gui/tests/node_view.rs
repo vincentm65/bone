@@ -560,7 +560,8 @@ async fn the_nodes_library_draws_the_chat() {
              local i = bone.gui.scroll_info('chat'); assert(i, 'no chat list')",
         )
         .unwrap();
-    let hello = (g.painted.iter()).find(|(t, _)| t.contains("hello there"));
+    // In the chat, under its header (which shows the same words as the title).
+    let hello = (g.painted.iter()).find(|(t, r)| t.contains("hello there") && r.min.y > 60.0);
     let hint = (g.painted.iter()).find(|(t, _)| t.contains("Message bone"));
     let (hello, hint) = (
         hello.expect("the message is painted").1,

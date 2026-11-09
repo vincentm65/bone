@@ -17,7 +17,9 @@ local tray = require("bone.desktop.tray")
 
 local function slot(name, ctx) return bone.gui.slots.nodes(name, ctx) end
 
-M.max_width = 1040 -- the chat and composer column, in pixels
+-- The chat and composer column, in pixels: 720 of text (about 80
+-- characters a line) and the scrollbar's inset beside it.
+M.max_width = 734
 -- The list reserves this much room on its right for its scrollbar. Keep the
 -- composer and bottom docks on the same visual edge as the chat items.
 M.chat_scrollbar_inset = 14
@@ -286,6 +288,55 @@ local function chat_fade_top(gutter)
   }
 end
 
+--- The header over the chat: the sidebar's button while it is closed, the
+--- chat's title and its folder, a hairline under them. Off where the window
+--- draws a title bar of its own (macOS, Windows), which shows the title.
+M.header_height = 48
+
+local function title_of(session)
+  local t = session and session.title
+  -- None yet: a placeholder ("[new session]", "[untitled]") stays out.
+  if type(t) ~= "string" or not t:match("%S") or t:match("^%[.*%]$") then return nil end
+  return t
+end
+
+local function short_path(cwd)
+  if not cwd or cwd == "" then return nil end
+  local home = os.getenv("HOME")
+  if home and home ~= "" and cwd:sub(1, #home) == home then cwd = "~" .. cwd:sub(#home + 1) end
+  return cwd == "~" and "~/" or cwd
+end
+
+function M.header(session)
+  if require("bone.nodes.titlebar").offset() > 0 then return nil end
+  local icons = require("bone.nodes.icons")
+  local sidebar = require("bone.desktop.sidebar")
+  local title = title_of(session)
+  local muted = (bone.hl.get("Muted") or {}).fg and "Muted" or "Dim"
+  local path = short_path(session and session.cwd)
+  local bar = {
+    height = M.header_height, shrink = 0, direction = "row", align = "center", gap = 10,
+    padding = { 0, 16, 0, sidebar.is_open() and 20 or 12 },
+  }
+  if not sidebar.is_open() then
+    bar[#bar + 1] = widgets.icon_button("sidebar", "Chats (ctrl+o)", function() sidebar.open() end,
+      { box = 28, size = 16, hl = muted, radius = style.radius.md, id = "header-sidebar" })
+  end
+  bar[#bar + 1] = { text = title or "New chat", size = style.size.body, medium = title ~= nil,
+    hl = title and "Normal" or muted, wrap = false, text_overflow = "ellipsis", shrink = 1 }
+  if path then
+    bar[#bar + 1] = style.finish({
+      direction = "row", align = "center", gap = 6, height = 24, padding = { 0, 9, 0, 8 }, shrink = 1,
+      radius = 12, border = 1, border_color = "PromptBorder", tooltip = session.cwd,
+      icons.node("folder", { size = 13, hl = "Dim" }),
+      { text = path, size = style.size.small, hl = muted, wrap = false, text_overflow = "ellipsis", shrink = 1 },
+    })
+  end
+  bar[#bar + 1] = { position = "absolute", left = 0, right = 0, bottom = 0, height = 1,
+    bg = style.alpha("WinSeparator", "ff", "fg", "PromptBorder") }
+  return style.finish(bar)
+end
+
 --- One chat's column: the chat, with the composer, tray and status bar
 --- under it. opts: `width` (pixels), `chat` (a chat number; nil or the chat
 --- on screen gets the editor, any other its read-only draft), `on_focus` (a
@@ -335,7 +386,7 @@ function M.column(ctx, opts)
     chat = not here and n or nil, on_focus = opts.on_focus })
   below[#below + 1] = here and tray.node() or nil
   below[#below + 1] = statusbar.node(session, ctx.cell)
-  return { grow = 1, direction = "column", chat, below }
+  return { grow = 1, direction = "column", here and M.header(session) or nil, chat, below }
 end
 
 --- The chats beside the sidebar: the chat on screen's column. A plugin
