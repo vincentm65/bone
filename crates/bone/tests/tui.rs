@@ -414,3 +414,30 @@ async fn first_run_setup_adds_a_provider() {
         again.screen()
     );
 }
+
+/// Setup dismissed before there was a provider: with one, the new chat no
+/// longer says there is none.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_provider_ends_a_dismissed_setup() {
+    let config = tempfile::tempdir().unwrap();
+    std::fs::write(
+        config.path().join("core.lua"),
+        r#"bone.config.providers.fake = { base_url = "http://127.0.0.1:1/v1", model = "fake" }"#,
+    )
+    .unwrap();
+    std::fs::write(
+        config.path().join("settings.json"),
+        r#"{ "setup": { "skipped": true } }"#,
+    )
+    .unwrap();
+    let loaded = scripting::load_with(config.path(), &|_| None).unwrap();
+    let e = Env {
+        config,
+        work: tempfile::tempdir().unwrap(),
+        server: Server::new(Arc::new(Core::from_loaded(loaded))),
+    };
+    let mut tui = e.tui(None).await;
+    tui.wait_for(WAIT, |s| s.contains("New session."))
+        .await
+        .unwrap();
+}
