@@ -211,30 +211,58 @@ end
 
 -- ---- the chat -------------------------------------------------------------
 
-local function welcome(width)
-  local s = bone.chat.session()
-  if bone.api.session() or (s and (s.items > 0 or s.loading)) then return nil end
-  local title, hint
-  if bone.settings.get("setup.skipped") then
-    title = "No model provider configured."
-    hint = "Run /setup to connect one · /health to diagnose setup"
-  else
-    title = "New session. Type a message and press enter."
-    hint = "/help lists commands · ctrl+o opens an earlier session"
-  end
-  -- Keep the welcome card's chrome from consuming the whole chat column on
-  -- a phone-sized window. Text still wraps, but at a readable size.
+-- Whether chat `s` (a column's) is new: nothing in it yet, nothing running.
+local function is_new(s)
+  if bone.api.session() or not s then return false end
+  return (s.items or 0) == 0 and not s.loading and not s.running
+end
+
+--- What a new chat offers to start with: { label, text = a message to
+--- start, or cmd = a command to run }. A gui.lua can replace them.
+M.suggestions = {
+  { label = "Review my unstaged changes", icon = "check", text = "Review my unstaged changes" },
+  { label = "Find where a function is used", icon = "search", text = "Find where this function is used: " },
+  { label = "Explain a failing test", icon = "terminal", text = "Explain why this test fails: " },
+}
+
+-- A new chat leads with the composer: a short greeting over it, places to
+-- start under it, and the keys that go elsewhere. `input` is the composer.
+local function welcome(width, input)
+  local unset = bone.settings.get("setup.skipped")
   local compact = width < 240
-  local pad = compact and math.min(12, math.max(4, width / 10)) or 28
+  local muted = (bone.hl.get("Muted") or {}).fg and "Muted" or "Dim"
+  local icons = require("bone.nodes.icons")
+  local chips = { direction = "row", flex_wrap = true, justify = "center", gap = 8, row_gap = 8 }
+  local list = unset and {
+    { label = "Connect a model", icon = "plus", cmd = "setup" },
+    { label = "Check the setup", icon = "gear", cmd = "health" },
+  } or M.suggestions
+  for _, it in ipairs(list) do
+    chips[#chips + 1] = widgets.press(style.finish({
+      direction = "row", align = "center", gap = 8, height = 32, padding = { 0, 12 }, radius = 16,
+      border = 1, border_color = "PromptBorder", label = it.label,
+      it.icon and icons.node(it.icon, { size = 14, hl = "Dim" }) or nil,
+      { text = it.label, size = style.size.body, hl = muted, wrap = false },
+    }), function()
+      if it.cmd then bone.cmd(it.cmd) return end
+      bone.prompt.set(it.text or it.label)
+      bone.gui.focus("composer-input")
+    end)
+  end
+  local hints = { direction = "row", flex_wrap = true, justify = "center", gap = 16, row_gap = 4 }
+  for _, h in ipairs({ { "Ctrl O", "earlier chats" }, { "/", "commands" } }) do
+    hints[#hints + 1] = { direction = "row", align = "center", gap = 6, widgets.keycap(h[1]),
+      { text = h[2], size = style.size.small, hl = "Dim", wrap = false } }
+  end
   return {
-    position = "absolute", left = 0, right = 0, top = 0, bottom = 0,
-    direction = "column", justify = "center", align = "center",
-    style.finish(widgets.surface({
-      gap = compact and 4 or 6, align = "center", radius = style.radius.lg, border = 0,
-      padding = { compact and 10 or 14, pad, compact and 10 or 14, pad },
-      { text = title, hl = "Normal", size = compact and style.size.body or style.size.lead, text_align = "center" },
-      { text = hint, hl = "Dim", size = compact and style.size.small or style.size.caption, text_align = "center" },
-    })),
+    grow = 1, direction = "column", justify = "center", align = "center", gap = compact and 12 or 22,
+    padding = { 0, 0, compact and 8 or 40, 0 },
+    { text = unset and "Connect a model to start" or "What are we building?", hl = "Normal",
+      size = compact and style.size.lead or style.size.display, medium = true, text_align = "center",
+      letter_spacing = compact and 0 or -0.4 },
+    { width = width, direction = "column", input },
+    not compact and chips or nil,
+    not compact and hints or nil,
   }
 end
 
@@ -360,13 +388,14 @@ function M.column(ctx, opts)
   local scrollbar_inset = content_width >= 240 and M.chat_scrollbar_inset or 0
   local usable_width = content_width - scrollbar_inset
   local chat = { grow = 1, direction = "column", padding = { 0, gutter, 0, gutter } }
-  if here then nodes.append(chat, slot("chat.top", ctx)) end
+  local new = is_new(session)
+  local top = here and slot("chat.top", ctx) or nil
+  if not new then nodes.append(chat, top) end
   chat[#chat + 1] = nodes.chat({
     chat = not here and n or nil,
     width_px = usable_width, cell = ctx.cell, padding = { 14, 14, M.chat_fade, 0 },
   })
   if here then
-    chat[#chat + 1] = welcome(usable_width)
     chat[#chat + 1] = chat_fade(gutter)
     chat[#chat + 1] = chat_fade_top(gutter)
     chat[#chat + 1] = jump()
@@ -382,11 +411,26 @@ function M.column(ctx, opts)
     for _, d in ipairs(docks) do d.margin = { 0, 0, 4, 0 } end
     nodes.append(below, docks)
   end
-  below[#below + 1] = composer.node({ session = session, width = usable_width,
+  local input = composer.node({ session = session, width = usable_width,
     chat = not here and n or nil, on_focus = opts.on_focus })
+  if new then
+    -- The chat's list stays (empty, out of the way); the composer moves up
+    -- to the middle with the welcome.
+    chat.grow, chat.height, chat.overflow = 0, 0, "hidden"
+  else
+    below[#below + 1] = input
+  end
   below[#below + 1] = here and tray.node() or nil
   below[#below + 1] = statusbar.node(session, ctx.cell)
-  return { grow = 1, direction = "column", here and M.header(session) or nil, chat, below }
+  local middle = nil
+  if new then
+    middle = { grow = 1, direction = "column", padding = { 0, gutter + scrollbar_inset, 0, gutter } }
+    nodes.append(middle, top)
+    middle[#middle + 1] = welcome(usable_width, input)
+  end
+  -- Each column has its header, so tiled chats keep their places as the
+  -- keyboard moves between them.
+  return { grow = 1, direction = "column", M.header(session), chat, middle, below }
 end
 
 --- The chats beside the sidebar: the chat on screen's column. A plugin

@@ -101,7 +101,7 @@ async fn narrow_new_session_scales_its_welcome_and_composer() {
         let title = g
             .painted
             .iter()
-            .find(|(text, _)| text.contains("New session"))
+            .find(|(text, _)| text.contains("building"))
             .map(|(_, rect)| *rect)
             .expect("new-session welcome is painted");
         assert!(
