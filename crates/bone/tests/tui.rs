@@ -441,3 +441,21 @@ async fn a_provider_ends_a_dismissed_setup() {
         .await
         .unwrap();
 }
+
+/// A terminal's page keys are its program's: only shift+page keys scroll back.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_page_keys_reach_the_program() {
+    let e = env(vec![], false).await;
+    std::fs::write(
+        e.config.path().join("tui.lua"),
+        r#"local term = require("bone.terminal")
+           term.setup()
+           bone.on("ready", function() term.open(nil, { cmd = "cat -v" }) end)"#,
+    )
+    .unwrap();
+    let mut tui = e.tui(None).await;
+    tui.settle(Duration::from_millis(200)).await;
+    tui.press("pagedown").unwrap();
+    tui.wait_for(WAIT, |s| s.contains("^[[6~")).await.unwrap();
+}
