@@ -35,7 +35,7 @@
 
 ## Startup
 
-`bone` and `bone --gui` both call `attach`. With no `--connect`, and no private core override, they use the default socket (`$XDG_RUNTIME_DIR/bone3/bone.sock`, falling back to the temporary directory's `bone3-$USER/bone.sock`, or `\\.\pipe\bone3-USERNAME` on Windows): connect if a server is already listening, otherwise bind it and host the core in this process. That hosted socket lives only as long as the UI. The TUI serves it until the TUI exits; the GUI's task is aborted when the window closes. Dropping the listener removes the socket. Another frontend can attach for that lifetime.
+`bone` and `bone --gui` both call `attach`. With no `--connect`, and no private core override, they use the default socket (`$XDG_RUNTIME_DIR/bone3/bone.sock`, falling back to the temporary directory's `bone3-$USER/bone.sock`, or `\\.\pipe\bone3-USERNAME` on Windows): connect if a server is already listening, otherwise bind it and host the core in this process. That hosted socket lives only as long as the UI. The TUI serves it until the TUI exits. A GUI on the default socket stays after its window closes, so the next `bone --gui` shows that window again; it leaves (and drops the socket) when that process does. A GUI started with `--connect` still ends when its window closes. Dropping the listener removes the socket. Another frontend can attach for that lifetime.
 
 An explicit `--connect [PATH]` (the default path when `PATH` is omitted) never starts a core. If the connect fails, that is an error. `core.lua` is loaded only after the attach-or-host choice, so a process that attaches does not apply its own core config.
 

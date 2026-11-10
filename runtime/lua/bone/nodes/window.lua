@@ -17,9 +17,9 @@ local tray = require("bone.desktop.tray")
 
 local function slot(name, ctx) return bone.gui.slots.nodes(name, ctx) end
 
--- The chat and composer column, in pixels: 720 of text (about 80
--- characters a line) and the scrollbar's inset beside it.
-M.max_width = 734
+-- The chat and composer column, in pixels: 900 of text (about 120
+-- characters a line of prose) and the scrollbar's inset beside it.
+M.max_width = 914
 -- The list reserves this much room on its right for its scrollbar. Keep the
 -- composer and bottom docks on the same visual edge as the chat items.
 M.chat_scrollbar_inset = 14
@@ -120,7 +120,9 @@ local function dock_size(info, ctx, sideways, flush)
   local cell = ctx.cell or bone.gui.window_info().cell or { w = 8, h = 18 }
   local room = sideways and ctx.width or ctx.height
   local px = info.size ~= "auto" and dragged_size(info.id)
-  if px then return math.max(0, math.min(room, px)) end
+  -- A dragged size gives way as the window narrows: beside the chat it
+  -- leaves the chat its least, as the drag itself does.
+  if px then return math.max(0, math.min(room, sideways and math.max(M.dock_min, room - M.chat_min) or room, px)) end
   local size = tonumber(info.size)
   if size and size < 1 then return math.max(0, room * size) end
   local cells = size or tonumber(info.max) or (sideways and 30 or 10)
@@ -267,11 +269,8 @@ local function welcome(width, input)
       bone.gui.focus("composer-input")
     end)
   end
-  local hints = { direction = "row", flex_wrap = true, justify = "center", gap = 16, row_gap = 4 }
-  for _, h in ipairs({ { "Ctrl O", "earlier chats" }, { "/", "commands" } }) do
-    hints[#hints + 1] = { direction = "row", align = "center", gap = 6, widgets.keycap(h[1]),
-      { text = h[2], size = style.size.small, hl = "Dim", wrap = false } }
-  end
+  local hints = widgets.hints("ctrl+o earlier chats · / commands", { 0, 0 })
+  hints.justify = "center"
   return {
     grow = 1, direction = "column", justify = "center", align = "center", gap = compact and 12 or 22,
     padding = { 0, 0, compact and 8 or 40, 0 },
@@ -284,16 +283,15 @@ local function welcome(width, input)
   }
 end
 
-local function jump()
+local function jump(gutter)
   local i = bone.gui.scroll_info("chat")
   if not i or i.offset >= i.max - 4 then return nil end
+  -- A small round button at the foot of the scrollbar's lane, beside the
+  -- text: it covers none of it.
   return {
-    position = "absolute", bottom = 10, left = 0, right = 0, z = 2,
-    direction = "row", justify = "center",
-    style.finish(widgets.press(widgets.surface({
-      text = "↓  Jump to latest", hl = "Accent", size = style.size.caption,
-      padding = { 6, 14, 6, 14 }, radius = style.radius.round,
-    }), function() bone.gui.scroll("chat", "end") end, "button")),
+    position = "absolute", bottom = 4, right = math.max(0, gutter - M.chat_scrollbar_inset), z = 2,
+    widgets.icon_button("arrow_down", "Jump to latest", function() bone.gui.scroll("chat", "end") end,
+      { box = 28, size = 15, hl = "Normal", radius = 14, bg = "Panel", border = 1, border_color = "PromptBorder" }),
   }
 end
 
@@ -310,27 +308,20 @@ end
 -- above them, and what scrolls down through them fades into the composer.
 M.chat_fade = 32
 
--- The fade over that padding, from clear to the chat's surface at the
--- composer's edge. nil when the scheme's background is not a hex color.
-local function chat_fade(gutter)
-  local clear, solid = style.alpha("Normal", "00", "bg"), style.alpha("Normal", "ff", "bg")
-  if not clear or not solid then return nil end
-  return {
-    position = "absolute", left = gutter, right = gutter, bottom = 0, height = M.chat_fade, z = 1,
-    gradient = { clear, solid },
-  }
-end
-
 -- The same at the top, shorter: what scrolls up out of the chat fades at
 -- the window's edge instead of being cut there. It covers no more than the
 -- list's top padding, so the first line at the top of a chat is clear.
 M.chat_fade_top = 14
-local function chat_fade_top(gutter)
+
+-- The fade over that padding, from clear to the chat's surface at the
+-- composer's edge (`top`: at the window's). nil when the scheme's
+-- background is not a hex color.
+local function chat_fade(gutter, top)
   local clear, solid = style.alpha("Normal", "00", "bg"), style.alpha("Normal", "ff", "bg")
   if not clear or not solid then return nil end
   return {
-    position = "absolute", left = gutter, right = gutter, top = 0, height = M.chat_fade_top, z = 1,
-    gradient = { solid, clear },
+    position = "absolute", left = gutter, right = gutter, z = 1, [top and "top" or "bottom"] = 0,
+    height = top and M.chat_fade_top or M.chat_fade, gradient = top and { solid, clear } or { clear, solid },
   }
 end
 
@@ -353,7 +344,7 @@ local function short_path(cwd)
   return cwd == "~" and "~/" or cwd
 end
 
-function M.header(session)
+function M.header(session, width)
   if require("bone.nodes.titlebar").offset() > 0 then return nil end
   M.menu_nodes = nil
   local icons = require("bone.nodes.icons")
@@ -372,9 +363,11 @@ function M.header(session)
   end
   bar[#bar + 1] = { text = title or "New chat", size = style.size.body, medium = title ~= nil,
     hl = title and "Normal" or muted, wrap = false, text_overflow = "ellipsis", shrink = 1 }
-  if path then
+  -- The folder keeps its shape (the title gives way first), and goes where
+  -- there is no room for it.
+  if path and (width or math.huge) >= 420 then
     bar[#bar + 1] = style.finish({
-      direction = "row", align = "center", gap = 6, height = 24, padding = { 0, 9, 0, 8 }, shrink = 1,
+      direction = "row", align = "center", gap = 6, height = 24, padding = { 0, 9, 0, 8 }, shrink = 0, max_width = 220,
       radius = 12, border = 1, border_color = "PromptBorder", tooltip = (session and session.cwd) or os.getenv("PWD"),
       icons.node("folder", { size = 13, hl = "Dim" }),
       { text = path, size = style.size.small, hl = muted, wrap = false, text_overflow = "ellipsis", shrink = 1 },
@@ -401,6 +394,7 @@ function M.header(session)
     -- Over everything (M.body puts it at the window's top), with a press
     -- anywhere else closing it.
     local menu = widgets.surface({
+      id = "chat-menu", transition = style.appear(),
       position = "absolute", right = 12, top = require("bone.nodes.titlebar").offset() + M.header_height - 4,
       z = 30, width = 200, padding = 4,
       shadow = style.shadow.menu,
@@ -452,8 +446,8 @@ function M.column(ctx, opts)
   })
   if here then
     chat[#chat + 1] = chat_fade(gutter)
-    chat[#chat + 1] = chat_fade_top(gutter)
-    chat[#chat + 1] = jump()
+    chat[#chat + 1] = chat_fade(gutter, true)
+    chat[#chat + 1] = jump(gutter)
   end
   local below = {
     direction = "column", padding = { 0, gutter + scrollbar_inset, 18, gutter }, gap = 4,
@@ -487,7 +481,7 @@ function M.column(ctx, opts)
   -- manager's title bar instead, unless it asks for `header = true`.
   local header = opts.header
   if header == nil then header = opts.on_focus == nil end
-  return { grow = 1, direction = "column", header and M.header(session) or nil, chat, middle, below }
+  return { grow = 1, direction = "column", header and M.header(session, width) or nil, chat, middle, below }
 end
 
 --- The chats beside the sidebar: the chat on screen's column. A plugin
@@ -522,7 +516,6 @@ M.titlebar_z = 9
 --- what floats over them. ctx = { width, height, cell } of that area.
 function M.body(ctx)
   local sidebar = require("bone.desktop.sidebar")
-  local side, room, backdrop = sidebar.node(ctx)
   local alpha = see_through()
   local chat_bg = alpha and (bone.hl.get("Normal") or {}).bg or "Normal"
   -- The chat fills the window. The sidebar is a card on it, in a lane at
@@ -531,13 +524,16 @@ function M.body(ctx)
   local main = style.finish({
     grow = 1, width = 0, direction = "row", bg = chat_bg, overflow = "hidden",
   })
-  room = (side and not backdrop) and room or 0
+  -- The sidebar floats over the chat where what the docks leave has no
+  -- room for both.
   local width, height = ctx.width, ctx.height
   local left, used = M.docked("left", ctx, width)
   width = width - used
   local right
   right, used = M.docked("right", ctx, width)
   width = width - used
+  local side, room, backdrop = sidebar.node({ width = width, height = height, cell = ctx.cell })
+  room = (side and not backdrop) and room or 0
   local dock_ctx = { width = width, height = height, cell = ctx.cell }
   local top
   top, used = M.docked("top", dock_ctx, height)

@@ -187,7 +187,6 @@ async fn translucent_picker_does_not_stack_backgrounds() {
       local info = bone.gui.window_info
       bone.gui.window_info = function() return { opacity = 0.5 } end
       local sidebar = require('bone.desktop.sidebar')
-      sidebar.slide_ms = 1
       sidebar.open()
       local root = require('bone.nodes.window').view({ width = 1000, height = 700 })
       bone.gui.window_info = info

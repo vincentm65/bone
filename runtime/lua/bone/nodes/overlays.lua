@@ -75,15 +75,11 @@ local function ask_key(k)
   return true
 end
 
--- Plain: the built-in card and the large image lose their radius and shadow.
--- Fills stay (the scrim, a floating panel). style.finish owns that once it exists.
+-- Plain: the built-in card and the large image, and what is in them, lose
+-- their radius and shadow (style.finish). Fills stay (the scrim, a panel).
 local function finish(node)
   if type(node) ~= "table" then return node end
-  if type(style.finish) == "function" then
-    style.finish(node)
-  elseif style.plain then
-    node.radius, node.shadow = nil, nil
-  end
+  style.finish(node)
   if style.plain then
     for i, child in ipairs(node) do node[i] = finish(child) end
   end
@@ -138,6 +134,7 @@ local function ask_dialog()
         { padding = { 7, 16 }, focusable = false }) }
   end
   return {
+    id = "ask", transition = not style.plain and style.appear() or nil,
     position = "absolute", left = 0, right = 0, top = 0, bottom = 0, z = 10, block_input = true,
     bg = style.scrim.dialog, direction = "column", justify = "center", align = "center", finish(card),
   }

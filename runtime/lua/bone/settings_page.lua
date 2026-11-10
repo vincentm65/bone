@@ -25,8 +25,10 @@ end
 -- ---- what the tabs hold ----------------------------------------------------
 
 -- The frontend's options: built-in ones and those the runtime and plugins
--- define, saved as <scope>.<name> ("tui" or "gui").
-local function option_rows(scope)
+-- define, saved as <scope>.<name> ("tui" or "gui"). `group(name)`, where a
+-- frontend gives one, is the place of an option's group: the rows are then
+-- a group at a time, by name in each, with `group` on every row.
+local function option_rows(scope, group)
   local rows = {}
   local names = bone.o.names()
   table.sort(names)
@@ -43,8 +45,15 @@ local function option_rows(scope)
         default = info.default,
         desc = info.desc or "",
         path = scope .. "." .. name,
+        group = group and group(name) or nil,
       }
     end
+  end
+  if group then
+    table.sort(rows, function(a, b)
+      if a.group ~= b.group then return a.group < b.group end
+      return a.name < b.name
+    end)
   end
   return rows
 end
@@ -298,7 +307,7 @@ function M.new(want, opts)
   local function all_rows()
     local t = st.tabs[st.tab]
     if t.name == "general" then
-      local out = option_rows(opts.scope)
+      local out = option_rows(opts.scope, opts.group)
       for i, page in ipairs(st.tabs) do
         if page.section == 1 then
           out[#out + 1] = { kind = "page", label = page.title, page = i }

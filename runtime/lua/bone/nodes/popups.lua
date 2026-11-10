@@ -207,22 +207,27 @@ function M.menu(spec)
   return id
 end
 
---- The windows now open, as nodes (bottom first).
+--- The windows now open, as nodes (bottom first). Each fades in as it
+--- opens (named by its id, so one opening does not fade the others again).
 function M.nodes()
   local out = {}
   local placed = bone.gui.popups()
   local dimmed = false
+  local function add(node, id)
+    node.id, node.transition = "win:" .. id, not style.plain and style.appear() or nil
+    out[#out + 1] = node
+  end
   for _, p in ipairs(placed) do
     if p.node then
       -- A dialog dims the window behind it, once, under the first one.
       if not dimmed and not style.plain then
         dimmed = true
-        out[#out + 1] = { position = "absolute", left = 0, top = 0, right = 0, bottom = 0,
-          z = M.chrome.z + p.z - 1, bg = style.scrim.dialog }
+        add({ position = "absolute", left = 0, top = 0, right = 0, bottom = 0,
+          z = M.chrome.z + p.z - 1, bg = style.scrim.dialog }, "scrim")
       end
-      out[#out + 1] = node_window(p)
+      add(node_window(p), p.id)
     elseif #p.lines > 0 then
-      out[#out + 1] = lines_window(p, placed.cell)
+      add(lines_window(p, placed.cell), p.id)
     end
   end
   return out

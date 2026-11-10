@@ -15,6 +15,21 @@ local function slot(name, ctx) return bone.gui.slots.nodes(name, ctx) end
 -- When each running turn started, by session.
 local started = {}
 
+--- The seconds the turn running in `session` has taken, nil when none is
+--- (or the chat has no id yet). Whole seconds: it asks for the next one's
+--- frame, and the spinner animates on its own canvas between them.
+function M.elapsed(session)
+  local id = session and session.session_id
+  if not (session and session.running) then
+    if id then started[id] = nil end
+    return nil
+  end
+  bone.gui.invalidate(1000)
+  if not id then return nil end
+  started[id] = started[id] or os.time()
+  return os.time() - started[id]
+end
+
 -- A statusline failure already shown, so a later rebuild does not notify again.
 local reported_error
 
@@ -71,7 +86,6 @@ end
 --- The bar for `session`; `cell` is the monospace cell, which the spinner
 --- is as tall as.
 function M.node(session, cell)
-  local id = session and session.session_id
   -- A narrow window has no room for the whole bar: the pieces that do not
   -- fit go on a line of their own, and a piece too long for its line is
   -- cut short with an ellipsis. Nothing is painted over anything else.
@@ -79,18 +93,7 @@ function M.node(session, cell)
     -- Inset like the composer's attach "+" above it, so the two read as one edge.
     direction = "row", flex_wrap = true, padding = { 6, 22, 0, 22 }, gap = 12, align = "center",
   }
-  local elapsed
-  if session and session.running then
-    local since = id and (started[id] or os.time())
-    if id then started[id] = since end
-    -- The "Working · Ns" text is whole seconds; the spinner animates on its
-    -- own canvas, so the window is not built again on every animation frame.
-    bone.gui.invalidate(1000)
-    elapsed = since and (os.time() - since) or nil
-  elseif id then
-    started[id] = nil
-  end
-  local spans = statusline_spans(session, elapsed)
+  local spans = statusline_spans(session, M.elapsed(session))
   if spans then
     if session and session.running then
       bar[#bar + 1] = widgets.spinner(math.max(20, cell and cell.h or 20))

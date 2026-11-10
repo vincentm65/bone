@@ -1,5 +1,6 @@
 -- The desktop library's /setup (and the window that opens by itself on a
--- first run): a card the size of every dialog, a welcome with buttons, then the
+-- first run): a card the size of every dialog; a welcome with buttons in
+-- the middle of it, then the
 -- provider as a card to choose, its details as a form, and the plugins to
 -- add. The steps, their rows and what keys do are bone.setup's page; this
 -- draws it.
@@ -42,8 +43,7 @@ end
 
 -- A label over a group of entries.
 local function section(text)
-  return { text = text:sub(1, 1):upper() .. text:sub(2), hl = "Dim", size = style.size.small, medium = true,
-    padding = { 10, style.inset, 6, style.inset } }
+  return widgets.heading(text:sub(1, 1):upper() .. text:sub(2))
 end
 
 local function paragraph(text)
@@ -106,8 +106,7 @@ function M.view(page)
       for _, e in ipairs(st.log) do
         local active, failed = e.state == "active", e.state == "error"
         add({ direction = "row", gap = 6, align = "start", padding = { 1, 10 },
-          { text = active and "▸" or failed and "✗" or "✓", hl = active and "Accent" or failed and "ErrorMsg" or "DiffAdd",
-            bold = true, font = "mono", size = style.size.body, width = 14, wrap = false, shrink = 0 },
+          widgets.mark(active and "active" or failed and "failed" or "done"),
           { text = e.text, hl = active and "Normal" or failed and "ErrorMsg" or "Dim", size = style.size.body,
             grow = 1, width = 0 } })
       end
@@ -191,7 +190,13 @@ function M.view(page)
         add({ text = st.note[1], hl = st.note[2] and "ErrorMsg" or "Dim", size = style.size.caption, padding = { 2, 10 } })
       end
     end
-    -- The one dialog size, whichever step it shows.
+    -- The one dialog size, whichever step it shows. The welcome is short:
+    -- it stands in the middle of the card rather than at its top.
+    if st.step == "welcome" then
+      local middle = { grow = 1, direction = "column", justify = "center" }
+      for _, n in ipairs(items) do middle[#middle + 1] = n end
+      return style.as_dialog({ grow = 1, direction = "column", middle, widgets.footer(hints(page.hint())) })
+    end
     return style.as_dialog(widgets.list("setup", items, selected, { estimate = 40, footer = hints(page.hint()) }))
   end
 

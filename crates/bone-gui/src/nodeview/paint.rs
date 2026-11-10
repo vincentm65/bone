@@ -177,6 +177,11 @@ impl Gui {
         }
 
         let hover_before = frame.hover.len();
+        // What is in a node that follows the pointer follows it too.
+        let group = frame.group_hover;
+        if sensed {
+            frame.group_hover = hovered;
+        }
 
         // The style now: the node's own, then what hover, focus and press
         // change, in that order.
@@ -187,6 +192,7 @@ impl Gui {
         let mut opacity = s.opacity;
         let mut tint = tint;
         for state in [
+            group.then_some(&s.group_hover),
             hovered.then_some(&s.hover),
             focused.then_some(&s.focus),
             pressed.then_some(&s.active),
@@ -434,6 +440,7 @@ impl Gui {
             }
         }
         fx.opacity = previous_opacity;
+        frame.group_hover = group;
         // A child under the pointer keeps its parents hovered, as in CSS:
         // otherwise a button that shows on a row's hover hides as soon as
         // the pointer reaches it.
@@ -467,11 +474,15 @@ impl Gui {
         let id = format!("{key}#{prop}");
         frame.tweened.insert(id.clone());
         let now = std::time::Instant::now();
-        let tween = self.view.tweens.entry(id).or_insert(Tween {
-            from: value,
-            to: value,
-            at: now,
-        });
+        // The first time there is nothing to fade from, but clear (`enter`):
+        // a frame in already, so what appears is seen at once.
+        let (from, at) = if tr.enter && prop == "opacity" {
+            let frame = std::time::Duration::from_millis(16);
+            ([0.0; 4], now.checked_sub(frame).unwrap_or(now))
+        } else {
+            (value, now)
+        };
+        let tween = self.view.tweens.entry(id).or_insert(Tween { from, to: value, at });
         let progress = |t: &Tween| {
             let span = (tr.duration_ms / 1000.0).max(0.001);
             tr.easing.at(now.duration_since(t.at).as_secs_f32() / span)

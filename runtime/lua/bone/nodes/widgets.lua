@@ -48,6 +48,27 @@ function M.note(text, margin, hl)
   })
 end
 
+--- A quiet label over a group of entries.
+function M.heading(text)
+  return style.finish({
+    text = text, hl = "Dim", medium = true, size = style.size.small,
+    padding = { 2, style.inset }, margin = style.margin(6, 2),
+  })
+end
+
+--- The mark in front of a step or a check: "done" (a check), "failed" (a
+--- cross), "active" (an arrow), else a dot; in `hl`, or the state's own
+--- color. Drawn, so it asks no font for a glyph.
+local MARK = { done = { "check", "DiffAdd" }, failed = { "close", "ErrorMsg" }, active = { "chevron_right", "Accent" } }
+function M.mark(state, hl)
+  local m = MARK[state]
+  return {
+    width = 14, height = 16, shrink = 0, direction = "row", justify = "center", align = "center",
+    m and require("bone.nodes.icons").node(m[1], { size = 12, hl = hl or m[2], width = 2 })
+      or { width = 4, height = 4, radius = 2, bg = style.alpha(hl or "Dim", "ff", "fg", "#7a7a7a") },
+  }
+end
+
 --- A clickable piece of text in the accent color.
 function M.link(text, click, o)
   return M.press(extend({
@@ -154,36 +175,27 @@ function M.switch(on, click)
   return node
 end
 
---- A check mark in front of an option: a glyph node.
+--- A check box in front of an option: filled, with a check, when `on`.
 function M.checkbox(on, o)
-  return extend({
-    text = on and "☑" or "☐", hl = on and "Accent" or "Dim", size = style.size.lead,
-    role = "checkbox", selected = on,
-  }, o)
-end
-
---- The same as a span, to put in a line of text.
-function M.check_span(on)
-  return { text = on and "☑  " or "☐  ", hl = on and "Accent" or "Dim" }
+  local fill = on and style.alpha("Normal", "ff", "fg", "TextSelection") or nil
+  return style.finish(extend({
+    width = 14, height = 14, radius = 4, shrink = 0, bg = fill, justify = "center", align = "center",
+    border = 1, border_color = fill or "Muted", role = "checkbox", selected = on,
+    on and require("bone.nodes.icons").node("check", { size = 10, width = 2.4,
+      hl = style.alpha("Normal", "ff", "bg", "#000000") }) or nil,
+  }, o))
 end
 
 --- A checklist: `items` are { text, state = "todo", "active" or "done" }.
 --- A dot for one to do, an accent arrow and bold text for the active one, a
 --- green check and struck-through grey text for one done.
-local CHECK = {
-  todo = { mark = "·", hl = "Dim" },
-  active = { mark = "▸", hl = "Accent" },
-  done = { mark = "✓", hl = "DiffAdd" },
-}
 function M.checklist(items, o)
   local list = extend({ direction = "column", gap = 3 }, o)
   for _, it in ipairs(items) do
     local done, active = it.state == "done", it.state == "active"
-    local c = CHECK[it.state] or CHECK.todo
     list[#list + 1] = {
       direction = "row", gap = 6, align = "start", role = "checkbox", selected = done,
-      { text = c.mark, hl = c.hl, bold = done or nil, font = "mono", size = style.size.body,
-        width = 14, wrap = false, shrink = 0 },
+      M.mark(it.state),
       { text = tostring(it.text or ""), hl = done and "Dim" or "Normal", size = style.size.body,
         bold = active or nil, strike = done or nil, grow = 1, width = 0 },
     }
@@ -226,6 +238,36 @@ function M.tabs(names, current, pick, o)
   local margin = seg.margin
   seg.margin = nil
   return { direction = "row", margin = margin or style.margin(0, 6), padding = { 0, style.inset - 2 }, seg }
+end
+
+--- A dialog's head: its `title`, then at the right `o.tabs` (names; `o.tab`
+--- is the current one, `o.pick(i)` runs for another) and × (`o.close`).
+function M.dialog_head(title, o)
+  o = o or {}
+  return style.finish({
+    direction = "row", align = "center", gap = style.space.md, shrink = 0, min_height = 30, margin = { 0, 0, 6, 0 },
+    { text = title, hl = "Normal", bold = true, size = style.size.lead, grow = 1, width = 0, wrap = false,
+      text_overflow = "ellipsis", padding = { 0, style.inset } },
+    o.tabs and M.segmented(o.tabs, o.tab, o.pick) or nil,
+    o.close and M.icon_button("close", "Close (esc)", o.close, { box = 28, size = 15, radius = style.radius.md }) or nil,
+  })
+end
+
+--- A dialog's search field, under its head: `query`, with the cursor while
+--- `o.typing`; `o.placeholder`; `o.click` (a press on it), `o.clear` (its ×,
+--- while there is a query), else `o.key` as the cap that comes to it.
+function M.search_box(query, o)
+  local shown = o.typing and (query .. "▏") or (query ~= "" and query or (o.placeholder or "Search"))
+  return M.press({
+    direction = "row", align = "center", gap = 8, shrink = 0, height = 32, margin = { 0, 0, 6, 0 },
+    padding = { 0, style.inset }, bg = "Normal", radius = style.radius.md, border = 1,
+    border_color = o.typing and "Muted" or "PromptBorder", cursor = "text",
+    require("bone.nodes.icons").node("search", { size = 15, hl = "Dim" }),
+    { text = shown, hl = (o.typing or query ~= "") and "Normal" or "Dim", size = style.size.body, grow = 1, width = 0,
+      wrap = false, text_overflow = "ellipsis" },
+    (query ~= "" and o.clear) and M.icon_button("close", "Clear the search", o.clear, { box = 20, size = 13 })
+      or (o.key and not o.typing and M.keycap(o.key)) or nil,
+  }, o.click, "button", false)
 end
 
 --- A form field: `label` over a box holding `value` (`editing` adds the
@@ -282,20 +324,32 @@ local KEYS = {
   backspace = 1, delete = 1, wheel = 1,
 }
 
+-- A single character is a key too ("/", "?", "x").
 local function is_key(k)
-  return KEYS[k] ~= nil or k:match("^%w$") ~= nil or k:match("^%a+%+.+$") ~= nil or k:match("^[fF]%d%d?$") ~= nil
+  return KEYS[k] ~= nil or #k == 1 or k:match("^%a+%+.+$") ~= nil or k:match("^[fF]%d%d?$") ~= nil
+end
+
+--- A key as a small outlined cap, named one way everywhere: "esc" and
+--- "Esc" are "Esc", "ctrl+o" is "Ctrl O"; a single character is itself.
+function M.keycap(key)
+  if #key > 1 and key:match("^%a") then
+    key = key:gsub("%+", " "):gsub("%a+", function(w) return #w > 1 and (w:sub(1, 1):upper() .. w:sub(2)) or w:upper() end)
+  end
+  local cap = {
+    text = key, size = style.size.micro, font = "mono", hl = "Dim", wrap = false,
+    border = 1, border_color = "PromptBorder", radius = style.radius.sm - 2, padding = { 1, 5 },
+  }
+  if key == "↑↓" then
+    -- Drawn: the font's two arrows run together.
+    local icons = require("bone.nodes.icons")
+    cap.text, cap.direction, cap.align, cap.height = nil, "row", "center", 18
+    cap[1], cap[2] = icons.node("arrow_up", { size = 10 }), icons.node("arrow_down", { size = 10 })
+  end
+  return style.finish(cap)
 end
 
 --- A row of key hints from a line such as "↑↓ move · enter open · esc
 --- close": each key a small keycap, then what it does.
---- A key as a small outlined cap ("Ctrl O", "esc").
-function M.keycap(key)
-  return style.finish({
-    text = key, size = style.size.micro, font = "mono", hl = "Dim", wrap = false,
-    border = 1, border_color = "PromptBorder", radius = style.radius.sm - 2, padding = { 1, 5 },
-  })
-end
-
 function M.hints(text, margin)
   local m = margin or { 8, 0 }
   local row = {
@@ -304,11 +358,11 @@ function M.hints(text, margin)
   }
   for part in (text .. " · "):gmatch("(.-) · ") do
     local key, what = part:match("^(%S+)%s+(.*)$")
-    -- Esc stands apart, at the right.
-    if key and (key == "esc" or key == "Esc") then row[#row + 1] = { grow = 1 } end
     if key and is_key(key) then
+      -- Esc stands apart, at the right of its line (the last, if they wrap).
+      local esc = key:lower() == "esc"
       row[#row + 1] = {
-        direction = "row", gap = 6, align = "center",
+        direction = "row", gap = 6, align = "center", grow = esc and 1 or nil, justify = esc and "end" or nil,
         M.keycap(key),
         { text = what, size = style.size.small, hl = "Dim" },
       }
@@ -382,6 +436,14 @@ end
 
 local shown = {} -- list id -> the entry last scrolled into view
 
+--- A dialog's foot: `node` (the keys) under a hairline the width of the window.
+function M.footer(node)
+  node.shrink = 0
+  return { direction = "column", shrink = 0, margin = { 4, -style.inset - 4, 0, -style.inset - 4 },
+    padding = { 6, style.inset + 4, 0, style.inset + 4 }, border = { 1, 0, 0, 0 }, border_color = "WinSeparator",
+    node }
+end
+
 --- A scrolling list of `items` (nodes) for a window or panel, entry
 --- `selected` (an index) kept in view; `id` names it. `opts.fit`: the
 --- window is as tall as its entries, not the room it was given.
@@ -401,11 +463,7 @@ function M.list(id, items, selected, opts)
     list = { count = #items, estimate = opts.estimate or 56, key = id, item = function(i) return items[i] end, fit = opts.fit },
   }
   if not opts.footer then return list end
-  -- The keys under a hairline, the width of the window.
-  opts.footer.shrink = 0
-  opts.footer = { direction = "column", shrink = 0, margin = { 4, -style.inset - 4, 0, -style.inset - 4 },
-    padding = { 6, style.inset + 4, 0, style.inset + 4 }, border = { 1, 0, 0, 0 }, border_color = "WinSeparator",
-    opts.footer }
+  opts.footer = M.footer(opts.footer)
   -- A dialog's list fades into its footer rather than cutting a row there.
   local clear, solid = style.alpha("Panel", "00", "bg"), style.alpha("Panel", "ff", "bg")
   if clear and solid and not opts.fit then
@@ -421,9 +479,9 @@ end
 M.spin = { dots = 10, interval = 100 }
 
 --- A ring of dots with a bright head that goes around, drawn on a canvas
---- of its own every frame (at most 60 a second), so the window is not built
---- again to animate it and the head moves on each step, not up to a frame
---- late. `side` is its size in pixels.
+--- of its own, so the window is not built again to animate it. It is drawn
+--- twice a step: the head moves on time, and nothing is painted between.
+--- `side` is its size in pixels.
 function M.spinner(side)
   local s = M.spin
   -- The head is the running color; the dots behind it fade from the text's.
@@ -435,7 +493,7 @@ function M.spinner(side)
   return {
     width = side, height = side, role = "none",
     canvas = {
-      fps = 60,
+      fps = 2000 / s.interval,
       draw = function(ctx)
         local draw, dots, count = bone.gui.draw, {}, s.dots
         local head = math.floor(ctx.time * 1000 / s.interval) % count

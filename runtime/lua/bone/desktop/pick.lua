@@ -9,7 +9,7 @@ local md = require("bone.desktop.markdown")
 local nodes = require("bone.nodes")
 local style = require("bone.nodes.style")
 local widgets = require("bone.nodes.widgets")
-local title, note, entry, hints = widgets.title, widgets.note, widgets.entry, widgets.hints
+local note, entry, hints = widgets.note, widgets.entry, widgets.hints
 
 --- The picker's spec for `page` (bone.ui.windows.select): a heading, a
 --- search field, the matches, and the keys.
@@ -19,13 +19,13 @@ function M.select(page)
   local function node()
     local list = page.matches()
     st.sel = math.max(1, math.min(st.sel, math.max(#list, 1)))
-    local items = {}
-    if opts.prompt then items[#items + 1] = title(opts.prompt) end
-    items[#items + 1] = {
-      text = st.query == "" and "Search…" or (st.query .. "▏"), size = style.size.body, hl = st.query == "" and "Dim" or "Normal",
-      bg = "InputBackground", radius = style.radius.lg, padding = { 6, 10 }, margin = { 0, 0, 6, 0 },
-      border = 1, border_color = "Accent",
+    -- As every dialog: the title and ×, the search under them (typing goes
+    -- there), over the matches.
+    local top = { direction = "column", shrink = 0,
+      widgets.dialog_head(opts.prompt or "Choose", { close = function() page.finish(nil) end }),
+      widgets.search_box(st.query, { typing = true }),
     }
+    local items = {}
     if st.loading then
       items[#items + 1] = note("Loading…", { 4, 4 })
     elseif #list == 0 then
@@ -39,8 +39,8 @@ function M.select(page)
     end
     local footer = opts.footer == nil and "↑↓ move · enter open · esc close" or opts.footer
     -- The one dialog size, however many match.
-    return style.as_dialog(widgets.list("select:" .. page.id, items, selected,
-      { estimate = 28, footer = footer and hints(footer) or nil }))
+    return style.as_dialog({ direction = "column", grow = 1, top, widgets.list("select:" .. page.id, items, selected,
+      { estimate = 28, footer = footer and hints(footer) or nil }) })
   end
 
   return { node = node }
@@ -58,16 +58,17 @@ function M.pager(page)
     local body
     if type(content) == "string" then
       body = { direction = "column", size = md.text_size, padding = { 0, 10 } }
-      nodes.append(body, md.nodes(content))
+      nodes.append(body, md.nodes(content, nil, { id = list }))
     elseif type(content) == "table" and content.kind then
       body = { direction = "column", padding = { 0, 10 }, require("bone.elements").node(content, {}, {}, false) }
     else
       body = require("bone.nodes").lines_node(content)
       body.padding = { 0, 10 }
     end
-    local items = { body }
-    if opts.title then table.insert(items, 1, title(opts.title)) end
-    return widgets.list(list, items, nil, { fit = true, footer = hints("↑↓ scroll · esc close") })
+    local view = widgets.list(list, { body }, nil, { fit = true, footer = hints("↑↓ scroll · esc close") })
+    if not opts.title then return view end
+    return { direction = "column", grow = 1, fit = true,
+      widgets.dialog_head(opts.title, { close = page.close }), view }
   end
 
   local function on_key(k)

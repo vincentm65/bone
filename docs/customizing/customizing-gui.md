@@ -140,7 +140,8 @@ otherwise it is a box.
 | `shadow` | `{ blur, spread, dx, dy, color }` or a list of them |
 | `opacity` | 0 to 1, for the node and everything in it |
 | `hover`, `active`, `focus` | `{ bg, gradient, border_color, color, opacity, shadow }`: what changes while the pointer is over the node, pressing it, or it has the keyboard focus. `color` recolors the text in it. Applied by Rust each frame, with no rebuild in Lua |
-| `transition` | `150` (ms) or `{ duration = 150, easing = "ease-out" }` (`linear`, `ease-in`, `ease-out`, `ease-in-out`): the node's background, border color and opacity fade to what they change to (from `hover` and the other states, or when Lua builds the view again) instead of jumping. A color that appears or goes away fades its alpha. Size, margin and padding are not faded: step those in Lua |
+| `group_hover` | The same, while the pointer is over the nearest node around this one that follows the pointer (one with a handler, a `cursor`, a `hover` look or a `tooltip`): a row's buttons shown over the row are `opacity = 0, group_hover = { opacity = 1 }`, with no `on_hover` and no rebuild |
+| `transition` | `150` (ms) or `{ duration = 150, easing = "ease-out" }` (`linear`, `ease-in`, `ease-out`, `ease-in-out`; `enter = true` fades the node in from clear when it appears, so give it an `id`): the node's background, border color and opacity fade to what they change to (from `hover` and the other states, or when Lua builds the view again) instead of jumping. A color that appears or goes away fades its alpha. Size, margin and padding are not faded: step those in Lua |
 | `tooltip` | text shown while the pointer rests on the node |
 
 Colors are `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `"transparent"`, or the
@@ -463,9 +464,10 @@ pane, and reveal it again before focusing it.
 
 ## A narrow window
 
-Under `require("bone.desktop.sidebar").overlay_below` pixels (760) the
-sessions sidebar floats over the chat on a backdrop that closes it, instead
-of taking room from it; choosing a chat closes it.
+Where the chat beside it would be under
+`require("bone.desktop.sidebar").chat_min` pixels (480), counting what the
+docked panels take, the sessions sidebar floats over the chat on a backdrop
+that closes it, instead of taking room from it; choosing a chat closes it.
 
 A row too narrow for its pieces does not pile them on top of each other:
 the pieces that do not fit go on a line of their own, and a piece too long

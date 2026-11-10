@@ -41,13 +41,11 @@ M.space = { xs = 2, sm = 4, md = 8, lg = 12, xl = 16 }
 M.inset = 10
 
 --- Shadows. Only what floats casts one (the composer, a menu, a dialog),
---- and it is the same one.
-M.shadow = {
-  card = { blur = 48, dy = 18, color = "#000000b3" },
-  menu = { blur = 48, dy = 18, color = "#000000b3" },
-  big = { blur = 48, dy = 18, color = "#000000b3" },
-  bubble = { blur = 48, dy = 18, color = "#000000b3" },
-}
+--- and it is the same one under every name (card, menu, big, bubble): deep
+--- on a dark scheme, faint on a light one. Set a name to give it its own.
+M.shadow = setmetatable({}, { __index = function()
+  return { blur = 48, dy = 18, color = M.dark() and "#000000b3" or "#00000024" }
+end })
 
 --- The size of a dialog (settings, the catalog, setup, a picker, help), in
 --- pixels: one size for all of them, kept while what they hold changes.
@@ -62,8 +60,14 @@ end
 --- The dimmed backdrops behind a dialog and behind a large image.
 M.scrim = { dialog = "#0000009e", image = "#000000d8" }
 
---- How long things animate, in milliseconds.
-M.motion = { fast = 50, base = 60, slow = 80 }
+--- How long things animate, in milliseconds: a hover is quick, a change
+--- of state (a switch, a tab, what appears) is long enough to be seen.
+M.motion = { fast = 50, base = 60, slow = 120 }
+
+--- The `transition` of what appears (a dialog, a menu): it fades in.
+function M.appear()
+  return { duration = M.motion.slow, easing = "ease-out", enter = true }
+end
 
 -- The channels of a "#rrggbb" color, or nil.
 local function rgb(color)

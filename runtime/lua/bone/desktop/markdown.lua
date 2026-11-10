@@ -8,14 +8,21 @@ local style = require("bone.nodes.style")
 
 M.text_size = style.size.text
 M.small_size = style.size.caption
+--- A line of reading text, in pixels: prose is set looser than the
+--- interface, which keeps the font's own.
+M.line_height = 22
+
+-- The bar of what scrolls sideways in the text (a table, a code block).
+local BAR = { width = 3, inset = 2 }
 
 --- Selectable text of `spans` (`{ text, hl, ... }` or `{ "text", "Group" }`).
 --- opts: size, font, hl (the group of the text around the spans), gap (px
---- above) and indent (px on the left).
+--- above), indent (px on the left) and line_height (px).
 function M.text(spans, opts)
   opts = opts or {}
   return style.finish({
     spans = spans, size = opts.size, font = opts.font, hl = opts.hl, selectable = true,
+    line_height = opts.line_height,
     margin = (opts.gap or 0) > 0 and { opts.gap, 0, 0, 0 } or nil,
     padding = (opts.indent or 0) > 0 and { 0, 0, 0, opts.indent } or nil,
   })
@@ -24,14 +31,21 @@ end
 --- Text on a band across the width (a code block, a row of a diff): opts as
 --- M.text's, and bg (default CodeBlock), pad (px around the text, default
 --- 8), radius (default 6). The font is monospace unless opts.font says.
+--- With `scroll` (an id, the window's own), a line too long is not wrapped:
+--- the band scrolls sideways, its bar in the padding under the text.
 function M.band(spans, opts)
   opts = opts or {}
   local pad = opts.pad or 8
+  local text = M.text(spans, { size = opts.size, font = opts.font or "mono" })
+  if opts.scroll then
+    text.wrap, text.shrink, text.margin = false, 0, { 0, 0, pad, 0 }
+    text = { id = opts.scroll, direction = "row", overflow = "scroll", scrollbar = BAR, text }
+  end
   return style.finish({
     bg = opts.bg or "CodeBlock", radius = opts.radius or style.radius.sm,
-    padding = { pad, pad, pad, pad + (opts.indent or 0) },
+    padding = { pad, pad, opts.scroll and 0 or pad, pad + (opts.indent or 0) },
     margin = (opts.gap or 0) > 0 and { opts.gap, 0, 0, 0 } or nil,
-    M.text(spans, { size = opts.size, font = opts.font or "mono" }),
+    text,
   })
 end
 
@@ -90,10 +104,17 @@ local function table_widths(rows, size)
   return widths
 end
 
--- `text` as paragraphs: { spans, size, font, gap, indent, band }.
-local function paragraphs(text, group)
+-- `text` as paragraphs: { spans, size, font, gap, indent, band, scroll }.
+-- `id` names what scrolls sideways in it (a code block, a table): with
+-- none, code wraps and a table is cut at the pane's edge. `width` is the
+-- text's, in pixels, where it is the chat's: a table wider fades at its edge.
+local function paragraphs(text, group, id, width)
   group = group or "Normal"
-  local out, gap = {}, 0
+  local out, gap, scrolls = {}, 0, 0
+  local function scroll_id()
+    scrolls = scrolls + 1
+    return id and (id .. ":" .. scrolls)
+  end
   local function add(p)
     p.gap = (p.gap or 0) + gap
     gap = 0
@@ -107,7 +128,9 @@ local function paragraphs(text, group)
       prev[#prev + 1] = { text = " ", hl = group }
       for _, s in ipairs(M.spans(b.spans, group)) do prev[#prev + 1] = s end
     elseif k == "paragraph" then
-      add({ spans = M.spans(b.spans, group), gap = #out > 0 and 4 or 0 })
+      -- A line all in bold heads what follows: it stands off what is above.
+      local heads = #b.spans == 1 and b.spans[1].bold
+      add({ spans = M.spans(b.spans, group), gap = #out > 0 and (heads and 12 or 4) or 0, prose = true })
     elseif k == "heading" then
       -- Nearer what it heads than what is above it.
       local size = ({ 22, 19, 17 })[b.level] or M.text_size + 1
@@ -122,16 +145,17 @@ local function paragraphs(text, group)
       local body = { { text = "\u{200B}", hl = group } }
       for _, s in ipairs(M.spans(b.spans, group)) do body[#body + 1] = s end
       add({ gap = 2, node = {
-        direction = "row", align = "start", padding = { 0, 0, 0, indent },
+        direction = "row", align = "start", padding = { 0, 0, 0, indent }, line_height = M.line_height,
         { text = marker, hl = "MdBullet", size = M.text_size, width = b.ordered and (#marker * 9 + 6) or 14,
           shrink = 0, wrap = false },
         style.finish({ spans = body, size = M.text_size, selectable = true, grow = 1, width = 0 }),
       } })
     elseif k == "quote" then
-      add({ spans = M.spans(b.spans, "MdQuote"), indent = 14, gap = 4 })
+      add({ spans = M.spans(b.spans, "MdQuote"), indent = 14, gap = 4, prose = true })
     elseif k == "code" then
       local body = table.concat(b.lines or {}, "\n")
-      add({ spans = { { text = body, hl = "MdCodeBlock" } }, size = M.small_size, band = true, gap = 6 })
+      add({ spans = { { text = body, hl = "MdCodeBlock" } }, size = M.small_size, band = true, gap = 6,
+        scroll = scroll_id() })
     elseif k == "table" then
       -- One padded line wraps in the pane and piles the next cell onto it.
       -- Each cell is its own text, so a long note wraps inside its column.
@@ -183,13 +207,22 @@ local function paragraphs(text, group)
         col[#col + 1] = line
       end
       -- Wider than the chat (a narrow window), the table scrolls sideways
-      -- rather than breaking its words; the columns never go under their
-      -- longest word.
+      -- rather than breaking its words (its bar in the space under it); the
+      -- columns never go under their longest word.
       local least = 0
       for j, w in pairs(widths) do least = least + w.word + (j > 1 and 16 or 0) end
       least = least + 2 * 12 + 2
-      col.grow, col.width, col.min_width = 1, 0, least
-      add({ node = { direction = "row", overflow = "scroll", col }, gap = 6 })
+      col.grow, col.width, col.min_width, col.margin = 1, 0, least, { 0, 0, 8, 0 }
+      local node = { id = scroll_id(), direction = "row", overflow = "scroll", scrollbar = BAR, col }
+      local clear, solid = style.alpha("Normal", "00", "bg"), style.alpha("Normal", "ff", "bg")
+      if width and least > width and clear and solid then
+        -- More to the right than shows: that edge fades into the chat, over
+        -- room left for it after the last column.
+        col.margin[2], node.grow, node.width = 24, 1, 0
+        node = { direction = "row", node, { position = "absolute", top = 0, right = 0, bottom = 8, width = 24,
+          gradient = { angle = 90, stops = { clear, solid } } } }
+      end
+      add({ node = node, gap = 6 })
     elseif k == "rule" then
       add({ spans = { { text = "———", hl = "Dim" } }, gap = 6 })
     elseif k == "blank" then
@@ -202,17 +235,20 @@ end
 
 --- `text` as a list of nodes, a paragraph each; `group` is the body text's
 --- (default Normal). opts: size (every paragraph's, headings and code too),
---- indent (px more on the left).
+--- indent (px more on the left), id (a name of the window's own for this
+--- text: its code blocks and tables then scroll sideways), width (the
+--- text's in pixels, in the chat).
 function M.nodes(text, group, opts)
   opts = opts or {}
   local out = {}
-  for _, p in ipairs(paragraphs(text, group)) do
+  for _, p in ipairs(paragraphs(text, group, opts.id, opts.width)) do
     if p.node then
       if (p.gap or 0) > 0 then p.node.margin = { p.gap, 0, 0, 0 } end
       out[#out + 1] = style.finish(p.node)
     else
-      local o = { size = opts.size or p.size, font = p.font, gap = p.gap,
-        indent = (p.indent or 0) + (opts.indent or 0) }
+      local o = { size = opts.size or p.size, font = p.font, gap = p.gap, scroll = p.scroll,
+        indent = (p.indent or 0) + (opts.indent or 0),
+        line_height = p.prose and not opts.size and M.line_height or nil }
       out[#out + 1] = p.band and M.band(p.spans, o) or M.text(p.spans, o)
     end
   end

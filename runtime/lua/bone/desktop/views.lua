@@ -85,7 +85,7 @@ end
 -- The message's text, unless it has none (only images).
 local function message(item, group)
   if not (item.text or ""):match("%S") then return {} end
-  return { md.text({ { item.text, group } }) }
+  return { md.text({ { item.text, group } }, { line_height = md.line_height }) }
 end
 
 -- ---- views -----------------------------------------------------------------
@@ -108,7 +108,8 @@ function M.assistant(item, ctx)
     if not item.streaming then return nil end
     out = { md.text({ { "…", "Dim" } }) }
   else
-    out = md.nodes(text)
+    out = md.nodes(text, nil, { id = "md:" .. tostring(item.key or item.id or item.index),
+      width = ctx and ctx.width_px and ctx.width_px - 8 })
   end
   if item.streaming and #out > 0 then
     -- A table has no text of its own to end on: the dots go under it.

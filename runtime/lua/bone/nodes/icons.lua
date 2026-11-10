@@ -49,16 +49,21 @@ local shapes = {
     9, 3, 4, 8, 3, 9.5, 3, 11, 3.6, 12.4, 5, 13.3, 6.5, 13.5, 8, 13 } } },
 }
 
+-- Draw lists already made, by icon, size, color and stroke: the window is
+-- built again often, and an icon need not be worked out again each time.
+local made = {}
+
 --- Add or replace icon `name` (shapes on a 16px grid).
-function M.define(name, list) shapes[name] = list end
+function M.define(name, list) shapes[name], made = list, {} end
 
 --- Whether there is an icon called `name`.
 function M.has(name) return shapes[name] ~= nil end
 
--- The draw list for `list` scaled by `k`, stroked in `color`.
+-- The draw list for `list` scaled by `k`, stroked in `color`; and whether
+-- it holds for good (a dot is filled in a group's color as it is now).
 local function draw_list(list, k, color, width)
   local d = bone.gui.draw
-  local out = {}
+  local out, fixed = {}, true
   for _, s in ipairs(list) do
     local kind = s[1]
     if kind == "circle" then
@@ -68,7 +73,7 @@ local function draw_list(list, k, color, width)
       local fill = color
       if not tostring(color):match("^#") then
         local g = bone.hl.get(color) or {}
-        fill = g.fg or color
+        fill, fixed = g.fg or color, false
       end
       out[#out + 1] = d.circle({ x = s[2] * k, y = s[3] * k, r = s[4] * k, fill = fill })
     elseif kind == "line" then
@@ -82,7 +87,7 @@ local function draw_list(list, k, color, width)
       out[#out + 1] = d.polyline({ points = pts, closed = s[3] or false, color = color, width = width })
     end
   end
-  return out
+  return out, fixed
 end
 
 --- Icon `name` as a node. o: size (16), hl (a group or "#rrggbb"; "Dim"),
@@ -94,9 +99,15 @@ function M.node(name, o)
   local k = size / 16
   local color = o.hl or "Dim"
   local width = (o.width or 1.5) * math.max(0.85, k)
+  local key = table.concat({ name, size, color, width }, "|")
   local node = {
     width = size, height = size, shrink = 0,
-    canvas = { draw = function() return list and draw_list(list, k, color, width) or {} end },
+    canvas = { draw = function()
+      if made[key] or not list then return made[key] or {} end
+      local ops, fixed = draw_list(list, k, color, width)
+      if fixed then made[key] = ops end
+      return ops
+    end },
   }
   for key, v in pairs(o) do
     if key ~= "size" and key ~= "hl" and key ~= "width" then node[key] = v end

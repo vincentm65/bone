@@ -12,17 +12,18 @@ local nodes = require("bone.nodes")
 local style = require("bone.nodes.style")
 local widgets = require("bone.nodes.widgets")
 
-local title, note, entry, hints = widgets.title, widgets.note, widgets.entry, widgets.hints
+local note, entry, hints = widgets.note, widgets.entry, widgets.hints
 
---- Read Markdown `text` in a window titled `name`; esc closes it.
-function M.read(text, name)
+-- A dialog that is read: its title and × over what scrolls (`body()`'s
+-- nodes), and esc. `sized`: the size of every dialog, not all the room.
+local function reader(name, key, body, keys, sized)
   local id
   id = bone.ui.popup({
     node = function()
-      local body = { direction = "column", size = md.text_size, padding = { 0, 10 } }
-      nodes.append(body, md.nodes(text or ""))
-      return widgets.list("read:" .. id, { title(name or "Help"), body },
-        nil, { footer = hints("wheel scroll · esc close") })
+      local view = { direction = "column", grow = 1,
+        widgets.dialog_head(name, { close = function() bone.ui.close(id) end }),
+        widgets.list(key .. id, body(), nil, { estimate = 40, footer = hints(keys) }) }
+      return sized and style.as_dialog(view) or view
     end,
     on_key = function(k)
       if k == "esc" or k == "q" or k == "ctrl+c" then bone.ui.close(id) end
@@ -30,6 +31,15 @@ function M.read(text, name)
     end,
   })
   return id
+end
+
+--- Read Markdown `text` in a window titled `name`; esc closes it.
+function M.read(text, name)
+  return reader(name or "Help", "read:", function()
+    local body = { direction = "column", size = md.text_size, padding = { 0, 10 } }
+    nodes.append(body, md.nodes(text or "", nil, { id = "read" }))
+    return { body }
+  end, "wheel scroll · esc close")
 end
 
 --- A guide or section by name ("lua", "keys"), in the reader.
@@ -53,24 +63,19 @@ function M.open()
   local function node()
     list = help.list(st.tab, st.query)
     st.sel = math.max(1, math.min(st.sel, math.max(1, #list)))
-    -- A palette: the search is the top line (the tabs at its right), set
-    -- off by a hairline; then one line per entry, and the keys.
-    local icons = require("bone.nodes.icons")
-    local top = style.finish({
-      direction = "row", align = "center", gap = 10, height = 50, shrink = 0,
-      margin = { -6, -style.inset - 4, 4, -style.inset - 4 }, padding = { 0, style.inset + 4, 0, style.inset + 6 },
-      border = { 0, 0, 1, 0 }, border_color = "WinSeparator",
-      icons.node("search", { size = 16, hl = "Dim" }),
-      { text = st.query == "" and "Search commands, keys and docs" or (st.query .. "▏"),
-        hl = st.query == "" and "Dim" or "Normal", size = style.size.text, grow = 1, width = 0, wrap = false,
-        text_overflow = "ellipsis" },
-      widgets.segmented(help.TABS, st.tab, function(i)
-        st.tab, st.query, st.sel = i, "", 1
-        bone.ui.update(id, {})
-      end, { align_self = "center" }),
-      widgets.icon_button("close", "Close (esc)", function() bone.ui.close(id) end,
-        { box = 28, size = 15, radius = style.radius.md }),
-    })
+    -- As every dialog: the title with the sections and × at its right,
+    -- the search under it (typing goes there), one line per entry, the keys.
+    local top = { direction = "column", shrink = 0,
+      widgets.dialog_head("Help", {
+        tabs = help.TABS, tab = st.tab,
+        pick = function(i)
+          st.tab, st.query, st.sel = i, "", 1
+          bone.ui.update(id, {})
+        end,
+        close = function() bone.ui.close(id) end,
+      }),
+      widgets.search_box(st.query, { typing = st.query ~= "", placeholder = "Search commands, keys and docs" }),
+    }
     local items = {}
     if #list == 0 then items[#items + 1] = note("No matches.", { 4, 4 }) end
     local selected, group
@@ -79,8 +84,7 @@ function M.open()
       -- Keys come in groups: a quiet heading over each.
       local g = st.tab == 2 and (it.meta or ""):match("^(.-) · ") or nil
       if g and g ~= group then
-        items[#items + 1] = { text = g, hl = "Dim", size = style.size.small, medium = true,
-          padding = { 8, style.inset, 4, style.inset } }
+        items[#items + 1] = widgets.heading(g)
       end
       group = g
       -- One line: the name (a key as a cap), and what it does.
@@ -143,15 +147,16 @@ function M.open()
   return id
 end
 
--- /health: this window's checks, then the core's.
-local MARK = { ok = { "•", "ToolDone" }, warn = { "!", "WarningMsg" }, error = { "×", "ErrorMsg" } }
+-- /health: this window's checks, then the core's. Each with its mark: a
+-- green dot, a cross for an error, an amber dot for anything else.
 local function checks(name, items, out)
-  out[#out + 1] = { text = name, hl = "Dim", medium = true, size = style.size.small, padding = { 2, style.inset }, margin = { 6, 0, 2, 0 } }
+  out[#out + 1] = widgets.heading(name)
   for _, it in ipairs(items) do
-    local m = MARK[it.status] or MARK.warn
     out[#out + 1] = {
       direction = "column", padding = { 4, style.inset },
-      { spans = { { text = m[1] .. "   ", hl = m[2], bold = true }, { text = it.name, hl = "Normal", bold = true } }, size = style.size.body },
+      { direction = "row", gap = 8, align = "center",
+        it.status == "error" and widgets.mark("failed") or widgets.mark(nil, it.status == "ok" and "ToolDone" or "WarningMsg"),
+        { text = it.name, hl = "Normal", bold = true, size = style.size.body } },
       { text = tostring(it.message), hl = "Dim", size = style.size.small, margin = { 2, 0, 0, 0 }, padding = { 0, 0, 0, 22 } },
     }
   end
@@ -161,23 +166,16 @@ function M.health()
   local mine = bone.api.health()
   for _, it in ipairs(bone._run_health()) do mine[#mine + 1] = it end
   local core
-  local id
-  id = bone.ui.popup({
-    node = function()
-      local items = { title("Health") }
-      checks("This window", mine, items)
-      if core then
-        checks("Core", core, items)
-      else
-        items[#items + 1] = note("Core: checking…", { 6, 0 })
-      end
-      return style.as_dialog(widgets.list("health:" .. id, items, nil, { estimate = 40, footer = hints("esc close") }))
-    end,
-    on_key = function(k)
-      if k == "esc" or k == "q" or k == "ctrl+c" then bone.ui.close(id) end
-      return true
-    end,
-  })
+  local id = reader("Health", "health:", function()
+    local items = {}
+    checks("This window", mine, items)
+    if core then
+      checks("Core", core, items)
+    else
+      items[#items + 1] = note("Core: checking…", { 6, 0 })
+    end
+    return items
+  end, "esc close", true)
   bone.request("health/check", {}, function(res, err)
     core = err and { { name = "core", status = "error", message = err } } or res or {}
     bone.ui.update(id, {})

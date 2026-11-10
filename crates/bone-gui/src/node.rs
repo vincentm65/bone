@@ -90,11 +90,13 @@ pub struct State {
 
 /// `transition = 150` (ms) or `{ duration = 150, easing = "ease-out" }`: what
 /// the node's background, border color and opacity change to (by Lua, or
-/// by `hover` and the other states) is faded to over that long.
+/// by `hover` and the other states) is faded to over that long. `enter`:
+/// the node fades in from clear when it appears.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transition {
     pub duration_ms: f32,
     pub easing: Easing,
+    pub enter: bool,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -255,6 +257,9 @@ pub struct Style {
     pub opacity: Option<f32>,
     /// Restyles while the pointer is over, pressing, or the focus is on
     /// the node. Applied by Rust each frame, with no rebuild in Lua.
+    /// `group_hover`: while it is over the nearest node around this one
+    /// that follows the pointer (a row's buttons, shown over the row).
+    pub group_hover: Option<Box<State>>,
     pub hover: Option<Box<State>>,
     pub active: Option<Box<State>>,
     pub focus: Option<Box<State>>,
@@ -1095,6 +1100,7 @@ fn transition(p: &Props) -> Result<Option<Transition>, String> {
             Some(Transition {
                 duration_ms: t.get("duration")?.unwrap_or(150.0),
                 easing: t.choice("easing")?.unwrap_or_default(),
+                enter: t.get("enter")?.unwrap_or(false),
             })
         }
         Some(v) => Some(Transition {
@@ -1102,6 +1108,7 @@ fn transition(p: &Props) -> Result<Option<Transition>, String> {
                 .ok_or("transition: a number of milliseconds or { duration, easing }")?
                 as f32,
             easing: Easing::default(),
+            enter: false,
         }),
     })
 }
@@ -1223,6 +1230,7 @@ pub fn parse(
             }
             h
         },
+        group_hover: state(&p, "group_hover", colors)?,
         active: state(&p, "active", colors)?,
         focus: state(&p, "focus", colors)?,
         tooltip: p.get("tooltip")?,

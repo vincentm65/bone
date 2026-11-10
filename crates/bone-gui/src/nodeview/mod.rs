@@ -348,6 +348,7 @@ pub(in crate::nodeview) fn needs_key(p: &Placed) -> bool {
     h.any()
         || s.cursor.is_some()
         || s.hover.is_some()
+        || s.group_hover.is_some()
         || s.active.is_some()
         || s.focus.is_some()
         || s.focusable == Some(true)
@@ -578,6 +579,9 @@ pub(in crate::nodeview) struct Frame {
     pub(in crate::nodeview) events: Vec<(u64, Arg)>,
     pub(in crate::nodeview) hits: Vec<Hit>,
     pub(in crate::nodeview) hover: std::collections::HashSet<String>,
+    /// Whether the pointer is over the nearest node that follows it around
+    /// the one being painted (`group_hover`).
+    pub(in crate::nodeview) group_hover: bool,
     pub(in crate::nodeview) pressed: std::collections::HashSet<String>,
     /// The tweens used this frame; the others are dropped.
     pub(in crate::nodeview) tweened: std::collections::HashSet<String>,
@@ -772,7 +776,13 @@ impl Gui {
                         .nodes
                         .iter()
                         .zip(&win.rects)
-                        .map(|(n, r)| flex::place(n, *r, &fonts))
+                        .map(|(n, r)| {
+                            // What scrolls inside an item (a table, a code
+                            // block) scrolls as it does in the window.
+                            let mut item = flex::place(n, *r, &fonts);
+                            apply_scroll(&mut item, &mut scroll);
+                            item
+                        })
                         .collect();
                     (id.clone(), (win.first, items))
                 })

@@ -56,12 +56,13 @@ use tokio::sync::mpsc;
 pub use crate::backend::Rect;
 pub use crate::backend::input::{Button, Event as InputEvent, Key, Modifiers};
 pub use crate::headless::Headless;
-pub use crate::native::run;
+pub use crate::native::{request_window, run, run_with};
 
 /// A chat. The line cache is `()`: the GUI draws items as nodes and uses
 /// the shared cache only to ask `stale_key` which of them changed.
 pub type ChatBuffer = bone_ui::chat::ChatBuffer<()>;
 
+#[derive(Clone)]
 pub struct GuiOptions {
     /// Where new sessions start.
     pub cwd: String,

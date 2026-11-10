@@ -1466,7 +1466,7 @@ async fn sidebar_rename_ends_on_a_click_away() {
     }
     let pencil = g
         .gui
-        .eval("(function() local r = bone.gui.rect('sidebar-rename') return r and (r.x + r.w / 2) .. ',' .. (r.y + r.h / 2) end)()")
+        .eval("(function() local r = bone.gui.rect('sidebar-edit:' .. bone.chat.session().session_id) return r and (r.x + r.w / 2) .. ',' .. (r.y + r.h / 2) end)()")
         .unwrap();
     let (x, y) = pencil.split_once(',').expect("no rename action");
     g.click_at(x.parse().unwrap(), y.parse().unwrap());

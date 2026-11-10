@@ -11,6 +11,7 @@ local menu = require("bone.menu")
 local style = require("bone.nodes.style")
 local widgets = require("bone.nodes.widgets")
 local icons = require("bone.nodes.icons")
+local statusbar = require("bone.nodes.statusbar")
 
 local SUGGESTIONS = 8 -- rows of the / menu
 
@@ -42,7 +43,8 @@ local function suggestions()
   local rows = SUGGESTIONS
   local first = math.max(1, math.min(menu.selected - rows + 1, n - rows + 1))
   if menu.selected < first then first = menu.selected end
-  local list = widgets.surface({ padding = { 6, 6, 0, 6 }, shadow = style.shadow.menu })
+  local list = widgets.surface({ id = "slash-menu", transition = style.appear(), padding = { 6, 6, 0, 6 },
+    shadow = style.shadow.menu })
   for i = first, math.min(n, first + rows - 1) do
     local it, on = items[i], i == menu.selected
     list[#list + 1] = style.finish(widgets.press({
@@ -54,16 +56,9 @@ local function suggestions()
     }, function() menu.selected = i; menu.complete() end, "option", not on))
   end
   -- The keys, under a hairline.
-  local keys = { direction = "row", align = "center", gap = 16, height = 36, padding = { 0, 4 }, margin = { 6, -6, 0, -6 },
-    border = { 1, 0, 0, 0 }, border_color = "WinSeparator" }
-  keys.padding = { 0, 14 }
-  for _, k in ipairs({ { "↑↓", "move" }, { "↵", "run" }, { "Tab", "complete" } }) do
-    keys[#keys + 1] = { direction = "row", align = "center", gap = 6, widgets.keycap(k[1]),
-      { text = k[2], size = style.size.small, hl = "Dim", wrap = false } }
-  end
-  keys[#keys + 1] = { grow = 1 }
-  keys[#keys + 1] = { direction = "row", align = "center", gap = 6, widgets.keycap("Esc"),
-    { text = "close", size = style.size.small, hl = "Dim", wrap = false } }
+  local keys = widgets.hints("↑↓ move · enter run · tab complete · esc close")
+  keys.height, keys.padding, keys.margin = 36, { 0, 14 }, { 6, -6, 0, -6 }
+  keys.border, keys.border_color = { 1, 0, 0, 0 }, "WinSeparator"
   list[#list + 1] = style.finish(keys)
   -- Over the composer with a gap, not touching it (an absolute node's
   -- margin is not laid out, so the gap is a transparent pad under it).
@@ -97,49 +92,44 @@ local function ring(fraction)
   }
 end
 
--- When each running turn started, by session (for "Working · 12s").
-local started = {}
-
 -- The toolbar under the field.
 local function toolbar(opts, running, empty)
   local session = opts.session
   local id = session and session.session_id
   local u = usage.of(id)
   local muted = (bone.hl.get("Muted") or {}).fg and "Muted" or "Dim"
-  local narrow = opts.width and opts.width < 420
+  -- Narrow, the model's name is cut short and the context is its ring alone;
+  -- they go only where there is no room at all.
+  local narrow, compact = opts.width and opts.width < 420, opts.width and opts.width < 240
   local bar = { direction = "row", align = "center", gap = 6, height = 30 }
   bar[#bar + 1] = widgets.icon_button("plus", "Attach files", function()
     if opts.on_focus then opts.on_focus() end
     require("bone.desktop.attach").pick()
   end, { box = 28, size = 16, hl = muted, radius = style.radius.md, id = opts.chat and nil or "composer-attach" })
   -- The model: an outlined pill that opens the provider page.
-  if u.model and u.model ~= "" and not narrow then
+  if u.model and u.model ~= "" and not compact then
     local name = (u.provider and u.provider ~= u.model) and (u.provider .. " · " .. u.model) or u.model
     bar[#bar + 1] = widgets.press(style.finish({
       direction = "row", align = "center", gap = 6, height = 28, padding = { 0, 8, 0, 9 }, radius = 14, shrink = 1,
-      border = 1, border_color = "PromptBorder", label = "Model: " .. name, tooltip = "Change the model (/provider)",
+      min_width = 56, border = 1, border_color = "PromptBorder", label = "Model: " .. name, tooltip = "Change the model (/provider)",
       icons.node("model", { size = 13, hl = "Dim" }),
       { text = name, size = style.size.small, hl = muted, wrap = false, text_overflow = "ellipsis", shrink = 1 },
       icons.node("chevron_down", { size = 12, hl = "Dim" }),
     }), function() require("bone.config").open("providers") end)
   end
+  local elapsed = statusbar.elapsed(session)
   if running then
-    local since = id and (started[id] or os.time())
-    if id then started[id] = since end
-    bone.gui.invalidate(1000)
     bar[#bar + 1] = {
       direction = "row", gap = 6, align = "center", margin = { 0, 0, 0, 4 }, shrink = 1,
       widgets.spinner(18),
-      { text = "Working" .. (since and (" · " .. bone.util.duration(os.time() - since)) or ""),
+      { text = "Working" .. (elapsed and (" · " .. bone.util.duration(elapsed)) or ""),
         hl = muted, size = style.size.small, wrap = false, text_overflow = "ellipsis", shrink = 1 },
     }
-  elseif id then
-    started[id] = nil
   end
   bar[#bar + 1] = { grow = 1 }
   nodes.append(bar, slot("composer.tools", opts))
   -- The context: how full, by the compaction limit when there is one.
-  if (u.curr or 0) > 0 and not narrow then
+  if (u.curr or 0) > 0 and not compact then
     -- "100k", not "100.0k".
     local function k(n) return (bone.util.tokens(n):gsub("%.0([km])$", "%1")) end
     local label = k(u.curr) .. (u.limit and u.limit > 0 and (" / " .. k(u.limit)) or "")
@@ -150,7 +140,8 @@ local function toolbar(opts, running, empty)
     bar[#bar + 1] = {
       direction = "row", align = "center", gap = 6, margin = { 0, 6, 0, 0 }, tooltip = tip,
       (u.limit and u.limit > 0) and ring(u.curr / u.limit) or nil,
-      { text = label, size = style.size.micro, font = "mono", hl = "Dim", wrap = false },
+      not (narrow and u.limit and u.limit > 0) and
+        { text = label, size = style.size.micro, font = "mono", hl = "Dim", wrap = false } or nil,
     }
   end
   -- Send, or stop while a turn runs: a round button in the text's color.

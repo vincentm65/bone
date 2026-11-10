@@ -17,6 +17,19 @@ local SIZE, CAPTION, SMALL = style.size.body, style.size.caption, style.size.sma
 local VALUE = 300
 -- Choices up to this many are a segmented switch; more, the value as text.
 local SEGMENTS = 5
+-- The options in groups, each under its name; one in none of them (a
+-- plugin's) is under the last.
+local GROUPS = {
+  { "Appearance", "font", "font_sans", "font_sans_bold", "font_sans_italic", "font_size", "opacity", "titlebar",
+    "widget_radius", "window_radius" },
+  { "Chat", "show_reasoning", "tool_detail", "tool_preview_lines", "diff_preview_lines", "fold_turns" },
+  { "Input", "prompt_max_height", "queue_mode", "scroll_line", "wheel_speed", "mouse", "timeoutlen" },
+  { "More" },
+}
+local GROUP = {}
+for i, g in ipairs(GROUPS) do
+  for j = 2, #g do GROUP[g[j]] = i end
+end
 
 local function hints(st, t)
   if st.ask then return "y yes · n no" end
@@ -39,6 +52,7 @@ function M.open(want)
   local page
   page = require("bone.settings_page").new(want, {
     scope = "gui",
+    group = function(name) return GROUP[name] or #GROUPS end,
     changed = function() if id then bone.ui.update(id, {}) end end,
     close = function()
       if paste_event then bone.off(paste_event) paste_event = nil end
@@ -149,8 +163,8 @@ function M.open(want)
   -- The heading: the title and the sections, or, on a page of its own, a
   -- way back and where you are.
   local function heading(t, section)
-    local row = { direction = "row", align = "center", gap = style.space.md, padding = { 0, 0, 0, 0 }, margin = { 0, 0, 6, 0 } }
     if t.page or st.prov then
+      local row = { direction = "row", align = "center", gap = style.space.md, min_height = 30, margin = { 0, 0, 6, 0 } }
       local here = t.page and t.title or (st.prov.new and "New provider" or st.prov.name)
       row[#row + 1] = widgets.icon_button("‹", "Back", function() page.on_key("esc"); refresh() end,
         { size = style.size.lead, box = 26 })
@@ -165,37 +179,23 @@ function M.open(want)
     end
     local names = {}
     for i = 1, 3 do names[i] = st.tabs[i].title end
-    row[#row + 1] = { text = "Settings", hl = "Normal", bold = true, size = style.size.lead, grow = 1,
-      padding = { 0, 0, 0, style.inset } }
-    row[#row + 1] = widgets.segmented(names, section, function(i)
-      page.switch_tab(i - st.tab)
-      refresh()
-    end)
-    row[#row + 1] = widgets.icon_button("close", "Close (esc)", function() page.on_key("esc"); refresh() end,
-      { box = 28, size = 15, radius = style.radius.md })
-    return row
+    return widgets.dialog_head("Settings", {
+      tabs = names, tab = section,
+      pick = function(i) page.switch_tab(i - st.tab) refresh() end,
+      close = function() page.on_key("esc") refresh() end,
+    })
   end
 
   -- The search: a box under the heading; a press (or /) types into it.
   local function search()
-    local typing = st.search
-    local shown = typing and (st.query .. "▏") or (st.query ~= "" and st.query or "Search")
-    return widgets.press({
-      -- The same field as the sidebar's and help's search.
-      direction = "row", align = "center", gap = 8, margin = { 0, 0, 6, 0 }, padding = { 0, style.inset }, height = 32,
-      bg = "Normal", radius = style.radius.md, border = 1,
-      border_color = typing and "Muted" or "PromptBorder",
-      require("bone.nodes.icons").node("search", { size = 15, hl = "Dim" }),
-      { text = shown, hl = (typing or st.query ~= "") and "Normal" or "Dim", size = style.size.body, grow = 1, width = 0,
-        wrap = false, text_overflow = "ellipsis" },
-      st.query ~= "" and widgets.icon_button("close", "Clear the search", function()
-        st.query, st.search, st.sel = "", false, 1
+    return widgets.search_box(st.query, {
+      typing = st.search, key = "/",
+      clear = function() st.query, st.search, st.sel = "", false, 1 refresh() end,
+      click = function()
+        if not st.search then page.on_key("/") end
         refresh()
-      end, { box = 20, size = 13 }) or (not typing and widgets.keycap("/")) or nil,
-    }, function()
-      if not st.search then page.on_key("/") end
-      refresh()
-    end, "button", false)
+      end,
+    })
   end
 
   local function node()
@@ -216,6 +216,9 @@ function M.open(want)
     local selected
     for i, r in ipairs(list) do
       local on = i == st.sel
+      if r.group and r.group ~= (list[i - 1] or {}).group then
+        items[#items + 1] = widgets.heading(GROUPS[r.group][1])
+      end
       -- Pages (Compaction) after the options, set apart.
       if r.kind == "page" and i > 1 and list[i - 1].kind ~= "page" then
         items[#items + 1] = widgets.divider({ margin = { 4, 0, 4, 0 } })
@@ -231,7 +234,8 @@ function M.open(want)
             direction = "column", grow = 1, width = 0,
             {
               text = r.kind == "option" and (r.label:sub(1, 1):upper() .. r.label:sub(2)) or r.label,
-              size = SIZE, medium = true, wrap = false,
+              -- A provider's name is what it is called in core.lua and /provider.
+              size = SIZE, medium = true, wrap = false, font = r.kind == "provider" and "mono" or nil,
               text_overflow = "ellipsis", hl = danger and "ErrorMsg" or "Normal",
             },
             -- What it does, under its name.

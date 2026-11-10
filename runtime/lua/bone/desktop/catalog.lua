@@ -7,7 +7,7 @@ local M = {}
 local catalog = require("bone.catalog")
 local style = require("bone.nodes.style")
 local widgets = require("bone.nodes.widgets")
-local title, note, entry, hints = widgets.title, widgets.note, widgets.entry, widgets.hints
+local note, entry, hints = widgets.note, widgets.entry, widgets.hints
 
 --- The window's spec for `page` (bone.ui.windows.catalog).
 function M.view(page)
@@ -26,13 +26,16 @@ function M.view(page)
     for _, e in ipairs(list) do
       if e.state == "update" then updates = updates + 1 end
     end
-    local items = { title("Catalog") }
-    items[#items + 1] = note(("%s   ·   %d update%s   ·   %d selected"):format(
-      catalog.source(), updates, updates == 1 and "" or "s", #page.selected_rows(list)), { 0, 4 })
-    -- Two pages: a press on the other one is the tab key.
-    items[#items + 1] = widgets.tabs({ "Plugins", "GUIs" }, st.page == "tui" and 2 or 1, function()
-      page.on_key("tab")
-    end)
+    -- As every dialog: the title, with the two pages (a press on the other
+    -- one is the tab key) and × at its right; they stay over the list.
+    local top = widgets.dialog_head("Catalog", {
+      tabs = { "Plugins", "GUIs" }, tab = st.page == "tui" and 2 or 1,
+      pick = function() page.on_key("tab") end,
+      close = function() page.on_key("esc") end,
+    })
+    -- What there is to do; where the catalog comes from is its tooltip.
+    local items = { widgets.extend(note(("%d update%s   ·   %d selected"):format(
+      updates, updates == 1 and "" or "s", #page.selected_rows(list)), { 0, 4 }), { tooltip = catalog.source() }) }
     if st.err then
       items[#items + 1] = note("error: " .. st.err, { 4, 4 }, "ErrorMsg")
     elseif not st.entries then
@@ -44,19 +47,20 @@ function M.view(page)
     local selected, last
     for i, e in ipairs(list) do
       if e.state ~= last then
-        items[#items + 1] = { text = catalog.HEAD[e.state], hl = "Dim", medium = true, size = style.size.small,
-          padding = { 2, style.inset }, margin = { 6, 0, 2, 0 } }
+        items[#items + 1] = widgets.heading(catalog.HEAD[e.state])
         last = e.state
       end
       local on, picked = i == st.sel, st.selected[e.name]
-      local meta = (e.version or "") .. (catalog.supports(e) ~= "" and ("  ·  " .. catalog.supports(e)) or "")
+      -- Where it runs, said as the settings say it ("gui + core").
+      local runs = catalog.supports(e):gsub("^both$", "tui + gui")
+      local meta = (e.version or "") .. (runs ~= "" and ("  ·  " .. runs) or "")
       -- One line: the check, the name, its version, and the description cut
       -- to fit (all of it under the list for the selected one).
       local row = entry(on, {
         {
           direction = "row", align = "center", gap = style.space.md,
-          { spans = { widgets.check_span(picked), { text = catalog.label(e), hl = "Normal" } },
-            size = style.size.body, wrap = false, shrink = 0 },
+          widgets.checkbox(picked),
+          { text = catalog.label(e), hl = "Normal", size = style.size.body, wrap = false, shrink = 0 },
           { text = meta, hl = "Dim", size = style.size.small, wrap = false, shrink = 0 },
           { text = e.blocked or e.description or "", hl = "Dim", size = style.size.small, grow = 1, width = 0,
             wrap = false, text_overflow = "ellipsis" },
@@ -72,10 +76,10 @@ function M.view(page)
     local detail = status ~= "" and widgets.detail(status, st.ask and "Accent" or "Dim")
       or widgets.detail(current and current.description)
     -- The one dialog size, whichever page it shows.
-    return style.as_dialog(widgets.list("catalog", items, selected, {
+    return style.as_dialog({ direction = "column", grow = 1, top, widgets.list("catalog", items, selected, {
       estimate = 28,
       footer = { direction = "column", detail, hints(page.hint(), { 0, 0 }) },
-    }))
+    }) })
   end
 
   return { node = node }

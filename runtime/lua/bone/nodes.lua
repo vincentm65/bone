@@ -69,7 +69,8 @@ function M.chat(opts)
   end
   local s = other and bone.chat.session({ session = tostring(other) }) or here
   local n = s and s.items or 0
-  -- Views are told their width in character cells, as in the TUI.
+  -- Views are told their width in character cells, as in the TUI (and in
+  -- pixels, as `width_px`, where the window gave it).
   -- The window passes the cell it was built with; anyone else asks.
   local cell = opts.cell
   if not cell then
@@ -86,7 +87,7 @@ function M.chat(opts)
     item = function(i)
       local item = bone.chat.item(i, { full = true, session = other and tostring(other) or nil })
       if not item then return { height = 0 } end
-      return M.item(item, { width = width, region = "chat" })
+      return M.item(item, { width = width, width_px = opts.width_px, region = "chat" })
     end,
   }
   return node

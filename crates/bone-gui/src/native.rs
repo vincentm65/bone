@@ -4,6 +4,8 @@
 //! the input gathered since the last, and paints its draw list.
 
 use std::collections::HashMap;
+use std::io::{Read, Write};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -15,8 +17,8 @@ use gpui::{
     ModifiersChangedEvent, MouseButton, MouseDownEvent, MouseExitEvent, MouseMoveEvent,
     MouseUpEvent, NavigationDirection, ParentElement, PathBuilder, Pixels, Render, RenderImage,
     ScrollDelta, ScrollWheelEvent, Styled, Subscription, Task, TitlebarOptions, UTF16Selection,
-    Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowOptions, canvas, div,
-    point, px, size,
+    Window, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowHandle, WindowOptions,
+    canvas, div, point, px, size,
 };
 
 use crate::backend::draw::{DrawList, Shape};
@@ -893,16 +895,148 @@ const TRAFFIC_LIGHTS: (f32, f32) = (13.0, 10.0);
 /// Open the GUI on `conn` and run it until the window closes. Call from
 /// the main thread, inside a multi-threaded Tokio runtime.
 pub async fn run(conn: Connection, opts: GuiOptions) -> Result<(), String> {
-    let gui = Gui::connect(conn, opts).await?;
-    gui.watch_config();
-    tokio::task::block_in_place(move || open(gui))
+    run_with(conn, opts, true, false).await
 }
 
-fn open(mut gui: Gui) -> Result<(), String> {
-    let (w, h) = (
-        gui.window_info["width"].as_f64().filter(|w| *w > 0.0).unwrap_or(960.0) as f32,
-        gui.window_info["height"].as_f64().filter(|h| *h > 0.0).unwrap_or(720.0) as f32,
-    );
+/// [`run`], but `show` waits to open a window until [`request_window`], and
+/// `resident` keeps this process after the last window closes so the next
+/// launch does not start the GPU again.
+pub async fn run_with(
+    conn: Connection,
+    opts: GuiOptions,
+    show: bool,
+    resident: bool,
+) -> Result<(), String> {
+    let gui = Gui::connect(conn, opts.clone()).await?;
+    gui.watch_config();
+    tokio::task::block_in_place(move || open(gui, opts, show, resident))
+}
+
+fn open(gui: Gui, opts: GuiOptions, show: bool, resident: bool) -> Result<(), String> {
+    let resident_slot = start_resident(resident);
+    let resident = resident_slot.is_some();
+    if !show && !resident {
+        // Nothing would ever present a window or end this process.
+        return Err("another GUI already owns the control socket".into());
+    }
+    let (unlink, asks) = resident_slot.unzip();
+    let _unlink = unlink;
+    let mut prepared = Some(gui);
+    Application::new().run(move |cx: &mut App| {
+        if let Some(gui) = (show || resident).then(|| prepared.take()).flatten() {
+            match present(cx, gui) {
+                Ok(handle) => {
+                    // GPUI leaves the event loop when its last window is
+                    // destroyed, which would drop the GPU. Closing the last
+                    // window minimizes it instead, so the next launch only
+                    // has to show it.
+                    if resident {
+                        keep_on_close(cx, handle);
+                    }
+                    if !show {
+                        let _ = handle.update(cx, |_, window, _| park_window(window));
+                    }
+                }
+                Err(e) => {
+                    eprintln!("bone: cannot open a window: {e}");
+                    cx.quit();
+                    return;
+                }
+            }
+        }
+        if let Some(mut rx) = asks {
+            cx.spawn(async move |cx| {
+                while let Some(ask) = rx.recv().await {
+                    match ask {
+                        Ask::Quit(reply) => {
+                            let _ = cx.update(|cx| cx.quit());
+                            let _ = reply.send("ok\n".into());
+                        }
+                        Ask::Open(reply) => {
+                            let msg = cx.update(|app| show_window(app, &mut prepared, &opts));
+                            let _ = reply.send(msg.unwrap_or_else(|_| "err gone\n".into()));
+                        }
+                    }
+                }
+            })
+            .detach();
+        }
+        cx.on_window_closed(move |cx| {
+            if !resident && cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
+        #[cfg(target_os = "macos")]
+        dock_icon();
+        if show {
+            cx.activate(true);
+        }
+    });
+    Ok(())
+}
+
+/// A window's size, from Lua, or the default.
+fn window_size(gui: &Gui) -> (f32, f32) {
+    (
+        gui.window_info["width"]
+            .as_f64()
+            .filter(|w| *w > 0.0)
+            .unwrap_or(960.0) as f32,
+        gui.window_info["height"]
+            .as_f64()
+            .filter(|h| *h > 0.0)
+            .unwrap_or(720.0) as f32,
+    )
+}
+
+/// Closing the last window would end the process and drop the GPU.
+/// Keep it, off the current workspace, so the next launch only shows it.
+fn keep_on_close(cx: &mut App, handle: WindowHandle<Root>) {
+    let _ = handle.update(cx, |_, window, cx| {
+        window.on_window_should_close(cx, |window, cx| {
+            if cx.windows().len() > 1 {
+                return true;
+            }
+            park_window(window);
+            false
+        });
+    });
+}
+
+/// Put this process's window where it is not shown. Hyprland has no real
+/// minimize, so the window moves to a special workspace; elsewhere it is
+/// minimized.
+fn park_window(window: &mut Window) {
+    window.minimize_window();
+    let target = format!("special:bone,pid:{}", std::process::id());
+    hyprctl(&["dispatch", "movetoworkspacesilent", &target]);
+}
+
+/// Bring the parked window back onto the workspace the user is on.
+fn reveal_window() {
+    let pid = std::process::id();
+    let target = format!("+0,pid:{pid}");
+    let focus = format!("pid:{pid}");
+    hyprctl(&["dispatch", "movetoworkspace", &target]);
+    hyprctl(&["dispatch", "focuswindow", &focus]);
+}
+
+fn hyprctl(args: &[&str]) {
+    if std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_none() {
+        return;
+    }
+    let _ = std::process::Command::new("hyprctl")
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
+}
+
+/// Open `gui` in a new window.
+fn present(cx: &mut App, mut gui: Gui) -> Result<WindowHandle<Root>, String> {
+    let (w, h) = window_size(&gui);
     // See-through only if asked for when the window opens: an opaque
     // window draws faster, and works without a compositor.
     let transparent = gui.opacity() < 1.0;
@@ -911,44 +1045,195 @@ fn open(mut gui: Gui) -> Result<(), String> {
     // the `titlebar` option asks for the system's.
     let titlebar = Titlebar::native().filter(|_| gui.bool_option("titlebar", true));
     gui.titlebar = titlebar;
-    let mut slot = Some(gui);
-    Application::new().run(move |cx: &mut App| {
-        let Some(gui) = slot.take() else { return };
-        let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
-        let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions {
-                title: Some("New chat".into()),
-                appears_transparent: titlebar.is_some(),
-                traffic_light_position: (titlebar == Some(Titlebar::Mac))
-                    .then(|| point(px(TRAFFIC_LIGHTS.0), px(TRAFFIC_LIGHTS.1))),
-            }),
-            window_background: if transparent {
-                WindowBackgroundAppearance::Transparent
-            } else {
-                WindowBackgroundAppearance::Opaque
-            },
-            app_id: Some("bone".into()),
-            ..Default::default()
-        };
-        let opened = cx.open_window(options, |window, cx| cx.new(|cx| Root::new(gui, window, cx)));
-        if let Err(e) = opened {
-            eprintln!("bone: cannot open a window: {e}");
-            cx.quit();
-            return;
-        }
-        cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
-                cx.quit();
-            }
-        })
-        .detach();
-        #[cfg(target_os = "macos")]
-        dock_icon();
-        cx.activate(true);
-    });
-    Ok(())
+    let bounds = Bounds::centered(None, size(px(w), px(h)), cx);
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: Some(TitlebarOptions {
+            title: Some("New chat".into()),
+            appears_transparent: titlebar.is_some(),
+            traffic_light_position: (titlebar == Some(Titlebar::Mac))
+                .then(|| point(px(TRAFFIC_LIGHTS.0), px(TRAFFIC_LIGHTS.1))),
+        }),
+        window_background: if transparent {
+            WindowBackgroundAppearance::Transparent
+        } else {
+            WindowBackgroundAppearance::Opaque
+        },
+        app_id: Some("bone".into()),
+        ..Default::default()
+    };
+    cx.open_window(options, |window, cx| cx.new(|cx| Root::new(gui, window, cx)))
+        .map_err(|e| e.to_string())
 }
+
+/// Focus the window already open, or open one. The first call can use the
+/// GUI this process started with, so a daemon does not connect twice.
+fn show_window(cx: &mut App, prepared: &mut Option<Gui>, opts: &GuiOptions) -> String {
+    if let Some(handle) = cx.active_window().or_else(|| cx.windows().first().copied()) {
+        reveal_window();
+        let _ = handle.update(cx, |_view, window, _| window.activate_window());
+        cx.activate(true);
+        return "ok\n".into();
+    }
+    let gui = if let Some(gui) = prepared.take() {
+        gui
+    } else {
+        match connect_gui(opts.clone()) {
+            Ok(gui) => gui,
+            Err(e) => return format!("err {e}\n"),
+        }
+    };
+    match present(cx, gui) {
+        Ok(handle) => {
+            keep_on_close(cx, handle);
+            let _ = handle.update(cx, |_, window, _| window.activate_window());
+            cx.activate(true);
+            "ok\n".into()
+        }
+        Err(e) => format!("err {e}\n"),
+    }
+}
+
+/// Another window on the same core. `Gui` is not `Send`, so this stays on
+/// the window thread. That thread is inside `block_in_place`, which is what
+/// lets `block_on` drive the connect on the runtime it already belongs to.
+fn connect_gui(opts: GuiOptions) -> Result<Gui, String> {
+    let path = opts
+        .reconnect
+        .clone()
+        .ok_or_else(|| "this GUI has no server socket to open another window on".to_string())?;
+    tokio::runtime::Handle::current().block_on(async move {
+        let conn = bone_client::connect(&path).await.map_err(|e| e.to_string())?;
+        Gui::connect(conn, opts).await
+    })
+}
+
+/// What another `bone --gui` asks of the process that already has the GPU.
+enum Ask {
+    Open(std::sync::mpsc::Sender<String>),
+    Quit(std::sync::mpsc::Sender<String>),
+}
+
+/// Removes the control socket when this process leaves.
+struct Unlink(PathBuf);
+
+impl Drop for Unlink {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+/// Where a running GUI listens for `open` and `quit`.
+fn gui_socket_path() -> PathBuf {
+    let mut path = bone_proto::transport::default_socket_path();
+    path.set_file_name("gui.sock");
+    path
+}
+
+/// Ask the GUI that is already running to show its window, or with `show`
+/// false only whether one is running. False when none is, which is also
+/// when this process should become that GUI.
+pub fn request_window(show: bool) -> bool {
+    #[cfg(unix)]
+    {
+        let path = gui_socket_path();
+        let mut stream = match std::os::unix::net::UnixStream::connect(&path) {
+            Ok(stream) => stream,
+            Err(e) => {
+                if e.kind() == std::io::ErrorKind::ConnectionRefused {
+                    let _ = std::fs::remove_file(&path);
+                }
+                return false;
+            }
+        };
+        if !show {
+            return true;
+        }
+        let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
+        // Longer than the server's 5s wait for its event loop to answer.
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(8)));
+        if stream.write_all(b"open\n").is_err() {
+            return false;
+        }
+        let mut buf = [0u8; 64];
+        let n = stream.read(&mut buf).unwrap_or(0);
+        return buf[..n].starts_with(b"ok");
+    }
+    #[cfg(not(unix))]
+    false
+}
+
+#[cfg(unix)]
+fn bind_gui_socket() -> Option<std::os::unix::net::UnixListener> {
+    let path = gui_socket_path();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    match std::os::unix::net::UnixListener::bind(&path) {
+        Ok(listener) => Some(listener),
+        Err(_) if std::os::unix::net::UnixStream::connect(&path).is_err() => {
+            let _ = std::fs::remove_file(&path);
+            std::os::unix::net::UnixListener::bind(&path).ok()
+        }
+        Err(_) => None,
+    }
+}
+
+/// The control socket, when this process is the one later launches talk to.
+fn start_resident(
+    resident: bool,
+) -> Option<(Unlink, tokio::sync::mpsc::UnboundedReceiver<Ask>)> {
+    if !resident {
+        return None;
+    }
+    #[cfg(not(unix))]
+    {
+        return None;
+    }
+    #[cfg(unix)]
+    {
+        let listener = bind_gui_socket()?;
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        std::thread::spawn(move || serve_gui_socket(listener, tx));
+        Some((Unlink(gui_socket_path()), rx))
+    }
+}
+
+#[cfg(unix)]
+fn serve_gui_socket(
+    listener: std::os::unix::net::UnixListener,
+    tx: tokio::sync::mpsc::UnboundedSender<Ask>,
+) {
+    for conn in listener.incoming() {
+        let Ok(mut conn) = conn else { continue };
+        let _ = conn.set_read_timeout(Some(Duration::from_secs(1)));
+        let _ = conn.set_write_timeout(Some(Duration::from_secs(3)));
+        let mut buf = [0u8; 16];
+        let n = conn.read(&mut buf).unwrap_or(0);
+        let line = std::str::from_utf8(&buf[..n]).unwrap_or("").trim();
+        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+        let ask = match line {
+            "open" => Ask::Open(reply_tx),
+            "quit" => Ask::Quit(reply_tx),
+            _ => {
+                let _ = conn.write_all(b"err unknown\n");
+                continue;
+            }
+        };
+        if tx.send(ask).is_err() {
+            let _ = conn.write_all(b"err gone\n");
+            break;
+        }
+        let reply = reply_rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_else(|_| "err timeout\n".into());
+        let _ = conn.write_all(reply.as_bytes());
+        if line == "quit" {
+            break;
+        }
+    }
+}
+
 
 /// The app's icon in the Dock and the app switcher. A bare binary has
 /// none of its own (an app bundle's `Info.plist` would give it one).
