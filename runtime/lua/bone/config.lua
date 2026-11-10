@@ -227,30 +227,37 @@ function M.open(want)
     local first = math.max(1, st.sel - room + 1)
     for i = first, math.min(#list, first + room - 1) do
       local r = list[i]
-      local items, add = line(w, i == st.sel)
-      if i == st.sel then
-        add("  › ", KEY)
-        add(pad(r.label, label_w))
+      if r.kind == "header" then
+        -- A section label among a page's fields; never selected.
+        local items, add = line(w)
+        add("    " .. r.label:upper(), MUTED)
+        out[#out + 1] = items
       else
-        add("    " .. pad(r.label, label_w))
-      end
-      if i == st.sel and st.edit then
-        add(r.type == "secret" and string.rep("•", #st.edit) or st.edit)
-        add("▏")
-      else
-        value_into(add, r)
-        -- tui.lua runs last; say so when it overrides the saved value.
-        if r.kind == "option" then
-          local saved = bone.settings.get(r.path)
-          if saved ~= nil and saved ~= r.value then
-            add("   tui.lua sets " .. tostring(r.value), NOTE)
+        local items, add = line(w, i == st.sel)
+        if i == st.sel then
+          add("  › ", KEY)
+          add(pad(r.label, label_w))
+        else
+          add("    " .. pad(r.label, label_w))
+        end
+        if i == st.sel and st.edit then
+          add(r.type == "secret" and string.rep("•", #st.edit) or st.edit)
+          add("▏")
+        else
+          value_into(add, r)
+          -- tui.lua runs last; say so when it overrides the saved value.
+          if r.kind == "option" then
+            local saved = bone.settings.get(r.path)
+            if saved ~= nil and saved ~= r.value then
+              add("   tui.lua sets " .. tostring(r.value), NOTE)
+            end
           end
         end
+        if i == st.sel then
+          items[#items + 1] = { fill = " ", hl = "ConfigSelectedNormal" }
+        end
+        out[#out + 1] = items
       end
-      if i == st.sel then
-        items[#items + 1] = { fill = " ", hl = "ConfigSelectedNormal" }
-      end
-      out[#out + 1] = items
     end
     while #out < body_start + room do
       out[#out + 1] = ""

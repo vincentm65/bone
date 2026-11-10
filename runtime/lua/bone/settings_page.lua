@@ -62,7 +62,11 @@ end
 local function field_rows(page)
   local rows = {}
   for _, f in ipairs(page.fields or {}) do
-    if type(f.key) == "string" then
+    if type(f.header) == "string" then
+      -- A section label among the fields: { header = "Voice" }. Not a row
+      -- the selection can land on.
+      rows[#rows + 1] = { kind = "header", label = f.header, desc = f.desc or "" }
+    elseif type(f.key) == "string" then
       local path = page.name .. "." .. f.key
       local saved = bone.settings.get(path)
       local ftype = f.type or (f.choices and "string") or type(f.default)
@@ -304,6 +308,26 @@ function M.new(want, opts)
     return rows
   end
 
+  -- The nearest selectable row from `from`, moving `dir`-ward past headers
+  -- (and back the other way at the edge).
+  local function seek(list, from, dir)
+    local i = math.max(1, math.min(from, math.max(#list, 1)))
+    while list[i] and list[i].kind == "header" do i = i + dir end
+    if not list[i] then
+      i = math.max(1, math.min(from, math.max(#list, 1)))
+      while list[i] and list[i].kind == "header" do i = i - dir end
+    end
+    return list[i] and i or 1
+  end
+
+  -- The selection never rests on a header.
+  local function normalized(list)
+    if (list[st.sel] or {}).kind == "header" then
+      st.sel = seek(list, st.sel, 1)
+    end
+    return list
+  end
+
   local function all_rows()
     local t = st.tabs[st.tab]
     if t.name == "general" then
@@ -351,7 +375,7 @@ function M.new(want, opts)
       st.query, st.search, st.search_where = "", false, where
     end
     local list = all_rows()
-    if st.query == "" then return list end
+    if st.query == "" then return normalized(list) end
     local out = {}
     for _, r in ipairs(list) do
       local text, match = haystack(r), true
@@ -360,7 +384,7 @@ function M.new(want, opts)
       end
       if match then out[#out + 1] = r end
     end
-    return out
+    return normalized(out)
   end
 
   local function saved_note(err, ok_text)
@@ -668,13 +692,13 @@ function M.new(want, opts)
     elseif k == "esc" or k == "ctrl+c" or k == "q" then
       opts.close()
     elseif k == "up" or k == "wheelup" or k == "k" then
-      st.sel = math.max(1, st.sel - 1)
+      st.sel = seek(list, st.sel - 1, -1)
     elseif k == "down" or k == "wheeldown" or k == "j" then
-      st.sel = math.min(math.max(#list, 1), st.sel + 1)
+      st.sel = seek(list, st.sel + 1, 1)
     elseif k == "pageup" then
-      st.sel = math.max(1, st.sel - 10)
+      st.sel = seek(list, st.sel - 10, -1)
     elseif k == "pagedown" then
-      st.sel = math.min(math.max(#list, 1), st.sel + 10)
+      st.sel = seek(list, st.sel + 10, 1)
     elseif (k == "tab" or k == "right") and not st.prov and st.tab <= 3 then
       switch_tab(1)
     elseif (k == "shift+tab" or k == "backtab" or k == "left") and not st.prov and st.tab <= 3 then
