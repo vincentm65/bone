@@ -312,6 +312,7 @@ impl Gui {
                     .flatten(),
                 sideways: s.direction == crate::node::Direction::Row,
                 on_scroll: h.scroll,
+                scope: frame.scopes.last().copied(),
             });
         }
 

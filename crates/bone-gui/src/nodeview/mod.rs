@@ -79,6 +79,8 @@ pub(crate) struct Hit {
     /// A row, which the sideways wheel moves.
     pub(in crate::nodeview) sideways: bool,
     pub(in crate::nodeview) on_scroll: Option<u64>,
+    /// The `block_input` box it is in (a modal): the wheel stops there.
+    pub(in crate::nodeview) scope: Option<usize>,
 }
 
 /// A node the keyboard can reach, in the order they were drawn.

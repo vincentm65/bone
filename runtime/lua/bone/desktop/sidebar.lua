@@ -556,7 +556,7 @@ function M.node(ctx)
     card.shadow = style.shadow.card
     local backdrop = style.finish({
       position = "absolute", left = 0, right = 0, top = 0, bottom = 0, z = 7,
-      bg = style.scrim.dialog, on_click = close,
+      bg = style.scrim.dialog, on_click = close, on_scroll = function() end,
     })
     return widgets.card(card), 0, backdrop
   end

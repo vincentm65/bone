@@ -185,9 +185,17 @@ impl Gui {
         let on_dy = if held { raw_dy * speed } else { dy };
         let hits = std::mem::take(&mut self.view.hits);
         let mut taken_scroll = false;
-        // Something under the pointer scrolls with the wheel.
+        // Something under the pointer scrolls with the wheel. A modal
+        // (`block_input`) window owns it: what is behind or beside one does
+        // not scroll while it is open.
+        let trap = self.view.trap;
         let mut owned = false;
-        for hit in hits.iter().rev().filter(|h| h.rect.contains(pos)) {
+        for hit in hits
+            .iter()
+            .rev()
+            .filter(|h| h.rect.contains(pos))
+            .filter(|h| trap.is_none() || h.scope == trap)
+        {
             owned |= hit.on_scroll.is_some() || (hit.scroll.is_some() && !held);
             let mut taken = false;
             // A row moves with the sideways wheel, or the wheel with shift.
@@ -225,7 +233,9 @@ impl Gui {
         self.view.hits = hits;
         if taken_scroll {
             fx.out.repaint();
-        } else if !owned && raw_dy != 0.0 {
+        } else if !owned && raw_dy != 0.0 && trap.is_none() {
+            // A modal takes the wheel whole: what it does not scroll, the
+            // chat behind does not either.
             self.wheel_keys(raw_dy, m);
         }
     }

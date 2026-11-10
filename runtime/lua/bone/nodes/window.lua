@@ -378,6 +378,9 @@ function M.header(session, width)
   if title then
     bar[#bar + 1] = widgets.icon_button("more", "Chat actions", function()
       M.chat_menu = not M.chat_menu
+      -- esc reaches the menu through Lua's dismiss, which a focused panel
+      -- would take first (it would only give up the keyboard).
+      if M.chat_menu then bone.gui.focus(nil) end
       bone.gui.invalidate()
     end, { box = 28, size = 16, hl = muted, radius = style.radius.md, id = "header-more" })
   end
@@ -407,7 +410,9 @@ function M.header(session, width)
     })
     M.menu_nodes = {
       { position = "absolute", left = 0, top = 0, right = 0, bottom = 0, z = 29,
-        on_click = function() M.chat_menu = false bone.gui.invalidate() end },
+        on_click = function() M.chat_menu = false bone.gui.invalidate() end,
+        -- The menu owns the wheel: it must not scroll the chat behind it.
+        on_scroll = function() end },
       menu,
     }
   end
