@@ -43,8 +43,15 @@ M.inset = 10
 --- Shadows. Only what floats casts one (the composer, a menu, a dialog),
 --- and it is the same one under every name (card, menu, big, bubble): deep
 --- on a dark scheme, faint on a light one. Set a name to give it its own.
+local shadows = {}
 M.shadow = setmetatable({}, { __index = function()
-  return { blur = 48, dy = 18, color = M.dark() and "#000000b3" or "#00000024" }
+  local dark = M.dark()
+  local s = shadows[dark]
+  if not s then
+    s = { blur = 48, dy = 18, color = dark and "#000000b3" or "#00000024" }
+    shadows[dark] = s
+  end
+  return s
 end })
 
 --- The size of a dialog (settings, the catalog, setup, a picker, help), in

@@ -13,6 +13,7 @@ use crate::Server;
 pub struct Listener {
     listener: UnixListener,
     path: PathBuf,
+    removed: std::sync::atomic::AtomicBool,
 }
 
 impl Listener {
@@ -50,11 +51,21 @@ impl Listener {
         Ok(Listener {
             listener,
             path: path.to_owned(),
+            removed: false.into(),
         })
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// Remove the socket file now, while those already connected are
+    /// still served: a new launch then starts its own server, and this
+    /// one's end cannot take a successor's socket with it.
+    pub fn unlink(&self) {
+        if !self.removed.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 
     /// Accept connections forever, serving each on its own task.
@@ -86,6 +97,6 @@ impl Listener {
 
 impl Drop for Listener {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        self.unlink();
     }
 }

@@ -108,8 +108,10 @@ function M.assistant(item, ctx)
     if not item.streaming then return nil end
     out = { md.text({ { "…", "Dim" } }) }
   else
-    out = md.nodes(text, nil, { id = "md:" .. tostring(item.key or item.id or item.index),
-      width = ctx and ctx.width_px and ctx.width_px - 8 })
+    out = md.nodes(text, nil, {
+      id = "md:" .. tostring(ctx and ctx.list or "") .. ":" .. tostring(item.key or item.id or item.index),
+      width = ctx and ctx.width_px and ctx.width_px - 8,
+    })
   end
   if item.streaming and #out > 0 then
     -- A table has no text of its own to end on: the dots go under it.

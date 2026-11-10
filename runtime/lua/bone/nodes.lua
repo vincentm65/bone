@@ -78,16 +78,18 @@ function M.chat(opts)
     cell = info and info.cell
   end
   local width = math.floor((opts.width_px or 800) / (cell and cell.w or 8))
+  local key = s and s.session_id or ("new" .. tostring(s and s.chat or ""))
   node.list = {
     count = n,
     estimate = 60,
-    key = s and s.session_id or ("new" .. tostring(s and s.chat or "")),
+    key = key,
     -- Each item's node is kept until the chat says the item changed.
     chat = other or true,
     item = function(i)
       local item = bone.chat.item(i, { full = true, session = other and tostring(other) or nil })
       if not item then return { height = 0 } end
-      return M.item(item, { width = width, width_px = opts.width_px, region = "chat" })
+      -- `list` scopes ids (a code block's sideways scroll) to this chat.
+      return M.item(item, { width = width, width_px = opts.width_px, region = "chat", list = key })
     end,
   }
   return node

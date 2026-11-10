@@ -356,9 +356,12 @@ fn server(config_dir: &Path) -> StartupResult<Server> {
 }
 
 /// Exit-idle: the first client, or nobody coming at all, then the last
-/// client leaving. A moment's grace covers one arriving just as the last
-/// one leaves, and an accepted connection the count has not seen yet.
-async fn wait_idle(mut count: tokio::sync::watch::Receiver<usize>) {
+/// client leaving. The socket file goes the moment the count hits zero,
+/// so a launch landing in the teardown starts its own core instead of
+/// connecting to a dying one; the grace then covers a connection that
+/// was accepted before the file went but not counted yet, and such a
+/// straggler keeps this core serving until it leaves too.
+async fn wait_idle(mut count: tokio::sync::watch::Receiver<usize>, listener: &Listener) {
     let grace = std::time::Duration::from_millis(300);
     if tokio::time::timeout(std::time::Duration::from_secs(10), count.wait_for(|n| *n > 0))
         .await
@@ -370,6 +373,7 @@ async fn wait_idle(mut count: tokio::sync::watch::Receiver<usize>) {
         if count.wait_for(|n| *n == 0).await.is_err() {
             return;
         }
+        listener.unlink();
         tokio::time::sleep(grace).await;
         if *count.borrow_and_update() == 0 {
             return;
@@ -456,7 +460,7 @@ async fn run(mode: Mode, config_dir: PathBuf) -> StartupResult<()> {
             let (count, idle) = tokio::sync::watch::channel(0usize);
             tokio::select! {
                 r = listener.run_counted(&server, count) => r.map_err(|e| (1, format!("accept failed: {e}")))?,
-                _ = wait_idle(idle), if exit_idle => {}
+                _ = wait_idle(idle, &listener), if exit_idle => {}
                 _ = stop => {}
             }
             // Dropping the listener removes the socket file.

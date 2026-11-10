@@ -519,10 +519,15 @@ impl Metrics for Fonts<'_> {
 
 /// Offsets applied: the children of a scroll container move up by its
 /// offset, which follows the end when it was there.
-fn apply_scroll(p: &mut Placed, state: &mut HashMap<String, Scroll>) {
+fn apply_scroll(
+    p: &mut Placed,
+    state: &mut HashMap<String, Scroll>,
+    used: &mut std::collections::HashSet<String>,
+) {
     if let (Overflow::Scroll, Some(content), Some(id)) =
         (p.node.style.overflow, p.content, &p.node.id)
     {
+        used.insert(id.clone());
         let s = state.entry(id.clone()).or_default();
         // A row scrolls sideways, a column up and down.
         let sideways = p.node.style.direction == crate::node::Direction::Row;
@@ -546,7 +551,7 @@ fn apply_scroll(p: &mut Placed, state: &mut HashMap<String, Scroll>) {
         }
     }
     for c in &mut p.children {
-        apply_scroll(c, state);
+        apply_scroll(c, state, used);
     }
 }
 
@@ -722,6 +727,7 @@ impl Gui {
 
         let mut lists = std::mem::take(&mut self.view.lists);
         let mut scroll = std::mem::take(&mut self.view.scroll);
+        let mut used_scroll = std::collections::HashSet::new();
         set_totals(&mut tree, &mut lists);
         if self.draft_rc.as_ref() != self.draft.as_str() {
             self.draft_rc = Rc::from(self.draft.as_str());
@@ -751,7 +757,7 @@ impl Gui {
                 },
                 &fonts,
             );
-            apply_scroll(&mut placed, &mut scroll);
+            apply_scroll(&mut placed, &mut scroll, &mut used_scroll);
             drop(_place);
             let _realize = crate::profile::Span::start("realize");
             let again = self.realize(
@@ -780,7 +786,7 @@ impl Gui {
                             // What scrolls inside an item (a table, a code
                             // block) scrolls as it does in the window.
                             let mut item = flex::place(n, *r, &fonts);
-                            apply_scroll(&mut item, &mut scroll);
+                            apply_scroll(&mut item, &mut scroll, &mut used_scroll);
                             item
                         })
                         .collect();
@@ -788,6 +794,11 @@ impl Gui {
                 })
                 .collect();
             drop(_item_place);
+            // A chat keeps its position when it is switched away from,
+            // but a markdown block's sideways offset is one of thousands:
+            // those live only while their item is in the virtualized
+            // window, as tweens do.
+            scroll.retain(|k, _| used_scroll.contains(k) || !k.starts_with("md:"));
             self.view.scroll = scroll;
             let _paint = crate::profile::Span::start("paint");
             self.paint(

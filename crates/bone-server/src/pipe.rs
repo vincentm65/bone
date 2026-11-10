@@ -47,6 +47,10 @@ impl Listener {
         &self.path
     }
 
+    /// A named pipe has no file to remove: new connections keep reaching
+    /// this server until it exits. See the Unix listener's `unlink`.
+    pub fn unlink(&self) {}
+
     /// Accept connections forever, serving each on its own task. A new
     /// instance waits before each client is handed off, so none is turned
     /// away between connections.
