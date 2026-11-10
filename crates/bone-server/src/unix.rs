@@ -59,11 +59,27 @@ impl Listener {
 
     /// Accept connections forever, serving each on its own task.
     pub async fn run(&self, server: &Server) -> io::Result<()> {
+        self.run_counted(server, tokio::sync::watch::channel(0).0)
+            .await
+    }
+
+    /// Like [`run`](Self::run), keeping `clients` at the number of
+    /// connections currently being served.
+    pub async fn run_counted(
+        &self,
+        server: &Server,
+        clients: tokio::sync::watch::Sender<usize>,
+    ) -> io::Result<()> {
         loop {
             let (stream, _) = self.listener.accept().await?;
             let (r, w) = stream.into_split();
             let server = server.clone();
-            tokio::spawn(async move { server.serve(transport::framed(r, w)).await });
+            clients.send_modify(|n| *n += 1);
+            let clients = clients.clone();
+            tokio::spawn(async move {
+                server.serve(transport::framed(r, w)).await;
+                clients.send_modify(|n| *n -= 1);
+            });
         }
     }
 }

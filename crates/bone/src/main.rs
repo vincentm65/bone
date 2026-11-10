@@ -16,7 +16,6 @@ use bone_tui::RunOptions;
 const USAGE: &str = "\
 usage: bone [-r [ID]] [--connect [PATH]]
        bone --gui [--connect [PATH]]
-       bone --gui-daemon
        bone --headless [--listen [PATH]]
        bone --init
 
@@ -27,9 +26,8 @@ usage: bone [-r [ID]] [--connect [PATH]]
   --connect [PATH]  open the TUI on a server started with --listen
   --gui             open the desktop GUI instead of the TUI, on the same
                     core (needs a bone built with --features gui). A GUI
-                    already running is shown again, without starting over
-  --gui-daemon      start that GUI in the background with no window, so the
-                    next --gui is immediate
+                    already running opens the window there, without
+                    starting over
   --headless        run the core without a UI and serve the bone API
                     (JSON-RPC 2.0, one JSON message per line) on stdin/stdout
   --listen [PATH]   with --headless: serve on a Unix socket (a named pipe on
@@ -65,8 +63,6 @@ enum Mode {
     },
     Gui {
         connect: Option<PathBuf>,
-        /// Load the window, but do not show one until asked.
-        daemon: bool,
     },
 }
 
@@ -78,14 +74,12 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Mode>, St
     let mut resume = None;
     let mut init = false;
     let mut gui = false;
-    let mut gui_daemon = false;
     while let Some(arg) = args.next() {
         let mut value = || args.next_if(|a| !a.starts_with('-'));
         match arg.as_str() {
             "--headless" => headless = true,
             "--init" => init = true,
             "--gui" => gui = true,
-            "--gui-daemon" => gui_daemon = true,
             "--listen" => listen = Some(value().map_or_else(default_socket_path, PathBuf::from)),
             "--connect" => connect = Some(value().map_or_else(default_socket_path, PathBuf::from)),
             "-r" | "--resume" => resume = Some(value()),
@@ -104,7 +98,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Mode>, St
         return Ok(Some(Mode::Init));
     }
     if headless {
-        if gui || gui_daemon {
+        if gui {
             return Err("--gui and --headless are different ways to run bone".into());
         }
         if connect.is_some() || resume.is_some() {
@@ -115,20 +109,11 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Mode>, St
     if listen.is_some() {
         return Err("--listen needs --headless".into());
     }
-    if gui || gui_daemon {
+    if gui {
         if resume.is_some() {
             return Err("--resume is for the TUI, not --gui".into());
         }
-        if gui && gui_daemon {
-            return Err("--gui and --gui-daemon both open the desktop GUI".into());
-        }
-        if gui_daemon && connect.is_some() {
-            return Err("--gui-daemon serves the default core, not --connect".into());
-        }
-        return Ok(Some(Mode::Gui {
-            connect,
-            daemon: gui_daemon,
-        }));
+        return Ok(Some(Mode::Gui { connect }));
     }
     Ok(Some(Mode::Tui { connect, resume }))
 }
@@ -212,9 +197,9 @@ fn main() -> ExitCode {
     // A GUI that is already up just shows its window. This is the whole
     // launch: no runtime, no core, no GPU.
     #[cfg(feature = "gui")]
-    if let Mode::Gui { connect: None, daemon } = &mode
+    if let Mode::Gui { connect: None } = &mode
         && !private_core(|k| std::env::var_os(k))
-        && bone_gui::request_window(!daemon)
+        && bone_gui::request_window()
     {
         return ExitCode::SUCCESS;
     }
@@ -442,17 +427,11 @@ async fn run(mode: Mode, config_dir: PathBuf) -> StartupResult<()> {
                 }, if shared.is_some() => r.map_err(|e| (1, format!("accept failed: {e}")))?,
             }
         }
-        Mode::Gui { connect, daemon } => {
-            // Stay up after the window closes only for the default core,
-            // where another `bone --gui` can ask this process to show it.
+        Mode::Gui { connect } => {
+            // Only a GUI on the default core serves the control socket
+            // another `bone --gui` opens its window through.
             let resident = connect.is_none();
-            gui(
-                attach(connect, &config_dir).await?,
-                config_dir,
-                !daemon,
-                resident,
-            )
-            .await?
+            gui(attach(connect, &config_dir).await?, config_dir, resident).await?
         }
     }
     Ok(())
@@ -516,31 +495,30 @@ fn cwd() -> String {
 /// The GUI blocks its thread, so the shared core is served from a task,
 /// stopped (removing the socket) when the window closes.
 #[cfg(feature = "gui")]
-async fn gui(
-    a: Attached,
-    config_dir: PathBuf,
-    show: bool,
-    resident: bool,
-) -> StartupResult<()> {
+async fn gui(a: Attached, config_dir: PathBuf, resident: bool) -> StartupResult<()> {
+    // A GUI hosting the core counts the clients attached to it, and lives
+    // while any remain; its own extra windows connect in-process.
+    let mut clients = None;
+    let mut connect_local: Option<bone_gui::ConnectLocal> = None;
     let serving = a.shared.map(|(listener, server)| {
+        let (tx, rx) = tokio::sync::watch::channel(0);
+        clients = Some(rx);
+        let local = server.clone();
+        connect_local = Some(std::sync::Arc::new(move || local.connect_in_process()));
         tokio::spawn(async move {
-            if let Err(e) = listener.run(&server).await {
+            if let Err(e) = listener.run_counted(&server, tx).await {
                 eprintln!("bone: accept failed: {e}");
             }
         })
     });
-    // A resident GUI opens later windows through the socket it is serving.
     let resident = resident && a.path.is_some();
     let opts = bone_gui::GuiOptions {
         cwd: cwd(),
-        reconnect: if resident || !a.reload_core {
-            a.path
-        } else {
-            None
-        },
+        reconnect: if a.reload_core { None } else { a.path },
+        connect_local,
         config_dir: Some(config_dir),
     };
-    let r = bone_gui::run_with(a.conn, opts, show, resident).await;
+    let r = bone_gui::run_with(a.conn, opts, resident, clients).await;
     if let Some(task) = serving {
         task.abort();
         let _ = task.await;

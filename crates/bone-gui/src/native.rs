@@ -895,46 +895,44 @@ const TRAFFIC_LIGHTS: (f32, f32) = (13.0, 10.0);
 /// Open the GUI on `conn` and run it until the window closes. Call from
 /// the main thread, inside a multi-threaded Tokio runtime.
 pub async fn run(conn: Connection, opts: GuiOptions) -> Result<(), String> {
-    run_with(conn, opts, true, false).await
+    run_with(conn, opts, false, None).await
 }
 
-/// [`run`], but `show` waits to open a window until [`request_window`], and
-/// `resident` keeps this process after the last window closes so the next
-/// launch does not start the GPU again.
+/// [`run`], but `resident` serves the control socket later `bone --gui`
+/// launches use to open their window in this process, and `clients`, for
+/// a GUI hosting the core, follows how many connections that core serves:
+/// the process then outlives its last window while any remain.
 pub async fn run_with(
     conn: Connection,
     opts: GuiOptions,
-    show: bool,
     resident: bool,
+    clients: Option<tokio::sync::watch::Receiver<usize>>,
 ) -> Result<(), String> {
     let gui = Gui::connect(conn, opts.clone()).await?;
     gui.watch_config();
-    tokio::task::block_in_place(move || open(gui, opts, show, resident))
+    tokio::task::block_in_place(move || open(gui, opts, resident, clients))
 }
 
-fn open(gui: Gui, opts: GuiOptions, show: bool, resident: bool) -> Result<(), String> {
-    let resident_slot = start_resident(resident);
-    let resident = resident_slot.is_some();
-    if !show && !resident {
-        // Nothing would ever present a window or end this process.
-        return Err("another GUI already owns the control socket".into());
-    }
-    let (unlink, asks) = resident_slot.unzip();
+fn open(
+    gui: Gui,
+    opts: GuiOptions,
+    resident: bool,
+    clients: Option<tokio::sync::watch::Receiver<usize>>,
+) -> Result<(), String> {
+    let (unlink, asks) = start_resident(resident).unzip();
     let _unlink = unlink;
     let mut prepared = Some(gui);
     Application::new().run(move |cx: &mut App| {
-        if let Some(gui) = (show || resident).then(|| prepared.take()).flatten() {
+        // GPUI leaves the event loop when its last window is destroyed,
+        // which would drop the GPU and the hosted core. While clients are
+        // attached to that core, closing the last window parks it instead
+        // (`parked`), and the last client leaving ends the process.
+        let parked = std::rc::Rc::new(std::cell::Cell::new(false));
+        if let Some(gui) = prepared.take() {
             match present(cx, gui) {
                 Ok(handle) => {
-                    // GPUI leaves the event loop when its last window is
-                    // destroyed, which would drop the GPU. Closing the last
-                    // window minimizes it instead, so the next launch only
-                    // has to show it.
-                    if resident {
-                        keep_on_close(cx, handle);
-                    }
-                    if !show {
-                        let _ = handle.update(cx, |_, window, _| park_window(window));
+                    if let Some(rx) = clients.clone() {
+                        keep_on_close(cx, handle, rx, parked.clone());
                     }
                 }
                 Err(e) => {
@@ -944,7 +942,21 @@ fn open(gui: Gui, opts: GuiOptions, show: bool, resident: bool) -> Result<(), St
                 }
             }
         }
+        if let Some(mut rx) = clients.clone() {
+            let parked = parked.clone();
+            cx.spawn(async move |cx| {
+                while rx.changed().await.is_ok() {
+                    if *rx.borrow() == 0 && parked.get() {
+                        let _ = cx.update(|cx| cx.quit());
+                        break;
+                    }
+                }
+            })
+            .detach();
+        }
         if let Some(mut rx) = asks {
+            let clients = clients.clone();
+            let parked = parked.clone();
             cx.spawn(async move |cx| {
                 while let Some(ask) = rx.recv().await {
                     match ask {
@@ -953,7 +965,9 @@ fn open(gui: Gui, opts: GuiOptions, show: bool, resident: bool) -> Result<(), St
                             let _ = reply.send("ok\n".into());
                         }
                         Ask::Open(reply) => {
-                            let msg = cx.update(|app| show_window(app, &mut prepared, &opts));
+                            let msg = cx.update(|app| {
+                                show_window(app, &opts, clients.clone(), &parked)
+                            });
                             let _ = reply.send(msg.unwrap_or_else(|_| "err gone\n".into()));
                         }
                     }
@@ -962,16 +976,14 @@ fn open(gui: Gui, opts: GuiOptions, show: bool, resident: bool) -> Result<(), St
             .detach();
         }
         cx.on_window_closed(move |cx| {
-            if !resident && cx.windows().is_empty() {
+            if cx.windows().is_empty() {
                 cx.quit();
             }
         })
         .detach();
         #[cfg(target_os = "macos")]
         dock_icon();
-        if show {
-            cx.activate(true);
-        }
+        cx.activate(true);
     });
     Ok(())
 }
@@ -991,14 +1003,22 @@ fn window_size(gui: &Gui) -> (f32, f32) {
 }
 
 /// Closing the last window would end the process and drop the GPU.
-/// Keep it, off the current workspace, so the next launch only shows it.
-fn keep_on_close(cx: &mut App, handle: WindowHandle<Root>) {
+/// Closing the last window while `clients` are attached to the hosted
+/// core parks it instead, off the current workspace, so the core keeps
+/// serving them; the last client leaving then ends the process.
+fn keep_on_close(
+    cx: &mut App,
+    handle: WindowHandle<Root>,
+    clients: tokio::sync::watch::Receiver<usize>,
+    parked: std::rc::Rc<std::cell::Cell<bool>>,
+) {
     let _ = handle.update(cx, |_, window, cx| {
-        window.on_window_should_close(cx, |window, cx| {
-            if cx.windows().len() > 1 {
+        window.on_window_should_close(cx, move |window, cx| {
+            if cx.windows().len() > 1 || *clients.borrow() == 0 {
                 return true;
             }
             park_window(window);
+            parked.set(true);
             false
         });
     });
@@ -1066,26 +1086,29 @@ fn present(cx: &mut App, mut gui: Gui) -> Result<WindowHandle<Root>, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Focus the window already open, or open one. The first call can use the
-/// GUI this process started with, so a daemon does not connect twice.
-fn show_window(cx: &mut App, prepared: &mut Option<Gui>, opts: &GuiOptions) -> String {
+/// Focus the window already open, or open one.
+fn show_window(
+    cx: &mut App,
+    opts: &GuiOptions,
+    clients: Option<tokio::sync::watch::Receiver<usize>>,
+    parked: &std::rc::Rc<std::cell::Cell<bool>>,
+) -> String {
     if let Some(handle) = cx.active_window().or_else(|| cx.windows().first().copied()) {
         reveal_window();
+        parked.set(false);
         let _ = handle.update(cx, |_view, window, _| window.activate_window());
         cx.activate(true);
         return "ok\n".into();
     }
-    let gui = if let Some(gui) = prepared.take() {
-        gui
-    } else {
-        match connect_gui(opts.clone()) {
-            Ok(gui) => gui,
-            Err(e) => return format!("err {e}\n"),
-        }
+    let gui = match connect_gui(opts.clone()) {
+        Ok(gui) => gui,
+        Err(e) => return format!("err {e}\n"),
     };
     match present(cx, gui) {
         Ok(handle) => {
-            keep_on_close(cx, handle);
+            if let Some(rx) = clients {
+                keep_on_close(cx, handle, rx, parked.clone());
+            }
             let _ = handle.update(cx, |_, window, _| window.activate_window());
             cx.activate(true);
             "ok\n".into()
@@ -1098,12 +1121,14 @@ fn show_window(cx: &mut App, prepared: &mut Option<Gui>, opts: &GuiOptions) -> S
 /// the window thread. That thread is inside `block_in_place`, which is what
 /// lets `block_on` drive the connect on the runtime it already belongs to.
 fn connect_gui(opts: GuiOptions) -> Result<Gui, String> {
-    let path = opts
-        .reconnect
-        .clone()
-        .ok_or_else(|| "this GUI has no server socket to open another window on".to_string())?;
     tokio::runtime::Handle::current().block_on(async move {
-        let conn = bone_client::connect(&path).await.map_err(|e| e.to_string())?;
+        let conn = match (&opts.connect_local, &opts.reconnect) {
+            (Some(connect), _) => connect(),
+            (None, Some(path)) => bone_client::connect(path).await.map_err(|e| e.to_string())?,
+            (None, None) => {
+                return Err("this GUI has no server socket to open another window on".into());
+            }
+        };
         Gui::connect(conn, opts).await
     })
 }
@@ -1130,10 +1155,9 @@ fn gui_socket_path() -> PathBuf {
     path
 }
 
-/// Ask the GUI that is already running to show its window, or with `show`
-/// false only whether one is running. False when none is, which is also
-/// when this process should become that GUI.
-pub fn request_window(show: bool) -> bool {
+/// Ask the GUI that is already running to show its window. False when none
+/// is, which is also when this process should become that GUI.
+pub fn request_window() -> bool {
     #[cfg(unix)]
     {
         let path = gui_socket_path();
@@ -1146,9 +1170,6 @@ pub fn request_window(show: bool) -> bool {
                 return false;
             }
         };
-        if !show {
-            return true;
-        }
         let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
         // Longer than the server's 5s wait for its event loop to answer.
         let _ = stream.set_read_timeout(Some(Duration::from_secs(8)));

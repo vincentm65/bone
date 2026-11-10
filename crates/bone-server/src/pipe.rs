@@ -51,6 +51,17 @@ impl Listener {
     /// instance waits before each client is handed off, so none is turned
     /// away between connections.
     pub async fn run(&self, server: &Server) -> io::Result<()> {
+        self.run_counted(server, tokio::sync::watch::channel(0).0)
+            .await
+    }
+
+    /// Like [`run`](Self::run), keeping `clients` at the number of
+    /// connections currently being served.
+    pub async fn run_counted(
+        &self,
+        server: &Server,
+        clients: tokio::sync::watch::Sender<usize>,
+    ) -> io::Result<()> {
         let mut pipe = match self.next.lock().unwrap().take() {
             Some(pipe) => pipe,
             None => self.instance()?,
@@ -60,7 +71,12 @@ impl Listener {
             let connected = std::mem::replace(&mut pipe, self.instance()?);
             let (r, w) = tokio::io::split(connected);
             let server = server.clone();
-            tokio::spawn(async move { server.serve(transport::framed(r, w)).await });
+            clients.send_modify(|n| *n += 1);
+            let clients = clients.clone();
+            tokio::spawn(async move {
+                server.serve(transport::framed(r, w)).await;
+                clients.send_modify(|n| *n -= 1);
+            });
         }
     }
 
