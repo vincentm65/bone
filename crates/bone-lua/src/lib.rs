@@ -708,7 +708,9 @@ pub fn new_state(side: Side, config_dir: Option<&Path>) -> mlua::Result<Lua> {
     Ok(lua)
 }
 
-/// JSON → Lua. `null` becomes `nil`; empty objects become empty tables.
+/// JSON → Lua. `null` becomes `nil`; empty objects become empty tables, and
+/// arrays carry mlua's array metatable, so that an empty one is still `[]`
+/// when it goes back (`from_lua`, `bone.json.encode`).
 pub fn to_lua(lua: &Lua, v: &serde_json::Value) -> mlua::Result<Value> {
     Ok(match v {
         serde_json::Value::Null => Value::Nil,
@@ -723,6 +725,7 @@ pub fn to_lua(lua: &Lua, v: &serde_json::Value) -> mlua::Result<Value> {
             for (i, v) in a.iter().enumerate() {
                 t.raw_set(i + 1, to_lua(lua, v)?)?;
             }
+            t.set_metatable(Some(lua.array_metatable()))?;
             Value::Table(t)
         }
         serde_json::Value::Object(o) => {
@@ -735,7 +738,8 @@ pub fn to_lua(lua: &Lua, v: &serde_json::Value) -> mlua::Result<Value> {
     })
 }
 
-/// Lua → JSON. Tables with keys 1..n are arrays; an empty table is `{}`.
+/// Lua → JSON. Tables with keys 1..n are arrays; an empty table is `{}`,
+/// unless it came from a JSON array (and was not rebuilt on the way).
 pub fn from_lua(v: &Value) -> mlua::Result<serde_json::Value> {
     Ok(match v {
         Value::Nil => serde_json::Value::Null,
@@ -752,7 +756,9 @@ pub fn from_lua(v: &Value) -> mlua::Result<serde_json::Value> {
         Value::Table(t) => {
             let len = t.raw_len();
             let count = t.clone().pairs::<Value, Value>().count();
-            if len > 0 && len == count {
+            // Only mlua can tell its mark: it writes such a table as a list.
+            let marked = || matches!(serde_json::to_value(t), Ok(serde_json::Value::Array(_)));
+            if len == count && (len > 0 || marked()) {
                 let mut a = Vec::with_capacity(len);
                 for i in 1..=len {
                     a.push(from_lua(&t.raw_get::<Value>(i)?)?);
@@ -1189,6 +1195,27 @@ mod tests {
             .eval()
             .unwrap();
         assert_eq!(null, r#"{"x":null}"#);
+        // An empty array stays one through Lua, also once emptied in place;
+        // a table made in Lua is an object until it has items, and so is
+        // one that was given names.
+        let lists: Value = lua
+            .load(
+                r#"local t = bone.json.decode('{"a":[],"b":{},"c":[1],"d":[[]],"g":[]}')
+                table.remove(t.c)
+                t.e, t.f, t.g.k = {}, { "x" }, 1
+                return t"#,
+            )
+            .eval()
+            .unwrap();
+        assert_eq!(
+            from_lua(&lists).unwrap(),
+            serde_json::json!({ "a": [], "b": {}, "c": [], "d": [[]], "e": {}, "f": ["x"], "g": { "k": 1 } })
+        );
+        let encoded: String = lua
+            .load(r#"return bone.json.encode(bone.json.decode('{"a":[],"b":{}}'))"#)
+            .eval()
+            .unwrap();
+        assert_eq!(encoded, r#"{"a":[],"b":{}}"#);
         let s: String = lua
             .load(r#"return bone.inspect({1, "x", k = {true}})"#)
             .eval()

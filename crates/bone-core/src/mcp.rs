@@ -40,6 +40,8 @@ const START_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESTARTS: u32 = 5;
 /// Lines of a stdio server's stderr kept for error messages.
 const STDERR_LINES: usize = 20;
+/// How the error starts when an HTTP server no longer knows the session.
+const SESSION_LOST: &str = "the server ended the session";
 
 /// One server, as `bone.mcp.add` describes it.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
@@ -67,6 +69,10 @@ pub struct ServerConfig {
     /// Start on first use instead of at once.
     #[serde(default)]
     pub lazy: bool,
+    /// Start only when asked (`bone.mcp.start`) or called (`bone.mcp.call`),
+    /// not for the next turn: for a plugin that knows the tools already.
+    #[serde(default)]
+    pub on_call: bool,
     /// Per-call limit in ms.
     #[serde(default)]
     pub timeout: Option<u64>,
@@ -360,6 +366,7 @@ impl HttpConn {
             let _ = oauth::refresh(&self.name, &self.url, None).await;
         }
         let sent = oauth::access_token(&self.name, &self.url);
+        let in_session = self.session.lock().unwrap().is_some();
         let send = || self.post(&body).send();
         let failed = |e: reqwest::Error| format!("{}: {e}", self.url);
         let denied = |r: &reqwest::Response| r.status() == reqwest::StatusCode::UNAUTHORIZED;
@@ -390,6 +397,11 @@ impl HttpConn {
         }
         if !res.status().is_success() {
             let status = res.status();
+            if in_session && status == reqwest::StatusCode::NOT_FOUND {
+                // It restarted, or let the session expire: connect anew.
+                let _ = self.events.send(ConnEvent::Closed(SESSION_LOST.into()));
+                return Err(format!("{SESSION_LOST} (HTTP 404)"));
+            }
             let text = res.text().await.unwrap_or_default();
             return Err(format!("HTTP {status}: {}", text.trim()));
         }
@@ -820,7 +832,7 @@ impl McpManager {
                 task: Mutex::new(None),
                 config,
             });
-            if !server.config.lazy {
+            if !server.config.lazy && !server.config.on_call {
                 self.start(&server);
             }
             servers.insert(server.config.name.clone(), server);
@@ -839,6 +851,15 @@ impl McpManager {
             .get(name)
             .cloned()
             .ok_or_else(|| format!("no MCP server {name}"))
+    }
+
+    /// Start a server that has not been started yet (`bone.mcp.start`).
+    pub fn wake(&self, name: &str) -> Result<(), String> {
+        let server = self.server(name)?;
+        if server.status() == Status::Idle {
+            self.start(&server);
+        }
+        Ok(())
     }
 
     /// Drop the server's connection and start it again now, with a fresh
@@ -935,13 +956,14 @@ impl McpManager {
         self.servers.lock().unwrap().is_empty()
     }
 
-    /// Start lazy servers and wait (up to `limit`) for those starting for
-    /// the first time. A server that failed and is waiting to restart is not
-    /// waited for: its tools are just missing until it is back.
+    /// Start lazy servers (but those that start `on_call`) and wait (up to
+    /// `limit`) for those starting for the first time. A server that failed
+    /// and is waiting to restart is not waited for: its tools are just
+    /// missing until it is back.
     pub async fn ensure_ready(&self, limit: Duration) {
         let servers = self.all();
         for s in &servers {
-            if s.status() == Status::Idle {
+            if s.status() == Status::Idle && !s.config.on_call {
                 self.start(s);
             }
         }
@@ -1030,17 +1052,9 @@ impl McpManager {
         tool: &str,
         args: Value,
     ) -> Result<(String, bool), String> {
-        let s = self
-            .servers
-            .lock()
-            .unwrap()
-            .get(server)
-            .cloned()
-            .ok_or_else(|| format!("no MCP server {server}"))?;
-        if s.status() == Status::Idle {
-            self.start(&s);
-        }
-        call_on(&s, tool, args).await
+        self.wake(server)?;
+        let server = self.server(server)?;
+        call_on(&server, tool, args).await
     }
 
     /// Every server: `{ name, state, error, tools }`.
@@ -1089,49 +1103,63 @@ impl McpManager {
     }
 }
 
-/// Wait (briefly) for the server, then call its tool.
+/// Wait (briefly) for the server, then call its tool; once more on a new
+/// connection when the server had dropped the session.
 async fn call_on(server: &Server, tool: &str, args: Value) -> Result<(String, bool), String> {
-    let conn = tokio::time::timeout(START_TIMEOUT, async {
-        loop {
-            let changed = server.changed.notified();
-            {
-                let st = server.state.lock().unwrap();
-                match st.status {
-                    Status::Ready => return st.conn.clone(),
-                    Status::Failed | Status::Auth => return None,
-                    _ => {}
+    let mut lost: Option<Arc<Conn>> = None;
+    loop {
+        // Ready, and not on the connection that just failed.
+        let conn = tokio::time::timeout(START_TIMEOUT, async {
+            loop {
+                let changed = server.changed.notified();
+                {
+                    let st = server.state.lock().unwrap();
+                    match (st.status, &st.conn, &lost) {
+                        (Status::Ready, Some(c), Some(l)) if Arc::ptr_eq(c, l) => {}
+                        (Status::Ready, conn, _) => return conn.clone(),
+                        (Status::Failed | Status::Auth, ..) => return None,
+                        _ => {}
+                    }
                 }
+                changed.await;
             }
-            changed.await;
-        }
-    })
-    .await
-    .ok()
-    .flatten();
-    let Some(conn) = conn else {
-        let why = server.state.lock().unwrap().error.clone();
-        return Err(format!(
-            "MCP server {} is not running{}",
-            server.config.name,
-            why.map(|w| format!(": {w}")).unwrap_or_default()
-        ));
-    };
-    let result = tokio::time::timeout(server.config.call_timeout(), conn.call_tool(tool, args))
+        })
+        .await
+        .ok()
+        .flatten();
+        let Some(conn) = conn else {
+            let why = server.state.lock().unwrap().error.clone();
+            return Err(format!(
+                "MCP server {} is not running{}",
+                server.config.name,
+                why.map(|w| format!(": {w}")).unwrap_or_default()
+            ));
+        };
+        let result = tokio::time::timeout(
+            server.config.call_timeout(),
+            conn.call_tool(tool, args.clone()),
+        )
         .await
         .map_err(|_| format!("{tool} did not answer in time"))?;
-    if let Err(e) = &result
-        && e.starts_with(AUTH_REQUIRED)
-    {
-        // The token stopped working mid-session: show it and stop offering
-        // the tools until the user signs in again.
-        server.set(|s| {
-            s.conn = None;
-            s.tools.clear();
-            s.error = Some(e.clone());
-            s.status = Status::Auth;
-        });
+        match &result {
+            Err(e) if e.starts_with(SESSION_LOST) && lost.is_none() => {
+                lost = Some(conn);
+                continue;
+            }
+            Err(e) if e.starts_with(AUTH_REQUIRED) => {
+                // The token stopped working mid-session: show it and stop
+                // offering the tools until the user signs in again.
+                server.set(|s| {
+                    s.conn = None;
+                    s.tools.clear();
+                    s.error = Some(e.clone());
+                    s.status = Status::Auth;
+                });
+            }
+            _ => {}
+        }
+        return result;
     }
-    result
 }
 
 /// (Re)start supervising `server`. Unless `force`, a running one is left.

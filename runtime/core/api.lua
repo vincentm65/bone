@@ -340,6 +340,8 @@ end
 --- (/mcp, mcp plugin). client_id = "..." for servers that refuse registration.
 --- Their tools reach the model as <server>_<tool>. In hooks and tools:
 ---   bone.mcp.call(server, tool, args) -> { text, is_error }
+---   bone.mcp.start(server)     start one added with on_call = true: such a
+---                              server waits for this or its first call
 ---   bone.mcp.list() -> { { name, state, error, tools } }
 bone.mcp = {}
 bone._mcp = {}
@@ -359,6 +361,7 @@ function bone.mcp.add(name, spec, opts)
     allow = tools.allow,
     deny = tools.deny,
     lazy = opts.lazy,
+    on_call = opts.on_call,
     timeout = opts.timeout,
     client_id = opts.client_id or spec.client_id,
   }
@@ -391,6 +394,13 @@ function bone.mcp.call(server, tool, args)
     error("bone.mcp.call only works inside hooks, tools and providers", 2)
   end
   return wait({ mcp_call = { server = server, tool = tool, arguments = args } })
+end
+
+function bone.mcp.start(server)
+  if not in_job() then
+    error("bone.mcp.start only works inside hooks, tools and providers", 2)
+  end
+  wait({ mcp_start = server })
 end
 
 --- Functions clients can call (the lua/call method), for plugins whose TUI

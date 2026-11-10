@@ -1534,6 +1534,49 @@ async fn mcp_tools_reach_the_model_and_survive_reloads() {
     assert!(h.call::<McpList>(Empty {}).await.unwrap().is_empty());
 }
 
+/// A server added with `on_call` waits until a plugin starts it, and an
+/// empty list is still a list after a hook has handed it on.
+#[tokio::test]
+async fn mcp_servers_can_wait_and_empty_lists_survive_hooks() {
+    let fixtures = tempfile::tempdir().unwrap();
+    let script = fixtures.path().join("server.sh");
+    std::fs::write(&script, crate::mcp::tests::BASH_SERVER).unwrap();
+    let lua = format!(
+        r#"
+        bone.mcp.add("sh", {{ command = "bash", args = {{ "{script}" }} }}, {{ on_call = true }})
+        bone.hook("turn_start", function(ev)
+          if ev.text == "wake" then bone.mcp.start("sh") end
+        end)
+        bone.hook("tool_call", function(ev) return {{ arguments = ev.arguments }} end)
+        bone.tool.register {{ name = "probe", run = function(args) return bone.json.encode(args) end }}
+        "#,
+        script = script.display(),
+    );
+    let mut h = Harness::with_lua(
+        &lua,
+        vec![
+            calls(&[("c1", "probe", json!({ "labels": [], "meta": {} }))]),
+            text("one"),
+            text("two"),
+        ],
+    )
+    .await;
+    h.start("go").await;
+    h.until::<TurnFinished>().await;
+    let t = h.transcript().await;
+    assert_eq!(
+        serde_json::from_str::<Value>(tool_result(&t[2]).0).unwrap(),
+        json!({ "labels": [], "meta": {} }),
+        "{t:#?}"
+    );
+    assert_eq!(h.call::<McpList>(Empty {}).await.unwrap()[0].state, "idle");
+    h.start("wake").await;
+    h.until::<TurnFinished>().await;
+    let tools = h.provider.tools.lock().unwrap().clone();
+    assert!(!tools[0].contains(&"sh_hello".to_owned()), "{tools:?}");
+    assert!(tools[2].contains(&"sh_hello".to_owned()), "{tools:?}");
+}
+
 // ---- lua/call ------------------------------------------------------------------
 
 impl Harness {

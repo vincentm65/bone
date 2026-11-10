@@ -291,10 +291,37 @@ async fn talks_to_a_real_stdio_server() {
     assert!(m.list()[0].error.as_ref().unwrap().contains("cannot run"));
 }
 
+/// One HTTP request: its head in lower case, and its JSON body.
+async fn http_request(sock: &mut tokio::net::TcpStream) -> (String, Value) {
+    use tokio::io::AsyncReadExt;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    loop {
+        let n = sock.read(&mut chunk).await.unwrap();
+        buf.extend_from_slice(&chunk[..n]);
+        let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
+            continue;
+        };
+        let head = String::from_utf8_lossy(&buf[..i]).to_lowercase();
+        let len: usize = head
+            .lines()
+            .find_map(|l| l.strip_prefix("content-length:"))
+            .map(|v| v.trim().parse().unwrap())
+            .unwrap_or(0);
+        while buf.len() < i + 4 + len {
+            let n = sock.read(&mut chunk).await.unwrap();
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        return (
+            head,
+            serde_json::from_slice::<Value>(&buf[i + 4..i + 4 + len]).unwrap_or_default(),
+        );
+    }
+}
+
 /// Streamable HTTP: JSON and SSE answers, and the session id round trip.
 #[tokio::test]
 async fn talks_to_an_http_server() {
-    use tokio::io::AsyncReadExt;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/mcp", listener.local_addr().unwrap());
     let seen: Arc<Mutex<Vec<(String, Value)>>> = Default::default();
@@ -302,29 +329,7 @@ async fn talks_to_an_http_server() {
     tokio::spawn(async move {
         loop {
             let (mut sock, _) = listener.accept().await.unwrap();
-            let mut buf = Vec::new();
-            let mut chunk = [0u8; 8192];
-            let (head, body) = loop {
-                let n = sock.read(&mut chunk).await.unwrap();
-                buf.extend_from_slice(&chunk[..n]);
-                let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") else {
-                    continue;
-                };
-                let head = String::from_utf8_lossy(&buf[..i]).to_lowercase();
-                let len: usize = head
-                    .lines()
-                    .find_map(|l| l.strip_prefix("content-length:"))
-                    .map(|v| v.trim().parse().unwrap())
-                    .unwrap_or(0);
-                while buf.len() < i + 4 + len {
-                    let n = sock.read(&mut chunk).await.unwrap();
-                    buf.extend_from_slice(&chunk[..n]);
-                }
-                break (
-                    head,
-                    serde_json::from_slice::<Value>(&buf[i + 4..i + 4 + len]).unwrap(),
-                );
-            };
+            let (head, body) = http_request(&mut sock).await;
             seen2.lock().unwrap().push((head, body.clone()));
             let id = body["id"].clone();
             let reply =
@@ -389,4 +394,103 @@ async fn talks_to_an_http_server() {
             .all(|(h, _)| h.contains("mcp-session-id: sess-1"))
     );
     assert_eq!(seen[1].1["method"], "notifications/initialized");
+}
+
+/// A server that no longer knows the session answers 404: a new session
+/// is started and the call made once more, not for ever.
+#[tokio::test]
+async fn an_http_session_that_ended_is_started_again() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    let sessions = Arc::new(AtomicUsize::new(0));
+    let started = sessions.clone();
+    tokio::spawn(async move {
+        loop {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let (head, body) = http_request(&mut sock).await;
+            let ok = |extra: &str, result: Value| {
+                let b = json!({ "jsonrpc": "2.0", "id": body["id"], "result": result }).to_string();
+                format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n{extra}content-length: {}\r\nconnection: close\r\n\r\n{b}",
+                    b.len()
+                )
+            };
+            let gone = "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
+            let resp = match body["method"].as_str().unwrap_or_default() {
+                "initialize" => {
+                    let n = started.fetch_add(1, Ordering::SeqCst) + 1;
+                    ok(
+                        &format!("mcp-session-id: sess-{n}\r\n"),
+                        json!({ "protocolVersion": PROTOCOL_VERSION, "capabilities": {}, "serverInfo": { "name": "web", "version": "1" } }),
+                    )
+                }
+                "tools/list" => ok(
+                    "",
+                    json!({ "tools": [{ "name": "search", "inputSchema": { "type": "object" } }, { "name": "void", "inputSchema": { "type": "object" } }] }),
+                ),
+                // The first session is forgotten; `void` forgets them all.
+                "tools/call"
+                    if body["params"]["name"] == "void"
+                        || head.contains("mcp-session-id: sess-1\r") =>
+                {
+                    gone.to_owned()
+                }
+                "tools/call" => ok(
+                    "",
+                    json!({ "content": [{ "type": "text", "text": format!("found {}", body["params"]["arguments"]["q"]) }] }),
+                ),
+                _ => "HTTP/1.1 202 Accepted\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                    .to_owned(),
+            };
+            sock.write_all(resp.as_bytes()).await.unwrap();
+            sock.shutdown().await.ok();
+        }
+    });
+    let m = McpManager::default();
+    m.apply(vec![
+        ServerConfig::from_lua_json(json!({ "name": "web", "url": url })).unwrap(),
+    ]);
+    m.ensure_ready(Duration::from_secs(10)).await;
+    assert_eq!(names(&m), ["web_search", "web_void"], "{:?}", m.list());
+    assert_eq!(
+        m.call("web", "search", json!({ "q": "it" })).await,
+        Ok(("found \"it\"".into(), false))
+    );
+    assert_eq!(sessions.load(Ordering::SeqCst), 2);
+    assert_eq!(m.list()[0].state, "ready");
+    // The new session works without another start.
+    assert_eq!(
+        m.call("web", "search", json!({ "q": "more" })).await,
+        Ok(("found \"more\"".into(), false))
+    );
+    assert_eq!(sessions.load(Ordering::SeqCst), 2);
+    let lost = m.call("web", "void", json!({})).await.unwrap_err();
+    assert!(lost.starts_with(SESSION_LOST), "{lost}");
+}
+
+/// `on_call`: not started for a turn, only when asked or called.
+#[tokio::test]
+async fn a_server_can_wait_for_its_first_call() {
+    let (m, fake) = manager();
+    let (mut a, mut b) = (config("fk"), config("other"));
+    (a.on_call, b.on_call) = (true, true);
+    m.apply(vec![a, b]);
+    m.ensure_ready(Duration::from_secs(5)).await;
+    assert!(m.list().iter().all(|s| s.state == "idle"), "{:?}", m.list());
+    assert_eq!(fake.connections.load(Ordering::SeqCst), 0);
+    assert!(names(&m).is_empty());
+    // A call starts the server and waits for it.
+    assert_eq!(
+        m.call("fk", "echo", json!({ "text": "hi" })).await,
+        Ok(("echo: hi".into(), false))
+    );
+    assert_eq!(fake.connections.load(Ordering::SeqCst), 1);
+    assert_eq!(m.list()[1].state, "idle");
+    // So does asking; the turn then waits for it like for any other.
+    m.wake("other").unwrap();
+    m.wake("other").unwrap();
+    m.ensure_ready(Duration::from_secs(5)).await;
+    assert_eq!(fake.connections.load(Ordering::SeqCst), 2);
+    assert!(names(&m).contains(&"other_echo".to_owned()));
+    assert!(m.wake("nobody").is_err());
 }

@@ -379,8 +379,17 @@ impl Host {
     }
 
     /// `{ mcp_call = { server, tool, arguments } }` from core Lua: `{ text,
-    /// is_error }`. `None` for other waits.
+    /// is_error }`; `{ mcp_start = server }` starts one that has not been.
+    /// `None` for other waits.
     pub(crate) async fn mcp_wait(&self, spec: &Json) -> Option<Result<Json, String>> {
+        if let Some(server) = spec.get("mcp_start") {
+            let name = server.as_str().unwrap_or_default();
+            return Some(
+                self.inner()
+                    .and_then(|i| i.mcp.wake(name))
+                    .map(|()| json!({})),
+            );
+        }
         let call = spec.get("mcp_call")?;
         let r = async {
             let inner = self.inner()?;
