@@ -540,7 +540,7 @@ local function foldable(t)
 end
 
 -- What a run of calls did, in the order first seen: "Read 3 files, ran 2
--- shell commands, called web_search 2 times".
+-- shell commands, called web_search 2 times"; and how many of them failed.
 local function summary(calls)
   local order, seen = {}, {}
   local function bump(key, phrase, unique)
@@ -576,8 +576,7 @@ local function summary(calls)
   local text = table.concat(parts, ", ")
   local failed = 0
   for _, t in ipairs(calls) do failed = failed + (t.done and t.is_error and 1 or 0) end
-  text = text:sub(1, 1):upper() .. text:sub(2)
-  return failed > 0 and (text .. ", " .. failed .. " failed") or text
+  return text:sub(1, 1):upper() .. text:sub(2), failed
 end
 
 --- In "summary": the line for the first call of a stretch (the calls between
@@ -599,12 +598,12 @@ local function summary_nodes(item, width)
       stretch[#stretch + 1] = t
     end
   end
-  local running, failed, ms = false, false, 0
+  local running, ms = false, 0
   for _, t in ipairs(stretch) do
     running = running or not t.done
-    failed = failed or (t.done and t.is_error) or false
     ms = ms + (t.duration_ms or 0)
   end
+  local did, failed = summary(stretch)
   local open = toggled[run_key(item)]
   -- The state, what the run did, how long it took, and a chevron that
   -- says it opens.
@@ -612,10 +611,17 @@ local function summary_nodes(item, width)
   if ms >= 100 and not running then
     meta[#meta + 1] = { text = ms >= 1000 and bone.util.duration(ms / 1000) or (ms .. "ms"), hl = "Dim", font = "mono" }
   end
-  local text = md.text({ { text = summary(stretch), hl = "ToolArgs" } }, { size = md.small_size })
+  local spans = { { text = did, hl = "ToolArgs" } }
+  if failed > 0 then
+    spans[#spans + 1] = { text = ", ", hl = "ToolArgs" }
+    spans[#spans + 1] = { text = failed .. " failed", hl = "ToolError" }
+  end
+  local text = md.text(spans, { size = md.small_size })
   text.shrink, text.wrap, text.text_overflow = 1, false, "ellipsis"
+  -- A cross only when every call failed: a run that went on past a failed
+  -- call came to something, and its failures are counted in red.
   local head = { direction = "row", align = "center", gap = 8, padding = PAD,
-    lead_slot(state_icon(running, failed)), text }
+    lead_slot(state_icon(running, failed > 0 and failed == #stretch)), text }
   if #meta > 0 then
     local m = md.text(meta, { size = style.size.micro })
     m.wrap = false
