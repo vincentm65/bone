@@ -20,8 +20,8 @@ usage: bone [-r [ID]] [--connect [PATH]]
        bone --init
 
   (no options)      open the TUI on the server at the default PATH if one
-                    is running; otherwise run the core in this process and
-                    serve it at PATH while the TUI is open
+                    is running; otherwise start the core as a process of
+                    its own, which exits with its last client
   -r, --resume [ID] reopen session ID, or the newest session
   --connect [PATH]  open the TUI on a server started with --listen
   --gui             open the desktop GUI instead of the TUI, on the same
@@ -30,6 +30,8 @@ usage: bone [-r [ID]] [--connect [PATH]]
                     starting over
   --headless        run the core without a UI and serve the bone API
                     (JSON-RPC 2.0, one JSON message per line) on stdin/stdout
+  --exit-idle       with --listen: exit when the last client disconnects
+                    (how the TUI and the GUI start their shared core)
   --listen [PATH]   with --headless: serve on a Unix socket (a named pipe on
                     Windows) instead of stdio
   --init            write starter core.lua and tui.lua (never overwrites)
@@ -56,7 +58,7 @@ Environment variables override core.lua for one run:
 enum Mode {
     Init,
     Stdio,
-    Listen(PathBuf),
+    Listen { path: PathBuf, exit_idle: bool },
     Tui {
         connect: Option<PathBuf>,
         resume: Option<Option<String>>,
@@ -74,6 +76,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Mode>, St
     let mut resume = None;
     let mut init = false;
     let mut gui = false;
+    let mut exit_idle = false;
     while let Some(arg) = args.next() {
         let mut value = || args.next_if(|a| !a.starts_with('-'));
         match arg.as_str() {
@@ -81,6 +84,7 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Mode>, St
             "--init" => init = true,
             "--gui" => gui = true,
             "--listen" => listen = Some(value().map_or_else(default_socket_path, PathBuf::from)),
+            "--exit-idle" => exit_idle = true,
             "--connect" => connect = Some(value().map_or_else(default_socket_path, PathBuf::from)),
             "-r" | "--resume" => resume = Some(value()),
             "-h" | "--help" => {
@@ -104,9 +108,13 @@ fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Option<Mode>, St
         if connect.is_some() || resume.is_some() {
             return Err("--connect and --resume are for the TUI, not --headless".into());
         }
-        return Ok(Some(listen.map_or(Mode::Stdio, Mode::Listen)));
+        return Ok(Some(match listen {
+            Some(path) => Mode::Listen { path, exit_idle },
+            None if exit_idle => return Err("--exit-idle needs --listen".into()),
+            None => Mode::Stdio,
+        }));
     }
-    if listen.is_some() {
+    if listen.is_some() || exit_idle {
         return Err("--listen needs --headless".into());
     }
     if gui {
@@ -349,31 +357,86 @@ fn server(config_dir: &Path) -> StartupResult<Server> {
 
 enum Endpoint {
     Attached(Connection),
-    Local(Option<Listener>),
+    Local,
 }
 
-/// Another startup may win the socket after our initial connect failed.
-async fn bind_or_connect(path: &Path) -> StartupResult<Endpoint> {
-    let display = path.display();
-    match Listener::bind(path).await {
-        Ok(listener) => Ok(Endpoint::Local(Some(listener))),
-        Err(bind) => bone_client::connect(path)
-            .await
-            .map(Endpoint::Attached)
-            .map_err(|connect| {
-                // Another bone serves it, but this one may not connect: on
-                // Windows, one running as another user (or an older bone
-                // running as administrator, before pipes allowed that).
-                let why = if connect.kind() == std::io::ErrorKind::PermissionDenied {
-                    format!(
-                        "another bone is running at {display} that this one may not join (another \
-                         user's, or an older bone run as administrator); quit it and start bone again"
-                    )
-                } else {
-                    format!("cannot listen on {display}: {bind}; cannot connect: {connect}")
-                };
-                (1, why)
-            }),
+/// Exit-idle: the first client, or nobody coming at all, then the last
+/// client leaving. A moment's grace covers one arriving just as the last
+/// one leaves, and an accepted connection the count has not seen yet.
+async fn wait_idle(mut count: tokio::sync::watch::Receiver<usize>) {
+    let grace = std::time::Duration::from_millis(300);
+    if tokio::time::timeout(std::time::Duration::from_secs(10), count.wait_for(|n| *n > 0))
+        .await
+        .is_err()
+    {
+        return;
+    }
+    loop {
+        if count.wait_for(|n| *n == 0).await.is_err() {
+            return;
+        }
+        tokio::time::sleep(grace).await;
+        if *count.borrow_and_update() == 0 {
+            return;
+        }
+    }
+}
+
+/// Start the shared core as its own process serving `path`, and connect to
+/// it. The core exits with its last client. Two launches may race: the
+/// loser's core finds the socket taken and leaves, and both connect to the
+/// winner's.
+async fn spawn_core(path: &Path) -> StartupResult<Connection> {
+    let exe = std::env::current_exe()
+        .map_err(|e| (1, format!("cannot find this bone to start the core: {e}")))?;
+    let mut cmd = std::process::Command::new(exe);
+    cmd.arg("--headless")
+        .arg("--listen")
+        .arg(path)
+        .arg("--exit-idle")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped());
+    // Its own group: the terminal's signals are for the UI, not the core.
+    #[cfg(unix)]
+    std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0000_0208);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| (1, format!("cannot start the core: {e}")))?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match bone_client::connect(path).await {
+            Ok(conn) => {
+                // Drain its stderr and reap it, instead of leaving a zombie.
+                std::thread::spawn(move || {
+                    if let Some(mut err) = child.stderr.take() {
+                        let _ = std::io::copy(&mut err, &mut std::io::sink());
+                    }
+                    let _ = child.wait();
+                });
+                return Ok(conn);
+            }
+            Err(e) if matches!(child.try_wait(), Ok(Some(_))) => {
+                // It lost a race to another core: connect to that one.
+                if let Ok(conn) = bone_client::connect(path).await {
+                    return Ok(conn);
+                }
+                let mut why = String::new();
+                if let Some(mut err) = child.stderr.take() {
+                    let _ = std::io::Read::read_to_string(&mut err, &mut why);
+                }
+                let why = why.trim();
+                let why = if why.is_empty() { &format!("cannot connect: {e}") } else { why };
+                return Err((1, format!("the core exited at startup: {why}")));
+            }
+            Err(e) if std::time::Instant::now() > deadline => {
+                let _ = child.kill();
+                return Err((1, format!("cannot connect to the core at {}: {e}", path.display())));
+            }
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(30)).await,
+        }
     }
 }
 
@@ -382,7 +445,7 @@ async fn run(mode: Mode, config_dir: PathBuf) -> StartupResult<()> {
         // stdout belongs to the protocol from here on.
         Mode::Init => init_config(&config_dir)?,
         Mode::Stdio => server(&config_dir)?.serve_stdio().await,
-        Mode::Listen(path) => {
+        Mode::Listen { path, exit_idle } => {
             let listener = Listener::bind(&path)
                 .await
                 .map_err(|e| (1, format!("cannot listen on {}: {e}", path.display())))?;
@@ -390,8 +453,10 @@ async fn run(mode: Mode, config_dir: PathBuf) -> StartupResult<()> {
             eprintln!("bone: listening on {}", listener.path().display());
             let stop =
                 stop_signal().map_err(|e| (1, format!("cannot install signal handlers: {e}")))?;
+            let (count, idle) = tokio::sync::watch::channel(0usize);
             tokio::select! {
-                r = listener.run(&server) => r.map_err(|e| (1, format!("accept failed: {e}")))?,
+                r = listener.run_counted(&server, count) => r.map_err(|e| (1, format!("accept failed: {e}")))?,
+                _ = wait_idle(idle), if exit_idle => {}
                 _ = stop => {}
             }
             // Dropping the listener removes the socket file.
@@ -399,7 +464,6 @@ async fn run(mode: Mode, config_dir: PathBuf) -> StartupResult<()> {
         Mode::Tui { connect, resume } => {
             let Attached {
                 conn,
-                shared,
                 reload_core,
                 path,
             } = attach(connect, &config_dir).await?;
@@ -414,17 +478,8 @@ async fn run(mode: Mode, config_dir: PathBuf) -> StartupResult<()> {
                     reconnect: if reload_core { None } else { path },
                 },
             );
-            // Keep the listener alive only while the TUI runs, propagating errors.
-            tokio::select! {
-                r = tui => {
-                    if let Some(why) = r.map_err(|e| (1, e.to_string()))? {
-                        return Err((1, why));
-                    }
-                }
-                r = async {
-                    let (listener, server) = shared.as_ref().unwrap();
-                    listener.run(server).await
-                }, if shared.is_some() => r.map_err(|e| (1, format!("accept failed: {e}")))?,
+            if let Some(why) = tui.await.map_err(|e| (1, e.to_string()))? {
+                return Err((1, why));
             }
         }
         Mode::Gui { connect } => {
@@ -437,11 +492,9 @@ async fn run(mode: Mode, config_dir: PathBuf) -> StartupResult<()> {
     Ok(())
 }
 
-/// A frontend's connection to its core, and the core it hosts, if any.
+/// A frontend's connection to its core.
 struct Attached {
     conn: Connection,
-    /// The core this process runs, and the socket it serves it on.
-    shared: Option<(Listener, Server)>,
     /// The core runs in this process, so the frontend may reload it.
     reload_core: bool,
     /// The default or `--connect` socket.
@@ -450,8 +503,9 @@ struct Attached {
 
 /// Connect a frontend to the core at `connect`, or the default socket.
 async fn attach(connect: Option<PathBuf>, config_dir: &Path) -> StartupResult<Attached> {
-    // Explicit connects never start a core. Plain bone attaches or hosts
-    // the default socket, except when this run has private core settings.
+    // Explicit connects never start a core. Plain bone attaches to the
+    // default socket, starting the core there if none is, except when this
+    // run has private core settings: that core stays in-process.
     let explicit = connect.is_some();
     let path =
         connect.or_else(|| (!private_core(|k| std::env::var_os(k))).then(default_socket_path));
@@ -461,28 +515,22 @@ async fn attach(connect: Option<PathBuf>, config_dir: &Path) -> StartupResult<At
             Err(e) if explicit => {
                 return Err((1, format!("cannot connect to {}: {e}", path.display())));
             }
-            Err(_) => bind_or_connect(path).await?,
+            Err(_) => Endpoint::Attached(spawn_core(path).await?),
         },
-        None => Endpoint::Local(None),
+        None => Endpoint::Local,
     };
     // Loading core.lua is deliberately after deciding whether to attach.
     Ok(match endpoint {
         Endpoint::Attached(conn) => Attached {
             conn,
-            shared: None,
             reload_core: false,
             path,
         },
-        Endpoint::Local(listener) => {
-            let server = server(config_dir)?;
-            let conn = server.connect_in_process();
-            Attached {
-                conn,
-                shared: listener.map(|listener| (listener, server)),
-                reload_core: true,
-                path,
-            }
-        }
+        Endpoint::Local => Attached {
+            conn: server(config_dir)?.connect_in_process(),
+            reload_core: true,
+            path,
+        },
     })
 }
 
@@ -492,42 +540,23 @@ fn cwd() -> String {
         .unwrap_or_else(|_| ".".into())
 }
 
-/// The GUI blocks its thread, so the shared core is served from a task,
-/// stopped (removing the socket) when the window closes.
+/// The GUI's core, like the TUI's, runs in its own process and exits with
+/// its last client.
 #[cfg(feature = "gui")]
 async fn gui(a: Attached, config_dir: PathBuf, resident: bool) -> StartupResult<()> {
-    // A GUI hosting the core counts the clients attached to it, and lives
-    // while any remain; its own extra windows connect in-process.
-    let mut clients = None;
-    let mut connect_local: Option<bone_gui::ConnectLocal> = None;
-    let serving = a.shared.map(|(listener, server)| {
-        let (tx, rx) = tokio::sync::watch::channel(0);
-        clients = Some(rx);
-        let local = server.clone();
-        connect_local = Some(std::sync::Arc::new(move || local.connect_in_process()));
-        tokio::spawn(async move {
-            if let Err(e) = listener.run_counted(&server, tx).await {
-                eprintln!("bone: accept failed: {e}");
-            }
-        })
-    });
     let resident = resident && a.path.is_some();
     let opts = bone_gui::GuiOptions {
         cwd: cwd(),
         reconnect: if a.reload_core { None } else { a.path },
-        connect_local,
         config_dir: Some(config_dir),
     };
-    let r = bone_gui::run_with(a.conn, opts, resident, clients).await;
-    if let Some(task) = serving {
-        task.abort();
-        let _ = task.await;
-    }
-    r.map_err(|why| (1, why))
+    bone_gui::run_with(a.conn, opts, resident)
+        .await
+        .map_err(|why| (1, why))
 }
 
 #[cfg(not(feature = "gui"))]
-async fn gui(_: Attached, _: PathBuf, _: bool, _: bool) -> StartupResult<()> {
+async fn gui(_: Attached, _: PathBuf, _: bool) -> StartupResult<()> {
     Err((
         2,
         "this bone was built without the GUI; build it with --features gui".into(),
@@ -568,52 +597,6 @@ mod tests {
         ));
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn concurrent_startup_loser_attaches_to_winner() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("bone.sock");
-        let (a, b) = tokio::join!(bind_or_connect(&path), bind_or_connect(&path));
-        let (listener, conn) = match (a.unwrap(), b.unwrap()) {
-            (Endpoint::Local(Some(listener)), Endpoint::Attached(conn))
-            | (Endpoint::Attached(conn), Endpoint::Local(Some(listener))) => (listener, conn),
-            _ => panic!("expected one host and one attached client"),
-        };
-        // The attached connection must speak to the winning core, not a second core.
-        let loaded = scripting::load_with(dir.path(), &|key| match key {
-            "BONE_BASE_URL" => Some("http://127.0.0.1:9".into()),
-            "BONE_MODEL" => Some("winner".into()),
-            _ => None,
-        })
-        .unwrap();
-        let server = Server::new(Arc::new(Core::from_loaded(loaded)));
-        let (client, _events) = bone_client::Client::new(conn);
-        tokio::select! {
-            result = listener.run(&server) => panic!("listener stopped: {result:?}"),
-            result = tokio::time::timeout(std::time::Duration::from_secs(5), client.initialize("loser")) => {
-                assert_eq!(result.unwrap().unwrap().server_name, "bone");
-            }
-        }
-        assert!(path.exists());
-        drop(listener);
-        assert!(!path.exists());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn socket_startup_reports_bind_and_connect_failures() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("not-a-socket");
-        std::fs::write(&path, "keep me").unwrap();
-        let Err((code, why)) = bind_or_connect(&path).await else {
-            panic!("must not silently start an unshared core");
-        };
-        assert_eq!(code, 1);
-        assert!(why.contains("cannot listen on"), "{why}");
-        assert!(why.contains("cannot connect"), "{why}");
-        assert_eq!(std::fs::read_to_string(path).unwrap(), "keep me");
-    }
-
     #[test]
     fn args() {
         let tui = |connect: Option<&str>, resume: Option<Option<&str>>| {
@@ -634,11 +617,11 @@ mod tests {
         assert_eq!(parse(&["--headless"]), Ok(Some(Mode::Stdio)));
         assert_eq!(
             parse(&["--headless", "--listen", "/tmp/s"]),
-            Ok(Some(Mode::Listen("/tmp/s".into())))
+            Ok(Some(Mode::Listen { path: "/tmp/s".into(), exit_idle: false }))
         );
         assert_eq!(
             parse(&["--listen", "--headless"]),
-            Ok(Some(Mode::Listen(default_socket_path())))
+            Ok(Some(Mode::Listen { path: default_socket_path(), exit_idle: false }))
         );
         assert!(parse(&["--listen"]).is_err());
         assert_eq!(parse(&["--init"]), Ok(Some(Mode::Init)));

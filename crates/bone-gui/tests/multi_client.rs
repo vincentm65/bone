@@ -149,7 +149,6 @@ impl Env {
         let opts = GuiOptions {
             cwd: self.cwd(),
             reconnect: None,
-        connect_local: None,
             config_dir: Some(self.config.path().to_owned()),
         };
         let gui = bone_gui::Headless::start(self.server.connect_in_process(), opts, 1000.0, 700.0)
@@ -344,7 +343,6 @@ async fn reconnecting_restores_everything() {
     let opts = GuiOptions {
         cwd: e.cwd(),
         reconnect: Some(gui_sock.clone()),
-        connect_local: None,
         config_dir: Some(e.config.path().to_owned()),
     };
     let conn = bone_client::connect(&gui_sock).await.unwrap();
@@ -478,7 +476,6 @@ async fn a_restarted_server_gives_back_the_session() {
     let opts = GuiOptions {
         cwd: e.cwd(),
         reconnect: Some(gui_sock.clone()),
-        connect_local: None,
         config_dir: Some(e.config.path().to_owned()),
     };
     let conn = bone_client::connect(&gui_sock).await.unwrap();

@@ -61,7 +61,6 @@ async fn gui(library: &str) -> Fixture {
     let opts = GuiOptions {
         cwd: work.path().to_string_lossy().into_owned(),
         reconnect: None,
-        connect_local: None,
         config_dir: Some(config.path().to_owned()),
     };
     let ui = Headless::start(server.connect_in_process(), opts, 1000.0, 700.0)

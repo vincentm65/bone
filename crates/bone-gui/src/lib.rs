@@ -62,9 +62,6 @@ pub use crate::native::{request_window, run, run_with};
 /// the shared cache only to ask `stale_key` which of them changed.
 pub type ChatBuffer = bone_ui::chat::ChatBuffer<()>;
 
-/// Another connection to the core this process hosts, made on demand.
-pub type ConnectLocal = Arc<dyn Fn() -> Connection + Send + Sync>;
-
 #[derive(Clone)]
 pub struct GuiOptions {
     /// Where new sessions start.
@@ -72,9 +69,6 @@ pub struct GuiOptions {
     /// The socket to connect to again if the server goes away; `None` for
     /// an in-process server, which cannot.
     pub reconnect: Option<PathBuf>,
-    /// Connects the extra windows this process opens to the core it
-    /// hosts; `None` connects them over `reconnect`.
-    pub connect_local: Option<ConnectLocal>,
     /// Where the user's config, plugins and runtime overrides live; `None`
     /// runs the built-in UI only.
     pub config_dir: Option<PathBuf>,

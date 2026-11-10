@@ -23,7 +23,6 @@ async fn gui(config: &Path, work: &Path) -> Headless {
     let opts = GuiOptions {
         cwd: work.to_string_lossy().into_owned(),
         reconnect: None,
-        connect_local: None,
         config_dir: Some(config.to_owned()),
     };
     Headless::start(server.connect_in_process(), opts, 1440.0, 900.0)
