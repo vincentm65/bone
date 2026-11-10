@@ -135,6 +135,22 @@ fn handler_ids(n: &Node, out: &mut Vec<u64>) {
     }
 }
 
+/// Node `n`, made for a tree before, is kept in this one: after a rebuild
+/// its functions are still in the table before (`old`), so they come along.
+/// Without them a click on it does nothing and a canvas in it draws nothing.
+fn carry_handlers(n: &Node, old: Option<&mlua::Table>, sink: &Sink) {
+    let Some(old) = old else { return };
+    let mut ids = Vec::new();
+    handler_ids(n, &mut ids);
+    for id in ids {
+        if matches!(sink.table.raw_get::<Value>(id), Ok(Value::Nil)) {
+            let _ = sink
+                .table
+                .raw_set(id, old.raw_get::<Value>(id).unwrap_or(Value::Nil));
+        }
+    }
+}
+
 /// The items of one list that are in view, made and placed.
 pub(super) struct Window {
     pub(super) nodes: Vec<Rc<Node>>,
@@ -410,24 +426,13 @@ impl Gui {
         {
             let wake = &mut self.view.wake;
             *wake = Some(wake.map_or(due, |w| w.min(due)));
+            carry_handlers(&node, self.view.bound.prev_sink.as_ref(), sink);
             return node;
         }
         if key.is_none()
             && let Some(node) = chat.kept.remove(&item)
         {
-            // After a rebuild its functions are still in the table of the
-            // tree before: they come along.
-            if let Some(old) = &self.view.bound.prev_sink {
-                let mut ids = Vec::new();
-                handler_ids(&node, &mut ids);
-                for id in ids {
-                    if matches!(sink.table.raw_get::<Value>(id), Ok(Value::Nil)) {
-                        let _ = sink
-                            .table
-                            .raw_set(id, old.raw_get::<Value>(id).unwrap_or(Value::Nil));
-                    }
-                }
-            }
+            carry_handlers(&node, self.view.bound.prev_sink.as_ref(), sink);
             return node;
         }
         self.lua.render_deps = Some(Vec::new());
