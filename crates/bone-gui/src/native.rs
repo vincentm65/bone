@@ -1014,7 +1014,7 @@ fn keep_on_close(
 ) {
     let _ = handle.update(cx, |_, window, cx| {
         window.on_window_should_close(cx, move |window, cx| {
-            if cx.windows().len() > 1 || *clients.borrow() == 0 {
+            if cx.windows().len() > 1 || *clients.borrow() == 0 || !can_park() {
                 return true;
             }
             park_window(window);
@@ -1022,6 +1022,24 @@ fn keep_on_close(
             false
         });
     });
+}
+
+/// Whether a parked window can be brought back: on Hyprland `hyprctl`
+/// moves it, on X11 activating sends `_NET_ACTIVE_WINDOW`, which
+/// deiconifies, and on Windows activating restores a minimized window.
+/// Mutter and KWin on Wayland reject GPUI's activation token, and macOS's
+/// `makeKeyAndOrderFront` leaves a miniaturized window in the Dock, so
+/// there a close stays a close.
+fn can_park() -> bool {
+    if cfg!(windows) {
+        return true;
+    }
+    if cfg!(target_os = "macos") {
+        return false;
+    }
+    std::env::var_os("HYPRLAND_INSTANCE_SIGNATURE").is_some()
+        || (std::env::var_os("WAYLAND_DISPLAY").is_none()
+            && std::env::var_os("DISPLAY").is_some())
 }
 
 /// Put this process's window where it is not shown. Hyprland has no real
