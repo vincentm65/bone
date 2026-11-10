@@ -8,7 +8,11 @@
 -- "panel:<id>" in bone.ui.layout. While it has the keyboard every key goes to
 -- the program except those in M.escape, which gives the keyboard back to the prompt;
 -- the wheel and shift+page keys scroll back; xterm mouse reporting
--- receives clicks, drags and wheel events.
+-- receives clicks, drags and wheel events. In the desktop app the screen is
+-- laid out on a grid of character cells, and when the program does not take
+-- the mouse a drag selects (a double click a word, a triple click a line);
+-- releasing copies the selection, and ctrl+c while there is one copies it
+-- again and ends it (with none, ctrl+c goes to the program).
 --
 --   local term = require("bone.terminal")
 --   term.open({ id = "logs", dock = "right", size = 0.5 }, { cmd = "tail -f log" })
@@ -143,30 +147,216 @@ local function render(id, t, ctx)
   return lines
 end
 
--- Node panels use pixels; the PTY and render() still use character cells.
+-- Desktop app: the space around the screen, in pixels.
+local PAD_X, PAD_Y = 6, 4
+local CHAR = "[%z\1-\127\194-\244][\128-\191]*"
+
+local function codepoint(ch)
+  local b1, b2, b3, b4 = ch:byte(1, 4)
+  b2, b3, b4 = b2 or 0x80, b3 or 0x80, b4 or 0x80
+  if b1 < 0x80 then return b1 end
+  if b1 < 0xE0 then return (b1 % 0x20) * 0x40 + b2 % 0x40 end
+  if b1 < 0xF0 then return (b1 % 0x10) * 0x1000 + (b2 % 0x40) * 0x40 + b3 % 0x40 end
+  return (b1 % 0x08) * 0x40000 + (b2 % 0x40) * 0x1000 + (b3 % 0x40) * 0x40 + b4 % 0x40
+end
+
+-- Characters a monospace font draws one cell wide: Latin, Greek, Cyrillic,
+-- punctuation, box drawing and blocks. Any other one (wide, an icon, an
+-- emoji, one from a fallback font) is placed in its cells on its own, so a
+-- glyph that is not exactly as wide cannot move the rest of the line.
+local function regular(ch)
+  if #ch == 1 then return true end
+  local cp = codepoint(ch)
+  return cp < 0x530 or (cp >= 0x2000 and cp < 0x2070) or (cp >= 0x2500 and cp < 0x25A0)
+end
+
+local function char_width(ch)
+  if #ch == 1 then return 1 end
+  return bone.text.width(ch)
+end
+
+-- A line's characters by column: cells[col] is the character there, "" for
+-- the second cell of a wide one.
+local function cells_of(line)
+  local cells = {}
+  for _, item in ipairs(line or {}) do
+    for ch in item[1]:gmatch(CHAR) do
+      local w = char_width(ch)
+      if w == 0 and #cells > 0 then
+        local i = #cells
+        while i > 1 and cells[i] == "" do i = i - 1 end
+        cells[i] = cells[i] .. ch
+      else
+        cells[#cells + 1] = ch
+        for _ = 2, w do cells[#cells + 1] = "" end
+      end
+    end
+  end
+  return cells
+end
+
+-- Selection: t.sel = { a = { line, col }, b = { line, col }, unit = 1 | 2 | 3
+-- (characters, words, lines) }. A line is a screen row minus the scroll, so
+-- a selection stays on its text while scrolling back.
+local WORD_STOP = "[%s\"'`()%[%]{}<>|,;]"
+
+local function word_edge(t, line, col, dir)
+  local cells = cells_of(t.screen and t.screen.lines[line + t.scroll])
+  local ch = cells[col]
+  if not ch or ch == "" and col > 1 then
+    while col > 1 and cells[col] == "" do col = col - 1 end
+    ch = cells[col]
+  end
+  if not ch or ch:match("^" .. WORD_STOP .. "$") then return col end
+  while true do
+    local n = col + dir
+    while cells[n] == "" do n = n + dir end
+    local c = cells[n]
+    if not c or c:match("^" .. WORD_STOP .. "$") then break end
+    col = n
+  end
+  if dir > 0 then while cells[col + 1] == "" do col = col + 1 end end
+  return col
+end
+
+-- The selection's first and last cell, in order: l1, c1, l2, c2.
+local function sel_range(t)
+  local s = t.sel
+  if not s then return end
+  local a, b = s.a, s.b
+  if a[1] > b[1] or (a[1] == b[1] and a[2] > b[2]) then a, b = b, a end
+  local l1, c1, l2, c2 = a[1], a[2], b[1], b[2]
+  if s.unit == 2 then
+    c1, c2 = word_edge(t, l1, c1, -1), word_edge(t, l2, c2, 1)
+  elseif s.unit == 3 then
+    c1, c2 = 1, math.huge
+  end
+  return l1, c1, l2, c2
+end
+
+-- The selected text: each line's cells, trailing blanks dropped.
+local function sel_text(t)
+  local l1, c1, l2, c2 = sel_range(t)
+  if not l1 or not t.screen then return nil end
+  local out = {}
+  for line = l1, l2 do
+    local cells = cells_of(t.screen.lines[line + t.scroll])
+    local from, to = line == l1 and c1 or 1, line == l2 and math.min(c2, #cells) or #cells
+    local parts = {}
+    for col = from, to do parts[#parts + 1] = cells[col] end
+    out[#out + 1] = (table.concat(parts):gsub("%s+$", ""))
+  end
+  local text = table.concat(out, "\n")
+  return text ~= "" and text or nil
+end
+
+-- "@term/<fg>/<bg>/<flags>" (see bone-ui's term.rs) drawn in reverse: a group
+-- with the colors swapped, the defaults being Normal's.
+local reversed = {}
+local function reverse_group(fg, bg, flags, normal)
+  local name = "@termrev/" .. fg .. "/" .. bg .. "/" .. flags
+  local key = tostring(normal.fg) .. tostring(normal.bg)
+  if reversed[name] ~= key then
+    local function value(c, default) return c == "-" and default or tonumber(c) or c end
+    bone.hl.set(name, {
+      fg = value(bg, normal.bg or "#000000"), bg = value(fg, normal.fg or "#eeeeee"),
+      bold = flags:find("b") and true or nil, italic = flags:find("i") and true or nil,
+      underline = flags:find("u") and true or nil,
+    })
+    reversed[name] = key
+  end
+  return name
+end
+
+-- A run of cells with one look, as a box exactly that many cells wide.
+local function segment(seg, look)
+  local width = seg.cols * look.cw
+  local text = table.concat(seg.parts)
+  local hl, bg = seg.hl ~= "Normal" and seg.hl or nil, nil
+  local fg, b, flags = seg.hl:match("^@term/([^/]*)/([^/]*)/(%a*)$")
+  if fg and flags:find("r") then
+    hl = reverse_group(fg, b, flags, look.normal)
+    bg = hl
+  elseif fg and b ~= "-" then
+    bg = seg.hl
+  end
+  if seg.sel then bg = look.selection end
+  local span = { text = text, hl = hl }
+  if seg.cur then
+    bg, span.color = look.normal.fg or "#eeeeee", look.normal.bg or "#161616"
+  end
+  if not bg and not text:find("[^ ]") then
+    return { width = width, height = look.ch, shrink = 0 }
+  end
+  return {
+    width = width, height = look.ch, shrink = 0, bg = bg, line_height = look.ch,
+    font = "mono", size = look.size, wrap = false, spans = { span },
+  }
+end
+
+-- One screen row: its runs of cells, with the selection and the cursor.
+local function row_node(t, line, row, cursor, sel, look)
+  local kids, seg, col = { direction = "row", height = look.ch, shrink = 0 }, nil, 1
+  local l1, c1, l2, c2 = sel[1], sel[2], sel[3], sel[4]
+  local selected = l1 and line >= l1 and line <= l2
+  local function in_sel(c)
+    return selected and (line > l1 or c >= c1) and (line < l2 or c <= c2)
+  end
+  local function flush()
+    if seg then kids[#kids + 1] = segment(seg, look) end
+    seg = nil
+  end
+  local function add(ch, w, hl, lone)
+    local s, cur = in_sel(col), cursor == col
+    local key = hl .. (s and "|s" or "")
+    if lone or cur or not seg or seg.lone or seg.cur or seg.key ~= key then
+      flush()
+      seg = { key = key, hl = hl, sel = s, cur = cur, lone = lone, parts = {}, cols = 0 }
+    end
+    seg.parts[#seg.parts + 1] = ch
+    seg.cols = seg.cols + w
+    col = col + w
+  end
+  for _, item in ipairs(row) do
+    local hl = item[2] or "Normal"
+    for ch in item[1]:gmatch(CHAR) do
+      local w = char_width(ch)
+      if w == 0 and seg then
+        seg.parts[#seg.parts + 1] = ch
+      else
+        w = math.max(w, 1)
+        add(ch, w, hl, not regular(ch) or w > 1)
+      end
+    end
+  end
+  -- The selection and the cursor reach past the end of the text.
+  local to = cursor or 0
+  if selected then to = math.max(to, line < l2 and look.cols or math.min(c2, look.cols)) end
+  while col <= to do add(" ", 1, "Normal", false) end
+  flush()
+  return kids
+end
+
+-- The desktop app's view: the screen on a grid of character cells.
 local function node(id, t, ctx)
   local cell = ctx.cell or bone.gui.window_info().cell or { w = 8, h = 18 }
-  local lines = render(id, t, {
-    width = math.max(1, math.floor(ctx.width / cell.w)),
-    height = math.max(1, math.floor(ctx.height / cell.h)),
-    focused = ctx.focused,
-  })
-  local out = { direction = "column", overflow = "hidden" }
-  local normal = bone.hl.get("Normal") or {}
-  for _, line in ipairs(lines) do
-    local spans = {}
-    for i, item in ipairs(line) do
-      local span = { text = item[1], hl = item[2], bg = item[2] ~= "Normal" and item[2] or nil }
-      -- Node spans do not apply the TUI's reverse modifier.
-      if item[2] == "TermCursor" then
-        span.color, span.bg = normal.bg or "#161616", normal.fg or "#eeeeee"
-      end
-      spans[i] = span
-    end
-    out[#out + 1] = {
-      height = cell.h, line_height = cell.h, font = "mono", size = bone.o.font_size or 14,
-      wrap = false, spans = #spans > 0 and spans or { " " },
-    }
+  local cols = math.max(1, math.floor((ctx.width - 2 * PAD_X) / cell.w))
+  local rows = math.max(1, math.floor((ctx.height - 2 * PAD_Y) / cell.h))
+  local out = { id = "term:" .. id, direction = "column", overflow = "hidden", padding = { PAD_Y, PAD_X } }
+  if not active or terms[id] ~= t then return out end
+  local s = t.job:screen({ width = cols, height = rows, scroll = t.scroll }) or t.screen
+  if not s then return out end
+  t.screen, t.scroll, t.cell, t.cols, t.rows = s, s.scroll, cell, cols, rows
+  local sel_hl = bone.hl.get("TextSelection")
+  local look = {
+    cw = cell.w, ch = cell.h, cols = cols, size = bone.o.font_size or 14,
+    normal = bone.hl.get("Normal") or {},
+    selection = sel_hl and sel_hl.bg and "TextSelection" or "#2a3f55",
+  }
+  local sel = { sel_range(t) }
+  local cursor = ctx.focused and s.cursor
+  for r, row in ipairs(s.lines) do
+    out[#out + 1] = row_node(t, r - t.scroll, row, cursor and cursor[1] == r and cursor[2], sel, look)
   end
   return out
 end
@@ -178,6 +368,13 @@ local function on_key(id, t, key)
   last = id
   if M.passthrough[key] then
     return false
+  elseif key == "ctrl+c" and t.sel then
+    -- With a selection, ctrl+c copies it (and ends it) instead of
+    -- interrupting the program. Key names fold shift into letters, so
+    -- ctrl+shift+c arrives as this too.
+    local text = sel_text(t)
+    if text then bone.clipboard.copy(text) end
+    t.sel = nil
   elseif M.escape[key] then
     bone.ui.panel.focus(nil)
   elseif key == "wheelup" then
@@ -195,7 +392,7 @@ local function on_key(id, t, key)
   else
     local bytes = encode(key, t.screen and t.screen.app_cursor)
     if bytes then
-      t.scroll = 0
+      t.scroll, t.sel = 0, nil
       t.job:write(bytes)
     end
   end
@@ -204,7 +401,30 @@ end
 
 local pasting
 local mouse_events
+-- The terminal being selected in with the pointer, and the last press.
+local selecting
+local last_press
+
+-- In the desktop app: the cell under the pointer of terminal `t`, from its
+-- grid's place on screen (unclamped; nil when it has not been drawn).
+local function gui_cell(id, t, ev)
+  local r = t.cell and ev.px and bone.gui.rect("term:" .. id)
+  if not r then return end
+  local col = math.floor((ev.px - r.x - PAD_X) / t.cell.w) + 1
+  local row = math.floor((ev.py - r.y - PAD_Y) / t.cell.h) + 1
+  return row, col, r
+end
+
 local function mouse_position(ev)
+  if ev.px and bone.gui and bone.gui.rect then
+    for id, t in pairs(terms) do
+      local row, col, r = gui_cell(id, t, ev)
+      if row and t.screen and ev.px >= r.x and ev.px < r.x + r.w and ev.py >= r.y and ev.py < r.y + r.h then
+        return id, t, math.max(1, math.min(t.rows, row)), math.max(1, math.min(t.cols, col))
+      end
+    end
+    return
+  end
   local id = ev.panel
   if not id and type(ev.region) == "string" then
     id = ev.region:match("^panel:(.+)$")
@@ -218,7 +438,43 @@ local function mouse_position(ev)
   return id, t, row, col
 end
 
-local function mouse_code(t, ev)
+-- A drag in progress: extend the selection, scrolling back past the top.
+local function drag_selection(id, t, ev)
+  local row, col = gui_cell(id, t, ev)
+  if not row then return end
+  if row < 1 then
+    shift_scroll(t, 1)
+  elseif row > t.rows and t.scroll > 0 then
+    shift_scroll(t, -1)
+  end
+  row = math.max(1, math.min(t.rows, row))
+  col = math.max(1, math.min(t.cols, col))
+  t.sel.b = { row - t.scroll, col }
+end
+
+-- Press, drag and release of the left button where the program does not
+-- take the mouse: select, and copy on release.
+local function select_mouse(ev)
+  local t = selecting and terms[selecting]
+  if t and t.sel and (ev.action == "drag" or ev.action == "up") then
+    drag_selection(selecting, t, ev)
+    if ev.action == "up" then
+      selecting = nil
+      local a, b = t.sel.a, t.sel.b
+      local click = t.sel.unit == 1 and a[1] == b[1] and a[2] == b[2]
+      local text = not click and sel_text(t)
+      if text then
+        bone.clipboard.copy(text)
+      else
+        t.sel = nil
+      end
+    end
+    return true
+  end
+  selecting = nil
+end
+
+local function mouse_code(t, ev, row, col)
   local mode = t.screen.mouse
   if mode == nil or mode == "none" then return end
   local action, button = ev.action, ev.button
@@ -236,7 +492,6 @@ local function mouse_code(t, ev)
       code = code + 32
     end
   end
-  local row, col = ev.panel_row or ev.row, ev.panel_col or ev.col
   if t.screen.mouse_encoding == "sgr" then
     return string.format("\27[<%d;%d;%d%s", code, col, row, action == "up" and "m" or "M")
   end
@@ -257,27 +512,43 @@ function M.setup()
     if not active or ev.context ~= "panel" or not t or type(ev.text) ~= "string" then
       return
     end
-    local text = ev.text
+    -- Line breaks are typed as enter, as terminals paste them; the bracket's
+    -- own end in the text would end the paste early and run the rest.
+    local text = ev.text:gsub("\r?\n", "\r")
     if t.screen and t.screen.bracketed_paste then
-      text = "\27[200~" .. text .. "\27[201~"
+      text = "\27[200~" .. text:gsub("\27%[20[01]~", "") .. "\27[201~"
     end
-    t.scroll = 0
+    t.scroll, t.sel = 0, nil
     t.job:write(text)
   end)
   mouse_events = bone.on("mouse", function(ev)
-    local id, t = mouse_position(ev)
+    if active and select_mouse(ev) then return true end
+    local id, t, row, col = mouse_position(ev)
     if not id then return end
-    local bytes = mouse_code(t, ev)
-    if not bytes then
-      if ev.action == "wheel" then
-        shift_scroll(t, ev.button == "up" and 3 or -3); if bone.gui then bone.gui.invalidate() end; return true
-      end
-      return
+    local bytes = mouse_code(t, ev, row, col)
+    if bytes then
+      bone.ui.panel.focus(id)
+      t.scroll, t.sel = 0, nil
+      t.job:write(bytes)
+      return true
     end
-    bone.ui.panel.focus(id)
-    t.scroll = 0
-    t.job:write(bytes)
-    return true
+    if ev.action == "wheel" then
+      shift_scroll(t, ev.button == "up" and 3 or -3); if bone.gui then bone.gui.invalidate() end; return true
+    end
+    -- The desktop app selects; the TUI's own selection works over panels.
+    if ev.action == "down" and ev.button == "left" and ev.px and t.cell then
+      local now, line = bone.now(), row - t.scroll
+      local p = last_press
+      local unit = 1
+      if p and p.id == id and now - p.time < 400 and p.line == line and p.col == col then
+        unit = p.unit % 3 + 1
+      end
+      last_press = { id = id, time = now, line = line, col = col, unit = unit }
+      t.sel = { a = { line, col }, b = { line, col }, unit = unit }
+      selecting = id
+      bone.ui.panel.focus(id)
+      return true
+    end
   end)
 end
 

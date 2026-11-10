@@ -150,7 +150,11 @@ end)
 While a terminal has the keyboard every key goes to the program (including
 `esc`, `tab` and `ctrl+c`) except `ctrl+]`, which returns to the prompt;
 `ctrl+]` from the prompt focuses the last terminal again. `shift+pageup` and
-`shift+pagedown` scroll back. Keys in `terminal.passthrough` go to the
+`shift+pagedown` scroll back. In the desktop app, when the program does not
+take the mouse, a drag selects text (a double click a word, a triple click a
+line) and releasing copies it; `ctrl+c` while a selection is shown copies it
+again and clears it instead of interrupting. Pasted line breaks are typed as
+`enter`. Keys in `terminal.passthrough` go to the
 `panel` keymap context instead, so a window manager's prefix works inside a
 terminal. A window manager can also wrap `terminal.open` to place `/term` in
 a layout leaf of its own (the `windows` plugin does both). Closing the panel

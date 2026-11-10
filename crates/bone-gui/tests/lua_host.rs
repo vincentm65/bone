@@ -853,14 +853,19 @@ async fn a_terminal_in_a_panel() {
         local cell = bone.gui.window_info().cell
         local function cursor()
           local tree = window.panel('term1', { width = 400, height = 180, cell = cell })
+          local normal = bone.hl.get('Normal') or {}
+          -- Rows of runs, each a whole number of cells wide.
           for _, row in ipairs(tree[1][1]) do
-            assert(row.font == 'mono' and row.height == cell.h and row.line_height == cell.h and not row.wrap)
-            for _, span in ipairs(row.spans) do
-              if type(span) == 'table' and span.hl == 'TermCursor' then
-                local normal = bone.hl.get('Normal') or {}
-                assert(span.bg == (normal.fg or '#eeeeee') and span.color == (normal.bg or '#161616'),
-                  'node spans need explicit reversed colors for a visible cursor')
-                return true
+            assert(row.direction == 'row' and row.height == cell.h)
+            for _, run in ipairs(row) do
+              local cells = run.width / cell.w
+              assert(run.height == cell.h and math.abs(cells - math.floor(cells + 0.5)) < 1e-6)
+              if run.spans then
+                assert(run.font == 'mono' and run.line_height == cell.h and not run.wrap)
+                -- Node spans need explicit reversed colors for a visible cursor.
+                if run.bg == (normal.fg or '#eeeeee') and run.spans[1].color == (normal.bg or '#161616') then
+                  return true
+                end
               end
             end
           end
