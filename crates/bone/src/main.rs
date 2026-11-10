@@ -384,6 +384,16 @@ async fn wait_idle(mut count: tokio::sync::watch::Receiver<usize>) {
 async fn spawn_core(path: &Path) -> StartupResult<Connection> {
     let exe = std::env::current_exe()
         .map_err(|e| (1, format!("cannot find this bone to start the core: {e}")))?;
+    // The core's stderr goes to a log beside the socket: read back if it
+    // dies at startup, and still writable after this launcher exits — a
+    // pipe would close with it, and a later eprintln! in the core would
+    // panic on the broken pipe.
+    let log = path.with_file_name("core.log");
+    if let Some(dir) = log.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let log_file = std::fs::File::create(&log)
+        .map_err(|e| (1, format!("cannot write {}: {e}", log.display())))?;
     let mut cmd = std::process::Command::new(exe);
     cmd.arg("--headless")
         .arg("--listen")
@@ -391,7 +401,7 @@ async fn spawn_core(path: &Path) -> StartupResult<Connection> {
         .arg("--exit-idle")
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::piped());
+        .stderr(log_file);
     // Its own group: the terminal's signals are for the UI, not the core.
     #[cfg(unix)]
     std::os::unix::process::CommandExt::process_group(&mut cmd, 0);
@@ -404,11 +414,8 @@ async fn spawn_core(path: &Path) -> StartupResult<Connection> {
     loop {
         match bone_client::connect(path).await {
             Ok(conn) => {
-                // Drain its stderr and reap it, instead of leaving a zombie.
+                // Reap it when it exits, instead of leaving a zombie.
                 std::thread::spawn(move || {
-                    if let Some(mut err) = child.stderr.take() {
-                        let _ = std::io::copy(&mut err, &mut std::io::sink());
-                    }
                     let _ = child.wait();
                 });
                 return Ok(conn);
@@ -418,10 +425,7 @@ async fn spawn_core(path: &Path) -> StartupResult<Connection> {
                 if let Ok(conn) = bone_client::connect(path).await {
                     return Ok(conn);
                 }
-                let mut why = String::new();
-                if let Some(mut err) = child.stderr.take() {
-                    let _ = std::io::Read::read_to_string(&mut err, &mut why);
-                }
+                let mut why = std::fs::read_to_string(&log).unwrap_or_default();
                 if why.trim().is_empty() {
                     why = format!("cannot connect: {e}");
                 }
@@ -517,6 +521,19 @@ async fn attach(connect: Option<PathBuf>, config_dir: &Path) -> StartupResult<At
         Ok(conn) => conn,
         Err(e) if explicit => {
             return Err((1, format!("cannot connect to {}: {e}", path.display())));
+        }
+        // On Windows, another user's bone (or an older one run as
+        // administrator) owns the pipe; a core we start is doomed too.
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Err((
+                1,
+                format!(
+                    "another bone is running at {} that this one may not join (another \
+                     user's, or an older bone run as administrator); quit it and start \
+                     bone again",
+                    path.display()
+                ),
+            ));
         }
         Err(_) => spawn_core(&path).await?,
     };

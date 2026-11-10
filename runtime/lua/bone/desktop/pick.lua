@@ -23,7 +23,7 @@ function M.select(page)
     -- there), over the matches.
     local top = { direction = "column", shrink = 0,
       widgets.dialog_head(opts.prompt or "Choose", { close = function() page.finish(nil) end }),
-      widgets.search_box(st.query, { typing = true }),
+      widgets.search_box(st.query, { typing = st.query ~= "" }),
     }
     local items = {}
     if st.loading then

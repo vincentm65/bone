@@ -1043,14 +1043,11 @@ pub fn request_window() -> bool {
     #[cfg(unix)]
     {
         let path = gui_socket_path();
-        let mut stream = match std::os::unix::net::UnixStream::connect(&path) {
-            Ok(stream) => stream,
-            Err(e) => {
-                if e.kind() == std::io::ErrorKind::ConnectionRefused {
-                    let _ = std::fs::remove_file(&path);
-                }
-                return false;
-            }
+        // A refused connect may be a dead GUI's socket or a live one with
+        // a full backlog; bind_gui_socket tells them apart, so a stale
+        // file is not removed here.
+        let Ok(mut stream) = std::os::unix::net::UnixStream::connect(&path) else {
+            return false;
         };
         let _ = stream.set_write_timeout(Some(Duration::from_millis(200)));
         // Longer than the server's 5s wait for its event loop to answer.
@@ -1072,13 +1069,22 @@ fn bind_gui_socket() -> Option<std::os::unix::net::UnixListener> {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    match std::os::unix::net::UnixListener::bind(&path) {
-        Ok(listener) => Some(listener),
-        Err(_) if std::os::unix::net::UnixStream::connect(&path).is_err() => {
-            let _ = std::fs::remove_file(&path);
-            std::os::unix::net::UnixListener::bind(&path).ok()
+    // A dead GUI's socket is replaced at once. A live holder that would
+    // not show a window is a GUI on its way out: give it a moment to
+    // leave (unlinking its socket) before giving up on being resident.
+    let deadline = Instant::now() + Duration::from_millis(1500);
+    loop {
+        match std::os::unix::net::UnixListener::bind(&path) {
+            Ok(listener) => return Some(listener),
+            Err(_) if std::os::unix::net::UnixStream::connect(&path).is_err() => {
+                let _ = std::fs::remove_file(&path);
+                return std::os::unix::net::UnixListener::bind(&path).ok();
+            }
+            Err(_) if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(_) => return None,
         }
-        Err(_) => None,
     }
 }
 
@@ -1109,23 +1115,27 @@ fn serve_gui_socket(
 ) {
     for conn in listener.incoming() {
         let Ok(mut conn) = conn else { continue };
-        let _ = conn.set_read_timeout(Some(Duration::from_secs(1)));
-        let _ = conn.set_write_timeout(Some(Duration::from_secs(3)));
-        let mut buf = [0u8; 16];
-        let n = conn.read(&mut buf).unwrap_or(0);
-        if std::str::from_utf8(&buf[..n]).unwrap_or("").trim() != "open" {
-            let _ = conn.write_all(b"err unknown\n");
-            continue;
-        }
-        let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        if tx.send(reply_tx).is_err() {
-            let _ = conn.write_all(b"err gone\n");
-            break;
-        }
-        let reply = reply_rx
-            .recv_timeout(Duration::from_secs(5))
-            .unwrap_or_else(|_| "err timeout\n".into());
-        let _ = conn.write_all(reply.as_bytes());
+        let tx = tx.clone();
+        // A thread each: one stalled connector must not hold up the next.
+        std::thread::spawn(move || {
+            let _ = conn.set_read_timeout(Some(Duration::from_secs(1)));
+            let _ = conn.set_write_timeout(Some(Duration::from_secs(3)));
+            let mut buf = [0u8; 16];
+            let n = conn.read(&mut buf).unwrap_or(0);
+            if std::str::from_utf8(&buf[..n]).unwrap_or("").trim() != "open" {
+                let _ = conn.write_all(b"err unknown\n");
+                return;
+            }
+            let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+            if tx.send(reply_tx).is_err() {
+                let _ = conn.write_all(b"err gone\n");
+                return;
+            }
+            let reply = reply_rx
+                .recv_timeout(Duration::from_secs(5))
+                .unwrap_or_else(|_| "err timeout\n".into());
+            let _ = conn.write_all(reply.as_bytes());
+        });
     }
 }
 
