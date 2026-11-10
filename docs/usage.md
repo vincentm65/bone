@@ -143,10 +143,18 @@ Options are set in `~/.bone/tui.lua` (`bone.o.tool_detail = "rows"`). What you c
 ## Command line
 
 ```text
-bone [-r [ID]] [--connect [PATH]]   TUI (core in-process, or on a socket server)
+bone [-r [ID]] [--connect [PATH]]   TUI (on the shared core, or the server you name)
+bone --gui [--connect [PATH]]       the desktop app, on the same core
 bone --headless [--listen [PATH]]   core only, on stdio or a local socket/named pipe
 bone --init                         starter ~/.bone/core.lua and tui.lua
 ```
+
+Without `--connect`, the TUI and the GUI share one core on the default socket:
+the first launch starts it as a process of its own (`bone --headless --listen
+--exit-idle`), later launches attach, and the core exits when its last client
+disconnects — whichever order the UIs close in, nothing is left running.
+`bone --gui` while the desktop app is already running opens the window in that
+process instead of starting a second one.
 
 Configuration lives in `~/.bone/` (or `$BONE_CONFIG_DIR`); sessions are saved in `~/.bone/sessions/`. `BONE_BASE_URL`, `BONE_MODEL`, `BONE_API_KEY`, `BONE_REASONING_EFFORT`, `BONE_SYSTEM_PROMPT`, and `BONE_DATA_DIR` override `core.lua` for one run. `BONE_DEBUG_HTTP=<dir>` saves every model request and raw response there (API keys excluded), which is the thing to attach when a provider misbehaves.
 

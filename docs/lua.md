@@ -530,7 +530,7 @@ Lua values do not survive a reload, so keep what must last in `bone.state`. `bon
 
 Core plugins can be switched off and on the same way: `plugin/unload`, `plugin/load` and `plugin/reload` (also `/plugins unload|load|reload name` in the TUI, which handles the plugin's TUI half too). Each is a reload with that plugin left out or put back; the choice lasts until the server restarts. A plugin installed while bone runs is picked up by any reload.
 
-When the TUI runs the core in its own process (not `--connect`), it also reloads the core by itself (with `core/reload`) when a file the core loads changes: `core.lua`, a plugin's `core.lua`, `runtime/core/`, or a module either side can `require` (`lua/`, a plugin's `lua/`, `runtime/lua/`). `bone.o.autoreload = false` turns this off.
+When the core runs inside the TUI's own process (only with the [environment overrides](#environment-overrides), which keep the core private), the TUI also reloads it by itself (with `core/reload`) when a file the core loads changes: `core.lua`, a plugin's `core.lua`, `runtime/core/`, or a module either side can `require` (`lua/`, a plugin's `lua/`, `runtime/lua/`). `bone.o.autoreload = false` turns this off. On the shared core, or over `--connect`, reload by hand with `/plugins reload` — it reaches every attached UI — or close every UI: the shared core exits with its last client and the next launch starts it fresh.
 
 ### Environment overrides
 
@@ -561,7 +561,7 @@ The TUI watches the Lua it loads (`ui.lua`, `tui.lua`, `lua/`, `colors/`, `runti
 
 The new state loads while the current one keeps running, and it is taken only if loading it raised no Lua error the current one did not also have (the same file and message; only line numbers may differ). Otherwise the current configuration and the built-in options stay as they were, the error is shown (and listed by `/health`), and the next save tries again; requests the failed load already sent to the core are not undone. When it is taken, the old state's `bone.plugin.on_shutdown` hooks run and it is dropped with everything it made (keymaps, commands, event handlers, popups, panels, running `bone.job`s, colors), and replies to its requests are ignored. `bone.plugin.state` tables are saved before the new state loads, so it reads them; what a shutdown hook writes into one during a reload is saved but not seen by the new state, so save plugin state as it changes rather than in `on_shutdown`. Panels do not carry over; `ready` gets `{ reload = true, panels = { … } }`, the ids of the panels that were open, so a plugin can open its panel again.
 
-Files only the core loads, and modules either side can `require`, reload the core too when it runs in the same process (see [Reloading](#reloading); not with `--connect`). `bone.o.autoreload = false` stops watching.
+Files only the core loads, and modules either side can `require`, reload the core too when it runs in the same process (see [Reloading](#reloading); only with the environment overrides that keep the core private). `bone.o.autoreload = false` stops watching.
 
 Every key comes from Lua, with one exception: when `ctrl+c` is not mapped where it is pressed (say, a broken or emptied `runtime/tui/defaults.lua`), or is mapped to a Lua function that errors or returns `false`, it runs the built-in `interrupt`, so bone can always be quit.
 

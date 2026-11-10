@@ -27,7 +27,7 @@ Watched files are `ui.lua`, `gui.lua`, the TUI's `library` selection file,
 `lua/`, `runtime/`, `colors/`, the active GUI library directory, and plugin
 Lua files. The GUI currently does not watch `gui-library`, `core.lua` or a
 project's `.bone/`. Use `/gui use NAME` to switch libraries live. It does
-not send `core/reload`, even when this window hosts the core. Plugin Lua
+not send `core/reload`. Plugin Lua
 files are watched regardless of side, but a GUI reload still reloads only
 GUI Lua. Changes made while autoreload is off are not picked up just by
 turning it back on; a subsequent watched change triggers a reload.

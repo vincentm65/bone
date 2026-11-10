@@ -86,11 +86,21 @@ For a one-off run without a config: `BONE_BASE_URL=http://localhost:8080/v1 BONE
 
 Type a message and press enter. A good first test is `explain this project` or `run the tests and fix any failures`. Tool calls run without asking unless you add an approval hook. Type `/` for commands (`/help` lists them), `ctrl+o` opens an earlier session, `ctrl+c` cancels a turn (twice on an empty prompt quits), and `bone3 -r` picks up where you left off.
 
-## Running the core separately
+## One core, shared
+
+Every `bone3` and `bone3 --gui` without `--connect` shares one core: the first
+launch starts it as a process of its own, later launches attach to it, and it
+exits when its last client disconnects. Open the TUI and the desktop app side
+by side and they stay in sync; close them in any order and nothing is left
+running. A `bone3 --gui` while the desktop app is already running opens the
+window there instead of starting over.
+
+To run the core by hand, for scripts, editors, or a server that outlives its
+clients:
 
 ```sh
 bone3 --headless                 # serve the API on stdin/stdout (for scripts and editors)
-bone3 --headless --listen        # serve on $XDG_RUNTIME_DIR/bone3/bone.sock
+bone3 --headless --listen        # serve on $XDG_RUNTIME_DIR/bone3/bone.sock until signalled
 bone3 --connect                  # a TUI on that server; run several, they stay in sync
 ```
 
