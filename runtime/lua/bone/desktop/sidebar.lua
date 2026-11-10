@@ -325,7 +325,16 @@ end
 -- rest).
 local KEYS = {
   esc = function()
-    if st.menu then st.menu = false redraw() else bone.gui.focus(nil) end
+    -- Menu, then the filter, then the panel: each esc gives back one thing.
+    if st.menu then st.menu = false redraw() return end
+    if st.query ~= "" then
+      st.query, st.sel = "", 1
+      compute()
+      bone.gui.scroll("sessions-list", "top")
+      redraw()
+      return
+    end
+    close()
   end,
   ["ctrl+o"] = close,
   tab = switch_page, ["shift+tab"] = switch_page,
@@ -623,7 +632,7 @@ function M.content()
   out[#out + 1] = nav("chat", "Chats", st.page == "chats", function() if st.page ~= "chats" then switch_page() end end)
   out[#out + 1] = nav("terminal", "Processes", st.page == "running",
     function() if st.page ~= "running" then switch_page() end end, #jobs > 0 and #jobs or nil)
-  out[#out + 1] = nav("layers", "Catalog", false, function() require("bone.catalog").open() end)
+  out[#out + 1] = nav("layers", "Catalog", false, function() require("bone.catalog").open(take_keys) end)
   if st.page == "chats" then
     out[#out + 1] = project_filter()
   end
@@ -646,7 +655,7 @@ function M.content()
       { text = user:sub(1, 1):upper(), size = style.size.micro, medium = true, hl = "Normal" },
     }) or nil,
     { text = user, size = style.size.body, hl = muted, grow = 1, wrap = false, text_overflow = "ellipsis" },
-    widgets.icon_button("gear", "Settings", function() require("bone.config").open() end,
+    widgets.icon_button("gear", "Settings", function() require("bone.config").open(nil, take_keys) end,
       { box = 28, size = 16, hl = muted, radius = style.radius.md, id = "sidebar-settings" }),
     { width = 4 },
   })
@@ -662,11 +671,10 @@ function M.content()
   return out
 end
 
---- Open the sidebar, or close it when it has the keyboard.
+--- Open the sidebar, or close it.
 function M.open()
   if open then
-    if has_keys() then close() else take_keys() end
-    redraw()
+    close()
     return
   end
   open, st.loading, st.sel = true, true, 1

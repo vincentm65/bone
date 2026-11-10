@@ -31,13 +31,17 @@ for i, g in ipairs(GROUPS) do
   for j = 2, #g do GROUP[g[j]] = i end
 end
 
-local function hints(st, t)
+local function hints(st, t, r)
   if st.ask then return "y yes · n no" end
   if st.edit then return "enter save · esc cancel" end
   if st.search then return "↑↓ move · enter choose · esc clear" end
   if t.page or st.prov then return "↑↓ move · / search · enter change · r reset · esc back" end
   if t.name == "providers" then return "↑↓ move · / search · enter use · e edit · a add · d delete · esc close" end
-  if t.name == "plugins" then return "↑↓ move · / search · enter settings · space on/off · esc close" end
+  if t.name == "plugins" then
+    -- Enter opens a page only for the rows that have one; space is what
+    -- turns a plugin on or off.
+    return "↑↓ move · / search · " .. (r and r.page and "enter settings · " or "") .. "space on/off · esc close"
+  end
   return "↑↓ move · / search · enter change · r reset · tab section · esc close"
 end
 
@@ -47,7 +51,7 @@ local function text(value, hl, size)
     wrap = false, text_overflow = "ellipsis" }
 end
 
-function M.open(want)
+function M.open(want, keep)
   local id, paste_event
   local page
   page = require("bone.settings_page").new(want, {
@@ -57,6 +61,7 @@ function M.open(want)
     close = function()
       if paste_event then bone.off(paste_event) paste_event = nil end
       bone.ui.close(id)
+      if keep then keep() end
     end,
   })
   local st = page.st
@@ -187,8 +192,10 @@ function M.open(want)
   end
 
   -- The search: a box under the heading; a press (or /) types into it.
+  -- It keeps a roomy gap under it: the list cuts a row in half at its top
+  -- edge, and that edge should not read as the search field's own.
   local function search()
-    return widgets.search_box(st.query, {
+    local box = widgets.search_box(st.query, {
       typing = st.search, key = "/",
       clear = function() st.query, st.search, st.sel = "", false, 1 refresh() end,
       click = function()
@@ -196,6 +203,8 @@ function M.open(want)
         refresh()
       end,
     })
+    box.margin = { 0, 0, 14, 0 }
+    return box
   end
 
   local function node()
@@ -279,7 +288,7 @@ function M.open(want)
     -- The one dialog size, whichever section or page it shows.
     return style.as_dialog({ direction = "column", grow = 1, top, widgets.list("settings:" .. id, items, selected, {
       estimate = 44,
-      footer = { direction = "column", detail, widgets.hints(hints(st, t), { 0, 0 }) },
+      footer = { direction = "column", detail, widgets.hints(hints(st, t, list[st.sel]), { 0, 0 }) },
     }) })
   end
 

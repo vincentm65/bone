@@ -471,6 +471,15 @@ function M.new(want, opts)
     end
   end
 
+  -- The choice after a row's current one, wrapping to the first.
+  local function next_choice(row)
+    local i = 1
+    for k, c in ipairs(row.choices) do
+      if c == row.value then i = k end
+    end
+    return row.choices[i % #row.choices + 1]
+  end
+
   -- Enter / space on a row.
   local function activate(row, space)
     if not row then
@@ -555,13 +564,7 @@ function M.new(want, opts)
       if row.type == "boolean" then
         return save_provider_field(row, not row.value)
       elseif row.type == "choice" then
-        local i = 1
-        for k, c in ipairs(row.choices) do
-          if c == row.value then
-            i = k
-          end
-        end
-        return save_provider_field(row, row.choices[i % #row.choices + 1])
+        return save_provider_field(row, next_choice(row))
       elseif not space then
         st.edit = (row.type == "secret" and "") or (row.value == nil and "" or tostring(row.value))
       end
@@ -574,13 +577,7 @@ function M.new(want, opts)
     elseif row.type == "boolean" then
       save(row, not row.value)
     elseif row.choices and #row.choices > 0 then
-      local i = 1
-      for k, c in ipairs(row.choices) do
-        if c == row.value then
-          i = k
-        end
-      end
-      save(row, row.choices[i % #row.choices + 1])
+      save(row, next_choice(row))
     elseif not space then
       st.edit = row.value == nil and "" or tostring(row.value)
     end

@@ -440,6 +440,10 @@ function M.column(ctx, opts)
   local new = is_new(session)
   local top = here and slot("chat.top", ctx) or nil
   if not new then nodes.append(chat, top) end
+  -- A chat being read in: say so, rather than show a blank page.
+  if not new and session and session.loading and (session.items or 0) == 0 then
+    chat[#chat + 1] = widgets.note("Loading this chat…", { 4, 2 })
+  end
   chat[#chat + 1] = nodes.chat({
     chat = not here and n or nil,
     width_px = usable_width, cell = ctx.cell, padding = { 14, 14, M.chat_fade, 0 },
@@ -578,6 +582,16 @@ function M.setup(opts)
   M.bare = opts and opts.bare or false
   require("bone.nodes.style").plain = M.bare
   tray.setup()
+  -- Esc closes the chat's action menu before it dismisses anything else.
+  local dismissed = bone.ui.actions.dismiss
+  bone.ui.actions.dismiss = function()
+    if M.chat_menu then
+      M.chat_menu = false
+      bone.gui.invalidate()
+      return true
+    end
+    return dismissed and dismissed() or false
+  end
   statusbar.setup()
   overlays.setup()
   package.loaded["bone.config"] = require("bone.desktop.settings")

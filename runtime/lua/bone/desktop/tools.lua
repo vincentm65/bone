@@ -381,7 +381,7 @@ end
 
 -- A call's line: `lead` (its dot), what it did (`spans`), and `meta` at the
 -- right. Cut to the width unless `wrap`.
-local function line(lead, spans, meta, wrap)
+local function line(lead, spans, meta, wrap, tail)
   local text = md.text(spans, { size = md.small_size })
   text.shrink = 1
   if not wrap then text.wrap, text.text_overflow = false, "ellipsis" end
@@ -391,6 +391,7 @@ local function line(lead, spans, meta, wrap)
     m.wrap = false
     out[#out + 1] = m
   end
+  if tail then out[#out + 1] = tail end
   return out
 end
 
@@ -528,7 +529,10 @@ local function card(item, expanded, width)
     under[#under + 1] = report
     if not report then nodes.append(under, paras) end
   end
-  return { frame(line(dot(item), title, meta, expanded), under) }
+  -- A folded card with output under it shows the same mark the summary's
+  -- line does, so a cut short (or "…") row reads as one you can open.
+  local more = not expanded and #under > 0 and icons.node("chevron_right", { size = 12, hl = "Dim" }) or nil
+  return { frame(line(dot(item), title, meta, expanded, more), under) }
 end
 
 -- ---- summaries -------------------------------------------------------------

@@ -34,7 +34,9 @@ local function load_model(key)
       if model.current then
         state.info[key].model = model.model or model.name
         state.info[key].provider = model.name
-        state.info[key].limit = tonumber(model.compact_limit)
+        -- What the core actually compacts at: the provider's own limit, or
+        -- compact.limit when it sets none (0 still means "never").
+        state.info[key].limit = tonumber(model.compact_limit) or tonumber(bone.settings.get("compact.limit"))
         break
       end
     end

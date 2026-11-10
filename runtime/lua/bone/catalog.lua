@@ -491,24 +491,27 @@ function M.page(hooks)
       or ""
   end
 
+  -- Every page of the catalog answers tab and esc, working or not.
+  local NAV = " · tab page · esc close"
+
   --- The keys that do something now.
   local function hint()
     local e = rows()[st.sel]
     if st.ask then
       return "y yes · n no"
     elseif st.busy then
-      return "working…"
+      return "working…" .. NAV
     elseif e and e.state == "unavailable" then
-      return e.blocked .. " · ↑↓ move · tab page · esc close"
+      return e.blocked .. " · ↑↓ move" .. NAV
     elseif e and #selected_rows(rows()) > 0 then
-      return "space toggle · enter install selected · a all · n clear · u scan · x remove · tab page · esc close"
+      return "space toggle · enter install selected · a all · n clear · u scan · x remove" .. NAV
     elseif e and e.state == "available" then
-      return "↑↓ move · space select · enter install · a all · u scan · tab page · esc close"
+      return "↑↓ move · space select · enter install · a all · u scan" .. NAV
     elseif e then
       return "↑↓ move · space select · enter " .. (e.state == "update" and "update" or "reinstall")
-        .. " · a all · u scan · x remove · tab page · esc close"
+        .. " · a all · u scan · x remove" .. NAV
     end
-    return "r refresh · tab page · esc close"
+    return "r refresh" .. NAV
   end
 
   local function done(what)
@@ -574,7 +577,7 @@ function M.page(hooks)
       st.sel = math.max(1, st.sel - 1)
     elseif k == "down" or k == "j" or k == "wheeldown" then
       st.sel = math.min(math.max(#list, 1), st.sel + 1)
-    elseif k == "tab" and not st.busy then
+    elseif k == "tab" then
       st.page, st.sel, st.selected = st.page == "tui" and "plugin" or "tui", 1, {}
     elseif (k == "r" or k == "u") and not st.busy then
       load(k == "u" and "scanning for updates…" or nil)
@@ -697,11 +700,14 @@ end
 
 --- /catalog: the page in a window. A library draws it differently by
 --- setting `bone.ui.windows.catalog(page)`, which returns the window's spec.
-function M.open()
+function M.open(keep)
   local id
   local page = M.page({
     changed = function() if id then bone.ui.update(id, {}) end end,
-    close = function() bone.ui.close(id) end,
+    close = function()
+      bone.ui.close(id)
+      if keep then keep() end
+    end,
   })
   local view = bone.ui.windows.catalog
   local spec = view and view(page) or { lines = function(ctx) return render(page, ctx) end, anchor = "prompt" }
