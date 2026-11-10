@@ -9,8 +9,10 @@ use std::time::Duration;
 use bone_core::Core;
 use bone_core::scripting;
 use bone_gui::{GuiOptions, Headless};
-use bone_proto::methods::{MessageCompletedParams, TurnFinishedParams};
-use bone_proto::types::{ChatMessage, TurnOutcome};
+use bone_proto::methods::{
+    MessageCompletedParams, ToolOutputParams, ToolStartedParams, TurnFinishedParams,
+};
+use bone_proto::types::{ChatMessage, ToolCall, TurnOutcome};
 use bone_server::Server;
 
 /// A headless GUI with the shared defaults (unless a test chose a library).
@@ -1379,6 +1381,56 @@ async fn a_canvas_is_drawn_by_lua() {
         .filter(|e| e.contains("bad shape"))
         .count();
     assert_eq!(errors, 1, "{:?}", g.gui.lua_errors());
+}
+
+/// A running call's node is kept a moment while its output streams in, and
+/// every event builds the window again: the kept node's functions come
+/// along, so its icon (a canvas) is still drawn rather than blinking out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_running_calls_icon_stays_while_its_output_streams() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.gui
+        .run_lua(
+            "t",
+            r##"
+      local draw = bone.gui.draw
+      bone.ui.views.tool = function()
+        return { node = { width = 120, height = 16, canvas = { draw = function()
+          return { draw.text{ x = 0, y = 12, text = "running-mark", size = 12, color = "#eeeeee" } }
+        end } } }
+      end
+    "##,
+        )
+        .unwrap();
+    g.gui.chats[0].turn_started(1, "go");
+    g.gui.chats[0].tool_started(&ToolStartedParams {
+        session_id: "s".into(),
+        turn_id: 1,
+        call: ToolCall {
+            id: "c1".into(),
+            name: "shell".into(),
+            arguments: "{}".into(),
+        },
+        started_at: None,
+        generation_ms: None,
+    });
+    g.gui.view.invalidate();
+    g.frame();
+    let shown = |g: &Headless| g.painted.iter().any(|(t, _)| t == "running-mark");
+    assert!(shown(&g), "{:?}", g.painted);
+    for i in 0..3 {
+        g.gui.chats[0].tool_output(&ToolOutputParams {
+            session_id: "s".into(),
+            turn_id: 1,
+            call_id: "c1".into(),
+            text: format!("line {i}\n"),
+        });
+        g.gui.view.invalidate();
+        g.frame();
+        assert!(shown(&g), "output {i}: {:?}", g.painted);
+    }
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 
 /// A font family Lua registers can be named by any node.
