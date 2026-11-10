@@ -901,36 +901,25 @@ pub async fn run(conn: Connection, opts: GuiOptions) -> Result<(), String> {
 /// [`run`], but `resident` serves the control socket later `bone --gui`
 /// launches use to open their window in this process.
 pub async fn run_with(conn: Connection, opts: GuiOptions, resident: bool) -> Result<(), String> {
-    let gui = Gui::connect(conn, opts.clone()).await?;
+    let gui = Gui::connect(conn, opts).await?;
     gui.watch_config();
-    tokio::task::block_in_place(move || open(gui, opts, resident))
+    tokio::task::block_in_place(move || open(gui, resident))
 }
 
-fn open(gui: Gui, opts: GuiOptions, resident: bool) -> Result<(), String> {
+fn open(gui: Gui, resident: bool) -> Result<(), String> {
     let (unlink, asks) = start_resident(resident).unzip();
     let _unlink = unlink;
-    let mut prepared = Some(gui);
     Application::new().run(move |cx: &mut App| {
-        if let Some(gui) = prepared.take()
-            && let Err(e) = present(cx, gui)
-        {
+        if let Err(e) = present(cx, gui) {
             eprintln!("bone: cannot open a window: {e}");
             cx.quit();
             return;
         }
         if let Some(mut rx) = asks {
             cx.spawn(async move |cx| {
-                while let Some(ask) = rx.recv().await {
-                    match ask {
-                        Ask::Quit(reply) => {
-                            let _ = cx.update(|cx| cx.quit());
-                            let _ = reply.send("ok\n".into());
-                        }
-                        Ask::Open(reply) => {
-                            let msg = cx.update(|app| show_window(app, &opts));
-                            let _ = reply.send(msg.unwrap_or_else(|_| "err gone\n".into()));
-                        }
-                    }
+                while let Some(reply) = rx.recv().await {
+                    let msg = cx.update(show_window);
+                    let _ = reply.send(msg.unwrap_or_else(|_| "err gone\n".into()));
                 }
             })
             .detach();
@@ -1016,47 +1005,21 @@ fn present(cx: &mut App, mut gui: Gui) -> Result<WindowHandle<Root>, String> {
         .map_err(|e| e.to_string())
 }
 
-/// Focus the window already open, or open one.
-fn show_window(cx: &mut App, opts: &GuiOptions) -> String {
-    if let Some(handle) = cx.active_window().or_else(|| cx.windows().first().copied()) {
-        reveal_window();
-        let _ = handle.update(cx, |_view, window, _| window.activate_window());
-        cx.activate(true);
-        return "ok\n".into();
-    }
-    let gui = match connect_gui(opts.clone()) {
-        Ok(gui) => gui,
-        Err(e) => return format!("err {e}\n"),
+/// Focus the window already open. Without one this process is on its way
+/// out, and the refused asker becomes the GUI itself.
+fn show_window(cx: &mut App) -> String {
+    let Some(handle) = cx.active_window().or_else(|| cx.windows().first().copied()) else {
+        return "err closing\n".into();
     };
-    match present(cx, gui) {
-        Ok(handle) => {
-            let _ = handle.update(cx, |_, window, _| window.activate_window());
-            cx.activate(true);
-            "ok\n".into()
-        }
-        Err(e) => format!("err {e}\n"),
-    }
+    reveal_window();
+    let _ = handle.update(cx, |_view, window, _| window.activate_window());
+    cx.activate(true);
+    "ok\n".into()
 }
 
-/// Another window on the same core. `Gui` is not `Send`, so this stays on
-/// the window thread. That thread is inside `block_in_place`, which is what
-/// lets `block_on` drive the connect on the runtime it already belongs to.
-fn connect_gui(opts: GuiOptions) -> Result<Gui, String> {
-    let path = opts
-        .reconnect
-        .clone()
-        .ok_or_else(|| "this GUI has no server socket to open another window on".to_string())?;
-    tokio::runtime::Handle::current().block_on(async move {
-        let conn = bone_client::connect(&path).await.map_err(|e| e.to_string())?;
-        Gui::connect(conn, opts).await
-    })
-}
-
-/// What another `bone --gui` asks of the process that already has the GPU.
-enum Ask {
-    Open(std::sync::mpsc::Sender<String>),
-    Quit(std::sync::mpsc::Sender<String>),
-}
+/// Another `bone --gui`'s ask to open the window here: the reply line it
+/// is owed ("ok" or "err …").
+type Ask = std::sync::mpsc::Sender<String>;
 
 /// Removes the control socket when this process leaves.
 struct Unlink(PathBuf);
@@ -1150,17 +1113,12 @@ fn serve_gui_socket(
         let _ = conn.set_write_timeout(Some(Duration::from_secs(3)));
         let mut buf = [0u8; 16];
         let n = conn.read(&mut buf).unwrap_or(0);
-        let line = std::str::from_utf8(&buf[..n]).unwrap_or("").trim();
+        if std::str::from_utf8(&buf[..n]).unwrap_or("").trim() != "open" {
+            let _ = conn.write_all(b"err unknown\n");
+            continue;
+        }
         let (reply_tx, reply_rx) = std::sync::mpsc::channel();
-        let ask = match line {
-            "open" => Ask::Open(reply_tx),
-            "quit" => Ask::Quit(reply_tx),
-            _ => {
-                let _ = conn.write_all(b"err unknown\n");
-                continue;
-            }
-        };
-        if tx.send(ask).is_err() {
+        if tx.send(reply_tx).is_err() {
             let _ = conn.write_all(b"err gone\n");
             break;
         }
@@ -1168,9 +1126,6 @@ fn serve_gui_socket(
             .recv_timeout(Duration::from_secs(5))
             .unwrap_or_else(|_| "err timeout\n".into());
         let _ = conn.write_all(reply.as_bytes());
-        if line == "quit" {
-            break;
-        }
     }
 }
 

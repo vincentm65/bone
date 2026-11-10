@@ -355,11 +355,6 @@ fn server(config_dir: &Path) -> StartupResult<Server> {
         })
 }
 
-enum Endpoint {
-    Attached(Connection),
-    Local,
-}
-
 /// Exit-idle: the first client, or nobody coming at all, then the last
 /// client leaving. A moment's grace covers one arriving just as the last
 /// one leaves, and an accepted connection the count has not seen yet.
@@ -427,9 +422,10 @@ async fn spawn_core(path: &Path) -> StartupResult<Connection> {
                 if let Some(mut err) = child.stderr.take() {
                     let _ = std::io::Read::read_to_string(&mut err, &mut why);
                 }
-                let why = why.trim();
-                let why = if why.is_empty() { &format!("cannot connect: {e}") } else { why };
-                return Err((1, format!("the core exited at startup: {why}")));
+                if why.trim().is_empty() {
+                    why = format!("cannot connect: {e}");
+                }
+                return Err((1, format!("the core exited at startup: {}", why.trim())));
             }
             Err(e) if std::time::Instant::now() > deadline => {
                 let _ = child.kill();
@@ -507,30 +503,27 @@ async fn attach(connect: Option<PathBuf>, config_dir: &Path) -> StartupResult<At
     // default socket, starting the core there if none is, except when this
     // run has private core settings: that core stays in-process.
     let explicit = connect.is_some();
-    let path =
-        connect.or_else(|| (!private_core(|k| std::env::var_os(k))).then(default_socket_path));
-    let endpoint = match &path {
-        Some(path) => match bone_client::connect(path).await {
-            Ok(conn) => Endpoint::Attached(conn),
-            Err(e) if explicit => {
-                return Err((1, format!("cannot connect to {}: {e}", path.display())));
-            }
-            Err(_) => Endpoint::Attached(spawn_core(path).await?),
-        },
-        None => Endpoint::Local,
-    };
-    // Loading core.lua is deliberately after deciding whether to attach.
-    Ok(match endpoint {
-        Endpoint::Attached(conn) => Attached {
-            conn,
-            reload_core: false,
-            path,
-        },
-        Endpoint::Local => Attached {
+    let Some(path) =
+        connect.or_else(|| (!private_core(|k| std::env::var_os(k))).then(default_socket_path))
+    else {
+        // core.lua loads only here, where this run's core actually lives.
+        return Ok(Attached {
             conn: server(config_dir)?.connect_in_process(),
             reload_core: true,
-            path,
-        },
+            path: None,
+        });
+    };
+    let conn = match bone_client::connect(&path).await {
+        Ok(conn) => conn,
+        Err(e) if explicit => {
+            return Err((1, format!("cannot connect to {}: {e}", path.display())));
+        }
+        Err(_) => spawn_core(&path).await?,
+    };
+    Ok(Attached {
+        conn,
+        reload_core: false,
+        path: Some(path),
     })
 }
 
