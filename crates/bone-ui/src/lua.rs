@@ -331,8 +331,12 @@ pub trait Host {
     /// `/tui use` chose another library (`prev` was in use): load the UI
     /// again, outside the op, and go back to `prev` if it does not load.
     fn library_changed(&mut self, prev: String);
-    /// Where this frontend runs, for finding a project's `.bone/`.
+    /// Where this frontend runs, for finding a project's `.bone/`; new
+    /// sessions start here.
     fn cwd(&self) -> &str;
+    /// New sessions start in `dir` from now on (`/cd`). A session keeps
+    /// the directory it was created in.
+    fn set_cwd(&mut self, dir: String);
     /// Stop job `id` without calling back; the callbacks it held.
     fn cancel_job(&mut self, id: u64) -> Vec<u64>
     where
@@ -429,6 +433,12 @@ pub fn dispatch<H: Host>(
         "notify" => notify(h, lua, a),
         "settings_get" => json(lua, h.settings()),
         "session" => session(h, lua),
+        "cwd" => ret(lua, h.cwd().to_owned()),
+        "cd" => args::<String>(lua, a).and_then(|dir| {
+            h.set_cwd(dir);
+            h.changed();
+            ret(lua, ())
+        }),
         "prompt_get" => ret(lua, h.prompt_text()),
         "prompt_set" => args::<String>(lua, a).and_then(|text| {
             h.set_prompt_text(&text);

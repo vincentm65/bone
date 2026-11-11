@@ -779,6 +779,10 @@ impl Host for Gui {
         &self.opts.cwd
     }
 
+    fn set_cwd(&mut self, dir: String) {
+        self.opts.cwd = dir;
+    }
+
     fn panel_store(&mut self) -> bone_ui::lua::panels::PanelStore<'_> {
         let l = &mut self.lua;
         bone_ui::lua::panels::PanelStore {

@@ -186,10 +186,12 @@ async fn the_slash_menu_opens_and_esc_hides_it() {
     use bone_gui::{Key, Modifiers};
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut g = gui(config.path(), work.path()).await;
+    // A command's name, and not the header's folder (where chats start).
+    let folder = work.path().to_string_lossy().into_owned();
     let menu = |g: &Headless| {
         g.painted
             .iter()
-            .any(|(t, _)| t.len() > 1 && t.len() < 20 && t.starts_with('/'))
+            .any(|(t, _)| t.len() > 1 && t.len() < 20 && t.starts_with('/') && *t != folder)
     };
     g.frame();
     assert!(!menu(&g));
@@ -1530,4 +1532,35 @@ async fn terminal_uses_the_panel_attachment_hook() {
         )
         .unwrap();
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}
+
+/// `/cd` names where the next session starts: the one a first message
+/// creates is in that directory, not where the GUI was started.
+#[tokio::test(flavor = "multi_thread")]
+async fn cd_is_where_the_next_session_starts() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let project = work.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    let mut g = gui(config.path(), work.path()).await;
+    g.gui.run_lua("t", "bone.cmd('/cd project')").unwrap();
+    g.send("hello");
+    g.wait_for(Duration::from_secs(10), |gui| {
+        gui.chats[gui.current].session_id().is_some()
+    })
+    .await
+    .unwrap();
+    let want = project.to_string_lossy().into_owned();
+    g.gui
+        .run_lua(
+            "t",
+            &format!("local s = bone.api.session() assert(s and s.cwd == {want:?}, s and s.cwd)"),
+        )
+        .unwrap();
+    // The header's folder is that session's, and is a button for /cd.
+    g.gui
+        .run_lua(
+            "t",
+            "assert(bone.gui.rect('header-folder'), 'no folder in the header')",
+        )
+        .unwrap();
 }

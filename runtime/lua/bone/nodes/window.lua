@@ -344,6 +344,13 @@ local function short_path(cwd)
   return cwd == "~" and "~/" or cwd
 end
 
+-- A long path keeps its end: the folder's own name says more than /home.
+local function path_tail(path, max)
+  if #path <= max then return path end
+  local cut = path:sub(-(max - 1)):gsub("^[\128-\191]+", "")
+  return "…" .. (cut:match("/.*$") or cut)
+end
+
 function M.header(session, width)
   if require("bone.nodes.titlebar").offset() > 0 then return nil end
   M.menu_nodes = nil
@@ -351,8 +358,10 @@ function M.header(session, width)
   local sidebar = require("bone.desktop.sidebar")
   local title = title_of(session)
   local muted = (bone.hl.get("Muted") or {}).fg and "Muted" or "Dim"
-  -- A new chat has no folder of its own yet: it starts where bone runs.
-  local path = short_path((session and session.cwd) or os.getenv("PWD"))
+  -- A new chat has no folder of its own yet: it starts where bone runs,
+  -- or where /cd said.
+  local folder = (session and session.cwd) or bone.api.cwd()
+  local path = short_path(folder)
   local bar = {
     height = M.header_height, shrink = 0, direction = "row", align = "center", gap = 10,
     padding = { 0, 16, 0, sidebar.is_open() and 20 or 12 },
@@ -364,14 +373,16 @@ function M.header(session, width)
   bar[#bar + 1] = { text = title or "New chat", size = style.size.body, medium = title ~= nil,
     hl = title and "Normal" or muted, wrap = false, text_overflow = "ellipsis", shrink = 1 }
   -- The folder keeps its shape (the title gives way first), and goes where
-  -- there is no room for it.
+  -- there is no room for it. It is a button: /cd, to choose where new chats
+  -- start (this one stays where it is).
   if path and (width or math.huge) >= 420 then
-    bar[#bar + 1] = style.finish({
+    bar[#bar + 1] = widgets.press({
       direction = "row", align = "center", gap = 6, height = 24, padding = { 0, 9, 0, 8 }, shrink = 0, max_width = 220,
-      radius = 12, border = 1, border_color = "PromptBorder", tooltip = (session and session.cwd) or os.getenv("PWD"),
+      radius = 12, border = 1, border_color = "PromptBorder", id = "header-folder",
+      tooltip = folder .. " · click to choose where new chats start (/cd)",
       icons.node("folder", { size = 13, hl = "Dim" }),
-      { text = path, size = style.size.small, hl = muted, wrap = false, text_overflow = "ellipsis", shrink = 1 },
-    })
+      { text = path_tail(path, 30), size = style.size.small, hl = muted, wrap = false, text_overflow = "ellipsis", shrink = 1 },
+    }, function() bone.cmd("/cd") end, "button")
   end
   -- The chat's actions, quiet at the right: a menu of what you can do to it.
   bar[#bar + 1] = { grow = 1 }

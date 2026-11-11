@@ -834,6 +834,7 @@ bone.now()                              -- milliseconds since the epoch
 - `bone.api.prompt_get()`, `bone.api.prompt_set(text)`, `bone.prompt.history_add(text)` (for up/down recall)
 - `bone.api.log(n)` (the last n messages), `bone.api.show(text)` (show without logging), `bone.api.colors_name()`, `bone.api.exec_lua(code)` and `bone.api.source(path)` (run Lua / a Lua file)
 - `bone.api.session()` → `{ session_id, cwd, title, running }` or `nil`
+- `bone.api.cwd()` → the directory new sessions start in (where bone was started, until changed); `bone.api.cd(dir)` changes it, taking the path as given (`/cd` is what checks it). A session keeps the directory it was created in.
 - `bone.strwidth(s)`: display width in columns.
 - `bone.ui.win{ lines, width, height, anchor, row, col, z, focus, keys, on_key, guard }` → id: a window drawn over the screen. Lua draws every cell; Rust only places it and clears what is behind it.
   - `lines`: a list of lines, or `function(ctx)` returning one (called every frame), with `ctx = { width, height }` the most room it has.

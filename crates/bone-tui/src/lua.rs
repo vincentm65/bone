@@ -809,6 +809,10 @@ impl bone_ui::lua::Host for App {
         &self.cwd
     }
 
+    fn set_cwd(&mut self, dir: String) {
+        self.cwd = dir;
+    }
+
     fn jobs(&mut self) -> &mut bone_ui::jobs::Jobs {
         &mut self.jobs
     }

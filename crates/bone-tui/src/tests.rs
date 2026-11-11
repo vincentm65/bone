@@ -625,7 +625,7 @@ async fn slash_menu_scrolls_when_it_overflows() {
     h.input("/").await;
     let screen = h.screen(80, 24);
     assert!(
-        screen.contains("/?") && !screen.contains(" of 54"),
+        screen.contains("/?") && !screen.contains(" of 55"),
         "{screen}"
     );
     // The wheel and pages scroll the menu.
@@ -634,11 +634,11 @@ async fn slash_menu_scrolls_when_it_overflows() {
         h.input("{pagedown}").await;
     }
     let screen = h.screen(80, 24);
-    // Two pages down (plus the wheel) has scrolled to the quit command.
-    assert!(screen.contains("/quit"), "{screen}");
+    // Two pages down (plus the wheel) has scrolled to the queue command.
+    assert!(screen.contains("/queue"), "{screen}");
     // The selection completes into the prompt.
     h.input("{tab}").await;
-    assert_eq!(h.prompt(), "/quit ");
+    assert_eq!(h.prompt(), "/queue ");
     for i in 1..=32 {
         h.lua(&format!("bone.cmd.del('zz{}')", i)).await;
     }

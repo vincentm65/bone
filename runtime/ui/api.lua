@@ -497,6 +497,17 @@ bone.api = {
   session = function()
     return api("session")
   end,
+  --- The directory new sessions start in: where bone was started, until
+  --- cd() (or /cd) names another.
+  cwd = function()
+    return api("cwd")
+  end,
+  --- Start new sessions in `dir` from now on. The path is taken as given
+  --- (/cd is what checks it); a session keeps the directory it was
+  --- created in.
+  cd = function(dir)
+    api("cd", dir)
+  end,
 }
 
 --- Highlight groups: bone.hl.set("ToolPath", { fg = "#7dcfff", bold = true })
