@@ -1564,3 +1564,22 @@ async fn cd_is_where_the_next_session_starts() {
         )
         .unwrap();
 }
+
+/// The menu over the prompt lists a command's arguments as they are: a
+/// directory under `/cd` is `project/`, not a command called `/project/`.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_menu_shows_arguments_without_a_slash() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    std::fs::create_dir(work.path().join("project")).unwrap();
+    let mut g = gui(config.path(), work.path()).await;
+    let has = |g: &Headless, text: &str| g.painted.iter().any(|(t, _)| t == text);
+    g.text("/c");
+    g.frame();
+    g.frame();
+    assert!(has(&g, "/cd"), "a command's name keeps its slash");
+    g.text("d pro");
+    g.frame();
+    g.frame();
+    assert!(has(&g, "project/"), "{:?}", g.painted);
+    assert!(!has(&g, "/project/"));
+}

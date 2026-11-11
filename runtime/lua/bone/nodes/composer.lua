@@ -33,7 +33,9 @@ end
 -- The / menu, above the composer: the closest match nearest the text.
 local function suggestions()
   local text = bone.prompt.get()
-  local items = menu.all(text)
+  -- `argument`: these complete a command's argument (a file, a name), not
+  -- the command's own name.
+  local items, argument = menu.all(text)
   if #items == 0 then return nil end
   if menu.last_text ~= text then
     menu.last_text, menu.offset, menu.selected, menu.last_selected = text, 0, 1, 1
@@ -50,7 +52,10 @@ local function suggestions()
     list[#list + 1] = style.finish(widgets.press({
       direction = "row", gap = 10, align = "center", height = 34, padding = { 0, 10 }, radius = style.radius.md,
       bg = on and "Selection" or nil, selected = on,
-      { text = "/" .. it.name, size = style.size.body, width = 130, wrap = false, text_overflow = "ellipsis", shrink = 0 },
+      -- A command's name is "/name" in a column; an argument is itself, as
+      -- wide as it is (a path is longer than a name).
+      { text = argument and it.name or "/" .. it.name, size = style.size.body, width = not argument and 130 or nil,
+        wrap = false, text_overflow = "ellipsis", shrink = argument and 1 or 0 },
       { text = it.desc or "", hl = on and "Muted" or "Dim", size = style.size.body, grow = 1, width = 0,
         wrap = false, text_overflow = "ellipsis" },
     }, function() menu.selected = i; menu.complete() end, "option", not on))

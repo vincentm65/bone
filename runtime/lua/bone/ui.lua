@@ -55,7 +55,9 @@ function M.setup(opts)
   end
 
   -- Matching slash commands while typing "/…", attached to the prompt.
-  -- ctx = { items = { { name, desc } }, selected, width, height };
+  -- ctx = { items = { { name, desc } }, selected, width, height, argument };
+  -- `argument`: the items complete a command's argument (a file, a name),
+  -- not the command's own name, and are shown as they are.
   function bone.ui.suggestions(ctx)
     local name_w, desc_w = 0, 0
     for _, it in ipairs(ctx.items) do
@@ -66,7 +68,7 @@ function M.setup(opts)
     for i, it in ipairs(ctx.items) do
       local hl = i == ctx.selected and "Selection" or "InputBackground"
       local prefix = "  "
-      local name = "/" .. it.name
+      local name = ctx.argument and it.name or "/" .. it.name
       local name_text = prefix .. name
       local used = bone.text.width(prefix) + name_w + 1 + desc_w
       lines[i] = {

@@ -614,6 +614,26 @@ async fn slash_commands_suggest_complete_and_run() {
 }
 
 #[tokio::test]
+async fn slash_menu_lists_arguments_without_a_slash() {
+    let mut h = Harness::new().await;
+    h.lua(
+        "bone.cmd.create('zzarg', function() end, { complete = function() return { 'alpha', 'beta' } end })",
+    )
+    .await;
+    // A command's name keeps its slash; what completes its argument has none.
+    h.input("/zzar").await;
+    assert!(h.screen(80, 24).contains("/zzarg"));
+    h.input("g a").await;
+    let screen = h.screen(80, 24);
+    assert!(
+        screen.contains("  alpha") && !screen.contains("/alpha"),
+        "{screen}"
+    );
+    h.input("{ctrl+u}").await;
+    h.lua("bone.cmd.del('zzarg')").await;
+}
+
+#[tokio::test]
 async fn slash_menu_scrolls_when_it_overflows() {
     let mut h = Harness::new().await;
     // 32 extra commands overflow the window (the builtin names/aliases

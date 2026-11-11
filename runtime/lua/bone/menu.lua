@@ -251,7 +251,7 @@ end
 
 local function render(ctx)
   local text = bone.prompt.get()
-  local items = M.all(text)
+  local items, argument = M.all(text)
   if #items == 0 or type(bone.ui.suggestions) ~= "function" then
     return {}
   end
@@ -280,6 +280,7 @@ local function render(ctx)
   return bone.ui.suggestions({
     items = shown,
     selected = selected,
+    argument = argument,
     width = ctx.width,
     height = ctx.height,
   }) or {}
