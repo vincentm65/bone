@@ -108,7 +108,7 @@ pub(crate) enum ProcessState {
 }
 
 impl ProcessState {
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Running => "running",
             Self::Exited => "exited",
@@ -163,6 +163,8 @@ pub(crate) struct ProcessView {
     pub signal: Option<i32>,
     pub error: Option<String>,
     pub terminal: bool,
+    /// The last lines of output, once the job has stopped.
+    pub ending: Option<String>,
     /// New output `(offset, text)`, when that is what changed.
     pub chunk: Option<(u64, String)>,
 }
@@ -357,6 +359,7 @@ impl ProcessRegistry {
             signal: snapshot.signal,
             error: snapshot.error.clone(),
             terminal: snapshot.background,
+            ending: (snapshot.state != ProcessState::Running).then(|| ending_of(&snapshot.combined)),
             chunk: None,
         }
     }
@@ -731,6 +734,18 @@ fn send_output(
 }
 
 /// The last non-empty line, cut to `TAIL_MAX` bytes.
+/// About the last 20 lines of `text`, at most 2000 bytes.
+fn ending_of(text: &str) -> String {
+    let text = text.trim_end();
+    let mut start = text.len().saturating_sub(2000);
+    while !text.is_char_boundary(start) {
+        start += 1;
+    }
+    let text = &text[start..];
+    let lines: Vec<&str> = text.lines().collect();
+    lines[lines.len().saturating_sub(20)..].join("\n")
+}
+
 fn tail_of(text: &str) -> String {
     let line = text
         .rsplit('\n')

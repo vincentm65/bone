@@ -53,6 +53,10 @@ bone._hooks = {}
 ---   "tool_call"   { session_id, cwd, id, name, arguments }
 ---   "tool_result" { session_id, id, name, arguments, output, is_error }
 ---   "turn_end"    { session_id, turn_id, outcome }    after a turn (changes ignored)
+---   "process_exit" { session_id, id, command, state, code, signal, error,
+---                   elapsed_ms, output }              a background shell job stopped
+---                                                     (state: exited, cancelled, timed_out,
+---                                                     failed; output: its last lines; results ignored)
 --- A hook returns nil (no change), a table of fields to change in `ev`
 --- (later hooks see the changes), or { deny = "why" } to stop that step: the
 --- turn, the model call, or the tool call (the model sees "why"). Hooks run

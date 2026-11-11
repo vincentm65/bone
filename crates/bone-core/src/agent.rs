@@ -814,7 +814,28 @@ impl Turn<'_> {
         let processes = {
             let events = self.inner.events.clone();
             let session_id = self.session_id.clone();
+            let scripting = self.rt.scripting.clone();
             Arc::new(move |mut view: ProcessView, version: u64| {
+                // A background job stopped: Lua decides who hears of it.
+                if view.terminal
+                    && !view.running
+                    && let Some(s) = &scripting
+                {
+                    s.fire(
+                        "process_exit",
+                        json!({
+                            "session_id": session_id,
+                            "id": view.id,
+                            "command": view.command,
+                            "state": view.state.name(),
+                            "code": view.code,
+                            "signal": view.signal,
+                            "error": view.error,
+                            "elapsed_ms": view.elapsed_ms,
+                            "output": view.ending.take().unwrap_or_default(),
+                        }),
+                    );
+                }
                 let chunk = view
                     .chunk
                     .take()
