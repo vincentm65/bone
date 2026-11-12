@@ -61,6 +61,19 @@ for (const [os, cpu, triple, exe, packageTarget] of targets) {
     fs.copyFileSync(path.join(root, 'crates', 'bone-gui', 'assets', icon), path.join(shareDir, icon));
   }
 
+  // The npm page of a platform package: point at the package to install.
+  fs.writeFileSync(path.join(dir, 'README.md'), [
+    `# ${name}`,
+    '',
+    `The native bone binary for ${os} ${cpu}. It is installed for you by`,
+    '[bone-agent](https://www.npmjs.com/package/bone-agent); install that instead:',
+    '',
+    '```sh',
+    'npm install -g bone-agent',
+    '```',
+    ''
+  ].join('\n'));
+
   fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({
     name,
     version,

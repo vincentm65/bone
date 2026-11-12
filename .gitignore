@@ -1,6 +1,7 @@
 /target
 /dist
 /npm/dist
+/npm/bone-agent/README.md
 /crates/bone-fake-provider/
 /docs/testing-providers.md
 /bone-desktop-gui-test-findings-3.0.10.md

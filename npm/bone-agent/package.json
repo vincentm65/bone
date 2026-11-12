@@ -1,7 +1,23 @@
 {
   "name": "bone-agent",
   "version": "3.0.10",
-  "description": "Bone: a terminal AI coding agent with a Lua-scriptable core and TUI",
+  "description": "bone: a coding agent for your terminal and desktop. A small Rust core, any OpenAI-compatible model, scriptable in Lua.",
+  "keywords": [
+    "ai",
+    "agent",
+    "coding-agent",
+    "coding-assistant",
+    "cli",
+    "tui",
+    "terminal",
+    "desktop",
+    "llm",
+    "local-llm",
+    "openai-compatible",
+    "mcp",
+    "lua",
+    "rust"
+  ],
   "bin": {
     "bone": "bin/bone.js"
   },

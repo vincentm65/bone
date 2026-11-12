@@ -187,6 +187,10 @@ jobs:
           done
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      # The npm page's README: the repository's, with its links and images
+      # pointed at this commit on GitHub.
+      - name: write the package README
+        run: node npm/make-readme.js
       - name: publish main package
         run: |
           if npm view "bone-agent@${{ steps.rel.outputs.version }}" version >/dev/null 2>&1; then
