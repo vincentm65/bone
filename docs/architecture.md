@@ -90,3 +90,16 @@ The TUI reads the clipboard in a short-lived helper process (the system clipboar
 - `tests/ui/*.lua`: conformance scripts for the shared Lua UI API, run in both frontends (`bone/tests/conformance.rs`, `bone-gui/tests/conformance.rs`); the four about the TUI's cell layout (`frontend`, `layout`, `panels`, `scrolling`) run only in the TUI.
 - `bone-gui/tests`: the GUI driven headlessly (`bone_gui::Headless`, frames with no window and fixed-width text): Lua hosting, the node view (layout, scrolling, lists, painted output), keys, clicks, resizing and HiDPI, and several clients (TUI and GUI) on one server, including a server restart.
 - `bone/tests/images.rs`: image upload, model payloads, persistence/restart, queue editing, draft races, compaction, and optional native clipboard through a separate headless process.
+
+Running them:
+
+```sh
+cargo test --workspace
+cargo clippy --workspace --all-targets
+```
+
+- After an intended wire change, refresh the protocol golden files with `UPDATE_GOLDEN=1 cargo test -p bone-proto --test golden`.
+- The end-to-end TUI tests: `cargo test -p bone --test tui`.
+- Image tests: `cargo test -p bone --test images`. On an isolated desktop, `cargo test -p bone --test images -- --ignored` adds native clipboard coverage; set `BONE_TEST_SCREENSHOT` to a captured PNG to use its pixels, or `BONE_TEST_BINARY` to a release executable to test that build. These ignored tests replace and clear the clipboard on the display they run on.
+- Windows shell checks: `cargo test -p bone-core native_windows_shell`. Run `cargo test -p bone-core native_windows_shell_pty -- --ignored` on native Windows to validate ConPTY; Wine cannot validate its child console output.
+- `scripts/dist.sh` builds `dist/bone-<version>-<target>.tar.gz`.

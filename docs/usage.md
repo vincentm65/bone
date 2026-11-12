@@ -162,3 +162,22 @@ Configuration lives in `~/.bone/` (or `$BONE_CONFIG_DIR`); sessions are saved in
 **Updates.** When bone starts it checks, in the background, for a newer bone and for updated catalog plugins. Installed from npm, it asks to update (bone first, then plugins) and then to restart; on Windows, quit and run `bone update`. Built from a git checkout, it says how many commits it is behind `origin/main` (update with `git pull && scripts/install.sh`). A plugin that needs a newer bone is not offered, or installed by `/catalog`, until bone is updated. "Skip this version" stops asking about that update; `update.check = false` in settings turns the check off.
 
 On Windows, `--listen` and `--connect` use `\\.\pipe\bone3-<USERNAME>` by default (or the named-pipe path you provide). Only the current user can connect. Shell commands run in `cmd.exe`, and background jobs use ConPTY.
+
+## Desktop shortcut
+
+`bone desktop` adds the desktop app to your system: a Start menu and desktop shortcut on Windows, `~/Applications/Bone.app` on macOS (Spotlight, Launchpad, the Dock) and an app menu entry on Linux. The shortcut opens the desktop app from this install, starting in your home folder. `bone update` updates the shortcut's app too. Run `bone desktop` again after changing `PATH` or your Node version, and `bone desktop --remove` to take the shortcut away.
+
+## Building from source
+
+You need Rust 1.88+ and a C toolchain (LuaJIT is built from source and compiled into the binary).
+
+```sh
+scripts/install.sh              # builds release, installs ~/.local/bin/bone3
+scripts/install.sh --name bone  # install as `bone` instead
+```
+
+Or `cargo build --release` and run `target/release/bone`. The desktop app is built in by default; add `--no-default-features` for a TUI-only binary.
+
+**Windows.** Build with `cargo build --release` in a Rust/C toolchain terminal and run `target/release/bone.exe`. Shell tools use `cmd.exe`; live shell jobs use ConPTY (Windows 10 version 1809 or newer). The default config directory is `%USERPROFILE%\.bone`.
+
+**Android/Termux.** Use Clang with its compiler runtime installed. The build finds and links Clang's builtins archive for LuaJIT's instruction-cache flush on its own; no extra `RUSTFLAGS` are needed. For cross builds, set the Android C compiler through `CC_<target>` (for example `CC_aarch64_linux_android`) and the Rust linker as usual. Select Android API 23 or newer for the shell tool's `openpty` support.
