@@ -316,7 +316,7 @@ async fn a_lagging_gui_reloads_its_chats() {
 }
 
 fn lagged(gui: &mut bone_gui::Gui) {
-    gui.handle_event(&bone_client::Event {
+    gui.handle_event(&bone_proto::client::Event {
         method: "session/updated".into(),
         params: Some(json!({ "session_id": "", "reason": "lagged" })),
     });
@@ -345,7 +345,7 @@ async fn reconnecting_restores_everything() {
         reconnect: Some(gui_sock.clone()),
         config_dir: Some(e.config.path().to_owned()),
     };
-    let conn = bone_client::connect(&gui_sock).await.unwrap();
+    let conn = bone_proto::client::connect(&gui_sock).await.unwrap();
     let mut gui = bone_gui::Headless::start(conn, opts, 1000.0, 700.0)
         .await
         .unwrap();
@@ -478,7 +478,7 @@ async fn a_restarted_server_gives_back_the_session() {
         reconnect: Some(gui_sock.clone()),
         config_dir: Some(e.config.path().to_owned()),
     };
-    let conn = bone_client::connect(&gui_sock).await.unwrap();
+    let conn = bone_proto::client::connect(&gui_sock).await.unwrap();
     let mut gui = bone_gui::Headless::start(conn, opts, 1000.0, 700.0)
         .await
         .unwrap();

@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use bone_client::{Client, ClientError};
+use bone_proto::client::{Client, ClientError};
 use bone_core::Core;
 use bone_core::config::{CoreConfig, ProviderConfig};
 use bone_proto::methods::{Echo, EchoParams, Initialize, InitializeParams};
@@ -31,7 +31,7 @@ fn server_at(base_url: &str) -> Server {
     })))
 }
 
-fn connect() -> (Client, bone_client::EventStream) {
+fn connect() -> (Client, bone_proto::client::EventStream) {
     let server = server();
     Client::new(server.connect_in_process())
 }

@@ -10,7 +10,7 @@ to change.
 | Layer | Shared? | Where |
 |---|---|---|
 | Core, sessions, turns, tools, hooks, asks | Yes, one core; neither frontend knows the other | `bone-core`, `bone-server` |
-| Wire protocol, requests, events, reconnect | Yes | `bone-proto`, `bone-client` |
+| Wire protocol, requests, events, reconnect | Yes | `bone-proto` (with `bone_proto::client`) |
 | Client-side state: chat items and reducer, composer/editor, keymaps and key sequences, commands, options, popups and panels (state), jobs, processes, terminal emulation, themes, markdown parsing, layout tree and solver | Yes, in cells | `bone-ui` |
 | Lua UI API (`bone.ui`, `bone.keymap`, `bone.o`, `bone.on`, `bone.cmd`, `bone.chat`, `bone.prompt`, `bone.job`, plugins, libraries) | Yes: about 160 ops, one definition, behind the `Host` trait | `bone_ui::lua`, `runtime/ui/api.lua` |
 | Behaviour modules in Lua: commands, `/` menu, keys, setup, config data, `bone.chats`, `bone.background`, `bone.usage`, `bone.timing` | Yes | `runtime/lua/bone/` |

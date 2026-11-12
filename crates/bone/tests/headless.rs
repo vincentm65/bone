@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Stdio;
 use std::time::Duration;
 
-use bone_client::{Client, connect, spawn};
+use bone_proto::client::{Client, connect, spawn};
 use bone_proto::methods::{
     Echo, EchoParams, Echoed, SessionCreate, SessionCreateParams, SessionList,
 };

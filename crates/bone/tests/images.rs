@@ -1,6 +1,6 @@
 //! Full image path: composer -> RPC upload -> durable PNG -> provider HTTP.
 use base64::{Engine, engine::general_purpose::STANDARD};
-use bone_client::Client;
+use bone_proto::client::Client;
 use bone_core::{Core, scripting};
 use bone_proto::methods::*;
 use bone_server::Server;
@@ -455,7 +455,7 @@ async fn native_screenshot_paste_reaches_provider_over_stdio() {
         .env("BONE_CONFIG_DIR", env.config.path())
         .env_remove("BONE_BASE_URL")
         .env_remove("BONE_MODEL");
-    let (conn, _child) = bone_client::spawn(cmd).unwrap();
+    let (conn, _child) = bone_proto::client::spawn(cmd).unwrap();
     let mut tui = Headless::start(
         conn,
         RunOptions {
@@ -723,7 +723,7 @@ async fn read_file_parallel_images_keep_tool_replies_ordered_over_stdio() {
         .env("BONE_CONFIG_DIR", env.config.path())
         .env_remove("BONE_BASE_URL")
         .env_remove("BONE_MODEL");
-    let (conn, _child) = bone_client::spawn(cmd).unwrap();
+    let (conn, _child) = bone_proto::client::spawn(cmd).unwrap();
     let mut tui = Headless::start(
         conn,
         RunOptions {

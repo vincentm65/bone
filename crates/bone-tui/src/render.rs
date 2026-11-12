@@ -689,7 +689,7 @@ mod tests {
     #[tokio::test]
     async fn panel_refresh_timer_preserves_chat_cache_and_rearms() {
         let (conn, _server) = bone_proto::transport::in_process();
-        let (client, _events) = bone_client::Client::new(conn);
+        let (client, _events) = bone_proto::client::Client::new(conn);
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         let mut app = App::new(std::sync::Arc::new(client), tx, "/work".into(), None);
         app.with_api(|lua| {

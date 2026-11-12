@@ -629,7 +629,7 @@ async fn a_question_from_the_core_is_a_modal_dialog() {
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
     let mut g = gui(config.path(), work.path()).await;
     g.frame();
-    let ev = bone_client::Event {
+    let ev = bone_proto::client::Event {
         method: "ask/requested".into(),
         params: Some(serde_json::json!({
             "ask_id": 7,
@@ -660,7 +660,7 @@ async fn a_question_from_the_core_is_a_modal_dialog() {
         "{:?}",
         g.boxes
     );
-    let ev = bone_client::Event {
+    let ev = bone_proto::client::Event {
         method: "ask/resolved".into(),
         params: Some(serde_json::json!({ "ask_id": 7 })),
     };

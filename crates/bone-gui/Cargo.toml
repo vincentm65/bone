@@ -8,14 +8,12 @@ rust-version = "1.95"
 
 [dependencies]
 base64.workspace = true
-bone-client.workspace = true
 bone-lua.workspace = true
 bone-media.workspace = true
 bone-proto.workspace = true
 bone-ui.workspace = true
 gpui = "0.2.2"
 image.workspace = true
-smallvec = "1"
 ttf-parser = "0.25"
 mlua.workspace = true
 serde_json.workspace = true

@@ -4,7 +4,7 @@
 //! always type, `/` starts a command, and popups (from Lua, or the session
 //! picker) take the keyboard while open. Keymaps, commands, colors and views
 //! come from Lua. It talks to the bone core only through a
-//! [`bone_client::Client`], so it runs the same against an in-process server
+//! [`bone_proto::client::Client`], so it runs the same against an in-process server
 //! or a socket.
 
 mod app;
@@ -38,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use bone_client::{Client, EventStream as ServerEvents};
+use bone_proto::client::{Client, EventStream as ServerEvents};
 use bone_proto::Connection;
 use bone_proto::methods::{Empty, SettingsGet};
 use crossterm::event::{Event, EventStream, KeyEventKind, MouseButton, MouseEventKind};
@@ -181,7 +181,7 @@ pub async fn run(conn: Connection, opts: RunOptions) -> io::Result<Option<String
                 None => match &reconnect_to {
                     Some(path) => {
                         app.server_lost();
-                        retry = Some(Box::pin(bone_client::reconnect(path.clone(), "bone-tui")));
+                        retry = Some(Box::pin(bone_proto::client::reconnect(path.clone(), "bone-tui")));
                     }
                     None => app.server_closed(),
                 },

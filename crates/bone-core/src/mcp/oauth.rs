@@ -131,20 +131,8 @@ fn form(pairs: &[(&str, &str)]) -> String {
 }
 
 fn b64url(bytes: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    let mut out = String::new();
-    for c in bytes.chunks(3) {
-        let n = u32::from_be_bytes([0, c[0], *c.get(1).unwrap_or(&0), *c.get(2).unwrap_or(&0)]);
-        out.push(T[(n >> 18) as usize & 63] as char);
-        out.push(T[(n >> 12) as usize & 63] as char);
-        if c.len() > 1 {
-            out.push(T[(n >> 6) as usize & 63] as char);
-        }
-        if c.len() > 2 {
-            out.push(T[n as usize & 63] as char);
-        }
-    }
-    out
+    use base64::Engine;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
 fn random(n: usize) -> Vec<u8> {

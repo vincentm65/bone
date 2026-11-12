@@ -3,7 +3,7 @@
 //! A second frontend beside the TUI, built on the same `bone-ui` state: the
 //! transcript reducer, the event handling, and the bare item text are
 //! shared; this crate owns the window, drawing, and input. It talks to the
-//! core only through a [`bone_client::Client`], so it runs the same against
+//! core only through a [`bone_proto::client::Client`], so it runs the same against
 //! an in-process server or a socket, next to a TUI on the same core.
 //!
 //! [`Gui`] is the client state and logic; `view.rs` draws a frame of it,
@@ -38,7 +38,7 @@ use std::rc::Rc;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-use bone_client::{Client, Event, EventStream};
+use bone_proto::client::{Client, Event, EventStream};
 use bone_proto::Connection;
 use bone_proto::Method;
 use bone_proto::methods::{
@@ -79,7 +79,7 @@ enum Msg {
     Apply(Box<dyn FnOnce(&mut Gui) + Send>),
     Event(Event),
     Lost,
-    Reconnected(Box<bone_client::Reconnected>),
+    Reconnected(Box<bone_proto::client::Reconnected>),
 }
 
 /// Something to tell the user, in the status line.
@@ -536,14 +536,14 @@ impl Gui {
         self.fire_event("server/disconnected", serde_json::json!({}));
         let (tx, repaint) = (self.tx.clone(), self.repaint.clone());
         self.rt.spawn(async move {
-            let r = bone_client::reconnect(path, "bone-gui").await;
+            let r = bone_proto::client::reconnect(path, "bone-gui").await;
             let _ = tx.send(Msg::Reconnected(Box::new(r)));
             wake(&repaint);
         });
     }
 
     /// A new connection: take its snapshots before its buffered events.
-    fn reconnected(&mut self, r: bone_client::Reconnected) {
+    fn reconnected(&mut self, r: bone_proto::client::Reconnected) {
         self.client = Arc::new(r.client);
         self.settings = r.settings;
         self.asks = r.asks.into_iter().map(|a| (a.ask_id, a)).collect();

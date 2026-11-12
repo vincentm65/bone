@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bone_client::{Client, EventStream};
+use bone_proto::client::{Client, EventStream};
 use bone_core::Core;
 use bone_core::config::{CoreConfig, ProviderConfig};
 use bone_proto::methods::*;
@@ -64,7 +64,7 @@ fn sse(chunks: &[Value]) -> String {
     out
 }
 
-async fn next_event(events: &mut EventStream) -> bone_client::Event {
+async fn next_event(events: &mut EventStream) -> bone_proto::client::Event {
     tokio::time::timeout(Duration::from_secs(10), events.recv())
         .await
         .unwrap()

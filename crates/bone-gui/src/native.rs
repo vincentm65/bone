@@ -415,7 +415,7 @@ impl Root {
                         let buf = image::RgbaImage::from_raw(picture.width, picture.height, bgra)
                             .unwrap_or_default();
                         let frame = image::Frame::new(buf);
-                        (Arc::new(RenderImage::new(smallvec::smallvec![frame])), now)
+                        (Arc::new(RenderImage::new([frame])), now)
                     });
                     *used = now;
                     // Only the `uv` part shows: the whole picture is drawn

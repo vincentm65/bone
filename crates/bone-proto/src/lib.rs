@@ -8,7 +8,10 @@
 //! - [`methods`]: typed requests ([`Method`]) and server events ([`Notification`]).
 //! - [`codec`]: NDJSON encoding of messages.
 //! - [`transport`]: a bidirectional [`Connection`] and the in-process transport.
+//! - [`client`]: a request handle and event stream over a [`Connection`], with
+//!   connect, spawn and reconnect.
 
+pub mod client;
 pub mod codec;
 pub mod message;
 pub mod methods;

@@ -178,7 +178,7 @@ progress lines settled.
 ## Rust client
 
 ```rust
-let (client, mut events) = bone_client::Client::new(bone_client::connect(path).await?);
+let (client, mut events) = bone_proto::client::Client::new(bone_proto::client::connect(path).await?);
 client.initialize("my-tool").await?;
 let s = client.request::<SessionCreate>(SessionCreateParams { cwd: Some(cwd) }).await?;
 client.request::<TurnStart>(TurnStartParams { session_id: s.session_id, text: "hi".into(), images: Vec::new() }).await?;
@@ -188,4 +188,4 @@ while let Some(e) = events.recv().await {
 }
 ```
 
-`bone_client::spawn` takes an owned `tokio::process::Command` configured with `--headless` and returns `(Connection, Child)` for a private server; keep the child handle alive while using the connection. `bone_client::reconnect(path, client_name)` connects to a socket server again after losing it, retrying with backoff, and returns the new client with its settings and open questions already fetched. `crates/bone-server/examples/chat.rs` is a complete line-mode client.
+`bone_proto::client::spawn` takes an owned `tokio::process::Command` configured with `--headless` and returns `(Connection, Child)` for a private server; keep the child handle alive while using the connection. `bone_proto::client::reconnect(path, client_name)` connects to a socket server again after losing it, retrying with backoff, and returns the new client with its settings and open questions already fetched. `crates/bone-server/examples/chat.rs` is a complete line-mode client.

@@ -12,7 +12,6 @@ rust-version = "1.88"
 bone-proto = { path = "crates/bone-proto" }
 bone-core = { path = "crates/bone-core" }
 bone-server = { path = "crates/bone-server" }
-bone-client = { path = "crates/bone-client" }
 bone-lua = { path = "crates/bone-lua" }
 bone-tui = { path = "crates/bone-tui" }
 bone-gui = { path = "crates/bone-gui" }
@@ -34,7 +33,6 @@ libc = "0.2"
 mlua = { version = "0.11", features = ["luajit", "vendored", "serialize"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
 rusqlite = { version = "0.34", features = ["bundled", "hooks"] }
-similar = "2"
 tempfile = "3"
 tokio-util = "0.7"
 uuid = { version = "1", features = ["v7"] }

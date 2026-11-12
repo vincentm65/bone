@@ -29,7 +29,7 @@ that behaves differently in the GUI is a bug.
 - **The core is the authority.** Sessions, transcripts, turns, queues, tools,
   questions, settings, and event ordering remain in `bone-core`/`bone-server`.
 - **Both frontends are clients.** `bone-tui` and `bone-gui` use
-  `bone-client`/`bone-proto`; neither talks directly to the other.
+  `bone-proto` (its `client` module); neither talks directly to the other.
 - **One implementation of client-side state.** Anything that is not drawing —
   the transcript reducer, markdown parsing, prompt editing, keymaps, commands,
   options, highlight groups — lives in a shared crate used by both frontends.
@@ -120,7 +120,7 @@ bone-core ── bone-server ──┬── bone-tui ── ratatui/crossterm a
                                    │
                     both depend on bone-ui (shared client state, no rendering)
 
-bone-proto / bone-client: wire contract, transport, spawn-or-connect, reconnect
+bone-proto (with bone_proto::client): wire contract, transport, spawn-or-connect, reconnect
 bone-lua: Lua state setup, sides, capabilities, plugins, state, docs
 ```
 
@@ -134,7 +134,7 @@ Crates:
 - `bone-tui`: terminal frontend; converts `bone-ui` values to ratatui and
   crossterm events to `bone-ui` events.
 - `bone-gui`: desktop frontend; same, for the chosen GUI stack.
-- `bone-client`: gains the reconnect logic from `bone-tui`, so both
+- `bone_proto::client`: gains the reconnect logic from `bone-tui`, so both
   frontends share it. Spawn-or-connect stays in the `bone` binary, which
   launches either frontend.
 
@@ -345,7 +345,7 @@ call sites do not change:
    blocks.
 7. `vt100` screen emulation (`term.rs`) behind a frontend-neutral
    styled-lines result.
-8. Reconnect logic into `bone-client` (`bone_client::reconnect`).
+8. Reconnect logic into the client (`bone_proto::client::reconnect`).
    Spawn-or-connect (`bind_or_connect`) stays in `crates/bone`: binding the
    socket is the server's side (`bone_server::Listener`), and the GUI shares
    it by starting through the same binary.
@@ -373,7 +373,7 @@ decision here.
 Create `crates/bone-gui`:
 
 - window, event loop, and renderer with the chosen toolkit;
-- connect, spawn-or-connect, and reconnect through `bone-client`;
+- connect, spawn-or-connect, and reconnect through `bone_proto::client`;
 - `initialize`, session list and selector, `session/messages`, event stream;
 - transcript driven by the shared reducer, prompt via the shared composer,
   submit, streaming output, questions/approvals;

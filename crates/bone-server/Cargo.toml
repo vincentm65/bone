@@ -21,6 +21,5 @@ windows-sys = { version = "0.61", features = [
 
 [dev-dependencies]
 bone-lua.workspace = true
-bone-client.workspace = true
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "net", "io-util"] }

@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use base64::Engine;
-use bone_client::{Client, ClientError, Event as ServerEvent};
+use bone_proto::client::{Client, ClientError, Event as ServerEvent};
 use bone_proto::Method;
 use bone_proto::methods::*;
 use bone_proto::types::ImageAttachment;

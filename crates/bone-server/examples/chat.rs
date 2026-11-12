@@ -14,7 +14,7 @@
 use std::io::{BufRead, Write};
 use std::sync::Arc;
 
-use bone_client::{Client, connect};
+use bone_proto::client::{Client, connect};
 use bone_core::Core;
 use bone_core::scripting;
 use bone_proto::methods::*;

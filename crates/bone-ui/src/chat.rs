@@ -15,7 +15,7 @@ use std::time::Instant;
 
 use crate::data::Dep;
 
-use bone_client::Event;
+use bone_proto::client::Event;
 use bone_proto::methods::{
     MessageCompleted, MessageCompletedParams, MessageDelta, MessageDeltaParams, QueueChanged,
     QueueMode, QueuedMessage, ToolFinished, ToolFinishedParams, ToolOutput, ToolOutputParams,

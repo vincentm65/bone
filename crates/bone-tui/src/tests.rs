@@ -4,7 +4,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bone_client::{Client, EventStream};
+use bone_proto::client::{Client, EventStream};
 use bone_proto::methods::*;
 use bone_proto::types::{ChatMessage, DeltaKind, SessionInfo, ToolCall, TurnOutcome, Usage};
 use bone_proto::{Message, Notification, RpcError, transport};
@@ -1452,7 +1452,7 @@ async fn rapid_streaming_deltas_do_not_redraw_every_token() {
         text: "token-1 ".into(),
     };
     h.app.autocmds.clear();
-    h.app.handle_server(bone_client::Event {
+    h.app.handle_server(bone_proto::client::Event {
         method: MessageDelta::METHOD.into(),
         params: Some(serde_json::to_value(&delta).unwrap()),
     });
@@ -5747,11 +5747,11 @@ async fn reconnected_refreshes_all_chats_and_processes_and_submits_on_new_client
     assert_eq!(*h.log.lock().unwrap(), old_requests);
 }
 
-/// `bone_client::reconnect` as the TUI calls it, as a tuple.
+/// `bone_proto::client::reconnect` as the TUI calls it, as a tuple.
 async fn reconnect(
     path: std::path::PathBuf,
 ) -> (Client, EventStream, Value, Vec<AskRequestedParams>) {
-    let r = bone_client::reconnect(path, "bone-tui").await;
+    let r = bone_proto::client::reconnect(path, "bone-tui").await;
     (r.client, r.events, r.settings, r.asks)
 }
 

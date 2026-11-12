@@ -14,11 +14,11 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use bone_proto::methods::{
+use crate::methods::{
     AskList, AskRequestedParams, Empty, Initialize, InitializeParams, InitializeResult,
     SettingsGet, Shutdown,
 };
-use bone_proto::{
+use crate::{
     Connection, Message, Method, Notification, PROTOCOL_VERSION, RequestId, RpcError,
 };
 use serde_json::Value;
@@ -153,7 +153,7 @@ pub async fn connect(path: impl AsRef<std::path::Path>) -> std::io::Result<Conne
     let (r, w) = tokio::net::UnixStream::connect(path).await?.into_split();
     #[cfg(windows)]
     let (r, w) = tokio::io::split(open_pipe(path.as_ref()).await?);
-    Ok(bone_proto::transport::framed(r, w))
+    Ok(crate::transport::framed(r, w))
 }
 
 /// A new connection after the server went away, with the snapshots a client
@@ -220,7 +220,7 @@ pub fn spawn(
         .spawn()?;
     let stdin = child.stdin.take().expect("stdin is piped");
     let stdout = child.stdout.take().expect("stdout is piped");
-    Ok((bone_proto::transport::framed(stdout, stdin), child))
+    Ok((crate::transport::framed(stdout, stdin), child))
 }
 
 async fn read_loop(

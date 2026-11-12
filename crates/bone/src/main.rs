@@ -416,7 +416,7 @@ async fn spawn_core(path: &Path) -> StartupResult<Connection> {
         .map_err(|e| (1, format!("cannot start the core: {e}")))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        match bone_client::connect(path).await {
+        match bone_proto::client::connect(path).await {
             Ok(conn) => {
                 // Reap it when it exits, instead of leaving a zombie.
                 std::thread::spawn(move || {
@@ -426,7 +426,7 @@ async fn spawn_core(path: &Path) -> StartupResult<Connection> {
             }
             Err(e) if matches!(child.try_wait(), Ok(Some(_))) => {
                 // It lost a race to another core: connect to that one.
-                if let Ok(conn) = bone_client::connect(path).await {
+                if let Ok(conn) = bone_proto::client::connect(path).await {
                     return Ok(conn);
                 }
                 let mut why = std::fs::read_to_string(&log).unwrap_or_default();
@@ -521,7 +521,7 @@ async fn attach(connect: Option<PathBuf>, config_dir: &Path) -> StartupResult<At
             path: None,
         });
     };
-    let conn = match bone_client::connect(&path).await {
+    let conn = match bone_proto::client::connect(&path).await {
         Ok(conn) => conn,
         Err(e) if explicit => {
             return Err((1, format!("cannot connect to {}: {e}", path.display())));

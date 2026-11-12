@@ -10,7 +10,6 @@ bone-core.workspace = true
 bone-lua.workspace = true
 bone-proto.workspace = true
 bone-server.workspace = true
-bone-client.workspace = true
 bone-tui.workspace = true
 bone-gui = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }

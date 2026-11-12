@@ -5,7 +5,7 @@
 use std::io;
 use std::time::{Duration, Instant};
 
-use bone_client::EventStream;
+use bone_proto::client::EventStream;
 use bone_proto::Connection;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;

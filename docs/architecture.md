@@ -12,20 +12,19 @@
         (shared UI state, Lua UI API,                bone-core
          the Host trait, layout, keys)    (sessions, agent loop, provider,
                       │                    tools, hooks, core Lua)
-                 bone-client                             │
-           (typed requests, events)                      │
+                      │                                  │
                       └──────────── bone-proto ──────────┘
-                           (JSON-RPC types, codec, transports)
+                    (JSON-RPC types, codec, transports, the client:
+                              typed requests, events)
 
      bone-lua: shared Lua setup and the embedded runtime/ directory
 ```
 
 | Crate | Owns |
 |---|---|
-| `bone-proto` | the only contract: message envelope, typed methods/events, NDJSON codec, `Connection` and transports |
+| `bone-proto` | the only contract: message envelope, typed methods/events, NDJSON codec, `Connection` and transports; and the client (`bone_proto::client`): request/response matching and the event stream, for any transport, with connect, spawn and reconnect |
 | `bone-core` | everything authoritative: sessions (JSONL files), the agent loop, built-in and Lua providers, tools, hooks and `bone.ask`, `core.lua` |
 | `bone-server` | hosts a core for any number of connections: stdio, Unix socket, Windows named pipe, in-process |
-| `bone-client` | request/response matching and the event stream, for any transport |
 | `bone-ui` | what both frontends share and is not drawing: chat items, composer, keymaps, options, popups, panels, the TUI's layout solver (in character cells), Markdown, themes, and the Lua UI API (`bone.ui`, `runtime/ui/`) behind the `Host` trait |
 | `bone-tui` | the terminal frontend: rendering with ratatui, terminal keys and mouse, terminal views and jobs, `tui.lua` and `bone.tui` |
 | `bone-gui` | the desktop frontend (`bone --gui`, the `gui` feature): a GPUI window (`native.rs`) that draws a tree of nodes from Lua (`node.rs`, `flex.rs`, `nodeview/`: `mod.rs`, `paint.rs`, `edit.rs`, `list.rs`, `focus.rs`, `ops.rs`) as a renderer-neutral draw list (`backend/`), its own text editing, `gui.lua` and `bone.gui`; a headless mode for tests |
