@@ -97,6 +97,9 @@ local function node_window(p)
   if not (prompt and prompt.w >= 320 and prompt.x >= p.x and prompt.x + prompt.w <= p.x + p.w) then
     prompt = nil
   end
+  -- A window that asked for more room than a dialog has (a dashboard, a
+  -- reader) is not one: it keeps the width it asked for, centered.
+  if prompt and (p.want_w or 0) > math.max(CONTENT_W, prompt.w) then prompt = nil end
   if prompt then inner_w = prompt.w - 2 * c.pad end
   -- What a dialog's widgets can lay out to (bone.nodes.widgets.detail).
   style.dialog.inner = prompt and inner_w or nil

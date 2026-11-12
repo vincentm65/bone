@@ -1064,6 +1064,50 @@ async fn popups_are_nodes_in_a_look_lua_sets() {
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 
+/// A window of nodes is a dialog on the composer's column, unless it asked
+/// for more room than a dialog has (a dashboard with `width = 10000`): then
+/// it has the room it asked for.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_window_that_asks_for_more_room_is_wider_than_the_composer() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.resize(1600.0, 900.0);
+    for _ in 0..3 {
+        g.frame();
+    }
+    let widths = |g: &mut Headless, spec: &str| -> (f32, f32) {
+        g.gui
+            .run_lua(
+                "t",
+                &format!(
+                    "win = bone.ui.popup({{ {spec} node = function() return {{ id = 'probe', grow = 1 }} end }})"
+                ),
+            )
+            .unwrap();
+        for _ in 0..3 {
+            g.frame();
+        }
+        let got = g
+            .gui
+            .eval("bone.gui.rect('probe').w .. ',' .. bone.gui.rect('prompt').w")
+            .unwrap();
+        g.gui.run_lua("t", "bone.ui.close(win)").unwrap();
+        g.frame();
+        let (a, b) = got.split_once(',').unwrap();
+        (a.parse().unwrap(), b.parse().unwrap())
+    };
+    // The card's padding and border, each side.
+    let pad = 2.0 * (14.0 + 1.0);
+    let (dialog, prompt) = widths(&mut g, "");
+    assert_eq!(dialog, prompt - pad, "a dialog is the composer's width");
+    // In cells: 40 of them is less than a dialog, 10000 the whole window.
+    let (small, prompt) = widths(&mut g, "width = 40, height = 10,");
+    assert_eq!(small, prompt - pad, "a small window is still a dialog");
+    let (wide, prompt) = widths(&mut g, "width = 10000, height = 10000,");
+    assert!(prompt < 1000.0 && wide == 1600.0 - pad, "{wide} beside {prompt}");
+    assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
+}
+
 /// An `image` node reads its file once and draws it in the box its declared
 /// size gives it.
 #[tokio::test(flavor = "multi_thread")]
