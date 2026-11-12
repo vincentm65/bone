@@ -19,7 +19,7 @@ bone-ui = { path = "crates/bone-ui" }
 bone-media = { path = "crates/bone-media" }
 base64 = "0.22"
 bitflags = "2"
-sha2 = "0.10"
+ring = "0.17"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

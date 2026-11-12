@@ -18,7 +18,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 /// What an error starts with when the server wants (new) credentials; the
 /// supervisor shows the server as needing authentication instead of retrying.
@@ -319,7 +318,7 @@ impl Flow {
             }
         };
         let verifier = b64url(&random(32));
-        let challenge = b64url(&Sha256::digest(verifier.as_bytes()));
+        let challenge = b64url(&crate::sha256::digest(&verifier));
         let state = b64url(&random(16));
         let mut u = Url::parse(&meta.authorization_endpoint)
             .map_err(|e| format!("{}: {e}", meta.authorization_endpoint))?;
@@ -532,7 +531,7 @@ mod tests {
     fn pkce_challenge_matches_the_rfc_example() {
         let v = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
         assert_eq!(
-            b64url(&Sha256::digest(v.as_bytes())),
+            b64url(&crate::sha256::digest(v)),
             "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM"
         );
     }

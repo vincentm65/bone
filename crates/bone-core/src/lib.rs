@@ -13,6 +13,7 @@ mod index;
 pub mod mcp;
 pub mod provider;
 mod runtime;
+mod sha256;
 pub mod scripting;
 pub mod session;
 pub mod settings;

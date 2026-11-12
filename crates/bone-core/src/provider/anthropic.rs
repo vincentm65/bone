@@ -12,11 +12,11 @@ use std::collections::BTreeMap;
 
 use bone_proto::types::{ChatMessage, ImageAttachment, ReasoningState, ToolCall, Usage};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use super::openai::{configured, post_events};
 use super::{Completion, CompletionRequest, Delta, DeltaSink, ProviderError};
 use crate::config::ProviderConfig;
+use crate::sha256;
 
 pub(crate) const DEFAULT_URL: &str = "https://api.anthropic.com/v1";
 const DEFAULT_MAX_TOKENS: u64 = 32_000;
@@ -255,17 +255,17 @@ impl History {
         let done = messages.len().saturating_sub(1);
         while self.done.len() < done {
             let next = &messages[self.done.len()];
-            self.done.push(Sha256::digest(next.to_string()).into());
+            self.done.push(sha256::digest(next.to_string()));
         }
         if self.head.is_none_or(|(n, _)| n != system.len()) {
-            let head = Sha256::digest(json!([system, tools]).to_string()).into();
+            let head = sha256::digest(json!([system, tools]).to_string());
             self.head = Some((system.len(), head));
         }
-        let mut h = Sha256::new();
+        let mut h = sha256::Hasher::new();
         h.update(self.head.unwrap().1);
         self.done.iter().for_each(|d| h.update(d));
         h.update(json!(messages.get(done)).to_string());
-        h.finalize().iter().map(|b| format!("{b:02x}")).collect()
+        sha256::hex(&h.finish())
     }
 }
 

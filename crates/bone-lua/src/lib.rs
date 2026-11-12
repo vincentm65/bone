@@ -634,8 +634,8 @@ pub fn new_state(side: Side, config_dir: Option<&Path>) -> mlua::Result<Lua> {
     bone.set(
         "sha256",
         lua.create_function(|_, text: mlua::String| {
-            use sha2::{Digest, Sha256};
-            Ok(Sha256::digest(text.as_bytes())
+            Ok(ring::digest::digest(&ring::digest::SHA256, &text.as_bytes())
+                .as_ref()
                 .iter()
                 .map(|b| format!("{b:02x}"))
                 .collect::<String>())
@@ -1220,6 +1220,11 @@ mod tests {
         // crates in a build may turn on).
         let encoded: serde_json::Value = serde_json::from_str(&encoded).unwrap();
         assert_eq!(encoded, serde_json::json!({ "a": [], "b": {} }));
+        let hash: String = lua.load(r#"return bone.sha256("abc")"#).eval().unwrap();
+        assert_eq!(
+            hash,
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
         let s: String = lua
             .load(r#"return bone.inspect({1, "x", k = {true}})"#)
             .eval()

@@ -7,7 +7,8 @@ use std::sync::Mutex;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bone_proto::types::{ChatMessage, ImageAttachment};
-use sha2::{Digest, Sha256};
+
+use crate::sha256;
 
 /// Base64 kept of verified images, at most (then it starts over).
 const CACHE_BYTES: usize = 64 << 20;
@@ -15,6 +16,17 @@ const CACHE_BYTES: usize = 64 << 20;
 pub(crate) struct AttachmentStore {
     dir: PathBuf,
     cache: Mutex<HashMap<String, Verified>>,
+}
+
+/// A new file only its owner can read, with `bytes` on disk.
+fn write_private(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut file = options.open(path)?;
+    file.write_all(bytes)?;
+    file.sync_all()
 }
 
 #[derive(Clone)]
@@ -56,18 +68,23 @@ impl AttachmentStore {
 
     pub fn upload_bytes(&self, bytes: &[u8], name: &str) -> Result<ImageAttachment, String> {
         let png = bone_media::normalize(bytes)?;
-        let id = format!("{:x}", Sha256::digest(&png.bytes));
+        let id = sha256::hex(&sha256::digest(&png.bytes));
         std::fs::create_dir_all(&self.dir)
             .map_err(|e| format!("cannot create attachment storage: {e}"))?;
         let path = self.path(&id)?;
         if !path.exists() {
-            let mut tmp = tempfile::NamedTempFile::new_in(&self.dir).map_err(|e| e.to_string())?;
-            tmp.write_all(&png.bytes).map_err(|e| e.to_string())?;
-            tmp.as_file().sync_all().map_err(|e| e.to_string())?;
-            match tmp.persist_noclobber(&path) {
-                Ok(_) => {}
-                Err(e) if e.error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                Err(e) => return Err(format!("cannot save attachment: {}", e.error)),
+            // Written whole under another name, then renamed: a reader never
+            // sees part of a file. Another upload of the same image may win
+            // the name first; the content is the same, so either file will do.
+            let tmp = self
+                .dir
+                .join(format!(".{id}.{}.tmp", uuid::Uuid::now_v7().simple()));
+            let saved = write_private(&tmp, &png.bytes).and_then(|()| std::fs::rename(&tmp, &path));
+            if let Err(e) = saved {
+                let _ = std::fs::remove_file(&tmp);
+                if !path.exists() {
+                    return Err(format!("cannot save attachment: {e}"));
+                }
             }
         }
         let name: String = name.chars().filter(|c| !c.is_control()).take(120).collect();
@@ -103,7 +120,7 @@ impl AttachmentStore {
         if bytes.len() > bone_media::MAX_IMAGE_BYTES {
             return Err("stored image exceeds the 20 MiB limit".into());
         }
-        if format!("{:x}", Sha256::digest(&bytes)) != id {
+        if sha256::hex(&sha256::digest(&bytes)) != id {
             return Err("stored image is corrupt".into());
         }
         let (width, height) = bone_media::png_dimensions(&bytes)?;
