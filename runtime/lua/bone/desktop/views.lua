@@ -90,52 +90,7 @@ end
 
 -- ---- views -----------------------------------------------------------------
 
--- Messages a plugin sends rather than the user types: the subagent
--- plugin's reports and messages, and the core's notice for a finished
--- background shell job. Known by how they open.
-local REPORT_OPENINGS = { "Background sub-agent (", "Background job shell-", "Message from agent ", "Message from chat " }
-local function is_report(item)
-  local text = item.text or ""
-  for _, opening in ipairs(REPORT_OPENINGS) do
-    if text:sub(1, #opening) == opening then return true end
-  end
-  return false
-end
-
--- Such a message is a small left-aligned report, its first line as a
--- title; a click shows all of it.
-local REPORT_PREVIEW = 3
-local opened = {}
-
-local function report(item, ctx)
-  local s = bone.chat.session()
-  local key = (s and s.session_id or "") .. ":" .. tostring(item.index)
-  local text = trim(item.text)
-  local head, body = text:match("^([^\n]*)\n?(.*)$")
-  head = trim(head):gsub(":$", "")
-  local out = { md.text({ { "◆ ", "Accent" }, { head, "Dim" } }, { size = md.small_size }) }
-  local paras = md.nodes(trim(body), "ToolOutput", { size = md.small_size, indent = 12 })
-  for i, node in ipairs(paras) do
-    if not opened[key] and i > REPORT_PREVIEW then
-      out[#out + 1] = md.text({ { "⋮ +" .. (#paras - REPORT_PREVIEW) .. " more", "Dim" } },
-        { size = md.small_size, indent = 12 })
-      break
-    end
-    out[#out + 1] = node
-  end
-  footer(item, ctx, out)
-  return {
-    node = box(out, { pad = { 0, 4 }, margin = { 10, 4 } }),
-    lines = plain(item.text, "Dim"),
-    click = function()
-      opened[key] = not opened[key]
-      bone.chat.redraw(item.index)
-    end,
-  }
-end
-
 function M.user(item, ctx)
-  if is_report(item) then return report(item, ctx) end
   local out = message(item, "UserBubble")
   images(item, out)
   footer(item, ctx, out)
