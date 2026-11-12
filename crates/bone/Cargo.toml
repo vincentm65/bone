@@ -37,5 +37,6 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "process", "time", "net", "io-util"] }
 libc.workspace = true
 
-[target.'cfg(any(target_os = "linux", target_os = "macos", windows))'.dev-dependencies]
-arboard = { version = "3.6", features = ["wayland-data-control"] }
+# The clipboard test's owner; on Linux it uses wl-copy or xclip.
+[target.'cfg(any(target_os = "macos", windows))'.dev-dependencies]
+arboard = "3.6"

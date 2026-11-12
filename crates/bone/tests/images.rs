@@ -417,6 +417,86 @@ async fn compaction_summarizer_receives_images_and_retains_original_transcript()
     );
 }
 
+/// What holds the clipboard for the native paste test: `wl-copy` (or `xclip`
+/// under X11) on Linux, as a desktop program would.
+#[cfg(target_os = "linux")]
+struct Owner;
+
+#[cfg(target_os = "linux")]
+impl Owner {
+    fn new() -> Self {
+        Owner
+    }
+
+    fn put(&self, kind: Option<&str>, data: &[u8]) {
+        use std::io::Write;
+        use std::process::{Command, Stdio};
+        let mut cmd = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            let mut cmd = Command::new("wl-copy");
+            cmd.args(kind.iter().flat_map(|k| ["--type", k]));
+            cmd
+        } else {
+            let mut cmd = Command::new("xclip");
+            cmd.args(["-selection", "clipboard", "-i"]);
+            cmd.args(kind.iter().flat_map(|k| ["-t", k]));
+            cmd
+        };
+        // The program stays behind to serve the data; it must not hold the
+        // test's output open.
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(data).unwrap();
+        assert!(child.wait().unwrap().success());
+    }
+
+    fn set_image(&mut self, png: &[u8], _pixels: &image::RgbaImage) {
+        self.put(Some("image/png"), png);
+    }
+
+    fn set_text(&mut self, text: &str) {
+        self.put(None, text.as_bytes());
+    }
+
+    fn clear(&mut self) {
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+            let _ = std::process::Command::new("wl-copy").arg("--clear").status();
+        }
+    }
+}
+
+/// The system clipboard itself.
+#[cfg(any(target_os = "macos", windows))]
+struct Owner(arboard::Clipboard);
+
+#[cfg(any(target_os = "macos", windows))]
+impl Owner {
+    fn new() -> Self {
+        Owner(arboard::Clipboard::new().unwrap())
+    }
+
+    fn set_image(&mut self, _png: &[u8], pixels: &image::RgbaImage) {
+        self.0
+            .set_image(arboard::ImageData {
+                width: pixels.width() as usize,
+                height: pixels.height() as usize,
+                bytes: std::borrow::Cow::Borrowed(pixels.as_raw()),
+            })
+            .unwrap();
+    }
+
+    fn set_text(&mut self, text: &str) {
+        self.0.set_text(text).unwrap();
+    }
+
+    fn clear(&mut self) {
+        self.0.clear().unwrap();
+    }
+}
+
 #[cfg(any(target_os = "linux", target_os = "macos", windows))]
 #[tokio::test]
 #[ignore = "requires a graphical clipboard; run on an isolated display"]
@@ -438,14 +518,8 @@ async fn native_screenshot_paste_reaches_provider_over_stdio() {
     )
     .unwrap()
     .bytes;
-    let mut owner = arboard::Clipboard::new().unwrap();
-    owner
-        .set_image(arboard::ImageData {
-            width: pixels.width() as usize,
-            height: pixels.height() as usize,
-            bytes: std::borrow::Cow::Borrowed(pixels.as_raw()),
-        })
-        .unwrap();
+    let mut owner = Owner::new();
+    owner.set_image(&env.png, &pixels);
     // Real child process + NDJSON; the client filesystem does not supply a
     // server path. This covers the headless transport as well as clipboard.
     let binary =
@@ -487,7 +561,7 @@ async fn native_screenshot_paste_reaches_provider_over_stdio() {
     for _ in 0..bone_media::MAX_IMAGES {
         env.attach(&mut tui).await;
     }
-    owner.set_text("clipboard text\nsecond line").unwrap();
+    owner.set_text("clipboard text\nsecond line");
     tui.press("ctrl+v").unwrap();
     tui.wait_for(WAIT, |s| {
         s.contains("clipboard text") && s.contains("second line")
@@ -496,7 +570,7 @@ async fn native_screenshot_paste_reaches_provider_over_stdio() {
     .unwrap();
     assert_eq!(tui.prompt_text(), "clipboard text\nsecond line");
     assert_eq!(tui.images().len(), bone_media::MAX_IMAGES);
-    owner.clear().unwrap();
+    owner.clear();
 }
 
 #[tokio::test]

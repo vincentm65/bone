@@ -1203,6 +1203,32 @@ impl App {
             )
         };
         out.push(item("clipboard", status, route));
+        // Reading it (ctrl+v, /paste) needs a program on Linux: the one of
+        // the display there is, Wayland first.
+        if cfg!(target_os = "linux") && !ssh {
+            let tools: Vec<_> = [
+                ("WAYLAND_DISPLAY", "wl-paste", "wl-clipboard"),
+                ("DISPLAY", "xclip", "xclip"),
+            ]
+            .into_iter()
+            .filter(|(display, ..)| env(display).is_some())
+            .collect();
+            if let Some((_, bin, _)) = tools.iter().find(|(_, bin, _)| on_path(bin)) {
+                out.push(item(
+                    "paste",
+                    "ok",
+                    format!("{bin} reads screenshots and text"),
+                ));
+            } else if let Some((_, _, package)) = tools.first() {
+                out.push(item(
+                    "paste",
+                    "warn",
+                    format!(
+                        "install {package} to paste screenshots with ctrl+v; /attach PATH works without it"
+                    ),
+                ));
+            }
+        }
         let last = self
             .lua_errors
             .last()

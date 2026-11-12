@@ -5,7 +5,7 @@ OpenAI-compatible model, a fullscreen TUI, and Lua for everything you'd
 want to change.
 
 - **One API.** The core speaks JSON-RPC 2.0 over stdio, Unix sockets or Windows named pipes. The TUI is just a client; scripts and editors can be too.
-- **Images.** Paste screenshots with `ctrl+v` or `/paste`, attach PNG/JPEG/WebP files with `/attach PATH`, and send them to a vision model. Native clipboard support covers macOS, Windows, Linux X11 and Wayland.
+- **Images.** Paste screenshots with `ctrl+v` or `/paste`, attach PNG/JPEG/WebP files with `/attach PATH`, and send them to a vision model. Clipboard support covers macOS, Windows, and Linux through `wl-paste` (Wayland, package wl-clipboard) or `xclip` (X11).
 - **A simple TUI.** Type and press enter. `/` commands with suggestions, streaming output, and a session picker. Tool calls run without asking; Lua hooks can add confirmation prompts (see [docs/lua.md](docs/lua.md#asking-the-user)).
 - **Lua all the way down.** `~/.bone/core.lua` sets up providers (or writes new ones with the Lua provider API), tools and hooks; `~/.bone/tui.lua` keys, commands, colors, the statusline and how tool calls look. The screen starts with the standard UI in `runtime/lua/bone/ui/`, replaceable piece by piece.
 
