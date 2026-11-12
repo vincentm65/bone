@@ -340,6 +340,8 @@ pub struct SessionStore {
     /// With when each was last asked for.
     loaded: Mutex<HashMap<SessionId, (SessionHandle, u64)>>,
     tick: AtomicU64,
+    /// Held while a session loads from disk, so loads go one at a time.
+    loading: Mutex<()>,
     /// What `list` read from files not loaded, by their modification time.
     listed: Mutex<HashMap<SessionId, (SystemTime, SessionInfo)>>,
     /// `None` when the index could not be opened; sessions work without.
@@ -372,6 +374,7 @@ impl SessionStore {
             dir: data_dir.join("sessions"),
             loaded: Mutex::new(HashMap::new()),
             tick: Default::default(),
+            loading: Mutex::new(()),
             listed: Mutex::new(HashMap::new()),
             index,
             usage_log: data_dir.join("usage.jsonl"),
@@ -435,13 +438,19 @@ impl SessionStore {
 
     /// The session from memory, or loaded from disk.
     pub fn get(&self, id: &str) -> Result<SessionHandle, SessionError> {
-        if let Some((s, used)) = self.loaded.lock().unwrap().get_mut(id) {
-            *used = self.tick.fetch_add(1, Ordering::Relaxed);
-            return Ok(s.clone());
+        if let Some(s) = self.held(id) {
+            return Ok(s);
         }
         // Ids are UUIDs; anything else could escape the sessions directory.
         if uuid::Uuid::parse_str(id).is_err() {
             return Err(SessionError::NotFound(id.to_owned()));
+        }
+        // A second request loading the same session would take what the
+        // first has appended since for a torn tail and cut it off the file:
+        // it waits instead, and finds the session in memory.
+        let _loading = self.loading.lock().unwrap();
+        if let Some(s) = self.held(id) {
+            return Ok(s);
         }
         let path = self.path(id);
         let Loaded {
@@ -472,6 +481,14 @@ impl SessionStore {
         let session = self.open(info, messages, summary, model, users, file);
         session.lock().unwrap().tool_times = tool_times;
         Ok(self.keep(id, session))
+    }
+
+    /// The session if it is in memory, marked as just used.
+    fn held(&self, id: &str) -> Option<SessionHandle> {
+        let mut loaded = self.loaded.lock().unwrap();
+        let (s, used) = loaded.get_mut(id)?;
+        *used = self.tick.fetch_add(1, Ordering::Relaxed);
+        Some(s.clone())
     }
 
     /// A session over its open `file`, with nothing running yet. A queue
@@ -1309,6 +1326,50 @@ mod tests {
         drop(loaded);
         let again = store.get(&first_id).unwrap();
         assert_eq!(again.lock().unwrap().messages.len(), 1);
+    }
+
+    /// Two requests load a session at once and one appends right away: the
+    /// other must not take that record for a torn tail and cut it off.
+    #[test]
+    fn concurrent_loads_keep_what_the_first_appends() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = SessionStore::new(dir.path());
+        let user = |text: String| ChatMessage::User {
+            content: text,
+            images: Vec::new(),
+        };
+        let id = {
+            let s = store.create("/w".into()).unwrap();
+            let mut s = s.lock().unwrap();
+            for i in 0..200 {
+                s.push(user(format!("seed {i}"))).unwrap();
+            }
+            s.info.session_id.clone()
+        };
+        for n in 0..500 {
+            store.loaded.lock().unwrap().clear();
+            let gate = std::sync::Barrier::new(2);
+            let in_memory = std::thread::scope(|scope| {
+                let first = scope.spawn(|| {
+                    gate.wait();
+                    let s = store.get(&id).unwrap();
+                    let mut s = s.lock().unwrap();
+                    s.push(user(format!("turn {n}"))).unwrap();
+                    s.messages.len()
+                });
+                scope.spawn(|| {
+                    gate.wait();
+                    store.get(&id).unwrap();
+                });
+                first.join().unwrap()
+            });
+            let on_disk = read_file(&store.path(&id), usize::MAX).unwrap();
+            assert_eq!(
+                on_disk.messages.len(),
+                in_memory,
+                "append {n} was cut off the file"
+            );
+        }
     }
 
     #[test]
