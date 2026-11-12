@@ -1215,7 +1215,11 @@ mod tests {
             .load(r#"return bone.json.encode(bone.json.decode('{"a":[],"b":{}}'))"#)
             .eval()
             .unwrap();
-        assert_eq!(encoded, r#"{"a":[],"b":{}}"#);
+        // Compared as values: the order of keys in the text follows Lua's
+        // table order when serde_json keeps insertion order (a feature other
+        // crates in a build may turn on).
+        let encoded: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(encoded, serde_json::json!({ "a": [], "b": {} }));
         let s: String = lua
             .load(r#"return bone.inspect({1, "x", k = {true}})"#)
             .eval()
