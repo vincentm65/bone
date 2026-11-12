@@ -375,8 +375,13 @@ local function state_icon(running, failed)
   return icons.node("check", { size = 14, hl = "ToolDone" })
 end
 
+-- A sub-agent call that returned at once (background) runs on after it:
+-- its agent's status says whether it is done.
 local function dot(item)
-  return lead_slot(state_icon(not item.done, item.is_error))
+  local a = item.name == "subagent" and require("bone.agents").for_call(item.id)
+  local running = not item.done or (a and a.status == "running")
+  if running and item.done then bone.chat.refresh_in(1000) end
+  return lead_slot(state_icon(running, item.is_error))
 end
 
 -- A call's line: `lead` (its dot), what it did (`spans`), and `meta` at the

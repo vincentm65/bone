@@ -100,7 +100,22 @@ end
 
 -- ---- messages -------------------------------------------------------------
 
+-- Messages a plugin sends rather than the user types: the subagent
+-- plugin's reports and messages, and the core's notice for a finished
+-- background shell job. Known by how they open.
+local REPORT_OPENINGS = { "Background sub-agent (", "Background job shell-", "Message from agent ", "Message from chat " }
+local function is_report(item)
+  local text = item.text or ""
+  for _, opening in ipairs(REPORT_OPENINGS) do
+    if text:sub(1, #opening) == opening then return true end
+  end
+  return false
+end
+local report
+
 function views.user(item, ctx)
+  -- Sent by a plugin (an agent's answer, a finished shell job), not typed.
+  if is_report(item) then return report(item, ctx) end
   local out = { {} } -- A blank line above every user message, including the first.
   local band = "UserMessage"
   for i, line in ipairs(lines(item.text)) do
@@ -230,6 +245,13 @@ end
 local function expanded(ctx)
   if ctx and ctx.tool_expanded ~= nil then return ctx.tool_expanded end
   return detail() == "full"
+end
+
+-- A sub-agent call that returned at once (background) runs on after it:
+-- its agent's status, not the call's, says whether it is done.
+local function agent_running(item)
+  local a = item.name == "subagent" and require("bone.agents").for_call(item.id)
+  return a and a.status == "running" or false
 end
 
 local function running_mark(item)
@@ -524,19 +546,22 @@ local function agent_content(item, ctx, args)
   if task ~= "" then
     title[#title + 1] = { " · " .. name, "Dim" }
   end
-  local status = not item.done and "running" or item.is_error and "failed" or "done"
-  title[#title + 1] = { " · " .. status, item.is_error and "ToolError" or "Dim" }
-  -- Prefer persisted tool timing: the agent record is only in memory.
   local agent = require("bone.agents").for_call(item.id)
+  local running = not item.done or agent_running(item)
+  local status = running and "running" or item.is_error and "failed" or "done"
+  title[#title + 1] = { " · " .. status, item.is_error and "ToolError" or "Dim" }
+  -- The agent's own clock when this run knows it (a background agent
+  -- outlives its call); else the persisted tool timing.
   local start = item.started_at or (agent and agent.started_at)
-  local ms = item.duration_ms or (not item.done and start and bone.now() - start)
+  local ms = item.done and agent_running(item) and agent.started_at and bone.now() - agent.started_at
     or (agent and agent.started_at and agent.finished_at and agent.finished_at - agent.started_at)
+    or item.duration_ms or (not item.done and start and bone.now() - start)
   local stats = ms and bone.util.duration(math.max(ms, 0) / 1000)
   if agent and agent.tokens > 0 then
     stats = bone.util.tokens(agent.tokens) .. " tok" .. (stats and (" · " .. stats) or "")
   end
   if stats then title[#title + 1] = { " · " .. stats, "Dim" } end
-  if not item.done then bone.chat.refresh_in(1000) end
+  if running then bone.chat.refresh_in(1000) end
 
   local report = bone.ui.markdown(trim(item.output or item.live or ""), math.max(ctx.width - 8, 1))
   local shown = (expanded(ctx) or item.is_error) and #report or math.min(#report, AGENT_PREVIEW_MAX)
@@ -800,7 +825,7 @@ render_tool = function(item, ctx, full)
   local content = custom and custom(item, ctx) or bone.ui.tool_content(item, ctx)
 
   local marker
-  if not item.done then
+  if not item.done or agent_running(item) then
     marker = { "  " .. running_mark(item) .. " ", "ToolRunning" }
   elseif item.is_error then
     marker = { "  ✕ ", "ToolError" }
@@ -843,6 +868,39 @@ render_tool = function(item, ctx, full)
   return out
 end
 
+-- A message a plugin sent (is_report): its first line as a title, the
+-- rest as a short report under a gutter that a click (or ctrl+t) opens.
+local REPORT_PREVIEW = 3
+local function report_key(item)
+  local s = bone.chat.session()
+  return (s and s.session_id or "") .. ":report:" .. tostring(item.index)
+end
+
+report = function(item, ctx)
+  local full = detail() == "full"
+  if toggled[report_key(item)] then full = not full end
+  local text = trim(item.text or "")
+  local head, body = text:match("^([^\n]*)\n?(.*)$")
+  head = trim(head):gsub(":$", "")
+  local out = { {} }
+  append(out, wrap({ { head, "Dim" } }, ctx.width,
+    { first = { { "  ◆ ", "Accent" } }, rest = { { "    ", "Dim" } } }))
+  local rows = bone.ui.markdown(trim(body), math.max(ctx.width - 8, 1))
+  local shown = full and #rows or math.min(#rows, REPORT_PREVIEW)
+  while shown > 0 and #rows[shown] == 0 do shown = shown - 1 end
+  local lines_ = {}
+  for i = 1, shown do lines_[#lines_ + 1] = rows[i] end
+  if shown < #rows then
+    lines_[#lines_ + 1] = { { more(#rows - shown, "line", { tool_expanded = full }), "ToolSummary" } }
+  end
+  for i, line in ipairs(lines_) do
+    local row = { { i == #lines_ and "    ╰ " or "    │ ", "ToolGutter" } }
+    append(row, line)
+    out[#out + 1] = row
+  end
+  return out
+end
+
 function views.tool(item, ctx)
   local mode = detail()
   if mode == "summary" then
@@ -865,6 +923,12 @@ bone.on("mouse", function(ev)
     return
   end
   local item = bone.chat.item(ev.index)
+  if item and item.kind == "user" and is_report(item) then
+    detail()
+    toggled[report_key(item)] = not toggled[report_key(item)]
+    bone.chat.redraw(ev.index)
+    return
+  end
   if not item or item.kind ~= "tool" then return end
   -- A live sub-agent's title still opens its session; its report toggles.
   if item.name == "subagent" and (ev.line or 1) <= 2 and require("bone.agents").for_call(item.id) then
