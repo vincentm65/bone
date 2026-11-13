@@ -225,50 +225,55 @@ function M.open(want, keep)
     local selected
     for i, r in ipairs(list) do
       local on = i == st.sel
-      if r.group and r.group ~= (list[i - 1] or {}).group then
-        items[#items + 1] = widgets.heading(GROUPS[r.group][1])
-      end
-      -- Pages (Compaction) after the options, set apart.
-      if r.kind == "page" and i > 1 and list[i - 1].kind ~= "page" then
-        items[#items + 1] = widgets.divider({ margin = { 4, 0, 4, 0 } })
-      end
-      local action = r.kind == "paction"
-      local danger = action and (r.action == "delete" or r.action == "undo")
-      -- The name takes what the control leaves; the › has a column of its
-      -- own, so the controls line up whether a row opens a page or not.
-      local row = {
-        {
-          direction = "row", align = "center", gap = style.space.md, min_height = 20,
+      if r.kind == "header" then
+        -- A section label among a page's fields; never selected.
+        items[#items + 1] = widgets.heading(r.label)
+      else
+        if r.group and r.group ~= (list[i - 1] or {}).group then
+          items[#items + 1] = widgets.heading(GROUPS[r.group][1])
+        end
+        -- Pages (Compaction) after the options, set apart.
+        if r.kind == "page" and i > 1 and list[i - 1].kind ~= "page" then
+          items[#items + 1] = widgets.divider({ margin = { 4, 0, 4, 0 } })
+        end
+        local action = r.kind == "paction"
+        local danger = action and (r.action == "delete" or r.action == "undo")
+        -- The name takes what the control leaves; the › has a column of its
+        -- own, so the controls line up whether a row opens a page or not.
+        local row = {
           {
-            direction = "column", grow = 1, width = 0,
+            direction = "row", align = "center", gap = style.space.md, min_height = 20,
             {
-              text = r.kind == "option" and (r.label:sub(1, 1):upper() .. r.label:sub(2)) or r.label,
-              -- A provider's name is what it is called in core.lua and /provider.
-              size = SIZE, medium = true, wrap = false, font = r.kind == "provider" and "mono" or nil,
-              text_overflow = "ellipsis", hl = danger and "ErrorMsg" or "Normal",
+              direction = "column", grow = 1, width = 0,
+              {
+                text = r.kind == "option" and (r.label:sub(1, 1):upper() .. r.label:sub(2)) or r.label,
+                -- A provider's name is what it is called in core.lua and /provider.
+                size = SIZE, medium = true, wrap = false, font = r.kind == "provider" and "mono" or nil,
+                text_overflow = "ellipsis", hl = danger and "ErrorMsg" or "Normal",
+              },
+              -- What it does, under its name.
+              (r.desc and r.desc ~= "" and r.kind ~= "provider") and {
+                text = r.desc:sub(1, 1):upper() .. r.desc:sub(2), size = SMALL, hl = "Dim", wrap = false,
+                text_overflow = "ellipsis", margin = { 2, 0, 0, 0 },
+              } or nil,
             },
-            -- What it does, under its name.
-            (r.desc and r.desc ~= "" and r.kind ~= "provider") and {
-              text = r.desc:sub(1, 1):upper() .. r.desc:sub(2), size = SMALL, hl = "Dim", wrap = false,
-              text_overflow = "ellipsis", margin = { 2, 0, 0, 0 },
-            } or nil,
+            value_node(r, i, on),
+            {
+              text = (r.kind == "page" or r.page) and "›" or "", hl = "Dim", size = SIZE,
+              width = 10, shrink = 0, text_align = "right",
+            },
           },
-          value_node(r, i, on),
-          {
-            text = (r.kind == "page" or r.page) and "›" or "", hl = "Dim", size = SIZE,
-            width = 10, shrink = 0, text_align = "right",
-          },
-        },
-      }
-      local function add(line)
-        row[#row + 1] = { text = line, hl = "Dim", size = SMALL, margin = { 2, 0, 0, 0 } }
+        }
+        local function add(line)
+          row[#row + 1] = { text = line, hl = "Dim", size = SMALL, margin = { 2, 0, 0, 0 } }
+        end
+        if r.kind == "option" and not (on and st.edit) then
+          local saved = bone.settings.get(r.path)
+          if saved ~= nil and saved ~= r.value then add("gui.lua sets " .. tostring(r.value)) end
+        end
+        items[#items + 1] = widgets.entry(on, row, on_click(i))
+        if on then selected = #items end
       end
-      if r.kind == "option" and not (on and st.edit) then
-        local saved = bone.settings.get(r.path)
-        if saved ~= nil and saved ~= r.value then add("gui.lua sets " .. tostring(r.value)) end
-      end
-      items[#items + 1] = widgets.entry(on, row, on_click(i))
-      if on then selected = #items end
     end
 
     -- Under the rows, a space for a question or what happened (what a

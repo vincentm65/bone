@@ -231,7 +231,7 @@ A project can carry `.bone/ui.lua`, then `.bone/tui.lua` or `.bone/gui.lua` for 
     "default": 5, "min": 1, "max": 10, "desc": "when the model does not ask for a number" } ] }
 ```
 
-or from its `ui.lua`, `tui.lua` or `gui.lua` with `bone.settings.page{ name = "myplugin", title = "My plugin", fields = { … } }` (the same field shape: `key`, `label`, `type` = `"boolean"`, `"integer"`, `"number"` or `"string"`, `choices`, `default`, `min`, `max`, `desc`). Values are saved as `<name>.<key>`, and the plugin reads them with `bone.settings.get` (falling back to its default). `require("bone.config").open(tab)` opens a section or detail page by name or title.
+or from its `ui.lua`, `tui.lua` or `gui.lua` with `bone.settings.page{ name = "myplugin", title = "My plugin", fields = { … } }` (the same field shape: `key`, `label`, `type` = `"boolean"`, `"integer"`, `"number"` or `"string"`, `choices`, `default`, `min`, `max`, `desc`; a `{ header = "Section" }` entry labels the fields after it). Values are saved as `<name>.<key>`, and the plugin reads them with `bone.settings.get` (falling back to its default). `require("bone.config").open(tab)` opens a section or detail page by name or title.
 
 In either frontend: `bone.settings.get(path)`, `bone.settings.all()`, `bone.settings.set(path, value, cb)` and `bone.settings.reset(path, cb)` (paths are dotted, `cb(all, err)` gets every setting after the change), and the `settings/changed` event `{ path, value }`. In the core, `bone.settings.get(path)` and `bone.settings.all()` read the file (changes go through a client).
 
