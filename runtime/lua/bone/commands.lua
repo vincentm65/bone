@@ -63,13 +63,14 @@ end
 --- starts.
 local function here()
   local s = bone.api.session()
-  return (((s and s.cwd) or bone.api.cwd()):gsub("\\", "/"))
+  return (((s and s.cwd) or bone.api.cwd()):gsub("\\", "/"):gsub("^//%?/", ""))
 end
 
 --- What was typed as an absolute path with no `.` or `..` left in it:
 --- ~ is home, anything else relative starts from here().
 local function full_dir(path)
-  path = path:gsub("\\", "/")
+  -- (Windows' \\?\C:\... long form, which sessions' directories come in, is C:/...)
+  path = path:gsub("\\", "/"):gsub("^//%?/", "")
   if path == "~" or path:sub(1, 2) == "~/" then
     path = home_dir() .. path:sub(2)
   elseif path:sub(1, 1) ~= "/" and not path:match("^%a:/") then
