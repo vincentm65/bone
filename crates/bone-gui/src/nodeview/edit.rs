@@ -24,8 +24,8 @@ pub(crate) struct EditState {
     /// The pointer went down here and is selecting.
     pub selecting: bool,
     /// When the caret's blink cycle started: none while the field or the
-    /// window is without the keyboard, and afresh at each edit, so the caret
-    /// is lit while typing. See [`CARET_PERIOD`].
+    /// window is without the keyboard, and afresh at each edit and at each
+    /// return of the keyboard. See [`CARET_PERIOD`].
     pub caret_at: Option<Instant>,
 }
 
@@ -386,20 +386,26 @@ impl crate::Gui {
             }
             // The caret blinks. Its cycle starts afresh with every edit,
             // move, press and composed character, so it is lit while typing.
-            // A window without the keyboard keeps it lit and asks for no
-            // frames.
+            // A window without the keyboard shows no caret at all and asks
+            // for no frames: the frame the focus change itself draws is what
+            // wipes the half-blink the timer left standing, and the cycle
+            // starts afresh on the next frame that has the keyboard, so the
+            // caret is there the moment focus comes back.
             let typing = out.changed || out.moved || out.pressed || !self.view.preedit.is_empty();
-            if typing || !fx.input.focused {
+            let blind = !fx.input.focused;
+            if typing || blind {
                 state.caret_at = None;
             }
-            let now = Instant::now();
-            let since = now - *state.caret_at.get_or_insert(now);
-            let phase = since.as_millis() as u64 % CARET_PERIOD;
-            let lit = !fx.input.focused || phase < CARET_ON;
-            if fx.input.focused {
-                let edge = if lit { CARET_ON } else { CARET_PERIOD };
+            let lit = if blind {
+                false
+            } else {
+                let now = Instant::now();
+                let since = now - *state.caret_at.get_or_insert(now);
+                let phase = since.as_millis() as u64 % CARET_PERIOD;
+                let edge = if phase < CARET_ON { CARET_ON } else { CARET_PERIOD };
                 fx.out.repaint_after(Duration::from_millis(edge - phase));
-            }
+                phase < CARET_ON
+            };
             if lit {
                 // At a line's start the caret stands just left of the
                 // field's area, which would cut it away whole.

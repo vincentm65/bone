@@ -143,6 +143,10 @@ struct Root {
     _messages: Task<()>,
 }
 
+/// The fastest an unfocused window repaints: sooner deadlines (spinners) wait
+/// this long, later ones (a clock) keep their own.
+const BACKGROUND_BEAT: Duration = Duration::from_millis(250);
+
 impl Root {
     fn new(mut gui: Gui, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
@@ -278,11 +282,7 @@ impl Root {
         // The next frame: at once, at a deadline, or on input.
         if let Some(after) = out.repaint_after {
             // A window in the background animates slowly.
-            let after = if window.is_window_active() {
-                after
-            } else {
-                after.max(Duration::from_millis(500))
-            };
+            let after = if window.is_window_active() { after } else { after.max(BACKGROUND_BEAT) };
             if after.is_zero() {
                 window.request_animation_frame();
             } else {

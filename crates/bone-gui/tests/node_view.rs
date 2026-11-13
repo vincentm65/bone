@@ -1682,4 +1682,12 @@ async fn the_prompt_caret_blinks() {
     g.text("h");
     g.frame();
     assert!(caret_lit(&g), "typing did not relight the caret");
+    // Out of the window's keyboard it is gone whole, not left standing mid
+    // blink, and it is back on the first frame that has the keyboard again.
+    g.set_focused(false);
+    g.frame();
+    assert!(!caret_lit(&g), "an unfocused window still shows a caret");
+    g.set_focused(true);
+    g.frame();
+    assert!(caret_lit(&g), "the caret does not come back with the focus");
 }
