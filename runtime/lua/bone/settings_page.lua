@@ -350,6 +350,7 @@ function M.new(want, opts)
           desc = p.added and "added in /config (or /setup)" or "from core.lua",
         }
       end
+      out[#out + 1] = { kind = "new", label = "+ New provider" }
       return out
     elseif t.name == "plugins" then
       return plugin_rows()
@@ -378,7 +379,7 @@ function M.new(want, opts)
     if st.query == "" then return normalized(list) end
     local out = {}
     for _, r in ipairs(list) do
-      local text, match = haystack(r), true
+      local text, match = haystack(r), r.kind ~= "new"
       for word in st.query:lower():gmatch("%S+") do
         if not text:find(word, 1, true) then match = false break end
       end
@@ -504,19 +505,29 @@ function M.new(want, opts)
     return row.choices[i % #row.choices + 1]
   end
 
+  -- Switch to a provider: `u` on its row, or the editor's Use row. The Use
+  -- row stays where it is; `u` closes a page opened straight on providers.
+  local function use_provider(name, stay)
+    bone.settings.set("provider", name, function(_, err)
+      load_providers()
+      saved_note(err, "using " .. name)
+      if not err and not stay and want == "providers" then
+        opts.close()
+      end
+    end)
+  end
+
   -- Enter / space on a row.
   local function activate(row, space)
     if not row then
       return
     end
-    if row.kind == "provider" then
+    if row.kind == "provider" or row.kind == "new" then
       if space then
         return
       end
-      bone.settings.set("provider", row.name, function(_, err)
-        load_providers()
-        saved_note(err, "using " .. row.name); if not err and want == "providers" then opts.close() end
-      end)
+      local blank = { name = "", base_url = "", model = "", type = "", key = "", api_key_env = "" }
+      st.prov, st.sel = row.kind == "new" and { new = true, draft = blank } or { name = row.name }, 1
     elseif row.kind == "paction" then
       if space then
         return
@@ -559,10 +570,7 @@ function M.new(want, opts)
           end
         end)
       elseif row.action == "use" then
-        bone.settings.set("provider", name, function(_, err)
-          load_providers()
-          saved_note(err, "using " .. name)
-        end)
+        use_provider(name, true)
       elseif row.action == "undo" then
         st.ask = { text = "undo your changes to " .. name .. "? (back to core.lua)", action = function()
           bone.settings.reset("providers." .. name, function(_, err)
@@ -711,14 +719,13 @@ function M.new(want, opts)
       save_provider_field(row, "")
     elseif k == "r" and row and row.path then
       reset(row)
-    elseif k == "e" and row and row.kind == "provider" then
-      st.prov, st.sel = { name = row.name }, 1
+    elseif k == "u" and row and row.kind == "provider" then
+      use_provider(row.name)
     elseif k == "a" and st.tabs[st.tab].name == "providers" and not st.prov then
-      st.prov = { new = true, draft = { name = "", base_url = "", model = "", type = "", key = "", api_key_env = "" } }
-      st.sel = 1
+      activate({ kind = "new" })
     elseif k == "d" and row and row.kind == "provider" then
       if not row.added then
-        st.note = { row.name .. " is defined in core.lua; e edits it, and core.lua is where to remove it", "ErrorMsg" }
+        st.note = { row.name .. " is defined in core.lua; open it to edit it, and core.lua is where to remove it", "ErrorMsg" }
       else
         local name = row.name
         st.ask = { text = "delete " .. name .. " and its saved key?", action = function()

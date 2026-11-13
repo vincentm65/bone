@@ -36,7 +36,7 @@ local function hints(st, t, r)
   if st.edit then return "enter save · esc cancel" end
   if st.search then return "↑↓ move · enter choose · esc clear" end
   if t.page or st.prov then return "↑↓ move · / search · enter change · r reset · esc back" end
-  if t.name == "providers" then return "↑↓ move · / search · enter use · e edit · a add · d delete · esc close" end
+  if t.name == "providers" then return "↑↓ move · / search · enter open · u use · a add · d delete · esc close" end
   if t.name == "plugins" then
     -- Enter opens a page only for the rows that have one; space is what
     -- turns a plugin on or off.
@@ -67,11 +67,12 @@ function M.open(want, keep)
   local st = page.st
   local function refresh() bone.ui.update(id, {}) end
 
-  -- A press on a row selects it; on the selected one it acts (enter).
+  -- A press acts: a provider row opens it, a field row edits it, a Use row
+  -- switches. What is pressed also becomes the selection.
   local function on_click(i)
     return function()
-      local list = page.rows()
-      if st.sel == i then page.activate(list[i], false) else st.sel = i end
+      st.sel = i
+      page.activate(page.rows()[i], false)
       refresh()
     end
   end
@@ -116,7 +117,7 @@ function M.open(want, keep)
         text(r.error or where, r.error and "ErrorMsg" or "Dim", SMALL),
         widgets.switch(r.on, act(i, function() page.activate(r, true) end)),
       }
-    elseif r.kind == "paction" or r.kind == "page" then
+    elseif r.kind == "paction" or r.kind == "page" or r.kind == "new" then
       return nil
     elseif r.type == "boolean" then
       return widgets.switch(r.value, act(i, function() page.activate(r, false) end))
@@ -259,7 +260,7 @@ function M.open(want, keep)
             },
             value_node(r, i, on),
             {
-              text = (r.kind == "page" or r.page) and "›" or "", hl = "Dim", size = SIZE,
+              text = (r.kind == "page" or r.page or r.kind == "provider" or r.kind == "new") and "›" or "", hl = "Dim", size = SIZE,
               width = 10, shrink = 0, text_align = "right",
             },
           },

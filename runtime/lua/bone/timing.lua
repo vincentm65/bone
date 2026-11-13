@@ -1,5 +1,5 @@
 -- How long each turn worked, for a footer under its last item ("Worked for
--- 3s · Finished at 23:17"), kept per session outside the transcript so
+-- 3s · Finished at 9:17 PM"), kept per session outside the transcript so
 -- another frontend watching unrelated chats cannot overwrite it. M.footer
 -- gives the text; each frontend draws it (runtime/lua/bone/ui/turn_timing.lua
 -- for the TUI).
@@ -7,6 +7,13 @@ local M = {}
 local sessions, legacy = {}, bone.state.load("standard-turn-timing")
 local name = "standard-turn-timing."
 local kinds = { "user", "reasoning", "assistant", "tool", "notice" }
+
+-- The clock follows the machine's locale: 12-hour where the locale's own time
+-- format carries its AM/PM marker, 24-hour where it does not.
+os.setlocale("", "time")
+local probe = 1700003200
+local marker = os.date("%p", probe)
+local clock = marker ~= "" and os.date("%X", probe):find(marker, 1, true) and "%I:%M %p" or "%H:%M"
 
 local function state_of(id)
   if not sessions[id] then
@@ -55,8 +62,10 @@ function M.footer(item, ctx)
   local user = bone.chat.items({ turn = data.turn, kind = "user", first = 1 })[1]
   local last = bone.chat.items({ turn = data.turn, kind = kinds, last = 1 })[1]
   if not user or user.text ~= timing.text or not last or last.index ~= item.index then return end
+  local at = os.date(clock, math.floor(timing.finished / 1000))
+  if clock == "%I:%M %p" then at = at:gsub("^0", "") end
   return "Worked for " .. bone.util.duration(math.max(0, (timing.finished - timing.started) / 1000))
-    .. " · Finished at " .. os.date("%H:%M", math.floor(timing.finished / 1000))
+    .. " · Finished at " .. at
 end
 
 bone.on("turn/started", function(ev) capture(ev.session_id) end)

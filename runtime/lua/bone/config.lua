@@ -90,7 +90,7 @@ function M.open(want)
       if row.added then
         add("added", MUTED)
       end
-    elseif row.kind == "paction" then
+    elseif row.kind == "paction" or row.kind == "new" then
       return
     elseif row.kind == "pfield" then
       if row.type == "boolean" then
@@ -294,7 +294,7 @@ function M.open(want)
     elseif t.name == "providers" and st.prov then
       hint = { { "↑↓", "move" }, { "/", "search" }, { "enter", "change" }, { "r", "reset to core.lua" }, { "esc", "back" } }
     elseif t.name == "providers" then
-      hint = { { "↑↓", "move" }, { "/", "search" }, { "enter", "use" }, { "e", "edit" }, { "a", "add" }, { "d", "delete" }, { "tab", "section" }, { "esc", "close" } }
+      hint = { { "↑↓", "move" }, { "/", "search" }, { "enter", "open" }, { "u", "use" }, { "a", "add" }, { "d", "delete" }, { "tab", "section" }, { "esc", "close" } }
     elseif t.name == "plugins" then
       hint = { { "↑↓", "move" }, { "/", "search" }, { "enter", "settings" }, { "space", "on/off" }, { "tab", "section" }, { "esc", "close" } }
     else

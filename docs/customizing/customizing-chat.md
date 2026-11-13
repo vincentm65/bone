@@ -75,9 +75,11 @@ level clears these local choices. Live summaries type themselves in; completed
 history appears immediately.
 
 Each completed turn ends with a `Worked for … · Finished at …` footer, saved
-in TUI state so it survives reopening the session. The statusline shows elapsed
-time only while a turn is running. Its `total` covers the current session;
-`agents` separately shows sub-agents' input and output tokens seen this run.
+in TUI state so it survives reopening the session; the clock follows the
+system's locale — 12-hour where its time format carries an AM/PM marker. The
+statusline shows elapsed time only while a turn is running. Its `total` covers
+the current session; `agents` separately shows sub-agents' input and output
+tokens seen this run.
 
 Sub-agent calls show the task first, then the agent's name and status. Their
 reports render as Markdown in an indented gutter, with an opening paragraph
