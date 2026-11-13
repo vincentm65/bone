@@ -4712,7 +4712,7 @@ async fn saved_settings_apply_before_tui_lua_and_keys_save_them() {
 async fn config_provider_compact_limit_saves_numbers_and_resets_empty() {
     let mut h = Harness::new().await;
     h.input("/provider{enter}").await;
-    h.input("{enter}").await;
+    h.input("e").await;
     for _ in 0..20 {
         if h.screen(100, 34).contains("› Compaction limit") {
             break;
@@ -4809,7 +4809,7 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
         json!({ "path": "tui.prompt_max_height", "value": 7 })
     );
 
-    // Providers: enter opens one, u uses it.
+    // Providers: enter uses one, e sets its model.
     h.input("{tab}").await;
     let screen = h.screen(100, 34);
     assert_eq!(top(&screen), config_top);
@@ -4817,10 +4817,10 @@ async fn config_page_sets_options_providers_plugins_and_plugin_settings() {
         screen.contains("q1") && screen.contains("in use") && screen.contains("d1"),
         "{screen}"
     );
-    h.input("u").await; // ds is first
+    h.input("{enter}").await; // ds is first
     assert_eq!(last_set(&h), json!({ "path": "provider", "value": "ds" }));
-    // enter opens the editor; every field saves at once, as an override.
-    h.input("{enter}").await;
+    // e opens the editor; every field saves at once, as an override.
+    h.input("e").await;
     let screen = h.screen(100, 34);
     assert_eq!(top(&screen), config_top);
     for row in [
