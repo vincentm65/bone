@@ -49,6 +49,7 @@ const TOOL_RESULT_CHARS: usize = 2000;
 const OVERFLOW: &[&str] = &[
     "context length",
     "context window",
+    "context size",
     "context_length_exceeded",
     "maximum context",
     "too many tokens",
