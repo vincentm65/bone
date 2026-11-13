@@ -1665,8 +1665,15 @@ async fn blank_slate_draws_only_text() {
 fn bottom(h: &mut Harness, w: u16, rows: u16, n: usize) -> (Vec<String>, Option<(u16, u16)>) {
     let mut term = Terminal::new(TestBackend::new(w, rows)).unwrap();
     term.draw(|f| render::draw(f, &mut h.app)).unwrap();
-    let cursor = term.get_cursor_position().ok().map(|p| (p.x, p.y));
     let buf = term.backend().buffer();
+    // The caret is drawn: the one reversed cell.
+    let cursor = (0..rows)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .find(|&(x, y)| {
+            buf[(x, y)]
+                .modifier
+                .contains(ratatui::style::Modifier::REVERSED)
+        });
     let lines: Vec<String> = (0..rows)
         .map(|y| (0..w).map(|x| buf[(x, y)].symbol()).collect())
         .collect();
