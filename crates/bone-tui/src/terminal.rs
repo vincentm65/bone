@@ -3,7 +3,6 @@
 
 use std::io::{self, BufWriter, Stdout};
 
-use crossterm::cursor::Hide;
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, KeyboardEnhancementFlags,
     PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
@@ -28,7 +27,54 @@ type Backend = Anchored<CrosstermBackend<BufWriter<Stdout>>>;
 /// the terminal draws a column wider or narrower than ratatui thought
 /// shifts the rest of the row over the next pane, and the diff renderer
 /// never repaints what it overwrote.
-pub struct Anchored<B>(B);
+///
+/// It also writes nothing for a frame that changes nothing: the cursor is
+/// hidden (and a synchronized update begun) only once a cell is written, a
+/// move to where the cursor already is is skipped, and showing or hiding
+/// it waits for the flush, after it is in place. Otherwise every frame
+/// blinks the prompt's cursor off and on, which over SSH arrives as
+/// separate packets and reads as typing lag.
+pub struct Anchored<B> {
+    inner: B,
+    /// Wrap frames in synchronized updates (not under tmux).
+    sync: bool,
+    /// Whether this frame began a synchronized update.
+    began: bool,
+    /// Whether the terminal shows the cursor; None until known.
+    visible: Option<bool>,
+    /// What this frame asked for, applied at the flush.
+    want_visible: Option<bool>,
+    /// Where the cursor is; None once cells are written or cleared.
+    at: Option<Position>,
+}
+
+impl<B: ratatui::backend::Backend + io::Write> Anchored<B> {
+    fn new(inner: B, sync: bool) -> Self {
+        Self { inner, sync, began: false, visible: None, want_visible: None, at: None }
+    }
+
+    /// Before anything is written: begin the update, hide the cursor.
+    fn begin(&mut self) -> io::Result<()> {
+        if self.sync && !self.began {
+            queue!(self.inner, BeginSynchronizedUpdate)?;
+            self.began = true;
+        }
+        if self.visible != Some(false) {
+            self.inner.hide_cursor()?;
+            self.visible = Some(false);
+        }
+        Ok(())
+    }
+
+    /// Close the synchronized update this frame began, if any.
+    fn end(&mut self) -> io::Result<()> {
+        if self.began {
+            self.began = false;
+            execute!(self.inner, EndSynchronizedUpdate)?;
+        }
+        Ok(())
+    }
+}
 
 /// Text every terminal draws one column wide.
 fn plain(symbol: &str) -> bool {
@@ -41,69 +87,94 @@ fn plain(symbol: &str) -> bool {
         | '\u{2010}'..='\u{2027}' | '\u{2500}'..='\u{259F}' | '\u{2800}'..='\u{28FF}')
 }
 
-impl<B: ratatui::backend::Backend> ratatui::backend::Backend for Anchored<B> {
+impl<B: ratatui::backend::Backend + io::Write> ratatui::backend::Backend for Anchored<B> {
     fn draw<'a, I>(&mut self, content: I) -> io::Result<()>
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
+        let mut content = content.peekable();
+        if content.peek().is_none() {
+            return Ok(());
+        }
+        self.begin()?;
+        self.at = None;
         // Each draw starts with a cursor move.
         let mut run = Vec::new();
         for cell in content {
             let plain = plain(cell.2.symbol());
             run.push(cell);
             if !plain {
-                self.0.draw(run.drain(..))?;
+                self.inner.draw(run.drain(..))?;
             }
         }
-        self.0.draw(run.into_iter())
+        self.inner.draw(run.into_iter())
     }
     fn append_lines(&mut self, n: u16) -> io::Result<()> {
-        self.0.append_lines(n)
+        self.at = None;
+        self.inner.append_lines(n)
     }
     fn hide_cursor(&mut self) -> io::Result<()> {
-        self.0.hide_cursor()
+        self.want_visible = Some(false);
+        Ok(())
     }
     fn show_cursor(&mut self) -> io::Result<()> {
-        self.0.show_cursor()
+        self.want_visible = Some(true);
+        Ok(())
     }
     fn get_cursor_position(&mut self) -> io::Result<Position> {
-        self.0.get_cursor_position()
+        self.inner.get_cursor_position()
     }
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
-        self.0.set_cursor_position(position)
+        let position = position.into();
+        if self.at == Some(position) {
+            return Ok(());
+        }
+        self.at = Some(position);
+        self.inner.set_cursor_position(position)
     }
     fn clear(&mut self) -> io::Result<()> {
-        self.0.clear()
+        self.begin()?;
+        self.at = None;
+        self.inner.clear()
     }
     fn clear_region(&mut self, clear_type: ClearType) -> io::Result<()> {
-        self.0.clear_region(clear_type)
+        self.begin()?;
+        self.at = None;
+        self.inner.clear_region(clear_type)
     }
     fn size(&self) -> io::Result<Size> {
-        self.0.size()
+        self.inner.size()
     }
     fn window_size(&mut self) -> io::Result<WindowSize> {
-        self.0.window_size()
+        self.inner.window_size()
     }
     fn flush(&mut self) -> io::Result<()> {
-        self.0.flush()
+        if let Some(want) = self.want_visible.take()
+            && self.visible != Some(want)
+        {
+            if want {
+                self.inner.show_cursor()?;
+            } else {
+                self.inner.hide_cursor()?;
+            }
+            self.visible = Some(want);
+        }
+        ratatui::backend::Backend::flush(&mut self.inner)
     }
 }
 
 impl<B: io::Write> io::Write for Anchored<B> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.write(buf)
+        self.inner.write(buf)
     }
     fn flush(&mut self) -> io::Result<()> {
-        self.0.flush()
+        self.inner.flush()
     }
 }
 
 pub struct Guard {
     terminal: Terminal<Backend>,
     enhanced: bool,
-    /// tmux repaints the whole pane after every synchronized update, which
-    /// sends the outer terminal 30x or more the bytes of the frame itself.
-    sync: bool,
 }
 
 impl std::ops::Deref for Guard {
@@ -137,34 +208,26 @@ pub fn enter() -> io::Result<Guard> {
         )?;
     }
     let out = BufWriter::with_capacity(256 * 1024, out);
-    let mut terminal = Terminal::new(Anchored(CrosstermBackend::new(out)))?;
+    let sync = std::env::var_os("TMUX").is_none();
+    let mut terminal = Terminal::new(Anchored::new(CrosstermBackend::new(out), sync))?;
     terminal.clear()?;
-    Ok(Guard {
-        terminal,
-        enhanced,
-        sync: std::env::var_os("TMUX").is_none(),
-    })
+    terminal.backend_mut().end()?;
+    Ok(Guard { terminal, enhanced })
 }
 
 impl Guard {
-    /// Draw a frame as one synchronized update (outside tmux), which
-    /// terminals that support it show only once it is complete. The cursor
-    /// is hidden while cells are written (SSH can drop the update, and it
-    /// would flicker).
+    /// Draw a frame as one synchronized update (outside tmux: tmux repaints
+    /// the whole pane after every one, 30x or more the bytes of the frame),
+    /// which terminals that support it show only once it is complete. The
+    /// cursor is hidden while cells are written (SSH can drop the update,
+    /// and it would flicker). A frame that changes nothing writes nothing.
     pub fn draw_frame(&mut self, render: impl FnOnce(&mut ratatui::Frame)) -> io::Result<()> {
-        if self.sync {
-            queue!(self.terminal.backend_mut(), BeginSynchronizedUpdate)?;
-        }
-        queue!(self.terminal.backend_mut(), Hide)?;
         self.terminal.draw(|f| {
             render(f);
             widen(f.buffer_mut());
         })?;
         crate::stats::mark("draw");
-        if self.sync {
-            execute!(self.terminal.backend_mut(), EndSynchronizedUpdate)?;
-        }
-        Ok(())
+        self.terminal.backend_mut().end()
     }
 }
 
