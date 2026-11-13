@@ -622,6 +622,11 @@ impl Host {
                 return serde_json::to_value(&session.lock().unwrap().info)
                     .map_err(|e| e.to_string());
             }
+            "cd" => {
+                let dir = spec["cwd"].as_str().ok_or("a directory is needed")?;
+                let info = inner.session_cd(id, dir).map_err(|e| e.message)?;
+                return serde_json::to_value(info).map_err(|e| e.to_string());
+            }
             "queue_list" => {
                 let s = session.lock().unwrap();
                 return serde_json::to_value(&s.queue).map_err(|e| e.to_string());

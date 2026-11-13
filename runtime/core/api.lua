@@ -185,6 +185,9 @@ end
 ---                                      the owner's). messages accepts tables or raw JSON
 ---                                      strings from snapshot.raw_messages. Returns
 ---                                      its info.
+---   bone.session.cd(id, dir)           move an idle session to another working
+---                                      directory (relative: from its own), for
+---                                      its next turn on. Returns its info.
 ---   bone.session.run(id, text)         start a turn on an idle session and wait
 ---                                      for it: { session_id, turn_id, text,
 ---                                      outcome = { status, message? } }, text
@@ -216,6 +219,10 @@ function bone.session.append(id, message)
 end
 function bone.session.compact(id, messages)
   return session_op("compact", id, { messages = messages })
+end
+function bone.session.cd(id, dir)
+  assert(type(dir) == "string", "bone.session.cd(id, dir)")
+  return session_op("cd", id, { cwd = dir })
 end
 function bone.session.create(opts)
   opts = opts or {}

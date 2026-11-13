@@ -43,6 +43,8 @@ pub(crate) enum Record {
     Usage(UsageRecord),
     /// The provider entry and model this session's turns use from here on.
     Model(Pin),
+    /// The working directory from here on (`session/cd`).
+    Cwd(String),
 }
 
 /// A provider entry (`None`: the env-configured one) and model.
@@ -144,6 +146,8 @@ pub struct Session {
     pub model: Option<Pin>,
     /// When its tool calls ran, by call id (those recorded with times).
     pub tool_times: BTreeMap<String, ToolTiming>,
+    /// Where the working directory changed, in transcript order.
+    moves: Vec<Move>,
     next_turn: TurnId,
     next_queue: u64,
     file: File,
@@ -152,6 +156,25 @@ pub struct Session {
     /// Where the queue is kept.
     queue_path: PathBuf,
     queue_dirty: Cell<bool>,
+}
+
+/// A change of working directory before the transcript's message `at`.
+struct Move {
+    at: usize,
+    from: String,
+    to: String,
+}
+
+/// Note a move to `to` before message `at`. Moves with no message between
+/// them are one, and one that ends where it started is none.
+fn moved(moves: &mut Vec<Move>, at: usize, from: &str, to: String) {
+    let from = match moves.last() {
+        Some(last) if last.at == at => moves.pop().unwrap().from,
+        _ => from.to_owned(),
+    };
+    if from != to {
+        moves.push(Move { at, from, to });
+    }
 }
 
 #[derive(Default, Serialize, Deserialize)]
@@ -214,6 +237,23 @@ impl Session {
     pub fn pin(&mut self, model: Pin) -> std::io::Result<()> {
         self.model = Some(model.clone());
         write_record(&mut self.file, Record::Model(model))
+    }
+
+    /// Move to `cwd` (nothing moves if the file write fails): tools run there
+    /// from the next turn on. Also kept beside the file, best effort, for listings.
+    pub fn cd(&mut self, cwd: String) -> std::io::Result<()> {
+        write_record(&mut self.file, Record::Cwd(cwd.clone()))?;
+        self.file.sync_data()?;
+        let _ = std::fs::write(self.path.with_extension("cwd"), &cwd);
+        moved(
+            &mut self.moves,
+            self.messages.len(),
+            &self.info.cwd,
+            cwd.clone(),
+        );
+        self.info.cwd = cwd;
+        self.reindex();
+        Ok(())
     }
 
     /// Bring the index up to date with the file.
@@ -289,6 +329,8 @@ impl Session {
             .and_then(|()| self.file.sync_data());
         self.messages = messages;
         self.summary = None;
+        // Their places in the old transcript mean nothing in this one.
+        self.moves.clear();
         self.generation += 1;
         self.reindex();
         written
@@ -306,17 +348,37 @@ impl Session {
     /// The transcript as the model is sent it: the summary and a handoff of
     /// the cut, then what the summary does not cover.
     pub fn context(&self) -> Vec<ChatMessage> {
-        let messages = match &self.summary {
-            Some(sum) if sum.through <= self.messages.len() => {
+        let summary = (self.summary.as_ref()).filter(|s| s.through <= self.messages.len());
+        let through = summary.map_or(0, |s| s.through);
+        let mut tail = self.messages[through..].to_vec();
+        // The first message sent from a new working directory says so: the
+        // paths before it were relative to the old one. (A move the summary
+        // covers is left to the system prompt, which names where it is now.)
+        for m in self.moves.iter().filter(|m| m.at >= through) {
+            let user = tail[m.at - through..].iter_mut().find_map(|msg| match msg {
+                ChatMessage::User { content, .. } => Some(content),
+                _ => None,
+            });
+            if let Some(content) = user {
+                *content = format!(
+                    "[The working directory changed from {from} to {to}. Relative paths \
+                     earlier in this conversation were in {from}.]\n\n{content}",
+                    from = m.from,
+                    to = m.to,
+                );
+            }
+        }
+        let messages = match summary {
+            Some(sum) => {
                 let mut out = vec![crate::compact::context_message(
                     &sum.text,
                     &self.messages[..sum.through],
                     sum.through < self.messages.len(),
                 )];
-                out.extend(self.messages[sum.through..].iter().cloned());
+                out.extend(tail);
                 out
             }
-            _ => self.messages.clone(),
+            None => tail,
         };
         crate::transcript::repair(messages)
     }
@@ -461,6 +523,7 @@ impl SessionStore {
             users,
             model,
             tool_times,
+            moves,
         } = match read_file(&path, usize::MAX) {
             Ok(r) => r,
             Err(SessionError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -473,13 +536,14 @@ impl SessionStore {
         if file.metadata()?.len() > good_len {
             file.set_len(good_len)?;
         }
-        if let Some(t) = self.saved_title(id) {
+        if let Some(t) = self.saved(id, "title") {
             info.title = Some(t);
         }
         // Turn ids count every user message ever written (compacted ones
         // too), so they stay unique across reloads.
         let session = self.open(info, messages, summary, model, users, file);
         session.lock().unwrap().tool_times = tool_times;
+        session.lock().unwrap().moves = moves;
         Ok(self.keep(id, session))
     }
 
@@ -529,6 +593,7 @@ impl SessionStore {
             safe_point: false,
             model,
             tool_times: BTreeMap::new(),
+            moves: Vec::new(),
             next_turn: users as TurnId,
             next_queue,
             file,
@@ -586,6 +651,7 @@ impl SessionStore {
         self.listed.lock().unwrap().remove(id);
         std::fs::remove_file(self.path(id))?;
         let _ = std::fs::remove_file(self.title_path(id));
+        let _ = std::fs::remove_file(self.path(id).with_extension("cwd"));
         let _ = std::fs::remove_file(self.queue_path(id));
         if let Some(index) = &self.index {
             let _ = index.remove(id);
@@ -641,7 +707,7 @@ impl SessionStore {
                 .unwrap_or_default()
                 .to_string_lossy()
                 .into_owned();
-            let title = self.saved_title(&id);
+            let title = self.saved(&id, "title");
             if let Err(e) = index.sync(&id, &path, title.as_deref()) {
                 eprintln!("bone: session index: {id}: {e}");
             }
@@ -662,9 +728,10 @@ impl SessionStore {
         self.dir.join(format!("{id}.title"))
     }
 
-    /// The title a rename gave, if any.
-    fn saved_title(&self, id: &str) -> Option<String> {
-        std::fs::read_to_string(self.title_path(id))
+    /// What is kept beside a session's file, if anything: the title a
+    /// rename gave (`title`), where `session/cd` last moved it (`cwd`).
+    fn saved(&self, id: &str, ext: &str) -> Option<String> {
+        std::fs::read_to_string(self.dir.join(format!("{id}.{ext}")))
             .ok()
             .filter(|t| !t.trim().is_empty())
     }
@@ -714,9 +781,12 @@ impl SessionStore {
                 continue;
             };
             listed.insert(id.to_string(), (mtime, info.clone()));
-            if let Some(t) = self.saved_title(&id) {
+            if let Some(t) = self.saved(&id, "title") {
                 info.title = Some(t);
             }
+            // A session that moved says where to beside its file: only the
+            // file's start was read.
+            info.cwd = self.saved(&id, "cwd").unwrap_or(info.cwd);
             out.push(info);
         }
         // UUIDv7 ids sort by creation time.
@@ -740,6 +810,7 @@ struct Loaded {
     users: usize,
     model: Option<Pin>,
     tool_times: BTreeMap<String, ToolTiming>,
+    moves: Vec<Move>,
 }
 
 /// Read a session file, stopping after `max_user` user messages (enough to
@@ -770,6 +841,7 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
         users: 0,
         model: None,
         tool_times: BTreeMap::new(),
+        moves: Vec::new(),
     };
     // Bytes, not a String: a line of binary garbage must not fail the read.
     let mut buf = Vec::new();
@@ -805,6 +877,13 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
             Ok(Record::Compact(messages)) => {
                 loaded.messages = messages;
                 loaded.summary = None;
+                loaded.moves.clear();
+                loaded.good_len += len;
+            }
+            Ok(Record::Cwd(cwd)) => {
+                let at = loaded.messages.len();
+                moved(&mut loaded.moves, at, &loaded.info.cwd, cwd.clone());
+                loaded.info.cwd = cwd;
                 loaded.good_len += len;
             }
             Ok(Record::Summary(summary)) => {

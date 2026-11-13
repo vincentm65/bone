@@ -373,13 +373,14 @@ function M.header(session, width)
   bar[#bar + 1] = { text = title or "New chat", size = style.size.body, medium = title ~= nil,
     hl = title and "Normal" or muted, wrap = false, text_overflow = "ellipsis", shrink = 1 }
   -- The folder keeps its shape (the title gives way first), and goes where
-  -- there is no room for it. It is a button: /cd, to choose where new chats
-  -- start (this one stays where it is).
+  -- there is no room for it. It is a button: /cd, to move this chat to
+  -- another folder (or, before it has started, to choose where it starts).
   if path and (width or math.huge) >= 420 then
     bar[#bar + 1] = widgets.press({
       direction = "row", align = "center", gap = 6, height = 24, padding = { 0, 9, 0, 8 }, shrink = 0, max_width = 220,
       radius = 12, border = 1, border_color = "PromptBorder", id = "header-folder",
-      tooltip = folder .. " · click to choose where new chats start (/cd)",
+      tooltip = folder .. (session and session.cwd and " · click to move this chat to another folder (/cd)"
+        or " · click to choose where new chats start (/cd)"),
       icons.node("folder", { size = 13, hl = "Dim" }),
       { text = path_tail(path, 30), size = style.size.small, hl = muted, wrap = false, text_overflow = "ellipsis", shrink = 1 },
     }, function() bone.cmd("/cd") end, "button")

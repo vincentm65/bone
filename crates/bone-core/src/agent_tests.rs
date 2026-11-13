@@ -1892,6 +1892,110 @@ async fn the_limit_compacts_before_the_call() {
 }
 
 #[tokio::test]
+async fn the_limit_summarizes_in_place_with_the_previous_request_as_prefix() {
+    let mut h = Harness::with_lua(
+        "bone.config.compact = { keep = 1, limit = 1 }",
+        vec![text("a1"), text("SUM"), text("a2")],
+    )
+    .await;
+    h.start("q1").await;
+    h.until::<TurnFinished>().await;
+    h.start("q2").await;
+    assert_eq!(h.until::<SessionCompacted>().await.reason, "limit");
+    h.until::<TurnFinished>().await;
+    let seen = h.provider.seen.lock().unwrap().clone();
+    let tools = h.provider.tools.lock().unwrap().clone();
+    let systems = h.provider.systems.lock().unwrap().clone();
+    assert_eq!(seen.len(), 3, "{seen:#?}");
+    // The summary request is the call the turn was about to make, then the
+    // instruction: a continuation a prompt cache already holds.
+    assert_eq!(&seen[1][..3], &[user("q1"), assistant("a1"), user("q2")]);
+    assert_eq!(seen[1].len(), 4, "{:#?}", seen[1]);
+    let ChatMessage::User { content, .. } = &seen[1][3] else {
+        panic!("no instruction: {:?}", seen[1]);
+    };
+    assert!(content.starts_with("Stop the task here."), "{content}");
+    assert!(content.contains("containing \"q2\""), "{content}");
+    assert!(!tools[0].is_empty());
+    assert_eq!(tools[1], tools[0]);
+    assert_eq!(systems[1], systems[0]);
+    // The turn then goes on with the summary and the kept turn.
+    assert_handoff(&seen[2][0], "SUM");
+    assert_eq!(&seen[2][1..], &[user("q2")]);
+}
+
+#[tokio::test]
+async fn an_in_place_reply_with_a_tool_call_falls_back_to_the_rendered_transcript() {
+    // Text with a tool call is the model going on with the task, not a summary.
+    let busy = Step::Reply(Completion {
+        content: "Let me check first.".into(),
+        tool_calls: vec![ToolCall {
+            id: "c1".into(),
+            name: "read".into(),
+            arguments: "{}".into(),
+        }],
+        ..Default::default()
+    });
+    let mut h = Harness::with_lua(
+        "bone.config.compact = { keep = 1, limit = 1 }",
+        vec![text("a1"), busy, text("SUM"), text("a2")],
+    )
+    .await;
+    h.start("q1").await;
+    h.until::<TurnFinished>().await;
+    h.start("q2").await;
+    assert_eq!(h.until::<SessionCompacted>().await.reason, "limit");
+    h.until::<TurnFinished>().await;
+    let seen = h.provider.seen.lock().unwrap().clone();
+    let tools = h.provider.tools.lock().unwrap().clone();
+    assert_eq!(seen.len(), 4, "{seen:#?}");
+    // The fallback: the summarizer prompt, the transcript as text, no tools.
+    assert!(tools[2].is_empty());
+    let ChatMessage::User { content, .. } = &seen[2][0] else {
+        panic!("not the rendered transcript: {:?}", seen[2]);
+    };
+    assert!(content.contains("USER: q1") && content.contains("ASSISTANT: a1"), "{content}");
+    assert_handoff(&seen[3][0], "SUM");
+}
+
+#[tokio::test]
+async fn cd_moves_the_session_and_tells_the_model_where() {
+    let mut h = Harness::new(vec![text("a1"), text("a2"), text("a3")]).await;
+    h.start("q1").await;
+    h.until::<TurnFinished>().await;
+    std::fs::create_dir(h.work.path().join("sub")).unwrap();
+    let session = h.core.inner.sessions.get(&h.session_id).unwrap();
+    let from = session.lock().unwrap().info.cwd.clone();
+    let cd = |dir: &str| SessionCdParams {
+        session_id: h.session_id.clone(),
+        cwd: dir.into(),
+    };
+    assert!(h.call::<SessionCd>(cd("missing")).await.is_err());
+    let to = h.call::<SessionCd>(cd("sub")).await.unwrap().cwd;
+    assert_eq!(to, format!("{from}/sub"));
+    // The first message from the new directory says so; later ones do not.
+    h.start("q2").await;
+    h.until::<TurnFinished>().await;
+    h.start("q3").await;
+    h.until::<TurnFinished>().await;
+    let seen = h.last_seen();
+    assert_eq!(seen[0], user("q1"));
+    let ChatMessage::User { content, .. } = &seen[2] else {
+        panic!("{seen:#?}");
+    };
+    assert!(content.starts_with(&format!("[The working directory changed from {from} to {to}.")));
+    assert!(content.ends_with("\n\nq2"), "{content}");
+    assert_eq!(seen[4], user("q3"));
+    // A fresh core finds it there, with the same note, and lists it there.
+    let store = crate::session::SessionStore::new(h._data.path());
+    let fresh = store.get(&h.session_id).unwrap();
+    assert_eq!(fresh.lock().unwrap().info.cwd, to);
+    assert_eq!(fresh.lock().unwrap().context(), session.lock().unwrap().context());
+    let listed = crate::session::SessionStore::new(h._data.path()).list().unwrap();
+    assert_eq!(listed[0].cwd, to);
+}
+
+#[tokio::test]
 async fn provider_limits_override_the_global_limit_at_both_checks() {
     for keep in [0, 1] {
         let mut steps = vec![text("a1"), text("SUM")];

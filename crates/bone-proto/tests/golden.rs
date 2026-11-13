@@ -462,6 +462,17 @@ fn requests() {
             ..info()
         },
     );
+    exchange::<SessionCd>(
+        48,
+        SessionCdParams {
+            session_id: SID.into(),
+            cwd: "/home/me/other".into(),
+        },
+        SessionInfo {
+            cwd: "/home/me/other".into(),
+            ..info()
+        },
+    );
     exchange::<SessionDelete>(
         28,
         SessionRef {

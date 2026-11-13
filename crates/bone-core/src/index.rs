@@ -393,6 +393,10 @@ fn index_record(tx: &Transaction, id: &str, record: Record, at: u64, seq: &mut u
         )
         .and_then(|()| run("UPDATE sessions SET root = coalesce((SELECT root FROM sessions WHERE id = ?1), ?1) WHERE root = ?1", params![id])),
         Record::Compact(_) | Record::Summary(_) | Record::Model(_) => Ok(()),
+        Record::Cwd(cwd) => run(
+            "UPDATE sessions SET cwd = ?2 WHERE id = ?1",
+            params![id, cwd],
+        ),
         Record::Usage(u) => run(
             "INSERT INTO usage (session_id, turn_id, source, at, provider, model,
                                 input_tokens, output_tokens, cached_tokens, context_tokens)

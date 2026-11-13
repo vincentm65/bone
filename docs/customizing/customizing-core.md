@@ -210,6 +210,7 @@ bone.session.messages(id)                 -- the full stored transcript
 bone.session.snapshot(id)                 -- info, messages, raw_messages, summary, model, active_turn, generation
 bone.session.append(id, { role = "user", content = "Remember: be brief." })
 bone.session.compact(id, { { role = "user", content = "Summary of earlier work: ..." } })
+bone.session.cd(id, "../other-project")   -- move an idle session; its tools run there from its next turn
 ```
 
 `snapshot` reads a consistent session state under one lock. To seed a new

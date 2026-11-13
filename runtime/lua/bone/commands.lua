@@ -38,10 +38,11 @@ cmd("where", function()
   end
 end, { desc = "show the current session and directory" })
 
--- ---- /cd: the directory new sessions start in ------------------------------
--- A session keeps the directory it was created in (its tools run there, and
--- its history says so), so /cd does not move the one on screen: it names
--- where the next ones start, and starts one when a session is open.
+-- ---- /cd: the directory this session works in ------------------------------
+-- /cd moves the session on screen: its tools run in the new directory from
+-- its next turn on (the core tells the model where the change was), and new
+-- sessions start there too. With none started yet it only names where the
+-- next one starts.
 
 local function home_dir()
   local h = os.getenv("HOME")
@@ -58,14 +59,21 @@ local function short_dir(path)
   return path
 end
 
+--- Where /cd starts from: the session's directory, or where the next one
+--- starts.
+local function here()
+  local s = bone.api.session()
+  return (((s and s.cwd) or bone.api.cwd()):gsub("\\", "/"))
+end
+
 --- What was typed as an absolute path with no `.` or `..` left in it:
---- ~ is home, anything else relative starts from where sessions start now.
+--- ~ is home, anything else relative starts from here().
 local function full_dir(path)
   path = path:gsub("\\", "/")
   if path == "~" or path:sub(1, 2) == "~/" then
     path = home_dir() .. path:sub(2)
   elseif path:sub(1, 1) ~= "/" and not path:match("^%a:/") then
-    path = bone.api.cwd():gsub("\\", "/"):gsub("/+$", "") .. "/" .. path
+    path = here():gsub("/+$", "") .. "/" .. path
   end
   local drive = path:match("^%a:") or ""
   local parts = {}
@@ -79,19 +87,42 @@ local function full_dir(path)
   return drive .. "/" .. table.concat(parts, "/")
 end
 
+-- The directory each session was in before its last /cd ("" for none
+-- started), for /cd -.
+local before = {}
+
 local function cd(path)
-  local dir = full_dir(path)
-  if bone.fs.list(dir) == nil then
-    return bone.notify("/cd: " .. dir .. " is not a directory that can be read", "error")
+  local s = bone.api.session()
+  local key, from = s and s.session_id or "", full_dir(".")
+  local dir = path == "-" and before[key] or full_dir(path)
+  if path == "-" and not dir then
+    return bone.notify("/cd -: no directory to go back to yet", "error")
   end
-  bone.api.cd(dir)
-  if bone.api.session() then bone.action("new_session") end
-  bone.notify("new sessions start in " .. short_dir(dir))
+  if bone.fs.list(dir) == nil then
+    return bone.notify("/cd: " .. short_dir(dir) .. " is not a directory that can be read", "error")
+  end
+  if dir == from then return bone.notify("already in " .. short_dir(dir)) end
+  if not s then
+    before[key] = from
+    bone.api.cd(dir)
+    return bone.notify("new sessions start in " .. short_dir(dir))
+  end
+  if s.running then
+    return bone.notify("/cd: a turn is running here; stop it (esc) or wait for it to end", "error")
+  end
+  bone.request("session/cd", { session_id = s.session_id, cwd = dir }, function(info, err)
+    if not info then return bone.notify("/cd: " .. tostring(err), "error") end
+    -- The same place by another name (a link to it).
+    if info.cwd == s.cwd then return bone.notify("already in " .. short_dir(info.cwd)) end
+    before[key] = s.cwd
+    bone.api.cd(info.cwd)
+    bone.notify("moved to " .. short_dir(info.cwd))
+  end)
 end
 
 --- Walk the directories: each one opens, the first row takes it.
 local function browse(dir)
-  local items = { { use = dir, text = "Start sessions in " .. short_dir(dir) } }
+  local items = { { use = dir, text = (bone.api.session() and "Move to " or "Start sessions in ") .. short_dir(dir) } }
   local up = dir:match("^(.*)/[^/]+$")
   if up then items[#items + 1] = { open = (up == "" or up:match("^%a:$")) and up .. "/" or up, text = ".." } end
   for _, e in ipairs(bone.fs.list(dir) or {}) do
@@ -112,30 +143,31 @@ end
 cmd("cd", function(c)
   local arg = (c.args or ""):match("^%s*(.-)%s*$")
   if arg ~= "" then return cd(arg) end
-  -- The directories sessions were started in before, then a way to any other.
-  local here, home = full_dir(bone.api.cwd()), home_dir()
+  -- The directories sessions are in, the latest first, then a way to any
+  -- other. Not the one this is in already.
+  local at, home = full_dir("."), home_dir()
   local function choose(it)
     if not it then return end
     if it.use then cd(it.use) else browse(it.open) end
   end
   local picker = bone.ui.select({}, {
-    prompt = "start sessions in: ", loading = true,
+    prompt = bone.api.session() and "move this session to: " or "start sessions in: ", loading = true,
     format = function(it) return it.text end, on_choice = choose,
   })
   bone.request("session/list", {}, function(list)
-    local items, seen = {}, {}
+    local items, seen = {}, { [at] = true }
     for _, s in ipairs(list or {}) do
       if s.cwd and s.cwd ~= "" and not s.owner and not seen[s.cwd] then
         seen[s.cwd] = true
         items[#items + 1] = { use = s.cwd, text = short_dir(s.cwd) }
       end
     end
-    items[#items + 1] = { open = here, text = "Browse " .. short_dir(here) .. " …" }
-    if home ~= here then items[#items + 1] = { open = home, text = "Browse ~ …" } end
+    items[#items + 1] = { open = at, text = "Browse " .. short_dir(at) .. " …" }
+    if home ~= at then items[#items + 1] = { open = home, text = "Browse ~ …" } end
     picker:set_items(items)
   end)
 end, {
-  desc = "the directory new sessions start in: /cd ~/projects/x, /cd .., or alone to pick one",
+  desc = "move this session to another directory (new ones start there too): /cd ~/projects/x, /cd .., /cd - for the one before, or alone to pick",
   complete = function(ctx)
     -- The directories under what is typed so far.
     local token = ctx.token or ""

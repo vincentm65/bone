@@ -158,6 +158,7 @@ pub const METHODS: &[&str] = &[
     SessionActive::METHOD,
     SessionMessages::METHOD,
     SessionRename::METHOD,
+    SessionCd::METHOD,
     SessionDelete::METHOD,
     SessionCompact::METHOD,
     AttachmentUpload::METHOD,
@@ -369,6 +370,18 @@ method!(
 pub struct SessionRenameParams {
     pub session_id: SessionId,
     pub title: String,
+}
+
+method!(
+    /// Move a session to another working directory: its tools run there
+    /// from its next turn on. Not while a turn runs.
+    SessionCd, "session/cd", SessionCdParams => SessionInfo
+);
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCdParams {
+    pub session_id: SessionId,
+    pub cwd: String,
 }
 
 method!(

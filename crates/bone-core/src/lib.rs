@@ -20,7 +20,7 @@ pub mod settings;
 pub mod tools;
 mod transcript;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, RwLock, Weak};
 
 use bone_proto::methods::{
@@ -33,12 +33,13 @@ use bone_proto::methods::{
     ProcessSnapshot, ProcessState, ProcessesGet, ProcessesList, ProcessesResult, QueueAdd,
     QueueAddParams, QueueAddResult, QueueChanged, QueueChangedParams, QueueClear, QueueMode,
     QueueMove, QueueRemove, QueueResume, QueueUpdate, SecretSet, SecretsList, SecretsSet,
-    SessionActive, SessionCompact, SessionCompactParams, SessionCreate, SessionCreateParams,
-    SessionCreated, SessionDelete, SessionDeleted, SessionList, SessionMessages,
-    SessionMessagesParams, SessionMessagesResult, SessionRef, SessionRename, SessionRenameParams,
-    SessionUpdated, SessionUpdatedParams, SettingPath, SettingSet, SettingsChanged,
-    SettingsChangedParams, SettingsGet, SettingsReset, SettingsSet, StoreQuery, StoreQueryParams,
-    TurnCancel, TurnStart, TurnStartParams, TurnStartResult, TurnSteer, TurnSteerParams,
+    SessionActive, SessionCd, SessionCompact, SessionCompactParams, SessionCreate,
+    SessionCreateParams, SessionCreated, SessionDelete, SessionDeleted, SessionList,
+    SessionMessages, SessionMessagesParams, SessionMessagesResult, SessionRef, SessionRename,
+    SessionRenameParams, SessionUpdated, SessionUpdatedParams, SettingPath, SettingSet,
+    SettingsChanged, SettingsChangedParams, SettingsGet, SettingsReset, SettingsSet, StoreQuery,
+    StoreQueryParams, TurnCancel, TurnStart, TurnStartParams, TurnStartResult, TurnSteer,
+    TurnSteerParams,
 };
 use bone_proto::types::{ImageAttachment, SessionInfo};
 use bone_proto::{Method, Notification, RpcError};
@@ -332,6 +333,38 @@ impl Inner {
         self.start_next(session);
     }
 
+    /// Move a session to `dir` (relative: from where it is now), for its
+    /// next turn on. A running turn was started where it is, so not then.
+    pub(crate) fn session_cd(&self, id: &str, dir: &str) -> Result<SessionInfo, RpcError> {
+        let session = self.session(id).map_err(session_error)?;
+        let info = {
+            let mut s = session.lock().unwrap();
+            if let Some(active) = &s.active {
+                return Err(RpcError::new(
+                    RpcError::BUSY,
+                    format!("turn {} is still running", active.turn_id),
+                ));
+            }
+            let cwd = std::fs::canonicalize(Path::new(&s.info.cwd).join(dir))
+                .ok()
+                .filter(|p| p.is_dir())
+                .ok_or_else(|| RpcError::invalid_params(format!("not a directory: {dir}")))?
+                .to_string_lossy()
+                .into_owned();
+            if cwd == s.info.cwd {
+                return Ok(s.info.clone());
+            }
+            s.cd(cwd)
+                .map_err(|e| RpcError::internal(format!("cannot save session: {e}")))?;
+            s.info.clone()
+        };
+        self.emit::<SessionUpdated>(SessionUpdatedParams {
+            session_id: id.to_owned(),
+            reason: "cd".into(),
+        });
+        Ok(info)
+    }
+
     /// Take up `settings.json` as it is now if it was changed outside this
     /// core (an editor, the agent, another core). Checked as a turn starts.
     pub(crate) async fn settings_from_disk(&self) {
@@ -595,6 +628,9 @@ impl Core {
             }
             SessionRename::METHOD => {
                 dispatch::<SessionRename, _>(params, |p| self.session_rename(p))
+            }
+            SessionCd::METHOD => {
+                dispatch::<SessionCd, _>(params, |p| self.inner.session_cd(&p.session_id, &p.cwd))
             }
             SessionDelete::METHOD => {
                 dispatch::<SessionDelete, _>(params, |p| self.session_delete(p))
