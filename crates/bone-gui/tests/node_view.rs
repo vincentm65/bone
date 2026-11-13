@@ -1635,3 +1635,51 @@ async fn elements_dock_as_nodes_and_take_clicks() {
     assert_eq!(g.gui.eval("pressed").unwrap(), "true");
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
+
+/// Whether the prompt's caret is drawn: the only bar a point and a half
+/// wide. It counts only where its clip leaves it a width: at a line's start
+/// it stands left of the field's own area.
+fn caret_lit(g: &Headless) -> bool {
+    let Some(i) = (g.fills.iter()).position(|(r, _)| (r.width() - 1.5).abs() < 0.01 && r.height() > 8.0)
+    else {
+        return false;
+    };
+    let (r, clip) = (g.fills[i].0, g.fill_clips[i]);
+    assert!(r.intersect(clip).width() >= 1.0, "the caret is clipped away: {r:?} cut to {clip:?}");
+    true
+}
+
+/// Draw frames until the caret is lit (or away), for up to two of its cycles.
+async fn caret_becomes(g: &mut Headless, lit: bool) -> bool {
+    for _ in 0..100 {
+        g.frame();
+        if caret_lit(g) == lit {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    false
+}
+
+/// The prompt's caret blinks: lit, then away for the rest of its cycle, and
+/// typing relights it at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_prompt_caret_blinks() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    g.resize(600.0, 700.0);
+    g.settle(Duration::from_millis(100)).await;
+
+    assert!(caret_becomes(&mut g, true).await, "no caret in the prompt");
+    assert!(
+        g.repaint < Duration::from_secs(1),
+        "the window sleeps while the caret is showing"
+    );
+    assert!(caret_becomes(&mut g, false).await, "the caret never goes away");
+    assert!(caret_becomes(&mut g, true).await, "the caret does not come back");
+    // Typed in the dark half of its cycle, it is lit in the next frame.
+    assert!(caret_becomes(&mut g, false).await);
+    g.text("h");
+    g.frame();
+    assert!(caret_lit(&g), "typing did not relight the caret");
+}

@@ -119,6 +119,9 @@ pub struct Headless {
     pub boxes: Vec<Rect>,
     /// Those with the color each was filled with (red, green, blue, alpha).
     pub fills: Vec<(Rect, [u8; 4])>,
+    /// The rectangle each fill was cut to, index for index with [`Headless::fills`]:
+    /// a fill whose own rectangle falls outside it is not drawn at all.
+    pub fill_clips: Vec<Rect>,
     /// The last frame's shapes.
     pub draw: DrawList,
     size: (f32, f32),
@@ -148,6 +151,7 @@ impl Headless {
             painted: Vec::new(),
             boxes: Vec::new(),
             fills: Vec::new(),
+            fill_clips: Vec::new(),
             draw: DrawList::default(),
             size: (width, height),
             events: Vec::new(),
@@ -172,6 +176,7 @@ impl Headless {
         self.painted.clear();
         self.boxes.clear();
         self.fills.clear();
+        self.fill_clips.clear();
         for item in &out.draw.items {
             match &item.shape {
                 Shape::Text { at, text, .. } => {
@@ -180,6 +185,7 @@ impl Headless {
                 Shape::Rect { rect, fill, .. } if fill.3 > 0 => {
                     self.boxes.push(*rect);
                     self.fills.push((*rect, [fill.0, fill.1, fill.2, fill.3]));
+                    self.fill_clips.push(item.clip);
                 }
                 _ => {}
             }

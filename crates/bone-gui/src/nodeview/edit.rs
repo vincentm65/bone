@@ -1,9 +1,11 @@
 //! A text field: the prompt and the view's text inputs. Its text is edited
 //! with the keys and text left for it this frame, and the pointer places
 //! the cursor and selects; it paints itself: the text (or the placeholder),
-//! the selection, the cursor, and the input method's text being composed.
+//! the selection, the blinking cursor, and the input method's text being
+//! composed.
 
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use crate::backend::input::{Event, Key, Modifiers};
 use crate::backend::interact::Sense;
@@ -21,7 +23,17 @@ pub(crate) struct EditState {
     pub scroll: f32,
     /// The pointer went down here and is selecting.
     pub selecting: bool,
+    /// When the caret's blink cycle started: none while the field or the
+    /// window is without the keyboard, and afresh at each edit, so the caret
+    /// is lit while typing. See [`CARET_PERIOD`].
+    pub caret_at: Option<Instant>,
 }
+
+/// The caret's cycle, in milliseconds: lit for the first [`CARET_ON`] of
+/// each `CARET_PERIOD`, then away for the rest. A field that shows a caret
+/// asks to be drawn again at each edge of the cycle.
+const CARET_PERIOD: u64 = 1000;
+const CARET_ON: u64 = 500;
 
 /// Text with a cursor and a selection, in chars.
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -372,15 +384,38 @@ impl crate::Gui {
                     inside,
                 );
             }
-            fx.paint(
-                Shape::Rect {
-                    rect: caret,
-                    corners: Corners::default(),
-                    fill: look.cursor,
-                },
-                inside,
-            );
+            // The caret blinks. Its cycle starts afresh with every edit,
+            // move, press and composed character, so it is lit while typing.
+            // A window without the keyboard keeps it lit and asks for no
+            // frames.
+            let typing = out.changed || out.moved || out.pressed || !self.view.preedit.is_empty();
+            if typing || !fx.input.focused {
+                state.caret_at = None;
+            }
+            let now = Instant::now();
+            let since = now - *state.caret_at.get_or_insert(now);
+            let phase = since.as_millis() as u64 % CARET_PERIOD;
+            let lit = !fx.input.focused || phase < CARET_ON;
+            if fx.input.focused {
+                let edge = if lit { CARET_ON } else { CARET_PERIOD };
+                fx.out.repaint_after(Duration::from_millis(edge - phase));
+            }
+            if lit {
+                // At a line's start the caret stands just left of the
+                // field's area, which would cut it away whole.
+                let room = Rect::from_min_max(inside.min - vec2(1.5, 0.0), inside.max);
+                fx.paint(
+                    Shape::Rect {
+                        rect: caret,
+                        corners: Corners::default(),
+                        fill: look.cursor,
+                    },
+                    room.intersect(clip),
+                );
+            }
             fx.out.ime = Some(caret);
+        } else {
+            state.caret_at = None;
         }
         out
     }

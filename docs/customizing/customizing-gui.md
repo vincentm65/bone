@@ -335,6 +335,12 @@ standard composer takes `bone.ui.prompt`'s `placeholder`, `prefix`, `min`
 and `max` (else `bone.o.prompt_max_height` when set); the rest of that box
 (border, background, padding, edges) is the composer's card.
 
+The caret in the field with the keyboard blinks: lit for half a second, away
+for the rest of the second, the cycle starting afresh whenever the text or
+the cursor moves so that it stays lit while typing. A window without the
+keyboard focus keeps it lit and asks for no frames. Its color is the `Cursor`
+group's foreground.
+
 ## The chat
 
 `require("bone.nodes").chat(opts)` is the list node for the chat on screen. Its
