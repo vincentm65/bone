@@ -6,7 +6,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
-features=()
+features=(--no-default-features)
 prefix=bone
 if [ "${1:-}" = "--gui" ]; then
   features=(--features gui)

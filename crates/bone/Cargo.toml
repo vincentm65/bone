@@ -22,7 +22,9 @@ libc.workspace = true
 embed-resource = "3"
 
 [features]
-# The desktop GUI (`bone --gui`); off by default, so the TUI build is unchanged.
+# The desktop GUI (`bone --gui`) is built in by default; the TUI costs little
+# extra. Build TUI-only with `--no-default-features`.
+default = ["gui"]
 gui = ["dep:bone-gui"]
 # Windows: no console window (a desktop program). For the npm package's
 # bone-gui.exe, which is only started for the GUI.

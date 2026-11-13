@@ -77,7 +77,7 @@ jobs:
           fi
       - name: build release binary
         shell: bash
-        run: cargo build --release --locked -p bone --target ${{ matrix.target }}
+        run: cargo build --release --locked -p bone --no-default-features --target ${{ matrix.target }}
       - name: verify binary identity
         shell: bash
         run: |
