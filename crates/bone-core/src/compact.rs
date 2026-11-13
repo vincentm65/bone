@@ -500,6 +500,44 @@ fn render(messages: &[ChatMessage]) -> String {
     out.join("\n")
 }
 
+/// The model call a turn was about to make, as its hooks left it: the
+/// system prompt, the context and the tools. Summarizing with these and one
+/// more user message (the instruction) keeps the request a continuation of
+/// the last one, so a provider that caches prompts (a local server's
+/// checkpoint, a hosted prompt cache) reads only the instruction instead of
+/// the whole conversation again. The rendered transcript is the fallback.
+pub(crate) struct Prefix {
+    pub messages: Vec<ChatMessage>,
+    pub tools: Vec<ToolSpec>,
+}
+
+/// The instruction appended to a [`Prefix`]. `kept` is the start of the
+/// first turn kept word for word, if any.
+fn in_place_instruction(custom: Option<&str>, kept: Option<&str>) -> String {
+    let stop =
+        "Stop the task here. Do not call any tools and do not continue the work. Reply only with";
+    let task = match custom {
+        Some(prompt) => format!(
+            "{stop} what the instructions below ask for, about the conversation above.\n\n{prompt}"
+        ),
+        // PROMPT, its first sentence ("Summarize the conversation below …") made "above".
+        None => format!(
+            "{stop} a summary of the conversation above, as a handoff for the assistant that will continue it. {}",
+            PROMPT.split_once(". ").map_or("", |(_, rest)| rest)
+        ),
+    };
+    match kept {
+        Some(start) => format!(
+            "{task}\n\nThe newest turns, from the user message containing \"{start}\", are kept word for word \
+after your summary. Summarize only what comes before that message."
+        ),
+        None => format!(
+            "{task}\n\nNothing after this is kept. Your summary is the only record of the conversation, \
+so quote the findings and the remaining work exactly. Do not list tool names."
+        ),
+    }
+}
+
 /// Clears a session's `compacting` flag however the compaction ends
 /// (including a cancelled turn dropping it).
 struct Compacting<'a>(&'a SessionHandle);
@@ -543,21 +581,27 @@ impl Inner {
         &self,
         session: &SessionHandle,
         reason: &str,
+        prefix: Option<Prefix>,
     ) -> Result<SessionCompactedParams, String> {
         let cfg = self.compact_config();
-        let (session_id, plan, generation, messages_len, pin) = {
+        let (session_id, plan, generation, messages_len, pin, kept) = {
             let mut s = session.lock().unwrap();
             if s.compacting {
                 return Err("this session is already being compacted".into());
             }
             let plan = plan(&s, cfg.keep).ok_or("nothing to compact yet")?;
             s.compacting = true;
+            let kept = s.messages.get(plan.cut).map(|m| match m {
+                ChatMessage::User { content, .. } => content.trim().chars().take(160).collect(),
+                _ => String::new(),
+            });
             (
                 s.info.session_id.clone(),
                 plan,
                 s.generation,
                 s.messages.len(),
                 s.model.clone(),
+                kept,
             )
         };
         let _busy = Compacting(session);
@@ -566,55 +610,83 @@ impl Inner {
             Some(name) => (Some(name), Value::Null),
             None => rt.pinned_options(pin.as_ref()),
         };
-        let can_see_images = rt.supports_images(provider.as_deref(), true);
-        // The kept turns are not in the rendered transcript. Say so, or the
-        // summary describes the previous request as if it were still current.
-        let note = if plan.cut < messages_len {
-            "Newer turns after this transcript are kept word for word and are not shown here. \
-Summarize only this part."
-        } else {
-            "Nothing after this transcript is kept. A short excerpt of what the last rounds \
-found, and what is left, is attached separately; your summary is the only record of everything \
-older, so quote the findings and the remaining work exactly. Do not list tool names."
-        };
-        let mut messages = vec![
-            ChatMessage::System {
-                content: cfg.prompt.clone().unwrap_or_else(|| PROMPT.into()),
-            },
-            ChatMessage::User {
-                content: format!("{}\n\n{note}", render(&plan.input)),
-                images: Vec::new(),
-            },
-        ];
-        if can_see_images {
-            for (index, message) in plan.input.iter().enumerate() {
-                let images = message.images();
-                if !images.is_empty() {
-                    messages.push(ChatMessage::User {
-                        content: format!("Images from transcript message {}. Preserve their relevant visual details in the summary.", index + 1),
-                        images: images.to_vec(),
-                    });
-                }
-            }
-        }
-        let call = ModelCall {
-            provider,
-            options,
+        let call = |messages, tools| ModelCall {
+            provider: provider.clone(),
+            options: options.clone(),
             messages,
-            tools: Vec::new(),
+            tools,
             depth: 0,
             session_id: Some(session_id.clone()),
             source: Some("compact"),
         };
-        let reply = self
-            .model_call(call, &mut |_| {})
-            .await
-            .map_err(|e| format!("the summary failed: {e}"))?;
-        let text = reply.content.trim();
-        if text.is_empty() {
-            return Err("the summary came back empty".into());
+        let mut text = String::new();
+        // In place first: the call the turn was about to make, plus the
+        // instruction. Not with a separate summarizer (`compact.provider`),
+        // which holds none of this conversation.
+        if let Some(p) = prefix.filter(|_| cfg.provider.is_none()) {
+            let mut messages = p.messages;
+            messages.push(ChatMessage::User {
+                content: in_place_instruction(cfg.prompt.as_deref(), kept.as_deref()),
+                images: Vec::new(),
+            });
+            let tools = (p.tools.iter())
+                .map(|t| serde_json::to_value(t).unwrap_or_default())
+                .collect();
+            match self.model_call(call(messages, tools), &mut |_| {}).await {
+                Ok(reply) if reply.tool_calls.is_empty() && !reply.content.trim().is_empty() => {
+                    text = reply.content.trim().to_owned();
+                }
+                // (a tool call instead of a summary, or no room for the
+                // instruction: the rendered transcript is smaller)
+                Ok(_) => eprintln!(
+                    "bone: compact: the in-place reply was no summary; summarizing the transcript"
+                ),
+                Err(e) => eprintln!(
+                    "bone: compact: the in-place summary failed ({e}); summarizing the transcript"
+                ),
+            }
         }
-
+        if text.is_empty() {
+            let can_see_images = rt.supports_images(provider.as_deref(), true);
+            // The kept turns are not in the rendered transcript. Say so, or the
+            // summary describes the previous request as if it were still current.
+            let note = if plan.cut < messages_len {
+                "Newer turns after this transcript are kept word for word and are not shown here. \
+Summarize only this part."
+            } else {
+                "Nothing after this transcript is kept. A short excerpt of what the last rounds \
+found, and what is left, is attached separately; your summary is the only record of everything \
+older, so quote the findings and the remaining work exactly. Do not list tool names."
+            };
+            let mut messages = vec![
+                ChatMessage::System {
+                    content: cfg.prompt.clone().unwrap_or_else(|| PROMPT.into()),
+                },
+                ChatMessage::User {
+                    content: format!("{}\n\n{note}", render(&plan.input)),
+                    images: Vec::new(),
+                },
+            ];
+            if can_see_images {
+                for (index, message) in plan.input.iter().enumerate() {
+                    let images = message.images();
+                    if !images.is_empty() {
+                        messages.push(ChatMessage::User {
+                            content: format!("Images from transcript message {}. Preserve their relevant visual details in the summary.", index + 1),
+                            images: images.to_vec(),
+                        });
+                    }
+                }
+            }
+            let reply = self
+                .model_call(call(messages, Vec::new()), &mut |_| {})
+                .await
+                .map_err(|e| format!("the summary failed: {e}"))?;
+            text = reply.content.trim().to_owned();
+            if text.is_empty() {
+                return Err("the summary came back empty".into());
+            }
+        }
         let mut s = session.lock().unwrap();
         // Positions only move when bone.session.compact rewrites the
         // transcript; then this summary no longer fits it.
@@ -624,7 +696,7 @@ older, so quote the findings and the remaining work exactly. Do not list tool na
         let before = tokens(&s, &s.context());
         s.summarize(Some(Summary {
             through: plan.cut,
-            text: text.to_owned(),
+            text,
         }))
         .map_err(|e| format!("cannot save session: {e}"))?;
         let done = SessionCompactedParams {

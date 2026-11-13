@@ -610,7 +610,7 @@ impl Core {
                 let done = if p.clear {
                     self.inner.clear_compaction(&session)
                 } else {
-                    self.inner.compact(&session, "manual").await
+                    self.inner.compact(&session, "manual", None).await
                 };
                 // "nothing to compact yet" and the like: plain messages.
                 done.map(|d| serde_json::to_value(d).unwrap_or_default())

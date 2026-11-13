@@ -1867,8 +1867,10 @@ async fn the_limit_compacts_before_the_call() {
     let seen = h.last_seen();
     assert_handoff(&seen[0], "SUM");
     assert_eq!(&seen[1..], &[user("q2")]);
-    // A failed summary leaves the context intact; the end-of-turn check retries.
+    // A failed summary (in place, then from the rendered transcript) leaves
+    // the context intact; the end-of-turn check retries.
     h.provider.steps.lock().unwrap().extend([
+        Step::Fail("summary unavailable".into()),
         Step::Fail("summary unavailable".into()),
         text("a3"),
         text("SUM2"),

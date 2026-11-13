@@ -56,6 +56,15 @@ const MAX_RETRIES: u32 = 5;
 /// How long `stream` hooks' input collects before they run.
 const STREAM_BATCH: Duration = Duration::from_millis(50);
 
+/// A model call as the hooks left it (`Agent::request`): messages, tools,
+/// and the provider and model a request hook asked for.
+type Request = (
+    Vec<ChatMessage>,
+    Vec<ToolSpec>,
+    Option<String>,
+    Option<String>,
+);
+
 enum Stop {
     Cancelled,
     Failed(String),
@@ -200,12 +209,79 @@ impl Turn<'_> {
         cfg
     }
 
+    /// Compact with the request the next model call would send (`system`
+    /// and the context, through the same hooks) as the summarizer's
+    /// prefix: a provider that caches prompts has all of it but the
+    /// instruction already (see `compact.rs`). A request hook that moves the
+    /// call to another provider or model, or refuses, gets the rendered transcript.
+    async fn compact_in_place(&self, system: &ChatMessage, reason: &str) -> Result<bool, Stop> {
+        let mut messages = vec![system.clone()];
+        messages.extend(self.session.lock().unwrap().context());
+        let prefix = match self.request(messages).await {
+            Ok((messages, tools, None, None)) => Some(crate::compact::Prefix { messages, tools }),
+            Err(Stop::Cancelled) => return Err(Stop::Cancelled),
+            _ => None,
+        };
+        self.compact(reason, prefix).await
+    }
+
+    /// The messages and tools of a model call after the `context` and
+    /// `request` hooks, and the provider or model a request hook asked for.
+    async fn request(&self, mut messages: Vec<ChatMessage>) -> Result<Request, Stop> {
+        if self.has_hook("context") {
+            let ev = json!({ "session_id": self.session_id, "messages": messages });
+            if let Some(ev) = self.safe_hooks("context", ev).await? {
+                messages = messages_from_lua(&ev["messages"], &messages).map_err(|e| {
+                    Stop::Failed(format!("context hook returned bad messages: {e}"))
+                })?;
+            }
+        }
+        let mut tools: Vec<ToolSpec> = self.rt.tools.specs().to_vec();
+        // MCP tools, unless a built-in or Lua tool has the name.
+        for t in self.inner.mcp.tool_specs() {
+            if !tools.iter().any(|have| have.name == t.name) {
+                tools.push(t);
+            }
+        }
+        let mut provider = None;
+        let mut model = None;
+        let ev = self.has_hook("request").then(|| {
+            json!({
+                "session_id": self.session_id,
+                "messages": messages,
+                "tools": tools,
+            })
+        });
+        if let Some(ev) = ev
+            && let Some(ev) = self.safe_hooks("request", ev).await?
+        {
+            provider = ev["provider"].as_str().map(str::to_owned);
+            model = ev["model"].as_str().map(str::to_owned);
+            messages = messages_from_lua(&ev["messages"], &messages)
+                .map_err(|e| Stop::Failed(format!("request hook returned bad messages: {e}")))?;
+            tools = serde_json::from_value(list(&ev["tools"]))
+                .map_err(|e| Stop::Failed(format!("request hook returned bad tools: {e}")))?;
+        }
+        // Schemas from Lua tables come out in Lua's iteration order, which
+        // changes with every Lua state (a restart, a core reload). Sorted,
+        // the tool definitions read the same each time, so the provider's
+        // prompt cache survives them.
+        for t in &mut tools {
+            sort_keys(&mut t.parameters);
+        }
+        Ok((messages, tools, provider, model))
+    }
+
     /// Compact the session between model calls (see `compact.rs`); whether
     /// it did. Failing to (nothing to compact yet, the summary failed) is
     /// not the turn's failure.
-    async fn compact(&self, reason: &str) -> Result<bool, Stop> {
+    async fn compact(
+        &self,
+        reason: &str,
+        prefix: Option<crate::compact::Prefix>,
+    ) -> Result<bool, Stop> {
         tokio::select! {
-            r = self.inner.compact(self.session, reason) => {
+            r = self.inner.compact(self.session, reason, prefix) => {
                 if let Err(error) = &r {
                     self.inner.emit::<SessionCompactFailed>(SessionCompactFailedParams {
                         session_id: self.session_id.clone(), reason: reason.into(), error: error.clone(),
@@ -311,58 +387,17 @@ impl Turn<'_> {
                     (over, all)
                 };
                 if over {
-                    self.compact("limit").await?;
+                    self.compact_in_place(&system, "limit").await?;
                 } else {
                     checked = Some(all);
                 }
             }
-            let mut messages = checked.unwrap_or_else(|| {
-                let mut all = vec![system];
+            let messages = checked.unwrap_or_else(|| {
+                let mut all = vec![system.clone()];
                 all.extend(self.session.lock().unwrap().context());
                 all
             });
-            if self.has_hook("context") {
-                let ev = json!({ "session_id": self.session_id, "messages": messages });
-                if let Some(ev) = self.safe_hooks("context", ev).await? {
-                    messages = messages_from_lua(&ev["messages"], &messages).map_err(|e| {
-                        Stop::Failed(format!("context hook returned bad messages: {e}"))
-                    })?;
-                }
-            }
-            let mut tools: Vec<ToolSpec> = self.rt.tools.specs().to_vec();
-            // MCP tools, unless a built-in or Lua tool has the name.
-            for t in self.inner.mcp.tool_specs() {
-                if !tools.iter().any(|have| have.name == t.name) {
-                    tools.push(t);
-                }
-            }
-            let mut use_provider = None;
-            let mut use_model = None;
-            let ev = self.has_hook("request").then(|| {
-                json!({
-                    "session_id": self.session_id,
-                    "messages": messages,
-                    "tools": tools,
-                })
-            });
-            if let Some(ev) = ev
-                && let Some(ev) = self.safe_hooks("request", ev).await?
-            {
-                use_provider = ev["provider"].as_str().map(str::to_owned);
-                use_model = ev["model"].as_str().map(str::to_owned);
-                messages = messages_from_lua(&ev["messages"], &messages).map_err(|e| {
-                    Stop::Failed(format!("request hook returned bad messages: {e}"))
-                })?;
-                tools = serde_json::from_value(list(&ev["tools"]))
-                    .map_err(|e| Stop::Failed(format!("request hook returned bad tools: {e}")))?;
-            }
-            // Schemas from Lua tables come out in Lua's iteration order, which
-            // changes with every Lua state (a restart, a core reload). Sorted,
-            // the tool definitions read the same each time, so the provider's
-            // prompt cache survives them.
-            for t in &mut tools {
-                sort_keys(&mut t.parameters);
-            }
+            let (messages, tools, use_provider, use_model) = self.request(messages).await?;
 
             // Tool definitions count toward the provider's input tokens; left
             // out, a short transcript with many tools looks several times
@@ -461,7 +496,9 @@ impl Turn<'_> {
                             && !overflowed
                             && compact.auto
                             && crate::compact::is_overflow(&e.0)
-                            && self.compact("overflow").await? =>
+                            // (the prompt is what overflowed: the rendered,
+                            // clipped transcript, not the prompt again)
+                            && self.compact("overflow", None).await? =>
                     {
                         overflowed = true;
                         continue 'call;
@@ -573,7 +610,7 @@ impl Turn<'_> {
                             && crate::compact::can_compact(&s, compact.keep)
                     };
                     if can {
-                        self.compact("limit").await?;
+                        self.compact_in_place(&system, "limit").await?;
                     }
                 }
                 // A message steered in meanwhile gets an answer before the
