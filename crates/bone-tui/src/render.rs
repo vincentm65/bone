@@ -209,7 +209,16 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         }
     }
     if let Some(c) = cursor {
-        frame.set_cursor_position(c);
+        // Experiment (BONE_DRAWN_CARET=1): draw the caret as a reversed
+        // cell, like the settings fields, and leave the terminal's hidden.
+        if std::env::var_os("BONE_DRAWN_CARET").is_some() {
+            if frame.area().contains(c) {
+                let cell = &mut frame.buffer_mut()[(c.x, c.y)];
+                cell.set_style(cell.style().add_modifier(ratatui::style::Modifier::REVERSED));
+            }
+        } else {
+            frame.set_cursor_position(c);
+        }
     }
     // A finished selection is copied, unless a `select` handler returns
     // true for its text.
