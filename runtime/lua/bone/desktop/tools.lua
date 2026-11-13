@@ -613,7 +613,7 @@ local function summary_nodes(item, width)
   -- says it opens.
   local meta = {}
   if ms >= 100 and not running then
-    meta[#meta + 1] = { text = ms >= 1000 and bone.util.duration(ms / 1000) or (ms .. "ms"), hl = "Dim", font = "mono" }
+    meta[#meta + 1] = { text = bone.util.duration(ms / 1000), hl = "Dim", font = "mono" }
   end
   local spans = { { text = did, hl = "ToolArgs" } }
   if failed > 0 then

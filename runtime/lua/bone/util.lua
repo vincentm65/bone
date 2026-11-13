@@ -96,12 +96,14 @@ function M.extend(...)
   return out
 end
 
---- Human-readable duration: `45s`, `1m 05s`, `1h 04m`.
+--- Human-readable duration: `0.65s`, `45s`, `1m 05s`, `1h 04m`.
 function M.duration(secs)
   if not secs then
     return ""
   end
-  secs = math.floor(secs)
+  local ms = math.floor(secs * 1000 + 0.5)
+  if ms < 1000 then return string.format("%.2fs", ms / 1000) end
+  secs = math.floor(ms / 1000)
   local h, m, s = math.floor(secs / 3600), math.floor(secs % 3600 / 60), secs % 60
   if h > 0 then
     return string.format("%dh %02dm", h, m)
