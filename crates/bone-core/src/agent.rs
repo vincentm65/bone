@@ -92,6 +92,7 @@ pub(crate) async fn run_turn(
         let s = session.lock().unwrap();
         (s.info.session_id.clone(), PathBuf::from(&s.info.cwd))
     };
+    inner.settings_from_disk().await;
     let rt = inner.runtime();
     let stream = rt
         .scripting

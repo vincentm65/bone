@@ -332,6 +332,31 @@ impl Inner {
         self.start_next(session);
     }
 
+    /// Take up `settings.json` as it is now if it was changed outside this
+    /// core (an editor, the agent, another core). Checked as a turn starts.
+    pub(crate) async fn settings_from_disk(&self) {
+        let Some(Ok(disk)) = (self.source.as_ref()).map(|s| settings::load(&s.config_dir)) else {
+            return;
+        };
+        let old = {
+            let mut guard = self.settings.lock().unwrap();
+            if guard.as_ref().ok() == Some(&disk) {
+                return;
+            }
+            std::mem::replace(&mut *guard, Ok(disk.clone())).unwrap_or_default()
+        };
+        if provider_differs(&old, &disk)
+            && let Err(e) = self.reload(Change::Same).await
+        {
+            eprintln!("bone: settings.json: {e}");
+        }
+        self.emit::<SettingsChanged>(SettingsChangedParams {
+            path: String::new(),
+            value: Value::Null,
+            settings: disk,
+        });
+    }
+
     /// A session just made: start it and tell every client.
     fn created_session(&self, info: &SessionInfo) {
         self.started_session(&info.session_id, &info.cwd, true);
@@ -460,32 +485,31 @@ impl Core {
                 )));
             }
         }
-        let before = {
+        let (before, reload) = {
             let mut guard = self.inner.settings.lock().unwrap();
-            let current = guard.as_mut().map_err(|e| {
+            // The file may have changed since this core read it (another
+            // core on the same config dir, or an editor): the change goes
+            // onto what is there now, not onto this core's older copy.
+            let mut current = settings::load(&source.config_dir).map_err(|e| {
                 RpcError::invalid_params(format!("{e}; fix or remove it before changing settings"))
             })?;
             let before = current.clone();
-            settings::set(current, &path, value.clone()).map_err(RpcError::invalid_params)?;
+            settings::set(&mut current, &path, value.clone()).map_err(RpcError::invalid_params)?;
             // A provider added while none is chosen in settings is chosen.
             if let Some(name) = path.strip_prefix("providers.")
                 && value.is_object()
-                && settings::get(current, "provider").is_none()
+                && settings::get(&current, "provider").is_none()
             {
-                settings::set(current, "provider", Value::String(name.to_owned()))
+                settings::set(&mut current, "provider", Value::String(name.to_owned()))
                     .map_err(RpcError::invalid_params)?;
             }
-            settings::save(&source.config_dir, current).map_err(RpcError::internal)?;
-            before
+            settings::save(&source.config_dir, &current).map_err(RpcError::internal)?;
+            let old = std::mem::replace(&mut *guard, Ok(current.clone())).unwrap_or_default();
+            (before, provider_differs(&old, &current))
         };
-        if (path == "provider" || path.starts_with("providers."))
-            && let Err(e) = self.inner.reload(Change::Same).await
-        {
-            let mut guard = self.inner.settings.lock().unwrap();
-            if let Ok(current) = guard.as_mut() {
-                *current = before;
-                let _ = settings::save(&source.config_dir, current);
-            }
+        if reload && let Err(e) = self.inner.reload(Change::Same).await {
+            let _ = settings::save(&source.config_dir, &before);
+            *self.inner.settings.lock().unwrap() = Ok(before);
             return Err(RpcError::invalid_params(format!("not saved: {e}")));
         }
         // The session that asked follows the change; the others keep theirs.
@@ -1205,6 +1229,10 @@ fn reloaded(r: Result<bone_proto::methods::ReloadResult, String>) -> Result<Valu
         Ok(r) => Ok(serde_json::to_value(r).unwrap_or_default()),
         Err(e) => Err(RpcError::new(RpcError::INVALID_PARAMS, e)),
     }
+}
+
+fn provider_differs(a: &Value, b: &Value) -> bool {
+    (a.get("provider"), a.get("providers")) != (b.get("provider"), b.get("providers"))
 }
 
 fn no_item(id: u64) -> RpcError {
