@@ -45,10 +45,7 @@ fn modifier(m: Modifier) -> ratatui::style::Modifier {
         (Modifier::DIM, R::DIM),
         (Modifier::ITALIC, R::ITALIC),
         (Modifier::UNDERLINED, R::UNDERLINED),
-        (Modifier::SLOW_BLINK, R::SLOW_BLINK),
-        (Modifier::RAPID_BLINK, R::RAPID_BLINK),
         (Modifier::REVERSED, R::REVERSED),
-        (Modifier::HIDDEN, R::HIDDEN),
         (Modifier::CROSSED_OUT, R::CROSSED_OUT),
     ]
     .into_iter()

@@ -13,9 +13,9 @@ const MAX_TEXT: usize = 1 << 20;
 const SCROLLBACK: usize = 5000;
 
 pub struct Term {
-    /// Output as written, from byte `start` up to `end` of the stream.
+    /// The output as written (its last MAX_TEXT bytes), which ends at byte
+    /// `end` of the stream.
     text: String,
-    start: u64,
     end: u64,
     /// Chunks went missing (or none came yet): read it all again.
     pub stale: bool,
@@ -37,7 +37,6 @@ impl Default for Term {
     fn default() -> Self {
         Term {
             text: String::new(),
-            start: 0,
             end: 0,
             stale: true,
             reading: false,
@@ -150,7 +149,6 @@ impl Term {
     pub fn load(&mut self, offset: u64, data: &str) {
         self.pending.clear();
         self.text.clear();
-        self.start = offset;
         self.end = offset;
         self.screen = None;
         self.stale = false;
@@ -169,7 +167,6 @@ impl Term {
                 cut += 1;
             }
             self.text.drain(..cut);
-            self.start += cut as u64;
         }
     }
 

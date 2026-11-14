@@ -36,10 +36,7 @@ bitflags! {
         const DIM = 1 << 1;
         const ITALIC = 1 << 2;
         const UNDERLINED = 1 << 3;
-        const SLOW_BLINK = 1 << 4;
-        const RAPID_BLINK = 1 << 5;
         const REVERSED = 1 << 6;
-        const HIDDEN = 1 << 7;
         const CROSSED_OUT = 1 << 8;
     }
 }
@@ -68,12 +65,6 @@ impl Style {
     pub const fn add_modifier(mut self, m: Modifier) -> Self {
         self.sub_modifier = self.sub_modifier.difference(m);
         self.add_modifier = self.add_modifier.union(m);
-        self
-    }
-
-    pub const fn remove_modifier(mut self, m: Modifier) -> Self {
-        self.add_modifier = self.add_modifier.difference(m);
-        self.sub_modifier = self.sub_modifier.union(m);
         self
     }
 
