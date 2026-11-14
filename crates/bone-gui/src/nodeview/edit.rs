@@ -264,7 +264,10 @@ impl crate::Gui {
         if resp.hovered {
             fx.out.cursor = Cursor::Text;
         }
-        let shaped = self.field_shape(fx, f, look, area.width());
+        // The input method's text goes to the focused field only, and never
+        // shows in clear in a password field.
+        let preedit = if focused && !look.password { self.view.preedit.clone() } else { String::new() };
+        let shaped = self.field_shape(fx, f, look, area.width(), &preedit);
         let state = self.view.edits.entry(key.to_owned()).or_default();
         let origin = |state: &EditState| {
             if look.multiline {
@@ -332,7 +335,7 @@ impl crate::Gui {
                 );
             }
         }
-        if f.text.is_empty() && self.view.preedit.is_empty() || !focused && f.text.is_empty() {
+        if f.text.is_empty() && preedit.is_empty() {
             let mut st = look.style.clone();
             st.color = look.placeholder_color;
             let hint = fx.shaper.shape(Job::simple(
@@ -359,7 +362,7 @@ impl crate::Gui {
             );
         }
         if focused {
-            let shown = f.cursor + self.view.preedit.chars().count();
+            let shown = f.cursor + preedit.chars().count();
             let (c, line) = shaped.cursor_pos(shown.min(shaped.char_count()));
             // A thin caret, and at a line's start it stands just before the
             // first glyph (the placeholder's too), not over it.
@@ -391,7 +394,7 @@ impl crate::Gui {
             // wipes the half-blink the timer left standing, and the cycle
             // starts afresh on the next frame that has the keyboard, so the
             // caret is there the moment focus comes back.
-            let typing = out.changed || out.moved || out.pressed || !self.view.preedit.is_empty();
+            let typing = out.changed || out.moved || out.pressed || !preedit.is_empty();
             let blind = !fx.input.focused;
             if typing || blind {
                 state.caret_at = None;
@@ -428,13 +431,12 @@ impl crate::Gui {
 
     /// The field's text laid out as it is drawn: the password hidden, the
     /// marks over it, and the input method's text at the cursor.
-    fn field_shape(&self, fx: &Fx, f: &Field, look: &Look, width: f32) -> Arc<Shaped> {
+    fn field_shape(&self, fx: &Fx, f: &Field, look: &Look, width: f32, preedit: &str) -> Arc<Shaped> {
         let text: String = if look.password {
             "•".repeat(f.len())
         } else {
             f.text.clone()
         };
-        let preedit = &self.view.preedit;
         let cursor = f.cursor.min(text.chars().count());
         let mut job = Job {
             text: String::new(),
