@@ -266,7 +266,10 @@ async fn image_only_send_persists_and_survives_restart() {
         })
         .await
         .unwrap();
-    let bone_proto::types::ChatMessage::User { content, images } = &stored.messages[0] else {
+    let bone_proto::types::ChatMessage::User {
+        content, images, ..
+    } = &stored.messages[0]
+    else {
         panic!()
     };
     assert!(content.is_empty());

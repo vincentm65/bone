@@ -245,7 +245,8 @@ end
 ---   bone.queue.add(id, text, mode, images, source)   mode "steer" (default) or "next";
 ---                                     idle sessions start a turn: { turn_id }, else { id };
 ---                                     source names a sender other than the user
----                                     ("agent", "job"), so trays leave it out
+---                                     ("agent", "job"): trays leave it out, and the
+---                                     chat keeps it and draws it as a report
 
 ---   bone.queue.list(id)              { { id, text, mode, created_at } }
 ---   bone.queue.remove(id, queue_id), bone.queue.clear(id)

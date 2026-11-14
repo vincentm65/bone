@@ -4,6 +4,7 @@
 --   bone.ui.views.reasoning = function(item, ctx) return nil end   -- hide it
 --
 -- item: { kind, index, text, streaming }           user/reasoning/assistant
+--       (a user item's `source` says who sent it when not the user: "job", "agent")
 --       { kind, index, text, error }                notice
 --       { kind, index, id, name, arguments, raw_arguments,
 --         output, is_error, done }                   tool
@@ -100,17 +101,24 @@ end
 
 -- ---- messages -------------------------------------------------------------
 
+local function images(item, out, width)
+  for _, image in ipairs(item.images or {}) do
+    append(out, wrap({ { ("  [Image: %s · %d×%d]"):format(image.name, image.width, image.height), "Dim" } }, width))
+  end
+  return out
+end
+
+local report -- a message the user did not type; drawn below, with the tool views
+
 function views.user(item, ctx)
+  if item.source then return report(item, ctx) end
   local out = { {} } -- A blank line above every user message, including the first.
   local band = "UserMessage"
   for i, line in ipairs(lines(item.text)) do
     local first = i == 1 and { { "› ", "UserPrompt" } } or { { "  ", band } }
     append(out, wrap({ { line, band } }, ctx.width, { first = first, rest = { { "  ", band } }, pad = band }))
   end
-  for _, image in ipairs(item.images or {}) do
-    append(out, wrap({ { ("  [Image: %s · %d×%d]"):format(image.name, image.width, image.height), "Dim" } }, ctx.width))
-  end
-  return out
+  return images(item, out, ctx.width)
 end
 
 function views.reasoning(item, ctx)
@@ -569,6 +577,30 @@ local function agent_content(item, ctx, args)
   return { title = title, body = rows }
 end
 
+-- A message from a job or an agent (item.source): its first line, then the
+-- rest as a short preview in a gutter, like a sub-agent's report. A click
+-- or ctrl+t shows all of it.
+report = function(item, ctx)
+  local full = detail() == "full"
+  if toggled[tool_key(item)] then full = not full end
+  local head, rest = trim(item.text):match("^([^\n]*)\n?(.*)$")
+  local out = { {} }
+  append(out, wrap({ { (trim(head):gsub(":$", "")), "Dim" } }, ctx.width,
+    { first = { { "  ◆ ", "Accent" } }, rest = { { "    ", "Normal" } } }))
+  local rows = bone.ui.markdown(trim(rest), math.max(ctx.width - 8, 1))
+  local shown = full and #rows or math.min(#rows, AGENT_PREVIEW_MAX)
+  while shown > 0 and #rows[shown] == 0 do shown = shown - 1 end
+  local body = {}
+  for i = 1, shown do body[#body + 1] = rows[i] end
+  if shown < #rows then
+    body[#body + 1] = { { more(#rows - shown, "line", { tool_expanded = full }), "ToolSummary" } }
+  end
+  for i, line in ipairs(body) do
+    out[#out + 1] = append({ { i == #body and "      ╰ " or "      │ ", "ToolGutter" } }, line)
+  end
+  return images(item, out, ctx.width)
+end
+
 --- The built-in content for a tool call: { title = spans or { spans, ... },
 --- lines = { spans, ... }, body = rows drawn as they are (gutter, diff) }.
 function bone.ui.tool_content(item, ctx)
@@ -865,7 +897,7 @@ bone.on("mouse", function(ev)
     return
   end
   local item = bone.chat.item(ev.index)
-  if not item or item.kind ~= "tool" then return end
+  if not item or not (item.kind == "tool" or item.kind == "user" and item.source) then return end
   -- A live sub-agent's title still opens its session; its report toggles.
   if item.name == "subagent" and (ev.line or 1) <= 2 and require("bone.agents").for_call(item.id) then
     return

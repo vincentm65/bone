@@ -62,6 +62,7 @@ pub(crate) fn summary_message(text: &str) -> ChatMessage {
     ChatMessage::User {
         content: format!("{SUMMARY_HEADER}{text}"),
         images: Vec::new(),
+        source: None,
     }
 }
 
@@ -72,6 +73,7 @@ pub(crate) fn context_message(text: &str, covered: &[ChatMessage], kept: bool) -
     ChatMessage::User {
         content: format!("{SUMMARY_HEADER}{text}{}", handoff(covered, kept)),
         images: Vec::new(),
+        source: None,
     }
 }
 
@@ -125,7 +127,10 @@ In progress:\n",
 }
 
 fn request_text(message: &ChatMessage) -> String {
-    let ChatMessage::User { content, images } = message else {
+    let ChatMessage::User {
+        content, images, ..
+    } = message
+    else {
         return String::new();
     };
     let mut text = clip(content.trim(), REQUEST_CHARS);
@@ -331,7 +336,9 @@ pub(crate) fn chars(messages: &[ChatMessage], replays_reasoning: bool) -> usize 
         .iter()
         .map(|m| match m {
             ChatMessage::System { content } => content.len(),
-            ChatMessage::User { content, images }
+            ChatMessage::User {
+                content, images, ..
+            }
             | ChatMessage::Tool {
                 content, images, ..
             } => {
@@ -467,7 +474,9 @@ fn render(messages: &[ChatMessage]) -> String {
     for m in messages {
         match m {
             ChatMessage::System { .. } => {}
-            ChatMessage::User { content, images } => {
+            ChatMessage::User {
+                content, images, ..
+            } => {
                 let labels = images
                     .iter()
                     .map(|i| format!(" [Image: {} {}×{}]", i.name, i.width, i.height))
@@ -634,6 +643,7 @@ impl Inner {
             messages.push(ChatMessage::User {
                 content: in_place_instruction(cfg.prompt.as_deref(), kept.as_deref()),
                 images: Vec::new(),
+                source: None,
             });
             let tools = (p.tools.iter())
                 .map(|t| serde_json::to_value(t).unwrap_or_default())
@@ -671,6 +681,7 @@ older, so quote the findings and the remaining work exactly. Do not list tool na
                 ChatMessage::User {
                     content: format!("{}\n\n{note}", render(&plan.input)),
                     images: Vec::new(),
+                    source: None,
                 },
             ];
             if can_see_images {
@@ -680,6 +691,7 @@ older, so quote the findings and the remaining work exactly. Do not list tool na
                         messages.push(ChatMessage::User {
                             content: format!("Images from transcript message {}. Preserve their relevant visual details in the summary.", index + 1),
                             images: images.to_vec(),
+                            source: None,
                         });
                     }
                 }
@@ -790,6 +802,7 @@ mod tests {
         ChatMessage::User {
             content: text.into(),
             images: Vec::new(),
+            source: None,
         }
     }
 

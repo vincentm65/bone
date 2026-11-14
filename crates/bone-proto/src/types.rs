@@ -18,6 +18,10 @@ pub enum ChatMessage {
         content: String,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<ImageAttachment>,
+        /// Who sent it when not the user (e.g. "agent", "job"), as queued
+        /// with `bone.queue.add`. Providers don't send it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        source: Option<String>,
     },
     Assistant {
         #[serde(default, skip_serializing_if = "String::is_empty")]

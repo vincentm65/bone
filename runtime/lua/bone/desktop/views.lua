@@ -88,9 +88,39 @@ local function message(item, group)
   return { md.text({ { item.text, group } }, { line_height = md.line_height }) }
 end
 
+-- A message from a job or an agent (item.source): its first line, then a
+-- short preview of the rest; a click shows all of it.
+local PREVIEW = 3
+local opened = {}
+local function report(item, ctx)
+  local s = bone.chat.session()
+  local key = (s and s.session_id or "") .. ":" .. tostring(item.key)
+  local head, rest = trim(item.text):match("^([^\n]*)\n?(.*)$")
+  local out = { md.text({ { "◆ ", "Accent" }, { (trim(head):gsub(":$", "")), "Dim" } }, { size = md.small_size }) }
+  local paras = md.nodes(trim(rest), "ToolOutput", { size = md.small_size, indent = 12 })
+  for i, para in ipairs(paras) do
+    if not opened[key] and i > PREVIEW then
+      out[#out + 1] = md.text({ { "⋮ +" .. (#paras - PREVIEW) .. " more", "Dim" } }, { size = md.small_size, indent = 12 })
+      break
+    end
+    out[#out + 1] = para
+  end
+  images(item, out)
+  footer(item, ctx, out)
+  return {
+    node = box(out, { pad = { 0, 4 }, margin = { 10, 4 } }),
+    lines = plain(item.text, "Dim"),
+    click = function()
+      opened[key] = not opened[key]
+      bone.chat.redraw(item.index)
+    end,
+  }
+end
+
 -- ---- views -----------------------------------------------------------------
 
 function M.user(item, ctx)
+  if item.source then return report(item, ctx) end
   local out = message(item, "UserBubble")
   images(item, out)
   footer(item, ctx, out)

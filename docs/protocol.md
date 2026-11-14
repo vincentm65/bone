@@ -107,6 +107,8 @@ The queue: each session keeps `[{ id, text, images?, mode: "steer" | "next", cre
 
 Empty assistant `content`/`reasoning`/`tool_calls`, absent `reasoning_state` and a false `is_error` are omitted. A tool call's `arguments` is the raw JSON string the model produced, which may be invalid. Assistant `reasoning_state` is saved with the transcript and returned to clients: `{ model, items, prefix?, field? }` holds opaque provider reasoning for replay on compatible later calls. Keep it intact when copying messages; `prefix` can bind it to an unchanged conversation, and `field` records the Chat Completions reasoning field.
 
+A user message has `source` when someone other than the user sent it: the `source` it was queued with (`bone.queue.add`), such as `"agent"` or `"job"`. Providers do not send it.
+
 User and tool messages may include `images: [ImageAttachment, ...]`. `read_file` image results retain their references on the tool message. `tool/finished` reports the text and dimensions; `session/messages` includes the image references.
 
 ## Events
@@ -115,7 +117,7 @@ Every event carries `session_id` (except `echoed`, `ask/resolved`, `settings/cha
 
 | Event | Params | Meaning |
 |---|---|---|
-| `turn/started` | `{ text, images? }` | a user message started a turn (from any client) |
+| `turn/started` | `{ text, images?, source? }` | a user message started a turn (from any client); `source` as on the message |
 | `message/delta` | `{ kind: "text" \| "reasoning", text }` | streamed model output |
 | `message/completed` | `{ message, usage? }` | the final assistant message as saved; replaces whatever streamed |
 | `tool/started` | `{ call, started_at?, generation_ms? }` | the core is handling a tool call (`tool_call` hooks run next); `started_at` is milliseconds since the Unix epoch. On the first call of a reply, `generation_ms` is how long the model spent writing that reply after its reasoning (from the last reasoning it streamed, or the start of the model call when none did, to the reply's end) |
@@ -124,7 +126,7 @@ Every event carries `session_id` (except `echoed`, `ask/resolved`, `settings/cha
 | `process/changed` | `{ session_id, version, process: ProcessSnapshot, chunk? }` | a managed shell process started, produced output, or changed state. `chunk` is `{ offset, data }`: new output as written, at byte `offset` (chunks follow on from each other; after a gap, `process/read` it) |
 | `ask/requested` | `{ ask_id, question }` | core Lua (a hook or tool) called `bone.ask(question)` and waits; answer with `ask/respond`. `question` is whatever the Lua passed, e.g. `{ kind: "confirm", text: "Write this file?" }` |
 | `ask/resolved` | `{ ask_id, answer }` | answered by some client, or `answer: null` if it was dropped (the turn was cancelled, or the core reloaded) first |
-| `turn/steered` | `{ text }` | a steer message from the queue joined the running turn's transcript (show it as a user message) |
+| `turn/steered` | `{ text, images?, source? }` | a steer message from the queue joined the running turn's transcript (show it as a user message) |
 | `queue/changed` | `{ items, paused, error? }` | the session's queue after a change; a failed automatic start retains the item and pauses the queue. `error` also reports save failures, which do not reject accepted changes or stop the queue |
 | `turn/finished` | `{ outcome: { status: "completed" \| "cancelled" \| "failed", message? } }` | the turn is over |
 | `settings/changed` | `{ path, value, settings }` | a setting was saved (`value` null: removed) by some client; `settings` is all of them (no `session_id`) |

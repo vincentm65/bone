@@ -65,6 +65,7 @@ mod tests {
             ChatMessage::User {
                 content: "hi".into(),
                 images: Vec::new(),
+                source: None,
             },
             ChatMessage::Assistant {
                 content: String::new(),
@@ -102,6 +103,7 @@ mod tests {
         let user = ChatMessage::User {
             content: "hi".into(),
             images: Vec::new(),
+            source: None,
         };
         let asked = ChatMessage::Assistant {
             content: String::new(),

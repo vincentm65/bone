@@ -4,7 +4,8 @@
     "method": "turn/steered",
     "params": {
       "session_id": "01a0fe5e-0000-7000-8000-000000000001",
-      "text": "also update the README",
+      "source": "job",
+      "text": "Background job shell-1 finished after 2s: exit code 0.",
       "turn_id": 1
     }
   }

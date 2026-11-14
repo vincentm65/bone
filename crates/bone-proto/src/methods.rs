@@ -1044,6 +1044,9 @@ pub struct TurnStartedParams {
     pub text: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<crate::types::ImageAttachment>,
+    /// Who sent it when not the user (see `ChatMessage::User`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

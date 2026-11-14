@@ -407,6 +407,7 @@ async fn hooks_run_at_every_step() {
         ChatMessage::User {
             content: "go (via hook)".into(),
             images: Vec::new(),
+            source: None,
         }
     );
     assert!(tool_result(&t[2]).0.starts_with("seen: Created"), "{t:#?}");
@@ -526,6 +527,7 @@ async fn turns_leave_usage_and_tool_calls_in_the_index() {
         messages: vec![ChatMessage::User {
             content: "hi".into(),
             images: Vec::new(),
+            source: None,
         }],
         tools: vec![],
         options: Value::Null,
@@ -999,6 +1001,7 @@ async fn system_and_context_hooks_shape_each_request() {
         vec![ChatMessage::User {
             content: "second".into(),
             images: Vec::new(),
+            source: None,
         }]
     );
     // The stored transcript is untouched.
@@ -1210,6 +1213,7 @@ async fn hooks_can_add_to_and_compact_the_transcript() {
     assert!(seen[1].contains(&ChatMessage::User {
         content: "remember: be brief".into(),
         images: Vec::new(),
+        source: None,
     }));
     // go, injected, assistant(poke), tool, done = 5 before compaction.
     let t = h.transcript().await;
@@ -1218,6 +1222,7 @@ async fn hooks_can_add_to_and_compact_the_transcript() {
         vec![ChatMessage::User {
             content: "summary of 5 messages".into(),
             images: Vec::new(),
+            source: None,
         }]
     );
     // Turn ids keep counting, and the checkpoint survives a restart.
@@ -1233,6 +1238,7 @@ async fn hooks_can_add_to_and_compact_the_transcript() {
         ChatMessage::User {
             content: "summary of 3 messages".into(),
             images: Vec::new(),
+            source: None,
         }
     );
 }
@@ -1268,6 +1274,7 @@ async fn lua_tools_call_the_model() {
         vec![ChatMessage::User {
             content: "say hi".into(),
             images: Vec::new(),
+            source: None,
         }]
     );
     assert_eq!(h.provider.systems.lock().unwrap()[1], "be brief");
@@ -1420,6 +1427,7 @@ async fn clients_call_the_model_over_the_protocol() {
             messages: vec![ChatMessage::User {
                 content: "hi".into(),
                 images: Vec::new(),
+                source: None,
             }],
             tools: vec![],
             options: Value::Null,
@@ -1446,6 +1454,7 @@ async fn clients_call_the_model_over_the_protocol() {
             messages: vec![ChatMessage::User {
                 content: "again".into(),
                 images: Vec::new(),
+                source: None,
             }],
             tools: vec![],
             options: Value::Null,
@@ -1658,6 +1667,7 @@ fn user(text: &str) -> ChatMessage {
     ChatMessage::User {
         content: text.into(),
         images: Vec::new(),
+        source: None,
     }
 }
 
@@ -2324,6 +2334,7 @@ async fn a_message_steered_during_the_last_answer_still_gets_one() {
         ChatMessage::User {
             content: "also check the README".into(),
             images: Vec::new(),
+            source: None,
         }
     );
     assert_eq!(h.provider.seen.lock().unwrap()[1].last(), Some(&t[3]));
@@ -2575,7 +2586,7 @@ async fn core_lua_can_queue_messages() {
         r#"bone.hook("turn_end", function(ev)
              if not queued then
                queued = true
-               bone.queue.add(ev.session_id, "follow up", "next")
+               bone.queue.add(ev.session_id, "follow up", "next", nil, "job")
              end
            end)
            bone.tool.register { name = "peek", run = function(_, ctx)
@@ -2591,7 +2602,9 @@ async fn core_lua_can_queue_messages() {
     h.start("go").await;
     let turns = h.turns(2).await;
     assert_eq!(turns[1].0, "follow up");
-    assert_eq!(tool_result(&h.transcript().await[4]).0, "0");
+    let transcript = h.transcript().await;
+    assert!(matches!(&transcript[2], ChatMessage::User { source: Some(s), .. } if s == "job"));
+    assert_eq!(tool_result(&transcript[4]).0, "0");
 }
 
 #[tokio::test]

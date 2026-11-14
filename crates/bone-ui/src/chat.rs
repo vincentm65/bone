@@ -30,7 +30,12 @@ use crate::text::{clean, truncate};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Entry {
-    User(String, Vec<bone_proto::types::ImageAttachment>),
+    /// Text, images, and who sent it when not the user (`ChatMessage::User`).
+    User(
+        String,
+        Vec<bone_proto::types::ImageAttachment>,
+        Option<String>,
+    ),
     Assistant {
         text: String,
         reasoning: String,
@@ -295,9 +300,11 @@ impl<L> ChatBuffer<L> {
         for m in messages {
             match m {
                 ChatMessage::System { .. } => {}
-                ChatMessage::User { content, images } => {
-                    self.push(Entry::User(content.clone(), images.clone()))
-                }
+                ChatMessage::User {
+                    content,
+                    images,
+                    source,
+                } => self.push(Entry::User(content.clone(), images.clone(), source.clone())),
                 ChatMessage::Assistant { .. } => self.add_assistant_message(m),
                 ChatMessage::Tool {
                     call_id,
@@ -326,7 +333,7 @@ impl<L> ChatBuffer<L> {
     }
 
     pub fn turn_started(&mut self, turn_id: TurnId, text: &str) {
-        self.turn_started_with_images(turn_id, text, Vec::new());
+        self.turn_started_with_images(turn_id, text, Vec::new(), None);
     }
 
     pub fn turn_started_with_images(
@@ -334,6 +341,7 @@ impl<L> ChatBuffer<L> {
         turn_id: TurnId,
         text: &str,
         images: Vec<bone_proto::types::ImageAttachment>,
+        source: Option<String>,
     ) {
         if self.session.as_ref().is_some_and(|s| s.title.is_none()) {
             let title = text
@@ -343,7 +351,7 @@ impl<L> ChatBuffer<L> {
                 .trim();
             self.session.as_mut().unwrap().title = Some(truncate(title, 80));
         }
-        self.push(Entry::User(text.to_owned(), images));
+        self.push(Entry::User(text.to_owned(), images, source));
         self.turn = Some(RunningTurn {
             turn_id,
             started: Instant::now(),
@@ -539,8 +547,9 @@ impl<L> ChatBuffer<L> {
         &mut self,
         text: &str,
         images: Vec<bone_proto::types::ImageAttachment>,
+        source: Option<String>,
     ) {
-        self.push(Entry::User(text.to_owned(), images));
+        self.push(Entry::User(text.to_owned(), images, source));
     }
 
     /// The core's queue for this session changed.
@@ -721,8 +730,8 @@ impl<L> ChatBuffer<L> {
             return json!({ "kind": kind, "index": index });
         };
         match (&self.entries[at], item.part) {
-            (Entry::User(text, images), _) => {
-                json!({ "kind": kind, "index": index, "text": edges(text), "images": images })
+            (Entry::User(text, images, source), _) => {
+                json!({ "kind": kind, "index": index, "text": edges(text), "images": images, "source": source })
             }
             (
                 Entry::Assistant {
@@ -1129,15 +1138,19 @@ pub fn apply_event<'a, L: 'a>(
     on!(TurnStarted, |c, p| c.turn_started_with_images(
         p.turn_id,
         &p.text,
-        p.images.clone()
+        p.images.clone(),
+        p.source.clone()
     ));
     on!(MessageDelta, |c, p| c.delta(&p));
     on!(MessageCompleted, |c, p| c.message_completed(&p));
     on!(ToolStarted, |c, p| c.tool_started(&p));
     on!(ToolFinished, |c, p| c.tool_finished(&p));
     on!(ToolOutput, |c, p| c.tool_output(&p));
-    on!(TurnSteered, |c, p| c
-        .steered_with_images(&p.text, p.images.clone()));
+    on!(TurnSteered, |c, p| c.steered_with_images(
+        &p.text,
+        p.images.clone(),
+        p.source.clone()
+    ));
     on!(TurnFinished, |c, p| c.turn_finished(&p));
     on!(QueueChanged, |c, p| {
         c.set_queue(p.items, p.paused);

@@ -94,6 +94,7 @@ mod tests {
                 ChatMessage::User {
                     content: "go".into(),
                     images: Vec::new(),
+                    source: None,
                 },
                 ChatMessage::Assistant {
                     content: String::new(),

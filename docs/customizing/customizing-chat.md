@@ -23,7 +23,7 @@ end
 
 | Kind | Item fields |
 |---|---|
-| `user` | `text` |
+| `user` | `text`, `source` (who sent it when not the user, e.g. `"job"` or `"agent"`) |
 | `reasoning`, `assistant` | `text`, `streaming`; `assistant` also `usage = { input, output }` |
 | `tool` | `id`, `name`, `arguments` (decoded), `raw_arguments`, `output` (nil while running), `is_error`, `done`, `live` (output so far while it runs), `started_at` (ms), `duration_ms`, `usage` |
 | `notice` | `text`, `error` |
@@ -87,6 +87,10 @@ preview of up to three rows in `"summary"` and `"rows"` and the whole report
 in `"full"`; failures show the whole report at every level. Clicking the
 title opens its session when it was started during this run; clicking the
 report expands or collapses it.
+
+A message that a job or an agent sent (a `user` item with `source`, such as a
+finished background job's notice) is drawn as a short report the same way:
+its first line, then a three-row preview; a click or `ctrl+t` shows all of it.
 
 ## Your own items
 

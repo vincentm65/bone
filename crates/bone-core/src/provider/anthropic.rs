@@ -71,7 +71,9 @@ fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> (Value,
                 system.extend(text(content));
                 continue;
             }
-            ChatMessage::User { content, images } => {
+            ChatMessage::User {
+                content, images, ..
+            } => {
                 let blocks = images.iter().map(image).chain(text(content)).collect();
                 ("user", blocks)
             }

@@ -349,7 +349,9 @@ fn wire_messages(messages: &[ChatMessage], replay: Option<&str>, model: &str) ->
 fn wire_message(msg: &ChatMessage, replay: Option<&str>) -> Value {
     match msg {
         ChatMessage::System { content } => json!({ "role": "system", "content": content }),
-        ChatMessage::User { content, images } => wire_user(content, images),
+        ChatMessage::User {
+            content, images, ..
+        } => wire_user(content, images),
         ChatMessage::Assistant {
             content,
             tool_calls,

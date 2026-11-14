@@ -218,6 +218,7 @@ mod tests {
             .hydrate(vec![ChatMessage::User {
                 content: String::new(),
                 images: vec![image],
+                source: None,
             }])
             .unwrap();
         let ChatMessage::User { images, .. } = &hydrated[0] else {

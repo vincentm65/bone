@@ -312,6 +312,7 @@ fn started(session: &str, text: &str) -> TurnStartedParams {
         turn_id: 1,
         text: text.into(),
         images: Vec::new(),
+        source: None,
     }
 }
 

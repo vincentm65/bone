@@ -77,7 +77,9 @@ fn wire_input(messages: &[ChatMessage], model: &str) -> Vec<Value> {
         match message {
             // System prompts go in `instructions`.
             ChatMessage::System { .. } => {}
-            ChatMessage::User { content, images } => out.push(wire_user(content, images)),
+            ChatMessage::User {
+                content, images, ..
+            } => out.push(wire_user(content, images)),
             ChatMessage::Assistant {
                 content,
                 tool_calls,

@@ -129,7 +129,7 @@ impl Inner {
         session: session::SessionHandle,
         text: String,
     ) -> Result<bone_proto::types::TurnId, RpcError> {
-        self.begin_turn_with_images(session, text, Vec::new())
+        self.begin_turn_with_images(session, text, Vec::new(), None)
     }
 
     pub(crate) fn begin_turn_with_images(
@@ -137,6 +137,7 @@ impl Inner {
         session: session::SessionHandle,
         text: String,
         mut images: Vec<ImageAttachment>,
+        source: Option<String>,
     ) -> Result<bone_proto::types::TurnId, RpcError> {
         self.validate_input(&session.lock().unwrap(), &text, &mut images)?;
         let (turn_id, cancel) = {
@@ -159,7 +160,7 @@ impl Inner {
         };
         // The turn saves the message and announces itself after its
         // `turn_start` hooks have run.
-        let turn = agent::run_turn(self.clone(), session, turn_id, text, images, cancel);
+        let turn = agent::run_turn(self.clone(), session, turn_id, text, images, source, cancel);
         match &self.tokio {
             Some(rt) => drop(rt.spawn(turn)),
             None => drop(tokio::spawn(turn)),
@@ -209,7 +210,12 @@ impl Inner {
                 self.emit_queue(&s, None);
             }
             drop(s);
-            match self.begin_turn_with_images(session.clone(), text.clone(), images.clone()) {
+            match self.begin_turn_with_images(
+                session.clone(),
+                text.clone(),
+                images.clone(),
+                source.clone(),
+            ) {
                 Ok(turn_id) => {
                     return Ok(QueueAddResult {
                         id: None,
@@ -295,9 +301,12 @@ impl Inner {
             self.emit_queue(&s, None);
             q
         };
-        if let Err(e) =
-            self.begin_turn_with_images(session.clone(), next.text.clone(), next.images.clone())
-        {
+        if let Err(e) = self.begin_turn_with_images(
+            session.clone(),
+            next.text.clone(),
+            next.images.clone(),
+            next.source.clone(),
+        ) {
             let mut s = session.lock().unwrap();
             s.queue.insert(0, next);
             let error = if e.code == RpcError::BUSY {
@@ -1187,7 +1196,7 @@ impl Core {
             .map_err(session_error)?;
         let turn_id = self
             .inner
-            .begin_turn_with_images(session, params.text, params.images)?;
+            .begin_turn_with_images(session, params.text, params.images, None)?;
         Ok(TurnStartResult { turn_id })
     }
 

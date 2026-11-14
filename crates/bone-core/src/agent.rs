@@ -86,6 +86,7 @@ pub(crate) async fn run_turn(
     turn_id: TurnId,
     text: String,
     images: Vec<bone_proto::types::ImageAttachment>,
+    source: Option<String>,
     cancel: CancellationToken,
 ) {
     let (session_id, cwd) = {
@@ -110,7 +111,7 @@ pub(crate) async fn run_turn(
         stream,
     };
     // A panic still ends the turn; otherwise the session stays busy for good.
-    let drive = std::panic::AssertUnwindSafe(turn.drive(text, images));
+    let drive = std::panic::AssertUnwindSafe(turn.drive(text, images, source));
     let outcome = match futures_util::FutureExt::catch_unwind(drive).await {
         Ok(Ok(())) => TurnOutcome::Completed,
         Ok(Err(Stop::Cancelled)) => TurnOutcome::Cancelled,
@@ -306,8 +307,9 @@ impl Turn<'_> {
         &self,
         text: String,
         mut images: Vec<bone_proto::types::ImageAttachment>,
+        source: Option<String>,
     ) -> Result<(), Stop> {
-        let ev = json!({ "session_id": self.session_id, "cwd": self.cwd.to_string_lossy(), "text": text, "images": images });
+        let ev = json!({ "session_id": self.session_id, "cwd": self.cwd.to_string_lossy(), "text": text, "images": images, "source": source });
         let text = match self.safe_hooks("turn_start", ev).await? {
             Some(ev) => {
                 if let Some(v) = ev.get("images") {
@@ -324,6 +326,7 @@ impl Turn<'_> {
         self.record(ChatMessage::User {
             content: text.clone(),
             images: images.clone(),
+            source: source.clone(),
         })?;
         if !self.inner.mcp.is_empty() {
             self.inner.mcp.ensure_ready(MCP_WAIT).await;
@@ -333,6 +336,7 @@ impl Turn<'_> {
             turn_id: self.turn_id,
             text,
             images,
+            source,
         });
 
         let dynamic = match &self.rt.scripting {
@@ -724,12 +728,14 @@ impl Turn<'_> {
             self.record(ChatMessage::User {
                 content: q.text.clone(),
                 images: q.images.clone(),
+                source: q.source.clone(),
             })?;
             self.inner.emit::<TurnSteered>(TurnStartedParams {
                 session_id: self.session_id.clone(),
                 turn_id: self.turn_id,
                 text: q.text,
                 images: q.images,
+                source: q.source,
             });
         }
         Ok(())

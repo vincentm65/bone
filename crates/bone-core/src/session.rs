@@ -932,7 +932,10 @@ fn write_line(file: &mut File, record: Record, timing: Option<ToolTiming>) -> st
 }
 
 pub(crate) fn title_of(msg: &ChatMessage) -> Option<String> {
-    let ChatMessage::User { content, images } = msg else {
+    let ChatMessage::User {
+        content, images, ..
+    } = msg
+    else {
         return None;
     };
     let line = content
@@ -961,6 +964,7 @@ mod tests {
             s.push(ChatMessage::User {
                 content: "\n  fix the bug  \nplease".into(),
                 images: Vec::new(),
+                source: None,
             })
             .unwrap();
             s.push(ChatMessage::Assistant {
@@ -998,6 +1002,7 @@ mod tests {
         let user = |t: &str| ChatMessage::User {
             content: t.into(),
             images: Vec::new(),
+            source: None,
         };
         {
             let mut s = a.lock().unwrap();
@@ -1065,6 +1070,7 @@ mod tests {
             ChatMessage::User {
                 content: "first".into(),
                 images: Vec::new(),
+                source: None,
             },
             ChatMessage::Assistant {
                 content: "reply".into(),
@@ -1075,6 +1081,7 @@ mod tests {
             ChatMessage::User {
                 content: "second".into(),
                 images: Vec::new(),
+                source: None,
             },
         ];
         let summary = Some(Summary {
@@ -1141,6 +1148,7 @@ mod tests {
             .push(ChatMessage::User {
                 content: "hi".into(),
                 images: Vec::new(),
+                source: None,
             })
             .unwrap();
         let path = dir.path().join(format!("sessions/{id}.jsonl"));
@@ -1158,6 +1166,7 @@ mod tests {
             .push(ChatMessage::User {
                 content: "again".into(),
                 images: Vec::new(),
+                source: None,
             })
             .unwrap();
         let again = SessionStore::new(dir.path()).get(&id).unwrap();
@@ -1173,6 +1182,7 @@ mod tests {
         let user = |t: &str| ChatMessage::User {
             content: t.into(),
             images: Vec::new(),
+            source: None,
         };
         s.lock().unwrap().push(user("one")).unwrap();
         let path = dir.path().join(format!("sessions/{id}.jsonl"));
@@ -1236,6 +1246,7 @@ mod tests {
             s.push(ChatMessage::User {
                 content: "find the walrus".into(),
                 images: Vec::new(),
+                source: None,
             })
             .unwrap();
             s.push(ChatMessage::Assistant {
@@ -1389,6 +1400,7 @@ mod tests {
             .push(ChatMessage::User {
                 content: "kept on disk".into(),
                 images: Vec::new(),
+                source: None,
             })
             .unwrap();
         drop(first);
@@ -1414,6 +1426,7 @@ mod tests {
         let user = |text: String| ChatMessage::User {
             content: text,
             images: Vec::new(),
+            source: None,
         };
         let id = {
             let s = store.create("/w".into()).unwrap();
@@ -1473,6 +1486,7 @@ mod tests {
             Record::Message(ChatMessage::User {
                 content: "a title".into(),
                 images: Vec::new(),
+                source: None,
             }),
         )
         .unwrap();

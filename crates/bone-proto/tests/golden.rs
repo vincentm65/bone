@@ -191,6 +191,7 @@ fn requests() {
                 ChatMessage::User {
                     content: "run the tests".into(),
                     images: Vec::new(),
+                    source: None,
                 },
                 ChatMessage::Assistant {
                     content: String::new(),
@@ -378,6 +379,7 @@ fn requests() {
             messages: vec![ChatMessage::User {
                 content: "Name this session in three words.".into(),
                 images: Vec::new(),
+                source: None,
             }],
             tools: vec![],
             options: json!({ "max_tokens": 50 }),
@@ -659,6 +661,7 @@ fn events() {
         turn_id: 1,
         text: "run the tests".into(),
         images: Vec::new(),
+        source: None,
     });
     event::<MessageDelta>(MessageDeltaParams {
         session_id: SID.into(),
@@ -762,8 +765,9 @@ fn events() {
     event::<TurnSteered>(TurnStartedParams {
         session_id: SID.into(),
         turn_id: 1,
-        text: "also update the README".into(),
+        text: "Background job shell-1 finished after 2s: exit code 0.".into(),
         images: Vec::new(),
+        source: Some("job".into()),
     });
     event::<SessionCompacted>(SessionCompactedParams {
         session_id: SID.into(),

@@ -315,7 +315,7 @@ A hook runs at a point in the core with an event table. It returns `nil` (no cha
 
 | Point | Event | `deny` means |
 |---|---|---|
-| `turn_start` | `{ session_id, cwd, text, images }`, before the user's message is saved | the turn fails with "why" |
+| `turn_start` | `{ session_id, cwd, text, images, source }`, before the user's message is saved (`source`: who queued it, when not the user) | the turn fails with "why" |
 | `system` | `{ session_id, cwd, prompt }`, once per turn: the system prompt (after `bone.config.system_prompt` and the working directory); return `{ prompt = ... }` to change it | the turn fails |
 | `context` | `{ session_id, messages }`, before each model call: the messages it will send (system prompt first, then a compacted session's summary and a handoff of the cut in place of what it covers); return `{ messages = ... }` to send different ones. The stored transcript is not changed | the turn fails |
 | `request` | `{ session_id, messages, tools }`, before each call to the model, after `context`; return `{ provider = "name", model = "model-id" }` to override this call's provider entry and model (both fields optional). `provider` names a `bone.config.providers` entry; without `model`, that entry's configured model is used. `model` alone keeps the session's selected provider entry. Neither override changes the session's saved selection | the turn fails |
@@ -1010,7 +1010,7 @@ end
 
 | Kind | Item fields |
 |---|---|
-| `user` | `text`, `images` (attachment references) |
+| `user` | `text`, `images` (attachment references), `source` (who sent it when not the user: `"job"`, `"agent"`; drawn as a report) |
 | `reasoning`, `assistant` | `text`, `streaming`; `assistant` also `usage = { input, output }` (tokens of that model message, when the core sent them) |
 | `tool` | `id`, `name`, `arguments` (decoded), `raw_arguments`, `output` (nil while running), `is_error`, `done`, `live` (output so far while it runs, from `tool/output`; the last 64 KB), `started_at` (ms since the epoch), `duration_ms`, and `usage` when it is the first call of a message without text |
 | `notice` | `text`, `error` |

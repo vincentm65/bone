@@ -8,6 +8,7 @@ fn user(text: &str) -> ChatMessage {
     ChatMessage::User {
         content: text.into(),
         images: Vec::new(),
+        source: None,
     }
 }
 
@@ -125,6 +126,7 @@ fn images_and_empty_text() {
         ChatMessage::User {
             content: String::new(),
             images: vec![image.clone()],
+            source: None,
         },
         ChatMessage::Assistant {
             content: "\n\n".into(),
