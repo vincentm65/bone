@@ -1169,92 +1169,96 @@ impl State {
     /// Resume a coroutine. A yield is either background work
     /// (`{ wait = spec }`: start it and park the coroutine) or a question
     /// (`bone.ask`: park it and tell clients). Otherwise it finished.
-    fn step(&mut self, thread: Thread, args: MultiValue, session_id: Option<String>, done: Done) {
-        let r = thread.resume::<MultiValue>(args);
-        if r.is_ok() && thread.status() == ThreadStatus::Resumable {
-            let yielded = r.ok().and_then(|v| v.into_iter().next());
-            if let Some(Value::Table(t)) = &yielded
-                && let Ok(spec @ Value::Table(_)) = t.get::<Value>("wait")
-            {
-                let spec = from_lua(&spec).unwrap_or(Json::Null);
-                // Session reads and writes are quick and answered here.
-                if spec["session"].is_object() {
-                    let args = match self.host.session_op(&spec["session"]) {
-                        Ok(v) => to_lua(&self.lua, &v).map(|v| MultiValue::from_iter([v])),
-                        Err(e) => self
-                            .lua
-                            .create_string(&e)
-                            .map(|e| MultiValue::from_iter([Value::Nil, Value::String(e)])),
-                    };
-                    match args {
-                        Ok(args) => self.step(thread, args, session_id, done),
-                        Err(e) => self.finish(done, Err(e)),
+    fn step(&mut self, thread: Thread, mut args: MultiValue, session_id: Option<String>, done: Done) {
+        // A loop, not recursion: a script calling bone.session.* in a long
+        // loop would otherwise grow the stack until the core aborts.
+        loop {
+            let r = thread.resume::<MultiValue>(args);
+            if r.is_ok() && thread.status() == ThreadStatus::Resumable {
+                let yielded = r.ok().and_then(|v| v.into_iter().next());
+                if let Some(Value::Table(t)) = &yielded
+                    && let Ok(spec @ Value::Table(_)) = t.get::<Value>("wait")
+                {
+                    let spec = from_lua(&spec).unwrap_or(Json::Null);
+                    // Session reads and writes are quick and answered here.
+                    if spec["session"].is_object() {
+                        let next = match self.host.session_op(&spec["session"]) {
+                            Ok(v) => to_lua(&self.lua, &v).map(|v| MultiValue::from_iter([v])),
+                            Err(e) => self
+                                .lua
+                                .create_string(&e)
+                                .map(|e| MultiValue::from_iter([Value::Nil, Value::String(e)])),
+                        };
+                        match next {
+                            Ok(next) => args = next,
+                            Err(e) => return self.finish(done, Err(e)),
+                        }
+                        continue;
                     }
-                    return;
-                }
-                self.next_wait += 1;
-                let wait_id = self.next_wait;
-                let jobs = self.jobs.clone();
-                let streams = self.streams.clone();
-                let host = self.host.clone();
-                let calling = session_id.clone();
-                let task = self.rt.spawn(async move {
-                    let result = if let Some(r) = host.mcp_wait(&spec).await {
-                        r
-                    } else if let Some(r) = host.session_wait(&spec).await {
-                        r
-                    } else if let Some(r) = host.model_wait(&spec, calling).await {
-                        r
-                    } else if let Some(r) = streams.wait(&spec).await {
-                        r
-                    } else {
-                        bone_lua::wait::run(spec).await
-                    };
-                    let _ = jobs.send(Job::Resume { wait_id, result });
-                });
-                let w = Waiting {
-                    thread,
-                    session_id,
-                    done,
-                };
-                self.pending.insert(wait_id, (w, task.abort_handle()));
-                return;
-            }
-            let question = match &yielded {
-                Some(Value::Table(t)) => match t.get::<Value>("ask") {
-                    Ok(q @ Value::Table(_)) => from_lua(&q).ok(),
-                    _ => None,
-                },
-                _ => None,
-            };
-            let Some(question) = question else {
-                let e = mlua::Error::runtime(
-                    "a hook, tool or system_prompt may only yield through bone.ask \
-                     or a waiting call (bone.system, bone.sleep, bone.http, ...)",
-                );
-                return self.finish(done, Err(e));
-            };
-            let ask_id = self.ask_ids.fetch_add(1, Ordering::Relaxed) + 1;
-            let params = AskRequestedParams {
-                ask_id,
-                session_id: session_id.clone(),
-                question,
-            };
-            let _ = self.events.send(AskEvent::Requested(params.clone()));
-            self.waiting.insert(
-                ask_id,
-                (
-                    Waiting {
+                    self.next_wait += 1;
+                    let wait_id = self.next_wait;
+                    let jobs = self.jobs.clone();
+                    let streams = self.streams.clone();
+                    let host = self.host.clone();
+                    let calling = session_id.clone();
+                    let task = self.rt.spawn(async move {
+                        let result = if let Some(r) = host.mcp_wait(&spec).await {
+                            r
+                        } else if let Some(r) = host.session_wait(&spec).await {
+                            r
+                        } else if let Some(r) = host.model_wait(&spec, calling).await {
+                            r
+                        } else if let Some(r) = streams.wait(&spec).await {
+                            r
+                        } else {
+                            bone_lua::wait::run(spec).await
+                        };
+                        let _ = jobs.send(Job::Resume { wait_id, result });
+                    });
+                    let w = Waiting {
                         thread,
                         session_id,
                         done,
+                    };
+                    self.pending.insert(wait_id, (w, task.abort_handle()));
+                    return;
+                }
+                let question = match &yielded {
+                    Some(Value::Table(t)) => match t.get::<Value>("ask") {
+                        Ok(q @ Value::Table(_)) => from_lua(&q).ok(),
+                        _ => None,
                     },
-                    params,
-                ),
-            );
-            return;
+                    _ => None,
+                };
+                let Some(question) = question else {
+                    let e = mlua::Error::runtime(
+                        "a hook, tool or system_prompt may only yield through bone.ask \
+                         or a waiting call (bone.system, bone.sleep, bone.http, ...)",
+                    );
+                    return self.finish(done, Err(e));
+                };
+                let ask_id = self.ask_ids.fetch_add(1, Ordering::Relaxed) + 1;
+                let params = AskRequestedParams {
+                    ask_id,
+                    session_id: session_id.clone(),
+                    question,
+                };
+                let _ = self.events.send(AskEvent::Requested(params.clone()));
+                self.waiting.insert(
+                    ask_id,
+                    (
+                        Waiting {
+                            thread,
+                            session_id,
+                            done,
+                        },
+                        params,
+                    ),
+                );
+                return;
+            }
+            return self.finish(done, r);
         }
-        self.finish(done, r);
     }
 
     fn finish(&self, done: Done, r: mlua::Result<MultiValue>) {
