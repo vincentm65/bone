@@ -365,7 +365,10 @@ impl Flow {
         loop {
             let (mut sock, _) = listener.accept().await.map_err(|e| e.to_string())?;
             let mut buf = vec![0u8; 8192];
-            let n = sock.read(&mut buf).await.unwrap_or(0);
+            // A connection that sends nothing (a browser's preconnect) must
+            // not hold up the one that brings the code.
+            let read = tokio::time::timeout(std::time::Duration::from_secs(5), sock.read(&mut buf));
+            let n = read.await.ok().and_then(Result::ok).unwrap_or(0);
             let req = String::from_utf8_lossy(&buf[..n]).into_owned();
             let target = req
                 .lines()
@@ -420,7 +423,8 @@ impl Flow {
             let d = q.get("error_description").map(|d| format!(" ({d})"));
             return Err(format!("the server refused: {e}{}", d.unwrap_or_default()));
         }
-        if q.get("state").is_some_and(|s| *s != self.state) {
+        // A redirect without our state may be another site's doing.
+        if q.get("state") != Some(&self.state) {
             return Err("the redirect belongs to a different sign-in".into());
         }
         q.get("code")
