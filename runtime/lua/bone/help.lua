@@ -130,16 +130,6 @@ M.TABS = { "Commands", "Keys", "Docs" }
 --- The entries of tab `tab` (1 commands, 2 keys, 3 docs) that match every
 --- word of `query`: { label, desc, meta, command | section | doc | topic }.
 function M.list(tab, query)
-  local docs = {}
-  local sections = doc_sections()
-  for _, d in ipairs(bone._docs) do
-    docs[#docs + 1] = d.plugin
-      and { label = d.name, desc = "Read the " .. d.name .. " plugin's guide", doc = d, meta = "Plugin" }
-      or { label = d.name .. ".md", desc = "Read the complete " .. d.name .. " guide", topic = d.name, meta = "Full guide" }
-  end
-  for i, s in ipairs(sections) do
-    docs[#docs + 1] = { label = s.title:gsub("`", ""), desc = "Read this section of " .. file(s.doc), meta = file(s.doc), section = i }
-  end
   local keys, guide = {}, {}
   for _, k in ipairs(M.KEYS) do
     keys[#keys + 1] = { label = k[1], desc = k[2], meta = k[3] .. " · default shortcut", topic = "keys" }
@@ -163,7 +153,15 @@ function M.list(tab, query)
     elseif tab == 2 then
       all = keys
     else
-      all = docs
+      -- Only this tab parses the docs (the others ask on every keystroke).
+      for _, d in ipairs(bone._docs) do
+        all[#all + 1] = d.plugin
+          and { label = d.name, desc = "Read the " .. d.name .. " plugin's guide", doc = d, meta = "Plugin" }
+          or { label = d.name .. ".md", desc = "Read the complete " .. d.name .. " guide", topic = d.name, meta = "Full guide" }
+      end
+      for i, s in ipairs(doc_sections()) do
+        all[#all + 1] = { label = s.title:gsub("`", ""), desc = "Read this section of " .. file(s.doc), meta = file(s.doc), section = i }
+      end
     end
   end
   local out = {}

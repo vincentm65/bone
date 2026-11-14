@@ -1400,6 +1400,7 @@ function bone.ui.pager(content, opts)
   opts = opts or {}
   local top, rows, total = 0, 1, 0
   local id
+  local memo -- { width, lines } of string content, so scrolling doesn't re-wrap it
 
   local function body_lines(width)
     if type(content) == "table" and content.kind then
@@ -1414,6 +1415,7 @@ function bone.ui.pager(content, opts)
       end
       return out
     end
+    if memo and memo[1] == width then return memo[2] end
     local out, code = {}, false
     for line in (content .. "\n"):gmatch("(.-)\n") do
       local hl = "Normal"
@@ -1433,6 +1435,7 @@ function bone.ui.pager(content, opts)
         end
       end
     end
+    memo = { width, out }
     return out
   end
 
@@ -1486,7 +1489,7 @@ function bone.ui.pager(content, opts)
   page.id = id
   local handle = {}
   function handle:set(new)
-    content, top = new, 0
+    content, top, memo = new, 0, nil
     bone.ui.update(id, {})
   end
   function handle:close()
