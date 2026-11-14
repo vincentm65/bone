@@ -122,7 +122,7 @@ pub struct App {
     pub views_rev: u64,
     /// While a chat view draws: the chat queries it made, and when it asked
     /// to be drawn again (`bone.chat.refresh_in`).
-    pub render_deps: Option<Vec<crate::data::Dep>>,
+    pub render_deps: Option<Vec<bone_ui::data::Dep>>,
     pub render_expires: Option<std::time::Instant>,
     /// When the chat on screen next needs drawing for a view's timer.
     pub chat_expiry: Option<std::time::Instant>,
