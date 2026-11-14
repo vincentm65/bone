@@ -51,7 +51,7 @@ local function shorten(v, max)
   for seg in v:gmatch("[^/]+") do segs[#segs + 1] = seg end
   local lead = v:sub(1, 1) == "/" and "/" or ""
   if #segs < 3 or #segs[#segs] + #lead + #segs[1] + 4 > max then
-    return "…" .. v:sub(-(max - 1))
+    return "…" .. (v:sub(-(max - 1)):gsub("^[\128-\191]+", "")) -- not mid-character
   end
   local tail, i = { segs[#segs] }, #segs - 1
   while i > 1 and #lead + #segs[1] + 3 + #table.concat(tail, "/") + #segs[i] + 1 <= max do
