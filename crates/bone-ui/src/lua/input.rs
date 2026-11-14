@@ -301,16 +301,7 @@ fn keymap_key<H: Host>(h: &mut H, ctx: Context, key: Key) {
         return;
     }
 
-    let (pending, fallback, pending_ctx) = take_pending(h);
-    if let Some(action) = fallback {
-        if !dispatch_action(h, action) && h.context() == pending_ctx {
-            replay_literal(h, &pending_ctx, &pending);
-        }
-    } else if h.context() == pending_ctx {
-        // A prefix with no exact fallback is literal when the next key
-        // proves it was not a sequence.
-        replay_literal(h, &pending_ctx, &pending);
-    }
+    finish_pending(h);
     // The mismatching key was not consumed by the failed sequence.
     dispatch_key(h, key, false);
 }
@@ -371,14 +362,17 @@ pub fn flush_pending<H: Host>(h: &mut H) {
         discard_pending(h);
         return;
     }
+    finish_pending(h);
+    h.prompt_changed();
+}
+
+/// The pending prefix's own action; when it has none (or it did nothing),
+/// its keys were not a sequence after all and are typed.
+fn finish_pending<H: Host>(h: &mut H) {
     let (keys, action, ctx) = take_pending(h);
-    if let Some(action) = action
-        && !dispatch_action(h, action)
-        && h.context() == ctx
-    {
+    if action.is_none_or(|a| !dispatch_action(h, a)) && h.context() == ctx {
         replay_literal(h, &ctx, &keys);
     }
-    h.prompt_changed();
 }
 
 fn raw_intercepts<H: Host>(h: &mut H, ctx: &Context, key: Key) -> bool {
