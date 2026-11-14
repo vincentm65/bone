@@ -449,6 +449,10 @@ function M.new(want, opts)
       if row.tui and turning_on ~= loaded then
         local ok, e = pcall(turning_on and bone.plugin.load or bone.plugin.unload, row.name)
         tui_err = not ok and e or nil
+        -- A load that fails is kept in the plugin's info, not thrown.
+        for _, p in ipairs(bone.plugin.list()) do
+          if turning_on and p.name == row.name then tui_err = tui_err or p.error end
+        end
       end
       if row.core then
         bone.request(turning_on and "plugin/load" or "plugin/unload", { name = row.name }, function(_, e)
