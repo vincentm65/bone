@@ -982,14 +982,18 @@ fn opt_list<H: Host>(h: &mut H, lua: &Lua) -> mlua::Result<MultiValue> {
 /// Run the handlers of `event` with `data`; what they returned.
 pub fn fire<H: Host>(h: &mut H, event: &str, data: serde_json::Value) -> Vec<Value> {
     let event = canonical_event(event);
-    let cbs: Vec<u64> = h
+    let cbs: Vec<(u64, u64)> = h
         .autocmds()
         .iter()
         .filter(|a| a.event == event)
-        .map(|a| a.callback)
+        .map(|a| (a.id, a.callback))
         .collect();
     let mut out = Vec::new();
-    for cb in cbs {
+    for (id, cb) in cbs {
+        // An earlier handler may have removed this one.
+        if !h.autocmds().iter().any(|a| a.id == id) {
+            continue;
+        }
         let data = data.clone();
         if let Some(v) = h.call_callback(cb, &format!("autocmd {event}"), |lua| to_lua(lua, &data))
         {
