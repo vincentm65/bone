@@ -578,26 +578,30 @@ impl crate::Gui {
                 f.go(to, shift);
             }
             Key::Backspace if edit => {
-                if !f.delete_selection() && f.cursor > 0 {
+                if f.delete_selection() {
+                    out.changed = true;
+                } else if f.cursor > 0 {
                     let from = if word {
                         f.word_back(f.cursor)
                     } else {
                         f.cursor - 1
                     };
                     f.replace(from, f.cursor, "");
+                    out.changed = true;
                 }
-                out.changed = true;
             }
             Key::Delete if edit => {
-                if !f.delete_selection() && f.cursor < f.len() {
+                if f.delete_selection() {
+                    out.changed = true;
+                } else if f.cursor < f.len() {
                     let to = if word {
                         f.word_forward(f.cursor)
                     } else {
                         f.cursor + 1
                     };
                     f.replace(f.cursor, to, "");
+                    out.changed = true;
                 }
-                out.changed = true;
             }
             Key::Enter => {
                 let newline = look.multiline
