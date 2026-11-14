@@ -553,7 +553,7 @@ impl Host {
                         }
                         // Ended, and a later turn overwrote the outcome.
                         if s.active.as_ref().map(|a| a.turn_id) != Some(turn_id) {
-                            break json!({ "status": "completed" });
+                            break json!({ "status": "unknown" });
                         }
                     }
                     Err(broadcast::error::RecvError::Closed) => {

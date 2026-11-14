@@ -371,6 +371,7 @@ local info = bone.session.create({
 })                                              -- cwd defaults to the owner's
 local r, err = bone.session.run(info.session_id, "Find every caller of panel_at")
 -- r = { session_id, turn_id, text (the final answer), outcome = { status, message? } }
+-- status "unknown": the turn ended but its outcome was lost (events fell behind)
 ```
 
 `create` emits `session/created`; with an `owner`, clients show the session as the owner's sub-agent (the TUI lists it above the prompt and opens it on a click). `run` starts a turn on an idle session and waits for it without blocking anything else, so several can run at once (a tool registered with `parallel = true`). Cancelling the calling turn cancels this one. The catalog's `subagent` plugin is built on these.
