@@ -9,7 +9,8 @@ use serde_json::{Value, json};
 /// the end.
 pub fn parse(text: &str) -> Vec<Value> {
     let mut out: Vec<Value> = Vec::new();
-    let mut code: Option<(Option<String>, Vec<String>)> = None;
+    // An open code block: its fence (only the same one closes it), language, lines.
+    let mut code: Option<(&str, Option<String>, Vec<String>)> = None;
     let lines: Vec<&str> = text.lines().collect();
     let mut i = 0;
     while i < lines.len() {
@@ -17,19 +18,20 @@ pub fn parse(text: &str) -> Vec<Value> {
         let raw = lines[i];
         i += 1;
         let trimmed = raw.trim_start();
-        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+        let fence = ["```", "~~~"].into_iter().find(|f| trimmed.starts_with(f));
+        if let Some(f) = fence.filter(|f| code.as_ref().is_none_or(|(m, ..)| m == f)) {
             match code.take() {
-                Some((lang, lines)) => {
+                Some((_, lang, lines)) => {
                     out.push(json!({ "kind": "code", "lang": lang, "lines": lines }))
                 }
                 None => {
                     let lang = trimmed[3..].trim();
-                    code = Some(((!lang.is_empty()).then(|| lang.to_owned()), Vec::new()));
+                    code = Some((f, (!lang.is_empty()).then(|| lang.to_owned()), Vec::new()));
                 }
             }
             continue;
         }
-        if let Some((_, lines)) = &mut code {
+        if let Some((_, _, lines)) = &mut code {
             lines.push(raw.to_owned());
             continue;
         }
@@ -107,7 +109,7 @@ pub fn parse(text: &str) -> Vec<Value> {
         }
         out.push(json!({ "kind": "paragraph", "indent": indent, "spans": inline(trimmed) }));
     }
-    if let Some((lang, lines)) = code {
+    if let Some((_, lang, lines)) = code {
         out.push(json!({ "kind": "code", "lang": lang, "lines": lines, "open": true }));
     }
     while out.last().is_some_and(|b| b["kind"] == "blank") {
@@ -116,12 +118,13 @@ pub fn parse(text: &str) -> Vec<Value> {
     out
 }
 
-/// A row like `| a | b |` to its cells (`a`, `b`); the trailing `|` is optional.
+/// A row like `| a | b |` to its cells (`a`, `b`); the trailing `|` is
+/// optional, and `\|` is a pipe inside a cell.
 fn split_row(row: &str) -> Vec<String> {
-    let t = row.trim();
-    let t = t.strip_prefix('|').unwrap_or(t);
+    let t = row.trim().replace("\\|", "\u{1}");
+    let t = t.strip_prefix('|').unwrap_or(&t);
     let t = t.strip_suffix('|').unwrap_or(t);
-    t.split('|').map(|c| c.trim().to_owned()).collect()
+    t.split('|').map(|c| c.trim().replace('\u{1}', "|")).collect()
 }
 
 /// `|---|:===:|`-style separator row.
