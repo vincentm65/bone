@@ -110,7 +110,7 @@ local function toolbar(opts, running, empty)
   bar[#bar + 1] = widgets.icon_button("plus", "Attach files", function()
     if opts.on_focus then opts.on_focus() end
     require("bone.desktop.attach").pick()
-  end, { box = 28, size = 16, hl = muted, radius = style.radius.md, id = opts.chat and nil or "composer-attach" })
+  end, { box = 28, size = 16, hl = muted, radius = style.radius.md, id = not opts.chat and "composer-attach" or nil })
   -- The model: an outlined pill that opens the provider page.
   if u.model and u.model ~= "" and not compact then
     local name = (u.provider and u.provider ~= u.model) and (u.provider .. " · " .. u.model) or u.model
