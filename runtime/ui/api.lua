@@ -1405,7 +1405,13 @@ function bone.ui.pager(content, opts)
       return (require("bone.elements").lines(content, width, {}, false))
     end
     if type(content) ~= "string" then
-      return content
+      -- Wrapped here as box() will, so the height and scrolling count rows.
+      local out = {}
+      for _, l in ipairs(content) do
+        local wrapped = bone.text.wrap(spans(l), width)
+        for _, r in ipairs(#wrapped > 0 and wrapped or { {} }) do out[#out + 1] = r end
+      end
+      return out
     end
     local out, code = {}, false
     for line in (content .. "\n"):gmatch("(.-)\n") do
