@@ -266,10 +266,6 @@ impl Session {
     }
 
     /// Add to the in-memory queue; returns the message's id.
-    pub fn enqueue(&mut self, text: String, mode: QueueMode) -> u64 {
-        self.enqueue_with_images(text, mode, Vec::new(), None)
-    }
-
     pub fn enqueue_with_images(
         &mut self,
         text: String,

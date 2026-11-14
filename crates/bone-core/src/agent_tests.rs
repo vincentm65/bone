@@ -2492,7 +2492,7 @@ async fn the_queue_survives_a_restart() {
     let session = fresh.get(&h.session_id).unwrap();
     let mut s = session.lock().unwrap();
     assert!(s.queue.is_empty());
-    assert!(s.enqueue("new".into(), QueueMode::Next) > previous);
+    assert!(s.enqueue_with_images("new".into(), QueueMode::Next, Vec::new(), None) > previous);
 }
 
 #[tokio::test]

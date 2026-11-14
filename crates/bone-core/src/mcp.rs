@@ -818,6 +818,7 @@ impl Default for McpManager {
 
 impl McpManager {
     /// Use `connector` to open connections (tests).
+    #[cfg(test)]
     pub fn set_connector(&self, connector: Connector) {
         *self.connector.lock().unwrap() = connector;
     }

@@ -7,7 +7,7 @@
 //!
 //! Signing in works over SSH too: the browser is usually on another machine,
 //! so the redirect to `http://127.0.0.1:<port>/callback` may land nowhere.
-//! [`Flow::finish_with`] accepts the address the browser ended up on (or just
+//! [`Flow::code_from`] accepts the address the browser ended up on (or just
 //! the code), pasted back.
 
 use std::collections::BTreeMap;
