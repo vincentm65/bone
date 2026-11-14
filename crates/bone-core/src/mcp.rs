@@ -741,7 +741,7 @@ async fn supervise(server: Arc<Server>, connector: Connector) {
                 let why = loop {
                     match events.recv().await {
                         Some(ConnEvent::ToolsChanged) => {
-                            if let Ok(tools) = conn.list_tools().await {
+                            if let Ok(Ok(tools)) = tokio::time::timeout(START_TIMEOUT, conn.list_tools()).await {
                                 server.set(|s| s.tools = tools);
                             }
                         }
