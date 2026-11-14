@@ -598,6 +598,7 @@ function bone.ui.clear()
   for k in pairs(tool_view_store) do tool_view_store[k] = nil end
   for k in pairs(bone.ui.regions) do bone.ui.regions[k] = nil end
   for k in pairs(bone.ui.actions) do bone.ui.actions[k] = nil end
+  api("ui_refresh")
 end
 
 --- Lua handlers for builtin actions: bone.ui.actions[name] = function()
