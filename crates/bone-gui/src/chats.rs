@@ -226,9 +226,11 @@ impl Gui {
             let draft = (
                 std::mem::take(&mut self.draft),
                 std::mem::take(&mut self.images),
+                std::mem::take(&mut self.prompt.pastes),
             );
             self.drafts.insert(self.current, draft);
-            (self.draft, self.images) = self.drafts.remove(&buf).unwrap_or_default();
+            (self.draft, self.images, self.prompt.pastes) =
+                self.drafts.remove(&buf).unwrap_or_default();
             // An image still being read was for the draft left behind.
             self.draft_epoch += 1;
             self.current = buf;

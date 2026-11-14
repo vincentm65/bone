@@ -136,8 +136,8 @@ pub struct Gui {
     /// `/gui use` switched the GUI's library from this one (none chosen
     /// before: `None` inside).
     pub(crate) gui_library_prev: Option<Option<String>>,
-    /// The drafts of the chats not on screen.
-    drafts: std::collections::HashMap<usize, (String, Vec<ImageAttachment>)>,
+    /// The drafts of the chats not on screen, with their long pastes.
+    drafts: std::collections::HashMap<usize, (String, Vec<ImageAttachment>, Vec<(String, String)>)>,
     pub status: Option<Status>,
     /// The server went away and it is not coming back.
     pub closed: bool,
@@ -506,14 +506,26 @@ impl Gui {
     }
 
     /// A prompt that did not go out comes back to the draft.
-    fn unsent(&mut self, buf: usize, text: String, images: Vec<ImageAttachment>, e: String) {
+    /// It goes back to the chat it was sent from, ahead of anything typed since.
+    fn unsent(&mut self, buf: usize, mut text: String, images: Vec<ImageAttachment>, e: String) {
         if let Some(c) = self.chats.get_mut(buf) {
             c.starting = false;
         }
-        if self.draft.is_empty() {
-            self.draft = text;
+        let (draft, imgs) = if buf == self.current {
+            (&mut self.draft, &mut self.images)
+        } else {
+            let d = self.drafts.entry(buf).or_default();
+            (&mut d.0, &mut d.1)
+        };
+        if !draft.is_empty() {
+            text = format!("{text}\n{draft}");
         }
-        self.images.splice(0..0, images);
+        *draft = text;
+        imgs.splice(0..0, images);
+        if buf == self.current {
+            self.cursor_to_end();
+            self.prompt_changed();
+        }
         self.error(format!("not sent: {e}"));
     }
 
