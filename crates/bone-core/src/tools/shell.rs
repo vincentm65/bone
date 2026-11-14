@@ -9,7 +9,7 @@ use std::io::Read;
 use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -181,6 +181,8 @@ struct Process {
     pty: Mutex<Option<PtyMaster>>,
     control: mpsc::UnboundedSender<Control>,
     done: Notify,
+    /// Started with `stdin = "pipe"` and not closed since: writes reach it.
+    stdin_open: AtomicBool,
 }
 
 enum Control {
@@ -253,6 +255,7 @@ impl ProcessRegistry {
             pty: Mutex::new(None),
             control,
             done: Notify::new(),
+            stdin_open: AtomicBool::new(matches!(spec.stdin, Stdin::Pipe)),
         });
         self.processes
             .lock()
@@ -429,14 +432,19 @@ impl ProcessRegistry {
         views
     }
     fn write(&self, owner: &str, id: &str, data: Vec<u8>) -> Result<(), String> {
-        self.get(owner, id)?
-            .control
+        let p = self.get(owner, id)?;
+        // Said plainly, or the model believes input arrived that was dropped.
+        if !p.stdin_open.load(Ordering::Relaxed) {
+            return Err(format!("{id} has no open stdin; start it with stdin=\"pipe\""));
+        }
+        p.control
             .send(Control::Write(data))
             .map_err(|_| "job is no longer running".into())
     }
     fn close_stdin(&self, owner: &str, id: &str) -> Result<(), String> {
-        self.get(owner, id)?
-            .control
+        let p = self.get(owner, id)?;
+        p.stdin_open.store(false, Ordering::Relaxed);
+        p.control
             .send(Control::CloseStdin)
             .map_err(|_| "job is no longer running".into())
     }
