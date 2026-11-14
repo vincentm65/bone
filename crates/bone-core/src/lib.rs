@@ -997,7 +997,10 @@ impl Core {
                 });
             };
             let r = inner.model_call(call, &mut on_delta).await;
-            inner.model_requests.lock().unwrap().remove(&request_id);
+            // Gone: model/cancel took it and has reported it.
+            if inner.model_requests.lock().unwrap().remove(&request_id).is_none() {
+                return;
+            }
             let done = match r {
                 Ok(c) => ModelCompletedParams {
                     request_id,
