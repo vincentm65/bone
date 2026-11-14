@@ -70,8 +70,13 @@ impl Listener {
             Some(pipe) => pipe,
             None => self.instance()?,
         };
+        let mut failures = 0;
         loop {
-            pipe.connect().await?;
+            if let Err(e) = pipe.connect().await {
+                crate::accept_failed(e, &mut failures).await;
+                pipe = self.instance()?;
+                continue;
+            }
             let connected = std::mem::replace(&mut pipe, self.instance()?);
             let (r, w) = tokio::io::split(connected);
             let server = server.clone();

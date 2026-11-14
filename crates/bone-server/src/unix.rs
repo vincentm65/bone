@@ -81,8 +81,15 @@ impl Listener {
         server: &Server,
         clients: tokio::sync::watch::Sender<usize>,
     ) -> io::Result<()> {
+        let mut failures = 0;
         loop {
-            let (stream, _) = self.listener.accept().await?;
+            let (stream, _) = match self.listener.accept().await {
+                Ok(accepted) => accepted,
+                Err(e) => {
+                    crate::accept_failed(e, &mut failures).await;
+                    continue;
+                }
+            };
             let (r, w) = stream.into_split();
             let server = server.clone();
             clients.send_modify(|n| *n += 1);

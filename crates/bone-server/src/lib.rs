@@ -174,3 +174,14 @@ async fn recv_event(events: &mut Option<broadcast::Receiver<Event>>) -> Event {
         Err(broadcast::error::RecvError::Closed) => std::future::pending().await,
     }
 }
+
+/// A failed accept (out of descriptors, a client gone mid-handshake) must not
+/// end a core other clients use: say so now and then, wait a little, go on.
+#[cfg(any(unix, windows))]
+async fn accept_failed(e: std::io::Error, failures: &mut u32) {
+    if *failures % 100 == 0 {
+        eprintln!("bone: accepting a connection failed: {e}");
+    }
+    *failures += 1;
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+}
