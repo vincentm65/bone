@@ -114,9 +114,11 @@ mod tools {
             })?;
             let mut stderr = child.stderr.take().unwrap();
             let errors = std::thread::spawn(move || {
-                let mut text = String::new();
-                let _ = (&mut stderr).take(4096).read_to_string(&mut text);
-                text
+                let mut text = Vec::new();
+                let _ = (&mut stderr).take(4096).read_to_end(&mut text);
+                // The rest is drained, so a chatty helper never blocks on a full pipe.
+                let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+                String::from_utf8_lossy(&text).into_owned()
             });
             let limit = bone_media::MAX_IMAGE_BYTES as u64 + 1;
             let mut out = Vec::new();
