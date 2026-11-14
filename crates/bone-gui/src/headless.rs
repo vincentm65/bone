@@ -128,7 +128,6 @@ pub struct Headless {
     /// Input for the next frame, as the window would send it.
     events: Vec<Event>,
     mods: Modifiers,
-    scale: f32,
     /// Whether the window has the focus. Gaining it checks the Lua
     /// config for a saved edit.
     focused: bool,
@@ -156,7 +155,6 @@ impl Headless {
             size: (width, height),
             events: Vec::new(),
             mods: Modifiers::NONE,
-            scale: 1.0,
             focused: true,
             ui_secs: 0.0,
             backend: NoWindow::default(),
@@ -167,7 +165,6 @@ impl Headless {
     pub fn frame(&mut self) {
         let mut input = FrameInput::new(Rect::from_min_size(pos(0.0, 0.0), vec2(self.size.0, self.size.1)));
         input.events = std::mem::take(&mut self.events);
-        input.scale = self.scale;
         input.focused = self.focused;
         input.mods = self.mods;
         let started = std::time::Instant::now();
@@ -227,11 +224,6 @@ impl Headless {
     /// The window's size in logical points, from the next frame.
     pub fn resize(&mut self, width: f32, height: f32) {
         self.size = (width, height);
-    }
-
-    /// The display's scale (2.0 for a HiDPI screen), from the next frame.
-    pub fn set_scale(&mut self, scale: f32) {
-        self.scale = scale;
     }
 
     /// Whether the window has the focus, from the next frame. Gaining it

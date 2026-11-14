@@ -137,10 +137,6 @@ impl Row {
         self.start + self.chars() + usize::from(self.newline)
     }
 
-    pub fn left(&self) -> f32 {
-        self.xs.first().copied().unwrap_or(0.0)
-    }
-
     pub fn right(&self) -> f32 {
         self.xs.last().copied().unwrap_or(0.0)
     }

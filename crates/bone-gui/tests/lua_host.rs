@@ -446,13 +446,6 @@ async fn resizing_and_hidpi() {
     let resized = g.gui.eval("resized").unwrap();
     assert_eq!(resized, format!("{narrow}x{}", g.gui.view.screen_size.1));
 
-    g.set_scale(2.0);
-    g.frame();
-    g.frame();
-    assert_eq!(
-        g.gui.view.screen_cols, narrow,
-        "the same columns on a 2x display"
-    );
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 

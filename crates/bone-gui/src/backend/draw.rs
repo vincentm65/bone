@@ -127,14 +127,6 @@ impl DrawList {
             opacity,
         });
     }
-
-    /// The text painted, each with the box it covers.
-    pub fn texts(&self) -> impl Iterator<Item = (&str, Rect)> {
-        self.items.iter().filter_map(|i| match &i.shape {
-            Shape::Text { at, text, .. } => Some((text.text.as_str(), text.rect_at(*at))),
-            _ => None,
-        })
-    }
 }
 
 /// The color `c` at `opacity`.

@@ -44,10 +44,6 @@ impl Modifiers {
             self.ctrl
         }
     }
-
-    pub fn any(&self) -> bool {
-        self.ctrl || self.alt || self.shift || self.logo
-    }
 }
 
 /// A key on the keyboard, by what it is, not what it types.
@@ -77,14 +73,10 @@ pub enum Key {
 
 #[allow(non_upper_case_globals)]
 impl Key {
-    pub const A: Key = Key::Char('a');
-    pub const C: Key = Key::Char('c');
     pub const G: Key = Key::Char('g');
     pub const K: Key = Key::Char('k');
     pub const O: Key = Key::Char('o');
-    pub const V: Key = Key::Char('v');
     pub const W: Key = Key::Char('w');
-    pub const X: Key = Key::Char('x');
     pub const Num5: Key = Key::Char('5');
     pub const CloseBracket: Key = Key::Char(']');
 }
@@ -161,8 +153,6 @@ pub struct FrameInput {
     pub events: Vec<Event>,
     /// The window's area, in logical pixels.
     pub screen: Rect,
-    /// Physical pixels per logical one.
-    pub scale: f32,
     /// Whether the window has the keyboard focus.
     pub focused: bool,
     pub fullscreen: bool,
@@ -177,7 +167,6 @@ impl FrameInput {
         FrameInput {
             events: Vec::new(),
             screen,
-            scale: 1.0,
             focused: true,
             fullscreen: false,
             maximized: false,

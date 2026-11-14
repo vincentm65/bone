@@ -1222,14 +1222,7 @@ pub fn parse(
         },
         radius: corners(&p, "radius")?,
         opacity: p.get("opacity")?,
-        hover: {
-            let mut h = state(&p, "hover", colors)?;
-            // The old one-field form.
-            if let Some(bg) = p.color("hover_bg", colors, true)? {
-                h.get_or_insert_with(Default::default).bg = Some(bg);
-            }
-            h
-        },
+        hover: state(&p, "hover", colors)?,
         group_hover: state(&p, "group_hover", colors)?,
         active: state(&p, "active", colors)?,
         focus: state(&p, "focus", colors)?,

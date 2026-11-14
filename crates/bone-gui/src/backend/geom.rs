@@ -29,10 +29,6 @@ impl Vec2 {
     pub fn length(self) -> f32 {
         (self.x * self.x + self.y * self.y).sqrt()
     }
-
-    pub fn dot(self, o: Vec2) -> f32 {
-        self.x * o.x + self.y * o.y
-    }
 }
 
 impl Pos {
@@ -111,15 +107,6 @@ pub struct Rect {
 }
 
 impl Rect {
-    pub const NOTHING: Rect = Rect {
-        min: pos(f32::INFINITY, f32::INFINITY),
-        max: pos(f32::NEG_INFINITY, f32::NEG_INFINITY),
-    };
-    pub const EVERYTHING: Rect = Rect {
-        min: pos(f32::NEG_INFINITY, f32::NEG_INFINITY),
-        max: pos(f32::INFINITY, f32::INFINITY),
-    };
-
     pub fn from_min_max(min: Pos, max: Pos) -> Rect {
         Rect { min, max }
     }
@@ -186,13 +173,6 @@ impl Rect {
             && o.min.x <= self.max.x
             && self.min.y <= o.max.y
             && o.min.y <= self.max.y
-    }
-
-    pub fn union(&self, o: Rect) -> Rect {
-        Rect {
-            min: pos(self.min.x.min(o.min.x), self.min.y.min(o.min.y)),
-            max: pos(self.max.x.max(o.max.x), self.max.y.max(o.max.y)),
-        }
     }
 
     pub fn expand(&self, by: f32) -> Rect {

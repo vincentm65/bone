@@ -234,7 +234,6 @@ impl Root {
         );
         let mut input = FrameInput::new(screen);
         input.events = std::mem::take(&mut self.events);
-        input.scale = window.scale_factor();
         input.focused = window.is_window_active();
         input.fullscreen = window.is_fullscreen();
         input.maximized = window.is_maximized();
