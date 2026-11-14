@@ -87,7 +87,9 @@ function M.setup(opts)
     end
     local lines = {}
     health_lines(bone.api_info().side:upper(), mine, lines)
-    local pager = bone.ui.pager({ unpack(lines), { { "Core: checking…", "Dim" } } }, { title = "Health" })
+    local waiting = { unpack(lines) }
+    waiting[#waiting + 1] = { { "Core: checking…", "Dim" } }
+    local pager = bone.ui.pager(waiting, { title = "Health" })
     bone.request("health/check", {}, function(core, err)
       local all = { unpack(lines) }
       if err then
