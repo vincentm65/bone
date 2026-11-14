@@ -39,8 +39,12 @@ uuid = { version = "1", features = ["v7"] }
 
 # gpui 0.2.2 pulls xattr 0.2, which names libc::ENOATTR, gone on Linux from
 # current libc; the vendored copy uses ENODATA there.
+# gpui 0.2.2 reads every system font before it opens a window on Linux
+# (seconds when they are not in the page cache); the vendored copy loads them
+# on a thread instead (look for "Patched for bone").
 [patch.crates-io]
 xattr = { path = "crates/bone-gui/vendor/xattr" }
+gpui = { path = "crates/bone-gui/vendor/gpui" }
 
 [profile.release]
 lto = "thin"

@@ -155,6 +155,10 @@ impl Root {
         let notify = Arc::new(tokio::sync::Notify::new());
         let n = notify.clone();
         gui.set_waker(Box::new(move || n.notify_one()));
+        // The system's fonts load behind the first frames; draw again with
+        // them for any glyph Geist lacks.
+        let n = notify.clone();
+        gpui::fonts::on_loaded(move || n.notify_one());
         let messages = cx.spawn_in(window, async move |this, cx| {
             loop {
                 notify.notified().await;
