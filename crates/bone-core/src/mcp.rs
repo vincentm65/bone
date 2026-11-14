@@ -185,9 +185,9 @@ impl LineConn {
         let pending2 = pending.clone();
         let replies = out.clone();
         tokio::spawn(async move {
-            let mut lines = BufReader::new(reader).lines();
+            let mut reader = BufReader::new(reader);
             let why = loop {
-                let line = match lines.next_line().await {
+                let line = match next_line(&mut reader).await {
                     Ok(Some(l)) => l,
                     Ok(None) => break "the server closed the connection".to_owned(),
                     Err(e) => break format!("reading from the server: {e}"),
@@ -603,8 +603,8 @@ pub fn connect(
         if let Some(err) = child.stderr.take() {
             let tail = tail.clone();
             tokio::spawn(async move {
-                let mut lines = BufReader::new(err).lines();
-                while let Ok(Some(l)) = lines.next_line().await {
+                let mut err = BufReader::new(err);
+                while let Ok(Some(l)) = next_line(&mut err).await {
                     let mut t = tail.lock().unwrap();
                     if t.len() == STDERR_LINES {
                         t.pop_front();
@@ -729,14 +729,14 @@ async fn supervise(server: Arc<Server>, connector: Connector) {
         .unwrap_or_else(|_| Err("did not start in time".into()));
         let why = match started {
             Ok((conn, mut events, tools)) => {
-                restarts = 0;
+                let up = std::time::Instant::now();
                 server.set(|s| {
                     s.status = Status::Ready;
                     s.error = None;
                     s.conn = Some(conn.clone());
                     s.tools = tools;
                 });
-                loop {
+                let why = loop {
                     match events.recv().await {
                         Some(ConnEvent::ToolsChanged) => {
                             if let Ok(tools) = conn.list_tools().await {
@@ -747,7 +747,13 @@ async fn supervise(server: Arc<Server>, connector: Connector) {
                         // HTTP has no event stream: stay as is.
                         None => std::future::pending::<()>().await,
                     }
+                };
+                // Up a minute: a fresh budget. One that dies right after
+                // starting, every time, runs it out instead of looping.
+                if up.elapsed() > Duration::from_secs(60) {
+                    restarts = 0;
                 }
+                why
             }
             Err(why) => why,
         };
@@ -779,6 +785,16 @@ async fn supervise(server: Arc<Server>, connector: Connector) {
         // 1, 2, 4, 8, 16 seconds.
         tokio::time::sleep(Duration::from_secs(1u64 << (restarts - 1).min(4))).await;
     }
+}
+
+/// One line, without its line ending; bytes that are not UTF-8 are replaced
+/// rather than ending the stream as `lines()` would.
+async fn next_line(r: &mut (impl AsyncBufReadExt + Unpin)) -> std::io::Result<Option<String>> {
+    let mut b = Vec::new();
+    if r.read_until(b'\n', &mut b).await? == 0 {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8_lossy(&b).trim_end_matches(['\n', '\r']).to_owned()))
 }
 
 /// Every configured server, for the life of the core.
