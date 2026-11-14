@@ -94,7 +94,9 @@ function M.node()
   local out = { direction = "column", head }
   local rows = all[ui.page]
   ui.sel = math.max(1, math.min(ui.sel, #rows))
-  for i = 1, math.min(#rows, 6) do
+  -- Six rows, scrolled to keep the selection in them.
+  local first = math.max(1, ui.sel - 5)
+  for i = first, math.min(#rows, first + 5) do
     local r = rows[i]
     local live = r.status == "running"
     local glyph = live and { "●", "PanelRunning" } or bg.GLYPH[r.status] or { "·", "Dim" }
