@@ -5,7 +5,7 @@ use mlua::{Function, Lua, MultiValue, Value};
 
 use crate::Gui;
 
-use super::{Target, remember_text};
+use super::{Target, push_text};
 
 /// `bone.ui.popup` / `win` / `update` and `bone.ui.panel.open` / `update`:
 /// a spec's `node` (a function of `{ width, height }` returning the content
@@ -197,9 +197,7 @@ pub(crate) fn dispatch(
         }),
         // gui_input_set(id, text): replace the text of text input `id`.
         "gui_input_set" => args::<(String, String)>(lua, a).and_then(|(id, text)| {
-            let buf = gui.view.inputs.entry(id).or_default();
-            buf.pushed = Some(text.clone());
-            remember_text(buf, text);
+            push_text(gui.view.inputs.entry(id).or_default(), text);
             gui.view.invalidate();
             ret(lua, ())
         }),

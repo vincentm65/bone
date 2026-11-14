@@ -125,6 +125,17 @@ pub(in crate::nodeview) fn remember_text(buf: &mut InputBuf, text: String) {
     buf.text = text;
 }
 
+/// Lua set the text. The caret goes to its end, unless it is the text already
+/// there (Lua echoing what was typed), which keeps the caret where it is.
+pub(in crate::nodeview) fn push_text(buf: &mut InputBuf, text: String) {
+    buf.pushed = Some(text.clone());
+    if buf.text != text {
+        let n = text.chars().count();
+        remember_text(buf, text);
+        (buf.anchor, buf.cursor) = (n, n);
+    }
+}
+
 /// A value on its way: `[red, green, blue, alpha]` or `[opacity, 0, 0, 0]`.
 pub(in crate::nodeview) struct Tween {
     pub(in crate::nodeview) from: [f32; 4],

@@ -670,10 +670,7 @@ impl Gui {
         let buf = vs.inputs.entry(key.clone()).or_default();
         // Lua pushed a new value.
         if let Some(v) = t.value.as_ref().filter(|v| buf.pushed.as_ref() != Some(*v)) {
-            buf.pushed = Some(v.clone());
-            super::remember_text(buf, v.clone());
-            buf.anchor = buf.anchor.min(v.chars().count());
-            buf.cursor = v.chars().count();
+            super::push_text(buf, v.clone());
         }
         // Asked to take the keyboard, or appearing with `focus`.
         if vs.focus_request.as_deref() == Some(&key)
