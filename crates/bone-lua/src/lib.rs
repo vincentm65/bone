@@ -741,6 +741,15 @@ pub fn to_lua(lua: &Lua, v: &serde_json::Value) -> mlua::Result<Value> {
 /// Lua → JSON. Tables with keys 1..n are arrays; an empty table is `{}`,
 /// unless it came from a JSON array (and was not rebuilt on the way).
 pub fn from_lua(v: &Value) -> mlua::Result<serde_json::Value> {
+    walk(v, 0)
+}
+
+/// [`from_lua`] at nesting `depth`; past JSON's usual 128 levels the table
+/// is taken to contain itself (`t.self = t`) rather than overflow the stack.
+fn walk(v: &Value, depth: u32) -> mlua::Result<serde_json::Value> {
+    if depth > 128 {
+        return Err(mlua::Error::runtime("table nests too deeply (does it contain itself?)"));
+    }
     Ok(match v {
         Value::Nil => serde_json::Value::Null,
         Value::Boolean(b) => serde_json::Value::Bool(*b),
@@ -761,7 +770,7 @@ pub fn from_lua(v: &Value) -> mlua::Result<serde_json::Value> {
             if len == count && (len > 0 || marked()) {
                 let mut a = Vec::with_capacity(len);
                 for i in 1..=len {
-                    a.push(from_lua(&t.raw_get::<Value>(i)?)?);
+                    a.push(walk(&t.raw_get::<Value>(i)?, depth + 1)?);
                 }
                 serde_json::Value::Array(a)
             } else {
@@ -778,7 +787,7 @@ pub fn from_lua(v: &Value) -> mlua::Result<serde_json::Value> {
                             )));
                         }
                     };
-                    o.insert(key, from_lua(&v)?);
+                    o.insert(key, walk(&v, depth + 1)?);
                 }
                 serde_json::Value::Object(o)
             }
