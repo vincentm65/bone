@@ -23,10 +23,22 @@ pub async fn run(spec: Json) -> Result<Json, String> {
     Err(format!("unknown wait: {spec}"))
 }
 
-/// `{ code, stdout, stderr }`; on timeout the process is killed and
-/// `timed_out = true` (code nil).
+/// `{ code, stdout, stderr }`; on timeout the process and everything it
+/// started are killed and `timed_out = true` (code nil).
 async fn system(cmd: &str, spec: &Json) -> Result<Json, String> {
+    /// Kills the process group unless disarmed: a timeout or a dropped wait
+    /// takes the command's children with it, a normal exit leaves them (a
+    /// viewer started by `xdg-open` keeps running).
+    struct Group(Option<u32>);
+    impl Drop for Group {
+        fn drop(&mut self) {
+            if let Some(pid) = self.0 {
+                crate::sys::kill_tree(pid);
+            }
+        }
+    }
     let mut c = tokio::process::Command::from(crate::sys::shell(cmd));
+    crate::sys::new_group(c.as_std_mut());
     c.stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .kill_on_drop(true);
@@ -40,6 +52,7 @@ async fn system(cmd: &str, spec: &Json) -> Result<Json, String> {
         std::process::Stdio::null()
     });
     let mut child = c.spawn().map_err(|e| format!("cannot run {cmd:?}: {e}"))?;
+    let mut group = Group(child.id());
     if let (Some(data), Some(mut pipe)) = (stdin, child.stdin.take()) {
         tokio::spawn(async move {
             let _ = pipe.write_all(data.as_bytes()).await;
@@ -52,8 +65,9 @@ async fn system(cmd: &str, spec: &Json) -> Result<Json, String> {
             Err(_) => return Ok(json!({ "timed_out": true, "stdout": "", "stderr": "" })),
         },
         None => out.await,
-    }
-    .map_err(|e| format!("{cmd:?}: {e}"))?;
+    };
+    group.0 = None;
+    let out = out.map_err(|e| format!("{cmd:?}: {e}"))?;
     Ok(json!({
         "code": out.status.code(),
         "stdout": String::from_utf8_lossy(&out.stdout),
