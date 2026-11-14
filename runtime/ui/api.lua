@@ -297,16 +297,13 @@ bone.on("model/completed", function(ev)
     model_finish(call, ev)
   else
     model_done_early[ev.request_id] = ev
+    -- Another client's model calls never get a reply here; forget their
+    -- events after a while.
+    bone.defer(60000, function()
+      model_done_early[ev.request_id] = nil
+      model_deltas_early[ev.request_id] = nil
+    end)
   end
-end)
-
--- Another client's model calls never get a reply here; forget their events
--- after a while.
-bone.on("model/completed", function(ev)
-  bone.defer(60000, function()
-    model_done_early[ev.request_id] = nil
-    model_deltas_early[ev.request_id] = nil
-  end)
 end)
 
 --- Call a function core Lua registered with bone.rpc.register (lua/call):
