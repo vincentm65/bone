@@ -83,7 +83,8 @@ pub async fn send(req: &Json) -> Result<(reqwest::Response, Json), String> {
     let method = req["method"].as_str().unwrap_or("GET");
     let method = reqwest::Method::from_bytes(method.to_uppercase().as_bytes())
         .map_err(|_| format!("bad HTTP method {method:?}"))?;
-    let mut b = reqwest::Client::new().request(method, url);
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    let mut b = CLIENT.get_or_init(reqwest::Client::new).request(method, url);
     if let Some(h) = req["headers"].as_object() {
         for (k, v) in h {
             b = b.header(k, v.as_str().unwrap_or_default());

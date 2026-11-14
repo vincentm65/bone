@@ -113,11 +113,18 @@ fn merge(into: &mut Value, from: &Value) {
 }
 
 /// An HTTP client for providers; one serves every request a provider makes.
+/// One client for every provider, so a model call reuses its connection (a
+/// clone shares the pool).
 pub(crate) fn http_client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .connect_timeout(CONNECT_TIMEOUT)
-        .build()
-        .expect("reqwest client builds")
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            reqwest::Client::builder()
+                .connect_timeout(CONNECT_TIMEOUT)
+                .build()
+                .expect("reqwest client builds")
+        })
+        .clone()
 }
 
 pub(super) fn check_images(
