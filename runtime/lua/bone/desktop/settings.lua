@@ -36,7 +36,7 @@ local function hints(st, t, r)
   if st.edit then return "enter save · esc cancel" end
   if st.search then return "↑↓ move · enter choose · esc clear" end
   if t.page or st.prov then return "↑↓ move · / search · enter change · r reset · esc back" end
-  if t.name == "providers" then return "↑↓ move · / search · enter open · u use · a add · d delete · esc close" end
+  if t.name == "providers" then return "↑↓ move · / search · enter use · e edit · a add · d delete · esc close" end
   if t.name == "plugins" then
     -- Enter opens a page only for the rows that have one; space is what
     -- turns a plugin on or off.
@@ -72,7 +72,12 @@ function M.open(want, keep)
   local function on_click(i)
     return function()
       st.sel = i
-      page.activate(page.rows()[i], false)
+      local r = page.rows()[i]
+      if r and r.kind == "provider" then
+        page.edit_provider(r.name)
+      else
+        page.activate(r, false)
+      end
       refresh()
     end
   end

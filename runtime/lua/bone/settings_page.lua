@@ -141,8 +141,8 @@ end
 
 --- A page opened on `want` (a section or detail page, by name or title).
 function M.new(want, opts)
-  -- The desktop opens a provider on enter (`u` uses it) and lists a
-  -- "+ New provider" row; the TUI uses one on enter and edits it with `e`.
+  -- Enter uses a provider and `e` edits it; the desktop also lists a
+  -- "+ New provider" row and opens a provider on a click.
   local gui = opts.scope == "gui"
   local titles = {}
   local st = {
@@ -510,8 +510,7 @@ function M.new(want, opts)
     return row.choices[i % #row.choices + 1]
   end
 
-  -- Switch to a provider: from its row (enter in the TUI, `u` in the
-  -- desktop), or the editor's Use row. The Use row stays where it is; the
+  -- Switch to a provider: enter on its row, or the editor's Use row. The Use row stays where it is; the
   -- list row closes a page opened straight on providers.
   local function use_provider(name, stay)
     bone.settings.set("provider", name, function(_, err)
@@ -532,7 +531,7 @@ function M.new(want, opts)
       if space then
         return
       end
-      if row.kind == "provider" and not gui then
+      if row.kind == "provider" then
         return use_provider(row.name)
       end
       local blank = { name = "", base_url = "", model = "", type = "", key = "", api_key_env = "" }
@@ -728,15 +727,13 @@ function M.new(want, opts)
       save_provider_field(row, "")
     elseif k == "r" and row and row.path then
       reset(row)
-    elseif k == "u" and gui and row and row.kind == "provider" then
-      use_provider(row.name)
-    elseif k == "e" and not gui and row and row.kind == "provider" then
+    elseif k == "e" and row and row.kind == "provider" then
       st.prov, st.sel = { name = row.name }, 1
     elseif k == "a" and st.tabs[st.tab].name == "providers" and not st.prov then
       activate({ kind = "new" })
     elseif k == "d" and row and row.kind == "provider" then
       if not row.added then
-        st.note = { row.name .. " is defined in core.lua; " .. (gui and "open it" or "e") .. " edits it, and core.lua is where to remove it", "ErrorMsg" }
+        st.note = { row.name .. " is defined in core.lua; e edits it, and core.lua is where to remove it", "ErrorMsg" }
       else
         local name = row.name
         st.ask = { text = "delete " .. name .. " and its saved key?", action = function()
@@ -764,6 +761,10 @@ function M.new(want, opts)
     rows = rows,
     on_key = on_key,
     activate = activate,
+    --- Open provider `name`'s editor (the desktop does on a click).
+    edit_provider = function(name)
+      st.prov, st.sel = { name = name }, 1
+    end,
     --- Give a row (an option, a field or a provider's field) `value`, as
     --- a choice picked with the pointer does.
     set = function(row, value)
