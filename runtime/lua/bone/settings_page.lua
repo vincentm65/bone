@@ -441,16 +441,22 @@ function M.new(want, opts)
       if err then
         return saved_note(err)
       end
-      if row.tui then
-        pcall(turning_on and bone.plugin.load or bone.plugin.unload, row.name)
+      -- This side's half: only if it changes, and a failure is shown.
+      local tui_err, loaded = nil, false
+      for _, p in ipairs(row.tui and bone.plugin.list() or {}) do
+        loaded = loaded or (p.name == row.name and p.loaded)
+      end
+      if row.tui and turning_on ~= loaded then
+        local ok, e = pcall(turning_on and bone.plugin.load or bone.plugin.unload, row.name)
+        tui_err = not ok and e or nil
       end
       if row.core then
         bone.request(turning_on and "plugin/load" or "plugin/unload", { name = row.name }, function(_, e)
           load_plugins()
-          saved_note(e, row.name .. (turning_on and " on" or " off"))
+          saved_note(e or tui_err, row.name .. (turning_on and " on" or " off"))
         end)
       else
-        saved_note(nil, row.name .. (turning_on and " on" or " off"))
+        saved_note(tui_err, row.name .. (turning_on and " on" or " off"))
       end
     end
     if #list > 0 then
