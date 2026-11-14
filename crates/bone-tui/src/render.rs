@@ -222,7 +222,8 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let finished = match &mut app.selection {
         Some(s) if s.done && !s.copied => {
             s.copied = true;
-            Some(s.text(frame.buffer_mut()))
+            // A drag over blank cells copies nothing, not "" over the clipboard.
+            Some(s.text(frame.buffer_mut())).filter(|t| !t.trim().is_empty())
         }
         _ => None,
     };
