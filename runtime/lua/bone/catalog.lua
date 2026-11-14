@@ -392,7 +392,8 @@ function M.remove(name, cb, kind)
     end
     bone.fs.mkdir(b)
     local ok, err = os.rename(dest, b .. "/" .. name)
-    cb(ok and true or false, ok and nil or tostring(err))
+    if not ok then return cb(false, tostring(err)) end
+    cb(true)
   end)
 end
 
@@ -692,7 +693,6 @@ local function render(page, ctx)
     out[#out + 1] = prefix
   end
   out[#out + 1] = ""
-  local e = list[st.sel]
   out[#out + 1] = { { bone.text.truncate("   " .. page.note(), w), st.ask and "Accent" or "Dim" } }
   out[#out + 1] = { { "   " .. page.hint(), "Dim" } }
   return out
