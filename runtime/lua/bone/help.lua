@@ -31,9 +31,6 @@ local function doc_sections()
   return out
 end
 
-M.file = file
-M.sections = doc_sections
-
 --- Section `best` of `secs` with its subsections: text, title.
 function M.section(secs, best)
   local s, lines = secs[best], {}

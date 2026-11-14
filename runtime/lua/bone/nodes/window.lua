@@ -23,7 +23,6 @@ M.max_width = 914
 -- The list reserves this much room on its right for its scrollbar. Keep the
 -- composer and bottom docks on the same visual edge as the chat items.
 M.chat_scrollbar_inset = 14
-M.spinner = widgets.spin -- the status bar's: { dots, interval } (ms to go round)
 
 -- ---- docked panels: those drawn as nodes (bone.ui.panel.open{ node = fn }) --
 

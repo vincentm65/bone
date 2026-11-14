@@ -318,33 +318,10 @@ pub fn plugins(config_dir: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// Run `file` of each plugin in `<config dir>/plugins/`, in name order.
-/// While one runs, `bone.plugin.current()` describes it.
-pub fn run_user_plugins(lua: &Lua, config_dir: &Path, file: &str) -> mlua::Result<()> {
-    run_user_plugins_except(lua, config_dir, file, &|_| false)
-}
-
-/// [`run_user_plugins`], leaving out the plugins `skip` names.
-pub fn run_user_plugins_except(
-    lua: &Lua,
-    config_dir: &Path,
-    file: &str,
-    skip: &dyn Fn(&str) -> bool,
-) -> mlua::Result<()> {
-    for plugin in plugins(config_dir) {
-        if skip(&plugin_name(&plugin)) {
-            continue;
-        }
-        set_loading(lua, Some(&plugin))?;
-        let r = run_file(lua, &plugin.join(file));
-        set_loading(lua, None)?;
-        r?;
-    }
-    Ok(())
-}
-
-/// [`run_user_plugins_except`], but a plugin that fails does not stop the
-/// rest: each failure is returned with the plugin's name, in load order.
+/// Run `file` of each plugin in `<config dir>/plugins/`, in name order,
+/// leaving out the plugins `skip` names. While one runs,
+/// `bone.plugin.current()` describes it. A plugin that fails does not stop
+/// the rest: each failure is returned with the plugin's name, in load order.
 pub fn run_user_plugins_each(
     lua: &Lua,
     config_dir: &Path,
@@ -1311,7 +1288,7 @@ mod tests {
             "seen = bone._loading.name",
         )
         .unwrap();
-        run_user_plugins(&lua, dir.path(), "core.lua").unwrap();
+        assert!(run_user_plugins_each(&lua, dir.path(), "core.lua", &|_| false).unwrap().is_empty());
         let seen: String = lua.load("return seen").eval().unwrap();
         assert_eq!(seen, "p1");
         let after: Value = lua.load("return bone._loading").eval().unwrap();

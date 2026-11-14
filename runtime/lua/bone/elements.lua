@@ -56,14 +56,13 @@
 -- button take one too.
 local M = {}
 
---- The kinds, and those that sit in a row's line.
+--- The kinds.
 M.kinds = {
   text = true, row = true, column = true, section = true, split = true, list = true,
   checklist = true, button = true, tabs = true, field = true, diff = true, code = true,
   markdown = true, image = true, badge = true, meter = true, spinner = true,
   divider = true, hints = true,
 }
-M.inline = { text = true, badge = true, button = true, spinner = true, meter = true, hints = true }
 
 --- A tone's highlight group: the roles every colorscheme defines.
 M.tones = {

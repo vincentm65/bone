@@ -18,10 +18,6 @@
 -- it is being typed): each word must be in a row's name, value or text.
 local M = {}
 
-local function text_width(s)
-  return bone.text.width(s)
-end
-
 -- ---- what the tabs hold ----------------------------------------------------
 
 -- The frontend's options: built-in ones and those the runtime and plugins

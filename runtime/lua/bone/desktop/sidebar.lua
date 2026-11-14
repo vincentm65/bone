@@ -699,7 +699,6 @@ M.close = close
 
 --- Whether it is open, and whether it has the keyboard.
 function M.is_open() return open end
-M.has_keys = has_keys
 
 chats.watch(function(kind, ev)
   -- A turn that finishes in a chat you are not looking at is new to you.

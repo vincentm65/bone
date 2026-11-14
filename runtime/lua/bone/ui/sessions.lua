@@ -4,7 +4,7 @@
 local M = {}
 local panel, state
 local chats = require("bone.chats")
-local live, touched = chats.live, chats.touched
+local live = chats.live
 local empty_row = {}
 local recent_window, recent_label = chats.recent_window, chats.recent_label
 local count, timestamp = chats.count, chats.timestamp
