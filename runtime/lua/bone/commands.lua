@@ -95,7 +95,7 @@ local before = {}
 local function cd(path)
   local s = bone.api.session()
   local key, from = s and s.session_id or "", full_dir(".")
-  local dir = path == "-" and before[key] or full_dir(path)
+  local dir = path == "-" and before[key] or path ~= "-" and full_dir(path)
   if path == "-" and not dir then
     return bone.notify("/cd -: no directory to go back to yet", "error")
   end
