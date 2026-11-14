@@ -91,6 +91,10 @@ fn skip_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
                 }
             }
         }
+        // Character set choice (`ESC ( B` from `tput sgr0`): one more byte.
+        Some('(' | ')' | '*' | '+' | '#' | '%') => {
+            chars.next();
+        }
         _ => {}
     }
 }
