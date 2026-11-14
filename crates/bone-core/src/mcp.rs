@@ -881,7 +881,11 @@ impl McpManager {
             .url
             .clone()
             .ok_or_else(|| format!("{name} is a stdio server; it has no sign-in"))?;
-        let mut flow = oauth::Flow::start(name, &url, server.config.client_id.clone()).await?;
+        // Discovery is several requests; bound them together too.
+        let start = oauth::Flow::start(name, &url, server.config.client_id.clone());
+        let mut flow = tokio::time::timeout(Duration::from_secs(60), start)
+            .await
+            .map_err(|_| format!("{name}: the sign-in server did not answer in time"))??;
         let listener = flow.take_listener().ok_or("no redirect socket")?;
         let (shown, redirect) = (flow.url.clone(), flow.redirect_uri.clone());
         let flow = Arc::new(flow);

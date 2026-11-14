@@ -58,10 +58,19 @@ pub struct Entry {
 }
 
 fn load() -> BTreeMap<String, Entry> {
-    path()
-        .and_then(|p| std::fs::read_to_string(p).ok())
-        .and_then(|t| serde_json::from_str(&t).ok())
-        .unwrap_or_default()
+    let Some(p) = path() else { return BTreeMap::new() };
+    let Ok(text) = std::fs::read_to_string(&p) else { return BTreeMap::new() };
+    serde_json::from_str(&text).unwrap_or_else(|_| {
+        // Set aside, or the next save would erase every sign-in in it.
+        let _ = std::fs::rename(&p, p.with_extension("json.bad"));
+        BTreeMap::new()
+    })
+}
+
+/// HTTP for signing in: no request may hang it.
+fn http() -> reqwest::Client {
+    let b = reqwest::Client::builder().timeout(std::time::Duration::from_secs(30));
+    b.build().unwrap_or_default()
 }
 
 fn save(all: &BTreeMap<String, Entry>) -> Result<(), String> {
@@ -266,7 +275,7 @@ pub struct Flow {
 impl Flow {
     /// Discover, register a client and build the authorization address.
     pub async fn start(name: &str, url: &str, client_id: Option<String>) -> Result<Flow, String> {
-        let http = reqwest::Client::new();
+        let http = http();
         // An unauthenticated request shows where the server says to look.
         let www = http
             .post(url)
@@ -459,7 +468,7 @@ fn entry_from(doc: &Value, prev: Entry) -> Result<Entry, String> {
 }
 
 async fn token_request(endpoint: &str, pairs: &[(&str, &str)]) -> Result<Value, String> {
-    let res = reqwest::Client::new()
+    let res = http()
         .post(endpoint)
         .header("content-type", "application/x-www-form-urlencoded")
         .header("accept", "application/json")
