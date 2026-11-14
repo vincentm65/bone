@@ -666,28 +666,12 @@ pub struct GroupStyle {
     pub dim: bool,
 }
 
-pub fn parse_hex(s: &str) -> Option<Rgba> {
-    let h = s.strip_prefix('#')?;
-    let byte = |i: usize| u8::from_str_radix(h.get(i..i + 2)?, 16).ok();
-    let nib = |i: usize| {
-        u8::from_str_radix(h.get(i..i + 1)?, 16)
-            .ok()
-            .map(|n| n * 17)
-    };
-    match h.len() {
-        3 => Some(Rgba(nib(0)?, nib(1)?, nib(2)?, 0xff)),
-        4 => Some(Rgba(nib(0)?, nib(1)?, nib(2)?, nib(3)?)),
-        6 => Some(Rgba(byte(0)?, byte(2)?, byte(4)?, 0xff)),
-        8 => Some(Rgba(byte(0)?, byte(2)?, byte(4)?, byte(6)?)),
-        _ => None,
-    }
-}
-
 pub fn color(c: &dyn Colors, s: &str, bg: bool) -> Option<Rgba> {
     if s == "transparent" {
         return Some(Rgba(0, 0, 0, 0));
     }
-    parse_hex(s).or_else(|| c.group(s, bg))
+    let hex = bone_ui::theme::parse_hex(s).map(|(r, g, b, a)| Rgba(r, g, b, a));
+    hex.or_else(|| c.group(s, bg))
 }
 
 fn le(e: mlua::Error) -> String {

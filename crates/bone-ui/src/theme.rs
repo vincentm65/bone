@@ -218,16 +218,29 @@ impl Theme {
     }
 }
 
-/// `#rrggbb`, an ANSI name (`red`, `darkgray`, `lightblue`...), `reset`, or a
-/// 0-255 palette index.
+/// `#rgb`, `#rgba`, `#rrggbb` or `#rrggbbaa`, as (r, g, b, a).
+pub fn parse_hex(s: &str) -> Option<(u8, u8, u8, u8)> {
+    let h = s.strip_prefix('#')?;
+    let byte = |i: usize| u8::from_str_radix(h.get(i..i + 2)?, 16).ok();
+    let nib = |i: usize| u8::from_str_radix(h.get(i..i + 1)?, 16).ok().map(|n| n * 17);
+    match h.len() {
+        3 => Some((nib(0)?, nib(1)?, nib(2)?, 0xff)),
+        4 => Some((nib(0)?, nib(1)?, nib(2)?, nib(3)?)),
+        6 => Some((byte(0)?, byte(2)?, byte(4)?, 0xff)),
+        8 => Some((byte(0)?, byte(2)?, byte(4)?, byte(6)?)),
+        _ => None,
+    }
+}
+
+/// `#rrggbb` or `#rgb`, an ANSI name (`red`, `darkgray`, `lightblue`...),
+/// `reset`, or a 0-255 palette index.
 pub fn parse_color(s: &str) -> Result<Color, String> {
     if let Some(hex) = s.strip_prefix('#') {
-        if hex.len() == 6
-            && let Ok(v) = u32::from_str_radix(hex, 16)
-        {
-            return Ok(Color::Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8));
-        }
-        return Err(format!("bad color {s:?}: use #rrggbb"));
+        // A terminal has no alpha, so #rgba and #rrggbbaa are refused.
+        return match parse_hex(s) {
+            Some((r, g, b, _)) if matches!(hex.len(), 3 | 6) => Ok(Color::Rgb(r, g, b)),
+            _ => Err(format!("bad color {s:?}: use #rrggbb")),
+        };
     }
     if let Ok(n) = s.parse::<u8>() {
         return Ok(Color::Indexed(n));
