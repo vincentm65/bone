@@ -8,10 +8,10 @@ local p = {
   -- Hairlines: white at 8% (a divider) and 14% (an outline) on black.
   line = "#141414", border = "#262626",
   fg = "#ededed", muted = "#a1a1a1", dim = "#7a7a7a",
-  blue = "#4c8dff", path = "#a1a1a1",
+  blue = "#4c8dff",
   green = "#5fd08a", yellow = "#f0b84a", orange = "#f0b84a", red = "#ff6b6b",
   -- Syntax only (shell lines).
-  purple = "#c4b1f0", cyan = "#9ccfdd",
+  cyan = "#9ccfdd",
   bubble = "#1a1a1a",
   diff_add = "#7ee787", diff_add_bg = "#172b23", diff_del = "#ff7b72", diff_del_bg = "#34212a",
 }

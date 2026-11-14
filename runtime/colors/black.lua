@@ -8,10 +8,7 @@ local p = {
   good = "#9ece6a",
   warn = "#e0af68",
   error = "#f7768e",
-  selection = "#1a1a1a",
   path = "#abc4e3",
-  variable = "#bb9af7",
-  number = "#ff9e64",
   -- The user's message and the input sit on a raised grey, one step above
   -- the terminal's own background; the panels and the chat stay black.
   user_bg = "#222222",
