@@ -118,13 +118,22 @@ pub(crate) async fn run_turn(
         cancel: &cancel,
         stream,
     };
-    let outcome = match turn.drive(text, images).await {
-        Ok(()) => TurnOutcome::Completed,
-        Err(Stop::Cancelled) => TurnOutcome::Cancelled,
-        Err(Stop::Failed(message)) => TurnOutcome::Failed { message },
+    // A panic still ends the turn; otherwise the session stays busy for good.
+    let drive = std::panic::AssertUnwindSafe(turn.drive(text, images));
+    let outcome = match futures_util::FutureExt::catch_unwind(drive).await {
+        Ok(Ok(())) => TurnOutcome::Completed,
+        Ok(Err(Stop::Cancelled)) => TurnOutcome::Cancelled,
+        Ok(Err(Stop::Failed(message))) => TurnOutcome::Failed { message },
+        Err(p) => {
+            let why = (p.downcast_ref::<&str>().map(|s| s.to_string()))
+                .or_else(|| p.downcast_ref::<String>().cloned());
+            let message = format!("internal error: {}", why.unwrap_or_default());
+            TurnOutcome::Failed { message }
+        }
     };
     let resumed = {
-        let mut s = session.lock().unwrap();
+        let mut s = session.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        s.safe_point = false;
         s.last_outcome = Some((turn_id, outcome.clone()));
         match s.active.take_if(|a| a.turn_id == turn_id) {
             Some(a) => a.after_cancel > 0,
@@ -172,12 +181,9 @@ impl Turn<'_> {
             return Ok(None);
         };
         // Hooks may wait on the user (bone.ask); a cancel drops the question.
-        let out = tokio::select! {
-            out = s.hooks(name, event) => out,
-            _ = self.cancel.cancelled() => {
-                s.cancel_session(&self.session_id);
-                return Err(Refused::Cancelled);
-            }
+        let Ok(out) = self.or_cancel(s.hooks(name, event)).await else {
+            s.cancel_session(&self.session_id);
+            return Err(Refused::Cancelled);
         };
         match out.deny {
             Some(why) => Err(Refused::Denied(why)),
@@ -280,15 +286,19 @@ impl Turn<'_> {
         reason: &str,
         prefix: Option<crate::compact::Prefix>,
     ) -> Result<bool, Stop> {
+        let r = self.or_cancel(self.inner.compact(self.session, reason, prefix)).await?;
+        if let Err(error) = &r {
+            self.inner.emit::<SessionCompactFailed>(SessionCompactFailedParams {
+                session_id: self.session_id.clone(), reason: reason.into(), error: error.clone(),
+            });
+        }
+        Ok(r.is_ok())
+    }
+
+    /// `f`, unless the turn is cancelled first.
+    async fn or_cancel<T>(&self, f: impl Future<Output = T>) -> Result<T, Stop> {
         tokio::select! {
-            r = self.inner.compact(self.session, reason, prefix) => {
-                if let Err(error) = &r {
-                    self.inner.emit::<SessionCompactFailed>(SessionCompactFailedParams {
-                        session_id: self.session_id.clone(), reason: reason.into(), error: error.clone(),
-                    });
-                }
-                Ok(r.is_ok())
-            },
+            r = f => Ok(r),
             _ = self.cancel.cancelled() => Err(Stop::Cancelled),
         }
     }
@@ -337,11 +347,12 @@ impl Turn<'_> {
         let dynamic = match &self.rt.scripting {
             Some(s) if s.has_system_prompt_fn() => {
                 let cwd = self.cwd.to_string_lossy();
-                Some(
-                    s.system_prompt(&cwd, &self.session_id)
-                        .await
-                        .map_err(Stop::Failed)?,
-                )
+                // It may wait (bone.ask, bone.http); a cancel stops it.
+                let Ok(r) = self.or_cancel(s.system_prompt(&cwd, &self.session_id)).await else {
+                    s.cancel_session(&self.session_id);
+                    return Err(Stop::Cancelled);
+                };
+                Some(r.map_err(Stop::Failed)?)
             }
             _ => None,
         };
@@ -481,10 +492,7 @@ impl Turn<'_> {
                         tools: &tools,
                         depth: 0,
                     };
-                    tokio::select! {
-                        _ = self.cancel.cancelled() => None,
-                        r = provider.complete(req, &mut on_delta) => Some(r),
-                    }
+                    self.or_cancel(provider.complete(req, &mut on_delta)).await.ok()
                 };
                 match result {
                     Some(Ok(c)) => break c,
@@ -533,10 +541,7 @@ impl Turn<'_> {
                                     .unwrap_or_default(),
                             );
                         }
-                        tokio::select! {
-                            _ = self.cancel.cancelled() => return Err(Stop::Cancelled),
-                            _ = tokio::time::sleep(Duration::from_millis(ms)) => {}
-                        }
+                        self.or_cancel(tokio::time::sleep(Duration::from_millis(ms))).await?;
                     }
                     interrupted => {
                         // Keep what the user already saw stream in.
