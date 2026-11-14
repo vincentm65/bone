@@ -329,6 +329,7 @@ function M.page(opts, hooks)
       st.models = #names > 0 and names or nil
       st.models_err = #names == 0 and (err and "not reachable"
         or res and (res.status == 401 or res.status == 403) and "the key was refused"
+        or res and res.status == 200 and "no models listed"
         or res and ("HTTP " .. res.status) or "no answer") or nil
       redraw()
     end)
