@@ -49,7 +49,6 @@ pub const RUNTIME: &[(&str, &str)] = runtime_files![
     "lua/bone/ui/turn_timing.lua",
     "lua/bone/ui/views.lua",
     "ui/api.lua",
-    "tui/api.lua",
     "tui/defaults.lua",
     "tui/bare.lua",
     "gui/api.lua",
@@ -923,7 +922,7 @@ pub fn create_tui_library(config_dir: &Path, name: &str, base: &str) -> Result<P
                 ("bare", _) => continue,
                 (
                     _,
-                    "ui/api.lua" | "tui/api.lua" | "tui/bare.lua" | "gui/api.lua" | "gui/bare.lua",
+                    "ui/api.lua" | "tui/bare.lua" | "gui/api.lua" | "gui/bare.lua",
                 ) => {
                     continue;
                 }

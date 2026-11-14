@@ -65,8 +65,8 @@ Capability names describe the contract, not the internal Rust module layout.
 ### Frontends: the shared UI API
 
 The TUI and the desktop GUI (`bone --gui`) load the same Lua UI API,
-`runtime/ui/api.lua`, then their own (`runtime/tui/api.lua`,
-`runtime/gui/api.lua`), the defaults, and your config: each plugin's
+`runtime/ui/api.lua`, then the GUI its own (`runtime/gui/api.lua`), the
+defaults, and your config: each plugin's
 `ui.lua` then `tui.lua` or `gui.lua`, then `~/.bone/ui.lua` and `tui.lua`
 or `gui.lua`. Put UI code meant for both in `ui.lua`. `bone.api_info().side`
 is `"tui"` or `"gui"`.

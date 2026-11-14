@@ -1,3 +1,0 @@
--- The TUI's own Lua API, loaded after runtime/ui/api.lua (the API every
--- frontend shares) and before runtime/tui/defaults.lua and ~/.bone/tui.lua.
--- Empty for now: everything the TUI exposes is meant for the GUI too.
