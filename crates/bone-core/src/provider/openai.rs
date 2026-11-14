@@ -582,6 +582,10 @@ impl Accumulator {
                 if call.id.is_empty() {
                     call.id = super::fallback_call_id(index);
                 }
+                // A call with no arguments streamed means none, as JSON.
+                if call.arguments.trim().is_empty() {
+                    call.arguments = "{}".into();
+                }
                 call
             })
             .collect();
