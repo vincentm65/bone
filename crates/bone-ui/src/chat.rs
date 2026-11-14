@@ -1104,7 +1104,8 @@ impl<L> ChatBuffer<L> {
 
 /// The chat showing session `id`, or chat number `id`.
 pub fn find_chat<L>(chats: &[ChatBuffer<L>], id: &str) -> Option<usize> {
-    (chats.iter().position(|c| c.session_id() == Some(id)))
+    // A chat still loading `id` counts, or opening it twice makes two.
+    (chats.iter().position(|c| c.session_id() == Some(id) || c.loading.as_deref() == Some(id)))
         .or_else(|| id.parse().ok().filter(|&b| b < chats.len()))
 }
 

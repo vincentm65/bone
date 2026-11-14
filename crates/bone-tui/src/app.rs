@@ -1074,6 +1074,7 @@ impl App {
         let c = &self.chats[self.current];
         let buf = if show
             && c.session.is_none()
+            && c.loading.is_none()
             && c.entries.is_empty()
             && !c.starting
             && self.draft_empty()
@@ -1083,6 +1084,7 @@ impl App {
             self.chats.push(ChatBuffer::new(None));
             self.chats.len() - 1
         };
+        self.chats[buf].loading = Some(session_id.clone());
         if show {
             self.show_chat(buf);
         }
@@ -1108,6 +1110,7 @@ impl App {
                     }
                     Err(e) => {
                         if let Some(c) = app.chat_mut(buf) {
+                            c.loading = None;
                             c.notice(format!("cannot load session: {e}"), true);
                         }
                     }
