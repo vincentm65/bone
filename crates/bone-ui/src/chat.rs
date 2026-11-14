@@ -546,9 +546,7 @@ impl<L> ChatBuffer<L> {
     /// The core's queue for this session changed.
     pub fn set_queue(&mut self, queue: Vec<QueuedMessage>, paused: bool) {
         if queue != self.queue || paused != self.queue_paused {
-            if queue.len() != self.queue.len() {
-                self.invalidate_items();
-            }
+            self.invalidate_items();
             self.queue = queue;
             self.queue_paused = paused;
             self.next_rev += 1;
@@ -621,8 +619,10 @@ impl<L> ChatBuffer<L> {
             }
             add_lua(self.ids.get(i + 1).copied(), &mut out);
         }
-        // Queued messages come last.
-        out.extend((0..self.queue.len()).map(|i| Item {
+        // The user's queued messages come last; those from agents and jobs
+        // stay out of sight until they join the transcript.
+        let mine = (0..self.queue.len()).filter(|&i| self.queue[i].source.is_none());
+        out.extend(mine.map(|i| Item {
             entry: QUEUE_BASE + i,
             part: Part::Queued,
         }));

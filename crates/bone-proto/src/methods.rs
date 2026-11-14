@@ -482,6 +482,10 @@ pub struct QueuedMessage {
     pub created_at: u64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<crate::types::ImageAttachment>,
+    /// Who queued it when not the user (e.g. "agent", "job"), for UIs that
+    /// show only the user's own queue.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

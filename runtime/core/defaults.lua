@@ -25,5 +25,5 @@ bone.hook("process_exit", function(ev)
   if ev.output and ev.output ~= "" then
     text = text .. "\n\nLast output:\n```\n" .. ev.output .. "\n```"
   end
-  pcall(bone.queue.add, ev.session_id, text, "steer")
+  pcall(bone.queue.add, ev.session_id, text, "steer", nil, "job")
 end)

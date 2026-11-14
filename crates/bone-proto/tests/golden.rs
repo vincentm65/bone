@@ -129,6 +129,7 @@ fn queued(id: u64, mode: QueueMode, text: &str) -> QueuedMessage {
         mode,
         created_at: 1_790_000_100,
         images: Vec::new(),
+        source: None,
     }
 }
 

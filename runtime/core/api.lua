@@ -242,17 +242,20 @@ end
 
 --- A session's message queue (as queue/add and friends; clients see the
 --- changes). In hooks, tools and providers:
----   bone.queue.add(id, text, mode, images)   mode "steer" (default) or "next";
----                                     idle sessions start a turn: { turn_id }, else { id }
+---   bone.queue.add(id, text, mode, images, source)   mode "steer" (default) or "next";
+---                                     idle sessions start a turn: { turn_id }, else { id };
+---                                     source names a sender other than the user
+---                                     ("agent", "job"), so trays leave it out
+
 ---   bone.queue.list(id)              { { id, text, mode, created_at } }
 ---   bone.queue.remove(id, queue_id), bone.queue.clear(id)
 bone.queue = {
-  add = function(id, text, mode, images)
-    local ev, why = bone.run_hooks("queue_add", { session_id = id, text = text, mode = mode or "steer", images = images or {} })
+  add = function(id, text, mode, images, source)
+    local ev, why = bone.run_hooks("queue_add", { session_id = id, text = text, mode = mode or "steer", images = images or {}, source = source })
     if why then
       error(why, 2)
     end
-    return session_op("queue_add", id, { text = ev.text, mode = ev.mode, images = ev.images })
+    return session_op("queue_add", id, { text = ev.text, mode = ev.mode, images = ev.images, source = ev.source })
   end,
   list = function(id)
     return session_op("queue_list", id)

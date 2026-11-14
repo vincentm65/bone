@@ -199,6 +199,7 @@ impl Inner {
         text: String,
         mode: QueueMode,
         mut images: Vec<ImageAttachment>,
+        source: Option<String>,
     ) -> Result<QueueAddResult, RpcError> {
         self.validate_input(&session.lock().unwrap(), &text, &mut images)?;
         if session.lock().unwrap().active.is_none() {
@@ -225,7 +226,12 @@ impl Inner {
             .active
             .as_ref()
             .is_none_or(|a| a.closing || a.cancel.is_cancelled());
-        let id = s.enqueue_with_images(text, if ending { QueueMode::Next } else { mode }, images);
+        let id = s.enqueue_with_images(
+            text,
+            if ending { QueueMode::Next } else { mode },
+            images,
+            source,
+        );
         // Sent after a cancel, while the turn winds down: it goes first, as
         // it would have once idle, and the queue doesn't pause.
         if let Some(a) = s.active.as_mut().filter(|a| a.cancel.is_cancelled()) {
@@ -1211,7 +1217,7 @@ impl Core {
         }
         let session = self.inner.session(&p.session_id).map_err(session_error)?;
         self.inner
-            .queue_add_with_images(&session, text, mode, images)
+            .queue_add_with_images(&session, text, mode, images, None)
     }
 
     fn turn_cancel(&self, params: SessionRef) -> Result<(), RpcError> {

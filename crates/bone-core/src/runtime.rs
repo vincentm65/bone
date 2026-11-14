@@ -644,7 +644,8 @@ impl Host {
                     return Err("bone.queue.add needs text or images".into());
                 }
                 let mode = serde_json::from_value(spec["mode"].clone()).unwrap_or_default();
-                let r = inner.queue_add_with_images(&session, text, mode, images);
+                let source = spec["source"].as_str().map(str::to_owned);
+                let r = inner.queue_add_with_images(&session, text, mode, images, source);
                 return r.map(|r| json!(r)).map_err(|e| e.message);
             }
             "queue_remove" | "queue_clear" => {

@@ -3084,6 +3084,7 @@ async fn typing_during_a_turn_queues_it() {
         mode,
         created_at: 0,
         images: Vec::new(),
+        source: None,
     };
     let changed = |items: Vec<QueuedMessage>| QueueChangedParams {
         session_id: "s-new".into(),
