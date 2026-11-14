@@ -277,7 +277,7 @@ impl Shaper for GpuiShaper {
                     cut += 1;
                 }
                 rows = vec![(s, cut, false)];
-                ellipsis = Some((w, dots));
+                ellipsis = Some((w + dw, dots));
             } else {
                 rows.truncate(1);
             }
