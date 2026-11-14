@@ -87,7 +87,11 @@ pub async fn send(req: &Json) -> Result<(reqwest::Response, Json), String> {
     let mut b = CLIENT.get_or_init(reqwest::Client::new).request(method, url);
     if let Some(h) = req["headers"].as_object() {
         for (k, v) in h {
-            b = b.header(k, v.as_str().unwrap_or_default());
+            match v {
+                Json::Null => {}
+                Json::String(s) => b = b.header(k, s),
+                v => b = b.header(k, v.to_string()),
+            }
         }
     }
     match &req["body"] {
