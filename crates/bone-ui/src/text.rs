@@ -69,7 +69,7 @@ pub fn glyph_width(c: char, col: usize) -> usize {
     g.width().unwrap_or(0) * n
 }
 
-fn skip_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+pub(crate) fn skip_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
     match chars.next() {
         // CSI: parameters then one final byte in @..~
         Some('[') => {
@@ -79,9 +79,10 @@ fn skip_escape(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
                 }
             }
         }
-        // OSC / DCS / APC...: until BEL or ESC \
+        // OSC / DCS / APC...: until BEL or ESC \ (or the line's end, so
+        // an unterminated one doesn't swallow the lines after it)
         Some(']' | 'P' | '_' | '^' | 'X') => {
-            while let Some(c) = chars.next() {
+            while let Some(c) = chars.next_if(|&c| c != '\n') {
                 if c == '\x07' {
                     break;
                 }

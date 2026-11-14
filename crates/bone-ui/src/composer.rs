@@ -11,8 +11,9 @@ use crate::layout::BufferId;
 pub const PASTE_PLACEHOLDER_THRESHOLD: usize = 500;
 
 /// Pasted text as the prompt keeps it: `\n` line ends (also for `\r\n`,
-/// `\r` and the Unicode line and paragraph separators), tabs kept, other
-/// control and [invisible](crate::text::invisible) characters dropped.
+/// `\r` and the Unicode line and paragraph separators), tabs kept, escape
+/// sequences, other control and [invisible](crate::text::invisible)
+/// characters dropped.
 pub fn clean_paste(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -24,6 +25,7 @@ pub fn clean_paste(text: &str) -> String {
             }
             '\n' | '\u{85}' | '\u{2028}' | '\u{2029}' => out.push('\n'),
             '\t' => out.push('\t'),
+            '\x1b' => crate::text::skip_escape(&mut chars),
             c if c.is_control() || crate::text::invisible(c) => {}
             c => out.push(c),
         }
