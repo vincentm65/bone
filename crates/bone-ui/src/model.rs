@@ -288,15 +288,18 @@ pub fn layout_items(items: &[Item], width_cols: usize) -> Vec<(String, &str)> {
     let mut spans = Vec::new();
     let mut used = 0;
     let mut fill_i = 0;
-    for item in items {
+    for (i, item) in items.iter().enumerate() {
         if used >= width_cols {
             break;
         }
         match item {
             Item::Text(t, hl) => {
                 let room = width_cols - used;
-                let t = if width(t) > room {
-                    truncate(t, room)
+                // Text that exactly fills the rest is cut too when more
+                // follows, so the line ends with … instead of dropping it.
+                let more = items[i + 1..].iter().any(|i| matches!(i, Item::Text(t, _) if width(t) > 0));
+                let t = if width(t) > room || (width(t) == room && more) {
+                    truncate(&format!("{t}…"), room)
                 } else {
                     t.clone()
                 };
