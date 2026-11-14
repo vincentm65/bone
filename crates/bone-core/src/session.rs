@@ -847,7 +847,9 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
     let mut buf = Vec::new();
     for n in 2.. {
         buf.clear();
-        if reader.read_until(b'\n', &mut buf)? == 0 {
+        // A final line without its newline is a torn write (crash
+        // mid-append), even if it parses: the next append would glue onto it.
+        if reader.read_until(b'\n', &mut buf)? == 0 || buf.last() != Some(&b'\n') {
             break;
         }
         let len = buf.len() as u64;
@@ -895,8 +897,6 @@ fn read_file(path: &Path, max_user: usize) -> Result<Loaded, SessionError> {
                 loaded.good_len += len;
             }
             Ok(Record::Session(_)) => return Err(corrupt(format!("second header at line {n}"))),
-            // A torn final write (crash mid-append) should not lose the session.
-            Err(_) if !line.ends_with('\n') => break,
             // Nor should one damaged line in the middle: skip it and keep
             // the rest. The file is left as it is; tool calls it leaves
             // unanswered are closed before the model sees them.
