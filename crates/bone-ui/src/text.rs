@@ -179,7 +179,8 @@ pub fn clip_groups(spans: &[(String, String)], width: usize) -> Groups {
             used += w;
             out.push((t, g.clone()));
         } else {
-            out.push((truncate(&t, width - used), g.clone()));
+            // At most w - 1, so a span that exactly fills the rest still gets the …
+            out.push((truncate(&t, (width - used).min(w.saturating_sub(1))), g.clone()));
             break;
         }
     }
