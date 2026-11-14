@@ -413,7 +413,9 @@ impl HttpConn {
         let pending: Pending = Default::default();
         let (tx, mut rx) = oneshot::channel();
         pending.lock().unwrap().insert(id, tx);
-        let handle = |msg: Value| handle_incoming(msg, &pending, &self.events, |_| {});
+        // A server request (a ping) is answered with a post of its own.
+        let reply = |r: Value| drop(tokio::spawn(self.post(&r).send()));
+        let handle = |msg: Value| handle_incoming(msg, &pending, &self.events, reply);
         if !sse {
             let msg: Value = res.json().await.map_err(|e| e.to_string())?;
             handle(msg);
