@@ -47,16 +47,31 @@ pub(super) async fn post_events(
     let resp = send(http, url, headers, body, &mut capture).await?;
     let mut bytes = resp.bytes_stream();
     let mut parser = SseParser::default();
+    // The start of the body, until an event comes: a 200 that is no stream
+    // (a JSON error from a proxy, say) is shown rather than lost.
+    let (mut head, mut seen) = (Vec::new(), false);
     while let Some(chunk) = bytes.next().await {
         let chunk = chunk.map_err(|e| ProviderError(format!("stream error: {e}")))?;
         capture.chunk(&chunk);
+        if !seen && head.len() < 2048 {
+            head.extend_from_slice(&chunk[..chunk.len().min(2048 - head.len())]);
+        }
         for data in parser.push(&chunk) {
+            seen = true;
             if apply(&data)? {
                 return Ok(true);
             }
         }
     }
-    parser.finish().map_or(Ok(false), |data| apply(&data))
+    if let Some(data) = parser.finish() {
+        return apply(&data);
+    }
+    let head = String::from_utf8_lossy(&head);
+    // Only blank lines and `:` comments (keepalives) is still just a stream that ended.
+    if !seen && head.lines().any(|l| !l.trim().is_empty() && !l.starts_with(':')) {
+        return Err(ProviderError(format!("unexpected response: {}", head.trim())));
+    }
+    Ok(false)
 }
 
 /// `Authorization: Bearer <key>`, when there is a key.
@@ -174,6 +189,7 @@ pub(super) async fn send(
 ) -> Result<reqwest::Response, ProviderError> {
     let mut attempt = 1;
     loop {
+        let mut wait = Duration::from_secs(1 << (attempt - 1));
         let mut req = http
             .post(url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -185,6 +201,11 @@ pub(super) async fn send(
             Ok(resp) if resp.status().is_success() => return Ok(resp),
             Ok(resp) => {
                 let status = resp.status();
+                // The server's Retry-After (seconds) when longer, up to 30 s.
+                let after = resp.headers().get(reqwest::header::RETRY_AFTER);
+                if let Some(secs) = after.and_then(|v| v.to_str().ok()?.trim().parse::<u64>().ok()) {
+                    wait = wait.max(Duration::from_secs(secs.min(30)));
+                }
                 let text = resp.text().await.unwrap_or_default();
                 capture.chunk(format!("HTTP {status}\n{text}\n").as_bytes());
                 let err = ProviderError(format!("HTTP {status}: {}", text.trim()));
@@ -201,7 +222,7 @@ pub(super) async fn send(
         if attempt >= MAX_ATTEMPTS {
             return Err(retryable);
         }
-        tokio::time::sleep(Duration::from_secs(1 << (attempt - 1))).await;
+        tokio::time::sleep(wait).await;
         attempt += 1;
     }
 }
@@ -231,7 +252,7 @@ fn encode(body: &Value) -> Vec<u8> {
 fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> Value {
     let mut body = json!({
         "model": config.model,
-        "messages": wire_messages(req.messages, replay_field(req.messages, config)),
+        "messages": wire_messages(req.messages, replay_field(req.messages, config), &config.model),
         "stream": true,
     });
     if config.stream_usage {
@@ -253,7 +274,7 @@ fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> Value {
             })
             .collect();
     }
-    if let Some(effort) = config.reasoning_effort.as_deref().filter(|e| !e.is_empty()) {
+    if let Some(effort) = config.effort() {
         body["reasoning_effort"] = json!(effort);
     }
     body
@@ -277,7 +298,7 @@ fn replay_field<'a>(messages: &'a [ChatMessage], config: &ProviderConfig) -> Opt
     }
 }
 
-fn wire_messages(messages: &[ChatMessage], replay: Option<&str>) -> Vec<Value> {
+fn wire_messages(messages: &[ChatMessage], replay: Option<&str>, model: &str) -> Vec<Value> {
     let mut out = Vec::new();
     let mut images = Vec::new();
     for (index, message) in messages.iter().enumerate() {
@@ -293,7 +314,9 @@ fn wire_messages(messages: &[ChatMessage], replay: Option<&str>) -> Vec<Value> {
         {
             continue;
         }
-        out.push(wire_message(message, replay));
+        // Reasoning another model wrote is not this one's to read back.
+        let other = matches!(message, ChatMessage::Assistant { reasoning_state: Some(s), .. } if s.model != model);
+        out.push(wire_message(message, replay.filter(|_| !other)));
         if let ChatMessage::Tool {
             call_id,
             images: attached,
@@ -492,8 +515,21 @@ impl Accumulator {
                 self.content.push_str(&text);
                 on_delta(Delta::Text(text));
             }
-            for (pos, tc) in d.tool_calls.unwrap_or_default().into_iter().enumerate() {
-                let index = tc.index.unwrap_or(pos);
+            for tc in d.tool_calls.unwrap_or_default() {
+                // Without `index`, a new id starts the next call, as does a
+                // name once the last call is whole (a server may repeat the
+                // name on every delta); anything else continues the last one.
+                let index = tc.index.unwrap_or_else(|| {
+                    let Some((&k, last)) = self.calls.last_key_value() else { return 0 };
+                    let id = tc.id.as_deref().filter(|id| !id.is_empty());
+                    let name = tc.function.as_ref().and_then(|f| f.name.as_deref());
+                    let new = id.is_some_and(|id| id != last.id)
+                        || name.is_some_and(|n| {
+                            !n.is_empty() && !last.name.is_empty()
+                                && (n != last.name || serde_json::from_str::<Value>(&last.arguments).is_ok())
+                        });
+                    if new { k + 1 } else { k }
+                });
                 let call = self.calls.entry(index).or_insert_with(|| ToolCall {
                     id: String::new(),
                     name: String::new(),

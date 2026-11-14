@@ -99,6 +99,13 @@ pub struct ProviderConfig {
     pub body: serde_json::Value,
 }
 
+impl ProviderConfig {
+    /// The reasoning effort to send; "default" (the settings' unset) is none.
+    pub fn effort(&self) -> Option<&str> {
+        self.reasoning_effort.as_deref().filter(|e| !e.is_empty() && *e != "default")
+    }
+}
+
 impl Default for ProviderConfig {
     /// No provider: every field at its default, as an empty entry reads.
     fn default() -> Self {

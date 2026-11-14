@@ -52,10 +52,7 @@ pub(super) async fn stream(
 fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> (Value, String) {
     // Cache breakpoints unless the entry says `cache = false`.
     let cache = config.options.get("cache") != Some(&Value::Bool(false));
-    let effort = config
-        .reasoning_effort
-        .as_deref()
-        .filter(|e| !e.is_empty() && *e != "default");
+    let effort = config.effort();
     // Effort "none", or `body = { thinking = null }`, turns thinking off.
     let replay = effort != Some("none") && !config.body.get("thinking").is_some_and(Value::is_null);
     let mut history = History::default();

@@ -29,7 +29,7 @@ pub(super) async fn stream(
 
 fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> Value {
     let mut reasoning = json!({ "summary": "auto" });
-    if let Some(effort) = config.reasoning_effort.as_deref().filter(|e| !e.is_empty()) {
+    if let Some(effort) = config.effort() {
         reasoning["effort"] = json!(effort);
     }
     let instructions: Vec<&str> = req
