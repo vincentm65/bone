@@ -231,6 +231,9 @@ impl Gui {
             self.drafts.insert(self.current, draft);
             (self.draft, self.images, self.prompt.pastes) =
                 self.drafts.remove(&buf).unwrap_or_default();
+            // Up and down start over from the new chat's draft.
+            (self.prompt.history_pos, self.prompt.saved) = (None, None);
+            self.cursor_to_end();
             // An image still being read was for the draft left behind.
             self.draft_epoch += 1;
             self.current = buf;

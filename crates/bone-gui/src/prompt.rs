@@ -26,8 +26,8 @@ pub(crate) struct PromptState {
     pub marks_for: Option<(String, usize, usize)>,
     history: Vec<(String, Vec<ImageAttachment>)>,
     /// The entry recalled, and the draft that was there before.
-    history_pos: Option<usize>,
-    saved: Option<(String, Vec<ImageAttachment>)>,
+    pub(crate) history_pos: Option<usize>,
+    pub(crate) saved: Option<(String, Vec<ImageAttachment>)>,
 }
 
 /// These ops. `Err(a)` hands the arguments to the next dispatcher.
