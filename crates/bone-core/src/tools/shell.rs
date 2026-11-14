@@ -278,10 +278,11 @@ impl ProcessRegistry {
         let process = self.get(owner, id)?;
         let deadline = timeout.map(|t| Instant::now() + t);
         loop {
+            // Before the check: a finish in between still wakes it.
+            let notified = process.done.notified();
             if process.snapshot.lock().unwrap().state != ProcessState::Running {
                 return Ok(process.snapshot.lock().unwrap().clone());
             }
-            let notified = process.done.notified();
             match deadline {
                 Some(deadline) => {
                     tokio::select! { _ = notified => {}, _ = sleep_until(deadline) => return Err(format!("waiting for {id} timed out")) }
