@@ -438,15 +438,12 @@ impl App {
             self.composer.saved = None;
         }
         // Each chat keeps its scroll position (render.rs drops a hidden
-        // chat's rendered lines).
-        let w = if id == self.current {
-            Window::default()
-        } else {
-            let old = self.windows.get(&CHAT_WIN).cloned().unwrap_or_default();
+        // chat's rendered lines); showing the chat on screen leaves it be.
+        if id != self.current {
+            let w = self.chat_views.remove(&id).unwrap_or_default();
+            let old = self.windows.insert(CHAT_WIN, w).unwrap_or_default();
             self.chat_views.insert(self.current, old);
-            self.chat_views.remove(&id).unwrap_or_default()
-        };
-        self.windows.insert(CHAT_WIN, w);
+        }
         self.current = id;
         // The tray's shells are the chat on screen's.
         match self.chats[id].session_id().map(str::to_owned) {
@@ -1086,6 +1083,9 @@ impl App {
         };
         self.chats[buf].loading = Some(session_id.clone());
         if show {
+            if buf == self.current {
+                self.windows.insert(CHAT_WIN, Window::default());
+            }
             self.show_chat(buf);
         }
         self.request::<SessionMessages>(
@@ -1560,6 +1560,7 @@ impl App {
         };
         self.chats[buf] = ChatBuffer::new(None);
         if buf == self.current {
+            self.windows.insert(CHAT_WIN, Window::default());
             self.show_chat(buf);
             self.info("session deleted");
         }
