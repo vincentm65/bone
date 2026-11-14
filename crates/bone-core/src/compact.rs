@@ -551,7 +551,7 @@ impl Drop for Compacting<'_> {
 
 impl Inner {
     /// `bone.config.compact` with settings.json's `compact` over it, field
-    /// by field. Bad settings are reported and left out.
+    /// by field. A field that doesn't fit is left out.
     pub(crate) fn compact_config(&self) -> CompactConfig {
         let base = self.runtime().config.compact.clone();
         let saved = match &*self.settings.lock().unwrap() {
@@ -561,14 +561,19 @@ impl Inner {
         let Some(Value::Object(fields)) = saved else {
             return base;
         };
-        let mut merged = serde_json::to_value(&base).unwrap_or_default();
+        let Ok(Value::Object(mut merged)) = serde_json::to_value(&base) else {
+            return base;
+        };
         for (k, v) in fields {
-            merged[k] = v;
+            let old = merged.insert(k.clone(), v);
+            if serde_json::from_value::<CompactConfig>(Value::Object(merged.clone())).is_err() {
+                match old {
+                    Some(old) => merged.insert(k, old),
+                    None => merged.remove(&k),
+                };
+            }
         }
-        let mut cfg = serde_json::from_value(merged).unwrap_or_else(|e| {
-            eprintln!("bone: settings.json compact: {e}");
-            base
-        });
+        let mut cfg = serde_json::from_value(Value::Object(merged)).unwrap_or(base);
         // 0 and "" (as a settings page saves "none") mean none.
         cfg.limit = cfg.limit.filter(|&l| l > 0);
         cfg.provider = cfg.provider.filter(|p| !p.trim().is_empty());
