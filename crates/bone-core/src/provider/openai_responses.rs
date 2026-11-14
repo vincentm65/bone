@@ -42,12 +42,12 @@ fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> Value {
         .collect();
     let mut body = json!({
         "model": config.model,
-        "input": wire_input(req.messages, &config.model),
         "stream": true,
         "store": false,
         "include": ["reasoning.encrypted_content"],
         "reasoning": reasoning,
     });
+    body["input"] = Value::Array(wire_input(req.messages, &config.model));
     if !instructions.is_empty() {
         body["instructions"] = json!(instructions.join("\n\n"));
     }

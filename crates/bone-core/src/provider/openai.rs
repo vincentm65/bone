@@ -259,9 +259,11 @@ fn encode(body: &Value) -> Vec<u8> {
 fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> Value {
     let mut body = json!({
         "model": config.model,
-        "messages": wire_messages(req.messages, replay_field(req.messages, config), &config.model),
         "stream": true,
     });
+    // Moved in, not through json! (which would deep-copy the transcript).
+    let messages = wire_messages(req.messages, replay_field(req.messages, config), &config.model);
+    body["messages"] = Value::Array(messages);
     if config.stream_usage {
         body["stream_options"] = json!({ "include_usage": true });
     }

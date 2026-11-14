@@ -132,8 +132,8 @@ fn request_body(config: &ProviderConfig, req: &CompletionRequest<'_>) -> (Value,
         "model": config.model,
         "max_tokens": DEFAULT_MAX_TOKENS,
         "stream": true,
-        "messages": messages,
     });
+    body["messages"] = Value::Array(messages);
     if !system.is_empty() {
         body["system"] = json!(system);
     }
