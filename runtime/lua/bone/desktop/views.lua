@@ -13,6 +13,7 @@ local nodes = require("bone.nodes")
 local timing = require("bone.timing")
 local style = require("bone.nodes.style")
 local widgets = require("bone.nodes.widgets")
+local tools = require("bone.desktop.tools")
 
 local function trim(s)
   return ((s or ""):gsub("^%s+", ""):gsub("%s+$", ""))
@@ -88,32 +89,27 @@ local function message(item, group)
   return { md.text({ { item.text, group } }, { line_height = md.line_height }) }
 end
 
--- A message from a job or an agent (item.source): its first line, then a
--- short preview of the rest; a click shows all of it.
+-- A message from a job or an agent (item.source): its first line, then the
+-- first lines of the rest; a click or ctrl+t shows all of it, as on a tool card.
 local PREVIEW = 3
-local opened = {}
 local function report(item, ctx)
-  local s = bone.chat.session()
-  local key = (s and s.session_id or "") .. ":" .. tostring(item.key)
   local head, rest = trim(item.text):match("^([^\n]*)\n?(.*)$")
   local out = { md.text({ { "◆ ", "Accent" }, { (trim(head):gsub(":$", "")), "Dim" } }, { size = md.small_size }) }
-  local paras = md.nodes(trim(rest), "ToolOutput", { size = md.small_size, indent = 12 })
-  for i, para in ipairs(paras) do
-    if not opened[key] and i > PREVIEW then
-      out[#out + 1] = md.text({ { "⋮ +" .. (#paras - PREVIEW) .. " more", "Dim" } }, { size = md.small_size, indent = 12 })
-      break
-    end
-    out[#out + 1] = para
+  local all, kept, n = tools.expanded(item), {}, 0
+  for line in (trim(rest) .. "\n"):gmatch("(.-)\n") do
+    if not line:match("^%s*([`~])%1%1") then n = n + 1 end -- a code fence is no line of its own
+    if all or n <= PREVIEW then kept[#kept + 1] = line end
+  end
+  nodes.append(out, md.nodes(table.concat(kept, "\n"), "ToolOutput", { size = md.small_size, indent = 12 }))
+  if not all and n > PREVIEW then
+    out[#out + 1] = md.text({ { "⋮ +" .. (n - PREVIEW) .. " more", "Dim" } }, { size = md.small_size, indent = 12 })
   end
   images(item, out)
   footer(item, ctx, out)
   return {
     node = box(out, { pad = { 0, 4 }, margin = { 10, 4 } }),
     lines = plain(item.text, "Dim"),
-    click = function()
-      opened[key] = not opened[key]
-      bone.chat.redraw(item.index)
-    end,
+    click = function() tools.toggle(item) end,
   }
 end
 
@@ -213,7 +209,7 @@ function M.setup()
   for _, kind in ipairs({ "user", "assistant", "reasoning", "notice", "compacted", "queued" }) do
     views[kind] = M[kind]
   end
-  views.tool = require("bone.desktop.tools").view
+  views.tool = tools.view
 end
 
 return M
