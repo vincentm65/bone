@@ -43,8 +43,8 @@ function M.band(spans, opts)
   end
   return style.finish({
     bg = opts.bg or "CodeBlock", radius = opts.radius or style.radius.sm,
-    padding = { pad, pad, opts.scroll and 0 or pad, pad + (opts.indent or 0) },
-    margin = (opts.gap or 0) > 0 and { opts.gap, 0, 0, 0 } or nil,
+    padding = { pad, pad, opts.scroll and 0 or pad, pad },
+    margin = { opts.gap or 0, 0, 0, opts.indent or 0 }, -- indented, the band moves, not only its text
     text,
   })
 end
@@ -243,7 +243,7 @@ function M.nodes(text, group, opts)
   local out = {}
   for _, p in ipairs(paragraphs(text, group, opts.id, opts.width)) do
     if p.node then
-      if (p.gap or 0) > 0 then p.node.margin = { p.gap, 0, 0, 0 } end
+      p.node.margin = { p.gap or 0, 0, 0, opts.indent or 0 }
       out[#out + 1] = style.finish(p.node)
     else
       local o = { size = opts.size or p.size, font = p.font, gap = p.gap, scroll = p.scroll,

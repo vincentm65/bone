@@ -94,7 +94,9 @@ end
 local PREVIEW = 3
 local function report(item, ctx)
   local head, rest = trim(item.text):match("^([^\n]*)\n?(.*)$")
-  local out = { md.text({ { "◆ ", "Accent" }, { (trim(head):gsub(":$", "")), "Dim" } }, { size = md.small_size }) }
+  local first = (trim(head):gsub(":$", ""))
+  local spans = md.spans((bone.markdown.parse(first)[1] or {}).spans or { { text = first } }, "Dim") -- `code` as code
+  local out = { md.text({ { "◆ ", "Accent" }, unpack(spans) }, { size = md.small_size }) }
   local all, kept, n = tools.expanded(item), {}, 0
   for line in (trim(rest) .. "\n"):gmatch("(.-)\n") do
     if not line:match("^%s*([`~])%1%1") then n = n + 1 end -- a code fence is no line of its own
