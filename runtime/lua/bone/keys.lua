@@ -76,6 +76,38 @@ map({
   ["ctrl+end"] = "scroll_bottom",
 })
 
+-- Moving between areas: the prompt, then each panel that takes the keyboard,
+-- in placement order (the sessions sidebar, the files panel, …), and round.
+local function cycle_area(step)
+  return function()
+    local ring = { false }
+    -- `visible` (did it fit the last frame) is the terminal's layout; the
+    -- desktop places its panels itself.
+    local gui = bone.has_capability and bone.has_capability("gui.window_nodes")
+    for _, p in ipairs(bone.ui.panel.list() or {}) do
+      if p.focusable and not p.hidden and (gui or p.visible ~= false) then ring[#ring + 1] = p.id end
+    end
+    local now = bone.ui.panel.focused() or false
+    local at = 1
+    for i, id in ipairs(ring) do if id == now then at = i end end
+    local next = ring[(at - 1 + step) % #ring + 1]
+    bone.ui.panel.focus(next or nil)
+  end
+end
+
+-- The keys no panel takes (a terminal panel turns `global_keys` off and
+-- gets every key): they run before a focused panel's own.
+pcall(bone.keymap.context, "global", { fallback = {} })
+map({
+  ["f6"] = cycle_area(1),
+  ["shift+f6"] = cycle_area(-1),
+  ["f1"] = "/help",
+}, "global")
+map({
+  ["f6"] = cycle_area(1),
+  ["shift+f6"] = cycle_area(-1),
+})
+
 -- While a Lua popup is open (after the popup's own keys).
 map({
   ["ctrl+c"] = "interrupt",

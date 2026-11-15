@@ -633,6 +633,8 @@ function M._open(spec, opts)
   terms[id] = t
   last = id
   p.focusable = true
+  -- Every key goes to the program (F6 and f1 too); ctrl+] is the way out.
+  p.global_keys = false
   p.title = p.title or "terminal · " .. (type(opts.cmd) == "table" and table.concat(opts.cmd, " ") or opts.cmd or shell[1]:match("[^/\\\\]+$"))
   if p.focus == nil then p.focus = true end
   p.render = function(ctx) return render(id, t, ctx) end

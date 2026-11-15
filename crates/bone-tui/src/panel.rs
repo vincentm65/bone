@@ -98,6 +98,9 @@ impl App {
 
     pub(crate) fn paint_panels(&mut self, frame: &mut Frame<'_>, placements: &[PanelPlacement]) {
         let rect = |r: bone_ui::layout::Rect| Rect::new(r.x, r.y, r.width, r.height);
+        // The panel with the keyboard: its bar is lit, so it shows where the
+        // keys are.
+        let focused = self.focused_panel().map(|p| p.id.clone());
         for placement in placements {
             let Some(f) = shared::panel_frame(self, placement) else {
                 continue;
@@ -115,7 +118,11 @@ impl App {
                 .collect();
             frame.render_widget(Paragraph::new(shown), body);
             if let Some(x) = f.separator {
-                let style = self.theme.hl("WinSeparator");
+                let style = if focused.as_deref() == Some(placement.id.as_str()) {
+                    self.theme.hl("WinSeparatorFocus")
+                } else {
+                    self.theme.hl("WinSeparator")
+                };
                 for y in area.y..area.bottom() {
                     if let Some(cell) = frame.buffer_mut().cell_mut((x, y)) {
                         cell.set_symbol("│").set_style(style);

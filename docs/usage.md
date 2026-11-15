@@ -37,7 +37,8 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `ctrl+n` | new session |
 | `ctrl+]` / `ctrl+5` | **term plugin:** open or focus a terminal panel (Unix); in the terminal, return to the prompt |
 | `shift+pageup` / `shift+pagedown` in a terminal | scroll terminal history |
-| `ctrl+p` | move focus to the next panel |
+| `F6` / `shift+F6` | move the keys to the next / previous area: the prompt, then each panel (the sidebar, files …). Works from inside any panel except a terminal, which keeps every key (`ctrl+]` leaves it). The panel with the keys has its bar lit in the accent colour, and the prompt's `›` dims |
+| `ctrl+p` | move focus to the next panel (from the prompt) |
 | `up` / `down` | move between prompt lines; past the edges, earlier messages. With `/` suggestions showing, move through them |
 | `tab` | complete the selected `/` command |
 | `esc` | hide suggestions, or clear a message |
@@ -53,7 +54,7 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 
 Pastes longer than 500 characters appear as `[Pasted text #N +M chars]` while you compose; the full text is sent when you submit. Backspace immediately after the placeholder removes the whole pasted block.
 
-**Panels.** Plugins can dock panels beside, above or below the session (`bone.ui.panel`). Click one (or use the key its plugin gives) to give it the keyboard: the arrows, `pageup`/`pagedown`, `home`/`end` and the wheel scroll it, `tab`/`shift+tab` move to the next/previous panel and back to the prompt, `esc` returns to the prompt. The wheel over a panel always scrolls that panel.
+**Panels.** Plugins can dock panels beside, above or below the session (`bone.ui.panel`). Click one (or use the key its plugin gives) to give it the keyboard: the arrows, `pageup`/`pagedown`, `home`/`end` and the wheel scroll it, `tab`/`shift+tab` move to the next/previous panel and back to the prompt (unless the panel uses `tab` itself), `F6`/`shift+F6` do so from any panel, `esc` returns to the prompt. The focused panel's bar beside the chat is drawn in the accent colour (`WinSeparatorFocus`). The wheel over a panel always scrolls that panel.
 
 **Approval popup.** By default tool calls run without asking. Custom hooks can pause with `bone.ask`; a TUI handler displays the question and replies with `ask/respond` (see [lua.md](lua.md#asking-the-user)).
 

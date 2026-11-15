@@ -241,12 +241,19 @@ fn dispatch_key<H: Host>(h: &mut H, key: Key, allow_raw: bool) {
     }
     h.dismiss_message();
     // A focused panel's own keys come first (not in the middle of a key
-    // sequence).
+    // sequence), after the `global` context: the keys that move between
+    // areas and the app's own, which no panel can take (unless it turned
+    // `global_keys` off, as a terminal does).
     if h.key_state().pending_keys.is_empty()
         && let Some(id) = h.focused_panel()
-        && panel_key(h, &id, key)
     {
-        return;
+        let global = panels::panel(h.panel_store().panels, &id).is_some_and(|p| p.global_keys);
+        if global && global_key(h, key) {
+            return;
+        }
+        if panel_key(h, &id, key) {
+            return;
+        }
     }
     let ctx = h.context();
     if ctx == Context::Popup {
@@ -372,6 +379,20 @@ fn finish_pending<H: Host>(h: &mut H) {
     let (keys, action, ctx) = take_pending(h);
     if action.is_none_or(|a| !dispatch_action(h, a)) && h.context() == ctx {
         replay_literal(h, &ctx, &keys);
+    }
+}
+
+/// A key mapped in the `global` context (single keys only): run it.
+fn global_key<H: Host>(h: &mut H, key: Key) -> bool {
+    let ctx = Context::Named("global".into());
+    let lookup = h.keymap_store().keymaps.lookup(&ctx, &[key]);
+    match lookup.action {
+        Some(action) => {
+            discard_pending(h);
+            dispatch_action(h, action);
+            true
+        }
+        None => false,
     }
 }
 

@@ -5,8 +5,13 @@ function M.setup(opts)
   opts = opts or {}
   local change_count = require("bone.ui.change_count")
   change_count.setup()
+  -- The bar of the panel with the keys is lit (WinSeparatorFocus); the
+  -- prompt's sign dims while a panel has them.
+  bone.hl.set("WinSeparatorFocus", { link = "Accent", default = true })
   bone.ui.prompt = opts.prompt or {
-    prefix = { { "› ", "UserPrompt" } },
+    prefix = function()
+      return { { "› ", bone.ui.panel.focused() and "Dim" or "UserPrompt" } }
+    end,
     continuation = { { "  ", "InputText" } },
     placeholder = { { "Message bone… (enter sends, alt+enter for a new line, / for commands)", "Placeholder" } },
     -- Three-row composer: the Git change count above, the text row, and a

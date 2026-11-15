@@ -109,6 +109,10 @@ pub struct Panel {
     pub on_key: Option<u64>,
     pub on_close: Option<u64>,
     pub focusable: bool,
+    /// While focused, the `global` keymap context runs before its own keys
+    /// (moving between areas, the app's own keys). A terminal turns it off
+    /// to get every key.
+    pub global_keys: bool,
     /// Keymap context while focused; `None` is `panel`.
     pub context: Option<Context>,
     pub hidden: bool,
@@ -143,6 +147,7 @@ impl Panel {
             on_key: None,
             on_close: None,
             focusable: true,
+            global_keys: true,
             context: None,
             hidden: false,
             follow: false,

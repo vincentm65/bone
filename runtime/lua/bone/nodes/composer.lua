@@ -6,6 +6,8 @@
 -- context).
 local M = {}
 
+bone.hl.set("PromptBorderFocus", { link = "Dim", default = true })
+
 local nodes = require("bone.nodes")
 local menu = require("bone.menu")
 local style = require("bone.nodes.style")
@@ -240,7 +242,11 @@ function M.node(opts)
     table.insert(field, 1, { spans = prefix, size = style.size.text, hl = "UserPrompt", wrap = false })
   end
   local card = {
-    id = opts.chat and ("prompt:" .. opts.chat) or "prompt", bg = "InputBackground", border = 1, border_color = "PromptBorder",
+    id = opts.chat and ("prompt:" .. opts.chat) or "prompt", bg = "InputBackground", border = 1,
+    -- A step lighter while the prompt has the keys: no panel, window,
+    -- text field or button (ctrl+p) has them.
+    border_color = (not opts.chat and not bone.ui.panel.focused() and bone.keymap.current() == "main"
+      and not bone.gui.focused()) and "PromptBorderFocus" or "PromptBorder",
     radius = style.radius.round, padding = compact and { 8, 8, 8, 8 } or { 12, 10, 10, 12 },
     direction = "column", gap = compact and 6 or 8, shadow = style.shadow.card,
     on_press = opts.chat and opts.on_focus or nil,

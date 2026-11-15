@@ -17,6 +17,9 @@ local tray = require("bone.desktop.tray")
 
 local function slot(name, ctx) return bone.gui.slots.nodes(name, ctx) end
 
+-- The lit edge of the panel with the keys (a scheme can set its own).
+bone.hl.set("WinSeparatorFocus", { link = "Accent", default = true })
+
 -- The chat and composer column, in pixels: 900 of text (about 120
 -- characters a line of prose) and the scrollbar's inset beside it.
 M.max_width = 914
@@ -211,7 +214,9 @@ function M.docked(side, ctx, available, flush)
         card = style.finish({
           grow = not auto and 1 or nil, direction = "column", padding = M.dock_pad, overflow = "hidden",
           bg = (bone.hl.get("Sidebar") or {}).bg and "Sidebar" or "Panel",
-          border = EDGE[side], border_color = "WinSeparator",
+          -- The panel with the keys has its edge lit: where the keys are.
+          border = EDGE[side],
+          border_color = bone.ui.panel.focused() == info.id and "WinSeparatorFocus" or "WinSeparator",
         })
       end
       card[#card + 1] = title
@@ -501,8 +506,30 @@ function M.column(ctx, opts)
   -- manager's title bar instead, unless it asks for `header = true`.
   local header = opts.header
   if header == nil then header = opts.on_focus == nil end
-  return { grow = 1, direction = "column", header and M.header(session, width) or nil, chat, middle, below }
+  return { id = here and "chat-column" or nil, grow = 1, direction = "column",
+    header and M.header(session, width) or nil, chat, middle, below }
 end
+
+-- A press anywhere in the chat on screen gives the prompt the keys back,
+-- from a panel, a text field or a button that had them: typing goes on in
+-- the prompt without aiming for it. The press itself still selects text or
+-- presses what it lands on.
+bone.on("mouse", function(ev)
+  if ev.action ~= "down" or ev.button ~= "left" or not ev.px then return end
+  if not bone.ui.panel.focused() and not bone.gui.focused() then return end
+  local function inside(r)
+    return r and ev.px >= r.x and ev.px < r.x + r.w and ev.py >= r.y and ev.py < r.y + r.h
+  end
+  -- A panel docked at the bottom stands in the chat's column (a terminal
+  -- over the composer): a press on it is that panel's.
+  for _, info in ipairs(bone.ui.panel.list() or {}) do
+    if inside(bone.gui.rect("dock:" .. info.id)) or inside(bone.gui.rect("panel:" .. info.id)) then return end
+  end
+  if inside(bone.gui.rect("chat-column")) then
+    if bone.ui.panel.focused() then bone.ui.panel.focus(nil) end
+    bone.gui.focus(nil)
+  end
+end)
 
 --- The chats beside the sidebar: the chat on screen's column. A plugin
 --- replaces it to show several (ctx = { width, height, cell } of the area).

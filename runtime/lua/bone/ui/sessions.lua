@@ -159,6 +159,12 @@ local function move(delta)
 end
 
 local function render(ctx)
+  -- With the keys, the blank column at the edge (where a drag resizes it)
+  -- shows the lit bar every focused panel has; without them it stays blank.
+  if panel and (ctx.focused or false) ~= (state.edge or false) then
+    state.edge = ctx.focused or false
+    panel:update({ separator = state.edge })
+  end
   -- After a drag, save the width drawn: Rust keeps the chat 20 columns, and
   -- the release can arrive before the last drag has been drawn.
   if state.save_width then

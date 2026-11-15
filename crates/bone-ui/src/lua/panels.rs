@@ -262,6 +262,9 @@ fn apply_panel_spec<H: Host>(
     if let Some(v) = spec.get::<Option<bool>>("focusable")? {
         p.focusable = v;
     }
+    if let Some(v) = spec.get::<Option<bool>>("global_keys")? {
+        p.global_keys = v;
+    }
     if let Some(v) = spec.get::<Option<bool>>("hidden")? {
         p.hidden = v;
     }

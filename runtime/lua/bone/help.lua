@@ -96,6 +96,7 @@ M.KEYS = {
   { "ctrl+o", "open an earlier session", "Sessions" },
   { "ctrl+n", "start a new session", "Sessions" },
   { "f1", "open this help browser", "Sessions" },
+  { "f6 / shift+f6", "move the keys to the next / previous area: the prompt, the sidebar, each panel (the lit bar shows where they are)", "Sessions" },
   { "pageup / pagedown", "scroll the conversation or command suggestions", "Reading" },
   { "shift+up / shift+down / wheel", "scroll the conversation or command suggestions", "Reading" },
   { "ctrl+home / ctrl+end", "jump to the top or bottom; bottom follows new output", "Reading" },
