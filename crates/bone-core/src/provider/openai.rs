@@ -15,6 +15,9 @@ use crate::config::ProviderConfig;
 
 const MAX_ATTEMPTS: u32 = 3;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+/// A response that sends nothing for this long has stalled (a server can be
+/// quiet a while reading a big prompt or thinking unstreamed).
+const STREAM_IDLE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 300 });
 
 /// One completion over `/chat/completions`.
 pub(super) async fn stream(
@@ -50,7 +53,12 @@ pub(super) async fn post_events(
     // The start of the body, until an event comes: a 200 that is no stream
     // (a JSON error from a proxy, say) is shown rather than lost.
     let (mut head, mut seen) = (Vec::new(), false);
-    while let Some(chunk) = bytes.next().await {
+    loop {
+        let Ok(next) = tokio::time::timeout(STREAM_IDLE, bytes.next()).await else {
+            let secs = STREAM_IDLE.as_secs();
+            return Err(ProviderError(format!("the response stalled: nothing came for {secs} s")));
+        };
+        let Some(chunk) = next else { break };
         let chunk = chunk.map_err(|e| ProviderError(format!("stream error: {e}")))?;
         capture.chunk(&chunk);
         if !seen && head.len() < 2048 {
@@ -620,6 +628,30 @@ mod tests {
             }
         }
         (acc.finish("m"), deltas)
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_goes_quiet_fails() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let _ = sock.read(&mut [0u8; 65536]).await;
+            let data = "data: {\"choices\":[{\"delta\":{\"content\":\"{\"}}]}\n\n";
+            let head = "HTTP/1.1 200 OK\r\ntransfer-encoding: chunked\r\n\r\n";
+            let body = format!("{head}{:x}\r\n{data}\r\n", data.len());
+            sock.write_all(body.as_bytes()).await.unwrap();
+            std::future::pending::<()>().await; // then silence, connection open
+        });
+        let mut text = String::new();
+        let r = post_events(&http_client(), &url, &[], &json!({}), |d| {
+            text.push_str(d);
+            Ok(false)
+        })
+        .await;
+        assert!(r.unwrap_err().0.contains("stalled"));
+        assert!(text.contains(r#""content":"{""#));
     }
 
     #[test]
