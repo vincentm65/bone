@@ -55,7 +55,6 @@ pub struct Composer {
     pub drafts: HashMap<BufferId, Draft>,
     pub pending: HashMap<(BufferId, u64), usize>,
     pub saved: Option<Draft>,
-    pub history: Vec<Draft>,
     pub history_pos: Option<usize>,
 }
 

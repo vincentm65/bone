@@ -439,7 +439,7 @@ impl Gui {
         }
         let mode = mode.unwrap_or_else(|| bone_ui::options::queue_mode(&self.lua.dynamic_options));
         let images = std::mem::take(&mut self.images);
-        self.remember(&text, &images);
+        (self.prompt.history_pos, self.prompt.saved) = (None, None);
         self.clear_draft();
         let buf = self.current;
         self.chats[buf].starting = true;

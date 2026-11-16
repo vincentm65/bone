@@ -11,7 +11,7 @@ use mlua::{Lua, MultiValue, Table, Value};
 use crate::Gui;
 
 /// What is kept of the prompt besides its text: the cursor and selection,
-/// and the history of sent messages.
+/// and where up and down are in what was sent.
 #[derive(Default)]
 pub(crate) struct PromptState {
     /// Where the selection starts and the cursor is, in chars from the
@@ -24,7 +24,6 @@ pub(crate) struct PromptState {
     /// anchor and cursor they were asked for (None: ask again).
     pub marks: PromptMarks,
     pub marks_for: Option<(String, usize, usize)>,
-    history: Vec<(String, Vec<ImageAttachment>)>,
     /// The entry recalled, and the draft that was there before.
     pub(crate) history_pos: Option<usize>,
     pub(crate) saved: Option<(String, Vec<ImageAttachment>)>,
@@ -163,18 +162,9 @@ impl Gui {
         (pos(t.cursor()), selection)
     }
 
-    /// Remember a sent message for up and down.
-    pub(crate) fn remember(&mut self, text: &str, images: &[ImageAttachment]) {
-        let p = &mut self.prompt;
-        if (p.history.last()).is_none_or(|(t, i)| t != text || i.as_slice() != images) {
-            p.history.push((text.to_owned(), images.to_vec()));
-        }
-        p.history_pos = None;
-        p.saved = None;
-    }
-
     /// Up or down on the prompt: the line above or below, else the message
-    /// sent before or after. Returns whether it did anything.
+    /// or command sent in this chat before or after. Returns whether it did
+    /// anything.
     pub(crate) fn vertical(&mut self, up: bool) -> bool {
         let mut t = self.buffer();
         let moved = if up { t.up() } else { t.down() };
@@ -182,15 +172,17 @@ impl Gui {
             self.set_buffer(&t);
             return true;
         }
-        let p = &mut self.prompt;
-        let len = p.history.len();
+        let history = self.chats[self.current].recall();
+        let len = history.len();
         if len == 0 {
             return false;
         }
+        let p = &mut self.prompt;
         let pos = match (p.history_pos, up) {
             (None, true) => Some(len - 1),
             (None, false) => return false,
-            (Some(i), true) => Some(i.saturating_sub(1)),
+            // The list may have shrunk since (a queued message taken back).
+            (Some(i), true) => Some(i.min(len).saturating_sub(1)),
             (Some(i), false) if i + 1 < len => Some(i + 1),
             (Some(_), false) => None,
         };
@@ -199,7 +191,7 @@ impl Gui {
         }
         p.history_pos = pos;
         let (text, images) = match pos {
-            Some(i) => p.history[i].clone(),
+            Some(i) => (history[i].0.to_owned(), history[i].1.to_vec()),
             None => p.saved.take().unwrap_or_default(),
         };
         (self.draft, self.images) = (text, images);

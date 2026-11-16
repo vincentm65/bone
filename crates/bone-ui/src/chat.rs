@@ -22,7 +22,8 @@ use bone_proto::methods::{
     ToolStarted, ToolStartedParams, TurnFinished, TurnFinishedParams, TurnStarted, TurnSteered,
 };
 use bone_proto::types::{
-    ChatMessage, DeltaKind, SessionInfo, ToolCall, ToolTiming, TurnId, TurnOutcome, Usage,
+    ChatMessage, DeltaKind, ImageAttachment, SessionInfo, ToolCall, ToolTiming, TurnId,
+    TurnOutcome, Usage,
 };
 use serde_json::{Value, json};
 
@@ -141,6 +142,9 @@ pub struct ChatBuffer<L> {
     /// session's latest messages, `session/messages` with `tail`). Entries
     /// before the first user message belong to that turn.
     pub omitted_turns: usize,
+    /// Commands run here (not in the transcript), each after how many user
+    /// messages (omitted, loaded and queued) there were then.
+    commands: Vec<(usize, String)>,
     /// Bumped when the queue changes; the cache key of queued items.
     queue_rev: u64,
     /// How finished turns ended, by the id of their user message's entry.
@@ -209,6 +213,7 @@ impl<L> Default for ChatBuffer<L> {
             queue_paused: false,
             loading: None,
             omitted_turns: 0,
+            commands: Vec::new(),
             queue_rev: 0,
             outcomes: HashMap::new(),
             ids: Vec::new(),
@@ -565,6 +570,39 @@ impl<L> ChatBuffer<L> {
 
     pub fn notice(&mut self, text: String, error: bool) {
         self.push(Entry::Notice { text, error });
+    }
+
+    /// A command run here, recalled after the messages sent before it.
+    pub fn remember_command(&mut self, text: &str) {
+        let users = self.entries.iter().filter(|e| matches!(e, Entry::User(..)));
+        let at = self.omitted_turns + users.count() + self.queue.len();
+        self.commands.push((at, text.to_owned()));
+    }
+
+    /// What up and down recall, oldest first: the messages the user sent
+    /// (loaded and queued; not a job's or an agent's) and the commands run
+    /// here, in the order they came. A repeat in a row is kept once.
+    pub fn recall(&self) -> Vec<(&str, &[ImageAttachment])> {
+        let sent = self.entries.iter().filter_map(|e| match e {
+            Entry::User(text, images, source) => Some((text, images, source.is_none())),
+            _ => None,
+        });
+        let queued = (self.queue.iter()).map(|q| (&q.text, &q.images, q.source.is_none()));
+        let mut commands = self.commands.iter().peekable();
+        let mut out: Vec<(&str, &[ImageAttachment])> = Vec::new();
+        for (n, (text, images, mine)) in (self.omitted_turns..).zip(sent.chain(queued)) {
+            while let Some((_, c)) = commands.next_if(|(at, _)| *at <= n) {
+                out.push((c, &[]));
+            }
+            if mine {
+                out.push((text, images));
+            }
+        }
+        for (_, c) in commands {
+            out.push((c, &[]));
+        }
+        out.dedup();
+        out
     }
 
     // ---- items ---------------------------------------------------------------

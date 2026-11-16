@@ -561,7 +561,8 @@ impl Host for Gui {
     }
 
     fn history_add(&mut self, text: &str) {
-        self.remember(text, &[]);
+        self.chats[self.current].remember_command(text);
+        (self.prompt.history_pos, self.prompt.saved) = (None, None);
     }
 
     fn process_list(&self) -> Vec<ProcessSnapshot> {

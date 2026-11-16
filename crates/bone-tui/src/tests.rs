@@ -795,7 +795,7 @@ async fn prompt_grows_and_history_recalls() {
     let screen = h.screen(40, 12);
     assert!(screen.contains(" › one\n   two\n   three"), "{screen}");
     h.input("{enter}").await;
-    h.emit::<TurnStarted>(started("s-new", "one")).await;
+    h.emit::<TurnStarted>(started("s-new", "one\ntwo\nthree")).await;
     h.emit::<TurnFinished>(finished("s-new", TurnOutcome::Completed))
         .await;
     h.input("{up}").await;

@@ -944,7 +944,7 @@ bone.prompt = {
   insert = function(text)
     api("prompt_edit", "insert", nil, nil, text)
   end,
-  --- Remember text for up/down recall (as sending it does).
+  --- Remember a command for up/down recall in the chat on screen.
   history_add = function(text)
     api("history_add", text)
   end,

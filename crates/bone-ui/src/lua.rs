@@ -254,7 +254,7 @@ pub trait Host {
     fn prompt_info(&mut self, lua: &Lua) -> mlua::Result<Table>;
     /// The prompt has no text and no images.
     fn prompt_empty(&self) -> bool;
-    /// Remember a sent prompt or command for recall.
+    /// Remember a command run in the chat on screen for recall.
     fn history_add(&mut self, text: &str);
     /// The id of the panel with the keyboard.
     fn focused_panel(&self) -> Option<String>;

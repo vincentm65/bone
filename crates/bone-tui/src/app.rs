@@ -863,45 +863,33 @@ impl App {
         }
     }
 
-    /// Remember a sent prompt or command for up/down recall.
+    /// Remember a command run in the chat on screen for up/down recall.
     pub fn history_add(&mut self, text: &str) {
-        let draft = Draft {
-            text: text.to_owned(),
-            ..Default::default()
-        };
-        self.history_add_draft(draft);
-        self.composer.history_pos = None;
-    }
-
-    fn history_add_draft(&mut self, draft: Draft) {
-        if self
-            .composer
-            .history
-            .last()
-            .is_none_or(|last| last.text != draft.text || last.images != draft.images)
-        {
-            self.composer.history.push(draft);
-        }
-        self.composer.history_pos = None;
-        self.composer.saved = None;
+        self.chats[self.current].remember_command(text);
+        (self.composer.history_pos, self.composer.saved) = (None, None);
     }
 
     /// Up/Down: move between prompt lines, and past the first/last line
-    /// through history.
+    /// through what was sent in this chat.
     fn vertical(&mut self, up: bool) {
         let moved = if up {
             self.prompt.up()
         } else {
             self.prompt.down()
         };
-        if moved || self.composer.history.is_empty() {
+        if moved {
             return;
         }
-        let len = self.composer.history.len();
+        let history = self.chats[self.current].recall();
+        let len = history.len();
+        if len == 0 {
+            return;
+        }
         let pos = match (self.composer.history_pos, up) {
             (None, true) => Some(len - 1),
             (None, false) => return,
-            (Some(p), true) => Some(p.saturating_sub(1)),
+            // The list may have shrunk since (a queued message taken back).
+            (Some(p), true) => Some(p.min(len).saturating_sub(1)),
             (Some(p), false) if p + 1 < len => Some(p + 1),
             (Some(_), false) => None,
         };
@@ -909,9 +897,14 @@ impl App {
             self.composer.saved = Some(self.draft());
         }
         self.composer.history_pos = pos;
-        let mut draft = pos
-            .map(|p| self.composer.history[p].clone())
-            .unwrap_or_else(|| self.composer.saved.take().unwrap_or_default());
+        let mut draft = match pos {
+            Some(p) => Draft {
+                text: history[p].0.to_owned(),
+                images: history[p].1.to_vec(),
+                ..Default::default()
+            },
+            None => self.composer.saved.take().unwrap_or_default(),
+        };
         self.composer.invalidate();
         draft.epoch = self.composer.epoch;
         self.apply_draft(draft);
@@ -986,7 +979,7 @@ impl App {
             && let Some(session_id) = self.chats[buf].session_id().map(str::to_owned)
         {
             let mode = mode.unwrap_or_else(|| bone_ui::options::queue_mode(&self.dynamic_options));
-            self.history_add_draft(draft.clone());
+            (self.composer.history_pos, self.composer.saved) = (None, None);
             self.clear_prompt();
             let params = QueueAddParams {
                 session_id,
@@ -1006,7 +999,7 @@ impl App {
             return self.error("A turn is still starting");
         }
         self.chats[buf].starting = true;
-        self.history_add_draft(draft.clone());
+        (self.composer.history_pos, self.composer.saved) = (None, None);
         self.clear_prompt();
         match self.chats[buf].session_id() {
             Some(id) => self.start_turn(buf, id.to_owned(), draft),
