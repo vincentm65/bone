@@ -17,7 +17,8 @@ use std::sync::Arc;
 
 use bone_core::{Core, Event, dispatch};
 use bone_proto::methods::{
-    Initialize, InitializeParams, InitializeResult, SessionUpdated, SessionUpdatedParams, Shutdown,
+    Initialize, InitializeParams, InitializeResult, QueueAdd, SessionUpdated, SessionUpdatedParams,
+    Shutdown, TurnStart, TurnSteer,
 };
 use bone_proto::{Connection, Message, Method, PROTOCOL_VERSION, RequestId, RpcError, transport};
 use serde_json::{Value, json};
@@ -63,6 +64,8 @@ impl Server {
     pub async fn serve(&self, conn: Connection) {
         let Connection { tx, mut rx } = conn;
         let mut events: Option<broadcast::Receiver<Event>> = None;
+        // The name the client gave in `initialize` (`bone-tui`, `bone-gui`…).
+        let mut client: Option<String> = None;
 
         loop {
             let msg = tokio::select! {
@@ -94,6 +97,10 @@ impl Server {
                     "connection already initialized",
                 )),
                 Initialize::METHOD => {
+                    client = params
+                        .as_ref()
+                        .and_then(|p| p["client_name"].as_str())
+                        .map(str::to_owned);
                     let result = dispatch::<Initialize, _>(params, initialize);
                     if result.is_ok() {
                         events = Some(self.core.subscribe());
@@ -110,6 +117,14 @@ impl Server {
                     return;
                 }
                 _ => {
+                    // A message to a session says which client sent it.
+                    let mut params = params;
+                    if let (Some(Value::Object(p)), Some(name)) = (&mut params, &client)
+                        && [TurnStart::METHOD, TurnSteer::METHOD, QueueAdd::METHOD]
+                            .contains(&method.as_str())
+                    {
+                        p.insert("client".into(), Value::String(name.clone()));
+                    }
                     let core = self.core.clone();
                     let tx = tx.clone();
                     tokio::spawn(async move {

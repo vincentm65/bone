@@ -602,6 +602,14 @@ impl Core {
     /// Handle one request. Unknown methods return `METHOD_NOT_FOUND`.
     /// Long work (turns) runs in the background and reports through events.
     pub async fn handle(&self, method: &str, params: Option<Value>) -> Result<Value, RpcError> {
+        // The server names the client that sent a message to a session
+        // (`client`), so the system prompt can say which app the user is in.
+        if let Some(p) = &params
+            && let (Some(id), Some(client)) = (p["session_id"].as_str(), p["client"].as_str())
+            && let Ok(session) = self.inner.session(id)
+        {
+            session.lock().unwrap().client = Some(client.to_owned());
+        }
         match method {
             AttachmentUpload::METHOD => {
                 let p = decode::<AttachmentUpload>(params)?;

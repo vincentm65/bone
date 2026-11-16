@@ -1,5 +1,5 @@
 -- Default keys. ~/.bone/tui.lua runs after this and can change or delete
--- any of them; ~/.bone/runtime/tui/defaults.lua replaces this file.
+-- any of them; a library's tui/defaults.lua (/tui) runs instead of this file.
 -- Keys without a mapping type text into the prompt.
 
 -- The standard Lua UI is the starting point. User config and plugins run

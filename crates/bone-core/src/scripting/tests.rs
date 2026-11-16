@@ -48,7 +48,8 @@ fn config_and_env_overrides() {
     );
     assert!(!c.provider.stream_usage);
     assert!(c.data_dir.ends_with("somewhere") && !c.data_dir.starts_with("~"));
-    assert!(c.system_prompt.unwrap().starts_with("You are bone"));
+    // The built-in prompt is a function (it says which app and library).
+    assert!(c.system_prompt.is_none() && ex.system_prompt_fn);
 
     let env = |k: &str| match k {
         "BONE_MODEL" => Some("override".into()),
@@ -160,7 +161,7 @@ async fn hooks_tools_and_system_prompt() {
     let loaded = load(dir.path()).unwrap();
     let s = loaded.scripting.clone();
     assert!(s.has_hook("tool_call") && s.has_hook("tool_result") && s.has_system_prompt_fn());
-    assert_eq!(s.system_prompt("/w", "s").await.unwrap(), "prompt for /w");
+    assert_eq!(s.system_prompt("/w", "s", None).await.unwrap(), "prompt for /w");
 
     let tool = |name: &str| {
         LuaTool::new(

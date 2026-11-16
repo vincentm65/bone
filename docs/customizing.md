@@ -14,26 +14,90 @@ bone.docs.list()                       -- { { name = "customizing/customizing-tu
 local guide = bone.docs.read("customizing/customizing-tui.md")
 ```
 
-## Where customizations live
+## Where a change goes
 
-| File | Runs in | What it controls |
+**Changes to an app (how the TUI or GUI looks or behaves) go in a UI library
+of the user's own:** a folder in `~/.bone/libraries/NAME/`. Nothing else.
+
+- The built-in libraries, **standard** and **bare**, are read from the binary
+  and cannot be changed. Never edit bone's source or try to replace a
+  built-in file; never copy one whole into a library.
+- A library holds only its changes. Its entry file runs the built-in UI first,
+  so everything it does not change keeps getting bone's updates:
+
+  | App | Entry file in the library | Which library the app uses |
+  |---|---|---|
+  | terminal (TUI) | `tui/defaults.lua` | `~/.bone/library` (just the name; none = standard) |
+  | desktop (GUI) | `gui/defaults.lua` | `~/.bone/gui-library`; without it, the TUI's choice if that library has a `gui/` folder, else standard |
+
+  A new library's entry file is exactly one line, the built-in UI it starts
+  from: `bone.builtin("tui/defaults.lua")` (or `"gui/defaults.lua"`; bare is
+  `"tui/bare.lua"` / `"gui/bare.lua"`). Write the library's name to the
+  app's file above to switch to it; the app reloads by itself.
+- Not UI: tools, hooks, providers and the system prompt go in
+  `~/.bone/core.lua` (`customizing/customizing-core.md`). Something to share
+  with others is a plugin (`customizing/customizing-plugins.md`).
+
+## How to make a change in a library
+
+1. **Most changes are a few lines in the entry file, after the
+   `bone.builtin(...)` line**: options (`bone.o`), keys (`bone.keymap.set`),
+   slash commands (`bone.cmd.create`), colors (`bone.hl.set`,
+   `bone.colorscheme`), the statusline, regions, chat views, panels. The
+   guides' snippets, written for `tui.lua` and `gui.lua`, work there too.
+2. **To change part of a built-in module**, give the library a file at the
+   module's path that starts from the built-in one and changes only what it
+   needs. The app loads the library's file in place of the built-in module:
+
+   ```lua
+   -- ~/.bone/libraries/NAME/lua/bone/ui/layout.lua
+   local M = bone.builtin("bone.ui.layout")   -- the built-in module
+   local setup = M.setup
+   function M.setup(opts)
+     setup(opts)
+     bone.ui.regions.top = function() return { "my header" } end
+   end
+   return M
+   ```
+
+   To see what a built-in module does, read its copy in
+   `~/.bone/docs/builtin/` (same path as in the map below). Those copies are
+   for reading only: bone rewrites them at every start and never loads them.
+3. Save. The app reloads; a Lua error is shown to the user and listed by
+   `/health`, and the app keeps running.
+
+## Which built-in file does what
+
+Read them in `~/.bone/docs/builtin/`; a library file at the same path
+replaces one.
+
+| Area | TUI | GUI |
 |---|---|---|
-| `~/.bone/core.lua` | the core (server) | providers, system prompt, tools, hooks |
-| `~/.bone/tui.lua` | the TUI | options, keys, commands, colors, panels, chat look |
-| `~/.bone/ui.lua` | the TUI and the GUI | UI config for every frontend; runs before `tui.lua` / `gui.lua` |
-| `~/.bone/gui.lua` | the GUI (`bone --gui`) | the GUI's own config: `bone.gui.window`, `bone.o.font` (see `customizing-gui.md`) |
-| `~/.bone/plugins/<name>/` | core and frontends | optional `core.lua`, `ui.lua` (every frontend), `tui.lua`, `gui.lua`, and `lua/` modules |
-| `.bone/` in a trusted project | each frontend | `ui.lua`, then that frontend's file (`tui.lua` or `gui.lua`); `/plugins trust` once covers both |
-| `~/.bone/docs/` | — | these guides, rewritten at startup (edits there are lost) |
+| Entry (what loads, default keys) | `tui/defaults.lua` | `gui/defaults.lua` |
+| Chat items (messages, tool calls, diffs) | `lua/bone/ui/views.lua` | `lua/bone/desktop/views.lua`, `lua/bone/desktop/tools.lua` |
+| Layout (regions, prompt box, empty chat) | `lua/bone/ui/layout.lua`, `lua/bone/ui.lua` | `lua/bone/nodes/library.lua`, `lua/bone/nodes/window.lua` |
+| Statusline / status bar | `lua/bone/ui/statusline.lua` | `lua/bone/nodes/statusbar.lua` |
+| Prompt / composer | `lua/bone/ui/layout.lua` | `lua/bone/nodes/composer.lua` |
+| Sessions list | `lua/bone/ui/sessions.lua` | `lua/bone/desktop/sidebar.lua` |
+| Queue, sub-agents, jobs under the prompt | `lua/bone/ui/tray.lua` | `lua/bone/desktop/tray.lua` |
+| Sizes, corners, spacing | — | `lua/bone/nodes/style.lua` |
+| Colors | `colors/black.lua`, `colors/ansi.lua` | `colors/graphite.lua` |
+| Key bindings (both apps) | `lua/bone/keys.lua` | same |
+| Slash commands and the `/` menu | `lua/bone/commands.lua`, `lua/bone/menu.lua` | same, plus `lua/bone/gui.lua` |
+| Pickers, pagers, popups | (built into the TUI) | `lua/bone/desktop/pick.lua`, `lua/bone/nodes/popups.lua` |
+| Settings, setup, help | `lua/bone/config.lua`, `lua/bone/setup.lua`, `lua/bone/help.lua` | `lua/bone/desktop/settings.lua`, `lua/bone/desktop/setup.lua`, `lua/bone/desktop/help.lua` |
 
-The runtime defaults (keymaps, the standard look, the `/` menu) live in
-`runtime/`, built into the binary. A frontend resolves a file from its active
-library first (`~/.bone/libraries/<name>/`, chosen with `/tui` or `/gui`;
-which one is active is in `customizing-tui.md` and `customizing-gui.md`),
-then `~/.bone/runtime/<same path>`, then the built-in copy. Prefer changing
-pieces from your config:
-`local M = bone.builtin("bone.ui.layout")` gives you the built-in module to
-wrap. `bone.builtin` always reads that built-in copy.
+## Other files bone loads
+
+These still run, after the library, but changes the agent makes go in the
+library:
+
+| File | Runs in | Use |
+|---|---|---|
+| `~/.bone/ui.lua`, `~/.bone/tui.lua`, `~/.bone/gui.lua` | the TUI and GUI; the TUI; the GUI | personal config written by hand (skipped by bare) |
+| `~/.bone/plugins/<name>/` | core and frontends | installed plugins: `core.lua`, `ui.lua`, `tui.lua`, `gui.lua`, `lua/` |
+| `.bone/` in a trusted project | each frontend | `ui.lua`, then `tui.lua` or `gui.lua`; `/plugins trust` once covers both |
+| `~/.bone/docs/` | — | these guides, rewritten at startup (edits there are lost) |
 
 The full API reference is `lua.md` (next to this guide; also `/help lua` in
 the TUI), and `architecture.md` explains how the core, server and frontends

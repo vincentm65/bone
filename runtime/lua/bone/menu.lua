@@ -4,8 +4,8 @@
 -- the rest (wheel, shift+up/down, pageup/pagedown).
 -- It handles those builtin actions through bone.ui.actions, so keymaps that
 -- name "submit", "complete", "dismiss", "up" or "down" keep working; how it
--- looks is bone.ui.suggestions(ctx). Replace this module
--- (~/.bone/runtime/lua/bone/menu.lua) to change how matching works.
+-- looks is bone.ui.suggestions(ctx). A library of yours can have its own
+-- lua/bone/menu.lua (starting from bone.builtin) to change how matching works.
 
 local M = {
   offset = 0, -- first match row shown (the list scrolls when it overflows)

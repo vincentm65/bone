@@ -7,8 +7,8 @@
 
 local M = {}
 
--- Help browser and topic lookup. Override ~/.bone/runtime/lua/bone/help.lua
--- to customize it, or replace bone.ui.help from tui.lua.
+-- Help browser and topic lookup. A library of yours can have its own
+-- lua/bone/help.lua (starting from bone.builtin), or replace bone.ui.help.
 local function file(d) return d.plugin and d.name .. "/README.md" or d.name .. ".md" end
 
 local function doc_sections()

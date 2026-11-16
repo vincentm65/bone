@@ -1091,11 +1091,12 @@ async fn lua_api_and_errors() {
 }
 
 #[tokio::test]
-async fn runtime_defaults_can_be_replaced() {
+async fn a_library_can_replace_the_defaults() {
     let dir = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(dir.path().join("runtime/tui")).unwrap();
+    std::fs::create_dir_all(dir.path().join("libraries/x/tui")).unwrap();
+    std::fs::write(dir.path().join("library"), "x\n").unwrap();
     std::fs::write(
-        dir.path().join("runtime/tui/defaults.lua"),
+        dir.path().join("libraries/x/tui/defaults.lua"),
         r#"bone.keymap.set("enter", "submit")"#,
     )
     .unwrap();
@@ -3262,8 +3263,9 @@ async fn the_command_menu_and_actions_are_lua() {
 #[tokio::test]
 async fn reload_picks_up_edited_standard_library_modules() {
     let dir = tempfile::tempdir().unwrap();
-    let views = dir.path().join("runtime/lua/bone/ui/views.lua");
+    let views = dir.path().join("libraries/x/lua/bone/ui/views.lua");
     std::fs::create_dir_all(views.parent().unwrap()).unwrap();
+    std::fs::write(dir.path().join("library"), "x\n").unwrap();
     let write = |tag: &str| {
         std::fs::write(
             &views,
@@ -3332,9 +3334,10 @@ async fn reload_reruns_the_defaults_and_keeps_option_values() {
         })
         .unwrap();
 
-    // Edit the standard menu module: its actions must come from the new file.
-    let menu = dir.path().join("runtime/lua/bone/menu.lua");
+    // A library's menu module: its actions must come from the new file.
+    let menu = dir.path().join("libraries/x/lua/bone/menu.lua");
     std::fs::create_dir_all(menu.parent().unwrap()).unwrap();
+    std::fs::write(dir.path().join("library"), "x\n").unwrap();
     std::fs::write(
         &menu,
         "bone.ui.actions.dismiss = function() return 'EDITED' end",
@@ -4420,10 +4423,15 @@ async fn reload_starts_a_fresh_lua_state() {
 }
 
 #[tokio::test]
-async fn runtime_overrides_can_extend_the_builtin_and_are_listed_in_health() {
+async fn a_library_module_can_extend_the_builtin() {
     let dir = tempfile::tempdir().unwrap();
-    let ui = dir.path().join("runtime/lua/bone/ui");
+    let lib = dir.path().join("libraries/mine");
+    let ui = lib.join("lua/bone/ui");
     std::fs::create_dir_all(&ui).unwrap();
+    std::fs::write(dir.path().join("library"), "mine\n").unwrap();
+    // A new library's entry runs the built-in UI.
+    std::fs::create_dir_all(lib.join("tui")).unwrap();
+    std::fs::write(lib.join("tui/defaults.lua"), bone_lua::library_entry("tui", "")).unwrap();
     // Start from the built-in layout, change one thing.
     std::fs::write(
         ui.join("layout.lua"),
@@ -4438,28 +4446,12 @@ async fn runtime_overrides_can_extend_the_builtin_and_are_listed_in_health() {
         "#,
     )
     .unwrap();
-    // A plain copy of a built-in file.
-    std::fs::write(
-        ui.join("statusline.lua"),
-        bone_lua::builtin_source("lua/bone/ui/statusline.lua").unwrap(),
-    )
-    .unwrap();
     let mut h = Harness::build(Some(dir.path().to_owned())).await;
     h.app.load_user_config();
     let screen = h.screen(40, 10);
     assert!(screen.contains("MINE"), "{screen}");
     // The rest of the built-in layout still applies: the three-row prompt.
     assert!(screen.contains(" › Message bone"), "{screen}");
-
-    let health = serde_json::to_string(&h.app.tui_health()).unwrap();
-    assert!(
-        health.contains("lua/bone/ui/layout.lua (differs from built-in)"),
-        "{health}"
-    );
-    assert!(
-        health.contains("lua/bone/ui/statusline.lua (same as built-in)"),
-        "{health}"
-    );
     let e = h
         .app
         .with_api(|lua| lua.load(r#"bone.builtin("bone.nope")"#).exec())
@@ -4527,88 +4519,6 @@ async fn left_and_right_are_columns_of_the_default_layout() {
     // Only a separator between the two shown columns, none for `right`.
     let screen = h.screen(30, 4);
     assert!(screen.starts_with("LEFT  │> go\n"), "{screen}");
-}
-
-#[tokio::test]
-async fn runtime_command_lists_and_resets_copies() {
-    let dir = tempfile::tempdir().unwrap();
-    let ui = dir.path().join("runtime/lua/bone/ui");
-    std::fs::create_dir_all(&ui).unwrap();
-    std::fs::write(ui.join("views.lua"), "-- my views\\n").unwrap();
-    std::fs::write(
-        ui.join("statusline.lua"),
-        bone_lua::builtin_source("lua/bone/ui/statusline.lua").unwrap(),
-    )
-    .unwrap();
-    let mut h = Harness::build(Some(dir.path().to_owned())).await;
-    h.app.load_user_config();
-
-    h.input("/runtime{enter}").await;
-    let m = h.message();
-    assert!(m.contains("lua/bone/ui/views.lua  (changed)"), "{m}");
-    assert!(
-        m.contains("lua/bone/ui/statusline.lua  (same as built-in)"),
-        "{m}"
-    );
-
-    // Tab completion offers the copies after `reset`.
-    let names: Vec<String> = h
-        .app
-        .with_api(|lua| {
-            lua.load(
-                r#"local out = {}
-                   for _, c in ipairs(bone.cmd.complete("runtime", { args = "reset ", argv = { "reset" } }) or {}) do
-                     out[#out + 1] = type(c) == "table" and c.value or c
-                   end
-                   return out"#,
-            )
-            .eval()
-        })
-        .unwrap();
-    assert!(
-        names.contains(&"lua/bone/ui/views.lua".to_owned()),
-        "{names:?}"
-    );
-    assert!(names.contains(&"all".to_owned()), "{names:?}");
-
-    // One file: moved to a backup, the built-in is used again.
-    h.input("/runtime reset lua/bone/ui/views.lua{enter}").await;
-    let m = h.message();
-    assert!(
-        m.starts_with("Reset 1 file to the built-in version."),
-        "{m}"
-    );
-    assert!(!ui.join("views.lua").exists());
-    let backups: Vec<_> = std::fs::read_dir(dir.path().join("runtime-backup"))
-        .unwrap()
-        .collect();
-    assert_eq!(backups.len(), 1);
-    let saved = backups[0]
-        .as_ref()
-        .unwrap()
-        .path()
-        .join("lua/bone/ui/views.lua");
-    assert_eq!(std::fs::read_to_string(saved).unwrap(), "-- my views\\n");
-
-    // Bad names are refused; `all` takes the rest.
-    h.input("/runtime reset nope.lua{enter}").await;
-    assert!(
-        h.message()
-            .contains("nope.lua is not a built-in runtime file"),
-        "{}",
-        h.message()
-    );
-    h.input("/runtime reset lua/bone/ui/views.lua{enter}").await;
-    assert!(h.message().contains("is not overridden"), "{}", h.message());
-    h.input("/runtime reset all{enter}").await;
-    assert!(h.message().starts_with("Reset 1 file"), "{}", h.message());
-    assert!(!ui.join("statusline.lua").exists());
-    h.input("/runtime{enter}").await;
-    assert!(
-        h.message().starts_with("No runtime files are overridden"),
-        "{}",
-        h.message()
-    );
 }
 
 #[tokio::test]

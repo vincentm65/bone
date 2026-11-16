@@ -1,7 +1,10 @@
 # Customizing the GUI's look and behavior
 
-Where: `~/.bone/gui.lua` (the GUI only) or `~/.bone/ui.lua` (the TUI and the
-GUI); a plugin's `gui.lua` and `ui.lua` work the same. The GUI is `bone --gui`
+Where: the GUI's UI library of your own, `~/.bone/libraries/NAME/gui/defaults.lua`
+after its `bone.builtin("gui/defaults.lua")` line (see `../customizing.md`,
+"Where a change goes"). The built-in standard and bare libraries cannot be
+changed. `~/.bone/gui.lua`, `~/.bone/ui.lua` and a plugin's `gui.lua` and
+`ui.lua` also run, after the library. The GUI is `bone --gui`
 (a build with the `gui` feature). A Lua error never crashes it: it is shown
 once and listed by `/health`.
 
@@ -23,11 +26,11 @@ user and trusted project config, then saved GUI settings. A new load error
 keeps the previous configuration. Option values carry over; chats, the
 prompt and the session stay.
 
-Watched files are `ui.lua`, `gui.lua`, the TUI's `library` selection file,
-`lua/`, `runtime/`, `colors/`, the active GUI library directory, and plugin
-Lua files. The GUI currently does not watch `gui-library`, `core.lua` or a
-project's `.bone/`. Use `/gui use NAME` to switch libraries live. It does
-not send `core/reload`. Plugin Lua
+Watched files are `ui.lua`, `gui.lua`, the `library` and `gui-library`
+selection files, `lua/`, `colors/`, the active GUI library directory, and
+plugin Lua files, so writing a library's name to `gui-library` switches to
+it. The GUI does not watch `core.lua` or a project's `.bone/`. It does not
+send `core/reload`. Plugin Lua
 files are watched regardless of side, but a GUI reload still reloads only
 GUI Lua. Changes made while autoreload is off are not picked up just by
 turning it back on; a subsequent watched change triggers a reload.
@@ -44,13 +47,13 @@ The GUI has its own library selector (`/gui`), separate from `/tui`:
 
 ```
 /gui                     choose one from a menu
-/gui use NAME            standard | bare | a copy of yours; reloads
-/gui create NAME [base]  copy the standard UI (base: bare) to edit
-/gui delete NAME         move a copy not in use aside
+/gui use NAME            standard | bare | one of yours; reloads
+/gui create NAME [base]  one of yours, starting from standard (base: bare)
+/gui delete NAME         move one of yours not in use aside
 ```
 
 `/gui` writes `~/.bone/gui-library`. With no such file the GUI follows the
-TUI's library (`/tui`) when that is `bare` or a copy that has a `gui/`
+TUI's library (`/tui`) when that is `bare` or one of yours that has a `gui/`
 directory, and is `standard` otherwise, so a library made only for the
 terminal leaves the GUI its own.
 
@@ -58,12 +61,15 @@ terminal leaves the GUI its own.
 bubbles for your messages, proportional Markdown answers, tool calls as
 cards, a card composer, the sessions sidebar, a tray and a status bar. `bare`
 is the same window with every chat item drawn as its text, and it does not
-run your `ui.lua` and `gui.lua` or a project's (plugins still load). A copy lives in
-`~/.bone/libraries/NAME/`; its `gui/defaults.lua` is the entry point, and any
-file in it replaces the built-in one of the same path. For one change, a file
-at the same path under `~/.bone/runtime/` does the same without a copy. The
+run your `ui.lua` and `gui.lua` or a project's (plugins still load). Neither
+can be changed. One of yours lives in `~/.bone/libraries/NAME/`; its
+`gui/defaults.lua` is the entry point (it starts with
+`bone.builtin("gui/defaults.lua")`, which runs the standard UI), and any file
+in it replaces the built-in one of the same path: start such a file from
+`bone.builtin("<module>")` and change only what you need, never copy the
+built-in one whole (read it in `~/.bone/docs/builtin/`). The
 window itself is `lua/bone/nodes/window.lua`, the chat is
-`lua/bone/nodes.lua`: replace either to draw differently. The window is made
+`lua/bone/nodes.lua`. The window is made
 of files of its own, each replaceable: `nodes/composer.lua`, `statusbar.lua`,
 `toolstrip.lua` (a turn's tool calls as a timeline, drawn in the chat),
 `overlays.lua` (the toast, the core's questions, a large image), `popups.lua`

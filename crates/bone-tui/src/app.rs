@@ -202,7 +202,7 @@ pub struct App {
 }
 
 impl App {
-    /// `config_dir` is where runtime overrides and `tui.lua` live; `None`
+    /// `config_dir` is where libraries and `tui.lua` live; `None`
     /// uses only the embedded runtime.
     pub fn new(
         client: Arc<Client>,
@@ -1255,37 +1255,6 @@ impl App {
                 "tui lua",
                 "error",
                 format!("switched off after errors: {}{last}", names.join(", ")),
-            ));
-        }
-        let overrides = self
-            .config_dir
-            .as_deref()
-            .map(bone_lua::runtime_overrides)
-            .unwrap_or_default();
-        if overrides.is_empty() {
-            out.push(item(
-                "runtime overrides",
-                "ok",
-                "none; the built-in runtime is used".into(),
-            ));
-        } else {
-            let list: Vec<String> = overrides
-                .iter()
-                .map(|(rel, same)| {
-                    if *same {
-                        format!("{rel} (same as built-in)")
-                    } else {
-                        format!("{rel} (differs from built-in)")
-                    }
-                })
-                .collect();
-            out.push(item(
-                "runtime overrides",
-                "warn",
-                format!(
-                    "these replace built-in files and hide their updates (/runtime reset FILE goes back to the built-in one): {}",
-                    list.join(", ")
-                ),
             ));
         }
         out

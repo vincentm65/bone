@@ -90,8 +90,7 @@ The model can also use `read_file` to view PNG, JPEG and WebP files on the core 
 | `/detach [N|all]` | remove an attachment (default: the last one) |
 | `/model [name]` | show or change the on-screen session's model for its selected provider |
 | `/provider` | open the Providers page in `/config` |
-| `/tui`, `/tui use NAME`, `/tui create NAME [bare]`, `/tui delete NAME` | choose standard, bare, or an editable TUI library; create a copy or move an inactive copy aside |
-| `/runtime`, `/runtime reset FILE`, `/runtime reset all` | your copies of built-in Lua files in `~/.bone/runtime/` (bone never overwrites them); reset goes back to the built-in ones, keeping your copies in `~/.bone/runtime-backup/` |
+| `/tui`, `/tui use NAME`, `/tui create NAME [bare]`, `/tui delete NAME` | choose the built-in standard or bare library (read-only) or one of yours; create one that starts from standard (or bare) and holds only your changes, or move an inactive one aside |
 | `/new`, `/clear` | start a new session |
 | `/archive` | move this conversation to History and start a new session |
 | `/term [command]`, `/terminal [command]`, `/term close` | **term plugin:** open a terminal panel on the TUI's machine (Unix), or close it and stop its program |

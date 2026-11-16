@@ -60,7 +60,7 @@ pub struct RunOptions {
     pub clipboard_executable: Option<PathBuf>,
     /// Working directory for new sessions.
     pub cwd: String,
-    /// Where `tui.lua`, `lua/` modules and runtime overrides live.
+    /// Where `tui.lua`, `lua/` modules and libraries live.
     pub config_dir: Option<PathBuf>,
     /// Resume a session at startup: `Some(None)` for the newest.
     pub resume: Option<Option<String>>,
@@ -303,15 +303,13 @@ enum Watched {
     Gui,
 }
 
-/// `ui.lua`, `tui.lua`, `colors/`, `runtime/ui/` and `runtime/tui/` are the
-/// TUI's; `gui.lua` and `runtime/gui/` the GUI's; `core.lua` and
-/// `runtime/core/` the core's, and the same inside a plugin. Modules (`lua/`,
-/// `runtime/lua/`) can be required by either.
+/// `ui.lua`, `tui.lua`, `colors/` and libraries are the TUI's; `gui.lua`
+/// the GUI's; `core.lua` the core's, and the same inside a plugin. Modules
+/// (`lua/`) can be required by either.
 fn side_of(rel: &Path) -> Watched {
     let parts: Vec<&str> = rel.iter().filter_map(|p| p.to_str()).collect();
     let parts = match parts.as_slice() {
         ["plugins", _, rest @ ..] => rest,
-        ["runtime", rest @ ..] => rest,
         all => all,
     };
     match parts {
@@ -346,7 +344,7 @@ fn lua_snapshot(dir: Option<&Path>, project: Option<&Path>) -> LuaSources {
             files.push(path);
         }
     }
-    for sub in ["lua", "runtime", "colors"] {
+    for sub in ["lua", "colors"] {
         collect_lua_files(&dir.join(sub), &mut files);
     }
     // Only the library in use.

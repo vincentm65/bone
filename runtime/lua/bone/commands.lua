@@ -1,6 +1,6 @@
 -- The built-in slash commands, as Lua. Each is an ordinary bone.cmd command:
--- replace one with bone.cmd.create, remove it with bone.cmd.del, or replace
--- this module (~/.bone/runtime/lua/bone/commands.lua).
+-- replace one with bone.cmd.create, remove it with bone.cmd.del, or give a
+-- library of yours lua/bone/commands.lua, starting from bone.builtin.
 
 local cmd = bone.cmd.create
 
@@ -223,68 +223,9 @@ end, {
   end,
 })
 
--- /runtime: your copies of built-in runtime files, and going back to the
--- built-in ones. Bone never writes these copies; this is how to undo them.
-cmd("runtime", function(c)
-  local sub, what = c.args:match("^(%S*)%s*(.-)%s*$")
-  local list = bone.runtime.overrides()
-  if sub == "" then
-    if #list == 0 then
-      return bone.notify("No runtime files are overridden; bone uses its built-in ones.")
-    end
-    local rows = { "Your copies in runtime/ (used instead of the built-in files):" }
-    for _, o in ipairs(list) do
-      rows[#rows + 1] = "  " .. o.path .. (o.same and "  (same as built-in)" or "  (changed)")
-    end
-    rows[#rows + 1] = "/runtime reset FILE or /runtime reset all goes back to the built-in ones."
-    return bone.notify(table.concat(rows, "\n"))
-  end
-  if sub ~= "reset" or what == "" then
-    return bone.notify("usage: /runtime, /runtime reset FILE, /runtime reset all", "error")
-  end
-  local paths = {}
-  if what == "all" then
-    for _, o in ipairs(list) do
-      paths[#paths + 1] = o.path
-    end
-    if #paths == 0 then
-      return bone.notify("Nothing to reset: no runtime files are overridden.")
-    end
-  else
-    paths[1] = what
-  end
-  local stamp = tostring(os.time())
-  local moved, where, core = 0, nil, false
-  for _, path in ipairs(paths) do
-    local ok, to = pcall(bone.runtime.reset, path, stamp)
-    if not ok then
-      return bone.notify(error_text(to), "error")
-    end
-    moved = moved + 1
-    where = to:sub(1, #to - #path - 1)
-    core = core or path:match("^core/") ~= nil
-  end
-  bone.notify(
-    ("Reset %d file%s to the built-in version. Your copies are in %s."):format(moved, moved == 1 and "" or "s", where)
-      .. (core and " Core files apply when the core reloads (by itself, or /plugins reload)." or "")
-  )
-end, {
-  desc = "your copies of built-in runtime files; /runtime reset FILE|all goes back to the built-in",
-  complete = function(ctx)
-    local argv = ctx.argv or {}
-    if #argv <= 1 and not (ctx.args or ""):match("%s$") then
-      return { { value = "reset", desc = "go back to the built-in file" } }
-    end
-    local out = { { value = "all", desc = "every overridden file" } }
-    for _, o in ipairs(bone.runtime.overrides()) do
-      out[#out + 1] = { value = o.path, desc = o.same and "same as built-in" or "changed" }
-    end
-    return out
-  end,
-})
-
--- /tui: which UI library the TUI loads. Standard is the built-in one; a
--- copy (libraries/NAME/ in the config dir) is yours to edit; bare loads none.
+-- /tui: which UI library the TUI loads. Standard and bare are built in and
+-- cannot be edited; a library of yours (libraries/NAME/ in the config dir)
+-- starts from one of them and holds only your changes.
 local function use_library(name)
   local ok, e = pcall(bone.library.use, name)
   if not ok then
@@ -307,7 +248,7 @@ cmd("tui", function(c)
       format = function(n)
         return (n == info.active and "● " or "  ") .. n
       end,
-      footer = "enter switch · esc close · /tui create NAME [bare] makes a copy",
+      footer = "enter switch · esc close · /tui create NAME [bare] makes your own",
       on_choice = function(n)
         if n and n ~= info.active then
           use_library(n)
@@ -329,16 +270,17 @@ cmd("tui", function(c)
   if sub == "delete" then
     return bone.notify(("Deleted %s (moved to %s)."):format(new, out))
   end
-  bone.notify(("Created %s.\nEdit: %s\nActivate with: /tui use %s"):format(new, out, new))
+  bone.notify(("Created %s in %s (it starts as the %s UI; ask bone to change it).\nUse it: /tui use %s")
+    :format(new, out, from == "bare" and "bare" or "standard", new))
 end, {
-  desc = "the TUI library: standard, bare or your copies; /tui use|create|delete NAME",
+  desc = "the TUI library: standard, bare or your own; /tui use|create|delete NAME",
   complete = function(ctx)
     local argv = ctx.argv or {}
     if #argv <= 1 and not (ctx.args or ""):match("%s$") then
       return {
         { value = "use", desc = "switch library" },
-        { value = "create", desc = "copy standard (or bare: NAME bare) to edit" },
-        { value = "delete", desc = "remove a copy not in use" },
+        { value = "create", desc = "your own, starting from standard (or bare: NAME bare)" },
+        { value = "delete", desc = "remove one of yours not in use" },
       }
     end
     if argv[1] ~= "use" and argv[1] ~= "delete" then

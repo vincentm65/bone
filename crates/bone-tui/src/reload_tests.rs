@@ -152,9 +152,10 @@ async fn ready_after_a_reload_names_the_panels_that_were_open() {
 #[tokio::test]
 async fn ctrl_c_quits_when_lua_maps_no_keys() {
     let dir = tempfile::tempdir().unwrap();
-    // An empty copy of the defaults drops every default keymap.
-    let defaults = dir.path().join("runtime/tui/defaults.lua");
+    // A library with empty defaults drops every default keymap.
+    let defaults = dir.path().join("libraries/x/tui/defaults.lua");
     std::fs::create_dir_all(defaults.parent().unwrap()).unwrap();
+    std::fs::write(dir.path().join("library"), "x\n").unwrap();
     std::fs::write(&defaults, "").unwrap();
     let mut h = Harness::build(Some(dir.path().to_owned())).await;
     h.app.load_user_config();
@@ -177,8 +178,9 @@ async fn ctrl_c_quits_when_lua_maps_no_keys() {
 #[tokio::test]
 async fn ctrl_c_mapped_only_elsewhere_still_interrupts_here() {
     let dir = tempfile::tempdir().unwrap();
-    let defaults = dir.path().join("runtime/tui/defaults.lua");
+    let defaults = dir.path().join("libraries/x/tui/defaults.lua");
     std::fs::create_dir_all(defaults.parent().unwrap()).unwrap();
+    std::fs::write(dir.path().join("library"), "x\n").unwrap();
     std::fs::write(
         &defaults,
         r#"bone.keymap.set("ctrl+c", "dismiss", { context = "popup" })"#,
@@ -322,16 +324,13 @@ fn files_belong_to_the_side_that_loads_them() {
     let side = |p: &str| side_of(Path::new(p));
     assert_eq!(side("tui.lua"), Watched::Tui);
     assert_eq!(side("colors/black.lua"), Watched::Tui);
-    assert_eq!(side("runtime/tui/defaults.lua"), Watched::Tui);
-    assert_eq!(side("runtime/colors/black.lua"), Watched::Tui);
+    assert_eq!(side("libraries/mine/tui/defaults.lua"), Watched::Tui);
     assert_eq!(side("plugins/git/tui.lua"), Watched::Tui);
     assert_eq!(side("plugins/git/colors/x.lua"), Watched::Tui);
     assert_eq!(side("core.lua"), Watched::Core);
-    assert_eq!(side("runtime/core/api.lua"), Watched::Core);
     assert_eq!(side("plugins/git/core.lua"), Watched::Core);
     assert_eq!(side("lua/mine.lua"), Watched::Both);
     assert_eq!(side("lua/tui/x.lua"), Watched::Both);
-    assert_eq!(side("runtime/lua/bone/util.lua"), Watched::Both);
     assert_eq!(side("plugins/git/lua/git.lua"), Watched::Both);
 }
 

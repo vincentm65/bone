@@ -482,9 +482,16 @@ impl Scripting {
             .map_err(|_| "the Lua thread stopped".to_string())
     }
 
-    pub async fn system_prompt(&self, cwd: &str, session_id: &str) -> Result<String, String> {
+    /// `client`: the app that sent the turn's message (`bone-tui`,
+    /// `bone-gui`…), when known.
+    pub async fn system_prompt(
+        &self,
+        cwd: &str,
+        session_id: &str,
+        client: Option<&str>,
+    ) -> Result<String, String> {
         let (reply, rx) = oneshot::channel();
-        let ctx = json!({ "cwd": cwd, "session_id": session_id });
+        let ctx = json!({ "cwd": cwd, "session_id": session_id, "client": client });
         self.run(
             "_system_prompt",
             vec![ctx],
@@ -1334,7 +1341,7 @@ fn setup(
     let disabled = &opts.disabled;
     let lua = bone_lua::new_state(Side::Core, Some(dir)).map_err(|e| e.to_string())?;
     let run = |rel: &str| {
-        bone_lua::run_runtime(&lua, Some(dir), rel).map_err(|e| format!("runtime/{rel}: {e}"))
+        bone_lua::run_runtime(&lua, rel).map_err(|e| format!("runtime/{rel}: {e}"))
     };
     // Hooks added at any time count (the core skips points with none).
     let hooks = hook_set.clone();

@@ -1,8 +1,11 @@
 # Customizing the TUI's look and behavior
 
-Where: `~/.bone/ui.lua` then `~/.bone/tui.lua` (global), and in a project
-`.bone/ui.lua` then `.bone/tui.lua` (loaded only after `/plugins trust`;
-`ui.lua` runs first in both). A Lua error never crashes bone; it is shown
+Where: the TUI's UI library of your own, `~/.bone/libraries/NAME/tui/defaults.lua`
+after its `bone.builtin("tui/defaults.lua")` line (see `../customizing.md`,
+"Where a change goes"). The built-in standard and bare libraries cannot be
+changed. `~/.bone/ui.lua` then `~/.bone/tui.lua`, and in a project
+`.bone/ui.lua` then `.bone/tui.lua` (loaded only after `/plugins trust`),
+also run, after the library. A Lua error never crashes bone; it is shown
 once and listed by `/health`. The TUI reloads when a file changes, so you
 can edit and watch. With nothing defined, Rust draws a plain-text chat and a
 bare prompt; everything else is Lua.
@@ -229,34 +232,37 @@ Helpers: `bone.text.wrap(spans, width, { first, rest, pad })`,
 
 ## TUI libraries (/tui)
 
-`/tui` picks the library the TUI loads in place of the standard UI:
+`/tui` picks the library the TUI loads:
 
-- **standard**: the full UI. Most people never change this.
-- **bare**: plain chat and prompt, the basic keys and every command. It
-  skips `ui.lua` and `tui.lua`, in `~/.bone/` and in the project.
-- **your copies**, in `~/.bone/libraries/NAME/`: `/tui create NAME` copies
-  standard's files, `/tui create NAME bare` starts from bare instead. Edit
-  them (saves reload live), then `/tui use NAME`. A file a copy lacks is
-  the runtime override, if present, then the built-in one; `tui.lua` and
-  plugins still run on top. Library files take precedence over `~/.bone/runtime/`.
+- **standard**: the full UI. Built in; it cannot be changed.
+- **bare**: plain chat and prompt, the basic keys and every command. Built
+  in; it cannot be changed. It skips `ui.lua` and `tui.lua`, in `~/.bone/`
+  and in the project.
+- **yours**, in `~/.bone/libraries/NAME/`: `/tui create NAME` makes one that
+  starts from standard, `/tui create NAME bare` from bare. It holds only
+  `tui/defaults.lua`, one line that runs the built-in UI
+  (`bone.builtin("tui/defaults.lua")`); add your changes after it. A file
+  the library lacks is the built-in one, so it keeps getting bone's updates;
+  `tui.lua` and plugins still run on top.
 
-`/tui delete NAME` moves a copy you are not using to
+`/tui use NAME` switches (it writes `~/.bone/library`; writing that file
+does the same). `/tui delete NAME` moves one of yours you are not using to
 `libraries/.deleted-NAME-…/`. A switch that fails to load keeps the UI you
-had. If a copy breaks so badly `/tui` is gone, delete `~/.bone/library` to
-go back to standard. Plugins work in every library. With no explicit GUI
+had. If a library breaks so badly `/tui` is gone, delete `~/.bone/library`
+to go back to standard. Plugins work in every library. With no explicit GUI
 choice (`~/.bone/gui-library`, from `/gui use`), `/tui` also selects what the
-GUI draws when the choice is `bare` or a copy that has a `gui/` directory;
-otherwise the GUI stays on standard.
+GUI draws when the choice is `bare` or a library that has a `gui/`
+directory; otherwise the GUI stays on standard.
 
-## Overriding the runtime
+## Changing a built-in module
 
 The default look is `runtime/lua/bone/ui/` (views, statusline, layout,
-tray, …) set up by `runtime/tui/defaults.lua`. You can replace any
-runtime file by writing the same path under `~/.bone/runtime/` — start from
-the built-in one:
+tray, …) set up by `runtime/tui/defaults.lua`; read them in
+`~/.bone/docs/builtin/`. To change a module, give your library a file at the
+same path that starts from the built-in one and changes only what it needs:
 
 ```lua
--- ~/.bone/runtime/lua/bone/ui/layout.lua
+-- ~/.bone/libraries/NAME/lua/bone/ui/layout.lua
 local M = bone.builtin("bone.ui.layout")   -- the built-in module, not this file
 local setup = M.setup
 function M.setup(opts)
@@ -266,8 +272,7 @@ end
 return M
 ```
 
-`/runtime` lists overrides; `/runtime reset FILE` (or `all`) moves your copy
-to `~/.bone/runtime-backup/` and restores the built-in.
+Never copy a built-in file whole: the copy would keep that version forever.
 
 ## Worked example: a compact top bar
 

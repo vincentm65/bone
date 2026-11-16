@@ -1017,29 +1017,16 @@ function bone.chat.remove(id)
   return api("chat_remove", id)
 end
 
---- Your copies of built-in runtime files (in the config dir's runtime/):
---- bone.runtime.overrides() → { { path, same }, … } (`same`: identical to
---- the built-in one); bone.runtime.reset(path) moves your copy to
---- runtime-backup/ so the built-in is used again, returning where it went
---- (the TUI reloads by itself when the file goes).
-bone.runtime = {
-  overrides = function()
-    return api("runtime_overrides")
-  end,
-  reset = function(path, stamp)
-    return api("runtime_reset", path, stamp)
-  end,
-}
-
---- UI libraries (/tui): the standard UI, bare (none), or your editable
---- copies in the config dir's libraries/. bone.library.info() →
+--- UI libraries (/tui): the built-in standard and bare UIs (read-only), or
+--- your own in the config dir's libraries/. bone.library.info() →
 --- { active, drawn, custom = { names }, dir }: `drawn` is the one this
---- frontend uses (the GUI uses a copy only if it has a gui/ folder, else
---- the standard UI); create(name, from) copies the
---- standard files (or, with from = "bare", the bare one) to a new one and
---- returns its folder; delete(name) moves one not in use aside; use(name)
---- switches to it (`standard`, `bare` or a copy's name) and reloads the
---- frontend's Lua, going back if it does not load.
+--- frontend uses (the GUI uses one of yours only if it has a gui/ folder,
+--- else the standard UI); create(name, from) makes a new one that starts
+--- from the standard UI (or, with from = "bare", the bare one) and holds
+--- only entry files that run it, and returns its folder; delete(name) moves
+--- one not in use aside; use(name) switches to it (`standard`, `bare` or
+--- one of yours) and reloads the frontend's Lua, going back if it does not
+--- load.
 bone.library = {
   info = function()
     return api("library_info")

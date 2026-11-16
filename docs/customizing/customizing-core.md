@@ -22,7 +22,7 @@ bone.config.providers.qwen = {
   stream_usage = true,                    -- send stream_options.include_usage
 }
 bone.config.provider = "qwen"      -- which entry to use (optional if there is one)
-bone.config.system_prompt = "..."  -- or function(ctx) return "..." end; ctx = { cwd, session_id }
+bone.config.system_prompt = "..."  -- or function(ctx) return "..." end; ctx = { cwd, session_id, client }
 ```
 
 Over Chat Completions, once the model streams reasoning (in `reasoning_content`
@@ -100,7 +100,11 @@ Anthropic's output limit. Both can be set in `settings.json` too
 (`providers.<name>.headers`, `providers.<name>.body`).
 
 `bone.config.system_prompt` replaces the built-in system prompt (the working
-directory and today's date are always appended after it). `BONE_SYSTEM_PROMPT` overrides it for
+directory and today's date are always appended after it). The built-in one is
+a function: it adds, per turn, which app the user is in (`ctx.client`, the
+client that sent the message: `"bone-tui"`, `"bone-gui"`…), which UI library
+it uses (`bone.ui_libraries()`), and exactly how to change it; replacing the
+prompt drops that part. `BONE_SYSTEM_PROMPT` overrides it for
 one run. Settings and the `system` hook can change it per turn.
 
 ## Tools

@@ -1,7 +1,7 @@
 -- The GUI's own commands: /gui shows and chooses the GUI's library, which
 -- is separate from the TUI's (/tui): standard (graphite, bubbles and cards,
--- drawn like the Android app), bare (flat text), or a copy of yours under
--- libraries/ that has a gui/ folder.
+-- drawn like the Android app), bare (flat text), or a library of yours
+-- under libraries/ that has a gui/ folder.
 local function error_text(e)
   return (tostring(e):gsub("^runtime error: ", ""):gsub("\nstack traceback:.*$", ""))
 end
@@ -26,14 +26,14 @@ local function menu()
   end
   require("bone.nodes.popups").menu({
     title = "GUI library",
-    note = "Choose how the desktop app looks. Your custom copies stay in ~/.bone/libraries.",
+    note = "Choose how the desktop app looks. Your own libraries are in ~/.bone/libraries.",
     selected = selected, empty = "No GUI libraries found.",
     items = function()
       local out = {}
       for _, name in ipairs(names) do
         out[#out + 1] = {
           label = name == "standard" and "Standard" or name == "bare" and "Bare" or name,
-          detail = DETAILS[name] or "Your copy in ~/.bone/libraries",
+          detail = DETAILS[name] or "Yours, in ~/.bone/libraries",
           badge = name == info.active and "IN USE" or nil,
         }
       end
@@ -58,19 +58,20 @@ bone.cmd.create("gui", function(c)
     if word == "delete" then
       return bone.notify(("Deleted %s (moved to %s)."):format(name, out))
     end
-    return bone.notify(("Created %s.\nEdit: %s\nActivate with: /gui use %s"):format(name, out, name))
+    return bone.notify(("Created %s in %s (it starts as the %s UI; ask bone to change it).\nUse it: /gui use %s")
+      :format(name, out, from == "bare" and "bare" or "standard", name))
   end
   if word ~= "" then return usage() end
   menu()
 end, {
-  desc = "the GUI's library: standard, bare or your copies; /gui use|create|delete NAME",
+  desc = "the GUI's library: standard, bare or your own; /gui use|create|delete NAME",
   complete = function(ctx)
     local argv = ctx.argv or {}
     if #argv <= 1 and not (ctx.args or ""):match("%s$") then
       return {
         { value = "use", desc = "switch library" },
-        { value = "create", desc = "copy standard (or NAME bare) to edit" },
-        { value = "delete", desc = "remove a copy not in use" },
+        { value = "create", desc = "your own, starting from standard (or NAME bare)" },
+        { value = "delete", desc = "remove one of yours not in use" },
       }
     end
     if argv[1] ~= "use" and argv[1] ~= "delete" then return {} end

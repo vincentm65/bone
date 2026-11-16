@@ -794,15 +794,15 @@ impl Host for Gui {
 
 /// Where the GUI's Lua comes from, as a hash of paths and metadata, to
 /// notice edits by polling. Only what the GUI loads: the user's `ui.lua`
-/// and `gui.lua`, modules, runtime overrides, colorschemes, the library in
-/// use, and plugins.
+/// and `gui.lua`, modules, colorschemes, which library is in use and its
+/// files, and plugins.
 pub fn lua_sources(dir: &Path) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut files = Vec::new();
-    for name in ["ui.lua", "gui.lua", "library"] {
+    for name in ["ui.lua", "gui.lua", "library", "gui-library"] {
         files.push(dir.join(name));
     }
-    for sub in ["lua", "runtime", "colors"] {
+    for sub in ["lua", "colors"] {
         collect_lua_files(&dir.join(sub), &mut files);
     }
     if let Some(name) = bone_lua::library(dir, Side::Gui) {

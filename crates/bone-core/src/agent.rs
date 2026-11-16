@@ -339,11 +339,14 @@ impl Turn<'_> {
             source,
         });
 
+        // A system_prompt function, unless BONE_SYSTEM_PROMPT replaces it.
         let dynamic = match &self.rt.scripting {
-            Some(s) if s.has_system_prompt_fn() => {
+            Some(s) if s.has_system_prompt_fn() && self.rt.config.system_prompt.is_none() => {
                 let cwd = self.cwd.to_string_lossy();
+                let client = self.session.lock().unwrap().client.clone();
                 // It may wait (bone.ask, bone.http); a cancel stops it.
-                let Ok(r) = self.or_cancel(s.system_prompt(&cwd, &self.session_id)).await else {
+                let prompt = s.system_prompt(&cwd, &self.session_id, client.as_deref());
+                let Ok(r) = self.or_cancel(prompt).await else {
                     s.cancel_session(&self.session_id);
                     return Err(Stop::Cancelled);
                 };

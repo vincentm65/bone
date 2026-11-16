@@ -176,7 +176,7 @@ pub trait Host {
     fn autocmds(&mut self) -> &mut Vec<Autocmd>;
     fn keymap_store(&mut self) -> KeymapStore<'_>;
     fn looks(&mut self) -> Looks<'_>;
-    /// Where the user's config, plugins and runtime overrides are.
+    /// Where the user's config, plugins and libraries are.
     fn config_dir(&self) -> Option<&Path>;
     /// Run Lua that may call the API again, from inside an op: the API is
     /// bound afresh for it, as for the frontend's own Lua calls.

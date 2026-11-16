@@ -146,6 +146,9 @@ pub struct Session {
     pub model: Option<Pin>,
     /// When its tool calls ran, by call id (those recorded with times).
     pub tool_times: BTreeMap<String, ToolTiming>,
+    /// The client that last sent it a message (`bone-tui`, `bone-gui`…),
+    /// as the server names it; not kept.
+    pub client: Option<String>,
     /// Where the working directory changed, in transcript order.
     moves: Vec<Move>,
     next_turn: TurnId,
@@ -591,6 +594,7 @@ impl SessionStore {
             safe_point: false,
             model,
             tool_times: BTreeMap::new(),
+            client: None,
             moves: Vec::new(),
             next_turn: users as TurnId,
             next_queue,

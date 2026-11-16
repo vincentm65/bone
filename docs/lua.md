@@ -13,10 +13,10 @@ bone runs a separate LuaJIT state for the core and for each frontend:
 
 Numbering, everywhere: indexes into lists start at 1, as in Lua (chat item `index`, `first`/`last`, `from`/`to`); positions start at 0 (screen cells `x`, `y`; prompt `row`, `col` and highlight ranges). Chat buffer numbers also start at 0; they are identifiers, not list indexes. Settings are fields you assign (`bone.ui.statusline = fn`, `bone.ui.layout = {…}`, `bone.ui.spinner = {…}`, `bone.o.name = value`); actions are calls (`bone.chat.add`, `bone.ui.popup`, `bone.notify`).
 
-The core loads `runtime/core/api.lua`, `runtime/core/defaults.lua`, plugins, then `core.lua`. Each frontend loads `runtime/ui/api.lua`, its own API and defaults, plugins, then your `ui.lua` and frontend-specific file, followed by trusted project config. `bare` skips the user and project files, not plugins. Saved options apply before user config in the TUI but after it in the GUI (see [Settings](#settings)). The runtime is built into the binary. A frontend's active library takes precedence over `~/.bone/runtime/<same path>`, which takes precedence over the built-in copy (for example `~/.bone/runtime/tui/defaults.lua` replaces the TUI defaults when no library file overrides it). A replacement hides every later change to the built-in file, so prefer changing pieces from your config; when you do replace a file, start from the built-in one and change only what you need:
+The core loads `runtime/core/api.lua`, `runtime/core/defaults.lua`, plugins, then `core.lua`. Each frontend loads `runtime/ui/api.lua`, its own API and defaults, plugins, then your `ui.lua` and frontend-specific file, followed by trusted project config. `bare` skips the user and project files, not plugins. Saved options apply before user config in the TUI but after it in the GUI (see [Settings](#settings)). The runtime is built into the binary and is read only from there: nothing in the config dir replaces a built-in file. Changes to how an app looks go in a UI library of your own (`~/.bone/libraries/<name>/`, see [TUI libraries](#tui-libraries) and [GUI libraries](customizing/customizing-gui.md#libraries)); a file in the library in use replaces the built-in one of the same path. Start such a file from the built-in one and change only what you need:
 
 ```lua
--- ~/.bone/runtime/lua/bone/ui/layout.lua
+-- ~/.bone/libraries/<name>/lua/bone/ui/layout.lua
 local M = bone.builtin("bone.ui.layout")   -- the built-in module, not this file
 local setup = M.setup
 function M.setup(opts)
@@ -26,9 +26,9 @@ end
 return M
 ```
 
-`bone.builtin(name)` runs the built-in version of a module (`"bone.ui.layout"`) or file (`"tui/defaults.lua"`) and returns what it returns. Bone never writes into `~/.bone/runtime/`, so your copies are safe from updates. `/runtime` lists them (and which are still identical to the built-in), and `/runtime reset FILE` or `/runtime reset all` goes back to the built-in versions: your copies are moved to `~/.bone/runtime-backup/<time>/`, not deleted, and the TUI reloads by itself. `/runtime` lists overrides, and `/health` includes them.
+`bone.builtin(name)` runs the built-in version of a module (`"bone.ui.layout"`) or file (`"tui/defaults.lua"`) and returns what it returns, whatever the library holds. A new library's entry file is just `bone.builtin("tui/defaults.lua")` (or `"gui/defaults.lua"`), so it starts as the standard UI and keeps getting its updates. Copies of the built-in files to read are in `~/.bone/docs/builtin/`, rewritten at every start; bone never loads them.
 
-`require("x.y")` finds `~/.bone/lua/x/y.lua` (or `x/y/init.lua`), then each plugin's `lua/`, then the runtime's `lua/` modules. In either frontend, an active custom library's files in `~/.bone/libraries/<name>/` take precedence over `~/.bone/runtime/` and the built-in runtime; missing files fall back to those. See [TUI libraries](#tui-libraries) below and [GUI libraries](customizing/customizing-gui.md#libraries).
+`require("x.y")` looks in the library in use (`lua/x/y.lua` or `lua/x/y/init.lua`), then the built-in modules, then `~/.bone/lua/`, then each plugin's `lua/`; so a stray file in `~/.bone/lua/bone/` never replaces a built-in module. `bone.ui_libraries()` (core and frontends) gives `{ tui, gui, mine = { { name, tui, gui } }, dir }`: the library each app uses (`"standard"`, `"bare"` or a name) and the user's own, with whether each has files for that app.
 
 ## Extension contract (API v1)
 
@@ -253,7 +253,7 @@ bone.config.providers.qwen = {
   body = { temperature = 0.7 },          -- optional request body overrides
 }
 bone.config.provider = "qwen"      -- default entry (optional if there is one)
-bone.config.system_prompt = "..."  -- or function(ctx) return "..." end; ctx = { cwd, session_id }
+bone.config.system_prompt = "..."  -- or function(ctx) return "..." end; ctx = { cwd, session_id, client }
 bone.config.data_dir = "~/somewhere"  -- sessions; default is the config dir
 bone.config.parallel_tools = true  -- run a reply's read-only tool calls at the same time (default)
 bone.config.compact = {            -- summarizing long sessions for the model (these are the defaults)
@@ -544,18 +544,18 @@ The TUI has no modes: keys go to the prompt, and while a focused window is open 
 
 ### TUI libraries
 
-`/tui` chooses the standard library, `bare` (plain UI), or a custom copy in `~/.bone/libraries/<name>/`. `/tui create NAME` copies the built-in UI runtime files (including GUI files) for editing; `/tui create NAME bare` starts with only bare defaults. `/tui use NAME` switches and reloads, reverting if loading fails; `/tui delete NAME` moves an inactive copy aside rather than deleting it. `/catalog` also installs shared libraries (kind `tui`) into `libraries/`; they are yours to edit, and show as an update only when the catalog's `version` is newer than the installed `manifest.json`. Library files win over runtime overrides in the TUI, but do not change the core's runtime. Missing files fall back to runtime overrides, then built-ins; `bone.builtin` always reads the built-in copy.
+`/tui` chooses the built-in standard library, `bare` (plain UI), or one of yours in `~/.bone/libraries/<name>/`. The built-in ones cannot be changed. `/tui create NAME` makes one whose `tui/defaults.lua` is the single line `bone.builtin("tui/defaults.lua")` (with `bare`, `bone.builtin("tui/bare.lua")`): it starts as that UI and holds only your changes, added after that line. `/tui use NAME` switches and reloads, reverting if loading fails (writing the name to `~/.bone/library` also switches); `/tui delete NAME` moves an inactive one aside rather than deleting it. `/catalog` also installs shared libraries (kind `tui`) into `libraries/`; they are yours to edit, and show as an update only when the catalog's `version` is newer than the installed `manifest.json`. A file a library lacks is the built-in one; `bone.builtin` always reads the built-in copy. Library files do not change the core.
 
 ```lua
 bone.library.info()                  -- { active, custom = { names }, dir }
-bone.library.create("myui")          -- returns its folder; optional second argument: "bare"
+bone.library.create("myui")          -- returns its folder; optional second argument: "bare"; makes only this frontend's entry file
 bone.library.use("myui")             -- or "standard", "bare"
 bone.library.delete("old-ui")        -- cannot delete the active library; returns backup folder
 ```
 
 Selecting `bare` still loads plugins and saved TUI options, but skips the user's `ui.lua`, `tui.lua` and trusted project config. A custom library created from bare defaults does load those configs.
 
-The GUI has its own `/gui` selector. Until a GUI choice is saved in `~/.bone/gui-library`, it follows `/tui` when that library is `bare` or a copy containing a `gui/` directory; otherwise it uses `standard`. See [GUI libraries](customizing/customizing-gui.md#libraries).
+The GUI has its own `/gui` selector. Until a GUI choice is saved in `~/.bone/gui-library`, it follows `/tui` when that library is `bare` or one of yours containing a `gui/` directory; otherwise it uses `standard`. See [GUI libraries](customizing/customizing-gui.md#libraries).
 
 ### Reloading
 
@@ -701,7 +701,7 @@ User commands appear in the `/` suggestions with their `desc`, and in `/help`. E
 
 #### The `/` menu
 
-The menu is the Lua module `bone.menu` (`runtime/lua/bone/menu.lua`): it matches what you type against command names and aliases (by prefix, sorted, at most eight rows), or asks a command's completion function for its arguments, and keeps the selection. It is drawn by `bone.ui.suggestions(ctx)` in the `above_prompt` region, so the prompt composer expands to contain the list instead of having a floating box cover it. It takes part in keys through `bone.ui.actions`: `submit` runs `/commands` (the selected match for a partial name; `//text` sends `/text`; `/etc/hosts …` is a message), `complete` (tab) fills in the selection, `dismiss` (esc) hides the menu until the text changes, and `up`/`down` move through it. `require("bone.menu")` gives the module (`all(text)`, `complete()`, `move(by)`); override `~/.bone/runtime/lua/bone/menu.lua` (starting from `bone.builtin("bone.menu")`) for different matching.
+The menu is the Lua module `bone.menu` (`runtime/lua/bone/menu.lua`): it matches what you type against command names and aliases (by prefix, sorted, at most eight rows), or asks a command's completion function for its arguments, and keeps the selection. It is drawn by `bone.ui.suggestions(ctx)` in the `above_prompt` region, so the prompt composer expands to contain the list instead of having a floating box cover it. It takes part in keys through `bone.ui.actions`: `submit` runs `/commands` (the selected match for a partial name; `//text` sends `/text`; `/etc/hosts …` is a message), `complete` (tab) fills in the selection, `dismiss` (esc) hides the menu until the text changes, and `up`/`down` move through it. `require("bone.menu")` gives the module (`all(text)`, `complete()`, `move(by)`); give your library `lua/bone/menu.lua` (starting from `bone.builtin("bone.menu")`) for different matching.
 
 #### Actions in Lua
 
@@ -854,7 +854,7 @@ bone.now()                              -- milliseconds since the epoch
 - `bone.api.open_session(id)`: show a session (also accepts a chat number).
 - `bone.ui.windows.<select|pager|setup|catalog> = function(page)` is how a library draws what the runtime opens itself: it returns the popup spec (`node` or `lines`, size, anchor); the standard library sets all four, and without one the window is drawn as `lines`.
 - `bone.ui.pager(content, { title, width, height })` → handle: scrollable text in a focused window. `content` is a string (wrapped; `#` lines are headings) or a list of lines. `up`/`down`/wheel, `pageup`/`pagedown`, `home`/`end`, `esc` or `q` closes. `handle:set(content)`, `handle:close()`.
-- `bone.ui.help(topic)` and `bone.ui.health()`: what `/help {topic}` and `/health` call (in `runtime/tui/defaults.lua`). With no topic, `bone.ui.help()` opens the searchable Commands / Keys / Docs popup. Its browser and topic lookup live in `runtime/lua/bone/help.lua`; override `~/.bone/runtime/lua/bone/help.lua` to customize it. The docs (usage, Lua, protocol, architecture, customization guides and loaded plugins' READMEs) are in `bone._docs`; the TUI's built-in checks come from `bone.api.health()`.
+- `bone.ui.help(topic)` and `bone.ui.health()`: what `/help {topic}` and `/health` call (in `runtime/tui/defaults.lua`). With no topic, `bone.ui.help()` opens the searchable Commands / Keys / Docs popup. Its browser and topic lookup live in `runtime/lua/bone/help.lua`; give your library `lua/bone/help.lua` (starting from `bone.builtin("bone.help")`) to customize it. The docs (usage, Lua, protocol, architecture, customization guides and loaded plugins' READMEs) are in `bone._docs`; the TUI's built-in checks come from `bone.api.health()`.
 - `bone.ui.geometry()` (TUI only; part of `ui.layout`, which the GUI does not have) → `{ leaves = { { name, x, y, width, height } }, seps = { { x, y, width, height, path } } }`: where the last frame put each layout leaf and column separator. A separator's `path` is the 1-based child indexes from `bone.ui.layout` to the column after it, so a mouse handler can resize the split it belongs to.
 - `bone.ui.box(lines, { title, title_hl, border_hl, width, pad, chars })` → the lines inside a rounded border (`PopupBorder`/`PopupTitle` by default). Only used if you call it.
 
@@ -934,9 +934,9 @@ Groups: `Normal Dim Accent UserPrompt UserMessage Reasoning ToolName ToolArgs To
 
 ### Drawing the screen
 
-Rust keeps the session data, wraps text, caches, scrolls and paints. Everything about how things look is Lua. `runtime/tui/defaults.lua` calls `require("bone.ui").setup(opts)`, the standard UI in `runtime/lua/bone/ui/` (views, statusline, a divider that shows a running turn, the three-row prompt, the empty-session hint, the model reasoning in the chat while it streams, and the layout). Replace any piece from `tui.lua`, or override a module under `~/.bone/runtime/lua/bone/ui/` that starts from `bone.builtin` (see the top of this file). With nothing defined, Rust draws the chat as plain text (`> ` before your messages, one blank line between items, tool calls as name, arguments and output, reasoning hidden) and the bare prompt below it. Message text reaches views without blank lines at its edges.
+Rust keeps the session data, wraps text, caches, scrolls and paints. Everything about how things look is Lua. `runtime/tui/defaults.lua` calls `require("bone.ui").setup(opts)`, the standard UI in `runtime/lua/bone/ui/` (views, statusline, a divider that shows a running turn, the three-row prompt, the empty-session hint, the model reasoning in the chat while it streams, and the layout). Replace any piece from your library's `tui/defaults.lua`, or give the library a module under `lua/bone/ui/` that starts from `bone.builtin` (see the top of this file). With nothing defined, Rust draws the chat as plain text (`> ` before your messages, one blank line between items, tool calls as name, arguments and output, reasoning hidden) and the bare prompt below it. Message text reaches views without blank lines at its edges.
 
-The standard UI is implemented in `runtime/lua/bone/ui/`; override its callbacks or copy built-in modules with `/runtime` to change the look. The catalog’s `themes` package adds color palettes, not an alternate UI.
+The standard UI is implemented in `runtime/lua/bone/ui/`; override its callbacks, or change built-in modules in a library of your own, to change the look. The catalog’s `themes` package adds color palettes, not an alternate UI.
 
 The TUI reloads your Lua when it changes (see [Reloading](#reloading-1)). `bone.ui.clear()` removes every view, region, action and UI function, for a config that starts from a blank screen.
 

@@ -1617,9 +1617,10 @@ async fn default_system_prompt_points_at_the_docs() {
         system.contains(&format!("{docs}/customizing.md")),
         "system prompt should point at the config dir's customization docs: {system:?}"
     );
+    let libraries = config_dir.join("libraries").to_string_lossy().into_owned();
     assert!(
-        system.contains(&format!("{docs}/customizing/customizing-tui.md")),
-        "system prompt should point at the TUI guide: {system:?}"
+        system.contains(&format!("a folder in {libraries}/")),
+        "system prompt should say where UI changes go: {system:?}"
     );
 }
 

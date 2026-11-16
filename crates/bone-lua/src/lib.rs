@@ -617,6 +617,34 @@ pub fn new_state(side: Side, config_dir: Option<&Path>) -> mlua::Result<Lua> {
                 .collect::<String>())
         })?,
     )?;
+    // bone.ui_libraries(): the UI library each app uses, and the user's own:
+    // { tui = name, gui = name, mine = { { name, tui = bool, gui = bool } },
+    // dir }. `standard` and `bare` are the built-in ones; `tui`/`gui` in
+    // `mine` say whether that library has files for the app.
+    if let Some(dir) = config_dir.map(Path::to_owned) {
+        bone.set(
+            "ui_libraries",
+            lua.create_function(move |lua, ()| {
+                let out = lua.create_table()?;
+                let tui = tui_library(&dir).unwrap_or_else(|| "standard".into());
+                let gui = library(&dir, Side::Gui).unwrap_or_else(|| "standard".into());
+                out.set("tui", tui)?;
+                out.set("gui", gui)?;
+                let mine = lua.create_table()?;
+                for name in tui_libraries(&dir) {
+                    let lib = dir.join("libraries").join(&name);
+                    let t = lua.create_table()?;
+                    t.set("tui", lib.join("tui").is_dir())?;
+                    t.set("gui", lib.join("gui").is_dir())?;
+                    t.set("name", name)?;
+                    mine.push(t)?;
+                }
+                out.set("mine", mine)?;
+                out.set("dir", dir.join("libraries").to_string_lossy().as_ref())?;
+                Ok(out)
+            })?,
+        )?;
+    }
     // bone.docs: the customization guides. list() -> { { name, desc } } (the
     // description is the guide's first line); read(name) -> text, or nil and
     // an error.
@@ -778,19 +806,11 @@ fn walk(v: &Value, depth: u32) -> mlua::Result<serde_json::Value> {
     })
 }
 
-/// The source of a runtime file: the user's override if present, else the
-/// embedded copy.
-pub fn runtime_source(config_dir: Option<&Path>, rel: &str) -> Option<(String, String)> {
-    if let Some(dir) = config_dir {
-        let path = dir.join("runtime").join(rel);
-        if let Ok(src) = std::fs::read_to_string(&path) {
-            return Some((src, path.to_string_lossy().into_owned()));
-        }
-    }
-    RUNTIME
-        .iter()
-        .find(|(p, _)| *p == rel)
-        .map(|(_, src)| ((*src).to_owned(), format!("runtime/{rel}")))
+/// The source of a built-in runtime file and its chunk name. Built-in files
+/// always come from the binary: the config dir cannot replace them (a
+/// library, see [`frontend_runtime_source`], is the place for changes).
+fn runtime_source(rel: &str) -> Option<(String, String)> {
+    builtin_source(rel).map(|src| (src.to_owned(), format!("runtime/{rel}")))
 }
 
 /// The TUI library chosen with `/tui`, kept in `<config dir>/library`:
@@ -852,14 +872,14 @@ pub fn library(config_dir: &Path, side: Side) -> Option<String> {
     }
 }
 
-/// Like [`runtime_source`], for the TUI: the chosen library's copy of `rel`
-/// comes first. A file the library lacks is the standard one.
+/// The TUI's runtime file `rel`: the chosen library's copy first; a file the
+/// library lacks is the built-in one.
 pub fn tui_runtime_source(config_dir: Option<&Path>, rel: &str) -> Option<(String, String)> {
     frontend_runtime_source(config_dir, Side::Tui, rel)
 }
 
-/// Like [`runtime_source`], for frontend `side`: its library's copy of
-/// `rel` (see [`library`]) comes first.
+/// Frontend `side`'s runtime file `rel`: its library's copy (see
+/// [`library`]) first, else the built-in one.
 pub fn frontend_runtime_source(
     config_dir: Option<&Path>,
     side: Side,
@@ -873,7 +893,7 @@ pub fn frontend_runtime_source(
             return Some((src, path.to_string_lossy().into_owned()));
         }
     }
-    runtime_source(config_dir, rel)
+    runtime_source(rel)
 }
 
 /// The libraries under `<config dir>/libraries/`, by name.
@@ -884,17 +904,38 @@ pub fn tui_libraries(config_dir: &Path) -> Vec<String> {
         .flatten()
         .filter(|e| e.path().is_dir())
         .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| !n.starts_with('.'))
+        // `standard` and `bare` are always the built-in ones: a folder of
+        // that name is never one of yours.
+        .filter(|n| !n.starts_with('.') && n != "standard" && n != "bare")
         .collect();
     names.sort();
     names
 }
 
-/// Copy the built-in UI files (all but the base API and the core's) to a
-/// new library, `<config dir>/libraries/<name>/`. `base` is `""` for the
-/// standard UI; `bare` copies only the bare library's files, as its
-/// `defaults.lua`. An existing library is never touched.
-pub fn create_tui_library(config_dir: &Path, name: &str, base: &str) -> Result<PathBuf, String> {
+/// The entry file `app` (`"tui"` or `"gui"`) of a new library: it runs the
+/// built-in UI it starts from (`base`: `""` for standard, `"bare"`), always
+/// the version of bone in use, and the library's changes go below it.
+pub fn library_entry(app: &str, base: &str) -> String {
+    let file = if base == "bare" { "bare" } else { "defaults" };
+    format!(
+        "-- This library starts from bone's built-in {ui} UI, run by the line below\n\
+         -- (always the version of bone in use). Put your changes after it.\n\
+         bone.builtin(\"{app}/{file}.lua\")\n",
+        ui = if base == "bare" { "bare" } else { "standard" },
+    )
+}
+
+/// Make a new library, `<config dir>/libraries/<name>/`, for frontend
+/// `side`, that starts from the standard UI (`base` `""`) or the bare one
+/// (`"bare"`). It holds only that frontend's entry file (see
+/// [`library_entry`]), never copies of built-in files, so it keeps getting
+/// bone's updates. An existing library is never touched.
+pub fn create_tui_library(
+    config_dir: &Path,
+    name: &str,
+    base: &str,
+    side: Side,
+) -> Result<PathBuf, String> {
     let valid = !name.starts_with('.')
         && !["", "bare", "standard"].contains(&name)
         && name
@@ -904,42 +945,57 @@ pub fn create_tui_library(config_dir: &Path, name: &str, base: &str) -> Result<P
         return Err(format!("bad library name {name:?}"));
     }
     if !["", "bare"].contains(&base) {
-        return Err(format!("no library to copy named {base}"));
+        return Err(format!("no library to start from named {base}"));
     }
     let root = config_dir.join("libraries");
     let dest = root.join(name);
     if dest.exists() {
         return Err(format!("{} already exists", dest.display()));
     }
-    // Copied whole into a hidden folder first, so a half copy is never listed.
+    // Made in a hidden folder first, so a half-made one is never listed.
     let tmp = root.join(format!(".{name}.tmp"));
-    let copy = || -> std::io::Result<()> {
+    let make = || -> std::io::Result<()> {
         let _ = std::fs::remove_dir_all(&tmp);
-        for (rel, src) in RUNTIME {
-            let rel = match (base, *rel) {
-                ("bare", "tui/bare.lua") => "tui/defaults.lua",
-                ("bare", "gui/bare.lua") => "gui/defaults.lua",
-                ("bare", _) => continue,
-                (
-                    _,
-                    "ui/api.lua" | "tui/bare.lua" | "gui/api.lua" | "gui/bare.lua",
-                ) => {
-                    continue;
-                }
-                (_, r) if r.starts_with("core/") => continue,
-                (_, r) => r,
-            };
-            let path = tmp.join(rel);
-            std::fs::create_dir_all(path.parent().unwrap_or(&tmp))?;
-            std::fs::write(path, src)?;
-        }
+        let app = if side == Side::Gui { "gui" } else { "tui" };
+        std::fs::create_dir_all(tmp.join(app))?;
+        std::fs::write(tmp.join(app).join("defaults.lua"), library_entry(app, base))?;
         std::fs::rename(&tmp, &dest)
     };
-    copy().map_err(|e| {
+    make().map_err(|e| {
         let _ = std::fs::remove_dir_all(&tmp);
         format!("{}: {e}", dest.display())
     })?;
     Ok(dest)
+}
+
+/// The files under `dir`, as paths relative to it (`/`-separated).
+fn files_under(dir: &Path) -> Vec<String> {
+    fn walk(root: &Path, dir: &Path, out: &mut Vec<String>) {
+        for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(root, &path, out);
+            } else if let Ok(rel) = path.strip_prefix(root) {
+                let parts: Vec<_> = rel.iter().map(|p| p.to_string_lossy()).collect();
+                out.push(parts.join("/"));
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
+}
+
+/// Remove the empty folders under `dir` (not `dir` itself).
+fn remove_empty_dirs(dir: &Path) {
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            remove_empty_dirs(&path);
+            let _ = std::fs::remove_dir(&path);
+        }
+    }
 }
 
 /// Delete a library that is not in use: it is moved aside to a hidden
@@ -979,17 +1035,39 @@ pub fn set_tui_library(config_dir: &Path, name: &str) -> Result<(), String> {
     r.map_err(|e| format!("{}: {e}", path.display()))
 }
 
-/// Write the embedded docs to `<config dir>/docs/`, so they always match
-/// this build. A file is only rewritten when it changed.
+/// What `<config dir>/docs/builtin/README.md` says.
+const BUILTIN_README: &str = "\
+# bone's built-in files, to read
+
+These are copies of the Lua files built into bone (its `runtime/` folder),
+rewritten at every start so they always match the bone in use. bone never
+loads them: editing them changes nothing, and the edit is lost at the next
+start. To change something, see `../customizing.md`: changes go in a UI
+library of your own, starting from `bone.builtin(...)`.
+";
+
+/// Write the embedded docs to `<config dir>/docs/`, and the built-in
+/// runtime files to read to `docs/builtin/`, so they always match this
+/// build. A file is only rewritten when it changed; one no longer built in
+/// is removed from `docs/builtin/`.
 pub fn write_docs(config_dir: &Path) -> std::io::Result<()> {
-    for (name, src) in DOCS {
-        let path = config_dir.join("docs").join(name);
-        if std::fs::read_to_string(&path).is_ok_and(|old| old == *src) {
+    let builtin = config_dir.join("docs").join("builtin");
+    let docs = DOCS.iter().map(|(name, src)| (config_dir.join("docs").join(name), *src));
+    let runtime = RUNTIME.iter().map(|(rel, src)| (builtin.join(rel), *src));
+    let readme = std::iter::once((builtin.join("README.md"), BUILTIN_README));
+    for (path, src) in docs.chain(runtime).chain(readme) {
+        if std::fs::read_to_string(&path).is_ok_and(|old| old == src) {
             continue;
         }
         std::fs::create_dir_all(path.parent().expect("a file's directory"))?;
         std::fs::write(&path, src)?;
     }
+    for rel in files_under(&builtin) {
+        if rel != "README.md" && builtin_source(&rel).is_none() {
+            let _ = std::fs::remove_file(builtin.join(&rel));
+        }
+    }
+    remove_empty_dirs(&builtin);
     Ok(())
 }
 
@@ -1016,39 +1094,9 @@ pub fn builtin_source(rel: &str) -> Option<&'static str> {
     RUNTIME.iter().find(|(p, _)| *p == rel).map(|(_, src)| *src)
 }
 
-/// Runtime files `config_dir/runtime/` overrides, with whether each is the
-/// same as the built-in one (so only hides later updates).
-pub fn runtime_overrides(config_dir: &Path) -> Vec<(&'static str, bool)> {
-    RUNTIME
-        .iter()
-        .filter_map(|(rel, src)| {
-            let text = std::fs::read_to_string(config_dir.join("runtime").join(rel)).ok()?;
-            Some((*rel, text == *src))
-        })
-        .collect()
-}
-
-/// Stop overriding the built-in runtime file `rel`: move the copy under
-/// `config_dir/runtime/` into `backup` (same relative path), so the
-/// built-in one is used again. Returns where the copy went.
-pub fn reset_runtime_file(config_dir: &Path, rel: &str, backup: &Path) -> Result<PathBuf, String> {
-    if builtin_source(rel).is_none() {
-        return Err(format!("{rel} is not a built-in runtime file"));
-    }
-    let from = config_dir.join("runtime").join(rel);
-    if !from.is_file() {
-        return Err(format!("{rel} is not overridden"));
-    }
-    let to = backup.join(rel);
-    std::fs::create_dir_all(to.parent().expect("a file's directory"))
-        .and_then(|_| std::fs::rename(&from, &to))
-        .map_err(|e| format!("cannot move {}: {e}", from.display()))?;
-    Ok(to)
-}
-
-/// Run a runtime file (see [`runtime_source`]).
-pub fn run_runtime(lua: &Lua, config_dir: Option<&Path>, rel: &str) -> mlua::Result<()> {
-    let (src, name) = runtime_source(config_dir, rel)
+/// Run a built-in runtime file.
+pub fn run_runtime(lua: &Lua, rel: &str) -> mlua::Result<()> {
+    let (src, name) = runtime_source(rel)
         .ok_or_else(|| mlua::Error::runtime(format!("missing runtime file {rel}")))?;
     lua.load(src).set_name(format!("@{name}")).exec()
 }
@@ -1098,14 +1146,16 @@ fn setup_require(lua: &Lua, side: Side, config_dir: Option<&Path>) -> mlua::Resu
             .get::<Table>("bone")?
             .set("plugins", lua.create_table()?)?;
     }
-    // Then the embedded runtime `lua/` directory.
+    // The runtime `lua/` directory (the library's copy, then the built-in
+    // one) is searched before those paths, so a built-in module always comes
+    // from the binary or the library in use, never a stray user file.
     let dir = config_dir.map(Path::to_owned);
     let searcher = lua.create_function(move |lua, name: String| {
         let rel = name.replace('.', "/");
         for candidate in [format!("lua/{rel}.lua"), format!("lua/{rel}/init.lua")] {
             let found = match side {
                 Side::Tui | Side::Gui => frontend_runtime_source(dir.as_deref(), side, &candidate),
-                _ => runtime_source(dir.as_deref(), &candidate),
+                _ => runtime_source(&candidate),
             };
             if let Some((src, chunk_name)) = found {
                 let f = lua
@@ -1120,8 +1170,8 @@ fn setup_require(lua: &Lua, side: Side, config_dir: Option<&Path>) -> mlua::Resu
         ))?))
     })?;
     // bone.builtin(name): the built-in version of a runtime module (or file,
-    // given as a path), even when the config dir overrides it, so an
-    // override can start from it and change only what it needs.
+    // given as a path), even when the library in use has its own copy, so
+    // a library can start from it and change only what it needs.
     let builtin = lua.create_function(|lua, name: String| {
         let candidates = if name.contains('/') {
             vec![name.clone()]
@@ -1148,7 +1198,11 @@ fn setup_require(lua: &Lua, side: Side, config_dir: Option<&Path>) -> mlua::Resu
     let list: Table = package
         .get("loaders")
         .or_else(|_| package.get("searchers"))?;
-    list.raw_set(list.raw_len() + 1, searcher)?;
+    // Second, after `package.preload`.
+    for i in (2..=list.raw_len()).rev() {
+        list.raw_set(i + 1, list.raw_get::<Value>(i)?)?;
+    }
+    list.raw_set(2, searcher)?;
     Ok(())
 }
 
@@ -1295,13 +1349,14 @@ mod tests {
     }
 
     #[test]
-    fn require_prefers_user_modules_and_runtime_overrides() {
+    fn require_finds_user_modules_but_builtins_stay_built_in() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("lua/my")).unwrap();
         std::fs::write(dir.path().join("lua/my/mod.lua"), "return { x = 1 }").unwrap();
-        std::fs::create_dir_all(dir.path().join("runtime/lua/bone")).unwrap();
+        // A user module does not replace a built-in one.
+        std::fs::create_dir_all(dir.path().join("lua/bone")).unwrap();
         std::fs::write(
-            dir.path().join("runtime/lua/bone/util.lua"),
+            dir.path().join("lua/bone/util.lua"),
             "return { inspect = function() return 'mine' end }",
         )
         .unwrap();
@@ -1314,7 +1369,7 @@ mod tests {
         );
         assert_eq!(
             lua.load("return bone.inspect(1)").eval::<String>().unwrap(),
-            "mine"
+            "1"
         );
         let err = lua.load("require('nope.nothing')").exec().unwrap_err();
         assert!(
