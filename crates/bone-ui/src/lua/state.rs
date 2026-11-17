@@ -146,9 +146,11 @@ fn install_text(lua: &Lua, bone: &Table) -> mlua::Result<()> {
             spans_out(lua, spans)
         })?,
     )?;
-    // wrap(spans, width, { first = prefix, rest = prefix, pad = "Group" }):
-    // word-wrap to lines; `rest` defaults to blanks as wide as `first`, and
-    // `pad` fills each line to the full width (for background bands).
+    // wrap(spans, width, { first = prefix, rest = prefix, pad = "Group",
+    // copy = "- " }): word-wrap to lines; `rest` defaults to blanks as wide
+    // as `first`, and `pad` fills each line to the full width (for
+    // background bands). Each line's `copy` (see `model::LineCopy`) leaves
+    // its prefix out of a mouse copy, the first one copied as `copy`.
     text.set(
         "wrap",
         lua.create_function(|lua, (spans, width, opts): (Value, usize, Option<Table>)| {
@@ -169,15 +171,26 @@ fn install_text(lua: &Lua, bone: &Table) -> mlua::Result<()> {
                 }
             };
             let pad: Option<String> = opt(&opts, "pad")?;
+            let lead: Option<String> = opt(&opts, "copy")?;
+            let width_of = |g: &[(String, String)]| -> usize {
+                g.iter().map(|(t, _)| crate::text::width(t)).sum()
+            };
             let out = lua.create_table()?;
-            for mut line in crate::text::wrap_groups(&spans, &first, &rest, width) {
+            let rows = crate::text::wrap_groups(&spans, &first, &rest, width);
+            for (i, (mut line, join)) in rows.into_iter().enumerate() {
                 if let Some(hl) = &pad {
-                    let used: usize = line.iter().map(|(t, _)| crate::text::width(t)).sum();
+                    let used = width_of(&line);
                     if used < width {
                         line.push((" ".repeat(width - used), hl.clone()));
                     }
                 }
-                out.push(spans_out(lua, line)?)?;
+                let copy = lua.create_table()?;
+                copy.set("skip", width_of(if i == 0 { &first } else { &rest }))?;
+                copy.set("lead", lead.as_deref().filter(|_| i == 0))?;
+                copy.set("join", join)?;
+                let row = spans_out(lua, line)?;
+                row.set("copy", copy)?;
+                out.push(row)?;
             }
             Ok(out)
         })?,

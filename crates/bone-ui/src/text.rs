@@ -121,13 +121,15 @@ pub fn clean(s: &str) -> String {
 pub type Groups = Vec<(String, String)>;
 
 /// Word-wrap grouped spans to `width`; `first` prefixes the first row and
-/// `rest` the others. Text is sanitized first (tabs expanded).
+/// `rest` the others. Text is sanitized first (tabs expanded). Each row after
+/// the first comes with the text its break left out (the spaces, or "" inside
+/// a long word), so a copy can put the line back together.
 pub fn wrap_groups(
     spans: &[(String, String)],
     first: &[(String, String)],
     rest: &[(String, String)],
     width: usize,
-) -> Vec<Groups> {
+) -> Vec<(Groups, Option<String>)> {
     let styled: Vec<(char, &str)> = spans
         .iter()
         .flat_map(|(t, g)| {
@@ -143,12 +145,14 @@ pub fn wrap_groups(
     let body = width
         .saturating_sub(prefix_w(first).max(prefix_w(rest)))
         .max(1);
-    wrap_ranges(&chars, body)
-        .into_iter()
+    let ranges = wrap_ranges(&chars, body);
+    ranges
+        .iter()
         .enumerate()
         .map(|(i, r)| {
+            let join = (i > 0).then(|| chars[ranges[i - 1].end..r.start].iter().collect());
             let mut body: Groups = Vec::new();
-            for &(c, g) in &styled[r] {
+            for &(c, g) in &styled[r.clone()] {
                 match body.last_mut() {
                     Some((t, last)) if last == g => t.push(c),
                     _ => body.push((c.to_string(), g.to_owned())),
@@ -160,7 +164,7 @@ pub fn wrap_groups(
                 rest.to_vec()
             };
             out.extend(body);
-            out
+            (out, join)
         })
         .collect()
 }
@@ -301,18 +305,32 @@ mod tests {
         assert_eq!(
             rows,
             vec![
-                vec![g("> ", "P"), g("aa ", "A"), g("bbb", "B")],
-                vec![g("  ", "P"), g("cc", "B")]
+                (vec![g("> ", "P"), g("aa ", "A"), g("bbb", "B")], None),
+                (vec![g("  ", "P"), g("cc", "B")], Some(" ".into()))
             ]
         );
         // Text equal to a prefix's group still starts its own span.
         let rows = wrap_groups(&[g("x", "P")], &[g("> ", "P")], &[], 8);
-        assert_eq!(rows, vec![vec![g("> ", "P"), g("x", "P")]]);
+        assert_eq!(rows, vec![(vec![g("> ", "P"), g("x", "P")], None)]);
         assert_eq!(
             clip_groups(&[g("abc", "A"), g("def", "B")], 4),
             vec![g("abc", "A"), g("…", "B")]
         );
         assert_eq!(clean("a\x1b[31mb\tc\x07"), "ab\tc");
+    }
+
+    #[test]
+    fn wrapped_rows_and_joins_give_back_the_text() {
+        let g = |t: &str| (t.to_owned(), "A".to_owned());
+        // Spaces at a break, nothing inside a long word.
+        for text in ["ab   cd", "a  b c   dddddd  e", "x    "] {
+            let mut back = String::new();
+            for (row, join) in wrap_groups(&[g(text)], &[g("> ")], &[g("  ")], 5) {
+                back += join.as_deref().unwrap_or("");
+                back.extend(row.into_iter().skip(1).map(|(t, _)| t));
+            }
+            assert_eq!(back.trim_end(), text.trim_end(), "{text:?}");
+        }
     }
 
     #[test]

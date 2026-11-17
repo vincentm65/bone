@@ -41,6 +41,12 @@ local function trim(s)
   return (s:gsub("^%s+", ""):gsub("%s+$", ""))
 end
 
+-- `line` behind a `prefix` span that a mouse copy leaves out.
+local function nest(prefix, line)
+  local c = line.copy or {}
+  return append({ prefix, copy = { skip = bone.text.width(prefix[1]) + (c.skip or 0), lead = c.lead, join = c.join } }, line)
+end
+
 -- A blank line between exchanges.
 local function starts(kind, ctx)
   if not ctx.prev then
@@ -156,7 +162,7 @@ function views.assistant(item, ctx)
   end)
   if item.streaming then
     if #md > 0 then
-      md[#md] = append({}, md[#md])
+      md[#md] = append({ copy = md[#md].copy }, md[#md])
       table.insert(md[#md], { "▍", "Dim" })
     else
       md[1] = { { "  ▍", "Dim" } }
@@ -380,13 +386,12 @@ local function gutter(text, width, group, gutter_group, ctx)
   end
   if not expanded(ctx) and #rows > GUTTER_MAX then
     local hidden = #rows - 4
+    rows[#rows - 1].copy = nil -- no longer continues the row above
     rows = { rows[1], rows[2], { { more(hidden, "terminal line", ctx), group } }, rows[#rows - 1], rows[#rows] }
   end
   local out = {}
   for i, r in ipairs(rows) do
-    local row = { { i == #rows and "      ╰ " or "      │ ", gutter_group } }
-    append(row, r)
-    out[#out + 1] = row
+    out[#out + 1] = nest({ i == #rows and "      ╰ " or "      │ ", gutter_group }, r)
   end
   return out
 end
@@ -480,6 +485,7 @@ local function diff_view(rows, width)
         first = { { "  " .. num .. " " .. r.sign .. " " .. indent, group } },
         rest = { { string.rep(" ", 10) .. indent, group } },
         pad = band,
+        copy = r.sign .. indent, -- a copy reads as a unified diff
       }))
     end
   end
@@ -570,9 +576,7 @@ local function agent_content(item, ctx, args)
   local gutter_group = item.is_error and "ToolError" or "ToolGutter"
   local rows = {}
   for i, line in ipairs(body) do
-    local row = { { i == #body and "      ╰ " or "      │ ", gutter_group } }
-    append(row, line)
-    rows[#rows + 1] = row
+    rows[#rows + 1] = nest({ i == #body and "      ╰ " or "      │ ", gutter_group }, line)
   end
   return { title = title, body = rows }
 end
@@ -596,7 +600,7 @@ report = function(item, ctx)
     body[#body + 1] = { { more(#rows - shown, "line", { tool_expanded = full }), "ToolSummary" } }
   end
   for i, line in ipairs(body) do
-    out[#out + 1] = append({ { i == #body and "      ╰ " or "      │ ", "ToolGutter" } }, line)
+    out[#out + 1] = nest({ i == #body and "      ╰ " or "      │ ", "ToolGutter" }, line)
   end
   return images(item, out, ctx.width)
 end
@@ -864,9 +868,7 @@ render_tool = function(item, ctx, full)
   -- Custom views' lines sit under the label; errors always show.
   local body = {}
   for _, l in ipairs(content.lines or {}) do
-    local row = { { "    ", "Normal" } }
-    append(row, bone.text.clip(as_spans(l, "ToolOutput"), ctx.width - 4))
-    body[#body + 1] = row
+    body[#body + 1] = nest({ "    ", "Normal" }, bone.text.clip(as_spans(l, "ToolOutput"), ctx.width - 4))
   end
   if custom and item.is_error and #body == 0 then
     body = gutter(item.output or "", ctx.width, "ToolOutput", "ToolError", ctx)

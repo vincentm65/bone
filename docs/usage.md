@@ -44,7 +44,7 @@ These come from `runtime/tui/defaults.lua`; change them in `~/.bone/tui.lua`.
 | `esc` | hide suggestions, or clear a message |
 | `pageup` / `pagedown`, `shift+up` / `shift+down`, mouse wheel | scroll the session |
 | `ctrl+home` / `ctrl+end` | top / bottom (bottom keeps following new output) |
-| mouse drag | highlight text; releasing copies it to the clipboard (through tmux when inside it, else OSC 52, plus `wl-copy`/`xclip` locally). `bone.o.mouse = false` in `tui.lua` hands the mouse back to the terminal |
+| mouse drag | highlight text; releasing copies it to the clipboard (through tmux when inside it, else OSC 52, plus `wl-copy`/`xclip` locally). In the chat, the copy is the text alone: no gutters, quote and code bars or indents, bullets as `- `, and lines the screen wrapped joined again. `bone.o.mouse = false` in `tui.lua` hands the mouse back to the terminal |
 | `ctrl+left` / `ctrl+right`, `alt+left` / `alt+right` | move by word |
 | `ctrl+a` / `ctrl+e`, `home` / `end` | start / end of line |
 | `ctrl+w`, `alt+backspace` | delete the word before the cursor |

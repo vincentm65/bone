@@ -44,6 +44,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
     let area = frame.area();
     app.screen = area;
+    app.copy_rows.clear();
     crate::stats::mark("pre");
     app.spinner = app.read_spinner();
     crate::stats::mark("spinner");
@@ -223,7 +224,7 @@ pub fn draw(frame: &mut Frame<'_>, app: &mut App) {
         Some(s) if s.done && !s.copied => {
             s.copied = true;
             // A drag over blank cells copies nothing, not "" over the clipboard.
-            Some(s.text(frame.buffer_mut())).filter(|t| !t.trim().is_empty())
+            Some(s.text(frame.buffer_mut(), &app.copy_rows)).filter(|t| !t.trim().is_empty())
         }
         _ => None,
     };
@@ -370,7 +371,11 @@ fn draw_chat(frame: &mut Frame<'_>, app: &mut App, area: Rect, buf: BufferId) {
         app.redraw |= !win.follow;
         win.follow = true;
     }
-    let lines: Vec<Line> = chat.rows().skip(win.top).take(height).cloned().collect();
+    let mut lines: Vec<Line> = Vec::with_capacity(height);
+    for (y, (line, copy)) in (area.y..).zip(chat.rows().skip(win.top).take(height)) {
+        lines.push(line.clone());
+        app.copy_rows.extend(copy.clone().map(|c| (area, y, c)));
+    }
     frame.render_widget(Paragraph::new(lines), area);
     if total == 0
         && let Some((_, lines)) =

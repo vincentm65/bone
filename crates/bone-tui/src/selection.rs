@@ -7,6 +7,8 @@ use ratatui::layout::Rect;
 use ratatui::style::Modifier;
 use unicode_width::UnicodeWidthStr;
 
+use bone_ui::model::LineCopy;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Selection {
     /// Where the button went down and where the pointer is, as (col, row).
@@ -68,12 +70,27 @@ impl Selection {
     }
 
     /// The selected text: rows joined with newlines, trailing blanks dropped.
-    pub fn text(&self, buf: &Buffer) -> String {
+    /// `copy` is the chat rows on screen as (chat area, row, [`LineCopy`]):
+    /// in its chat, a row's decoration is left out (copied as its `lead`
+    /// when the selection takes the row from its start) and a wrapped row
+    /// rejoins the one above.
+    pub fn text(&self, buf: &Buffer, copy: &[(Rect, u16, LineCopy)]) -> String {
         let area = buf.area.intersection(self.clip);
-        let ((_, sy), (_, ey)) = self.bounds();
-        let mut rows = Vec::new();
-        for y in sy.max(area.top())..=ey.min(area.bottom().saturating_sub(1)) {
+        let ((sx, sy), (_, ey)) = self.bounds();
+        let top = sy.max(area.top());
+        let mut out = String::new();
+        for y in top..=ey.min(area.bottom().saturating_sub(1)) {
+            // Not under a panel over the chat: it has rows of its own.
+            let info = (copy.iter())
+                .find(|(a, row, _)| *row == y && self.clip.intersection(*a) == *a)
+                .map(|(a, _, c)| (a.x + c.skip as u16, c));
+            let start = info.map_or(area.left(), |(start, _)| start);
             let mut row = String::new();
+            if let Some((_, c)) = info
+                && (y > sy || sx <= start)
+            {
+                row.push_str(&c.lead);
+            }
             let mut skip = 0;
             for x in area.left()..area.right() {
                 let sym = buf[(x, y)].symbol();
@@ -83,13 +100,16 @@ impl Selection {
                     continue;
                 }
                 skip = sym.width().saturating_sub(1);
-                if self.contains(x, y) {
+                if x >= start && self.contains(x, y) {
                     row.push_str(sym);
                 }
             }
-            rows.push(row.trim_end().to_owned());
+            if y > top {
+                out.push_str(info.and_then(|(_, c)| c.join.as_deref()).unwrap_or("\n"));
+            }
+            out.push_str(row.trim_end());
         }
-        rows.join("\n")
+        out
     }
 }
 
@@ -165,11 +185,40 @@ mod tests {
         // Dragged upward: still from (2,0) to (1,2).
         let mut s = Selection::new((1, 2), buf.area);
         s.head = (2, 0);
-        assert_eq!(s.text(&buf), "cdef\n日本 x\nuv");
+        assert_eq!(s.text(&buf, &[]), "cdef\n日本 x\nuv");
         assert!(s.contains(5, 0) && !s.contains(1, 0) && !s.contains(2, 2));
         assert_eq!(base64(b"hi!"), "aGkh");
         assert_eq!(base64(b"hi"), "aGk=");
         assert_eq!(base64(b"h"), "aA==");
         assert_eq!(osc52("hi"), "\x1b]52;c;aGk=\x07");
+    }
+
+    #[test]
+    fn decoration_is_left_out_and_wrapped_rows_rejoin() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 14, 5));
+        // A list item wrapped onto two rows, then a code line in a gutter.
+        for (y, text) in (0..).zip(["  • one two", "    three", "  ▎ ls -l", "plain"]) {
+            buf.set_string(0, y, text, ratatui::style::Style::default());
+        }
+        let row = |y, lead: &str, join: Option<&str>| {
+            let copy = LineCopy {
+                skip: 4,
+                lead: lead.into(),
+                join: join.map(Into::into),
+            };
+            (buf.area, y, copy)
+        };
+        let rows = [row(0, "- ", None), row(1, "", Some(" ")), row(2, "", None)];
+        let mut s = Selection::new((0, 0), buf.area);
+        s.head = (13, 3);
+        assert_eq!(s.text(&buf, &rows), "- one two three\nls -l\nplain");
+        // Starting after the bullet leaves the lead out too.
+        s.anchor = (8, 0);
+        assert_eq!(s.text(&buf, &rows), "two three\nls -l\nplain");
+        // A selection in a pane over part of the chat reads the screen.
+        s.clip = Rect::new(0, 0, 12, 5);
+        s.anchor = (0, 0);
+        s.head = (11, 0);
+        assert_eq!(s.text(&buf, &rows), "  • one two");
     }
 }

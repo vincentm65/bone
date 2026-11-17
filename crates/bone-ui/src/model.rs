@@ -389,13 +389,47 @@ pub fn items_width(items: &[Item]) -> usize {
         .sum()
 }
 
+/// How a mouse copy reads a line, from its `copy` field (which
+/// `bone.text.wrap` sets): the first `skip` columns are decoration (a
+/// gutter, an indent, a bullet) and are copied as `lead`; `join`, when set,
+/// means the line continues the one above (a wrapped line), and a copy
+/// joins the two with it instead of a line break.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LineCopy {
+    pub skip: usize,
+    pub lead: String,
+    pub join: Option<String>,
+}
+
+/// A line's items and how a copy reads it.
+pub type CopyLine = (Vec<Item>, Option<LineCopy>);
+
 /// A list of lines, as views, regions and panels return.
 pub fn parse_lines(v: Value) -> mlua::Result<Option<Vec<Vec<Item>>>> {
+    Ok(parse_lines_copy(v)?.map(|lines| lines.into_iter().map(|(l, _)| l).collect()))
+}
+
+/// [`parse_lines`], keeping each line's [`LineCopy`].
+pub fn parse_lines_copy(v: Value) -> mlua::Result<Option<Vec<CopyLine>>> {
+    let copy = |c: mlua::Table| -> mlua::Result<_> {
+        Ok(LineCopy {
+            skip: c.get::<Option<usize>>("skip")?.unwrap_or(0),
+            lead: c.get::<Option<String>>("lead")?.unwrap_or_default(),
+            join: c.get("join")?,
+        })
+    };
     match v {
         Value::Nil => Ok(None),
         Value::Table(t) => t
             .sequence_values::<Value>()
-            .map(|l| parse_items(l?, "Normal"))
+            .map(|l| {
+                let l = l?;
+                let c = match &l {
+                    Value::Table(t) => t.get::<Option<mlua::Table>>("copy")?.map(copy),
+                    _ => None,
+                };
+                Ok((parse_items(l, "Normal")?, c.transpose()?))
+            })
             .collect::<mlua::Result<_>>()
             .map(Some),
         other => Err(mlua::Error::runtime(format!(

@@ -99,7 +99,7 @@ impl App {
             buf,
             width_cols,
             view,
-            &|app: &App, items, width| render_items(items, width, &app.theme),
+            &|app: &App, items, copy, width| (render_items(items, width, &app.theme), copy),
             &|data, width, first| bare(data, width, first),
         )
     }

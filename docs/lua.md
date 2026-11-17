@@ -1178,7 +1178,8 @@ Each returns one line (`"%="` is a blank stretch); the row exists only while the
 
 - `bone.markdown.parse(text)` → blocks: `{ kind = "heading", level, spans }`, `"paragraph"` / `"item"` (`indent`, and for items `marker`, `ordered`), `"quote"`, `"code"` (`lang`, `lines`), `"rule"`, `"blank"`. Spans are `{ text, bold?, italic?, code?, link? }`.
 - `bone.ui.markdown(text, width, indent)` → that rendered as lines (part of the API, so it works under any TUI library).
-- `bone.text.wrap(spans, width, { first, rest, pad })` → lines. `first`/`rest` prefix the first and following rows (`rest` defaults to blanks as wide as `first`); `pad = "Group"` fills each row to the width (background bands).
+- `bone.text.wrap(spans, width, { first, rest, pad, copy })` → lines. `first`/`rest` prefix the first and following rows (`rest` defaults to blanks as wide as `first`); `pad = "Group"` fills each row to the width (background bands). Each row says how a mouse copy in the chat reads it: the prefixes are left out (the first one copied as `copy`, e.g. `"- "` for a bullet; default nothing), and wrapped rows join back into one line.
+- A chat line's `copy` field does that by hand: `{ { "  │ ", "ToolGutter" }, { text, "ToolOutput" }, copy = { skip = 4, lead = "", join = nil } }` leaves out the first `skip` columns (copying `lead` in their place when the selection takes the row from its start); `join`, when set, means the row continues the one above, joined with that text (`" "`) instead of a line break.
 - `bone.text.clip(spans, width)`, `bone.text.truncate(s, n)`, `bone.text.width(s)`.
 - `bone.text.edit(s, key)` → `s` with a typing key applied (backspace, ctrl+u, space, a character), or nil for any other key: a one-line input in a popup's `on_key`.
 - `bone.text.shell(cmd)` → the command as highlighted spans.

@@ -522,7 +522,7 @@ fn dispatch(app: &mut App, lua: &Lua, op: &str, a: MultiValue) -> mlua::Result<M
 }
 
 impl bone_ui::lua::Host for App {
-    type Line = ratatui::text::Line<'static>;
+    type Line = crate::chat::Row;
 
     fn chat_store(&mut self) -> bone_ui::lua::ChatStore<'_, Self::Line> {
         bone_ui::lua::ChatStore {

@@ -148,6 +148,8 @@ pub struct App {
     pub processes: bone_ui::lua::processes::Processes,
     /// Text highlighted with the mouse.
     pub selection: Option<crate::selection::Selection>,
+    /// The chat rows on screen that say how they copy: (chat area, row, how).
+    pub copy_rows: Vec<(Rect, u16, bone_ui::model::LineCopy)>,
     /// Text to put on the system clipboard after the next draw.
     pub clipboard: Option<String>,
     composer: Composer,
@@ -253,6 +255,7 @@ impl App {
             jobs: Default::default(),
             processes: Default::default(),
             selection: None,
+            copy_rows: Vec::new(),
             clipboard: None,
             composer: Composer::default(),
             clipboard_executable: None,

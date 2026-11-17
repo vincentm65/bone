@@ -1779,7 +1779,7 @@ pub fn render_chat<H: Host>(
     buf: usize,
     width_cols: usize,
     view: ChatView,
-    line: &impl Fn(&H, &[crate::model::Item], usize) -> H::Line,
+    line: &impl Fn(&H, &[crate::model::Item], Option<crate::model::LineCopy>, usize) -> H::Line,
     bare: &impl Fn(&serde_json::Value, usize, bool) -> Vec<H::Line>,
 ) -> usize {
     let generation = h.generation();
@@ -1877,7 +1877,7 @@ fn render_item<H: Host>(
     index: usize,
     key: &RenderKey,
     prev: Option<String>,
-    line: &impl Fn(&H, &[crate::model::Item], usize) -> H::Line,
+    line: &impl Fn(&H, &[crate::model::Item], Option<crate::model::LineCopy>, usize) -> H::Line,
     bare: &impl Fn(&serde_json::Value, usize, bool) -> Vec<H::Line>,
 ) -> Vec<H::Line> {
     let c = h.chat_store();
@@ -1899,11 +1899,14 @@ fn render_item<H: Host>(
         };
         let v = f.call::<Value>((to_lua(lua, &data)?, to_lua(lua, &ctx)?))?;
         // nil hides the item.
-        Ok(Some(crate::model::parse_lines(v)?.unwrap_or_default()))
+        Ok(Some(crate::model::parse_lines_copy(v)?.unwrap_or_default()))
     })
     .flatten();
     match lines {
-        Some(lines) => lines.iter().map(|l| line(h, l, key.width)).collect(),
+        Some(lines) => lines
+            .into_iter()
+            .map(|(l, copy)| line(h, &l, copy, key.width))
+            .collect(),
         None => bare(&data, key.width, key.prev.is_none()),
     }
 }

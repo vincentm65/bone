@@ -8,23 +8,26 @@ pub use bone_ui::chat::RunningTurn;
 
 use crate::text::{sanitize, wrap};
 
-pub type ChatBuffer = bone_ui::chat::ChatBuffer<Line<'static>>;
+pub type ChatBuffer = bone_ui::chat::ChatBuffer<Row>;
+
+/// A chat row: the line drawn, and how a mouse copy reads it.
+pub type Row = (Line<'static>, Option<bone_ui::model::LineCopy>);
 
 /// The bare rendering used when no Lua view applies: plain wrapped text with
 /// a blank line between items, no colors. Reasoning is hidden (a Lua view
 /// can show it). `first` is whether this is the first item.
-pub fn bare(data: &Value, width: usize, first: bool) -> Vec<Line<'static>> {
+pub fn bare(data: &Value, width: usize, first: bool) -> Vec<Row> {
     let text = bone_ui::chat::bare_text(data);
     if text.is_empty() {
         return Vec::new();
     }
-    let gap = (!first).then(Line::default);
+    let gap = (!first).then(Row::default);
     gap.into_iter()
         .chain(
             sanitize(&text)
                 .split('\n')
                 .flat_map(|l| wrap(l, width))
-                .map(Line::from),
+                .map(|l| (Line::from(l), None)),
         )
         .collect()
 }
@@ -52,7 +55,7 @@ mod tests {
             let lines = bare(&c.item_data(item, index, true), width, index == 1);
             c.store(item, key, lines, Vec::new(), None, 0);
         }
-        c.rows().map(|l| l.to_string()).collect()
+        c.rows().map(|(l, _)| l.to_string()).collect()
     }
 
     #[test]

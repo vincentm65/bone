@@ -1555,7 +1555,7 @@ local function md_table(b, width, indent)
       if i < #b.rows then out[#out + 1] = {} end
     else
       for r = 1, height do
-        local line = { { indent, "Normal" } }
+        local line = { { indent, "Normal" }, copy = { skip = bone.text.width(indent) } }
         for c = 1, #w do
           local spans, n = cells[c][r] or {}, 0
           for _, s in ipairs(spans) do n = n + bone.text.width(s[1]) end
@@ -1585,7 +1585,8 @@ function bone.ui.markdown(text, width, indent)
     elseif b.kind == "heading" then
       append(out, bone.text.wrap(md_spans(b.spans, "MdHeading"), width, { first = pre, rest = pre }))
     elseif b.kind == "rule" then
-      out[#out + 1] = { { indent, "Normal" }, { string.rep("─", math.min(width - #indent, 40)), "Dim" } }
+      out[#out + 1] = { { indent, "Normal" }, { string.rep("─", math.min(width - #indent, 40)), "Dim" },
+        copy = { skip = bone.text.width(indent) } }
     elseif b.kind == "quote" then
       local p = { { indent, "Normal" }, { "▏ ", "MdQuote" } }
       append(out, bone.text.wrap(md_spans(b.spans, "MdQuote"), width, { first = p, rest = p }))
@@ -1596,7 +1597,8 @@ function bone.ui.markdown(text, width, indent)
       local bullet = b.ordered and (b.marker .. " ") or "• "
       local first = { { indent .. lead, "Normal" }, { bullet, "MdBullet" } }
       local rest = { { string.rep(" ", #indent + #lead + bone.text.width(bullet)), "Normal" } }
-      append(out, bone.text.wrap(md_spans(b.spans, "Normal"), width, { first = first, rest = rest }))
+      local copy = lead .. (b.ordered and bullet or "- ") -- as Markdown writes it
+      append(out, bone.text.wrap(md_spans(b.spans, "Normal"), width, { first = first, rest = rest, copy = copy }))
     elseif b.kind == "code" then
       local p = { { indent, "Normal" }, { "▎ ", "ToolGutter" } }
       for _, l in ipairs(b.lines) do
