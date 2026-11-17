@@ -84,20 +84,24 @@ function kinds.list(el, _, F)
     return el.empty and widgets.note(tostring(el.empty), { 0, 0 }) or nil
   end
   local owned = E.controlled(el)
+  -- `on` is a mark beside an entry (as in the terminal), not a selection.
+  local marks = false
+  for _, it in ipairs(items) do marks = marks or it.on ~= nil end
   local list = { direction = "column" }
   for i, it in ipairs(items) do
-    local line = {
-      direction = "row", gap = style.space.md, align = "center",
-      { text = tostring(it.text or ""), hl = group(it.tone), size = style.size.body, grow = 1, width = 0,
-        wrap = false, text_overflow = "ellipsis" },
-    }
+    local line = { direction = "row", gap = style.space.md, align = "center" }
+    if marks then
+      line[#line + 1] = { text = it.on and "●" or "", hl = "Accent", size = style.size.small, width = 10, shrink = 0 }
+    end
+    line[#line + 1] = { text = tostring(it.text or ""), hl = group(it.tone), size = style.size.body, grow = 1, width = 0,
+      wrap = false, text_overflow = "ellipsis" }
     for _, b in ipairs(it.badges or {}) do
       line[#line + 1] = widgets.pill(tostring(b.text or ""), { hl = group(b.tone, "Dim"), bg = "Selection" })
     end
     if it.detail then
       line[#line + 1] = { text = tostring(it.detail), hl = "Dim", size = style.size.small, wrap = false }
     end
-    local on = it.on == true or (owned and i == el.selected)
+    local on = owned and i == el.selected
     local node = widgets.entry(on, { line }, F.press(el, i))
     if (it.depth or 0) > 0 then
       local pad = node.padding or { 5, 10 }

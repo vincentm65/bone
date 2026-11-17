@@ -16,6 +16,7 @@
 --   split     { side, main }  two columns: a narrow one beside the rest
 --   list      { items = { { text, detail, tone, on, depth, badges = { { text, tone } }, on_press } },
 --               on_press(i, item), selected, on_select(i, item), on_key(key, i, item), empty }
+--               an entry's `on` is a mark beside it: ● when true, room for one when false
 --   checklist { items = { { text, state = "todo" | "active" | "done", on_press } }, on_press(i, item) }
 --   button    { label, on_press, primary, on_key(key) }
 --   tabs      { names, current, on_select(i) }
@@ -427,7 +428,8 @@ function M.drawer_title(spec, st)
 end
 
 --- The same for a window: `lines` (in a box, with `title`, scrolling when
---- taller than the room) and `node`.
+--- taller than the room) and `node`. Without a `height` it is as tall as
+--- what it holds, in either frontend.
 function M.win_spec(spec, st)
   st = st or {}
   st.view = spec.view
@@ -455,9 +457,12 @@ function M.win_spec(spec, st)
   if gui() then
     spec.node = function(ctx)
       local node = M.node(build(st, ctx, true), ctx, st, focused)
-      if not st.title then return node end
-      local widgets = require("bone.nodes.widgets")
-      return { direction = "column", grow = 1, widgets.title(st.title), node }
+      if st.title then
+        local widgets = require("bone.nodes.widgets")
+        node = { direction = "column", grow = 1, widgets.title(st.title), node }
+      end
+      if node and not height then node.fit = true end
+      return node
     end
   end
   hook_keys(spec, st, true)
