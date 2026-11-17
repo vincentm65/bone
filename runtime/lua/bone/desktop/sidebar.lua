@@ -7,8 +7,9 @@
 -- the recent ones next (a chat that runs, or one touched within the last
 -- hour, as in the TUI), then the rest in date groups (Today, Yesterday, This
 -- week, Earlier), one line each (title and when; model and tokens in its
--- tooltip) with a dot for what it needs from you (running, waiting for an
--- approval, finished while you were elsewhere).
+-- tooltip) with a dot for what it needs from you (bone.chats.state: a
+-- question waiting for your answer, running, finished while you were
+-- elsewhere).
 -- Over a row, pin and rename take the place of its time (the window does
 -- that, `group_hover`: nothing is built again as the pointer moves). The
 -- Processes page lists every chat's background work. The
@@ -50,9 +51,6 @@ local st = {
   renaming = nil, -- the session being renamed
 }
 
--- What each chat needs from you, by session id.
-local waiting = {} -- ask id -> session id
-local unread = {}
 local pinned = bone.state.load("sidebar-pinned") or {}
 
 local function redraw()
@@ -90,13 +88,6 @@ local function folder(cwd)
   return (cwd or ""):gsub("/+$", ""):match("([^/]+)$") or "~"
 end
 
-local function is_waiting(id)
-  for _, sid in pairs(waiting) do
-    if sid == id then return true end
-  end
-  return false
-end
-
 --- The rows of the current page, from the data: { kind = "group" | "card" |
 --- "none", ... }, and the things the cards stand for (`items`).
 local function compute()
@@ -117,7 +108,6 @@ local function compute()
   else
     local g = chats.grouped(st.all, st.query, st.stats)
     local current = (bone.chat.session() or {}).session_id
-    if current then unread[current] = nil end
     for _, s in ipairs(g.items) do
       -- A chat with no title has no message in it: nothing to go back to.
       -- It stays listed while on screen, pinned, running or searched for.
@@ -156,8 +146,7 @@ local function compute()
         rows[#rows + 1] = { kind = "group", text = name }
         heading = name
       end
-      local state = (is_waiting(id) and "waiting") or (chats.live[id] and "running")
-        or (unread[id] and "unread") or nil
+      local state = chats.state(id)
       local meta = {}
       local stats = st.stats[id]
       if not st.project then meta[#meta + 1] = (stats and stats.model) or "No model used" end
@@ -227,7 +216,7 @@ local function choose(i, keep_keys)
   local r = st.items[i]
   if not r or not r.session_id then return end
   st.sel = i
-  unread[r.session_id] = nil
+  chats.seen(r.session_id)
   bone.api.open_session(r.session_id)
   if keep_keys and not overlaid then take_keys() else bone.gui.focus(nil) end
   -- Over the chat it has done its job: let the chat show.
@@ -288,7 +277,7 @@ local function select(i)
   if st.page == "chats" then
     local r = st.items[st.sel]
     if r and r.session_id then
-      unread[r.session_id] = nil
+      chats.seen(r.session_id)
       bone.api.open_session(r.session_id)
     end
   end
@@ -358,25 +347,9 @@ end
 
 -- ---- nodes ------------------------------------------------------------------
 
--- The dot for what a chat needs, or nil. A running one breathes, on a
--- canvas of its own: the window is not built again for it.
-local DOT = {
-  running = { "SessionRunning", "ToolRunning", "Running" },
-  waiting = { "SessionWaiting", "ErrorMsg", "Waiting for your approval" },
-  unread = { "SessionUnread", "Normal", "New since you looked" },
-}
+-- The dot for what a chat needs, or nil: widgets.status_dot.
 local function dot(state)
-  local d = DOT[state]
-  if not d then return nil end
-  local color = style.alpha(group(d[1], d[2]), "", "fg", "#ededed")
-  local running = state == "running"
-  return {
-    width = 6, height = 6, shrink = 0, tooltip = d[3],
-    canvas = { fps = running and 20 or nil, draw = function(ctx)
-      local a = running and (0.675 + 0.325 * math.sin(ctx.time * 3.5)) or 1
-      return { bone.gui.draw.circle({ x = 3, y = 3, r = 3, fill = ("%s%02x"):format(color, math.floor(a * 255)) }) }
-    end },
-  }
+  return widgets.status_dot(state)
 end
 
 -- A small glyph button shown over the row of chat `id`.
@@ -445,7 +418,7 @@ local function row(i)
   end
   -- What a row leaves out (the model, the tokens; what it waits for) is its
   -- tooltip.
-  local tip = r.state == "waiting" and "Waiting for your approval" or (r.meta ~= "" and r.meta or nil)
+  local tip = r.state == "waiting" and "Waiting for you" or (r.meta ~= "" and r.meta or nil)
   -- The row takes the pointer edge to edge, the card inset in it: across the
   -- gap between two cards the pointer stays a hand and the row stays lit.
   return {
@@ -700,12 +673,7 @@ M.close = close
 --- Whether it is open, and whether it has the keyboard.
 function M.is_open() return open end
 
-chats.watch(function(kind, ev)
-  -- A turn that finishes in a chat you are not looking at is new to you.
-  if kind == "turn" and ev and not ev.running and ev.session_id
-      and ev.session_id ~= (bone.chat.session() or {}).session_id then
-    unread[ev.session_id] = true
-  end
+chats.watch(function(kind)
   if not open then return end
   if kind == "turn" or kind == "created" or kind == "updated" or kind == "deleted" then
     refresh()
@@ -713,16 +681,6 @@ chats.watch(function(kind, ev)
     compute()
     redraw()
   end
-end)
-
--- A question from the core (an approval) waits in its chat until answered.
-bone.on("ask/requested", function(ev)
-  if ev.session_id then waiting[ev.ask_id] = ev.session_id end
-  if open then compute() redraw() end
-end)
-bone.on("ask/resolved", function(ev)
-  waiting[ev.ask_id] = nil
-  if open then compute() redraw() end
 end)
 
 return M

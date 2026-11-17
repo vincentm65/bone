@@ -371,8 +371,24 @@ function M.header(session, width)
     padding = { 0, 16, 0, sidebar.is_open() and 20 or 12 },
   }
   if not sidebar.is_open() then
-    bar[#bar + 1] = widgets.icon_button("sidebar", "Chats (ctrl+o)", function() sidebar.open() end,
-      { box = 28, size = 16, hl = muted, radius = style.radius.md, id = "header-sidebar" })
+    -- Another chat needs you (a question for you, or a reply you have not
+    -- seen): a dot on the button, which the sidebar's rows then explain.
+    local other = require("bone.chats").elsewhere()
+    local state = (other.waiting > 0 and "waiting") or (other.unread > 0 and "unread") or nil
+    local tip = "Chats (ctrl+o)"
+    if state then
+      local parts = {}
+      if other.waiting > 0 then parts[#parts + 1] = other.waiting .. (other.waiting == 1 and " waits" or " wait") .. " for you" end
+      if other.unread > 0 then parts[#parts + 1] = other.unread .. " new" end
+      tip = tip .. " · " .. table.concat(parts, ", ")
+    end
+    bar[#bar + 1] = {
+      shrink = 0,
+      widgets.icon_button("sidebar", tip, function() sidebar.open() end,
+        { box = 28, size = 16, hl = muted, radius = style.radius.md, id = "header-sidebar" }),
+      state and { position = "absolute", right = 3, top = 3, width = 6, height = 6, id = "header-attention",
+        widgets.status_dot(state, { size = 6, tooltip = false }) } or nil,
+    }
   end
   bar[#bar + 1] = { text = title or "New chat", size = style.size.body, medium = title ~= nil,
     hl = title and "Normal" or muted, wrap = false, text_overflow = "ellipsis", shrink = 1 }
@@ -656,6 +672,10 @@ function M.setup(opts)
     bone.prompt.attach(path)
   end, { desc = "add files (a dialog), or attach an image by path" })
   bone.on("submit", function() bone.gui.scroll("chat", "end") end)
+  -- What other chats need from you shows on the header and in the composer.
+  require("bone.chats").watch(function(kind)
+    if kind == "attention" then bone.gui.invalidate() end
+  end)
   -- Files dropped on the window: images attach, other paths go in the message.
   bone.on("drop", function(ev) require("bone.desktop.attach").add(ev.paths or {}) end)
   -- An answer that finishes while the window is away: a notification.
@@ -666,6 +686,17 @@ function M.setup(opts)
     if status == "cancelled" then return end
     local title = status == "failed" and "bone: the turn failed" or "bone finished"
     bone.gui.notify(title, status == "failed" and ev.outcome.message or (s.title or ""))
+  end)
+  -- A question that comes while the window is away: a notification too.
+  -- Whatever asked (an approval, ask_user, a plugin), it waits for you.
+  bone.on("ask/requested", function(ev)
+    if bone.gui.window_info().focused then return end
+    local chat = ev.session_id and require("bone.agents").top(ev.session_id)
+    local title
+    for _, s in ipairs(bone.chat.sessions()) do
+      if chat and s.session_id == chat then title = s.title end
+    end
+    bone.gui.notify("bone is waiting for you", title or "")
   end)
   bone.gui.view(M.view)
 end

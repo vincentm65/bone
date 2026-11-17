@@ -453,3 +453,121 @@ async fn standard_agents_spend_is_separate_and_scoped_to_root() {
         "assert(totals > 0, 'statusline must query its own total')",
     );
 }
+
+/// What waits for you knows no tool: any `bone.ask` (here of a kind no
+/// plugin draws) puts "waiting for you" on its chat's statusline in place of
+/// "thinking", and another chat's question or finished turn is counted
+/// there until it is answered or seen. The sessions sidebar marks them.
+#[tokio::test]
+async fn standard_ui_shows_what_waits_for_you() {
+    let mut h = Harness::new().await;
+    h.input("go{enter}").await;
+    h.emit::<TurnStarted>(started("s-new", "go")).await;
+    let current = text(
+        &mut h,
+        "return tostring((bone.chat.session() or {}).session_id)",
+    );
+    assert_eq!(current, "s-new");
+    let ask = |id: u64, session: &str| AskRequestedParams {
+        ask_id: id,
+        session_id: Some(session.into()),
+        question: json!({ "kind": "some_plugin_prompt", "text": "?" }),
+    };
+    let line = statusline(&mut h, "s-new");
+    assert!(!line.contains("waiting"), "{line}");
+
+    h.emit::<AskRequested>(ask(1, "s-new")).await;
+    let line = statusline(&mut h, "s-new");
+    assert!(line.contains("● waiting for you"), "{line}");
+    assert!(!line.contains("chat waits"), "{line}");
+
+    h.emit::<AskRequested>(ask(2, "s-other")).await;
+    let line = statusline(&mut h, "s-new");
+    assert!(line.contains("● 1 chat waits"), "{line}");
+    assert_eq!(
+        text(
+            &mut h,
+            "local c = require('bone.chats'); return c.state('s-other') .. ' ' .. c.state('s-new')"
+        ),
+        "waiting waiting"
+    );
+
+    // Answered (by any client, or dropped with its turn): gone.
+    for ask_id in [1, 2] {
+        h.emit::<AskResolved>(AskResolvedParams {
+            ask_id,
+            answer: Value::Null,
+        })
+        .await;
+    }
+    let line = statusline(&mut h, "s-new");
+    assert!(
+        !line.contains("waiting") && !line.contains("waits"),
+        "{line}"
+    );
+
+    // A turn that ends in another chat is new until that chat is seen; one
+    // that ends in the chat on screen is not.
+    h.emit::<TurnFinished>(finished("s-other", TurnOutcome::Completed))
+        .await;
+    h.emit::<TurnFinished>(finished("s-new", TurnOutcome::Completed))
+        .await;
+    let line = statusline(&mut h, "s-new");
+    assert!(line.contains("● 1 new"), "{line}");
+    assert_eq!(
+        text(
+            &mut h,
+            "local c = require('bone.chats'); return tostring(c.state('s-other')) .. ' ' .. tostring(c.state('s-new'))"
+        ),
+        "unread nil"
+    );
+    exec(&mut h, "require('bone.chats').seen('s-other')");
+    let line = statusline(&mut h, "s-new");
+    assert!(!line.contains("new"), "{line}");
+
+    // The sidebar's rows: a dot before the title, which blinks while the
+    // chat waits (its color comes and goes), and stays for a reply not seen.
+    h.input("{ctrl+o}").await;
+    let screen = h.screen(100, 30);
+    assert!(screen.contains("   second"), "{screen}");
+    h.emit::<AskRequested>(ask(3, "s-two")).await;
+    let screen = h.screen(100, 30);
+    assert!(screen.contains(" ● second"), "{screen}");
+    // A whole beat (1200 ms) in, then 900 ms on: lit, then off.
+    exec(
+        &mut h,
+        "TEST_NOW = 1200 * 1000000; bone.now = function() return TEST_NOW end",
+    );
+    // The dot's color on the row of `title`.
+    let dot = |h: &mut Harness, title: &str| {
+        let (w, rows) = (100u16, 30u16);
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(w, rows)).unwrap();
+        term.draw(|f| crate::render::draw(f, &mut h.app)).unwrap();
+        let buf = term.backend().buffer().clone();
+        (0..rows)
+            .find_map(|y| {
+                let row: String = (0..w).map(|x| buf[(x, y)].symbol().to_owned()).collect();
+                let at = row.find(&format!("● {title}"))?;
+                let x = row[..at].chars().count() as u16;
+                Some(buf[(x, y)].fg)
+            })
+            .expect("a dot before the title")
+    };
+    let lit = dot(&mut h, "second");
+    exec(&mut h, "TEST_NOW = TEST_NOW + 900");
+    let dim = dot(&mut h, "second");
+    // The waiting color (the theme's warning one by default), then dim.
+    let warn = text(&mut h, "return bone.hl.get('WarningMsg').fg");
+    let (r, g, b, _) = bone_ui::theme::parse_hex(&warn).unwrap();
+    assert_eq!(lit, ratatui::style::Color::Rgb(r, g, b), "{warn}");
+    assert_ne!(lit, dim, "the dot blinks");
+    h.emit::<AskResolved>(AskResolvedParams {
+        ask_id: 3,
+        answer: Value::Null,
+    })
+    .await;
+    h.emit::<TurnFinished>(finished("s-two", TurnOutcome::Completed))
+        .await;
+    let screen = h.screen(100, 30);
+    assert!(screen.contains(" ● second"), "{screen}");
+}

@@ -125,7 +125,18 @@ local function toolbar(opts, running, empty)
     }), function() require("bone.config").open("providers") end)
   end
   local elapsed = statusbar.elapsed(session)
-  if running then
+  -- A question open in this chat (any bone.ask: an approval, ask_user, a
+  -- plugin's) holds the turn: it waits for you, not for the model.
+  local waiting = id and require("bone.chats").waiting(id)
+  if waiting then
+    bar[#bar + 1] = {
+      direction = "row", gap = 6, align = "center", margin = { 0, 0, 0, 4 }, shrink = 1,
+      { width = 18, height = 18, justify = "center", align = "center", shrink = 0,
+        widgets.status_dot("waiting", { size = 7, tooltip = false }) },
+      { text = "Waiting for you", hl = "SessionWaiting", size = style.size.small, wrap = false,
+        text_overflow = "ellipsis", shrink = 1 },
+    }
+  elseif running then
     bar[#bar + 1] = {
       direction = "row", gap = 6, align = "center", margin = { 0, 0, 0, 4 }, shrink = 1,
       widgets.spinner(18),

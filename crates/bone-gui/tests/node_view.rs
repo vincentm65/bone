@@ -1691,3 +1691,145 @@ async fn the_prompt_caret_blinks() {
     g.frame();
     assert!(caret_lit(&g), "the caret does not come back with the focus");
 }
+
+/// What waits for you knows no tool: any question from the core (here of a
+/// kind no plugin draws) in another chat puts a dot on the header's chats
+/// button, and in its own chat the composer says "Waiting for you" where it
+/// said "Working". A turn that ends in another chat is a dot too, until
+/// that chat is seen.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_chat_waiting_for_you_shows_whatever_asked() {
+    let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let mut g = gui(config.path(), work.path()).await;
+    for _ in 0..3 {
+        g.frame();
+    }
+    let has = |g: &mut bone_gui::Headless, id: &str| {
+        g.gui
+            .eval(&format!("tostring(bone.gui.rect('{id}') ~= nil)"))
+            .unwrap()
+            == "true"
+    };
+    assert!(has(&mut g, "header-sidebar"), "the header is drawn");
+    assert!(!has(&mut g, "header-attention"));
+
+    let event = |method: &str, params: serde_json::Value| bone_proto::client::Event {
+        method: method.into(),
+        params: Some(params),
+    };
+    g.gui.handle_event(&event(
+        "ask/requested",
+        serde_json::json!({ "ask_id": 41, "session_id": "s-other",
+            "question": { "kind": "some_plugin_prompt", "text": "Pick one" } }),
+    ));
+    for _ in 0..3 {
+        g.frame();
+    }
+    assert!(has(&mut g, "header-attention"), "a dot on the chats button");
+    assert_eq!(
+        g.gui
+            .eval("require('bone.chats').state('s-other')")
+            .unwrap(),
+        "waiting"
+    );
+    // The waiting dot pulses: its ring grows and fades over a beat, its
+    // fill changes, every color a valid #rrggbbaa.
+    g.gui
+        .run_lua(
+            "t",
+            r#"
+        local widgets = require("bone.nodes.widgets")
+        local node = widgets.status_dot("waiting")
+        local function ops(t)
+          local out = node.canvas.draw({ time = t, width = node.width, height = node.height })
+          assert(#out == 2, "a ring and a dot")
+          for _, op in ipairs(out) do
+            local c = op.fill or op.stroke
+            assert(type(c) == "string" and c:match("^#%x%x%x%x%x%x%x%x$"), tostring(c))
+          end
+          return out
+        end
+        local a, b = ops(0.1), ops(0.8)
+        assert(a[1].r < b[1].r, "the ring grows")
+        assert(a[2].fill ~= b[2].fill, "the dot pulses")
+        assert(node.width > 6 and node.margin[1] < 0, "room for the ring, given back")
+        assert(#widgets.status_dot("unread").canvas.draw({ time = 0 }) == 1)
+        assert(widgets.status_dot(nil) == nil)
+      "#,
+        )
+        .unwrap();
+
+    // In its own chat, the composer says so instead of "Working".
+    g.gui
+        .run_lua(
+            "t",
+            r#"
+        local composer = require("bone.nodes.composer")
+        normal_view = bone.gui.view
+        bone.gui.view(function(ctx)
+          return { width = ctx.width, direction = "column",
+            composer.node({ session = { session_id = "s-other", running = true }, width = ctx.width }) }
+        end)
+      "#,
+        )
+        .unwrap();
+    for _ in 0..3 {
+        g.frame();
+    }
+    let painted = |g: &bone_gui::Headless, s: &str| g.painted.iter().any(|(t, _)| t.contains(s));
+    assert!(painted(&g, "Waiting for you"), "{:?}", g.painted);
+    assert!(!painted(&g, "Working"), "{:?}", g.painted);
+
+    // Answered: back to "Working", and the dot goes.
+    g.gui
+        .handle_event(&event("ask/resolved", serde_json::json!({ "ask_id": 41 })));
+    for _ in 0..3 {
+        g.frame();
+    }
+    assert!(
+        painted(&g, "Working") && !painted(&g, "Waiting for you"),
+        "{:?}",
+        g.painted
+    );
+    assert_eq!(
+        g.gui
+            .eval("tostring(require('bone.chats').state('s-other'))")
+            .unwrap(),
+        "nil"
+    );
+
+    // A turn that ends in another chat: new to you until it is seen.
+    g.gui
+        .run_lua("t", "bone.gui.view(require('bone.nodes.window').view)")
+        .unwrap();
+    g.gui.handle_event(&event(
+        "turn/finished",
+        serde_json::json!({ "session_id": "s-other", "turn_id": 1, "outcome": { "status": "completed" } }),
+    ));
+    for _ in 0..3 {
+        g.frame();
+    }
+    assert_eq!(
+        g.gui
+            .eval("tostring(require('bone.chats').state('s-other'))")
+            .unwrap(),
+        "unread"
+    );
+    assert!(has(&mut g, "header-attention"));
+    g.gui
+        .run_lua("t", "require('bone.chats').seen('s-other')")
+        .unwrap();
+    for _ in 0..3 {
+        g.frame();
+    }
+    assert!(!has(&mut g, "header-attention"));
+
+    // The sidebar draws the same states, and opens with them.
+    g.gui
+        .run_lua("t", "require('bone.desktop.sidebar').open()")
+        .unwrap();
+    for _ in 0..3 {
+        g.frame();
+    }
+    assert!(has(&mut g, "sessions-list"));
+}

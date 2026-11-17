@@ -3,12 +3,25 @@
 -- way (runtime/lua/bone/ui/sessions.lua for the TUI). It tracks which
 -- sessions run (turn events), when each was last touched, which are
 -- archived, the background shells, and fetches the session list and usage.
+-- It also knows what each chat needs from you (M.state): a question open in
+-- it, or a turn that ended while you were elsewhere.
 -- Views subscribe with M.watch(fn); fn(kind, ev) runs after each change:
--- "turn" (ev.running), "created", "updated", "deleted", "shells".
+-- "turn" (ev.running), "created", "updated", "deleted", "shells", "attention".
 local M = {}
 
 local agents = require("bone.agents")
 M.live, M.touched, M.versions, M.shells = {}, {}, {}, {}
+-- Questions waiting for an answer: ask id -> the chat it is in (false: none).
+-- Any core-side `bone.ask` counts (a tool's approval, ask_user, a plugin's
+-- own prompt): what asked is never looked at.
+M.asks = {}
+-- Chats whose turn ended while another chat was on screen.
+M.unread = {}
+
+-- Their colors, for a colorscheme without its own (graphite has them).
+bone.hl.set("SessionWaiting", { link = "WarningMsg", default = true })
+bone.hl.set("SessionUnread", { link = "Accent", default = true })
+bone.hl.set("SessionRunning", { link = "ToolRunning", default = true })
 M.archived = bone.state.load("sessions-archived")
 local watchers = {}
 
@@ -222,6 +235,98 @@ function M.stop(j)
   end
 end
 
+-- ---- what a chat needs from you ---------------------------------------------
+
+local function on_screen()
+  return (bone.chat.session() or {}).session_id
+end
+
+--- Whether chat `id` (or one of its agents) has a question waiting for you.
+--- Without `id`: whether any chat does.
+function M.waiting(id)
+  for _, chat in pairs(M.asks) do
+    if id == nil or chat == id then return true end
+  end
+  return false
+end
+
+--- What chat `id` needs from you, the most pressing first: "waiting" (a
+--- question is open in it), "running", "unread" (it finished while you were
+--- in another chat), or nil.
+function M.state(id)
+  if not id then return nil end
+  if M.waiting(id) then return "waiting" end
+  if M.live[id] then return "running" end
+  if M.unread[id] and id ~= on_screen() then return "unread" end
+  return nil
+end
+
+--- The chats other than the one on screen that need you: { waiting = n,
+--- unread = n } (a chat counts once, as waiting if it is both).
+function M.elsewhere()
+  local current, seen, out = on_screen(), {}, { waiting = 0, unread = 0 }
+  for _, chat in pairs(M.asks) do
+    if chat and chat ~= current and not seen[chat] then
+      seen[chat] = true
+      out.waiting = out.waiting + 1
+    end
+  end
+  for id in pairs(M.unread) do
+    if id ~= current and not seen[id] and not M.live[id] then out.unread = out.unread + 1 end
+  end
+  return out
+end
+
+--- Chat `id` has been looked at: it is no longer new.
+function M.seen(id)
+  if id and M.unread[id] then
+    M.unread[id] = nil
+    changed("attention", { session_id = id })
+  end
+end
+
+-- A question from a sub-agent belongs to the chat that started it.
+local function chat_of(ev)
+  return ev.session_id and agents.top(ev.session_id) or false
+end
+
+-- ask/list's answer can cross events: a question answered while it was on
+-- its way is not brought back, and one asked meanwhile is kept.
+local answered, fresh = {}, {}
+
+-- What waits now, from the core: on load, and after a reconnect (whose
+-- questions may have been answered or dropped while this one was away).
+local function fetch_asks()
+  answered, fresh = {}, {}
+  bone.request("ask/list", {}, function(list, err)
+    if err then return end
+    local asks = {}
+    for _, ev in ipairs(list or {}) do
+      if type(ev) == "table" and ev.ask_id ~= nil and not answered[ev.ask_id] then
+        asks[ev.ask_id] = chat_of(ev)
+      end
+    end
+    for ask_id in pairs(fresh) do asks[ask_id] = M.asks[ask_id] end
+    M.asks = asks
+    changed("attention", {})
+  end)
+end
+
+bone.on("ask/requested", function(ev)
+  if type(ev) ~= "table" or ev.ask_id == nil or answered[ev.ask_id] then return end
+  M.asks[ev.ask_id], fresh[ev.ask_id] = chat_of(ev), true
+  changed("attention", ev)
+end)
+bone.on("ask/resolved", function(ev)
+  if type(ev) ~= "table" or ev.ask_id == nil then return end
+  answered[ev.ask_id], fresh[ev.ask_id] = true, nil
+  M.asks[ev.ask_id] = nil
+  changed("attention", ev)
+end)
+bone.on("server/reconnected", fetch_asks)
+bone.on("chat/shown", function(ev) M.seen(ev and ev.session_id) end)
+fetch_asks()
+
 local function turn_changed(ev, running)
   local id = ev.session_id
   if not id then return end
@@ -231,6 +336,9 @@ local function turn_changed(ev, running)
     M.archived[id] = nil
     bone.state.save("sessions-archived", M.archived)
   end
+  -- A turn that ends in a chat you are not looking at is new to you (an
+  -- agent's ends in its own chat, which you did not start).
+  if not running and id ~= on_screen() and not agents.get(id) then M.unread[id] = true end
   changed("turn", { session_id = id, running = running })
 end
 bone.on("turn/started", function(ev) turn_changed(ev, true) end)
@@ -251,6 +359,10 @@ end)
 bone.on("session/updated", function(ev) changed("updated", ev) end)
 bone.on("session/deleted", function(ev)
   M.live[ev.session_id], M.touched[ev.session_id] = nil, nil
+  M.unread[ev.session_id] = nil
+  for ask_id, chat in pairs(M.asks) do
+    if chat == ev.session_id then M.asks[ask_id] = nil end
+  end
   for id, proc in pairs(M.shells) do
     if proc.session_id == ev.session_id then M.shells[id] = nil end
   end

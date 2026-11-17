@@ -79,6 +79,7 @@ replaces one.
 | Statusline / status bar | `lua/bone/ui/statusline.lua` | `lua/bone/nodes/statusbar.lua` |
 | Prompt / composer | `lua/bone/ui/layout.lua` | `lua/bone/nodes/composer.lua` |
 | Sessions list | `lua/bone/ui/sessions.lua` | `lua/bone/desktop/sidebar.lua` |
+| What a chat needs from you (a question open, a reply not seen), as data | `lua/bone/chats.lua` | same; drawn by `widgets.status_dot` in `lua/bone/nodes/widgets.lua` |
 | Queue, sub-agents, jobs under the prompt | `lua/bone/ui/tray.lua` | `lua/bone/desktop/tray.lua` |
 | Sizes, corners, spacing | — | `lua/bone/nodes/style.lua` |
 | Colors | `colors/black.lua`, `colors/ansi.lua` | `colors/graphite.lua` |

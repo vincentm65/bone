@@ -4,7 +4,6 @@
 local M = {}
 local panel, state
 local chats = require("bone.chats")
-local live = chats.live
 local empty_row = {}
 local recent_window, recent_label = chats.recent_window, chats.recent_label
 local count, timestamp = chats.count, chats.timestamp
@@ -23,6 +22,14 @@ local function setup_colors()
   bone.hl.set("SessionTab", { link = "Normal", bg = background, bold = true })
   bone.hl.set("SessionTabLine", { link = "Accent", bg = background })
   bone.hl.set("SessionCount", { link = "WarningMsg", bg = background })
+  -- A chat's dot (bone.chats.state), on the panel and on a selected card.
+  local function dot(name, link)
+    bone.hl.set(name, { link = link, bg = background, bold = true })
+    bone.hl.set(name .. "Selected", { link = link, bg = selection.bg, bold = true })
+  end
+  dot("SessionDotWaiting", "SessionWaiting")
+  dot("SessionDotUnread", "SessionUnread")
+  dot("SessionDotOff", "Dim")
 end
 
 function M.archive_current(id)
@@ -190,11 +197,19 @@ local function render(ctx)
     text = bone.text.truncate(text:gsub("(%S)%s+", "%1 "), ctx.width)
     return { { text .. string.rep(" ", math.max(0, ctx.width - bone.text.width(text))), hl } }
   end
-  local function card(text, style)
-    local width = math.max(0, ctx.width - 4)
+  -- `mark`: a span before the text, in its own color.
+  local function card(text, style, mark)
+    local width = math.max(0, ctx.width - 4 - (mark and bone.text.width(mark[1]) or 0))
     text = bone.text.truncate(text:gsub("%s+", " "), width)
-    return { { "  ", "Normal" }, { text .. string.rep(" ", math.max(0, width - bone.text.width(text))), style }, { "  ", "Normal" } }
+    local out = { { "  ", "Normal" } }
+    out[#out + 1] = mark
+    out[#out + 1] = { text .. string.rep(" ", math.max(0, width - bone.text.width(text))), style }
+    out[#out + 1] = { "  ", "Normal" }
+    return out
   end
+  -- A waiting chat's dot blinks: on for 700 ms, off for 500.
+  local blink_on = bone.now() % 1200 < 700
+  local blinking = false
   -- Rust needs the full dense list for scrolling, but only viewport rows need text.
   local out = state.rows
   for _, line in ipairs(state.visible_rows) do out[line] = empty_row end
@@ -248,9 +263,22 @@ local function render(ctx)
       local s = state.items[index]
       local active = index == state.selected and ctx.focused
       if kind == "title" then
-        local marker = live[s.session_id] and (" " .. ctx.spinner .. " ")
-          or (s.session_id == current and " ● " or "   ")
-        formatted = card(marker .. (s.title or "[untitled]"), active and "SessionCardTitle" or "Normal")
+        -- What the chat needs from you (bone.chats.state): a question
+        -- waiting, running, a reply you have not seen; else whether it is
+        -- the one on screen.
+        local need, hl = chats.state(s.session_id), active and "SessionCardTitle" or "Normal"
+        local sel = active and "Selected" or ""
+        if need == "waiting" then
+          blinking = true
+          formatted = card(s.title or "[untitled]", hl,
+            { " ● ", (blink_on and "SessionDotWaiting" or "SessionDotOff") .. sel })
+        elseif need == "running" then
+          formatted = card(" " .. ctx.spinner .. " " .. (s.title or "[untitled]"), hl)
+        elseif need == "unread" then
+          formatted = card(s.title or "[untitled]", hl, { " ● ", "SessionDotUnread" .. sel })
+        else
+          formatted = card((s.session_id == current and " ● " or "   ") .. (s.title or "[untitled]"), hl)
+        end
       else
         local meta = state.stats[s.session_id]
         local totals = meta and (count(meta.tokens) .. " tokens · " .. count(meta.turns) .. " turns")
@@ -268,6 +296,10 @@ local function render(ctx)
   -- Animate runs, or refresh idle timestamps and age-based grouping each minute.
   if bone.ui.refresh_in then
     bone.ui.refresh_in(state.running and ((bone.ui.spinner and bone.ui.spinner.interval) or 120) or (60 - os.time() % 60) * 1000)
+    if blinking then
+      local t = bone.now() % 1200
+      bone.ui.refresh_in(t < 700 and 700 - t or 1200 - t)
+    end
   end
   -- Fill unused viewport rows without adding padding to the scrollable content.
   if #out < ctx.height then
@@ -356,6 +388,8 @@ chats.watch(function(kind, ev)
   local open = panel and panel:is_open()
   if kind == "archived" then
     if state then state.filter_dirty = true end
+  elseif kind == "attention" then
+    return -- the dots: drawn again on the next frame, with nothing to fetch
   elseif kind == "turn" then
     if open then
       filter()
