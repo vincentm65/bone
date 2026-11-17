@@ -546,7 +546,8 @@ end
 ---       kind: "user", "reasoning", "assistant", "tool", "notice".
 ---       ctx = { width, region, prev = { kind } }. Return nil to hide.
 ---   bone.ui.tool_views[name] = function(item, ctx) return { title, lines } end
----       the content of one tool's calls; views.tool frames it.
+---       the content of one tool's calls; views.tool frames it. Called
+---       with ctx.summary, it may return { summary = "phrase" } for summary lines.
 ---   bone.ui.regions[name] = { size = n | "auto", max = n, render = function(ctx) return lines end }
 ---       name: "top", "above_prompt" (rows), "left", "right" (columns).
 ---   bone.ui.statusline(ctx), bone.ui.divider(ctx): one row each, only

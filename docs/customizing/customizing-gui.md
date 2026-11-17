@@ -369,7 +369,8 @@ bone.chat.add("build", { text = "building…" })
 
 `bone.ui.tool_views[name]` works as in the TUI: the standard tool card
 draws its `title` in the window's font and its `lines` in monospace under
-it, or a `node` it returns as it is.
+it, or a `node` it returns as it is. Its `summary` phrase (when called with
+`ctx.summary`) names the call in summary lines, as in the TUI.
 
 `bone.chat.scroll`, `scroll_to` and `view` move and read the chat list.
 

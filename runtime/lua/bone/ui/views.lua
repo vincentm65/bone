@@ -704,9 +704,22 @@ local function arg(t, key)
   return type(v) == "string" and v or nil
 end
 
+-- The phrase a tool view gives a call for summary lines ("loaded the money
+-- skill"): called with ctx.summary, it may return { summary = "..." }.
+local function own_phrase(t, width)
+  local view = bone.ui.tool_views[t.name]
+  if not view then
+    return nil
+  end
+  local ok, content = pcall(view, t, { summary = true, region = "chat", width = width })
+  local s = ok and type(content) == "table" and content.summary or nil
+  return type(s) == "string" and s ~= "" and s or nil
+end
+
 -- What a run of calls did, in the order first seen: "read 3 files",
--- "ran 2 shell commands", "wrote 1 file", "called web_search 2 times".
-local function summary(calls)
+-- "ran 2 shell commands", "wrote 1 file", "called web_search 2 times", or
+-- a tool view's own phrase.
+local function summary(calls, width)
   local order, seen = {}, {}
   local function bump(key, phrase, unique)
     local s = seen[key]
@@ -725,7 +738,10 @@ local function summary(calls)
     end
   end
   for _, t in ipairs(calls) do
-    if t.name == "read_file" then
+    local own = own_phrase(t, width)
+    if own then
+      bump("own:" .. own, function(n) return own .. (n > 1 and " " .. n .. " times" or "") end)
+    elseif t.name == "read_file" then
       bump("read", function(n) return "read " .. plural(n, "file") end, arg(t, "path") or t.id)
     elseif t.name == "write_file" then
       bump("write", function(n) return "wrote " .. plural(n, "file") end, arg(t, "path") or t.id)
@@ -816,7 +832,7 @@ local function summary_view(item, ctx)
     running = running or not t.done
   end
   local out = starts("tool", ctx)
-  append(out, wrap({ { typed(tool_key(item), summary(stretch), running), "ToolArgs" } }, ctx.width, {
+  append(out, wrap({ { typed(tool_key(item), summary(stretch, ctx.width), running), "ToolArgs" } }, ctx.width, {
     first = running and { { "  " .. running_mark(item) .. " ", "ToolRunning" } } or { { "    ", "Normal" } },
     rest = { { "    ", "Normal" } },
   }))

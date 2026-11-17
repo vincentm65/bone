@@ -543,9 +543,20 @@ local function foldable(t)
   return t.name ~= "edit_file" and t.name ~= "subagent"
 end
 
+-- The phrase a tool view gives a call for summary lines ("loaded the money
+-- skill"): called with ctx.summary, it may return { summary = "..." }.
+local function own_phrase(t, width)
+  local view = bone.ui.tool_views[t.name]
+  if not view then return nil end
+  local ok, content = pcall(view, t, { summary = true, region = "chat", width = width })
+  local s = ok and type(content) == "table" and content.summary or nil
+  return type(s) == "string" and s ~= "" and s or nil
+end
+
 -- What a run of calls did, in the order first seen: "Read 3 files, ran 2
--- shell commands, called web_search 2 times"; and how many of them failed.
-local function summary(calls)
+-- shell commands, called web_search 2 times", or a tool view's own phrase;
+-- and how many of them failed.
+local function summary(calls, width)
   local order, seen = {}, {}
   local function bump(key, phrase, unique)
     local s = seen[key]
@@ -565,7 +576,10 @@ local function summary(calls)
   end
   for _, t in ipairs(calls) do
     local path = args_of(t).path
-    if t.name == "read_file" then
+    local own = own_phrase(t, width)
+    if own then
+      bump("own:" .. own, function(n) return own .. (n > 1 and " " .. n .. " times" or "") end)
+    elseif t.name == "read_file" then
       bump("read", function(n) return "read " .. plural(n, "file") end, type(path) == "string" and path or t.id)
     elseif t.name == "write_file" then
       bump("write", function(n) return "wrote " .. plural(n, "file") end, type(path) == "string" and path or t.id)
@@ -607,7 +621,7 @@ local function summary_nodes(item, width)
     running = running or not t.done
     ms = ms + (t.duration_ms or 0)
   end
-  local did, failed = summary(stretch)
+  local did, failed = summary(stretch, width)
   local open = toggled[run_key(item)]
   -- The state, what the run did, how long it took, and a chevron that
   -- says it opens.

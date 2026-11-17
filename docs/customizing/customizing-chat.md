@@ -54,7 +54,9 @@ draws one item again and `bone.chat.redraw()` all of them;
 `bone.ui.tool_views[name](item, ctx)` can supply the content for one tool as
 `{ title = line, lines = { line, ... } }` (`title` may also be a list of
 lines; `lines` sit indented under it). Return `nil` for the built-in content
-(`bone.ui.tool_content`).
+(`bone.ui.tool_content`). Called with `ctx.summary`, a view may return
+`{ summary = "loaded the money skill" }`: summary lines use that phrase for
+the call in place of `called name` (the same phrase twice reads `… 2 times`).
 
 ```lua
 -- a compact one-line summary for a specific tool
