@@ -4,7 +4,7 @@
 -- (bone.nodes.window places `M.node()`). A search field with the project
 -- and new-chat buttons beside it, Chats and Processes, then your
 -- conversations in the TUI's sections (bone.chats.section): Pinned, Pending
--- review (finished within the last hour, or a question waiting), Running,
+-- (finished within the last hour, or a question waiting), Running,
 -- then Archived, which is split by date (Today, Yesterday, This week,
 -- Earlier). One line each (title and when; model and tokens in its
 -- tooltip) with a dot for what it needs from you (bone.chats.state: a
@@ -535,7 +535,7 @@ end
 function M.content()
   local jobs = chats.jobs()
   if st.page == "running" and #jobs > 0 then bone.gui.invalidate(1000) end
-  -- Pending review ages: a chat is archived when the window passes, and
+  -- Active ages: a chat is archived when the window passes, and
   -- the window itself can change (bone.ui.sessions_archive_after), so the
   -- rows are made again each minute and when it changes (as in the TUI).
   -- That also picks up pins and archives made in the other frontend.

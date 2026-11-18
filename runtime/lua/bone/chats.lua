@@ -119,7 +119,7 @@ function M.activity(s, stats)
 end
 
 --- Archive session `id` (default: the one on screen): it leaves
---- Pending review until it runs again.
+--- Active until it runs again.
 function M.archive(id)
   id = id or (bone.chat.session() or {}).session_id
   if not id then return end
@@ -141,11 +141,11 @@ function M.toggle_pin(id)
 end
 
 -- The sections of the list, in order.
-M.sections = { "Pinned", "Pending review", "Running", "Archived" }
+M.sections = { "Pinned", "Active", "Running", "Archived" }
 
 --- Which section chat `id` belongs in (an index into M.sections), with
 --- `at` its last activity: pinned; a question waiting for you, or finished
---- within M.recent_window() and not archived (Pending review); a turn
+--- within M.recent_window() and not archived (Active); a turn
 --- running; or the rest (Archived).
 function M.section(id, at)
   if M.pinned[id] then return 1 end

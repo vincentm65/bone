@@ -377,7 +377,7 @@ it, or a `node` it returns as it is. Its `summary` phrase (when called with
 ### The sessions sidebar
 
 `ctrl+o` (or `/sessions`) opens the conversations sidebar: a card beside the
-chat with your conversations in the TUI's sections — Pinned, Pending review
+chat with your conversations in the TUI's sections — Pinned, Active
 (finished within the last hour, or a question waiting for you), Running, then
 Archived, split by date (Today, Yesterday, This week, Earlier). How long a
 finished chat waits for review before it is archived is

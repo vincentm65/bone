@@ -689,7 +689,7 @@ async fn session_sidebar_groups_live_and_recent_chats() {
         .await;
     let screen = h.screen(80, 24);
     assert!(
-        !screen.contains("Running ·") && screen.contains("Pending review · 1"),
+        !screen.contains("Running ·") && screen.contains("Active · 1"),
         "{screen}"
     );
     // How long a finished chat waits for review applies at once (s-two
@@ -697,7 +697,7 @@ async fn session_sidebar_groups_live_and_recent_chats() {
     h.lua("bone.ui.sessions_archive_after = 1e10").await;
     let screen = h.screen(80, 24);
     assert!(
-        screen.contains("Pending review · 2") && !screen.contains("Archived"),
+        screen.contains("Active · 2") && !screen.contains("Archived"),
         "{screen}"
     );
     h.lua("bone.ui.sessions_archive_after = nil").await;
@@ -725,7 +725,7 @@ async fn session_sidebar_groups_live_and_recent_chats() {
     );
     let screen = h.screen(80, 24);
     assert!(
-        screen.contains("Pending review · 1") && screen.contains("Running · 1"),
+        screen.contains("Active · 1") && screen.contains("Running · 1"),
         "{screen}"
     );
 }
