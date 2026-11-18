@@ -48,10 +48,11 @@ const MAX_RETRIES: u32 = 5;
 const STREAM_BATCH: Duration = Duration::from_millis(50);
 
 /// A model call as the hooks left it (`Agent::request`): messages, tools,
-/// and the provider and model a request hook asked for.
+/// and the provider, model and reasoning effort a request hook asked for.
 type Request = (
     Vec<ChatMessage>,
     Vec<ToolSpec>,
+    Option<String>,
     Option<String>,
     Option<String>,
 );
@@ -219,7 +220,9 @@ impl Turn<'_> {
         let mut messages = vec![system.clone()];
         messages.extend(self.session.lock().unwrap().context());
         let prefix = match self.request(messages).await {
-            Ok((messages, tools, None, None)) => Some(crate::compact::Prefix { messages, tools }),
+            Ok((messages, tools, None, None, _)) => {
+                Some(crate::compact::Prefix { messages, tools })
+            }
             Err(Stop::Cancelled) => return Err(Stop::Cancelled),
             _ => None,
         };
@@ -244,8 +247,7 @@ impl Turn<'_> {
                 tools.push(t);
             }
         }
-        let mut provider = None;
-        let mut model = None;
+        let (mut provider, mut model, mut effort) = (None, None, None);
         let ev = self.has_hook("request").then(|| {
             json!({
                 "session_id": self.session_id,
@@ -258,6 +260,7 @@ impl Turn<'_> {
         {
             provider = ev["provider"].as_str().map(str::to_owned);
             model = ev["model"].as_str().map(str::to_owned);
+            effort = ev["reasoning_effort"].as_str().map(str::to_owned);
             messages = messages_from_lua(&ev["messages"], &messages)
                 .map_err(|e| Stop::Failed(format!("request hook returned bad messages: {e}")))?;
             tools = serde_json::from_value(list(&ev["tools"]))
@@ -270,7 +273,7 @@ impl Turn<'_> {
         for t in &mut tools {
             sort_keys(&mut t.parameters);
         }
-        Ok((messages, tools, provider, model))
+        Ok((messages, tools, provider, model, effort))
     }
 
     /// Compact the session between model calls (see `compact.rs`); whether
@@ -409,7 +412,7 @@ impl Turn<'_> {
                 all.extend(self.session.lock().unwrap().context());
                 all
             });
-            let (messages, tools, use_provider, use_model) = self.request(messages).await?;
+            let (messages, tools, use_provider, use_model, effort) = self.request(messages).await?;
 
             // Tool definitions count toward the provider's input tokens; left
             // out, a short transcript with many tools looks several times
@@ -426,10 +429,11 @@ impl Turn<'_> {
                 let _ = self.session.lock().unwrap().pin(pin.clone());
                 pin
             });
-            // Request overrides last for this call only. A model alone keeps
-            // the session's pinned entry, not the runtime's current default.
-            let mut provider = if use_provider.is_some() || use_model.is_some() {
-                let options = use_model
+            // Request overrides last for this call only. A model or effort alone
+            // keeps the session's pinned entry, not the runtime's current default.
+            let mut provider = if use_provider.is_some() || use_model.is_some() || effort.is_some()
+            {
+                let mut options = use_model
                     .as_ref()
                     .map(|model| json!({ "model": model }))
                     .unwrap_or(Value::Null);
@@ -437,6 +441,10 @@ impl Turn<'_> {
                     served = self.rt.model_of(Some(name), &options);
                 } else if let Some(model) = use_model {
                     served.1 = model;
+                }
+                // (and an effort alone, the session's model)
+                if let Some(effort) = effort {
+                    options = json!({ "model": served.1, "reasoning_effort": effort });
                 }
                 self.rt
                     .provider_for(served.0.as_deref(), &options)
