@@ -540,7 +540,8 @@ local function card(item, expanded, width)
   elseif name == "subagent" then
     if ok then
       paras = {}
-      for i, n in ipairs(md.nodes(out, "ToolOutput", { size = md.small_size, indent = 12 })) do
+      local opts = { size = md.small_size, indent = 12, redraw = function() bone.chat.redraw(item.index) end }
+      for i, n in ipairs(md.nodes(out, "ToolOutput", opts)) do
         if not expanded and i > AGENT_MAX then break end
         paras[#paras + 1] = n
       end

@@ -160,6 +160,41 @@ function M.icon_button(glyph, label, click, o)
   return style.finish(M.press(extend(node, o), click, "button", false))
 end
 
+-- When each copy button was last pressed, by its key.
+local copied_at = {}
+
+--- How long a copy button shows its check after a press, in milliseconds.
+M.copied_ms = 1500
+
+--- Whether copy button `key` was pressed within `M.copied_ms`.
+function M.copied(key)
+  local at = copied_at[key]
+  if at and bone.now() - at < M.copied_ms then return true end
+  copied_at[key] = nil
+  return false
+end
+
+--- A button that copies `text` (or what a function returns) and says so
+--- where it is: its icon is a check for a moment, no message elsewhere.
+--- `key` tells it from the others; `redraw` draws it again (default: the
+--- window; a chat item passes bone.chat.redraw of its index). o: as
+--- icon_button's, and `label` (default "Copy").
+function M.copy_button(text, key, redraw, o)
+  o = extend({}, o or {})
+  redraw = redraw or function() bone.gui.invalidate() end
+  local label = o.label or "Copy"
+  o.label = nil
+  local done = M.copied(key)
+  -- The check keeps its color under the pointer, which is still on it.
+  if done then o.hl, o.hover = "DiffAdd", { bg = "Selection" } end
+  return M.icon_button(done and "check" or "copy", done and "Copied" or label, function()
+    bone.clipboard.copy(type(text) == "function" and text() or text)
+    copied_at[key] = bone.now()
+    redraw()
+    bone.defer(M.copied_ms + 20, redraw)
+  end, o)
+end
+
 --- An on/off switch: a track with a knob; on, the track is the text's color
 --- and the knob the window's. `click` runs when it is pressed.
 function M.switch(on, click)
