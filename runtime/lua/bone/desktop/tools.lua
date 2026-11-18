@@ -672,11 +672,7 @@ function M.view(item, ctx)
   if mode == "summary" then paras = summary_nodes(item, ctx.width) end
   if paras == nil then return nil end
   local key = paras and run_key(item) or tool_key(item)
-  if paras == false then
-    local expanded = mode == "full"
-    if toggled[tool_key(item)] then expanded = not expanded end
-    paras = card(item, expanded, ctx.width)
-  end
+  if paras == false then paras = card(item, M.expanded(item), ctx.width) end
   local text = timing.footer(item, ctx)
   if text then
     paras[#paras + 1] = md.text({ { text, "Dim" } }, { size = md.small_size, gap = 10 })
@@ -694,6 +690,12 @@ function M.toggle(item, key)
   key = key or tool_key(item)
   toggled[key] = not toggled[key] or nil
   bone.chat.redraw(item.index)
+end
+
+--- Whether a call (or a job's report) shows all of itself: ctrl+t's "full",
+--- turned the other way by a click.
+function M.expanded(item)
+  return (detail() == "full") ~= (toggled[tool_key(item)] or false)
 end
 
 -- ctrl+t: every call one step more (or less) detailed.
