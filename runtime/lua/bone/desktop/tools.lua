@@ -37,6 +37,13 @@ M.labels = {
   web_search = "Searched the web", web_fetch = "Fetched", subagent = "Agent",
 }
 
+--- The same while the call runs.
+M.running_labels = {
+  read_file = "Reading", write_file = "Writing", edit_file = "Editing", shell = "Running",
+  grep = "Searching", rg = "Searching", glob = "Listing", list_files = "Listing",
+  web_search = "Searching the web", web_fetch = "Fetching", subagent = "Agent",
+}
+
 local KEYS = { "path", "file_path", "command", "pattern", "query", "url", "task", "prompt" }
 
 local function args_of(item)
@@ -368,15 +375,40 @@ end
 
 local icons = require("bone.nodes.icons")
 
--- What a call came to as an icon: a check, a cross, or a clock while it runs.
+-- What a call came to as an icon: a check, a cross, or a spinner while it runs.
 local function state_icon(running, failed)
-  if running then return icons.node("clock", { size = 14, hl = "ToolRunning" }) end
+  if running then return widgets.spinner(16) end
   if failed then return icons.node("close", { size = 14, hl = "ToolError" }) end
   return icons.node("check", { size = 14, hl = "ToolDone" })
 end
 
 local function dot(item)
   return lead_slot(state_icon(not item.done, item.is_error))
+end
+
+-- When each running call was first seen, by key. The core sends no start
+-- time, so a call's time so far counts from here (from when the chat
+-- opened, for one already running then).
+local started = {}
+-- The lines that are drawn again in a second, so their time goes on.
+local ticking = {}
+
+-- How long running call `t` has run, in seconds. `line` (the item that
+-- draws it) is drawn again in a second, once however many calls it holds.
+local function running_for(t, line)
+  local key = tool_key(t)
+  started[key] = started[key] or bone.now()
+  local line_key = tool_key(line)
+  if line.index and not ticking[line_key] then
+    ticking[line_key] = true
+    local index = line.index
+    bone.defer(1000, function()
+      ticking[line_key] = nil
+      local now = bone.chat.item(index)
+      if now and tool_key(now) == line_key then bone.chat.redraw(index) end
+    end)
+  end
+  return (bone.now() - started[key]) / 1000
 end
 
 -- A call's line: `lead` (its dot), what it did (`spans`), and `meta` at the
@@ -452,7 +484,7 @@ local function card(item, expanded, width)
   local failed = item.is_error
   local a = args_of(item)
   local name = item.name
-  local label = M.labels[name] or name
+  local label = (not item.done and M.running_labels[name]) or M.labels[name] or name
   -- Room for the label, the extras and the mark besides the path.
   local what = target(item, not expanded and math.min(60, math.max(24, width - 40)) or nil)
   local title = { { text = label, hl = "ToolName", medium = true } }
@@ -517,8 +549,12 @@ local function card(item, expanded, width)
     body = head(text_rows(out, "ToolOutput"), PREVIEW_MAX, expanded)
   end
 
+  if item.done then started[tool_key(item)] = nil end
   if item.duration_ms and item.duration_ms >= 1000 then
     extra(bone.util.duration(item.duration_ms / 1000))
+  elseif not item.done then
+    local secs = running_for(item, item)
+    if secs >= 1 then extra(bone.util.duration(math.floor(secs))) end
   end
   local under = {}
   if body and #body > 0 then under[1] = band(body) end
@@ -553,18 +589,30 @@ local function own_phrase(t, width)
   return type(s) == "string" and s ~= "" and s or nil
 end
 
--- What a run of calls did, in the order first seen: "Read 3 files, ran 2
--- shell commands, called web_search 2 times", or a tool view's own phrase;
--- and how many of them failed.
+-- The longest command a summary line names; the rest of the line stays in view.
+local COMMAND_MAX = 60
+
+-- A command cut to `max` characters, "…" at its end (not mid-character).
+local function cut(text, max)
+  if #text <= max then return text end
+  return (text:sub(1, max - 1):gsub("[\192-\255][\128-\191]*$", "")) .. "…"
+end
+
+-- What a run of calls did, in the order first seen, as spans: one call by
+-- what it acted on ("Read ledger/store.py, ran `make test`"), more by
+-- their count ("read 3 files, ran 2 shell commands, called web_search 2
+-- times"), or a tool view's own phrase; "reading", "running", … while one
+-- of them runs. And how many of them failed.
 local function summary(calls, width)
   local order, seen = {}, {}
-  local function bump(key, phrase, unique)
+  local function bump(key, t, phrase, unique)
     local s = seen[key]
     if not s then
-      s = { phrase = phrase, n = 0, unique = {} }
+      s = { phrase = phrase, n = 0, unique = {}, first = t, running = false }
       seen[key] = s
       order[#order + 1] = s
     end
+    s.running = s.running or not t.done
     if unique then
       if not s.unique[unique] then
         s.unique[unique] = true
@@ -574,27 +622,49 @@ local function summary(calls, width)
       s.n = s.n + 1
     end
   end
+  local function said(text) return { text = text, hl = "ToolArgs" } end
+  -- A file: by its path while it is the only one.
+  local function files(done, doing)
+    return function(s)
+      local verb = s.running and doing or done
+      local path = s.n == 1 and target(s.first, 48) or ""
+      return { said(verb .. " " .. (path ~= "" and path or plural(s.n, "file"))) }
+    end
+  end
   for _, t in ipairs(calls) do
     local path = args_of(t).path
     local own = own_phrase(t, width)
     if own then
-      bump("own:" .. own, function(n) return own .. (n > 1 and " " .. n .. " times" or "") end)
+      bump("own:" .. own, t, function(s) return { said(own .. (s.n > 1 and " " .. s.n .. " times" or "")) } end)
     elseif t.name == "read_file" then
-      bump("read", function(n) return "read " .. plural(n, "file") end, type(path) == "string" and path or t.id)
+      bump("read", t, files("read", "reading"), type(path) == "string" and path or t.id)
     elseif t.name == "write_file" then
-      bump("write", function(n) return "wrote " .. plural(n, "file") end, type(path) == "string" and path or t.id)
+      bump("write", t, files("wrote", "writing"), type(path) == "string" and path or t.id)
     elseif t.name == "shell" then
-      bump("shell", function(n) return "ran " .. plural(n, "shell command") end)
+      bump("shell", t, function(s)
+        local verb = s.running and "running" or "ran"
+        local command = s.n == 1 and target(s.first) or ""
+        if command == "" then return { said(verb .. " " .. plural(s.n, "shell command")) } end
+        -- The command in the font it is typed in, a step smaller to sit
+        -- level with the words around it.
+        return { said(verb .. " "),
+          { text = cut(command, COMMAND_MAX), hl = "ToolArgs", font = "mono", size = md.small_size - 1 } }
+      end)
     else
-      bump("tool:" .. t.name, function(n) return "called " .. t.name .. (n > 1 and " " .. n .. " times" or "") end)
+      bump("tool:" .. t.name, t, function(s)
+        return { said((s.running and "calling " or "called ") .. t.name .. (s.n > 1 and " " .. s.n .. " times" or "")) }
+      end)
     end
   end
-  local parts = {}
-  for _, s in ipairs(order) do parts[#parts + 1] = s.phrase(s.n) end
-  local text = table.concat(parts, ", ")
+  local spans = {}
+  for i, s in ipairs(order) do
+    if i > 1 then spans[#spans + 1] = said(", ") end
+    for _, span in ipairs(s.phrase(s)) do spans[#spans + 1] = span end
+  end
+  if spans[1] then spans[1].text = spans[1].text:sub(1, 1):upper() .. spans[1].text:sub(2) end
   local failed = 0
   for _, t in ipairs(calls) do failed = failed + (t.done and t.is_error and 1 or 0) end
-  return text:sub(1, 1):upper() .. text:sub(2), failed
+  return spans, failed
 end
 
 --- In "summary": the line for the first call of a stretch (the calls between
@@ -616,20 +686,26 @@ local function summary_nodes(item, width)
       stretch[#stretch + 1] = t
     end
   end
-  local running, ms = false, 0
+  -- How long the calls took; while one runs, its time so far too.
+  local running, ms, live = false, 0, 0
   for _, t in ipairs(stretch) do
-    running = running or not t.done
-    ms = ms + (t.duration_ms or 0)
+    if t.done then
+      ms = ms + (t.duration_ms or 0)
+      started[tool_key(t)] = nil
+    else
+      running = true
+      live = math.max(live, running_for(t, item))
+    end
   end
-  local did, failed = summary(stretch, width)
+  local spans, failed = summary(stretch, width)
   local open = toggled[run_key(item)]
   -- The state, what the run did, how long it took, and a chevron that
   -- says it opens.
   local meta = {}
-  if ms >= 100 and not running then
-    meta[#meta + 1] = { text = bone.util.duration(ms / 1000), hl = "Dim", font = "mono" }
+  local secs = running and math.floor(ms / 1000 + live) or ms / 1000
+  if (running and secs >= 1) or (not running and ms >= 100) then
+    meta[#meta + 1] = { text = bone.util.duration(secs), hl = "Dim", font = "mono" }
   end
-  local spans = { { text = did, hl = "ToolArgs" } }
   if failed > 0 then
     spans[#spans + 1] = { text = ", ", hl = "ToolArgs" }
     spans[#spans + 1] = { text = failed .. " failed", hl = "ToolError" }
