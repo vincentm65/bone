@@ -394,7 +394,7 @@ chats.watch(function(kind, ev)
   local open = panel and panel:is_open()
   if kind == "archived" or kind == "pinned" or kind == "attention" then
     -- Only the sections change (a waiting question moves its chat to
-    -- Pending review): nothing to fetch.
+    -- Active): nothing to fetch.
     if state then state.filter_dirty = true end
   elseif kind == "turn" then
     if open then

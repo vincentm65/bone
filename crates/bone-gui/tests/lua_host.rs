@@ -237,7 +237,7 @@ async fn ctrl_o_opens_the_sessions_sidebar() {
 }
 
 /// The sidebar has the TUI's sections (a chat touched within the last hour
-/// is under "Pending review"), and pins with ctrl+t where the TUI reads
+/// is under "Active"), and pins with ctrl+t where the TUI reads
 /// them; the desktop's own old pins move there.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_sidebar_has_the_tui_sections_and_shares_pins() {
@@ -275,9 +275,9 @@ async fn the_sidebar_has_the_tui_sections_and_shares_pins() {
     g.frame();
     let painted: Vec<_> = g.painted.iter().map(|(t, _)| t.clone()).collect();
     assert!(
-        painted.iter().any(|t| t == "Pending review")
+        painted.iter().any(|t| t == "Active")
             && !painted.iter().any(|t| t == "Pinned"),
-        "the new chat is not pending review; painted {painted:?}"
+        "the new chat is not active; painted {painted:?}"
     );
     // ctrl+t from its search field pins the selected chat, in the file
     // the TUI reads.
@@ -286,7 +286,7 @@ async fn the_sidebar_has_the_tui_sections_and_shares_pins() {
     g.frame();
     let painted: Vec<_> = g.painted.iter().map(|(t, _)| t.clone()).collect();
     assert!(
-        painted.iter().any(|t| t == "Pinned") && !painted.iter().any(|t| t == "Pending review"),
+        painted.iter().any(|t| t == "Pinned") && !painted.iter().any(|t| t == "Active"),
         "ctrl+t did not pin it; painted {painted:?}"
     );
     let id = g.gui.eval("bone.chat.session().session_id").unwrap();
