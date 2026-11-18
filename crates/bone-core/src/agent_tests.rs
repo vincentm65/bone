@@ -1111,6 +1111,28 @@ async fn request_hook_overrides_provider_and_model() {
 }
 
 #[tokio::test]
+async fn request_hook_overrides_reasoning_effort() {
+    let lua = r#"
+        bone.provider.register("echo", { complete = function(req)
+          return { content = req.options.model .. "/" .. tostring(req.options.reasoning_effort) }
+        end })
+        bone.config.providers.x = { type = "echo", model = "x-default", reasoning_effort = "high" }
+        bone.config.provider = "x"
+        bone.hook("request", function() return { reasoning_effort = "low" } end)
+    "#;
+    let mut h = Harness::with_lua(lua, vec![text("runtime-default")]).await;
+    let session = h.core.inner.session(&h.session_id).unwrap();
+    let pin = (Some("x".into()), "pinned".into());
+    session.lock().unwrap().pin(pin).unwrap();
+    h.start("first").await;
+    h.until::<TurnFinished>().await;
+    assert!(
+        matches!(h.transcript().await.last(), Some(ChatMessage::Assistant { content, .. })
+        if content == "pinned/low")
+    );
+}
+
+#[tokio::test]
 async fn request_error_hooks_can_retry() {
     let mut h = Harness::with_lua(
         r#"
