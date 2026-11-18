@@ -176,11 +176,15 @@ end
 local function toast()
   local s = bone.gui.status()
   if not s or s.text == "" then return nil end
-  -- A message stays a few seconds.
+  -- A message stays a few seconds; it fades in, and fades out over its
+  -- last moments rather than vanishing.
   local life = s.error and 8000 or 4000
   if s.age_ms >= life then return nil end
-  bone.gui.invalidate(life - s.age_ms + 50)
+  local fade = style.motion.slow
+  local leaving = s.age_ms >= life - fade
+  bone.gui.invalidate((leaving and life or life - fade) - s.age_ms + 20)
   return {
+    id = "toast", transition = style.appear(), opacity = leaving and 0 or 1,
     position = "absolute", left = 0, right = 0, bottom = 96, z = 4, direction = "row", justify = "center",
     widgets.press(widgets.surface({
       text = s.text, size = style.size.caption, hl = s.error and "ErrorMsg" or "StatusLine",

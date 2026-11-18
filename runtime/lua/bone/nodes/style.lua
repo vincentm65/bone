@@ -69,7 +69,8 @@ M.scrim = { dialog = "#0000009e", image = "#000000d8" }
 
 --- How long things animate, in milliseconds: a hover is quick, a change
 --- of state (a switch, a tab, what appears) is long enough to be seen.
-M.motion = { fast = 50, base = 60, slow = 120 }
+--- Under about 100 a fade reads as a jump.
+M.motion = { fast = 120, base = 150, slow = 200 }
 
 --- The `transition` of what appears (a dialog, a menu): it fades in.
 function M.appear()

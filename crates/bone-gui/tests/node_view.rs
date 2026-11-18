@@ -559,8 +559,10 @@ async fn the_nodes_library_draws_the_chat() {
         .unwrap();
     // In the chat, under its header (which shows the same words as the title).
     let hello = (g.painted.iter()).find(|(t, r)| t.contains("hello there") && r.min.y > 60.0);
-    // While the reply runs, the placeholder says a message queues.
-    let hint = (g.painted.iter()).find(|(t, _)| t.contains("Ask bone") || t.contains("Message bone"));
+    // While the reply runs, the placeholder says what a message would do.
+    let hint = (g.painted.iter()).find(|(t, _)| {
+        t.contains("Ask bone") || t.contains("this turn") || t.contains("next turn")
+    });
     let (hello, hint) = (
         hello.expect("the message is painted").1,
         hint.expect("the composer is painted").1,
