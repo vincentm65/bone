@@ -5,7 +5,7 @@ local M = {}
 local panel, state
 local chats = require("bone.chats")
 local empty_row = {}
-local recent_window, recent_label = chats.recent_window, chats.recent_label
+local recent_window = chats.recent_window
 local count, timestamp = chats.count, chats.timestamp
 
 local function setup_colors()
@@ -107,7 +107,7 @@ local function filter(reset)
     if s.session_id == id then state.selected = i end
     local g = groups[s.session_id]
     if g ~= previous then
-      if previous or g == 1 then append("separator") end
+      append("separator")
       append("header", g)
       previous = g
     end
@@ -151,6 +151,12 @@ local function switch_page()
   state.items, state.selected = saved.items, saved.selected
   filter()
   panel:scroll(saved.top - panel:info().top)
+end
+
+-- ctrl+t on the Chats page: pin the selected chat, or unpin it.
+local function pin()
+  local s = state.page == "chats" and state.items[state.selected]
+  if s then chats.toggle_pin(s.session_id) end
 end
 
 -- x on the Processes page: stop the selected shell or sub-agent.
@@ -238,7 +244,7 @@ local function render(ctx)
     elseif kind == "search" then
       formatted = row("  ⌕ " .. (state.query == "" and "search" or state.query), state.query == "" and "Dim" or "Accent")
     elseif kind == "help" then
-      formatted = row(state.page == "running" and "  ↵ open · x stop · tab chats · esc prompt" or "  ↵ open · tab processes · esc prompt", "Dim")
+      formatted = row(state.page == "running" and "  ↵ open · x stop · tab chats · esc prompt" or "  ↵ open · ctrl+t pin · tab processes", "Dim")
     elseif kind == "status" then
       formatted = row(state.page == "running" and " nothing running in the background"
         or state.loading and " loading…" or (state.query == "" and " no sessions yet" or " no matching sessions"), "Dim")
@@ -255,8 +261,7 @@ local function render(ctx)
     elseif kind == "separator" then
       formatted = { { fill = "─", hl = "Dim" } }
     elseif kind == "header" then
-      local name = index == 1 and ("Recent · last " .. recent_label()) or "History"
-      formatted = row("  " .. name .. " · " .. state.sizes[index], "Dim")
+      formatted = row("  " .. chats.sections[index] .. " · " .. state.sizes[index], "Dim")
     elseif kind == "blank" then
       formatted = row("", "Normal")
     else
@@ -353,6 +358,7 @@ function M.open()
       ["ctrl+o"] = function() panel:close() end,
       tab = switch_page, ["shift+tab"] = switch_page,
       enter = function() choose(state.selected) end,
+      ["ctrl+t"] = pin,
       up = function() move(-1) end, down = function() move(1) end,
       pageup = function() move(-math.max(1, math.floor(panel:info().height / 3))) end,
       pagedown = function() move(math.max(1, math.floor(panel:info().height / 3))) end,
@@ -386,10 +392,10 @@ end
 
 chats.watch(function(kind, ev)
   local open = panel and panel:is_open()
-  if kind == "archived" then
+  if kind == "archived" or kind == "pinned" or kind == "attention" then
+    -- Only the sections change (a waiting question moves its chat to
+    -- Pending review): nothing to fetch.
     if state then state.filter_dirty = true end
-  elseif kind == "attention" then
-    return -- the dots: drawn again on the next frame, with nothing to fetch
   elseif kind == "turn" then
     if open then
       filter()

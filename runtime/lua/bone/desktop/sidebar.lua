@@ -3,10 +3,10 @@
 -- the chat where there is no room for both), drawn as nodes
 -- (bone.nodes.window places `M.node()`). A search field with the project
 -- and new-chat buttons beside it, Chats and Processes, then your
--- conversations: pinned ones first,
--- the recent ones next (a chat that runs, or one touched within the last
--- hour, as in the TUI), then the rest in date groups (Today, Yesterday, This
--- week, Earlier), one line each (title and when; model and tokens in its
+-- conversations in the TUI's sections (bone.chats.section): Pinned, Pending
+-- review (finished within the last hour, or a question waiting), Running,
+-- then Archived, which is split by date (Today, Yesterday, This week,
+-- Earlier). One line each (title and when; model and tokens in its
 -- tooltip) with a dot for what it needs from you (bone.chats.state: a
 -- question waiting for your answer, running, finished while you were
 -- elsewhere).
@@ -17,8 +17,8 @@
 -- list makes nodes only for the ones in view, so a long history costs
 -- nothing. It takes the keyboard as it opens (its search field, or the
 -- card itself on the Processes page): up/down choose, enter opens, typing
--- searches, tab changes page, x stops a process, esc goes back to the
--- prompt, ctrl+o closes; a click opens.
+-- searches, ctrl+t pins, tab changes page, x stops a process, esc goes
+-- back to the prompt, ctrl+o closes; a click opens.
 local M = {}
 
 local chats = require("bone.chats")
@@ -37,7 +37,7 @@ M.chat_min = 480
 -- How far the card stands off the window's edges.
 M.inset = style.space.lg
 
-local ROW = { group = 34, card = 32, none = 40 }
+local ROW = { group = 34, date = 24, card = 32, none = 40 }
 
 local open = false
 local overlaid = false -- drawn over the chat (a narrow window), not beside it
@@ -50,8 +50,6 @@ local st = {
   menu = false, -- the project menu is open
   renaming = nil, -- the session being renamed
 }
-
-local pinned = bone.state.load("sidebar-pinned") or {}
 
 local function redraw()
   bone.gui.invalidate()
@@ -112,39 +110,26 @@ local function compute()
       -- A chat with no title has no message in it: nothing to go back to.
       -- It stays listed while on screen, pinned, running or searched for.
       local empty = not s.title and st.query == "" and s.session_id ~= current
-        and not pinned[s.session_id] and not chats.live[s.session_id]
+        and not chats.pinned[s.session_id] and not chats.live[s.session_id]
       if not empty and (not st.project or s.cwd == st.project) then items[#items + 1] = s end
     end
     if #items == 0 then
       rows[1] = { kind = "none", text = st.loading and "Loading…"
         or ((st.query == "" and not st.project) and "No chats yet" or "No matching chats") }
     end
-    -- Pinned first, then the recent ones, then the rest; newest first in
-    -- each group. A chat is recent while it runs or was touched within
-    -- the window (bone.ui.sessions_recent_seconds), as in the TUI.
-    table.sort(items, function(a, b)
-      local ap, bp = pinned[a.session_id] and 1 or 0, pinned[b.session_id] and 1 or 0
-      if ap ~= bp then return ap > bp end
-      local ag, bg = g.groups[a.session_id] or 2, g.groups[b.session_id] or 2
-      if ag ~= bg then return ag < bg end
-      local aa, ba = g.activities[a.session_id], g.activities[b.session_id]
-      if aa ~= ba then return aa > ba end
-      return a.session_id < b.session_id
-    end)
-    local heading
+    -- g.items is in section order, newest first in each (as in the TUI).
+    local heading, date
     for i, s in ipairs(items) do
       local id, at = s.session_id, g.activities[s.session_id]
-      local name
-      if pinned[id] then
-        name = "Pinned"
-      elseif (g.groups[id] or 2) == 1 then
-        name = "Recent · last " .. chats.recent_label()
-      else
-        name = date_group(at)
+      local section = g.groups[id] or 4
+      if section ~= heading then
+        rows[#rows + 1] = { kind = "group", text = chats.sections[section] }
+        heading, date = section, nil
       end
-      if name ~= heading then
-        rows[#rows + 1] = { kind = "group", text = name }
-        heading = name
+      -- The archive is long: it is split by date.
+      if section == 4 and date_group(at) ~= date then
+        date = date_group(at)
+        rows[#rows + 1] = { kind = "date", text = date }
       end
       local state = chats.state(id)
       local meta = {}
@@ -155,7 +140,7 @@ local function compute()
         meta[#meta + 1] = stats.turns .. (stats.turns == 1 and " turn" or " turns")
       end
       rows[#rows + 1] = {
-        kind = "card", item = i, id = id, state = state, pinned = pinned[id],
+        kind = "card", item = i, id = id, state = state, pinned = chats.pinned[id],
         title = s.title or "Untitled", meta = table.concat(meta, " · "),
         time = when(at),
       }
@@ -232,10 +217,7 @@ local function start_rename(id)
 end
 
 local function toggle_pin(id)
-  pinned[id] = not pinned[id] or nil
-  bone.state.save("sidebar-pinned", pinned)
-  compute()
-  redraw()
+  chats.toggle_pin(id) -- the watcher below draws it again
 end
 
 -- `away`: the field lost the keyboard to a click elsewhere, which keeps it.
@@ -328,6 +310,10 @@ local KEYS = {
   ["ctrl+o"] = close,
   tab = switch_page, ["shift+tab"] = switch_page,
   enter = function() if st.page == "chats" then choose(st.sel) end end,
+  ["ctrl+t"] = function()
+    local r = st.page == "chats" and st.items[st.sel]
+    if r and r.session_id then toggle_pin(r.session_id) end
+  end,
   up = function() select(st.sel - 1) end, down = function() select(st.sel + 1) end,
   pageup = function() select(st.sel - 5) end, pagedown = function() select(st.sel + 5) end,
 }
@@ -364,6 +350,9 @@ local function row(i)
   if r.kind == "group" then
     return { height = ROW.group, direction = "row", align = "end", padding = { 0, 8, 7, 8 },
       { text = r.text, hl = "Dim", size = style.size.small, medium = true } }
+  elseif r.kind == "date" then
+    return { height = ROW.date, direction = "row", align = "end", padding = { 0, 8, 5, 8 },
+      { text = r.text, hl = "Dim", size = style.size.micro } }
   elseif r.kind == "none" then
     return { height = ROW.none, direction = "row", align = "center", justify = "center",
       { text = r.text, hl = "Dim", size = style.size.caption } }
@@ -546,9 +535,10 @@ end
 function M.content()
   local jobs = chats.jobs()
   if st.page == "running" and #jobs > 0 then bone.gui.invalidate(1000) end
-  -- The recent group ages: a chat leaves it when the window passes, and
-  -- the window itself can change (bone.ui.sessions_recent_seconds), so
-  -- the rows are made again each minute and when it changes (as in the TUI).
+  -- Pending review ages: a chat is archived when the window passes, and
+  -- the window itself can change (bone.ui.sessions_archive_after), so the
+  -- rows are made again each minute and when it changes (as in the TUI).
+  -- That also picks up pins and archives made in the other frontend.
   local minute = math.floor(os.time() / 60)
   local window = chats.recent_window()
   if minute ~= st.minute or window ~= st.window then compute() end

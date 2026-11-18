@@ -2,11 +2,13 @@
 -- sidebar to draw: every frontend's sidebar uses this, and draws it its own
 -- way (runtime/lua/bone/ui/sessions.lua for the TUI). It tracks which
 -- sessions run (turn events), when each was last touched, which are
--- archived, the background shells, and fetches the session list and usage.
+-- pinned or archived (shared by every frontend), which section each is in
+-- (M.section), the background shells, and fetches the session list and usage.
 -- It also knows what each chat needs from you (M.state): a question open in
 -- it, or a turn that ended while you were elsewhere.
 -- Views subscribe with M.watch(fn); fn(kind, ev) runs after each change:
--- "turn" (ev.running), "created", "updated", "deleted", "shells", "attention".
+-- "turn" (ev.running), "created", "updated", "deleted", "shells", "attention",
+-- "archived", "pinned".
 local M = {}
 
 local agents = require("bone.agents")
@@ -22,7 +24,41 @@ M.unread = {}
 bone.hl.set("SessionWaiting", { link = "WarningMsg", default = true })
 bone.hl.set("SessionUnread", { link = "Accent", default = true })
 bone.hl.set("SessionRunning", { link = "ToolRunning", default = true })
-M.archived = bone.state.load("sessions-archived")
+
+-- Pinned and archived chats are kept where every frontend on this machine
+-- reads them (state/shared/), so the TUI and the desktop agree. Each side
+-- once kept its own (`old`): it is copied over once (sessions-moved says
+-- so) and left as it was, for an older bone that still reads it.
+local moved = bone.state.load("sessions-moved")
+local function shared(name, old)
+  local ok, set = pcall(bone.state.load, name, { shared = true })
+  set = ok and type(set) == "table" and set or {}
+  if old and not moved[name] then
+    local had = bone.state.load(old)
+    for id, on in pairs(type(had) == "table" and had or {}) do set[id] = set[id] or on end
+    bone.state.save(name, set, { shared = true })
+    moved[name] = true
+    bone.state.save("sessions-moved", moved)
+  end
+  return set
+end
+M.archived = shared("sessions-archived", "sessions-archived")
+M.pinned = shared("sessions-pinned", "sidebar-pinned")
+
+-- Read them again: the other frontend may have changed them.
+local function reload()
+  M.archived = shared("sessions-archived")
+  M.pinned = shared("sessions-pinned")
+end
+
+-- Change one chat in a shared set, reading it first so the other
+-- frontend's changes are kept.
+local function mark(name, id, on)
+  reload()
+  local set = name == "sessions-pinned" and M.pinned or M.archived
+  set[id] = on or nil
+  bone.state.save(name, set, { shared = true })
+end
 local watchers = {}
 
 --- Call fn(kind, ev) after each change; returns a function that stops it.
@@ -39,10 +75,13 @@ local function changed(kind, ev)
   for _, fn in ipairs(watchers) do fn(kind, ev) end
 end
 
---- How recent a conversation is to count as recent, in seconds
---- (bone.ui.sessions_recent_seconds; read each time for live changes).
+--- How long a finished chat waits for review before it is archived, in
+--- seconds: bone.ui.sessions_archive_after (the older name,
+--- bone.ui.sessions_recent_seconds, still works), an hour by default. Read
+--- each time, so a change applies at once.
 function M.recent_window()
-  return math.max(0, tonumber(bone.ui.sessions_recent_seconds) or 3600)
+  return math.max(0, tonumber(bone.ui.sessions_archive_after)
+    or tonumber(bone.ui.sessions_recent_seconds) or 3600)
 end
 
 --- That window as "1h", "30m", "2d".
@@ -79,14 +118,41 @@ function M.activity(s, stats)
   return math.max(M.touched[s.session_id] or 0, meta and meta.at or s.created_at or 0)
 end
 
---- Archive session `id` (default: the one on screen): it leaves the
---- recent group until it runs again.
+--- Archive session `id` (default: the one on screen): it leaves
+--- Pending review until it runs again.
 function M.archive(id)
   id = id or (bone.chat.session() or {}).session_id
   if not id then return end
-  M.archived[id] = true
-  bone.state.save("sessions-archived", M.archived)
+  mark("sessions-archived", id, true)
   changed("archived", { session_id = id })
+end
+
+--- Pin chat `id`, or unpin it (`on` false): pinned chats are listed first,
+--- in every frontend, and are never archived.
+function M.pin(id, on)
+  if not id then return end
+  mark("sessions-pinned", id, on)
+  changed("pinned", { session_id = id })
+end
+
+--- Pin chat `id` if it is not, else unpin it.
+function M.toggle_pin(id)
+  M.pin(id, not M.pinned[id])
+end
+
+-- The sections of the list, in order.
+M.sections = { "Pinned", "Pending review", "Running", "Archived" }
+
+--- Which section chat `id` belongs in (an index into M.sections), with
+--- `at` its last activity: pinned; a question waiting for you, or finished
+--- within M.recent_window() and not archived (Pending review); a turn
+--- running; or the rest (Archived).
+function M.section(id, at)
+  if M.pinned[id] then return 1 end
+  if M.waiting(id) then return 2 end
+  if M.live[id] then return 3 end
+  if not M.archived[id] and at >= os.time() - M.recent_window() then return 2 end
+  return 4
 end
 
 --- Sessions with a turn running that this frontend already knows of;
@@ -129,17 +195,18 @@ function M.jobs()
 end
 
 --- The sessions in `all` that match `query` (title or folder), as
---- { items, groups, activities, sizes, running }: items sorted recent
---- (group 1) before history (group 2), newest first.
+--- { items, groups, activities, sizes, running }: items sorted by section
+--- (M.section: groups[id] and sizes are indexes into M.sections), newest
+--- first in each.
 function M.grouped(all, query, stats)
-  local now, window = os.time(), M.recent_window()
-  local items, groups, activities, sizes = {}, {}, {}, { 0, 0 }
+  reload()
+  local items, groups, activities, sizes = {}, {}, {}, { 0, 0, 0, 0 }
   local running = false
   query = (query or ""):lower()
   for _, s in ipairs(all) do
     if ((s.title or "[untitled]") .. " " .. (s.cwd or "")):lower():find(query, 1, true) then
       local sid, at = s.session_id, M.activity(s, stats)
-      local g = not M.archived[sid] and (M.live[sid] or at >= now - window) and 1 or 2
+      local g = M.section(sid, at)
       groups[sid], activities[sid] = g, at
       sizes[g] = sizes[g] + 1
       running = running or M.live[sid]
@@ -332,10 +399,7 @@ local function turn_changed(ev, running)
   if not id then return end
   M.versions[id] = (M.versions[id] or 0) + 1
   M.live[id], M.touched[id] = running, os.time()
-  if running and M.archived[id] then
-    M.archived[id] = nil
-    bone.state.save("sessions-archived", M.archived)
-  end
+  if running and M.archived[id] then mark("sessions-archived", id, false) end
   -- A turn that ends in a chat you are not looking at is new to you (an
   -- agent's ends in its own chat, which you did not start).
   if not running and id ~= on_screen() and not agents.get(id) then M.unread[id] = true end

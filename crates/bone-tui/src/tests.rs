@@ -673,7 +673,7 @@ async fn session_sidebar_groups_live_and_recent_chats() {
     h.input("{ctrl+o}").await;
     let screen = h.screen(80, 24);
     assert!(
-        screen.contains("Recent · last 1h · 1") && screen.contains("History · 1"),
+        screen.contains("Running · 1") && screen.contains("Archived · 1"),
         "{screen}"
     );
     assert!(
@@ -689,11 +689,19 @@ async fn session_sidebar_groups_live_and_recent_chats() {
         .await;
     let screen = h.screen(80, 24);
     assert!(
-        !screen.contains("Running ·") && screen.contains("Recent · last 1h"),
+        !screen.contains("Running ·") && screen.contains("Pending review · 1"),
         "{screen}"
     );
-    h.lua("bone.ui.sessions_recent_seconds = 1800").await;
-    assert!(h.screen(80, 24).contains("Recent · last 30m"));
+    // How long a finished chat waits for review applies at once (s-two
+    // last did something in 2023).
+    h.lua("bone.ui.sessions_archive_after = 1e10").await;
+    let screen = h.screen(80, 24);
+    assert!(
+        screen.contains("Pending review · 2") && !screen.contains("Archived"),
+        "{screen}"
+    );
+    h.lua("bone.ui.sessions_archive_after = nil").await;
+    assert!(h.screen(80, 24).contains("Archived · 1"));
     let queries_before_start = h.requests("store/query").len();
     h.emit::<TurnStarted>(started("s-two", "work")).await;
     assert_eq!(
@@ -715,7 +723,69 @@ async fn session_sidebar_groups_live_and_recent_chats() {
         h.requests("session/messages"),
         vec![json!({ "session_id": "s-one" })]
     );
-    assert!(h.screen(80, 24).contains("Recent · last 30m · 2"));
+    let screen = h.screen(80, 24);
+    assert!(
+        screen.contains("Pending review · 1") && screen.contains("Running · 1"),
+        "{screen}"
+    );
+}
+
+#[tokio::test]
+async fn session_sidebar_pins_with_ctrl_t_in_the_shared_state() {
+    let mut h = Harness::new().await;
+    let pins = h._dir.as_ref().unwrap().path().join("state/shared/sessions-pinned.json");
+    h.input("{ctrl+o}").await;
+    // The first row is selected: "first", which runs.
+    h.input("{ctrl+t}").await;
+    let screen = h.screen(80, 24);
+    assert!(
+        screen.contains("Pinned · 1") && !screen.contains("Running ·"),
+        "{screen}"
+    );
+    let saved = std::fs::read_to_string(&pins).unwrap();
+    assert!(saved.contains("s-one"), "{saved}");
+    // Pinned in the desktop (the same file): it shows on the next rebuild.
+    std::fs::write(&pins, r#"{ "s-one": true, "s-two": true }"#).unwrap();
+    h.lua("bone.ui.sessions_archive_after = 7200").await;
+    assert!(h.screen(80, 24).contains("Pinned · 2"));
+    h.input("{ctrl+t}").await;
+    let screen = h.screen(80, 24);
+    assert!(
+        screen.contains("Pinned · 1") && screen.contains("Running · 1"),
+        "{screen}"
+    );
+    let saved = std::fs::read_to_string(&pins).unwrap();
+    assert!(!saved.contains("s-one") && saved.contains("s-two"), "{saved}");
+}
+
+#[tokio::test]
+async fn session_sidebar_copies_the_old_archive_list_to_the_shared_one_once() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("state/tui")).unwrap();
+    std::fs::write(
+        dir.path().join("state/tui/sessions-archived.json"),
+        r#"{ "s-one": true }"#,
+    )
+    .unwrap();
+    let mut h = Harness::build(Some(dir.path().to_owned())).await;
+    h.app.load_user_config();
+    h.settle().await;
+    let shared =
+        std::fs::read_to_string(dir.path().join("state/shared/sessions-archived.json")).unwrap();
+    assert!(shared.contains("s-one"), "{shared}");
+    // Copied once: unarchived in the shared list, the old one does not
+    // bring it back.
+    h.lua("bone.state.save('sessions-archived', {}, { shared = true })").await;
+    h.lua("package.loaded['bone.chats'] = nil; require('bone.chats')").await;
+    let shared =
+        std::fs::read_to_string(dir.path().join("state/shared/sessions-archived.json")).unwrap();
+    assert!(!shared.contains("s-one"), "{shared}");
+    h.lua("bone.state.save('sessions-archived', { ['s-one'] = true }, { shared = true })").await;
+    // Archived by hand: it stays archived after its turn ends.
+    h.input("{ctrl+o}").await;
+    h.emit::<TurnFinished>(finished("s-one", TurnOutcome::Completed))
+        .await;
+    assert!(h.screen(80, 24).contains("Archived · 2"));
 }
 #[tokio::test]
 async fn session_picker_filters_and_opens() {
@@ -5329,7 +5399,7 @@ async fn session_sidebar_formats_only_visible_rows_for_large_history() {
     // Manual scrolling must not snap back to the still-selected current chat.
     h.lua("bone.ui.panel.get('sessions'):scroll('top')").await;
     let screen = h.screen(100, 24);
-    assert!(screen.contains("History · 4500") && screen.contains("conversation 1"));
+    assert!(screen.contains("Archived · 4500") && screen.contains("conversation 1"));
     h.input("{home}").await;
     assert!(h.screen(100, 24).contains("conversation 1"));
     assert_eq!(h.app.panel("sessions").unwrap().top, 0);

@@ -377,12 +377,17 @@ it, or a `node` it returns as it is. Its `summary` phrase (when called with
 ### The sessions sidebar
 
 `ctrl+o` (or `/sessions`) opens the conversations sidebar: a card beside the
-chat with your conversations — the pinned ones first, then the recent ones (a
-chat that runs, or one touched within the last hour, as in the TUI), then the
-rest by date (Today, Yesterday, This week, Earlier). How long a chat counts
-as recent is `bone.ui.sessions_recent_seconds` (an hour by default; it is the
-TUI's option, set in `ui.lua` or `gui.lua`), and the rows are made again
-each minute, so a chat leaves the group when its time is up. The sidebar is
+chat with your conversations in the TUI's sections — Pinned, Pending review
+(finished within the last hour, or a question waiting for you), Running, then
+Archived, split by date (Today, Yesterday, This week, Earlier). How long a
+finished chat waits for review before it is archived is
+`bone.ui.sessions_archive_after` (an hour by default; it is the TUI's option,
+set in `ui.lua` or `gui.lua`; the older `bone.ui.sessions_recent_seconds`
+still works), and the rows are made again each minute, so a chat moves when
+its time is up. Pin a chat with the pin over its row or `ctrl+t`. Pins and
+archives are shared with the TUI (`state/shared/sessions-pinned.json` and
+`sessions-archived.json`), and `bone.chats` has them: `section(id, at)`,
+`pin(id, on)`, `archive(id)`. The sidebar is
 `require("bone.desktop.sidebar")`: replace it to draw another one.
 
 ### More than one chat
