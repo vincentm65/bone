@@ -236,12 +236,23 @@ async fn ctrl_o_opens_the_sessions_sidebar() {
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 
-/// The sidebar groups the recent chats as the TUI does: the ones touched
-/// within the last hour under "Recent · last 1h".
+/// The sidebar has the TUI's sections (a chat touched within the last hour
+/// is under "Pending review"), and pins with ctrl+t where the TUI reads
+/// them; the desktop's own old pins move there.
 #[tokio::test(flavor = "multi_thread")]
-async fn the_sidebar_groups_the_recent_chats() {
+async fn the_sidebar_has_the_tui_sections_and_shares_pins() {
+    use bone_gui::{Key, Modifiers};
     let (config, work) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let pins = config.path().join("state/shared/sessions-pinned.json");
+    std::fs::create_dir_all(config.path().join("state/gui")).unwrap();
+    std::fs::write(
+        config.path().join("state/gui/sidebar-pinned.json"),
+        r#"{ "old-chat": true }"#,
+    )
+    .unwrap();
     let mut g = gui(config.path(), work.path()).await;
+    let moved = std::fs::read_to_string(&pins).unwrap();
+    assert!(moved.contains("old-chat"), "{moved}");
     g.frame();
     g.gui
         .run_lua(
@@ -264,23 +275,23 @@ async fn the_sidebar_groups_the_recent_chats() {
     g.frame();
     let painted: Vec<_> = g.painted.iter().map(|(t, _)| t.clone()).collect();
     assert!(
-        painted.iter().any(|t| t == "Recent · last 1h"),
-        "the recent group is missing; painted {painted:?}"
+        painted.iter().any(|t| t == "Pending review")
+            && !painted.iter().any(|t| t == "Pinned"),
+        "the new chat is not pending review; painted {painted:?}"
     );
-    // The window is the TUI's option.
-    g.gui
-        .run_lua(
-            "t",
-            "bone.ui.sessions_recent_seconds = 1800\nbone.gui.invalidate()",
-        )
-        .unwrap();
+    // ctrl+t from its search field pins the selected chat, in the file
+    // the TUI reads.
+    g.key(Key::Char('t'), Modifiers::CTRL);
     g.frame();
     g.frame();
     let painted: Vec<_> = g.painted.iter().map(|(t, _)| t.clone()).collect();
     assert!(
-        painted.iter().any(|t| t == "Recent · last 30m"),
-        "the recent group did not follow the window; painted {painted:?}"
+        painted.iter().any(|t| t == "Pinned") && !painted.iter().any(|t| t == "Pending review"),
+        "ctrl+t did not pin it; painted {painted:?}"
     );
+    let id = g.gui.eval("bone.chat.session().session_id").unwrap();
+    let saved = std::fs::read_to_string(&pins).unwrap();
+    assert!(saved.contains(&id) && saved.contains("old-chat"), "{saved}");
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 
