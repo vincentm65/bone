@@ -54,24 +54,43 @@ local function redraw_of(item)
   return function() bone.chat.redraw(item.index) end
 end
 
+-- How a turn that did not finish says so in its footer.
+local ENDED = { failed = "Failed after ", stopped = "Stopped after " }
+
 -- The turn's footer under its last item: on a reply, a quiet copy button,
--- then how long the turn worked.
-local function footer(item, ctx, out, copy)
-  local text = timing.footer(item, ctx)
-  if not text then return out end
-  local line = md.text({ { text, "Dim" } }, { size = style.size.small })
-  line.margin = nil
-  if not copy then
+-- then how long the turn worked ("Failed after 2s · 1:46 PM" for one that
+-- failed, "Stopped after" for one you stopped). o: copy (the text a copy
+-- button copies), copy_label, ended ("failed", "stopped"), actions (nodes
+-- before the copy button; the row shows with them even when the turn's
+-- time is not known).
+local function footer(item, ctx, out, o)
+  o = o or {}
+  local t = timing.finished(item, ctx)
+  local actions = o.actions or {}
+  if not t and #actions == 0 then return out end
+  local line
+  if t then
+    local text = o.ended and (ENDED[o.ended] .. bone.util.duration(t.secs) .. " · " .. t.at)
+      or ("Worked for " .. bone.util.duration(t.secs) .. " · Finished at " .. t.at)
+    line = md.text({ { text, "Dim" } }, { size = style.size.small })
+    line.margin = nil
+  end
+  if not o.copy and #actions == 0 then
     line.margin = { 10, 0, 0, 0 }
     out[#out + 1] = line
     return out
   end
-  out[#out + 1] = {
-    direction = "row", align = "center", gap = 8, margin = { 8, 0, 0, -4 },
-    widgets.copy_button(copy, "reply:" .. tostring(ctx and ctx.list or "") .. ":" .. tostring(item.key or item.id or item.index),
-      redraw_of(item), { label = "Copy the reply", box = 26, size = 14, hl = "Dim", radius = style.radius.md }),
-    line,
-  }
+  -- A bare icon leads a little left, so its glyph (not its box) is on the
+  -- text's edge; a filled button starts on that edge itself.
+  local row = { direction = "row", align = "center", gap = 8, margin = { 8, 0, 0, #actions > 0 and 0 or -4 } }
+  for _, a in ipairs(actions) do row[#row + 1] = a end
+  if o.copy then
+    row[#row + 1] = widgets.copy_button(o.copy,
+      "copy:" .. tostring(ctx and ctx.list or "") .. ":" .. tostring(item.key or item.id or item.index),
+      redraw_of(item), { label = o.copy_label or "Copy the reply", box = 26, size = 14, hl = "Dim", radius = style.radius.md })
+  end
+  row[#row + 1] = line
+  out[#out + 1] = row
   return out
 end
 
@@ -155,7 +174,7 @@ function M.assistant(item, ctx)
       out[#out + 1] = md.text({ { "…", "Dim" } })
     end
   end
-  footer(item, ctx, out, not item.streaming and text ~= "" and text or nil)
+  footer(item, ctx, out, { copy = not item.streaming and text ~= "" and text or nil })
   return {
     node = box(out, { size = md.text_size, pad = { 0, 4 }, margin = { 10, 4 } }),
     lines = plain(text),
@@ -174,10 +193,124 @@ function M.reasoning(item, ctx)
   }
 end
 
+-- ---- a failed turn -----------------------------------------------------------
+
+-- What a failed turn's error means, in a line: the provider bone could not
+-- reach, or the HTTP status it answered with; nil when the message says it
+-- plainly enough itself.
+local function explain(message, provider)
+  local named = type(provider) == "string" and provider ~= ""
+  local url = message:match("error sending request for url %((.-)%)")
+  if url then
+    local host = url:match("^%a[%w+.-]*://([^/]+)") or url
+    return "Couldn't reach " .. (named and provider or "the provider") .. " at " .. host
+  end
+  local status = tonumber(message:match("HTTP (%d%d%d)"))
+  if status then
+    local why = (status == 401 or status == 403) and "refused the API key"
+      or status == 404 and "has no such model or address"
+      or status == 429 and "hit its rate limit"
+      or status == 400 and "rejected the request"
+      or status >= 500 and "had an error of its own"
+      or "answered with an error"
+    return (named and provider or "The provider") .. " " .. why .. " (HTTP " .. status .. ")"
+  end
+  if message:lower():find("timed out", 1, true) then
+    return (named and provider or "The provider") .. " took too long to answer"
+  end
+  return nil
+end
+
+-- The longest error shown in full; a copy takes all of it.
+local DETAIL_MAX = 400
+
+-- The error of the chat on screen that offers Retry: { session, index }.
+local offered = nil
+
+-- Retry: the failed turn's message, sent again (the core keeps the failed
+-- one in the history, as there is no going back on a turn).
+local function retry(item)
+  local s = bone.chat.session()
+  local data = bone.chat.item(item.index)
+  local user = data and bone.chat.items({ turn = data.turn, kind = "user", first = 1 })[1]
+  if not (s and user) then return end
+  local params = { session_id = s.session_id, text = user.text or "" }
+  if user.images and #user.images > 0 then params.images = user.images end
+  bone.request("queue/add", params, function(_, err)
+    if err then bone.notify(tostring(err), "error") end
+    bone.chat.redraw(item.index)
+  end)
+end
+
+-- Whether `item` (an error) can send its turn again: it is the last thing
+-- in the chat, nothing runs, and you sent the message it failed on.
+local function can_retry(item)
+  local s = bone.chat.session()
+  if not s or s.running then return false end
+  local last = bone.chat.items({ last = 1 })[1]
+  if not last or last.index ~= item.index then return false end
+  local data = bone.chat.item(item.index)
+  local user = data and bone.chat.items({ turn = data.turn, kind = "user", first = 1 })[1]
+  return user ~= nil and not user.source
+end
+
+-- A turn that failed: what went wrong in a line, the error itself under it
+-- in grey (cut short; the copy button takes all of it), then Retry and
+-- when it failed.
+local function failed(item, ctx)
+  local message = trim((item.text or ""):gsub("^error:%s*", ""))
+  local s = bone.chat.session()
+  local provider = s and require("bone.usage").of(s.session_id).provider
+  local head = explain(message, provider)
+  local first, rest = message:match("^([^\n]*)\n?(.*)$")
+  local out = { md.text({ { head or first, "ErrorMsg" } }) }
+  -- Under a line of ours, the provider's own words when its answer carries
+  -- them ({"error":{"message":"…"}}), else the error as it came.
+  local said = message:match('"message"%s*:%s*"([^"]+)"')
+  local detail = head and (said or message) or trim(rest)
+  if detail ~= "" then
+    if #detail > DETAIL_MAX then
+      detail = detail:sub(1, DETAIL_MAX):gsub("[\192-\255][\128-\191]*$", "") .. "…"
+    end
+    out[#out + 1] = md.text({ { detail, "Dim" } }, { size = style.size.small, gap = 2 })
+  end
+  local actions = {}
+  if can_retry(item) then
+    offered = { session = s.session_id, index = item.index }
+    actions[1] = widgets.button("Retry", function() retry(item) end, false, false,
+      { size = style.size.small, padding = { 3, 10 }, radius = style.radius.sm,
+        label = "Send the message again", tooltip = "Send the message again" })
+  end
+  footer(item, ctx, out, { actions = actions, copy = message, copy_label = "Copy the error", ended = "failed" })
+  return {
+    node = box(out, { size = md.small_size, pad = { 0, 4 }, margin = { 6, 4 } }),
+    lines = plain(item.text, "ErrorMsg"),
+  }
+end
+
+-- A turn starting puts away the Retry of the error before it.
+bone.on("turn/started", function(ev)
+  local s = bone.chat.session()
+  if offered and offered.session == ev.session_id and s and s.session_id == ev.session_id then
+    bone.chat.redraw(offered.index)
+  end
+  if offered and offered.session == ev.session_id then offered = nil end
+end)
+
 function M.notice(item, ctx)
-  local hl = item.error and "ErrorMsg" or "Notice"
-  local out = { md.text({ { item.text or "", hl } }) }
-  footer(item, ctx, out)
+  if item.error then return failed(item, ctx) end
+  local hl = "Notice"
+  local out = {}
+  if item.text == "cancelled" then
+    -- You stopped it: its footer says so ("Stopped after 4s · 2:52 PM"),
+    -- or a quiet "Stopped" where the turn's time is not known.
+    footer(item, ctx, out, { ended = "stopped" })
+    if #out == 0 then out[1] = md.text({ { "Stopped", "Dim" } }) end
+    out[1].margin = nil
+  else
+    out[1] = md.text({ { item.text or "", hl } })
+    footer(item, ctx, out)
+  end
   return {
     node = box(out, { size = md.small_size, pad = { 0, 4 }, margin = { 6, 4 } }),
     lines = plain(item.text, hl),

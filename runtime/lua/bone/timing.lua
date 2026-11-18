@@ -48,8 +48,9 @@ local function capture(id)
   save(id)
 end
 
---- The footer under `item` when it is the last of a finished turn, else nil.
-function M.footer(item, ctx)
+--- When `item` is the last of a finished turn: { secs (how long it worked),
+--- at (the clock time it ended, "9:17 PM") }; else nil.
+function M.finished(item, ctx)
   if not ctx or ctx.region ~= "chat" then return end
   local s = bone.chat.session()
   local id = s and s.session_id
@@ -64,8 +65,13 @@ function M.footer(item, ctx)
   if not user or user.text ~= timing.text or not last or last.index ~= item.index then return end
   local at = os.date(clock, math.floor(timing.finished / 1000))
   if clock == "%I:%M %p" then at = at:gsub("^0", "") end
-  return "Worked for " .. bone.util.duration(math.max(0, (timing.finished - timing.started) / 1000))
-    .. " · Finished at " .. at
+  return { secs = math.max(0, (timing.finished - timing.started) / 1000), at = at }
+end
+
+--- The footer under `item` when it is the last of a finished turn, else nil.
+function M.footer(item, ctx)
+  local t = M.finished(item, ctx)
+  return t and ("Worked for " .. bone.util.duration(t.secs) .. " · Finished at " .. t.at)
 end
 
 bone.on("turn/started", function(ev) capture(ev.session_id) end)
