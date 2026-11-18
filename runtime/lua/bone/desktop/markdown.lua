@@ -63,7 +63,8 @@ function M.spans(list, group)
     elseif s.italic then
       hl = "MdItalic"
     end
-    out[#out + 1] = { text = s.text, hl = hl, bold = s.bold, italic = s.italic, code = s.code, link = s.link }
+    out[#out + 1] = { text = s.text, hl = hl, color = s.color, bold = s.bold, italic = s.italic, code = s.code,
+      link = s.link }
   end
   return out
 end
@@ -153,9 +154,15 @@ local function paragraphs(text, group, id, width)
     elseif k == "quote" then
       add({ spans = M.spans(b.spans, "MdQuote"), indent = 14, gap = 4, prose = true })
     elseif k == "code" then
-      local body = table.concat(b.lines or {}, "\n")
-      add({ spans = { { text = body, hl = "MdCodeBlock" } }, size = M.small_size, band = true, gap = 6,
-        scroll = scroll_id() })
+      local body = {}
+      for n, l in ipairs(b.spans or {}) do
+        if n > 1 then body[#body + 1] = { text = "\n", hl = "MdCodeBlock" } end
+        for _, s in ipairs(l) do
+          body[#body + 1] = { text = s.text, hl = "MdCodeBlock", color = s.color }
+        end
+      end
+      if #body == 0 then body[1] = { text = "", hl = "MdCodeBlock" } end
+      add({ spans = body, size = M.small_size, band = true, gap = 6, scroll = scroll_id() })
     elseif k == "table" then
       -- One padded line wraps in the pane and piles the next cell onto it.
       -- Each cell is its own text, so a long note wraps inside its column.

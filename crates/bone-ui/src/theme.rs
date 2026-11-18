@@ -130,6 +130,12 @@ impl Theme {
     /// A group's style. Unknown groups, and links that lead nowhere, are
     /// `Normal`.
     pub fn hl(&self, name: &str) -> Style {
+        // `Group#rrggbb`: the group in that color (markdown's <#f80>text</>).
+        if let Some((group, _)) = name.split_once('#')
+            && let Some((r, g, b, _)) = parse_hex(&name[group.len()..])
+        {
+            return self.hl(group).fg(Color::Rgb(r, g, b));
+        }
         self.resolve(name, 0, 0)
             .or_else(|| self.resolve("Normal", 0, 0))
             .unwrap_or_default()

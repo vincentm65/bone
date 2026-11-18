@@ -1497,19 +1497,11 @@ end
 local function md_spans(spans, base)
   local out = {}
   for _, s in ipairs(spans) do
-    if s.code then
-      out[#out + 1] = { s.text, "MdCode" }
-    elseif s.link then
-      out[#out + 1] = { s.text, "MdLink" }
-      if s.link ~= s.text then
-        out[#out + 1] = { " <" .. s.link .. ">", "Dim" }
-      end
-    elseif s.bold then
-      out[#out + 1] = { s.text, "MdBold" }
-    elseif s.italic then
-      out[#out + 1] = { s.text, "MdItalic" }
-    else
-      out[#out + 1] = { s.text, base }
+    local hl = s.code and "MdCode" or s.link and "MdLink" or s.bold and "MdBold"
+      or s.italic and "MdItalic" or base
+    out[#out + 1] = { s.text, hl .. (s.color or "") } -- Group#rrggbb: that group, colored
+    if s.link and s.link ~= s.text then
+      out[#out + 1] = { " <" .. s.link .. ">", "Dim" }
     end
   end
   return out
@@ -1602,8 +1594,15 @@ function bone.ui.markdown(text, width, indent)
       append(out, bone.text.wrap(md_spans(b.spans, "Normal"), width, { first = first, rest = rest, copy = copy }))
     elseif b.kind == "code" then
       local p = { { indent, "Normal" }, { "▎ ", "ToolGutter" } }
-      for _, l in ipairs(b.lines) do
-        append(out, bone.text.wrap({ { l, "MdCodeBlock" } }, width, { first = p, rest = p }))
+      for _, l in ipairs(b.spans) do
+        local line = {}
+        for _, s in ipairs(l) do
+          line[#line + 1] = { s.text, "MdCodeBlock" .. (s.color or "") }
+        end
+        if #line == 0 then
+          line[1] = { "", "MdCodeBlock" }
+        end
+        append(out, bone.text.wrap(line, width, { first = p, rest = p }))
       end
     else
       local first = { { indent .. string.rep(" ", b.indent), "Normal" } }

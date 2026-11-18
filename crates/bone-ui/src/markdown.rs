@@ -1,6 +1,9 @@
 //! Markdown as data. `parse` splits text into blocks (headings, paragraphs,
 //! list items, quotes, code, rules, blank lines) with inline spans marked
 //! bold/italic/code/link. Lua decides how they look (`bone.markdown.parse`).
+//! `<#f80>text</>` colors its text (a span's `color`, as `#rrggbb`) in prose
+//! and in code blocks without a language (or `text`). Runs nest; one left
+//! open runs to the end of its block.
 
 use serde_json::{Value, json};
 
@@ -21,9 +24,7 @@ pub fn parse(text: &str) -> Vec<Value> {
         let fence = ["```", "~~~"].into_iter().find(|f| trimmed.starts_with(f));
         if let Some(f) = fence.filter(|f| code.as_ref().is_none_or(|(m, ..)| m == f)) {
             match code.take() {
-                Some((_, lang, lines)) => {
-                    out.push(json!({ "kind": "code", "lang": lang, "lines": lines }))
-                }
+                Some((_, lang, lines)) => out.push(code_block(lang, &lines, false)),
                 None => {
                     let lang = trimmed[3..].trim();
                     code = Some((f, (!lang.is_empty()).then(|| lang.to_owned()), Vec::new()));
@@ -110,12 +111,77 @@ pub fn parse(text: &str) -> Vec<Value> {
         out.push(json!({ "kind": "paragraph", "indent": indent, "spans": inline(trimmed) }));
     }
     if let Some((_, lang, lines)) = code {
-        out.push(json!({ "kind": "code", "lang": lang, "lines": lines, "open": true }));
+        out.push(code_block(lang, &lines, true));
     }
     while out.last().is_some_and(|b| b["kind"] == "blank") {
         out.pop();
     }
     out
+}
+
+/// A code block: `lines` its text as shown, `spans` each line's
+/// `{ text, color? }` spans. Only a block without a language (or `text`)
+/// takes color tags, and a run may cross its lines.
+fn code_block(lang: Option<String>, lines: &[String], open: bool) -> Value {
+    let (tags, mut colors) = (lang.as_deref().is_none_or(|l| l == "text"), Vec::new());
+    let spans: Vec<Vec<Value>> = lines.iter().map(|l| literal(l, tags, &mut colors)).collect();
+    let shown: Vec<String> = (spans.iter())
+        .map(|l| l.iter().filter_map(|s| s["text"].as_str()).collect())
+        .collect();
+    let mut b = json!({ "kind": "code", "lang": lang, "lines": shown, "spans": spans });
+    if open {
+        b["open"] = json!(true);
+    }
+    b
+}
+
+/// A color tag at `c[i]`: `<#rgb>` / `<#rrggbb>` opens a run (`Some` color,
+/// as `#rrggbb`), `</>` closes the innermost (`None`; text unless `open`).
+/// With where the text goes on.
+fn tag(c: &[char], i: usize, open: bool) -> Option<(Option<String>, usize)> {
+    if c[i] != '<' {
+        return None;
+    }
+    if c[i..].starts_with(&['<', '/', '>']) {
+        return open.then_some((None, i + 3));
+    }
+    let hex: String = c[i + 1..].iter().take(8).take_while(|&&ch| ch != '>').collect();
+    let at = i + 2 + hex.chars().count();
+    if c.get(at - 1) != Some(&'>') || !matches!(hex.len(), 4 | 7) {
+        return None;
+    }
+    let (r, g, b, _) = crate::theme::parse_hex(&hex)?;
+    Some((Some(format!("#{r:02x}{g:02x}{b:02x}")), at))
+}
+
+/// Text taken as written, but for color tags (when `tags`), as
+/// `{ text, color? }` spans. `colors`: the runs open before and after.
+fn literal(text: &str, tags: bool, colors: &mut Vec<String>) -> Vec<Value> {
+    let c: Vec<char> = text.chars().collect();
+    let (mut out, mut buf, mut i) = (Vec::new(), String::new(), 0);
+    loop {
+        let t = (tags && i < c.len()).then(|| tag(&c, i, !colors.is_empty())).flatten();
+        if i < c.len() && t.is_none() {
+            buf.push(c[i]);
+            i += 1;
+            continue;
+        }
+        if !buf.is_empty() {
+            let mut s = json!({ "text": std::mem::take(&mut buf) });
+            paint(std::slice::from_mut(&mut s), colors.last());
+            out.push(s);
+        }
+        let Some((col, at)) = t else { return out };
+        if let Some(col) = col { colors.push(col) } else { colors.pop(); }
+        i = at;
+    }
+}
+
+/// Give `spans` the color of the innermost open run, if any.
+fn paint(spans: &mut [Value], color: Option<&String>) {
+    for s in spans.iter_mut().filter(|_| color.is_some()) {
+        s["color"] = json!(color);
+    }
 }
 
 /// A row like `| a | b |` to its cells (`a`, `b`); the trailing `|` is
@@ -178,8 +244,8 @@ fn list_item(s: &str) -> Option<(&str, &str)> {
     None
 }
 
-/// Inline markup: `code`, **bold**, *italic* / _italic_, [text](url).
-/// Each span is `{ text, bold?, italic?, code?, link? }`.
+/// Inline markup: `code`, **bold**, *italic* / _italic_, [text](url),
+/// <#f80>color</>. Each span is `{ text, bold?, italic?, code?, link?, color? }`.
 pub fn inline(text: &str) -> Vec<Value> {
     let c: Vec<char> = text.chars().collect();
     let n = c.len();
@@ -202,7 +268,7 @@ pub fn inline(text: &str) -> Vec<Value> {
         (from..n.saturating_sub(pat.len() - 1)).find(|&j| c[j..j + pat.len()] == *pat)
     };
     let alnum = |i: usize| i < n && c[i].is_alphanumeric();
-    let mut i = 0;
+    let (mut i, mut colors, mut mark) = (0, Vec::new(), 0);
     while i < n {
         let ch = c[i];
         if ch == '`'
@@ -211,6 +277,14 @@ pub fn inline(text: &str) -> Vec<Value> {
             flush(&mut buf, &mut out, bold, italic);
             out.push(json!({ "text": c[i + 1..j].iter().collect::<String>(), "code": true }));
             i = j + 1;
+            continue;
+        }
+        // A tag colors what came since the last one, then opens or closes.
+        if let Some((col, at)) = tag(&c, i, !colors.is_empty()) {
+            flush(&mut buf, &mut out, bold, italic);
+            paint(&mut out[mark..], colors.last());
+            if let Some(col) = col { colors.push(col) } else { colors.pop(); }
+            (mark, i) = (out.len(), at);
             continue;
         }
         if (ch == '*' || ch == '_') && i + 1 < n && c[i + 1] == ch {
@@ -250,7 +324,10 @@ pub fn inline(text: &str) -> Vec<Value> {
             && let Some(end) = find(close + 2, &[')'])
         {
             flush(&mut buf, &mut out, bold, italic);
-            let label: String = c[i + 1..close].iter().collect();
+            // A label's tags are dropped; the link takes the color around it.
+            let label = c[i + 1..close].iter().collect::<String>();
+            let label = literal(&label, true, &mut colors.clone());
+            let label: String = label.iter().filter_map(|s| s["text"].as_str()).collect();
             let url: String = c[close + 2..end].iter().collect();
             out.push(json!({ "text": label, "link": url }));
             i = end + 1;
@@ -260,6 +337,7 @@ pub fn inline(text: &str) -> Vec<Value> {
         i += 1;
     }
     flush(&mut buf, &mut out, bold, italic);
+    paint(&mut out[mark..], colors.last());
     out
 }
 
