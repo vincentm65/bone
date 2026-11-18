@@ -230,8 +230,13 @@ function M.node(opts)
   local ctx = { text = text, empty = text == "", focused = not opts.chat, running = running or false,
     session = opts.session }
   local placeholder = prompt_line("placeholder", ctx)
+  -- During a turn, what enter does with a message (bone.o.queue_mode), in
+  -- few enough words to stay one line in a narrow window.
+  local ok, mode = pcall(function() return bone.o.queue_mode end)
+  local steer = not ok or mode ~= "next"
   placeholder = placeholder and spans_text(placeholder)
-    or (running and "Message bone (queues)…" or "Ask bone, or type / for commands")
+    or (running and (steer and "Add to this turn…" or "Queue for next turn…")
+      or "Ask bone, or type / for commands")
   local prefix = not opts.chat and prompt_line("prefix", ctx) or nil
   local p = type(bone.ui.prompt) == "table" and bone.ui.prompt or {}
   local rows = max_rows()
@@ -240,7 +245,7 @@ function M.node(opts)
   local compact = opts.width and opts.width < 240
   local field_placeholder = placeholder
   if compact then
-    field_placeholder = opts.width < 96 and "…" or (running and "Queue…" or "Ask bone…")
+    field_placeholder = opts.width < 96 and "…" or (running and (steer and "Steer…" or "Queue…") or "Ask bone…")
   end
   -- The field, with the prompt's prefix before it.
   local field = { direction = "row", gap = 8, align = "start", padding = { 0, 4, 0, 4 },

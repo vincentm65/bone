@@ -489,7 +489,14 @@ local function card(item, expanded, width)
   local what = target(item, not expanded and math.min(60, math.max(24, width - 40)) or nil)
   local title = { { text = label, hl = "ToolName", medium = true } }
   if what ~= "" then
-    title[#title + 1] = { text = "  " .. what, hl = name == "shell" and "ShellProgram" or "ToolPath" }
+    if name == "shell" then
+      -- A command in the font it is typed in, a step smaller to sit level
+      -- with the label, and quiet: green would read as "it worked".
+      title[#title + 1] = { text = "  ", hl = "ToolArgs" }
+      title[#title + 1] = { text = what, hl = "ToolArgs", font = "mono", size = md.small_size - 1 }
+    else
+      title[#title + 1] = { text = "  " .. what, hl = "ToolPath" }
+    end
   end
   -- Details at the right, "·" between.
   local meta = {}
