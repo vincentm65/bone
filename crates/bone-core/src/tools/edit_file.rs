@@ -91,6 +91,35 @@ impl Args {
     }
 }
 
+/// Where old_string stops matching the file, from its start: the file's line
+/// there against old_string's (nothing when under 20 bytes matched).
+fn near_miss(text: &str, old: &str) -> String {
+    let found = |end: &usize| text.contains(&old[..*end]);
+    let lines = old.match_indices('\n').map(|(i, _)| i + 1);
+    let ln = lines.take_while(found).last().unwrap_or(0);
+    let chars = old[ln..].char_indices().map(|(i, c)| ln + i + c.len_utf8());
+    let k = chars.take_while(found).last().unwrap_or(ln);
+    let Some(at) = text.find(&old[..k]).filter(|_| k >= 20) else {
+        return String::new();
+    };
+    let line = |s: &str, at: usize| {
+        let start = s[..at].rfind('\n').map_or(0, |i| i + 1);
+        s[start..]
+            .split('\n')
+            .next()
+            .unwrap_or("")
+            .chars()
+            .take(160)
+            .collect::<String>()
+    };
+    let (n, file, want) = (
+        text[..at + k].matches('\n').count() + 1,
+        line(text, at + k),
+        line(old, k),
+    );
+    format!(" It matches up to line {n}, where the file has {file:?}, not {want:?}.")
+}
+
 /// Resolve all matches against the original bytes; reject cross-edit overlaps.
 /// Returning a new string before the sole file write makes validation atomic.
 fn apply(text: &str, edits: &[Replacement], display: &str) -> Result<(String, usize), String> {
@@ -119,8 +148,9 @@ fn apply(text: &str, edits: &[Replacement], display: &str) -> Result<(String, us
         match matches.len() {
             0 => {
                 return Err(format!(
-                    "edit {}: old_string not found in {display}. Re-read the file and copy the text exactly.",
-                    index + 1
+                    "edit {}: old_string not found in {display}.{} Re-read the file and copy the text exactly.",
+                    index + 1,
+                    near_miss(text, &edit.old_string)
                 ));
             }
             n if n > 1 && !edit.replace_all => {
@@ -298,6 +328,28 @@ mod tests {
                 .unwrap_err()
                 .contains("not found")
         );
+    }
+    #[test]
+    fn not_found_shows_where_it_stops_matching() {
+        let file = "fn a() {\n    let width = compute(1);\n    let y = 2;\n}\n";
+        for (old, hint) in [
+            (
+                "    let width = compute(1);\n    let y = 3;",
+                r#"line 3, where the file has "    let y = 2;", not "    let y = 3;"."#,
+            ),
+            (
+                "    let width = compute(1); // cached",
+                r#"line 2, where the file has "    let width = compute(1);", not "    let width = compute(1); // cached"."#,
+            ),
+            (
+                "fn a() {\n    let width = compute(1);\n}",
+                r#"line 3, where the file has "    let y = 2;", not "}"."#,
+            ),
+            ("let q", "not found in f. Re-read"),
+        ] {
+            let err = apply(file, &[edit(old, "", false)], "f").unwrap_err();
+            assert!(err.contains(hint), "{err}");
+        }
     }
     #[test]
     fn reject_empty_missing_and_noop() {
