@@ -162,7 +162,9 @@ local function paragraphs(text, group, id, width)
         end
       end
       if #body == 0 then body[1] = { text = "", hl = "MdCodeBlock" } end
-      add({ spans = body, size = M.small_size, band = true, gap = 6, scroll = scroll_id() })
+      local lang = type(b.lang) == "string" and b.lang ~= "" and b.lang ~= "text" and b.lang or nil
+      add({ spans = body, size = M.small_size, band = true, gap = 6, scroll = scroll_id(),
+        code = { text = table.concat(b.lines or {}, "\n"), lang = lang } })
     elseif k == "table" then
       -- One padded line wraps in the pane and piles the next cell onto it.
       -- Each cell is its own text, so a long note wraps inside its column.
@@ -240,11 +242,33 @@ local function paragraphs(text, group, id, width)
   return out
 end
 
+-- A code block's corner while the pointer is on the block: its language
+-- and a copy button, on the block's own fill so the line under them is
+-- hidden rather than crossed. It stays a moment after a copy, its check
+-- showing, wherever the pointer goes.
+local function corner(code, key, redraw)
+  local widgets = require("bone.nodes.widgets")
+  local copied = widgets.copied(key)
+  local node = {
+    position = "absolute", top = 4, right = 4, z = 1,
+    direction = "row", align = "center", gap = 4, padding = { 0, 0, 0, code.lang and 8 or 0 },
+    bg = "CodeBlock", radius = style.radius.sm,
+    opacity = copied and 1 or 0, group_hover = { opacity = 1 }, transition = style.motion.base,
+  }
+  if code.lang then
+    node[#node + 1] = { text = code.lang, size = style.size.micro, font = "mono", hl = "Dim", wrap = false }
+  end
+  node[#node + 1] = widgets.copy_button(code.text, key, redraw,
+    { label = "Copy the code", box = 24, size = 14, hl = "Dim", radius = style.radius.sm })
+  return style.finish(node)
+end
+
 --- `text` as a list of nodes, a paragraph each; `group` is the body text's
 --- (default Normal). opts: size (every paragraph's, headings and code too),
 --- indent (px more on the left), id (a name of the window's own for this
 --- text: its code blocks and tables then scroll sideways), width (the
---- text's in pixels, in the chat).
+--- text's in pixels, in the chat), redraw (draws the text again, for a
+--- code block's copy button to show its check; default: the window).
 function M.nodes(text, group, opts)
   opts = opts or {}
   local out = {}
@@ -256,7 +280,13 @@ function M.nodes(text, group, opts)
       local o = { size = opts.size or p.size, font = p.font, gap = p.gap, scroll = p.scroll,
         indent = (p.indent or 0) + (opts.indent or 0),
         line_height = p.prose and not opts.size and M.line_height or nil }
-      out[#out + 1] = p.band and M.band(p.spans, o) or M.text(p.spans, o)
+      local node = p.band and M.band(p.spans, o) or M.text(p.spans, o)
+      if p.code and p.code.text:match("%S") then
+        -- The block follows the pointer, so its corner shows (group_hover).
+        node.cursor = "text"
+        node[#node + 1] = corner(p.code, p.scroll or ("code:" .. p.code.text), opts.redraw)
+      end
+      out[#out + 1] = node
     end
   end
   return out

@@ -635,7 +635,9 @@ under the list however far it scrolls). A window's content may also set
 `max_width` and `max_height` (pixels) to make the card smaller;
 `bone.nodes.style.as_dialog(node)` sets them to `style.dialog`, the one size
 settings, the catalog, setup, the picker and help share. Also
-`icon_button(glyph, label, click, o)`, `link(text, click)`, `pill(text)`,
+`icon_button(glyph, label, click, o)`, `copy_button(text, key, redraw, o)`
+(copies `text` and shows a check in place for `copied_ms`; `copied(key)` says
+whether it still does), `link(text, click)`, `pill(text)`,
 `tabs(names, current, pick)`, `segmented(names, current, pick, o)` (`o.item`
 replaces fields of each choice), `switch(on, click)` (an on/off toggle),
 `detail(text or node, hl)` (a fixed two-line space under a list for the

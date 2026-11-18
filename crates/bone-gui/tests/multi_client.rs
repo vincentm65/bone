@@ -220,7 +220,7 @@ async fn events_arrive_in_order() {
     let mut tui = e.tui().await;
     gui.send("run something");
     gui.wait_for(WAIT, |g| {
-        g.transcript().contains("Ran 1 shell command")
+        g.transcript().contains("Ran echo tool-ran")
             && g.transcript().contains("all done")
             && idle(g)
     })
@@ -228,7 +228,7 @@ async fn events_arrive_in_order() {
     .unwrap();
     let live = gui.gui.transcript();
     // Drawn by the standard views, as in the TUI: tools collapsed.
-    let order: Vec<_> = ["run something", "Ran 1 shell command", "all done"]
+    let order: Vec<_> = ["run something", "Ran echo tool-ran", "all done"]
         .iter()
         .map(|s| {
             live.find(s)
@@ -281,7 +281,7 @@ async fn a_question_answered_in_one_client_closes_in_the_other() {
         .await
         .unwrap();
     // The summary types itself out over a few frames.
-    gui.wait_for(WAIT, |g| g.transcript().contains("Ran 1 shell command"))
+    gui.wait_for(WAIT, |g| g.transcript().contains("Ran echo allowed"))
         .await
         .unwrap();
     // The core no longer has it either: a late answer is refused.
@@ -402,7 +402,7 @@ async fn reconnecting_restores_everything() {
     .unwrap();
     gui.wait_for(WAIT, |g| {
         let t = g.transcript();
-        t.contains("Ran 1 shell command") && t.contains("steer from tui")
+        t.contains("Ran echo approved") && t.contains("steer from tui")
     })
     .await
     .unwrap_or_else(|t| panic!("{t}"));

@@ -49,6 +49,11 @@ local function box(children, o)
   })
 end
 
+-- Draws `item` again (a copy button's check comes and goes this way).
+local function redraw_of(item)
+  return function() bone.chat.redraw(item.index) end
+end
+
 -- The turn's footer under its last item: on a reply, a quiet copy button,
 -- then how long the turn worked.
 local function footer(item, ctx, out, copy)
@@ -63,10 +68,8 @@ local function footer(item, ctx, out, copy)
   end
   out[#out + 1] = {
     direction = "row", align = "center", gap = 8, margin = { 8, 0, 0, -4 },
-    widgets.icon_button("copy", "Copy the reply", function()
-      bone.clipboard.copy(copy)
-      bone.notify("Copied", "info")
-    end, { box = 26, size = 14, hl = "Dim", radius = style.radius.md }),
+    widgets.copy_button(copy, "reply:" .. tostring(ctx and ctx.list or "") .. ":" .. tostring(item.key or item.id or item.index),
+      redraw_of(item), { label = "Copy the reply", box = 26, size = 14, hl = "Dim", radius = style.radius.md }),
     line,
   }
   return out
@@ -102,7 +105,8 @@ local function report(item, ctx)
     if not line:match("^%s*([`~])%1%1") then n = n + 1 end -- a code fence is no line of its own
     if all or n <= PREVIEW then kept[#kept + 1] = line end
   end
-  nodes.append(out, md.nodes(table.concat(kept, "\n"), "ToolOutput", { size = md.small_size, indent = 12 }))
+  nodes.append(out, md.nodes(table.concat(kept, "\n"), "ToolOutput",
+    { size = md.small_size, indent = 12, redraw = redraw_of(item) }))
   if not all and n > PREVIEW then
     out[#out + 1] = md.text({ { "⋮ +" .. (n - PREVIEW) .. " more", "Dim" } }, { size = md.small_size, indent = 12 })
   end
@@ -139,6 +143,7 @@ function M.assistant(item, ctx)
     out = md.nodes(text, nil, {
       id = "md:" .. tostring(ctx and ctx.list or "") .. ":" .. tostring(item.key or item.id or item.index),
       width = ctx and ctx.width_px and ctx.width_px - 8,
+      redraw = redraw_of(item),
     })
   end
   if item.streaming and #out > 0 then
@@ -161,7 +166,7 @@ function M.reasoning(item, ctx)
   local text = trim(item.text)
   if not bone.o.show_reasoning or text == "" then return nil end
   local out = { md.text({ { item.streaming and "Thinking…" or "Reasoning", "Dim" } }, { size = md.small_size }) }
-  nodes.append(out, md.nodes(text, "Reasoning", { size = md.small_size }))
+  nodes.append(out, md.nodes(text, "Reasoning", { size = md.small_size, redraw = redraw_of(item) }))
   footer(item, ctx, out)
   return {
     node = box(out, { pad = { 0, 4 }, margin = { 8, 2 } }),
