@@ -168,6 +168,21 @@ impl Inner {
         Ok(turn_id)
     }
 
+    /// The runtime a turn on `s` runs on: a subagent's is its nearest owner's
+    /// mid-turn (whose Lua waits on it there, even after a reload), any
+    /// other session's the current one.
+    pub(crate) fn runtime_for(&self, s: &session::Session) -> Arc<runtime::Runtime> {
+        let mut owner = s.info.owner.as_ref().map(|o| o.session_id.clone());
+        while let Some(handle) = owner.and_then(|id| self.sessions.get(&id).ok()) {
+            let o = handle.lock().unwrap();
+            if let Some((_, rt)) = &o.turn_rt {
+                return rt.clone();
+            }
+            owner = o.info.owner.as_ref().map(|o| o.session_id.clone());
+        }
+        self.runtime()
+    }
+
     /// Validate stored attachments and the session's model before saving input.
     pub(crate) fn validate_input(
         &self,
@@ -181,7 +196,7 @@ impl Inner {
         self.attachments
             .validate(images)
             .map_err(RpcError::invalid_params)?;
-        let rt = self.runtime();
+        let rt = self.runtime_for(session);
         let pin = session.model.clone();
         if !rt.supports_images(
             pin.as_ref().and_then(|p| p.0.as_deref()),

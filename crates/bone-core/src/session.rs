@@ -142,6 +142,8 @@ pub struct Session {
     pub queue: Vec<QueuedMessage>,
     /// The queue waits (after a cancelled turn, or a restart).
     pub queue_paused: bool,
+    /// The runtime its turn runs on, until that turn's turn_end hooks end.
+    pub(crate) turn_rt: Option<(TurnId, Arc<crate::runtime::Runtime>)>,
     /// The model it is locked to; `None` until its first turn or change.
     pub model: Option<Pin>,
     /// When its tool calls ran, by call id (those recorded with times).
@@ -581,6 +583,7 @@ impl SessionStore {
             queue_dirty: Cell::new(false),
             queue_paused: !saved.items.is_empty(),
             queue: saved.items,
+            turn_rt: None,
             info,
             messages,
             summary,

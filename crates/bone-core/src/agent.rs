@@ -94,7 +94,8 @@ pub(crate) async fn run_turn(
         (s.info.session_id.clone(), PathBuf::from(&s.info.cwd))
     };
     inner.settings_from_disk().await;
-    let rt = inner.runtime();
+    let rt = inner.runtime_for(&session.lock().unwrap());
+    session.lock().unwrap().turn_rt = Some((turn_id, rt.clone()));
     let stream = rt
         .scripting
         .clone()
@@ -156,6 +157,8 @@ pub(crate) async fn run_turn(
             let _ = s.hooks("turn_end", ev).await;
         }
     }
+    (session.lock().unwrap_or_else(std::sync::PoisonError::into_inner).turn_rt)
+        .take_if(|(t, _)| *t == turn_id);
     inner.emit::<TurnFinished>(TurnFinishedParams {
         session_id: turn.session_id,
         turn_id,
