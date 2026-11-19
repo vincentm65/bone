@@ -33,18 +33,37 @@ impl Gui {
             offset: crate::backend::Vec2::ZERO,
         };
         self.route_keys(&mut fx);
-        // The node view (`bone.gui.view`) is the whole window, on the canvas.
-        let screen = input.screen;
-        fx.paint(
-            Shape::Rect {
-                rect: screen,
-                corners: Corners::default(),
-                fill: self.canvas(),
-            },
-            screen,
-        );
-        if !self.view_ui(&mut fx) {
-            self.no_view_ui(&mut fx);
+        self.draw_view(&mut fx);
+        // A handler ran (a drag, a click): what it changed is drawn in this
+        // frame, not the next. The pass again hears none of the input, which
+        // the first took, so nothing fires twice.
+        if std::mem::take(&mut self.view.handled) {
+            let mut quiet = input.clone();
+            quiet.events.clear();
+            self.view.pointer.begin(&quiet);
+            let mut again = FrameOutput::default();
+            let mut fx = Fx {
+                input: &quiet,
+                shaper,
+                out: &mut again,
+                typed: Vec::new(),
+                opacity: 1.0,
+                offset: crate::backend::Vec2::ZERO,
+            };
+            self.draw_view(&mut fx);
+            out.draw = again.draw;
+            out.cursor = again.cursor;
+            out.ime = again.ime;
+            out.controls = again.controls;
+            out.copy = again.copy.or(out.copy.take());
+            if let Some(after) = again.repaint_after {
+                out.repaint_after(after);
+            }
+            // One it fired (the pointer is over another node now) is drawn
+            // next frame.
+            if std::mem::take(&mut self.view.handled) {
+                out.repaint();
+            }
         }
         self.sweep_previews();
         if let Some(t) = self.lua.copied.take() {
@@ -53,6 +72,22 @@ impl Gui {
         out.title = Some((self.window_title.clone()).unwrap_or_else(|| self.window_name()));
         out.close = self.closed;
         out
+    }
+
+    /// The node view (`bone.gui.view`), the whole window, on the canvas.
+    fn draw_view(&mut self, fx: &mut Fx) {
+        let screen = fx.input.screen;
+        fx.paint(
+            Shape::Rect {
+                rect: screen,
+                corners: Corners::default(),
+                fill: self.canvas(),
+            },
+            screen,
+        );
+        if !self.view_ui(fx) {
+            self.no_view_ui(fx);
+        }
     }
 
     /// The window's background: the Normal group's, or a dark canvas when

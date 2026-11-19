@@ -227,6 +227,9 @@ pub struct ViewState {
     pub(crate) bound: Bound,
     /// Lua should build the tree again.
     pub dirty: bool,
+    /// The nodes' handlers ran this frame: the frame draws again with what
+    /// they changed.
+    pub(crate) handled: bool,
     pub(crate) scroll: HashMap<String, Scroll>,
     pub(crate) lists: HashMap<String, ListState>,
     pub(crate) hits: Vec<Hit>,
@@ -892,6 +895,11 @@ impl Gui {
             if again {
                 fx.out.repaint();
             }
+            // An item is to be made again later (an answer streaming, a
+            // width still moving): the view wakes then.
+            if let Some(at) = self.view.wake {
+                fx.out.repaint_after(at.saturating_duration_since(now));
+            }
             drop(_realize);
             let _item_place = crate::profile::Span::start("item-place");
             let placed_lists: HashMap<String, (usize, Vec<Placed>)> = windows
@@ -974,6 +982,7 @@ impl Gui {
         self.settle_focus(fx, frame.focusables, frame.trap, frame.press_focus);
         if !frame.events.is_empty() {
             self.view.dirty = true;
+            self.view.handled = true;
         }
         self.call_handlers(frame.events);
         true
