@@ -25,6 +25,10 @@ pub(crate) struct ListState {
     gap: f32,
     estimate: f32,
     width: f32,
+    /// The width a chat list's items are made at, and when its width last
+    /// moved: see [`WIDTH_SETTLE`].
+    made_width: usize,
+    width_moved: Option<Instant>,
     pub(super) nodes: HashMap<usize, Rc<Node>>,
     /// A chat list's items made last frame, by chat item: kept while the
     /// chat says they are fresh.
@@ -90,6 +94,13 @@ pub(crate) enum ChatMove {
 /// often: each delta would otherwise remake all of it, which grows with its
 /// length. The view wakes when the time is up.
 const STREAM_EVERY: Duration = Duration::from_millis(50);
+
+/// A chat list's width that keeps moving (a split or a dock dragged, the
+/// window resized) keeps the items made at the width before, laid out at
+/// the new one, until it has rested this long: making each again at every
+/// step is most of such a frame. One change alone (a panel opening) makes
+/// them again at once.
+const WIDTH_SETTLE: Duration = Duration::from_millis(100);
 
 /// A chat list's items this frame (see `Gui::chat_items`). Built only when
 /// a visible item is missing from the cache.
@@ -229,11 +240,27 @@ impl Gui {
         st.measured.resize(l.count, false);
         (st.gap, st.estimate) = (l.gap, est);
         let width = p.inner.w;
+        let now = Instant::now();
+        let settling = |st: &ListState| st.width_moved.is_some_and(|t| now < t + WIDTH_SETTLE);
         if (st.width - width).abs() > 0.5 {
             // Another width wraps differently: what was seen is a guess.
             st.width = width;
             st.nodes.clear();
+            if !settling(st) {
+                st.made_width = width.round() as usize;
+            }
+            st.width_moved = Some(now);
         }
+        if st.made_width != width.round() as usize {
+            if let (true, Some(t)) = (settling(st), st.width_moved) {
+                let due = t + WIDTH_SETTLE;
+                let wake = &mut self.view.wake;
+                *wake = Some(wake.map_or(due, |w| w.min(due)));
+            } else {
+                st.made_width = width.round() as usize;
+            }
+        }
+        let made_width = st.made_width;
         let sc = scroll.entry(id.to_owned()).or_default();
         let old_max = sc.max;
         let at_end = !sc.held && !sc.dragging && sc.offset >= old_max - 1.0;
@@ -290,7 +317,7 @@ impl Gui {
                 _ if is_chat => {
                     if chat.is_none() {
                         let kept = std::mem::take(&mut st.chat);
-                        chat = Some(self.chat_items(buf, width, kept, st.streamed.take()));
+                        chat = Some(self.chat_items(buf, made_width, kept, st.streamed.take()));
                     }
                     self.chat_item(l, i, base, sink, chat.as_mut().unwrap())
                 }
@@ -382,7 +409,7 @@ impl Gui {
     fn chat_items(
         &mut self,
         buf: usize,
-        width: f32,
+        width: usize,
         kept: HashMap<bone_ui::chat::Item, Rc<Node>>,
         streamed: Option<(bone_ui::chat::Item, Instant)>,
     ) -> ChatItems {
@@ -396,7 +423,7 @@ impl Gui {
             kept,
             used: HashMap::new(),
             data,
-            width: width.round() as usize,
+            width,
             generation,
             now,
             streamed,
