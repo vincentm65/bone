@@ -762,7 +762,12 @@ function M.view(item, ctx)
     paras[#paras + 1] = md.text({ { text, "Dim" } }, { size = md.small_size, gap = 10 })
   end
   local fallback = { { { (M.labels[item.name] or item.name) .. " " .. target(item), "ToolName" } } }
-  local node = style.finish({ direction = "column", margin = { 3, 0, 3, 0 } })
+  -- Opening or folding it (a click, ctrl+t, output arriving) eases its
+  -- height rather than jumping the chat under it.
+  local node = style.finish({
+    direction = "column", margin = { 3, 0, 3, 0 }, id = "tool-view:" .. tool_key(item),
+    transition = { duration = style.motion.slow, easing = "ease-out", height = true },
+  })
   nodes.append(node, paras)
   return { node = node, lines = fallback, click = function() M.toggle(item, key) end }
 end

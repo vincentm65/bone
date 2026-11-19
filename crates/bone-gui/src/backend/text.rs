@@ -31,6 +31,9 @@ pub struct RunStyle {
     /// Slanted by the renderer (a face without an italic of its own).
     pub italic: bool,
     pub background: Option<Rgba>,
+    /// Room kept at each end of the run, inside its background: a code
+    /// span's chip, which stands clear of the text beside it.
+    pub pad: f32,
     pub underline: bool,
     pub strike: bool,
     /// Pixels from one line to the next (none: the font's own).
@@ -46,6 +49,7 @@ impl RunStyle {
             color,
             italic: false,
             background: None,
+            pad: 0.0,
             underline: false,
             strike: false,
             line_height: None,
@@ -53,6 +57,9 @@ impl RunStyle {
         }
     }
 }
+
+/// The room on each side of a code span's text, inside its chip.
+pub const CHIP_PAD: f32 = 3.0;
 
 /// Text to lay out: `text` in runs (byte ranges that cover it in order),
 /// wrapped at `wrap` (one line that ends in "…" with `ellipsis`), and
@@ -285,6 +292,7 @@ pub fn fixed_layout_by(job: &Job, advance: impl Fn(&RunStyle, char) -> Option<f3
     let chars: Vec<(char, f32, f32)> = {
         let mut out = Vec::new();
         for (range, style) in &job.runs {
+            let first = out.len();
             for c in job.text[range.clone()].chars() {
                 let w = if c == '\n' {
                     0.0
@@ -293,6 +301,7 @@ pub fn fixed_layout_by(job: &Job, advance: impl Fn(&RunStyle, char) -> Option<f3
                 };
                 out.push((c, w, style.line_height.unwrap_or(style.size * 1.25)));
             }
+            pad_ends(&mut out[first..], style.pad, |c| c.0 == '\n', |c, p| c.1 += p);
         }
         out
     };
@@ -381,6 +390,26 @@ pub fn fixed_layout_by(job: &Job, advance: impl Fn(&RunStyle, char) -> Option<f3
     }
     let height = rows.iter().map(|r| r.height).sum();
     (vec2(width, height), rows)
+}
+
+/// Widen the first and the last char of a run (`chars`, those `newline`
+/// says are line breaks left out) by `pad`: the run's chip has room at
+/// either end.
+pub(crate) fn pad_ends<T>(
+    chars: &mut [T],
+    pad: f32,
+    newline: impl Fn(&T) -> bool,
+    mut widen: impl FnMut(&mut T, f32),
+) {
+    if pad <= 0.0 {
+        return;
+    }
+    let Some(a) = chars.iter().position(|c| !newline(c)) else {
+        return;
+    };
+    let b = chars.iter().rposition(|c| !newline(c)).unwrap_or(a);
+    widen(&mut chars[a], pad);
+    widen(&mut chars[b], pad);
 }
 
 /// The fixed-advance [`Shaper`] of window-less frames.

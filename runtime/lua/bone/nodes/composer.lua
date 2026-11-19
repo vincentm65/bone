@@ -47,7 +47,7 @@ local function suggestions()
   local rows = SUGGESTIONS
   local first = math.max(1, math.min(menu.selected - rows + 1, n - rows + 1))
   if menu.selected < first then first = menu.selected end
-  local list = widgets.surface({ id = "slash-menu", transition = style.appear(), padding = { 6, 6, 0, 6 },
+  local list = widgets.surface({ id = "slash-menu", transition = style.appear(6), padding = { 6, 6, 0, 6 },
     shadow = style.shadow.menu })
   for i = first, math.min(n, first + rows - 1) do
     local it, on = items[i], i == menu.selected

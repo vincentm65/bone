@@ -304,8 +304,12 @@ impl Gui {
             }
             let mg = item.style.margin;
             // The same node at the same width (a change of either gives another
-            // node or clears `cached`) is as tall as it was.
-            let height = if st.measured[i] && prev.is_some_and(|p| Rc::ptr_eq(&p, &item)) {
+            // node or clears `cached`) is as tall as it was, unless a height
+            // in it is still easing (`transition = { height = true }`).
+            let height = if st.measured[i]
+                && !fonts.heights_moving
+                && prev.is_some_and(|p| Rc::ptr_eq(&p, &item))
+            {
                 st.heights[i]
             } else {
                 let _item_measure = crate::profile::Span::start("item-measure");

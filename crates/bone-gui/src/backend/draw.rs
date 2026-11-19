@@ -101,6 +101,53 @@ pub enum Shape {
     },
 }
 
+impl Shape {
+    /// The same shape moved by `by`.
+    pub fn translate(self, by: Vec2) -> Shape {
+        match self {
+            Shape::Rect {
+                rect,
+                corners,
+                fill,
+            } => Shape::Rect {
+                rect: rect.translate(by),
+                corners,
+                fill,
+            },
+            Shape::Stroke { rect, corners, width, color, outside } => {
+                Shape::Stroke { rect: rect.translate(by), corners, width, color, outside }
+            }
+            Shape::Shadow { rect, corners, offset, blur, spread, color } => {
+                Shape::Shadow { rect: rect.translate(by), corners, offset, blur, spread, color }
+            }
+            Shape::Gradient { rect, corners, gradient } => {
+                Shape::Gradient { rect: rect.translate(by), corners, gradient }
+            }
+            Shape::Text { at, text, color } => Shape::Text { at: at + by, text, color },
+            Shape::Image { rect, uv, corners, picture } => {
+                Shape::Image { rect: rect.translate(by), uv, corners, picture }
+            }
+            Shape::Circle {
+                center,
+                radius,
+                fill,
+                stroke,
+            } => Shape::Circle {
+                center: center + by,
+                radius,
+                fill,
+                stroke,
+            },
+            Shape::Path { points, closed, stroke, fill } => Shape::Path {
+                points: points.into_iter().map(|p| p + by).collect(),
+                closed,
+                stroke,
+                fill,
+            },
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Item {
     pub shape: Shape,

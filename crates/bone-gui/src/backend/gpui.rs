@@ -203,6 +203,7 @@ impl Shaper for GpuiShaper {
         let mut chars: Vec<Ch> = Vec::new();
         for (k, (range, st)) in job.runs.iter().enumerate() {
             let text = &job.text[range.clone()];
+            let begin = chars.len();
             let mut first = true;
             for piece in text.split('\n') {
                 if !first {
@@ -218,6 +219,16 @@ impl Shaper for GpuiShaper {
                 }
                 first = false;
                 self.line(piece, st, k, &mut chars);
+            }
+            // A chip's room at either end: its first glyph moves right by
+            // it, and the run is that much wider on both sides.
+            if st.pad > 0.0 {
+                if let Some(a) = chars[begin..].iter().position(|c| !c.newline) {
+                    for g in &mut chars[begin + a].glyphs {
+                        g.0 += st.pad;
+                    }
+                }
+                super::text::pad_ends(&mut chars[begin..], st.pad, |c| c.newline, |c, p| c.w += p);
             }
         }
         let base = job.runs.first().map(|(_, s)| s.clone()).unwrap_or_else(|| {

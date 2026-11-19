@@ -429,7 +429,7 @@ function M.header(session, width)
     -- Over everything (M.body puts it at the window's top), with a press
     -- anywhere else closing it.
     local menu = widgets.surface({
-      id = "chat-menu", transition = style.appear(),
+      id = "chat-menu", transition = style.appear(-6),
       position = "absolute", right = 12, top = require("bone.nodes.titlebar").offset() + M.header_height - 4,
       z = 30, width = 200, padding = 4,
       shadow = style.shadow.menu,

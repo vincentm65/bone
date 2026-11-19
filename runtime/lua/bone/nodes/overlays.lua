@@ -134,7 +134,7 @@ local function ask_dialog()
         { padding = { 7, 16 }, focusable = false }) }
   end
   return {
-    id = "ask", transition = not style.plain and style.appear() or nil,
+    id = "ask", transition = not style.plain and style.appear(8) or nil,
     position = "absolute", left = 0, right = 0, top = 0, bottom = 0, z = 10, block_input = true,
     bg = style.scrim.dialog, direction = "column", justify = "center", align = "center", finish(card),
   }
@@ -184,7 +184,7 @@ local function toast()
   local leaving = s.age_ms >= life - fade
   bone.gui.invalidate((leaving and life or life - fade) - s.age_ms + 20)
   return {
-    id = "toast", transition = style.appear(), opacity = leaving and 0 or 1,
+    id = "toast", transition = style.appear(8), opacity = leaving and 0 or 1,
     position = "absolute", left = 0, right = 0, bottom = 96, z = 4, direction = "row", justify = "center",
     widgets.press(widgets.surface({
       text = s.text, size = style.size.caption, hl = s.error and "ErrorMsg" or "StatusLine",

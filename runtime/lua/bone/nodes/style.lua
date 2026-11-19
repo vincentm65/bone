@@ -72,9 +72,13 @@ M.scrim = { dialog = "#0000009e", image = "#000000d8" }
 --- Under about 100 a fade reads as a jump.
 M.motion = { fast = 120, base = 150, slow = 200 }
 
---- The `transition` of what appears (a dialog, a menu): it fades in.
-function M.appear()
-  return { duration = M.motion.slow, easing = "ease-out", enter = true }
+--- The `transition` of what appears (a dialog, a menu): it fades in, and
+--- with `dy` (or `dx`) it slides in from that many pixels away: a menu
+--- under what opened it from above (`dy` < 0), what rises over the
+--- composer from below.
+function M.appear(dy, dx)
+  local from = (dy or dx) and { dx = dx or 0, dy = dy or 0 } or true
+  return { duration = M.motion.slow, easing = "ease-out", enter = from }
 end
 
 -- The channels of a "#rrggbb" color, or nil.

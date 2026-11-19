@@ -91,12 +91,30 @@ pub struct State {
 /// `transition = 150` (ms) or `{ duration = 150, easing = "ease-out" }`: what
 /// the node's background, border color and opacity change to (by Lua, or
 /// by `hover` and the other states) is faded to over that long. `enter`:
-/// the node fades in from clear when it appears.
+/// the node fades in from clear when it appears; `enter = { dx, dy }` also
+/// slides it in from that far off. `height`: a change of its height (what
+/// it holds grew or shrank) is eased too, its content cut at the edge
+/// meanwhile; it needs an `id`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transition {
     pub duration_ms: f32,
     pub easing: Easing,
     pub enter: bool,
+    /// Where an entering node starts, from where it is laid out.
+    pub enter_offset: (f32, f32),
+    pub height: bool,
+}
+
+impl Transition {
+    fn new(duration_ms: f32) -> Transition {
+        Transition {
+            duration_ms,
+            easing: Easing::default(),
+            enter: false,
+            enter_offset: (0.0, 0.0),
+            height: false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -1081,19 +1099,25 @@ fn transition(p: &Props) -> Result<Option<Transition>, String> {
         None | Some(Value::Boolean(false)) => None,
         Some(Value::Table(t)) => {
             let t = Props::new(t)?;
+            let (enter, enter_offset) = match t.raw("enter") {
+                None | Some(Value::Nil) => (false, (0.0, 0.0)),
+                Some(Value::Table(e)) => {
+                    let e = Props::new(e)?;
+                    (true, (e.get("dx")?.unwrap_or(0.0), e.get("dy")?.unwrap_or(0.0)))
+                }
+                Some(_) => (t.get("enter")?.unwrap_or(false), (0.0, 0.0)),
+            };
             Some(Transition {
-                duration_ms: t.get("duration")?.unwrap_or(150.0),
                 easing: t.choice("easing")?.unwrap_or_default(),
-                enter: t.get("enter")?.unwrap_or(false),
+                enter,
+                enter_offset,
+                height: t.get("height")?.unwrap_or(false),
+                ..Transition::new(t.get("duration")?.unwrap_or(150.0))
             })
         }
-        Some(v) => Some(Transition {
-            duration_ms: num(v)
-                .ok_or("transition: a number of milliseconds or { duration, easing }")?
-                as f32,
-            easing: Easing::default(),
-            enter: false,
-        }),
+        Some(v) => Some(Transition::new(
+            num(v).ok_or("transition: a number of milliseconds or { duration, easing }")? as f32,
+        )),
     })
 }
 
