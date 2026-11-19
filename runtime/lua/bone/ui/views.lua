@@ -669,10 +669,13 @@ function bone.ui.tool_content(item, ctx)
     if not expanded(ctx) then
       -- Condensed: a stub of the file and its counts, the amounts in the
       -- diff colors; the diff itself waits for a click or ctrl+t.
+      -- Same as the desktop's stub: the amounts in the diff colors.
       local title = { {
         { "edit_file", "ToolName" },
         { " " .. (args.path or ""), "ToolPath" },
-        { " (-" .. count(rows, "-") .. " | +" .. count(rows, "+") .. ")", "Dim" },
+        { " (-", "Dim" }, { tostring(count(rows, "-")), "DiffDelete" },
+        { " | +", "Dim" }, { tostring(count(rows, "+")), "DiffAdd" },
+        { ")", "Dim" },
       } }
       local body = {}
       if #rows > 0 then
