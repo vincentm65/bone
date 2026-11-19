@@ -151,6 +151,24 @@ fn carry_handlers(n: &Node, old: Option<&mlua::Table>, sink: &Sink) {
     }
 }
 
+/// At a rebuild, every chat item a list keeps has its functions copied from
+/// the table before (`old`) into the new one (`sink`), whatever this build
+/// goes on to lay out. A build that fails (the fallback is drawn) or that
+/// leaves the chat out would otherwise not copy them, and the build after
+/// it would find them in neither table: the buttons of a kept item (Retry,
+/// copy) would then do nothing until the item was made again.
+pub(super) fn carry_kept(
+    lists: &HashMap<String, ListState>,
+    old: Option<&mlua::Table>,
+    sink: &Sink,
+) {
+    for st in lists.values() {
+        for node in st.chat.values() {
+            carry_handlers(node, old, sink);
+        }
+    }
+}
+
 /// The items of one list that are in view, made and placed.
 pub(super) struct Window {
     pub(super) nodes: Vec<Rc<Node>>,
