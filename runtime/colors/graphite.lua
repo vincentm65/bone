@@ -96,3 +96,8 @@ hl("PanelRunning", { fg = p.blue, bg = p.panel })
 hl("SessionRunning", { fg = p.fg })
 hl("SessionWaiting", { fg = p.orange })
 hl("SessionUnread", { fg = p.blue })
+-- The list's status words: Working blue, Done green, Failed red (Waiting is
+-- SessionWaiting's amber).
+hl("SessionWorking", { fg = p.blue })
+hl("SessionDone", { fg = p.green })
+hl("SessionFailed", { fg = p.red })

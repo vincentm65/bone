@@ -516,15 +516,18 @@ M.spin = { dots = 10, interval = 100 }
 --- A ring of dots with a bright head that goes around, drawn on a canvas
 --- of its own, so the window is not built again to animate it. It is drawn
 --- twice a step: the head moves on time, and nothing is painted between.
---- `side` is its size in pixels.
-function M.spinner(side)
+--- `side` is its size in pixels; `color` (a highlight group) colors the
+--- whole ring instead of the running color and the text's.
+function M.spinner(side, color)
   local s = M.spin
   -- The head is the running color; the dots behind it fade from the text's.
+  local base = color or "Normal"
   local trail = {
-    style.alpha("Normal", "cc", "fg", "Dim"), style.alpha("Normal", "88", "fg", "Dim"),
-    style.alpha("Normal", "55", "fg", "Dim"),
+    style.alpha(base, "cc", "fg", "Dim"), style.alpha(base, "88", "fg", "Dim"),
+    style.alpha(base, "55", "fg", "Dim"),
   }
-  local rest = style.alpha("Normal", "30", "fg", "Dim")
+  local rest = style.alpha(base, "30", "fg", "Dim")
+  local lead = color or "ToolRunning"
   return {
     width = side, height = side, role = "none",
     canvas = {
@@ -540,7 +543,7 @@ function M.spinner(side)
             x = c + math.cos(angle) * radius,
             y = c + math.sin(angle) * radius,
             r = behind == 0 and 2.4 or 1.5,
-            fill = behind == 0 and "ToolRunning" or trail[behind] or rest,
+            fill = behind == 0 and lead or trail[behind] or rest,
           })
         end
         return dots

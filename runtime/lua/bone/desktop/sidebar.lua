@@ -3,24 +3,24 @@
 -- the chat where there is no room for both), drawn as nodes
 -- (bone.nodes.window places `M.node()`). A search field with the project
 -- and new-chat buttons beside it, Chats and Processes, then your
--- conversations in the TUI's sections (bone.chats.section): Pinned, Pending
--- (finished within the last hour, or a question waiting), Running,
--- then Archived, which is split by date (Today, Yesterday, This week,
--- Earlier). One line each (title and when; model and tokens in its
--- tooltip) with a dot for what it needs from you (bone.chats.state: a
--- question waiting for your answer, running, finished while you were
--- elsewhere).
--- Over a row, pin and rename take the place of its time (the window does
--- that, `group_hover`: nothing is built again as the pointer moves). The
--- Processes page lists every chat's background work. The
--- data is bone.chats. The rows are made once when the data changes, and the
--- list makes nodes only for the ones in view, so a long history costs
--- nothing. Each section header (and each date header inside Archived) is a
--- button: click it to hide or show its chats (kept between runs), or press
--- ctrl+shift+t / ctrl+shift+r over a chat. It takes the keyboard as it opens (its search field, or the
--- card itself on the Processes page): up/down choose, enter opens, typing
--- searches, ctrl+t pins, tab changes page, x stops a process, esc goes
--- back to the prompt, ctrl+o closes; a click opens.
+-- conversations as the TUI lists them (bone.chats.list): a header per
+-- section (Pinned, Active, Running, Archived) with its count, which folds
+-- it (a click, or enter on it; the archive starts folded, and the TUI and
+-- this share the fold), then one line per chat: its title, white when it
+-- needs you or is open, and at the right what it needs (bone.chats.status:
+-- Working with a spinner, Waiting, Done, Failed) or its time. Its model
+-- and tokens are its tooltip.
+-- Over a row, pin, rename and archive take the place of its status (the
+-- window does that, `group_hover`: nothing is built again as the pointer
+-- moves). The
+-- Processes page lists every chat's background work. The data is
+-- bone.chats. The rows are made once when the data changes (and each
+-- minute, for the times), and the list makes nodes only for the ones in
+-- view, so a long history costs nothing. It takes the keyboard as it opens
+-- (its search field, or the card itself on the Processes page): up/down
+-- choose (a header too), enter opens or folds, typing searches, ctrl+t
+-- pins, f2 renames, ctrl+a archives, tab changes page, x stops a process,
+-- esc goes back to the prompt, ctrl+o closes; a click opens.
 local M = {}
 
 local chats = require("bone.chats")
@@ -39,7 +39,7 @@ M.chat_min = 480
 -- How far the card stands off the window's edges.
 M.inset = style.space.lg
 
-local ROW = { group = 34, date = 24, card = 32, none = 40 }
+local ROW = { header = 42, card = 38, none = 40 }
 
 local open = false
 local overlaid = false -- drawn over the chat (a narrow window), not beside it
@@ -53,39 +53,8 @@ local st = {
   renaming = nil, -- the session being renamed
 }
 
--- Collapsed sections: keys are the section index (1..4) and, inside
--- Archived, "4:" .. the date heading. Hidden sections persist between runs.
-local collapsed = {}
-local compute -- defined below; the collapse helpers call it
-for _, k in ipairs(bone.state.load("sidebar-collapsed") or {}) do collapsed[k] = true end
-
 local function redraw()
   bone.gui.invalidate()
-end
-
-local function save_collapsed()
-  local keys = {}
-  for k in pairs(collapsed) do keys[#keys + 1] = k end
-  bone.state.save("sidebar-collapsed", keys)
-end
-
-local function toggle_collapsed(key)
-  if collapsed[key] then collapsed[key] = nil else collapsed[key] = true end
-  save_collapsed()
-  compute()
-  redraw()
-end
-
--- The section the selected chat sits in, for h/l.
-local function selected_section()
-  local r = st.items[st.sel]
-  if not r then return nil end
-  for _, row_ in ipairs(st.rows) do
-    if row_.kind == "card" and row_.item == st.sel then
-      return tostring(row_.section), row_.date
-    end
-  end
-  return nil
 end
 
 -- A highlight group, or `fallback` when the colorscheme does not set it.
@@ -94,68 +63,32 @@ local function group(name, fallback)
   return (g and g.fg) and name or fallback
 end
 
--- The live sections carry a color of their own: Active blue, Running green.
--- They come from the colorscheme's state colors, so a different one still
--- fits; the archive keeps the plain greys.
-local SECTION = {
-  [2] = { "SessionUnread", "#4c8dff" }, -- Active: a chat you can be back in
-  [3] = { "Success", "#5fd08a" },       -- Running: a turn going now
-}
-
--- `a` toward `b` by `t`, both "#rrggbb".
-local function mix(a, b, t)
-  local function ch(s, i) return tonumber(s:sub(i, i + 1), 16) end
-  local out = {}
-  for i = 2, 7, 2 do
-    local v = math.floor(ch(a, i) * (1 - t) + ch(b, i) * t + 0.5)
-    out[#out + 1] = ("%02x"):format(math.max(0, math.min(255, v)))
-  end
-  return "#" .. table.concat(out)
-end
-
-local function hex(name, fallback)
-  local g = bone.hl.get(name)
-  local c = (g and g.fg) or fallback
-  return c:match("^#%x%x%x%x%x%x$") and c or fallback
-end
-
--- The tint for a section: `from`'s grey, pulled `t` of the way to the
--- section's color. nil for the sections that stay grey.
-local function section_color(section, from, t)
-  local c = SECTION[section]
-  if not c then return nil end
-  return mix(hex(from, "#a1a1a1"), hex(c[1], c[2]), t)
-end
-
--- How many midnights ago a time was: 0 today, 1 yesterday.
-local function days_ago(at)
-  local today = os.date("*t")
-  local midnight = os.time({ year = today.year, month = today.month, day = today.day, hour = 0 })
-  return math.max(0, math.ceil((midnight - at) / 86400))
-end
-
--- "Today", "Yesterday", "This week" or "Earlier" for a time.
-local function date_group(at)
-  local d = days_ago(at)
-  return d == 0 and "Today" or d == 1 and "Yesterday" or d <= 6 and "This week" or "Earlier"
-end
-
--- A row's time: minutes and hours as they passed, days as its group counts
--- them (a chat under "This week" is never "1d").
-local function when(at)
-  local age = os.time() - at
-  if age >= 86400 and age < 7 * 86400 then return days_ago(at) .. "d" end
-  return (chats.timestamp(at):gsub(" ago$", ""))
-end
-
 local function folder(cwd)
   return (cwd or ""):gsub("/+$", ""):match("([^/]+)$") or "~"
 end
 
---- The rows of the current page, from the data: { kind = "group" | "card" |
---- "none", ... }, and the things the cards stand for (`items`).
-compute = function()
+-- The chat an item stands for: a chat row's, or a process's.
+local function sid(item)
+  return item and (item.session and item.session.session_id or item.session_id)
+end
+
+-- What an item is, to find it again when the list changes.
+local function key_of(item)
+  if not item then return nil end
+  if item.kind == "header" then return "header:" .. item.section end
+  return item.key or sid(item)
+end
+
+--- The rows of the current page, from the data: { kind = "header" | "card"
+--- | "none", ... }, and the things they stand for (`items`: a chat page's
+--- bone.chats.list rows, or the processes), which the keyboard moves over.
+--- `fresh` (a new search, project or page) starts at the first chat.
+local function compute(fresh)
   chats.note_running()
+  local key = not fresh and key_of(st.items[st.sel])
+  -- A header stays selected only where the keyboard moved to it.
+  if fresh then st.picked = false end
+  if key and key:match("^header:") and not st.picked then key = nil end
   local rows, items = {}, {}
   if st.page == "running" then
     local jobs = chats.jobs()
@@ -165,66 +98,61 @@ compute = function()
     for i, j in ipairs(jobs) do
       items[i] = j
       rows[#rows + 1] = {
-        kind = "card", item = i, state = "running", title = j.title, section = 3,
-        meta = j.detail ~= "" and j.detail or "running", time = bone.util.duration(os.time() - j.started),
+        kind = "card", item = i, title = j.title, meta = j.detail ~= "" and j.detail or "running",
+        status = { state = "running", hl = "SessionWorking", text = bone.util.duration(os.time() - j.started) },
       }
     end
   else
-    local g = chats.grouped(st.all, st.query, st.stats)
     local current = (bone.chat.session() or {}).session_id
-    for _, s in ipairs(g.items) do
+    local list = chats.list(st.all, st.query, st.stats, function(s)
       -- A chat with no title has no message in it: nothing to go back to.
       -- It stays listed while on screen, pinned, running or searched for.
       local empty = not s.title and st.query == "" and s.session_id ~= current
         and not chats.pinned[s.session_id] and not chats.live[s.session_id]
-      if not empty and (not st.project or s.cwd == st.project) then items[#items + 1] = s end
-    end
-    if #items == 0 then
+      return not empty and (not st.project or s.cwd == st.project)
+    end)
+    if #list == 0 then
       rows[1] = { kind = "none", text = st.loading and "Loading…"
         or ((st.query == "" and not st.project) and "No chats yet" or "No matching chats") }
     end
-    -- g.items is in section order, newest first in each (as in the TUI).
-    local heading, date
-    for i, s in ipairs(items) do
-      local id, at = s.session_id, g.activities[s.session_id]
-      local section = g.groups[id] or 4
-      if section ~= heading then
-        rows[#rows + 1] = { kind = "group", text = chats.sections[section], key = tostring(section) }
-        heading, date = section, nil
-      end
-      -- The archive is long: it is split by date.
-      if section == 4 and date_group(at) ~= date then
-        date = date_group(at)
-        rows[#rows + 1] = { kind = "date", text = date, key = "4:" .. date }
-      end
-      -- A collapsed header hides its chats; the rows still count for
-      -- scrolling, and keyboard selection can open a hidden chat.
-      local hide = collapsed[tostring(section)] or (date and collapsed["4:" .. date])
-      if hide then
-        for k = #rows, 1, -1 do
-          if rows[k].kind == "group" or rows[k].kind == "date" then
-            rows[k].hidden_count = (rows[k].hidden_count or 0) + 1
-            break
-          end
+    for i, r in ipairs(list) do
+      items[i] = r
+      if r.kind == "header" then
+        rows[#rows + 1] = { kind = "header", item = i, section = r.section, count = r.count, folded = r.folded }
+      else
+        local id = r.session.session_id
+        local meta, stats = {}, st.stats[id]
+        if not st.project then meta[#meta + 1] = (stats and stats.model) or "No model used" end
+        if stats and (stats.tokens or 0) > 0 then meta[#meta + 1] = chats.count(stats.tokens) .. " tokens" end
+        if stats and (stats.turns or 0) > 0 and st.project then
+          meta[#meta + 1] = stats.turns .. (stats.turns == 1 and " turn" or " turns")
         end
+        rows[#rows + 1] = {
+          kind = "card", item = i, id = id, pinned = chats.pinned[id], section = r.section,
+          title = r.session.title or "Untitled", meta = table.concat(meta, " · "),
+          status = chats.status(id, r.at),
+        }
       end
-      local state = chats.state(id)
-      local meta = {}
-      local stats = st.stats[id]
-      if not st.project then meta[#meta + 1] = (stats and stats.model) or "No model used" end
-      if stats and (stats.tokens or 0) > 0 then meta[#meta + 1] = chats.count(stats.tokens) .. " tokens" end
-      if stats and (stats.turns or 0) > 0 and st.project then
-        meta[#meta + 1] = stats.turns .. (stats.turns == 1 and " turn" or " turns")
-      end
-      rows[#rows + 1] = {
-        kind = "card", item = i, id = id, state = state, pinned = chats.pinned[id],
-        title = s.title or "Untitled", meta = table.concat(meta, " · "),
-        time = when(at), section = section, date = date, hidden = hide,
-      }
     end
   end
   st.rows, st.items = rows, items
   st.sel = #items == 0 and 0 or math.max(1, math.min(st.sel, #items))
+  -- The same item again; else (nothing chosen yet, or it went) the chat on
+  -- screen, else the first chat: not a header.
+  local found = false
+  for i, item in ipairs(items) do
+    if key and key_of(item) == key then st.sel, found = i, true break end
+  end
+  if not found and st.page == "chats" then
+    local current, first = not fresh and (bone.chat.session() or {}).session_id, nil
+    for i, item in ipairs(items) do
+      if item.kind == "chat" then
+        first = first or i
+        if sid(item) == current then first = i break end
+      end
+    end
+    st.sel = first or st.sel
+  end
   st.version = st.version + 1
   st.minute = math.floor(os.time() / 60)
   st.window = chats.recent_window()
@@ -274,12 +202,19 @@ local function refresh()
   end)
 end
 
+-- Open item `i`: a chat, or fold a section's header.
 local function choose(i, keep_keys)
   local r = st.items[i]
-  if not r or not r.session_id then return end
-  st.sel = i
-  chats.seen(r.session_id)
-  bone.api.open_session(r.session_id)
+  if not r then return end
+  st.sel, st.picked = i, true
+  if r.kind == "header" then
+    chats.toggle_folded(r.section) -- the watcher below draws it again
+    return
+  end
+  local id = sid(r)
+  if not id then return end
+  chats.seen(id)
+  bone.api.open_session(id)
   if keep_keys and not overlaid then take_keys() else bone.gui.focus(nil) end
   -- Over the chat it has done its job: let the chat show.
   if overlaid then open = false end
@@ -295,6 +230,12 @@ end
 
 local function toggle_pin(id)
   chats.toggle_pin(id) -- the watcher below draws it again
+end
+
+-- Whether chat row `r` can be archived: not pinned (pinned chats never
+-- are) and not in Archived already.
+local function archivable(r)
+  return not r.pinned and r.section ~= 1 and r.section ~= 4
 end
 
 -- `away`: the field lost the keyboard to a click elsewhere, which keeps it.
@@ -315,8 +256,8 @@ end
 local function reveal()
   local top, h = 0, 0
   for _, r in ipairs(st.rows) do
-    if r.kind == "card" and r.item == st.sel then
-      h = ROW.card
+    if r.item == st.sel then
+      h = ROW[r.kind]
       break
     end
     top = top + ROW[r.kind]
@@ -324,21 +265,21 @@ local function reveal()
   local info = bone.gui.scroll_info("sessions-list")
   if not info or h == 0 then return end
   if top < info.offset then
-    bone.gui.scroll("sessions-list", top - ROW.group)
+    bone.gui.scroll("sessions-list", top - ROW.header)
   elseif top + h > info.offset + info.viewport then
     bone.gui.scroll("sessions-list", top + h - info.viewport + 8)
   end
 end
 
+-- Move the keyboard's row to item `i`; on the Chats page a chat there opens
+-- as you pass it.
 local function select(i)
-  st.sel = math.max(1, math.min(#st.items, i))
+  st.sel, st.picked = math.max(1, math.min(#st.items, i)), true
   reveal()
-  if st.page == "chats" then
-    local r = st.items[st.sel]
-    if r and r.session_id then
-      chats.seen(r.session_id)
-      bone.api.open_session(r.session_id)
-    end
+  local r = st.items[st.sel]
+  if st.page == "chats" and r and r.kind == "chat" then
+    chats.seen(sid(r))
+    bone.api.open_session(sid(r))
   end
   -- open_session can replace/rebuild the GUI view; refresh the card so
   -- its keyboard focus and selection remain visible.
@@ -349,7 +290,7 @@ end
 local function switch_page()
   st.page = st.page == "chats" and "running" or "chats"
   st.sel, st.menu = 1, false
-  compute()
+  compute(true)
   bone.gui.scroll("sessions-list", "top")
   take_keys()
   redraw()
@@ -357,7 +298,7 @@ end
 
 local function set_project(cwd)
   st.project, st.menu, st.sel = cwd, false, 1
-  compute()
+  compute(true)
   bone.gui.scroll("sessions-list", "top")
   take_keys()
   redraw()
@@ -377,7 +318,7 @@ local KEYS = {
     if st.menu then st.menu = false redraw() return end
     if st.query ~= "" then
       st.query, st.sel = "", 1
-      compute()
+      compute(true)
       bone.gui.scroll("sessions-list", "top")
       redraw()
       return
@@ -389,40 +330,23 @@ local KEYS = {
   enter = function() if st.page == "chats" then choose(st.sel) end end,
   ["ctrl+t"] = function()
     local r = st.page == "chats" and st.items[st.sel]
-    if r and r.session_id then toggle_pin(r.session_id) end
+    if r and r.kind == "chat" then toggle_pin(sid(r)) end
+  end,
+  f2 = function()
+    local r = st.page == "chats" and st.items[st.sel]
+    if r and r.kind == "chat" then start_rename(sid(r)) end
+  end,
+  ["ctrl+a"] = function()
+    local r = st.page == "chats" and st.items[st.sel]
+    if r and r.kind == "chat" and not chats.pinned[sid(r)] and r.section ~= 4 then chats.archive(sid(r)) end
   end,
   up = function() select(st.sel - 1) end, down = function() select(st.sel + 1) end,
   pageup = function() select(st.sel - 5) end, pagedown = function() select(st.sel + 5) end,
-  -- ctrl+shift+t collapses and ctrl+shift+r expands the section the
-  -- selected chat is in (and, in the archive, its date group too); the
-  -- search field takes plain letters, so these are keys that reach here.
-  ["ctrl+shift+t"] = function()
-    local key, date = selected_section()
-    if not key then return end
-    if not collapsed[key] then toggle_collapsed(key) end
-    if date and not collapsed["4:" .. date] then
-      collapsed["4:" .. date] = true
-      save_collapsed()
-      compute()
-      redraw()
-    end
-  end,
-  ["ctrl+shift+r"] = function()
-    local key, date = selected_section()
-    if not key then return end
-    if collapsed[key] or (date and collapsed["4:" .. date]) then
-      collapsed[key], collapsed["4:" .. date] = nil, nil
-      save_collapsed()
-      compute()
-      redraw()
-    end
-  end,
 }
 
 local function on_key(key)
   if KEYS[key] then
-    -- A handler returning false gives the key back (h/l to the search).
-    if KEYS[key]() == false then return false end
+    KEYS[key]()
     return true
   end
   -- x stops a process on the Processes page.
@@ -435,39 +359,52 @@ end
 
 -- ---- nodes ------------------------------------------------------------------
 
--- The dot for what a chat needs, or nil: widgets.status_dot. Running gets
--- a spinner instead: it reads as work, not as a state flag.
-local function dot(state)
-  if state == "running" then return widgets.spinner(14) end
-  return widgets.status_dot(state)
-end
-
 -- A small glyph button shown over the row of chat `id`.
 local function action(glyph, label, fn, id, on)
   return widgets.icon_button(glyph, label, fn, { hl = on and "Normal" or "Dim", size = 13, box = 22,
     focusable = false, id = "sidebar-" .. glyph .. ":" .. id })
 end
 
+-- A row's status (bone.chats.status): Working with a spinner, Waiting with
+-- its pulsing dot, Done, Failed, or the time. `id`: a chat, whose pin,
+-- rename and archive take its place while the pointer is on the row.
+local function status_node(s, id)
+  local box = { direction = "row", align = "center", gap = 5, group_hover = id and { opacity = 0 } or nil }
+  if s.state == "running" then
+    box[#box + 1] = widgets.spinner(12, "SessionWorking")
+  elseif s.state == "waiting" then
+    box[#box + 1] = widgets.status_dot("waiting", { tooltip = false })
+  end
+  box[#box + 1] = { text = s.text or "", hl = s.hl or "Dim", size = style.size.micro, wrap = false }
+  return box
+end
+
+-- What a row's tooltip says first, for a state that needs you.
+local TIPS = { waiting = "Waiting for you", failed = "Its last turn failed", unread = "Finished while you were elsewhere" }
+
 local function row(i)
   local r = st.rows[i]
   if not r then return { height = 0 } end
-  if r.hidden then return { height = 0 } end
-  if r.kind == "group" or r.kind == "date" then
-    -- A section header is a button: its chevron shows whether the chats
-    -- under it are hidden, and clicking it toggles them.
+  if r.kind == "header" then
+    -- A section's header is a button: it folds the section, or unfolds it.
+    -- Its arrow shows while it is folded, or the pointer is on it.
     local icons = require("bone.nodes.icons")
-    local closed = collapsed[r.key]
-    local head = {
-      height = ROW[r.kind], direction = "row", align = "center", padding = { 0, 8, 0, 8 },
-      cursor = "pointer", on_click = function() toggle_collapsed(r.key) end,
-      { text = r.text,
-        hl = "Dim",
-        size = r.kind == "group" and style.size.small or style.size.micro,
-        medium = r.kind == "group", grow = 1 },
-      r.hidden_count and { text = tostring(r.hidden_count), hl = "Dim", size = style.size.micro, font = "mono" } or nil,
-      icons.node(closed and "chevron_right" or "chevron_down", { size = 11, hl = "Dim" }),
+    local name = chats.sections[r.section]
+    return {
+      height = ROW.header, padding = { 12, 0, 2, 0 }, direction = "column", cursor = "pointer",
+      role = "button", label = name .. ", " .. r.count .. (r.folded and ", folded" or ""),
+      on_click = function() chats.toggle_folded(r.section) end,
+      style.finish({
+        grow = 1, direction = "row", align = "center", gap = 6, padding = { 0, 9 }, radius = style.radius.md,
+        border = 1, border_color = (r.item == st.sel and has_keys()) and "PromptBorder" or "transparent",
+        hover = { bg = style.hover() }, transition = style.motion.base,
+        { text = name, hl = "Dim", size = style.size.small, medium = true, wrap = false },
+        { text = tostring(r.count), hl = "Dim", size = style.size.micro, wrap = false },
+        { grow = 1 },
+        { opacity = r.folded and 1 or 0, group_hover = { opacity = 1 },
+          icons.node(r.folded and "chevron_right" or "chevron_down", { size = 11, hl = "Dim" }) },
+      }),
     }
-    return head
   end
   if r.kind == "none" then
     return { height = ROW.none, direction = "row", align = "center", justify = "center",
@@ -475,8 +412,8 @@ local function row(i)
   end
   local on = r.item == st.sel
   local current = r.id and r.id == (bone.chat.session() or {}).session_id
+  local status = r.status or {}
   local title = { direction = "row", gap = 8, align = "center", height = 30 }
-  title[#title + 1] = dot(r.state)
   -- The rename field lost the keyboard (a click elsewhere): it ends, and
   -- keeps what was typed, as a file manager's does.
   if r.id and st.renaming == r.id then
@@ -503,35 +440,39 @@ local function row(i)
       },
     })
   else
-    -- The work itself is always white; only its time carries the section's
-    -- color (Active blue, Running green). The archive keeps its grey.
-    local tint = section_color(r.section, "Dim", 1)
+    -- White; an archived chat a step quieter, unless it needs you, is open,
+    -- or has the keyboard. The only color in the row is its status's.
+    local quiet = r.section == 4 and not ((on and has_keys()) or current or status.state)
     title[#title + 1] = {
-      text = r.title, size = style.size.body, medium = r.state == "unread", -- the current one has its fill
-      color = (tint or (on and has_keys()) or current or r.state == "unread") and "Normal"
-        or group("Muted", nil),
+      text = r.title, size = style.size.body,
+      color = quiet and group("Muted", nil) or "Normal",
       text_overflow = "ellipsis", wrap = false, grow = 1, shrink = 1,
     }
-    -- The time, and over it pin and rename while the pointer is on the row:
-    -- one slot, so the title keeps its width and nothing is built again.
+    -- The status, and over it pin, rename and archive while the pointer is
+    -- on the row: one slot as wide as they are, so the title keeps its
+    -- width and nothing is built again.
     local id = r.id
-    title[#title + 1] = {
-      width = 46, height = 22, shrink = 0, direction = "row", justify = "end", align = "center",
-      { text = r.time or "", color = tint, hl = "Dim", size = style.size.micro, font = "mono", wrap = false,
-        group_hover = id and { opacity = 0 } or nil },
-      id and { position = "absolute", right = 0, top = 0, direction = "row", gap = 2,
-        opacity = 0, group_hover = { opacity = 1 },
-        action("pin", r.pinned and "Unpin" or "Pin", function() toggle_pin(id) end, id, r.pinned),
-        action("edit", "Rename", function() start_rename(id) end, id) } or nil,
-    }
+    local actions = id and { position = "absolute", right = 0, top = 0, direction = "row", gap = 2,
+      opacity = 0, group_hover = { opacity = 1 },
+      action("pin", r.pinned and "Unpin" or "Pin", function() toggle_pin(id) end, id, r.pinned),
+      action("edit", "Rename", function() start_rename(id) end, id) }
+    if actions and archivable(r) then
+      actions[#actions + 1] = action("archive", "Archive", function() chats.archive(id) end, id)
+    end
+    local n = actions and (#actions) or 0
+    local slot = { min_width = id and (n * 22 + (n - 1) * 2) or nil, height = 22, shrink = 0, direction = "row",
+      justify = "end", align = "center", status_node(status, id) }
+    if actions then slot[#slot + 1] = actions end
+    title[#title + 1] = slot
   end
-  -- What a row leaves out (the model, the tokens; what it waits for) is its
+  -- What a row leaves out (the model, the tokens; what it needs) is its
   -- tooltip.
-  local tip = r.state == "waiting" and "Waiting for you" or (r.meta ~= "" and r.meta or nil)
+  local tip = TIPS[status.state]
+  if r.meta and r.meta ~= "" then tip = tip and (tip .. " · " .. r.meta) or r.meta end
   -- The row takes the pointer edge to edge, the card inset in it: across the
   -- gap between two cards the pointer stays a hand and the row stays lit.
   return {
-    height = ROW.card, padding = { 1, 0 }, direction = "column",
+    height = ROW.card, padding = { 2, 0 }, direction = "column",
     cursor = "pointer", role = "option", selected = on, tooltip = tip,
     on_click = function()
       if st.page == "running" then
@@ -541,7 +482,7 @@ local function row(i)
       end
     end,
     style.finish({
-      grow = 1, direction = "column", justify = "center", padding = { 0, 7 },
+      grow = 1, direction = "column", justify = "center", padding = { 0, 9 },
       -- The open chat is filled. The keyboard's row, where it is another
       -- (a search), is outlined, while the list has the keyboard.
       radius = style.radius.md, bg = current and "Selection" or nil,
@@ -664,7 +605,14 @@ function M.content()
   local minute = math.floor(os.time() / 60)
   local window = chats.recent_window()
   if minute ~= st.minute or window ~= st.window then compute() end
-  bone.gui.invalidate((60 - os.time() % 60) * 1000)
+  -- While a chat runs, its row shows a live clock: its rows are made again
+  -- each second (the spinner's own canvas aside).
+  local running = false
+  for _, r in ipairs(st.rows) do
+    if r.kind == "card" and r.status and r.status.state == "running" then running = true break end
+  end
+  if running then compute() end
+  bone.gui.invalidate(running and 1000 or (60 - os.time() % 60) * 1000)
   local icons = require("bone.nodes.icons")
   local muted = group("Muted", "Dim")
   -- A page of the sidebar, or a place it opens: an icon and a name.
@@ -699,7 +647,7 @@ function M.content()
           on_change = function(text)
             if st.page ~= "chats" then st.page = "chats" end
             st.query, st.sel = text, 1
-            compute()
+            compute(true)
             bone.gui.scroll("sessions-list", "top")
             redraw()
           end,
@@ -762,14 +710,14 @@ function M.open()
     close()
     return
   end
-  open, st.loading, st.sel = true, true, 1
+  open, st.loading, st.sel, st.picked = true, true, 1, false
   compute()
   -- Start navigation from the conversation already on screen. Up/down then
   -- previews the adjacent conversation instead of jumping from the top.
   local current = (bone.chat.session() or {}).session_id
   if current then
-    for i, chat in ipairs(st.items) do
-      if chat.session_id == current then st.sel = i break end
+    for i, item in ipairs(st.items) do
+      if item.kind == "chat" and sid(item) == current then st.sel = i break end
     end
   end
   take_keys()

@@ -4,7 +4,8 @@
 -- to a folded card per call, each opened in turn by a click; "rows" is a card per
 -- call with its output cut short (shell output to its first and last two
 -- lines, other output to its first five), "full" shows everything. Edits
--- always show their diff and failures their output. A call with nothing to
+-- show their diff when opened (condensed: just the +/- counts) and failures
+-- their output. A call with nothing to
 -- show is one line (a status dot, what it did, on what, and its details at
 -- the right); one with output is a card, that line as its head over a
 -- hairline and the output, diff or report in monospace under it.
@@ -535,6 +536,7 @@ local function card(item, expanded, width)
       for _, l in ipairs(content) do rows[#rows + 1] = { sign = "+", text = l } end
       paras = diff_nodes(rows, #rows, true)
     end
+    -- Condensed: the stub line only, "+N lines" in the add color.
   elseif name == "edit_file" then
     local rows, plus, minus, n, all = diff_rows(a)
     if ok or not item.done then
@@ -542,7 +544,9 @@ local function card(item, expanded, width)
       meta[#meta + 1] = { text = " −" .. minus, hl = "DiffDelete" }
       if n > 1 then extra(plural(n, "edit")) end
       if all then extra("replace all") end
-      paras = diff_nodes(rows, EDIT_MAX, expanded)
+      -- Condensed: the stub line only (the counts carry the edit's size,
+      -- in the diff colors); the diff appears when the card is opened.
+      if expanded then paras = diff_nodes(rows, EDIT_MAX, true) end
     end
   elseif name == "subagent" then
     if ok then
@@ -581,10 +585,11 @@ end
 
 -- ---- summaries -------------------------------------------------------------
 
--- Folded into a summary line: everything but edits (their diff always
--- shows) and sub-agents.
+-- Folded into a summary line: everything but sub-agents. Edits fold too,
+-- counted: the line ends "edited 5 files (+34 -234)", the counts in the
+-- diff colors; a click opens the run, and each edit its diff.
 local function foldable(t)
-  return t.name ~= "edit_file" and t.name ~= "subagent"
+  return t.name ~= "subagent"
 end
 
 -- The phrase a tool view gives a call for summary lines ("loaded the money
@@ -616,7 +621,7 @@ local function summary(calls, width)
   local function bump(key, t, phrase, unique)
     local s = seen[key]
     if not s then
-      s = { phrase = phrase, n = 0, unique = {}, first = t, running = false }
+      s = { phrase = phrase, n = 0, unique = {}, first = t, running = false, plus = 0, minus = 0 }
       seen[key] = s
       order[#order + 1] = s
     end
@@ -648,6 +653,17 @@ local function summary(calls, width)
       bump("read", t, files("read", "reading"), type(path) == "string" and path or t.id)
     elseif t.name == "write_file" then
       bump("write", t, files("wrote", "writing"), type(path) == "string" and path or t.id)
+    elseif t.name == "edit_file" then
+      -- One file: by its path; a batch: just the count. The +/- ride at
+      -- the line's end (below), in the diff colors.
+      bump("edit", t, function(s)
+        local verb = s.running and "editing" or "edited"
+        local one = s.n == 1 and target(s.first, 48) or ""
+        return { said(verb .. " " .. (one ~= "" and one or plural(s.n, "file"))) }
+      end, type(path) == "string" and path or t.id)
+      local s = seen.edit
+      local _, p, m = diff_rows(args_of(t))
+      s.plus, s.minus = s.plus + p, s.minus + m
     elseif t.name == "shell" then
       bump("shell", t, function(s)
         local verb = s.running and "running" or "ran"
@@ -672,6 +688,15 @@ local function summary(calls, width)
   if spans[1] then spans[1].text = spans[1].text:sub(1, 1):upper() .. spans[1].text:sub(2) end
   local failed = 0
   for _, t in ipairs(calls) do failed = failed + (t.done and t.is_error and 1 or 0) end
+  -- The edit counts, last on the line, in the diff colors.
+  local edit = seen.edit
+  if edit and edit.n > 0 and (edit.plus > 0 or edit.minus > 0) then
+    spans[#spans + 1] = said(" (+")
+    spans[#spans + 1] = { text = "+" .. edit.plus, hl = "DiffAdd" }
+    spans[#spans + 1] = said(" ")
+    spans[#spans + 1] = { text = "-" .. edit.minus, hl = "DiffDelete" }
+    spans[#spans + 1] = said(")")
+  end
   return spans, failed
 end
 
