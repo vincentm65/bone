@@ -51,24 +51,6 @@ local function args_of(item)
   return type(item.arguments) == "table" and item.arguments or {}
 end
 
--- A path cut to `max` characters in the middle ("/tmp/…/dir/file.txt"),
--- the file name kept.
-local function shorten(v, max)
-  if #v <= max then return v end
-  local segs = {}
-  for seg in v:gmatch("[^/]+") do segs[#segs + 1] = seg end
-  local lead = v:sub(1, 1) == "/" and "/" or ""
-  if #segs < 3 or #segs[#segs] + #lead + #segs[1] + 4 > max then
-    return "…" .. (v:sub(-(max - 1)):gsub("^[\128-\191]+", "")) -- not mid-character
-  end
-  local tail, i = { segs[#segs] }, #segs - 1
-  while i > 1 and #lead + #segs[1] + 3 + #table.concat(tail, "/") + #segs[i] + 1 <= max do
-    table.insert(tail, 1, segs[i])
-    i = i - 1
-  end
-  return lead .. segs[1] .. "/…/" .. table.concat(tail, "/")
-end
-
 -- What the call acted on, relative to the session's folder; a path cut to
 -- `max` characters when there is one.
 local function target(item, max)
@@ -76,11 +58,7 @@ local function target(item, max)
   for _, k in ipairs(KEYS) do
     if type(a[k]) == "string" and a[k] ~= "" then
       local v = a[k]:gsub("%s+", " ")
-      local s = bone.chat.session()
-      local prefix = ((s and s.cwd) or ""):gsub("/$", "") .. "/"
-      if #prefix > 1 and v:sub(1, #prefix) == prefix then v = v:sub(#prefix + 1) end
-      if max and (k == "path" or k == "file_path") then v = shorten(v, max) end
-      return v
+      return bone.util.short_path(v, (k == "path" or k == "file_path") and max or nil)
     end
   end
   return ""

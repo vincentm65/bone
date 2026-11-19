@@ -149,4 +149,26 @@ function M.front_matter(text)
   return meta, text:sub(close_end + 1)
 end
 
+--- `path` as the chat shows it: relative to the session's folder and, given
+--- `max`, cut to that many characters in the middle ("/tmp/…/dir/file.txt"),
+--- the file name kept.
+function M.short_path(path, max)
+  local s = bone.chat.session()
+  local prefix = ((s and s.cwd) or ""):gsub("/$", "") .. "/"
+  if #prefix > 1 and path:sub(1, #prefix) == prefix then path = path:sub(#prefix + 1) end
+  if not max or #path <= max then return path end
+  local segs = {}
+  for seg in path:gmatch("[^/]+") do segs[#segs + 1] = seg end
+  local lead = path:sub(1, 1) == "/" and "/" or ""
+  if #segs < 3 or #segs[#segs] + #lead + #segs[1] + 4 > max then
+    return "…" .. (path:sub(-(max - 1)):gsub("^[\128-\191]+", "")) -- not mid-character
+  end
+  local tail, i = { segs[#segs] }, #segs - 1
+  while i > 1 and #lead + #segs[1] + 3 + #table.concat(tail, "/") + #segs[i] + 1 <= max do
+    table.insert(tail, 1, segs[i])
+    i = i - 1
+  end
+  return lead .. segs[1] .. "/…/" .. table.concat(tail, "/")
+end
+
 return M
