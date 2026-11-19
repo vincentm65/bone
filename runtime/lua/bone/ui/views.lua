@@ -200,7 +200,8 @@ end
 -- ---- tools ----------------------------------------------------------------
 -- Laid out like the first bone: a label row ("shell cmd", "read_file path
 -- (lines 1-20, 20 read)"), shell output and errors in a │ ╰ gutter, edits as
--- a numbered diff. bone.o.tool_detail picks how much: "summary" folds each
+-- a numbered diff (condensed views show just the file and its +/- counts,
+-- until a click or ctrl+t opens the diff). bone.o.tool_detail picks how much: "summary" folds each
 -- run of calls into one line ("Read 3 files, ran 2 shell commands"), "rows"
 -- is one call per row and "full" shows everything. ctrl+t steps through.
 
@@ -665,6 +666,20 @@ function bone.ui.tool_content(item, ctx)
     local summary = (edits and "preview: " or "") .. "-" .. count(rows, "-") .. " | +" .. count(rows, "+")
     if edits and #edits > 1 then summary = summary .. "; " .. plural(#edits, "edit") end
     if all then summary = summary .. "; replace_all" end
+    if not expanded(ctx) then
+      -- Condensed: a stub of the file and its counts, the amounts in the
+      -- diff colors; the diff itself waits for a click or ctrl+t.
+      local title = { {
+        { "edit_file", "ToolName" },
+        { " " .. (args.path or ""), "ToolPath" },
+        { " (-" .. count(rows, "-") .. " | +" .. count(rows, "+") .. ")", "Dim" },
+      } }
+      local body = {}
+      if #rows > 0 then
+        body[1] = nest({ "      ", "Normal" }, { { more(#rows, "diff row", ctx), "ToolSummary" } })
+      end
+      return { title = title, body = body }
+    end
     return { title = file_label(name, args.path, summary), body = diff_view(rows, width) }
   end
 
@@ -693,9 +708,10 @@ end
 
 -- ---- tool summaries ------------------------------------------------------
 
--- Folded into a summary line: everything but edits and sub-agents.
+-- Folded into a summary line: everything but sub-agents. Edits fold too,
+-- counted: the line ends "edited N files (+34 -234)".
 local function foldable(t)
-  return t.name ~= "edit_file" and t.name ~= "subagent"
+  return t.name ~= "subagent"
 end
 
 local function arg(t, key)
@@ -716,15 +732,28 @@ local function own_phrase(t, width)
   return type(s) == "string" and s ~= "" and s or nil
 end
 
+-- The +/- an edit call changed, from its anchored output (the summary
+-- query strips it, so the caller passes the full item); nil when it has
+-- no diff yet.
+local function edit_counts(t)
+  local out = t.output
+  if type(out) ~= "string" or out == "" then return nil end
+  local rows = anchored_diff(out)
+  local plus, minus = count(rows, "+"), count(rows, "-")
+  if plus + minus == 0 then return nil end
+  return plus, minus
+end
+
 -- What a run of calls did, in the order first seen: "read 3 files",
--- "ran 2 shell commands", "wrote 1 file", "called web_search 2 times", or
--- a tool view's own phrase.
+-- "ran 2 shell commands", "edited 5 files (+34 -234)", or
+-- a tool view's own phrase. Returns the plain text (for the typing effect,
+-- the edit counts included) and the tail: those counts as colored spans.
 local function summary(calls, width)
   local order, seen = {}, {}
   local function bump(key, phrase, unique)
     local s = seen[key]
     if not s then
-      s = { phrase = phrase, n = 0, unique = {} }
+      s = { phrase = phrase, n = 0, unique = {}, plus = 0, minus = 0, counted = false }
       seen[key] = s
       order[#order + 1] = s
     end
@@ -745,13 +774,33 @@ local function summary(calls, width)
       bump("read", function(n) return "read " .. plural(n, "file") end, arg(t, "path") or t.id)
     elseif t.name == "write_file" then
       bump("write", function(n) return "wrote " .. plural(n, "file") end, arg(t, "path") or t.id)
+    elseif t.name == "edit_file" then
+      -- One file: by its path; a batch: just the count.
+      bump("edit", function(n)
+        local path = arg(t, "path")
+        return "edited " .. (n == 1 and path or plural(n, "file"))
+      end, arg(t, "path") or t.id)
+      local s = seen.edit
+      if not s.counted then
+        -- The summary query strips output: ask for the full call once.
+        s.counted = true
+        for _, e in ipairs(calls) do
+          if e.kind == "tool" and e.name == "edit_file" then
+            local full = bone.chat.item(e.index, { full = true })
+            local p, m = edit_counts(full)
+            if p then
+              s.plus, s.minus = s.plus + p, s.minus + m
+            end
+          end
+        end
+      end
     elseif t.name == "shell" then
       bump("shell", function(n) return "ran " .. plural(n, "shell command") end)
     else
       bump("tool:" .. t.name, function(n) return "called " .. t.name .. (n > 1 and " " .. n .. " times" or "") end)
     end
   end
-  local parts = {}
+  local parts, tail = {}, {}
   for _, s in ipairs(order) do
     parts[#parts + 1] = s.phrase(s.n)
   end
@@ -761,7 +810,21 @@ local function summary(calls, width)
     failed = failed + (t.done and t.is_error and 1 or 0)
   end
   text = text:sub(1, 1):upper() .. text:sub(2)
-  return failed > 0 and (text .. ", " .. failed .. " failed") or text
+  if failed > 0 then
+    text = text .. ", " .. failed .. " failed"
+  end
+  -- The edit counts ride at the line's very end, in the diff colors.
+  local edit = seen.edit
+  if edit and edit.n > 0 and edit.plus + edit.minus > 0 then
+    local counts = " (+" .. edit.plus .. " -" .. edit.minus .. ")"
+    text = text .. counts
+    tail = {
+      plain = counts,
+      { " (+", "ToolArgs" }, { tostring(edit.plus), "DiffAdd" }, { " ", "ToolArgs" },
+      { "-" .. edit.minus, "DiffDelete" }, { ")", "ToolArgs" },
+    }
+  end
+  return text, tail
 end
 
 -- Type live summaries, preserving their common prefix when the text changes.
@@ -817,7 +880,7 @@ local function summary_view(item, ctx)
     return nil
   end
   -- This call and the ones after it (reasoning between them does not
-  -- break the stretch; an edit or sub-agent does).
+  -- break the stretch; a sub-agent does).
   local stretch = {}
   for _, t in ipairs(bone.chat.items({ around = item.index, from = item.index, kind = { "tool", "reasoning" } })) do
     if t.kind == "tool" then
@@ -832,7 +895,22 @@ local function summary_view(item, ctx)
     running = running or not t.done
   end
   local out = starts("tool", ctx)
-  append(out, wrap({ { typed(tool_key(item), summary(stretch, ctx.width), running), "ToolArgs" } }, ctx.width, {
+  local text, tail = summary(stretch, ctx.width)
+  local shown = typed(tool_key(item), text, running)
+  local spans = {}
+  local plain = tail.plain
+  if plain and shown:find(plain, 1, true) then
+    -- The typed text has reached the counts: draw them in the diff colors.
+    local at = shown:find(plain, 1, true)
+    spans[#spans + 1] = { shown:sub(1, at - 1), "ToolArgs" }
+    for _, sp in ipairs(tail) do spans[#spans + 1] = sp end
+    if at + #plain <= #shown then
+      spans[#spans + 1] = { shown:sub(at + #plain), "ToolArgs" }
+    end
+  else
+    spans[1] = { shown, "ToolArgs" }
+  end
+  append(out, wrap(spans, ctx.width, {
     first = running and { { "  " .. running_mark(item) .. " ", "ToolRunning" } } or { { "    ", "Normal" } },
     rest = { { "    ", "Normal" } },
   }))
@@ -847,7 +925,13 @@ end
 
 --- The label rows (marker on the first), then the output.
 render_tool = function(item, ctx, full)
-  ctx = { width = ctx.width, region = ctx.region, prev = ctx.prev, tool_expanded = full }
+  ctx = {
+    width = ctx.width, region = ctx.region, prev = ctx.prev,
+    -- `full` is the call's effective expansion (the caller folds the per-call
+    -- click toggle in), so views that fold their own bodies (the condensed
+    -- edit stub) see it too.
+    tool_expanded = full == true,
+  }
   local custom = bone.ui.tool_views[item.name]
   local content = custom and custom(item, ctx) or bone.ui.tool_content(item, ctx)
 

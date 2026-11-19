@@ -673,15 +673,13 @@ async fn session_sidebar_groups_live_and_recent_chats() {
     h.input("{ctrl+o}").await;
     let screen = h.screen(80, 24);
     assert!(
-        screen.contains("Running · 1") && screen.contains("Archived · 1"),
+        screen.contains("Running 1") && screen.contains("Archived 1"),
         "{screen}"
     );
+    // Archived is folded by default: only the running chat's rows show.
+    assert!(screen.contains("first"), "{screen}");
     assert!(
-        screen.find("first").unwrap() < screen.find("second").unwrap(),
-        "{screen}"
-    );
-    assert!(
-        screen.contains("A first") || screen.contains("B first"),
+        screen.contains("first") && screen.contains("0:00"),
         "{screen}"
     );
     assert!(h.requests("session/messages").is_empty());
@@ -689,7 +687,7 @@ async fn session_sidebar_groups_live_and_recent_chats() {
         .await;
     let screen = h.screen(80, 24);
     assert!(
-        !screen.contains("Running ·") && screen.contains("Active · 1"),
+        !screen.contains("Running") && screen.contains("Active 1"),
         "{screen}"
     );
     // How long a finished chat waits for review applies at once (s-two
@@ -697,11 +695,11 @@ async fn session_sidebar_groups_live_and_recent_chats() {
     h.lua("bone.ui.sessions_archive_after = 1e10").await;
     let screen = h.screen(80, 24);
     assert!(
-        screen.contains("Active · 2") && !screen.contains("Archived"),
+        screen.contains("Active 2") && !screen.contains("Archived"),
         "{screen}"
     );
     h.lua("bone.ui.sessions_archive_after = nil").await;
-    assert!(h.screen(80, 24).contains("Archived · 1"));
+    assert!(h.screen(80, 24).contains("Archived 1"));
     let queries_before_start = h.requests("store/query").len();
     h.emit::<TurnStarted>(started("s-two", "work")).await;
     assert_eq!(
@@ -711,7 +709,7 @@ async fn session_sidebar_groups_live_and_recent_chats() {
     );
     let screen = h.screen(80, 24);
     assert!(
-        screen.contains("A second") || screen.contains("B second"),
+        screen.contains("first") && screen.contains("second"),
         "{screen}"
     );
     // Header lines don't open a transcript; selection stays on its session.
@@ -725,7 +723,7 @@ async fn session_sidebar_groups_live_and_recent_chats() {
     );
     let screen = h.screen(80, 24);
     assert!(
-        screen.contains("Active · 1") && screen.contains("Running · 1"),
+        screen.contains("Active 1") && screen.contains("Running 1"),
         "{screen}"
     );
 }
@@ -739,7 +737,7 @@ async fn session_sidebar_pins_with_ctrl_t_in_the_shared_state() {
     h.input("{ctrl+t}").await;
     let screen = h.screen(80, 24);
     assert!(
-        screen.contains("Pinned · 1") && !screen.contains("Running ·"),
+        screen.contains("Pinned 1") && !screen.contains("Running"),
         "{screen}"
     );
     let saved = std::fs::read_to_string(&pins).unwrap();
@@ -747,11 +745,11 @@ async fn session_sidebar_pins_with_ctrl_t_in_the_shared_state() {
     // Pinned in the desktop (the same file): it shows on the next rebuild.
     std::fs::write(&pins, r#"{ "s-one": true, "s-two": true }"#).unwrap();
     h.lua("bone.ui.sessions_archive_after = 7200").await;
-    assert!(h.screen(80, 24).contains("Pinned · 2"));
+    assert!(h.screen(80, 24).contains("Pinned 2"));
     h.input("{ctrl+t}").await;
     let screen = h.screen(80, 24);
     assert!(
-        screen.contains("Pinned · 1") && screen.contains("Running · 1"),
+        screen.contains("Pinned 1") && screen.contains("Running 1"),
         "{screen}"
     );
     let saved = std::fs::read_to_string(&pins).unwrap();
@@ -785,12 +783,15 @@ async fn session_sidebar_copies_the_old_archive_list_to_the_shared_one_once() {
     h.input("{ctrl+o}").await;
     h.emit::<TurnFinished>(finished("s-one", TurnOutcome::Completed))
         .await;
-    assert!(h.screen(80, 24).contains("Archived · 2"));
+    h.lua("require('bone.chats').toggle_folded(4)").await;
+    assert!(h.screen(80, 24).contains("Archived 2"));
 }
 #[tokio::test]
 async fn session_picker_filters_and_opens() {
     let mut h = Harness::new().await;
     h.input("{ctrl+o}").await;
+    h.lua("require('bone.chats').toggle_folded(4)").await;
+    h.settle().await;
     // Conversations use a docked Lua panel, not a floating picker.
     assert_eq!(
         h.app.context(),
@@ -803,8 +804,7 @@ async fn session_picker_filters_and_opens() {
     assert!(
         screen.contains("second")
             && screen.contains("first")
-            && screen.contains("12.8k tokens")
-            && screen.contains("3 turns"),
+            && screen.contains("Nov 14 2023"),
         "{screen}"
     );
     // Typing filters.
@@ -3488,13 +3488,14 @@ async fn std_tool_screen(
         h.input("{ctrl+t}").await;
     }
     let screen = h.screen(width, 60);
-    screen
+    let out: Vec<String> = screen
         .lines()
         .skip_while(|l| !l.starts_with(" › go") && !l.starts_with("› go"))
         .skip(1)
         .take_while(|l| !l.starts_with('─'))
         .map(str::to_owned)
-        .collect()
+        .collect();
+    out
 }
 
 #[tokio::test]
@@ -3560,32 +3561,27 @@ async fn standard_tool_views_match_the_first_bone() {
         "⋮ +2 more lines (click or ctrl+t)",
         "",
         "    edit_file a.rs (-1 | +2)",
-        "      4   fn a() {",
-        "      5 -     old();",
-        "      5 +     new();",
-        "      6 +     more();",
-        "      6   }",
+        "      ⋮ +5 diff rows (click or ctrl+t)",
         "",
         "  ✕ grep",
         "      │ no such dir",
         "      ╰ second",
     ];
-    // The default: one line for the stretch before the edit; the edit and
-    // the failed call in full.
+    // The default: one line for the whole stretch, the edit counted in it
+    // and the failure counted at its end.
     let rows = std_tool_screen(&calls, 60, 0).await;
+
     assert_eq!(
-        rows[..5],
+        rows[..4],
         [
             "",
-            "    Read 1 file, ran 2 shell commands, called web_search",
+            "    Read 1 file, ran 2 shell commands, called web_search,",
+            "    edited a.rs, called grep, 1 failed (+2 -1)",
             "",
-            "    edit_file a.rs (-1 | +2)",
-            "      4   fn a() {",
         ],
         "{}",
         rows.join("\n")
     );
-    assert!(rows.join("\n").contains("Called grep, 1 failed"));
     assert!(!rows.join("\n").contains("✕ Called grep"));
 
     // ctrl+t once: a row per call.
@@ -5376,9 +5372,12 @@ async fn session_sidebar_formats_only_visible_rows_for_large_history() {
     .await;
     h.lua("bone.api.open_session('history-4500')").await;
     h.input("{ctrl+o}").await;
+    h.lua("require('bone.chats').toggle_folded(4)").await;
+    h.settle().await;
     // First draw must reveal the current chat, not just select it offscreen.
     assert!(h.screen(100, 24).contains("conversation 4500"));
-    assert!(h.app.panel("sessions").unwrap().rows >= 13500);
+    let total = h.app.panel("sessions").unwrap().rows;
+    assert!(total >= 4500, "only {total} rows for 4500 chats");
     h.lua("sidebar_formats = 0").await;
     let screen = h.screen(100, 24);
     assert!(screen.contains("conversation 4500"), "{screen}");
@@ -5399,7 +5398,7 @@ async fn session_sidebar_formats_only_visible_rows_for_large_history() {
     // Manual scrolling must not snap back to the still-selected current chat.
     h.lua("bone.ui.panel.get('sessions'):scroll('top')").await;
     let screen = h.screen(100, 24);
-    assert!(screen.contains("Archived · 4500") && screen.contains("conversation 1"));
+    assert!(screen.contains("Archived 4500") && screen.contains("conversation 1"));
     h.input("{home}").await;
     assert!(h.screen(100, 24).contains("conversation 1"));
     assert_eq!(h.app.panel("sessions").unwrap().top, 0);

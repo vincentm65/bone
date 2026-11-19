@@ -528,11 +528,13 @@ async fn standard_ui_shows_what_waits_for_you() {
     // The sidebar's rows: a dot before the title, which blinks while the
     // chat waits (its color comes and goes), and stays for a reply not seen.
     h.input("{ctrl+o}").await;
+    h.lua("require('bone.chats').toggle_folded(4)").await;
+    h.settle().await;
     let screen = h.screen(100, 30);
-    assert!(screen.contains("   second"), "{screen}");
+    assert!(screen.contains("second"), "{screen}");
     h.emit::<AskRequested>(ask(3, "s-two")).await;
     let screen = h.screen(100, 30);
-    assert!(screen.contains(" ● second"), "{screen}");
+    assert!(screen.contains("second") && screen.contains("● Waiting"), "{screen}");
     // A whole beat (1200 ms) in, then 900 ms on: lit, then off.
     exec(
         &mut h,
@@ -547,11 +549,12 @@ async fn standard_ui_shows_what_waits_for_you() {
         (0..rows)
             .find_map(|y| {
                 let row: String = (0..w).map(|x| buf[(x, y)].symbol().to_owned()).collect();
-                let at = row.find(&format!("● {title}"))?;
+                row.find(title)?;
+                let at = row.find('●')?;
                 let x = row[..at].chars().count() as u16;
                 Some(buf[(x, y)].fg)
             })
-            .expect("a dot before the title")
+            .expect("a status dot on the row")
     };
     let lit = dot(&mut h, "second");
     exec(&mut h, "TEST_NOW = TEST_NOW + 900");
@@ -569,5 +572,5 @@ async fn standard_ui_shows_what_waits_for_you() {
     h.emit::<TurnFinished>(finished("s-two", TurnOutcome::Completed))
         .await;
     let screen = h.screen(100, 30);
-    assert!(screen.contains(" ● second"), "{screen}");
+    assert!(screen.contains("second") && screen.contains("●"), "{screen}");
 }

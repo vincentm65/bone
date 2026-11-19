@@ -21,6 +21,8 @@ local p = {
 local hl = bone.hl.set
 hl("Normal", { fg = p.fg })
 hl("Dim", { fg = p.subtle })
+-- A step above Dim: what is there but needs nothing (a sidebar title).
+hl("Muted", { fg = p.muted })
 hl("Accent", { fg = p.accent, bold = true })
 hl("UserPrompt", { fg = p.accent, bg = p.user_bg, bold = true })
 hl("UserMessage", { fg = p.fg, bg = p.user_bg })

@@ -1,8 +1,16 @@
 -- Conversation sidebar with a Processes tab for every chat's background work.
 -- The data (what runs, archived, stats, shells) is bone.chats, shared with
--- other frontends' sidebars; this draws it for the TUI.
+-- other frontends' sidebars; this draws it for the TUI, the way the desktop
+-- draws it (bone.chats.list): a header per section with its count (enter
+-- or a click folds it; the archive starts folded), one line per chat with
+-- its status word or time at the right, and under the selected chat its
+-- time, tokens and turns, and at its right what can be done to it, each a
+-- click or a key: ☆ pin (ctrl+t), ✎ rename (f2, in its row: enter keeps
+-- it, esc drops it), ⤓ archive (ctrl+a).
 local M = {}
 local panel, state
+-- The selected chat's actions (defined below, used by render).
+local start_rename, finish_rename, archive
 local chats = require("bone.chats")
 local empty_row = {}
 local recent_window = chats.recent_window
@@ -30,10 +38,26 @@ local function setup_colors()
   dot("SessionDotWaiting", "SessionWaiting")
   dot("SessionDotUnread", "SessionUnread")
   dot("SessionDotOff", "Dim")
-  -- The running spinner: green, on the panel or on a selected card.
-  bone.hl.set("SessionRunning", { link = "Success", bg = background })
-  bone.hl.set("SessionRunningSelected", { link = "Success", bg = selection.bg })
+  -- Section headers, and the titles of chats that need nothing from you.
+  bone.hl.set("SessionHeader", { link = "Dim", bg = background, bold = true })
+  -- (Its color, not a link: a scheme without Muted has no group to follow,
+  -- and gives Normal's color for it; Dim, the step below, stands in.)
+  local muted = (bone.hl.get("Muted") or {}).fg
+  if muted == (bone.hl.get("Normal") or {}).fg then muted = nil end
+  bone.hl.set("SessionQuiet", muted and { fg = muted, bg = background } or { link = "Dim", bg = background })
+  -- The status words (bone.chats.status), on the panel and on a selected row.
+  for name, link in pairs({ Working = "SessionWorking", Waiting = "SessionWaiting",
+      Done = "SessionDone", Failed = "SessionFailed", Time = "Dim" }) do
+    bone.hl.set("SessionStatus" .. name, { link = link, bg = background })
+    bone.hl.set("SessionStatus" .. name .. "Selected", { link = link, bg = selection.bg })
+  end
 end
+
+-- bone.chats.status's colors, as this panel's groups.
+local STATUS = {
+  SessionWorking = "SessionStatusWorking", SessionWaiting = "SessionStatusWaiting",
+  SessionDone = "SessionStatusDone", SessionFailed = "SessionStatusFailed", Dim = "SessionStatusTime",
+}
 
 function M.archive_current(id)
   chats.archive(id)
@@ -78,20 +102,20 @@ local function filter_running()
   state.selected = math.min(math.max(1, state.selected), #state.items)
 end
 
-local function filter(reset)
-  if reset then state.initial = nil end
-  if state.page == "running" then return filter_running() end
-  local selected = not reset and state.items[state.selected]
-  local id = selected and selected.session_id or (not reset and state.initial)
-  state.filter_minute, state.filter_window, state.filter_dirty = math.floor(os.time() / 60), recent_window(), false
-  local g = chats.grouped(state.all, state.query, state.stats)
-  state.items = g.items
-  local groups, activities, sizes, running = g.groups, g.activities, g.sizes, g.running
-  state.selected = math.min(math.max(1, state.selected), #state.items)
-  -- Build content positions once, shared by rendering, reveal and hit testing.
+-- What a row of the Chats page is, to find it again after the list changes:
+-- its chat's id, or its section's header.
+local function key_of(r)
+  if not r then return nil end
+  if r.kind == "header" then return "header:" .. r.section end
+  return r.session and r.session.session_id
+end
+
+-- The Chats page's lines from its rows (state.items): positions are built
+-- once, shared by rendering, reveal and hit testing. The selected chat has
+-- a second line, so this runs again when the selection moves.
+local function layout()
   state.lines, state.hits, state.descriptors, state.rows = {}, {}, {}, {}
   state.visible_rows = {}
-  state.activities, state.sizes, state.running = activities, sizes, running
   local function append(kind, index)
     local line = #state.rows + 1
     state.rows[line] = empty_row
@@ -105,21 +129,49 @@ local function filter(reset)
   append("search")
   append("help")
   if state.loading or #state.items == 0 then append("status") end
-  local previous
-  for i, s in ipairs(state.items) do
-    if s.session_id == id then state.selected = i end
-    local g = groups[s.session_id]
-    if g ~= previous then
-      append("separator")
-      append("header", g)
-      previous = g
+  -- A rule above each header (after a blank, below a chat), and a blank
+  -- line between two chats.
+  for i, r in ipairs(state.items) do
+    local prev = state.items[i - 1]
+    if prev and prev.kind == "chat" then append("blank") end
+    if r.kind == "header" then append("separator") end
+    local line = append(r.kind == "header" and "header" or "title", i)
+    state.lines[i], state.hits[line] = line, i
+    if r.kind == "chat" and i == state.selected then
+      state.hits[append("meta", i)] = i
     end
-    local line = append("title", i)
-    append("meta", i)
-    append("blank")
-    state.lines[i] = line
-    state.hits[line], state.hits[line + 1] = i, i
   end
+end
+
+local function filter(reset)
+  if reset then state.initial = nil end
+  if state.page == "running" then return filter_running() end
+  local key = not reset and key_of(state.items[state.selected]) or (not reset and state.initial)
+  -- A header stays selected only where you moved to it.
+  if reset then state.picked = false end
+  if key and key:match("^header:") and not state.picked then key = state.initial end
+  state.filter_minute, state.filter_window, state.filter_dirty = math.floor(os.time() / 60), recent_window(), false
+  local rows, g = chats.list(state.all, state.query, state.stats)
+  state.items, state.running = rows, g.running
+  state.selected = math.min(math.max(1, state.selected), #state.items)
+  -- The same row again; else (nothing chosen yet, or it went) the chat on
+  -- screen, else the first chat: not a header.
+  local found = false
+  for i, r in ipairs(rows) do
+    if key and key_of(r) == key then state.selected, found = i, true break end
+  end
+  if not found then
+    -- (A new search starts at its first match.)
+    local current, first = not reset and (bone.chat.session() or {}).session_id, nil
+    for i, r in ipairs(rows) do
+      if r.kind == "chat" then
+        first = first or i
+        if r.session.session_id == current then first = i break end
+      end
+    end
+    state.selected = first or state.selected
+  end
+  layout()
 end
 
 local function reveal(info)
@@ -137,17 +189,24 @@ local function reveal(info)
 end
 
 local function choose(index)
-  local s = state.items[index]
-  if not s then return end
-  state.selected = index
+  local r = state.items[index]
+  if not r then return end
+  state.renaming = nil
+  state.selected, state.picked = index, true
+  -- A section's header folds it, or unfolds it.
+  if r.kind == "header" then
+    chats.toggle_folded(r.section)
+    return
+  end
+  if state.page == "chats" then layout() end
   -- Keep the agents panel available while interacting with the chosen chat.
   bone.ui.panel.focus(nil)
   -- A shell opens the chat that started it; a sub-agent, its own chat.
-  bone.api.open_session(s.session_id)
+  bone.api.open_session(r.session and r.session.session_id or r.session_id)
 end
 
 local function switch_page()
-  state.initial = nil
+  state.initial, state.renaming = nil, nil
   state.pages[state.page] = { items = state.items, selected = state.selected, top = panel:info().top }
   state.page = state.page == "running" and "chats" or "running"
   local saved = state.pages[state.page] or { items = {}, selected = 1, top = 0 }
@@ -156,10 +215,22 @@ local function switch_page()
   panel:scroll(saved.top - panel:info().top)
 end
 
+-- The selected row of the Chats page, if it is a chat (not a header).
+local function selected_chat()
+  local r = state.page == "chats" and state.items[state.selected]
+  return r and r.kind == "chat" and r or nil
+end
+
+-- Whether chat row `r` can be archived: not pinned (pinned chats never
+-- are) and not in Archived already.
+local function archivable(r)
+  return r.section ~= 1 and r.section ~= 4
+end
+
 -- ctrl+t on the Chats page: pin the selected chat, or unpin it.
 local function pin()
-  local s = state.page == "chats" and state.items[state.selected]
-  if s then chats.toggle_pin(s.session_id) end
+  local r = selected_chat()
+  if r then chats.toggle_pin(r.session.session_id) end
 end
 
 -- x on the Processes page: stop the selected shell or sub-agent.
@@ -169,8 +240,11 @@ local function stop()
 end
 
 local function move(delta)
-  state.initial = nil
+  state.initial, state.picked, state.renaming = nil, true, nil
+  local was = state.selected
   state.selected = math.max(1, math.min(#state.items, state.selected + delta))
+  -- The selected chat's second line moves with it.
+  if state.page == "chats" and state.selected ~= was then layout() end
   reveal()
 end
 
@@ -195,6 +269,8 @@ local function render(ctx)
       or state.filter_minute ~= math.floor(os.time() / 60) then
     filter()
   end
+  -- A rename ends when the panel loses the keyboard.
+  if state.renaming and not ctx.focused then state.renaming = nil end
   -- Wait for both list ordering and viewport geometry, then reveal only once.
   if state.initial and state.page == "chats" and not state.loading
       and not state.stats_loading and ctx.height > 0 then
@@ -205,6 +281,26 @@ local function render(ctx)
     -- Collapse whitespace inside the text, but keep the indent.
     text = bone.text.truncate(text:gsub("(%S)%s+", "%1 "), ctx.width)
     return { { text .. string.rep(" ", math.max(0, ctx.width - bone.text.width(text))), hl } }
+  end
+  -- A line of spans: `left` from the margin (its last span cut to fit),
+  -- `right` against the far margin, `fill` (a group) between them.
+  local function spread(left, right, fill)
+    local inner = math.max(0, ctx.width - 4)
+    local rw = 0
+    for _, span in ipairs(right) do rw = rw + bone.text.width(span[1]) end
+    if rw > inner then right, rw = {}, 0 end
+    local room = math.max(0, inner - rw - (rw > 0 and 2 or 0))
+    local out, used = { { "  ", "Normal" } }, 0
+    for _, span in ipairs(left) do
+      local text = span[1]:gsub("%s+", " ")
+      if bone.text.width(text) > room - used then text = bone.text.truncate(text, math.max(0, room - used)) end
+      out[#out + 1] = { text, span[2] }
+      used = used + bone.text.width(text)
+    end
+    out[#out + 1] = { string.rep(" ", math.max(0, inner - used - rw)), fill }
+    for _, span in ipairs(right) do out[#out + 1] = span end
+    out[#out + 1] = { "  ", "Normal" }
+    return out
   end
   -- `mark`: a span before the text, in its own color.
   local function card(text, style, mark)
@@ -247,7 +343,7 @@ local function render(ctx)
     elseif kind == "search" then
       formatted = row("  ⌕ " .. (state.query == "" and "search" or state.query), state.query == "" and "Dim" or "Accent")
     elseif kind == "help" then
-      formatted = row(state.page == "running" and "  ↵ open · x stop · tab chats · esc prompt" or "  ↵ open · ctrl+t pin · tab processes", "Dim")
+      formatted = row(state.page == "running" and "  ↵ open · x stop · tab chats · esc prompt" or "  ↵ open · tab processes", "Dim")
     elseif kind == "status" then
       formatted = row(state.page == "running" and " nothing running in the background"
         or state.loading and " loading…" or (state.query == "" and " no sessions yet" or " no matching sessions"), "Dim")
@@ -257,7 +353,7 @@ local function render(ctx)
       local j, active = state.items[index], index == state.selected and ctx.focused
       if kind == "job" then
         formatted = card(j.title, active and "SessionCardTitle" or "Normal",
-          { " " .. ctx.spinner .. " ", "SessionRunning" .. (active and "Selected" or "") })
+          { " " .. ctx.spinner .. " ", "SessionStatusWorking" .. (active and "Selected" or "") })
       else
         local detail = j.detail ~= "" and ("  ·  " .. j.detail) or ""
         formatted = card("   " .. bone.util.duration(os.time() - j.started) .. detail, active and "SessionCardMeta" or "Dim")
@@ -265,36 +361,75 @@ local function render(ctx)
     elseif kind == "separator" then
       formatted = { { fill = "─", hl = "Dim" } }
     elseif kind == "header" then
-      formatted = row("  " .. chats.sections[index] .. " · " .. state.sizes[index], "Dim")
+      -- "Active 3", and whether it is folded.
+      local r = state.items[index]
+      local active = index == state.selected and ctx.focused
+      local quiet = active and "SessionCardMeta" or "Dim"
+      formatted = spread({ { chats.sections[r.section], active and "SessionCardTitle" or "SessionHeader" },
+        { " " .. r.count, quiet } }, { { r.folded and "▸" or "▾", quiet } }, quiet)
     elseif kind == "blank" then
       formatted = row("", "Normal")
     else
-      local s = state.items[index]
+      local r = state.items[index]
+      local s = r.session
       local active = index == state.selected and ctx.focused
-      if kind == "title" then
-        -- What the chat needs from you (bone.chats.state): a question
-        -- waiting, running, a reply you have not seen; else whether it is
-        -- the one on screen.
-        local need, hl = chats.state(s.session_id), active and "SessionCardTitle" or "Normal"
-        local sel = active and "Selected" or ""
-        if need == "waiting" then
-          blinking = true
-          formatted = card(s.title or "[untitled]", hl,
-            { " ● ", (blink_on and "SessionDotWaiting" or "SessionDotOff") .. sel })
-        elseif need == "running" then
-          -- In the dots' column, so titles line up whatever their mark.
-          formatted = card(s.title or "[untitled]", hl,
-            { " " .. ctx.spinner .. " ", "SessionRunning" .. (active and "Selected" or "") })
-        elseif need == "unread" then
-          formatted = card(s.title or "[untitled]", hl, { " ● ", "SessionDotUnread" .. sel })
-        else
-          formatted = card((s.session_id == current and " ● " or "   ") .. (s.title or "[untitled]"), hl)
+      local sel = active and "Selected" or ""
+      if kind == "title" and state.renaming and state.renaming.id == s.session_id then
+        -- Being renamed: the text typed so far and the caret, its end
+        -- kept in view.
+        local text, room = state.renaming.text, math.max(1, ctx.width - 5)
+        while bone.text.width(text) > room do
+          text = text:gsub("^[%z\1-\127\194-\244][\128-\191]*", "", 1)
         end
+        local hl = active and "SessionCardTitle" or "Normal"
+        formatted = spread({ { text, hl }, { "▏", hl } }, {}, hl)
+      elseif kind == "title" then
+        -- The title: white, or a step quieter in Archived unless the chat
+        -- needs you or is on screen; at the right what it needs
+        -- (bone.chats.status), or its time.
+        local status = chats.status(s.session_id, r.at)
+        local quiet = r.section == 4 and not (status.state or s.session_id == current)
+        local hl = active and "SessionCardTitle" or (quiet and "SessionQuiet" or "Normal")
+        local right
+        if status.state == "running" then
+          right = { { ctx.spinner .. " " .. status.text, "SessionStatusWorking" .. sel } }
+        elseif status.state == "waiting" then
+          -- Its dot blinks.
+          blinking = true
+          right = { { "● ", (blink_on and "SessionDotWaiting" or "SessionDotOff") .. sel },
+            { status.text, "SessionStatusWaiting" .. sel } }
+        else
+          right = { { status.text, (STATUS[status.hl] or "SessionStatusTime") .. sel } }
+        end
+        formatted = spread({ { s.title or "[untitled]", hl } }, right, hl)
       else
         local meta = state.stats[s.session_id]
         local totals = meta and (count(meta.tokens) .. " tokens · " .. count(meta.turns) .. " turns")
           or (state.stats_loading and "usage loading…" or "usage unavailable")
-        formatted = card("   " .. timestamp(state.activities[s.session_id]) .. "  ·  " .. totals, active and "SessionCardMeta" or "Dim")
+        local hl = active and "SessionCardMeta" or "Dim"
+        -- At its right, what can be done to it: pin, rename, archive (a
+        -- click: state.action_cols, for the mouse). Not while it is being
+        -- renamed.
+        local icons, right = {}, {}
+        if not state.renaming then
+          icons = { { r.section == 1 and "★" or "☆", pin }, { "✎", start_rename } }
+          if archivable(r) then icons[#icons + 1] = { "⤓", archive } end
+        end
+        for k, a in ipairs(icons) do
+          if k > 1 then right[#right + 1] = { "  ", hl } end
+          right[#right + 1] = { a[1], hl }
+        end
+        formatted = spread({ { "  " .. timestamp(r.at) .. " · " .. totals, hl } }, right, hl)
+        -- Each icon's columns (one either side too), from the right margin.
+        state.action_cols = {}
+        local col = ctx.width - 2
+        for k = #icons, 1, -1 do
+          local w = bone.text.width(icons[k][1])
+          col = col - w
+          state.action_cols[k] = { col - 1, col + w, icons[k][2] }
+          col = col - 2
+        end
+        if col < 2 then state.action_cols = {} end
       end
     end
     for _, span in ipairs(formatted) do
@@ -347,6 +482,46 @@ local function refresh_list(st, p)
   end)
 end
 
+-- f2: rename the selected chat, in its row.
+start_rename = function()
+  local r = selected_chat()
+  if not r then return end
+  state.renaming = { id = r.session.session_id, text = r.session.title or "" }
+  -- (A click on it from the prompt: the keys come here for the typing.)
+  if bone.ui.panel.focused() ~= "sessions" then panel:focus() end
+end
+
+-- enter keeps the new title (`keep`), esc drops it.
+finish_rename = function(keep)
+  local ren = state.renaming
+  state.renaming = nil
+  if not (keep and ren) then return end
+  local title = ren.text:gsub("^%s+", ""):gsub("%s+$", "")
+  if title == "" then return end
+  local st, p = state, panel
+  bone.request("session/rename", { session_id = ren.id, title = title }, function(_, err)
+    if err then bone.notify("rename: " .. tostring(err), "error") end
+    if state == st and p:is_open() then refresh_list(st, p) end
+  end)
+end
+
+-- ctrl+a: archive the selected chat (it leaves Active until it runs again).
+archive = function()
+  local r = selected_chat()
+  -- (Not while its title is being typed.)
+  if state.renaming or not (r and archivable(r)) then return end
+  -- The selection stays in place: on the next chat, else the one before.
+  for _, d in ipairs({ 1, -1 }) do
+    local i = state.selected + d
+    while state.items[i] and state.items[i].kind ~= "chat" do i = i + d end
+    if state.items[i] then
+      state.selected = i
+      break
+    end
+  end
+  chats.archive(r.session.session_id)
+end
+
 function M.open()
   if panel and panel:is_open() then
     if bone.ui.panel.focused() == "sessions" then panel:close() else panel:focus() end
@@ -360,17 +535,31 @@ function M.open()
     size = tonumber(bone.state.load("sessions-width").width) or tonumber(bone.ui.sessions_width) or 48,
     render = render,
     keys = {
-      esc = function() bone.ui.panel.focus(nil) end,
+      esc = function()
+        if state.renaming then return finish_rename(false) end
+        bone.ui.panel.focus(nil)
+      end,
       ["ctrl+o"] = function() panel:close() end,
       tab = switch_page, ["shift+tab"] = switch_page,
-      enter = function() choose(state.selected) end,
+      enter = function()
+        if state.renaming then return finish_rename(true) end
+        choose(state.selected)
+      end,
       ["ctrl+t"] = pin,
+      f2 = function() start_rename() end,
+      ["ctrl+a"] = function() archive() end,
       up = function() move(-1) end, down = function() move(1) end,
       pageup = function() move(-math.max(1, math.floor(panel:info().height / 3))) end,
       pagedown = function() move(math.max(1, math.floor(panel:info().height / 3))) end,
       home = function() move(-#state.items) end, ["end"] = function() move(#state.items) end,
     },
     on_key = function(key)
+      -- Typing goes to the title being renamed.
+      if state.renaming then
+        local text = bone.text.edit(state.renaming.text, key)
+        if text then state.renaming.text = text end
+        return text ~= nil
+      end
       if state.page == "running" then
         if key == "x" then stop() return true end
         return false
@@ -398,9 +587,9 @@ end
 
 chats.watch(function(kind, ev)
   local open = panel and panel:is_open()
-  if kind == "archived" or kind == "pinned" or kind == "attention" then
+  if kind == "archived" or kind == "pinned" or kind == "attention" or kind == "folded" then
     -- Only the sections change (a waiting question moves its chat to
-    -- Active): nothing to fetch.
+    -- Active; a header folds): nothing to fetch.
     if state then state.filter_dirty = true end
   elseif kind == "turn" then
     if open then
@@ -435,6 +624,17 @@ bone.on("mouse", function(ev)
   if state.resizing then return true end
   if ev.panel ~= "sessions" then return end
   state.initial = nil
+  -- A click on one of the selected chat's icons runs it; elsewhere on the
+  -- line, it opens the chat.
+  if (state.descriptors[ev.panel_line] or {})[1] == "meta" then
+    local col = ev.x - info.col
+    for _, a in ipairs(state.action_cols or {}) do
+      if col >= a[1] and col <= a[2] then
+        a[3]()
+        return true
+      end
+    end
+  end
   local index = state.hits[ev.panel_line]
   if index then
     choose(index)

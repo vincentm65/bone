@@ -5,10 +5,14 @@
 -- pinned or archived (shared by every frontend), which section each is in
 -- (M.section), the background shells, and fetches the session list and usage.
 -- It also knows what each chat needs from you (M.state): a question open in
--- it, or a turn that ended while you were elsewhere.
+-- it, or a turn that ended (or failed) while you were elsewhere. M.list and
+-- M.status are the list itself as both sidebars draw it: section headers
+-- (with counts, foldable, the fold shared by every frontend) and one line
+-- per chat, its title and a status word (Working, Waiting, Done, Failed) or
+-- its time.
 -- Views subscribe with M.watch(fn); fn(kind, ev) runs after each change:
 -- "turn" (ev.running), "created", "updated", "deleted", "shells", "attention",
--- "archived", "pinned".
+-- "archived", "pinned", "folded".
 local M = {}
 
 local agents = require("bone.agents")
@@ -19,11 +23,20 @@ M.live, M.touched, M.versions, M.shells = {}, {}, {}, {}
 M.asks = {}
 -- Chats whose turn ended while another chat was on screen.
 M.unread = {}
+-- Of those, the ones whose turn failed.
+M.failed = {}
+-- When each running turn started (os.time()), for the sidebar's live clock;
+-- unknown for one already running when this frontend started.
+M.started = {}
 
 -- Their colors, for a colorscheme without its own (graphite has them).
 bone.hl.set("SessionWaiting", { link = "WarningMsg", default = true })
 bone.hl.set("SessionUnread", { link = "Accent", default = true })
 bone.hl.set("SessionRunning", { link = "ToolRunning", default = true })
+-- The list's status words (M.status).
+bone.hl.set("SessionWorking", { link = "Accent", default = true })
+bone.hl.set("SessionDone", { link = "Success", default = true })
+bone.hl.set("SessionFailed", { link = "ErrorMsg", default = true })
 
 -- Pinned and archived chats are kept where every frontend on this machine
 -- reads them (state/shared/), so the TUI and the desktop agree. Each side
@@ -44,11 +57,14 @@ local function shared(name, old)
 end
 M.archived = shared("sessions-archived", "sessions-archived")
 M.pinned = shared("sessions-pinned", "sidebar-pinned")
+-- Folded sections (M.is_folded), by index: true or false where chosen.
+M.folded = shared("sessions-folded")
 
 -- Read them again: the other frontend may have changed them.
 local function reload()
   M.archived = shared("sessions-archived")
   M.pinned = shared("sessions-pinned")
+  M.folded = shared("sessions-folded")
 end
 
 -- Change one chat in a shared set, reading it first so the other
@@ -101,7 +117,7 @@ function M.count(n)
   return tostring(n)
 end
 
---- A time as "now", "5m ago", "Oct 03".
+--- A time as "now", "5m ago", "Oct 03" (M.ago for the list's shorter form).
 function M.timestamp(at)
   if at <= 0 then return "" end
   local age = math.max(0, os.time() - at)
@@ -110,6 +126,30 @@ function M.timestamp(at)
   if age < 86400 then return math.floor(age / 3600) .. "h ago" end
   if age < 7 * 86400 then return math.floor(age / 86400) .. "d ago" end
   return os.date(os.date("%Y", at) == os.date("%Y") and "%b %d" or "%b %d %Y", at)
+end
+
+--- A time as the list shows it: "now", "5m", "3h", "2d", "Oct 03".
+function M.ago(at)
+  return (M.timestamp(at or 0):gsub(" ago$", ""))
+end
+
+--- How long a running turn has gone, as the sidebars' live clock: "0:47",
+--- "14:05", "1:02:30".
+function M.clock(seconds)
+  seconds = math.max(0, math.floor(seconds or 0))
+  local h, m, s = math.floor(seconds / 3600), math.floor(seconds % 3600 / 60), seconds % 60
+  if h > 0 then return ("%d:%02d:%02d"):format(h, m, s) end
+  return ("%d:%02d"):format(m, s)
+end
+
+--- How long a turn has run, as the list shows it: "" under a minute, then
+--- "4m", "1h 5m".
+function M.elapsed(seconds)
+  seconds = math.max(0, seconds or 0)
+  if seconds < 60 then return "" end
+  if seconds < 3600 then return math.floor(seconds / 60) .. "m" end
+  local h, m = math.floor(seconds / 3600), math.floor(seconds % 3600 / 60)
+  return m > 0 and (h .. "h " .. m .. "m") or (h .. "h")
 end
 
 --- When session `s` last did something (stats from M.fetch_stats).
@@ -143,6 +183,25 @@ end
 -- The sections of the list, in order.
 M.sections = { "Pinned", "Active", "Running", "Archived" }
 
+-- Folded unless chosen otherwise: the archive, which is long.
+local FOLDED = { [4] = true }
+
+--- Whether section `n` (an index into M.sections) is folded: its header
+--- stays, its chats are hidden. Every frontend shares it.
+function M.is_folded(n)
+  local on = M.folded[tostring(n)]
+  if on == nil then return FOLDED[n] or false end
+  return on == true
+end
+
+--- Fold section `n`, or unfold it.
+function M.toggle_folded(n)
+  reload()
+  M.folded[tostring(n)] = not M.is_folded(n)
+  bone.state.save("sessions-folded", M.folded, { shared = true })
+  changed("folded", { section = n })
+end
+
 --- Which section chat `id` belongs in (an index into M.sections), with
 --- `at` its last activity: pinned; a question waiting for you, or finished
 --- within M.recent_window() and not archived (Active); a turn
@@ -162,6 +221,9 @@ function M.note_running()
   for _, s in ipairs(bone.chat.sessions()) do
     if s.session_id and s.running and not M.live[s.session_id] then
       M.live[s.session_id] = true
+      -- Its turn began before this frontend saw it: count the clock from
+      -- the moment we noticed, rather than show no time at all.
+      M.started[s.session_id] = M.started[s.session_id] or os.time()
       found = true
     end
   end
@@ -287,7 +349,10 @@ function M.fetch_active(done)
       if M.versions[id] == before[id] then M.live[id] = active[id] end
     end
     for id in pairs(active) do
-      if M.versions[id] == before[id] then M.live[id] = true end
+      if M.versions[id] == before[id] then
+        M.live[id] = true
+        M.started[id] = M.started[id] or os.time()
+      end
     end
     done()
   end)
@@ -318,14 +383,69 @@ function M.waiting(id)
 end
 
 --- What chat `id` needs from you, the most pressing first: "waiting" (a
---- question is open in it), "running", "unread" (it finished while you were
---- in another chat), or nil.
+--- question is open in it), "running", "failed" (its turn failed while you
+--- were in another chat), "unread" (it finished while you were elsewhere),
+--- or nil.
 function M.state(id)
   if not id then return nil end
   if M.waiting(id) then return "waiting" end
   if M.live[id] then return "running" end
-  if M.unread[id] and id ~= on_screen() then return "unread" end
+  if id ~= on_screen() then
+    if M.failed[id] then return "failed" end
+    if M.unread[id] then return "unread" end
+  end
   return nil
+end
+
+-- The word for each state, and its color.
+local WORDS = {
+  waiting = { "Waiting", "SessionWaiting" },
+  failed = { "Failed", "SessionFailed" },
+  unread = { "Done", "SessionDone" },
+}
+
+--- What the list shows at the right of chat `id` (last active at `at`):
+--- { text, hl, state }. A state (M.state) is a word in its color:
+--- a live clock ("2:34", SessionWorking) while it runs, then "Waiting",
+--- "Failed", "Done"; with none, the time (M.ago), in Dim.
+function M.status(id, at)
+  local state = M.state(id)
+  if state == "running" then
+    local t = M.started[id] and M.clock(os.time() - M.started[id]) or "Working"
+    return { state = state, hl = "SessionWorking", text = t }
+  end
+  local word = WORDS[state]
+  if word then return { state = state, text = word[1], hl = word[2] } end
+  return { text = M.ago(at), hl = "Dim" }
+end
+
+--- The Chats list as rows, the same in every sidebar: before each
+--- section's chats its header, { kind = "header", section, count, folded },
+--- then { kind = "chat", session, section, at } for each chat. A folded
+--- section keeps its header (and its count) and shows only the chat on
+--- screen; a search (`query`) unfolds them all. `keep(s)`, if given,
+--- leaves out the chats it is false for (they are not counted). Also
+--- returns M.grouped's answer.
+function M.list(all, query, stats, keep)
+  local g = M.grouped(all, query, stats)
+  local current, searching = on_screen(), (query or "") ~= ""
+  local rows, head = {}, nil
+  for _, s in ipairs(g.items) do
+    if not keep or keep(s) then
+      local id = s.session_id
+      local section = g.groups[id] or 4
+      if not head or head.section ~= section then
+        head = { kind = "header", section = section, count = 0,
+          folded = not searching and M.is_folded(section) }
+        rows[#rows + 1] = head
+      end
+      head.count = head.count + 1
+      if not head.folded or id == current then
+        rows[#rows + 1] = { kind = "chat", session = s, section = section, at = g.activities[id] or 0 }
+      end
+    end
+  end
+  return rows, g
 end
 
 --- The chats other than the one on screen that need you: { waiting = n,
@@ -346,8 +466,8 @@ end
 
 --- Chat `id` has been looked at: it is no longer new.
 function M.seen(id)
-  if id and M.unread[id] then
-    M.unread[id] = nil
+  if id and (M.unread[id] or M.failed[id]) then
+    M.unread[id], M.failed[id] = nil, nil
     changed("attention", { session_id = id })
   end
 end
@@ -399,10 +519,17 @@ local function turn_changed(ev, running)
   if not id then return end
   M.versions[id] = (M.versions[id] or 0) + 1
   M.live[id], M.touched[id] = running, os.time()
+  M.started[id] = running and os.time() or nil
+  if running then M.failed[id] = nil end
   if running and M.archived[id] then mark("sessions-archived", id, false) end
   -- A turn that ends in a chat you are not looking at is new to you (an
-  -- agent's ends in its own chat, which you did not start).
-  if not running and id ~= on_screen() and not agents.get(id) then M.unread[id] = true end
+  -- agent's ends in its own chat, which you did not start), and says so
+  -- when it failed.
+  if not running and id ~= on_screen() and not agents.get(id) then
+    M.unread[id] = true
+    local outcome = type(ev.outcome) == "table" and ev.outcome.status
+    M.failed[id] = outcome == "failed" or nil
+  end
   changed("turn", { session_id = id, running = running })
 end
 bone.on("turn/started", function(ev) turn_changed(ev, true) end)
@@ -423,7 +550,7 @@ end)
 bone.on("session/updated", function(ev) changed("updated", ev) end)
 bone.on("session/deleted", function(ev)
   M.live[ev.session_id], M.touched[ev.session_id] = nil, nil
-  M.unread[ev.session_id] = nil
+  M.unread[ev.session_id], M.failed[ev.session_id], M.started[ev.session_id] = nil, nil, nil
   for ask_id, chat in pairs(M.asks) do
     if chat == ev.session_id then M.asks[ask_id] = nil end
   end
