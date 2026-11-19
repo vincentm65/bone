@@ -208,7 +208,8 @@ local function choose(i, keep_keys)
   if not r then return end
   st.sel, st.picked = i, true
   if r.kind == "header" then
-    chats.toggle_folded(r.section) -- the watcher below draws it again
+    -- (A search shows them all unfolded: nothing to fold.)
+    if st.query == "" then chats.toggle_folded(r.section) end -- the watcher below draws it again
     return
   end
   local id = sid(r)
@@ -222,8 +223,10 @@ local function choose(i, keep_keys)
   redraw()
 end
 
-local function start_rename(id)
+local function start_rename(id, title)
   st.renaming, st.rename_focused = id, false
+  -- From its title, not what a rename given up left in the field.
+  bone.gui.set_input_text("sidebar-rename", title or "")
   bone.gui.focus("sidebar-rename")
   redraw()
 end
@@ -232,22 +235,10 @@ local function toggle_pin(id)
   chats.toggle_pin(id) -- the watcher below draws it again
 end
 
--- Whether chat row `r` can be archived: not pinned (pinned chats never
--- are) and not in Archived already.
-local function archivable(r)
-  return not r.pinned and r.section ~= 1 and r.section ~= 4
-end
-
 -- `away`: the field lost the keyboard to a click elsewhere, which keeps it.
 local function rename(id, title, away)
   st.renaming = nil
-  title = (title or ""):gsub("^%s+", ""):gsub("%s+$", "")
-  if title ~= "" then
-    bone.request("session/rename", { session_id = id, title = title }, function(_, err)
-      if err then bone.notify("rename: " .. tostring(err), "error") end
-      refresh()
-    end)
-  end
+  chats.rename(id, title, refresh)
   if not away then take_keys() end
   redraw()
 end
@@ -305,7 +296,7 @@ local function set_project(cwd)
 end
 
 local function close()
-  open, st.menu = false, false
+  open, st.menu, st.renaming = false, false, nil
   bone.gui.focus(nil)
   redraw()
 end
@@ -334,21 +325,20 @@ local KEYS = {
   end,
   f2 = function()
     local r = st.page == "chats" and st.items[st.sel]
-    if r and r.kind == "chat" then start_rename(sid(r)) end
+    if r and r.kind == "chat" then start_rename(sid(r), r.session.title) end
   end,
+  -- (While searching, ctrl+a selects the search's text instead.)
   ["ctrl+a"] = function()
-    local r = st.page == "chats" and st.items[st.sel]
-    if r and r.kind == "chat" and not chats.pinned[sid(r)] and r.section ~= 4 then chats.archive(sid(r)) end
+    local r = st.query == "" and st.page == "chats" and st.items[st.sel]
+    if not (r and r.kind == "chat") then return false end
+    if chats.archivable(r.section) then chats.archive(sid(r)) end
   end,
   up = function() select(st.sel - 1) end, down = function() select(st.sel + 1) end,
   pageup = function() select(st.sel - 5) end, pagedown = function() select(st.sel + 5) end,
 }
 
 local function on_key(key)
-  if KEYS[key] then
-    KEYS[key]()
-    return true
-  end
+  if KEYS[key] then return KEYS[key]() ~= false end
   -- x stops a process on the Processes page.
   if st.page == "running" and key == "x" and st.items[st.sel] then
     chats.stop(st.items[st.sel])
@@ -393,7 +383,7 @@ local function row(i)
     return {
       height = ROW.header, padding = { 12, 0, 2, 0 }, direction = "column", cursor = "pointer",
       role = "button", label = name .. ", " .. r.count .. (r.folded and ", folded" or ""),
-      on_click = function() chats.toggle_folded(r.section) end,
+      on_click = function() if st.query == "" then chats.toggle_folded(r.section) end end,
       style.finish({
         grow = 1, direction = "row", align = "center", gap = 6, padding = { 0, 9 }, radius = style.radius.md,
         border = 1, border_color = (r.item == st.sel and has_keys()) and "PromptBorder" or "transparent",
@@ -455,8 +445,8 @@ local function row(i)
     local actions = id and { position = "absolute", right = 0, top = 0, direction = "row", gap = 2,
       opacity = 0, group_hover = { opacity = 1 },
       action("pin", r.pinned and "Unpin" or "Pin", function() toggle_pin(id) end, id, r.pinned),
-      action("edit", "Rename", function() start_rename(id) end, id) }
-    if actions and archivable(r) then
+      action("edit", "Rename", function() start_rename(id, r.title) end, id) }
+    if actions and chats.archivable(r.section) then
       actions[#actions + 1] = action("archive", "Archive", function() chats.archive(id) end, id)
     end
     local n = actions and (#actions) or 0

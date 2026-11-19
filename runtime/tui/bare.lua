@@ -72,7 +72,9 @@ function bone.ui.health()
     tui[#tui + 1] = it
   end
   add(lines, "TUI", tui)
-  local pager = bone.ui.pager({ unpack(lines), { { "Core: checking…", "Normal" } } }, { title = "Health" })
+  local waiting = { unpack(lines) }
+  waiting[#waiting + 1] = { { "Core: checking…", "Normal" } }
+  local pager = bone.ui.pager(waiting, { title = "Health" })
   bone.request("health/check", {}, function(core, err)
     local all = { unpack(lines) }
     add(all, "Core", err and { { name = "core", status = "error", message = err } } or core or {})

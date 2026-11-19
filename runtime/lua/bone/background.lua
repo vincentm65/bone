@@ -102,7 +102,7 @@ local function shell_rows()
     if p.terminal and not cleared["shell:" .. p.id] then
       local status = "running"
       if not p.running then
-        status = PROCESS_STATUS[p.state] or ((p.code or 0) == 0 and "done" or "failed")
+        status = PROCESS_STATUS[p.state] or (p.code == 0 and "done" or "failed")
       end
       local detail = p.tail or last_line(p.output)
       if status ~= "running" and status ~= "done" then
@@ -211,6 +211,8 @@ end
 --- Put a queued message ({ id, text }) in the prompt to edit; enter saves
 --- it in place, esc gives up.
 function M.edit(r)
+  -- (Not over a draft, which esc would then throw away.)
+  if bone.prompt.get() ~= "" then return bone.notify("send or clear the prompt first", "warn") end
   local s = bone.chat.session()
   bone.prompt.set(r.text)
   bone.prompt.set_images(r.images or {})

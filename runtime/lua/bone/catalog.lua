@@ -541,7 +541,7 @@ function M.page(hooks)
       else
         st.note = { ("installed %d/%d; failed: %s"):format(p.total - #p.failures, p.total, table.concat(p.failures, ", ")), true }
       end
-      load(st.note[1])
+      load()
     end
     for _, e in ipairs(entries) do
       redraw()
