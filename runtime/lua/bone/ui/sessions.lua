@@ -161,15 +161,16 @@ local function filter(reset)
     if key and key_of(r) == key then state.selected, found = i, true break end
   end
   if not found then
-    -- (A new search starts at its first match.)
-    local current, first = not reset and (bone.chat.session() or {}).session_id, nil
-    for i, r in ipairs(rows) do
-      if r.kind == "chat" then
-        first = first or i
-        if r.session.session_id == current then first = i break end
-      end
+    -- A new search starts at its first match; a chat that left the list
+    -- (archived, folded away) leaves the selection where it was.
+    local at = reset and 1 or state.selected
+    local i = at
+    while rows[i] and rows[i].kind ~= "chat" do i = i + 1 end
+    if not rows[i] then
+      i = math.min(at, #rows)
+      while rows[i] and rows[i].kind ~= "chat" do i = i - 1 end
     end
-    state.selected = first or state.selected
+    if rows[i] then state.selected = i end
   end
   layout()
 end
@@ -195,7 +196,8 @@ local function choose(index)
   state.selected, state.picked = index, true
   -- A section's header folds it, or unfolds it.
   if r.kind == "header" then
-    chats.toggle_folded(r.section)
+    -- (A search shows them all unfolded: nothing to fold.)
+    if state.query == "" then chats.toggle_folded(r.section) end
     return
   end
   if state.page == "chats" then layout() end
@@ -219,12 +221,6 @@ end
 local function selected_chat()
   local r = state.page == "chats" and state.items[state.selected]
   return r and r.kind == "chat" and r or nil
-end
-
--- Whether chat row `r` can be archived: not pinned (pinned chats never
--- are) and not in Archived already.
-local function archivable(r)
-  return r.section ~= 1 and r.section ~= 4
 end
 
 -- ctrl+t on the Chats page: pin the selected chat, or unpin it.
@@ -413,7 +409,7 @@ local function render(ctx)
         local icons, right = {}, {}
         if not state.renaming then
           icons = { { r.section == 1 and "★" or "☆", pin }, { "✎", start_rename } }
-          if archivable(r) then icons[#icons + 1] = { "⤓", archive } end
+          if chats.archivable(r.section) then icons[#icons + 1] = { "⤓", archive } end
         end
         for k, a in ipairs(icons) do
           if k > 1 then right[#right + 1] = { "  ", hl } end
@@ -429,7 +425,7 @@ local function render(ctx)
           state.action_cols[k] = { col - 1, col + w, icons[k][2] }
           col = col - 2
         end
-        if col < 2 then state.action_cols = {} end
+        if col < 0 then state.action_cols = {} end -- (spread left them out)
       end
     end
     for _, span in ipairs(formatted) do
@@ -485,7 +481,7 @@ end
 -- f2: rename the selected chat, in its row.
 start_rename = function()
   local r = selected_chat()
-  if not r then return end
+  if not r or state.renaming then return end
   state.renaming = { id = r.session.session_id, text = r.session.title or "" }
   -- (A click on it from the prompt: the keys come here for the typing.)
   if bone.ui.panel.focused() ~= "sessions" then panel:focus() end
@@ -496,11 +492,8 @@ finish_rename = function(keep)
   local ren = state.renaming
   state.renaming = nil
   if not (keep and ren) then return end
-  local title = ren.text:gsub("^%s+", ""):gsub("%s+$", "")
-  if title == "" then return end
   local st, p = state, panel
-  bone.request("session/rename", { session_id = ren.id, title = title }, function(_, err)
-    if err then bone.notify("rename: " .. tostring(err), "error") end
+  chats.rename(ren.id, ren.text, function()
     if state == st and p:is_open() then refresh_list(st, p) end
   end)
 end
@@ -509,17 +502,7 @@ end
 archive = function()
   local r = selected_chat()
   -- (Not while its title is being typed.)
-  if state.renaming or not (r and archivable(r)) then return end
-  -- The selection stays in place: on the next chat, else the one before.
-  for _, d in ipairs({ 1, -1 }) do
-    local i = state.selected + d
-    while state.items[i] and state.items[i].kind ~= "chat" do i = i + d end
-    if state.items[i] then
-      state.selected = i
-      break
-    end
-  end
-  chats.archive(r.session.session_id)
+  if r and not state.renaming and chats.archivable(r.section) then chats.archive(r.session.session_id) end
 end
 
 function M.open()

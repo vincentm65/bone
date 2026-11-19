@@ -72,6 +72,7 @@ end
 local function mark(name, id, on)
   reload()
   local set = name == "sessions-pinned" and M.pinned or M.archived
+  if set[id] == (on or nil) then return end
   set[id] = on or nil
   bone.state.save(name, set, { shared = true })
 end
@@ -165,6 +166,23 @@ function M.archive(id)
   if not id then return end
   mark("sessions-archived", id, true)
   changed("archived", { session_id = id })
+end
+
+--- Whether a chat in section `n` can be archived: one in Active or
+--- Running (pinned chats never are; archived ones already are).
+function M.archivable(n)
+  return n == 2 or n == 3
+end
+
+--- Rename chat `id` to `title` (trimmed; an empty one is ignored), then
+--- done() once the core has it.
+function M.rename(id, title, done)
+  title = (title or ""):gsub("^%s+", ""):gsub("%s+$", "")
+  if title == "" then return end
+  bone.request("session/rename", { session_id = id, title = title }, function(_, err)
+    if err then bone.notify("rename: " .. tostring(err), "error") end
+    if done then done() end
+  end)
 end
 
 --- Pin chat `id`, or unpin it (`on` false): pinned chats are listed first,
@@ -521,7 +539,7 @@ local function turn_changed(ev, running)
   M.live[id], M.touched[id] = running, os.time()
   M.started[id] = running and os.time() or nil
   if running then M.failed[id] = nil end
-  if running and M.archived[id] then mark("sessions-archived", id, false) end
+  if running then mark("sessions-archived", id, false) end
   -- A turn that ends in a chat you are not looking at is new to you (an
   -- agent's ends in its own chat, which you did not start), and says so
   -- when it failed.

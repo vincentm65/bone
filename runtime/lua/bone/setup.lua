@@ -210,7 +210,7 @@ function M.page(opts, hooks)
       end
     end
     local function finished()
-      st.step = "done"
+      st.step, st.sel = "done", math.min(st.sel, #st.first_prompts)
       redraw()
     end
     local function after_key()
