@@ -372,16 +372,17 @@ impl Root {
                     let Some(laid) = text.handle.downcast_ref::<Laid>() else {
                         return;
                     };
-                    // A span's background (a code span's chip) is a pill a
-                    // little wider than its glyphs and a little shorter
-                    // than its line, with soft corners.
+                    // A span's background (a code span's chip) is a pill as
+                    // wide as layout made it (its glyphs and the room at
+                    // its ends, `RunStyle::pad`) and a little shorter than
+                    // its line, with soft corners.
                     for d in laid.decos.iter().filter(|d| d.under) {
                         let r = d.rect.translate(at.to_vec2());
                         let trim = if r.height() > 14.0 { 2.0 } else { 0.0 };
                         let r = crate::backend::Rect::from_xywh(
-                            r.min.x - 3.0,
+                            r.min.x,
                             r.min.y + trim,
-                            r.width() + 6.0,
+                            r.width(),
                             r.height() - 2.0 * trim,
                         );
                         window.paint_quad(

@@ -143,6 +143,39 @@ pub(in crate::nodeview) struct Tween {
     pub(in crate::nodeview) at: std::time::Instant,
 }
 
+/// A node's height on its way to the height of what it holds.
+#[derive(Clone, Debug)]
+pub(in crate::nodeview) struct HeightTween {
+    from: f32,
+    to: f32,
+    at: std::time::Instant,
+    /// The width it was placed at: at another (the window was resized) it
+    /// takes its new height at once.
+    width: f32,
+    /// How long it moves for, and how.
+    duration_ms: f32,
+    easing: node::Easing,
+    /// Placed or measured this frame; the others are dropped.
+    seen: bool,
+}
+
+impl HeightTween {
+    fn progress(&self, now: std::time::Instant) -> f32 {
+        let span = (self.duration_ms / 1000.0).max(0.001);
+        now.saturating_duration_since(self.at).as_secs_f32() / span
+    }
+
+    /// The height it is shown at, at `now`.
+    fn at(&self, now: std::time::Instant) -> f32 {
+        let k = self.easing.at(self.progress(now));
+        self.from + (self.to - self.from) * k
+    }
+
+    fn moving(&self, now: std::time::Instant) -> bool {
+        self.progress(now) < 1.0 && (self.to - self.from).abs() > 0.5
+    }
+}
+
 /// What belongs to one Lua state: its functions and what was made from
 /// them. A reload swaps it out whole, so the old state's view keeps working
 /// until the new configuration is taken, and none of it outlives its state.
@@ -231,6 +264,11 @@ pub struct ViewState {
     pub(crate) inputs: HashMap<String, InputBuf>,
     /// Values being faded (`transition`), by node and property.
     pub(in crate::nodeview) tweens: HashMap<String, Tween>,
+    /// Eased heights (`transition = { height = true }`), by node id.
+    pub(in crate::nodeview) heights: HashMap<String, HeightTween>,
+    /// One was moving last frame: this one measures again too, so what
+    /// kept a height measured on the way takes the one it arrived at.
+    pub(in crate::nodeview) heights_moved: bool,
     /// The text input that has the keyboard, if one does (not the prompt).
     pub input_focus: Option<String>,
     /// Asked to take the keyboard (`bone.gui.focus`).
@@ -344,12 +382,20 @@ pub(crate) struct Fx<'a> {
     pub typed: Vec<Event>,
     /// How opaque what is painted now is.
     pub opacity: f32,
+    /// How far what is painted now is moved from where it was laid out (a
+    /// node sliding in, `enter = { dx, dy }`).
+    pub offset: crate::backend::Vec2,
 }
 
 impl Fx<'_> {
-    /// Paint `shape`, cut to `clip`, at the opacity painted now.
+    /// Paint `shape`, cut to `clip`, at the opacity and offset painted now.
     pub fn paint(&mut self, shape: Shape, clip: Area) {
-        self.out.draw.push(shape, clip, self.opacity);
+        if self.offset == crate::backend::Vec2::ZERO {
+            self.out.draw.push(shape, clip, self.opacity);
+        } else {
+            let by = self.offset;
+            self.out.draw.push(shape.translate(by), clip.translate(by), self.opacity);
+        }
     }
 }
 
@@ -407,6 +453,14 @@ pub(in crate::nodeview) struct Fonts<'a> {
     texts: HashMap<String, Rc<str>>,
     /// The families Lua registered.
     registered: Vec<String>,
+    /// Eased heights, moved here for the frame, and the frame's time, so
+    /// every measure of a node in it agrees.
+    heights: std::cell::RefCell<HashMap<String, HeightTween>>,
+    now: std::time::Instant,
+    /// A height was moving when the frame began, or in the frame before:
+    /// the lists measure their items again rather than trust the heights
+    /// they kept.
+    pub(in crate::nodeview) heights_moving: bool,
 }
 
 /// `c` a step toward white (bold without a bold face).
@@ -471,6 +525,11 @@ impl Fonts<'_> {
             style.strike |= s.strike;
             style.underline = s.underline;
             style.background = s.bg;
+            // A chip (a code span) keeps room at its ends, so it stands
+            // clear of the words beside it.
+            if s.bg.is_some() {
+                style.pad = crate::backend::text::CHIP_PAD;
+            }
             job.append(&s.text, style);
         }
         job
@@ -490,6 +549,48 @@ impl Fonts<'_> {
 }
 
 impl Metrics for Fonts<'_> {
+    fn shown_height(&self, key: &str, natural: f32, _tr: &node::Transition) -> f32 {
+        let mut heights = self.heights.borrow_mut();
+        match heights.get_mut(key) {
+            Some(t) => {
+                t.seen = true;
+                t.at(self.now)
+            }
+            None => natural,
+        }
+    }
+
+    fn settle_height(&self, key: &str, width: f32, natural: f32, tr: &node::Transition) {
+        let now = self.now;
+        let fresh = HeightTween {
+            from: natural,
+            to: natural,
+            at: now,
+            width,
+            duration_ms: tr.duration_ms,
+            easing: tr.easing,
+            seen: true,
+        };
+        let mut heights = self.heights.borrow_mut();
+        match heights.get_mut(key) {
+            // New, or at a new width: no easing, it is as tall as it is.
+            None => {
+                heights.insert(key.to_owned(), fresh);
+            }
+            Some(t) if (t.width - width).abs() > 0.5 => *t = fresh,
+            Some(t) => {
+                t.seen = true;
+                if (t.to - natural).abs() > 0.5 {
+                    // From wherever it had got to.
+                    *t = HeightTween {
+                        from: t.at(now),
+                        ..fresh
+                    };
+                }
+            }
+        }
+    }
+
     fn text(&self, t: &Text, max_width: Option<f32>) -> Size {
         let _span = crate::profile::Span::start("text-measure");
         let g = self.shaper.shape(self.job(t, max_width));
@@ -745,6 +846,7 @@ impl Gui {
         if self.draft_rc.as_ref() != self.draft.as_str() {
             self.draft_rc = Rc::from(self.draft.as_str());
         }
+        let now = std::time::Instant::now();
         let fonts = Fonts {
             shaper: fx.shaper,
             faces: self.view.faces,
@@ -755,6 +857,10 @@ impl Gui {
             texts: (self.view.inputs.iter())
                 .map(|(k, b)| (k.clone(), Rc::clone(&b.measure)))
                 .collect(),
+            heights_moving: self.view.heights_moved
+                || self.view.heights.values().any(|t| t.moving(now)),
+            heights: std::cell::RefCell::new(std::mem::take(&mut self.view.heights)),
+            now,
         };
         let mut frame = Frame::default();
         let mut windows = Windows::new();
@@ -842,6 +948,15 @@ impl Gui {
         self.view.pressed = frame.pressed;
         let used = std::mem::take(&mut frame.tweened);
         self.view.tweens.retain(|k, _| used.contains(k));
+        // The eased heights of what was laid out are kept; one still on its
+        // way wants the next frame.
+        let mut heights = fonts.heights.take();
+        heights.retain(|_, t| std::mem::replace(&mut t.seen, false));
+        self.view.heights_moved = heights.values().any(|t| t.moving(now));
+        if self.view.heights_moved {
+            fx.out.repaint_after(std::time::Duration::from_millis(16));
+        }
+        self.view.heights = heights;
         self.view.hits = frame.hits;
         self.view.input_keys = std::mem::take(&mut frame.input_keys);
         // A text input that is not drawn any more has not the keyboard, nor

@@ -217,7 +217,7 @@ function M.nodes()
   local placed = bone.gui.popups()
   local dimmed = false
   local function add(node, id)
-    node.id, node.transition = "win:" .. id, not style.plain and style.appear() or nil
+    node.id, node.transition = "win:" .. id, not style.plain and style.appear(8) or nil
     out[#out + 1] = node
   end
   for _, p in ipairs(placed) do

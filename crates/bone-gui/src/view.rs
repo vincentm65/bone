@@ -30,6 +30,7 @@ impl Gui {
             out: &mut out,
             typed: Vec::new(),
             opacity: 1.0,
+            offset: crate::backend::Vec2::ZERO,
         };
         self.route_keys(&mut fx);
         // The node view (`bone.gui.view`) is the whole window, on the canvas.

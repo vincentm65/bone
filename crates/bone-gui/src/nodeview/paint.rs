@@ -47,7 +47,10 @@ impl Gui {
             String::new()
         };
         let outer_clip = clip;
-        let clip = if s.clips() { clip.intersect(r) } else { clip };
+        // An eased height (`transition = { height = true }`) cuts what it
+        // holds at its edge while it is on its way.
+        let eased = s.transition.is_some_and(|t| t.height);
+        let clip = if s.clips() || eased { clip.intersect(r) } else { clip };
         if s.block_input {
             frame.scope_count += 1;
             frame.scopes.push(frame.scope_count);
@@ -231,6 +234,12 @@ impl Gui {
         let previous_opacity = fx.opacity;
         if let Some(o) = opacity {
             fx.opacity = previous_opacity * o.clamp(0.0, 1.0);
+        }
+        // `enter = { dx, dy }`: it and what it holds slide in from there.
+        let previous_offset = fx.offset;
+        if let Some(tr) = s.transition.filter(|t| t.enter && t.enter_offset != (0.0, 0.0)) {
+            let o = self.fade(fx, frame, &key, "offset", [0.0; 4], &tr);
+            fx.offset = previous_offset + vec2(o[0], o[1]);
         }
 
         let corners = s.radius;
@@ -441,6 +450,7 @@ impl Gui {
             }
         }
         fx.opacity = previous_opacity;
+        fx.offset = previous_offset;
         frame.group_hover = group;
         // A child under the pointer keeps its parents hovered, as in CSS:
         // otherwise a button that shows on a row's hover hides as soon as
@@ -475,13 +485,20 @@ impl Gui {
         let id = format!("{key}#{prop}");
         frame.tweened.insert(id.clone());
         let now = std::time::Instant::now();
-        // The first time there is nothing to fade from, but clear (`enter`):
-        // a frame in already, so what appears is seen at once.
-        let (from, at) = if tr.enter && prop == "opacity" {
-            let frame = std::time::Duration::from_millis(16);
-            ([0.0; 4], now.checked_sub(frame).unwrap_or(now))
-        } else {
-            (value, now)
+        // The first time there is nothing to fade from, but where what
+        // enters starts (`enter`): clear, and `enter_offset` away; a frame
+        // in already, so what appears is seen at once.
+        let start = match prop {
+            "opacity" if tr.enter => Some([0.0; 4]),
+            "offset" if tr.enter => Some([tr.enter_offset.0, tr.enter_offset.1, 0.0, 0.0]),
+            _ => None,
+        };
+        let (from, at) = match start {
+            Some(from) => {
+                let frame = std::time::Duration::from_millis(16);
+                (from, now.checked_sub(frame).unwrap_or(now))
+            }
+            None => (value, now),
         };
         let tween = self.view.tweens.entry(id).or_insert(Tween { from, to: value, at });
         let progress = |t: &Tween| {

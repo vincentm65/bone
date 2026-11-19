@@ -7,6 +7,7 @@
 
 use crate::node::{
     Align, Dim, Direction, Edges, Image, Input, Justify, Kind, Node, Overflow, Text, TextInput,
+    Transition,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -30,6 +31,15 @@ pub trait Metrics {
     fn input(&self, input: &Input, max_width: Option<f32>) -> Size;
     /// A text field: as wide as it may be, as tall as its rows.
     fn text_input(&self, input: &TextInput, max_width: Option<f32>) -> Size;
+    /// The height a node whose height is eased (`transition = { height =
+    /// true }`, by its id `key`) is shown at now: `natural`, the height of
+    /// what it holds, unless it is on its way from another.
+    fn shown_height(&self, _key: &str, natural: f32, _tr: &Transition) -> f32 {
+        natural
+    }
+    /// Where such a node's height is going: its `natural` height at the
+    /// `width` it is placed at.
+    fn settle_height(&self, _key: &str, _width: f32, _natural: f32, _tr: &Transition) {}
     /// A picture: its own size, scaled down to the width on offer.
     fn image(&self, image: &Image, max_width: Option<f32>) -> Size {
         let Some((w, h)) = image.natural else {
@@ -91,7 +101,26 @@ pub fn natural_at(n: &Node, width: f32, m: &dyn Metrics) -> Size {
     measure(n, Some(width), true, m)
 }
 
+/// The id and transition of a node whose height is eased.
+fn eased(n: &Node) -> Option<(&str, &Transition)> {
+    let tr = n.style.transition.as_ref().filter(|t| t.height)?;
+    Some((n.id.as_deref()?, tr))
+}
+
+/// [`natural_of`], at the height an eased node is shown at now.
 fn measure(n: &Node, avail: Option<f32>, definite: bool, m: &dyn Metrics) -> Size {
+    let size = natural_of(n, avail, definite, m);
+    match eased(n) {
+        Some((key, tr)) => Size {
+            h: m.shown_height(key, size.h, tr),
+            ..size
+        },
+        None => size,
+    }
+}
+
+/// The border box `n`'s content gives it.
+fn natural_of(n: &Node, avail: Option<f32>, definite: bool, m: &dyn Metrics) -> Size {
     let s = &n.style;
     let inset = inset(n);
     let explicit_w = match (definite, avail) {
@@ -244,6 +273,21 @@ fn flex_sizes(items: &[(&Node, f32, f32)], room: f32, gap: f32, row: bool) -> Ve
 
 /// Lay `n` out in the border box `rect`.
 pub fn place<'a>(n: &'a Node, rect: Rect, m: &dyn Metrics) -> Placed<'a> {
+    // An eased node is shown at `rect` but lays out what it holds at its
+    // natural height (cut at its edge while it moves there), and says that
+    // that is where its height is going.
+    let shown = rect;
+    let rect = match eased(n) {
+        Some((key, tr)) => {
+            let natural = natural_of(n, Some(rect.w), true, m).h;
+            m.settle_height(key, rect.w, natural, tr);
+            Rect {
+                h: rect.h.max(natural),
+                ..rect
+            }
+        }
+        None => rect,
+    };
     let s = &n.style;
     let pad = inset(n);
     let mut inner = Rect {
@@ -539,7 +583,7 @@ pub fn place<'a>(n: &'a Node, rect: Rect, m: &dyn Metrics) -> Placed<'a> {
     }
     Placed {
         node: n,
-        rect,
+        rect: shown,
         inner: if scroll {
             // The room the children scroll in, not their length.
             Rect {

@@ -459,7 +459,7 @@ local function project_menu()
     position = "absolute", left = 8, right = 8, top = 46, z = 30,
     bg = "Panel", radius = style.radius.lg, border = 1, border_color = "PromptBorder", padding = 4,
     shadow = style.shadow.menu, direction = "column", max_height = 360,
-    overflow = "scroll", id = "sidebar-projects", transition = style.appear(),
+    overflow = "scroll", id = "sidebar-projects", transition = style.appear(-6),
   }
   local function item(label, count, cwd)
     local on = st.project == cwd
@@ -516,9 +516,11 @@ function M.node(ctx)
     local below = require("bone.nodes.titlebar").offset()
     card.position, card.left, card.top, card.bottom, card.z = "absolute", M.inset, M.inset + below, M.inset, 8
     card.shadow = style.shadow.card
+    -- It slides in from the window's edge over a dimming chat.
+    card.transition = style.appear(nil, -16)
     local backdrop = style.finish({
-      position = "absolute", left = 0, right = 0, top = 0, bottom = 0, z = 7,
-      bg = style.scrim.dialog, on_click = close, on_scroll = function() end,
+      position = "absolute", left = 0, right = 0, top = 0, bottom = 0, z = 7, id = "sidebar-scrim",
+      bg = style.scrim.dialog, on_click = close, on_scroll = function() end, transition = style.appear(),
     })
     return widgets.card(card), 0, backdrop
   end

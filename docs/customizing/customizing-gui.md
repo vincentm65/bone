@@ -147,7 +147,7 @@ otherwise it is a box.
 | `opacity` | 0 to 1, for the node and everything in it |
 | `hover`, `active`, `focus` | `{ bg, gradient, border_color, color, opacity, shadow }`: what changes while the pointer is over the node, pressing it, or it has the keyboard focus. `color` recolors the text in it. Applied by Rust each frame, with no rebuild in Lua |
 | `group_hover` | The same, while the pointer is over the nearest node around this one that follows the pointer (one with a handler, a `cursor`, a `hover` look or a `tooltip`): a row's buttons shown over the row are `opacity = 0, group_hover = { opacity = 1 }`, with no `on_hover` and no rebuild |
-| `transition` | `150` (ms) or `{ duration = 150, easing = "ease-out" }` (`linear`, `ease-in`, `ease-out`, `ease-in-out`; `enter = true` fades the node in from clear when it appears, so give it an `id`): the node's background, border color and opacity fade to what they change to (from `hover` and the other states, or when Lua builds the view again) instead of jumping. A color that appears or goes away fades its alpha. Size, margin and padding are not faded: step those in Lua |
+| `transition` | `150` (ms) or `{ duration = 150, easing = "ease-out" }` (`linear`, `ease-in`, `ease-out`, `ease-in-out`; `enter = true` fades the node in from clear when it appears, `enter = { dx, dy }` also slides it in from that many pixels away, so give it an `id`; `height = true`, with an `id`, eases a change of its height, as what it holds grows or shrinks, cutting that at its edge meanwhile, though a node seen for the first time or at a new width takes its height at once): the node's background, border color and opacity fade to what they change to (from `hover` and the other states, or when Lua builds the view again) instead of jumping. A color that appears or goes away fades its alpha. Width, margin and padding are not faded: step those in Lua |
 | `tooltip` | text shown while the pointer rests on the node |
 
 Colors are `#rgb`, `#rgba`, `#rrggbb`, `#rrggbbaa`, `"transparent"`, or the
@@ -166,7 +166,9 @@ click handler above it does not see clicks on the text). Underline and dim
 from a group apply only on an explicit span's `hl` (`{ text = "x", hl =
 "MdCode" }` or `{ "x", "MdCode" }`), not on a node's `text` with `hl`.
 Text style otherwise is inherited from the boxes around it. A span also takes
-`code`, `link` (underlined), `bg`, `strike`.
+`code` (monospace a step smaller, unless it sets its `size`, on a `CodeBlock`
+chip), `link` (underlined), `bg` (a chip in that color), `strike`. A chip has
+a little room at its ends, so it stands clear of the words beside it.
 
 ### Images
 
