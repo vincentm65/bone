@@ -504,7 +504,7 @@ local function count(rows, sign)
 end
 
 local function file_label(name, path, summary)
-  local t = { { name, "ToolName" }, { " " .. (path or ""), "ToolPath" } }
+  local t = { { name, "ToolName" }, { " " .. bone.util.short_path(path or "", 48), "ToolPath" } }
   if summary then
     t[#t + 1] = { " (" .. summary .. ")", "ToolArgs" }
   end
@@ -606,6 +606,28 @@ report = function(item, ctx)
   return images(item, out, ctx.width)
 end
 
+-- An edit call's diff rows, its edits and whether one replaces all: from
+-- its arguments (a preview, not the file's diff: offsets and replace_all
+-- occurrences are unknown), else the anchored diff in its output.
+local function edit_rows(args, out)
+  local edits = type(args.edits) == "table" and args.edits or
+    (type(args.old_string) == "string" and { args } or nil)
+  if not edits then return anchored_diff(out), nil, false end
+  local rows, all = {}, false
+  for i, edit in ipairs(edits) do
+    if i > 1 then rows[#rows + 1] = { separator = true } end
+    append(rows, diff_lines(edit.old_string or "", edit.new_string or ""))
+    all = all or edit.replace_all == true
+  end
+  return rows, edits, all
+end
+
+-- " +2 −1": what an edit added and removed, in the diff colors (as the
+-- desktop shows it).
+local function amounts(plus, minus)
+  return { { " +" .. plus, "DiffAdd" }, { " −" .. minus, "DiffDelete" } }
+end
+
 --- The built-in content for a tool call: { title = spans or { spans, ... },
 --- lines = { spans, ... }, body = rows drawn as they are (gutter, diff) }.
 function bone.ui.tool_content(item, ctx)
@@ -648,42 +670,24 @@ function bone.ui.tool_content(item, ctx)
     if not ok then
       return { title = file_label(name, args.path), body = err or {} }
     end
-    local edits = type(args.edits) == "table" and args.edits or
-      (type(args.old_string) == "string" and { args } or nil)
-    local rows, all = {}, false
-    if edits then
-      -- Argument previews, not an actual file diff: offsets and per-edit
-      -- replace_all occurrence counts are unknown. Never multiply a batch
-      -- preview by the aggregate replacement count in the tool output.
-      for i, edit in ipairs(edits) do
-        if i > 1 then rows[#rows + 1] = { separator = true } end
-        append(rows, diff_lines(edit.old_string or "", edit.new_string or ""))
-        all = all or edit.replace_all == true
-      end
-    else
-      rows = anchored_diff(out)
-    end
-    local summary = (edits and "preview: " or "") .. "-" .. count(rows, "-") .. " | +" .. count(rows, "+")
-    if edits and #edits > 1 then summary = summary .. "; " .. plural(#edits, "edit") end
-    if all then summary = summary .. "; replace_all" end
+    -- "edit_file path +2 −1", then a batch's size and replace_all. Never
+    -- multiply a batch preview by the replacement count in the output.
+    local rows, edits, all = edit_rows(args, out)
+    local title = { { "edit_file", "ToolName" }, { " " .. bone.util.short_path(args.path or "", 48), "ToolPath" } }
+    append(title, amounts(count(rows, "+"), count(rows, "-")))
+    local extra = {}
+    if edits and #edits > 1 then extra[#extra + 1] = plural(#edits, "edit") end
+    if all then extra[#extra + 1] = "replace_all" end
+    if #extra > 0 then title[#title + 1] = { " (" .. table.concat(extra, "; ") .. ")", "ToolArgs" } end
     if not expanded(ctx) then
-      -- Condensed: a stub of the file and its counts, the amounts in the
-      -- diff colors; the diff itself waits for a click or ctrl+t.
-      -- Same as the desktop's stub: the amounts in the diff colors.
-      local title = { {
-        { "edit_file", "ToolName" },
-        { " " .. (args.path or ""), "ToolPath" },
-        { " (-", "Dim" }, { tostring(count(rows, "-")), "DiffDelete" },
-        { " | +", "Dim" }, { tostring(count(rows, "+")), "DiffAdd" },
-        { ")", "Dim" },
-      } }
+      -- Condensed: the diff waits for a click or ctrl+t.
       local body = {}
       if #rows > 0 then
         body[1] = nest({ "      ", "Normal" }, { { more(#rows, "diff row", ctx), "ToolSummary" } })
       end
-      return { title = title, body = body }
+      return { title = { title }, body = body }
     end
-    return { title = file_label(name, args.path, summary), body = diff_view(rows, width) }
+    return { title = { title }, body = diff_view(rows, width) }
   end
 
   local target = args.path or args.query or args.task
@@ -735,17 +739,6 @@ local function own_phrase(t, width)
   return type(s) == "string" and s ~= "" and s or nil
 end
 
--- The +/- an edit call changed, from its anchored output (the summary
--- query strips it, so the caller passes the full item); nil when it has
--- no diff yet.
-local function edit_counts(t)
-  local out = t.output
-  if type(out) ~= "string" or out == "" then return nil end
-  local rows = anchored_diff(out)
-  local plus, minus = count(rows, "+"), count(rows, "-")
-  if plus + minus == 0 then return nil end
-  return plus, minus
-end
 
 -- What a run of calls did, in the order first seen: "read 3 files",
 -- "ran 2 shell commands", "edited 5 files (+34 -234)", or
@@ -781,19 +774,17 @@ local function summary(calls, width)
       -- One file: by its path; a batch: just the count.
       bump("edit", function(n)
         local path = arg(t, "path")
-        return "edited " .. (n == 1 and path or plural(n, "file"))
+        return "edited " .. (n == 1 and path and bone.util.short_path(path, 48) or plural(n, "file"))
       end, arg(t, "path") or t.id)
       local s = seen.edit
       if not s.counted then
         -- The summary query strips output: ask for the full call once.
         s.counted = true
         for _, e in ipairs(calls) do
-          if e.kind == "tool" and e.name == "edit_file" then
+          if e.kind == "tool" and e.name == "edit_file" and e.done and not e.is_error then
             local full = bone.chat.item(e.index, { full = true })
-            local p, m = edit_counts(full)
-            if p then
-              s.plus, s.minus = s.plus + p, s.minus + m
-            end
+            local rows = edit_rows(type(full.arguments) == "table" and full.arguments or {}, full.output or "")
+            s.plus, s.minus = s.plus + count(rows, "+"), s.minus + count(rows, "-")
           end
         end
       end
@@ -812,18 +803,13 @@ local function summary(calls, width)
     end
   end
   local edit = seen.edit
-  local counts
   if edit and edit.n > 0 then
     parts[#parts + 1] = edit.phrase(edit.n)
     if edit.plus + edit.minus > 0 then
       -- The counts, in the diff colors, right after it.
-      counts = " (+" .. edit.plus .. " -" .. edit.minus .. ")"
-      parts[#parts] = parts[#parts] .. counts
-      tail = {
-        plain = counts,
-        { " (+", "ToolArgs" }, { tostring(edit.plus), "DiffAdd" }, { " ", "ToolArgs" },
-        { "-" .. edit.minus, "DiffDelete" }, { ")", "ToolArgs" },
-      }
+      tail = amounts(edit.plus, edit.minus)
+      tail.plain = tail[1][1] .. tail[2][1]
+      parts[#parts] = parts[#parts] .. tail.plain
     end
   end
   local text = table.concat(parts, ", ")
