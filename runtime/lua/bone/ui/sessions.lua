@@ -30,6 +30,9 @@ local function setup_colors()
   dot("SessionDotWaiting", "SessionWaiting")
   dot("SessionDotUnread", "SessionUnread")
   dot("SessionDotOff", "Dim")
+  -- The running spinner: green, on the panel or on a selected card.
+  bone.hl.set("SessionRunning", { link = "Success", bg = background })
+  bone.hl.set("SessionRunningSelected", { link = "Success", bg = selection.bg })
 end
 
 function M.archive_current(id)
@@ -253,7 +256,8 @@ local function render(ctx)
     elseif kind == "job" or kind == "job_meta" then
       local j, active = state.items[index], index == state.selected and ctx.focused
       if kind == "job" then
-        formatted = card(" " .. ctx.spinner .. " " .. j.title, active and "SessionCardTitle" or "Normal")
+        formatted = card(j.title, active and "SessionCardTitle" or "Normal",
+          { " " .. ctx.spinner .. " ", "SessionRunning" .. (active and "Selected" or "") })
       else
         local detail = j.detail ~= "" and ("  ·  " .. j.detail) or ""
         formatted = card("   " .. bone.util.duration(os.time() - j.started) .. detail, active and "SessionCardMeta" or "Dim")
@@ -278,7 +282,9 @@ local function render(ctx)
           formatted = card(s.title or "[untitled]", hl,
             { " ● ", (blink_on and "SessionDotWaiting" or "SessionDotOff") .. sel })
         elseif need == "running" then
-          formatted = card(" " .. ctx.spinner .. " " .. (s.title or "[untitled]"), hl)
+          -- In the dots' column, so titles line up whatever their mark.
+          formatted = card(s.title or "[untitled]", hl,
+            { " " .. ctx.spinner .. " ", "SessionRunning" .. (active and "Selected" or "") })
         elseif need == "unread" then
           formatted = card(s.title or "[untitled]", hl, { " ● ", "SessionDotUnread" .. sel })
         else

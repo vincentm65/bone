@@ -113,12 +113,13 @@ local function toolbar(opts, running, empty)
     if opts.on_focus then opts.on_focus() end
     require("bone.desktop.attach").pick()
   end, { box = 28, size = 16, hl = muted, radius = style.radius.md, id = not opts.chat and "composer-attach" or nil })
-  -- The model: an outlined pill that opens the provider page.
+  -- The model: a plain control that opens the provider page (no outline:
+  -- the toolbar is a row of bare controls, not a row of bubbles).
   if u.model and u.model ~= "" and not compact then
     local name = (u.provider and u.provider ~= u.model) and (u.provider .. " · " .. u.model) or u.model
     bar[#bar + 1] = widgets.press(style.finish({
-      direction = "row", align = "center", gap = 6, height = 28, padding = { 0, 8, 0, 9 }, radius = 14, shrink = 1,
-      min_width = 56, border = 1, border_color = "PromptBorder", label = "Model: " .. name, tooltip = "Change the model (/provider)",
+      direction = "row", align = "center", gap = 6, height = 28, padding = { 0, 8 }, radius = style.radius.md,
+      shrink = 1, min_width = 56, label = "Model: " .. name, tooltip = "Change the model (/provider)",
       icons.node("model", { size = 13, hl = "Dim" }),
       { text = name, size = style.size.small, hl = muted, wrap = false, text_overflow = "ellipsis", shrink = 1 },
       icons.node("chevron_down", { size = 12, hl = "Dim" }),
@@ -248,7 +249,9 @@ function M.node(opts)
     field_placeholder = opts.width < 96 and "…" or (running and (steer and "Steer…" or "Queue…") or "Ask bone…")
   end
   -- The field, with the prompt's prefix before it.
-  local field = { direction = "row", gap = 8, align = "start", padding = { 0, 4, 0, 4 },
+  -- Room around the text on a normal composer; a narrow one keeps it tight
+  -- so the field still has width on a phone-sized window.
+  local field = { direction = "row", gap = 8, align = "start", padding = compact and { 0, 4, 0, 4 } or { 4, 8, 4, 8 },
     { input = not opts.chat, placeholder = field_placeholder,
       text_input = opts.chat and { value = bone.gui.draft(opts.chat), placeholder = field_placeholder, multiline = true, max_rows = rows, read_only = true } or nil,
       size = style.size.text, min_rows = tonumber(p.min), max_rows = rows, hl = "InputText", grow = 1, width = 0,
@@ -263,7 +266,7 @@ function M.node(opts)
     -- text field or button (ctrl+p) has them.
     border_color = (not opts.chat and not bone.ui.panel.focused() and bone.keymap.current() == "main"
       and not bone.gui.focused()) and "PromptBorderFocus" or "PromptBorder",
-    radius = style.radius.round, padding = compact and { 8, 8, 8, 8 } or { 12, 10, 10, 12 },
+    radius = style.radius.round, padding = compact and { 8, 8, 8, 8 } or { 14, 16, 14, 16 },
     direction = "column", gap = compact and 6 or 8, shadow = style.shadow.card,
     on_press = opts.chat and opts.on_focus or nil,
     field,

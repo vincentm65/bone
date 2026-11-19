@@ -15,7 +15,9 @@
 -- Processes page lists every chat's background work. The
 -- data is bone.chats. The rows are made once when the data changes, and the
 -- list makes nodes only for the ones in view, so a long history costs
--- nothing. It takes the keyboard as it opens (its search field, or the
+-- nothing. Each section header (and each date header inside Archived) is a
+-- button: click it to hide or show its chats (kept between runs), or press
+-- ctrl+shift+t / ctrl+shift+r over a chat. It takes the keyboard as it opens (its search field, or the
 -- card itself on the Processes page): up/down choose, enter opens, typing
 -- searches, ctrl+t pins, tab changes page, x stops a process, esc goes
 -- back to the prompt, ctrl+o closes; a click opens.
@@ -51,14 +53,78 @@ local st = {
   renaming = nil, -- the session being renamed
 }
 
+-- Collapsed sections: keys are the section index (1..4) and, inside
+-- Archived, "4:" .. the date heading. Hidden sections persist between runs.
+local collapsed = {}
+local compute -- defined below; the collapse helpers call it
+for _, k in ipairs(bone.state.load("sidebar-collapsed") or {}) do collapsed[k] = true end
+
 local function redraw()
   bone.gui.invalidate()
+end
+
+local function save_collapsed()
+  local keys = {}
+  for k in pairs(collapsed) do keys[#keys + 1] = k end
+  bone.state.save("sidebar-collapsed", keys)
+end
+
+local function toggle_collapsed(key)
+  if collapsed[key] then collapsed[key] = nil else collapsed[key] = true end
+  save_collapsed()
+  compute()
+  redraw()
+end
+
+-- The section the selected chat sits in, for h/l.
+local function selected_section()
+  local r = st.items[st.sel]
+  if not r then return nil end
+  for _, row_ in ipairs(st.rows) do
+    if row_.kind == "card" and row_.item == st.sel then
+      return tostring(row_.section), row_.date
+    end
+  end
+  return nil
 end
 
 -- A highlight group, or `fallback` when the colorscheme does not set it.
 local function group(name, fallback)
   local g = bone.hl.get(name)
   return (g and g.fg) and name or fallback
+end
+
+-- The live sections carry a color of their own: Active blue, Running green.
+-- They come from the colorscheme's state colors, so a different one still
+-- fits; the archive keeps the plain greys.
+local SECTION = {
+  [2] = { "SessionUnread", "#4c8dff" }, -- Active: a chat you can be back in
+  [3] = { "Success", "#5fd08a" },       -- Running: a turn going now
+}
+
+-- `a` toward `b` by `t`, both "#rrggbb".
+local function mix(a, b, t)
+  local function ch(s, i) return tonumber(s:sub(i, i + 1), 16) end
+  local out = {}
+  for i = 2, 7, 2 do
+    local v = math.floor(ch(a, i) * (1 - t) + ch(b, i) * t + 0.5)
+    out[#out + 1] = ("%02x"):format(math.max(0, math.min(255, v)))
+  end
+  return "#" .. table.concat(out)
+end
+
+local function hex(name, fallback)
+  local g = bone.hl.get(name)
+  local c = (g and g.fg) or fallback
+  return c:match("^#%x%x%x%x%x%x$") and c or fallback
+end
+
+-- The tint for a section: `from`'s grey, pulled `t` of the way to the
+-- section's color. nil for the sections that stay grey.
+local function section_color(section, from, t)
+  local c = SECTION[section]
+  if not c then return nil end
+  return mix(hex(from, "#a1a1a1"), hex(c[1], c[2]), t)
 end
 
 -- How many midnights ago a time was: 0 today, 1 yesterday.
@@ -88,7 +154,7 @@ end
 
 --- The rows of the current page, from the data: { kind = "group" | "card" |
 --- "none", ... }, and the things the cards stand for (`items`).
-local function compute()
+compute = function()
   chats.note_running()
   local rows, items = {}, {}
   if st.page == "running" then
@@ -99,7 +165,7 @@ local function compute()
     for i, j in ipairs(jobs) do
       items[i] = j
       rows[#rows + 1] = {
-        kind = "card", item = i, state = "running", title = j.title,
+        kind = "card", item = i, state = "running", title = j.title, section = 3,
         meta = j.detail ~= "" and j.detail or "running", time = bone.util.duration(os.time() - j.started),
       }
     end
@@ -123,13 +189,24 @@ local function compute()
       local id, at = s.session_id, g.activities[s.session_id]
       local section = g.groups[id] or 4
       if section ~= heading then
-        rows[#rows + 1] = { kind = "group", text = chats.sections[section] }
+        rows[#rows + 1] = { kind = "group", text = chats.sections[section], key = tostring(section) }
         heading, date = section, nil
       end
       -- The archive is long: it is split by date.
       if section == 4 and date_group(at) ~= date then
         date = date_group(at)
-        rows[#rows + 1] = { kind = "date", text = date }
+        rows[#rows + 1] = { kind = "date", text = date, key = "4:" .. date }
+      end
+      -- A collapsed header hides its chats; the rows still count for
+      -- scrolling, and keyboard selection can open a hidden chat.
+      local hide = collapsed[tostring(section)] or (date and collapsed["4:" .. date])
+      if hide then
+        for k = #rows, 1, -1 do
+          if rows[k].kind == "group" or rows[k].kind == "date" then
+            rows[k].hidden_count = (rows[k].hidden_count or 0) + 1
+            break
+          end
+        end
       end
       local state = chats.state(id)
       local meta = {}
@@ -142,7 +219,7 @@ local function compute()
       rows[#rows + 1] = {
         kind = "card", item = i, id = id, state = state, pinned = chats.pinned[id],
         title = s.title or "Untitled", meta = table.concat(meta, " · "),
-        time = when(at),
+        time = when(at), section = section, date = date, hidden = hide,
       }
     end
   end
@@ -316,11 +393,36 @@ local KEYS = {
   end,
   up = function() select(st.sel - 1) end, down = function() select(st.sel + 1) end,
   pageup = function() select(st.sel - 5) end, pagedown = function() select(st.sel + 5) end,
+  -- ctrl+shift+t collapses and ctrl+shift+r expands the section the
+  -- selected chat is in (and, in the archive, its date group too); the
+  -- search field takes plain letters, so these are keys that reach here.
+  ["ctrl+shift+t"] = function()
+    local key, date = selected_section()
+    if not key then return end
+    if not collapsed[key] then toggle_collapsed(key) end
+    if date and not collapsed["4:" .. date] then
+      collapsed["4:" .. date] = true
+      save_collapsed()
+      compute()
+      redraw()
+    end
+  end,
+  ["ctrl+shift+r"] = function()
+    local key, date = selected_section()
+    if not key then return end
+    if collapsed[key] or (date and collapsed["4:" .. date]) then
+      collapsed[key], collapsed["4:" .. date] = nil, nil
+      save_collapsed()
+      compute()
+      redraw()
+    end
+  end,
 }
 
 local function on_key(key)
   if KEYS[key] then
-    KEYS[key]()
+    -- A handler returning false gives the key back (h/l to the search).
+    if KEYS[key]() == false then return false end
     return true
   end
   -- x stops a process on the Processes page.
@@ -333,8 +435,10 @@ end
 
 -- ---- nodes ------------------------------------------------------------------
 
--- The dot for what a chat needs, or nil: widgets.status_dot.
+-- The dot for what a chat needs, or nil: widgets.status_dot. Running gets
+-- a spinner instead: it reads as work, not as a state flag.
 local function dot(state)
+  if state == "running" then return widgets.spinner(14) end
   return widgets.status_dot(state)
 end
 
@@ -347,13 +451,25 @@ end
 local function row(i)
   local r = st.rows[i]
   if not r then return { height = 0 } end
-  if r.kind == "group" then
-    return { height = ROW.group, direction = "row", align = "end", padding = { 0, 8, 7, 8 },
-      { text = r.text, hl = "Dim", size = style.size.small, medium = true } }
-  elseif r.kind == "date" then
-    return { height = ROW.date, direction = "row", align = "end", padding = { 0, 8, 5, 8 },
-      { text = r.text, hl = "Dim", size = style.size.micro } }
-  elseif r.kind == "none" then
+  if r.hidden then return { height = 0 } end
+  if r.kind == "group" or r.kind == "date" then
+    -- A section header is a button: its chevron shows whether the chats
+    -- under it are hidden, and clicking it toggles them.
+    local icons = require("bone.nodes.icons")
+    local closed = collapsed[r.key]
+    local head = {
+      height = ROW[r.kind], direction = "row", align = "center", padding = { 0, 8, 0, 8 },
+      cursor = "pointer", on_click = function() toggle_collapsed(r.key) end,
+      { text = r.text,
+        hl = "Dim",
+        size = r.kind == "group" and style.size.small or style.size.micro,
+        medium = r.kind == "group", grow = 1 },
+      r.hidden_count and { text = tostring(r.hidden_count), hl = "Dim", size = style.size.micro, font = "mono" } or nil,
+      icons.node(closed and "chevron_right" or "chevron_down", { size = 11, hl = "Dim" }),
+    }
+    return head
+  end
+  if r.kind == "none" then
     return { height = ROW.none, direction = "row", align = "center", justify = "center",
       { text = r.text, hl = "Dim", size = style.size.caption } }
   end
@@ -387,9 +503,13 @@ local function row(i)
       },
     })
   else
+    -- The work itself is always white; only its time carries the section's
+    -- color (Active blue, Running green). The archive keeps its grey.
+    local tint = section_color(r.section, "Dim", 1)
     title[#title + 1] = {
       text = r.title, size = style.size.body, medium = r.state == "unread", -- the current one has its fill
-      hl = ((on and has_keys()) or current or r.state == "unread") and "Normal" or group("Muted", nil),
+      color = (tint or (on and has_keys()) or current or r.state == "unread") and "Normal"
+        or group("Muted", nil),
       text_overflow = "ellipsis", wrap = false, grow = 1, shrink = 1,
     }
     -- The time, and over it pin and rename while the pointer is on the row:
@@ -397,7 +517,7 @@ local function row(i)
     local id = r.id
     title[#title + 1] = {
       width = 46, height = 22, shrink = 0, direction = "row", justify = "end", align = "center",
-      { text = r.time or "", hl = "Dim", size = style.size.micro, font = "mono", wrap = false,
+      { text = r.time or "", color = tint, hl = "Dim", size = style.size.micro, font = "mono", wrap = false,
         group_hover = id and { opacity = 0 } or nil },
       id and { position = "absolute", right = 0, top = 0, direction = "row", gap = 2,
         opacity = 0, group_hover = { opacity = 1 },

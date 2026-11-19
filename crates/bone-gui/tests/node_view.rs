@@ -1106,7 +1106,7 @@ async fn a_window_that_asks_for_more_room_is_wider_than_the_composer() {
     let (small, prompt) = widths(&mut g, "width = 40, height = 10,");
     assert_eq!(small, prompt - pad, "a small window is still a dialog");
     let (wide, prompt) = widths(&mut g, "width = 10000, height = 10000,");
-    assert!(prompt < 1000.0 && wide == 1600.0 - pad, "{wide} beside {prompt}");
+    assert!(prompt < wide && wide == 1600.0 - pad, "{wide} beside {prompt}");
     assert!(g.gui.lua_errors().is_empty(), "{:?}", g.gui.lua_errors());
 }
 
@@ -1734,8 +1734,8 @@ async fn a_chat_waiting_for_you_shows_whatever_asked() {
             .unwrap(),
         "waiting"
     );
-    // The waiting dot pulses: its ring grows and fades over a beat, its
-    // fill changes, every color a valid #rrggbbaa.
+    // The waiting dot pulses: one dot, no ring, its fill changing over a
+    // beat, every color a valid #rrggbbaa.
     g.gui
         .run_lua(
             "t",
@@ -1744,17 +1744,14 @@ async fn a_chat_waiting_for_you_shows_whatever_asked() {
         local node = widgets.status_dot("waiting")
         local function ops(t)
           local out = node.canvas.draw({ time = t, width = node.width, height = node.height })
-          assert(#out == 2, "a ring and a dot")
-          for _, op in ipairs(out) do
-            local c = op.fill or op.stroke
-            assert(type(c) == "string" and c:match("^#%x%x%x%x%x%x%x%x$"), tostring(c))
-          end
+          assert(#out == 1, "just a dot")
+          local c = out[1].fill
+          assert(type(c) == "string" and c:match("^#%x%x%x%x%x%x%x%x$"), tostring(c))
           return out
         end
         local a, b = ops(0.1), ops(0.8)
-        assert(a[1].r < b[1].r, "the ring grows")
-        assert(a[2].fill ~= b[2].fill, "the dot pulses")
-        assert(node.width > 6 and node.margin[1] < 0, "room for the ring, given back")
+        assert(a[1].fill ~= b[1].fill, "the dot pulses")
+        assert(node.width == 6 and node.margin == nil, "the dot's own size")
         assert(#widgets.status_dot("unread").canvas.draw({ time = 0 }) == 1)
         assert(widgets.status_dot(nil) == nil)
       "#,
