@@ -680,8 +680,17 @@ async fn the_standard_library() {
              assert(t.node[1][1][2].spans[1].text == 'Ran', 'a card titled by what it did')
              local e = bone.ui.views.tool({ kind = 'tool', id = 'c2', name = 'edit_file',
                arguments = { path = 'x.rs', old_string = 'a', new_string = 'b' }, done = true }, { width = 60 })
+             local stub = e.node[1]
+             assert(#e.node == 1 and stub.bg == nil, 'condensed: the stub line alone, no card')
+             local head = stub[1]
+             local meta = head[4]
+             assert(meta.spans[1].hl == 'DiffAdd' and meta.spans[2].hl == 'DiffDelete',
+               'the +/- counts in the diff colors')
+             bone.o.tool_detail = 'full'
+             local e = bone.ui.views.tool({ kind = 'tool', id = 'c2b', name = 'edit_file',
+               arguments = { path = 'x.rs', old_string = 'a', new_string = 'b' }, done = true }, { width = 60 })
              local card = e.node[1]
-             assert(#e.node == 1 and #card == 3, 'one card: its line, a hairline and one code block, not a band per line')
+             assert(#e.node == 1 and #card == 3, 'opened: its line, a hairline and one code block, not a band per line')
              assert(card.bg == 'CodeBlock' and card.radius == 8, 'one dark rounded card')
              local block = card[3]
              assert(block[1].radius == nil and block[1].bg == 'DiffDelete', 'a flat highlighted removal')
