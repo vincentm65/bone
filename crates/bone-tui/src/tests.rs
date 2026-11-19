@@ -3560,7 +3560,7 @@ async fn standard_tool_views_match_the_first_bone() {
         "r5",
         "⋮ +2 more lines (click or ctrl+t)",
         "",
-        "    edit_file a.rs +2 −1",
+        "    edit_file a.rs (+2 −1)",
         "      ⋮ +5 diff rows (click or ctrl+t)",
         "",
         "  ✕ grep",
@@ -3576,7 +3576,7 @@ async fn standard_tool_views_match_the_first_bone() {
         [
             "",
             "    Read 1 file, ran 2 shell commands, called web_search,",
-            "    called grep, edited a.rs +2 −1, 1 failed",
+            "    called grep, edited a.rs (+2 −1), 1 failed",
             "",
         ],
         "{}",

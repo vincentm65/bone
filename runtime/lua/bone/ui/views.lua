@@ -622,10 +622,20 @@ local function edit_rows(args, out)
   return rows, edits, all
 end
 
--- " +2 −1": what an edit added and removed, in the diff colors (as the
--- desktop shows it).
+-- Group `from`'s color without its background (that is for the diff's own
+-- lines), as group `name`; set again when a colorscheme changes it.
+local function fg_only(name, from)
+  local fg = (bone.hl.get(from) or {}).fg
+  if (bone.hl.get(name) or {}).fg ~= fg then bone.hl.set(name, { fg = fg }) end
+  return name
+end
+
+-- " (+2 −1)": what an edit added and removed, the amounts in the diff colors.
 local function amounts(plus, minus)
-  return { { " +" .. plus, "DiffAdd" }, { " −" .. minus, "DiffDelete" } }
+  return {
+    { " (", "ToolArgs" }, { "+" .. plus, fg_only("ToolAdded", "DiffAdd") }, { " ", "ToolArgs" },
+    { "−" .. minus, fg_only("ToolRemoved", "DiffDelete") }, { ")", "ToolArgs" },
+  }
 end
 
 --- The built-in content for a tool call: { title = spans or { spans, ... },
@@ -670,7 +680,7 @@ function bone.ui.tool_content(item, ctx)
     if not ok then
       return { title = file_label(name, args.path), body = err or {} }
     end
-    -- "edit_file path +2 −1", then a batch's size and replace_all. Never
+    -- "edit_file path (+2 −1)", then a batch's size and replace_all. Never
     -- multiply a batch preview by the replacement count in the output.
     local rows, edits, all = edit_rows(args, out)
     local title = { { "edit_file", "ToolName" }, { " " .. bone.util.short_path(args.path or "", 48), "ToolPath" } }
@@ -678,7 +688,8 @@ function bone.ui.tool_content(item, ctx)
     local extra = {}
     if edits and #edits > 1 then extra[#extra + 1] = plural(#edits, "edit") end
     if all then extra[#extra + 1] = "replace_all" end
-    if #extra > 0 then title[#title + 1] = { " (" .. table.concat(extra, "; ") .. ")", "ToolArgs" } end
+    -- (Inside the amounts' brackets.)
+    if #extra > 0 then table.insert(title, #title, { "; " .. table.concat(extra, "; "), "ToolArgs" }) end
     if not expanded(ctx) then
       -- Condensed: the diff waits for a click or ctrl+t.
       local body = {}
@@ -808,7 +819,7 @@ local function summary(calls, width)
     if edit.plus + edit.minus > 0 then
       -- The counts, in the diff colors, right after it.
       tail = amounts(edit.plus, edit.minus)
-      tail.plain = tail[1][1] .. tail[2][1]
+      tail.plain = " (+" .. edit.plus .. " −" .. edit.minus .. ")"
       parts[#parts] = parts[#parts] .. tail.plain
     end
   end
