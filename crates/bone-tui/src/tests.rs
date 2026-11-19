@@ -3576,7 +3576,7 @@ async fn standard_tool_views_match_the_first_bone() {
         [
             "",
             "    Read 1 file, ran 2 shell commands, called web_search,",
-            "    edited a.rs, called grep, 1 failed (+2 -1)",
+            "    called grep, edited a.rs (+2 -1), 1 failed",
             "",
         ],
         "{}",
