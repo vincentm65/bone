@@ -369,6 +369,8 @@ impl Turn<'_> {
         }
         // Compacting after a context overflow, once per model call.
         let mut overflowed = false;
+        // An empty reply is asked for again once (see below).
+        let mut retried_empty = false;
         'call: loop {
             self.take_steer()?;
             let system = ChatMessage::System {
@@ -607,13 +609,22 @@ impl Turn<'_> {
                 })?;
             }
             overflowed = false;
+            // An empty reply (no text, no tool call: say a call lost in the
+            // model's reasoning) would end the turn with nothing said, so the
+            // same request goes out once more. Saved without its reasoning
+            // state, the empty reply is not sent back to any provider.
+            let retry = !retried_empty && calls.is_empty() && content.trim().is_empty();
+            retried_empty = retry;
             self.complete_message(
                 content,
                 reasoning,
                 calls.clone(),
                 completion.usage,
-                completion.reasoning_state,
+                completion.reasoning_state.filter(|_| !retry),
             )?;
+            if retry {
+                continue;
+            }
             if calls.is_empty() {
                 let compact = self.compact_config();
                 if let Some(limit) = compact.limit {
