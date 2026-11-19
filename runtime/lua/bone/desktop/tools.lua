@@ -681,22 +681,30 @@ local function summary(calls, width)
     end
   end
   local spans = {}
-  for i, s in ipairs(order) do
-    if i > 1 then spans[#spans + 1] = said(", ") end
-    for _, span in ipairs(s.phrase(s)) do spans[#spans + 1] = span end
+  for _, s in ipairs(order) do
+    -- The edit phrase always closes the chain, so its counts sit right
+    -- after it, at the line's end.
+    if s ~= seen.edit then
+      if #spans > 0 then spans[#spans + 1] = said(", ") end
+      for _, span in ipairs(s.phrase(s)) do spans[#spans + 1] = span end
+    end
+  end
+  local edit = seen.edit
+  if edit and edit.n > 0 then
+    if #spans > 0 then spans[#spans + 1] = said(", ") end
+    for _, span in ipairs(edit.phrase(edit)) do spans[#spans + 1] = span end
+    if edit.plus > 0 or edit.minus > 0 then
+      -- The counts, in the diff colors.
+      spans[#spans + 1] = said(" (+")
+      spans[#spans + 1] = { text = "+" .. edit.plus, hl = "DiffAdd" }
+      spans[#spans + 1] = said(" ")
+      spans[#spans + 1] = { text = "-" .. edit.minus, hl = "DiffDelete" }
+      spans[#spans + 1] = said(")")
+    end
   end
   if spans[1] then spans[1].text = spans[1].text:sub(1, 1):upper() .. spans[1].text:sub(2) end
   local failed = 0
   for _, t in ipairs(calls) do failed = failed + (t.done and t.is_error and 1 or 0) end
-  -- The edit counts, last on the line, in the diff colors.
-  local edit = seen.edit
-  if edit and edit.n > 0 and (edit.plus > 0 or edit.minus > 0) then
-    spans[#spans + 1] = said(" (+")
-    spans[#spans + 1] = { text = "+" .. edit.plus, hl = "DiffAdd" }
-    spans[#spans + 1] = said(" ")
-    spans[#spans + 1] = { text = "-" .. edit.minus, hl = "DiffDelete" }
-    spans[#spans + 1] = said(")")
-  end
   return spans, failed
 end
 

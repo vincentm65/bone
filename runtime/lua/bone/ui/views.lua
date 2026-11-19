@@ -802,7 +802,26 @@ local function summary(calls, width)
   end
   local parts, tail = {}, {}
   for _, s in ipairs(order) do
-    parts[#parts + 1] = s.phrase(s.n)
+    -- The edit phrase always closes the chain, so its counts sit at the
+    -- line's end rather than floating away from it.
+    if s ~= seen.edit then
+      parts[#parts + 1] = s.phrase(s.n)
+    end
+  end
+  local edit = seen.edit
+  local counts
+  if edit and edit.n > 0 then
+    parts[#parts + 1] = edit.phrase(edit.n)
+    if edit.plus + edit.minus > 0 then
+      -- The counts, in the diff colors, right after it.
+      counts = " (+" .. edit.plus .. " -" .. edit.minus .. ")"
+      parts[#parts] = parts[#parts] .. counts
+      tail = {
+        plain = counts,
+        { " (+", "ToolArgs" }, { tostring(edit.plus), "DiffAdd" }, { " ", "ToolArgs" },
+        { "-" .. edit.minus, "DiffDelete" }, { ")", "ToolArgs" },
+      }
+    end
   end
   local text = table.concat(parts, ", ")
   local failed = 0
@@ -812,17 +831,6 @@ local function summary(calls, width)
   text = text:sub(1, 1):upper() .. text:sub(2)
   if failed > 0 then
     text = text .. ", " .. failed .. " failed"
-  end
-  -- The edit counts ride at the line's very end, in the diff colors.
-  local edit = seen.edit
-  if edit and edit.n > 0 and edit.plus + edit.minus > 0 then
-    local counts = " (+" .. edit.plus .. " -" .. edit.minus .. ")"
-    text = text .. counts
-    tail = {
-      plain = counts,
-      { " (+", "ToolArgs" }, { tostring(edit.plus), "DiffAdd" }, { " ", "ToolArgs" },
-      { "-" .. edit.minus, "DiffDelete" }, { ")", "ToolArgs" },
-    }
   end
   return text, tail
 end
