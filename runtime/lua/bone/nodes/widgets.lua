@@ -557,7 +557,7 @@ local DOT = {
 }
 
 --- The dot for what a chat needs from you (bone.chats.state), or nil for
---- none: "waiting" (a question for you) pulses, a ring going out from it,
+--- none: "waiting" (a question for you) pulses, "running" breathes,
 --- "running" breathes, "unread" is still. Each animates on a canvas of its
 --- own, so nothing else is built again for it. o: `size` (the dot, 6),
 --- `tooltip` (false: none).
@@ -570,29 +570,16 @@ function M.status_dot(state, o)
   local function fill(a) return ("%s%02x"):format(color, math.floor(math.max(0, math.min(1, a)) * 255)) end
   local tooltip = o.tooltip == nil and d[2] or o.tooltip or nil
   local r = size / 2
-  if state ~= "waiting" then
-    local running = state == "running"
-    return {
-      width = size, height = size, shrink = 0, tooltip = tooltip, role = "none",
-      canvas = { fps = running and 20 or nil, draw = function(ctx)
-        local a = running and (0.675 + 0.325 * math.sin(ctx.time * 3.5)) or 1
-        return { bone.gui.draw.circle({ x = r, y = r, r = r, fill = fill(a) }) }
-      end },
-    }
-  end
-  -- The ring needs room past the dot: the canvas is that much bigger, and
-  -- gives it back with a margin, so the dot keeps its place in the row.
-  local pad = math.ceil(size * 0.8)
-  local box = size + 2 * pad
+  -- Waiting pulses on its own; running breathes; unread is still. No ring
+  -- around waiting: a dot is enough to say "this one needs you".
+  local animate = state == "waiting" or state == "running"
   return {
-    width = box, height = box, shrink = 0, margin = { -pad, -pad, -pad, -pad }, tooltip = tooltip, role = "none",
-    canvas = { fps = 30, draw = function(ctx)
-      local t = (ctx.time / 1.4) % 1 -- a beat every 1.4 s
-      local c = box / 2
-      return {
-        bone.gui.draw.circle({ x = c, y = c, r = r + (pad - 1) * t, stroke = fill(0.6 * (1 - t) ^ 1.5), width = 1.5 }),
-        bone.gui.draw.circle({ x = c, y = c, r = r, fill = fill(0.6 + 0.4 * math.cos(t * 2 * math.pi)) }),
-      }
+    width = size, height = size, shrink = 0, tooltip = tooltip, role = "none",
+    canvas = { fps = animate and 20 or nil, draw = function(ctx)
+      local a = 1
+      if state == "running" then a = 0.675 + 0.325 * math.sin(ctx.time * 3.5)
+      elseif state == "waiting" then a = 0.6 + 0.4 * math.cos(ctx.time * 2 * math.pi / 1.4) end
+      return { bone.gui.draw.circle({ x = r, y = r, r = r, fill = fill(a) }) }
     end },
   }
 end

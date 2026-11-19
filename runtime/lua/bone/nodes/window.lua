@@ -20,9 +20,9 @@ local function slot(name, ctx) return bone.gui.slots.nodes(name, ctx) end
 -- The lit edge of the panel with the keys (a scheme can set its own).
 bone.hl.set("WinSeparatorFocus", { link = "Accent", default = true })
 
--- The chat and composer column, in pixels: 900 of text (about 120
+-- The chat and composer column, in pixels: 1250 of text (about 165
 -- characters a line of prose) and the scrollbar's inset beside it.
-M.max_width = 914
+M.max_width = 1280
 -- The list reserves this much room on its right for its scrollbar. Keep the
 -- composer and bottom docks on the same visual edge as the chat items.
 M.chat_scrollbar_inset = 14
