@@ -801,6 +801,7 @@ impl Gui {
         };
         if rebuilt {
             self.view.bound.prev_sink = (self.view.bound.sink.take()).map(|s| s.table);
+            list::carry_kept(&self.view.lists, self.view.bound.prev_sink.as_ref(), &sink);
             self.view.bound.canvases.clear();
             // What Lua highlights in the prompt may have changed too.
             self.prompt.marks_for = None;
