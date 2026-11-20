@@ -107,7 +107,7 @@ The queue: each session keeps `[{ id, text, images?, mode: "steer" | "next", cre
 
 Empty assistant `content`/`reasoning`/`tool_calls`, absent `reasoning_state` and a false `is_error` are omitted. A tool call's `arguments` is the raw JSON string the model produced, which may be invalid. Assistant `reasoning_state` is saved with the transcript and returned to clients: `{ model, items, prefix?, field? }` holds opaque provider reasoning for replay on compatible later calls. Keep it intact when copying messages; `prefix` can bind it to an unchanged conversation, and `field` records the Chat Completions reasoning field.
 
-A user message has `source` when someone other than the user sent it: the `source` it was queued with (`bone.queue.add`), such as `"agent"` or `"job"`. Providers do not send it.
+A user message has `source` when someone other than the user sent it: the `source` it was queued with (`bone.queue.add`), such as `"agent"`, `"job"` or `"result"`. Providers do not send it.
 
 User and tool messages may include `images: [ImageAttachment, ...]`. `read_file` image results retain their references on the tool message. `tool/finished` reports the text and dimensions; `session/messages` includes the image references.
 

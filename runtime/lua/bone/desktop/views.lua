@@ -111,15 +111,42 @@ local function message(item, group)
   return { md.text({ { item.text, group } }, { line_height = md.line_height }) }
 end
 
--- A message from a job or an agent (item.source): its first line, then the
--- first lines of the rest; a click or ctrl+t shows all of it, as on a tool card.
+-- A message from someone other than the user (item.source). One that
+-- reports on work the chat started (source "result" from agents, "job"
+-- from a background shell job) is not drawn: the call's own line shows how
+-- it went. Others (an agent's "From …:"): folded ("summary"), one line, the
+-- first line then the start of the rest; else the first line, then the
+-- first lines of the rest. A click or ctrl+t shows all of it, as on a tool
+-- card.
 local PREVIEW = 3
+local HIDDEN = { result = true, job = true }
 local function report(item, ctx)
+  if HIDDEN[item.source] then return nil end
   local head, rest = trim(item.text):match("^([^\n]*)\n?(.*)$")
   local first = (trim(head):gsub(":$", ""))
   local spans = md.spans((bone.markdown.parse(first)[1] or {}).spans or { { text = first } }, "Dim") -- `code` as code
-  local out = { md.text({ { "◆ ", "Accent" }, unpack(spans) }, { size = md.small_size }) }
   local all, kept, n = tools.expanded(item), {}, 0
+  if bone.o.tool_detail ~= "rows" and bone.o.tool_detail ~= "full" and not all then
+    local line = { { "◆ ", "Accent" }, unpack(spans) }
+    local gist = trim(rest):match("^[^\n]*") or ""
+    if gist ~= "" then
+      line[#line + 1] = { " · ", "Dim" }
+      for _, s in ipairs(md.spans((bone.markdown.parse(gist)[1] or {}).spans or { { text = gist } })) do
+        line[#line + 1] = s
+      end
+    end
+    local text = md.text(line, { size = md.small_size })
+    text.wrap, text.text_overflow = false, "ellipsis"
+    local out = { text }
+    images(item, out)
+    footer(item, ctx, out)
+    return {
+      node = box(out, { pad = { 0, 4 }, margin = { 10, 4 } }),
+      lines = plain(item.text, "Dim"),
+      click = function() tools.toggle(item) end,
+    }
+  end
+  local out = { md.text({ { "◆ ", "Accent" }, unpack(spans) }, { size = md.small_size }) }
   for line in (trim(rest) .. "\n"):gmatch("(.-)\n") do
     if not line:match("^%s*([`~])%1%1") then n = n + 1 end -- a code fence is no line of its own
     if all or n <= PREVIEW then kept[#kept + 1] = line end

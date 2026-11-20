@@ -13,6 +13,8 @@ local M = {}
 
 local md = require("bone.desktop.markdown")
 local nodes = require("bone.nodes")
+local agents = require("bone.agents")
+local jobs = require("bone.jobs")
 local timing = require("bone.timing")
 local style = require("bone.nodes.style")
 local widgets = require("bone.nodes.widgets")
@@ -64,6 +66,14 @@ local function target(item, max)
   return ""
 end
 M.target = target
+
+-- A subagent call that messages an agent (`to`) or lists them, rather than
+-- starting one: it folds like any call.
+local function talks(item)
+  if item.name ~= "subagent" then return false end
+  local a = args_of(item)
+  return (type(a.to) == "string" and a.to ~= "") or a.list == true
+end
 
 -- ---- text ------------------------------------------------------------------
 
@@ -454,18 +464,86 @@ local function custom_card(item, content)
   return { frame(line(dot(item), line_spans(title[1], "ToolName")), #rows > 0 and { band(rows) } or nil) }
 end
 
+-- A sub-agent: one line, what it does and at the right its name, model,
+-- step, tokens and time, live while it works (it works on after its call
+-- returns). Folded ("summary") that is all; otherwise its report, the
+-- agent's last answer, under it.
+local function agent_card(item, expanded, width)
+  local a, state = agents.call_state(item)
+  local args = args_of(item)
+  local name = a and a.name or (type(args.name) == "string" and args.name ~= "" and args.name) or "agent"
+  local task = type(args.task) == "string" and args.task:match("%S") and args.task:gsub("%s+", " ") or name
+  local title = {
+    { text = M.labels.subagent, hl = "ToolName", medium = true },
+    { text = "  " .. task, hl = "ToolPath" },
+  }
+  local meta = {}
+  local function extra(text, hl)
+    if #meta > 0 then meta[#meta + 1] = { text = " · ", hl = "Dim" } end
+    meta[#meta + 1] = { text = text, hl = hl or "Dim" }
+  end
+  if task ~= name then extra(name) end
+  local usage = a and require("bone.usage").of(a.id)
+  if usage and usage.model then extra(usage.model) end
+  if state == "running" and a and a.step then extra(a.step) end
+  local tokens = math.max(usage and (usage.input or 0) + (usage.output or 0) or 0,
+    a and a.tokens + (a.extra_tokens or 0) or 0)
+  if tokens > 0 then extra(bone.util.tokens(tokens) .. " tok") end
+  -- An agent from before a restart has no clock of this run: its report's
+  -- fetch says how long it took.
+  if a and not a.started_at and state ~= "running" then agents.report(a) end
+  local ms
+  if a and a.started_at then
+    ms = (state == "running" and bone.now() or a.finished_at or bone.now()) - a.started_at
+  elseif a and a.took_ms then
+    ms = a.took_ms
+  elseif item.duration_ms and item.duration_ms >= 1000 then
+    ms = item.duration_ms -- a call that waited for its agent (older chats)
+  end
+  if ms and ms >= 1000 then extra(bone.util.duration(ms / 1000)) end
+  if state == "failed" then
+    extra(a and a.status == "cancelled" and "stopped" or "failed", "ToolError")
+  end
+  -- Drawn again in a second while it works, or its model is still loading.
+  if state == "running" or (usage and not usage.model) then running_for(item, item) end
+
+  local under = {}
+  if expanded or detail() ~= "summary" then
+    local text = a and agents.report(a)
+    if not text and not a then text = item.output end
+    if text and text:match("%S") then
+      local report = { direction = "column", padding = { 2, 12, 8, 0 } }
+      local opts = { size = md.small_size, indent = 12, redraw = function() bone.chat.redraw(item.index) end }
+      for i, n in ipairs(md.nodes(text, state == "failed" and "ToolError" or "ToolOutput", opts)) do
+        if not expanded and i > AGENT_MAX then break end
+        report[#report + 1] = n
+      end
+      under[1] = report
+    end
+  end
+  local more = not expanded and #under > 0 and icons.node("chevron_right", { size = 12, hl = "Dim" }) or nil
+  local lead = lead_slot(state_icon(state == "running", state == "failed"))
+  return { frame(line(lead, title, meta, expanded, more), under) }
+end
+
 --- The nodes of one call: its title, then its body. `expanded`: all of the
 --- output, not the folded form.
 local function card(item, expanded, width)
   local custom = bone.ui.tool_views[item.name]
   local content = custom and custom(item, { width = width, region = "chat", tool_expanded = expanded })
   if content then return custom_card(item, content) end
+  if item.name == "subagent" and not talks(item) then return agent_card(item, expanded, width) end
   local failed = item.is_error
   local a = args_of(item)
   local name = item.name
   local label = (not item.done and M.running_labels[name]) or M.labels[name] or name
+  if name == "subagent" then label = a.list == true and "Listed agents" or "Messaged" end
+  -- A background job the call started stands for it until it ends.
+  local job = jobs.of(item)
+  local job_state = job and jobs.state(job)
   -- Room for the label, the extras and the mark besides the path.
   local what = target(item, not expanded and math.min(60, math.max(24, width - 40)) or nil)
+  if name == "subagent" then what = a.list == true and "" or a.to end
   local title = { { text = label, hl = "ToolName", medium = true } }
   if what ~= "" then
     if name == "shell" then
@@ -489,6 +567,10 @@ local function card(item, expanded, width)
   local ok = item.done and not failed
   if failed then
     body = head_tail(text_rows(out, "ToolError"), expanded)
+  elseif job then
+    if job_state == "failed" then extra(jobs.line(job, job_state):match("^%S+ %S+") or "failed", "ToolError") end
+    if job_state == "running" then running_for(item, item) end
+    body = { row(jobs.line(job, job_state), job_state == "failed" and "ToolError" or "ToolOutput") }
   elseif name == "shell" then
     local text, code = split_exit_code(item.done and out or (item.live or ""))
     if code and code ~= 0 then extra("exit " .. code, "ToolError") end
@@ -558,16 +640,18 @@ local function card(item, expanded, width)
   -- A folded card with output under it shows the same mark the summary's
   -- line does, so a cut short (or "…") row reads as one you can open.
   local more = not expanded and #under > 0 and icons.node("chevron_right", { size = 12, hl = "Dim" }) or nil
-  return { frame(line(dot(item), title, meta, expanded, more), under) }
+  local lead = job and lead_slot(state_icon(job_state == "running", job_state == "failed")) or dot(item)
+  return { frame(line(lead, title, meta, expanded, more), under) }
 end
 
 -- ---- summaries -------------------------------------------------------------
 
--- Folded into a summary line: everything but sub-agents. Edits fold too,
--- counted: the line ends "edited 5 files (+34 -234)", the counts in the
--- diff colors; a click opens the run, and each edit its diff.
+-- Folded into a summary line: everything but starting a sub-agent, which
+-- is a line of its own (messaging one, or listing them, folds). Edits fold
+-- too, counted: the line ends "edited 5 files (+34 -234)", the counts in
+-- the diff colors; a click opens the run, and each edit its diff.
 local function foldable(t)
-  return t.name ~= "subagent"
+  return t.name ~= "subagent" or talks(t)
 end
 
 -- The phrase a tool view gives a call for summary lines ("loaded the money
@@ -662,6 +746,12 @@ local function summary(calls, width)
         return { said(verb .. " "),
           { text = cut(command, COMMAND_MAX), hl = "ToolArgs", font = "mono", size = md.small_size - 1 } }
       end)
+    elseif t.name == "subagent" and type(args_of(t).to) == "string" then
+      bump("message", t, function(s)
+        return { said("messaged " .. (s.n == 1 and args_of(s.first).to or plural(s.n, "agent"))) }
+      end, args_of(t).to)
+    elseif t.name == "subagent" then
+      bump("agents", t, function() return { said("listed agents") } end)
     else
       bump("tool:" .. t.name, t, function(s)
         return { said((s.running and "calling " or "called ") .. t.name .. (s.n > 1 and " " .. s.n .. " times" or "")) }
@@ -691,8 +781,12 @@ local function summary(calls, width)
     end
   end
   if spans[1] then spans[1].text = spans[1].text:sub(1, 1):upper() .. spans[1].text:sub(2) end
+  -- A background job that ended badly failed, as its command would have.
   local failed = 0
-  for _, t in ipairs(calls) do failed = failed + (t.done and t.is_error and 1 or 0) end
+  for _, t in ipairs(calls) do
+    local job = jobs.of(t)
+    if (t.done and t.is_error) or (job and jobs.state(job) == "failed") then failed = failed + 1 end
+  end
   return spans, failed
 end
 
@@ -718,7 +812,12 @@ local function summary_nodes(item, width)
   -- How long the calls took; while one runs, its time so far too.
   local running, ms, live = false, 0, 0
   for _, t in ipairs(stretch) do
-    if t.done then
+    local job = t.done and jobs.of(t)
+    if job and jobs.state(job) == "running" then
+      -- A background job keeps the line running until it ends.
+      running = true
+      running_for(t, item)
+    elseif t.done then
       ms = ms + (t.duration_ms or 0)
       started[tool_key(t)] = nil
     else
