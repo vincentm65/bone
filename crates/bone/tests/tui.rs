@@ -459,3 +459,39 @@ async fn terminal_page_keys_reach_the_program() {
     tui.press("pagedown").unwrap();
     tui.wait_for(WAIT, |s| s.contains("^[[6~")).await.unwrap();
 }
+
+/// A click's release names its button in the SGR encoding (`<0;…m` for the
+/// left one, not the older encodings' 3): tmux binds MouseUp and
+/// MouseDragEnd by that number, and passes it on to the program in a pane.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn terminal_sgr_release_names_its_button() {
+    let e = env(vec![], false).await;
+    std::fs::write(
+        e.config.path().join("tui.lua"),
+        r#"local term = require("bone.terminal")
+           term.setup()
+           bone.on("ready", function()
+             term.open(nil, { cmd = [[printf '\033[?1000h\033[?1006hMOUSE_READY\n'; exec cat -v]] })
+           end)"#,
+    )
+    .unwrap();
+    let mut tui = e.tui(None).await;
+    // The program's own line, not the panel's title (which shows the command).
+    let ready = |l: &str| l.trim() == "MOUSE_READY";
+    let screen = tui
+        .wait_for(WAIT, |s| s.lines().any(ready))
+        .await
+        .unwrap();
+    let y = screen.lines().position(ready).unwrap();
+    tui.click(2, y as u16);
+    // The terminal echoes what it is sent: the press, then the release.
+    let s = tui
+        .wait_for(WAIT, |s| s.matches("^[[<").count() >= 2)
+        .await
+        .unwrap();
+    let press = s.split("^[[<").nth(1).unwrap();
+    let at = press.split('M').next().unwrap();
+    assert!(at.starts_with("0;"), "{s}");
+    assert!(s.contains(&format!("^[[<{at}M^[[<{at}m")), "{s}");
+}
