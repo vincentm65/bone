@@ -1,8 +1,13 @@
-use std::{env, path::Path, process::Command};
+use std::{
+    env,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     record_build();
+    embed_runtime();
     if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("android") {
         return;
     }
@@ -43,6 +48,36 @@ fn main() {
     );
     println!("cargo:rustc-link-lib=static={library}");
     println!("cargo:rerun-if-changed={}", archive.display());
+}
+
+/// `RUNTIME` in `$OUT_DIR/runtime_files.rs`: every `.lua` file under the
+/// repository's `runtime/`, by relative path. Cargo scans the directory, so
+/// a file added or removed rebuilds it.
+fn embed_runtime() {
+    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("runtime/").flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "lua") {
+                out.push(path);
+            }
+        }
+    }
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../runtime");
+    let root = root.canonicalize().expect("runtime/");
+    println!("cargo:rerun-if-changed={}", root.display());
+    let mut files = Vec::new();
+    walk(&root, &mut files);
+    files.sort();
+    let mut src = String::from("pub const RUNTIME: &[(&str, &str)] = &[\n");
+    for path in files {
+        let rel = path.strip_prefix(&root).unwrap().iter();
+        let rel: Vec<_> = rel.map(|c| c.to_string_lossy()).collect();
+        src += &format!("    ({:?}, include_str!({:?})),\n", rel.join("/"), path);
+    }
+    let out = Path::new(&env::var("OUT_DIR").unwrap()).join("runtime_files.rs");
+    std::fs::write(out, src + "];\n").expect("OUT_DIR");
 }
 
 /// The git commit (and checkout) built from, for `bone --version` and

@@ -16,78 +16,9 @@ use std::path::{Path, PathBuf};
 
 use mlua::{ExternalResult, Function, Lua, LuaSerdeExt, MultiValue, Table, Value};
 
-/// Files from the repository's `runtime/` directory, by relative path.
-macro_rules! runtime_files {
-    ($($path:literal),* $(,)?) => {
-        &[$(($path, include_str!(concat!("../../../runtime/", $path)))),*]
-    };
-}
-
-pub const RUNTIME: &[(&str, &str)] = runtime_files![
-    "lua/bone/util.lua",
-    "lua/bone/menu.lua",
-    "lua/bone/commands.lua",
-    "lua/bone/help.lua",
-    "lua/bone/config.lua",
-    "lua/bone/settings_page.lua",
-    "lua/bone/catalog.lua",
-    "lua/bone/update.lua",
-    "lua/bone/setup.lua",
-    "lua/bone/agents.lua",
-    "lua/bone/keys.lua",
-    "lua/bone/elements.lua",
-    "lua/bone/elements/lines.lua",
-    "lua/bone/elements/nodes.lua",
-    "lua/bone/ui.lua",
-    "lua/bone/ui/change_count.lua",
-    "lua/bone/ui/dock_resize.lua",
-    "lua/bone/ui/dot_matrix.lua",
-    "lua/bone/ui/layout.lua",
-    "lua/bone/ui/sessions.lua",
-    "lua/bone/ui/statusline.lua",
-    "lua/bone/ui/tray.lua",
-    "lua/bone/ui/turn_timing.lua",
-    "lua/bone/ui/views.lua",
-    "ui/api.lua",
-    "tui/defaults.lua",
-    "tui/bare.lua",
-    "gui/api.lua",
-    "gui/defaults.lua",
-    "gui/bare.lua",
-    "lua/bone/gui.lua",
-    "lua/bone/chats.lua",
-    "lua/bone/background.lua",
-    "lua/bone/usage.lua",
-    "lua/bone/timing.lua",
-    "lua/bone/terminal.lua",
-    "lua/bone/desktop/markdown.lua",
-    "lua/bone/desktop/views.lua",
-    "lua/bone/desktop/tools.lua",
-    "lua/bone/desktop/attach.lua",
-    "lua/bone/nodes.lua",
-    "lua/bone/nodes/window.lua",
-    "lua/bone/nodes/titlebar.lua",
-    "lua/bone/nodes/style.lua",
-    "lua/bone/nodes/widgets.lua",
-    "lua/bone/nodes/icons.lua",
-    "lua/bone/nodes/popups.lua",
-    "lua/bone/nodes/composer.lua",
-    "lua/bone/nodes/statusbar.lua",
-    "lua/bone/nodes/overlays.lua",
-    "lua/bone/nodes/library.lua",
-    "lua/bone/desktop/sidebar.lua",
-    "lua/bone/desktop/tray.lua",
-    "lua/bone/desktop/settings.lua",
-    "lua/bone/desktop/help.lua",
-    "lua/bone/desktop/pick.lua",
-    "lua/bone/desktop/setup.lua",
-    "lua/bone/desktop/catalog.lua",
-    "core/api.lua",
-    "core/defaults.lua",
-    "colors/black.lua",
-    "colors/ansi.lua",
-    "colors/graphite.lua",
-];
+// `RUNTIME`: every file in the repository's `runtime/` directory, by
+// relative path (written by build.rs).
+include!(concat!(env!("OUT_DIR"), "/runtime_files.rs"));
 
 /// The customization guides and the references they point to, embedded.
 /// Exposed to both sides as `bone.docs`, and written to `<config dir>/docs/`
